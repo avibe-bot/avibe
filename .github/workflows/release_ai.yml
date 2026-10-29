@@ -36,7 +36,7 @@ jobs:
       version: ${{ steps.resolve.outputs.version }}
       tag: ${{ steps.resolve.outputs.tag }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # Resolve the requested tag with the tooling that tag carries. An
           # unpinned checkout would run a dispatched branch's resolver against a
@@ -77,8 +77,9 @@ jobs:
       release_tag: ${{ needs.resolve-desktop-release.outputs.tag }}
       updater_enabled: ${{ needs.resolve-desktop-release.outputs.updater_enabled == 'true' }}
     # A called job's Environment secrets resolve empty unless the caller inherits
-    # (actions/runner#4453). On this path the callee reads only the updater pair from
-    # desktop-updater; Apple identities stay gated to manual dispatch.
+    # (actions/runner#4453). The callee reads the updater pair and, on macOS, the
+    # Apple set from desktop-updater: every tag build is Developer ID signed and
+    # notarized, and fails without the complete set.
     secrets: inherit
 
   resolve-show-runtime-ref:
@@ -121,7 +122,7 @@ jobs:
             artifact: win32-arm64
     steps:
       - name: Checkout Show Runtime
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: avibe-bot/vibe-show-runtime
           ref: ${{ needs.resolve-show-runtime-ref.outputs.ref }}
@@ -156,7 +157,7 @@ jobs:
           }
           JS
       - name: Upload Show Runtime bundle
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: show-runtime-${{ matrix.artifact }}
           path: |
@@ -171,12 +172,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ needs.resolve-desktop-release.outputs.source_sha }}
 
       - name: Checkout release verification
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ github.sha }}
           path: release-automation
@@ -218,7 +219,7 @@ jobs:
             --router-output vibe/show_router.tsx
 
       - name: Setup Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
 
@@ -278,7 +279,7 @@ jobs:
           fi
 
       - name: Upload release artifacts
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: release-dist
           path: dist/
@@ -299,7 +300,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # Publish with the release tooling and installation guidance the
           # released source carries. resolve-desktop-release is skipped on the

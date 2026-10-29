@@ -61,7 +61,8 @@ def create_sqlite_engine(db_path: Path | None = None, *, read_only: bool = False
     def _set_sqlite_pragmas(dbapi_connection, _connection_record) -> None:
         cursor = dbapi_connection.cursor()
         if not read_only:
-            cursor.execute("PRAGMA journal_mode = WAL")
+            with loop_writers.track_autocommit_write(dbapi_connection):
+                cursor.execute("PRAGMA journal_mode = WAL")
         cursor.execute("PRAGMA foreign_keys = ON")
         cursor.execute("PRAGMA busy_timeout = 5000")
         cursor.close()

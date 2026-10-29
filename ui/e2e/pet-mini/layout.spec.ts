@@ -17,7 +17,8 @@ for (const theme of ['light', 'dark']) {
         - document.querySelector('.pet-mini-collapsed')!.getBoundingClientRect().bottom);
       expect(gap).toBeGreaterThanOrEqual(13);
       expect(gap).toBeLessThanOrEqual(15);
-      await expect(page.locator('.pet-mini-reply-toggle')).toContainText(lang === 'zh' ? /已回复：\S/ : /Replied: \S/);
+      await expect(page.locator('.pet-mini-reply-toggle')).not.toContainText(/已回复：|Replied:/);
+      await expect(page.locator('.pet-mini-reply-toggle')).toContainText('我会帮你');
       await page.locator('.pet-mini-collapsed').click();
       const stop = page.locator('.pet-mini-stop').first();
       await expect(stop).toHaveAttribute('aria-label', lang === 'zh' ? /^停止：.+/ : /^Stop: .+/);
@@ -288,6 +289,9 @@ test.describe('expanded dismiss controls on touch', () => {
       await expect(dismiss).toHaveCSS('opacity', '1');
       await expect(dismiss).toHaveCSS('pointer-events', 'auto');
     }
+    await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+    await expect(page.locator('.pet-mini-dock')).toHaveCSS('opacity', '1');
+    await expect(page.locator('.pet-mini-dock')).toHaveCSS('pointer-events', 'auto');
   });
 });
 
@@ -648,17 +652,24 @@ test('the history fades over a taller, darker band than the card list', async ({
   }, where);
 
   await page.locator('.pet-mini-collapsed').click();
-  expect(await scrollTo('.pet-mini-scroll', 'middle')).toBeGreaterThan(64);
+  // Both lists open with a height transition; measure their scroll range once it has run.
+  await expect.poll(() => scrollTo('.pet-mini-scroll', 'middle')).toBeGreaterThan(64);
   await expect.poll(() => mask('.pet-mini-scroll')).toContain('rgb(0, 0, 0) 32px');
   expect(await mask('.pet-mini-scroll')).toContain('calc(100% - 32px)');
   expect(await mask('.pet-mini-scroll')).not.toContain('rgba');
 
   await page.locator('.pet-mini-reply-toggle').click();
   await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).toHaveClass(/is-open/);
-  expect(await scrollTo('.pet-mini-bubble-history', 'middle')).toBeGreaterThan(96);
-  // A 48px band that is already well faded across its outer two thirds.
-  await expect.poll(() => mask('.pet-mini-bubble-history')).toContain('rgb(0, 0, 0) 48px');
+  await expect.poll(() => scrollTo('.pet-mini-bubble-history', 'middle')).toBeGreaterThan(96);
+  // A 48px band that is already well faded across its outer two thirds. The opening
+  // history settles on its latest line, so place it in the middle again until both
+  // bands are drawn rather than racing that first scroll.
+  await expect.poll(async () => {
+    await scrollTo('.pet-mini-bubble-history', 'middle');
+    return mask('.pet-mini-bubble-history');
+  }).toContain('calc(100% - 48px)');
   const middle = await mask('.pet-mini-bubble-history');
+  expect(middle).toContain('rgb(0, 0, 0) 48px');
   for (const stop of ['rgba(0, 0, 0, 0.12) 16.8px', 'rgba(0, 0, 0, 0.55) 33.6px', 'calc(100% - 48px)', 'rgba(0, 0, 0, 0.55) calc(100% - 33.6px)', 'rgba(0, 0, 0, 0.12) calc(100% - 16.8px)']) {
     expect(middle).toContain(stop);
   }
@@ -976,11 +987,11 @@ test('an old, finished exchange starts with the bubble hidden, and takes no spac
   await expect.poll(() => bubbleIsRegion(page)).toBe(false);
 });
 
-// The reply lingers for 10s of on-screen time after the turn ends (spec §4.2).
+// The reply lingers for 20s of on-screen time after the turn ends (spec §4.2).
 // It waits until the running turn and its conversation are on screen, so the
 // turn's end is one this page watched happen.
 const finishTurn = async (page: import('@playwright/test').Page, text = '做完了。') => {
-  await expect(page.locator('.pet-mini-reply-bubble')).toContainText('检查桌宠 mini 的交互');
+  await expect(page.locator('.pet-mini-reply-toggle')).toContainText('思考中');
   await page.evaluate((text) =>
     window.petFixtureFinishTurn({ id: 'live_reply', author: 'agent', type: 'result', text, read_at: null }), text);
 };
@@ -997,7 +1008,7 @@ const tabToToggle = async (page: import('@playwright/test').Page, browserName: s
 };
 
 for (const theme of ['light', 'dark']) {
-  test(`a running turn shows thinking, then its reply for 10s on screen (${theme})`, async ({ page }) => {
+  test(`a running turn shows thinking, then its reply for 20s on screen (${theme})`, async ({ page }) => {
     await page.clock.install();
     await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&running=1&asr=1');
     await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
@@ -1007,8 +1018,8 @@ for (const theme of ['light', 'dark']) {
     await finishTurn(page);
     await page.clock.runFor(100);
     await expect(bubbleShown(page)).toBeVisible();
-    await expect(page.locator('.pet-mini-reply-toggle')).toContainText('已回复：做完了。');
-    await page.clock.runFor(9_500);
+    await expect(page.locator('.pet-mini-reply-toggle')).toContainText('做完了。');
+    await page.clock.runFor(19_500);
     await expect(bubbleShown(page)).toBeVisible();
     await page.clock.runFor(1_000);
     await expect(bubbleShown(page)).toHaveCount(0);
@@ -1024,12 +1035,12 @@ test('a background completion arriving during the linger does not take over its 
   await page.clock.runFor(500);
   await finishTurn(page);
   await page.clock.runFor(1_000);
-  await expect(page.locator('.pet-mini-reply-toggle')).toContainText('已回复：做完了。');
+  await expect(page.locator('.pet-mini-reply-toggle')).toContainText('做完了。');
   await page.evaluate(() => window.petFixtureMessage({
     id: 'background', author: 'agent', type: 'result', text: '后台任务也完成了。', read_at: null, metadata: { detached: true },
   }));
   await page.clock.runFor(500);
-  await expect(page.locator('.pet-mini-reply-toggle')).toContainText('已回复：做完了。');
+  await expect(page.locator('.pet-mini-reply-toggle')).toContainText('做完了。');
   await expect(page.locator('.pet-mini-reply-toggle')).not.toContainText('后台任务');
 });
 
@@ -1240,31 +1251,105 @@ for (const theme of ['light', 'dark']) {
   }
 }
 
-test('a double-click opens the conversation in Avibe and leaves the history as it was', async ({ page }) => {
-  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long');
+for (const initiallyOpen of [false, true]) {
+  test(`a double-click never toggles history (initially open=${initiallyOpen})`, async ({ page }) => {
+    await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long');
+    const avatar = page.locator('.pet-mini-avatar-button');
+    await expect(avatar).toBeVisible();
+    await page.clock.install();
+    if (initiallyOpen) {
+      await avatar.click();
+      await page.clock.runFor(450);
+      await expect(avatar).toHaveAttribute('aria-expanded', 'true');
+    }
+    // Record every committed aria-expanded value, including transient states
+    // that could otherwise disappear before Playwright's final assertion.
+    await avatar.evaluate((node, initial) => {
+      node.setAttribute('data-history-changed', 'false');
+      new MutationObserver((records) => {
+        if (records.some((record) => record.oldValue !== String(initial))
+          || node.getAttribute('aria-expanded') !== String(initial)) {
+          node.setAttribute('data-history-changed', 'true');
+        }
+      }).observe(node, { attributes: true, attributeOldValue: true, attributeFilter: ['aria-expanded'] });
+    }, initiallyOpen);
+    await avatar.dblclick();
+    await page.clock.runFor(600);
+    await expect.poll(() => page.evaluate(() => window.petFixtureOpens.length)).toBe(1);
+    await expect(avatar).toHaveAttribute('aria-expanded', String(initiallyOpen));
+    await expect(avatar).toHaveAttribute('data-history-changed', 'false');
+    if (!initiallyOpen) expect(await page.evaluate(() => window.petFixtureMarkReads)).toEqual([]);
+    // The OS transfers key to the main window during pet_open.
+    await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+    await expect(avatar).toHaveAttribute('aria-expanded', String(initiallyOpen));
+    const box = (await avatar.boundingBox())!;
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2 + 20, box.y + box.height / 2 + 5, { steps: 4 });
+    await page.mouse.up();
+    await page.clock.runFor(600);
+    expect(await page.evaluate(() => window.petFixtureOpens.length)).toBe(1);
+  });
+}
+
+test('idle dock recovers on the first shell enter when the pointer left before blur', async ({ page }) => {
+  await page.goto('/e2e/pet-mini/fixture.html?main=false&activities=0&asr=1');
   const avatar = page.locator('.pet-mini-avatar-button');
-  await expect(avatar).toBeVisible();
-  await avatar.dblclick();
-  await expect.poll(() => page.evaluate(() => window.petFixtureOpens)).toEqual(['avibe://session/ses_main']);
-  await page.waitForTimeout(100);
-  await expect(avatar).toHaveAttribute('aria-expanded', 'false');
-  await expect(page.locator('.pet-mini-detail.is-open')).toHaveCount(0);
-  await avatar.click();
-  await expect(page.locator('.pet-mini-detail.is-open')).toHaveCount(1);
-  await avatar.dblclick();
-  await expect.poll(() => page.evaluate(() => window.petFixtureOpens.length)).toBe(2);
-  await page.waitForTimeout(100);
-  await expect(avatar).toHaveAttribute('aria-expanded', 'true');
-  await expect(page.locator('.pet-mini-detail.is-open')).toHaveCount(1);
-  // A drag never opens it.
-  const box = (await avatar.boundingBox())!;
-  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-  await page.mouse.down();
-  await page.mouse.move(box.x + box.width / 2 + 20, box.y + box.height / 2 + 5, { steps: 4 });
-  await page.mouse.up();
-  await page.waitForTimeout(100);
-  expect(await page.evaluate(() => window.petFixtureOpens.length)).toBe(2);
+  const dock = page.locator('.pet-mini-dock');
+  await avatar.hover();
+  await avatar.focus();
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent('avibe:pet-hover', { detail: { hover: true } })));
+  await expect(dock).toHaveCSS('opacity', '1');
+  await page.mouse.move(0, 0);
+  await page.evaluate(() => {
+    window.dispatchEvent(new CustomEvent('avibe:pet-hover', { detail: { hover: false } }));
+    window.dispatchEvent(new Event('blur'));
+  });
+  await expect(dock).toHaveCSS('opacity', '0');
+  await expect(avatar).not.toBeFocused();
+  // No additional leave or window focus: the first shell enter must recover.
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent('avibe:pet-hover', { detail: { hover: true } })));
+  await expect(dock).toHaveCSS('opacity', '1');
+  await expect(dock).toHaveCSS('pointer-events', 'auto');
 });
+
+for (const theme of ['light', 'dark']) {
+  for (const cause of ['double-click', 'blur']) {
+    test(`idle dock hides after ${cause} until shell leave/re-enter (${theme})`, async ({ page }, testInfo) => {
+      await page.goto('/e2e/pet-mini/fixture.html?main=false&activities=0&asr=1');
+      await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
+      const avatar = page.locator('.pet-mini-avatar-button');
+      const dock = page.locator('.pet-mini-dock');
+      await avatar.hover();
+      await avatar.focus();
+      await page.evaluate(() => window.dispatchEvent(new CustomEvent('avibe:pet-hover', { detail: { hover: true } })));
+      await expect(dock).toHaveCSS('opacity', '1');
+      if (cause === 'double-click') await avatar.dblclick();
+      else await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+      await expect(dock).toHaveCSS('opacity', '0');
+      await expect(dock).toHaveCSS('pointer-events', 'none');
+      await expect(avatar).not.toBeFocused();
+      await page.screenshot({ path: testInfo.outputPath('dock-suppressed.png'), animations: 'disabled' });
+      // The actual pointer remains over the avatar: stale CSS hover and
+      // repeated shell hover must both remain suppressed.
+      await page.evaluate(() => window.dispatchEvent(new CustomEvent('avibe:pet-hover', { detail: { hover: true } })));
+      await expect(dock).toHaveCSS('opacity', '0');
+      await page.evaluate(() => window.dispatchEvent(new CustomEvent('avibe:pet-hover', { detail: { hover: false } })));
+      await expect(dock).toHaveCSS('opacity', '0');
+      await page.mouse.move(0, 0);
+      await page.evaluate(() => window.dispatchEvent(new CustomEvent('avibe:pet-hover', { detail: { hover: true } })));
+      await expect(dock).toHaveCSS('opacity', '1');
+      await page.screenshot({ path: testInfo.outputPath('dock-reentered.png'), animations: 'disabled' });
+      // Shell hover can show it again without window focus or CSS hover.
+      await dock.locator('button').last().click();
+      await expect(page.getByRole('textbox')).toBeVisible();
+      await avatar.dblclick();
+      await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+      await expect(dock).toHaveClass(/is-active/);
+      await expect(dock).toHaveCSS('opacity', '1');
+    });
+  }
+}
 
 for (const reduced of [false, true]) {
   test(`thinking is content-sized and centred, and the reply widens it from the centre (reduced=${reduced})`, async ({ page }) => {
@@ -1291,7 +1376,7 @@ for (const reduced of [false, true]) {
       }
       return seen;
     });
-    await expect(page.locator('.pet-mini-reply-toggle')).toContainText('已回复');
+    await expect(page.locator('.pet-mini-reply-toggle')).toContainText('做完了');
     for (const frame of frames) expect(Math.abs(frame.centre - centre)).toBeLessThanOrEqual(1);
     const widths = frames.map((frame) => frame.width);
     for (let i = 1; i < widths.length; i += 1) expect(widths[i]).toBeGreaterThanOrEqual(widths[i - 1] - 0.5);

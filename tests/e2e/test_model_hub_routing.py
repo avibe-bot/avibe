@@ -273,10 +273,37 @@ def test_mh_routing_012_persisted_dormant_opencode_override_reaches_exact_source
         asyncio.run(exercise(adapter, first, second))
 
 
+async def _save_during_incremental_stream(
+    client, url, payload, headers, service, menu, next_chain, adapter, old_connection, mock, terminal, disconnect,
+):
+    """MH-ROUTING-009 for incrementally streamed protocols: Save while the consumer is reading output."""
+    async with client.post(url, json=payload, headers=headers) as response:
+        assert response.status == 200
+        prefix = b""
+        while b"mock response" not in prefix:
+            prefix += await asyncio.wait_for(response.content.readuntil(b"\n\n"), timeout=10)
+        saved = await asyncio.wait_for(service.set_agent_chain("opencode", menu, next_chain), timeout=10)
+        assert adapter.supervisor.client_if_running().connection == old_connection
+        assert adapter._active_transports == 1
+        if disconnect:
+            response.close()
+            mock.configure(stream="healthy")
+        else:
+            mock.configure(stream="healthy")
+            tail = await asyncio.wait_for(response.read(), timeout=15)
+            assert terminal in prefix + tail
+        assert saved["chain"]["manual_override"] == next_chain
+
+
 @pytest.mark.parametrize("protocol", ["openai_responses", "openai_chat", "anthropic"])
 @pytest.mark.parametrize("disconnect", [False, True], ids=["complete", "client-close"])
 def test_mh_routing_009_save_during_active_stream_hot_reloads_without_restart_or_truncation(tmp_path, monkeypatch, protocol, disconnect):
-    """MH-ROUTING-009: Save hot-reloads the live engine during active output; the stream is neither awaited nor truncated."""
+    """MH-ROUTING-009: Save hot-reloads the live engine during active output; the stream is neither awaited nor truncated.
+
+    An initial Responses stream is held by the gateway until its upstream terminal (one exact
+    overload replay, docs/plans/openai-streamed-overload-retry.md): the consumer has no bytes while
+    the upstream is paused, so the Save lands while the held request's engine transport is live.
+    """
     async def exercise(adapter, mock):
         service, menu, target, sources = _real_route_service(tmp_path, adapter, [mock], protocol, [])
         await service.runtime_start()
@@ -296,31 +323,46 @@ def test_mh_routing_009_save_during_active_stream_hot_reloads_without_restart_or
         mock.configure(stream="pause_after_first_output")
         mock.reset_requests()
         save = None
+        next_target = "vendor/next-unlisted-target"
+        next_chain = {"hops": [{"source_id": sources[0].id, "model_id": next_target}]}
+        headers = {"Authorization": f"Bearer {token}"}
         try:
             async with aiohttp.ClientSession(trust_env=False) as client:
-                async with client.post(f"{base_url}/v1/{path}", json=payload,
-                                       headers={"Authorization": f"Bearer {token}"}) as response:
-                    assert response.status == 200
-                    prefix = b""
-                    while b"mock response" not in prefix:
-                        prefix += await asyncio.wait_for(response.content.readuntil(b"\n\n"), timeout=10)
-                    next_target = "vendor/next-unlisted-target"
-                    save = asyncio.create_task(service.set_agent_chain("opencode", menu, {
-                        "hops": [{"source_id": sources[0].id, "model_id": next_target}],
-                    }))
-                    saved = await asyncio.wait_for(save, timeout=10)
-                    assert adapter.supervisor.client_if_running().connection == old_connection
-                    assert adapter._active_transports == 1
-                    if disconnect:
-                        response.close()
+                if protocol == "openai_responses":
+                    held = asyncio.ensure_future(client.post(f"{base_url}/v1/{path}", json=payload, headers=headers))
+                    try:
+                        # The upstream is paused after its first output while the gateway holds it.
+                        deadline = time.monotonic() + 10
+                        while not ([row for row in mock.requests() if row["path"] == f"/v1/{path}"]
+                                   and adapter._active_transports == 1):
+                            assert time.monotonic() < deadline, "the held Responses stream never reached its upstream"
+                            await asyncio.sleep(0.05)
+                        save = asyncio.create_task(service.set_agent_chain("opencode", menu, next_chain))
+                        saved = await asyncio.wait_for(save, timeout=10)
+                        assert not held.done()
+                        assert adapter.supervisor.client_if_running().connection == old_connection
+                        assert adapter._active_transports == 1
                         mock.configure(stream="healthy")
-                    else:
-                        mock.configure(stream="healthy")
-                        tail = await asyncio.wait_for(response.read(), timeout=15)
-                        assert terminal in prefix + tail
-                    assert saved["chain"]["manual_override"] == {"hops": [{"source_id": sources[0].id, "model_id": next_target}]}
+                        if disconnect:
+                            held.cancel()
+                            await asyncio.gather(held, return_exceptions=True)
+                        else:
+                            async with await asyncio.wait_for(held, timeout=15) as response:
+                                assert response.status == 200
+                                body = await asyncio.wait_for(response.read(), timeout=15)
+                            assert b"mock response" in body and terminal in body
+                    finally:
+                        if not held.done():
+                            held.cancel()
+                            await asyncio.gather(held, return_exceptions=True)
+                    assert saved["chain"]["manual_override"] == next_chain
+                else:
+                    await _save_during_incremental_stream(
+                        client, f"{base_url}/v1/{path}", payload, headers, service, menu, next_chain, adapter,
+                        old_connection, mock, terminal, disconnect,
+                    )
                 async with client.post(f"{base_url}/v1/{path}", json={**payload, "stream": False},
-                                       headers={"Authorization": f"Bearer {token}"}) as response:
+                                       headers=headers) as response:
                     raw = await asyncio.wait_for(response.read(), timeout=10)
                     assert response.status == 200, raw
             captured = [row["body"]["model"] for row in mock.requests() if row["path"] == f"/v1/{path}"]

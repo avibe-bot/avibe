@@ -1,0 +1,17 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-pet-settings",
+  "description": "Desktop Mini Settings controls for the Workbench. These commands are available only to the main window on the local Runtime origin.",
+  "local": false,
+  "windows": ["main"],
+  "remote": {
+    "urls": ["http://127.0.0.1:*/*", "http://[\\:\\:1]:*/*"]
+  },
+  "permissions": [
+    "allow-pet-settings",
+    "allow-pet-set-enabled",
+    "allow-pet-set-shortcut",
+    "allow-pet-reset-shortcuts",
+    "allow-pet-set-voice-mode"
+  ]
+}

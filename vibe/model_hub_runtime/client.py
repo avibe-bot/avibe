@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import functools
 import io
 import json
 import logging
@@ -47,6 +48,7 @@ from core.handlers.model_hub.json_wire import (
 from core.handlers.model_hub.request import FORWARDED_CALLER_HEADERS
 from core.os_errors import local_os_errno
 from core.handlers.model_hub.stream_wire import (
+    GOOGLE_ERROR_STATUS_MACHINE_CODES,
     ErrorEnvelopePath,
     ProtocolObservation,
     ProtocolSSEState,
@@ -806,6 +808,9 @@ class EngineClient:
                         observed_payload,
                         outcome="failed_terminal",
                         error_payload=payload,
+                        error_envelope_paths=(
+                            observed_payload.error_envelope_paths or _HTTP_ERROR_ENVELOPE_PATHS
+                        ),
                         message=f"upstream returned HTTP {response.status}",
                         recovery_verified=False,
                     ),
@@ -1147,7 +1152,11 @@ async def probe_models(
     if not root:
         raise EngineClientError("source requires a base URL for model discovery")
     if protocol == "google":
-        return await _probe_google_models(root, secret=secret, timeout=timeout)
+        # A Gemini Source keeps the names Google lists (``models/<id>``), as it always has on the OpenAI-compatible
+        # endpoint, so its saved routes and sessions name the same models on either surface.
+        return await _probe_google_models(
+            root, secret=secret, timeout=timeout, full_names=normalized_vendor == "gemini",
+        )
     try:
         url = upstream_api_url(root, "/v1/models")
         credential = {} if secret is None else (
@@ -1200,8 +1209,14 @@ async def probe_models(
     return tuple(fallback_models)
 
 
-def _project_google_inventory(reader: BinaryIO) -> tuple[tuple[DiscoveredModel, ...], str | None]:
-    """Project routing identities and the continuation token, never model limits."""
+def _project_google_inventory(
+    reader: BinaryIO, *, full_names: bool = False,
+) -> tuple[tuple[DiscoveredModel, ...], str | None]:
+    """Project routing identities and the continuation token, never model limits.
+
+    A model's identity is its listed ``models/<id>`` name without the collection, or the whole name with
+    ``full_names``.
+    """
     names: dict[JSONScope, str] = {}
     objects: set[JSONScope] = set()
     valid_root = False
@@ -1229,7 +1244,7 @@ def _project_google_inventory(reader: BinaryIO) -> tuple[tuple[DiscoveredModel, 
             if event == "replace":
                 names.pop(scope, None)
             elif event == "scalar" and isinstance(value, str) and value.startswith("models/") and value[7:]:
-                names[scope] = value[7:]
+                names[scope] = value if full_names else value[7:]
         elif path == ("nextPageToken",):
             if event == "replace":
                 page_token, valid_token = None, True
@@ -1246,7 +1261,9 @@ def _project_google_inventory(reader: BinaryIO) -> tuple[tuple[DiscoveredModel, 
     return tuple(DiscoveredModel(id=name) for name in dict.fromkeys(names.values())), page_token
 
 
-async def _probe_google_models(root: str, *, secret: str | None, timeout: float) -> tuple[DiscoveredModel, ...]:
+async def _probe_google_models(
+    root: str, *, secret: str | None, timeout: float, full_names: bool = False,
+) -> tuple[DiscoveredModel, ...]:
     """Follow only page tokens on the same declared, credential-gated endpoint."""
     try:
         url = google_api_base_url(root) + "/v1beta/models"
@@ -1278,7 +1295,8 @@ async def _probe_google_models(root: str, *, secret: str | None, timeout: float)
                             await run_owned_in_thread(body.write, chunk)
                         await run_owned_in_thread(body.seek, 0)
                         page, page_token = await run_owned_in_thread(
-                            _project_before_deadline, body, _project_google_inventory, deadline=deadline,
+                            _project_before_deadline, body,
+                            functools.partial(_project_google_inventory, full_names=full_names), deadline=deadline,
                         )
                 models.update((model.id, model) for model in page)
                 if page_token is None:
@@ -1711,14 +1729,21 @@ def _project_root_map(reader: BinaryIO) -> bool:
     return root_is_map
 
 
+# Where an HTTP error body that matched none of its protocol's envelopes may
+# still carry one: Google answers its REST and OpenAI-compatible endpoints with
+# the RPC envelope wrapped in a one-element array.
+_HTTP_ERROR_ENVELOPE_PATHS: tuple[ErrorEnvelopePath, ...] = (("error",), ("*", "error"))
+
+
 def _project_raw_error_fields(
     reader: BinaryIO,
     envelope_paths: tuple[ErrorEnvelopePath, ...] = (("error",),),
 ) -> tuple[str | None, str | None, tuple[str, ...]]:
+    fields = ("type", "code", "status")
     selected_paths = {
         path
         for envelope_path in envelope_paths
-        for path in (envelope_path, (*envelope_path, "type"), (*envelope_path, "code"))
+        for path in (envelope_path, *((*envelope_path, field) for field in fields))
     }
     maps: set[ErrorEnvelopePath] = set()
     values: dict[JSONPath, object] = {}
@@ -1733,13 +1758,13 @@ def _project_raw_error_fields(
             if path == envelope_path:
                 if event == "replace":
                     maps.discard(envelope_path)
-                    values.pop((*envelope_path, "type"), None)
-                    values.pop((*envelope_path, "code"), None)
+                    for field in fields:
+                        values.pop((*envelope_path, field), None)
                 elif event == "start_map":
                     maps.add(envelope_path)
                 elif event == "start_array":
                     maps.discard(envelope_path)
-            elif path in {(*envelope_path, "type"), (*envelope_path, "code")}:
+            elif path in {(*envelope_path, field) for field in fields}:
                 if event == "replace":
                     values.pop(path, None)
                 elif event == "scalar":
@@ -1753,11 +1778,19 @@ def _project_raw_error_fields(
         if path in maps
         if (code := _safe_error_code(values.get((*path, "type")))) is not None
     ]
+
+    def envelope_code(path: ErrorEnvelopePath) -> str | None:
+        value = values.get((*path, "code"))
+        if type(value) is int and isinstance(values.get((*path, "status")), str):
+            # A Google RPC envelope names its class by HTTP status, as native Gemini errors do.
+            value = GOOGLE_ERROR_STATUS_MACHINE_CODES.get(value)
+        return _safe_error_code(value)
+
     codes = [
         code
         for path in envelope_paths
         if path in maps
-        if (code := _safe_error_code(values.get((*path, "code")))) is not None
+        if (code := envelope_code(path)) is not None
     ]
     candidates = tuple(dict.fromkeys((*types, *codes)))
     return types[0] if types else None, codes[0] if codes else None, candidates
@@ -2248,6 +2281,10 @@ _REJECTION_MESSAGE_SCAN_CHARS = 2000
 _INVALID_VALUE_MESSAGE = re.compile(r"Invalid value: '([A-Za-z0-9_.-]{1,64})'")
 _UNSUPPORTED_TOOL_TYPE_MESSAGE = re.compile(r"Unsupported tool type: ([A-Za-z0-9_.-]{1,64})")
 _INVALID_ENCRYPTED_CONTENT_MESSAGE = re.compile(r"Invalid encrypted_content in ([a-z_]{1,64}) block")
+# Gemini's refusal of Google Search on a model that cannot run it next to functions (measured 2026-10-27 on
+# gemini-2.5-flash and gemini-3-pro-image-preview: "Tool call context circulation is not enabled for models/…"),
+# named by the overlay's declaration type.
+_GOOGLE_SEARCH_REFUSAL_MESSAGE = re.compile(r"Tool call context circulation is not enabled")
 
 
 def _upstream_rejection(
@@ -2300,7 +2337,9 @@ def _upstream_rejection(
         error_type=token(error_type),
         param=token(fields.get("param")),
         invalid_value=named(_INVALID_VALUE_MESSAGE),
-        unsupported_tool_type=named(_UNSUPPORTED_TOOL_TYPE_MESSAGE),
+        unsupported_tool_type=named(_UNSUPPORTED_TOOL_TYPE_MESSAGE) or (
+            "google_search" if _GOOGLE_SEARCH_REFUSAL_MESSAGE.search(text) else None
+        ),
         invalid_encrypted_content_block=named(_INVALID_ENCRYPTED_CONTENT_MESSAGE),
     )
 

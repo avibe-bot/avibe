@@ -25,6 +25,7 @@ type FakeItem = {
   vendor?: string;
   display_name?: string;
   masked_credential?: string | null;
+  config_blocker?: boolean;
 };
 
 type FakeSource = {
@@ -129,7 +130,7 @@ const CONFIG = {
 /** Installed, verified and serving: the screen's `gatewayIntent` reads `running` and
  *  starts no install, which is the state every proof below is about something else. */
 const RUNTIME = {
-  contract_version: 21,
+  contract_version: 22,
   enabled: true,
   host_platform: 'darwin',
   manifest: {
@@ -265,10 +266,12 @@ export const vendorCount = (facts: ServerFacts): number =>
 /**
  * Importable rows this entry point could actually take — what the capsule counts.
  *
- * Stated from the server's own rule rather than from the product's projection: the
- * server migrates a backend whole and refuses a batch that omits one of its rows, so
- * one row it will not import takes its whole backend out of the offer. Written out
- * here because the point of every count below is to be derived twice.
+ * Stated from the server's own rule (`apply_native_migration`) rather than from the
+ * product's projection: the server migrates every importable row of a backend
+ * together, and refuses the backend outright while a native config it cannot parse
+ * (`config_blocker`) is present. A row it will not import otherwise stays native,
+ * shadowed by the Hub launch, and takes nothing out of the offer. Written out here
+ * because the point of every count below is to be derived twice.
  *
  * Enough for the shapes this fixture serves: no row carries `required_backends`, and
  * every importable row in it is a key, so there is no closure to walk and nothing
@@ -276,7 +279,7 @@ export const vendorCount = (facts: ServerFacts): number =>
  */
 export const importableCount = (facts: ServerFacts): number => {
   const blocked = new Set(
-    facts.items.filter((item) => item.proposed_action !== 'import').map((item) => item.backend),
+    facts.items.filter((item) => item.config_blocker === true).map((item) => item.backend),
   );
   return facts.items
     .filter((item) => item.proposed_action === 'import' && !blocked.has(item.backend))

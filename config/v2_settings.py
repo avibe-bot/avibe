@@ -5,10 +5,10 @@ import hmac
 import secrets
 import string
 import threading
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from config import paths
 from modules.agents.catalog import NATIVE_CLI_BACKENDS
@@ -137,23 +137,25 @@ class RoutingSettings:
     # Scope-level overrides applied on top of the selected Vibe Agent.
     model: Optional[str] = None
     reasoning_effort: Optional[str] = None
-    # OpenCode settings
+    # The native agent each CLI backend runs for this scope.
     opencode_agent: Optional[str] = None
-    opencode_model: Optional[str] = None
-    opencode_reasoning_effort: Optional[str] = None
-    # Claude Code settings
     claude_agent: Optional[str] = None
-    claude_model: Optional[str] = None
-    claude_reasoning_effort: Optional[str] = None
-    # Codex settings
     codex_agent: Optional[str] = None
-    codex_model: Optional[str] = None
-    codex_reasoning_effort: Optional[str] = None
 
-def _backend_specific_value(routing: RoutingSettings, backend: Optional[str], field: str) -> Optional[str]:
-    if backend not in NATIVE_CLI_BACKENDS:
+
+# Retired per-backend spellings of a scope's model and effort (``claude_model``,
+# ``codex_reasoning_effort``, ...). Older releases stored them, and API callers may
+# still send them; they are read only to fill ``model`` / ``reasoning_effort`` for a
+# route on that built-in backend's Agent, and are never stored or returned.
+LEGACY_ROUTING_ALIASES = frozenset(
+    f"{backend}_{kind}" for backend in NATIVE_CLI_BACKENDS for kind in ("model", "reasoning_effort")
+)
+
+
+def _legacy_routing_alias(payload: dict, agent_name: Optional[str], kind: str) -> Optional[str]:
+    if agent_name not in NATIVE_CLI_BACKENDS:
         return None
-    return getattr(routing, f"{backend}_{field}", None)
+    return payload.get(f"{agent_name}_{kind}")
 
 
 def _payload_value(payload: dict, key: str, fallback_key: str) -> Optional[str]:
@@ -163,27 +165,31 @@ def _payload_value(payload: dict, key: str, fallback_key: str) -> Optional[str]:
 
 
 def normalize_routing_settings(routing: Optional[RoutingSettings]) -> RoutingSettings:
-    """Normalize scope routing without consulting deprecated backend routing."""
+    """A copy of a scope route, or the empty route."""
     if routing is None:
         return RoutingSettings()
-    agent_name = getattr(routing, "agent_name", None)
-    builtin_agent_backend = agent_name if agent_name in NATIVE_CLI_BACKENDS else None
-    model = getattr(routing, "model", None)
-    reasoning_effort = getattr(routing, "reasoning_effort", None)
+    return RoutingSettings(**{item.name: getattr(routing, item.name, None) for item in fields(RoutingSettings)})
+
+
+def routing_from_stored_payload(payload: Optional[dict]) -> RoutingSettings:
+    """A route as stored in a scope's settings, from this or an older release.
+
+    An empty canonical value falls back to its retired per-backend alias, as the
+    rows older releases wrote can carry only that.
+    """
+    payload = payload if isinstance(payload, dict) else {}
+    agent_name = payload.get("agent_name") or payload.get("agent")
     return RoutingSettings(
         agent_name=agent_name,
-        model=model or _backend_specific_value(routing, builtin_agent_backend, "model"),
-        reasoning_effort=reasoning_effort
-        or _backend_specific_value(routing, builtin_agent_backend, "reasoning_effort"),
-        opencode_agent=getattr(routing, "opencode_agent", None),
-        opencode_model=getattr(routing, "opencode_model", None),
-        opencode_reasoning_effort=getattr(routing, "opencode_reasoning_effort", None),
-        claude_agent=getattr(routing, "claude_agent", None),
-        claude_model=getattr(routing, "claude_model", None),
-        claude_reasoning_effort=getattr(routing, "claude_reasoning_effort", None),
-        codex_agent=getattr(routing, "codex_agent", None),
-        codex_model=getattr(routing, "codex_model", None),
-        codex_reasoning_effort=getattr(routing, "codex_reasoning_effort", None),
+        model=payload.get("model")
+        or payload.get("model_override")
+        or _legacy_routing_alias(payload, agent_name, "model"),
+        reasoning_effort=payload.get("reasoning_effort")
+        or payload.get("reasoning_effort_override")
+        or _legacy_routing_alias(payload, agent_name, "reasoning_effort"),
+        opencode_agent=payload.get("opencode_agent"),
+        claude_agent=payload.get("claude_agent"),
+        codex_agent=payload.get("codex_agent"),
     )
 
 
@@ -271,53 +277,43 @@ class SettingsState:
     bind_codes: List[BindCode] = field(default_factory=list)
 
 
+def lift_legacy_routing_aliases(payload: dict, agent_name: Optional[str]) -> dict:
+    """``payload`` with its retired per-backend aliases folded into the canonical keys.
+
+    An alias fills only a canonical key the payload does not state, and only
+    for a route on that built-in backend's own Agent; every alias is dropped.
+    """
+    lifted = {key: value for key, value in payload.items() if key not in LEGACY_ROUTING_ALIASES}
+    for kind in ("model", "reasoning_effort"):
+        alias = _legacy_routing_alias(payload, agent_name, kind)
+        if alias is not None and kind not in lifted and f"{kind}_override" not in lifted:
+            lifted[kind] = alias
+    return lifted
+
+
 def _parse_routing(payload: dict) -> RoutingSettings:
-    """Parse a routing settings dict into a RoutingSettings dataclass."""
+    """A route as an API caller or settings file states it.
+
+    A canonical key that is present wins, even as an explicit clear; only an
+    absent one is filled from its retired per-backend alias.
+    """
     if not isinstance(payload, dict):
         payload = {}
-    model_key_present = "model" in payload or "model_override" in payload
-    reasoning_key_present = "reasoning_effort" in payload or "reasoning_effort_override" in payload
-    return normalize_routing_settings(
-        RoutingSettings(
-            agent_name=payload.get("agent_name") or payload.get("agent"),
-            model=_payload_value(payload, "model", "model_override"),
-            reasoning_effort=_payload_value(payload, "reasoning_effort", "reasoning_effort_override"),
-            opencode_agent=payload.get("opencode_agent"),
-            opencode_model=None if model_key_present else payload.get("opencode_model"),
-            opencode_reasoning_effort=None if reasoning_key_present else payload.get("opencode_reasoning_effort"),
-            claude_agent=payload.get("claude_agent"),
-            claude_model=None if model_key_present else payload.get("claude_model"),
-            claude_reasoning_effort=None if reasoning_key_present else payload.get("claude_reasoning_effort"),
-            codex_agent=payload.get("codex_agent"),
-            codex_model=None if model_key_present else payload.get("codex_model"),
-            codex_reasoning_effort=None if reasoning_key_present else payload.get("codex_reasoning_effort"),
-        )
+    agent_name = payload.get("agent_name") or payload.get("agent")
+    payload = lift_legacy_routing_aliases(payload, agent_name)
+    return RoutingSettings(
+        agent_name=agent_name,
+        model=_payload_value(payload, "model", "model_override"),
+        reasoning_effort=_payload_value(payload, "reasoning_effort", "reasoning_effort_override"),
+        opencode_agent=payload.get("opencode_agent"),
+        claude_agent=payload.get("claude_agent"),
+        codex_agent=payload.get("codex_agent"),
     )
 
 
-def _routing_to_dict(routing: RoutingSettings) -> dict:
-    """Serialize a RoutingSettings to dict."""
-    routing = normalize_routing_settings(routing)
-    return {
-        "agent_name": routing.agent_name,
-        "model": routing.model,
-        "reasoning_effort": routing.reasoning_effort,
-        "opencode_agent": routing.opencode_agent,
-        "opencode_model": routing.opencode_model,
-        "opencode_reasoning_effort": routing.opencode_reasoning_effort,
-        "claude_agent": routing.claude_agent,
-        "claude_model": routing.claude_model,
-        "claude_reasoning_effort": routing.claude_reasoning_effort,
-        "codex_agent": routing.codex_agent,
-        "codex_model": routing.codex_model,
-        "codex_reasoning_effort": routing.codex_reasoning_effort,
-    }
-
-
-def routing_to_compat_dict(routing: RoutingSettings) -> dict:
-    """Serialize routing with legacy read-only aliases derived from canonical fields."""
-    routing = normalize_routing_settings(routing)
-    return _routing_to_dict(routing)
+def routing_to_dict(routing: Optional[RoutingSettings]) -> dict:
+    """A scope route as the settings API and storage spell it."""
+    return asdict(normalize_routing_settings(routing))
 
 
 def parse_settings_payload(payload: dict) -> tuple[SettingsState, bool]:
@@ -565,6 +561,23 @@ class SettingsStore:
                 raise
             # Use the exact revision committed by this transaction. Reading the
             # current value here could absorb a later external write without loading it.
+            self._observed_revision = revision
+            self._loaded_state = copy.deepcopy(self.settings)
+            self._generation += 1
+
+    def apply(self, mutate: Callable[[SettingsState], None], *, user_context=None) -> None:
+        """Run ``mutate`` on the authoritative settings inside one write transaction.
+
+        Unlike ``save``, nothing this store loaded earlier is written back, so an
+        edit cannot revert what another writer changed in the meantime. The store
+        then holds the committed snapshot.
+        """
+        with self._reload_lock:
+            try:
+                revision = self._service.save_state(self.settings, user_context=user_context, mutate=mutate)
+            except Exception:
+                self._load_with_revision()
+                raise
             self._observed_revision = revision
             self._loaded_state = copy.deepcopy(self.settings)
             self._generation += 1
@@ -867,6 +880,26 @@ class SettingsStore:
         self._carry_agent_binding_expectation(self.settings.users.get(key), settings)
         self.settings.users[key] = settings
         self.save()
+
+    def update_user_fields(self, user_id: str, *, platform: Optional[str] = None, **values) -> bool:
+        """Set only these fields of a bound user; False when the user is not bound.
+
+        Runtime bookkeeping (a DM channel id, a one-shot hint) must not write
+        back a cached copy of the rest of the row, such as a revoked admin flag.
+        """
+        key = self._user_key(user_id, platform)
+        found = []
+
+        def mutate(state: SettingsState) -> None:
+            user = state.users.get(key)
+            if user is None:
+                return
+            for name, value in values.items():
+                setattr(user, name, value)
+            found.append(True)
+
+        self.apply(mutate)
+        return bool(found)
 
     @staticmethod
     def _carry_agent_binding_expectation(previous: object, current: object) -> None:

@@ -11,6 +11,8 @@ import sys
 import pytest
 import yaml
 
+from scripts.ci_scenario_evidence import pytest_commands
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -25,6 +27,7 @@ def _run_isolated_unit_files(
     *,
     timeout: str = "15",
     timings: dict[str, float] | None = None,
+    lanes: int | None = None,
 ):
     (tmp_path / "tests").mkdir()
     (tmp_path / "scripts").mkdir()
@@ -36,8 +39,11 @@ def _run_isolated_unit_files(
         (tmp_path / "scripts" / "ci_unit_test_timings.json").write_text(
             json.dumps({"durations_seconds": timings}), encoding="utf-8",
         )
+    command = ["bash", str(ROOT / "scripts/ci_unit_tests.sh")]
+    if lanes is not None:
+        command = [sys.executable, str(ROOT / "scripts/ci_unit_test_lanes.py"), "0", "1", str(lanes)]
     return subprocess.run(
-        ["bash", str(ROOT / "scripts/ci_unit_tests.sh")], cwd=tmp_path,
+        command, cwd=tmp_path,
         env={**os.environ, "PYTHON": sys.executable, "CI_TEST_FILE_TIMEOUT_SECONDS": timeout,
              "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1", "PYTEST_ADDOPTS": ""},
         capture_output=True, text=True, timeout=40,
@@ -133,6 +139,55 @@ def test_unit_file_runner_preserves_assertions_and_integration_selection(tmp_pat
     assert [(row["file"], row["exit_code"]) for row in records] == [
         ("tests/test_assertion.py", int(failed)), ("tests/test_integration.py", 5),
     ]
+
+
+def test_unit_shard_lanes_run_planned_files_concurrently_and_fail_closed(tmp_path: Path) -> None:
+    """Lanes keep one process per file and every failure, and run files at the same time.
+
+    Each barrier file waits for the other's marker: run one after the other, the
+    first would time out. The signal file guards the inherited SIGINT disposition
+    that shell background jobs would silently turn into "ignored".
+    """
+    barrier = (
+        "import pathlib, time\n"
+        f"ROOT = pathlib.Path({str(tmp_path / 'barrier')!r})\n"
+        "def test_meets_the_other_lane():\n"
+        "    ROOT.mkdir(exist_ok=True)\n"
+        "    (ROOT / '{me}').touch()\n"
+        "    deadline = time.monotonic() + 10\n"
+        "    while not (ROOT / '{other}').exists():\n"
+        "        assert time.monotonic() < deadline, 'the other lane never ran alongside'\n"
+        "        time.sleep(0.05)\n"
+    )
+    result = _run_isolated_unit_files(
+        tmp_path,
+        {
+            "test_barrier_a.py": barrier.format(me="a", other="b"),
+            "test_barrier_b.py": barrier.format(me="b", other="a"),
+            "test_fails.py": "def test_fails():\n    assert False\n",
+            "test_signal.py": (
+                "import signal\n"
+                "def test_sigint_keeps_python_default():\n"
+                "    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler\n"
+            ),
+        },
+        timings={
+            "tests/test_barrier_a.py": 10.0, "tests/test_barrier_b.py": 10.0,
+            "tests/test_fails.py": 1.0, "tests/test_signal.py": 1.0,
+        },
+        lanes=2,
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    finished = [line for line in result.stdout.splitlines() if " Finished tests/" in line]
+    assert sorted(line.split()[3] for line in finished) == [
+        "tests/test_barrier_a.py", "tests/test_barrier_b.py", "tests/test_fails.py", "tests/test_signal.py",
+    ]
+    assert {line.split()[1] for line in finished} == {"0]", "1]"}
+    assert result.stdout.count("test_meets_the_other_lane PASSED") == 2
+    assert "test_sigint_keeps_python_default PASSED" in result.stdout
+    assert "FAILED files:\n[lane 0]   tests/test_fails.py" in result.stdout
+    assert "Failed lane(s): [0]." in result.stdout
 
 
 def _metrics(result) -> list[dict]:
@@ -360,13 +415,19 @@ def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
     check_steps = [step for step in checks["steps"] if "run" in step]
     build_steps = [step for step in build["steps"] if step.get("working-directory") == "ui"]
     assert all(step.get("working-directory") == "ui" for step in check_steps)
-    check_commands = "\n".join(step["run"] for step in check_steps).splitlines()
+    # The parts run on separate runners: each runs the shared steps with its own
+    # commands, and together they run every UI check exactly once.
+    shared = "\n".join(step["run"] for step in check_steps).splitlines()
+    parts = checks["strategy"]["matrix"]["include"]
+    assert checks["strategy"]["fail-fast"] is False
+    assert shared.count("${{ matrix.commands }}") == 1
+    assert "npm ci" in shared
+    check_commands = [line.strip() for part in parts for line in part["commands"].splitlines()]
     build_commands = "\n".join(step["run"] for step in build_steps).splitlines()
     for command in ("npm run validate:theme", "npm run lint", "npm run typecheck:tests", "npm test"):
         assert check_commands.count(command) == 1
         assert command not in build_commands
     assert build_commands.count("npm run build") == 1
-    assert "npm ci" in check_commands
     assert "npm ci" in build_commands
     for job in (checks, browsers, build):
         assert job["if"] == "needs.changes.outputs.docs_only == 'false'"
@@ -573,6 +634,78 @@ def test_every_linux_engine_e2e_runner_has_only_loopback() -> None:
     assert "--loopback-only" in gate["run"].split()
 
 
+# How GitHub runs a step's script on Linux: the default shell has no pipefail;
+# `shell: bash` adds it (docs: "Defaults: bash -e {0}" vs "bash --noprofile --norc -eo pipefail {0}").
+_GITHUB_LINUX_SHELLS = {
+    None: ["bash", "-e"],
+    "bash": ["bash", "--noprofile", "--norc", "-eo", "pipefail"],
+}
+
+
+def _workflow_steps():
+    for workflow in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        data = yaml.safe_load(workflow.read_text())
+        default = ((data.get("defaults") or {}).get("run") or {}).get("shell")
+        for job_id, job in (data.get("jobs") or {}).items():
+            job_default = ((job.get("defaults") or {}).get("run") or {}).get("shell") or default
+            for step in job.get("steps") or []:
+                yield workflow.name, job_id, step, step.get("shell") or job_default
+
+
+def test_steps_that_tee_a_command_keep_its_exit_status() -> None:
+    """A `cmd | tee log` pipeline exits with tee's status unless pipefail is on, hiding cmd's failure."""
+
+    unguarded = [
+        f"{workflow} {job_id}: {step.get('name')}"
+        for workflow, job_id, step, shell in _workflow_steps()
+        if "| tee" in (step.get("run") or "")
+        and shell != "bash"
+        and "pipefail" not in (step.get("run") or "")
+    ]
+    assert unguarded == []
+
+
+@pytest.mark.parametrize(
+    ("pytest_exit", "evidence_exit", "expected"),
+    [(0, 0, 0), (1, 0, 1), (0, 1, 1), (2, 1, 2)],
+    ids=["green", "pytest-failed", "evidence-failed", "both-failed"],
+)
+def test_release_e2e_gate_fails_when_its_tests_or_evidence_fail(
+    tmp_path: Path, pytest_exit: int, evidence_exit: int, expected: int,
+) -> None:
+    """The release E2E step, run as GitHub runs it, exits with pytest's failure, else the gate's.
+
+    Its pytest output goes through `| tee`; before the step ran with pipefail every
+    failing release E2E run (three cases from 2026-10-27) still concluded success.
+    """
+
+    release = yaml.safe_load((ROOT / ".github/workflows/model-hub-e2e.yml").read_text())
+    step, = [step for job in release["jobs"].values() for step in job["steps"]
+             if "e2e_model_hub" in step.get("run", "")]
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "ci_loopback_only.sh").write_text(
+        f'echo "pytest ran: $*"\nexit {pytest_exit}\n', encoding="utf-8",
+    )
+    (tmp_path / "scripts" / "ci_scenario_evidence.py").write_text(
+        f"raise SystemExit({evidence_exit})\n", encoding="utf-8",
+    )
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "python").symlink_to(sys.executable)
+    script = tmp_path / "step.sh"
+    script.write_text(step["run"], encoding="utf-8")
+
+    result = subprocess.run(
+        [*_GITHUB_LINUX_SHELLS[step.get("shell")], str(script)],
+        cwd=tmp_path,
+        env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "RUNNER_TEMP": str(tmp_path)},
+        capture_output=True, text=True, check=False,
+    )
+
+    assert result.returncode == expected, result.stdout + result.stderr
+    assert "pytest ran: python -m pytest -m e2e_model_hub" in (tmp_path / "model-hub-e2e.log").read_text()
+
+
 @pytest.mark.parametrize("gate_name", ["unit-tests", "install-upgrade-regression", "windows-install-smoke"])
 def test_required_gates_accept_skips_only_for_proven_docs_and_fail_closed(tmp_path: Path, gate_name: str) -> None:
     gate = _jobs()[gate_name]
@@ -606,6 +739,77 @@ def test_required_gates_accept_skips_only_for_proven_docs_and_fail_closed(tmp_pa
             env={**os.environ, **results}, capture_output=True, text=True, check=False,
         )
         assert (result.returncode == 0) == passes, (results, result.stdout, result.stderr)
+
+
+WEB_FETCH_TESTS = (
+    "-m pytest -q tests/test_model_hub_fetch_policy.py tests/test_model_hub_fetch_transport.py "
+    "tests/test_model_hub_fetch_tls.py tests/test_model_hub_local_fetch.py "
+    "tests/test_desktop_runtime_bundle_builder.py -k not packaged_cli_survives"
+)
+
+
+@pytest.mark.parametrize("failing", [(), ("3.11", "3.13")])
+def test_web_fetch_runtime_verifies_every_python_in_its_own_interpreter(tmp_path: Path, failing: tuple) -> None:
+    """One ubuntu job covers all five Pythons; every version runs, and each failure names its version."""
+    job = _jobs()["web-fetch-runtime"]
+    legs = job["strategy"]["matrix"]["include"]
+    assert job["strategy"]["fail-fast"] is False
+    assert [leg["os"] for leg in legs].count("ubuntu-latest") == 1
+    assert {(leg["os"], version) for leg in legs for version in leg["python"].split()} == {
+        *(("ubuntu-latest", version) for version in ("3.10", "3.11", "3.12", "3.13", "3.14")),
+        *((runner, "3.12") for runner in ("ubuntu-24.04-arm", "macos-15-intel", "macos-15", "windows-latest")),
+    }
+    step, = [step for step in job["steps"] if "PYTHON_VERSIONS" in step.get("env", {})]
+    assert step["env"]["PYTHON_VERSIONS"] == "${{ matrix.python }}"
+    # The evidence gate reads what this job selects from the workflow text.
+    assert pytest_commands(ROOT / ".github/workflows/lint.yml")["web-fetch-runtime"] == [(
+        "tests/test_model_hub_fetch_policy.py", "tests/test_model_hub_fetch_transport.py",
+        "tests/test_model_hub_fetch_tls.py", "tests/test_model_hub_local_fetch.py",
+        "tests/test_desktop_runtime_bundle_builder.py", "-k", "not packaged_cli_survives",
+    )]
+
+    # Stub uv and one interpreter per version; record every call they receive.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "calls.log"
+    (bin_dir / "uv").write_text(
+        "#!/bin/sh\n"
+        'if [ "$1 $2" = "python find" ]; then for last; do :; done; echo "$STUB_BIN/python$last"; exit 0; fi\n'
+        f'echo "uv $*" >> {calls}\n'
+    )
+    for version in ("3.10", "3.11", "3.12", "3.13", "3.14"):
+        (bin_dir / f"python{version}").write_text(
+            "#!/bin/sh\n"
+            f'echo "python{version} $*" >> {calls}\n'
+            f'if [ "$2" = pytest ] && [ "{version in failing}" = True ]; then exit 1; fi\n'
+        )
+    for path in bin_dir.iterdir():
+        path.chmod(0o755)
+    (tmp_path / "dist").mkdir()
+    (tmp_path / "dist" / "avibe_os-1-py3-none-any.whl").touch()
+
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step["run"]], cwd=tmp_path,
+        env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "STUB_BIN": str(bin_dir),
+             "PYTHON_VERSIONS": legs[0]["python"]},
+        capture_output=True, text=True, check=False,
+    )
+
+    assert result.returncode == (1 if failing else 0), result.stdout + result.stderr
+    log = calls.read_text().splitlines()
+    for version in ("3.10", "3.11", "3.12", "3.13", "3.14"):
+        interpreter = f"{bin_dir}/python{version}"
+        assert log.count(f"python{version} {WEB_FETCH_TESTS}") == 1
+        assert log.count(
+            f"uv pip install --system --python {interpreter} --require-hashes --only-binary=:all: "
+            "--no-binary claude-agent-sdk --no-binary http-ece -r fetch-requirements.txt"
+        ) == 1
+        assert log.count(f"uv pip install --system --python {interpreter} --no-deps dist/avibe_os-1-py3-none-any.whl") == 1
+        assert log.count(f"uv pip install --system --python {interpreter} pytest pytest-asyncio jsonschema") == 1
+        named = f"::error::web-fetch-runtime failed on Python {version}" in result.stdout
+        assert named == (version in failing)
+    if failing:
+        assert "web-fetch-runtime failed on Python: 3.11 3.13" in result.stdout
 
 
 def test_lint_replaces_only_the_same_pr_or_branch_and_runs_no_release_listener() -> None:

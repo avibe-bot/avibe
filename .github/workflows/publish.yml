@@ -112,7 +112,7 @@ jobs:
             artifact: win32-arm64
     steps:
       - name: Checkout Show Runtime
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: avibe-bot/vibe-show-runtime
           ref: ${{ needs.resolve-show-runtime-ref.outputs.ref }}
@@ -150,7 +150,7 @@ jobs:
           JS
 
       - name: Upload Show Runtime bundle
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: show-runtime-${{ matrix.artifact }}
           path: |
@@ -167,12 +167,12 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ needs.resolve-tag.outputs.tag }}
 
       - name: Checkout release automation
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ needs.resolve-tag.outputs.workflow_sha }}
           path: release-automation
@@ -225,7 +225,7 @@ jobs:
           cp vibe/show_runtime_manifest.json runtime-artifacts/show-runtime-manifest.json
 
       - name: Setup Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
 
@@ -366,7 +366,7 @@ jobs:
           if [ "$UPGRADE_DIRECTION" = forward ]; then
             mkdir -p "$RUNNER_TEMP/retired-updater-junit"
             pytest_status=0
-            (cd release-automation && python -m pytest tests/e2e/test_retired_updater_bridge.py -v \
+            (cd release-automation && python -m pytest tests/e2e/test_retired_updater_bridge.py --rootdir=. -v \
               --junitxml="$RUNNER_TEMP/retired-updater-junit/retired-updater-bridge.xml") || pytest_status=$?
             evidence_status=0
             (cd release-automation && python scripts/ci_scenario_evidence.py --release \
@@ -443,7 +443,7 @@ jobs:
           fi
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: dist
           path: dist/
@@ -471,7 +471,7 @@ jobs:
           test -n "$(find dist -maxdepth 1 -type f -name 'avibe_os-*.tar.gz' -print -quit)"
 
       - name: Publish avibe-os to PyPI
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # release/v1
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086  # release/v1
         with:
           skip-existing: true
         # Uses trusted publishing (OIDC), no API token needed
@@ -505,7 +505,7 @@ jobs:
           test -n "$(find dist -maxdepth 1 -type f -name 'vibe_remote-*' -print -quit)"
 
       - name: Publish vibe-remote to PyPI
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # release/v1
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086  # release/v1
         with:
           skip-existing: true
         # Uses trusted publishing (OIDC), no API token needed
@@ -527,7 +527,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ needs.resolve-tag.outputs.workflow_sha }}
 

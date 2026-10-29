@@ -99,8 +99,8 @@
     },
     "pet": {
       "toggle": "Show Pet",
-      "shortcutMenu": "Pet Shortcut",
-      "shortcutUnavailable": "{{shortcut}} is unavailable — another app may be using it"
+      "hide": "Hide Desktop Mini",
+      "shortcutSettings": "Shortcut settings…"
     },
     "uninstall": {
       "menuLabel": "Uninstall Avibe…",
@@ -189,6 +189,11 @@
     "zoomIn": "Zoom in",
     "zoomOut": "Zoom out",
     "resetZoom": "Reset zoom",
+    "pdfPage": "Page {{page}}",
+    "pdfPosition": "Page {{page}} of {{total}}",
+    "pdfCounter": "{{page}} / {{total}}",
+    "pdfInternalLink": "Go to the linked place in this document",
+    "zoomPercent": "{{percent}}%",
     "download": "Download"
   },
   "common": {
@@ -463,8 +468,18 @@
       "menuPlacementDescription": "Let Settings take over the window, or open it beside the app sidebar. Saved in this browser.",
       "menuPlacementStandalone": "Standalone",
       "menuPlacementInline": "Inline",
+      "remoteInstallEnable": "Enable remote installs",
+      "remoteInstallSaveFailed": "The desktop preference could not be saved. Try again.",
+      "remoteInstallTitle": "Allow remote installs",
+      "remoteInstallDescription": "Let authorized members install updates from a browser without confirmation on the host. This setting can only be changed in the desktop app.",
+      "remoteInstallWarning": "Remote installs can restart Avibe without someone at the host, interrupt running work, and leave a failed update for someone on the host to repair.",
       "autosaved": "Changes are saved automatically",
-      "languageSaveFailed": "The language changed here, but could not be saved for this instance"
+      "languageSaveFailed": "The language changed here, but could not be saved for this instance",
+      "desktopMini": {
+        "title": "Desktop Mini",
+        "description": "Show the Desktop Mini pet on your desktop.",
+        "saveFailed": "The Desktop Mini setting could not be saved."
+      }
     },
     "shortcuts": {
       "title": "Shortcuts",
@@ -479,6 +494,22 @@
         "title": "Show Page annotation mode",
         "description": "Enter annotation mode on the Show Page in front."
       },
+      "desktopMiniTitle": "Desktop Mini",
+      "desktopMiniDescription": "Set the global shortcuts and voice behavior for Desktop Mini.",
+      "desktopMiniVoice": {
+        "title": "Voice conversation",
+        "description": "Use the global shortcut to start and finish a Desktop Mini voice conversation."
+      },
+      "desktopMiniToggle": {
+        "title": "Show or hide Desktop Mini",
+        "description": "Use the global shortcut to show or hide Desktop Mini."
+      },
+      "desktopMiniMode": {
+        "title": "Voice shortcut mode",
+        "description": "Choose whether the voice shortcut is held or pressed twice.",
+        "hold": "Hold to talk",
+        "toggle": "Press to start, press to stop"
+      },
       "change": "Change {{action}} shortcut",
       "pressKeys": "Press shortcut",
       "escapeToCancel": "Esc cancels",
@@ -486,6 +517,9 @@
       "reserved": "This shortcut is already used by Avibe.",
       "conflict": "Already used by {{action}}.",
       "saveFailed": "Couldn't save the shortcut in this browser.",
+      "loading": "Loading…",
+      "desktopSaveFailed": "Couldn't save the Desktop Mini settings. Your previous settings are unchanged.",
+      "registrationFailed": "Couldn't register {{shortcut}}. It may be used by another app.",
       "modifierLabels": {
         "control": "Control",
         "option": "Option",
@@ -1375,6 +1409,15 @@
         },
         "follows": "Follows {{backend}} default routing. Changes to default routing apply here automatically.",
         "manualHint": "Only this model. Changes to default routing do not overwrite these route entries.",
+        "cacheTtl": {
+          "label": "Conversation cache lifetime",
+          "default": "Use built-in estimate",
+          "5m": "5 minutes",
+          "30m": "30 minutes",
+          "1h": "1 hour",
+          "12h": "12 hours",
+          "help": "This route-wide estimate controls when old tool results are cleared. Official OpenAI Responses GPT-5.6+ uses a 30-minute cache by default; selecting 30 minutes or 12 hours explicitly sends that provider option. The 12-hour mode costs 2.5x the model input rate for writes versus 1.25x for 30 minutes; cached reads keep the model-specific read price. Earlier OpenAI models' policy-dependent prompt_cache_retention is not inferred. Relays do not receive OpenAI-specific cache options."
+        },
         "undoDone": "Previous manual draft restored.",
         "restorePending": "Not saved yet. The saved route is still in use.",
         "preview": {
@@ -2874,7 +2917,10 @@
     "retry": "Retry"
   },
   "errors": {
+    "avault_authorization_required": "avault needs a one-time macOS Keychain authorization on the Mac running Avibe. Choose Authorize avault, then answer the dialog on that Mac.",
+    "stale_login_session": "Avibe is still running in a macOS login session that has ended. Open Terminal on the Mac's current desktop, run `vibe restart`, then try again. Do not retry this operation.",
     "invalid_field_name": "Use 1–64 lowercase letters, digits or underscores for field names, starting with a letter.",
+    "cache_ttl_unsupported": "That cache lifetime is not supported by this route. Use the built-in estimate or a provider-compatible value.",
     "field_exists": "A field with this name already exists. Choose a different name.",
     "field_not_found": "This field no longer exists. Refresh the secret and choose one of its current fields.",
     "too_many_fields": "A secret can have at most 32 fields, including the default field.",
@@ -3955,6 +4001,7 @@
     "topicIdLabel": "Topic ID: {{id}}",
     "topicCustomBadge": "Custom",
     "topicInheritedBadge": "Inherits group",
+    "newSessionHint": "This conversation's current session keeps its previous Agent. Send /new there to start a new session with this route.",
     "topicCustomize": "Customize",
     "topicReset": "Use group settings",
     "topicExpand": "Expand topic settings",
@@ -4151,8 +4198,14 @@
     "versionAndUpdate": "Version & Update",
     "buildAndVersion": "Build & Version",
     "currentVersion": "Current Version",
+    "versionPrefix": "v",
+    "versionTitle": "v{{version}}",
+    "versionValue": "{{version}}",
     "packageVersion": "Package Version",
     "sourceRevision": "Source Revision",
+    "sourceRevisionTitle": "Source Revision: {{revision}}",
+    "sourceRevisionTitleDirty": "Source Revision: {{revision}} (dirty)",
+    "sourceRevisionDirty": "{{revision}} (dirty)",
     "refreshBuildInfo": "Refresh Build Information",
     "unknownRevision": "unknown",
     "dirtySource": "dirty",
@@ -4162,6 +4215,7 @@
     "updateAvailable": "Update Available",
     "upgradeNow": "Upgrade Now",
     "upgrading": "Upgrading...",
+    "skipUpdate": "Skip this version",
     "upToDate": "You're up to date",
     "checkFailed": "Check failed",
     "upgradeSuccess": "Upgrade successful!",
@@ -4172,6 +4226,42 @@
     "autoUpdateHint": "Auto-install when idle",
     "desktopManagedUpdate": "Updates come from the Avibe desktop app on the computer running Avibe. Check for updates there.",
     "desktopManagedUpdateAvailable": "Version {{to}} is available. Update it with the Avibe desktop app on the computer running Avibe.",
+    "desktopManagedUpdateOwnerHint": "Request the update on the host. The desktop app will prompt there or install unattended according to its local setting.",
+    "desktopManagedUpdateMemberHint": "Update this host in the Avibe desktop app on the computer running Avibe.",
+    "desktopRemoteUpdateCheckWork": "Active work will be checked when you submit. If any work is running or cannot be checked, you will be asked to confirm interruption.",
+    "desktopRemoteUpdateUnknownWork": "Some activity could not be checked. Additional running work may be interrupted.",
+    "updateInterruptWarning": "Installation restarts Avibe and can interrupt Agent, Watch, Task, and IM work. Interrupted work may not resume.",
+    "runtimeUpdateDelivery": "a Runtime upgrade and restart",
+    "desktopRemoteUpdateLocalRequest": "An update to {{target}} was requested remotely. Install it now or ignore this request.",
+    "desktopRemoteUpdateRequiresHost": "This installation needs someone at the host to grant permission or repair the installation.",
+    "desktopRemoteUpdateVerifying": "The host reported completion. Waiting to confirm the installed version…",
+    "desktopRemoteUpdateDownloadingUnknown": "Downloading the update…",
+    "desktopRemoteUpdateShellUnavailable": "The desktop app did not respond. Open Avibe on the host and try again.",
+    "desktopRemoteUpdateNoUpdate": "This update is no longer available. Refresh the version information.",
+    "desktopRemoteUpdateNotManaged": "This host is no longer managed by the desktop app. Refresh the version information.",
+    "desktopRemoteUpdateInProgress": "Another update is in progress. Wait for the host to finish.",
+    "desktopRemoteUpdateTitle": "Update on host",
+    "desktopRemoteUpdateConfirmTitle": "Update the host to {{target}}?",
+    "desktopRemoteUpdateConfirmDescription": "The request will be delivered as {{delivery}}.",
+    "desktopRemoteUpdateDeliveryPrompt": "a host prompt",
+    "desktopRemoteUpdateDeliveryInstall": "an unattended install",
+    "desktopRemoteUpdateInterruptions": "{{agents}} agents, {{watches}} watches, and {{tasks}} tasks may be interrupted.",
+    "desktopRemoteUpdateConfirm": "Request update",
+    "desktopRemoteUpdateConfirmInterrupt": "Confirm and interrupt active work",
+    "desktopRemoteUpdateRequesting": "Requesting the host update…",
+    "desktopRemoteUpdateRequested": "The update request was sent to the host.",
+    "desktopRemoteUpdateAwaitingHost": "The host is waiting for someone there to approve the install.",
+    "desktopRemoteUpdateChecking": "The host is checking the signed release.",
+    "desktopRemoteUpdateDownloading": "Downloading the update: {{progress}}%",
+    "desktopRemoteUpdateInstalling": "Installing the update…",
+    "desktopRemoteUpdateRestarting": "Host restarting. Reconnecting automatically…",
+    "desktopRemoteUpdateCompleted": "The host finished updating to {{target}}.",
+    "desktopRemoteUpdateFailed": "The host could not finish the update. Check the desktop app on the host.",
+    "desktopRemoteUpdateDeclined": "The host declined the update.",
+    "desktopRemoteUpdateExpired": "The host update request expired.",
+    "desktopRemoteUpdateTimedOut": "Completion was not confirmed. Check the desktop app on the host.",
+    "desktopRemoteUpdateError": "The host could not accept the update request.",
+    "desktopRemoteUpdateIgnore": "Ignore this request",
     "runtimeVersionSkew": "This app is v{{app}}, but it is connected to an Avibe Runtime at v{{runtime}}"
   },
   "doctor": {
@@ -5443,6 +5533,23 @@
     }
   },
   "vaults": {
+    "avaultAuthorization": {
+      "title": "Authorize avault once",
+      "body": "avault keeps the Vault key in this Mac's Keychain. After the update to the signed avault, macOS must approve it once before Vault can use the key again.",
+      "steps": "Choose Authorize avault. A macOS dialog then appears on the Mac running Avibe, not in this browser: enter that Mac's login password and choose Always Allow.",
+      "action": "Authorize avault",
+      "askAdmin": "Ask an admin of this Avibe to authorize avault.",
+      "waiting": "Waiting for an answer on the Mac running Avibe…",
+      "succeeded": "avault is authorized. Retry what you were doing.",
+      "failed": {
+        "not_completed": "Authorization did not complete. If you chose Deny or closed the dialog, macOS will not show it again for about 2 minutes; try again after that.",
+        "no_gui_session": "The Mac running Avibe cannot show the dialog: Avibe is not running in a logged-in desktop session (for example, it was started over SSH). Log in to that Mac's desktop, start Avibe there, and try again.",
+        "timed_out": "Nobody answered the dialog within 10 minutes. Try again when you can reach the Mac running Avibe.",
+        "avault_missing": "avault is not installed. Install it under Settings → Dependencies first.",
+        "avault_upgrade_required": "This avault version cannot be authorized. Update it under Settings → Dependencies first.",
+        "failed": "Authorization failed. Try again."
+      }
+    },
     "remoteReadOnly": "Read-only",
     "remoteReadOnlyHint": "Vaults are read-only in remote mode.",
     "title": "Vaults",
@@ -6269,7 +6376,7 @@
     "mainAgentTitle": "Vibey",
     "thinking": "Thinking",
     "waiting": "Waiting",
-    "repliedPrefix": "Replied: {{text}}",
+    "fileAttachment": "File",
     "untitledTask": "Untitled task",
     "dismiss": "Dismiss task",
     "voiceContinue": "Continue voice input",
@@ -6325,7 +6432,6 @@
     "unknownProject": "Conversation",
     "unknownAgent": "Agent",
     "needsAuthorization": "Needs your approval",
-    "replied": "Replied",
     "referenceSession": "Reference session: {{title}}",
     "authorize": "Review",
     "recentTurns": "Recent turns",

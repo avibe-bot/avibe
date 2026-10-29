@@ -4,6 +4,7 @@ import asyncio
 import logging
 import sys
 from typing import Optional
+from urllib.parse import urlencode
 
 from modules.agents import get_agent_display_name
 from modules.agents.catalog import (
@@ -13,6 +14,7 @@ from modules.agents.catalog import (
     implicit_default_rank,
     is_builtin_backend,
 )
+from config.platform_registry import get_platform_descriptor
 from modules.im import MessageContext, InlineKeyboard, InlineButton
 from config.v2_settings import normalize_routing_settings
 from core.modals import (
@@ -24,7 +26,6 @@ from core.modals import (
     RoutingModalData,
     RoutingModalSelection,
 )
-from vibe import backend_model_catalog
 
 from .base import BaseHandler
 
@@ -45,6 +46,13 @@ def _effort_options(entries) -> list[RouteOption]:
         for entry in entries or []
         if entry.get("value") and entry["value"] != DEFAULT_OPTION_VALUE
     ]
+
+
+def _platform_supports_buttons(platform: str) -> bool:
+    try:
+        return get_platform_descriptor(platform).capabilities.supports_buttons
+    except ValueError:
+        return True
 
 
 class SettingsHandler(BaseHandler):
@@ -103,6 +111,10 @@ class SettingsHandler(BaseHandler):
         """Handle settings command - show settings menu"""
         try:
             platform = context.platform or (context.platform_specific or {}).get("platform") or self.config.platform
+            if not _platform_supports_buttons(platform):
+                # A settings menu needs buttons; the Web settings page is the form.
+                await self._send_web_settings_link(context)
+                return
             # For Slack, use modal dialog
             if platform == "slack":
                 await self._handle_settings_slack(context)
@@ -121,6 +133,28 @@ class SettingsHandler(BaseHandler):
             await self._get_im_client(context).send_message(
                 context, f"❌ {self._t('error.showSettings', error=str(e))}"
             )
+
+    async def _send_web_settings_link(self, context: MessageContext) -> None:
+        """Point a chat that cannot show a settings form at its row on the Web settings page.
+
+        The link opens through Avibe Cloud; without it, the reply says where the page is.
+        """
+        from core.avibe_cloud import workbench_url
+
+        platform = context.platform or (context.platform_specific or {}).get("platform") or self.config.platform
+        is_dm = bool((context.platform_specific or {}).get("is_dm"))
+        if is_dm:
+            query = urlencode({"platform": platform, "user": context.user_id})
+            path, page = f"/settings/platforms/users?{query}", self._t("scopeSettings.pageUsers")
+        else:
+            path, page = "/settings/platforms/groups", self._t("scopeSettings.pageGroups")
+        url = workbench_url(path, self.config)
+        text = (
+            self._t("scopeSettings.openInWebUrl", url=url)
+            if url
+            else self._t("scopeSettings.openInWeb", page=page)
+        )
+        await self._get_im_client(context).send_message(context, text)
 
     async def _handle_settings_traditional(self, context: MessageContext):
         """Handle settings for non-Slack platforms"""
@@ -316,7 +350,7 @@ class SettingsHandler(BaseHandler):
             message_types = settings_manager.get_available_message_types()
             if msg_type not in message_types:
                 return
-            is_shown = settings_manager.toggle_show_message_type(settings_key, msg_type)
+            is_shown = await asyncio.to_thread(settings_manager.toggle_show_message_type, settings_key, msg_type)
 
             # Update the keyboard
             user_settings = settings_manager.get_user_settings(settings_key)
@@ -362,7 +396,7 @@ class SettingsHandler(BaseHandler):
             logger.error(f"Error toggling message type {msg_type}: {e}")
             await self._get_im_client(context).send_message(
                 context,
-                self._get_formatter(context).format_error(self._t("error.toggleSettingFailed", error=str(e))),
+                self._get_formatter(context).format_error(self._t("error.toggleSettingFailed", error=self._settings_error_text(e))),
             )
 
     async def handle_info_message_types(self, context: MessageContext):
@@ -423,13 +457,13 @@ class SettingsHandler(BaseHandler):
             logger.error(f"Error in handle_info_how_it_works: {e}", exc_info=True)
             await self._get_im_client(context).send_message(context, f"❌ {self._t('error.helpInfoFailed')}")
 
-    async def handle_routing(self, context: MessageContext):
+    async def handle_routing(self, context: MessageContext, args: str = ""):
         """Handle routing command - show agent/model selection"""
         try:
             platform = context.platform or (context.platform_specific or {}).get("platform") or self.config.platform
             im_client = self._get_im_client(context)
             if not hasattr(im_client, "open_routing_modal"):
-                await im_client.send_message(context, self._t("routing.slackOnly"))
+                await self._send_web_settings_link(context)
                 return
             platform_specific = context.platform_specific or {}
             if platform == "slack":
@@ -705,6 +739,14 @@ class SettingsHandler(BaseHandler):
 
     def _routing_target_from_settings(self, routing) -> tuple[str, str, str, str, str]:
         agent_name = str(getattr(routing, "agent_name", None) or "").strip()
+        if not agent_name:
+            # A route that names no Agent runs the default one.
+            try:
+                default_agent = self.controller.vibe_agent_store.get_default_agent()
+            except Exception:
+                logger.debug("Failed to resolve the default Agent for a routing hint", exc_info=True)
+                default_agent = None
+            agent_name = str(getattr(default_agent, "name", None) or "").strip()
         backend = str(self._resolve_route_backend(agent_name) or agent_name).strip()
         variant = getattr(routing, f"{backend}_agent", None) if backend in NATIVE_CLI_BACKENDS else None
         variant = str(variant or "").strip()
@@ -729,6 +771,37 @@ class SettingsHandler(BaseHandler):
         # The scope's session keeps the Agent it started with, so another Agent, even on the same backend, takes
         # a new session to run.
         return bool(current_agent and next_agent and current_agent != next_agent)
+
+    def scope_needs_new_session(self, *, platform: str, kind: str, native_id: str, thread_id: str = "") -> bool:
+        """Whether this scope's current session runs another Agent than the route it stores.
+
+        Such a session keeps its Agent, so the stored route applies only once a new
+        session starts there. The IM routing form says so when it saves; the Web
+        settings pages ask this after an Agent change to say the same.
+        """
+        is_dm = kind == "user"
+        probe = MessageContext(
+            user_id=native_id if is_dm else "",
+            channel_id=native_id,
+            platform=platform,
+            platform_specific={"is_dm": is_dm, "platform": platform},
+        )
+        settings_manager = self._get_settings_manager(probe)
+        channel_id = native_id
+        if is_dm:
+            # A DM session is anchored on the platform's DM channel, which some
+            # platforms keep apart from the user id.
+            user = settings_manager.get_store().get_user(native_id, platform=platform)
+            channel_id = str(getattr(user, "dm_chat_id", "") or "") or native_id
+        context = MessageContext(
+            user_id=native_id if is_dm else "",
+            channel_id=channel_id,
+            thread_id=thread_id or None,
+            platform=platform,
+            platform_specific={"is_dm": is_dm, "platform": platform},
+        )
+        routing = settings_manager.get_channel_routing(self._get_settings_key(context))
+        return self._routing_update_needs_new_session_hint(context, routing)
 
     async def handle_settings_update(
         self,
@@ -756,12 +829,12 @@ class SettingsHandler(BaseHandler):
             im_client = self._get_im_client(context)
             settings_manager = self._get_settings_manager(context)
 
+            # One write: a DM has no mention gate, and a topic's first override
+            # materializes the gate it inherited.
+            changes = {"show_message_types": show_message_types}
             if not is_dm:
-                settings_manager.set_require_mention(settings_key, require_mention)
-
-            user_settings = settings_manager.get_user_settings(settings_key)
-            user_settings.show_message_types = show_message_types
-            settings_manager.update_user_settings(settings_key, user_settings)
+                changes["require_mention"] = require_mention
+            await asyncio.to_thread(settings_manager.change_scope_settings, settings_key, changes)
 
             language_saved = True
             if language is not None and language != self.config.language:
@@ -799,7 +872,7 @@ class SettingsHandler(BaseHandler):
                 )
                 await self._get_im_client(context).send_message(
                     context,
-                    f"❌ {self._t('error.settingsUpdateFailed', error=str(e))}",
+                    f"❌ {self._t('error.settingsUpdateFailed', error=self._settings_error_text(e))}",
                 )
             else:
                 raise
@@ -868,7 +941,6 @@ class SettingsHandler(BaseHandler):
         agents always stay, so switching back finds them.
         """
         from config.v2_settings import RoutingSettings
-        from modules.agents.opencode.utils import normalize_claude_reasoning_effort
 
         try:
             context = MessageContext(
@@ -902,32 +974,28 @@ class SettingsHandler(BaseHandler):
             }
             if backend in variants and variant is not _UNSET:
                 variants[backend] = variant
-            if backend == "claude":
-                # Claude Code rejects an effort its model does not support.
-                effective_model = model or agent.model
-                reasoning_effort = normalize_claude_reasoning_effort(
-                    effective_model,
-                    reasoning_effort,
-                    backend_model_catalog.catalog_reasoning_efforts_for_model("claude", effective_model),
-                )
 
-            routing = RoutingSettings(
-                agent_name=agent.name,
-                model=model,
-                reasoning_effort=reasoning_effort,
-                **{f"{native}_agent": value for native, value in variants.items()},
+            # The settings write stores the route as the Web would: an effort
+            # the model cannot take is dropped there, for every surface.
+            routing = await asyncio.to_thread(
+                settings_manager.set_channel_routing,
+                settings_key,
+                RoutingSettings(
+                    agent_name=agent.name,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    **{f"{native}_agent": value for native, value in variants.items()},
+                ),
             )
-
-            settings_manager.set_channel_routing(settings_key, routing)
             needs_new_session_hint = self._routing_update_needs_new_session_hint(context, routing)
 
             backend_name = display_name_for_backend(backend)
             parts = []
             for label, value in (
                 (self._t("routing.label.agent"), f"{agent.name} · {backend_name}"),
-                (self._t("modal.routing.backendAgent", backend=backend_name), variants.get(backend)),
-                (self._t("routing.label.model"), model),
-                (self._t("routing.label.reasoningEffort"), reasoning_effort),
+                (self._t("modal.routing.backendAgent", backend=backend_name), getattr(routing, f"{backend}_agent", None)),
+                (self._t("routing.label.model"), routing.model),
+                (self._t("routing.label.reasoningEffort"), routing.reasoning_effort),
             ):
                 if value:
                     # Route values are opaque and unbounded; a confirmation must fit any platform's message.
@@ -944,8 +1012,9 @@ class SettingsHandler(BaseHandler):
                 )
 
             logger.info(
-                f"Routing updated for {settings_key}: agent={agent.name}, variant={variants.get(backend)}, "
-                f"model={model}, reasoning_effort={reasoning_effort}"
+                f"Routing updated for {settings_key}: agent={routing.agent_name}, "
+                f"variant={getattr(routing, f'{backend}_agent', None)}, "
+                f"model={routing.model}, reasoning_effort={routing.reasoning_effort}"
             )
 
         except Exception as e:
@@ -959,7 +1028,7 @@ class SettingsHandler(BaseHandler):
             if notify_user:
                 await self._get_im_client(context).send_message(
                     context,
-                    f"❌ {self._t('error.routingUpdateFailed', error=str(e))}",
+                    f"❌ {self._t('error.routingUpdateFailed', error=self._settings_error_text(e))}",
                 )
             else:
                 raise

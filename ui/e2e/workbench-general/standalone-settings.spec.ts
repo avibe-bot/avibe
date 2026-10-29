@@ -315,7 +315,10 @@ test('C-SETTINGS-06: retained image viewer releases keys while Settings is foreg
   // Click the image body away from its hover download affordance so this is the
   // same pointer path a user takes on the media itself.
   await inlineImage.click({ position: { x: 8, y: 8 } });
-  const viewer = page.locator('[role="dialog"][aria-modal="true"]');
+  // The viewer is a modal Radix Dialog. Found by what it shows rather than by role
+  // and name: it stays mounted while Settings hides it, and a role query skips
+  // hidden nodes, which would lose the very image this case follows.
+  const viewer = page.locator('[role="dialog"]:has(img[src^="/api/media/"])');
   await expect(viewer).toBeVisible();
   const viewerImage = viewer.locator('img');
   const originalSrc = await viewerImage.getAttribute('src');
@@ -360,7 +363,7 @@ test('C-SETTINGS-06: retained image viewer releases keys while Settings is foreg
   await expect(viewerImage).toHaveAttribute('src', originalSrc!);
   await expect(viewerImage).toHaveJSProperty('naturalWidth', 64);
   await expect.poll(async () => settledScale(await originalTransform.getAttribute('style'))).toBeCloseTo(originalScale);
-  expect(await page.evaluate((node) => node === document.querySelector('[role="dialog"][aria-modal="true"] img'), originalImageHandle)).toBe(true);
+  expect(await viewerImage.evaluate((node, original) => node === original, originalImageHandle)).toBe(true);
 
   await page.evaluate(() => {
     (window as Window & { __viewerLowerEscape?: number }).__viewerLowerEscape = 0;

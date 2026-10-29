@@ -3893,6 +3893,8 @@ def test_api_key_setup_does_not_schedule_a_model(
             "openai_chat": "/v1/chat/completions",
         }
         listing_path = "/v1beta/models" if protocol == "google" else "/v1/models"
+        # A Gemini Source keeps the names Google lists; any other Google Source the bare ids.
+        listed_id = "models/relay-model" if vendor == "gemini" else "relay-model"
 
         async def upstream(request):
             body = await request.json() if request.method == "POST" else None
@@ -3966,7 +3968,7 @@ def test_api_key_setup_does_not_schedule_a_model(
                 assert observation["outcome"] == "observed"
                 assert observation["authenticated"] == "authenticated"
                 assert observation["protocol"] == protocol
-                assert observation["models"] == ["relay-model"]
+                assert observation["models"] == [listed_id]
             else:
                 assert observation["outcome"] != "observed"
                 assert observation["authenticated"] == "unknown"
@@ -3992,7 +3994,7 @@ def test_api_key_setup_does_not_schedule_a_model(
             assert h.source["protocol"] == protocol
             # Both paths end up holding the listing's inventory; only the one
             # the listing authenticated ends up without the pending marker.
-            assert [model["id"] for model in h.source["models"]] == ["relay-model"]
+            assert [model["id"] for model in h.source["models"]] == [listed_id]
             assert bool(h.source.get("verification_pending")) is not gated_inventory
             assert state_store.read_api_key(h.source["credential_ref"]) == valid_key
 
@@ -5005,3 +5007,38 @@ async def test_cloud_pairing_origin_reaches_effective_ui_listener(monkeypatch, s
     # Closing the disposable listener must remain visible as an unhealthy UI.
     payload = await asyncio.to_thread(remote_access.runtime_status_payload, config)
     assert payload["ui_healthy"] is False
+
+
+def test_avault_keychain_authorization_recovers_a_failed_vault_call(monkeypatch, tmp_path):
+    """AUTH-SETUP-134: failed Vault call -> recorded requirement -> Authorize avault -> retry succeeds.
+
+    avault is a fake honoring the 0.1.8 contract, answered in process under this
+    suite's no-process guard; nothing here touches a real Keychain or avault.
+    Nothing authorizes until the explicit Web action.
+    """
+    from tests.scenario_harness.avault_keychain import use_fake_avault_on_mac
+
+    avault = use_fake_avault_on_mac(monkeypatch, tmp_path)
+    avault.bind_in_process(monkeypatch)
+    client = app.test_client()
+
+    blocked = client.get("/api/vault/pubkey")
+    assert blocked.status_code == 409
+    assert blocked.get_json()["code"] == "avault_authorization_required"
+    status = client.get("/api/vault/avault-authorization").get_json()
+    assert status["required"] is True and status["attempt"] is None
+    assert "key authorize" not in avault.calls()
+
+    started = client.post("/api/vault/avault-authorization", json={}, headers=csrf_headers(client))
+    assert started.status_code == 200, started.get_json()
+    deadline = time.monotonic() + 10
+    while (attempt := client.get("/api/vault/avault-authorization").get_json()["attempt"])["state"] == "running":
+        assert time.monotonic() < deadline, attempt
+        time.sleep(0.05)
+    assert attempt["state"] == "succeeded"
+    assert client.get("/api/vault/avault-authorization").get_json()["required"] is False
+
+    retried = client.get("/api/vault/pubkey")
+    assert retried.status_code == 200
+    assert retried.get_json()["public_key"] == "pk"
+    assert avault.calls().count("key authorize") == 1

@@ -100,6 +100,27 @@ const renderPage = (instance: I18n = i18n) => {
   };
 };
 
+const installDesktopPet = (enabled = true) => {
+  Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
+  Object.defineProperty(window, '__AVIBE_DESKTOP_PET_SETTINGS__', { configurable: true, value: true });
+  let state = {
+    enabled,
+    voice_shortcut: 'Control+Alt+Space',
+    toggle_shortcut: 'Control+Alt+KeyM',
+    voice_mode: 'hold',
+    errors: [],
+  };
+  const invoke = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+    if (command === 'pet_settings') return state;
+    if (command === 'pet_set_enabled') {
+      state = { ...state, enabled: Boolean(args?.enabled) };
+    }
+    return state;
+  });
+  Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: { invoke } });
+  return { invoke, state: () => state };
+};
+
 /** A capability change arrives at a control by re-rendering it, so these tests
  *  never flip one without the other — otherwise a control would be asked about
  *  an authority it has not been told about yet. */
@@ -150,11 +171,17 @@ beforeEach(async () => {
   apiHandouts.length = 0;
   persisted.language = 'en';
   i18n = makeI18n();
+  Reflect.deleteProperty(window, '__AVIBE_DESKTOP_SHELL__');
+  Reflect.deleteProperty(window, '__AVIBE_DESKTOP_PET_SETTINGS__');
+  Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
 });
 
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  Reflect.deleteProperty(window, '__AVIBE_DESKTOP_SHELL__');
+  Reflect.deleteProperty(window, '__AVIBE_DESKTOP_PET_SETTINGS__');
+  Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
 });
 
 describe('General settings — language', () => {
@@ -610,5 +637,39 @@ describe('General settings — menu placement', () => {
       card.querySelector('[aria-hidden="true"]')?.childElementCount;
     expect(columns(placementCard(en.settings.general.menuPlacementStandalone))).toBe(2);
     expect(columns(placementCard(en.settings.general.menuPlacementInline))).toBe(3);
+  });
+});
+
+describe('General settings — Desktop Mini', () => {
+  it.each(['web', 'older desktop shell'] as const)('hides the switch on %s', (surface) => {
+    if (surface === 'older desktop shell') {
+      Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
+    }
+    renderPage();
+    expect(screen.queryByRole('switch', { name: en.settings.general.desktopMini.title })).toBeNull();
+  });
+
+  it('keeps one live switch in sync with the native state', async () => {
+    const native = installDesktopPet();
+    renderPage();
+    const toggle = await screen.findByRole('switch', { name: en.settings.general.desktopMini.title });
+    expect(toggle.getAttribute('aria-checked')).toBe('true');
+
+    await userEvent.setup().click(toggle);
+    await waitFor(() => expect(native.invoke).toHaveBeenCalledWith('pet_set_enabled', { enabled: false }));
+    await waitFor(() => expect(toggle.getAttribute('aria-checked')).toBe('false'));
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent('avibe:desktop-pet-settings', {
+        detail: {
+          enabled: true,
+          voice_shortcut: 'Control+Alt+Space',
+          toggle_shortcut: 'Control+Alt+KeyM',
+          voice_mode: 'hold',
+          errors: [],
+        },
+      }));
+    });
+    await waitFor(() => expect(toggle.getAttribute('aria-checked')).toBe('true'));
   });
 });

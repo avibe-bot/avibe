@@ -155,6 +155,8 @@ from core.agent_core.messages import (
     HostedRecord,
     Message,
     Origin,
+    TextBlock,
+    ThinkingBlock,
     ToolCallBlock,
     ToolResultMessage,
     Usage,
@@ -209,9 +211,21 @@ def _mind_text(files: Mapping[str, Optional[str]]) -> Optional[str]:
 
 
 def _cache_of(origin: Origin) -> tuple[str, str]:
-    """The upstream prompt cache an origin's requests use: its provider and model (C-9 section 3). The protocol that
-    reaches the gateway, converted or not (a Google hop is called over Chat), does not change the cache."""
+    """The upstream prompt cache an origin's requests use: provider and model.
+
+    Canonical response rows and served-hop metadata carry the credential-free Source identity, but this C-9 cache
+    clock intentionally keys by provider/model. Same-provider/model Sources therefore share one clock; Model Hub cache
+    overrides are route-wide rather than a claim of per-Source clocks.
+    """
     return origin.provider, origin.model
+
+
+def _silent_stop(message: AssistantMessage) -> bool:
+    """Whether a normal stop contains no user-visible model content to preserve."""
+    return all(
+        isinstance(block, ThinkingBlock) or (isinstance(block, TextBlock) and not block.text.strip())
+        for block in message.content
+    )
 
 
 async def _silent(*_: Any, **__: Any) -> None:
@@ -389,8 +403,8 @@ class Agent:
         # The images the run's committed tool results generated, which its final delivers: a reply even without text
         # (``has_reply``). Read from the committed rows, so a result another writer settled counts as it committed.
         self._generated_images: list[HostedImage] = []
-        # When each upstream prompt cache was last used in this Agent: the end of its latest model call, by the provider
-        # and model that served it (``_cache_of``, C-9 section 3).
+        # The C-9 cache clock deliberately keys the served provider/model boundary;
+        # canonical rows also retain Source identity, but it is not a separate clock.
         self._last_model_at: dict[tuple[str, str], float] = {}
         self._seq = 0
 
@@ -688,7 +702,7 @@ class Agent:
                             self._run_tools = dict(zip(names, setup.tools))
                 if consume:
                     await self._consume(input)
-                self._outcome.primary(await self._loop(system, emit, selected))
+                self._outcome.primary(await self._loop(system, emit, selected, discard_silent_final=consume))
             except _Ended:
                 self._outcome.primary("ended_by_hook")
             except _Exhausted as error:
@@ -727,8 +741,15 @@ class Agent:
         await emit(RunEnded, reason=self._outcome.reason, cause=self._outcome.cause)
 
     async def _error(
-        self, emit: Callable[..., Awaitable[Any]], kind: str, message: str, origin: ErrorOrigin, *, cause: bool,
+        self,
+        emit: Callable[..., Awaitable[Any]],
+        kind: str,
+        message: str,
+        origin: ErrorOrigin,
+        *,
+        cause: bool,
         provider_error: Optional[ProviderError] = None,
+        continuable: bool = False,
     ) -> None:
         """The one place the loop announces an error: ``origin`` as its caller states it, where the error is raised.
 
@@ -738,7 +759,7 @@ class Agent:
         event = await emit(
             AgentError, kind=kind, message=message, origin=origin,
             retryable=provider_error.retryable if provider_error is not None else False,
-            continuable=provider_error.continuable if provider_error is not None else False,
+            continuable=provider_error.continuable if provider_error is not None else continuable,
             retry_after_s=provider_error.retry_after_s if provider_error is not None else None,
         )
         if cause:
@@ -1059,9 +1080,14 @@ class Agent:
         *,
         replied: bool,
         keep_open: bool = False,
-    ) -> tuple[ContextEntry, bool]:
-        """Commit the response: its row, and whether it is final. Finality and queued-input admission share one lock
-        with the commit. ``replied`` is the run's decision whether it replies, which the store takes as given."""
+        discard_silent_final: bool = False,
+    ) -> tuple[Optional[ContextEntry], bool]:
+        """Commit the response and return whether it is final.
+
+        A silent normal stop can be admitted as a retryable terminal without becoming a transcript final. The
+        decision is made under the same lock as queued-input admission, so a concurrent steer still turns it into
+        the ordinary non-final response path.
+        """
         pending: list[tuple[AgentInput, bool]] = []
         consumed: list[tuple[AgentInput, bool]] = []
         failed = message.stop_reason in {"error", "aborted"}
@@ -1073,12 +1099,14 @@ class Agent:
                     if not pending:
                         pending = [(item, False) for item in self._follow_ups]
                 final = not message.tool_calls and not pending and not failed
+                discard = discard_silent_final and final
                 # A completed reply the pending input took the final word from: one cut off at its output limit
                 # never completed, as ``final_outcome`` holds for a final.
                 superseded = bool(pending) and replied and message.stop_reason != "length"
                 if (final or failed) and not keep_open:
                     self._open = False
-                row = await self._response(message, final=final, replied=replied, superseded=superseded)
+                if not discard:
+                    row = await self._response(message, final=final, replied=replied, superseded=superseded)
                 for item, is_steer in pending:
                     await self._consume(item)
                     (self._steers if is_steer else self._follow_ups).popleft()
@@ -1097,7 +1125,14 @@ class Agent:
                         await emit(SteerApplied, message_id=item.message_id)
         return row, final
 
-    async def _loop(self, system: str, emit: Callable[..., Awaitable[None]], selected: ModelSelection) -> RunEndReason:
+    async def _loop(
+        self,
+        system: str,
+        emit: Callable[..., Awaitable[None]],
+        selected: ModelSelection,
+        *,
+        discard_silent_final: bool,
+    ) -> RunEndReason:
         first_selection: Optional[ModelSelection] = selected
         length_tool_retries = 0
         while True:
@@ -1121,6 +1156,7 @@ class Agent:
                             response, _ = await self._commit_model_message(
                                 terminal.partial, emit, replied=replied, keep_open=True
                             )
+                            assert response is not None
                             malformed_recovery = (terminal, tools, response)
                     if malformed_recovery is None:
                         if terminal.partial is not None and not terminal.partial.content:
@@ -1159,12 +1195,36 @@ class Agent:
                             "local" if aborted else "source",
                             cause=decided,
                         )
-                    # Decided once: the empty-reply test, the row's type and settlement all take it (``has_reply``).
+                    # A normal stop with only private/blank content is a retryable source failure for Vibey. Do not
+                    # commit it as a final (or feed it back as assistant context); the adapter resumes this transcript.
                     replied = has_reply(message, generated_images=bool(self._generated_images))
-                    response, final = await self._commit_model_message(message, emit, replied=replied)
+                    retryable_empty = (
+                        discard_silent_final
+                        and message.stop_reason == "stop"
+                        and not message.tool_calls
+                        and _silent_stop(message)
+                        and not replied
+                    )
+                    response, final = await self._commit_model_message(
+                        message,
+                        emit,
+                        replied=replied,
+                        discard_silent_final=retryable_empty,
+                    )
                     empty_reply = final and not replied
                     truncated_reply = final and message.stop_reason == "length"
-                    if empty_reply or truncated_reply:
+                    retryable_empty = retryable_empty and final
+                    if retryable_empty:
+                        decided = self._outcome.primary("error")
+                        await self._error(
+                            emit,
+                            "empty_response",
+                            f"Model stopped with {message.stop_reason} without a reply.",
+                            "source",
+                            cause=decided,
+                            continuable=True,
+                        )
+                    elif empty_reply or truncated_reply:
                         decided = self._outcome.primary("error")
                         await self._error(
                             emit,
@@ -1517,7 +1577,9 @@ class Agent:
 
         Its use is the latest model call's end or response row's commit served by the route's upstream cache
         (``_cache_of``), so a long response counts as use until it ends, and a restarted Agent reads the rows. A route
-        with no use in the Session yet takes the latest use of any route: every error leans toward a warm cache.
+        with no use in the Session yet takes the latest use of any route: every error leans toward a warm cache. The
+        row also retains the served Source identity for canonical replay and scrubbing, but this C-9 clock intentionally
+        keys by provider/model.
         """
         used = dict(self._last_model_at)
         for row in self._rows:

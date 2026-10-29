@@ -9,11 +9,13 @@
   },
   "permissions": [
     "allow-pet-ready",
+    "allow-pet-context-menu",
     "allow-pet-set-expanded",
     "allow-pet-drag",
     "allow-pet-settle",
     "allow-pet-hit-regions",
     "allow-pet-set-dismissed",
+    "allow-pet-reset-voice-shortcut",
     "allow-pet-bind",
     "allow-pet-unbind",
     "allow-pet-open",

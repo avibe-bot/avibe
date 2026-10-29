@@ -113,14 +113,12 @@ def test_resolve_agent_for_context_reports_unregistered_default_agent_backend() 
     assert controller.resolve_agent_for_context(_context()) == "opencode"
 
 
-def test_codex_overrides_prefer_scope_level_model_and_reasoning() -> None:
+def test_codex_overrides_use_the_scope_level_model_and_reasoning() -> None:
     controller = _StubController()
     controller.primary_platform = "slack"
     controller._get_settings_key = lambda context: context.channel_id
     routing = SimpleNamespace(
         codex_agent=None,
-        codex_model="gpt-5.4",
-        codex_reasoning_effort="high",
         model="gpt-5.5",
         reasoning_effort="xhigh",
     )

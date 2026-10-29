@@ -476,7 +476,12 @@ async def test_responses_stream_with_reasoning_and_tool_call(tmp_path, monkeypat
 
 @pytest.mark.parametrize("protocol", PROTOCOLS)
 async def test_consumer_cancel_closes_upstream_and_keeps_the_source(tmp_path, monkeypatch, protocol) -> None:
-    """A consumer that stops reading cancels the upstream call and leaves the Source routable."""
+    """A consumer that stops reading cancels the upstream call and leaves the Source routable.
+
+    An initial Responses stream is held until its upstream terminal (one exact overload replay,
+    docs/plans/openai-streamed-overload-retry.md), so its consumer sees no headers while the
+    upstream is still writing: it gives up while waiting instead of after the first bytes.
+    """
     upstream_closed: asyncio.Future = asyncio.get_running_loop().create_future()
     healthy = await _healthy(protocol)
     calls = 0
@@ -503,13 +508,20 @@ async def test_consumer_cancel_closes_upstream_and_keeps_the_source(tmp_path, mo
 
     async with _through_engine(tmp_path, monkeypatch, protocol, handler) as harness:
         url, body = _frontend_request(protocol, harness.hop, stream=True)
+        headers = {"Authorization": f'Bearer {harness.hop["token"]}', **harness.hop["request_headers"]}
         async with aiohttp.ClientSession() as client:
-            async with client.post(url, headers={"Authorization": f'Bearer {harness.hop["token"]}',
-                                                 **harness.hop["request_headers"]},
-                                   json=body) as response:
-                assert response.status == 200
-                await response.content.readuntil(b"partial")
+            if protocol == "openai_responses":
+                request = asyncio.ensure_future(client.post(url, headers=headers, json=body))
+                done, _ = await asyncio.wait({request}, timeout=1.5)
+                assert not done, "a held Responses stream committed headers before its upstream terminal"
+                request.cancel()
+                await asyncio.gather(request, return_exceptions=True)
                 cancelled_at = time.monotonic()
+            else:
+                async with client.post(url, headers=headers, json=body) as response:
+                    assert response.status == 200
+                    await response.content.readuntil(b"partial")
+                    cancelled_at = time.monotonic()
         try:
             lag = round(await asyncio.wait_for(asyncio.shield(upstream_closed), timeout=10) - cancelled_at, 3)
         except asyncio.TimeoutError:

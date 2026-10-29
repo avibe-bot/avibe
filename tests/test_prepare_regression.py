@@ -128,6 +128,23 @@ def test_prepare_generates_unified_state(tmp_path: Path, monkeypatch: pytest.Mon
     assert opencode_config["provider"]["openai"]["options"]["baseURL"] == "https://ai-relay.example/v1"
 
 
+def test_prepare_routes_a_scope_model_only_for_its_own_backend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    module = _load_module()
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("REGRESSION_DISCORD_CODEX_MODEL", "gpt-5.5")
+    monkeypatch.setenv("REGRESSION_DISCORD_CODEX_REASONING_EFFORT", "high")
+    monkeypatch.setenv("REGRESSION_DISCORD_CLAUDE_MODEL", "claude-opus-4-8")
+
+    module.prepare(tmp_path)
+
+    settings = json.loads((tmp_path / "home" / ".avibe" / "state" / "settings.json").read_text(encoding="utf-8"))
+    routing = settings["scopes"]["channel"]["discord"]["123456789012345678"]["routing"]
+    assert routing["agent_name"] == "codex"
+    assert routing["model"] == "gpt-5.5"
+    assert routing["reasoning_effort"] == "high"
+    assert not {"codex_model", "codex_reasoning_effort", "claude_model"} & set(routing)
+
+
 def test_prepare_derives_openai_relay_base_from_anthropic_base(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

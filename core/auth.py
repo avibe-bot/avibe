@@ -30,6 +30,7 @@ ADMIN_PROTECTED_ACTIONS: frozenset = frozenset(
         "setup",
         "set_cwd",
         "settings",
+        "agent",
     }
 )
 

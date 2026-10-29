@@ -10,8 +10,8 @@
 // and the PR records the server implementation and feature-flag activation
 // edge. The client never synthesizes a fallback payload shape.
 
-export const CONTRACT_VERSION = 21 as const;
-export const PERSISTED_TURN_CONTRACT_VERSIONS = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21] as const;
+export const CONTRACT_VERSION = 22 as const;
+export const PERSISTED_TURN_CONTRACT_VERSIONS = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22] as const;
 export const AGENT_CHAIN_CONTRACT_VERSION = CONTRACT_VERSION;
 export const PROBE_RESULT_CONTRACT_VERSION = CONTRACT_VERSION;
 
@@ -415,8 +415,10 @@ export type RouteHopRef = RouteHop & {
   position: number;
 };
 
+export type CacheTtl = '5m' | '30m' | '1h' | '12h';
 export type AgentRoute = {
   hops: RouteHop[];
+  cache_ttl?: CacheTtl | null;
 };
 export type ManualRouteOverride = AgentRoute;
 export type RouteOrigin = 'automatic' | 'manual' | 'passthrough' | null;
@@ -871,6 +873,12 @@ export type UsageCounters = {
   cache_write_input_tokens?: number;
   /** Subset of `cache_write_input_tokens` written with the one-hour lifetime. */
   cache_write_1h_input_tokens?: number;
+  /** OpenAI Responses cache-write tokens written with the 30-minute lifetime. */
+  cache_write_30m_input_tokens?: number;
+  /** OpenAI Responses cache-write tokens written with the 12-hour lifetime. */
+  cache_write_12h_input_tokens?: number;
+  /** OpenAI Responses reports whose total or lifetime write breakdown was missing or invalid. */
+  cache_write_ttl_uncaptured_reports?: number;
   /** Token reports that could not carry cache writes (metered before they were
    *  captured, or on a protocol without them). */
   cache_write_uncaptured_reports?: number;
@@ -1401,6 +1409,7 @@ export type AgentSourcesPut = {
 /** PUT /api/models/agents/<backend>/chain?model=<id> — replaces exact hops. */
 export type AgentChainPut = {
   hops: RouteHop[];
+  cache_ttl?: CacheTtl | null;
   force?: boolean;
   would_remove_hops?: RouteHopRef[];
   would_interrupt?: SupplyGap[];

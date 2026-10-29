@@ -603,9 +603,12 @@ impl RuntimeCommand {
         backends_root: PathBuf,
         runtime_id: &str,
     ) -> Self {
-        let tools_dir = node.parent().expect("validated private Node has a parent").to_owned();
-        // The builder includes a relocatable vibe entry point in bin. Expose
-        // only that directory, never python/bin (which would shadow user tools).
+        // Only the relocatable vibe entry point belongs on the shared PATH.
+        // In particular, exposing bundled Node pairs an external npm shebang
+        // with our interpreter: npm's default global prefix then points inside
+        // this immutable tree, and a global install forces a startup repair.
+        // Private Node/npm consumers receive explicit handles below instead.
+        // Never expose python/bin either (it would shadow the user's tools).
         let cli_dir = runtime_root.join("bin");
         Self {
             executable: python,
@@ -640,7 +643,7 @@ impl RuntimeCommand {
                 // what covers this process itself.
                 (OsString::from("PYTHONDONTWRITEBYTECODE"), OsString::from("1")),
             ],
-            path_prefix: vec![cli_dir, tools_dir],
+            path_prefix: vec![cli_dir],
             withholds_inherited_python: true,
         }
     }
@@ -2338,7 +2341,7 @@ mod tests {
     }
 
     #[test]
-    fn private_runtime_commands_ignore_user_python_and_prepend_managed_tools() {
+    fn private_runtime_commands_isolate_python_and_expose_only_the_vibe_shim() {
         let runtime_root = PathBuf::from("/private/runtime");
         let python = PathBuf::from("/private/runtime/python/bin/python3");
         let node = PathBuf::from("/private/runtime/tools/bin/node");
@@ -2358,14 +2361,7 @@ mod tests {
             &"a".repeat(64),
         );
         let path_entries: Vec<_> = env::split_paths(&command.path(Some(&inherited)).expect("private PATH")).collect();
-        assert_eq!(
-            path_entries,
-            [
-                runtime_root.join("bin"),
-                node.parent().unwrap().to_owned(),
-                PathBuf::from("/usr/bin")
-            ]
-        );
+        assert_eq!(path_entries, [runtime_root.join("bin"), PathBuf::from("/usr/bin")]);
 
         assert_eq!(command.executable, python);
         assert_eq!(
@@ -2434,8 +2430,50 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[cfg(unix)]
     #[test]
-    fn a_private_runtime_keeps_its_own_tools_ahead_of_the_login_shell_path() {
+    fn a_private_runtime_leaves_external_npm_on_the_users_node() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch_dir("external-npm-node");
+        let tree = dir.join("Runtime With Spaces");
+        let tools = tree.join("tools/bin");
+        let external = dir.join("user-node/bin");
+        for path in [&tools, &external] {
+            std::fs::create_dir_all(path).expect("test-owned tool directory");
+        }
+        // The fixtures identify which interpreter /usr/bin/env selects. They
+        // do not simulate npm's prefix algorithm or run any package manager.
+        for (path, body) in [
+            (tools.join("node"), "#!/bin/sh\nprintf 'bundled-node'\n"),
+            (external.join("node"), "#!/bin/sh\nprintf 'user-node'\n"),
+            (external.join("npm"), "#!/usr/bin/env node\n"),
+        ] {
+            std::fs::write(&path, body).expect("test executable");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("executable mode");
+        }
+        let python = write_fake_runtime(&tree, "#!/bin/sh\nexec npm\n");
+        let runtime = RuntimeCommand::private(
+            tree.clone(),
+            python,
+            tools.join("node"),
+            tree.join("tools/npm/bin/npm-cli.js"),
+            dir.join("backends"),
+            &"a".repeat(64),
+        );
+        let login_path = env::join_paths([&external]).expect("test-owned PATH");
+
+        let mut command = Command::new(&runtime.executable);
+        command.env_clear().env("HOME", &dir).current_dir(&dir);
+        runtime.apply(&mut command, Some(&login_path));
+        let output = command.output().expect("test Runtime launches external npm");
+        assert!(output.status.success(), "{:?}", output.stderr);
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "user-node");
+        std::fs::remove_dir_all(dir).expect("remove test-owned tools");
+    }
+
+    #[test]
+    fn a_private_runtime_keeps_only_its_vibe_shim_ahead_of_the_login_shell_path() {
         let runtime = RuntimeCommand::private(
             PathBuf::from("/private/runtime"),
             PathBuf::from("/private/runtime/python/bin/python3"),
@@ -2457,7 +2495,6 @@ mod tests {
             env::split_paths(path).collect::<Vec<_>>(),
             [
                 PathBuf::from("/private/runtime/bin"),
-                PathBuf::from("/private/runtime/tools/bin"),
                 PathBuf::from("/login/nvm/bin"),
                 PathBuf::from("/usr/bin"),
             ]

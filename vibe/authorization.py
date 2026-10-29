@@ -573,6 +573,7 @@ _MEMBER_HTTP_RULES = tuple(
         ("PUT", r"^/api/projects/[^/]+/agents-md$"),
         # General instance settings; mixed writes retain access-administration guards.
         ("GET", r"^/api/doctor$"),
+        ("GET", r"^/api/macos/login-session$"),
         ("PUT", r"^/api/workbench/prefs$"),
         ("GET", r"^/api/cli/detect$"),
         ("GET", r"^/api/slack/manifest$"),
@@ -581,6 +582,7 @@ _MEMBER_HTTP_RULES = tuple(
         ("POST", r"^/api/settings$"),
         ("POST", r"^/api/settings/thread$"),
         ("DELETE", r"^/api/settings/thread$"),
+        ("PATCH", r"^/api/settings/scope$"),
         ("POST", r"^/api/slack/auth_test$"),
         ("POST", r"^/api/slack/channels$"),
         ("POST", r"^/api/discord/auth_test$"),
@@ -597,6 +599,7 @@ _MEMBER_HTTP_RULES = tuple(
         ("POST", r"^/api/logs$"),
         ("POST", r"^/api/opencode/options$"),
         ("POST", r"^/api/upgrade$"),
+        ("POST", r"^/api/desktop/update/request$"),
         ("POST", r"^/api/opencode/setup-permission$"),
         ("GET", r"^/api/opencode/permission-status$"),
         ("GET", r"^/api/claude/agents$"),

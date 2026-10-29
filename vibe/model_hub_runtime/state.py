@@ -15,7 +15,12 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from config.atomic_io import write_atomic
-from config.v2_config import normalize_model_hub_base_url, validate_model_hub_protocol_vendor
+from config.v2_config import (
+    GEMINI_NATIVE_BASE_URL,
+    normalize_model_hub_base_url,
+    on_gemini_openai_compatible_endpoint,
+    validate_model_hub_protocol_vendor,
+)
 from core import private_fs
 from core.handlers.model_hub.events import contains_credential_material
 from core.handlers.model_hub.identifiers import model_id_without_credential_address
@@ -605,6 +610,7 @@ class EngineStateStore:
                     base_url,
                     credential_kind=credential["kind"],
                 )
+                credential = self._follow_native_gemini(credential_ref, credential, vendor, protocol, base_url)
                 if credential["kind"] == "api_key":
                     if (
                         credential.get("vendor") != vendor
@@ -751,6 +757,30 @@ class EngineStateStore:
             )
             self._write_sources([updated_record if source.source_id == source_id else source for source in sources])
             return updated_record
+
+    def _follow_native_gemini(
+        self, credential_ref: str, credential: dict[str, Any], vendor: str, protocol: str, base_url: str | None,
+    ) -> dict[str, Any]:
+        """The credential a Gemini Source moved to the native protocol is bound by, moved with it.
+
+        ``_migrate_gemini_native_sources`` moves a Gemini API key's Source from Google's OpenAI-compatible endpoint to
+        the native root; the key it holds is the same key on the same account, so its binding follows the first time
+        the Source asks for it. Any other mismatch is still the caller's refusal.
+        """
+
+        if not (
+            credential.get("kind") == "api_key"
+            and vendor == "gemini" and protocol == "google"
+            and base_url in (None, _validated_base_url(GEMINI_NATIVE_BASE_URL))
+            and on_gemini_openai_compatible_endpoint(
+                credential.get("vendor"), credential.get("protocol"), credential.get("base_url"),
+            )
+        ):
+            return credential
+        moved = {**credential, "protocol": protocol, "base_url": base_url}
+        with self._lock:
+            self._secure_write_json(self._credential_path(credential_ref), moved)
+        return moved
 
     def credential_metadata(self, credential_ref: str) -> dict[str, Any]:
         payload = self.credential_metadata_if_present(credential_ref)
@@ -935,8 +965,10 @@ class EngineStateStore:
         protocol: str,
         base_url: str | None,
     ) -> str | None:
-        metadata = self.credential_metadata(credential_ref)
         normalized_base_url = _validated_base_url(base_url)
+        metadata = self._follow_native_gemini(
+            credential_ref, self.credential_metadata(credential_ref), vendor.strip().lower(), protocol, normalized_base_url,
+        )
         if (
             metadata["kind"] != "api_key"
             or metadata.get("vendor") != vendor.strip().lower()
@@ -1687,7 +1719,7 @@ def _validate_source_target(
     if protocol == "google":
         try:
             validate_model_hub_protocol_vendor(vendor, protocol)
-            google_api_base_url(base_url)
+            google_api_base_url(base_url or official_api_key_base_url(vendor))
         except ValueError as exc:
             raise EngineStateError(str(exc)) from None
         return

@@ -32,7 +32,7 @@ const api = vi.hoisted(() => {
   };
 });
 const authorization = vi.hoisted(() => ({
-  capabilities: { can_manage_instance: true },
+  capabilities: { can_manage_instance: true, can_read_instance: true },
 }));
 const media = vi.hoisted(() => ({
   matches: false,
@@ -703,7 +703,7 @@ describe('SettingsLayout', () => {
     const user = userEvent.setup();
     renderLayout('/settings');
 
-    const version = await screen.findByTitle('v3.1.4');
+    const version = await screen.findByTitle('dashboard.versionTitle');
     expect(version.parentElement?.parentElement?.className).toContain('md:hidden');
 
     await user.click(version);

@@ -61,6 +61,7 @@ def probes(monkeypatch):
     monkeypatch.setattr(api, "_show_runtime_dependencies_status", probe(GROUPS[2]))
     monkeypatch.setattr(api, "_model_hub_engine_dependency_status", probe(GROUPS[3]))
     monkeypatch.setattr(tmux_runtime, "tmux_status", probe(GROUPS[4]))
+    monkeypatch.setattr(api, "macos_login_session_state", lambda: "healthy")
     return calls
 
 
@@ -77,7 +78,7 @@ def test_selective_checks_preserve_complete_rows_and_only_probe_their_owners(pro
     assert result["deps"] == [row for row in complete["deps"] if row["id"] in requested]
     assert result["reconciling"] is False
     assert result["reconciling_dependencies"] == []
-    assert set(result) == {"ok", "deps", "reconciling", "reconciling_dependencies"}
+    assert set(result) == {"ok", "deps", "reconciling", "reconciling_dependencies", "login_session_state"}
     assert [group for group, _ in probes] == [group for group in GROUPS if set(group).intersection(requested)]
 
 

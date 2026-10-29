@@ -140,12 +140,25 @@ const withWorkspaceApi = async (page: Page) => {
       : route.fulfill({ status: 404, json: { error: `no project fixture for ${payload.folder_path}` } });
   });
   await page.route('**/api/workbench/projects-bootstrap**', (route) => route.fulfill({ json: PROJECTS }));
+  // The folder browser resolves its start through /api/browse, then lists every
+  // folder through the Files listing and offers the Home favorite.
   await page.route('**/api/browse', (route) => {
     const { path } = route.request().postDataJSON() as { path: string };
     const answer = BROWSE[path];
     return route.fulfill(
       answer ? { json: { ok: true, ...answer } } : { json: { ok: false, error: `no folder fixture for ${path}` } },
     );
+  });
+  await page.route('**/api/browse/favorites', (route) => route.fulfill({ json: { ok: true, favorites: [{ key: 'home', path: HOME_DIR }] } }));
+  await page.route('**/api/files/list?*', (route) => {
+    const path = new URL(route.request().url()).searchParams.get('path') ?? '';
+    const answer = BROWSE[path];
+    return route.fulfill(answer
+      ? { json: {
+        ok: true, path: answer.path, parent: answer.parent, truncated: false, limit: 2000,
+        entries: answer.dirs.map((dir) => ({ name: dir.name, kind: 'dir', size: null, mtime: null, ext: '' })),
+      } }
+      : { status: 404, json: { ok: false, error: { code: 'not_found', message: `no folder fixture for ${path}` } } });
   });
   return creates;
 };

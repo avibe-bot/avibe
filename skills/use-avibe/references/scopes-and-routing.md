@@ -1,20 +1,34 @@
 # Channels, Users, and Routing
 
+### Changing one scope
+
+`PATCH /api/settings/scope` changes only the fields it names on one channel, Telegram topic, or bound DM user. Use it for every single-scope edit:
+
+```json
+{
+  "platform": "slack",
+  "scope": "channel",
+  "id": "C123",
+  "changes": {
+    "enabled": true,
+    "routing": {"agent_name": "codex", "model": "gpt-5.4", "reasoning_effort": "high"}
+  },
+  "expected_agent_name": "<the scope's current expected_agent_name>"
+}
+```
+
+- `scope` is `channel`, `thread` (Telegram topics only; add `"thread_id"`), or `user` (the user must already be bound).
+- Channels and topics take `enabled`, `show_message_types`, `custom_cwd`, `require_mention`, `require_bind`, `routing`; users take `display_name`, `enabled`, `show_message_types`, `custom_cwd`, `routing`. Admin rights keep `POST /api/users/<user_id>/admin`.
+- `routing` merges key by key into the stored route. A request with `routing` must carry `expected_agent_name`: copy it from the scope's latest read (`null` for a scope inheriting the default Agent). If another writer changed the scope's Agent since, the request fails with `settings_conflict` (409); read again and retry.
+- The response's `settings` is the stored row; verify from it.
+
 ### Channel settings
 
-- `GET /settings?platform=<platform>`
+- `GET /api/settings?platform=<platform>`
   - returns channel settings, user settings, and bind codes for one platform
-- `POST /settings`
+- `POST /api/settings`
   - payload: `{"platform": "<platform>", "channels": {...}}`
-  - validates message visibility and routing, normalizes Claude reasoning, persists the full channel map for that platform
-
-Important: `POST /settings` replaces the entire `channels` map for the selected platform. To change one channel:
-
-1. `GET /settings?platform=<platform>`
-2. copy `response.channels`
-3. merge or add one channel entry
-4. `POST /settings` with the full merged `channels` object
-5. `GET /settings?platform=<platform>` again and verify
+  - replaces the entire `channels` map for that platform; keep it for bulk imports and use `PATCH /api/settings/scope` for anything else
 
 Channel entry shape:
 
@@ -30,15 +44,10 @@ Channel entry shape:
     "model": "gpt-5.4",
     "reasoning_effort": "high",
     "opencode_agent": null,
-    "opencode_model": null,
-    "opencode_reasoning_effort": null,
     "claude_agent": null,
-    "claude_model": null,
-    "claude_reasoning_effort": null,
-    "codex_agent": "reviewer",
-    "codex_model": "gpt-5.4",
-    "codex_reasoning_effort": "high"
-  }
+    "codex_agent": "reviewer"
+  },
+  "expected_agent_name": "codex"
 }
 ```
 
@@ -50,10 +59,11 @@ Field meanings:
 - `require_mention`: `null` inherits the platform default, `true` requires mention, `false` disables mention gating for that channel
 - `require_bind`: `null`/`false` lets any channel member use the bot (current default); `true` gates the channel to bound users only — messages from unbound senders are silently ignored (no denial reply), while the bot's own replies stay visible to everyone. Enforced in the shared auth pipeline, so it applies on every platform. Bind is platform-wide, so `require_bind` means "is this sender a bound user", not a per-channel allowlist.
 - `routing.agent_name`: Vibe Agent name for this scope, or `null` to inherit the default Agent
-- `routing.model`: canonical scope-level model override for the selected Agent backend
-- `routing.reasoning_effort`: canonical scope-level reasoning override for the selected Agent backend
-- `routing.<backend>_agent`: backend-specific subagent
-- `routing.<backend>_model` / `routing.<backend>_reasoning_effort`: legacy aliases accepted on input and derived on read-back; do not treat them as independent state
+- `routing.model`: scope-level model override for the selected Agent; `null` uses the Agent's own model
+- `routing.reasoning_effort`: scope-level reasoning override for the selected Agent; `null` uses the Agent's own
+- `routing.<backend>_agent`: the native subagent that backend runs for this scope
+- `expected_agent_name` (read-only): the Agent this view of the route is based on; send it back with routing changes
+- Older releases also used `routing.<backend>_model` / `routing.<backend>_reasoning_effort`. They are retired: never returned or stored, and only read to fill an unset `model` / `reasoning_effort` on that built-in backend's route. Do not send them.
 
 ### DM users and bind codes
 
@@ -61,7 +71,7 @@ Field meanings:
   - returns bound DM users for one platform
 - `POST /api/users`
   - payload: `{"platform": "<platform>", "users": {...}}`
-  - merges included users into existing users and preserves each existing user's `dm_chat_id`
+  - writes each included user as a whole row and keeps the others; use `PATCH /api/settings/scope` with `"scope": "user"` to change a user's fields
 - `POST /api/users/<user_id>/admin`
   - payload: `{"platform": "<platform>", "is_admin": true}`
 - `DELETE /api/users/<user_id>?platform=<platform>`
@@ -75,7 +85,7 @@ Field meanings:
 - `GET /api/setup/first-bind-code`
   - returns an existing valid setup bind code or creates a new one-time code
 
-Important: user updates are not field patches. Before changing a user's routing, cwd, visibility, or enabled flag, read the current user object and send the merged full user entry.
+Change a user's routing, cwd, visibility, or enabled flag with `PATCH /api/settings/scope` (`"scope": "user"`); `POST /api/users` is not a field patch.
 
 User entry shape:
 
@@ -92,15 +102,10 @@ User entry shape:
     "model": "claude-sonnet-4-6",
     "reasoning_effort": "high",
     "opencode_agent": null,
-    "opencode_model": null,
-    "opencode_reasoning_effort": null,
     "claude_agent": "reviewer",
-    "claude_model": "claude-sonnet-4-6",
-    "claude_reasoning_effort": "high",
-    "codex_agent": null,
-    "codex_model": null,
-    "codex_reasoning_effort": null
-  }
+    "codex_agent": null
+  },
+  "expected_agent_name": "claude"
 }
 ```
 
@@ -113,18 +118,18 @@ DM caveat: current DM authorization checks whether the user is bound, not whethe
 Agent resolution priority is:
 
 1. existing Agent Session backend snapshot, when the message belongs to an existing session/thread
-2. scope-level `routing.agent_name` from `/settings` or `/api/users`, for new sessions
+2. scope-level `routing.agent_name` of the channel, topic, or DM user, for new sessions
 3. global default Vibe Agent from the Agent catalog
 4. registered backend compatibility fallback, only when no enabled default Agent is available
 
-If the user names a specific channel or DM and wants a specific Agent, use the scope API, not global `/config`. New routing is Agent-based.
+If the user names a specific channel or DM and wants a specific Agent, use the scope API, not global `/api/config`. New routing is Agent-based.
 
 ### Working directory
 
 Working directory resolution is:
 
 1. `custom_cwd` on the target channel or user scope
-2. `runtime.default_cwd` from `/config`
+2. `runtime.default_cwd` from `/api/config`
 
 ### Message visibility
 
@@ -136,7 +141,7 @@ If a user asks for "vault messages", "internal messages", or "tool execution mes
 
 `require_mention` works like this:
 
-- `null`: inherit platform default from `/config`
+- `null`: inherit platform default from `/api/config`
 - `true`: require mention in that channel
 - `false`: do not require mention in that channel
 
@@ -154,39 +159,32 @@ Goal:
 
 API flow:
 
-1. `GET /settings?platform=slack`
-2. merge `channels.C123`
-3. `POST /settings` with all Slack channels
-4. read back `GET /settings?platform=slack`
-
-Merged channel entry:
+1. `GET /api/settings?platform=slack` and note `channels.C123.expected_agent_name` (`null` when the channel has no row yet)
+2. `PATCH /api/settings/scope` with that `expected_agent_name`:
 
 ```json
 {
-  "enabled": true,
-  "show_message_types": ["assistant"],
-  "custom_cwd": null,
-  "require_mention": null,
-  "routing": {
-    "agent_name": "codex",
-    "model": "gpt-5.4",
-    "reasoning_effort": "high",
-    "opencode_agent": null,
-    "opencode_model": null,
-    "opencode_reasoning_effort": null,
-    "claude_agent": null,
-    "claude_model": null,
-    "claude_reasoning_effort": null,
-    "codex_agent": "reviewer",
-    "codex_model": "gpt-5.4",
-    "codex_reasoning_effort": "high"
-  }
+  "platform": "slack",
+  "scope": "channel",
+  "id": "C123",
+  "changes": {
+    "enabled": true,
+    "routing": {
+      "agent_name": "codex",
+      "codex_agent": "reviewer",
+      "model": "gpt-5.4",
+      "reasoning_effort": "high"
+    }
+  },
+  "expected_agent_name": null
 }
 ```
 
+3. verify the response's `settings.routing`
+
 ### Route one channel to OpenCode with a subagent
 
-Use `/settings` and set:
+Use `PATCH /api/settings/scope` and set:
 
 - `routing.agent_name = "opencode"`
 - `routing.opencode_agent = "<agent>"`
@@ -197,7 +195,7 @@ If the user wants OpenCode-native defaults, providers, MCP servers, skills, plug
 
 ### Route one scope to Claude with model and reasoning
 
-Use `/settings` for a channel or `/api/users` for a DM user and set:
+Use `PATCH /api/settings/scope` (`"scope": "channel"` or `"user"`) and set:
 
 - `routing.agent_name = "claude"`
 - `routing.claude_agent = "<agent>"` if requested
@@ -208,7 +206,7 @@ The API normalizes Claude reasoning for incompatible model combinations; verify 
 
 ### Show tool execution messages in one channel
 
-Use `/settings` and add `toolcall` to the target channel's `show_message_types`.
+Use `PATCH /api/settings/scope` with the target channel's `show_message_types` plus `toolcall`.
 
 Preserve existing `system` and `assistant` values unless the user asked for a full replacement.
 

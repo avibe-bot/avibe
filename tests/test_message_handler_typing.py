@@ -811,8 +811,6 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
                 "reasoning_effort": "max",
                 "opencode_agent": None,
                 "claude_agent": None,
-                "claude_model": None,
-                "claude_reasoning_effort": None,
                 "codex_agent": None,
             },
         )()

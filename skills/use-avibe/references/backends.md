@@ -2,20 +2,20 @@
 
 ### Backend and local helper endpoints
 
-- `GET /cli/detect?binary=<name-or-path>`
+- `GET /api/cli/detect?binary=<name-or-path>`
   - detects a CLI binary path
-- `POST /agent/<name>/install`
+- `POST /api/agent/<name>/install`
   - `name` must be `opencode`, `claude`, or `codex`
-- `POST /opencode/options`
+- `POST /api/opencode/options`
   - payload: `{"cwd": "/path/to/repo"}`
   - returns OpenCode model, agent, and reasoning option data for that cwd
-- `POST /opencode/setup-permission`
+- `POST /api/opencode/setup-permission`
   - intentionally writes OpenCode native config to set `permission` to `allow`
-- `GET /claude/agents?cwd=/path/to/repo`
-- `GET /codex/agents?cwd=/path/to/repo`
-- `GET /claude/models`
-- `GET /codex/models`
-- `POST /browse`
+- `GET /api/claude/agents?cwd=/path/to/repo`
+- `GET /api/codex/agents?cwd=/path/to/repo`
+- `GET /api/claude/models`
+- `GET /api/codex/models`
+- `POST /api/browse`
   - payload: `{"path": "~", "show_hidden": false}`
 
 ## Agent Backend Capability Matrix
@@ -33,7 +33,7 @@ Behavior notes:
 - OpenCode subagents are selected through `routing.opencode_agent` or through prefix routing such as `reviewer: ...`.
 - Claude subagents are selected through `routing.claude_agent` or prefix routing.
 - Codex subagents are selected through `routing.codex_agent` or prefix routing.
-- Claude reasoning is selected through `routing.claude_reasoning_effort`; common values are `low`, `medium`, and `high`, and some models also allow `max`.
+- A scope's model and reasoning are `routing.model` and `routing.reasoning_effort`, for whichever backend its Agent runs; Claude's common efforts are `low`, `medium`, and `high`, and some models also allow `max`.
 - If a Claude reasoning value is invalid for the chosen model, the API normalizes or drops that override and falls back to the backend default.
 
 ## Subagent and Prefix Routing
@@ -81,7 +81,7 @@ Relevant docs:
 - plugins: `https://opencode.ai/docs/plugins/`
 - MCP servers: `https://opencode.ai/docs/mcp-servers/`
 
-Inside Avibe, a scope can select an OpenCode-backed Vibe Agent and then set subagent, model, and reasoning effort overrides. Use `POST /opencode/setup-permission` only for the specific permission helper.
+Inside Avibe, a scope can select an OpenCode-backed Vibe Agent and then set subagent, model, and reasoning effort overrides. Use `POST /api/opencode/setup-permission` only for the specific permission helper.
 
 ### Claude Code
 

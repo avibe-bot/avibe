@@ -243,6 +243,58 @@ def anthropic_hosted_block(
     )
 
 
+#: Gemini's server-side tool type for a Google Search it ran.
+GOOGLE_SEARCH_TOOL_TYPE = "GOOGLE_SEARCH_WEB"
+
+
+def google_hosted_block(
+    call: Mapping[str, Any],
+    response: Optional[Mapping[str, Any]],
+    *,
+    source_id: str,
+    call_id: str,
+    sources: tuple[HostedSource, ...] = (),
+) -> HostedToolBlock:
+    """A Gemini Google Search: its ``toolCall`` part and, once one arrived, its ``toolResponse`` part, both verbatim
+    with their signatures. ``sources`` are the response's grounding chunks, which Gemini reports once per response."""
+
+    tool_call = call.get("toolCall") if isinstance(call.get("toolCall"), Mapping) else {}
+    arguments = tool_call.get("args") if isinstance(tool_call.get("args"), Mapping) else {}
+    raw_queries = arguments.get("queries")
+    queries = tuple(query for query in raw_queries if _text(query)) if isinstance(raw_queries, list) else ()
+    action = HostedAction("search", queries=queries) if queries else HostedAction("other", name="google_search")
+    record = HostedRecord(status="pending") if response is None else HostedRecord(status="completed", sources=sources)
+    return HostedToolBlock(
+        id=_text(tool_call.get("id")) or call_id,
+        tool="web_search",
+        action=action,
+        record=record,
+        native=HostedNative(source_id=source_id, payload=_payload(call) if response is None else _payload(call, response)),
+    )
+
+
+def google_grounding_sources(metadata: Any) -> tuple[HostedSource, ...]:
+    """The web sources a Gemini response's ``groundingMetadata`` lists, in its order, each once."""
+
+    chunks = metadata.get("groundingChunks") if isinstance(metadata, Mapping) else None
+    sources: dict[str, HostedSource] = {}
+    for chunk in chunks if isinstance(chunks, list) else ():
+        web = chunk.get("web") if isinstance(chunk, Mapping) else None
+        url = _text(web.get("uri")) if isinstance(web, Mapping) else None
+        if url is not None and url not in sources:
+            sources[url] = HostedSource(url=url, title=_text(web.get("title")))
+    return tuple(sources.values())
+
+
+def google_search_count(metadata: Any) -> int:
+    """The searches Google bills a Gemini response for: its distinct, non-empty ``webSearchQueries``."""
+
+    queries = metadata.get("webSearchQueries") if isinstance(metadata, Mapping) else None
+    return len({query.strip() for query in queries if isinstance(query, str) and query.strip()}) if isinstance(
+        queries, list
+    ) else 0
+
+
 def citation(raw: Mapping[str, Any], *, offset: int = 0) -> Optional[Citation]:
     """A provider citation on assistant text: an OpenAI/xAI ``url_citation`` with its range, shifted by ``offset``
     into the block's text, or an Anthropic ``web_search_result_location``, which covers its whole text block."""

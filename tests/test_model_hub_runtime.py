@@ -1367,7 +1367,7 @@ def test_manifest_resolution_drives_admission_persistence_and_schema(
         installer=manager,
         state_store=EngineStateStore(tmp_path / "state"),
     )
-    projected = {"contract_version": 21, **supervisor.status()}
+    projected = {"contract_version": 22, **supervisor.status()}
     schema = json.loads(
         Path("docs/plans/model-hub-contracts/runtime-dependency.schema.json").read_text(
             encoding="utf-8"
@@ -1858,14 +1858,14 @@ def test_an_api_key_engine_entry_registers_its_vendors_image_models(tmp_path: Pa
     instance_dir, runtime_secrets = store.prepare_instance("install-1")
     refs = {
         "openai": store.store_api_key("openai-secret", vendor="openai", protocol="openai_responses"),
-        "gemini": store.store_api_key("gemini-secret", vendor="gemini", protocol="openai_chat"),
+        "gemini": store.store_api_key("gemini-secret", vendor="gemini", protocol="google"),
         "custom": store.store_api_key("custom-secret", base_url="https://api.example.test/v1"),
     }
     store.sync_sources([
         _binding(refs["openai"], source_id="src_openai0001", vendor="openai", protocol="openai_responses",
                  base_url=None, model_ids=("gpt-6-astra",)),
-        _binding(refs["gemini"], source_id="src_gemini0001", vendor="gemini", protocol="openai_chat",
-                 base_url=None, model_ids=("gemini-3-flash", "gemini-2.5-flash-image")),
+        _binding(refs["gemini"], source_id="src_gemini0001", vendor="gemini", protocol="google",
+                 base_url=None, model_ids=("models/gemini-3-flash", "models/gemini-2.5-flash-image")),
         _binding(
             refs["custom"], source_id="src_custom0001", model_ids=("model-a", "gemini-2.5-flash-image", "gpt-image-2"),
         ),
@@ -1882,11 +1882,15 @@ def test_an_api_key_engine_entry_registers_its_vendors_image_models(tmp_path: Pa
 
     [openai] = payload["codex-api-key"]
     assert models(openai) == {"gpt-6-astra": None, "gpt-image-2": None}
-    custom, gemini = sorted(payload["openai-compatibility"], key=lambda entry: entry["base-url"])
-    # Listed as a chat model or not, an image model is flagged, and registered once.
-    assert models(gemini) == {
-        "gemini-3-flash": None, "gemini-2.5-flash-image": True, "gemini-3-pro-image-preview": True,
+    custom, gemini_images = sorted(payload["openai-compatibility"], key=lambda entry: entry["base-url"])
+    # A Gemini key speaks Gemini: its models keep Google's names as the alias they are routed by, the bare id as the
+    # upstream name; its image models live on an internal OpenAI-compatible entry of the same key and prefix.
+    [gemini] = payload["gemini-api-key"]
+    assert {model["alias"]: model["name"] for model in gemini["models"]} == {
+        "models/gemini-3-flash": "gemini-3-flash", "models/gemini-2.5-flash-image": "gemini-2.5-flash-image",
     }
+    assert gemini_images["prefix"] == gemini["prefix"] and gemini_images["base-url"].endswith("/v1beta/openai")
+    assert models(gemini_images) == {"gemini-2.5-flash-image": True, "gemini-3-pro-image-preview": True}
     # Gemini's image models are Chat Completions ones; GPT Image's vendor speaks Responses, so it stays a chat row.
     assert models(custom) == {"model-a": None, "gemini-2.5-flash-image": True, "gpt-image-2": None}
     sources = {source.source_id: source for source in store.list_sources()}
@@ -2940,7 +2944,8 @@ def test_openai_compatibility_engine_base_url_uses_configured_api_root(
     [
         pytest.param(entry.official_base_url, entry.protocol, id=entry.id)
         for entry in api_key_vendor_catalog()
-        if entry.protocol in MODEL_PROTOCOLS
+        # Google has no model-free probe: its root is ``google_api_base_url``'s, with the version it appends.
+        if entry.protocol in MODEL_PROTOCOLS and entry.protocol != "google"
     ],
 )
 def test_catalog_official_base_url_composes_one_probe_endpoint(
@@ -2985,6 +2990,9 @@ def test_catalog_official_base_url_composes_one_probe_endpoint(
         ("deepseek", "https://API.DeepSeek.com/", "deepseek"),
         ("deepseek", "https://api.deepseek.com:443/v1/", "deepseek"),
         ("qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1/", "alibaba-cn"),
+        # Gemini's native root, with or without the version its engine entry appends.
+        ("gemini", "https://generativelanguage.googleapis.com", "google"),
+        ("gemini", "https://generativelanguage.googleapis.com/v1beta", "google"),
         # Any other endpoint may front another deployment.
         ("deepseek", "https://api.deepseek.com/beta", None),
         ("deepseek", "http://api.deepseek.com", None),
@@ -3053,6 +3061,9 @@ def test_catalog_owned_api_key_sources_without_explicit_base_url_sync_and_write_
         return
     if protocol == "openai_responses":
         assert payload["codex-api-key"][0]["base-url"] == expected_base_url
+        return
+    if protocol == "google":
+        assert payload["gemini-api-key"][0]["base-url"] == expected_base_url
         return
     expected_engine_base_url = expected_base_url
     if not urlsplit(expected_engine_base_url).path.rstrip("/"):
@@ -8907,6 +8918,71 @@ def test_engine_reported_upstream_transport_failure_takes_network_recovery(
     assert classify_outcome(outcome).reason == reason
     # The engine's own 500 is not an upstream status.
     assert (outcome.http_status is None) is (kind is RawOutcomeKind.NETWORK_ERROR)
+
+
+_GEMINI_SIGNATURE_REFUSAL = "Function call is missing a thought_signature in functionCall parts."
+
+
+@pytest.mark.parametrize(
+    ("body", "surfaced"),
+    [
+        # Gemini's OpenAI-compatible endpoint, relayed as is by the engine.
+        ([{"error": {"code": 400, "message": _GEMINI_SIGNATURE_REFUSAL, "status": "INVALID_ARGUMENT"}}], True),
+        ({"error": {"code": 400, "message": _GEMINI_SIGNATURE_REFUSAL, "status": "INVALID_ARGUMENT"}}, True),
+        # Only a Google RPC envelope's integer code names its class.
+        ({"error": {"code": 400, "message": _GEMINI_SIGNATURE_REFUSAL}}, False),
+    ],
+    ids=["google-array", "google-object", "integer-code-only"],
+)
+def test_engine_google_rpc_http_error_is_a_request_refusal_with_its_detail(body: object, surfaced: bool) -> None:
+    """A Google 400 relayed on a Chat Source names the rejected request, not an unknown Source failure."""
+
+    from aiohttp import web
+
+    async def run():
+        async def respond(_request: web.Request) -> web.Response:
+            return web.json_response(body, status=400)
+
+        app = web.Application()
+        app.router.add_post("/{path:.*}", respond)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        await web.TCPSite(runner, "127.0.0.1", 0).start()
+        try:
+            handle = await EngineClient(
+                EngineConnection(
+                    base_url=f"http://127.0.0.1:{runner.addresses[0][1]}",
+                    management_key="management-key",
+                    gateway_token="gateway-token",
+                )
+            ).invoke(
+                SourceRecord(
+                    source_id="src_fixture123",
+                    vendor="gemini",
+                    protocol="openai_chat",
+                    base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+                    credential_ref="cred_fixture123",
+                    allowed_origins=(),
+                    model_ids=("model-a",),
+                    prefix="source-fixture123",
+                ),
+                "model-a",
+                {"stream": True},
+                stream=True,
+            )
+            return await handle.outcome()
+        finally:
+            await runner.cleanup()
+
+    outcome = asyncio.run(run())
+    decision = classify_outcome(outcome)
+
+    assert outcome.http_status == 400
+    assert outcome.upstream_detail == _GEMINI_SIGNATURE_REFUSAL
+    if surfaced:
+        assert (decision.action, decision.error_code) == ("surface", "upstream_request_invalid")
+    else:
+        assert (decision.action, decision.reason) == ("fallback", "unclassified_error")
 
 
 @pytest.mark.parametrize(

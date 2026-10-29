@@ -39,6 +39,8 @@ LINT_WORKFLOW = "lint.yml"
 RELEASE_WORKFLOWS = ("model-hub-e2e.yml", "publish.yml")
 # What scripts/ci_unit_tests.sh runs: every test file outside tests/e2e, without the integration marker.
 UNIT_SHARD_ARGS = ("-m", "not integration", "--ignore=tests/e2e", "tests")
+# The launchers that run it: the serial runner, or its concurrent lanes on one runner.
+UNIT_SHARD_LAUNCHERS = ("scripts/ci_unit_tests.sh", "scripts/ci_unit_test_lanes.py")
 # The job this gate runs after on every event: its reports must all be there,
 # or a broken report would read as every case "not run".
 UNIT_SHARD_JOB = "unit-test-shards"
@@ -245,7 +247,7 @@ def pytest_commands(workflow: Path) -> dict[str, list[tuple[str, ...]]]:
     for job_id, job in jobs.items():
         for step in job.get("steps") or []:
             script = re.sub(r"[\\`]\r?\n", " ", step.get("run") or "")
-            if "scripts/ci_unit_tests.sh" in script:
+            if any(launcher in script for launcher in UNIT_SHARD_LAUNCHERS):
                 commands.setdefault(job_id, []).append(UNIT_SHARD_ARGS)
                 continue
             for line in script.splitlines():

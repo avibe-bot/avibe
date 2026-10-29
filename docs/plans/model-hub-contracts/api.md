@@ -8,11 +8,11 @@ credential redaction and supply-impact confirmation rules still apply; unknown
 API siblings retain the Owner default.
 
 
-Status: **Normative, `contract_version` 21** — Model Hub implementations must conform, and the response conformance guard enumerates this route table and validates one real server response for every route.
+Status: **Normative, `contract_version` 22** — Model Hub implementations must conform, and the response conformance guard enumerates this route table and validates one real server response for every route.
 
-Success envelope: `{ok: true, contract_version: 21, ...}`.
+Success envelope: `{ok: true, contract_version: 22, ...}`.
 Failure envelope:
-`{ok: false, contract_version: 21, error: <machine_code>, detail?: <i18n_key>}`.
+`{ok: false, contract_version: 22, error: <machine_code>, detail?: <i18n_key>}`.
 `detail` is always a string. Structured error data lives in a named sibling.
 Guarded mutation refusals specialize that envelope through
 `guard-refusal.schema.json`; both report arrays are required and together form the plan
@@ -24,7 +24,7 @@ table. The contract guard requires the two endpoint sets to be identical, requir
 exercised HTTP response for every registry entry, and validates that response against
 the route's named schema.
 
-The shared envelope and every versioned nested contract carry `contract_version` 21, the
+The shared envelope and every versioned nested contract carry `contract_version` 22, the
 terminal value. Supported persisted config shapes and historical TurnProvenance
 remain readable; ephemeral envelopes use only the terminal version.
 
@@ -63,9 +63,9 @@ runtime open. Once models are configured it participates in the runtime Stop gua
 | GET `/api/models/catalog/models-dev?query=<text>` | → `{matches: ModelsDevMatch[]}` | Read-only metadata lookup through the server-owned conditional cache. Results keep the shipped provider fields, deduplicate aggregator copies by model id, rank first-party matches first, add `first_party`, derive `native_protocol` from the model id's last path segment through the vendor map, cap results at 8, and never persist automatically. |
 | GET `/api/models/agents/<backend>/chains` | → `{chains: AgentChain[]}` | Hub only. Returns the complete Overview model set in menu order, followed by a selected model or configured Route not already present. All members share one config snapshot and observation time. Direct returns the documented `direct_mode` error. |
 | GET `/api/models/agents/<backend>/chain?model=<id>` | → `{chain: AgentChain}` | Hub only. Direct returns the documented `direct_mode` error. |
-| PUT `/api/models/agents/<backend>/chain?model=<id>` | `{hops: RouteHop[], force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409` or `{chain, removed_hops, interrupted}` | Nonempty hops save an exact manual override, including equal-to-automatic arrays. Empty hops remain accepted and use DELETE Restore semantics with identical exact effective-removal/supply guards. New pairs validate canonical ids, Source eligibility/existence and retirement; API-key pairs do not require inventory membership, while subscriptions retain existing membership admission/stale-hop retention. Only nonempty replacement uses the protected-supply-only `mutation.route_replace` guard. |
+| PUT `/api/models/agents/<backend>/chain?model=<id>` | `{hops: RouteHop[], cache_ttl?: "5m" | "30m" | "1h" | "12h" | null, force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409`, `422 cache_ttl_unsupported`, or `{chain, removed_hops, interrupted}` | Nonempty hops save an exact manual override, including equal-to-automatic arrays. On Vibey routes, `cache_ttl` is a route-wide C-9 clearing override; omitted/null uses the built-in estimate. It is rejected on non-Vibey routes. Confirmed official OpenAI Responses GPT-5.6+ routes may explicitly request the 30m default or opt into 12h; both are wired as `prompt_cache_options.ttl` and usage accounting keeps their write lifetimes separate. Custom relays never receive OpenAI-specific cache options. Empty hops remain accepted and use DELETE Restore semantics with identical exact effective-removal/supply guards. New pairs validate canonical ids, Source eligibility/existence and retirement; API-key pairs do not require inventory membership, while subscriptions retain existing membership admission/stale-hop retention. Only nonempty replacement uses the protected-supply-only `mutation.route_replace` guard. |
 | DELETE `/api/models/agents/<backend>/chain?model=<id>` | optional `{force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409` or `{chain, removed_hops, interrupted}` | `mutation.route_restore` removes the key and recomputes defaults; absent key is idempotent. Guard actual effective removals and supply loss. |
-| POST `/api/models/agents/<backend>/chain/preview?model=<id>` | `{manual_override: null \| {hops: RouteHop[]}}` → `{chain: AgentChain}` | Accepts empty hops and normalizes them to null before the shared planner evaluates isolated draft config. Output manual_override is nonempty or null; effective chain/origin follows inheritance. No persistence, events, engine startup/sync, credentials or egress, including when runtime is stopped. |
+| POST `/api/models/agents/<backend>/chain/preview?model=<id>` | `{manual_override: null \| {hops: RouteHop[], cache_ttl?: "5m" | "30m" | "1h" | "12h" | null}}` → `{chain: AgentChain}` | Accepts empty hops and normalizes them to null before the shared planner evaluates isolated draft config. On Vibey routes, the optional route-wide cache override is validated with the same provider/route rules as PUT; official OpenAI Responses GPT-5.6+ accepts explicit 30m or 12h, while relays never receive OpenAI-specific cache options. Other backends reject the field. Output manual_override is nonempty or null; effective chain/origin follows inheritance. No persistence, events, engine startup/sync, credentials or egress, including when runtime is stopped. |
 | POST `/api/models/agents/<backend>/probe` | `{model?}` → `{probe: ProbeResult}` | Hub only. Direct returns the same `direct_mode` error. |
 | GET `/api/models/agents/<backend>/provenance?model=<id>` | → `{provenance: TurnProvenance \| null}` | On-demand read of the most recently persisted retained record for this exact backend and canonical catalog model, regardless of outcome. Validates backend/model; absent history is null. Uses only the existing bounded store and never starts or syncs the engine. No history field is added to AgentChain. |
 | GET `/api/models/events?limit=<n>&before=<id>` | → `{events: ResolutionEvent[]}` | Bounded source-resolution feed. |
@@ -85,7 +85,7 @@ runtime open. Once models are configured it participates in the runtime Stop gua
 | POST `/api/models/migration/scan` | → `{scan: MigrationScan}` | Read-only. |
 | POST `/api/models/migration/apply` | `{item_ids: string[], clean_api_keys?: boolean}` → `{applied, sources, added_to}` | Applies one grouped, server-owned custody transaction. It checks saved configuration and custody locally, copies API keys without upstream validation, upgrades an existing native subscription Source in place when present, and commits Source/Routes/backend mode atomically. API-key originals are kept unless cleanup was selected. Pre-exposure failure is reversible; post-exposure recovery is forward-only and keeps the backend blocked until terminalized. |
 | GET `/api/models/turns/<turn_id>/provenance` | → `{provenance: TurnProvenance}` or documented absence error | Debug read for exactly attributed Hub turns. |
-| GET `/api/models/runtime/status` | → `{runtime: RuntimeDependency}` | Read-only managed engine status. The nested object carries `contract_version` 21 and persisted user intent in `enabled`; `not_started` is installed lazy-start idleness, not an alarm. |
+| GET `/api/models/runtime/status` | → `{runtime: RuntimeDependency}` | Read-only managed engine status. The nested object carries `contract_version` 22 and persisted user intent in `enabled`; `not_started` is installed lazy-start idleness, not an alarm. |
 | POST `/api/models/runtime/install` | → `{runtime: RuntimeDependency}` | Idempotently starts server-owned installation. It returns and persists `installing`; reload reads the same state. Uses the existing mutation authentication and CSRF guards. |
 | POST `/api/models/runtime/start` | → `{runtime: RuntimeDependency}` | Persists `enabled: true` and explicitly starts the managed engine. Service startup restores this intent; runtime availability has no separate enable-confirmation step. Uses the existing mutation authentication and CSRF guards; status reads never start it. |
 | POST `/api/models/runtime/stop` | → `{runtime: RuntimeDependency}` | Explicitly stops the managed engine, persists `enabled: false`, and returns it to `not_started`. The mutation is rejected with `runtime_in_use` while any native backend is configured for Hub mode or Avibe has catalog models, so disabling the shared runtime cannot strand a configured route. An empty Avibe catalog does not keep the runtime open. |
@@ -768,7 +768,7 @@ The terminal result of both ordinary API-key creation and OAuth creation is:
 ```json
 {
   "ok": true,
-  "contract_version": 21,
+  "contract_version": 22,
   "source": {
     "id": "src_anthkey01",
     "kind": "api_key",
@@ -878,7 +878,7 @@ Every guarded Source/inventory mutation uses the §4.5 envelope matrix and the c
 ```json
 {
   "ok": false,
-  "contract_version": 21,
+  "contract_version": 22,
   "error": "source_last_supplier",
   "would_remove_hops": [],
   "would_interrupt": [
@@ -1017,7 +1017,7 @@ API-key success:
 ```json
 {
   "ok": true,
-  "contract_version": 21,
+  "contract_version": 22,
   "source": {
     "id": "src_relay9c1x",
     "kind": "api_key",
@@ -1112,7 +1112,7 @@ Status and submit return the same terminal shape:
 ```json
 {
   "ok": true,
-  "contract_version": 21,
+  "contract_version": 22,
   "flow": {
     "flow_id": "oaf_claude01",
     "client_nonce": "ofn_01j5w8z7p4n6q2rt",
@@ -1185,9 +1185,9 @@ a valid `interrupted` chain.
 ```json
 {
   "ok": true,
-  "contract_version": 21,
+  "contract_version": 22,
   "chain": {
-    "contract_version": 21,
+    "contract_version": 22,
     "backend": "codex",
     "model_id": "gpt-5.6",
     "manual_override": null,
@@ -1214,7 +1214,7 @@ In Direct mode both chain and probe refuse with:
 ```json
 {
   "ok": false,
-  "contract_version": 21,
+  "contract_version": 22,
   "error": "direct_mode",
   "detail": "models.hub.direct_mode"
 }
@@ -1228,9 +1228,9 @@ A successful probe nests its result:
 ```json
 {
   "ok": true,
-  "contract_version": 21,
+  "contract_version": 22,
   "probe": {
-    "contract_version": 21,
+    "contract_version": 22,
     "backend": "claude",
     "channel": "hub",
     "reachable": false,
@@ -1253,7 +1253,7 @@ not-ready carries the closed i18n key `models.probe.native_cli_unavailable`.
 
 ```json
 {
-  "contract_version": 21,
+  "contract_version": 22,
   "backend": "codex",
   "channel": "native_cli",
   "reachable": true,
@@ -1266,7 +1266,7 @@ not-ready carries the closed i18n key `models.probe.native_cli_unavailable`.
 
 ```json
 {
-  "contract_version": 21,
+  "contract_version": 22,
   "backend": "codex",
   "channel": "native_cli",
   "reachable": false,
@@ -1282,7 +1282,7 @@ No candidate is an API error with a typed model-scoped state:
 ```json
 {
   "ok": false,
-  "contract_version": 21,
+  "contract_version": 22,
   "error": "probe_no_candidate",
   "detail": "models.probe.no_candidate.waiting",
   "supply": {
@@ -1473,7 +1473,7 @@ The store retains at most 500 exactly attributed settled turns with its existing
 writes. Ambiguous attribution remains excluded; this is not a log of every upstream
 request. Null means no matching retained record, including eviction. A newer served,
 canceled or other record without a terminal error supersedes older error display.
-Success uses exactly `{ok: true, contract_version: 21, provenance: TurnProvenance | null}`;
+Success uses exactly `{ok: true, contract_version: 22, provenance: TurnProvenance | null}`;
 there is no `success` field or envelope exception.
 
 Local `engine_down` records may also contain `local_error_detail`, an OS-generated
@@ -1577,7 +1577,7 @@ ambiguous absence are explicit and distinguishable from an unknown turn:
 ```json
 {
   "ok": false,
-  "contract_version": 21,
+  "contract_version": 22,
   "error": "provenance_unavailable",
   "detail": "models.provenance.direct_mode"
 }
@@ -1586,7 +1586,7 @@ ambiguous absence are explicit and distinguishable from an unknown turn:
 ```json
 {
   "ok": false,
-  "contract_version": 21,
+  "contract_version": 22,
   "error": "provenance_unavailable",
   "detail": "models.provenance.attribution_ambiguous"
 }
@@ -1732,12 +1732,16 @@ so one model is one row rather than one row per spelling.
 Cache writes are metered separately from input served from cache.
 `cache_write_input_tokens` is the subset of `input_tokens` written to the prompt
 cache (Anthropic `cache_creation_input_tokens`), disjoint from
-`cached_input_tokens`, and `cache_write_1h_input_tokens` is the part of it written
-with the one-hour lifetime (`cache_creation.ephemeral_1h_input_tokens`). OpenAI
-protocols report no cache writes, so both are zero there. The fields are additive:
-a ledger row written before they existed reads them as zero and counts its token
-reports in `cache_write_uncaptured_reports`, so a consumer can tell "no cache
-writes" from "cache writes not captured". No stored row is rewritten.
+`cached_input_tokens`. Anthropic's `cache_write_1h_input_tokens` is the part
+written with the one-hour lifetime (`cache_creation.ephemeral_1h_input_tokens`).
+Official OpenAI Responses reports disjoint `cache_write_30m_input_tokens` and
+`cache_write_12h_input_tokens`; those sum to its documented
+`cache_write_tokens` total when the evidence is complete. Missing or invalid
+OpenAI totals/breakdowns remain visible in `cache_write_ttl_uncaptured_reports`
+and keep the valuation a lower bound; no TTL is inferred from the configured
+request default. The fields are additive: released rows read missing new fields
+as zero while preserving their existing truthful Anthropic counters, and an
+untouched released row is not rewritten in place.
 
 ### API-price valuation
 

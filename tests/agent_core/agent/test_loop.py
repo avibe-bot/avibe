@@ -38,6 +38,8 @@ from core.agent_core.agent.loop import Agent
 from core.agent_core.agent.models import RetryPolicy
 from core.agent_core.ai.provider import (
     Done,
+    ImageModel,
+    ImageModels,
     ModelCapabilities,
     ModelRequest,
     ProviderError,
@@ -54,9 +56,11 @@ from core.agent_core.messages import (
     HostedImage,
     HostedNative,
     HostedRecord,
+    HostedResult,
     HostedSource,
     HostedSummary,
     HostedToolBlock,
+    ProxyExecution,
     ThinkingBlock,
     ToolCallBlock,
     ToolResultMessage,
@@ -65,6 +69,8 @@ from core.agent_core.messages import (
     text,
 )
 from core.agent_core.tools.base import CallInstance, ToolResult
+from core.agent_core.tools.hosted import hosted_tool_spec, image_generate_spec
+from modules.agents.vibey.tools import HostedTool, ImageGenerateTool
 from tests.agent_core.fakes import (
     ORIGIN,
     FakeJobHost,
@@ -1405,25 +1411,38 @@ async def test_tool_free_final_reply_is_committed_and_empty_success_is_an_error(
     events = await collect(agent)
     rows = await agent.store.load("session")
     responses = [row for row in rows if row.kind == "response"]
-    assert responses[0].message == message
+    retryable_empty = (
+        continuation == "final" and stop_reason == "stop" and shape in {"empty", "whitespace", "thinking"}
+    )
+    if retryable_empty:
+        assert responses == []
+    else:
+        assert responses[0].message == message
     committed = [event for event in events if isinstance(event, MessageCommitted)]
-    expected_finals = [True] if continuation == "final" else [False, True]
+    expected_finals = [] if retryable_empty else [True] if continuation == "final" else [False, True]
     assert [agent.store.final[row.row_id] for row in responses] == expected_finals
     assert [event.final for event in committed] == expected_finals
     assert [event.message_id for event in committed] == [row.row_id for row in responses]
-    assert len(provider.requests) == provider.closed_streams == len(expected_finals)
+    assert len(provider.requests) == provider.closed_streams == (1 if retryable_empty else len(expected_finals))
     assert [row.row_id for row in rows if row.kind == "input"] == (
         ["input"] if continuation == "final" else ["input", "pending"]
     )
     errors = [event for event in events if isinstance(event, AgentError)]
-    if continuation != "final" or (shape == "visible" and stop_reason != "length"):
+    if retryable_empty:
+        assert len(errors) == 1
+        assert errors[0].kind == "empty_response"
+        assert errors[0].continuable is True
+        assert committed == []
+        assert events[-1].reason == "error"
+    elif continuation != "final" or (shape == "visible" and stop_reason != "length"):
         assert errors == []
         assert events[-1].reason == "completed"
     else:
         assert len(errors) == 1
         assert errors[0].kind == (stop_reason if stop_reason in {"length", "refusal", "safety"} else "empty_response")
         assert errors[0].message
-        assert committed[0].seq < errors[0].seq < events[-1].seq
+        if committed:
+            assert committed[0].seq < errors[0].seq < events[-1].seq
         assert events[-1].reason == "error"
     project(rows)
 
@@ -1903,6 +1922,95 @@ async def committed_results(agent) -> list[tuple[str, str, bool]]:
         for row in rows
         if row.kind == "tool_result"
     ]
+
+
+@pytest.mark.parametrize("name", ["web_search", "x_search", "web_fetch"])
+async def test_each_proxied_read_only_hosted_tool_is_concurrent(name):
+    tool = HostedTool(hosted_tool_spec(name), lambda: ENDPOINT)
+
+    assert tool.concurrent is True
+
+
+async def test_proxied_hosted_calls_run_concurrently_and_commit_in_call_order(monkeypatch):
+    """A response's proxied hosted calls overlap, while durable results follow response call order."""
+    gathering, finished = Gathering(3), []
+
+    async def gateway_call(endpoint, client, tool, arguments):
+        query = arguments["query"]
+        await gathering.arrive(query)
+        if query == "q1":
+            while len(finished) < 2:
+                await asyncio.sleep(0)
+        finished.append(query)
+        return HostedResult(
+            HostedRecord(status="completed"),
+            ProxyExecution(ORIGIN, "src_executor01", "metered"),
+        ), None
+
+    monkeypatch.setattr("modules.agents.vibey.tools._gateway_call", gateway_call)
+    hosted = HostedTool(hosted_tool_spec("web_search"), lambda: ENDPOINT)
+    agent = tool_agent(
+        [
+            ToolCallBlock("a", "web_search", {"query": "q1"}),
+            ToolCallBlock("b", "web_search", {"query": "q2"}),
+            ToolCallBlock("c", "web_search", {"query": "q3"}),
+        ],
+        [hosted],
+    )
+
+    await asyncio.wait_for(collect(agent), 5)
+
+    assert finished[-1] == "q1"
+    assert [row[0] for row in await committed_results(agent)] == ["a", "b", "c"]
+
+
+async def test_proxied_hosted_search_and_read_share_a_concurrent_group(monkeypatch):
+    """A proxied hosted read-only call may overlap the ordinary concurrent ``read`` tool."""
+    gathering = Gathering(2)
+
+    async def gateway_call(endpoint, client, tool, arguments):
+        await gathering.arrive("hosted")
+        return HostedResult(
+            HostedRecord(status="completed"),
+            ProxyExecution(ORIGIN, "src_executor01", "metered"),
+        ), None
+
+    async def read(arguments, ctx):
+        await gathering.arrive("read")
+        return ToolResult((text("read done"),))
+
+    monkeypatch.setattr("modules.agents.vibey.tools._gateway_call", gateway_call)
+    hosted = HostedTool(hosted_tool_spec("web_search"), lambda: ENDPOINT)
+    agent = tool_agent(
+        [
+            ToolCallBlock("hosted", "web_search", {"query": "q"}),
+            ToolCallBlock("read", "read", {}),
+        ],
+        [hosted, ConcurrentTool("read", execute=read)],
+    )
+
+    events = await asyncio.wait_for(collect(agent), 5)
+
+    assert tool_events(events)[:2] == [("started", "hosted"), ("started", "read")]
+    assert [row[0] for row in await committed_results(agent)] == ["hosted", "read"]
+
+
+async def test_image_generate_stays_exclusive_next_to_concurrent_hosted_calls():
+    models = ImageModels((ImageModel("src_image01", "gpt-image-2", "test", (), ()),))
+    hosted = HostedTool(hosted_tool_spec("web_search"), lambda: ENDPOINT)
+    image = ImageGenerateTool(image_generate_spec(models), models, lambda: ENDPOINT)
+
+    groups = Agent._groups(
+        [
+            ToolCallBlock("before", "web_search", {"query": "q"}),
+            ToolCallBlock("image", "image_generate", {"model": "gpt-image-2", "prompt": "p"}),
+            ToolCallBlock("after", "web_search", {"query": "q2"}),
+        ],
+        {"web_search": hosted, "image_generate": image},
+    )
+
+    assert [[call.id for call in group] for group in groups] == [["before"], ["image"], ["after"]]
+    assert getattr(image, "concurrent", False) is not True
 
 
 async def test_neighbouring_concurrent_calls_start_together_and_commit_in_call_order():

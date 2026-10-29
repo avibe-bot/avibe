@@ -2,7 +2,11 @@ import { useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 
 import { SETTINGS_LANDING_PATH } from '@/lib/adminNavigation';
-import { DESKTOP_OPEN_SETTINGS_EVENT, isDesktopShell } from '@/lib/desktopShell';
+import {
+  DESKTOP_OPEN_SETTINGS_EVENT,
+  DESKTOP_OPEN_SHORTCUT_SETTINGS_EVENT,
+  isDesktopShell,
+} from '@/lib/desktopShell';
 
 /**
  * Answers the desktop shell's Settings… menu item. It navigates like the
@@ -20,8 +24,16 @@ export const DesktopSettingsCommand = () => {
       event.preventDefault();
       if (pathname !== SETTINGS_LANDING_PATH) navigate(SETTINGS_LANDING_PATH);
     };
+    const openShortcuts = (event: Event) => {
+      event.preventDefault();
+      if (pathname !== '/settings/shortcuts') navigate('/settings/shortcuts');
+    };
     window.addEventListener(DESKTOP_OPEN_SETTINGS_EVENT, open);
-    return () => window.removeEventListener(DESKTOP_OPEN_SETTINGS_EVENT, open);
+    window.addEventListener(DESKTOP_OPEN_SHORTCUT_SETTINGS_EVENT, openShortcuts);
+    return () => {
+      window.removeEventListener(DESKTOP_OPEN_SETTINGS_EVENT, open);
+      window.removeEventListener(DESKTOP_OPEN_SHORTCUT_SETTINGS_EVENT, openShortcuts);
+    };
   }, [navigate, pathname]);
 
   return null;

@@ -31,8 +31,17 @@ DEFAULT_AGENT_START_TIMEOUT = 5.0
 DEFAULT_AGENT_IDLE_TIMEOUT_SECS = 3600
 
 
+# Error-frame ``code`` avault 0.1.8+ sets when macOS Keychain has not yet
+# approved the binary; older agents never send ``code``.
+KEYCHAIN_AUTHORIZATION_REQUIRED_CODE = "keychain_authorization_required"
+
+
 class AvaultAgentError(Exception):
     """The resident avault agent failed a request."""
+
+
+class AvaultAgentAuthorizationRequiredError(AvaultAgentError):
+    """The agent could not read the master key until the user authorizes avault."""
 
 
 class AvaultAgentClient:
@@ -59,8 +68,10 @@ class AvaultAgentClient:
         if not isinstance(response, dict):
             raise AvaultAgentError("agent returned malformed response")
         if response.get("ok") is not True:
-            error = response.get("error")
-            raise AvaultAgentError(str(error or "avault agent request failed"))
+            error = str(response.get("error") or "avault agent request failed")
+            if response.get("code") == KEYCHAIN_AUTHORIZATION_REQUIRED_CODE:
+                raise AvaultAgentAuthorizationRequiredError(error)
+            raise AvaultAgentError(error)
         result = response.get("result")
         if not isinstance(result, dict):
             raise AvaultAgentError("agent returned malformed response")

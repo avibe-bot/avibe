@@ -88,7 +88,6 @@ from modules.agents.catalog import (
 from vibe.i18n import get_supported_languages, t
 from vibe.logging_config import application_log_paths
 from vibe.runtime import get_ui_dist_path, get_working_dir
-from vibe.sentry_integration import init_sentry
 from vibe import ui_asset_archive
 from storage.delivery_states import ADMITTED_DELIVERY_STATES
 
@@ -5848,6 +5847,31 @@ def vault_agent_pubkey_get():
         return _vault_error_response(exc)
 
 
+@app.route("/api/macos/login-session", methods=["GET"])
+def macos_login_session_get():
+    from vibe import api
+
+    return jsonify(api.get_macos_login_session_status())
+
+
+@app.route("/api/vault/avault-authorization", methods=["GET"])
+def vault_avault_authorization_get():
+    from vibe import api
+
+    return jsonify(api.get_avault_authorization_status())
+
+
+@app.route("/api/vault/avault-authorization", methods=["POST"])
+def vault_avault_authorization_post():
+    from vibe import api
+
+    # Machine-level, like dependency repair: the Keychain dialog appears on the host's screen.
+    authorization_context = getattr(g, "authorization_context", None)
+    if authorization_context is None or not authorization_context.can_manage_instance:
+        return jsonify({"ok": False, "error": "instance_access_forbidden"}), 403
+    return jsonify(api.start_avault_authorization())
+
+
 @app.route("/api/vault/sandbox/root-metadata", methods=["GET"])
 def vault_sandbox_root_metadata_get():
     from vibe import api
@@ -7119,6 +7143,131 @@ def version():
     return jsonify(api.get_version_info())
 
 
+_DESKTOP_UPDATE_ACK_TIMEOUT_SECONDS = 10.0
+_DESKTOP_UPDATE_ACK_POLL_SECONDS = 0.1
+
+
+def _upgrade_confirmation_response(counts: Any):
+    return (
+        jsonify(
+            {
+                "ok": False,
+                "error": "confirmation_required",
+                "counts": counts.as_dict(),
+            }
+        ),
+        409,
+    )
+
+
+async def _wait_for_desktop_update_ack(request_id: str):
+    from vibe.desktop_update_request import acknowledged_remote_request
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _DESKTOP_UPDATE_ACK_TIMEOUT_SECONDS
+    while True:
+        acknowledged = acknowledged_remote_request(request_id)
+        if acknowledged is not None:
+            return acknowledged
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return None
+        await asyncio.sleep(min(_DESKTOP_UPDATE_ACK_POLL_SECONDS, remaining))
+
+
+@app.route("/api/desktop/update/request", methods=["POST"])
+async def desktop_update_request():
+    from vibe import api
+    from vibe.desktop_update_request import (
+        DesktopUpdateRequestError,
+        create_or_reuse_desktop_update_request,
+        expire_desktop_update_request,
+        valid_target_version,
+    )
+    from vibe.sse_broker import broker
+    from vibe.upgrade import is_desktop_managed_runtime
+    from vibe.upgrade_interruptions import count_upgrade_interruptions
+
+    payload = request.json or {}
+    if not isinstance(payload, dict) or not set(payload).issubset(
+        {"target_version", "confirm_interrupt"}
+    ):
+        return jsonify({"ok": False, "error": "invalid_request"}), 422
+    target = valid_target_version(payload.get("target_version"))
+    confirm_interrupt = payload.get("confirm_interrupt", False)
+    if target is None or not isinstance(confirm_interrupt, bool):
+        return jsonify({"ok": False, "error": "invalid_request"}), 422
+    if not is_desktop_managed_runtime():
+        return jsonify({"ok": False, "error": "not_desktop_managed"}), 409
+
+    version = api.get_version_info()
+    if (
+        version.get("managed_by") != "desktop"
+        or version.get("has_update") is not True
+        or version.get("latest") != target
+    ):
+        return jsonify({"ok": False, "error": "no_update_available"}), 409
+
+    interruptions = await count_upgrade_interruptions()
+    if not confirm_interrupt and interruptions.requires_confirmation:
+        return _upgrade_confirmation_response(interruptions)
+
+    try:
+        decision = create_or_reuse_desktop_update_request(target)
+    except DesktopUpdateRequestError as exc:
+        return jsonify({"ok": False, "error": exc.code}), 409
+    if decision.needs_nudge:
+        broker.publish(
+            "desktop.update.requested",
+            {"request_id": decision.request["request_id"]},
+        )
+
+    acknowledged = await _wait_for_desktop_update_ack(
+        decision.request["request_id"]
+    )
+    if acknowledged is None:
+        expire_desktop_update_request(decision.request["request_id"])
+        return (
+            jsonify({"ok": False, "error": "desktop_shell_unavailable"}),
+            503,
+        )
+    status, remote = acknowledged
+    if (
+        remote["phase"] == "failed"
+        and remote["error_code"] == "update_in_progress"
+    ):
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": "update_in_progress",
+                    "request_id": remote["request_id"],
+                }
+            ),
+            409,
+        )
+    if remote["phase"] == "expired":
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": "desktop_shell_unavailable",
+                    "request_id": remote["request_id"],
+                }
+            ),
+            503,
+        )
+    return jsonify(
+        {
+            "ok": True,
+            "request_id": remote["request_id"],
+            "delivery": (
+                "install" if status["remote_install_allowed"] else "prompt"
+            ),
+        }
+    )
+
+
 # =============================================================================
 # POST Endpoints
 # =============================================================================
@@ -8068,6 +8217,48 @@ async def thread_settings_post(starlette_request: FastAPIRequest):
     return await _dispatch_native_ui_request(starlette_request, handler)
 
 
+async def _scope_needs_new_session(result: dict) -> bool | None:
+    """The controller's answer for the saved scope; None when it cannot answer now."""
+    from vibe import internal_client
+
+    try:
+        return await internal_client.scope_session_hint(
+            platform=str(result.get("platform") or ""),
+            scope=str(result.get("scope") or ""),
+            native_id=str(result.get("id") or ""),
+            thread_id=str(result.get("thread_id") or ""),
+        )
+    except Exception as exc:
+        logger.debug("Scope session hint unavailable: %s", exc)
+        return None
+
+
+@app.patch("/api/settings/scope", include_in_schema=False)
+async def scope_settings_patch(starlette_request: FastAPIRequest):
+    async def handler():
+        from vibe import api
+        from storage.settings_service import ScopeAgentUnavailableError, StaleScopeAgentBindingError
+
+        body = await starlette_request.body()
+        payload = await starlette_request.json() if body else {}
+        payload = payload if isinstance(payload, dict) else {}
+        user_context = _request_authorization_context()
+        try:
+            result = await asyncio.to_thread(api.patch_scope_settings, payload, user_context=user_context)
+            changes = payload.get("changes")
+            if isinstance(changes, dict) and "routing" in changes:
+                result["needs_new_session"] = await _scope_needs_new_session(result)
+            return result
+        except api.ScopeSettingsRequestError as exc:
+            return _coded_error_response(exc.code, exc.message, exc.status)
+        except StaleScopeAgentBindingError as exc:
+            return _settings_conflict_response(exc)
+        except ScopeAgentUnavailableError as exc:
+            return _scope_agent_unavailable_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
 @app.delete("/api/settings/thread", include_in_schema=False)
 async def thread_settings_delete(starlette_request: FastAPIRequest):
     async def handler():
@@ -8454,10 +8645,23 @@ async def opencode_options():
 
 
 @app.route("/api/upgrade", methods=["POST"])
-def upgrade():
+async def upgrade():
     from vibe import api
+    from vibe.upgrade_interruptions import count_upgrade_interruptions
 
-    result = api.do_upgrade()
+    payload = request.json or {}
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "invalid_request"}), 422
+    confirm_interrupt = payload.get("confirm_interrupt")
+    if "confirm_interrupt" in payload and not isinstance(confirm_interrupt, bool):
+        return jsonify({"ok": False, "error": "invalid_request"}), 422
+    # Missing preserves the released endpoint: old Workbenches continue without
+    # acquiring a new confirmation contract.
+    if confirm_interrupt is False:
+        interruptions = await count_upgrade_interruptions()
+        if interruptions.requires_confirmation:
+            return _upgrade_confirmation_response(interruptions)
+    result = await asyncio.to_thread(api.do_upgrade)
     return jsonify(result)
 
 
@@ -13935,12 +14139,14 @@ if os.environ.get("E2E_TEST_MODE", "").lower() in ("true", "1", "yes"):
                     ch.routing = RoutingSettings(
                         agent_name=_routing_name_for_backend(modal_values.get("backend", "opencode")),
                         model=(
-                            modal_values.get("opencode_model")
+                            modal_values.get("model")
+                            or modal_values.get("opencode_model")
                             or modal_values.get("claude_model")
                             or modal_values.get("codex_model")
                         ),
                         reasoning_effort=(
-                            modal_values.get("opencode_reasoning_effort")
+                            modal_values.get("reasoning_effort")
+                            or modal_values.get("opencode_reasoning_effort")
                             or modal_values.get("claude_reasoning_effort")
                             or modal_values.get("codex_reasoning_effort")
                         ),
@@ -13963,49 +14169,6 @@ if os.environ.get("E2E_TEST_MODE", "").lower() in ("true", "1", "yes"):
                     {"runtime": {"default_cwd": modal_values.get("cwd", "/tmp")}}
                 )
                 return jsonify({"ok": True, "action": action})
-
-            elif action == "routing_submit":
-                # Write routing config for a specific channel/user
-                channel_id = modal_values.get("channel_id") or modal_values.get("settings_key")
-                if not channel_id:
-                    return jsonify({"ok": False, "error": "channel_id required in modal_values"}), 400
-
-                from core.services import settings as settings_service
-
-                store = settings_service.reload_settings_store()
-                from vibe.api import _current_platform
-
-                platform = _current_platform()
-                ch = store.find_channel(channel_id, platform=platform)
-                if ch:
-                    from config.v2_settings import RoutingSettings
-
-                    ch.routing = RoutingSettings(
-                        agent_name=_routing_name_for_backend(modal_values.get("backend", "opencode")),
-                        model=(
-                            modal_values.get("opencode_model")
-                            or modal_values.get("claude_model")
-                            or modal_values.get("codex_model")
-                        ),
-                        reasoning_effort=(
-                            modal_values.get("opencode_reasoning_effort")
-                            or modal_values.get("claude_reasoning_effort")
-                            or modal_values.get("codex_reasoning_effort")
-                        ),
-                        opencode_agent=modal_values.get("opencode_agent"),
-                        claude_agent=modal_values.get("claude_agent"),
-                        codex_agent=modal_values.get("codex_agent"),
-                    )
-                    store.save()
-                    return jsonify({"ok": True, "action": action})
-                else:
-                    return jsonify({"ok": False, "error": f"channel {channel_id} not found in settings"}), 404
-
-            elif action == "cwd_submit":
-                # Update CWD via config API
-                new_cwd = modal_values.get("cwd", "/tmp")
-                result = vibe_api.save_config({"runtime": {"default_cwd": new_cwd}})
-                return jsonify({"ok": True, "action": action, "result": result})
 
             else:
                 return jsonify({"ok": False, "error": f"unknown action: {action}"}), 400
@@ -17787,10 +17950,9 @@ def run_ui_server(host: str, port: int) -> None:
     except FileNotFoundError:
         config = None
     except Exception as exc:
-        logger.warning("Skipping UI Sentry init because config load failed: %s", exc)
+        logger.warning("Skipping UI startup reconciliation because config load failed: %s", exc)
         config = None
     if config is not None:
-        init_sentry(config, component="ui", enable_fastapi=True)
         try:
             from vibe import remote_access
 

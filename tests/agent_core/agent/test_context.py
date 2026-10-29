@@ -464,41 +464,6 @@ def test_a_stored_request_size_the_transcript_cannot_explain_hides_at_most_its_e
     assert _est(rows, grown(rows, 40_000)) == 12_000 + after + 40_000 - excess  # over it: all but the excess
 
 
-def test_a_converted_route_anchor_uses_the_served_api_without_widening_identity():
-    from modules.agents.vibey.models import selection_from_hop
-
-    endpoint = selection_from_hop(
-        {
-            "backend": "vibey",
-            "protocol": "google",
-            "base_url": "http://hub.invalid/v1beta",
-            "token": "token",
-            "runtime_model": "test-model",
-            "provider": "test-provider",
-            "source_id": "src_google2501",
-            "source_identity": "sha256:test-google",
-            "request_headers": {},
-            "capabilities": {},
-            "hosted_tools": {},
-        },
-        gateway_base_url="http://hub.invalid/vibey",
-    ).endpoint
-    assert (endpoint.protocol, endpoint.origin_api) == ("openai_chat", "google")
-    rows, _, result = _anchored_rows(
-        endpoint=endpoint,
-        origin=Origin("test-provider", "google", "test-model"),
-    )
-    request = make_request(context_view(rows.rows).messages, endpoint=endpoint)
-    after = message_tokens(result.message) + message_tokens(request.messages[-1])
-    assert _est(rows, request) == 5_000 + after
-    assert _est(rows, request) > _whole(rows, request)
-
-    # The same provider/model on an ordinary Chat route is not treated as the converted Google route.
-    plain_endpoint = replace(endpoint, origin_api=None)
-    plain_request = replace(request, endpoint=plain_endpoint)
-    assert _est(rows, plain_request) == _whole(rows, plain_request)
-
-
 def test_a_checkpoint_or_another_route_invalidates_the_anchor():
     rows, anchored, result = _anchored_rows()
     other_route = ModelEndpoint("anthropic", "http://model.invalid", "other-model", "", provider="test-provider")
@@ -534,7 +499,7 @@ def test_a_checkpoint_or_another_route_invalidates_the_anchor():
         ("anthropic", "anthropic", "claude-opus-5-5", 300),  # message breakpoints: ephemeral, no ttl
         ("openai_responses", "openai", "gpt-6-astra", 1_800),
         ("openai_responses", "openai", "gpt-6.1-sol", 1_800),
-        ("openai_chat", "openai", "gpt-5.6-mini", 1_800),
+        ("openai_chat", "openai", "gpt-5.6-mini", 3_600),  # OpenAI cache retention is official Responses-only
         ("openai_responses", "openai", "gpt-5.5", 3_600),  # before GPT-5.6: in-memory, 5 minutes to an hour
         ("openai_responses", "openai", "gpt-4o", 3_600),
         ("openai_responses", "openai", "o3", 3_600),
@@ -547,6 +512,19 @@ def test_a_checkpoint_or_another_route_invalidates_the_anchor():
 )
 def test_a_route_cache_lives_as_long_as_its_family_documents_else_an_hour(protocol, provider, model, lifetime):
     assert cache_ttl_s(ModelEndpoint(protocol, "http://model.invalid", model, "", provider=provider)) == lifetime
+
+
+@pytest.mark.parametrize("cache_ttl, expected", [("1h", 3_600), ("12h", 43_200)])
+def test_a_route_cache_override_wins_over_provider_family(cache_ttl, expected):
+    endpoint = ModelEndpoint(
+        "openai_responses",
+        "http://model.invalid",
+        "gpt-6-astra",
+        "",
+        provider="openai",
+        cache_ttl=cache_ttl,
+    )
+    assert cache_ttl_s(endpoint) == expected
 
 
 def _random_rows(seed: int) -> list[ContextEntry]:

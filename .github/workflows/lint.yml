@@ -29,14 +29,14 @@ jobs:
       docs_only: ${{ steps.scope.outputs.docs_only }}
       windows_control_ipc: ${{ steps.scope.outputs.windows_control_ipc }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # Synthetic PR merge + both parents, without downloading all history.
           fetch-depth: 2
       - name: Classify the complete change
         id: scope
         run: python3 scripts/ci_docs_only.py
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         if: steps.scope.outputs.docs_only == 'true'
         with:
           python-version: "3.12"
@@ -59,18 +59,18 @@ jobs:
     env:
       AVIBE_CI_JUNIT_DIR: ${{ github.workspace }}/ci-junit
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Prepare hermetic UI asset placeholder
         run: |
           mkdir -p ui/dist
           printf '%s\n' '<!doctype html><html><body></body></html>' > ui/dist/index.html
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
       - name: Install pinned uv
         run: |
           python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.12.10
-      - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25  # v5
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/uv
           key: ${{ runner.os }}-${{ runner.arch }}-ci-uv-0.12.10-py3.12-${{ hashFiles('pyproject.toml', 'uv.lock') }}
@@ -85,7 +85,7 @@ jobs:
       # evidence ran (scripts/ci_scenario_evidence.py).
       - name: Upload junit reports
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: junit-${{ github.job }}-${{ strategy.job-index }}
           path: ci-junit/
@@ -97,8 +97,8 @@ jobs:
     if: needs.changes.outputs.docs_only == 'false'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: '3.12'
           cache: "pip"
@@ -111,6 +111,7 @@ jobs:
           pre-commit run --all-files
 
   web-fetch-runtime:
+    name: web-fetch-runtime (${{ matrix.os }}, ${{ matrix.label }})
     needs: [changes, build-linux-artifacts]
     if: needs.changes.outputs.docs_only == 'false'
     runs-on: ${{ matrix.os }}
@@ -118,46 +119,85 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Every leg is requested the moment the artifact build finishes, beside
+        # the install regression that sits on the critical path. Five ubuntu
+        # legs held runners for under a minute of setup each, so one ubuntu job
+        # verifies all five Pythons in turn, each in its own interpreter.
         include:
-          - {os: ubuntu-latest, python: "3.10"}
-          - {os: ubuntu-latest, python: "3.11"}
-          - {os: ubuntu-latest, python: "3.12"}
-          - {os: ubuntu-latest, python: "3.13"}
-          - {os: ubuntu-latest, python: "3.14"}
-          - {os: ubuntu-24.04-arm, python: "3.12"}
-          - {os: macos-15-intel, python: "3.12"}
-          - {os: macos-15, python: "3.12"}
-          - {os: windows-latest, python: "3.12"}
+          - {os: ubuntu-latest, label: "3.10-3.14", python: "3.10\n3.11\n3.12\n3.13\n3.14"}
+          - {os: ubuntu-24.04-arm, label: "3.12", python: "3.12"}
+          - {os: macos-15-intel, label: "3.12", python: "3.12"}
+          - {os: macos-15, label: "3.12", python: "3.12"}
+          - {os: windows-latest, label: "3.12", python: "3.12"}
     defaults:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: ${{ matrix.python }}
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
         with:
           name: vibe-wheel-linux
           path: dist
-      - name: Install frozen binary dependencies and wheel
+      - name: Prepare frozen requirements
         run: |
           python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.12.10
           uv export --frozen --no-dev --no-emit-project --output-file fetch-requirements.txt
-          uv pip install --system --require-hashes --only-binary=:all: --no-binary claude-agent-sdk --no-binary http-ece -r fetch-requirements.txt
-          uv pip install --system --no-deps dist/*.whl
-          uv pip install --system pytest pytest-asyncio jsonschema
           python -c "from pathlib import Path; p=Path('ui/dist'); p.mkdir(parents=True,exist_ok=True); (p/'index.html').touch()"
+      # Each listed Python gets the same frozen binary dependencies, wheel and
+      # pytest selection in its own interpreter. Every version runs even after
+      # one fails, and each failure names its version.
       - name: Verify native resources, pinned transports and disposable workers offline
+        env:
+          PYTHON_VERSIONS: ${{ matrix.python }}
         run: |
-          python -m pytest -q tests/test_model_hub_fetch_policy.py tests/test_model_hub_fetch_transport.py tests/test_model_hub_fetch_tls.py tests/test_model_hub_local_fetch.py tests/test_desktop_runtime_bundle_builder.py -k 'not packaged_cli_survives'
+          failed=""
+          for version in $PYTHON_VERSIONS; do
+            echo "::group::Python $version"
+            if python_bin="$(uv python find --system --no-project --python-preference only-system "$version")" \
+              && "$python_bin" -c "import sys; print(sys.executable, sys.version)" \
+              && uv pip install --system --python "$python_bin" --require-hashes --only-binary=:all: --no-binary claude-agent-sdk --no-binary http-ece -r fetch-requirements.txt \
+              && uv pip install --system --python "$python_bin" --no-deps dist/*.whl \
+              && uv pip install --system --python "$python_bin" pytest pytest-asyncio jsonschema \
+              && "$python_bin" -m pytest -q tests/test_model_hub_fetch_policy.py tests/test_model_hub_fetch_transport.py tests/test_model_hub_fetch_tls.py tests/test_model_hub_local_fetch.py tests/test_desktop_runtime_bundle_builder.py -k 'not packaged_cli_survives'
+            then
+              echo "::endgroup::"
+            else
+              echo "::endgroup::"
+              echo "::error::web-fetch-runtime failed on Python $version"
+              failed="$failed $version"
+            fi
+          done
+          if [ -n "$failed" ]; then
+            echo "web-fetch-runtime failed on Python:$failed"
+            exit 1
+          fi
 
   ui-checks:
     needs: changes
     if: needs.changes.outputs.docs_only == 'false'
+    # Static validation and Vitest share no state, and run back to back they
+    # were the workflow's longest job. Each part runs once on its own runner;
+    # the required unit-tests gate needs this job, so it needs both parts.
+    name: ui-checks (${{ matrix.part }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - part: static
+            commands: |
+              npm run validate:theme
+              npm run lint
+              # Production tsc excludes test files, and vitest only strips types.
+              npm run typecheck:tests
+          - part: tests
+            commands: |
+              npm test
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: "22.23.4"
@@ -168,11 +208,7 @@ jobs:
         working-directory: ui
         run: |
           npm ci
-          npm run validate:theme
-          npm run lint
-          # Production tsc excludes test files, and vitest only strips types.
-          npm run typecheck:tests
-          npm test
+          ${{ matrix.commands }}
 
   ui-browser-checks:
     needs: changes
@@ -180,9 +216,33 @@ jobs:
     # Browser interactions do not depend on lint, Vitest, or the production
     # bundle. Run alongside UI validation; the required unit-tests gate waits
     # for both lanes, including failure/cancellation of either one.
+    name: ui-browser-checks (${{ matrix.lane }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each suite runs serially with one worker and its own dev server; the
+        # serial job had become the workflow's longest. Two lanes balanced from
+        # measured suite times (about 6.5 minutes each) run every suite once.
+        # Rebalance from both lanes' times across several runs: one run's two
+        # lanes land on runners of different speeds.
+        include:
+          - lane: 1
+            suites: |
+              npm run test:onboarding-fidelity -- hub-ownership.spec.ts provider-gate.spec.ts lineup.spec.ts
+              npm run test:home-media
+              npm run test:voice-shortcut
+              npm run test:chat-selection
+              npm run test:badge-triggers
+          - lane: 2
+            suites: |
+              npm run test:project-order
+              npm run test:inbox-return
+              npm run test:workbench-general -- sidebar-floating.spec.ts desktop-window-chrome.spec.ts composer-route-trigger.spec.ts skills-dialog.spec.ts
+              npm run test:chat-interactions
+              npm run test:pdf-preview
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: "22.23.4"
@@ -192,29 +252,49 @@ jobs:
         working-directory: ui
         run: npm ci
 
+      # `--with-deps` fetches about 120 MB of WebKit system packages from the
+      # runner's Ubuntu mirror, which has taken 13 to 44 minutes when the
+      # mirror is slow. apt keeps the packages it downloads in this directory,
+      # restored and saved per runner image and Playwright version; apt still
+      # resolves, verifies and installs every package, and fetches any it lacks.
+      - name: Keep Playwright system packages restorable
+        id: browser-packages
+        working-directory: ui
+        run: |
+          mkdir -p "$HOME/.cache/playwright-apt/partial"
+          echo "Dir::Cache::Archives \"$HOME/.cache/playwright-apt/\";" | sudo tee /etc/apt/apt.conf.d/99playwright-archives
+          prefix="playwright-apt-$ImageOS-"
+          echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
+          echo "key=$prefix$ImageVersion-$(node -p "require('playwright-core/package.json').version")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/playwright-apt
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ steps.browser-packages.outputs.key }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-${{ steps.browser-packages.outputs.prefix }}
+      - name: Install browsers
+        working-directory: ui
+        run: |
+          npx playwright install --with-deps chromium webkit
+          # Drop superseded packages, then hand apt's root-owned files to the
+          # runner user so the cache can save them.
+          sudo apt-get autoclean
+          sudo rm -rf "$HOME/.cache/playwright-apt/partial" "$HOME/.cache/playwright-apt/lock"
+          sudo chown -R "$(id -u):$(id -g)" "$HOME/.cache/playwright-apt"
+
       - name: Test browser interactions
         # Model Hub catalog/provider regression runs on the scheduled/manual
         # model-hub-ui-regression workflow instead of blocking every PR.
         working-directory: ui
         run: |
-          npx playwright install --with-deps chromium webkit
-          npm run test:onboarding-fidelity -- hub-ownership.spec.ts provider-gate.spec.ts lineup.spec.ts
-          npm run test:project-order
-          npm run test:inbox-return
-          npm run test:home-media
-          npm run test:badge-triggers
-          npm run test:workbench-general -- sidebar-floating.spec.ts desktop-window-chrome.spec.ts skills-dialog.spec.ts
-          npm run test:voice-shortcut
-          npm run test:chat-interactions
-          npm run test:chat-selection
+          ${{ matrix.suites }}
 
   show-router-integration:
     needs: changes
     if: needs.changes.outputs.docs_only == 'false'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: avibe-bot/vibe-show-runtime
           # Producer of the checked-in generated router. Release builds export
@@ -226,13 +306,13 @@ jobs:
           node-version: "22.23.4"
           cache: npm
           cache-dependency-path: .show-runtime-test/package-lock.json
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
       - name: Install pinned uv
         run: |
           python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.12.10
-      - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25  # v5
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/uv
           key: ${{ runner.os }}-${{ runner.arch }}-ci-uv-0.12.10-py3.12-${{ hashFiles('pyproject.toml', 'uv.lock') }}
@@ -252,7 +332,7 @@ jobs:
     if: needs.changes.outputs.docs_only == 'false'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # Both distributions use VCS-derived versions; a shallow PR merge
           # checkout falls back to 0.1.dev1 instead of the 3.0 release line.
@@ -270,7 +350,7 @@ jobs:
           npm ci
           npm run build
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
           cache: "pip"
@@ -290,14 +370,14 @@ jobs:
           python scripts/prepare_local_show_runtime_manifest.py
           python -m build
 
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: ui-dist-linux
           path: ui/dist
           if-no-files-found: error
           retention-days: 1
 
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: vibe-wheel-linux
           path: dist/*.whl
@@ -306,7 +386,7 @@ jobs:
 
       # Keep the existing core-only wheel artifact stable for all consumers.
       # companion artifact, consumed only by the distribution contracts.
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: vibe-package-contracts-linux
           path: |
@@ -323,16 +403,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Refreshed complete-run timings balance eight lanes below nine minutes
-        # of file work, reducing the initial hosted-runner burst by one.
-        # Preserve discovery, watchdogs and one-process-per-file isolation.
+        # Eight runners with two planned lanes each: the refreshed complete-run
+        # timings give each lane about five minutes of file work. Preserve
+        # discovery, watchdogs and one-process-per-file isolation.
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
         shard-total: [8]
     # Every pytest run in this job writes its junit report here (tests/conftest.py).
     env:
       AVIBE_CI_JUNIT_DIR: ${{ github.workspace }}/ci-junit
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       # Editable installs require the force-included directory, but unit tests
       # build their own UI fixtures and do not need the production bundle.
@@ -341,7 +421,7 @@ jobs:
           mkdir -p ui/dist
           printf '%s\n' '<!doctype html><html><body></body></html>' > ui/dist/index.html
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
 
@@ -350,7 +430,7 @@ jobs:
         run: |
           python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.12.10
 
-      - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25  # v5
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/uv
           key: ${{ runner.os }}-${{ runner.arch }}-ci-uv-0.12.10-py3.12-${{ hashFiles('pyproject.toml', 'uv.lock') }}
@@ -363,14 +443,16 @@ jobs:
 
       # Only the tests run with loopback alone, so no process a test starts can
       # reach past it; installing dependencies above still needs the network.
+      # The single-threaded per-file suite left three of the runner's four vCPUs
+      # idle; two planned lanes keep two file processes in flight per runner.
       - name: Run unit tests shard ${{ matrix.shard }}/${{ matrix.shard-total }}
-        run: bash scripts/ci_loopback_only.sh bash scripts/ci_unit_tests.sh "${{ matrix.shard }}" "${{ matrix.shard-total }}"
+        run: bash scripts/ci_loopback_only.sh python scripts/ci_unit_test_lanes.py "${{ matrix.shard }}" "${{ matrix.shard-total }}" 2
 
       # Read by scenario-evidence, which proves each covered scenario row's
       # evidence ran (scripts/ci_scenario_evidence.py).
       - name: Upload junit reports
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: junit-${{ github.job }}-${{ strategy.job-index }}
           path: ci-junit/
@@ -392,7 +474,7 @@ jobs:
     env:
       BASE_SHA: ${{ github.event.pull_request.base.sha }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # The synthetic PR merge and both parents, base included.
           fetch-depth: 2
@@ -416,7 +498,7 @@ jobs:
         run: |
           mkdir -p ui/dist
           printf '%s\n' '<!doctype html><html><body></body></html>' > ui/dist/index.html
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         if: steps.manifest.outputs.changed == 'true'
         with:
           python-version: "3.12"
@@ -424,7 +506,7 @@ jobs:
         if: steps.manifest.outputs.changed == 'true'
         run: |
           python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.12.10
-      - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25  # v5
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         if: steps.manifest.outputs.changed == 'true'
         with:
           path: ~/.cache/uv
@@ -440,7 +522,7 @@ jobs:
         run: >-
           python scripts/model_hub_hosted_wire_gate.py --base "$BASE_SHA"
           --pull-request "$PR_NUMBER" --work-dir "$RUNNER_TEMP/hosted-wire" --loopback-only
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         if: always() && steps.manifest.outputs.changed == 'true'
         with:
           name: model-hub-hosted-wire-${{ github.sha }}-${{ github.run_attempt }}
@@ -504,14 +586,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Prepare minimal UI asset placeholder
         run: |
           mkdir -p ui/dist
           printf '%s\n' '<!doctype html><html><body></body></html>' > ui/dist/index.html
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
 
@@ -519,7 +601,7 @@ jobs:
         run: |
           python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.12.10
 
-      - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25  # v5
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/uv
           key: ${{ runner.os }}-${{ runner.arch }}-ci-uv-0.12.10-py3.12-${{ hashFiles('pyproject.toml', 'uv.lock') }}
@@ -544,7 +626,7 @@ jobs:
     env:
       AVIBE_CI_JUNIT_DIR: ${{ github.workspace }}/ci-junit
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # The guard reads each release's migration graph straight out of git. The
           # default shallow checkout fetches no tags, which would leave it with no
@@ -558,7 +640,7 @@ jobs:
           mkdir -p ui/dist
           printf '%s\n' '<!doctype html><html><body></body></html>' > ui/dist/index.html
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
 
@@ -566,7 +648,7 @@ jobs:
         run: |
           python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.12.10
 
-      - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25  # v5
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/uv
           key: ${{ runner.os }}-${{ runner.arch }}-ci-uv-0.12.10-py3.12-${{ hashFiles('pyproject.toml', 'uv.lock') }}
@@ -591,7 +673,7 @@ jobs:
       # evidence ran (scripts/ci_scenario_evidence.py).
       - name: Upload junit reports
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: junit-${{ github.job }}-${{ strategy.job-index }}
           path: ci-junit/
@@ -603,7 +685,7 @@ jobs:
     if: needs.changes.outputs.docs_only == 'false'
     runs-on: [self-hosted, Linux, X64, avibe]
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
@@ -629,7 +711,7 @@ jobs:
     env:
       AVIBE_CI_JUNIT_DIR: ${{ github.workspace }}/ci-junit
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
         with:
@@ -647,7 +729,7 @@ jobs:
           name: vibe-package-contracts-linux
           path: dist
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
 
@@ -700,7 +782,7 @@ jobs:
       # evidence ran (scripts/ci_scenario_evidence.py).
       - name: Upload junit reports
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: junit-${{ github.job }}-${{ strategy.job-index }}
           path: ci-junit/
@@ -744,7 +826,7 @@ jobs:
       matrix:
         runner: ${{ fromJSON(github.event_name == 'pull_request' && '["windows-latest"]' || '["windows-latest","windows-11-arm"]') }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
         with:
@@ -961,14 +1043,14 @@ jobs:
     env:
       AVIBE_CI_JUNIT_DIR: ${{ github.workspace }}/ci-junit
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
         with:
           name: vibe-wheel-linux
           path: dist
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
           architecture: x64
@@ -1000,7 +1082,7 @@ jobs:
       # evidence ran (scripts/ci_scenario_evidence.py).
       - name: Upload junit reports
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: junit-${{ github.job }}-${{ strategy.job-index }}
           path: ci-junit/
@@ -1015,14 +1097,14 @@ jobs:
     env:
       AVIBE_CI_JUNIT_DIR: ${{ github.workspace }}/ci-junit
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: vibe-wheel-linux
           path: dist
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
           cache: "pip"
@@ -1116,7 +1198,7 @@ jobs:
       # evidence ran (scripts/ci_scenario_evidence.py).
       - name: Upload junit reports
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: junit-${{ github.job }}-${{ strategy.job-index }}
           path: ci-junit/
@@ -1136,14 +1218,14 @@ jobs:
     env:
       AVIBE_CI_JUNIT_DIR: ${{ github.workspace }}/ci-junit
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Prepare minimal UI asset placeholder
         run: |
           New-Item -ItemType Directory -Force ui/dist | Out-Null
           Set-Content -Path ui/dist/index.html -Value '<!doctype html><html><body></body></html>'
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
           architecture: x64
@@ -1215,7 +1297,7 @@ jobs:
       # evidence ran (scripts/ci_scenario_evidence.py).
       - name: Upload junit reports
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: junit-${{ github.job }}-${{ strategy.job-index }}
           path: ci-junit/

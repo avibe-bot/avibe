@@ -2049,7 +2049,7 @@ class SessionHandler(BaseHandler):
                 claude_agent=current_routing.claude_agent if current_routing else None,
                 codex_agent=current_routing.codex_agent if current_routing else None,
             )
-            settings_manager.set_channel_routing(settings_key, routing)
+            await asyncio.to_thread(settings_manager.set_channel_routing, settings_key, routing)
 
             agent_label = agent.capitalize()
             preview = self._get_resume_preview(context, agent=agent, session_id=session_id)
@@ -2171,7 +2171,7 @@ class SessionHandler(BaseHandler):
             )
             await self._get_im_client(context).send_message(
                 context,
-                f"❌ {self._t('error.resumeSubmitFailed', error=str(e))}",
+                f"❌ {self._t('error.resumeSubmitFailed', error=self._settings_error_text(e))}",
             )
 
     def _routing_matches_backend(self, routing, backend: str) -> bool:

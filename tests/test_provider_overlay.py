@@ -301,14 +301,22 @@ def test_an_image_model_entry_is_read_in_a_stable_form(monkeypatch, tmp_path):
     assert catalog.provider_image_models("anthropic") == ()
 
 
+EXECUTOR_PROTOCOLS = {"anthropic", "openai_responses"}
+
+
 @pytest.mark.parametrize("vendor", sorted(BUNDLED["providers"]))
 def test_each_vendors_executor_models_run_every_search_tool_the_vendor_offers(vendor):
     """MH-HOSTED-005: an executor model the overlay does not declare a tool on would silently drop the vendor from
-    that tool's executor chain on every Source that lists it first."""
+    that tool's executor chain on every Source that lists it first.
+
+    The executor speaks Anthropic and Responses (``hosted_executor.executor_request``); Gemini runs Google Search
+    natively on its own hop only (``vibey-gemini-native.md`` §6), so a tool offered on another protocol needs none.
+    """
     offered = {
         (protocol, tool)
         for family in catalog.bundled_provider_overlay()[vendor]
         for protocol, tools in family.hosted_tools.items()
+        if protocol in EXECUTOR_PROTOCOLS
         for tool in tools
     }
     executors = catalog.provider_executor_models(vendor)

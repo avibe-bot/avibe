@@ -90,9 +90,11 @@ async def gateway_client(service, backend, model):
 async def loopback_engine(tmp_path, service, respond, *, models=None):
     """Use the production client/admission/stream observer against local HTTP."""
     config = service.store.load()
-    source = config.sources[0]
     state = EngineStateStore(tmp_path / "engine")
-    source.credential_ref = state.store_api_key("fixture", vendor=source.vendor, protocol=source.protocol)
+    for source in config.sources:
+        source.credential_ref = state.store_api_key(
+            "fixture", vendor=source.vendor, protocol=source.protocol, base_url=source.base_url,
+        )
     service.store.save(config)
     state.sync_sources(service._bindings(config))
     app = web.Application()

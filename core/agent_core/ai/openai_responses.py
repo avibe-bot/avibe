@@ -1335,6 +1335,8 @@ def build_responses_payload(
         "stream": True,
         "store": False,
     }
+    if request.endpoint.cache_ttl_wire and request.endpoint.cache_ttl in {"30m", "12h"}:
+        payload["prompt_cache_options"] = {"ttl": request.endpoint.cache_ttl}
     # A hosted tool this hop runs natively is sent as the provider's declaration in its spec's place (§4.1).
     native = native_hosted_tools(request)
     tools = [

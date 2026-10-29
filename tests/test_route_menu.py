@@ -88,9 +88,6 @@ def test_the_stored_route_shows_only_on_its_own_agent():
     assert data.stored_draft("a-reviewer") == RouteDraft("builder", None, None)
     assert data.stored_draft("a-claude") == RouteDraft("helper", None, None)
     assert data.stored_draft("a-vibey") == RouteDraft()
-    # A route saved by an older release with backend-specific fields reads the same.
-    legacy = RoutingSettings(agent_name="codex", codex_model="gpt-5.6", codex_reasoning_effort="high")
-    assert RoutingModalData(_agents(), "a-codex", legacy).stored_draft("a-codex") == RouteDraft(None, "gpt-5.6", "high")
 
 
 def test_default_options_inherit_the_chosen_agents_own_model_and_effort():

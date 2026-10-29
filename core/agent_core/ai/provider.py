@@ -105,6 +105,13 @@ class ModelEndpoint:
     token: str = field(repr=False)
     request_headers: Mapping[str, str] = field(default_factory=dict)
     provider: str = ""
+    #: Route-local cache lifetime override. The Model Hub validates provider
+    #: semantics before it reaches the adapter; unknown/relay routes use it only
+    #: for C-9 clearing, while official OpenAI Responses routes may also wire it.
+    cache_ttl: Optional[Literal["5m", "30m", "1h", "12h"]] = None
+    #: True only when Model Hub confirmed that the provider-specific TTL can be
+    #: sent on the wire (currently official OpenAI Responses GPT-5.6+).
+    cache_ttl_wire: bool = False
     #: The hop's Source (``HopResolution.source_id``): the pin of a request that carries native hosted content.
     source_id: Optional[str] = None
     #: That Source's credential-free identity (``HopResolution.source_identity``): the account a response's opaque
@@ -120,9 +127,6 @@ class ModelEndpoint:
     hosted_tools: Mapping[str, HostedToolRoute] = field(default_factory=dict)
     #: The models ``image_generate`` may call; None when the tool is off or no model is available.
     image_models: Optional[ImageModels] = None
-    #: The upstream protocol whose response origin and tokenizer anchor C-9 for a converted hop; ``None`` when the
-    #: wire protocol is also the served protocol.
-    origin_api: Optional[ProtocolName] = None
 
 
 @dataclass(frozen=True)

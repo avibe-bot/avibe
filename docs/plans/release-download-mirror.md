@@ -58,6 +58,14 @@ only the releases that `vibe/ripgrep_runtime_manifest.json` and
   asset name never change bytes.
 - `https://dl.avibe.bot/<root>index/releases.json` is the repository's release
   index: `Cache-Control: public, max-age=60`.
+- `https://dl.avibe.bot/latest/Avibe_<target>.<ext>` is a stable download
+  link for people, not clients: a copy of `Avibe_<version>_<target>.<ext>`
+  (`.dmg` and `.exe` installers) from the highest-SemVer stable `vX.Y.Z`
+  release that ships installers, the release the desktop updater's stable
+  channel offers. Its bytes change when that release changes, so it carries
+  `Cache-Control: public, max-age=60` and
+  `Content-Disposition: attachment; filename="Avibe_<version>_<target>.<ext>"`.
+  Only Avibe's root has `latest/`; clients keep using versioned URLs.
 - Other top-level prefixes are reserved and never touched by the release
   mirror (for example a future `thirdparty/` for install-script dependencies).
   A new mirrored repository takes a new root.
@@ -125,10 +133,14 @@ reconciles each mirrored repository against its own root:
 3. Upload each selected asset that is missing, has the wrong size, or is not
    recorded with the same digest in the previous index, after verifying the
    downloaded size and sha256 against GitHub's digest.
-4. Write the index if its bytes changed, then delete `<root>releases/` objects
-   that left the selection. Objects appear before the index names them and
-   disappear only after it stops naming them.
-5. If GitHub's digest for an indexed asset changed, re-upload it and fail the
+4. For Avibe, copy each `latest/` installer whose recorded sha256 differs
+   from its source inside the bucket, after the source is verified or
+   uploaded.
+5. Write the index if its bytes changed, then delete `<root>releases/` objects
+   that left the selection and `latest/` installers the latest release no
+   longer ships. Objects appear before the index names them and disappear only
+   after it stops naming them.
+6. If GitHub's digest for an indexed asset changed, re-upload it and fail the
    run: published bytes changed, and edge caches may hold the old copy until
    that URL is purged.
 

@@ -24,11 +24,16 @@ def test_dependabot_covers_ordinary_ecosystems_with_reviewable_update_policy() -
         ("uv", "/"),
     ]
 
+    # One weekday per ecosystem keeps the weekly PRs from saturating the hosted
+    # runner slots together.
+    days = [item["schedule"]["day"] for item in updates]
+    assert days == ["monday", "wednesday", "thursday", "friday", "tuesday"]
+    assert len(set(days)) == len(updates)
     for item in updates:
         assert item["schedule"] == {
             "interval": "weekly",
-            "day": "monday",
-            "time": "09:00",
+            "day": item["schedule"]["day"],
+            "time": "06:00",
             "timezone": "Asia/Shanghai",
         }
         assert item["open-pull-requests-limit"] == 3

@@ -340,8 +340,27 @@ vibe doctor repair tmux --yes
 - 稳定 `vibe` 启动器是否选中了不同的已安装版本（失败时列出两边的路径和版本；`stable-launchers` 会把它们都指向最新版本；两个安装同为最后激活时不做任何改动）
 - 正在运行的服务是否比最近一次激活的安装更旧（警告）
 - 通过统一依赖诊断组检查 askill、avault、Git Runtime、Model Hub 引擎（CPA）、Show Runtime、tmux 和 Node.js
+- avault 一次性的 macOS 钥匙串授权（警告；Doctor 从不代为授权，见 `vibe vault key authorize`）
 - `vibe doctor --deep` 还会在不下载正文的情况下探测缺失依赖的精确地址
 - 托管下载会对临时 HTTP、DNS、超时和连接故障执行有界退避重试
+
+### `vibe vault key authorize`
+
+授权 avault 一次，让它读取这台 Mac 钥匙串中的 Vault 密钥。
+
+```bash
+vibe vault key authorize
+```
+
+avault 0.1.8 起使用 Developer ID 签名。由更早的 avault 创建的 Vault 密钥，macOS 会先询问一次，
+才允许新签名的 avault 读取。在此之前，每次使用 Vault 都会失败并返回 `avault_authorization_required`，
+Vault 页面、「设置 → 依赖」和 `vibe doctor` 都会提示。你可以在 Vault 页面点击「授权 avault」，
+或在 Mac 桌面的终端里运行这条命令。两种方式下，macOS 对话框都出现在运行 Avibe 的 Mac 上，而不是浏览器里：
+输入那台 Mac 的登录密码，并选择「始终允许」。之后已签名的 avault 更新不会再询问。
+
+- 拒绝或取消对话框后，约 2 分钟内不会再次显示。
+- 通过 SSH 运行时无法显示对话框，请改用 Vault 页面。
+- Agent 不会运行它：Vault 命令遇到这个错误时，会让 Agent 请你来授权。
 
 ### `vibe remote`
 

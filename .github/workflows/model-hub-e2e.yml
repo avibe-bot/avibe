@@ -26,14 +26,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Prepare hermetic UI asset placeholder
         run: |
           mkdir -p ui/dist
           printf '%s\n' '<!doctype html><html><body></body></html>' > ui/dist/index.html
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
 
@@ -85,8 +85,11 @@ jobs:
         run: mkdir -p "$RUNNER_TEMP/model-hub-e2e-junit"
 
       # Every release E2E case selected below must be present and passing in this
-      # run's own report; collection or a green process is not enough.
+      # run's own report; collection or a green process is not enough. `shell: bash`
+      # runs with pipefail: without it the `| tee` pipeline reports tee's status and a
+      # failing pytest reads as green.
       - name: Run the Model Hub E2E and release evidence gate
+        shell: bash
         run: |
           bash scripts/ci_loopback_only.sh python -m pytest -m e2e_model_hub tests/e2e -p no:cacheprovider -ra \
             --basetemp="$RUNNER_TEMP/e2e" \
@@ -103,7 +106,7 @@ jobs:
 
       - name: Upload the run log
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: model-hub-e2e-${{ github.run_id }}-${{ github.run_attempt }}
           path: model-hub-e2e.log

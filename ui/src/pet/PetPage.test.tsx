@@ -207,7 +207,13 @@ const showCards = async () => {
 const showDetail = async () => {
   await showCards();
   const main = document.querySelector('.pet-mini-reply-toggle');
-  if (main && !document.querySelector('.pet-mini-detail.is-open')) fireEvent.click(main);
+  if (document.querySelector('.pet-mini-detail.is-open')) return;
+  if (main) {
+    fireEvent.click(main);
+    return;
+  }
+  const avatar = screen.queryByLabelText('pet.recentTurns');
+  if (avatar) fireEvent.click(avatar);
 };
 const pose = () => document.querySelector('.pet-avatar')?.getAttribute('data-pose');
 
@@ -398,7 +404,7 @@ describe('main-only resolution', () => {
     await emit((h) => h.onAuthorizationChanged?.({}));
     await showDetail();
     await emit((h) => h.onMessageNew?.(message('new-authorized', 'S', { text: 'New authorized reply' })));
-    expect(await screen.findByText('New authorized reply')).toBeTruthy();
+    expect((await screen.findAllByText('New authorized reply')).length).toBeGreaterThan(0);
   });
 
   it('keeps a draft through a transient resolution failure and fences a late transcript after access is lost', async () => {
@@ -479,7 +485,7 @@ describe('PetPage state', () => {
     await waitFor(() => expect(api.getTurnState.mock.calls.length).toBeGreaterThan(before));
   });
 
-  it('marks read through the last rendered unread result only when all unread rows are loaded', async () => {
+  it('keeps omitted unread results unread when the card renders only the latest one', async () => {
     tails.S = [
       message('r1', 'S'),
       message('u', 'S', { author: 'user', type: 'user' }),
@@ -491,20 +497,26 @@ describe('PetPage state', () => {
     render(<PetPage />);
     await waitFor(() => expect(pose()).toBe('ready'));
     await showDetail();
-    await screen.findByText('reply r3');
-    await waitFor(() => expect(markRead).toHaveBeenCalledWith('S', 'r3'));
+    await screen.findAllByText('reply r3');
+    expect(markRead).not.toHaveBeenCalled();
   });
 
   it('does not mark read when unread rows may reach past the loaded tail', async () => {
     tails.S = [message('r2', 'S', { read_at: null })];
-    api.listSessionMessages.mockImplementationOnce(async (id: string) => ({
+    const incompleteTail = async (id: string) => ({
       messages: tails[id] ?? [], next_after_id: null, next_before_id: 'older',
-    }));
+    });
+    api.listSessionMessages
+      .mockImplementationOnce(incompleteTail)
+      .mockImplementationOnce(incompleteTail)
+      .mockImplementationOnce(incompleteTail)
+      .mockImplementationOnce(incompleteTail)
+      .mockImplementationOnce(incompleteTail);
     unreadBySession = { S: 5 };
     mainSession('S');
     render(<PetPage />);
     await showDetail();
-    expect(await screen.findByText('pet.moreInAvibe')).toBeTruthy();
+    expect(document.querySelector('.pet-mini-detail.is-open')).toBeTruthy();
     expect(markRead).not.toHaveBeenCalled();
   });
 });
@@ -597,7 +609,7 @@ describe('PetPage review fixes', () => {
     mainSession('S');
     render(<PetPage />);
     await showDetail();
-    await screen.findByText('reply r1');
+    await screen.findAllByText('reply r1');
     await waitFor(() => expect(markRead).toHaveBeenCalled());
     await act(async () => new Promise((resolve) => setTimeout(resolve, 50)));
     expect(markRead).toHaveBeenCalledTimes(1);
@@ -696,7 +708,7 @@ describe('PetPage review fixes, round 3', () => {
       mainSession('S');
       render(<PetPage />);
       await showDetail();
-      await screen.findByText('reply r1');
+      await screen.findAllByText('reply r1');
       await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
       expect(markRead).not.toHaveBeenCalled();
       visibility = 'visible';
@@ -754,12 +766,15 @@ describe('PetPage independent sweep', () => {
   });
 
   it('does not mark read through rows trimmed from a long live tail', async () => {
-    tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('r1', 'S', { read_at: null })];
+    tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('r1', 'S')];
     unreadBySession = { S: 2 };
+    api.listSessionMessages.mockImplementationOnce(async (id: string) => ({
+      messages: tails[id] ?? [], next_after_id: null, next_before_id: 'older',
+    }));
     mainSession('S');
     render(<PetPage />);
-    // The hidden history proves the initial read applied without marking it read.
-    await screen.findByText('reply r1');
+    // The old reply stays hidden until the user opens the card.
+    await screen.findByLabelText('pet.recentTurns');
     // A long turn: many transcript rows arrive live, pushing r1 out of the tail.
     await emit((h) => {
       for (let index = 0; index < 70; index += 1) {
@@ -768,7 +783,7 @@ describe('PetPage independent sweep', () => {
       h.onMessageNew?.(message('r2', 'S', { read_at: null, text: 'reply r2' }));
     });
     await showDetail();
-    expect(await screen.findByText('pet.moreInAvibe')).toBeTruthy();
+    expect(document.querySelector('.pet-mini-detail.is-open')).toBeTruthy();
     expect(markRead).not.toHaveBeenCalled();
   });
 });
@@ -823,11 +838,12 @@ describe('PetPage review fixes, round 7', () => {
     // The live summon is newer than the pending one pet_ready still carries.
     await shellBound('S', 1);
     await showDetail();
-    // The summon expanded the panel (Vibey's aria-expanded now speaks for the history).
-    expect(screen.getByLabelText('pet.panel')).toBeTruthy();
+    // There is no reply yet, so the expanded surface contains only the input.
+    expect(screen.getByRole('textbox', { name: 'pet.inputPlaceholder' })).toBeTruthy();
     act(() => {
       window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
     });
+    expect(invoke).toHaveBeenCalledWith('pet_reset_voice_shortcut');
     await act(async () => ready.resolve({ binding: 'S', revision: 1, summon_pending: { intent: 'listen' } }));
     await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
     // The stale pending summon did not reopen the panel.
@@ -853,7 +869,7 @@ describe('PetPage review fixes, round 8', () => {
     const r2 = message('r2', 'S', { read_at: null, text: 'second reply' });
     tails.S = [...tails.S, r2];
     await emit((h) => h.onMessageNew?.(r2));
-    await screen.findByText('second reply');
+    await screen.findAllByText('second reply');
     expect(screen.queryByText('first reply')).toBeNull();
   });
 
@@ -919,7 +935,7 @@ describe('PetPage review fixes, round 10', () => {
     mainSession('S');
     render(<PetPage />);
     await showDetail();
-    await screen.findByText('unseen');
+    await screen.findAllByText('unseen');
     await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
     expect(markRead).not.toHaveBeenCalled();
     windowFocused = true;
@@ -998,7 +1014,7 @@ describe('PetPage review fixes, round 13', () => {
     mainSession('S');
     render(<PetPage />);
     await showDetail();
-    await screen.findByText('private reply');
+    await screen.findAllByText('private reply');
     sessionReads.S = async () => ({ status: 403, session: null });
     await emit((h) => h.onAuthorizationChanged?.({}));
     await waitFor(() => expect(screen.queryByText('private reply')).toBeNull());
@@ -1018,9 +1034,8 @@ describe('PetPage async closure', () => {
     mainSession('S');
     render(<PetPage />);
     await showDetail();
-    await screen.findByLabelText('pet.panel');
     await emit((h) => h.onMessageNew?.(message('live', 'S', { read_at: null })));
-    await screen.findByText('reply live');
+    await screen.findAllByText('reply live');
     await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
     expect(markRead).not.toHaveBeenCalled();
     // The snapshot shows older unread rows past the tail: still not marked.
@@ -1318,9 +1333,9 @@ describe('PetPage review fixes, round 14', () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_set_expanded', { expanded: true }));
     expect(order).toEqual([true]);
     // A second panel command while the expand is still in flight: a Vibey
-    // click, which opens the history (the panel is not confirmed open, so
+    // keyboard activation, which opens the history (the panel is not confirmed open, so
     // nothing is open to close). It waits its turn behind the first.
-    await userEvent.click(screen.getByLabelText('pet.recentTurns'));
+    fireEvent.click(screen.getByLabelText('pet.recentTurns'));
     expect(order).toEqual([true]);
     await act(async () => first.resolve({ panel_side: 'left', panel_edge: 'bottom' }));
     await waitFor(() => expect(order).toEqual([true, true]));
@@ -1533,6 +1548,42 @@ describe('desktop mini v2 interaction contract', () => {
     }
   }
 
+  it.each(['stop', 'escape', 'failure', 'completion'] as const)('resets native toggle voice state on %s so the next press starts again', async (ending) => {
+    const captures: Array<Deferred<string>> = [];
+    const start = vi.fn(async () => {});
+    class Dictation {
+      private completion = deferred<string>();
+      done = this.completion.promise;
+      constructor() { captures.push(this.completion); }
+      start = start;
+      finish = () => {};
+      abort = () => {};
+    }
+    await withVoiceEnv(() => true, Dictation, async () => {
+      const invoke = vi.fn(async (command: string) => command === 'pet_ready'
+        ? { binding: 'S', revision: 1, summon_pending: null }
+        : { panel_side: 'left', panel_edge: 'bottom' });
+      Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+      Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+      mainSession('S'); render(<PetPage />); tapHotkey();
+      await screen.findByLabelText('pet.voice.open');
+      invoke.mockClear();
+      summon('listen');
+      await waitFor(() => expect(start).toHaveBeenCalledTimes(1));
+      expect(pose()).toBe('listening');
+      if (ending === 'stop') await userEvent.click(screen.getByLabelText('pet.voice.stop'));
+      else if (ending === 'escape') fireEvent.keyDown(window, { key: 'Escape' });
+      else if (ending === 'failure') await act(async () => captures[0].reject(new Error('microphone disconnected')));
+      else await act(async () => captures[0].resolve('finished externally'));
+      await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_reset_voice_shortcut'));
+      await act(async () => captures[0].resolve('finished'));
+      // Native reset is paired with the runtime-host reset/press state test.
+      summon('listen');
+      await waitFor(() => expect(start).toHaveBeenCalledTimes(2));
+      expect(pose()).toBe('listening');
+    });
+  });
+
   it.each([
     ['microphone start', 'pet.voice.startFailed', () => ({ start: Promise.reject(new DOMException('denied', 'NotAllowedError')), done: new Promise<string>(() => {}) })],
     ['transcription', 'pet.voice.failed', (TranscriptionError: typeof VoiceTranscriptionErrorType) => ({ start: Promise.resolve(), done: Promise.reject(new TranscriptionError('failed')) })],
@@ -1601,7 +1652,7 @@ describe('desktop mini v2 interaction contract', () => {
     class Dictation { done = new Promise<string>(() => {}); start = start; finish = () => {}; abort = () => {}; }
     await withVoiceEnv(() => true, Dictation, async () => {
       vi.stubGlobal('fetch', vi.fn(() => status.promise));
-      mainSession('S'); render(<PetPage />); await screen.findByText('Session S');
+      mainSession('S'); render(<PetPage />); await screen.findByLabelText('pet.recentTurns');
       const avatar = screen.getByLabelText('pet.recentTurns');
       vi.useFakeTimers();
       try {
@@ -1726,7 +1777,7 @@ describe('desktop mini v2 interaction contract', () => {
     const report = vi.spyOn(petBridge, 'setHitRegions').mockResolvedValue(undefined);
     try {
       mainSession('S'); render(<PetPage />);
-      await screen.findByText('Session S');
+      await screen.findByLabelText('pet.recentTurns');
       const oldFrames = [...frames];
       expect(oldFrames.length).toBeGreaterThan(0);
       await emit((h) => h.onAuthorizationChanged?.({}));
@@ -1887,6 +1938,101 @@ describe('desktop mini v2 interaction contract', () => {
     expect(wrap.classList.contains('is-hovered')).toBe(false);
   });
 
+  it.each(['blur', 'open'])('suppresses the idle dock after %s until shell leave and re-enter', async (cause) => {
+    canChat = cause !== 'open';
+    mainSession('S'); render(<PetPage />);
+    const avatar = await screen.findByLabelText('pet.recentTurns');
+    const wrap = avatar.closest('.pet-mini-avatar-wrap')!;
+    const hover = (value: boolean) => act(() => {
+      window.dispatchEvent(new CustomEvent(PET_HOVER_EVENT, { detail: { hover: value } }));
+    });
+    hover(true);
+    act(() => avatar.focus());
+    if (cause === 'open') {
+      const { petBridge } = await import('./petBridge');
+      vi.spyOn(petBridge, 'open').mockResolvedValue();
+      await userEvent.dblClick(avatar);
+    } else act(() => window.dispatchEvent(new Event('blur')));
+    expect(wrap.classList.contains('is-hovered')).toBe(false);
+    expect(wrap.classList.contains('is-hover-suppressed')).toBe(true);
+    expect(document.activeElement).not.toBe(avatar);
+    hover(true);
+    expect(wrap.classList.contains('is-hovered')).toBe(false);
+    hover(false);
+    expect(wrap.classList.contains('is-hover-suppressed')).toBe(true);
+    hover(true);
+    expect(wrap.classList.contains('is-hover-suppressed')).toBe(false);
+    expect(wrap.classList.contains('is-hovered')).toBe(true);
+  });
+
+  it.each(['blur', 'open'])('restores the idle dock on the first enter when already outside before %s', async (cause) => {
+    canChat = cause !== 'open';
+    mainSession('S'); render(<PetPage />);
+    const avatar = await screen.findByLabelText('pet.recentTurns');
+    const wrap = avatar.closest('.pet-mini-avatar-wrap')!;
+    const hover = (value: boolean) => act(() => {
+      window.dispatchEvent(new CustomEvent(PET_HOVER_EVENT, { detail: { hover: value } }));
+    });
+    hover(true);
+    if (cause === 'open') {
+      const opened = deferred<void>();
+      const { petBridge } = await import('./petBridge');
+      vi.spyOn(petBridge, 'open').mockReturnValue(opened.promise);
+      await userEvent.dblClick(avatar);
+      // The pointer leaves while the session handoff is still pending.
+      hover(false);
+      act(() => window.dispatchEvent(new Event('blur')));
+      await act(async () => opened.resolve());
+    } else {
+      hover(false);
+      act(() => window.dispatchEvent(new Event('blur')));
+    }
+    expect(wrap.classList.contains('is-hovered')).toBe(false);
+    expect(wrap.classList.contains('is-hover-suppressed')).toBe(true);
+    // The shell emits transitions only: no second false arrives before enter.
+    hover(true);
+    expect(wrap.classList.contains('is-hover-suppressed')).toBe(false);
+    expect(wrap.classList.contains('is-hovered')).toBe(true);
+  });
+
+  it('keeps the typing dock active through a double-click and window blur', async () => {
+    mainSession('S'); render(<PetPage />);
+    await userEvent.click(await screen.findByLabelText('pet.keyboard.open'));
+    const input = await screen.findByRole('textbox');
+    const { petBridge } = await import('./petBridge');
+    vi.spyOn(petBridge, 'open').mockResolvedValue();
+    await userEvent.dblClick(screen.getByLabelText('pet.recentTurns'));
+    act(() => window.dispatchEvent(new Event('blur')));
+    expect(document.querySelector('.pet-mini-dock.is-active')).not.toBeNull();
+    expect(document.querySelector('.is-hover-suppressed')).toBeNull();
+    expect(screen.getByRole('textbox')).toBe(input);
+  });
+
+  it('keeps listening and finishing docks active through double-click and blur', async () => {
+    const done = deferred<string>();
+    const finish = vi.fn();
+    class Dictation { done = done.promise; start = async () => {}; finish = finish; abort = () => {}; }
+    await withVoiceEnv(() => true, Dictation, async () => {
+      mainSession('S'); render(<PetPage />);
+      await userEvent.click(await screen.findByLabelText('pet.voice.open'));
+      await waitFor(() => expect(pose()).toBe('listening'));
+      const { petBridge } = await import('./petBridge');
+      vi.spyOn(petBridge, 'open').mockResolvedValue();
+      await userEvent.dblClick(screen.getByLabelText('pet.recentTurns'));
+      act(() => window.dispatchEvent(new Event('blur')));
+      expect(pose()).toBe('listening');
+      expect(document.querySelector('.pet-mini-dock.is-active')).not.toBeNull();
+      expect(document.querySelector('.is-hover-suppressed')).toBeNull();
+      await userEvent.click(screen.getByLabelText('pet.voice.stop'));
+      expect(finish).toHaveBeenCalledOnce();
+      act(() => window.dispatchEvent(new Event('blur')));
+      expect(document.querySelector('.pet-mini-dock.is-active')).not.toBeNull();
+      expect(document.querySelector('.is-hover-suppressed')).toBeNull();
+      await act(async () => done.resolve('transcript'));
+      expect(await screen.findByRole('textbox')).toBeTruthy();
+    });
+  });
+
   it('keeps the unread count visible until the inbox confirms the result was read', async () => {
     tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('r', 'S', { read_at: null })];
     unreadBySession = { S: 1 };
@@ -1910,12 +2056,11 @@ describe('desktop mini v2 interaction contract', () => {
     unreadBySession = { S: 1 };
     mainSession('S');
     render(<PetPage />);
-    await screen.findByText('Question');
+    await screen.findByLabelText('pet.recentTurns');
     expect(markRead).not.toHaveBeenCalled();
     summon('show');
-    await waitFor(() => expect(document.querySelector('.pet-mini-detail')).toBeTruthy());
-    expect(markRead).not.toHaveBeenCalled();
-    fireEvent.click(document.querySelector('.pet-mini-reply-toggle')!);
+    fireEvent.click(screen.getByLabelText('pet.recentTurns'));
+    await waitFor(() => expect(document.querySelector('.pet-mini-detail.is-open')).toBeTruthy());
     await waitFor(() => expect(markRead).toHaveBeenCalledWith('S', 'r'));
     fireEvent.click(screen.getByLabelText('pet.recentTurns'));
     await waitFor(() => expect(document.querySelector('.pet-mini-detail.is-open')).toBeNull());
@@ -1987,7 +2132,7 @@ describe('desktop mini v2 interaction contract', () => {
   });
 
   it('holds for exactly 320ms, cancels a departed press, and falls back to text without voice support', async () => {
-    mainSession('S'); render(<PetPage />); await screen.findByText('Session S');
+    mainSession('S'); render(<PetPage />); await screen.findByLabelText('pet.recentTurns');
     const avatar = screen.getByLabelText('pet.recentTurns');
     vi.useFakeTimers();
     fireEvent.pointerDown(avatar, { button: 0, pointerId: 1 });
@@ -2013,7 +2158,7 @@ describe('desktop mini v2 interaction contract', () => {
   it('opens the history above the typed input, keeping its draft, focus and caret, and Escape closes the history first', async () => {
     withHistory();
     mainSession('S'); render(<PetPage />);
-    await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('Old reply'));
+    await screen.findByLabelText('pet.recentTurns');
     await userEvent.click(screen.getByLabelText('pet.keyboard.open'));
     const input = await screen.findByRole('textbox') as HTMLTextAreaElement;
     await userEvent.type(input, 'half a thought');
@@ -2025,6 +2170,7 @@ describe('desktop mini v2 interaction contract', () => {
     expect(screen.getByRole('textbox')).toBe(input);
     expect(input.value).toBe('half a thought');
     expect(document.activeElement).toBe(input);
+    expect(screen.getByLabelText('pet.keyboard.close').getAttribute('aria-pressed')).toBe('true');
     expect([input.selectionStart, input.selectionEnd]).toEqual([4, 4]);
     // Drawn in the same slot, above the input.
     const bubble = document.querySelector('.pet-mini-reply-bubble')!;
@@ -2051,10 +2197,9 @@ describe('desktop mini v2 interaction contract', () => {
   it('keeps an open history when the input opens, and sends from the input below it', async () => {
     withHistory();
     mainSession('S'); render(<PetPage />);
-    await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('Old reply'));
+    await screen.findByLabelText('pet.recentTurns');
     await userEvent.click(screen.getByLabelText('pet.recentTurns'));
     await waitFor(() => expect(historyIsOpen()).toBe(true));
-    await userEvent.click(screen.getByLabelText('pet.keyboard.open'));
     const input = await screen.findByRole('textbox');
     expect(historyIsOpen()).toBe(true);
     await userEvent.type(input, 'next{Enter}');
@@ -2088,74 +2233,112 @@ describe('desktop mini v2 interaction contract', () => {
     });
   });
 
-  it('a double-click opens the conversation in Avibe and leaves the history as before', async () => {
-    const invoke = vi.fn((command: string) => {
-      if (command === 'pet_ready') return Promise.resolve({ binding: 'S', revision: 1, summon_pending: null });
-      if (command === 'pet_open') return Promise.resolve(null);
-      return Promise.resolve({ panel_side: 'left', panel_edge: 'bottom' });
-    });
-    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
-    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+  it('handles a single pointer click immediately and keeps the draft when the card closes', async () => {
+    withHistory();
+    mainSession('S'); render(<PetPage />);
+    await screen.findByLabelText('pet.recentTurns');
+    const avatar = screen.getByLabelText('pet.recentTurns');
+    fireEvent.pointerDown(avatar, { button: 0, pointerId: 1 });
+    fireEvent.pointerUp(avatar, { pointerId: 1 });
+    await waitFor(() => expect(historyIsOpen()).toBe(true));
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: 'keep this draft' } });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    fireEvent.pointerDown(avatar, { button: 0, pointerId: 2 });
+    fireEvent.pointerUp(avatar, { pointerId: 2 });
+    await waitFor(() => expect(historyIsOpen()).toBe(false));
+    expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('keep this draft');
+  });
+
+  it('opens the main session on a double-click and leaves the main card closed', async () => {
+    withHistory();
+    mainSession('S'); render(<PetPage />);
+    await screen.findByLabelText('pet.recentTurns');
+    const { petBridge } = await import('./petBridge');
+    const opens = vi.spyOn(petBridge, 'open').mockResolvedValue();
+    const panel = vi.spyOn(petBridge, 'setExpanded');
+    const avatar = screen.getByLabelText('pet.recentTurns');
+    await userEvent.dblClick(avatar);
+    expect(historyIsOpen()).toBe(false);
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(document.querySelector('.pet-mini-dock.is-active')).toBeNull();
+    expect(opens).toHaveBeenCalledExactlyOnceWith('avibe://session/S');
+    expect(panel).toHaveBeenCalledWith(true);
+    expect(panel).toHaveBeenCalledWith(false);
+  });
+
+  it('does not pair a completed hold with a later native double-click count', async () => {
+    withHistory();
+    mainSession('S'); render(<PetPage />);
+    await screen.findByLabelText('pet.recentTurns');
+    const { petBridge } = await import('./petBridge');
+    const opens = vi.spyOn(petBridge, 'open').mockResolvedValue();
+    const avatar = screen.getByLabelText('pet.recentTurns');
+    vi.useFakeTimers();
     try {
-      withHistory();
-      mainSession('S'); render(<PetPage />);
-      await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('Old reply'));
-      const avatar = screen.getByLabelText('pet.recentTurns');
-      const opens = () => invoke.mock.calls.filter(([command]) => command === 'pet_open');
-      // Closed before: closed after, with the conversation opened once.
-      await userEvent.setup().dblClick(avatar);
-      await waitFor(() => expect(opens()).toEqual([['pet_open', { link: 'avibe://session/S' }]]));
-      await act(async () => new Promise((resolve) => setTimeout(resolve, 15)));
-      expect(historyIsOpen()).toBe(false);
-      expect(avatar.getAttribute('aria-expanded')).toBe('false');
-      // Open before: open after.
-      await userEvent.click(avatar);
-      await waitFor(() => expect(historyIsOpen()).toBe(true));
-      await userEvent.setup().dblClick(avatar);
-      await waitFor(() => expect(opens()).toHaveLength(2));
-      await act(async () => new Promise((resolve) => setTimeout(resolve, 15)));
-      expect(historyIsOpen()).toBe(true);
-      expect(avatar.getAttribute('aria-expanded')).toBe('true');
-      // Keyboard activation (no click count) and single clicks never open it.
-      fireEvent.click(avatar);
-      await waitFor(() => expect(historyIsOpen()).toBe(false));
-      await userEvent.click(avatar);
-      await waitFor(() => expect(historyIsOpen()).toBe(true));
-      expect(opens()).toHaveLength(2);
+      fireEvent.pointerDown(avatar, { button: 0, pointerId: 1 });
+      await act(async () => vi.advanceTimersByTime(320));
+      fireEvent.pointerUp(avatar, { pointerId: 1 });
+
+      fireEvent.pointerDown(avatar, { button: 0, pointerId: 2, detail: 2 });
+      fireEvent.mouseDown(avatar, { detail: 2 });
+      fireEvent.pointerUp(avatar, { pointerId: 2 });
+
+      expect(opens).not.toHaveBeenCalled();
     } finally {
-      Reflect.deleteProperty(window, '__AVIBE_DESKTOP_SHELL__');
-      Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
+      vi.useRealTimers();
     }
   });
 
-  it('a quick click after a hold is a single click, not a double-click', async () => {
-    const invoke = vi.fn((command: string) => {
-      if (command === 'pet_ready') return Promise.resolve({ binding: 'S', revision: 1, summon_pending: null });
-      return Promise.resolve(command === 'pet_open' ? null : { panel_side: 'left', panel_edge: 'bottom' });
-    });
-    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
-    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+  it('keeps the dock suppressed after opening Avibe until a fresh pointer re-entry', async () => {
     withHistory();
+    canChat = false;
     mainSession('S'); render(<PetPage />);
-    await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('Old reply'));
+    await screen.findByLabelText('pet.recentTurns');
+    const { petBridge } = await import('./petBridge');
+    const opens = vi.spyOn(petBridge, 'open').mockResolvedValue();
     const avatar = screen.getByLabelText('pet.recentTurns');
-    // A click, then a hold (which opens the input without voice), then a
-    // press the platform counts as the second of a double-click.
-    await userEvent.click(avatar);
-    await waitFor(() => expect(historyIsOpen()).toBe(true));
-    fireEvent.pointerDown(avatar, { button: 0, pointerId: 7 });
-    fireEvent.mouseDown(avatar, { detail: 2 });
-    await act(async () => new Promise((resolve) => setTimeout(resolve, 400)));
-    fireEvent.pointerUp(avatar, { pointerId: 7 });
-    expect(await screen.findByRole('textbox')).toBeTruthy();
-    fireEvent.pointerDown(avatar, { button: 0, pointerId: 8 });
-    fireEvent.mouseDown(avatar, { detail: 2 });
-    fireEvent.pointerUp(avatar, { pointerId: 8 });
-    await waitFor(() => expect(historyIsOpen()).toBe(false));
-    expect(invoke.mock.calls.filter(([command]) => command === 'pet_open')).toEqual([]);
+    const wrap = avatar.closest('.pet-mini-avatar-wrap')!;
+    act(() => window.dispatchEvent(new CustomEvent(PET_HOVER_EVENT, { detail: { hover: true } })));
+    await userEvent.dblClick(avatar);
+    act(() => window.dispatchEvent(new Event('blur')));
+    expect(opens).toHaveBeenCalledOnce();
+    expect(wrap.classList.contains('is-hover-suppressed')).toBe(true);
+    act(() => window.dispatchEvent(new CustomEvent(PET_HOVER_EVENT, { detail: { hover: false } })));
+    act(() => window.dispatchEvent(new CustomEvent(PET_HOVER_EVENT, { detail: { hover: true } })));
+    expect(wrap.classList.contains('is-hover-suppressed')).toBe(false);
   });
 
-  it('a double-click that first collapsed the card list puts the list back', async () => {
+  it.each(['drag', 'cancel', 'leave'])('a %s is not counted as a click', async (gesture) => {
+    withHistory();
+    mainSession('S'); render(<PetPage />);
+    await screen.findByLabelText('pet.recentTurns');
+    const { petBridge } = await import('./petBridge');
+    const opens = vi.spyOn(petBridge, 'open').mockResolvedValue();
+    const avatar = screen.getByLabelText('pet.recentTurns');
+    fireEvent.pointerDown(avatar, { button: 0, clientX: 0, clientY: 0 });
+    if (gesture === 'drag') fireEvent.pointerMove(avatar, { buttons: 1, clientX: 20, clientY: 0 });
+    if (gesture === 'cancel') fireEvent.pointerCancel(avatar);
+    if (gesture === 'leave') fireEvent.pointerLeave(avatar);
+    fireEvent.pointerUp(avatar);
+    expect(historyIsOpen()).toBe(false);
+    expect(opens).not.toHaveBeenCalled();
+  });
+
+  it('opens the text input on a long press without opening the main session', async () => {
+    withHistory();
+    mainSession('S'); render(<PetPage />);
+    await screen.findByLabelText('pet.recentTurns');
+    const avatar = screen.getByLabelText('pet.recentTurns');
+    vi.useFakeTimers();
+    fireEvent.pointerDown(avatar, { button: 0, pointerId: 7 });
+    await act(async () => vi.advanceTimersByTime(320));
+    expect(screen.getByRole('textbox')).toBeTruthy();
+    fireEvent.pointerUp(avatar, { pointerId: 7 });
+    expect(historyIsOpen()).toBe(false);
+  });
+
+  it('collapses the other cards and opens the main card on a single click', async () => {
     canUseAgents = true;
     const row = workingIn('running').agents[0];
     runningAgents = { ...workingIn('running'), agents: [
@@ -2167,10 +2350,11 @@ describe('desktop mini v2 interaction contract', () => {
     await waitFor(() => expect(document.querySelector('.pet-mini-collapsed')).not.toBeNull());
     await showCards();
     await waitFor(() => expect(document.querySelector('.pet-mini-scroll')).not.toBeNull());
-    await userEvent.setup().dblClick(screen.getByLabelText('pet.recentTurns'));
-    await act(async () => new Promise((resolve) => setTimeout(resolve, 15)));
-    expect(document.querySelector('.pet-mini-scroll')).not.toBeNull();
-    expect(historyIsOpen()).toBe(false);
+    const avatar = screen.getByLabelText('pet.recentTurns');
+    fireEvent.pointerDown(avatar, { button: 0, pointerId: 1 });
+    fireEvent.pointerUp(avatar, { pointerId: 1 });
+    expect(document.querySelector('.pet-mini-scroll')).toBeNull();
+    await waitFor(() => expect(historyIsOpen()).toBe(true));
   });
 });
 
@@ -2197,6 +2381,7 @@ describe('Personal Agent mini', () => {
     await waitFor(() => expect(pose()).toBe('needs_input'));
     expect(Array.from(document.querySelectorAll('.pet-mini-card'), (node) => node.getAttribute('data-session-id'))).toEqual(['approval', 'running', 'reply']);
     expect(document.querySelector('.pet-mini-card.is-main')).toBeNull();
+    expect(document.querySelector('[data-session-id="reply"] .pet-mini-unread-dot')).not.toBeNull();
     expect(api.getVaultRequests).not.toHaveBeenCalledWith(expect.objectContaining({ session: 'hidden' }), expect.anything());
     api.getVaultRequests.mockResolvedValue({ requests: [] });
     await emit((h) => h.onVaultsUpdated?.({}));
@@ -2206,11 +2391,12 @@ describe('Personal Agent mini', () => {
 
   it('keeps unread Inbox replies after their process ends and rechecks visibility', async () => {
     canUseAgents = true;
-    inboxSessions = [{ session_id: 'reply', unread: true, project_name: 'Project' } as InboxSession];
+    inboxSessions = [{ session_id: 'reply', unread: true, project_name: 'Project', preview_text: '**Latest reply**' } as InboxSession];
     unreadBySession = { reply: 1 };
     mainSession('S'); render(<PetPage />); await showDetail();
     await waitFor(() => expect(document.querySelector('[data-session-id="reply"]')).not.toBeNull());
-    expect(screen.getByText('pet.replied')).toBeTruthy();
+    expect(screen.getByText('Latest reply')).toBeTruthy();
+    expect(screen.queryByText('pet.replied')).toBeNull();
     expect(pose()).toBe('ready');
     sessionReads.reply = async () => ({ status: 200, session: session('reply', { visibility: 'background' }) });
     await emit((h) => h.onSessionActivity?.({ session_id: 'reply', scope_id: null, event: 'visibility', visibility: 'background' }));
@@ -2362,8 +2548,7 @@ describe('Personal Agent review: history and lifecycle', () => {
     } finally { vi.useRealTimers(); }
   });
 
-  it('draws a promoted result after the input it answered and before a later input answered by silence', async () => {
-    // Scenario: MESSAGE-DELIVERY-325.
+  it('shows only the latest assistant reply in the expanded card', async () => {
     tails.S = [
       message('ask', 'S', { author: 'user', type: 'user', text: 'Check CI' }),
       message('report', 'S', { text: 'CI is green', read_at: null, metadata: { promoted_from: 'output' } }),
@@ -2371,12 +2556,13 @@ describe('Personal Agent review: history and lifecycle', () => {
     ];
     render(<PetPage />); await showDetail();
     const text = document.querySelector('.pet-mini-detail')?.textContent ?? '';
-    expect(text.indexOf('Check CI')).toBeGreaterThanOrEqual(0);
-    expect(text.indexOf('Check CI')).toBeLessThan(text.indexOf('CI is green'));
-    expect(text.indexOf('CI is green')).toBeLessThan(text.indexOf('Also the docs'));
+    expect(text).toContain('CI is green');
+    expect(text).not.toContain('See #<result-ref>');
+    expect(text).not.toContain('Check CI');
+    expect(text).not.toContain('Also the docs');
   });
 
-  it('renders reference sidecars in current and historical Markdown', async () => {
+  it('renders reference sidecars for the latest reply', async () => {
     const reference = (id: string, title: string) => ({ references: [{ kind: 'session', session_id: id, title }] });
     tails.S = [
       message('old-user', 'S', { author: 'user', type: 'user', text: 'Read #<older>', content: reference('older', '旧项目') }),
@@ -2386,7 +2572,10 @@ describe('Personal Agent review: history and lifecycle', () => {
     ];
     render(<PetPage />); await showDetail();
     const detail = within(document.querySelector('.pet-mini-detail') as HTMLElement);
-    for (const title of ['#旧项目', '#Old result', '#当前项目', '#Latest result']) expect(detail.getByText(title)).toBeTruthy();
+    expect(detail.getByText('#Latest result')).toBeTruthy();
+    expect(detail.queryByText('#旧项目')).toBeNull();
+    expect(detail.queryByText('#Old result')).toBeNull();
+    expect(detail.queryByText('#当前项目')).toBeNull();
     expect(document.querySelector('.pet-mini-detail')?.textContent).not.toMatch(/#</);
   });
 
@@ -2693,7 +2882,7 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
     ];
     mainSession('S');
     render(<PetPage />);
-    await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('Done already'));
+    await screen.findByLabelText('pet.recentTurns');
     expect(bubbleOpen()).toBe(false);
   });
 
@@ -2735,7 +2924,7 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
   it('is content-sized while thinking, full width for the reply and whenever the history is open', async () => {
     const compact = () => document.querySelector('.pet-mini-reply-bubble')!.classList.contains('is-compact');
     tails.S = [message('u', 'S', { author: 'user', type: 'user', text: 'hello' })];
-    let running = true;
+    const running = true;
     api.getTurnState.mockImplementation(async () => (running ? { ...idleTurn, in_flight: true, foreground: 'running' as const } : idleTurn));
     mainSession('S');
     render(<PetPage />);
@@ -2747,32 +2936,71 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
     expect(compact()).toBe(false);
     fireEvent.click(document.querySelector('.pet-mini-reply-toggle')!);
     await waitFor(() => expect(document.querySelector('.pet-mini-detail.is-open')).toBeNull());
-    expect(compact()).toBe(true);
-    const result = message('r', 'S', { text: 'All done', read_at: null });
-    tails.S = [...tails.S, result];
-    running = false;
-    await emit((h) => {
-      h.onMessageNew?.(result);
-      h.onTurnEnd?.({ session_id: 'S' });
-    });
-    await waitFor(() => expect(document.querySelector('.pet-mini-reply-toggle')?.textContent).toContain('pet.repliedPrefix'));
-    expect(compact()).toBe(false);
-    expect(bubbleOpen()).toBe(true);
+    expect(screen.getByLabelText('pet.inputPlaceholder')).toBeTruthy();
+    expect(document.querySelector('.pet-mini-reply-bubble')).toBeNull();
   });
 
-  it('keeps the bubble open from running to its result, then shows the reply for 10s', async () => {
+  it('shows a plain text collapsed reply without the old prefix', async () => {
+    await runToResult('**Bold** and [a link](https://example.com)\nOpen `~/.avibe/config.json` and run `my_script.py`.\n2 < 3 && 5 > 4\n```ts\nconst answer = 1\n```');
+    const summary = document.querySelector('.pet-mini-reply-summary')!;
+    expect(summary.textContent).toContain('Bold and a link');
+    expect(summary.textContent).toContain('~/.avibe/config.json');
+    expect(summary.textContent).toContain('my_script.py');
+    expect(summary.textContent).toContain('2 < 3 && 5 > 4');
+    expect(summary.textContent).toContain('const answer = 1');
+    expect(summary.textContent).not.toContain('**');
+    expect(summary.textContent).not.toContain('```');
+    expect(summary.classList.contains('pet-mini-reply-summary')).toBe(true);
+  });
+
+  it('leaves an unread dot when an untouched reply times out, then clears it on expansion', async () => {
+    await runToResult();
+    await act(async () => { vi.advanceTimersByTime(20_100); });
+    await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')).toBeNull());
+    expect(document.querySelector('.pet-mini-avatar-unread-dot')).not.toBeNull();
+    fireEvent.click(screen.getByLabelText('pet.recentTurns'));
+    await waitFor(() => expect(document.querySelector('.pet-mini-detail.is-open')).not.toBeNull());
+    expect(document.querySelector('.pet-mini-avatar-unread-dot')).toBeNull();
+  });
+
+  it('clears the unread dot when another window marks the last reply read', async () => {
+    await runToResult();
+    await act(async () => { vi.advanceTimersByTime(20_100); });
+    await waitFor(() => expect(document.querySelector('.pet-mini-avatar-unread-dot')).not.toBeNull());
+
+    const read = message('r', 'S', { text: 'All done', read_at: '2026-10-04T00:00:02Z' });
+    tails.S = [
+      message('u', 'S', { author: 'user', type: 'user', text: 'hello' }),
+      read,
+    ];
+    await emit((h) => h.onMessageUpdated?.(read));
+
+    await waitFor(() => expect(document.querySelector('.pet-mini-avatar-unread-dot')).toBeNull());
+  });
+
+  it('a double-click leaves the lingering reply unseen and on its original timer', async () => {
+    await runToResult();
+    const { petBridge } = await import('./petBridge');
+    const opens = vi.spyOn(petBridge, 'open').mockResolvedValue();
+    await userEvent.dblClick(screen.getByLabelText('pet.recentTurns'));
+    expect(opens).toHaveBeenCalledExactlyOnceWith('avibe://session/S');
+    expect(document.querySelector('.pet-mini-detail.is-open')).toBeNull();
+    expect(bubbleOpen()).toBe(false);
+  });
+
+  it('keeps the bubble open from running to its result, then shows the reply for 20s', async () => {
     const classes = await runToResult();
     // No closed frame between the running bubble and the reply.
     expect(classes.every((value) => value.includes('is-open'))).toBe(true);
     expect(bubbleOpen()).toBe(true);
     expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('All done');
-    act(() => { vi.advanceTimersByTime(9_900); });
+    act(() => { vi.advanceTimersByTime(19_900); });
     expect(bubbleOpen()).toBe(true);
     act(() => { vi.advanceTimersByTime(200); });
     expect(bubbleOpen()).toBe(false);
   });
 
-  it('spends nothing while the turn still reads as running, so a late turn end still gets the full 10s', async () => {
+  it('spends nothing while the turn still reads as running, so a late turn end still gets the full 20s', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'], shouldAdvanceTime: true });
     tails.S = [message('u', 'S', { author: 'user', type: 'user', text: 'hello' })];
     let running = true;
@@ -2789,7 +3017,7 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
     running = false;
     await emit((h) => h.onTurnEnd?.({ session_id: 'S' }));
     await waitFor(() => expect(document.querySelector('.pet-mini-reply-toggle .pet-mini-running-dot')).toBeNull());
-    act(() => { vi.advanceTimersByTime(9_800); });
+    act(() => { vi.advanceTimersByTime(19_800); });
     expect(bubbleOpen()).toBe(true);
     act(() => { vi.advanceTimersByTime(400); });
     expect(bubbleOpen()).toBe(false);
@@ -2800,10 +3028,10 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
     tails.S = [message('u', 'S', { author: 'user', type: 'user' }), old];
     mainSession('S');
     render(<PetPage />);
-    await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('Old reply'));
+    await screen.findByLabelText('pet.recentTurns');
     await emit((h) => h.onMessageUpdated?.({ ...old, text: 'Old reply, edited' }));
-    await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('edited'));
     expect(bubbleOpen()).toBe(false);
+    expect(document.querySelector('.pet-mini-reply-bubble')).toBeNull();
   });
 
   it('hands keyboard focus to Vibey when a loading notice replaces the bubble', async () => {
@@ -2919,16 +3147,13 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
       await waitFor(() => expect(api.getTurnState).toHaveBeenCalled());
       await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
     });
-    // Closed before the reply came: it was never seen there.
-    await userEvent.click(screen.getByLabelText('pet.recentTurns'));
+    // Close the composer left by the first click. The reply was seen while
+    // the history was open, so it should not start a new linger.
+    await userEvent.keyboard('{Escape}');
     await waitFor(() => expect(bubbleOpen()).toBe(false));
     const late = message('late', 'S', { text: 'Late reply', read_at: null });
     tails.S = [...tails.S, late];
     await emit((h) => h.onMessageNew?.(late));
-    await waitFor(() => expect(bubbleOpen()).toBe(true));
-    act(() => { vi.advanceTimersByTime(9_800); });
-    expect(bubbleOpen()).toBe(true);
-    act(() => { vi.advanceTimersByTime(400); });
     expect(bubbleOpen()).toBe(false);
   });
 
@@ -2942,7 +3167,7 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
     tails.S = [...tails.S, late];
     await emit((h) => h.onMessageNew?.(late));
     await waitFor(() => expect(bubbleOpen()).toBe(true));
-    act(() => { vi.advanceTimersByTime(9_800); });
+    act(() => { vi.advanceTimersByTime(19_800); });
     expect(bubbleOpen()).toBe(true);
     act(() => { vi.advanceTimersByTime(400); });
     expect(bubbleOpen()).toBe(false);
@@ -2963,13 +3188,14 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
       act(() => { toggle.focus(); });
       fireEvent.click(screen.getByLabelText('pet.recentTurns'));
       await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_set_expanded', { expanded: true }));
-      // Not yet confirmed: the reply still holds the bubble, and focus stays put.
+      // Not yet confirmed: the reply still holds the bubble. The expanded
+      // card also opens the keyboard composer, so focus moves into it.
       expect(bubbleOpen()).toBe(true);
-      expect(document.activeElement).toBe(toggle);
+      expect(document.activeElement).toBe(screen.getByLabelText('pet.inputPlaceholder'));
       await act(async () => expand.reject(new Error('no monitor')));
       // Refused: the history never opened, so the reply plays out its time.
       expect(bubbleOpen()).toBe(true);
-      act(() => { vi.advanceTimersByTime(10_200); });
+      act(() => { vi.advanceTimersByTime(20_200); });
       expect(bubbleOpen()).toBe(false);
     } finally {
       Reflect.deleteProperty(window, '__AVIBE_DESKTOP_SHELL__');
@@ -3055,10 +3281,12 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
     summon('listen');
     await screen.findByLabelText('pet.inputPlaceholder');
     act(() => { vi.advanceTimersByTime(60_000); });
+    expect(screen.getByLabelText('pet.inputPlaceholder')).toBeTruthy();
+    expect(bubbleOpen()).toBe(false);
     act(() => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); });
     expect(screen.queryByLabelText('pet.inputPlaceholder')).toBeNull();
     expect(bubbleOpen()).toBe(true);
-    act(() => { vi.advanceTimersByTime(5_900); });
+    act(() => { vi.advanceTimersByTime(15_900); });
     expect(bubbleOpen()).toBe(true);
     act(() => { vi.advanceTimersByTime(200); });
     expect(bubbleOpen()).toBe(false);
@@ -3071,7 +3299,7 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
     act(() => { vi.advanceTimersByTime(60_000); });
     expect(bubbleOpen()).toBe(true);
     fireEvent.pointerLeave(bubbleWrap());
-    act(() => { vi.advanceTimersByTime(2_900); });
+    act(() => { vi.advanceTimersByTime(10_900); });
     expect(bubbleOpen()).toBe(true);
     act(() => { vi.advanceTimersByTime(200); });
     expect(bubbleOpen()).toBe(false);
@@ -3087,7 +3315,7 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
     act(() => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); });
     expect(screen.queryByLabelText('pet.inputPlaceholder')).toBeNull();
     expect(bubbleOpen()).toBe(true);
-    act(() => { vi.advanceTimersByTime(5_900); });
+    act(() => { vi.advanceTimersByTime(15_900); });
     expect(bubbleOpen()).toBe(true);
     act(() => { vi.advanceTimersByTime(200); });
     expect(bubbleOpen()).toBe(false);
@@ -3134,7 +3362,7 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
     tails.S = [message('u', 'S', { author: 'user', type: 'user', text: 'hello' }), message('r', 'S', { text: 'Old reply' })];
     mainSession('S');
     render(<PetPage />);
-    await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('Old reply'));
+    await screen.findByLabelText('pet.recentTurns');
     expect(bubbleOpen()).toBe(false);
     await userEvent.click(screen.getByLabelText('pet.recentTurns'));
     await waitFor(() => expect(bubbleOpen()).toBe(true));
@@ -3182,7 +3410,7 @@ describe('dragging the pet to the top of the display (spec §9.1)', () => {
     const invoke = recording((command) => command === 'pet_ready' ? ready(top, 4) : { revision: 4, layout: top });
     shell(invoke);
     mainSession('S'); render(<PetPage />);
-    await screen.findByText('Session S');
+    await screen.findByLabelText('pet.recentTurns');
     await waitFor(() => expect(edge()).toBe('top'));
     await waitFor(() => expect(settles(invoke)).toContainEqual([4, 'top']));
     expect(invoke).toHaveBeenCalledWith('pet_ready', { layouts: true });
@@ -3192,7 +3420,7 @@ describe('dragging the pet to the top of the display (spec §9.1)', () => {
     const readyAnswer = deferred<unknown>();
     shell(vi.fn((command: string) => command === 'pet_ready' ? readyAnswer.promise : Promise.resolve({ revision: 2, layout: top })));
     mainSession('S'); render(<PetPage />);
-    await screen.findByText('Session S');
+    await screen.findByLabelText('pet.recentTurns');
     const pending = () => document.querySelector('.pet-mini-stage')?.hasAttribute('data-layout-pending');
     expect(pending()).toBe(true);
     await act(async () => readyAnswer.resolve(ready(top, 2)));
@@ -3227,7 +3455,7 @@ describe('dragging the pet to the top of the display (spec §9.1)', () => {
     });
     shell(invoke);
     mainSession('S'); render(<PetPage />);
-    await screen.findByText('Session S');
+    await screen.findByLabelText('pet.recentTurns');
     const pending = () => document.querySelector('.pet-mini-stage')?.hasAttribute('data-layout-pending');
     const called = (name: string) => invoke.mock.calls.filter(([command]) => command === name).length;
     await waitFor(() => expect(pending()).toBe(false));
@@ -3246,7 +3474,7 @@ describe('dragging the pet to the top of the display (spec §9.1)', () => {
     const invoke = recording((command, args) => command === 'pet_ready' ? ready() : { revision: args?.revision ?? 1, layout: top });
     shell(invoke);
     mainSession('S'); render(<PetPage />);
-    await screen.findByText('Session S');
+    await screen.findByLabelText('pet.recentTurns');
     await waitFor(() => expect(settles(invoke)).toContainEqual([1, 'bottom']));
     await publish(3, top);
     await waitFor(() => expect(settles(invoke)).toContainEqual([3, 'top']));
@@ -3262,7 +3490,7 @@ describe('dragging the pet to the top of the display (spec §9.1)', () => {
     const invoke = recording((command, args) => command === 'pet_ready' ? readyAnswer.promise : { revision: args?.revision ?? 3, layout: top });
     shell(invoke);
     mainSession('S'); render(<PetPage />);
-    await screen.findByText('Session S');
+    await screen.findByLabelText('pet.recentTurns');
     // The shell published revision 3 while it still took this document for loading.
     await publish(3, top);
     await waitFor(() => expect(settles(invoke)).toEqual([[3, 'top']]));
@@ -3274,7 +3502,7 @@ describe('dragging the pet to the top of the display (spec §9.1)', () => {
     const invoke = recording((command) => command === 'pet_ready' ? ready() : { revision: 5, layout: top });
     shell(invoke);
     mainSession('S'); render(<PetPage />);
-    await screen.findByText('Session S');
+    await screen.findByLabelText('pet.recentTurns');
     await waitFor(() => expect(settles(invoke)).toContainEqual([5, 'top']));
     expect(edge()).toBe('top');
   });
@@ -3288,7 +3516,7 @@ describe('dragging the pet to the top of the display (spec §9.1)', () => {
     });
     shell(invoke);
     mainSession('S'); render(<PetPage />);
-    await screen.findByText('Session S');
+    await screen.findByLabelText('pet.recentTurns');
     const called = (name: string) => invoke.mock.calls.filter(([command]) => command === name).length;
     // The shell does not yet know this page draws the top layout.
     drag(screen.getByLabelText('pet.recentTurns'));
@@ -3310,7 +3538,7 @@ describe('dragging the pet to the top of the display (spec §9.1)', () => {
       : bottom);
     shell(invoke, false);
     mainSession('S'); render(<PetPage />);
-    await screen.findByText('Session S');
+    await screen.findByLabelText('pet.recentTurns');
     drag(screen.getByLabelText('pet.recentTurns'));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('plugin:window|start_dragging'));
     expect(invoke.mock.calls.some(([command]) => command === 'pet_drag' || command === 'pet_settle')).toBe(false);
@@ -3326,7 +3554,7 @@ describe('dragging the pet to the top of the display (spec §9.1)', () => {
     shell(invoke);
     tails.S = [message('u', 'S', { author: 'user', type: 'user', text: 'hello' }), message('r', 'S', { text: 'Old reply' })];
     mainSession('S'); render(<PetPage />);
-    await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('Old reply'));
+    await screen.findByLabelText('pet.recentTurns');
     await userEvent.click(screen.getByLabelText('pet.recentTurns'));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_set_expanded', { expanded: true }));
     await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));

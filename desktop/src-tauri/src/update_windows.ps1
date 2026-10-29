@@ -14,8 +14,13 @@ function Invoke-AvibeReplacement($requestData) {
         if ($info.ProductVersion -ne $requestData.version) { throw 'Installer version mismatch' }
         # Per-user NSIS installs are writable. Refuse elevation or a different scope.
         $probe = Join-Path $requestData.directory ([Guid]::NewGuid().ToString() + '.probe')
-        [IO.File]::WriteAllText($probe, '')
-        Remove-Item -LiteralPath $probe
+        try {
+            [IO.File]::WriteAllText($probe, '')
+            Remove-Item -LiteralPath $probe
+        } catch {
+            [IO.File]::WriteAllText((Join-Path $requestData.staging 'requires-host'), 'requires_host')
+            throw 'requires_host'
+        }
         Copy-Item -LiteralPath $requestData.directory -Destination $backup -Recurse
         [IO.File]::WriteAllText($ready, 'ready')
         Wait-Process -Id $requestData.pid -ErrorAction SilentlyContinue

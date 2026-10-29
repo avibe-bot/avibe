@@ -88,6 +88,12 @@ def _plain_history(value: Any) -> Any:
         ]
         return {"role": "assistant", "content": texts} if texts else None
     plain = {key: item for key, item in value.items() if key not in _OPAQUE_FIELDS}
+    if "functionCall" in value and "thoughtSignature" in value:
+        # Gemini 3+ refuses a current-turn call without a signature, and this account's cannot go to another:
+        # Google's documented stand-in takes its place, as the engine's Chat translation always wrote.
+        from core.agent_core.ai.google import DUMMY_THOUGHT_SIGNATURE
+
+        plain["thoughtSignature"] = DUMMY_THOUGHT_SIGNATURE
     if plain.get("thought") is True:
         # Gemini's readable thought text is ordinary history across origins.
         plain.pop("thought")
@@ -121,14 +127,22 @@ def without_opaque_history(request: Mapping[str, Any]) -> Mapping[str, Any]:
     return payload
 
 
+# Gemini's generateContent declares a server-side tool as a keyed object (``{"googleSearch": {}}``); the overlay
+# names it by the type Google's typed tools give it (``vibey-gemini-native.md`` §4).
+GOOGLE_NATIVE_TOOL_TYPES: Final[Mapping[str, str]] = {"googleSearch": "google_search"}
+
+
 def declared_tool_types(request: Mapping[str, Any]) -> frozenset[str]:
-    """The ``type`` of every tool the request declares."""
+    """The ``type`` of every tool the request declares, a Gemini keyed tool by its overlay type."""
 
     tools = request.get("tools")
     if not isinstance(tools, list):
         return frozenset()
     return frozenset(
         kind for tool in tools if isinstance(tool, Mapping) and isinstance(kind := tool.get("type"), str)
+    ) | frozenset(
+        kind for tool in tools if isinstance(tool, Mapping)
+        for key, kind in GOOGLE_NATIVE_TOOL_TYPES.items() if key in tool
     )
 
 

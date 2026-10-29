@@ -97,7 +97,7 @@ const formatBytes = (bytes: number): string =>
 const useHostedCost = (card: HostedActivity): string | null => {
   const { t } = useTranslation();
   const cost = card.cost;
-  if (!cost) return null;
+  if (!cost || (cost.at_least && cost.usd === 0)) return null;
   const figure = builtinKey(card.source_id) && cost.usd === 0 && !cost.at_least
     ? t('chat.agentActivity.hosted.cost.free') as string
     : cost.basis === 'included'

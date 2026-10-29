@@ -33,6 +33,7 @@ from config.v2_config import (
     ModelHubSourceStateConfig,
 )
 from core.handlers.model_hub.adapter import RawOutcomeKind
+from core.handlers.model_hub.capability_evidence import identity_digest
 from core.handlers.model_hub.pricing import PriceTable
 from core.handlers.model_hub.provenance import BoundedProvenanceStore, SERVED_HOP_HEADER
 from core.handlers.model_hub.request import ModelHubRequest
@@ -223,6 +224,34 @@ def _signed_history(protocol):
         {"messages": [{"role": "assistant", "content": [{"type": "text", "text": "Answer"}],
                        "tool_calls": [{**call, "extra_content": {"google": {}}}]}, result]},
     )
+
+
+def test_another_sources_gemini_history_keeps_its_calls_admissible() -> None:
+    """A Gemini history stripped for another Source keeps Google's stand-in where a call was signed: Gemini 3+
+    refuses a current-turn call without one, and this account's signature cannot go to another."""
+
+    from core.agent_core.ai.google import DUMMY_THOUGHT_SIGNATURE
+    from core.handlers.model_hub.request import without_opaque_history
+
+    first = {"functionCall": {"name": "verify", "args": {"thoughtSignature": "user-data"}, "id": "c1"}}
+    second = {"functionCall": {"name": "verify", "args": {}, "id": "c2"}}
+    result = {"role": "user", "parts": [{"functionResponse": {"name": "verify", "id": "c1", "response": {}}}]}
+    signed = {"contents": [
+        {"role": "model", "parts": [
+            {"text": "plan", "thought": True, "thoughtSignature": "opaque-thought"},
+            {"text": "Answer", "thoughtSignature": "opaque-text"},
+            {**first, "thoughtSignature": "opaque-call"},
+            second,
+        ]},
+        result,
+    ]}
+
+    assert without_opaque_history(signed) == {"contents": [
+        {"role": "model", "parts": [
+            {"text": "plan"}, {"text": "Answer"}, {**first, "thoughtSignature": DUMMY_THOUGHT_SIGNATURE}, second,
+        ]},
+        result,
+    ]}
 
 
 @pytest.mark.asyncio
@@ -419,8 +448,8 @@ async def test_opaque_history_origin_survives_recovery_walks(tmp_path, recovered
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
-async def test_native_history_is_not_scrubbed_by_vibey_origin_policy(tmp_path, backend):
-    """Native callers have no primary-origin metadata; their existing policy stays intact."""
+async def test_native_history_is_filtered_without_opaque_provenance(tmp_path, backend):
+    """Native callers fail safe when opaque response provenance is unavailable."""
     protocol = {"claude": "anthropic", "codex": "openai_responses", "opencode": "openai_chat"}[backend]
     primary = _source("src_primary01", "Primary", protocol=protocol)
     fallback = _source("src_fallback01", "Fallback", vendor="custom", protocol=protocol)
@@ -429,15 +458,83 @@ async def test_native_history_is_not_scrubbed_by_vibey_origin_policy(tmp_path, b
         _outcome(RawOutcomeKind.SUCCESS),
     ])
     selected = _canonicalize_fixed_test_routes(service)
-    signed, _plain = _signed_history(protocol)
-    original = copy.deepcopy(signed)
+    signed, _ = _signed_history(protocol)
+    if protocol == "anthropic":
+        expected = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "Visible reasoning"},
+                        {"type": "text", "text": "Answer", "signature": "opaque-text"},
+                        {"type": "tool_use", "id": "call_1", "name": "verify", "input": {"signature": "user-data"}, "thoughtSignature": "opaque-call"},
+                    ],
+                },
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "ok"}]},
+            ],
+        }
+    elif protocol == "openai_responses":
+        expected = {
+            "input": [
+                {"role": "assistant", "content": [{"type": "output_text", "text": "Visible reasoning"}]},
+                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Answer", "signature": "opaque-text"}]},
+                {"type": "function_call", "call_id": "call_1", "name": "verify", "arguments": '{"signature":"user-data"}', "signature": "opaque-call"},
+                {"type": "function_call_output", "call_id": "call_1", "output": "ok"},
+            ],
+            "store": False,
+        }
+    else:
+        expected = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Answer", "thoughtSignature": "opaque-text"}],
+                    "tool_calls": [{
+                        "type": "function", "id": "call_1",
+                        "function": {"name": "verify", "arguments": '{"signature":"user-data"}'},
+                        "extra_content": {"google": {}},
+                    }],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "ok"},
+            ],
+        }
     await service.resolve(
         backend=backend, model_id=selected.get(backend, "shared-model"),
         request=ModelHubRequest(signed, protocol=protocol), stream=False,
     )
     assert [entry[0] for entry in service.adapter.invocations] == [primary.id, fallback.id]
-    assert service.adapter.requests == [original, original]
+    assert service.adapter.requests == [expected, expected]
 
+
+@pytest.mark.asyncio
+async def test_response_consumer_registers_chat_tool_signature_provenance(tmp_path):
+    """MH-OPAQUE-OBSERVE-003: the gateway observes exact Chat tool metadata before forwarding completion."""
+
+    source = _source("src_primary01", "Primary", vendor="openai", protocol="openai_chat")
+    answer = (
+        b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"extra_content":{"google":{"thought_signature":"chat-response-signature"}}}]}}]}\n\n'
+        b'data: [DONE]\n\n'
+    )
+    service = _vibey_service(tmp_path, [source], handles=[
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=source.id, stream_started=True), (answer,)),
+    ])
+    gateway = ModelHubTurnGateway(service)
+    router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+    try:
+        hop = await router.resolve_hop("menu-alias", process_scope="vibey:opaque-response", turn_id="turn-chat-response")
+        async with aiohttp.ClientSession() as client:
+            async with client.post(
+                f'{hop["base_url"]}/{PROTOCOL_ENDPOINTS["openai_chat"]}',
+                headers={"Authorization": f'Bearer {hop["token"]}', **hop["request_headers"]},
+                json={"model": hop["runtime_model"], "stream": True, "messages": [{"role": "user", "content": "hi"}]},
+            ) as response:
+                assert response.status == 200
+                assert await response.read() == answer
+        assert service.opaque_provenance.accepts(
+            "openai_chat", "chat-response-signature", identity_digest(source),
+        )
+    finally:
+        await gateway.close()
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("metadata", ["unknown", "source", "catalog"])
@@ -685,7 +782,13 @@ async def test_the_next_vibey_call_takes_the_failed_over_source_while_the_last_c
     """
     primary = _source("src_primary01", "Primary", vendor="openai", protocol="openai_responses", model_id="gpt-x")
     fallback = _source("src_fallback01", "Fallback", vendor="openai", protocol="openai_responses", model_id="gpt-x")
-    answer = _body("openai_responses", True)
+    answer = (
+        b'event: response.output_item.done\ndata: '
+        b'{"type":"response.output_item.done","item":{"type":"reasoning",'
+        b'"encrypted_content":"race-opaque"}}\n\n'
+        b'event: response.completed\ndata: {"type":"response.completed",'
+        b'"response":{"id":"resp_1","status":"completed"}}\n\n'
+    )
     settling = _SettlingLiveHandle(
         _outcome(RawOutcomeKind.SUCCESS, source_id=fallback.id, stream_started=True), (answer,), held=held,
     )
@@ -709,6 +812,10 @@ async def test_the_next_vibey_call_takes_the_failed_over_source_while_the_last_c
                 received = b""
                 while b"response.completed" not in received:
                     received += await response.content.readany()
+                assert b"response.completed" in received
+                assert service.opaque_provenance.accepts(
+                    "openai_responses", "race-opaque", identity_digest(fallback),
+                )
                 # The terminal event is in: the next call resolves while this one still settles.
                 following = asyncio.create_task(
                     router.resolve_hop("menu-alias", process_scope="vibey:test", turn_id=turn_id)

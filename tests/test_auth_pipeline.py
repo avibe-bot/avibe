@@ -234,8 +234,8 @@ def test_require_bind_null_allows_any_member_regardless_of_platform_default():
     assert result.allowed is True
 
 
-@pytest.mark.parametrize("action", ["auth_setup:codex", "routing_submit:claude"])
-def test_admin_guard_denies_non_admin_for_a_protected_action_with_a_suffix(action):
+@pytest.mark.parametrize("action", ["agent", "auth_setup:codex", "routing_submit:claude"])
+def test_admin_guard_denies_non_admin_a_protected_action(action):
     store = _Store()
     store.settings.channels["C1"] = SimpleNamespace(enabled=True)
     store._bound_users.add("U5")

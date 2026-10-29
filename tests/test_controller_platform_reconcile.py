@@ -160,6 +160,7 @@ def _handler(**overrides):
         "handle_bind",
         "handle_change_cwd_submission",
         "handle_settings",
+        "handle_routing",
         "handle_settings_update",
         "handle_routing_update",
         "handle_routing_modal_update",

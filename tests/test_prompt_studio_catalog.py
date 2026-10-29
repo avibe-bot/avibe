@@ -171,7 +171,13 @@ def test_use_avibe_entry_routes_to_all_bundled_references() -> None:
     assert set(targets) == {path.relative_to(directory).as_posix() for path in (directory / "references").glob("*.md")}
     assert all((directory / target).is_file() for target in targets)
     assert (directory / "scripts/vibe_api.py").is_file()
-    for rule in ("preserve every existing channel", "missing user fields are not a patch", "Do not restart", "Treat secrets as opaque"):
+    for rule in (
+        "`PATCH /api/settings/scope`, which writes only the named fields",
+        "replaces the platform's whole channel map",
+        "writes each included user as a whole row",
+        "Do not restart",
+        "Treat secrets as opaque",
+    ):
         assert rule in entry
 
 

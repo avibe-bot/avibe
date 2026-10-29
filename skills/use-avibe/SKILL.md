@@ -2,7 +2,7 @@
 name: use-avibe
 slug: use-avibe
 description: Safely inspect and modify local Avibe configuration, routing, runtime settings, watches, scheduled tasks, Avibe Cloud remote access, and operational state. Also use it to report an Avibe bug, send product feedback, or file a feature request from the current conversation.
-version: 0.8.0
+version: 0.9.1
 ---
 
 # Use Avibe
@@ -36,11 +36,11 @@ Follow this skill as an operations playbook for agents, not as end-user marketin
 3. Preserve unrelated scopes, platforms, users, and secrets.
 4. Treat secrets as opaque. Do not print, invent, rotate, or overwrite tokens unless the user explicitly provides replacements.
 5. Use the smallest viable API call and verify by reading back the API response.
-6. For `POST /settings`, preserve every existing channel for that platform; the endpoint replaces the platform's channel map.
-7. For `POST /api/users`, merge each edited user with its current user payload first; missing user fields are not a patch.
+6. Change one channel, topic, or DM user with `PATCH /api/settings/scope`, which writes only the named fields; `POST /api/settings` replaces the platform's whole channel map.
+7. Change a bound DM user's fields with `PATCH /api/settings/scope` (`"scope": "user"`); `POST /api/users` writes each included user as a whole row.
 8. Make every persistent-state change through the Web UI API or the `vibe` CLI. Avibe's internal storage is opaque — do not read, query, or hand-edit it.
-9. `POST /config` persists the new payload but does not restart running platform adapters by itself. When the change is platform credentials, `proxy_url`, or other transport-level settings, plan an explicit restart afterwards; prefer the delayed CLI form (`vibe restart --delay-seconds 60`) when triggering it from inside an active conversation. The only credential save that restarts on its own is the WeChat QR-login completion through `POST /wechat/qr_login/poll`.
-10. Do not restart the service by default. Use `POST /doctor`, `GET /status`, and read-back checks first.
+9. `POST /api/config` persists the new payload but does not restart running platform adapters by itself. When the change is platform credentials, `proxy_url`, or other transport-level settings, plan an explicit restart afterwards; prefer the delayed CLI form (`vibe restart --delay-seconds 60`) when triggering it from inside an active conversation. The only credential save that restarts on its own is the WeChat QR-login completion through `POST /api/wechat/qr_login/poll`.
+10. Do not restart the service by default. Use `POST /api/doctor`, `GET /status`, and read-back checks first.
 11. Only start, stop, restart, or reload Avibe when the user explicitly asks or when a change cannot take effect otherwise; explain why before doing it.
 12. If an agent must restart Avibe from an active conversation, use `vibe restart --delay-seconds 60` so the current session can receive the reply before the restart lands.
 13. Tell the user whether the change is global or scope-specific.
@@ -55,16 +55,16 @@ Use this order when changing Avibe configuration:
    - When Avibe Cloud remote access is active, the public origin (e.g. `https://<slug>.avibe.bot`) also speaks the same API and requires OIDC session cookies — prefer the local origin from the host running Avibe.
    - Check liveness with `GET /health` or `GET /status`.
 2. Decide whether the request belongs in:
-   - `POST /config` for global defaults, platform credentials, runtime config, agent defaults, UI config, remote-access provider settings, update policy, or global display toggles
-   - `POST /settings` for channel-level routing, working directory, visibility, enablement, and mention policy
+   - `POST /api/config` for global defaults, platform credentials, runtime config, agent defaults, UI config, remote-access provider settings, update policy, or global display toggles
+   - `PATCH /api/settings/scope` for one channel's, topic's, or DM user's routing, working directory, visibility, enablement, and mention policy
    - `/api/users` and `/api/bind-codes` for DM user binding and user-scope settings
-   - `/remote-access/*` for Avibe Cloud pairing and tunnel control
+   - `/api/remote-access/*` for Avibe Cloud pairing and tunnel control
    - host backend config instead of Avibe when the request is OpenCode, Claude Code, or Codex native behavior
 3. Fetch the current state from the matching GET endpoint.
 4. Merge the requested change in memory.
 5. Send the mutating request through the Web UI API with CSRF protection.
 6. Read back the changed resource and verify the effective payload.
-7. Run `POST /doctor` only when the change affects runtime health, platform credentials, or backend availability.
+7. Run `POST /api/doctor` only when the change affects runtime health, platform credentials, or backend availability.
 8. Report the changed scope or global keys and whether a restart was avoided or still required.
 
 ## Task References

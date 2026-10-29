@@ -45,6 +45,14 @@ def _sites() -> dict[str, list[float]]:
     }
 
 
+def _matching_sites(*, filename: str, name: str) -> list[tuple[tuple, list[float]]]:
+    return [
+        (site, totals)
+        for site, totals in loop_writers._totals.items()
+        if site and site[0][0].endswith(filename) and site[0][2] == name
+    ]
+
+
 def _explicit_write(engine) -> None:
     with engine.begin() as conn:
         conn.execute(text("INSERT INTO notes (body) VALUES ('a')"))
@@ -90,6 +98,120 @@ def _timed_out_writer_wait(engine, db_path) -> None:
     finally:
         holder.rollback()
         holder.close()
+
+
+def test_loop_side_metadata_ddl_is_counted(census, tmp_path) -> None:
+    """The known ``metadata.create_all`` path reports its autocommit DDL once."""
+
+    from storage.sessions_service import SQLiteSessionsService
+
+    loop_writers._totals.clear()
+    service = SQLiteSessionsService(tmp_path / "metadata.sqlite")
+    service.close()
+
+    matches = _matching_sites(filename="storage/sessions_service.py", name="__init__")
+    assert len(matches) == 1
+    _site, totals = matches[0]
+    assert totals[0] == 1
+    assert totals[1] > 0
+    assert totals[2] > 0
+    assert totals[3] == 0
+
+
+def test_loop_side_journal_mode_setup_is_counted(census, tmp_path) -> None:
+    """The connection-initialization WAL change is visible when setup runs on-loop."""
+
+    loop_writers._totals.clear()
+    engine = create_sqlite_engine(tmp_path / "journal.sqlite")
+    try:
+        with engine.connect() as conn:
+            assert conn.exec_driver_sql("PRAGMA journal_mode").scalar_one() == "wal"
+    finally:
+        engine.dispose()
+
+    matches = _matching_sites(filename="storage/db.py", name="_set_sqlite_pragmas")
+    assert len(matches) == 1
+    _site, totals = matches[0]
+    assert totals[0] == 1
+    assert totals[1] > 0
+    assert totals[2] > 0
+
+
+def test_off_loop_connection_setup_is_not_counted(census, tmp_path) -> None:
+    """A worker opening a normal engine does not enter the controller census."""
+
+    loop_writers._totals.clear()
+    errors: list[BaseException] = []
+
+    def setup() -> None:
+        try:
+            engine = create_sqlite_engine(tmp_path / "off-loop.sqlite")
+            with engine.connect():
+                pass
+            engine.dispose()
+        except BaseException as exc:  # pragma: no cover - assertion below reports it
+            errors.append(exc)
+
+    worker = threading.Thread(target=setup)
+    worker.start()
+    worker.join()
+
+    assert errors == []
+    assert loop_writers._totals == {}
+
+
+def test_read_only_pragmas_are_not_counted(census) -> None:
+    """Connection-local pragma settings and data-version reads are not writers."""
+
+    loop_writers._totals.clear()
+    with census.connect() as conn:
+        conn.exec_driver_sql("PRAGMA foreign_keys = ON")
+        conn.exec_driver_sql("PRAGMA busy_timeout = 5000")
+        conn.exec_driver_sql("PRAGMA data_version").scalar_one()
+
+    assert loop_writers._totals == {}
+
+
+def test_a_failed_marked_autocommit_write_is_closed_once(census) -> None:
+    """A failed marked operation is counted, and its checkout record stays clean."""
+
+    def failed_ddl() -> None:
+        with census.connect() as conn:
+            with loop_writers.track_autocommit_write(conn):
+                conn.exec_driver_sql("CREATE TABLE broken (")
+
+    with pytest.raises(OperationalError, match="incomplete input"):
+        failed_ddl()
+
+    matches = _matching_sites(filename="tests/test_loop_writers.py", name="failed_ddl")
+    assert len(matches) == 1
+    _site, totals = matches[0]
+    assert totals[0] == 1
+    assert totals[1] > 0
+
+    failed_counts = [
+        totals[0]
+        for site, totals in loop_writers._totals.items()
+        if site[0][2] == "failed_ddl"
+    ]
+    assert failed_counts == [1]
+
+
+@pytest.mark.parametrize("finish", ("commit", "rollback"))
+def test_a_marked_transaction_is_counted_once(census, finish) -> None:
+    """A transaction finished inside the marker is owned by its census record."""
+
+    def finish_inside_marker() -> None:
+        with census.connect() as conn:
+            with loop_writers.track_autocommit_write(conn):
+                conn.execute(text("INSERT INTO notes (body) VALUES ('marker')"))
+                getattr(conn, finish)()
+
+    finish_inside_marker()
+
+    matches = _matching_sites(filename="tests/test_loop_writers.py", name="finish_inside_marker")
+    assert len(matches) == 1
+    assert matches[0][1][0] == 1
 
 
 def test_the_census_counts_exactly_the_loops_write_transactions(census) -> None:

@@ -6,6 +6,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from unittest.mock import patch
 
+import pytest
+
 from config.v2_settings import RoutingSettings
 from core.handlers.settings_handler import SettingsHandler
 from core.modals import (
@@ -18,6 +20,7 @@ from core.modals import (
 )
 from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS
 from modules.im import MessageContext
+from vibe.i18n import t
 
 
 def _values(options) -> list[str]:
@@ -43,6 +46,9 @@ class _AgentStore:
     def get(self, name):
         return next((agent for agent in self.agents if agent.name == name), None)
 
+    def get_default_agent(self):
+        return self.get("vibey")
+
 
 class _StubSettingsManager:
     def __init__(self, routing: RoutingSettings | None):
@@ -53,9 +59,10 @@ class _StubSettingsManager:
         assert settings_key == "telegram::-100123"
         return self.routing
 
-    def set_channel_routing(self, settings_key: str, routing: RoutingSettings) -> None:
+    def set_channel_routing(self, settings_key: str, routing: RoutingSettings) -> RoutingSettings:
         assert settings_key == "telegram::-100123"
         self.saved_routing = routing
+        return routing
 
 
 def _make_handler(settings_manager: _StubSettingsManager) -> tuple[SettingsHandler, AsyncMock]:
@@ -71,51 +78,54 @@ def _make_handler(settings_manager: _StubSettingsManager) -> tuple[SettingsHandl
     return SettingsHandler(controller), send_message
 
 
-def test_settings_update_materializes_topic_mention_before_saving_other_fields() -> None:
-    calls: list[str] = []
-    user_settings = SimpleNamespace(show_message_types=[])
+def test_settings_update_saves_a_topic_override_in_one_write(tmp_path, monkeypatch) -> None:
+    """A topic's first settings form saves its types and the mention gate it inherited, together."""
+    from config import paths
+    from config.v2_settings import ChannelSettings, SettingsStore, make_thread_settings_key
+    from modules.settings_manager import SettingsManager
 
-    class TopicSettingsManager:
-        sessions = object()
-
-        def set_require_mention(self, settings_key: str, value: bool | None) -> None:
-            assert settings_key == "thread::-100123::1"
-            assert value is None
-            calls.append("mention")
-
-        def get_user_settings(self, settings_key: str):
-            assert settings_key == "thread::-100123::1"
-            calls.append("read")
-            return user_settings
-
-        def update_user_settings(self, settings_key: str, settings) -> None:
-            assert settings_key == "thread::-100123::1"
-            assert settings.show_message_types == ["assistant"]
-            calls.append("save")
-
-    manager = TopicSettingsManager()
-    controller = SimpleNamespace(
-        config=SimpleNamespace(platform="telegram", language="en"),
-        im_client=SimpleNamespace(send_message=AsyncMock()),
-        settings_manager=manager,
-        _get_settings_key=lambda _context: "thread::-100123::1",
-        _get_lang=lambda: "en",
-    )
-    handler = SettingsHandler(controller)
-
-    asyncio.run(
-        handler.handle_settings_update(
-            user_id="42",
-            channel_id="-100123",
-            thread_id="1",
-            show_message_types=["assistant"],
-            require_mention=None,
-            notify_user=False,
+    monkeypatch.setattr(paths, "ensure_data_dirs", lambda: None)
+    SettingsStore.reset_instance()
+    manager = SettingsManager(settings_file=str(tmp_path / "settings.json"), platform="telegram")
+    manager.require_mention_default = lambda: False
+    try:
+        manager.store.update_channel(
+            "-100123",
+            ChannelSettings(enabled=True, show_message_types=["assistant", "toolcall"], require_mention=True),
             platform="telegram",
         )
-    )
+        writes = []
+        save_state = manager.store._service.save_state
+        monkeypatch.setattr(
+            manager.store._service, "save_state", lambda *args, **kwargs: writes.append(1) or save_state(*args, **kwargs)
+        )
+        controller = SimpleNamespace(
+            config=SimpleNamespace(platform="telegram", language="en"),
+            im_client=SimpleNamespace(send_message=AsyncMock()),
+            settings_manager=manager,
+            _get_settings_key=lambda _context: make_thread_settings_key("-100123", "1"),
+            _get_lang=lambda: "en",
+        )
 
-    assert calls == ["mention", "read", "save"]
+        asyncio.run(
+            SettingsHandler(controller).handle_settings_update(
+                user_id="42",
+                channel_id="-100123",
+                thread_id="1",
+                show_message_types=["assistant"],
+                require_mention=None,
+                notify_user=False,
+                platform="telegram",
+            )
+        )
+
+        topic = manager.store.find_thread("-100123", "1", platform="telegram")
+        # The form's "default" gate on a new topic keeps the channel's explicit gate.
+        assert (topic.show_message_types, topic.require_mention, topic.enabled) == (["assistant"], True, True)
+        assert manager.store.find_channel("-100123", platform="telegram").show_message_types == ["assistant", "toolcall"]
+        assert len(writes) == 1
+    finally:
+        SettingsStore.reset_instance()
 
 
 class _FlatScopeSessions:
@@ -137,9 +147,10 @@ class _FlatScopeSettingsManager:
         assert settings_key == "58181121"
         return self.routing
 
-    def set_channel_routing(self, settings_key: str, routing: RoutingSettings) -> None:
+    def set_channel_routing(self, settings_key: str, routing: RoutingSettings) -> RoutingSettings:
         assert settings_key == "58181121"
         self.saved_routing = routing
+        return routing
 
 
 def _make_flat_scope_handler(
@@ -176,8 +187,8 @@ def test_handle_routing_update_preserves_existing_codex_agent_when_omitted() -> 
         RoutingSettings(
             agent_name="codex",
             codex_agent="reviewer",
-            codex_model="gpt-5.4-mini",
-            codex_reasoning_effort="low",
+            model="gpt-5.4-mini",
+            reasoning_effort="low",
         )
     )
     handler, send_message = _make_handler(settings_manager)
@@ -198,8 +209,6 @@ def test_handle_routing_update_preserves_existing_codex_agent_when_omitted() -> 
     assert settings_manager.saved_routing.codex_agent == "reviewer"
     assert settings_manager.saved_routing.model == "gpt-5.4"
     assert settings_manager.saved_routing.reasoning_effort == "high"
-    assert settings_manager.saved_routing.codex_model is None
-    assert settings_manager.saved_routing.codex_reasoning_effort is None
     send_message.assert_not_awaited()
 
 
@@ -208,8 +217,8 @@ def test_handle_routing_update_allows_explicit_codex_agent_clear() -> None:
         RoutingSettings(
             agent_name="codex",
             codex_agent="reviewer",
-            codex_model="gpt-5.4-mini",
-            codex_reasoning_effort="low",
+            model="gpt-5.4-mini",
+            reasoning_effort="low",
         )
     )
     handler, _ = _make_handler(settings_manager)
@@ -231,8 +240,6 @@ def test_handle_routing_update_allows_explicit_codex_agent_clear() -> None:
     assert settings_manager.saved_routing.codex_agent is None
     assert settings_manager.saved_routing.model == "gpt-5.4"
     assert settings_manager.saved_routing.reasoning_effort == "high"
-    assert settings_manager.saved_routing.codex_model is None
-    assert settings_manager.saved_routing.codex_reasoning_effort is None
 
 
 def test_handle_routing_update_handles_first_codex_save_without_existing_routing() -> None:
@@ -256,35 +263,6 @@ def test_handle_routing_update_handles_first_codex_save_without_existing_routing
     assert settings_manager.saved_routing.codex_agent is None
     assert settings_manager.saved_routing.model == "gpt-5.4"
     assert settings_manager.saved_routing.reasoning_effort == "high"
-    assert settings_manager.saved_routing.codex_model is None
-    assert settings_manager.saved_routing.codex_reasoning_effort is None
-    send_message.assert_not_awaited()
-
-
-def test_handle_routing_update_preserves_catalog_claude_effort() -> None:
-    settings_manager = _StubSettingsManager(None)
-    handler, send_message = _make_handler(settings_manager)
-
-    with patch(
-        "core.handlers.settings_handler.backend_model_catalog.catalog_reasoning_efforts_for_model",
-        return_value=["low", "ultra"],
-    ):
-        asyncio.run(
-            handler.handle_routing_update(
-                user_id="42",
-                channel_id="-100123",
-                agent_id="id-claude",
-                variant="reviewer",
-                model="claude-future-6",
-                reasoning_effort="ultra",
-                notify_user=False,
-                platform="telegram",
-            )
-        )
-
-    assert settings_manager.saved_routing is not None
-    assert settings_manager.saved_routing.model == "claude-future-6"
-    assert settings_manager.saved_routing.reasoning_effort == "ultra"
     send_message.assert_not_awaited()
 
 
@@ -924,3 +902,124 @@ def test_handle_routing_modal_update_uses_the_visible_current_agent() -> None:
     assert len(update_calls) == 1
     assert update_calls[0]["routing"].current_agent == "id-opencode"
     assert update_calls[0]["selected_agent"] == "id-opencode"
+
+
+def test_a_routing_save_the_store_refuses_is_reported_not_confirmed(tmp_path, monkeypatch) -> None:
+    """IM forms used to confirm a routing change whose save had failed, because the save swallowed errors."""
+    from config import paths
+    from config.v2_settings import ChannelSettings, SettingsStore
+    from modules.settings_manager import SettingsManager
+
+    monkeypatch.setattr(paths, "ensure_data_dirs", lambda: None)
+    SettingsStore.reset_instance()
+    manager = SettingsManager(settings_file=str(tmp_path / "settings.json"), platform="telegram")
+    try:
+        manager.store.update_channel("-100123", ChannelSettings(enabled=True), platform="telegram")
+        handler, send_message = _make_handler(manager)
+        handler.controller._get_settings_key = lambda _context: "-100123"
+        # Listed by the form, but not an enabled Agent the store can bind.
+        handler.controller.vibe_agent_store.agents.append(
+            SimpleNamespace(id="id-gone", name="gone", backend="claude", model=None, enabled=True)
+        )
+
+        with patch.object(handler, "_routing_update_needs_new_session_hint", return_value=False):
+            asyncio.run(
+                handler.handle_routing_update(
+                    user_id="42", channel_id="-100123", agent_id="id-gone", platform="telegram"
+                )
+            )
+
+        text = send_message.await_args.args[1]
+        assert text.startswith("❌"), text
+        assert "Agent `gone` is unavailable for this route." in text
+        assert manager.get_channel_routing("-100123").agent_name is None
+        assert manager.store.find_channel("-100123", platform="telegram").routing.agent_name is None
+    finally:
+        SettingsStore.reset_instance()
+
+
+def test_scope_needs_new_session_answers_for_the_scope_the_web_saved() -> None:
+    """A DM session is anchored on the platform's DM channel; only a flat scope's live session keeps its Agent."""
+    rows = {"discord_D-chan": {"agent_name": "opencode", "agent_backend": "opencode"}}
+    anchors: list[str] = []
+
+    def find_session_for_anchor(session_key, anchor):
+        anchors.append(anchor)
+        return rows.get(anchor)
+
+    def handler_for(*, threaded: bool, routing_agent: str):
+        manager = SimpleNamespace(
+            get_channel_routing=lambda key: RoutingSettings(agent_name=routing_agent),
+            get_store=lambda: SimpleNamespace(
+                get_user=lambda user_id, platform=None: SimpleNamespace(dm_chat_id="D-chan") if user_id == "U1" else None
+            ),
+        )
+        controller = SimpleNamespace(
+            config=SimpleNamespace(platform="discord", language="en"),
+            im_client=SimpleNamespace(
+                should_use_thread_for_reply=lambda: threaded,
+                should_use_thread_for_dm_session=lambda: threaded,
+                should_use_message_id_for_channel_session=lambda context=None: threaded,
+            ),
+            settings_manager=manager,
+            sessions=SimpleNamespace(find_session_for_anchor=find_session_for_anchor),
+            session_handler=SimpleNamespace(get_base_session_id=lambda context: f"{context.platform}_{context.channel_id}"),
+            vibe_agent_store=_AgentStore(),
+            _get_settings_key=lambda context: context.user_id or context.channel_id,
+            _get_session_key=lambda context: f"{context.platform}::{context.channel_id}",
+            _get_lang=lambda: "en",
+        )
+        return SettingsHandler(controller)
+
+    flat = handler_for(threaded=False, routing_agent="vibey")
+    assert flat.scope_needs_new_session(platform="discord", kind="user", native_id="U1") is True
+    assert anchors[-1] == "discord_D-chan"
+    assert handler_for(threaded=False, routing_agent="opencode").scope_needs_new_session(
+        platform="discord", kind="user", native_id="U1"
+    ) is False
+    # A route back to the default Agent is compared as that Agent, with or without overrides.
+    for inherited in (RoutingSettings(), RoutingSettings(model="m1", reasoning_effort="high")):
+        flat.controller.settings_manager.get_channel_routing = lambda key, routing=inherited: routing
+        assert flat.scope_needs_new_session(platform="discord", kind="user", native_id="U1") is True
+    assert flat.scope_needs_new_session(platform="discord", kind="channel", native_id="C9") is False
+    assert handler_for(threaded=True, routing_agent="vibey").scope_needs_new_session(
+        platform="discord", kind="user", native_id="U1"
+    ) is False
+
+
+@pytest.mark.parametrize("entry", ["handle_routing", "handle_settings"])
+@pytest.mark.parametrize(
+    ("is_dm", "public_url", "expected"),
+    [
+        # Through Avibe Cloud the reply links to this chat's own row.
+        (True, "https://team.avibe.bot", ("scopeSettings.openInWebUrl", {
+            "url": "https://team.avibe.bot/settings/platforms/users?platform=wechat&user=wx%40im.wechat",
+        })),
+        (False, "https://team.avibe.bot", ("scopeSettings.openInWebUrl", {
+            "url": "https://team.avibe.bot/settings/platforms/groups",
+        })),
+        # Without it, the reply says where the page is.
+        (True, None, ("scopeSettings.openInWeb", {"page": t("scopeSettings.pageUsers", "en")})),
+    ],
+)
+def test_a_chat_without_a_settings_form_is_pointed_at_the_web_settings_page(entry, is_dm, public_url, expected) -> None:
+    """WeChat shows neither buttons nor forms: `/agent` and `/settings` answer with where to change them."""
+    send_message = AsyncMock()
+    cloud = SimpleNamespace(enabled=public_url is not None, public_url=public_url or "")
+    controller = SimpleNamespace(
+        config=SimpleNamespace(platform="wechat", language="en", remote_access=SimpleNamespace(vibe_cloud=cloud)),
+        im_client=SimpleNamespace(send_message=send_message),
+        settings_manager=SimpleNamespace(),
+        _get_lang=lambda: "en",
+    )
+    context = MessageContext(
+        user_id="wx@im.wechat",
+        channel_id="wx@im.wechat",
+        platform="wechat",
+        platform_specific={"platform": "wechat", "is_dm": is_dm},
+    )
+
+    asyncio.run(getattr(SettingsHandler(controller), entry)(context))
+
+    key, params = expected
+    send_message.assert_awaited_once_with(context, t(key, "en", **params))

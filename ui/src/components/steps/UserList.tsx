@@ -1,7 +1,8 @@
 import { platformText } from '@/lib/platforms';
 import type { TFunction } from 'i18next';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Bot,
   Check,
@@ -9,6 +10,7 @@ import {
   ChevronUp,
   Copy,
   KeyRound,
+  Loader2,
   Plus,
   RefreshCw,
   Shield,
@@ -18,12 +20,13 @@ import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 import { useApi } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
-import { getBackendUiMeta } from '../../lib/agentBackends';
 import { getEnabledPlatforms, platformSupportsToolcallDelivery } from '../../lib/platforms';
 import { FolderBrowser } from '../ui/folder-browser';
 import { copyTextToClipboard } from '../../lib/utils';
 import { PlatformIcon } from '../visual';
 import { RoutingConfigPanel } from '../shared/RoutingConfigPanel';
+import { scopeRouteSummary } from '../../lib/scopeRouteSummary';
+import { scopeSettingsChange, USER_SCOPE_FIELDS } from '../../lib/scopeSettingsPatch';
 import { SearchField, ToggleSwitch } from '../settings/SettingsPrimitives';
 import { Button } from '../ui/button';
 import { Dialog, DialogContent, DialogTitle } from '../ui/dialog';
@@ -42,14 +45,8 @@ interface UserConfig {
     model?: string | null;
     reasoning_effort?: string | null;
     opencode_agent?: string | null;
-    opencode_model?: string | null;
-    opencode_reasoning_effort?: string | null;
     claude_agent?: string | null;
-    claude_model?: string | null;
-    claude_reasoning_effort?: string | null;
     codex_agent?: string | null;
-    codex_model?: string | null;
-    codex_reasoning_effort?: string | null;
   };
 }
 
@@ -442,14 +439,19 @@ export const UserList: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
-  const [, setLoading] = useState(false);
+  const [savingRows, setSavingRows] = useState<Record<string, number>>({});
+  const [newSessionRows, setNewSessionRows] = useState<Record<string, boolean>>({});
   const [usersByPlatform, setUsersByPlatform] = useState<Record<string, Record<string, UserConfig>>>({});
   const [config, setConfig] = useState<any>({});
   const [browsingCwdFor, setBrowsingCwdFor] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [showDisabled, setShowDisabled] = useState(false);
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const rowRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const [refreshTrigger, setRefreshTrigger] = useState(0);
+  const userSaveVersionRef = useRef<Record<string, number>>({});
+  const routeSaveVersionRef = useRef<Record<string, number>>({});
 
   const enabledPlatforms = useMemo(() => getEnabledPlatforms(config), [config]);
   const vibeAgents = config.agent_catalog?.agents || [];
@@ -485,7 +487,34 @@ export const UserList: React.FC = () => {
     const next: Record<string, Record<string, UserConfig>> = {};
     for (const [p, u] of results) next[p] = u as Record<string, UserConfig>;
     setUsersByPlatform(next);
+    openLinkedUser(next);
   };
+
+  // A chat that cannot show a settings form links to its row (`?platform=…&user=…`):
+  // open it once it loads, then drop the link so a reload doesn't reopen it.
+  const linkedScrollRef = useRef<string | null>(null);
+  const openLinkedUser = (users: Record<string, Record<string, UserConfig>>) => {
+    const platform = searchParams.get('platform');
+    const userId = searchParams.get('user');
+    const linked = platform && userId ? users[platform]?.[userId] : undefined;
+    if (!platform || !userId || !linked) return;
+    const key = `${platform}::${userId}`;
+    setSearchQuery('');
+    if (!linked.enabled) setShowDisabled(true);
+    setExpandedKey(key);
+    linkedScrollRef.current = key;
+    setSearchParams((prev) => {
+      const params = new URLSearchParams(prev);
+      params.delete('platform');
+      params.delete('user');
+      return params;
+    }, { replace: true });
+  };
+  useEffect(() => {
+    if (!expandedKey || linkedScrollRef.current !== expandedKey) return;
+    linkedScrollRef.current = null;
+    rowRefs.current[expandedKey]?.scrollIntoView?.({ block: 'center' });
+  }, [expandedKey]);
 
   useEffect(() => { loadAllUsers(); }, [enabledPlatforms.join(','), refreshTrigger]);
 
@@ -517,31 +546,48 @@ export const UserList: React.FC = () => {
     });
   }, [aggregated, searchQuery, showDisabled]);
 
-  const persistUsers = async (platform: string, next: Record<string, Partial<UserConfig>>) => {
-    setLoading(true);
+  // Each edit sends only what it changed on one user; the stored row it gets
+  // back replaces the local one unless a newer edit of that user is in flight.
+  // The row shows the save in progress; only a failure is announced.
+  const persistUser = async (platform: string, userId: string, base: UserConfig, next: UserConfig) => {
+    const change = scopeSettingsChange(base, next, USER_SCOPE_FIELDS);
+    if (!change) return;
+    const rowKey = `${platform}::${userId}`;
+    const version = (userSaveVersionRef.current[rowKey] || 0) + 1;
+    userSaveVersionRef.current[rowKey] = version;
+    // The session note answers the latest route change, whatever else saved since.
+    const routeVersion = 'routing' in change.changes ? (routeSaveVersionRef.current[rowKey] || 0) + 1 : null;
+    if (routeVersion !== null) routeSaveVersionRef.current[rowKey] = routeVersion;
+    setSavingRows((prev) => ({ ...prev, [rowKey]: (prev[rowKey] || 0) + 1 }));
     try {
-      await api.saveUsers({ users: next }, platform);
-      showToast(t('userList.settingsSaved'));
+      const result = await api.patchScopeSettings({ platform, scope: 'user', id: userId, ...change });
+      if (routeVersion !== null && routeSaveVersionRef.current[rowKey] === routeVersion) {
+        setNewSessionRows((prev) => ({ ...prev, [rowKey]: result.needs_new_session === true }));
+      }
+      const stored = result.settings as UserConfig | undefined;
+      if (userSaveVersionRef.current[rowKey] !== version) return;
+      if (stored) {
+        setUsersByPlatform((prev) => ({ ...prev, [platform]: { ...(prev[platform] || {}), [userId]: stored } }));
+      }
     } catch {
       showToast(t('userList.settingsSaveFailed'), 'error');
+      const result = await api.getUsers(platform).catch(() => null);
+      if (result?.ok && userSaveVersionRef.current[rowKey] === version) {
+        setUsersByPlatform((prev) => ({ ...prev, [platform]: result.users || {} }));
+      }
     } finally {
-      setLoading(false);
+      setSavingRows((prev) => ({ ...prev, [rowKey]: Math.max(0, (prev[rowKey] || 1) - 1) }));
     }
   };
 
   const updateUser = (platform: string, userId: string, patch: Partial<UserConfig>) => {
-    const platformUsers = usersByPlatform[platform] || {};
-    const base = platformUsers[userId] || defaultUserConfig();
+    const base = (usersByPlatform[platform] || {})[userId] || defaultUserConfig();
     const next = { ...base, ...patch };
     if (!next.routing || typeof next.routing !== 'object') {
       next.routing = { agent_name: null };
     }
-    const nextPlatformUsers = { ...platformUsers, [userId]: next };
-    setUsersByPlatform((prev) => ({ ...prev, [platform]: nextPlatformUsers }));
-    void persistUsers(platform, { [userId]: canManageAccessMembers ? next : {
-      display_name: next.display_name, custom_cwd: next.custom_cwd,
-      routing: next.routing, show_message_types: next.show_message_types,
-    } });
+    setUsersByPlatform((prev) => ({ ...prev, [platform]: { ...(prev[platform] || {}), [userId]: next } }));
+    void persistUser(platform, userId, base, next);
   };
 
   const handleToggleAdmin = async (platform: string, userId: string, isAdmin: boolean) => {
@@ -595,14 +641,8 @@ export const UserList: React.FC = () => {
       model: null,
       reasoning_effort: null,
       opencode_agent: null,
-      opencode_model: null,
-      opencode_reasoning_effort: null,
       claude_agent: null,
-      claude_model: null,
-      claude_reasoning_effort: null,
       codex_agent: null,
-      codex_model: null,
-      codex_reasoning_effort: null,
     },
   });
 
@@ -675,25 +715,14 @@ export const UserList: React.FC = () => {
             visibleUsers.map((u) => {
               const expanded = expandedKey === u.key;
               const userConfig = u.config;
-              const defaultAgent = agentByName[defaultAgentName || ''] || null;
-              const selectedAgent = agentByName[userConfig.routing?.agent_name || ''] || agentByName[defaultAgentName || ''];
-              const effectiveBackend = selectedAgent?.backend || defaultAgent?.backend || 'opencode';
               const isBot = !userConfig.is_admin && (userConfig.display_name || u.userId).toLowerCase().includes('bot');
               const tone = AVATAR_TONES[hashCode(u.userId) % AVATAR_TONES.length];
               const initials = getInitials(userConfig.display_name, u.userId);
-              const backendModel = userConfig.routing.model || (
-                effectiveBackend === 'claude'
-                  ? userConfig.routing.claude_model
-                  : effectiveBackend === 'codex'
-                    ? userConfig.routing.codex_model
-                    : userConfig.routing.opencode_model
-              );
               const displayName = displayNameForUser(u);
               const metaPrefix = userConfig.enabled
-                ? selectedAgent
-                  ? `${selectedAgent.display_name || selectedAgent.name}${selectedAgent.model ? `/${selectedAgent.model}` : ''}`
-                  : `${getBackendUiMeta(effectiveBackend).label}${backendModel ? `/${backendModel}` : ''}`
+                ? scopeRouteSummary(userConfig.routing, agentByName, defaultAgentName, t)
                 : t('userList.disabled');
+              const saving = (savingRows[u.key] || 0) > 0;
 
               const updateRow = (patch: Partial<UserConfig>) => updateUser(u.platform, u.userId, patch);
               const toggleEnabled = () => updateRow({ enabled: !userConfig.enabled });
@@ -702,6 +731,7 @@ export const UserList: React.FC = () => {
               return (
                 <div
                   key={u.key}
+                  ref={(element) => { rowRefs.current[u.key] = element; }}
                   className={clsx(
                     'rounded-xl border transition-colors',
                     expanded
@@ -798,6 +828,10 @@ export const UserList: React.FC = () => {
                       </span>
                     )}
 
+                    {saving && (
+                      <Loader2 size={14} className="shrink-0 animate-spin text-muted" aria-label={t('common.saving')} />
+                    )}
+
                     {/* Chevron */}
                     {expanded ? (
                       <ChevronUp size={18} className="shrink-0 text-muted" />
@@ -817,6 +851,8 @@ export const UserList: React.FC = () => {
                       defaultAgentName={defaultAgentName}
                       availableMessageTypes={availableMessageTypes(u.platform)}
                       showRequireMention={false}
+                      saving={saving}
+                      routeNotice={newSessionRows[u.key] ? t('channelList.newSessionHint') : null}
                       footerActions={
                         <Button
                           type="button"

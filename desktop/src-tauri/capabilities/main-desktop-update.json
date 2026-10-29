@@ -1,0 +1,20 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-desktop-update",
+  "description": "The Workbench's desktop update popover: read the shell updater state, check for updates, and start the signed install or skip flow. Granted to the main window for the loopback Runtime origin only, never to the bundled bootstrap page.",
+  "local": false,
+  "windows": ["main"],
+  "remote": {
+    "urls": ["http://127.0.0.1:*/*", "http://[\\:\\:1]:*/*"]
+  },
+  "permissions": [
+    "core:event:default",
+    "allow-desktop-update-state",
+    "allow-desktop-update-check",
+    "allow-desktop-update-install",
+    "allow-desktop-update-skip",
+    "allow-desktop-remote-install-allowed",
+    "allow-desktop-remote-install-set",
+    "allow-desktop-update-remote-decline"
+  ]
+}

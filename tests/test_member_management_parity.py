@@ -124,7 +124,12 @@ def test_complete_registered_api_management_inventory():
         for method in (getattr(route, "methods", None) or ())
         if method not in {"HEAD", "OPTIONS"}
     }
-    assert len(endpoints) == 300  # master 292 + 8 MCP Hub routes, classified in tests/test_mcp_hub_api.py
+    assert len(endpoints) == 303  # master 297 + 6 MCP Hub routes, classified in tests/test_mcp_hub_api.py
+    # Editors who use Vault read avault's authorization state; the handler admits only
+    # instance managers to raise the Keychain dialog on the host.
+    for method in ("GET", "POST"):
+        assert (method, "/api/vault/avault-authorization") in endpoints
+        assert http_authorization_policy(method, "/api/vault/avault-authorization").minimum_role == "editor"
     for tool in ("web_search", "web_fetch"):
         retry_route = f"/api/models/hosted-tools/{tool}/services/{{source_id}}/retry"
         assert ("POST", retry_route) in endpoints
@@ -140,6 +145,8 @@ def test_complete_registered_api_management_inventory():
     assert http_authorization_policy("POST", "/api/desktop-mini/session").minimum_role == "editor"
     assert http_authorization_policy("GET", "/api/desktop/capabilities").minimum_role == "member"
     assert http_authorization_policy("GET", "/api/desktop/computer-use/status").minimum_role == "member"
+    assert ("POST", "/api/desktop/update/request") in endpoints
+    assert http_authorization_policy("POST", "/api/desktop/update/request").minimum_role == "member"
     # Additive read-only backend projection inherits native backend-management
     # authorization; it does not grant lower-tier credential-management access.
     assert ("GET", "/api/backend/{name}/connection") in endpoints
@@ -177,6 +184,19 @@ def test_complete_registered_api_management_inventory():
                 if role is None:
                     assert not context.has_role(minimum), (method, raw)
     assert actual_read_roles == baseline_read_roles
+
+
+@pytest.mark.parametrize("role, status", [("editor", 403), ("member", 200), ("owner", 200)])
+def test_authorize_avault_http_needs_instance_management(management_http, monkeypatch, role, status):
+    started = []
+    monkeypatch.setattr(api, "start_avault_authorization", lambda: started.append(True) or {"ok": True})
+    request_http = management_http(role)
+
+    assert request_http("GET", "/api/vault/avault-authorization").status_code == 200
+    response = request_http("POST", "/api/vault/avault-authorization", payload={})
+
+    assert response.status_code == status, response.get_json()
+    assert started == ([True] if status == 200 else [])
 
 
 @pytest.mark.parametrize("role, status", [("editor", 403), ("member", 200), ("owner", 200)])
@@ -426,6 +446,32 @@ def test_member_channel_and_dm_preferences_preserve_access_state(management_http
         assert request("POST", "/api/users", payload={"platform": "telegram", "users": patch}).status_code == 403
     assert set(store.get_users_for_platform("telegram")) == {"bound"}
     assert not store.get_user("bound", platform="telegram").enabled
+
+
+def test_member_scope_patch_preserves_access_state(management_http):
+    """PERMISSIONS-013: the single-scope settings PATCH keeps the same Member boundary."""
+
+    store = SettingsStore.get_instance()
+    store.set_channels_for_platform("telegram", {"chat": ChannelSettings(enabled=True, require_bind=True)})
+    store.set_users_for_platform("telegram", {"bound": UserSettings(is_admin=True, enabled=False, bound_at="old")})
+    store.save()
+    request = management_http()
+
+    def patch(scope, native_id, changes):
+        return request("PATCH", "/api/settings/scope", payload={
+            "platform": "telegram", "scope": scope, "id": native_id, "changes": changes,
+        })
+
+    assert patch("channel", "chat", {"custom_cwd": "/tmp/ordinary"}).status_code == 200
+    assert patch("user", "bound", {"display_name": "成员", "custom_cwd": "/tmp/dm"}).status_code == 200
+    assert patch("channel", "chat", {"require_bind": False}).status_code == 403
+    assert patch("user", "bound", {"enabled": True}).status_code == 403
+    refused = patch("user", "bound", {"is_admin": False})
+    assert refused.status_code == 400 and refused.get_json()["code"] == "invalid_changes"
+    store = SettingsStore.get_instance()
+    channel, user = store.find_channel("chat", platform="telegram"), store.get_user("bound", platform="telegram")
+    assert (channel.custom_cwd, channel.require_bind) == ("/tmp/ordinary", True)
+    assert (user.display_name, user.custom_cwd, user.is_admin, user.enabled) == ("成员", "/tmp/dm", True, False)
 
 
 @pytest.mark.parametrize(

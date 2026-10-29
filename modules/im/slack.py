@@ -208,9 +208,7 @@ class SlackBot(BaseIMClient):
             logger.debug("Failed to access settings store for Slack DM persistence", exc_info=True)
             return
         try:
-            store.update_user(user_id, record, platform="slack")
-        except TypeError:
-            store.update_user(user_id, record)
+            store.update_user_fields(user_id, platform="slack", dm_chat_id=normalized_channel_id)
         except Exception:
             logger.debug("Failed to persist Slack dm_chat_id for %s", user_id, exc_info=True)
             return

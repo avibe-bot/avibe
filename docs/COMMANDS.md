@@ -49,6 +49,7 @@ These commands are registered by the controller today:
 | `/resume` | Resume a recent session |
 | `/setup` | Repair backend login/auth |
 | `/settings` | Open settings UI |
+| `/agent` | Choose the Agent, model, and reasoning effort |
 | `/stop` | Interrupt the active backend execution |
 | `/bind <code>` | Bind a DM user to this Avibe instance |
 | `bind <code>` | Plain-text DM alias for unbound users only |
@@ -71,6 +72,7 @@ Authorization is centralized in `core/auth.py`.
 - `/setcwd <path>`
 - `/set_cwd <path>`
 - `/settings`
+- `/agent`
 - `/setup`
 
 Notes:
@@ -113,6 +115,7 @@ Notes:
 - Commands are parsed from normal text messages that start with `/`.
 - `/resume` uses a text-first flow instead of modals.
 - `/resume 1`, `/resume more`, `/resume latest ...`, and manual resume syntax are especially relevant on WeChat.
+- WeChat shows no buttons or forms, so `/agent` and `/settings` reply with where to change this chat's settings: a link to its row on the Web settings page when Avibe Cloud remote access is set up, otherwise the page to open in the Avibe Workbench.
 
 ### 2.4 Parser normalization and aliases
 
@@ -436,6 +439,7 @@ Open the settings UI for the current scope.
 
 - opens or routes to the settings menu for the current platform
 - allows changing settings such as routing and other scope-level controls through UI flows
+- on a platform without buttons (WeChat), replies with a link to this chat's row on the Web settings page instead
 
 #### Permission
 
@@ -445,6 +449,25 @@ Open the settings UI for the current scope.
 
 - This command is registered even though the exact UI differs by platform.
 - Prefer it when users want a guided configuration flow instead of raw commands.
+
+### `/agent`
+
+Choose the Agent, model, and reasoning effort for the current scope.
+
+#### Syntax
+
+```text
+/agent
+```
+
+#### What it does
+
+- opens the same Agent settings form as the `Agent Settings` button from `/start`
+- on a platform without forms (WeChat), replies with a link to this chat's row on the Web settings page instead
+
+#### Permission
+
+- admin-only
 
 ### `/stop`
 

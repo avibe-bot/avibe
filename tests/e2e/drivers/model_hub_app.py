@@ -248,7 +248,6 @@ class ModelHubTestApp:
                 "VIBE_INTERNAL_DISPATCH_SOCKET": str(
                     self.runtime_root / "dispatch.sock"
                 ),
-                "VIBE_SENTRY_DSN": "",
                 # OpenCode installs @opencode-ai/plugin from npm before its first
                 # request once a plugin is configured; offline, that install fails
                 # at once, and the Avibe plugin imports nothing from it.

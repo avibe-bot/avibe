@@ -1,5 +1,6 @@
 """Command handlers for bot commands like /start, /new, /cwd, etc."""
 
+import asyncio
 import logging
 import os
 import time
@@ -78,6 +79,7 @@ class CommandHandlers(BaseHandler):
             self._t("command.start.commandStart"),
             self._t("command.start.commandCwd"),
             self._t("command.start.commandSetCwd"),
+            self._t("command.start.commandAgent"),
             self._t("command.start.commandResume"),
             self._t("command.start.commandSetup"),
             self._t("command.start.commandStop", agent=agent_display_name),
@@ -701,7 +703,7 @@ class CommandHandlers(BaseHandler):
 
             # Save to user settings
             settings_key = self._get_settings_key(context)
-            settings_manager.set_custom_cwd(settings_key, absolute_path)
+            await asyncio.to_thread(settings_manager.set_custom_cwd, settings_key, absolute_path)
 
             logger.info(f"User {context.user_id} changed cwd to: {absolute_path}")
 
@@ -715,7 +717,7 @@ class CommandHandlers(BaseHandler):
         except Exception as e:
             logger.error(f"Error setting cwd: {e}")
             channel_context = self._get_channel_context(context)
-            await im_client.send_message(channel_context, f"❌ {self._t('error.cwdSetFailed', error=str(e))}")
+            await im_client.send_message(channel_context, f"❌ {self._t('error.cwdSetFailed', error=self._settings_error_text(e))}")
 
     async def handle_change_cwd_submission(
         self,

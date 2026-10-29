@@ -49,6 +49,7 @@ const viewport = vi.hoisted(() => {
 const api = vi.hoisted(() => ({
   getConfig: vi.fn(),
   getVersion: vi.fn(),
+  getMacOSLoginSessionStatus: vi.fn(),
 }));
 const status = vi.hoisted(() => ({ state: 'ready' as const }));
 const inbox = vi.hoisted(() => ({ totalUnread: 0 }));
@@ -138,7 +139,7 @@ vi.mock('./AppsLauncher', async () => {
 vi.mock('./AccountMenu', () => ({ AccountMenu: () => <div data-testid="account-menu" /> }));
 vi.mock('./LanguageSwitcher', () => ({ LanguageSwitcher: () => <div data-testid="language-switcher" /> }));
 vi.mock('./ThemeToggle', () => ({ ThemeToggle: () => <div data-testid="theme-toggle" /> }));
-vi.mock('./VersionBadge', () => ({ VersionBadge: () => null }));
+vi.mock('./VersionBadge', () => ({ VersionBadge: () => <div data-testid="version-badge" /> }));
 vi.mock('./apps/MobileDockDrawer', () => ({
   MobileDockDrawer: () => <div data-testid="mobile-dock-drawer" />,
 }));
@@ -207,12 +208,94 @@ beforeEach(() => {
   i18n = makeI18n();
   api.getConfig.mockResolvedValue({ platforms: { enabled: [] } });
   api.getVersion.mockResolvedValue({ version: 'test' });
+  api.getMacOSLoginSessionStatus.mockResolvedValue({ ok: true, state: 'healthy' });
 });
 
 afterEach(() => {
   cleanup();
   clearMobileProjectsListSnapshot();
   vi.clearAllMocks();
+});
+
+describe('AppShell stale login session notice', () => {
+  it('shows the restart instruction when the service outlived the macOS login session', async () => {
+    api.getMacOSLoginSessionStatus.mockResolvedValue({ ok: true, state: 'stale_login_session' });
+
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="/" element={<div>workbench</div>} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('errors.stale_login_session'));
+  });
+
+  it('reserves notice space on full-height app surfaces', async () => {
+    api.getMacOSLoginSessionStatus.mockResolvedValue({ ok: true, state: 'stale_login_session' });
+
+    render(
+      <MemoryRouter initialEntries={['/apps/terminal']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="/apps/terminal" element={<div data-testid="terminal-surface" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole('alert');
+    expect(document.querySelector('main')?.className).toContain('flex-col');
+    expect(screen.getByTestId('terminal-surface').parentElement?.className).toContain('min-h-0 flex-1 p-0');
+  });
+  it('keeps the notice above mobile chat surfaces', async () => {
+    api.getMacOSLoginSessionStatus.mockResolvedValue({ ok: true, state: 'stale_login_session' });
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-2']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="/chat/:sessionId" element={<div data-testid="chat-surface" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const notice = await screen.findByRole('alert');
+    expect(notice.className).toContain('fixed inset-x-0 top-0 z-50');
+    expect(screen.getByTestId('chat-surface')).toBeTruthy();
+  });
+
+  it('rechecks the state while the Workbench stays visible', async () => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+    const intervalSpy = vi.spyOn(window, 'setInterval').mockImplementation((callback) => {
+      void Promise.resolve().then(() => (callback as () => void)());
+      return 1;
+    });
+    api.getMacOSLoginSessionStatus
+      .mockResolvedValueOnce({ ok: true, state: 'healthy' })
+      .mockResolvedValueOnce({ ok: true, state: 'stale_login_session' });
+
+    try {
+      render(
+        <MemoryRouter initialEntries={['/']}>
+          <Routes>
+            <Route element={<AppShell />}>
+              <Route path="/" element={<div>workbench</div>} />
+            </Route>
+          </Routes>
+        </MemoryRouter>,
+      );
+      await waitFor(() => expect(api.getMacOSLoginSessionStatus).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(api.getMacOSLoginSessionStatus).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy());
+    } finally {
+      intervalSpy.mockRestore();
+    }
+  });
 });
 
 describe('AppShell setup access', () => {
@@ -906,7 +989,7 @@ describe('AppShell remote Apps access', () => {
     const surface = await screen.findByTestId('show-page-surface');
     expect(screen.queryByRole('banner')).toBeNull();
     expect(document.querySelector('nav.fixed.inset-x-0.bottom-0')).toBeNull();
-    expect(surface.parentElement?.className).toContain('h-full p-0');
+    expect(surface.parentElement?.className).toContain('min-h-0 flex-1 p-0');
     expect(surface.parentElement?.className).not.toContain('px-4 py-5');
   });
 
@@ -924,8 +1007,25 @@ describe('AppShell remote Apps access', () => {
     const surface = await screen.findByTestId('builtin-app-surface');
     expect(screen.queryByRole('banner')).toBeNull();
     expect(document.querySelector('nav.fixed.inset-x-0.bottom-0')).toBeNull();
-    expect(surface.parentElement?.className).toContain('h-full p-0');
+    expect(surface.parentElement?.className).toContain('min-h-0 flex-1 p-0');
     expect(surface.parentElement?.className).not.toContain('px-4 py-5');
+  });
+
+  it('keeps the sidebar offset for desktop embedded apps', async () => {
+    viewport.isDesktop = true;
+    render(
+      <MemoryRouter initialEntries={['/apps/terminal']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="/apps/terminal" element={<div data-testid="desktop-terminal-surface" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const surface = await screen.findByTestId('desktop-terminal-surface');
+    expect(document.querySelector('main')?.className).toContain('md:ml-[var(--app-sidebar-w)]');
+    expect(surface.parentElement?.className).toContain('md:px-10 md:py-8');
   });
 
   it.each([
@@ -1060,4 +1160,13 @@ describe('AppShell remote Apps access', () => {
     expect(await screen.findByTestId('workbench-surface')).toBeTruthy();
     expect(screen.queryByTestId('library-surface')).toBeNull();
   });
+});
+
+// Read-only members need the host guidance even though no update control is allowed.
+it.each(['editor', 'viewer'])('mounts the version badge for a read-capable %s', async () => {
+  viewport.isDesktop = true;
+  instanceAuth.capabilities.can_manage_instance = false;
+  instanceAuth.capabilities.can_read_instance = true;
+  render(<MemoryRouter initialEntries={['/']}><Routes><Route element={<AppShell />}><Route index element={<div />} /></Route></Routes></MemoryRouter>);
+  expect(await screen.findByTestId('version-badge')).toBeTruthy();
 });

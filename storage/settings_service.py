@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import asdict, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from sqlalchemy import Connection, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -20,8 +21,10 @@ from config.v2_settings import (
     _make_scoped_key,
     _split_scoped_key,
     make_thread_native_id,
+    LEGACY_ROUTING_ALIASES,
     normalize_routing_settings,
     normalize_show_message_types,
+    routing_from_stored_payload,
     split_thread_native_id,
 )
 from storage.agent_session_rows import reserve_write_lock
@@ -190,8 +193,20 @@ class SQLiteSettingsService:
         )
 
     def save_state(
-        self, state: SettingsState, *, user_context: Any = None, baseline: SettingsState | None = None
+        self,
+        state: SettingsState,
+        *,
+        user_context: Any = None,
+        baseline: SettingsState | None = None,
+        mutate: Callable[[SettingsState], None] | None = None,
     ) -> str:
+        """Persist ``state``, or apply ``mutate`` to the state held under the write lock.
+
+        With ``baseline``, only the scopes ``state`` changed since that load are
+        written. With ``mutate``, ``state`` only receives the committed snapshot:
+        the edit runs against the authoritative rows, so it cannot carry stale
+        copies of anything it did not change.
+        """
         from vibe.authorization import require_instance_role
 
         # General config still accepts Editor preferences and may round-trip
@@ -203,12 +218,15 @@ class SQLiteSettingsService:
         with self.engine.begin() as conn:
             reserve_write_lock(conn)
             current = self._load_state(conn)
-            if baseline is not None and not context.can_manage_access_members:
-                # A protected-field echo may equal the loaded value but no
-                # longer equal the authoritative value. Reject that stale
-                # snapshot before delta merging could silently drop the echo.
-                _require_preserved_access_policy(current, baseline)
-            if baseline is not None:
+            if mutate is not None:
+                state = copy.deepcopy(current)
+                mutate(state)
+            elif baseline is not None:
+                if not context.can_manage_access_members:
+                    # A protected-field echo may equal the loaded value but no
+                    # longer equal the authoritative value. Reject that stale
+                    # snapshot before delta merging could silently drop the echo.
+                    _require_preserved_access_policy(current, baseline)
                 state = _merge_settings_changes(current, draft, baseline)
             if not context.can_manage_access_members:
                 _require_preserved_access_policy(current, state)
@@ -393,14 +411,17 @@ class SQLiteSettingsService:
         current = conn.execute(
             select(scope_settings.c.agent_name).where(scope_settings.c.scope_id == scope_id)
         ).scalar_one_or_none()
+        if item.routing.agent_name == current:
+            # Writing back the stored binding cannot overwrite another writer's
+            # change, so an outdated token alone is not a conflict.
+            return item.routing
         if current == expected:
-            if item.routing.agent_name != current:
-                canonical_agent_name = SQLiteSettingsService._require_enabled_agent_binding(
-                    conn,
-                    item.routing.agent_name,
-                )
-                if canonical_agent_name != item.routing.agent_name:
-                    return replace(item.routing, agent_name=canonical_agent_name)
+            canonical_agent_name = SQLiteSettingsService._require_enabled_agent_binding(
+                conn,
+                item.routing.agent_name,
+            )
+            if canonical_agent_name != item.routing.agent_name:
+                return replace(item.routing, agent_name=canonical_agent_name)
             return item.routing
         if item.routing.agent_name == expected:
             return replace(item.routing, agent_name=current)
@@ -674,19 +695,9 @@ def _active_routing_variant(routing: RoutingSettings) -> str | None:
 
 def _routing_from_row(row: dict[str, Any], payload: dict[str, Any]) -> RoutingSettings:
     routing_payload = payload.get("routing") or {}
-    routing = RoutingSettings(
-        agent_name=routing_payload.get("agent_name") or routing_payload.get("agent"),
-        model=routing_payload.get("model") or routing_payload.get("model_override"),
-        reasoning_effort=routing_payload.get("reasoning_effort") or routing_payload.get("reasoning_effort_override"),
-        opencode_agent=routing_payload.get("opencode_agent"),
-        opencode_model=routing_payload.get("opencode_model"),
-        opencode_reasoning_effort=routing_payload.get("opencode_reasoning_effort"),
-        claude_agent=routing_payload.get("claude_agent"),
-        claude_model=routing_payload.get("claude_model"),
-        claude_reasoning_effort=routing_payload.get("claude_reasoning_effort"),
-        codex_agent=routing_payload.get("codex_agent"),
-        codex_model=routing_payload.get("codex_model"),
-        codex_reasoning_effort=routing_payload.get("codex_reasoning_effort"),
+    aliases = {key: value for key, value in routing_payload.items() if key in LEGACY_ROUTING_ALIASES}
+    routing = routing_from_stored_payload(
+        {key: value for key, value in routing_payload.items() if key not in LEGACY_ROUTING_ALIASES}
     )
     stored_agent_name = row.get("agent_name")
     if stored_agent_name:
@@ -703,6 +714,11 @@ def _routing_from_row(row: dict[str, Any], payload: dict[str, Any]) -> RoutingSe
         routing.claude_agent = routing.claude_agent or variant
     elif routing.agent_name == "opencode":
         routing.opencode_agent = routing.opencode_agent or variant
+    # A row an older release wrote may carry its model or effort only in a
+    # retired per-backend alias; the payload and the columns come first.
+    lifted = routing_from_stored_payload({**aliases, "agent_name": routing.agent_name})
+    routing.model = routing.model or lifted.model
+    routing.reasoning_effort = routing.reasoning_effort or lifted.reasoning_effort
     return routing
 
 

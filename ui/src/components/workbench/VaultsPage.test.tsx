@@ -27,6 +27,7 @@ const api = vi.hoisted(() => ({
   connectWorkbenchEvents: vi.fn(() => () => undefined),
   createVaultRevealContext: vi.fn(),
   getVaultAudit: vi.fn(),
+  getAvaultAuthorization: vi.fn(),
   getVaultGrants: vi.fn(),
   getVaultRequests: vi.fn(),
   listVaultSecrets: vi.fn(),
@@ -121,6 +122,7 @@ function renderPage(context: InstanceAuthorizationValue = remoteOwner, entry = '
 beforeEach(async () => {
   await testI18n.changeLanguage('en');
   eventHandlers.length = 0;
+  api.getAvaultAuthorization.mockResolvedValue({ ok: true, required: false, detected_at: null, attempt: null });
   api.connectWorkbenchEvents.mockImplementation((handlers: WorkbenchEventHandlers) => {
     eventHandlers.push(handlers);
     return () => {
@@ -167,6 +169,18 @@ describe('VaultsPage remote audit history', () => {
 
     expect(await screen.findByRole('button', { name: 'Add secret' })).toBeTruthy();
     expect(screen.queryByText('Read-only')).toBeNull();
+  });
+
+  it('offers Authorize avault before a Vault call fails, and only to an instance manager', async () => {
+    api.getAvaultAuthorization.mockResolvedValue({ ok: true, required: true, detected_at: '2026-10-26T09:00:00Z', attempt: null });
+
+    renderPage(member);
+    expect(await screen.findByRole('button', { name: 'Authorize avault' })).toBeTruthy();
+    cleanup();
+
+    renderPage(editor);
+    expect(await screen.findByText(en.vaults.avaultAuthorization.askAdmin)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Authorize avault' })).toBeNull();
   });
 });
 

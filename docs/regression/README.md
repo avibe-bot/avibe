@@ -241,12 +241,14 @@ config and state to rerun the wizard while keeping CLI logins made in it. The
 master environment is always seeded.
 
 Delete worktree environments promptly after the worktree is merged, abandoned,
-or removed. Before proposing or performing deletion of any regression
+or removed. Before updating, restarting, or deleting any regression
 environment, check its hold with `status` or `reconcile`; if held, tell the user
-who holds it and why, and do not offer a one-click delete. Long-running work
-must hold its environment for as long as it runs. The persistent `master`
-environment should stay running and preserve its product state across normal
-source updates.
+who holds it and why, and do not proceed or offer a one-click delete.
+Long-running work must hold its environment for as long as it runs, including
+on `master` (`hold --target master`). The persistent `master` environment
+should stay running and preserve its product state across normal source
+updates. Other Sessions run long checks on it, so deploy only the merged
+default branch there and verify an unmerged branch on a `worktree` target.
 
 `reconcile` answers "what is actually still here?". It enumerates worktree
 environments from Incus rather than from the runner's metadata, so an

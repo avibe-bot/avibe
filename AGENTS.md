@@ -120,16 +120,19 @@ Hard rules:
   for remote ops
 - use the runner, not raw Incus commands; it owns naming, source sync, state
   preparation, readiness checks, Show Runtime setup, metadata, and cleanup
-- `master` is the long-running unified four-platform environment; keep it online,
-  preserve product state, sync source, and restart the service in place
+- `master` is the long-running unified four-platform environment other Sessions
+  test on: deploy only the merged default branch to it, keep it online, preserve
+  product state, sync source, and restart the service in place; verify an
+  unmerged branch on a `worktree` target
 - `worktree` targets are temporary isolated environments; delete each one
   explicitly with
   `python3 scripts/incus_regression.py delete --target worktree --slug <slug> --yes`
   when merged, abandoned, or stale
-- before proposing or performing deletion of any regression environment, check
-  its hold with `status` or `reconcile`; if held, tell the user who holds it and
-  why, and do not offer a one-click delete. Long-running work must hold its
-  environment for as long as it runs.
+- before updating, restarting, or deleting any regression environment, check its
+  hold with `status` or `reconcile`, since holds do not stop `up` or `down`; if
+  held, tell the user who holds it and why, and do not proceed or offer a
+  one-click delete. Long-running work must hold its environment for as long as
+  it runs.
 - `reconcile` reports every worktree environment held by Incus, including
   environments created outside the runner, and only forgets metadata for
   environments that are no longer present. It never deletes an environment.

@@ -32,6 +32,7 @@ from core.agent_core.ai.provider import (
     ToolCallStart,
 )
 from core.agent_core.ai.registry import ADAPTERS, adapter_class, sent_effort
+from core.agent_core.messages import PROTOCOLS
 from tests.agent_core.ai._wire import build_wire_request
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import (
@@ -76,10 +77,30 @@ def _request(
     )
 
 
-def test_registry_exposes_only_v1_protocols() -> None:
-    assert set(ADAPTERS) == {"anthropic", "openai_chat", "openai_responses"}
-    with pytest.raises(ValueError, match="unsupported provider protocol: google"):
-        adapter_class("google")
+@pytest.mark.parametrize(
+    ("cache_ttl", "cache_ttl_wire", "expected"),
+    [
+        (None, False, None),
+        ("12h", True, {"ttl": "12h"}),
+        ("30m", False, None),  # relays may keep the local estimate, never OpenAI's wire option
+    ],
+)
+def test_responses_prompt_cache_retention_is_wired_only_when_model_hub_confirms_it(
+    cache_ttl: str | None, cache_ttl_wire: bool, expected: dict[str, str] | None,
+) -> None:
+    request = _request("openai_responses", model_id="gpt-6-astra")
+    request = replace(
+        request,
+        endpoint=replace(request.endpoint, cache_ttl=cache_ttl, cache_ttl_wire=cache_ttl_wire),
+    )
+    payload = build_responses_payload(request, request.messages)
+    assert payload.get("prompt_cache_options") == expected
+
+
+def test_registry_has_an_adapter_for_every_protocol() -> None:
+    assert set(ADAPTERS) == set(PROTOCOLS)
+    with pytest.raises(ValueError, match="unsupported provider protocol: bedrock"):
+        adapter_class("bedrock")  # type: ignore[arg-type]
 
 
 def test_each_known_wire_event_has_a_declarative_shape_row() -> None:
@@ -2257,6 +2278,57 @@ async def test_chat_completions_reassembles_parallel_calls() -> None:
     assert isinstance(final, Done)
     assert final.message.stop_reason == "tool_use"
     assert [call.arguments for call in final.message.tool_calls] == [{"path": "a"}, {"path": "b"}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tool_deltas",
+    [
+        pytest.param(
+            [{"index": 0, "id": "call_a", "function": {"name": "read", "arguments": "{}"},
+              "extra_content": {"google": {"thought_signature": "sig-a"}}}],
+            id="with-call",
+        ),
+        pytest.param(
+            [{"index": 0, "id": "call_a", "function": {"name": "read", "arguments": "{}"}},
+             {"index": 0, "extra_content": {"google": {"thought_signature": "sig-a"}}}],
+            id="own-delta",
+        ),
+    ],
+)
+async def test_chat_replays_gemini_tool_call_thought_signature(tool_deltas: list[dict[str, Any]]) -> None:
+    """Gemini answers the request after a tool call with 400 unless that call's thought signature comes back."""
+
+    frames = [{"choices": [{"delta": {"tool_calls": [delta]}}]} for delta in tool_deltas]
+    frames.append({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]})
+    served = "".join(f"data: {json.dumps(frame)}\n\n" for frame in frames) + "data: [DONE]\n\n"
+    answered = 'data: {"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        text = served if len(bodies) == 1 else answered
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=text)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = OpenAIChatAdapter(client)
+        first = await _events(adapter, _request("openai_chat"))
+        assert isinstance(first[-1], Done)
+        history = (
+            UserMessage((TextBlock(text="hello"),)),
+            first[-1].message,
+            ToolResultMessage("call_a", "read", (TextBlock(text="ok"),)),
+        )
+        second = await _events(adapter, _request("openai_chat", messages=history))
+
+    assert isinstance(second[-1], Done)
+    assistant = next(message for message in bodies[1]["messages"] if message["role"] == "assistant")
+    assert assistant["tool_calls"] == [{
+        "id": "call_a",
+        "type": "function",
+        "function": {"name": "read", "arguments": "{}"},
+        "extra_content": {"google": {"thought_signature": "sig-a"}},
+    }]
 
 
 @pytest.mark.asyncio

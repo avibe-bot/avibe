@@ -100,11 +100,52 @@ fn the_bootstrap_capability_grants_only_the_three_shell_commands() {
 }
 
 #[test]
-fn the_shell_enables_only_its_five_capabilities() {
+fn the_shell_enables_only_its_declared_capabilities() {
     assert_eq!(
         config()["app"]["security"]["capabilities"],
-        serde_json::json!(["bootstrap", "window-drag", "pet", "main-pet-bind", "main-computer-use"])
+        serde_json::json!([
+            "bootstrap",
+            "window-drag",
+            "pet",
+            "main-pet-bind",
+            "main-pet-settings",
+            "main-computer-use",
+            "main-desktop-update"
+        ])
     );
+}
+
+#[test]
+fn desktop_update_commands_are_workbench_scoped() {
+    let capability = read_json(crate_dir().join("capabilities/main-desktop-update.json"));
+    assert_eq!(capability["windows"], serde_json::json!([MAIN_WINDOW]));
+    assert_eq!(capability["local"], Value::Bool(false));
+    assert_eq!(
+        capability["permissions"],
+        serde_json::json!([
+            "core:event:default",
+            "allow-desktop-update-state",
+            "allow-desktop-update-check",
+            "allow-desktop-update-install",
+            "allow-desktop-update-skip",
+            "allow-desktop-remote-install-allowed",
+            "allow-desktop-remote-install-set",
+            "allow-desktop-update-remote-decline"
+        ])
+    );
+    let source = shipping_source("src/lib.rs");
+    for command in [
+        "updater::desktop_update_state",
+        "updater::desktop_update_check",
+        "updater::desktop_update_install",
+        "updater::desktop_update_skip",
+        "updater::desktop_remote_install_allowed",
+        "updater::desktop_remote_install_set",
+        "updater::desktop_update_remote_decline",
+    ] {
+        assert!(source.contains(command), "missing Workbench updater command {command}");
+    }
+    assert!(shipping_source("src/updater.rs").contains("This command is only available to the Avibe Workbench."));
 }
 
 #[test]
@@ -209,7 +250,7 @@ fn notification_lifecycle_follows_runtime_ownership_not_webview_visibility_or_ss
 }
 
 #[test]
-fn deep_links_have_native_entry_points_without_a_workbench_callable_command() {
+fn deep_links_have_native_entry_points_and_the_updates_popover_route() {
     let source = shipping_source("src/lib.rs");
     let build = shipping_source("build.rs");
     for required in [
@@ -226,10 +267,18 @@ fn deep_links_have_native_entry_points_without_a_workbench_callable_command() {
     }
     assert!(!build.contains("deep_link") && !build.contains("window_state"));
     assert!(!source.contains("on_open_url"));
-    // The one script the shell runs in the Workbench is its constant Settings
-    // request; nothing page-supplied is ever evaluated.
-    assert_eq!(source.matches(".eval(").count(), 1);
+    // The shell evaluates only its fixed Settings and Updates event scripts;
+    // nothing page-supplied is ever evaluated.
+    assert_eq!(source.matches(".eval(").count(), 3);
     assert!(source.contains("window.eval(open_settings_script())"));
+    assert!(source.contains("window.eval(open_updates_script())"));
+    assert!(source.contains("avibe:desktop-open-updates"));
+    assert!(source.contains("request_desktop_updates(app)"));
+    assert!(source.contains("take_desktop_update_request(webview.app_handle())"));
+    assert!(source.contains("if !open_desktop_updates(webview.app_handle())"));
+    assert!(source.contains("avibe://updates-fallback"));
+    assert!(source.contains("OPEN_UPDATES_FALLBACK_URL"));
+    assert!(shipping_source("src/pet.rs").contains("link != crate::updater::OPEN_URL"));
     assert!(!source.contains("RunEvent::Opened"));
     let receiver = source
         .split("fn receive_native_deep_link(")
@@ -402,7 +451,21 @@ fn every_shell_command_is_declared_so_its_permission_exists() {
         "open_install_docs",
         "computer_use_enable",
         "computer_use_open_permission",
+        "desktop_update_state",
+        "desktop_update_check",
+        "desktop_update_install",
+        "desktop_update_skip",
+        "pet_settings",
+        "pet_set_enabled",
+        "pet_set_shortcut",
+        "pet_reset_shortcuts",
+        "pet_set_voice_mode",
+        "pet_reset_voice_shortcut",
+        "desktop_remote_install_allowed",
+        "desktop_remote_install_set",
+        "desktop_update_remote_decline",
         "pet_ready",
+        "pet_context_menu",
         "pet_set_expanded",
         "pet_drag",
         "pet_settle",
@@ -692,6 +755,7 @@ fn the_pet_learns_the_shell_drags_it_from_one_top_level_marker() {
 #[test]
 fn the_workbench_learns_it_runs_in_the_shell_from_one_top_level_marker() {
     let source = shipping_source("src/lib.rs");
+    let pet_source = shipping_source("src/pet.rs");
     let builder = source
         .split("fn ensure_main_window(")
         .nth(1)
@@ -714,10 +778,24 @@ fn the_workbench_learns_it_runs_in_the_shell_from_one_top_level_marker() {
     // Show Page content runs in subframes, and WebView2 injects there regardless.
     assert!(marker.contains("if (window.self === window.top)"));
     assert!(marker.contains("Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true })"));
+    assert!(builder.contains(".initialization_script(pet::DESKTOP_PET_SETTINGS_MARKER)"));
+    let settings_marker = pet_source
+        .split("const DESKTOP_PET_SETTINGS_MARKER: &str =")
+        .nth(1)
+        .expect("Desktop Mini settings marker")
+        .split("\";\n")
+        .next()
+        .expect("settings marker literal");
+    assert!(settings_marker.contains("if (window.self === window.top)"));
+    assert!(settings_marker.contains("__AVIBE_DESKTOP_PET_SETTINGS__"));
     let reader = read_to_string(&crate_dir().join("../../ui/src/lib/desktopShell.ts"));
     assert!(
         reader.contains("window.__AVIBE_DESKTOP_SHELL__ === true"),
         "the Workbench must read the same marker the shell defines"
+    );
+    assert!(
+        reader.contains("window.__AVIBE_DESKTOP_PET_SETTINGS__ === true"),
+        "Settings must probe the Desktop Mini settings marker"
     );
 }
 
@@ -1052,19 +1130,49 @@ fn explicit_stop_does_not_schedule_automatic_recovery() {
 }
 
 #[test]
-fn updates_have_one_native_owner_and_no_remote_install_permission() {
+fn updates_have_one_native_owner_and_one_scoped_workbench_control_path() {
     let source = include_str!("../src/lib.rs");
     let updater = include_str!("../src/updater.rs");
-    // The shell downloads and verifies updates itself; no plugin exposes a
-    // second update path.
+    // The shell downloads and verifies updates itself; the Workbench only
+    // invokes the shell's existing state machine.
     assert!(!source.contains("tauri_plugin_updater"));
     assert!(source.contains("updater::check(app.handle().clone(), false)"));
-    assert!(source.contains("updater::MENU_ID => updater::check(app.clone(), true)"));
+    assert!(source.contains("updater::MENU_ID =>"));
     assert!(source.contains("url.as_str() == updater::OPEN_URL"));
     assert!(updater.contains("MessageDialogButtons::YesNoCancelCustom"));
     assert!(updater.contains("update::install_verified(download, &artifact, KEY"));
     assert!(!include_str!("../capabilities/bootstrap.json").contains("updater:"));
-    assert!(!include_str!("../build.rs").contains("update_install"));
+    assert!(include_str!("../build.rs").contains("desktop_update_install"));
+}
+
+#[test]
+fn windows_remote_update_refuses_an_unwritable_install_before_shell_exit() {
+    let installer = include_str!("../src/update_install.rs");
+    let helper = include_str!("../src/update_windows.ps1");
+    let windows_installer = installer
+        .split("#[cfg(target_os = \"windows\")]")
+        .nth(1)
+        .expect("Windows installer")
+        .split("#[cfg(not(any(target_os = \"macos\", target_os = \"windows\")))]")
+        .next()
+        .expect("Windows installer body");
+
+    let marker = helper.find("'requires-host'").expect("requires-host marker");
+    let ready = helper.find("[IO.File]::WriteAllText($ready").expect("ready marker");
+    assert!(
+        marker < ready,
+        "write access must be proved before the helper permits shell exit"
+    );
+
+    let wait_for_marker = windows_installer
+        .find("while !staging.path().join(\"ready\").exists() && !requires_host.exists()")
+        .expect("Rust waits for ready or requires-host");
+    let before_exit = windows_installer.find("before_exit();").expect("pre-exit receipt");
+    assert!(
+        wait_for_marker < before_exit,
+        "a privileged install must return requires_host before the shell records restart and exits"
+    );
+    assert!(windows_installer.contains("return Err(\"requires_host\".into());"));
 }
 
 #[test]
@@ -1174,15 +1282,30 @@ fn the_pet_and_the_workbench_get_only_their_pet_commands_on_loopback_pages() {
         pet["permissions"],
         serde_json::json!([
             "allow-pet-ready",
+            "allow-pet-context-menu",
             "allow-pet-set-expanded",
             "allow-pet-drag",
             "allow-pet-settle",
             "allow-pet-hit-regions",
             "allow-pet-set-dismissed",
+            "allow-pet-reset-voice-shortcut",
             "allow-pet-bind",
             "allow-pet-unbind",
             "allow-pet-open",
             "core:window:allow-start-dragging"
+        ])
+    );
+    let settings = read_json(crate_dir().join("capabilities/main-pet-settings.json"));
+    assert_eq!(settings["windows"], serde_json::json!([MAIN_WINDOW]));
+    assert_eq!(settings["local"], false);
+    assert_eq!(
+        settings["permissions"],
+        serde_json::json!([
+            "allow-pet-settings",
+            "allow-pet-set-enabled",
+            "allow-pet-set-shortcut",
+            "allow-pet-reset-shortcuts",
+            "allow-pet-set-voice-mode"
         ])
     );
     let workbench = read_json(crate_dir().join("capabilities/main-pet-bind.json"));
@@ -1207,7 +1330,7 @@ fn the_pet_and_the_workbench_get_only_their_pet_commands_on_loopback_pages() {
         true,
         "a transparent pet needs it on macOS"
     );
-    for grant in [&pet, &workbench] {
+    for grant in [&pet, &workbench, &settings] {
         let patterns = loopback_patterns(grant);
         for allowed in ["http://127.0.0.1:5123/pet", "http://[::1]:6174/chat/abc"] {
             let url = url::Url::parse(allowed).unwrap();

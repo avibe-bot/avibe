@@ -5,6 +5,7 @@ import pytest
 
 from core import update_checker
 from vibe import api
+from vibe.ui_server import app
 
 # What the desktop updater writes for an available release; its own tests write
 # the same document (desktop/runtime-host/src/update_status.rs).
@@ -113,6 +114,8 @@ DESKTOP_NO_CONCLUSION = {
     "latest": None,
     "has_update": False,
     "error": None,
+    "remote_install_allowed": False,
+    "remote_request": None,
     "build": {"kind": "package"},
     "managed_by": "desktop",
 }
@@ -139,6 +142,59 @@ def test_desktop_managed_runtime_relays_an_up_to_date_desktop(monkeypatch, tmp_p
     (tmp_path / "update-status.json").write_text(json.dumps(status), encoding="utf-8")
 
     assert api.get_version_info() == {**DESKTOP_NO_CONCLUSION, "latest": "3.2.2-rc.13"}
+
+
+def test_desktop_managed_runtime_relays_remote_update_progress(monkeypatch, tmp_path) -> None:
+    _desktop_managed(monkeypatch, tmp_path)
+    status = json.loads(DESKTOP_UPDATE_STATUS_FIXTURE.read_text(encoding="utf-8"))
+    status.update(
+        remote_install_allowed=True,
+        remote_request={
+            "request_id": "request-1",
+            "target": "3.2.3",
+            "phase": "downloading",
+            "progress": 65,
+            "error_code": None,
+            "updated_at": "2026-10-29T02:00:00Z",
+        },
+    )
+    (tmp_path / "update-status.json").write_text(json.dumps(status), encoding="utf-8")
+
+    result = api.get_version_info()
+    assert result["remote_install_allowed"] is True
+    assert result["remote_request"] == status["remote_request"]
+
+
+@pytest.mark.parametrize("phase", [[], {}], ids=["list-phase", "object-phase"])
+def test_version_endpoint_keeps_the_ordinary_result_for_a_malformed_remote_subsection(
+    monkeypatch,
+    tmp_path,
+    phase,
+) -> None:
+    _desktop_managed(monkeypatch, tmp_path)
+    status = json.loads(DESKTOP_UPDATE_STATUS_FIXTURE.read_text(encoding="utf-8"))
+    status.update(
+        remote_install_allowed=True,
+        remote_request={
+            "request_id": "request-1",
+            "target": "3.2.3",
+            "phase": phase,
+            "progress": None,
+            "error_code": None,
+            "updated_at": "2026-10-29T02:00:00Z",
+        },
+    )
+    (tmp_path / "update-status.json").write_text(json.dumps(status), encoding="utf-8")
+
+    response = app.test_client().get("/api/version", base_url="http://127.0.0.1")
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        **DESKTOP_NO_CONCLUSION,
+        "latest": "3.2.3",
+        "has_update": True,
+        "remote_install_allowed": True,
+    }
 
 
 def _fixture_with(**changes) -> str:

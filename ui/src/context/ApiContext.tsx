@@ -8,6 +8,7 @@ import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
 import type { AgentGraphParams, AgentGraphResult, AgentGraphVisibility } from '../lib/agentGraph';
 import { onPageReactivated, type PageReactivationListener } from '../lib/pageActivity';
+import type { ScopeKind, ScopeSettingsChange } from '../lib/scopeSettingsPatch';
 import type { ShowPagePayload } from '../lib/showPageLinks';
 import { visibilityActivityEvents } from '../lib/sessionVisibilityEvents';
 import { normalizeSessionInfo, type InstanceCapabilities, type SessionInfo } from '../lib/sessionInfo';
@@ -53,6 +54,24 @@ export type { ConfigMutation };
 // The workbench Dock API response shape ({ ok, dock }); the Dock document type
 // itself lives with the DockProvider that owns reconciliation.
 export type DockResponse = { ok: boolean; dock: DockDoc };
+export type ScopeSettingsPatchRequest = ScopeSettingsChange & {
+  platform: string;
+  scope: ScopeKind;
+  id: string;
+  thread_id?: string;
+};
+export type ScopeSettingsPatchResult = {
+  ok: boolean;
+  platform: string;
+  scope: ScopeKind;
+  id: string;
+  thread_id?: string;
+  /** The scope's stored row, in the shape the settings reads return it. */
+  settings: unknown;
+  /** After a routing change: whether the scope's current session keeps another
+   *  Agent until a new session starts there; null when that is unknown. */
+  needs_new_session?: boolean | null;
+};
 
 // Global workbench toggles persisted server-side in state_meta. Currently just
 // the background-work banner switch (spec req 2); read by ChatPage (to gate the
@@ -586,6 +605,7 @@ export type ApiContextType = {
   getSettings: (platform?: string) => Promise<any>;
   saveSettings: (payload: any, platform?: string) => Promise<any>;
   saveThreadSettings: (platform: string, channelId: string, threadId: string, settings: any) => Promise<any>;
+  patchScopeSettings: (request: ScopeSettingsPatchRequest) => Promise<ScopeSettingsPatchResult>;
   deleteThreadSettings: (platform: string, channelId: string, threadId: string) => Promise<any>;
   getUsers: (platform?: string) => Promise<any>;
   saveUsers: (payload: any, platform?: string) => Promise<any>;
@@ -646,6 +666,7 @@ export type ApiContextType = {
   detectCli: (binary: string, backend?: string) => Promise<CliDetectionResult>;
   installAgent: (name: string) => Promise<InstallResult>;
   listDependencies: (options?: DependencyReadOptions) => Promise<DependenciesResult>;
+  getMacOSLoginSessionStatus: () => Promise<MacOSLoginSessionStatus>;
   installDependency: (dep: string) => Promise<InstallResult>;
   getBackendConnection: (name: AgentBackendId) => Promise<BackendConnectionState>;
   getBackendRuntime: (name: string, cliPath?: string) => Promise<BackendRuntimeInfo>;
@@ -736,8 +757,12 @@ export type ApiContextType = {
     backend: string,
   ) => Promise<PickerAgentCatalog | null>;
   getLogs: (lines?: number, source?: string) => Promise<{ logs: LogEntry[]; total: number; source: string; sources: LogSource[] }>;
-  getVersion: (options?: { cache?: boolean }) => Promise<VersionInfo>;
-  doUpgrade: () => Promise<UpgradeResult>;
+  getVersion: (options?: { cache?: boolean; background?: boolean; signal?: AbortSignal }) => Promise<VersionInfo>;
+  requestDesktopUpdate: (
+    targetVersion: string,
+    options?: { confirmInterrupt?: boolean },
+  ) => Promise<DesktopRemoteUpdateResult>;
+  doUpgrade: (options?: { confirmInterrupt: boolean }) => Promise<UpgradeResult>;
   browseDirectory: (path: string, showHidden?: boolean) => Promise<{ ok: boolean; path?: string; parent?: string | null; dirs?: { name: string; path: string }[]; error?: string }>;
   browseFavorites: () => Promise<{ ok: boolean; system?: string; favorites?: { key: string; path: string }[]; error?: string }>;
   browseMkdir: (path: string) => Promise<{ path: string }>;
@@ -872,6 +897,9 @@ export type ApiContextType = {
   getVaultVmk: () => Promise<VaultVmkResult>;
   getVaultPubkey: () => Promise<{ ok: boolean; public_key: string; fingerprint: string }>;
   getVaultAgentPubkey: () => Promise<{ ok: boolean; public_key: string; fingerprint: string }>;
+  getAvaultAuthorization: () => Promise<AvaultAuthorizationStatus>;
+  /** Starts the one-time macOS Keychain authorization, or joins the one already running. */
+  authorizeAvault: () => Promise<AvaultAuthorizationStatus>;
   getVaultSandboxRootMetadata: () => Promise<VaultSandboxRootMetadataResult>;
   /** One batch of signed agent-delivery contexts for every protected member of a request (§7.1). */
   createVaultAgentBindingsBatch: (payload: {
@@ -1963,6 +1991,8 @@ export type VersionInfo = {
   has_update: boolean;
   error: string | null;
   managed_by?: 'desktop';
+  remote_install_allowed?: boolean;
+  remote_request?: DesktopRemoteUpdateRequest | null;
   build?: {
     kind: 'package' | 'source';
     revision?: string;
@@ -1970,13 +2000,66 @@ export type VersionInfo = {
   };
 };
 
-export type UpgradeResult = {
+export type DesktopRemoteUpdatePhase =
+  | 'requested'
+  | 'acknowledged'
+  | 'checking'
+  | 'awaiting_host'
+  | 'downloading'
+  | 'installing'
+  | 'restarting'
+  | 'completed'
+  | 'failed'
+  | 'declined'
+  | 'expired';
+
+export type DesktopRemoteUpdateRequest = {
+  request_id: string;
+  target: string;
+  phase: DesktopRemoteUpdatePhase;
+  progress: number | null;
+  error_code: string | null;
+  updated_at: string;
+};
+
+export type DesktopRemoteUpdateErrorCode =
+  | 'not_desktop_managed'
+  | 'no_update_available'
+  | 'update_in_progress'
+  | 'desktop_shell_unavailable'
+  | 'confirmation_required';
+
+export type DesktopRemoteUpdateResult =
+  | { ok: true; request_id: string; delivery: 'prompt' | 'install' }
+  | UpdateConfirmationRequired
+  | {
+      ok: false;
+      error: Exclude<DesktopRemoteUpdateErrorCode, 'confirmation_required'>;
+      message?: string;
+    };
+
+export type UpdateInterruptionCounts = {
+  agents: number;
+  watches: number;
+  tasks: number;
+  total: number;
+  unknown: boolean;
+};
+
+export type UpdateConfirmationRequired = {
+  ok: false;
+  error: 'confirmation_required';
+  counts: UpdateInterruptionCounts;
+};
+
+export type UpgradeResult = UpdateConfirmationRequired | {
   ok: boolean;
   message: string;
   output: string | null;
   activation_notice?: string | null;
   restarting: boolean;
   code?: string;
+  error?: never;
 };
 
 export type InstallResult = {
@@ -2023,11 +2106,37 @@ export type DependencyItem = {
   release_state?: 'published' | 'unavailable' | null;
   download_error?: DependencyDownloadError | null;
   inspection_error?: { kind: string; message: string } | null;
+  /** avault only: the binary cannot read the Vault key until the user authorizes it once. */
+  authorization_required?: boolean;
+};
+
+/** avault's one-time macOS Keychain authorization (see vibe/avault_authorization.py). */
+export type AvaultAuthorizationAttempt = {
+  id: string;
+  state: 'running' | 'succeeded' | 'failed';
+  reason?: string | null;
+  detail?: string;
+  started_at: string;
+  finished_at?: string;
+};
+
+export type AvaultAuthorizationStatus = {
+  ok: boolean;
+  required: boolean;
+  detected_at: string | null;
+  attempt: AvaultAuthorizationAttempt | null;
+  login_session_state?: MacOSLoginSessionStatus['state'];
+};
+
+export type MacOSLoginSessionStatus = {
+  ok: boolean;
+  state: 'healthy' | 'stale_login_session' | 'no_gui_session' | 'unknown' | 'not_applicable';
 };
 
 export type DependenciesResult = {
   ok: boolean;
   deps: DependencyItem[];
+  login_session_state?: MacOSLoginSessionStatus['state'];
   reconciling?: boolean;
   reconciling_dependencies?: string[];
 };
@@ -3527,6 +3636,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       thread_id: threadId,
       settings,
     }),
+    patchScopeSettings: (request) => patchJson('/api/settings/scope', request),
     deleteThreadSettings: (platform, channelId, threadId) => deleteJson(
       `/api/settings/thread?platform=${encodeURIComponent(platform)}&channel_id=${encodeURIComponent(channelId)}&thread_id=${encodeURIComponent(threadId)}`,
     ),
@@ -3650,6 +3760,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const path = `/api/dependencies${query ? `?${query}` : ''}`;
       return withApiDeadline(15_000, signal, (requestSignal) => getJson(path, { signal: requestSignal }));
     },
+    getMacOSLoginSessionStatus: () => getJson('/api/macos/login-session'),
     installDependency: (dep) => startAndPollDependencyInstall(dep),
     getBackendConnection: (name) => getJson(`/api/backend/${encodeURIComponent(name)}/connection`),
     getBackendRuntime: (name, cliPath) => getJson(`/api/backend/${encodeURIComponent(name)}/runtime${cliPath === undefined ? '' : `?cli_path=${encodeURIComponent(cliPath)}`}`),
@@ -3761,8 +3872,48 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         })
         .catch(() => null),
     getLogs: (lines = 500, source) => postJson('/api/logs', source ? { lines, source } : { lines }),
-    getVersion: (options) => getCachedJson('/api/version', 10_000, options),
-    doUpgrade: () => postJson('/api/upgrade', {}),
+    getVersion: (options) => options?.background
+      ? withApiDeadline(10_000, options.signal, async (signal) => {
+        const response = await apiFetch('/api/version', { signal });
+        // Reconnect failures belong to the update status, not repeated toasts.
+        if (!response.ok) throw new ApiError('Version read unavailable', response.status, null);
+        const payload = await response.json();
+        if (typeof payload?.current !== 'string') throw new Error('Invalid version response');
+        return payload as VersionInfo;
+      })
+      : getCachedJson('/api/version', 10_000, options),
+    requestDesktopUpdate: async (targetVersion, options) => {
+      const { res, payloadJson } = await requestJson(
+        '/api/desktop/update/request',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            target_version: targetVersion,
+            confirm_interrupt: options?.confirmInterrupt ?? false,
+          }),
+        },
+        '/api/desktop/update/request',
+        { handleError: false },
+      );
+      if (!res.ok && !['not_desktop_managed', 'no_update_available', 'update_in_progress',
+        'desktop_shell_unavailable', 'confirmation_required'].includes(payloadJson?.error)) {
+        throw new ApiError('Desktop update request failed', res.status, payloadJson?.error ?? null);
+      }
+      return payloadJson as DesktopRemoteUpdateResult;
+    },
+    doUpgrade: async (options) => {
+      if (!options) return postJson('/api/upgrade', {});
+      const { res, payloadJson } = await requestJson('/api/upgrade', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirm_interrupt: options.confirmInterrupt }),
+      }, '/api/upgrade', { handleError: false });
+      if (!res.ok && payloadJson?.error !== 'confirmation_required') {
+        throw new ApiError('Upgrade request failed', res.status, payloadJson?.error ?? null);
+      }
+      return payloadJson as UpgradeResult;
+    },
     browseDirectory: (path, showHidden) => postJson('/api/browse', { path, show_hidden: showHidden || false }),
     browseFavorites: () => getJson('/api/browse/favorites'),
     browseMkdir: (path) => postJson('/api/browse/mkdir', { path }),
@@ -4098,6 +4249,15 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     listVaultSecrets: (opts) => getCachedJson('/api/vault/secrets', 1500, opts),
     getVaultPubkey: () => getCachedJson('/api/vault/pubkey', 1500),
     getVaultAgentPubkey: () => getCachedJson('/api/vault/agent/pubkey', 1500),
+    getAvaultAuthorization: async () => {
+      // Polled while an attempt runs: a failed read rejects quietly, so the caller keeps
+      // its last status and keeps polling instead of taking an error body for a status.
+      const path = '/api/vault/avault-authorization';
+      const res = await apiFetch(path);
+      if (!res.ok) throw new ApiError(`Request failed: ${path} (${res.status})`, res.status, null);
+      return res.json();
+    },
+    authorizeAvault: () => postJson('/api/vault/avault-authorization', {}),
     getVaultSandboxRootMetadata: () => getCachedJson('/api/vault/sandbox/root-metadata', 1500, { handleError: false }),
     createVaultAgentBindingsBatch: (payload) =>
       postJson('/api/vault/agent-bindings:batch', payload, { handleError: false }),

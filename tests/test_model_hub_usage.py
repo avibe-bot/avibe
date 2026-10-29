@@ -70,7 +70,10 @@ def _as_released(counts: dict) -> dict:
         **counts,
         "cache_write_input_tokens": 0,
         "cache_write_1h_input_tokens": 0,
+        "cache_write_30m_input_tokens": 0,
+        "cache_write_12h_input_tokens": 0,
         "cache_write_uncaptured_reports": counts["token_reports"],
+        "cache_write_ttl_uncaptured_reports": 0,
     }
 
 
@@ -637,7 +640,10 @@ def test_modern_hourly_report_is_dense_and_keeps_source_model_identity(
         "output_tokens": 10,
         "cache_write_input_tokens": 0,
         "cache_write_1h_input_tokens": 0,
+        "cache_write_30m_input_tokens": 0,
+        "cache_write_12h_input_tokens": 0,
         "cache_write_uncaptured_reports": 0,
+        "cache_write_ttl_uncaptured_reports": 0,
     }
     measured = {
         (row["source_id"], row["model_id"]): row
@@ -3308,7 +3314,10 @@ def test_a_persisted_report_count_above_its_requests_is_repaired_on_read(
         # uncaptured cache-write evidence.
         "cache_write_input_tokens": 0,
         "cache_write_1h_input_tokens": 0,
+        "cache_write_30m_input_tokens": 0,
+        "cache_write_12h_input_tokens": 0,
         "cache_write_uncaptured_reports": 3,
+        "cache_write_ttl_uncaptured_reports": 0,
     }
 
 

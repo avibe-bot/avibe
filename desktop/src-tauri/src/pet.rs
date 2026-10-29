@@ -10,23 +10,24 @@
 //! and is reconciled whenever that record is written.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use avibe_runtime_host::deep_link::parse_deep_link;
 use avibe_runtime_host::pet::{
-    area_for, clamp_anchor, default_anchor, frame_at, hovering, place_moved, rescale, shortcut_label, upward_frame,
-    valid_session_id, FrameState, FrameStep, HitRect, LayoutSnapshot, LogicalRect, PageKind, PetAnchor, PetBinding,
-    PetFrame, PetIntent, PetLayout, PetReady, PetStore, WorkArea, SHORTCUT_PRESETS,
+    area_for, clamp_anchor, default_anchor, frame_at, hovering, place_moved, rescale, upward_frame, valid_session_id,
+    FrameState, FrameStep, HitRect, LayoutSnapshot, LogicalRect, PageKind, PetAnchor, PetBinding, PetFrame, PetIntent,
+    PetLayout, PetReady, PetStore, ShortcutEvent, VoiceMode, VoiceShortcutState, WorkArea, DEFAULT_SHORTCUT,
+    DEFAULT_TOGGLE_SHORTCUT,
 };
 use avibe_runtime_host::LoopbackOrigin;
 use serde::{Deserialize, Serialize};
-use tauri::menu::{CheckMenuItem, MenuItem, Submenu};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem};
 use tauri::{
     AppHandle, Manager, Monitor, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
-use tauri_plugin_global_shortcut::GlobalShortcutExt;
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 use url::Url;
 
 use crate::pet_native::{primary_button_down, set_frame, start_drag};
@@ -34,12 +35,14 @@ use crate::{native_catalog_for_locales, Shell, DESKTOP_SHELL_MARKER, MAIN_WINDOW
 
 pub const PET_WINDOW: &str = "pet";
 pub const MENU_ID: &str = "show-pet";
-pub const SHORTCUT_MENU_PREFIX: &str = "pet-shortcut:";
+pub const SHORTCUT_SETTINGS_MENU_ID: &str = "pet-shortcut-settings";
+pub const HIDE_MENU_ID: &str = "hide-pet";
 const PET_PATH: &str = "/pet";
 const SUMMON_EVENT: &str = "avibe:pet-summon";
 const BOUND_EVENT: &str = "avibe:pet-bound";
 const HOVER_EVENT: &str = "avibe:pet-hover";
 const LAYOUT_EVENT: &str = "avibe:pet-layout";
+pub const SETTINGS_EVENT: &str = "avibe:desktop-pet-settings";
 /// A drag settles before its anchor is saved, as the main window's frame does.
 const MOVE_SETTLE: Duration = Duration::from_millis(400);
 /// How often a drag checks whether the button is still down.
@@ -59,17 +62,25 @@ const WINDOW_GONE: &str = "The desktop pet window is gone.";
 /// "Show in pet" only when this is present.
 pub const DESKTOP_PET_MARKER: &str =
     "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_PET__', { value: true });";
+/// A newer shell capability than the original pet window contract. The
+/// Workbench probes this before rendering settings controls.
+pub const DESKTOP_PET_SETTINGS_MARKER: &str =
+    "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_PET_SETTINGS__', { value: true });";
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativePetCatalog {
     toggle: String,
-    shortcut_menu: String,
-    shortcut_unavailable: String,
+    shortcut_settings: String,
+    hide: String,
 }
 
 fn native_pet_catalog() -> NativePetCatalog {
     native_catalog_for_locales(sys_locale::get_locales()).pet
+}
+
+fn native_pet_menu_accelerator(store: &PetStore) -> &str {
+    store.toggle_shortcut()
 }
 
 #[derive(Clone, Copy)]
@@ -85,8 +96,12 @@ pub struct Pet {
     /// this origin.
     window_origin: Mutex<Option<LoopbackOrigin>>,
     frame: Mutex<Frame>,
-    /// The accelerator the OS refused, shown in the tray until a registration succeeds.
-    shortcut_error: Mutex<Option<String>>,
+    /// Every accelerator the OS refused. Lifecycle reconciliation can fail
+    /// independently for both actions; Settings must name both.
+    shortcut_errors: Mutex<Vec<PetShortcutError>>,
+    registered_shortcuts: Mutex<Vec<String>>,
+    voice_shortcut_state: Mutex<VoiceShortcutState>,
+    toggle_shortcut_down: Mutex<bool>,
     move_generation: Arc<AtomicU64>,
     /// Advances with every drag and every new window, so a stale drag's steps
     /// change nothing.
@@ -99,13 +114,16 @@ pub struct Pet {
 impl Pet {
     pub fn new(path: PathBuf) -> Self {
         Self {
-            store: Mutex::new(PetStore::load(path)),
+            store: Mutex::new(PetStore::load(path, shortcut_matches)),
             window_origin: Mutex::new(None),
             frame: Mutex::new(Frame {
                 expanded: false,
                 state: FrameState::new(PetFrame::default()),
             }),
-            shortcut_error: Mutex::new(None),
+            shortcut_errors: Mutex::new(Vec::new()),
+            registered_shortcuts: Mutex::new(Vec::new()),
+            voice_shortcut_state: Mutex::new(VoiceShortcutState::default()),
+            toggle_shortcut_down: Mutex::new(false),
             move_generation: Arc::new(AtomicU64::new(0)),
             drag_generation: AtomicU64::new(0),
             hit_regions: Mutex::new(Vec::new()),
@@ -122,13 +140,39 @@ impl Pet {
         self.store().enabled()
     }
 
+    fn set_enabled(&self, enabled: bool) -> Result<(), String> {
+        self.store().set_enabled(enabled).map_err(|error| error.to_string())?;
+        self.reset_voice_shortcut_state();
+        if !enabled {
+            // Unregistering voice means the old key-up event can no longer arrive.
+            *lock(&self.voice_shortcut_state) = VoiceShortcutState::default();
+        }
+        Ok(())
+    }
+
+    fn toggle_pressed(&self, event: ShortcutState) -> bool {
+        let mut down = lock(&self.toggle_shortcut_down);
+        let pressed = event == ShortcutState::Pressed;
+        let fire = pressed && !*down;
+        *down = pressed;
+        fire
+    }
+
+    fn reset_voice_shortcut_state(&self) -> bool {
+        let was_active = lock(&self.voice_shortcut_state).reset();
+        self.store().cancel_pending_voice();
+        was_active
+    }
+
     fn page_loading(&self) {
+        self.reset_voice_shortcut_state();
         lock(&self.frame).state.page_loading();
         self.store().page_loading();
         lock(&self.hit_regions).clear();
     }
 
     fn window_gone(&self) {
+        self.reset_voice_shortcut_state();
         self.store().window_gone();
         lock(&self.hit_regions).clear();
     }
@@ -140,44 +184,45 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 pub struct PetMenus {
     toggle: CheckMenuItem<tauri::Wry>,
-    shortcut: Submenu<tauri::Wry>,
-    presets: Vec<CheckMenuItem<tauri::Wry>>,
-    unavailable: MenuItem<tauri::Wry>,
-    unavailable_present: AtomicBool,
 }
 
-/// The tray's pet switch and shortcut presets, placed next to Notifications.
-pub fn tray_items(app: &AppHandle) -> tauri::Result<(CheckMenuItem<tauri::Wry>, Submenu<tauri::Wry>)> {
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PetShortcutTarget {
+    Voice,
+    Toggle,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PetShortcutError {
+    pub target: PetShortcutTarget,
+    pub shortcut: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PetSettingsState {
+    pub enabled: bool,
+    pub voice_shortcut: String,
+    pub toggle_shortcut: String,
+    pub voice_mode: VoiceMode,
+    pub errors: Vec<PetShortcutError>,
+}
+
+/// The tray's pet switch and one link into the authoritative Shortcut Settings
+/// page, placed next to Notifications.
+pub fn tray_items(app: &AppHandle) -> tauri::Result<(CheckMenuItem<tauri::Wry>, MenuItem<tauri::Wry>)> {
     let catalog = native_pet_catalog();
     let enabled = app.state::<Pet>().enabled();
     let toggle = CheckMenuItem::with_id(app, MENU_ID, &catalog.toggle, true, enabled, None::<&str>)?;
-    let macos = cfg!(target_os = "macos");
-    let presets = SHORTCUT_PRESETS
-        .iter()
-        .map(|preset| {
-            CheckMenuItem::with_id(
-                app,
-                format!("{SHORTCUT_MENU_PREFIX}{preset}"),
-                shortcut_label(preset, macos),
-                true,
-                false,
-                None::<&str>,
-            )
-        })
-        .collect::<tauri::Result<Vec<_>>>()?;
-    let shortcut = Submenu::with_id(app, "pet-shortcut", &catalog.shortcut_menu, true)?;
-    for preset in &presets {
-        shortcut.append(preset)?;
-    }
-    let unavailable = MenuItem::with_id(app, "pet-shortcut-unavailable", "", false, None::<&str>)?;
-    app.manage(PetMenus {
-        toggle: toggle.clone(),
-        shortcut: shortcut.clone(),
-        presets,
-        unavailable,
-        unavailable_present: AtomicBool::new(false),
-    });
-    Ok((toggle, shortcut))
+    let shortcut_settings = MenuItem::with_id(
+        app,
+        SHORTCUT_SETTINGS_MENU_ID,
+        &catalog.shortcut_settings,
+        true,
+        None::<&str>,
+    )?;
+    app.manage(PetMenus { toggle: toggle.clone() });
+    Ok((toggle, shortcut_settings))
 }
 
 fn refresh_menu(app: &AppHandle) {
@@ -185,90 +230,294 @@ fn refresh_menu(app: &AppHandle) {
         return;
     };
     let pet = app.state::<Pet>();
-    let (enabled, shortcut) = {
-        let store = pet.store();
-        (store.enabled(), store.shortcut().to_owned())
-    };
-    let error = lock(&pet.shortcut_error).clone();
-    let update = || -> tauri::Result<()> {
-        menus.toggle.set_checked(enabled)?;
-        for (item, preset) in menus.presets.iter().zip(SHORTCUT_PRESETS) {
-            item.set_checked(preset == shortcut)?;
-        }
-        if let Some(refused) = &error {
-            let label = native_pet_catalog()
-                .shortcut_unavailable
-                .replace("{{shortcut}}", &shortcut_label(refused, cfg!(target_os = "macos")));
-            menus.unavailable.set_text(label)?;
-        }
-        if error.is_some() != menus.unavailable_present.load(Ordering::SeqCst) {
-            if error.is_some() {
-                menus.shortcut.append(&menus.unavailable)?;
-            } else {
-                menus.shortcut.remove(&menus.unavailable)?;
-            }
-            menus.unavailable_present.store(error.is_some(), Ordering::SeqCst);
-        }
-        Ok(())
-    };
+    let enabled = pet.enabled();
+    let update = || -> tauri::Result<()> { menus.toggle.set_checked(enabled) };
     if update().is_err() {
         eprintln!("failed to refresh the desktop pet menu");
     }
 }
 
-/// Registers the summon shortcut while the pet is on, and nothing while it is
-/// off. A shortcut the OS refuses is shown in the tray, never swallowed.
-pub fn apply_shortcut(app: &AppHandle) {
-    let pet = app.state::<Pet>();
-    let (enabled, shortcut) = {
-        let store = pet.store();
-        (store.enabled(), store.shortcut().to_owned())
-    };
-    let shortcuts = app.global_shortcut();
-    let _ = shortcuts.unregister_all();
-    let error = if enabled {
-        match shortcuts.register(shortcut.as_str()) {
-            Ok(()) => None,
-            Err(error) => {
-                eprintln!("The desktop pet shortcut could not be registered: {error}");
-                Some(shortcut)
-            }
-        }
-    } else {
-        None
-    };
-    *lock(&pet.shortcut_error) = error;
-    refresh_menu(app);
+fn settings_state(pet: &Pet) -> PetSettingsState {
+    let store = pet.store();
+    PetSettingsState {
+        enabled: store.enabled(),
+        voice_shortcut: store.shortcut().to_owned(),
+        toggle_shortcut: store.toggle_shortcut().to_owned(),
+        voice_mode: store.voice_mode(),
+        errors: lock(&pet.shortcut_errors).clone(),
+    }
 }
 
-/// The tray switch.
-pub fn toggle(app: &AppHandle) {
-    let pet = app.state::<Pet>();
-    let enabled = !pet.enabled();
-    if pet.store().set_enabled(enabled).is_err() {
-        eprintln!("The desktop pet preference could not be saved.");
+fn dispatch_settings(app: &AppHandle, state: &PetSettingsState) {
+    let Some(window) = app.get_webview_window(MAIN_WINDOW).filter(crate::pet::is_workbench) else {
+        return;
+    };
+    dispatch(
+        &window,
+        SETTINGS_EVENT,
+        &serde_json::to_value(state).expect("pet settings are serializable"),
+    );
+}
+
+fn shortcut_matches(left: &str, right: &str) -> bool {
+    match (left.parse::<Shortcut>(), right.parse::<Shortcut>()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left.eq_ignore_ascii_case(right),
     }
-    apply_shortcut(app);
+}
+
+fn parse_shortcut(shortcut: &str) -> Result<Shortcut, String> {
+    shortcut.parse::<Shortcut>().map_err(|error| error.to_string())
+}
+
+fn validate_shortcut(shortcut: &str, other: &str) -> Result<(), String> {
+    let candidate = parse_shortcut(shortcut)?;
+    if !candidate
+        .mods
+        .intersects(Modifiers::CONTROL | Modifiers::ALT | Modifiers::SUPER | Modifiers::META)
+    {
+        return Err("A shortcut requires Control, Alt, or Command.".to_owned());
+    }
+    if candidate == parse_shortcut(other)? {
+        return Err("Desktop Mini shortcuts must be different.".to_owned());
+    }
+    for reserved in ["Alt+KeyZ", "Alt+KeyX"] {
+        if candidate == parse_shortcut(reserved).expect("reserved shortcuts are valid") {
+            return Err("This shortcut is already used by Avibe.".to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn replace_registered_shortcuts<F, U>(
+    current: &[String],
+    desired: &[String],
+    mut register: F,
+    mut unregister: U,
+) -> Result<Vec<String>, (String, String)>
+where
+    F: FnMut(&str) -> Result<(), String>,
+    U: FnMut(&str) -> Result<(), String>,
+{
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    let rollback = |added: &[String], removed: &[String], register: &mut F, unregister: &mut U| {
+        for shortcut in added.iter().rev() {
+            let _ = unregister(shortcut);
+        }
+        for shortcut in removed {
+            let _ = register(shortcut);
+        }
+    };
+    for shortcut in desired {
+        if current.iter().any(|registered| shortcut_matches(registered, shortcut)) {
+            continue;
+        }
+        if let Err(error) = register(shortcut) {
+            rollback(&added, &removed, &mut register, &mut unregister);
+            return Err((shortcut.clone(), error));
+        }
+        added.push(shortcut.clone());
+    }
+    for shortcut in current {
+        if desired.iter().any(|candidate| shortcut_matches(candidate, shortcut)) {
+            continue;
+        }
+        if let Err(error) = unregister(shortcut) {
+            rollback(&added, &removed, &mut register, &mut unregister);
+            return Err((shortcut.clone(), error));
+        }
+        removed.push(shortcut.clone());
+    }
+    Ok(desired.to_vec())
+}
+
+fn desired_shortcuts(state: &PetSettingsState) -> Vec<(PetShortcutTarget, String)> {
+    let mut desired = vec![(PetShortcutTarget::Toggle, state.toggle_shortcut.clone())];
+    if state.enabled {
+        desired.push((PetShortcutTarget::Voice, state.voice_shortcut.clone()));
+    }
+    desired
+}
+
+/// Settings edits are one transaction. A rejected candidate cannot replace any
+/// member of the previous live set.
+fn update_registered_shortcuts<F, U>(
+    current: &mut Vec<String>,
+    desired: &[(PetShortcutTarget, String)],
+    mut register: F,
+    mut unregister: U,
+) -> Result<(), PetShortcutError>
+where
+    F: FnMut(&str) -> Result<(), String>,
+    U: FnMut(&str) -> Result<(), String>,
+{
+    let values = desired.iter().map(|(_, shortcut)| shortcut.clone()).collect::<Vec<_>>();
+    match replace_registered_shortcuts(current, &values, &mut register, &mut unregister) {
+        Ok(next) => {
+            *current = next;
+            Ok(())
+        }
+        Err((shortcut, reason)) => {
+            let target = desired
+                .iter()
+                .find(|(_, value)| shortcut_matches(value, &shortcut))
+                .map(|(target, _)| *target)
+                .unwrap_or(PetShortcutTarget::Voice);
+            eprintln!("Desktop Mini shortcut registration refused: {shortcut}: {reason}");
+            Err(PetShortcutError { target, shortcut })
+        }
+    }
+}
+
+/// Lifecycle changes reconcile a set, independently attempting every member.
+/// `current` records only OS-accepted changes, including partial success.
+fn reconcile_registered_shortcuts<F, U>(
+    current: &mut Vec<String>,
+    desired: &[(PetShortcutTarget, String)],
+    mut register: F,
+    mut unregister: U,
+) -> Vec<PetShortcutError>
+where
+    F: FnMut(&str) -> Result<(), String>,
+    U: FnMut(&str) -> Result<(), String>,
+{
+    let mut errors = Vec::new();
+    current.retain(|shortcut| {
+        if desired.iter().any(|(_, value)| shortcut_matches(value, shortcut)) {
+            return true;
+        }
+        if let Err(reason) = unregister(shortcut) {
+            eprintln!("Desktop Mini shortcut removal refused: {shortcut}: {reason}");
+            // Lifecycle changes remove voice when disabled; edits use the
+            // transaction above and never enter this path.
+            errors.push(PetShortcutError {
+                target: PetShortcutTarget::Voice,
+                shortcut: shortcut.clone(),
+            });
+            return true;
+        }
+        false
+    });
+    for (target, shortcut) in desired {
+        if current.iter().any(|value| shortcut_matches(value, shortcut)) {
+            continue;
+        }
+        match register(shortcut) {
+            Ok(()) => current.push(shortcut.clone()),
+            Err(reason) => {
+                eprintln!("Desktop Mini shortcut registration refused: {shortcut}: {reason}");
+                errors.push(PetShortcutError {
+                    target: *target,
+                    shortcut: shortcut.clone(),
+                });
+            }
+        }
+    }
+    errors
+}
+
+/// Registers show/hide while Mini is off, and adds voice only while Mini is
+/// on. A refused replacement leaves the previous registration active.
+pub fn apply_shortcuts(app: &AppHandle) {
+    let pet = app.state::<Pet>();
+    let state = settings_state(&pet);
+    let shortcuts = app.global_shortcut();
+    *lock(&pet.shortcut_errors) = reconcile_registered_shortcuts(
+        &mut lock(&pet.registered_shortcuts),
+        &desired_shortcuts(&state),
+        |shortcut| shortcuts.register(shortcut).map_err(|error| error.to_string()),
+        |shortcut| shortcuts.unregister(shortcut).map_err(|error| error.to_string()),
+    );
+    refresh_menu(app);
+    dispatch_settings(app, &settings_state(&pet));
+}
+
+fn set_enabled(app: &AppHandle, enabled: bool) -> Result<(), String> {
+    let pet = app.state::<Pet>();
+    pet.set_enabled(enabled)?;
+    apply_shortcuts(app);
     if pet.enabled() {
         wake(app, PetIntent::Show);
     } else {
         reconcile(app);
     }
+    Ok(())
 }
 
-/// A shortcut preset from the tray.
-pub fn choose_shortcut(app: &AppHandle, id: &str) {
-    let Some(preset) = preset_for_menu(id) else {
-        return;
+/// The tray switch and the show/hide global shortcut share this writer.
+pub fn toggle(app: &AppHandle) {
+    if let Err(error) = set_enabled(app, !app.state::<Pet>().enabled()) {
+        eprintln!("The desktop pet preference could not be saved: {error}");
+    }
+}
+
+/// Shows the pet's native context menu. The menu action calls [`toggle`]
+/// through the same event path as the tray switch, so both surfaces persist
+/// the same `enabled` preference and reconcile the same window.
+#[tauri::command]
+pub fn pet_context_menu(window: WebviewWindow) -> Result<(), String> {
+    ensure_pet_page(&window)?;
+    let app = window.app_handle();
+    let pet = app.state::<Pet>();
+    if !pet.enabled() {
+        return Ok(());
+    }
+    let catalog = native_pet_catalog();
+    let shortcut = {
+        let store = pet.store();
+        native_pet_menu_accelerator(&store).to_owned()
     };
-    app.state::<Pet>().store().set_shortcut(preset);
-    apply_shortcut(app);
+    let hide = MenuItem::with_id(app, HIDE_MENU_ID, &catalog.hide, true, Some(shortcut.as_str()))
+        .map_err(|error| error.to_string())?;
+    let menu = Menu::with_items(app, &[&hide]).map_err(|error| error.to_string())?;
+    window.popup_menu(&menu).map_err(|error| error.to_string())
 }
 
-/// Presets only: the tray never registers an accelerator it did not offer.
-fn preset_for_menu(id: &str) -> Option<&'static str> {
-    let choice = id.strip_prefix(SHORTCUT_MENU_PREFIX)?;
-    SHORTCUT_PRESETS.iter().copied().find(|preset| *preset == choice)
+#[derive(Debug, PartialEq, Eq)]
+enum ShortcutAction {
+    Toggle,
+    Voice(PetIntent),
+}
+
+fn shortcut_action(pet: &Pet, shortcut: &Shortcut, event: ShortcutState) -> Option<ShortcutAction> {
+    let (voice, toggle, mode, enabled) = {
+        let store = pet.store();
+        (
+            store.shortcut().to_owned(),
+            store.toggle_shortcut().to_owned(),
+            store.voice_mode(),
+            store.enabled(),
+        )
+    };
+    if parse_shortcut(&toggle).is_ok_and(|candidate| candidate == *shortcut) {
+        return pet.toggle_pressed(event).then_some(ShortcutAction::Toggle);
+    }
+    if !enabled || !parse_shortcut(&voice).is_ok_and(|candidate| candidate == *shortcut) {
+        return None;
+    }
+    let event = match event {
+        ShortcutState::Pressed => ShortcutEvent::Pressed,
+        ShortcutState::Released => ShortcutEvent::Released,
+    };
+    lock(&pet.voice_shortcut_state)
+        .event(mode, event)
+        .map(ShortcutAction::Voice)
+}
+
+pub fn handle_shortcut(app: &AppHandle, shortcut: &Shortcut, event: ShortcutState) {
+    let handle = app.clone();
+    let shortcut = *shortcut;
+    let _ = app.run_on_main_thread(move || {
+        // Build/replace the window before starting its conversation state.
+        // Otherwise page_loading would erase the press that created it.
+        let window = reconcile_now(&handle);
+        match shortcut_action(&handle.state::<Pet>(), &shortcut, event) {
+            Some(ShortcutAction::Toggle) => toggle(&handle),
+            Some(ShortcutAction::Voice(intent)) => deliver_summon(&handle, window, intent),
+            None => {}
+        }
+    });
 }
 
 /// Brings the window in line with the switch and the Runtime the Workbench
@@ -276,6 +525,7 @@ fn preset_for_menu(id: &str) -> Option<&'static str> {
 pub fn reconcile(app: &AppHandle) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
+        apply_shortcuts(&handle);
         reconcile_now(&handle);
     });
 }
@@ -418,28 +668,34 @@ fn initial_anchor(saved: Option<&PetAnchor>, areas: &[WorkArea]) -> PetAnchor {
 pub fn wake(app: &AppHandle, intent: PetIntent) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
-        let pet = handle.state::<Pet>();
-        if !pet.enabled() {
-            return;
-        }
-        let Some(window) = reconcile_now(&handle) else {
-            // The Workbench has no Runtime yet; the summon waits for the
-            // window that Runtime will bring.
-            if intent != PetIntent::Release {
-                pet.store().summon_before_window(intent);
-            }
-            return;
-        };
-        if intent != PetIntent::Release {
-            let _ = window.show();
-            pet.poll_wake.notify_one();
-            let _ = window.set_focus();
-        }
-        let deliver = pet.store().summon(intent);
-        if let Some(intent) = deliver {
-            dispatch(&window, SUMMON_EVENT, &serde_json::json!({ "intent": intent }));
-        }
+        let window = reconcile_now(&handle);
+        deliver_summon(&handle, window, intent);
     });
+}
+
+fn deliver_summon(app: &AppHandle, window: Option<WebviewWindow>, intent: PetIntent) {
+    let pet = app.state::<Pet>();
+    if !pet.enabled() {
+        return;
+    }
+    let Some(window) = window else {
+        // No Runtime exists yet. Never carry an active microphone into the
+        // window a later Runtime will create.
+        pet.reset_voice_shortcut_state();
+        if intent != PetIntent::Release {
+            pet.store().summon_before_window(intent);
+        }
+        return;
+    };
+    if intent != PetIntent::Release {
+        let _ = window.show();
+        pet.poll_wake.notify_one();
+        let _ = window.set_focus();
+    }
+    let deliver = pet.store().summon(intent);
+    if let Some(intent) = deliver {
+        dispatch(&window, SUMMON_EVENT, &serde_json::json!({ "intent": intent }));
+    }
 }
 
 fn dispatch(window: &WebviewWindow, event: &str, detail: &serde_json::Value) {
@@ -482,7 +738,16 @@ pub fn page_loading(app: &AppHandle) {
 
 /// An OS close request only hides the pet; the tray switch turns it off.
 pub fn hide(app: &AppHandle) {
+    let pet = app.state::<Pet>();
+    let was_active = pet.reset_voice_shortcut_state();
     if let Some(window) = app.get_webview_window(PET_WINDOW) {
+        if was_active {
+            dispatch(
+                &window,
+                SUMMON_EVENT,
+                &serde_json::json!({ "intent": PetIntent::Release }),
+            );
+        }
         let _ = window.hide();
     }
 }
@@ -689,6 +954,184 @@ pub(crate) fn is_workbench(window: &WebviewWindow) -> bool {
 
 fn is_workbench_caller(label: &str, active: Option<&LoopbackOrigin>, url: &Url) -> bool {
     label == MAIN_WINDOW && active.is_some_and(|origin| origin.matches_url_origin(url))
+}
+
+fn ensure_workbench_page(window: &WebviewWindow) -> Result<(), String> {
+    if is_workbench(window) {
+        Ok(())
+    } else {
+        Err("This command is only available to the Avibe Workbench.".to_owned())
+    }
+}
+
+#[tauri::command]
+pub fn pet_settings(window: WebviewWindow) -> Result<PetSettingsState, String> {
+    ensure_workbench_page(&window)?;
+    Ok(settings_state(&window.state::<Pet>()))
+}
+
+#[tauri::command]
+pub fn pet_set_enabled(window: WebviewWindow, enabled: bool) -> Result<PetSettingsState, String> {
+    ensure_workbench_page(&window)?;
+    set_enabled(window.app_handle(), enabled)?;
+    Ok(settings_state(&window.state::<Pet>()))
+}
+
+#[tauri::command]
+pub fn pet_set_shortcut(
+    window: WebviewWindow,
+    target: PetShortcutTarget,
+    shortcut: String,
+) -> Result<PetSettingsState, String> {
+    ensure_workbench_page(&window)?;
+    let app = window.app_handle();
+    let pet = app.state::<Pet>();
+    let before = settings_state(&pet);
+    let other = match target {
+        PetShortcutTarget::Voice => before.toggle_shortcut.as_str(),
+        PetShortcutTarget::Toggle => before.voice_shortcut.as_str(),
+    };
+    validate_shortcut(&shortcut, other)?;
+    parse_shortcut(&shortcut)?;
+
+    let mut candidate = before.clone();
+    match target {
+        PetShortcutTarget::Voice => candidate.voice_shortcut = shortcut.clone(),
+        PetShortcutTarget::Toggle => candidate.toggle_shortcut = shortcut.clone(),
+    }
+    save_shortcuts(app, &before, &candidate)
+}
+
+#[derive(Debug)]
+enum ShortcutSaveError {
+    Registration(PetShortcutError),
+    Persistence(std::io::Error),
+    Validation(String),
+}
+
+/// One transaction for both edits and reset. The complete pair is registered
+/// before persistence, allowing even swapped shortcuts to return to defaults.
+fn commit_shortcuts<F, U>(
+    store: &mut PetStore,
+    current: &mut Vec<String>,
+    before: &PetSettingsState,
+    candidate: &PetSettingsState,
+    mut register: F,
+    mut unregister: U,
+) -> Result<(), ShortcutSaveError>
+where
+    F: FnMut(&str) -> Result<(), String>,
+    U: FnMut(&str) -> Result<(), String>,
+{
+    validate_shortcut(&candidate.voice_shortcut, &candidate.toggle_shortcut).map_err(ShortcutSaveError::Validation)?;
+    validate_shortcut(&candidate.toggle_shortcut, &candidate.voice_shortcut).map_err(ShortcutSaveError::Validation)?;
+    let previous_registration = current.clone();
+    let mut probe = candidate.clone();
+    probe.enabled = candidate.enabled || !shortcut_matches(&before.voice_shortcut, &candidate.voice_shortcut);
+    update_registered_shortcuts(current, &desired_shortcuts(&probe), &mut register, &mut unregister)
+        .map_err(ShortcutSaveError::Registration)?;
+    let save = if let Err(error) =
+        update_registered_shortcuts(current, &desired_shortcuts(candidate), &mut register, &mut unregister)
+    {
+        Err(ShortcutSaveError::Registration(error))
+    } else {
+        store
+            .try_set_shortcuts(
+                &candidate.voice_shortcut,
+                &candidate.toggle_shortcut,
+                candidate.voice_mode,
+            )
+            .map_err(ShortcutSaveError::Persistence)
+    };
+    if save.is_err() {
+        // Restore exactly what was live, not a desired binding refused at startup.
+        match replace_registered_shortcuts(current, &previous_registration, register, unregister) {
+            Ok(restored) => *current = restored,
+            Err((shortcut, reason)) => eprintln!("Desktop Mini shortcut rollback failed for {shortcut}: {reason}"),
+        }
+    }
+    save
+}
+
+fn save_shortcuts(
+    app: &AppHandle,
+    before: &PetSettingsState,
+    candidate: &PetSettingsState,
+) -> Result<PetSettingsState, String> {
+    let pet = app.state::<Pet>();
+    let shortcuts = app.global_shortcut();
+    let result = commit_shortcuts(
+        &mut pet.store(),
+        &mut lock(&pet.registered_shortcuts),
+        before,
+        candidate,
+        |shortcut| shortcuts.register(shortcut).map_err(|error| error.to_string()),
+        |shortcut| shortcuts.unregister(shortcut).map_err(|error| error.to_string()),
+    );
+    match result {
+        Ok(()) => {
+            let was_active = pet.reset_voice_shortcut_state();
+            // Removed accelerators will never deliver their release event.
+            if !shortcut_matches(&before.voice_shortcut, &candidate.voice_shortcut) {
+                *lock(&pet.voice_shortcut_state) = VoiceShortcutState::default();
+            }
+            if !shortcut_matches(&before.toggle_shortcut, &candidate.toggle_shortcut) {
+                *lock(&pet.toggle_shortcut_down) = false;
+            }
+            if was_active {
+                wake(app, PetIntent::Release);
+            }
+            lock(&pet.shortcut_errors).clear();
+        }
+        Err(ShortcutSaveError::Registration(error)) => {
+            let mut errors = lock(&pet.shortcut_errors);
+            errors.retain(|previous| previous.target != error.target);
+            errors.push(error);
+        }
+        Err(ShortcutSaveError::Persistence(error)) => {
+            return Err(format!("The Desktop Mini shortcuts could not be saved: {error}"))
+        }
+        Err(ShortcutSaveError::Validation(error)) => return Err(error),
+    }
+    refresh_menu(app);
+    let state = settings_state(&pet);
+    dispatch_settings(app, &state);
+    Ok(state)
+}
+
+#[tauri::command]
+pub fn pet_reset_shortcuts(window: WebviewWindow) -> Result<PetSettingsState, String> {
+    ensure_workbench_page(&window)?;
+    let app = window.app_handle();
+    let before = settings_state(&app.state::<Pet>());
+    let mut candidate = before.clone();
+    candidate.voice_shortcut = DEFAULT_SHORTCUT.to_owned();
+    candidate.toggle_shortcut = DEFAULT_TOGGLE_SHORTCUT.to_owned();
+    candidate.voice_mode = VoiceMode::Hold;
+    save_shortcuts(app, &before, &candidate)
+}
+
+#[tauri::command]
+pub fn pet_set_voice_mode(window: WebviewWindow, mode: VoiceMode) -> Result<PetSettingsState, String> {
+    ensure_workbench_page(&window)?;
+    let app = window.app_handle();
+    let pet = app.state::<Pet>();
+    pet.store()
+        .try_set_voice_mode(mode)
+        .map_err(|error| format!("The Desktop Mini voice mode could not be saved: {error}"))?;
+    if pet.reset_voice_shortcut_state() {
+        wake(app, PetIntent::Release);
+    }
+    let state = settings_state(&pet);
+    dispatch_settings(app, &state);
+    Ok(state)
+}
+
+#[tauri::command]
+pub fn pet_reset_voice_shortcut(window: WebviewWindow) -> Result<(), String> {
+    ensure_pet_page(&window)?;
+    window.state::<Pet>().reset_voice_shortcut_state();
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -1110,7 +1553,7 @@ pub fn pet_unbind(window: WebviewWindow, session_id: String) -> Result<PetBindin
 #[tauri::command]
 pub fn pet_open(window: WebviewWindow, link: String) -> Result<(), String> {
     ensure_pet_page(&window)?;
-    if parse_deep_link(&link).is_none() {
+    if link != crate::updater::OPEN_URL && parse_deep_link(&link).is_none() {
         return Err("Not an Avibe link.".to_owned());
     }
     let app = window.app_handle().clone();
@@ -1124,7 +1567,9 @@ pub fn pet_open(window: WebviewWindow, link: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use avibe_runtime_host::pet::shortcut_label;
     use avibe_runtime_host::pet::{settle_frame, DRAG_HEIGHT, WINDOW_HEIGHT};
+    use std::cell::RefCell;
 
     #[test]
     fn mixed_scale_cursor_hit_testing_uses_the_primary_scale_for_global_cursor() {
@@ -1334,9 +1779,25 @@ mod tests {
         for locale in ["en-US", "zh-CN"] {
             let catalog = native_catalog_for_locales([locale.to_owned()]).pet;
             assert!(!catalog.toggle.is_empty());
-            assert!(!catalog.shortcut_menu.is_empty());
-            assert!(catalog.shortcut_unavailable.contains("{{shortcut}}"));
+            assert!(!catalog.shortcut_settings.is_empty());
+            assert!(!catalog.hide.is_empty());
         }
+    }
+
+    #[test]
+    fn context_menu_uses_raw_toggle_shortcut_as_native_accelerator() {
+        let directory = TestPetDirectory::new();
+        let pet = Pet::new(directory.file());
+        let store = pet.store();
+        let accelerator = native_pet_menu_accelerator(&store);
+
+        assert_eq!(accelerator, DEFAULT_TOGGLE_SHORTCUT);
+        assert!(parse_shortcut(accelerator).is_ok());
+        assert_ne!(
+            accelerator,
+            shortcut_label(accelerator, cfg!(target_os = "macos")),
+            "native menus receive the accelerator syntax, not the display label"
+        );
     }
 
     fn origin(raw: &str) -> LoopbackOrigin {
@@ -1397,17 +1858,471 @@ mod tests {
         assert!(!is_workbench_caller(MAIN_WINDOW, Some(&a), &url("tauri://localhost/")));
     }
 
+    struct TestPetDirectory(PathBuf);
+    impl TestPetDirectory {
+        fn new() -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "avibe-pet-settings-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::SeqCst)
+            ));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+        fn file(&self) -> PathBuf {
+            self.0.join("pet.json")
+        }
+    }
+    impl Drop for TestPetDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
-    fn the_tray_registers_only_the_presets_it_offers() {
-        for preset in SHORTCUT_PRESETS {
+    fn show_hide_changes_once_per_physical_press_even_across_settings_writes() {
+        let directory = TestPetDirectory::new();
+        let pet = Pet::new(directory.file());
+        for expected in [true, false, true] {
+            assert!(pet.toggle_pressed(ShortcutState::Pressed));
+            pet.set_enabled(!pet.enabled()).unwrap();
+            assert_eq!(pet.enabled(), expected);
+            for _ in 0..5 {
+                assert!(!pet.toggle_pressed(ShortcutState::Pressed));
+                pet.reset_voice_shortcut_state();
+                assert_eq!(pet.enabled(), expected);
+            }
+            assert!(!pet.toggle_pressed(ShortcutState::Released));
+        }
+        assert_eq!(
+            PetStore::load(directory.file(), shortcut_matches).enabled(),
+            pet.enabled()
+        );
+    }
+
+    #[test]
+    fn hiding_while_voice_is_held_does_not_leave_a_latch_after_showing_again() {
+        let directory = TestPetDirectory::new();
+        let pet = Pet::new(directory.file());
+        pet.set_enabled(true).unwrap();
+        assert_eq!(
+            lock(&pet.voice_shortcut_state).event(VoiceMode::Hold, ShortcutEvent::Pressed),
+            Some(PetIntent::Listen)
+        );
+        pet.set_enabled(false).unwrap();
+        pet.set_enabled(true).unwrap();
+        assert_eq!(
+            lock(&pet.voice_shortcut_state).event(VoiceMode::Hold, ShortcutEvent::Pressed),
+            Some(PetIntent::Listen)
+        );
+    }
+
+    #[test]
+    fn lifecycle_registration_attempts_the_complete_set_and_reports_every_refusal() {
+        for enabled in [true, false] {
+            for refused in [
+                vec![],
+                vec![PetShortcutTarget::Toggle],
+                vec![PetShortcutTarget::Voice],
+                vec![PetShortcutTarget::Toggle, PetShortcutTarget::Voice],
+            ] {
+                let directory = TestPetDirectory::new();
+                let pet = Pet::new(directory.file());
+                pet.set_enabled(enabled).unwrap();
+                let desired = desired_shortcuts(&settings_state(&pet));
+                let registered = RefCell::new(Vec::<String>::new());
+                let attempted = RefCell::new(Vec::new());
+                let errors = reconcile_registered_shortcuts(
+                    &mut lock(&pet.registered_shortcuts),
+                    &desired,
+                    |shortcut| {
+                        let target = desired.iter().find(|(_, value)| value == shortcut).unwrap().0;
+                        attempted.borrow_mut().push(target);
+                        if refused.contains(&target) {
+                            return Err("OS refused".to_owned());
+                        }
+                        registered.borrow_mut().push(shortcut.to_owned());
+                        Ok(())
+                    },
+                    |_| panic!("startup has nothing to unregister"),
+                );
+                *lock(&pet.shortcut_errors) = errors.clone();
+                assert_eq!(
+                    *attempted.borrow(),
+                    desired.iter().map(|(target, _)| *target).collect::<Vec<_>>()
+                );
+                assert_eq!(
+                    errors,
+                    desired
+                        .iter()
+                        .filter(|(target, _)| refused.contains(target))
+                        .map(|(target, shortcut)| PetShortcutError {
+                            target: *target,
+                            shortcut: shortcut.clone()
+                        })
+                        .collect::<Vec<_>>()
+                );
+                let expected = desired
+                    .iter()
+                    .filter(|(target, _)| !refused.contains(target))
+                    .map(|(_, shortcut)| shortcut.clone())
+                    .collect::<Vec<_>>();
+                assert_eq!(*lock(&pet.registered_shortcuts), expected);
+                assert_eq!(*registered.borrow(), expected);
+                let state = settings_state(&pet);
+                assert_eq!(state.enabled, enabled, "OS refusal never disables Mini");
+                assert_eq!(state.errors, errors);
+                // The native state sent to Settings retains both failed keys.
+                assert_eq!(
+                    serde_json::to_value(&state).unwrap()["errors"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    errors.len()
+                );
+                let origin = LoopbackOrigin::parse("http://127.0.0.1:5123").unwrap();
+                assert_eq!(
+                    window_change(state.enabled, Some(&origin), None).build.is_some(),
+                    enabled
+                );
+                // A later lifecycle reconciliation retries only missing members.
+                let errors = reconcile_registered_shortcuts(
+                    &mut lock(&pet.registered_shortcuts),
+                    &desired,
+                    |shortcut| {
+                        registered.borrow_mut().push(shortcut.to_owned());
+                        Ok(())
+                    },
+                    |_| panic!("existing desired registrations must survive"),
+                );
+                assert!(errors.is_empty());
+                assert_eq!(lock(&pet.registered_shortcuts).len(), desired.len());
+                assert_eq!(*lock(&pet.registered_shortcuts), *registered.borrow());
+                // Disabling removes voice even after a partial startup result.
+                pet.set_enabled(false).unwrap();
+                let errors = reconcile_registered_shortcuts(
+                    &mut lock(&pet.registered_shortcuts),
+                    &desired_shortcuts(&settings_state(&pet)),
+                    |_| panic!("toggle is already registered"),
+                    |shortcut| {
+                        registered.borrow_mut().retain(|value| value != shortcut);
+                        Ok(())
+                    },
+                );
+                assert!(errors.is_empty());
+                assert_eq!(*registered.borrow(), vec![DEFAULT_TOGGLE_SHORTCUT.to_owned()]);
+                assert_eq!(*lock(&pet.registered_shortcuts), *registered.borrow());
+            }
+        }
+    }
+
+    #[test]
+    fn window_and_document_replacement_end_voice_without_releasing_physical_keys() {
+        for mode in [VoiceMode::Hold, VoiceMode::Toggle] {
+            for held in [true, false] {
+                // Hold-to-talk stops on key-up, so only its held state is active.
+                if mode == VoiceMode::Hold && !held {
+                    continue;
+                }
+                for destroy in [true, false] {
+                    let directory = TestPetDirectory::new();
+                    let pet = Pet::new(directory.file());
+                    pet.set_enabled(true).unwrap();
+                    pet.store().try_set_voice_mode(mode).unwrap();
+                    let key = parse_shortcut(pet.store().shortcut()).unwrap();
+                    pet.page_loading();
+                    assert_eq!(
+                        shortcut_action(&pet, &key, ShortcutState::Pressed),
+                        Some(ShortcutAction::Voice(PetIntent::Listen))
+                    );
+                    pet.store().summon(PetIntent::Listen);
+                    if !held {
+                        assert_eq!(shortcut_action(&pet, &key, ShortcutState::Released), None);
+                    }
+                    if destroy {
+                        let old = LoopbackOrigin::parse("http://127.0.0.1:5123").unwrap();
+                        let new = LoopbackOrigin::parse("http://127.0.0.1:5124").unwrap();
+                        assert_eq!(
+                            window_change(true, Some(&new), Some(Some(&old))),
+                            WindowChange {
+                                destroy: true,
+                                build: Some(new)
+                            }
+                        );
+                        pet.window_gone();
+                    }
+                    pet.page_loading();
+                    let pending = pet.store().page_ready().summon_pending;
+                    assert_ne!(
+                        pending.map(|summon| summon.intent),
+                        Some(PetIntent::Listen),
+                        "a replacement must not restart the old microphone"
+                    );
+                    if held {
+                        assert_eq!(
+                            shortcut_action(&pet, &key, ShortcutState::Pressed),
+                            None,
+                            "ignore repeats until key-up"
+                        );
+                        assert_eq!(shortcut_action(&pet, &key, ShortcutState::Released), None);
+                    }
+                    assert_eq!(
+                        shortcut_action(&pet, &key, ShortcutState::Pressed),
+                        Some(ShortcutAction::Voice(PetIntent::Listen))
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn migrated_voice_aliases_keep_their_action_and_persist_a_distinct_toggle() {
+        for voice in ["Control+Alt+KeyM", "Ctrl+Alt+M", "alt+ctrl+KeyM"] {
+            for explicit_toggle in [false, true] {
+                let directory = TestPetDirectory::new();
+                let mut preferences = serde_json::json!({ "version": 1, "enabled": true, "shortcut": voice });
+                if explicit_toggle {
+                    preferences["toggle_shortcut"] = serde_json::json!("Control+Alt+KeyM");
+                }
+                std::fs::write(directory.file(), preferences.to_string()).unwrap();
+                let pet = Pet::new(directory.file());
+                let state = settings_state(&pet);
+                assert_eq!(state.voice_shortcut, voice);
+                assert_ne!(
+                    parse_shortcut(&state.voice_shortcut).unwrap(),
+                    parse_shortcut(&state.toggle_shortcut).unwrap()
+                );
+                assert!(validate_shortcut(&state.toggle_shortcut, &state.voice_shortcut).is_ok());
+                let saved: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(directory.file()).unwrap()).unwrap();
+                assert_eq!(saved["shortcut"], voice);
+                assert_eq!(saved["toggle_shortcut"], state.toggle_shortcut);
+                let restored = Pet::new(directory.file());
+                assert_eq!(settings_state(&restored).toggle_shortcut, state.toggle_shortcut);
+                assert_eq!(
+                    shortcut_action(&restored, &parse_shortcut(voice).unwrap(), ShortcutState::Pressed),
+                    Some(ShortcutAction::Voice(PetIntent::Listen))
+                );
+                assert!(restored.enabled());
+            }
+        }
+    }
+
+    #[test]
+    fn reset_swapped_shortcuts_commits_the_pair_and_preserves_other_preferences() {
+        for enabled in [true, false] {
+            let directory = TestPetDirectory::new();
+            let pet = Pet::new(directory.file());
+            pet.set_enabled(enabled).unwrap();
+            pet.store().bind("session-kept");
+            pet.store()
+                .try_set_shortcuts(DEFAULT_TOGGLE_SHORTCUT, DEFAULT_SHORTCUT, VoiceMode::Toggle)
+                .unwrap();
+            let before = settings_state(&pet);
+            let mut candidate = before.clone();
+            candidate.voice_shortcut = DEFAULT_SHORTCUT.to_owned();
+            candidate.toggle_shortcut = DEFAULT_TOGGLE_SHORTCUT.to_owned();
+            candidate.voice_mode = VoiceMode::Hold;
+            let mut current = desired_shortcuts(&before)
+                .into_iter()
+                .map(|(_, value)| value)
+                .collect::<Vec<_>>();
+            let registered = RefCell::new(current.clone());
+            commit_shortcuts(
+                &mut pet.store(),
+                &mut current,
+                &before,
+                &candidate,
+                |shortcut| {
+                    assert!(
+                        !registered
+                            .borrow()
+                            .iter()
+                            .any(|value| shortcut_matches(value, shortcut)),
+                        "must not re-register an owned key"
+                    );
+                    registered.borrow_mut().push(shortcut.to_owned());
+                    Ok(())
+                },
+                |shortcut| {
+                    registered.borrow_mut().retain(|value| value != shortcut);
+                    Ok(())
+                },
+            )
+            .unwrap();
+            let restored = PetStore::load(directory.file(), shortcut_matches);
+            assert_eq!(restored.shortcut(), DEFAULT_SHORTCUT);
+            assert_eq!(restored.toggle_shortcut(), DEFAULT_TOGGLE_SHORTCUT);
+            assert_eq!(restored.voice_mode(), VoiceMode::Hold);
+            assert_eq!(restored.enabled(), enabled);
+            assert_eq!(restored.binding().binding.as_deref(), Some("session-kept"));
             assert_eq!(
-                preset_for_menu(&format!("{SHORTCUT_MENU_PREFIX}{preset}")),
-                Some(preset)
+                current,
+                desired_shortcuts(&candidate)
+                    .into_iter()
+                    .map(|(_, value)| value)
+                    .collect::<Vec<_>>()
+            );
+            let mut actual = registered.borrow().clone();
+            actual.sort();
+            current.sort();
+            assert_eq!(actual, current);
+        }
+    }
+
+    #[test]
+    fn refused_edits_and_failed_persistence_keep_the_saved_and_live_pair() {
+        for enabled in [true, false] {
+            for target in [PetShortcutTarget::Voice, PetShortcutTarget::Toggle] {
+                for disk_failure in [true, false] {
+                    let directory = TestPetDirectory::new();
+                    let pet = Pet::new(directory.file());
+                    pet.set_enabled(enabled).unwrap();
+                    let before = settings_state(&pet);
+                    let mut candidate = before.clone();
+                    match target {
+                        PetShortcutTarget::Voice => candidate.voice_shortcut = "Control+Alt+KeyQ".to_owned(),
+                        PetShortcutTarget::Toggle => candidate.toggle_shortcut = "Control+Alt+KeyQ".to_owned(),
+                    }
+                    let saved = std::fs::read(directory.file()).unwrap();
+                    if disk_failure {
+                        std::fs::create_dir(directory.file().with_extension("tmp")).unwrap();
+                    }
+                    let mut current = desired_shortcuts(&before)
+                        .into_iter()
+                        .map(|(_, value)| value)
+                        .collect::<Vec<_>>();
+                    let original = current.clone();
+                    let registered = RefCell::new(current.clone());
+                    let result = commit_shortcuts(
+                        &mut pet.store(),
+                        &mut current,
+                        &before,
+                        &candidate,
+                        |shortcut| {
+                            if !disk_failure && shortcut == "Control+Alt+KeyQ" {
+                                return Err("refused".to_owned());
+                            }
+                            registered.borrow_mut().push(shortcut.to_owned());
+                            Ok(())
+                        },
+                        |shortcut| {
+                            registered.borrow_mut().retain(|value| value != shortcut);
+                            Ok(())
+                        },
+                    );
+                    assert!(result.is_err());
+                    assert_eq!(pet.store().shortcut(), before.voice_shortcut);
+                    assert_eq!(pet.store().toggle_shortcut(), before.toggle_shortcut);
+                    assert_eq!(std::fs::read(directory.file()).unwrap(), saved);
+                    assert_eq!(current, original);
+                    let mut actual = registered.borrow().clone();
+                    let mut expected = original;
+                    actual.sort();
+                    expected.sort();
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn colliding_edit_is_rejected_before_touching_the_live_or_saved_set() {
+        let directory = TestPetDirectory::new();
+        let pet = Pet::new(directory.file());
+        pet.set_enabled(true).unwrap();
+        let before = settings_state(&pet);
+        let mut candidate = before.clone();
+        candidate.voice_shortcut = "Ctrl+Alt+M".to_owned();
+        let original = std::fs::read(directory.file()).unwrap();
+        let mut current = desired_shortcuts(&before)
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect::<Vec<_>>();
+        let live = current.clone();
+        let result = commit_shortcuts(
+            &mut pet.store(),
+            &mut current,
+            &before,
+            &candidate,
+            |_| panic!("invalid pair must not register"),
+            |_| panic!("invalid pair must not unregister"),
+        );
+        assert!(matches!(result, Err(ShortcutSaveError::Validation(_))));
+        assert_eq!(current, live);
+        assert_eq!(std::fs::read(directory.file()).unwrap(), original);
+    }
+
+    #[test]
+    fn native_shortcut_validation_requires_a_modifier_and_distinct_bindings() {
+        for invalid in ["Space", "Shift+Space", "Alt+KeyZ", "Alt+KeyX", "Control+Alt+KeyM"] {
+            assert!(
+                validate_shortcut(invalid, DEFAULT_TOGGLE_SHORTCUT).is_err(),
+                "{invalid}"
             );
         }
-        assert_eq!(preset_for_menu(&format!("{SHORTCUT_MENU_PREFIX}Super+KeyQ")), None);
-        assert_eq!(preset_for_menu(SHORTCUT_PRESETS[0]), None);
-        assert_eq!(preset_for_menu(MENU_ID), None);
+        assert!(validate_shortcut(DEFAULT_SHORTCUT, DEFAULT_TOGGLE_SHORTCUT).is_ok());
+    }
+
+    #[test]
+    fn disabled_pets_keep_only_the_show_hide_shortcut_registered() {
+        let state = PetSettingsState {
+            enabled: false,
+            voice_shortcut: "Control+Alt+Space".to_owned(),
+            toggle_shortcut: "Control+Alt+KeyM".to_owned(),
+            voice_mode: VoiceMode::Hold,
+            errors: Vec::new(),
+        };
+        assert_eq!(
+            desired_shortcuts(&state),
+            vec![(PetShortcutTarget::Toggle, "Control+Alt+KeyM".to_owned())]
+        );
+    }
+
+    #[test]
+    fn replacing_a_shortcut_rolls_back_when_registration_is_refused() {
+        let current = vec!["Control+Alt+KeyM".to_owned(), "Control+Alt+Space".to_owned()];
+        let desired = vec!["Control+Alt+KeyM".to_owned(), "Control+Alt+KeyK".to_owned()];
+        let registered = RefCell::new(current.clone());
+        let result = replace_registered_shortcuts(
+            &current,
+            &desired,
+            |shortcut| {
+                if shortcut == "Control+Alt+KeyK" {
+                    return Err("refused".to_owned());
+                }
+                registered.borrow_mut().push(shortcut.to_owned());
+                Ok(())
+            },
+            |shortcut| {
+                registered.borrow_mut().retain(|value| value != shortcut);
+                Ok(())
+            },
+        );
+        assert_eq!(result, Err(("Control+Alt+KeyK".to_owned(), "refused".to_owned())));
+        assert_eq!(*registered.borrow(), current);
+    }
+
+    #[test]
+    fn replacing_a_shortcut_registers_before_removing_the_old_binding() {
+        let current = vec!["Control+Alt+KeyM".to_owned(), "Control+Alt+Space".to_owned()];
+        let desired = vec!["Control+Alt+KeyM".to_owned(), "Control+Alt+KeyK".to_owned()];
+        let registered = RefCell::new(current.clone());
+        let result = replace_registered_shortcuts(
+            &current,
+            &desired,
+            |shortcut| {
+                registered.borrow_mut().push(shortcut.to_owned());
+                Ok(())
+            },
+            |shortcut| {
+                registered.borrow_mut().retain(|value| value != shortcut);
+                Ok(())
+            },
+        );
+        assert_eq!(result, Ok(desired.clone()));
+        assert_eq!(*registered.borrow(), vec!["Control+Alt+KeyM", "Control+Alt+KeyK"]);
     }
 
     #[test]
@@ -1423,6 +2338,8 @@ mod tests {
         }
         assert!(DESKTOP_PET_MARKER.starts_with("if (window.self === window.top)"));
         assert!(DESKTOP_PET_MARKER.contains("'__AVIBE_DESKTOP_PET__'"));
+        assert!(DESKTOP_PET_SETTINGS_MARKER.contains("'__AVIBE_DESKTOP_PET_SETTINGS__'"));
         assert!(read("lib/desktopShell.ts").contains("window.__AVIBE_DESKTOP_PET__ === true"));
+        assert!(read("lib/desktopShell.ts").contains("window.__AVIBE_DESKTOP_PET_SETTINGS__ === true"));
     }
 }

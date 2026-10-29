@@ -10,6 +10,7 @@ import {
   Globe,
   Hash,
   HelpCircle,
+  Loader2,
   MessageSquare,
   RefreshCw,
   Square,
@@ -27,10 +28,11 @@ import { hasUsableSecret } from '../../lib/secretFields';
 import { setConfigField } from '../../lib/configMutations';
 import { EyebrowBadge, PlatformIcon, WizardCard } from '../visual';
 import { RoutingConfigPanel } from '../shared/RoutingConfigPanel';
+import { scopeRouteSummary } from '../../lib/scopeRouteSummary';
+import { CHANNEL_SCOPE_FIELDS, scopeSettingsChange } from '../../lib/scopeSettingsPatch';
 import { CompactSelect, SearchField, ToggleSwitch } from '../settings/SettingsPrimitives';
 import { Button } from '../ui/button';
 import { TelegramTopicList } from './TelegramTopicList';
-import { getBackendUiMeta } from '@/lib/agentBackends';
 
 const PLATFORM_BRAND_COLORS: Record<string, string> = {
   slack: '#4A154B',
@@ -65,14 +67,8 @@ export interface ChannelConfig {
     model?: string | null;
     reasoning_effort?: string | null;
     opencode_agent?: string | null;
-    opencode_model?: string | null;
-    opencode_reasoning_effort?: string | null;
     claude_agent?: string | null;
-    claude_model?: string | null;
-    claude_reasoning_effort?: string | null;
     codex_agent?: string | null;
-    codex_model?: string | null;
-    codex_reasoning_effort?: string | null;
   };
   require_mention?: boolean | null;  // null=use global default, true=require, false=don't require
   require_bind?: boolean | null;  // null/false=off, true=only bound users may use this channel
@@ -107,6 +103,10 @@ const addDiscordGuildToAllowlist = (allowlist: string[], selectedGuild: string):
   }
   return merged;
 };
+
+/** The key a channel or Telegram topic row is tracked by on the settings page. */
+const scopeRowKey = (platformId: string, channelId: string, topicId?: string) =>
+  topicId ? `${platformId}::${channelId}::${topicId}` : `${platformId}::${channelId}`;
 
 export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onBack, isPage, forcedPlatform, wizardPlatforms }) => {
   const { capabilities } = useInstanceAuthorization();
@@ -147,6 +147,13 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
   const refreshFollowupVersionRef = useRef(0);
   const channelRequestVersionRef = useRef(0);
   const allPlatformsRequestVersionRef = useRef(0);
+  const scopeSaveVersionRef = useRef<Record<string, number>>({});
+  const routeSaveVersionRef = useRef<Record<string, number>>({});
+  // Per scope row (see scopeRowKey): saves in flight, and whether the last route
+  // change left a session that keeps its previous Agent.
+  const [savingRows, setSavingRows] = useState<Record<string, number>>({});
+  const [newSessionRows, setNewSessionRows] = useState<Record<string, boolean>>({});
+  const currentPlatformRef = useRef<string>('');
   // Directory browser state — tracks which channel's cwd picker is open
   const [browsingCwdFor, setBrowsingCwdFor] = useState<string | null>(null);
   // Page-mode tab/search/collapse state (only used when isPage is true)
@@ -285,6 +292,9 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
   const platform = isWizardMultiPlatform
     ? wizardActivePlatform
     : (forcedPlatform || pagePlatform || config.platform || data.platform || 'slack');
+  useEffect(() => {
+    currentPlatformRef.current = platform;
+  }, [platform]);
   const channelPlatforms = getEnabledPlatforms(config).filter((p) => platformSupportsChannels(config, p));
   const knownDiscordGuilds = [
     ...guilds,
@@ -644,23 +654,8 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
     return channel ? channel.enabled !== false : false;
   };
 
-  const persistConfigs = async (nextConfigs: Record<string, ChannelConfig>) => {
-    if (!isPage) {
-      setConfigs(nextConfigs);
-      return;
-    }
-
-    setLoading(true);
-    try {
-      await api.saveSettings({ channels: nextConfigs }, platform);
-      showToast(t('channelList.settingsSaved'));
-    } catch {
-      showToast(t('channelList.settingsSaveFailed'), 'error');
-    } finally {
-      setLoading(false);
-    }
-  };
-
+  // Setup-wizard edits stay local until the wizard saves them; the settings
+  // page edits through updateConfigForPlatform.
   const updateConfig = (channelId: string, patch: Partial<ChannelConfig>) => {
     const base = configs[channelId] || defaultConfig();
     const next = { ...base, ...patch };
@@ -670,9 +665,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
     if (!next.routing || typeof next.routing !== 'object') {
       next.routing = { agent_name: null };
     }
-    const nextConfigs = { ...configs, [channelId]: next };
-    setConfigs(nextConfigs);
-    void persistConfigs(nextConfigs);
+    setConfigs({ ...configs, [channelId]: next });
   };
 
   const defaultConfig = (): ChannelConfig => ({
@@ -684,14 +677,8 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
       model: null,
       reasoning_effort: null,
       opencode_agent: null,
-      opencode_model: null,
-      opencode_reasoning_effort: null,
       claude_agent: null,
-      claude_model: null,
-      claude_reasoning_effort: null,
       codex_agent: null,
-      codex_model: null,
-      codex_reasoning_effort: null,
     },
     require_mention: null,
     require_bind: null,
@@ -715,6 +702,57 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
   }, [currentRefreshMeta, t]);
 
   // ---- Page-mode all-platforms aggregation ----
+  const reloadChannelConfigs = async (platformId: string) => {
+    const settings = await api.getSettings(platformId).catch(() => null);
+    if (!settings) return;
+    const stored = (settings.channels || {}) as Record<string, ChannelConfig>;
+    setAllConfigsByPlatform((prev) => ({ ...prev, [platformId]: stored }));
+    if (currentPlatformRef.current === platformId) setConfigs(stored);
+    if (platformId === 'telegram') setThreadConfigs(settings.threads || {});
+  };
+
+  // Each edit sends only what it changed on one scope. Resolves to the stored
+  // row, or null when nothing was sent, the save failed (the page then reloads
+  // the platform), or a newer edit of the same scope owns the local row. The
+  // row shows the save in progress; only a failure is announced.
+  const persistScopeChange = async (
+    platformId: string,
+    scope: { kind: 'channel' | 'thread'; id: string; threadId?: string },
+    base: ChannelConfig,
+    next: ChannelConfig,
+    { create = false }: { create?: boolean } = {},
+  ): Promise<ChannelConfig | null> => {
+    const change = scopeSettingsChange(base, next, CHANNEL_SCOPE_FIELDS) || (create ? { changes: {} } : null);
+    if (!change) return null;
+    const rowKey = scopeRowKey(platformId, scope.id, scope.threadId);
+    const version = (scopeSaveVersionRef.current[rowKey] || 0) + 1;
+    scopeSaveVersionRef.current[rowKey] = version;
+    // The session note answers the latest route change, whatever else saved since.
+    const routeVersion = 'routing' in change.changes ? (routeSaveVersionRef.current[rowKey] || 0) + 1 : null;
+    if (routeVersion !== null) routeSaveVersionRef.current[rowKey] = routeVersion;
+    setSavingRows((prev) => ({ ...prev, [rowKey]: (prev[rowKey] || 0) + 1 }));
+    try {
+      const result = await api.patchScopeSettings({
+        platform: platformId,
+        scope: scope.kind,
+        id: scope.id,
+        ...(scope.threadId ? { thread_id: scope.threadId } : {}),
+        ...change,
+      });
+      if (routeVersion !== null && routeSaveVersionRef.current[rowKey] === routeVersion) {
+        setNewSessionRows((prev) => ({ ...prev, [rowKey]: result.needs_new_session === true }));
+      }
+      if (scopeSaveVersionRef.current[rowKey] !== version) return null;
+      return result.settings as ChannelConfig;
+    } catch {
+      showToast(t('channelList.settingsSaveFailed'), 'error');
+      if (scopeSaveVersionRef.current[rowKey] === version) await reloadChannelConfigs(platformId);
+      return null;
+    } finally {
+      setSavingRows((prev) => ({ ...prev, [rowKey]: Math.max(0, (prev[rowKey] || 1) - 1) }));
+    }
+  };
+
   const updateConfigForPlatform = async (
     platformId: string,
     channelId: string,
@@ -732,41 +770,61 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
     if (!next.routing || typeof next.routing !== 'object') {
       next.routing = { agent_name: null };
     }
-    const nextPlatformConfigs = { ...platformConfigs, [channelId]: next };
-    setAllConfigsByPlatform((prev) => ({ ...prev, [platformId]: nextPlatformConfigs }));
+    setAllConfigsByPlatform((prev) => ({
+      ...prev,
+      [platformId]: { ...(prev[platformId] || platformConfigs), [channelId]: next },
+    }));
     if (platformId === platform) {
-      setConfigs(nextPlatformConfigs);
+      setConfigs((prev) => ({ ...prev, [channelId]: next }));
     }
     if (!isPage) return;
-    try {
-      await api.saveSettings({ channels: nextPlatformConfigs }, platformId);
-      showToast(t('channelList.settingsSaved'));
-    } catch {
-      showToast(t('channelList.settingsSaveFailed'), 'error');
+    const stored = await persistScopeChange(platformId, { kind: 'channel', id: channelId }, base, next);
+    if (!stored) return;
+    // The stored row replaces the page's copy on whichever views hold that platform.
+    setAllConfigsByPlatform((prev) => ({
+      ...prev,
+      [platformId]: { ...(prev[platformId] || {}), [channelId]: stored },
+    }));
+    if (currentPlatformRef.current === platformId) {
+      setConfigs((prev) => ({ ...prev, [channelId]: stored }));
     }
   };
 
+  // A topic without an override shows its channel's settings; customizing it
+  // creates the override from the channel's stored settings.
   const saveTelegramTopicConfig = async (
     channelId: string,
     topicId: string,
-    next: ChannelConfig,
+    patch: Partial<ChannelConfig>,
+    inherited?: ChannelConfig,
   ) => {
-    setThreadConfigs((current) => ({
+    const existing = threadConfigs[channelId]?.[topicId];
+    const base = existing || inherited || defaultConfig();
+    const next = { ...base, ...patch };
+    const setTopic = (config: ChannelConfig) => setThreadConfigs((current) => ({
       ...current,
-      [channelId]: { ...(current[channelId] || {}), [topicId]: next },
+      [channelId]: { ...(current[channelId] || {}), [topicId]: config },
     }));
-    try {
-      const result = await api.saveThreadSettings('telegram', channelId, topicId, next);
-      const saved = (result.settings || next) as ChannelConfig;
-      setThreadConfigs((current) => ({
-        ...current,
-        [channelId]: { ...(current[channelId] || {}), [topicId]: saved },
-      }));
-      showToast(t('channelList.settingsSaved'));
-    } catch {
-      const settings = await api.getSettings('telegram').catch(() => null);
-      if (settings) setThreadConfigs(settings.threads || {});
-      showToast(t('channelList.settingsSaveFailed'), 'error');
+    setTopic(next);
+    const stored = await persistScopeChange(
+      'telegram',
+      { kind: 'thread', id: channelId, threadId: topicId },
+      base,
+      next,
+      { create: !existing },
+    );
+    if (stored) setTopic(stored);
+  };
+
+  // Page mode keys the open directory picker by `${platform}::${channelId}[::${topicId}]`.
+  const selectBrowsedDirectory = (path: string) => {
+    const [browsePlatform, browseChannelId, browseTopicId] = (browsingCwdFor || '').split('::');
+    setBrowsingCwdFor(null);
+    if (!browsePlatform || !browseChannelId) return;
+    if (browseTopicId && threadConfigs[browseChannelId]?.[browseTopicId]) {
+      void saveTelegramTopicConfig(browseChannelId, browseTopicId, { custom_cwd: path });
+    } else {
+      void updateConfigForPlatform(browsePlatform, browseChannelId, { custom_cwd: path });
     }
   };
 
@@ -1062,23 +1120,29 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
         showToast(t('channelList.settingsSaveFailed'), 'error');
         return;
       }
-      let changed = false;
-      const nextPlatformConfigs = { ...platformConfigs };
-      for (const [cid, cfg] of Object.entries(platformConfigs)) {
-        if (cfg?.enabled === true && (cfg.require_mention === null || cfg.require_mention === undefined)) {
-          nextPlatformConfigs[cid] = { ...cfg, require_mention: current };
-          changed = true;
-        }
-      }
-      if (changed) {
+      const inheriting = Object.keys(platformConfigs).filter((cid) => {
+        const cfg = platformConfigs[cid];
+        return cfg?.enabled === true && (cfg.require_mention === null || cfg.require_mention === undefined);
+      });
+      if (inheriting.length) {
+        const nextPlatformConfigs = { ...platformConfigs };
         try {
-          await api.saveSettings({ channels: nextPlatformConfigs }, key);
+          const results = await Promise.all(inheriting.map((cid) => api.patchScopeSettings({
+            platform: key,
+            scope: 'channel',
+            id: cid,
+            changes: { require_mention: current },
+          })));
+          inheriting.forEach((cid, index) => {
+            nextPlatformConfigs[cid] = (results[index].settings as ChannelConfig) || nextPlatformConfigs[cid];
+          });
         } catch {
           showToast(t('channelList.settingsSaveFailed'), 'error');
+          await reloadChannelConfigs(key);
           return;
         }
         setAllConfigsByPlatform((prev) => ({ ...prev, [key]: nextPlatformConfigs }));
-        if (key === platform) setConfigs(nextPlatformConfigs);
+        if (currentPlatformRef.current === key) setConfigs(nextPlatformConfigs);
       }
     }
 
@@ -1423,7 +1487,6 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
               const channelPlatform = row.platform;
               const rawConfig = row.config;
               const def = defaultConfig();
-              const defaultAgent = agentByName[defaultAgentName || ''] || null;
               const channelEnabled = rawConfig.enabled === true;
               const isUnavailable = channel.visibility_status === 'not_returned';
               const channelConfig = {
@@ -1436,10 +1499,9 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                 require_mention: rawConfig.require_mention !== undefined ? rawConfig.require_mention : def.require_mention,
                 require_bind: rawConfig.require_bind !== undefined ? rawConfig.require_bind : def.require_bind,
               };
-              const rowKey = `${channelPlatform}::${channel.id}`;
+              const rowKey = scopeRowKey(channelPlatform, channel.id);
               const expanded = expandedChannelId === rowKey;
-              const selectedAgent = agentByName[channelConfig.routing.agent_name || ''] || agentByName[defaultAgentName || ''];
-              const effectiveBackend = selectedAgent?.backend || defaultAgent?.backend || 'opencode';
+              const saving = (savingRows[rowKey] || 0) > 0;
 
               const updateRow = (patch: Partial<ChannelConfig>) => {
                 void updateConfigForPlatform(channelPlatform, channel.id, patch);
@@ -1466,16 +1528,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                 updateRow(patch);
               };
 
-              const backendModel = channelConfig.routing.model || (
-                effectiveBackend === 'claude'
-                  ? channelConfig.routing.claude_model
-                  : effectiveBackend === 'codex'
-                    ? channelConfig.routing.codex_model
-                    : effectiveBackend === 'opencode' ? channelConfig.routing.opencode_model : undefined
-              );
-              const agentSummary = selectedAgent
-                ? `${selectedAgent.display_name || selectedAgent.name}${selectedAgent.model ? ` / ${selectedAgent.model}` : ''}`
-                : `${getBackendUiMeta(effectiveBackend).label}${backendModel ? ` / ${backendModel}` : ''}`;
+              const agentSummary = scopeRouteSummary(channelConfig.routing, agentByName, defaultAgentName, t);
 
               return (
                 <div
@@ -1574,6 +1627,10 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                       </button>
                     )}
 
+                    {saving && (
+                      <Loader2 size={14} className="shrink-0 animate-spin text-muted" aria-label={t('common.saving')} />
+                    )}
+
                     {/* Chevron */}
                     {expanded ? (
                       <ChevronUp size={18} className="shrink-0 text-muted" />
@@ -1595,6 +1652,8 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                         availableMessageTypes={availableMessageTypes(channelPlatform)}
                         showRequireMention={true}
                         inheritsFromKey={channelPlatform}
+                        saving={saving}
+                        routeNotice={newSessionRows[rowKey] ? t('channelList.newSessionHint') : null}
                       />
                       {channelPlatform === 'telegram' && channel.supports_topics && (
                         <TelegramTopicList<ChannelConfig>
@@ -1615,20 +1674,26 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                               show_message_types: [...channelConfig.show_message_types],
                               routing: { ...channelConfig.routing },
                             };
-                            void saveTelegramTopicConfig(channel.id, topicId, snapshot);
+                            void saveTelegramTopicConfig(channel.id, topicId, {}, snapshot);
                             setExpandedTopicKey(`${channel.id}::${topicId}`);
                           }}
                           onReset={(topicId) => void resetTelegramTopicConfig(channel.id, topicId)}
                           onSetEnabled={(topicId, enabled) => {
                             const topicConfig = threadConfigs[channel.id]?.[topicId];
-                            if (topicConfig) void saveTelegramTopicConfig(channel.id, topicId, { ...topicConfig, enabled });
+                            if (topicConfig) void saveTelegramTopicConfig(channel.id, topicId, { enabled });
                           }}
                           renderEditor={(topicId, topicConfig) => {
                             return (
                               <RoutingConfigPanel
                                 value={topicConfig}
-                                onChange={(patch) => void saveTelegramTopicConfig(channel.id, topicId, { ...topicConfig, ...patch })}
-                                onBrowseDirectory={() => setBrowsingCwdFor(`telegram::${channel.id}::${topicId}`)}
+                                onChange={(patch) => void saveTelegramTopicConfig(channel.id, topicId, patch)}
+                                onBrowseDirectory={() => setBrowsingCwdFor(scopeRowKey('telegram', channel.id, topicId))}
+                                saving={(savingRows[scopeRowKey('telegram', channel.id, topicId)] || 0) > 0}
+                                routeNotice={
+                                  newSessionRows[scopeRowKey('telegram', channel.id, topicId)]
+                                    ? t('channelList.newSessionHint')
+                                    : null
+                                }
                                 globalConfig={config}
                                 vibeAgents={vibeAgents}
                                 defaultAgentName={defaultAgentName}
@@ -1660,14 +1725,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
           return (
             <FolderBrowser
               initialPath={selectedConfig?.custom_cwd || config.runtime?.default_cwd || '~/work'}
-              onSelect={(path) => {
-                if (browseTopicId && selectedConfig) {
-                  void saveTelegramTopicConfig(browseChannelId, browseTopicId, { ...selectedConfig, custom_cwd: path });
-                } else {
-                  void updateConfigForPlatform(browsePlatform, browseChannelId, { custom_cwd: path });
-                }
-                setBrowsingCwdFor(null);
-              }}
+              onSelect={selectBrowsedDirectory}
               onClose={() => setBrowsingCwdFor(null)}
             />
           );

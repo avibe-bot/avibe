@@ -17,7 +17,8 @@ from modules.agents.catalog import AGENT_BACKENDS, display_name_for_backend
 from config.v2_config import V2Config
 from config.v2_sessions import ActivePollInfo, SessionState
 from config.v2_settings import _split_scoped_key
-from storage.db import SqliteInvalidationProbe, create_sqlite_engine
+from storage import loop_writers
+from storage import message_deliveries as delivery_store
 from storage.agent_session_rows import (
     SUPERSEDED_ANCHOR_INFIX,
     create_agent_session_row,
@@ -32,6 +33,7 @@ from storage.agent_session_rows import (
     reserve_write_lock,
     snapshot_scope_workdir,
 )
+from storage.db import SqliteInvalidationProbe, create_sqlite_engine
 from storage.models import (
     agents,
     agent_events,
@@ -56,7 +58,6 @@ from storage.session_reclaim import (
     retire_session_delivery_owners,
 )
 from storage.settings_service import make_scope_id, upsert_scope
-from storage import message_deliveries as delivery_store
 
 
 _RUNTIME_RECORD_ROWID = literal_column("runtime_records.rowid")
@@ -325,7 +326,9 @@ class SQLiteSessionsService:
     def __init__(self, db_path: Path):
         self.db_path = db_path
         self.engine = create_sqlite_engine(db_path)
-        metadata.create_all(self.engine)
+        with self.engine.begin() as conn:
+            with loop_writers.track_autocommit_write(conn):
+                metadata.create_all(conn)
         self._probe = SqliteInvalidationProbe(self.engine)
 
     def close(self) -> None:

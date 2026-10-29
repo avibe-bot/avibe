@@ -6,10 +6,9 @@ turns it into the loop's ``ModelEndpoint`` and ``ModelCapabilities`` and keeps
 unknown capabilities ``None``; the loop applies the conservative defaults.
 Transport is the provider adapter registered for the endpoint's protocol.
 
-A ``google`` hop is called over Chat Completions at the same gateway: Model Hub
-serves every source on its OpenAI-compatible ``/v1`` surface and converts, so
-the agent needs no Gemini transport. The served origin still comes from
-``x-avibe-served-hop``.
+A ``google`` hop is called natively, at the gateway's ``/v1beta`` Gemini
+surface (``vibey-gemini-native.md``). The served origin comes from
+``x-avibe-served-hop`` on every protocol.
 
 Each enabled hosted tool's route rides on the endpoint as Model Hub resolved it
 (``hosted_tools``): an adapter declares a tool natively exactly where its mode
@@ -142,13 +141,8 @@ def _image_models(entry: Any) -> ImageModels:
     return ImageModels(tuple(models))
 
 
-def selection_from_hop(hop: Mapping[str, Any], *, gateway_base_url: Optional[str] = None) -> ModelSelection:
-    """Build the loop's selection from one ``HopResolution`` (hop-resolution.schema.json).
-
-    ``gateway_base_url`` is the Model Hub gateway prefix the hop's ``base_url`` was
-    built from; a ``google`` hop needs it, because its ``base_url`` is the
-    ``/v1beta`` Gemini surface and the agent speaks Chat to ``/v1``.
-    """
+def selection_from_hop(hop: Mapping[str, Any]) -> ModelSelection:
+    """Build the loop's selection from one ``HopResolution`` (hop-resolution.schema.json)."""
     if hop.get("backend") != "vibey":
         raise HopResolutionError(f"hop resolved for backend {hop.get('backend')!r}, not vibey")
     protocol = hop.get("protocol")
@@ -185,12 +179,19 @@ def selection_from_hop(hop: Mapping[str, Any], *, gateway_base_url: Optional[str
         context_price_steps=tuple(sorted(steps)),
     )
     base_url = hop["base_url"]
-    original_protocol = protocol
-    if protocol == "google":
-        if not gateway_base_url:
-            raise HopResolutionError("a google hop needs the gateway prefix to call Chat Completions")
-        protocol, base_url = "openai_chat", f"{gateway_base_url.rstrip('/')}/v1"
-    origin_api = original_protocol if original_protocol != protocol else None
+    raw_cache_ttl = hop.get("cache_ttl")
+    if raw_cache_ttl is not None and (
+        not isinstance(raw_cache_ttl, str)
+        or raw_cache_ttl not in {"5m", "30m", "1h", "12h"}
+    ):
+        raise HopResolutionError("hop cache_ttl is invalid")
+    cache_ttl = raw_cache_ttl
+    raw_cache_ttl_wire = hop.get("cache_ttl_wire", False)
+    if not isinstance(raw_cache_ttl_wire, bool):
+        raise HopResolutionError("hop cache_ttl_wire is invalid")
+    cache_ttl_wire = raw_cache_ttl_wire
+    if cache_ttl_wire and cache_ttl not in {"30m", "12h"}:
+        raise HopResolutionError("hop cache_ttl_wire requires 30m or 12h")
     endpoint = ModelEndpoint(
         protocol=protocol,
         base_url=base_url,
@@ -198,11 +199,12 @@ def selection_from_hop(hop: Mapping[str, Any], *, gateway_base_url: Optional[str
         token=hop["token"],
         request_headers=dict(headers),
         provider=hop["provider"],
+        cache_ttl=cache_ttl,
+        cache_ttl_wire=cache_ttl_wire,
         source_id=hop["source_id"],
         source_identity=hop["source_identity"],
         hosted_tools=hosted_tools,
         image_models=image_models,
-        origin_api=origin_api,
     )
     return ModelSelection(endpoint=endpoint, capabilities=capabilities)
 

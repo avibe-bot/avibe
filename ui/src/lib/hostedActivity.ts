@@ -150,7 +150,7 @@ export const hostedActivityFrom = (raw: unknown): HostedActivity | undefined => 
   if (typeof card.tool !== 'string' || !TOOLS.includes(card.tool)) return undefined;
   if (card.mode !== 'native' && card.mode !== 'proxy' && card.mode !== 'direct') return undefined;
   if (typeof card.status !== 'string' || !STATUSES.includes(card.status)) return undefined;
-  return {
+  const projected = {
     ...(card as unknown as HostedActivity),
     sources: Array.isArray(card.sources) ? (card.sources as HostedActivitySource[]).filter((s) => typeof s?.url === 'string' || typeof s?.title === 'string') : [],
     images: Array.isArray(card.images) ? (card.images as HostedActivityImage[]).filter((i) => typeof i?.path === 'string') : [],
@@ -159,6 +159,12 @@ export const hostedActivityFrom = (raw: unknown): HostedActivity | undefined => 
     switch: switchFrom(card.switch),
     fetch: fetchFrom(card.fetch),
   };
+  // A lower bound of exactly $0 carries no useful price information. Keep the
+  // reader aligned with the owner by treating it as unknown rather than showing
+  // "at least $0".
+  if (projected.cost?.at_least && projected.cost.usd === 0) delete projected.cost;
+  return projected;
+
 };
 
 /**
