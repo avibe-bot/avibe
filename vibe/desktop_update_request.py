@@ -169,12 +169,12 @@ def _remote_in_flight(remote: RemoteDesktopUpdateStatus | None) -> bool:
     return remote is not None and remote["phase"] not in _TERMINAL_PHASES
 
 
-def _awaiting_host_expired(
+def _remote_request_expired(
     remote: RemoteDesktopUpdateStatus | None,
     existing: DesktopUpdateRequest | None,
     now: datetime,
 ) -> bool:
-    if remote is None or remote["phase"] != "awaiting_host":
+    if remote is None or remote["phase"] in _TERMINAL_PHASES:
         return False
     if existing is not None and existing["request_id"] == remote["request_id"]:
         return not _request_pending(existing, now)
@@ -200,8 +200,8 @@ def create_or_reuse_desktop_update_request(
         status = read_desktop_update_status(status_path)
         remote = status["remote_request"] if status else None
         existing = read_desktop_update_request(path)
-        awaiting_expired = _awaiting_host_expired(remote, existing, moment)
-        if _remote_in_flight(remote) and not awaiting_expired:
+        remote_expired = _remote_request_expired(remote, existing, moment)
+        if _remote_in_flight(remote) and not remote_expired:
             if remote["target"] != normalized_target:
                 raise DesktopUpdateRequestError("update_in_progress")
             if existing is not None and existing["request_id"] == remote["request_id"]:
@@ -224,7 +224,7 @@ def create_or_reuse_desktop_update_request(
         terminal_request_id = (
             remote["request_id"]
             if remote is not None
-            and (remote["phase"] in _TERMINAL_PHASES or awaiting_expired)
+            and (remote["phase"] in _TERMINAL_PHASES or remote_expired)
             else None
         )
         if (

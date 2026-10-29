@@ -157,7 +157,24 @@ def test_unexpired_shell_status_is_the_idempotency_record(tmp_path) -> None:
     assert decision.request["request_id"] == "87dd4212-fb78-4c57-968c-2f699cc04462"
 
 
-def test_awaiting_host_status_cannot_keep_an_expired_request_alive(tmp_path) -> None:
+@pytest.mark.parametrize(
+    "phase",
+    [
+        "requested",
+        "acknowledged",
+        "awaiting_host",
+        "checking",
+        "downloading",
+        "installing",
+        "restarting",
+    ],
+)
+@pytest.mark.parametrize("expiry", ["file_state", "ttl"])
+def test_nonterminal_status_cannot_keep_an_expired_request_alive(
+    tmp_path,
+    phase,
+    expiry,
+) -> None:
     request_path = tmp_path / "desktop-update-request.json"
     status_path = tmp_path / "update-status.json"
     first = create_or_reuse_desktop_update_request(
@@ -175,7 +192,7 @@ def test_awaiting_host_status_cannot_keep_an_expired_request_alive(tmp_path) -> 
                 "remote_request": {
                     "request_id": first.request["request_id"],
                     "target": "3.2.4-rc.1",
-                    "phase": "awaiting_host",
+                    "phase": phase,
                     "progress": None,
                     "error_code": None,
                     "updated_at": "2026-10-29T02:00:05Z",
@@ -184,12 +201,20 @@ def test_awaiting_host_status_cannot_keep_an_expired_request_alive(tmp_path) -> 
         ),
         encoding="utf-8",
     )
+    if expiry == "file_state":
+        assert expire_desktop_update_request(
+            first.request["request_id"],
+            path=request_path,
+        )
+        retry_at = NOW + timedelta(seconds=10)
+    else:
+        retry_at = NOW + timedelta(minutes=31)
 
     replacement = create_or_reuse_desktop_update_request(
         "3.2.4-rc.1",
         request_path=request_path,
         status_path=status_path,
-        now=NOW + timedelta(minutes=31),
+        now=retry_at,
     )
 
     assert replacement.reused is False
