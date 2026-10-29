@@ -18,7 +18,10 @@ pub const PREFERENCES_VERSION: u64 = 1;
 /// voice; the voice build turns it on, and an explicit choice always wins.
 pub const DEFAULT_ENABLED: bool = false;
 
-/// `⌃⌥Space` on macOS, `Ctrl+Alt+Space` on Windows.
+/// Avoid the macOS Control-Option-Space input-source shortcut.
+#[cfg(target_os = "macos")]
+pub const DEFAULT_SHORTCUT: &str = "Alt+Shift+Space";
+#[cfg(not(target_os = "macos"))]
 pub const DEFAULT_SHORTCUT: &str = "Control+Alt+Space";
 
 /// `⌃⌥M` on macOS, `Ctrl+Alt+M` on Windows.
@@ -49,9 +52,9 @@ pub struct VoiceShortcutState {
 }
 
 impl VoiceShortcutState {
-    pub fn reset(&mut self) {
-        self.key_down = false;
-        self.active = false;
+    /// End the conversation without pretending a physically held key was released.
+    pub fn reset(&mut self) -> bool {
+        std::mem::take(&mut self.active)
     }
 
     pub fn event(&mut self, mode: VoiceMode, event: ShortcutEvent) -> Option<PetIntent> {
@@ -64,8 +67,8 @@ impl VoiceShortcutState {
                 }
                 ShortcutEvent::Released if self.key_down => {
                     self.key_down = false;
-                    self.active = false;
-                    Some(PetIntent::Release)
+                    let active = std::mem::take(&mut self.active);
+                    active.then_some(PetIntent::Release)
                 }
                 _ => None,
             },
@@ -109,8 +112,8 @@ pub struct PetAnchor {
     pub monitor: Option<String>,
 }
 
-/// Everything durable about the pet. `enabled` is written only by the tray
-/// switch, so saving an anchor or a binding never freezes the build default.
+/// Everything durable about the pet. `enabled` is written only by an explicit
+/// switch change, so saving an anchor or a binding never freezes the build default.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct PetPreferences {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -286,7 +289,7 @@ impl PetStore {
                 "Desktop Mini preferences are unavailable until the switch is enabled",
             ));
         }
-        if self.shortcut() == shortcut {
+        if self.preferences.shortcut.as_deref() == Some(shortcut) {
             return Ok(());
         }
         let next = PetPreferences {
@@ -335,6 +338,25 @@ impl PetStore {
         }
         let next = PetPreferences {
             voice_mode: Some(voice_mode),
+            ..self.preferences.clone()
+        };
+        write_preferences(&self.path, &next)?;
+        self.preferences = next;
+        Ok(())
+    }
+
+    /// Commit the complete shortcut preference pair without transient collisions.
+    pub fn try_set_shortcuts(&mut self, voice: &str, toggle: &str, mode: VoiceMode) -> std::io::Result<()> {
+        if !self.trusted {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Desktop Mini preferences are unavailable until the switch is enabled",
+            ));
+        }
+        let next = PetPreferences {
+            shortcut: Some(voice.to_owned()),
+            toggle_shortcut: Some(toggle.to_owned()),
+            voice_mode: Some(mode),
             ..self.preferences.clone()
         };
         write_preferences(&self.path, &next)?;
@@ -2354,11 +2376,14 @@ mod tests {
 
     #[test]
     fn shortcuts_are_labelled_the_way_each_platform_writes_them() {
-        assert_eq!(shortcut_label(DEFAULT_SHORTCUT, true), "⌃⌥Space");
-        assert_eq!(shortcut_label(DEFAULT_SHORTCUT, false), "Ctrl+Alt+Space");
+        assert_eq!(shortcut_label("Control+Alt+Space", true), "⌃⌥Space");
+        assert_eq!(shortcut_label("Control+Alt+Space", false), "Ctrl+Alt+Space");
         assert_eq!(shortcut_label("Alt+Shift+Space", true), "⌥⇧Space");
         assert_eq!(shortcut_label("Super+Shift+KeyP", false), "Win+Shift+P");
-        assert_eq!(DEFAULT_SHORTCUT, "Control+Alt+Space");
+        #[cfg(target_os = "macos")]
+        assert_eq!(shortcut_label(DEFAULT_SHORTCUT, true), "⌥⇧Space");
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(shortcut_label(DEFAULT_SHORTCUT, false), "Ctrl+Alt+Space");
     }
 
     #[test]
@@ -2375,6 +2400,45 @@ mod tests {
         assert_eq!(store.shortcut(), "Alt+Shift+Space");
         assert_eq!(store.toggle_shortcut(), DEFAULT_TOGGLE_SHORTCUT);
         assert_eq!(store.voice_mode(), VoiceMode::Hold);
+    }
+
+    #[test]
+    fn only_an_unset_voice_shortcut_adopts_the_platform_default() {
+        let directory = TestDirectory::new();
+        for explicit in ["Control+Alt+Space", "Alt+Shift+Space", "Control+Shift+KeyV"] {
+            let original = format!(r#"{{"version":1,"enabled":true,"shortcut":"{explicit}"}}"#);
+            std::fs::write(directory.file(), &original).unwrap();
+            assert_eq!(PetStore::load(directory.file()).shortcut(), explicit);
+            assert_eq!(std::fs::read_to_string(directory.file()).unwrap(), original);
+        }
+        for unset in [r#"{"version":1,"enabled":true}"#, r#"{"version":1,"shortcut":null}"#] {
+            std::fs::write(directory.file(), unset).unwrap();
+            assert_eq!(PetStore::load(directory.file()).shortcut(), DEFAULT_SHORTCUT);
+            assert_eq!(std::fs::read_to_string(directory.file()).unwrap(), unset);
+        }
+        let fresh = TestDirectory::new();
+        let mut store = PetStore::load(fresh.file());
+        assert_eq!(store.shortcut(), DEFAULT_SHORTCUT);
+        // Explicitly choosing today's default must be recorded as a choice.
+        store.try_set_shortcut(DEFAULT_SHORTCUT).unwrap();
+        let PreferencesLoad::Loaded(saved) = load_preferences(&fresh.file()) else {
+            panic!("saved choice")
+        };
+        assert_eq!(saved.shortcut.as_deref(), Some(DEFAULT_SHORTCUT));
+    }
+
+    #[test]
+    fn cancellation_preserves_each_modes_repeat_guard_until_release() {
+        for mode in [VoiceMode::Hold, VoiceMode::Toggle] {
+            let mut state = VoiceShortcutState::default();
+            assert_eq!(state.event(mode, ShortcutEvent::Pressed), Some(PetIntent::Listen));
+            state.reset();
+            for _ in 0..5 {
+                assert_eq!(state.event(mode, ShortcutEvent::Pressed), None);
+            }
+            assert_eq!(state.event(mode, ShortcutEvent::Released), None);
+            assert_eq!(state.event(mode, ShortcutEvent::Pressed), Some(PetIntent::Listen));
+        }
     }
 
     #[test]
@@ -2432,6 +2496,8 @@ mod tests {
             Some(PetIntent::Listen)
         );
         state.reset();
+        assert_eq!(state.event(VoiceMode::Toggle, ShortcutEvent::Pressed), None);
+        assert_eq!(state.event(VoiceMode::Toggle, ShortcutEvent::Released), None);
         assert_eq!(
             state.event(VoiceMode::Toggle, ShortcutEvent::Pressed),
             Some(PetIntent::Listen)

@@ -21,6 +21,7 @@ fn main() {
         "pet_settings",
         "pet_set_enabled",
         "pet_set_shortcut",
+        "pet_reset_shortcuts",
         "pet_set_voice_mode",
         "pet_reset_voice_shortcut",
         "pet_ready",

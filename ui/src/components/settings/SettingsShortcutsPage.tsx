@@ -32,8 +32,6 @@ import { SettingsPanel, SettingsRow } from './SettingsPrimitives';
 const SHORTCUT_IDS: readonly ActionShortcutId[] = ['voiceInput', 'showPageAnnotation'];
 type DesktopShortcutId = 'desktopVoice' | 'desktopToggle';
 type CaptureId = ActionShortcutId | DesktopShortcutId;
-const DEFAULT_DESKTOP_VOICE_SHORTCUT = 'Control+Alt+Space';
-const DEFAULT_DESKTOP_TOGGLE_SHORTCUT = 'Control+Alt+KeyM';
 
 export const SettingsShortcutsPage: React.FC = () => {
   const { t } = useTranslation();
@@ -236,7 +234,6 @@ export const SettingsShortcutsPage: React.FC = () => {
   };
 
   const reset = () => {
-    const previousActionShortcuts = readActionShortcuts();
     setCapturing(null);
     setError(null);
     if (!pet.actions) {
@@ -248,28 +245,14 @@ export const SettingsShortcutsPage: React.FC = () => {
       return;
     }
     void pet.apply(async () => {
-      let state = await pet.actions!.setShortcut('voice', DEFAULT_DESKTOP_VOICE_SHORTCUT);
-      if (state.error) {
-        writeActionShortcuts(previousActionShortcuts);
-        return state;
-      }
-      state = await pet.actions!.setShortcut('toggle', DEFAULT_DESKTOP_TOGGLE_SHORTCUT);
-      if (state.error) {
-        writeActionShortcuts(previousActionShortcuts);
-        return state;
-      }
-      state = await pet.actions!.setVoiceMode('hold');
-      if (state.error) {
-        writeActionShortcuts(previousActionShortcuts);
-        return state;
-      }
+      const state = await pet.actions!.resetShortcuts();
+      if (state.error) return state;
       if (!writeActionShortcuts(defaultActionShortcuts())) {
         setPersistError(t('settings.shortcuts.saveFailed'));
         return state;
       }
       setPersistError(null);
-      // Keep the browser copy aligned with the native result. The native
-      // commands have already accepted all three defaults before this write.
+      // Native defaults were accepted as a pair before resetting browser actions.
       return state;
     });
   };
@@ -285,12 +268,18 @@ export const SettingsShortcutsPage: React.FC = () => {
           variant="secondary"
           size="xs"
           onClick={reset}
+          disabled={pet.supported && (pet.loading || !pet.state)}
         >
           <RotateCcw className="size-3.5" />
           {t('settings.shortcuts.reset')}
         </Button>
       }
     >
+      {pet.supported && pet.error && (
+        <p role="alert" className="text-xs text-destructive-ink">
+          {t('settings.shortcuts.desktopSaveFailed')}
+        </p>
+      )}
       {persistError && (
         <p role="alert" className="text-xs text-destructive-ink">
           {persistError}

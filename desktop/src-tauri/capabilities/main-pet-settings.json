@@ -11,6 +11,7 @@
     "allow-pet-settings",
     "allow-pet-set-enabled",
     "allow-pet-set-shortcut",
+    "allow-pet-reset-shortcuts",
     "allow-pet-set-voice-mode"
   ]
 }

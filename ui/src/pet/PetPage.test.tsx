@@ -1534,6 +1534,42 @@ describe('desktop mini v2 interaction contract', () => {
     }
   }
 
+  it.each(['stop', 'escape', 'failure', 'completion'] as const)('resets native toggle voice state on %s so the next press starts again', async (ending) => {
+    const captures: Array<Deferred<string>> = [];
+    const start = vi.fn(async () => {});
+    class Dictation {
+      private completion = deferred<string>();
+      done = this.completion.promise;
+      constructor() { captures.push(this.completion); }
+      start = start;
+      finish = () => {};
+      abort = () => {};
+    }
+    await withVoiceEnv(() => true, Dictation, async () => {
+      const invoke = vi.fn(async (command: string) => command === 'pet_ready'
+        ? { binding: 'S', revision: 1, summon_pending: null }
+        : { panel_side: 'left', panel_edge: 'bottom' });
+      Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+      Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+      mainSession('S'); render(<PetPage />); tapHotkey();
+      await screen.findByLabelText('pet.voice.open');
+      invoke.mockClear();
+      summon('listen');
+      await waitFor(() => expect(start).toHaveBeenCalledTimes(1));
+      expect(pose()).toBe('listening');
+      if (ending === 'stop') await userEvent.click(screen.getByLabelText('pet.voice.stop'));
+      else if (ending === 'escape') fireEvent.keyDown(window, { key: 'Escape' });
+      else if (ending === 'failure') await act(async () => captures[0].reject(new Error('microphone disconnected')));
+      else await act(async () => captures[0].resolve('finished externally'));
+      await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_reset_voice_shortcut'));
+      await act(async () => captures[0].resolve('finished'));
+      // Native reset is paired with the runtime-host reset/press state test.
+      summon('listen');
+      await waitFor(() => expect(start).toHaveBeenCalledTimes(2));
+      expect(pose()).toBe('listening');
+    });
+  });
+
   it.each([
     ['microphone start', 'pet.voice.startFailed', () => ({ start: Promise.reject(new DOMException('denied', 'NotAllowedError')), done: new Promise<string>(() => {}) })],
     ['transcription', 'pet.voice.failed', (TranscriptionError: typeof VoiceTranscriptionErrorType) => ({ start: Promise.resolve(), done: Promise.reject(new TranscriptionError('failed')) })],

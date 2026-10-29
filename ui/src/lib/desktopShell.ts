@@ -87,6 +87,7 @@ export type DesktopPetSettingsActions = {
   getState: () => Promise<DesktopPetSettings>;
   setEnabled: (enabled: boolean) => Promise<DesktopPetSettings>;
   setShortcut: (target: DesktopPetShortcutTarget, shortcut: string) => Promise<DesktopPetSettings>;
+  resetShortcuts: () => Promise<DesktopPetSettings>;
   setVoiceMode: (mode: DesktopPetVoiceMode) => Promise<DesktopPetSettings>;
 };
 
@@ -99,6 +100,7 @@ export function desktopPetSettingsActions(): DesktopPetSettingsActions | null {
     setShortcut: async (target, shortcut) => (
       await invoke('pet_set_shortcut', { target, shortcut })
     ) as DesktopPetSettings,
+    resetShortcuts: async () => (await invoke('pet_reset_shortcuts')) as DesktopPetSettings,
     setVoiceMode: async (mode) => (await invoke('pet_set_voice_mode', { mode })) as DesktopPetSettings,
   };
 }

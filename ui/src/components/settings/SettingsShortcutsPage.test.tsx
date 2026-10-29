@@ -6,6 +6,7 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import en from '../../i18n/en.json';
+import type { DesktopPetSettings } from '../../lib/desktopShell';
 import { defaultActionShortcuts, readActionShortcuts, writeActionShortcuts } from '../../lib/actionShortcuts';
 import { SettingsShortcutsPage } from './SettingsShortcutsPage';
 
@@ -23,7 +24,7 @@ const renderPage = () => render(
   </I18nextProvider>,
 );
 
-const nativePetState = () => ({
+const nativePetState = (): DesktopPetSettings => ({
   enabled: true,
   voice_shortcut: 'Control+Alt+Space',
   toggle_shortcut: 'Control+Alt+KeyM',
@@ -44,12 +45,16 @@ const installDesktopPet = (state = nativePetState()) => {
       };
       return current;
     }
+    if (command === 'pet_reset_shortcuts') {
+      current = { ...current, voice_shortcut: navigator.platform === 'MacIntel' ? 'Alt+Shift+Space' : 'Control+Alt+Space', toggle_shortcut: 'Control+Alt+KeyM', voice_mode: 'hold', error: null };
+      return current;
+    }
     if (command === 'pet_set_voice_mode') {
-      current = { ...current, voice_mode: args?.mode };
+      current = { ...current, voice_mode: args?.mode as 'hold' | 'toggle' };
       return current;
     }
     if (command === 'pet_set_enabled') {
-      current = { ...current, enabled: args?.enabled };
+      current = { ...current, enabled: Boolean(args?.enabled) };
       return current;
     }
     return current;
@@ -247,4 +252,51 @@ describe('SettingsShortcutsPage', () => {
     }));
     expect(readActionShortcuts()).toEqual(defaultActionShortcuts());
   });
+  it.each([
+    ['MacIntel', 'Alt+Shift+Space', 'Option+Shift+Space'],
+    ['Win32', 'Control+Alt+Space', 'Ctrl+Alt+Space'],
+  ])('restores the native platform defaults as one pair on %s', async (platform, voiceDefault, label) => {
+    Object.defineProperty(navigator, 'platform', { configurable: true, value: platform });
+    const native = installDesktopPet({ ...nativePetState(), voice_shortcut: 'Control+Alt+KeyM', toggle_shortcut: voiceDefault, voice_mode: 'toggle' });
+    renderPage();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Restore defaults' }).hasAttribute('disabled')).toBe(false));
+    fireEvent.click(screen.getByRole('button', { name: 'Restore defaults' }));
+    await waitFor(() => expect(native.invoke).toHaveBeenCalledWith('pet_reset_shortcuts'));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Change Voice conversation shortcut' }).textContent).toContain(label));
+    expect(native.state()).toMatchObject({ voice_shortcut: voiceDefault, toggle_shortcut: 'Control+Alt+KeyM', voice_mode: 'hold' });
+    expect(native.invoke.mock.calls.some(([command]) => command === 'pet_set_shortcut')).toBe(false);
+  });
+
+  it.each(['capture', 'mode', 'reset'] as const)('shows a native %s save rejection and preserves settings', async (kind) => {
+    const native = installDesktopPet();
+    renderPage();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Restore defaults' }).hasAttribute('disabled')).toBe(false));
+    native.invoke.mockRejectedValueOnce(new Error('pet.json is read-only'));
+    if (kind === 'capture') {
+      const voice = screen.getByRole('button', { name: 'Change Voice conversation shortcut' });
+      fireEvent.click(voice);
+      fireEvent.keyDown(voice, { code: 'KeyQ', key: 'q', ctrlKey: true, altKey: true });
+    } else if (kind === 'mode') {
+      fireEvent.change(screen.getByRole('combobox', { name: 'Voice shortcut mode' }), { target: { value: 'toggle' } });
+    } else {
+      fireEvent.click(screen.getByRole('button', { name: 'Restore defaults' }));
+    }
+    expect((await screen.findByRole('alert')).textContent).toBe(en.settings.shortcuts.desktopSaveFailed);
+    expect(native.state()).toEqual(nativePetState());
+    expect(readActionShortcuts()).toEqual(defaultActionShortcuts());
+  });
+
+  it('renders a refusal returned by an actual capture attempt with the old key intact', async () => {
+    const native = installDesktopPet();
+    renderPage();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Restore defaults' }).hasAttribute('disabled')).toBe(false));
+    native.invoke.mockResolvedValueOnce({ ...nativePetState(), error: { target: 'voice', shortcut: 'Control+Alt+KeyQ' } });
+    const voice = screen.getByRole('button', { name: 'Change Voice conversation shortcut' });
+    fireEvent.click(voice);
+    fireEvent.keyDown(voice, { code: 'KeyQ', key: 'q', ctrlKey: true, altKey: true });
+    expect((await screen.findByRole('alert')).textContent).toContain("Couldn't register Ctrl+Alt+Q");
+    expect(voice.textContent).toContain('Ctrl+Alt+Space');
+    expect(native.state().voice_shortcut).toBe('Control+Alt+Space');
+  });
+
 });

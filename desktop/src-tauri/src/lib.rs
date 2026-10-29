@@ -2334,6 +2334,7 @@ pub fn run() {
             pet::pet_settings,
             pet::pet_set_enabled,
             pet::pet_set_shortcut,
+            pet::pet_reset_shortcuts,
             pet::pet_set_voice_mode,
             pet::pet_ready,
             pet::pet_set_expanded,

@@ -108,6 +108,7 @@ fn the_shell_enables_only_its_declared_capabilities() {
             "window-drag",
             "pet",
             "main-pet-bind",
+            "main-pet-settings",
             "main-computer-use",
             "main-desktop-update"
         ])
@@ -451,6 +452,7 @@ fn every_shell_command_is_declared_so_its_permission_exists() {
         "pet_settings",
         "pet_set_enabled",
         "pet_set_shortcut",
+        "pet_reset_shortcuts",
         "pet_set_voice_mode",
         "pet_reset_voice_shortcut",
         "pet_ready",
@@ -1261,6 +1263,7 @@ fn the_pet_and_the_workbench_get_only_their_pet_commands_on_loopback_pages() {
             "allow-pet-settings",
             "allow-pet-set-enabled",
             "allow-pet-set-shortcut",
+            "allow-pet-reset-shortcuts",
             "allow-pet-set-voice-mode"
         ])
     );
@@ -1286,7 +1289,7 @@ fn the_pet_and_the_workbench_get_only_their_pet_commands_on_loopback_pages() {
         true,
         "a transparent pet needs it on macOS"
     );
-    for grant in [&pet, &workbench] {
+    for grant in [&pet, &workbench, &settings] {
         let patterns = loopback_patterns(grant);
         for allowed in ["http://127.0.0.1:5123/pet", "http://[::1]:6174/chat/abc"] {
             let url = url::Url::parse(allowed).unwrap();
