@@ -485,7 +485,7 @@ describe('PetPage state', () => {
     await waitFor(() => expect(api.getTurnState.mock.calls.length).toBeGreaterThan(before));
   });
 
-  it('marks read through the last rendered unread result only when all unread rows are loaded', async () => {
+  it('keeps omitted unread results unread when the card renders only the latest one', async () => {
     tails.S = [
       message('r1', 'S'),
       message('u', 'S', { author: 'user', type: 'user' }),
@@ -498,7 +498,7 @@ describe('PetPage state', () => {
     await waitFor(() => expect(pose()).toBe('ready'));
     await showDetail();
     await screen.findAllByText('reply r3');
-    await waitFor(() => expect(markRead).toHaveBeenCalledWith('S', 'r3'));
+    expect(markRead).not.toHaveBeenCalled();
   });
 
   it('does not mark read when unread rows may reach past the loaded tail', async () => {
@@ -2260,6 +2260,8 @@ describe('desktop mini v2 interaction contract', () => {
     const avatar = screen.getByLabelText('pet.recentTurns');
     await userEvent.dblClick(avatar);
     expect(historyIsOpen()).toBe(false);
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(document.querySelector('.pet-mini-dock.is-active')).toBeNull();
     expect(opens).toHaveBeenCalledExactlyOnceWith('avibe://session/S');
     expect(panel).toHaveBeenCalledWith(true);
     expect(panel).toHaveBeenCalledWith(false);
@@ -2916,9 +2918,12 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
   });
 
   it('shows a plain text collapsed reply without the old prefix', async () => {
-    await runToResult('**Bold** and [a link](https://example.com)\n```ts\nconst answer = 1\n```');
+    await runToResult('**Bold** and [a link](https://example.com)\nOpen `~/.avibe/config.json` and run `my_script.py`.\n2 < 3 && 5 > 4\n```ts\nconst answer = 1\n```');
     const summary = document.querySelector('.pet-mini-reply-summary')!;
     expect(summary.textContent).toContain('Bold and a link');
+    expect(summary.textContent).toContain('~/.avibe/config.json');
+    expect(summary.textContent).toContain('my_script.py');
+    expect(summary.textContent).toContain('2 < 3 && 5 > 4');
     expect(summary.textContent).toContain('const answer = 1');
     expect(summary.textContent).not.toContain('**');
     expect(summary.textContent).not.toContain('```');

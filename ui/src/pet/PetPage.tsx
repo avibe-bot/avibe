@@ -81,17 +81,35 @@ type CardPresentation = { phase?: StopPhase; leaving?: boolean; retained?: PetCa
 const isRunning = (agent: RunningAgent) => agent.state === 'active';
 
 /** Make an agent reply readable when it is shown inside a compact card. */
-const collapseMarkdownToPlainText = (text: string): string => text
-  .replace(/```[^\n]*\n?/g, '')
-  .replace(/~~~[^\n]*\n?/g, '')
-  .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
-  .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
-  .replace(/`([^`]+)`/g, '$1')
-  .replace(/(^|\n)\s{0,3}(?:#{1,6}|>|[-*+]|\d+\.)\s*/g, '$1')
-  .replace(/[*_~]/g, '')
-  .replace(/<[^>]+>/g, '')
-  .replace(/\s+/g, ' ')
-  .trim();
+const collapseMarkdownToPlainText = (text: string): string => {
+  const code: string[] = [];
+  let nextCode = 0;
+  const protectCode = (): string => `@@PETCODE${nextCode++}@@`;
+  const plain = text
+    .replace(/```[^\n]*\n([\s\S]*?)\n?```|~~~[^\n]*\n([\s\S]*?)\n?~~~/g, (_match, fencedBacktick: string, fencedTilde: string) => {
+      const value = fencedBacktick ?? fencedTilde ?? '';
+      code.push(value);
+      return protectCode();
+    })
+    .replace(/`([^`\n]+)`/g, (_match, value: string) => {
+      code.push(value);
+      return protectCode();
+    })
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/(^|\n)\s{0,3}(?:#{1,6}|>|[-*+]|\d+\.)[ \t]+/g, '$1')
+    .replace(/~~([^~\n]+)~~/g, '$1')
+    .replace(/\*\*\*([^*\n]+)\*\*\*/g, '$1')
+    .replace(/___([^_\n]+)___/g, '$1')
+    .replace(/\*\*([^*\n]+)\*\*/g, '$1')
+    .replace(/__([^_\n]+)__/g, '$1')
+    .replace(/(?<!\w)\*([^*\n]+)\*(?!\w)/g, '$1')
+    .replace(/(?<!\w)_([^_\n]+)_(?!\w)/g, '$1')
+    .replace(/<!--[\s\S]*?-->|<\/?[a-z][a-z0-9-]*(?:\s+[^<>]*?)?\/?>/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return plain.replace(/@@PETCODE(\d+)@@/g, (_match, index: string) => code[Number(index)] ?? '');
+};
 
 function agentCard(
   agent: RunningAgent,
@@ -292,7 +310,7 @@ const PetSurface: React.FC = () => {
   const openCards = useCallback(() => {
     setDetailOpen(false);
     void setPanel(true);
-  }, [setPanel]);
+  }, [setDetailOpen, setPanel]);
   // A Vibey click (§5.1) opens the main card immediately, closes it when it is
   // already open, and folds the other cards as part of opening.
   const toggleVibey = () => {
@@ -323,6 +341,7 @@ const PetSurface: React.FC = () => {
   // whether that click is also the second half of a double-click.
   const pressRef = useRef<{ held: boolean; dragged: boolean; clicks: number; double: boolean; x: number; y: number; timer: number } | null>(null);
   const lastClickAtRef = useRef(0);
+  const composerBeforeClickRef = useRef(false);
   const doubleOpenedRef = useRef(false);
   const allowDoubleEventRef = useRef(false);
   const dismissTimers = useRef<Record<string, number>>({});
@@ -502,14 +521,14 @@ const PetSurface: React.FC = () => {
   const closeComposer = useCallback(() => {
     setComposing(false);
     setDraft('');
-  }, [setDraft]);
+  }, [setComposing, setDraft]);
   // An open history stays open: the input takes its place below it (§5.2).
   const openComposer = useCallback((text = '', selected?: SessionReference[]) => {
     if (!epoch.isCurrent()) return;
     setDraft(text, selected);
     setComposing(true);
     window.setTimeout(() => { if (epoch.isCurrent()) inputRef.current?.focus(); }, 0);
-  }, [setDraft, epoch]);
+  }, [epoch, setComposing, setDraft]);
 
   const send = useCallback(async (text: string, metadata?: Record<string, unknown>) => {
     if (!epoch.isCurrent() || !text.trim() || !binding || !canChat || data.session?.id !== binding) return false;
@@ -544,7 +563,7 @@ const PetSurface: React.FC = () => {
       // Release this request's document-wide lock, not a new surface's state.
       petComposer.setSending(false);
     }
-  }, [api, binding, canChat, data, setPanel, setUncertain, epoch, draftReferences]);
+  }, [api, binding, canChat, data, draftReferences, epoch, setComposing, setDetailOpen, setPanel, setUncertain]);
   const submit = async () => {
     const submitted = draft;
     if (!(await send(submitted)) || !epoch.isCurrent()) return;
@@ -648,8 +667,8 @@ const PetSurface: React.FC = () => {
   }, [listenPending, binding, canChat, expanded, voice.available, voice.start, openComposer, draft, uncertain, resetVoiceShortcut]);
   const dockActiveRef = useRef(false);
   useLayoutEffect(() => { dockActiveRef.current = voice.busy || composing; }, [voice.busy, composing]);
-  const suppressDock = useCallback(() => {
-    if (dockActiveRef.current) return;
+  const suppressDock = useCallback((force = false) => {
+    if (!force && dockActiveRef.current) return;
     // The shell emits transitions only; an already-outside pointer can enter next.
     hoverSuppressedRef.current = shellHoveredRef.current;
     setHoverSuppressed(true);
@@ -658,7 +677,7 @@ const PetSurface: React.FC = () => {
   }, []);
   useEffect(() => {
     const onBlur = () => {
-      suppressDock();
+      suppressDock(doubleOpenedRef.current && !composerBeforeClickRef.current && !draft.trim() && !voice.busy);
       if (!voice.busy) resetVoiceShortcut();
       // Opening Avibe must preserve the history/card list through its key change.
       if (!doubleOpenedRef.current && !voice.busy && !draft.trim()) void setPanel(false);
@@ -864,6 +883,8 @@ const PetSurface: React.FC = () => {
   const openDoubleClick = () => {
     if (doubleOpenedRef.current) return;
     doubleOpenedRef.current = true;
+    const preserveComposer = composerBeforeClickRef.current || Boolean(draft.trim()) || voice.busy;
+    if (!preserveComposer) setComposing(false);
     if (turnReply) setReplyUnreadDotClearedFor(turnReply.id);
     setDetailOpen(false);
     void setPanel(false);
@@ -872,11 +893,11 @@ const PetSurface: React.FC = () => {
       void inbox.markRead(binding, lastUnread.id);
     }
     if (!binding) {
-      suppressDock();
+      suppressDock(!preserveComposer);
       return;
     }
     void petBridge.open(sessionLink(binding)).then(() => {
-      if (epoch.isCurrent()) suppressDock();
+      if (epoch.isCurrent()) suppressDock(!preserveComposer);
     }, () => undefined);
   };
   useLayoutEffect(() => {
@@ -920,6 +941,7 @@ const PetSurface: React.FC = () => {
           const now = performance.now();
           const isSecondClick = event.detail >= 2
             || (lastClickAtRef.current > 0 && now - lastClickAtRef.current <= DOUBLE_CLICK_DETECTION_MS);
+          if (!isSecondClick) composerBeforeClickRef.current = composing || voice.busy || Boolean(draft.trim());
           pressRef.current = {
             held: false,
             dragged: false,
@@ -1695,7 +1717,7 @@ function usePetMarkRead(epoch: PetSurfaceEpoch, binding: string, exchange: Retur
   const marker = useRef<string | null>(null);
   useEffect(() => { marker.current = null; }, [epoch]);
   useEffect(() => {
-    if (!epoch.isCurrent() || !unreadId || !exchange.unreadComplete || !active || !visible) return;
+    if (!epoch.isCurrent() || !unreadId || exchange.results.length !== 1 || !exchange.unreadComplete || !active || !visible) return;
     const key = `${binding}\u0000${unreadId}`;
     if (marker.current === key) return;
     marker.current = key;
@@ -1703,5 +1725,5 @@ function usePetMarkRead(epoch: PetSurfaceEpoch, binding: string, exchange: Retur
       if (!epoch.isCurrent()) return;
       if (applied) onRead(); else marker.current = null;
     }, () => { if (epoch.isCurrent()) marker.current = null; });
-  }, [active, binding, exchange.unreadComplete, markRead, onRead, unreadId, visible, epoch]);
+  }, [active, binding, exchange.results.length, exchange.unreadComplete, markRead, onRead, unreadId, visible, epoch]);
 }
