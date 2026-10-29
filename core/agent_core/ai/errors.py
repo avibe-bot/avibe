@@ -338,6 +338,10 @@ def _classify_kind(
         return "overflow"
     if is_overflow_message(message, status=status):
         return "overflow"
+    if normalized_code in {"invalid_request_error", "upstream_request_invalid"}:
+        # An SSE error has no HTTP 400 status. Its explicit request-rejection type is still permanent, not an
+        # unknown/thinking-drop failure. Narrow compatibility recoveries are admitted separately by the adapter.
+        return "invalid_request"
     if exc is not None:
         # A stall is not a connection failure: the provider was reached and
         # then stopped sending.

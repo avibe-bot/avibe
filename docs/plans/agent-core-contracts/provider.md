@@ -72,7 +72,8 @@ History follows the same Source rule. A response's hosted calls go back verbatim
 when that hop's Source served them on the same origin (`conversion-tables.md`, Hosted tools): within their turn as a
 continuation, later with the hop's current `replay`, and pinned to that Source either way.
 
-**Refusals before any output** (`vibey-hosted-tools.md` §3.5). The gateway answers a pinned request it cannot serve
+**Refusals and changed-request recovery** (`vibey-hosted-tools.md` §3.5). Except for the corroborated Anthropic
+search recovery below, refusals require no output. The gateway answers a pinned request it cannot serve
 from that Source with `409 pin_unavailable`, matched on its `type` and `code`, and names the narrow hosted rule that
 fired in `error.reason` when one did. A provider refuses an opaque payload replayed under an account that cannot read
 it (a key change, or a relay serving a later turn from another pooled account, which no Source identity can see) with
@@ -95,6 +96,26 @@ for xAI's). The loop answers it by rendering the request again, never by the gen
   without them (`transcript.md`). Each pair is answered once; refused again, the error ends the run.
 
 A `pause_turn` continuation's `pin_unavailable` comes after output, so it is no refusal (`conversion-tables.md`).
+
+**Anthropic search replay compatibility** (`search-history-recovery.md`). An `invalid_request` from HTTP 400 or
+SSE may carry the run-local `search_history` refusal when its precise search ciphertext/citation error corresponds
+to native call/result pairs actually sent. A resolvable `messages.N.content.M` path narrows the match; a path that
+does not name such a pair is only a hint, since intermediary indices may differ. The exact
+assistant-prefill rejection is weaker evidence: it permits a trial only when canonical context ends in a real client
+result, the wire ends in a tool-result-only user message answering all preceding client calls beside a pending native
+search, and the compiler can demote completed search history. It is not a search diagnosis by itself.
+
+The loop tries once per Source identity per run, on the same hop with only web-search `replay=False`. The existing
+compiler preserves in-flight native content, declarations, saved client results, and signatures, while rendering
+completed history portably. The decision is not persisted or learned as permanent capability evidence. If an explicit
+search error instead names ciphertext remaining in the current exchange, the existing `opaque_refused(hosted)`
+fallback remains available once, including after a history trial, and persists only the released `hosted` payload kind.
+Absent ciphertext and already-demoted history do not authorize an unchanged retry.
+
+Both search paths may replace an uncommitted partial: audit the failed attempt's usage and recompile before committing
+any response. Failed client calls never execute, completed client results are not replayed, and Vibey publishes no
+failed narration or duplicate search card. `retryable` and `continuable` stay false: this is a bounded changed-request
+repair, not generic replay or an outer transcript continuation. Other refusal kinds retain their no-output boundary.
 
 The loop's `ModelRouter` returns the `ModelEndpoint` together with its `ModelCapabilities`. Every capability has a
 defined effect, including when it is unknown:
@@ -143,7 +164,7 @@ own bounded continuation policy (`loop-control.md`).
 | --- | --- | --- |
 | `overflow` | the request exceeded the model's context (Pi's overflow patterns and Anthropic's refusal of input plus `max_tokens` over the window, HTTP 413, `context_length_exceeded`) | overflow recovery (plan §5.2) |
 | `rate_limit`, `overloaded`, `network`, `stalled`, `server`, `interrupted` | transient (`network`: the provider could not be reached; `stalled`: a connected provider sent nothing for the silence bound; `interrupted`: the provider's stream ended after output without a terminal, as Model Hub reports with its own `modelHub.errors.stream_interrupted` frame) | retry with backoff, honoring `retry_after_s`, only when nothing was streamed (no deltas, no `partial`), at most 3 retries within 120 s; then the run ends with that error. After streamed text or a tool call the error is terminal for the request, matching Model Hub's first-byte rule; after thinking alone it is retried once (below) |
-| `auth`, `invalid_request` | not retryable | end the run with the error. The one narrow exception is a strict final tool-argument parse failure: the adapter keeps a safe partial with every call, marks malformed call identities in `malformed_tool_calls`, and grants only Vibey's transcript-only recovery permission; no malformed call is executed. |
+| `auth`, `invalid_request` | not retryable | end the run with the error, except for the corroborated search changed-request repair above and strict final tool-argument recovery below. Neither permits generic replay or execution of malformed calls. |
 | `aborted` | cancelled by the caller | end the run as aborted |
 | `unknown` | anything else | end the run with the error; after thinking alone, retry once (below) |
 
@@ -161,7 +182,8 @@ A `ProviderError` whose `partial` is committed (a response that failed after out
 partial's `error_message`, redacted like the error itself and bounded to 1,000 characters, so the transcript row says
 why the response ended. A Stop's partial carries none.
 
-A strict final tool-argument parse failure is the only `invalid_request` that carries recovery metadata. Its `partial`
+A strict final tool-argument parse failure is the only `invalid_request` that grants transcript-continuation
+permission (distinct from the search changed-request repair above). Its `partial`
 keeps text, thinking, and all canonical tool calls, replacing every malformed argument payload with `{}`. The
 `malformed_tool_calls` identities tell the loop which calls are unsafe: it commits the assistant row, records one
 model-visible error `tool_result` for each such call, executes valid sibling calls once, and then returns a bounded

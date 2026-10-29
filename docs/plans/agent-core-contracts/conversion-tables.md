@@ -145,6 +145,10 @@ HTTP `401/403` always map to `auth`, `413` to `overflow`, `429` to
 that says so), otherwise `server`.
 Transport errors map to `network`, and the silence bound to `stalled`. Every classification is non-retryable once
 the assembler has emitted text or a tool-call event; after thinking alone, see the Retry boundary row.
+`invalid_request_error` and `upstream_request_invalid` remain `invalid_request` even in an SSE error without an HTTP
+400 status, unless the earlier overflow rule applies. The corroborated Anthropic search recovery in C-2 `provider.md`
+is a separate changed-request repair: it keeps `retryable=false`, can discard an uncommitted partial, and does not
+relax generic replay or grant transcript-continuation permission.
 
 ## Endpoint identity and redaction ledger
 

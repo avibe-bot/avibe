@@ -71,7 +71,7 @@ from core.agent_core.agent.lifecycle import RunAborted as _Aborted, RunScope
 from core.agent_core.agent.models import ModelRouter, ModelSelection, RetryPolicy
 from core.agent_core.agent.outcome import OutcomeOwner
 from core.agent_core.agent.state import HookStateError, state_representation
-from core.agent_core.ai._common import endpoint_origin, native_hosted_tools, portable_endpoint
+from core.agent_core.ai._common import endpoint_origin, native_hosted_tools, portable_endpoint, search_history_endpoint
 from core.agent_core.ai.provider import (
     Done,
     ModelEndpoint,
@@ -238,8 +238,10 @@ MAX_REFUSAL_RESOLVES = 2
 
 @dataclass
 class _Refusals:
-    """A run's refusals before any output, and how the requests after them render (``vibey-hosted-tools.md`` §3.5).
+    """A run's refusals and changed-request recovery (``vibey-hosted-tools.md`` §3.5).
 
+    Generic pin/opaque refusals require no output. Corroborated Anthropic search refusals may also replace an
+    uncommitted partial: no client tool from that failed attempt has run, and its usage stays in the audit.
     A refusal is answered by a fresh hop, rendered normally: at most once per (Source, tool, aspect) a narrow hosted
     rule names, and at most ``MAX_REFUSAL_RESOLVES`` times in the run. Past a bound, or when a gateway hand-back's
     fresh hop is the refused one again, the request goes portable instead.
@@ -253,15 +255,25 @@ class _Refusals:
     rules: set[tuple[Optional[str], str, Optional[str]]] = field(default_factory=set)
     opaque: set[tuple[Optional[str], str]] = field(default_factory=set)
     unsaved: dict[Optional[str], list[str]] = field(default_factory=dict)
+    # A guarded compatibility trial is not permanent capability evidence. Keep it within this run, not in a new
+    # on-disk payload vocabulary that older releases cannot load after a rollback.
+    search_history: set[Optional[str]] = field(default_factory=set)
 
-    def answer(self, refusal: Refusal) -> Optional[Literal["resolve", "portable"]]:
+    def answer(self, refusal: Refusal) -> Optional[Literal["resolve", "portable", "same"]]:
         """How the next attempt answers ``refusal``, counted; None when the refusal stands as the error."""
+        if refusal.kind == "search_history":
+            if refusal.source_identity in self.search_history:
+                return None
+            self.search_history.add(refusal.source_identity)
+            return "same"
         if refusal.kind == "opaque_refused":
             fresh = [kind for kind in refusal.payloads if (refusal.source_identity, kind) not in self.opaque]
             if not fresh:
                 return None
             self.opaque.update((refusal.source_identity, kind) for kind in fresh)
             self.unsaved.setdefault(refusal.source_identity, []).extend(fresh)
+            if refusal.tool == "web_search":
+                return "same"
         rule = (refusal.source_id, refusal.tool, refusal.aspect) if refusal.tool is not None else None
         if self.resolves >= MAX_REFUSAL_RESOLVES or rule in self.rules:
             return "portable"
@@ -276,6 +288,8 @@ class _Refusals:
         endpoint = selection.endpoint
         if self.opaque:
             endpoint = replace(endpoint, opaque_refused=frozenset(self.opaque))
+        if endpoint.source_identity in self.search_history:
+            endpoint = search_history_endpoint(endpoint)
         if portable:
             endpoint = portable_endpoint(endpoint)
         return selection if endpoint is selection.endpoint else replace(selection, endpoint=endpoint)
@@ -910,8 +924,8 @@ class Agent:
             # A response that dropped after thinking alone is retried once per request (C-2 ``provider.md``): some
             # prompts drop at the same point every time.
             thinking_retried = False
-            # A refusal before any output is answered by rendering the request again (§3.5, ``_Refusals``): the hop a
-            # gateway hand-back refused, and whether the next request goes portable.
+            # A refusal is answered by a changed rendering (§3.5, ``_Refusals``): the hop a gateway hand-back refused,
+            # and whether the next request goes portable. Search-history trials keep the same hop.
             refused: Optional[ModelEndpoint] = None
             portable = False
             while True:
@@ -976,14 +990,28 @@ class Agent:
                         and not streamed
                         and (terminal.partial is None or not terminal.partial.content)
                     )
+                    search_recovery = (
+                        isinstance(terminal, ProviderError)
+                        and terminal.refusal is not None
+                        and (
+                            terminal.refusal.kind == "search_history"
+                            or (terminal.refusal.kind == "opaque_refused" and terminal.refusal.tool == "web_search")
+                        )
+                    )
                     rerender = (
                         self._refusals.answer(terminal.refusal)
                         if isinstance(terminal, ProviderError)
                         and terminal.refusal is not None
-                        and not streamed
-                        and (terminal.partial is None or not terminal.partial.content)
+                        and (
+                            search_recovery
+                            or (not streamed and (terminal.partial is None or not terminal.partial.content))
+                        )
                         else None
                     )
+                    # Search-history repair owns one changed-request trial even after deltas. No client tool from
+                    # this attempt has run: _loop executes only a committed, successful tool-use response. Failed
+                    # deltas stay speculative (Vibey displays committed rows); audit usage rather than publishing a
+                    # failed narration and consuming a separate transcript-continuation budget.
                     delay = (
                         self.retry.delay(terminal, retries=retries, streamed=streamed, elapsed_s=time.monotonic() - started)
                         if isinstance(terminal, ProviderError) and not relieve and rerender is None
@@ -1012,6 +1040,9 @@ class Agent:
                 terminal = replace(terminal, partial=None)
                 if rerender is not None:
                     await self._save_refusals()
+                if rerender == "same":
+                    selected = route
+                    continue
                 if rerender == "portable":
                     selected, portable = route, True
                     continue
