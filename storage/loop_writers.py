@@ -136,6 +136,7 @@ class _AutocommitWrite:
 
     def __init__(self, connection: CensusConnection, site: _Site) -> None:
         self._connection = connection
+        self._record = connection._census
         self._site = site
         self._started_at: float | None = None
         self._closed = False
@@ -150,6 +151,11 @@ class _AutocommitWrite:
         self._closed = True
         started_at = self._started_at
         if started_at is None:
+            return False
+        # A commit or rollback replaces the checkout's record. Identity, rather
+        # than ``in_transaction`` alone, catches a transaction that finished
+        # inside this context before SQLite cleared that flag.
+        if self._connection._census is not self._record:
             return False
         # If the marked operation opened a real SQLite transaction, its eventual
         # commit/rollback owns the timing and site. This keeps an explicit marker

@@ -197,6 +197,23 @@ def test_a_failed_marked_autocommit_write_is_closed_once(census) -> None:
     assert failed_counts == [1]
 
 
+@pytest.mark.parametrize("finish", ("commit", "rollback"))
+def test_a_marked_transaction_is_counted_once(census, finish) -> None:
+    """A transaction finished inside the marker is owned by its census record."""
+
+    def finish_inside_marker() -> None:
+        with census.connect() as conn:
+            with loop_writers.track_autocommit_write(conn):
+                conn.execute(text("INSERT INTO notes (body) VALUES ('marker')"))
+                getattr(conn, finish)()
+
+    finish_inside_marker()
+
+    matches = _matching_sites(filename="tests/test_loop_writers.py", name="finish_inside_marker")
+    assert len(matches) == 1
+    assert matches[0][1][0] == 1
+
+
 def test_the_census_counts_exactly_the_loops_write_transactions(census) -> None:
     """Every write the loop thread runs is counted under the function that ran it,
     whether it began explicitly or on its first statement, committed or rolled back.
