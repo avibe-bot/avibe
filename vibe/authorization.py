@@ -650,7 +650,6 @@ _EDITOR_HTTP_RULES = tuple(
         # MCP Hub reads match Skills; its management routes stay Owner-only.
         ("GET", r"^/api/mcp$"),
         ("GET", r"^/api/mcp/[^/]+$"),
-        ("GET", r"^/api/mcp/[^/]+/tools$"),
         ("GET", r"^/api/agents-graph$"),
         ("GET", r"^/api/agent-backends$"),
         # Read-only model catalogs. Chat's route picker is an editor surface and

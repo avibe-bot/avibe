@@ -1325,6 +1325,11 @@ class Controller:
                 self.web_ui_watchdog_task = asyncio.create_task(watch_web_ui(lambda: self.shutdown_requested))
         except Exception as e:
             logger.error("Failed to start the Web UI watchdog: %s", e, exc_info=True)
+        try:
+            # Off the readiness path: native MCP handshake must not delay startup.
+            asyncio.create_task(self.mcp_runtime.submit("discover", {}))
+        except Exception as e:
+            logger.error("Failed to start MCP Hub discovery: %s", e, exc_info=True)
 
     async def _recover_runtime_owners(self) -> None:
         """Restore durable execution owners before any producer can admit work."""

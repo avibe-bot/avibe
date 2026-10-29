@@ -79,8 +79,8 @@ def test_page_rejects_unsupported_input_with_field(server, error_type, field):
     assert (caught.value.type, caught.value.field, caught.value.usage) == (error_type, field, True)
 
 
-@pytest.mark.parametrize("name", ["add", "remove", "", ".", "..", "a/b", "a\\b", "a\x00b"])
-def test_reserved_and_invalid_names_are_rejected(name):
+@pytest.mark.parametrize("name", ["", ".", "..", "a/b", "a\\b", "a\x00b"])
+def test_invalid_names_are_rejected(name):
     with pytest.raises(McpHubError) as caught:
         parse_add_argv([name, "--", "srv"])
     assert caught.value.type == "invalid_name"

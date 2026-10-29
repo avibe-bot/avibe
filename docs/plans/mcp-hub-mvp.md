@@ -43,7 +43,7 @@ Out of scope: OAuth, SSE (explicit `unsupported_transport_sse` error), project s
 
 ## 3. Prompt injection
 
-The shared system prompt gets a short discovery index (outside `core/managed_skills.py`), only when at least one package is enabled and generated:
+The shared system prompt gets a short discovery index (outside `core/managed_skills.py`), only when at least one server is registered:
 
 ```text
 ## MCP capabilities
@@ -82,7 +82,7 @@ prompt index
 ### 4.1 Discover and call
 
 ```bash
-vibe mcp --list                         # enabled packages; --all includes disabled/draft/error
+vibe mcp --list                         # registered servers
 vibe mcp docs --list [--format json]
 vibe mcp docs search --help
 vibe mcp docs search --query 'async Python' --limit 5
@@ -113,67 +113,40 @@ Exit codes: `0` success, `2` usage/argument error, `1` any other failure (includ
 
 ### 4.3 Management
 
+`vibe mcp` is reserved for per-server sub-CLIs. Management is:
+
 ```bash
-vibe mcp add --transport http docs https://example.invalid/mcp --header 'Accept-Language: en'
-vibe mcp add playwright -- npx -y @playwright/mcp@latest
-vibe mcp add local-tools --env MODE=readonly -- python server.py
-vibe mcp add --json-stdin
-vibe mcp generate|regenerate|enable|disable|remove <name>
+vibe mcp-add --transport http docs https://example.invalid/mcp --header 'Accept-Language: en'
+vibe mcp-add playwright -- npx -y @playwright/mcp@latest
+vibe mcp-add --json-stdin
+vibe mcp-discover
+vibe mcp docs --refresh
+vibe mcp docs --remove
 ```
 
-- Syntax follows the [Claude Code `mcp add`](https://code.claude.com/docs/en/mcp) subset, including its `--env` placement rule (after the name, or separated from it by another option); stdio is default, argv after `--` is verbatim.
-- Avibe extensions: `--description`, `--cwd`, `--replace`, `--json-stdin`.
-- `--scope`, SSE and OAuth options fail explicitly.
-- Add only saves. An existing name needs `--replace`, which keeps state and the active revision until regeneration.
-- Names: whatever the native config or user provides. Reject only empty names, `.`/`..`, NUL, or `/`/`\\` (names become directory names). `add`/`generate`/`regenerate`/`enable`/`disable`/`remove` stay reserved because `vibe mcp <verb>` would otherwise be ambiguous. Immutable in MVP.
+- `vibe mcp-add` uses the Claude Code `mcp add` subset plus `--description`, `--cwd`, `--replace`, `--json-stdin`. It writes only the Avibe store, then refreshes that name; the call returns after refresh.
+- `vibe mcp-discover` runs one full pass (joins an in-flight pass) and prints registered / failed + reason. Controller startup runs the same pass in the background, off the controller loop.
+- Names: empty, `.`/`..`, NUL, `/`/`\\` rejected. Management verbs are not reserved names.
+- Owner-only: mcp-add, mcp-discover, `--refresh`, `--remove`. Editor: list/help/call.
 
 ## 5. Page configuration
 
-Flow: paste → **Parse and preview** → **Save** → **Generate** (later **Regenerate**). Parse/preview/save never run or connect to anything.
+Skills & MCP page, MCP tab. No status badges, enable toggle, generate/tools/edit.
 
-```json
-{
-  "mcpServers": {
-    "docs": {"type": "http", "url": "https://example.invalid/mcp", "headers": {"Accept-Language": "en"}},
-    "local-tools": {"command": "/absolute/path/to/server", "args": ["--read-only"]}
-  }
-}
-```
+- Toolbar: 技能 | MCP, search, `+ 添加 MCP`. Header `刷新` = discover all.
+- Row: transport icon, name, command/URL, tool count · transport, source chip (Avibe/Claude/Codex/OpenCode).
+- Detail: connection, tools, `vibe mcp <name> <tool>`, last refreshed. Footer: 刷新 / 删除.
+- Add dialog: JSON textarea, 取消 / 添加. Invalid JSON or failed refresh keeps the dialog open.
+- Delete: Avibe source removes artifacts; native source hides in Avibe (`hidden.json`) and leaves the native file byte-identical.
 
-- Accept the common provider shape: `command/args/env/cwd` with absent or `stdio` type → stdio; `url` with absent/`http`/`streamable-http`/`streamable_http` type → Streamable HTTP. Reject conflicting or unsupported fields with a field-specific message. Provider `enabled` is ignored.
-- Env and header values are stored as given, in plaintext, like Claude Code's own MCP config. No Vault integration in MVP. `<avibe-home>/mcp/` is created with the existing owner-private helpers (`core/private_fs.py`: `ensure_private_directory`, `make_private_file`; POSIX modes, Windows DACL); UI/API mask env/header values using the existing config-secret pattern (`has_<field>` metadata; an empty submitted value means "unchanged", see `_strip_preserved_config_secrets` in `vibe/api.py`; env/header maps are submitted whole, so a key left out is deleted); Avibe's own logs never print them. A server's own stderr is the server's output (as in Claude Code) and is not scrubbed.
-- URLs with embedded credentials (`user:pass@`) are rejected; put them in an `Authorization` header.
-- `${VAR}` / `${VAR:-default}` placeholders are not expanded; parse rejects them with a field-specific message asking for the literal value.
-- Hub-entered `cwd` (paste, `vibe mcp add`) must be absolute or omitted. A relative `cwd` read from any native file resolves against that file's directory (it always exists, so no HOME fallback is needed); `~` is expanded; only an empty or non-string `cwd` is rejected. The process starts there, so a relative `./command` resolves against it too. Codex does not document its own base (observed bases differ by version), so Hub uses one rule for every source. A natively `enabled=false` entry is omitted from Hub lists (CLI, API, UI, prompt index). Leftover generated artifacts for that name are not listed while the native off switch remains. Spawn isolation still disables those names. Provider `enabled` is still ignored on Hub save. Parse errors on a natively disabled entry are also omitted.
-- If a generated name disappears from its native file, Hub keeps the package (revision snapshot, enabled state, calls). Lists/API/UI mark it `nativeDeleted` ("deleted in Claude/Codex/OpenCode"). Drafts with no revision vanish. Re-adding the name natively clears the flag; definition drift is pending regenerate. Explicit `vibe mcp remove` / UI delete is how artifacts go away.
-- Existing names require explicit replace; omitted services are untouched.
+## 6. Discovery and versions
 
-Persisted `definition.json`:
-
-```json
-{
-  "schemaVersion": 1,
-  "name": "docs",
-  "description": "Search current library documentation",
-  "transport": {
-    "type": "streamable_http",
-    "url": "https://example.invalid/mcp",
-    "headers": {"Authorization": "Bearer <token>"}
-  }
-}
-```
-
-## 6. Generation and versions
-
-- Uses its own connection; the SDK's high-level client negotiates the protocol; then fetches all `tools/list` pages (cursors are opaque; stop when absent; fail after 100 pages), builds the revision.
-- Publish = write the full revision directory, then atomically replace `current.json`. Any failure leaves the previous revision active.
-- The owner serializes save/generate/enable/disable/remove per package, so these never race.
-- Initial generate publishes, then sets `state.json` enabled; a crash in between leaves a generated but disabled package that the user enables. Regenerate never changes `state.json`.
-- Keep the current and previous revision; delete older ones after publish. All readers go through one read helper that, if a revision file is missing, rereads `current.json` once.
-- Every generate publishes a new revision; there is no content hashing or "no change" detection. Nothing compares versions or detects updates; `tools/list_changed` is ignored.
-- Regenerate does not upgrade server software. A stale schema surfaces as a call error suggesting regeneration; calls are never replayed.
-- Calls connect with the admitted revision's `definition.json` snapshot (owner-private, may hold plaintext values), never the edited top-level file, so a pending edit cannot mix old schemas with a new URL/header/argv. Edits take effect on regeneration.
-- Tools with `execution.taskSupport: "required"` are skipped with a generation diagnostic (tasks are out of scope).
+- Discovery = generate for every Avibe definition and every native source entry (except natively `enabled=false` and Avibe-hidden names). Connect, list tools, publish. Success → registered. Failure → not listed; reason in logs and `vibe mcp-discover`.
+- Avibe name wins over a native duplicate.
+- A native entry removed or set `enabled=false` disappears at the next discovery; leftover artifacts may be deleted then.
+- Publish = write the full revision directory, then atomically replace `current.json`. Failure leaves the previous revision (if any) but an unsuccessful name is not listed.
+- Concurrent discover passes join one in-flight task.
+- Keep current + previous revision. Tools with `execution.taskSupport: "required"` are skipped with a diagnostic.
 
 ## 7. Runtime
 
@@ -199,22 +172,18 @@ Preserve typed content, `structuredContent`, `isError` and explicit null/false/e
 
 ## 8. UI / API
 
-UI shows each package's state (draft / generated / error), enabled toggle, active revision, server version and pending definition changes. Actions: paste/preview/save, generate or regenerate (one button), enable/disable, delete, browse static tools. All copy through i18n.
+No draft/generated/error/pending/nativeDeleted badges. No enable toggle.
 
 ```text
 GET    /api/mcp
-POST   /api/mcp/parse
-POST   /api/mcp/save
 GET    /api/mcp/{name}
-PATCH  /api/mcp/{name}
-POST   /api/mcp/{name}/generate     # initial or regenerate; same owner operation as the CLI
-GET    /api/mcp/{name}/tools        # published artifact
-POST   /api/mcp/{name}/enable
-POST   /api/mcp/{name}/disable
-DELETE /api/mcp/{name}
+POST   /api/mcp                  # add JSON block → Avibe store + refresh
+POST   /api/mcp/discover
+POST   /api/mcp/{name}/refresh
+DELETE /api/mcp/{name}           # Avibe: remove; native: hide
 ```
 
-Native async FastAPI routes calling the owner over IPC. Routes are classified in the existing Web route authorization (`vibe/authorization.py`): read routes (`GET /api/mcp`, `GET /api/mcp/{name}`, `GET /api/mcp/{name}/tools`) at Editor like Skills, management routes Owner-only; and forward the validated Web user context to the owner like existing config APIs do.
+Read routes Editor; management Owner. Native async FastAPI → owner IPC.
 
 ## 9. Prior art
 
@@ -229,12 +198,13 @@ Lifecycle follows mcporter `generate-cli` (inspected at [`5362d60`](https://gith
 
 Acceptance:
 
-1. Page and `vibe mcp add` produce identical definitions; Claude-style syntax is parser-tested; add never connects; env/header values live only in owner-private definition files, and are masked in UI/API and never printed by Avibe's own logs.
-2. Help/list work with the server and owner down; schema-to-flag contracts hold; injected prompt examples are parser-tested.
-3. Generation never publishes partial tool lists; readers never see mixed revisions; initial generate enables, regenerate preserves state.
-4. Tool execution uses `tools/call` against the admitted revision (SDK-internal auxiliary requests allowed); unknown-outcome connections are closed; process cap, idle close and timeouts hold; unknown outcomes are not retried.
-5. Results keep structured/multimodal/error content; disabled packages reject calls; tests cannot touch real user state.
-6. Avibe-spawned Claude/Codex/OpenCode sessions do not load native MCP servers; Hub add/save updates the corresponding native config; `vibe mcp generate` still publishes Avibe artifacts.
+1. Fresh start with reachable native servers lists and calls them without user action; unreachable ones are absent and `vibe mcp-discover` shows why.
+2. `vibe mcp-discover` and `vibe mcp <name> --refresh` work from CLI and UI; concurrent passes join. Startup discovery never blocks the controller loop or readiness.
+3. Add through page/`vibe mcp-add` writes only the Avibe store and the server appears after the call returns.
+4. Delete of an Avibe server removes it; delete of a native server hides it and leaves the native file byte-identical.
+5. Help/list work with the owner down; schema-to-flag contracts hold; injected prompt examples are parser-tested.
+6. UI matches the Pencil frames; leftover MVP `state.json` enabled flags and drafts load safely (ignored).
+7. Avibe-spawned sessions do not load native MCP (C3 unchanged).
 
 ## 11. Next action
 

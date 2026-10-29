@@ -20,7 +20,7 @@ STDIO = "stdio"
 HTTP = "streamable_http"
 
 # CLI grammar (`vibe mcp add|generate|...`) cannot select these as a server name.
-_RESERVED_NAMES = frozenset({"add", "generate", "regenerate", "enable", "disable", "remove"})
+_RESERVED_NAMES: frozenset[str] = frozenset()
 _STDIO_TYPES = {None, "stdio"}
 _HTTP_TYPES = {"http", "streamable-http", "streamable_http"}
 _PROVIDER_FIELDS = {"type", "command", "args", "env", "cwd", "url", "headers", "enabled", "description"}

@@ -1,9 +1,7 @@
-"""Web API for MCP Hub (``/api/mcp*``), shared by ``vibe/ui_server.py`` routes.
+"""Web API for MCP Hub (``/api/mcp*``).
 
-Reads come from the published artifacts in this process (they work with the
-owner or the server down). Every mutation is the same Controller-owned operation
-the CLI uses, over control IPC. Env/header values never leave the owner files:
-responses carry masked definitions with ``has_<field>`` metadata.
+Reads come from published artifacts. Mutations are Controller-owned operations
+over control IPC. Env/header values never leave the owner files.
 """
 
 from __future__ import annotations
@@ -47,82 +45,43 @@ def _servers_payload(definitions: list[dict[str, Any]]) -> list[dict[str, Any]]:
 async def run(handler, *args) -> tuple[dict[str, Any], int]:
     try:
         return await handler(*args), 200
-    except McpHubError as exc:
-        return _error(exc)
+    except McpHubError as cop:
+        return _error(cop)
 
 
 async def list_servers() -> dict[str, Any]:
     return {"ok": True, "servers": await asyncio.to_thread(repository.list_packages)}
 
 
-async def parse(body: dict[str, Any]) -> dict[str, Any]:
+async def add(body: dict[str, Any]) -> dict[str, Any]:
     definitions = parse_provider_json(str(body.get("text") or ""))
-
-    def _preview() -> list[dict[str, Any]]:
-        existing = set(repository.list_names())
-        return [{**masked_definition(item), "exists": item["name"] in existing} for item in definitions]
-
-    return {"ok": True, "servers": await asyncio.to_thread(_preview)}
-
-
-async def save(body: dict[str, Any]) -> dict[str, Any]:
-    definitions = parse_provider_json(str(body.get("text") or ""))
-    # Same rule as PATCH: a blank env/header value keeps the stored one.
-    payload = {
-        "replace": body.get("replace") is True,
-        "preserveSecrets": True,
-        "servers": _servers_payload(definitions),
-    }
-    return await _owner("save", payload)
+    payload = {"replace": body.get("replace") is True, "servers": _servers_payload(definitions)}
+    return await _owner("add", payload)
 
 
 async def detail(name: str) -> dict[str, Any]:
     def _read() -> dict[str, Any]:
         summary = repository.summarize(name)
-        payload: dict[str, Any] = {"ok": True, "server": summary}
         published = repository.read_published(name)
-        native_error = summary.get("error")
-        try:
-            payload["definition"] = masked_definition(repository.read_definition(name))
-        except McpHubError:
-            if published is not None:
-                payload["definition"] = masked_definition(published["definition"])
-            elif native_error:
-                payload["partial"] = True
+        payload: dict[str, Any] = {"ok": True, "server": summary}
+        if published is not None:
+            payload["definition"] = masked_definition(published["definition"])
+            payload["tools"] = [
+                {"name": tool.get("name"), "description": tool.get("description") or ""}
+                for tool in published["tools"]
+            ]
         return payload
 
     return await asyncio.to_thread(_read)
 
 
-async def update(name: str, body: dict[str, Any]) -> dict[str, Any]:
-    """Replace the definition; blank env/header values keep the stored ones."""
-
-    from core.mcp_hub.definition import definition_from_provider
-
-    definition = definition_from_provider(name, body.get("server"), description=body.get("description"))
-    payload = {"replace": True, "preserveSecrets": True, "servers": _servers_payload([definition])}
-    return await _owner("save", payload)
+async def discover() -> dict[str, Any]:
+    return await _owner("discover", {})
 
 
-async def tools(name: str) -> dict[str, Any]:
-    def _read() -> dict[str, Any]:
-        published = repository.read_published(name)
-        if published is None:
-            repository.read_definition(name)
-            raise McpHubError("not_generated", f"{name} has not been generated yet.")
-        return {
-            "ok": True,
-            "revision": published["revision"],
-            "tools": [
-                {**tool, "flags": command["flags"], "validated": command["validated"]}
-                for tool, command in zip(published["tools"], published["commands"])
-            ],
-        }
-
-    return await asyncio.to_thread(_read)
+async def refresh(name: str) -> dict[str, Any]:
+    return await _owner("refresh", {"name": name})
 
 
-async def operate(operation: str, name: str) -> dict[str, Any]:
-    if operation not in {"generate", "enable", "disable", "remove"}:
-        raise McpHubError("not_found", "Unknown MCP operation.")
-    return await _owner(operation, {"name": name})
+async def remove(name: str) -> dict[str, Any]:
+    return await _owner("remove", {"name": name})

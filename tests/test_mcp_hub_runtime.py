@@ -40,43 +40,35 @@ def runtime():
 
 @pytest.fixture
 def generated(runtime):
-    assert _run(runtime, "save", {"servers": [_server()]})["ok"]
-    assert _run(runtime, "generate", {"name": "echo"})["ok"]
+    assert _run(runtime, "add", {"servers": [_server()]})["ok"]
     return runtime
 
 
-def test_save_only_saves_and_initial_generate_publishes_then_enables(runtime):
-    _run(runtime, "save", {"servers": [_server()]})
-    assert repository.summarize("echo")["status"] == "draft"
-    assert repository.read_enabled("echo") is False
-
-    first = _run(runtime, "generate", {"name": "echo"})
+def test_add_writes_avibe_store_and_registers(runtime):
+    first = _run(runtime, "add", {"servers": [_server()]})
+    assert first["ok"] and first["toolCount"] == 7
+    assert repository.read_avibe_definition("echo") is not None
     published = repository.read_published("echo")
     assert published["revision"] == first["revision"]
     assert [tool["name"] for tool in published["tools"]] == ["add", "crash", "echo", "fail", "nap", "reject", "session_text"]
-    assert published["definition"]["transport"]["cwd"]  # frozen at generation
-    assert published["manifest"]["serverInfo"] == {"version": "0.1.0"}
-    assert repository.read_enabled("echo") is True
+    assert repository.summarize("echo")["source"] == "avibe"
 
 
-def test_regenerate_preserves_state_and_keeps_current_plus_previous(generated):
-    _run(generated, "disable", {"name": "echo"})
-    revisions = [_run(generated, "generate", {"name": "echo"})["revision"] for _ in range(3)]
+def test_refresh_keeps_current_plus_previous(generated):
+    revisions = [_run(generated, "refresh", {"name": "echo"})["revision"] for _ in range(3)]
     kept = sorted(path.name for path in (repository.package_dir("echo") / "revisions").iterdir())
     assert kept == sorted(revisions[-2:])
-    assert repository.read_enabled("echo") is False
 
 
-def test_failed_generation_leaves_previous_revision_active(generated):
+def test_failed_refresh_leaves_previous_revision_active(generated):
     before = repository.read_published("echo")["revision"]
-    _run(generated, "save", {"servers": [_server("/nonexistent/mcp-server")], "replace": True})
-    result = _run(generated, "generate", {"name": "echo"})
+    _run(generated, "add", {"servers": [_server("/nonexistent/mcp-server")], "replace": True})
+    result = _run(generated, "refresh", {"name": "echo"})
     assert result["ok"] is False and result["error"]["type"] == "connection"
     assert repository.read_published("echo")["revision"] == before
-    assert repository.summarize("echo")["pendingChanges"] is True
 
 
-def test_calls_return_envelopes_and_respect_enabled_state(generated):
+def test_calls_return_envelopes(generated):
     ok = _run(generated, "call", {"name": "echo", "tool": "echo", "arguments": {"text": "hi", "repeat": 2},
                                   "sessionId": "ses-1"})
     assert ok["status"] == "ok" and ok["revision"] == repository.read_published("echo")["revision"]
@@ -90,10 +82,6 @@ def test_calls_return_envelopes_and_respect_enabled_state(generated):
     invalid = _run(generated, "call", {"name": "echo", "tool": "add", "arguments": {"a": "x", "b": 1}})
     assert invalid["error"]["type"] == "invalid_arguments"
 
-    _run(generated, "disable", {"name": "echo"})
-    assert _run(generated, "call", {"name": "echo", "tool": "echo", "arguments": {"text": "x"}})["error"]["type"] == "disabled"
-    _run(generated, "enable", {"name": "echo"})
-    assert _run(generated, "call", {"name": "echo", "tool": "echo", "arguments": {"text": "x"}})["status"] == "ok"
 
 
 def test_concurrent_first_calls_in_one_session_share_the_open(generated):
@@ -126,21 +114,18 @@ def test_reader_rereads_current_when_its_revision_was_pruned(generated, monkeypa
     assert repository.read_published("echo")["revision"] == live
 
 
-def test_bad_package_file_disables_only_that_package(generated):
-    _run(generated, "save", {"servers": [{**_server(), "name": "other"}]})
+def test_unreadable_leftover_state_is_ignored(generated):
     state = repository.package_dir("echo") / "state.json"
     state.write_text("{not json")
-    summaries = {item["name"]: item for item in repository.list_packages()}
-    assert summaries["echo"]["status"] == "error" and summaries["echo"]["enabled"] is False
-    assert summaries["other"]["status"] == "draft"
+    assert repository.summarize("echo")["name"] == "echo"
     assert state.read_text() == "{not json"
 
 
-def test_future_format_revision_needs_regeneration(generated):
+def test_future_format_revision_is_not_listed(generated):
     published = repository.read_published("echo")
     manifest = repository.package_dir("echo") / "revisions" / published["revision"] / "manifest.json"
     manifest.write_text(json.dumps({"formatVersion": 99}))
-    assert repository.summarize("echo")["status"] == "needs_regeneration"
+    assert "echo" not in {item["name"] for item in repository.list_packages()}
     assert build_mcp_prompt_block() is None
 
 
@@ -174,11 +159,9 @@ def test_prompt_index_lists_enabled_servers_and_its_examples_parse(generated, ca
         assert mcp_cli.main(argv) == 0, example
     assert sent == [("echo", "echo")]
 
-    _run(generated, "disable", {"name": "echo"})
-    assert build_mcp_prompt_block() is None
 
 
-@pytest.mark.parametrize(("argv", "allowed"), [(["--list"], True), (["add", "x", "--", "srv"], False)])
+@pytest.mark.parametrize(("argv", "allowed"), [(["--list"], True), (["echo", "--refresh"], False)])
 def test_editor_discovers_but_cannot_manage(generated, argv, allowed, capsys):
     from vibe import mcp_cli
     from vibe.authorization import AuthorizationContext, invocation_authority
@@ -261,10 +244,9 @@ def test_malformed_revision_file_disables_only_that_package(generated, capsys, f
             del command[content]
         content = commands
     path.write_text(json.dumps(content))
-    summaries = {item["name"]: item for item in repository.list_packages()}
-    assert summaries["echo"]["status"] == "error" and summaries["echo"]["error"]["type"] == "invalid_package"
-    assert summaries["other"]["status"] == "draft"
-    assert mcp_cli.main(["--list", "--all"]) == 0
+    names = {item["name"] for item in repository.list_packages()}
+    assert "echo" not in names
+    assert mcp_cli.main(["--list"]) == 0
     assert mcp_cli.main(["echo", "--list"]) == 1
     call = _run(generated, "call", {"name": "echo", "tool": "echo", "arguments": {"text": "x"}})
     assert call["error"]["type"] == "invalid_package"
@@ -272,8 +254,7 @@ def test_malformed_revision_file_disables_only_that_package(generated, capsys, f
 
 def test_strict_legacy_server_that_exits_on_discover_still_generates(runtime):
     strict = str(Path(__file__).parent / "fixtures" / "mcp_strict_legacy_server.py")
-    _run(runtime, "save", {"servers": [{"name": "strict", "server": {"command": sys.executable, "args": [strict]}}]})
-    result = _run(runtime, "generate", {"name": "strict"})
+    result = _run(runtime, "add", {"servers": [{"name": "strict", "server": {"command": sys.executable, "args": [strict]}}]})
     assert result["ok"], result
     assert result["toolCount"] == 7
     call = _run(runtime, "call", {"name": "strict", "tool": "echo", "arguments": {"text": "hi"}})

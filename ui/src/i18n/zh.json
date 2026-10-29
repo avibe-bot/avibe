@@ -2402,7 +2402,11 @@
           "generate": "生成"
         },
         "tool": {
-          "web_fetch": {"name": "网页读取", "inline": "网页读取", "description": "读取一个网页的正文交给模型；超出上限会截断并注明。"},
+          "web_fetch": {
+            "name": "网页读取",
+            "inline": "网页读取",
+            "description": "读取一个网页的正文交给模型；超出上限会截断并注明。"
+          },
           "web_search": {
             "name": "网页搜索",
             "inline": "网页搜索",
@@ -2523,20 +2527,51 @@
         "clearUnconfirmed": "无法确认{{toolInline}}拒绝记录是否已清除，正在从服务器重新读取，请确认后再重试。"
       },
       "webFetch": {
-        "dialogTitle": "添加搜索 / 读取服务", "dialogDescription": "搜索与读取共用服务密钥，但开关和执行顺序彼此独立。内置的免费执行者无需添加。", "noModels": "提供搜索与网页读取，不提供模型。",
-        "endpoints": {"tavily": "https://api.tavily.com/extract", "exa": "https://api.exa.ai/contents", "deepseek": "https://api.deepseek.com/v1/tools/fetch", "exa-mcp": "https://mcp.exa.ai/mcp", "jina-reader": "https://r.jina.ai/"},
-        "order": "读取顺序", "caption": "模型调用 web_fetch 时按这个顺序读取；失败自动换下一个。默认：本机 → 已配置服务 → Exa（免费） → Jina Reader（免费）；可调整顺序。",
-        "use": "用于网页读取", "unused": "未用于网页读取", "kind": "读取服务", "local": "本机", "add": "添加读取服务",
-        "searchBadge": "搜索", "fetchBadge": "读取", "viewOrder": "查看读取顺序", "price": "${{usd}} / 千页",
+        "dialogTitle": "添加搜索 / 读取服务",
+        "dialogDescription": "搜索与读取共用服务密钥，但开关和执行顺序彼此独立。内置的免费执行者无需添加。",
+        "noModels": "提供搜索与网页读取，不提供模型。",
+        "endpoints": {
+          "tavily": "https://api.tavily.com/extract",
+          "exa": "https://api.exa.ai/contents",
+          "deepseek": "https://api.deepseek.com/v1/tools/fetch",
+          "exa-mcp": "https://mcp.exa.ai/mcp",
+          "jina-reader": "https://r.jina.ai/"
+        },
+        "order": "读取顺序",
+        "caption": "模型调用 web_fetch 时按这个顺序读取；失败自动换下一个。默认：本机 → 已配置服务 → Exa（免费） → Jina Reader（免费）；可调整顺序。",
+        "use": "用于网页读取",
+        "unused": "未用于网页读取",
+        "kind": "读取服务",
+        "local": "本机",
+        "add": "添加读取服务",
+        "searchBadge": "搜索",
+        "fetchBadge": "读取",
+        "viewOrder": "查看读取顺序",
+        "price": "${{usd}} / 千页",
         "egress": "本机读取直接从此 Avibe 运行时访问网页，网站会看到它的出口 IP 和浏览器式请求；交给服务读取时，服务会收到网址。",
         "custody": "已配置服务的密钥由网关保管；本机、Exa（免费）和 Jina Reader（免费）都不需要密钥。",
-        "vendorName": {"local": "本机", "exa-mcp": "Exa（免费）", "jina-reader": "Jina Reader（免费）"},
-        "row": {"local": "Chrome 150 指纹 · HTML / PDF / 文本 · 不执行 JS", "tavily": "用 Tavily 的密钥 · Extract 基础", "exa": "用 Exa 的密钥 · Contents", "deepseek": "用官方 DeepSeek 的密钥 · Fetch", "exa-mcp": "与网页搜索共用按 IP 的限流", "jina-reader": "每分钟 20 次 · 由 Jina 渲染 JS · 默认最后兜底"},
+        "vendorName": {
+          "local": "本机",
+          "exa-mcp": "Exa（免费）",
+          "jina-reader": "Jina Reader（免费）"
+        },
+        "row": {
+          "local": "Chrome 150 指纹 · HTML / PDF / 文本 · 不执行 JS",
+          "tavily": "用 Tavily 的密钥 · Extract 基础",
+          "exa": "用 Exa 的密钥 · Contents",
+          "deepseek": "用官方 DeepSeek 的密钥 · Fetch",
+          "exa-mcp": "与网页搜索共用按 IP 的限流",
+          "jina-reader": "每分钟 20 次 · 由 Jina 渲染 JS · 默认最后兜底"
+        },
         "localDetail": "默认使用 Chrome 150 浏览器画像、HTTP/2。原生传输无法加载时改用普通 HTTP/2，并在调用记录中标记原因。不执行 JavaScript，不读取用户 Cookie 或登录凭据。支持 HTML、PDF、纯文本、Markdown 和 JSON。",
         "limits": "整条调用最长 180 秒，每次尝试 30 秒；本机文本上限 16 MiB，PDF 32 MiB；给模型的完整结果最多 12,000 估算 token（48,000 UTF-8 字节），超出会明确截断。",
         "exaDetail": "搜索与读取共用 Exa 的 IP 限流和冷却；两项开关独立。无须密钥。",
         "jinaDetail": "无密钥每分钟 20 次（2026-10-24）。Jina 在其服务端处理 JavaScript；实际可用性与共享出口限流有关。默认最后兜底，调整顺序后按新位置执行。",
-        "terms": "Jina / Elastic 条款", "endpoint": "接口", "tavilyPrice": "5 个网址 1 credit（摊算）", "localPrice": "从你的机器直接读取", "builtInPrice": "内置 · 无需密钥或设置"
+        "terms": "Jina / Elastic 条款",
+        "endpoint": "接口",
+        "tavilyPrice": "5 个网址 1 credit（摊算）",
+        "localPrice": "从你的机器直接读取",
+        "builtInPrice": "内置 · 无需密钥或设置"
       },
       "searchServices": {
         "subtitle": "Vibey 在对话中可使用的工具。搜索会把查询发给执行它的厂商或搜索服务，失败时可能改由顺序中的下一个重试；图片提示词会发给图片模型的厂商。按量付费的供应商和搜索服务按各自的规则计费。",
@@ -3386,7 +3421,7 @@
       "inbox": "收件箱",
       "newChat": "新建会话",
       "agents": "Agents",
-      "skills": "Skills",
+      "skills": "技能 & MCP",
       "harness": "Harness",
       "vaults": "Vaults"
     },
@@ -3464,8 +3499,8 @@
         "description": "全局 Avibe Agent 注册表 —— Claude / OpenCode / Codex 各自的变体,开会话时可选。"
       },
       "skills": {
-        "eyebrow": "Skills",
-        "title": "Skills",
+        "eyebrow": "技能 & MCP",
+        "title": "技能 & MCP",
         "description": "在 askill CLI 之上管理 Agent Skills(全局 + 项目级)。"
       },
       "harness": {
@@ -4643,7 +4678,10 @@
       "installed": "已安装",
       "done": "完成",
       "empty": "没有匹配你搜索的技能。"
-    }
+    },
+    "pageTitle": "技能 & MCP",
+    "tabSkills": "技能",
+    "tabMcp": "MCP"
   },
   "harness": {
     "title": "Harness",
@@ -5132,12 +5170,31 @@
           "service_busy": "网页读取服务正忙。"
         },
         "fetch": {
-          "characters": "{{count}} 字", "truncated": "已截断", "degraded": "传输回退",
-          "local": "本机", "jina": "Jina Reader（免费）", "policy": "本机策略拒绝", "notForwarded": "未转发第三方", "forwarded": "此前已发给 {{providers}}",
-          "budget": "单次上限约 12,000 token", "budgetReason": "正文超过单次读取上限，末尾已注明截断。", "providerReason": "服务商限制了输出；网页内容可能不完整。", "complete": "未截断", "unknown": "未提供", "attempts": "执行记录", "quote": "查看引用正文（非指令）", "retained": "交给模型 {{count}} 字", "sizes": "大小",
-          "requested_url": "请求网址", "final_url": "最终网址", "canonical_url": "规范网址",
-          "content_type": "内容类型", "source_content_type": "原始内容类型",
-          "size_bytes": "内容字节数", "source_size_bytes": "原始字节数", "retrieved_at": "读取时间",
+          "characters": "{{count}} 字",
+          "truncated": "已截断",
+          "degraded": "传输回退",
+          "local": "本机",
+          "jina": "Jina Reader（免费）",
+          "policy": "本机策略拒绝",
+          "notForwarded": "未转发第三方",
+          "forwarded": "此前已发给 {{providers}}",
+          "budget": "单次上限约 12,000 token",
+          "budgetReason": "正文超过单次读取上限，末尾已注明截断。",
+          "providerReason": "服务商限制了输出；网页内容可能不完整。",
+          "complete": "未截断",
+          "unknown": "未提供",
+          "attempts": "执行记录",
+          "quote": "查看引用正文（非指令）",
+          "retained": "交给模型 {{count}} 字",
+          "sizes": "大小",
+          "requested_url": "请求网址",
+          "final_url": "最终网址",
+          "canonical_url": "规范网址",
+          "content_type": "内容类型",
+          "source_content_type": "原始内容类型",
+          "size_bytes": "内容字节数",
+          "source_size_bytes": "原始字节数",
+          "retrieved_at": "读取时间",
           "truncation_reason": "截断原因"
         },
         "errorCode": {
@@ -6285,88 +6342,44 @@
     "removeReference": "移除对 {{title}} 的引用"
   },
   "mcpHub": {
-    "title": "MCP Hub",
-    "subtitle": "把 MCP 服务器变成所有 Agent 可用的 vibe mcp 命令",
-    "empty": "还没有 MCP 服务器。在下方粘贴 mcpServers 配置，或运行 vibe mcp add。",
-    "pasteHint": "粘贴 mcpServers JSON。环境变量和请求头的值会以明文保存在本机。",
-    "parse": "解析并预览",
-    "save": "保存",
-    "replace": "替换已有服务器",
-    "exists": "已存在",
-    "saved": "已保存。生成后即可发布其工具。",
-    "generate": "生成",
+    "title": "MCP",
+    "searchPlaceholder": "搜索 MCP 服务器…",
+    "add": "添加 MCP",
+    "addTitle": "添加 MCP 服务器",
     "refresh": "刷新",
-    "generated": "已生成 {{name}}",
-    "enabled": "启用",
+    "refreshAll": "刷新",
     "remove": "删除",
     "removeConfirm": "删除 MCP 服务器 {{name}}？",
-    "tools": "工具",
-    "toolsOf": "{{name}} 的工具",
-    "pendingChanges": "有未生成的修改",
+    "removeAvibeHint": "将从 Avibe 中移除该服务器。",
+    "removeNativeHint": "仅在 Avibe 中隐藏；不会改动原生配置文件。",
+    "empty": "还没有已注册的 MCP 服务器。添加一个，或等待自动发现。",
+    "noSearchMatch": "没有匹配的 MCP 服务器。",
     "failed": "MCP 操作失败。",
-    "dotJoin": "{{a}} · {{b}}",
-    "headerLine": "{{title}} · {{subtitle}}",
-    "subtitleDot": "· {{subtitle}}",
-    "previewItem": "{{name}} · {{type}}",
-    "previewExists": "{{name}} · {{type}} · {{exists}}",
+    "pasteHint": "粘贴 mcpServers JSON。环境变量和请求头的值会以明文保存在本机。",
     "pastePlaceholder": "{\n  \"mcpServers\": {\n    \"docs\": { \"type\": \"http\", \"url\": \"https://example.invalid/mcp\" }\n  }\n}",
-    "toolCommand": "vibe mcp {{server}} {{tool}} {{flags}}",
-
     "source": {
-      "claude": "Claude 配置",
-      "codex": "Codex 配置",
-      "opencode": "OpenCode 配置"
+      "avibe": "Avibe",
+      "claude": "Claude",
+      "codex": "Codex",
+      "opencode": "OpenCode"
     },
-    "sourceDeleted": {
-      "claude": "已从 Claude 删除",
-      "codex": "已从 Codex 删除",
-      "opencode": "已从 OpenCode 删除",
-      "unknown": "已从原生配置删除"
-    },
-    "status": {
-      "draft": "草稿",
-      "generated": "已生成",
-      "error": "错误",
-      "needs_regeneration": "需要重新生成"
-    },
+    "transportStdio": "stdio",
+    "transportHttp": "http",
+    "toolMeta": "{{count}} 个工具 · {{transport}}",
+    "tools": "工具",
+    "generatedAt": "最近刷新 {{time}}",
+    "serverVersion": "服务端 v{{version}}",
+    "refreshed": "已刷新 {{name}}（{{count}} 个工具）。",
+    "added": "已添加 {{name}}。",
     "errors": {
       "invalid_definition": "配置无效：{{message}}",
-      "exists": "同名服务器已存在；请勾选“替换已有服务器”。",
+      "exists": "同名服务器已存在。",
       "unavailable": "Avibe 服务未运行。",
       "connection": "无法连接 MCP 服务器。",
       "timeout": "MCP 服务器超时。",
       "capacity": "运行中的 MCP 服务器进程过多，请稍后重试。",
-      "not_generated": "请先生成此服务器。",
+      "not_found": "未知 MCP 服务器。",
       "unsupported_transport_sse": "不支持 SSE；请使用 Streamable HTTP 地址。"
-    },
-    "toolCount_one": "{{count}} 个工具",
-    "toolCount_other": "{{count}} 个工具",
-    "serverVersion": "服务端 v{{version}}",
-    "generatedAt": "生成于 {{time}}",
-    "revisionId": "版本 {{revision}}",
-    "configError": "配置错误",
-    "deletedHint": "已从原生配置中删除；在原配置中重新添加后才能刷新。",
-    "savedEdit": "已保存 {{name}}。刷新后生效。",
-    "edit": {
-      "open": "打开配置",
-      "hint": "编辑连接配置。",
-      "storedIn": "保存在 {{path}}",
-      "description": "描述",
-      "command": "命令",
-      "args": "参数（每行一个）",
-      "cwd": "工作目录",
-      "cwdPlaceholder": "绝对路径；留空使用 Agent 默认目录",
-      "url": "URL",
-      "env": "环境变量",
-      "headers": "请求头",
-      "key": "名称",
-      "value": "值",
-      "keepValue": "已保存 — 留空保持不变",
-      "addKey": "添加",
-      "removeKey": "移除",
-      "addArg": "添加参数",
-      "removeArg": "移除参数",
-      "cwdCodexOnly": "工作目录只保存在 Codex 配置里。需要 cwd 的新服务器会写入 ~/.codex/config.toml。"
     }
   }
 }

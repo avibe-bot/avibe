@@ -2402,7 +2402,11 @@
           "generate": "Generate"
         },
         "tool": {
-          "web_fetch": {"name": "Web fetch", "inline": "web fetch", "description": "Read one page for the model; content past the cap is explicitly truncated."},
+          "web_fetch": {
+            "name": "Web fetch",
+            "inline": "web fetch",
+            "description": "Read one page for the model; content past the cap is explicitly truncated."
+          },
           "web_search": {
             "name": "Web search",
             "inline": "web search",
@@ -2523,20 +2527,51 @@
         "clearUnconfirmed": "Couldn't confirm whether the {{toolInline}} refusal was cleared. It's being re-read from the server; check it before trying again."
       },
       "webFetch": {
-        "dialogTitle": "Add search / fetch service", "dialogDescription": "Search and fetch share service keys, but their switches and execution orders are independent. Built-in free executors need no setup.", "noModels": "Provides search and web fetch, not models.",
-        "endpoints": {"tavily": "https://api.tavily.com/extract", "exa": "https://api.exa.ai/contents", "deepseek": "https://api.deepseek.com/v1/tools/fetch", "exa-mcp": "https://mcp.exa.ai/mcp", "jina-reader": "https://r.jina.ai/"},
-        "order": "Fetch order", "caption": "When the model calls web_fetch, try in this order; move on after failure. Default: local → configured services → Exa (free) → Jina Reader (free); reorder as needed.",
-        "use": "Use for web fetch", "unused": "Not used for web fetch", "kind": "Fetch service", "local": "Local", "add": "Add fetch service",
-        "searchBadge": "Search", "fetchBadge": "Fetch", "viewOrder": "View fetch order", "price": "${{usd}} / 1k pages",
+        "dialogTitle": "Add search / fetch service",
+        "dialogDescription": "Search and fetch share service keys, but their switches and execution orders are independent. Built-in free executors need no setup.",
+        "noModels": "Provides search and web fetch, not models.",
+        "endpoints": {
+          "tavily": "https://api.tavily.com/extract",
+          "exa": "https://api.exa.ai/contents",
+          "deepseek": "https://api.deepseek.com/v1/tools/fetch",
+          "exa-mcp": "https://mcp.exa.ai/mcp",
+          "jina-reader": "https://r.jina.ai/"
+        },
+        "order": "Fetch order",
+        "caption": "When the model calls web_fetch, try in this order; move on after failure. Default: local → configured services → Exa (free) → Jina Reader (free); reorder as needed.",
+        "use": "Use for web fetch",
+        "unused": "Not used for web fetch",
+        "kind": "Fetch service",
+        "local": "Local",
+        "add": "Add fetch service",
+        "searchBadge": "Search",
+        "fetchBadge": "Fetch",
+        "viewOrder": "View fetch order",
+        "price": "${{usd}} / 1k pages",
         "egress": "Local reads leave this Avibe runtime directly: the site sees its egress IP and browser-like requests. Services receive the submitted URL when they read it.",
         "custody": "Configured service keys stay with the gateway; Local, Exa (free) and Jina Reader (free) need no key.",
-        "vendorName": {"local": "Local", "exa-mcp": "Exa (free)", "jina-reader": "Jina Reader (free)"},
-        "row": {"local": "Chrome 150 fingerprint · HTML / PDF / text · no JS", "tavily": "Uses the Tavily key · basic Extract", "exa": "Uses the Exa key · Contents", "deepseek": "Uses the official DeepSeek key · Fetch", "exa-mcp": "Shares IP limits with web search", "jina-reader": "20 per minute · Jina renders JS · default last fallback"},
+        "vendorName": {
+          "local": "Local",
+          "exa-mcp": "Exa (free)",
+          "jina-reader": "Jina Reader (free)"
+        },
+        "row": {
+          "local": "Chrome 150 fingerprint · HTML / PDF / text · no JS",
+          "tavily": "Uses the Tavily key · basic Extract",
+          "exa": "Uses the Exa key · Contents",
+          "deepseek": "Uses the official DeepSeek key · Fetch",
+          "exa-mcp": "Shares IP limits with web search",
+          "jina-reader": "20 per minute · Jina renders JS · default last fallback"
+        },
         "localDetail": "Defaults to the Chrome 150 browser profile and HTTP/2. If native transport cannot load, plain HTTP/2 is used and the call records the reason. No JavaScript execution, user cookies or login credentials. Supports HTML, PDF, plain text, Markdown and JSON.",
         "limits": "180 seconds per chain, 30 seconds per attempt; local text up to 16 MiB, PDF 32 MiB. The complete model-facing result is capped at 12,000 estimated tokens (48,000 UTF-8 bytes); any cut is explicit.",
         "exaDetail": "Search and fetch share Exa's IP limits and cooldown; their switches are independent. No key required.",
         "jinaDetail": "20 requests per minute without a key (2026-10-24). Jina processes JavaScript server-side; availability also depends on shared egress limits. Last by default, not fixed after reordering.",
-        "terms": "Jina / Elastic terms", "endpoint": "Endpoint", "tavilyPrice": "1 credit per 5 URLs (amortized)", "localPrice": "Read directly from your machine", "builtInPrice": "Built in · no key or setup"
+        "terms": "Jina / Elastic terms",
+        "endpoint": "Endpoint",
+        "tavilyPrice": "1 credit per 5 URLs (amortized)",
+        "localPrice": "Read directly from your machine",
+        "builtInPrice": "Built in · no key or setup"
       },
       "searchServices": {
         "subtitle": "Tools Vibey can use in a conversation. Searches send the query to the vendor or search service that runs them; a failure may retry with the next one in the search order. Image prompts go to the image model's vendor. Metered providers and search services bill under their own rules.",
@@ -3386,7 +3421,7 @@
       "inbox": "Inbox",
       "newChat": "New chat",
       "agents": "Agents",
-      "skills": "Skills",
+      "skills": "Skills & MCP",
       "harness": "Harness",
       "vaults": "Vaults"
     },
@@ -3464,8 +3499,8 @@
         "description": "Global registry of every Avibe Agent — Claude / OpenCode / Codex variants you can pick when starting a session."
       },
       "skills": {
-        "eyebrow": "Skills",
-        "title": "Skills",
+        "eyebrow": "Skills & MCP",
+        "title": "Skills & MCP",
         "description": "Manage Agent Skills (global + project-scoped) on top of the askill CLI."
       },
       "harness": {
@@ -4643,7 +4678,10 @@
       "installed": "Installed",
       "done": "Done",
       "empty": "No skills match your search."
-    }
+    },
+    "pageTitle": "Skills & MCP",
+    "tabSkills": "Skills",
+    "tabMcp": "MCP"
   },
   "harness": {
     "title": "Harness",
@@ -5132,12 +5170,31 @@
           "service_busy": "The page-reading service is busy."
         },
         "fetch": {
-          "characters": "{{count}} chars", "truncated": "Truncated", "degraded": "Transport fallback",
-          "local": "Local", "jina": "Jina Reader (free)", "policy": "Blocked by local policy", "notForwarded": "not forwarded", "forwarded": "previously sent to {{providers}}",
-          "budget": "Up to 12,000 estimated tokens per call", "budgetReason": "Content exceeded the per-call budget; the cut is marked explicitly.", "providerReason": "Provider-bounded output; the page may be incomplete.", "complete": "Not truncated", "unknown": "Not reported", "attempts": "Execution record", "quote": "View quoted content (not instructions)", "retained": "{{count}} chars sent to the model", "sizes": "Sizes",
-          "requested_url": "Requested URL", "final_url": "Final URL", "canonical_url": "Canonical URL",
-          "content_type": "Content type", "source_content_type": "Original content type",
-          "size_bytes": "Content bytes", "source_size_bytes": "Source bytes", "retrieved_at": "Retrieved at",
+          "characters": "{{count}} chars",
+          "truncated": "Truncated",
+          "degraded": "Transport fallback",
+          "local": "Local",
+          "jina": "Jina Reader (free)",
+          "policy": "Blocked by local policy",
+          "notForwarded": "not forwarded",
+          "forwarded": "previously sent to {{providers}}",
+          "budget": "Up to 12,000 estimated tokens per call",
+          "budgetReason": "Content exceeded the per-call budget; the cut is marked explicitly.",
+          "providerReason": "Provider-bounded output; the page may be incomplete.",
+          "complete": "Not truncated",
+          "unknown": "Not reported",
+          "attempts": "Execution record",
+          "quote": "View quoted content (not instructions)",
+          "retained": "{{count}} chars sent to the model",
+          "sizes": "Sizes",
+          "requested_url": "Requested URL",
+          "final_url": "Final URL",
+          "canonical_url": "Canonical URL",
+          "content_type": "Content type",
+          "source_content_type": "Original content type",
+          "size_bytes": "Content bytes",
+          "source_size_bytes": "Source bytes",
+          "retrieved_at": "Retrieved at",
           "truncation_reason": "Truncation reason"
         },
         "errorCode": {
@@ -6285,88 +6342,44 @@
     "removeReference": "Remove reference to {{title}}"
   },
   "mcpHub": {
-    "title": "MCP Hub",
-    "subtitle": "MCP servers as vibe mcp commands for every Agent",
-    "empty": "No MCP servers yet. Paste an mcpServers block below or run vibe mcp add.",
-    "pasteHint": "Paste an mcpServers JSON block. Env and header values are stored in plaintext on this machine.",
-    "parse": "Parse and preview",
-    "save": "Save",
-    "replace": "Replace existing servers",
-    "exists": "exists",
-    "saved": "Saved. Generate it to publish its tools.",
-    "generate": "Generate",
+    "title": "MCP",
+    "searchPlaceholder": "Search MCP servers…",
+    "add": "Add MCP",
+    "addTitle": "Add MCP server",
     "refresh": "Refresh",
-    "generated": "Generated {{name}}",
-    "enabled": "Enabled",
+    "refreshAll": "Refresh",
     "remove": "Delete",
     "removeConfirm": "Delete MCP server {{name}}?",
-    "tools": "Tools",
-    "toolsOf": "Tools of {{name}}",
-    "pendingChanges": "Pending changes",
+    "removeAvibeHint": "This removes the server from Avibe.",
+    "removeNativeHint": "This hides the server in Avibe. The native config file is not changed.",
+    "empty": "No MCP server registered. Add one or wait for discovery.",
+    "noSearchMatch": "No matching MCP servers.",
     "failed": "MCP operation failed.",
-    "dotJoin": "{{a}} · {{b}}",
-    "headerLine": "{{title}} · {{subtitle}}",
-    "subtitleDot": "· {{subtitle}}",
-    "previewItem": "{{name}} · {{type}}",
-    "previewExists": "{{name}} · {{type}} · {{exists}}",
+    "pasteHint": "Paste an mcpServers JSON block. Env and header values are stored in plaintext on this machine.",
     "pastePlaceholder": "{\n  \"mcpServers\": {\n    \"docs\": { \"type\": \"http\", \"url\": \"https://example.invalid/mcp\" }\n  }\n}",
-    "toolCommand": "vibe mcp {{server}} {{tool}} {{flags}}",
-
     "source": {
-      "claude": "Claude config",
-      "codex": "Codex config",
-      "opencode": "OpenCode config"
+      "avibe": "Avibe",
+      "claude": "Claude",
+      "codex": "Codex",
+      "opencode": "OpenCode"
     },
-    "sourceDeleted": {
-      "claude": "deleted in Claude",
-      "codex": "deleted in Codex",
-      "opencode": "deleted in OpenCode",
-      "unknown": "deleted in native config"
-    },
-    "status": {
-      "draft": "Draft",
-      "generated": "Generated",
-      "error": "Error",
-      "needs_regeneration": "Needs regeneration"
-    },
+    "transportStdio": "stdio",
+    "transportHttp": "http",
+    "toolMeta": "{{count}} tools · {{transport}}",
+    "tools": "Tools",
+    "generatedAt": "last refreshed {{time}}",
+    "serverVersion": "server v{{version}}",
+    "refreshed": "Refreshed {{name}} ({{count}} tools).",
+    "added": "Added {{name}}.",
     "errors": {
       "invalid_definition": "Invalid definition: {{message}}",
-      "exists": "A server with this name exists; check Replace existing servers.",
+      "exists": "A server with this name already exists.",
       "unavailable": "The Avibe service is not running.",
       "connection": "Could not connect to the MCP server.",
       "timeout": "The MCP server timed out.",
       "capacity": "Too many MCP server processes are running; try again later.",
-      "not_generated": "Generate this server first.",
+      "not_found": "Unknown MCP server.",
       "unsupported_transport_sse": "SSE is not supported; use a Streamable HTTP URL."
-    },
-    "toolCount_one": "{{count}} tool",
-    "toolCount_other": "{{count}} tools",
-    "serverVersion": "server v{{version}}",
-    "generatedAt": "generated {{time}}",
-    "revisionId": "Revision {{revision}}",
-    "configError": "Config error",
-    "deletedHint": "Deleted from its native config; re-add it there to refresh.",
-    "savedEdit": "Saved {{name}}. Refresh to apply the changes.",
-    "edit": {
-      "open": "Open definition",
-      "hint": "Edit the connection definition.",
-      "storedIn": "Stored in {{path}}",
-      "description": "Description",
-      "command": "Command",
-      "args": "Arguments (one per line)",
-      "cwd": "Working directory",
-      "cwdPlaceholder": "Absolute path; empty uses the Agent default",
-      "url": "URL",
-      "env": "Environment variables",
-      "headers": "Headers",
-      "key": "Name",
-      "value": "Value",
-      "keepValue": "Stored — leave blank to keep",
-      "addKey": "Add",
-      "removeKey": "Remove",
-      "addArg": "Add argument",
-      "removeArg": "Remove argument",
-      "cwdCodexOnly": "A working directory is stored only for Codex. New servers that need one are written to ~/.codex/config.toml."
     }
   }
 }

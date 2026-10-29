@@ -17,7 +17,7 @@ PROMPT_SERVER_LIMIT = 50
 def build_mcp_prompt_block() -> Optional[RenderedPromptBlock]:
     """One line per enabled, generated package; omitted when there is none.
 
-    The index grants nothing: every call rechecks enabled state at the owner.
+    The index grants nothing: every call rechecks the published revision at the owner.
     """
 
     from vibe.i18n import t

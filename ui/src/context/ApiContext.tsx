@@ -541,21 +541,18 @@ export type TunnelConnectivityDiagnostics = {
 // MCP Hub (/api/mcp*): static packages generated from MCP servers.
 export interface McpServerSummary {
   name: string;
-  enabled: boolean;
-  status: 'draft' | 'generated' | 'error' | 'needs_regeneration';
-  revision: string | null;
   description?: string;
   transport?: string;
-  source?: 'claude' | 'codex' | 'opencode';
+  source?: 'avibe' | 'claude' | 'codex' | 'opencode';
   sourcePath?: string;
-  nativeDeleted?: boolean;
+  command?: string;
+  url?: string;
+  revision?: string | null;
   generatedAt?: string;
   serverVersion?: string;
   toolCount?: number;
-  pendingChanges?: boolean;
+  tools?: { name: string; description?: string }[];
   diagnostics?: string[];
-  hasCwd?: boolean;
-  error?: { type: string; message: string };
 }
 export interface McpError { type: string; message: string; field?: string; hint?: string }
 /** Masked definition from GET /api/mcp/{name}: env/header values are always blank. */
@@ -916,13 +913,11 @@ export type ApiContextType = {
   // Agent Skills — thin shells over the askill CLI (see /api/skills*).
   listSkills: (params?: { scope?: SkillScope | 'all'; projectId?: string; backends?: string[] }) => Promise<SkillsListResult>;
   listMcpServers: () => Promise<McpResult & { servers?: McpServerSummary[] }>;
-  parseMcp: (text: string) => Promise<McpResult & { servers?: McpParsedServer[] }>;
-  saveMcp: (text: string, replace: boolean) => Promise<McpResult>;
-  getMcpTools: (name: string) => Promise<McpResult & { tools?: McpTool[]; revision?: string }>;
-  runMcpOperation: (name: string, operation: 'generate' | 'enable' | 'disable') => Promise<McpResult>;
+  addMcp: (text: string) => Promise<McpResult & { saved?: string[]; name?: string; toolCount?: number }>;
+  discoverMcp: () => Promise<McpResult & { results?: { name: string; status: string; error?: string; toolCount?: number }[] }>;
+  refreshMcp: (name: string) => Promise<McpResult & { name?: string; toolCount?: number }>;
   removeMcp: (name: string) => Promise<McpResult>;
-  getMcpServer: (name: string) => Promise<McpResult & { server?: McpServerSummary; definition?: McpDefinition; partial?: boolean }>;
-  updateMcp: (name: string, body: { server: Record<string, unknown>; description: string }) => Promise<McpResult>;
+  getMcpServer: (name: string) => Promise<McpResult & { server?: McpServerSummary; definition?: McpDefinition; tools?: McpTool[] }>;
   previewSkillSource: (source: string, params?: { projectId?: string }) => Promise<SkillsPreviewResult>;
   addSkill: (payload: { source: string; scope: SkillScope; projectId?: string; backends?: string[]; all?: boolean; skill?: string; copy?: boolean }) => Promise<SkillsMutationResult>;
   removeSkill: (name: string, params?: { scope?: SkillScope; projectId?: string; backends?: string[] }) => Promise<SkillsMutationResult>;
@@ -4170,14 +4165,11 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return getCachedJson(qs ? `/api/skills?${qs}` : '/api/skills', 5_000);
     },
     listMcpServers: () => getJson('/api/mcp', { handleError: false }),
-    parseMcp: (text) => postJson('/api/mcp/parse', { text }, { handleError: false }),
-    saveMcp: (text, replace) => postJson('/api/mcp/save', { text, replace }, { handleError: false }),
-    getMcpTools: (name) => getJson(`/api/mcp/${encodeURIComponent(name)}/tools`, { handleError: false }),
-    runMcpOperation: (name, operation) =>
-      postJson(`/api/mcp/${encodeURIComponent(name)}/${operation}`, {}, { handleError: false }),
+    addMcp: (text) => postJson('/api/mcp', { text }, { handleError: false }),
+    discoverMcp: () => postJson('/api/mcp/discover', {}, { handleError: false }),
+    refreshMcp: (name) => postJson(`/api/mcp/${encodeURIComponent(name)}/refresh`, {}, { handleError: false }),
     removeMcp: (name) => deleteJson(`/api/mcp/${encodeURIComponent(name)}`, undefined, { handleError: false }),
     getMcpServer: (name) => getJson(`/api/mcp/${encodeURIComponent(name)}`, { handleError: false }),
-    updateMcp: (name, body) => patchJson(`/api/mcp/${encodeURIComponent(name)}`, body, { handleError: false }),
     previewSkillSource: (source, params) =>
       postJson('/api/skills/preview', { source, project_id: params?.projectId }),
     addSkill: (payload) =>

@@ -1,19 +1,24 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Loader2, Pencil, Plug, RefreshCw, Trash2 } from 'lucide-react';
+import { ChevronRight, Globe, Loader2, Plus, RefreshCw, Search, Terminal, Trash2, X } from 'lucide-react';
+import clsx from 'clsx';
 
 import { useApi } from '../../../context/ApiContext';
-import type { McpError, McpParsedServer, McpResult, McpServerSummary, McpTool } from '../../../context/ApiContext';
+import type { McpError, McpServerSummary } from '../../../context/ApiContext';
 import { useToast } from '../../../context/ToastContext';
 import { useInstanceAuthorization } from '../../../context/InstanceAuthorizationContext';
 import { Badge } from '../../ui/badge';
 import { Button } from '../../ui/button';
-import { Switch } from '../../ui/switch';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from '../../ui/dialog';
 import { Textarea } from '../../ui/textarea';
-import { McpServerDialog } from './McpServerDialog';
 
-// MCP Hub on the Skills page (docs/plans/mcp-hub-mvp.md §8): paste → parse →
-// save → generate, then enable/disable, browse static tools, delete.
+const SOURCE_CHIP: Record<string, string> = {
+  avibe: 'border-gold/40 bg-gold/[0.12] text-gold-ink',
+  claude: 'border-mint/40 bg-mint-soft text-mint-ink',
+  codex: 'border-violet/40 bg-violet/10 text-violet',
+  opencode: 'border-cyan/40 bg-cyan/10 text-cyan-ink',
+};
+
 export const McpHubSection: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
@@ -21,39 +26,20 @@ export const McpHubSection: React.FC = () => {
   const { capabilities } = useInstanceAuthorization();
   const canManage = capabilities.is_instance_owner;
   const [servers, setServers] = useState<McpServerSummary[]>([]);
-  const [text, setText] = useState('');
-  const [replace, setReplace] = useState(false);
-  const [preview, setPreview] = useState<McpParsedServer[] | null>(null);
+  const [search, setSearch] = useState('');
+  const [selected, setSelected] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [tools, setTools] = useState<{ name: string; items: McpTool[] } | null>(null);
-  const [editing, setEditing] = useState<string | null>(null);
+  const [showAdd, setShowAdd] = useState(false);
+  const [addText, setAddText] = useState('');
+  const [addError, setAddError] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<McpServerSummary | null>(null);
 
   const describe = useCallback(
     (error?: McpError) => (error ? t(`mcpHub.errors.${error.type}`, { defaultValue: error.message, message: error.message }) : t('mcpHub.failed')),
     [t],
   );
 
-  // Why Generate is unavailable, in the user's words; null when it is available.
-  const generateBlocked = (server: McpServerSummary): string | null => {
-    if (server.status === 'error') return server.error?.message ?? t('mcpHub.configError');
-    if (server.nativeDeleted) return t('mcpHub.deletedHint');
-    return null;
-  };
-
-  // Local "MM-DD HH:mm" from manifest generatedAt, else the revision's UTC stamp.
-  const generatedLabel = (server: McpServerSummary): string | null => {
-    let date = server.generatedAt ? new Date(server.generatedAt) : null;
-    const stamp = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z/.exec(server.revision ?? '');
-    if ((!date || Number.isNaN(date.getTime())) && stamp) {
-      const [, y, mo, d, h, mi, se] = stamp.map(Number);
-      date = new Date(Date.UTC(y, mo - 1, d, h, mi, se));
-    }
-    if (!date || Number.isNaN(date.getTime())) return null;
-    const pad = (value: number) => String(value).padStart(2, '0');
-    return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
-  };
-
-  const refresh = useCallback(async () => {
+  const load = useCallback(async () => {
     try {
       const res = await api.listMcpServers();
       if (res.ok) setServers(res.servers ?? []);
@@ -64,217 +50,236 @@ export const McpHubSection: React.FC = () => {
   }, [api, describe, showToast, t]);
 
   useEffect(() => {
-    let cancelled = false;
-    void api.listMcpServers().then((res) => {
-      if (!cancelled && res.ok) setServers(res.servers ?? []);
-      else if (!cancelled) showToast(describe(res.error), 'error');
-    }).catch(() => {
-      if (!cancelled) showToast(t('mcpHub.failed'), 'error');
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [api, describe, showToast, t]);
+    void load();
+  }, [load]);
 
-  const act = async <T extends McpResult>(key: string, run: () => Promise<T>, success?: string): Promise<T> => {
-    setBusy(key);
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return servers;
+    return servers.filter((item) => item.name.toLowerCase().includes(q) || (item.description || '').toLowerCase().includes(q));
+  }, [search, servers]);
+
+  const current = servers.find((item) => item.name === selected) ?? null;
+
+  const onDiscover = async () => {
+    if (!canManage) return;
+    setBusy('discover');
     try {
-      const res = await run();
-      if (!res.ok) {
-        showToast(describe(res.error), 'error');
-        return res;
-      }
-      if (success) showToast(success, 'success');
-      await refresh();
-      return res;
+      const res = await api.discoverMcp();
+      if (!res.ok) showToast(describe(res.error), 'error');
+      await load();
     } finally {
       setBusy(null);
     }
   };
 
-  const onParse = async () => {
-    const res = await act('parse', () => api.parseMcp(text));
-    setPreview(res.ok ? res.servers ?? [] : null);
-  };
-
-  const onSave = async () => {
-    const res = await act('save', () => api.saveMcp(text, replace), t('mcpHub.saved'));
-    if (res.ok) {
-      setText('');
-      setPreview(null);
+  const onRefreshOne = async (name: string) => {
+    setBusy(`refresh:${name}`);
+    try {
+      const res = await api.refreshMcp(name);
+      if (!res.ok) {
+        showToast(describe(res.error), 'error');
+        return;
+      }
+      showToast(t('mcpHub.refreshed', { name, count: res.toolCount ?? 0 }), 'success');
+      await load();
+    } finally {
+      setBusy(null);
     }
   };
 
-  const onTools = async (name: string) => {
-    const res = await api.getMcpTools(name);
-    if (res.ok) setTools({ name, items: res.tools ?? [] });
-    else showToast(describe(res.error), 'error');
+  const onAdd = async () => {
+    setBusy('add');
+    setAddError(null);
+    try {
+      const res = await api.addMcp(addText);
+      if (!res.ok) {
+        setAddError(describe(res.error));
+        return;
+      }
+      setShowAdd(false);
+      setAddText('');
+      showToast(t('mcpHub.added', { name: (res.saved ?? [])[0] || res.name || '' }), 'success');
+      await load();
+    } finally {
+      setBusy(null);
+    }
   };
+
+  const onDelete = async () => {
+    if (!confirmDelete) return;
+    const name = confirmDelete.name;
+    setBusy(`remove:${name}`);
+    try {
+      const res = await api.removeMcp(name);
+      if (!res.ok) {
+        showToast(describe(res.error), 'error');
+        return;
+      }
+      setConfirmDelete(null);
+      if (selected === name) setSelected(null);
+      await load();
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const transportLabel = (server: McpServerSummary) =>
+    server.transport === 'stdio' ? t('mcpHub.transportStdio') : t('mcpHub.transportHttp');
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex items-center gap-2">
-        <Plug className="size-3.5 text-cyan-ink" />
-        <span className="font-mono text-[10.5px] font-bold uppercase tracking-[0.1em] text-muted">{t('mcpHub.title')}</span>
-        <span className="font-mono text-[10px] text-muted">{t('mcpHub.subtitleDot', { subtitle: t('mcpHub.subtitle') })}</span>
+      <div className="flex flex-wrap items-center gap-2.5">
+        <div className="flex min-w-[220px] flex-1 items-center gap-2 rounded-md border border-border-strong bg-surface px-3 py-2">
+          <Search className="size-3.5 shrink-0 text-muted" />
+          <input
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder={t('mcpHub.searchPlaceholder')}
+            className="flex-1 bg-transparent text-[12px] text-foreground outline-none placeholder:text-muted"
+          />
+        </div>
+        {canManage ? (
+          <>
+            <Button type="button" variant="outline" size="xs" disabled={busy !== null} onClick={() => void onDiscover()}>
+              {busy === 'discover' ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
+              {t('mcpHub.refreshAll')}
+            </Button>
+            <Button type="button" variant="brand" size="xs" onClick={() => { setShowAdd(true); setAddError(null); }}>
+              <Plus className="size-3.5" />
+              {t('mcpHub.add')}
+            </Button>
+          </>
+        ) : null}
       </div>
 
-      {servers.length === 0 ? (
-        <div className="rounded-xl border border-dashed border-border bg-surface px-4 py-6 text-center text-[12px] text-muted">
-          {t('mcpHub.empty')}
-        </div>
-      ) : (
-        <div className="flex flex-col gap-2">
-          {servers.map((server) => (
-            <div key={server.name} className="flex flex-wrap items-center gap-2.5 rounded-xl border border-border bg-surface px-4 py-3">
-              <button
-                type="button"
-                className="font-mono text-[12.5px] font-semibold text-foreground hover:underline"
-                onClick={() => setEditing(server.name)}
-              >
-                {server.name}
-              </button>
-              <Badge variant="secondary">{t(`mcpHub.status.${server.status}`)}</Badge>
-              {server.source ? (
-                <Badge variant="secondary">
-                  {server.nativeDeleted
-                    ? t(`mcpHub.sourceDeleted.${server.source}`, { defaultValue: t('mcpHub.sourceDeleted.unknown') })
-                    : t(`mcpHub.source.${server.source}`)}
-                </Badge>
-              ) : server.nativeDeleted ? (
-                <Badge variant="secondary">{t('mcpHub.sourceDeleted.unknown')}</Badge>
-              ) : null}
-              {server.pendingChanges ? <Badge variant="secondary">{t('mcpHub.pendingChanges')}</Badge> : null}
-              <span className="min-w-0 flex-1 truncate text-[12px] text-muted">
-                {server.error?.message || generateBlocked(server) || server.description || ''}
-              </span>
-              {server.revision ? (
-                <span className="text-[11px] text-muted" title={t('mcpHub.revisionId', { revision: server.revision })}>
-                  {[
-                    t('mcpHub.toolCount', { count: server.toolCount ?? 0 }),
-                    server.serverVersion ? t('mcpHub.serverVersion', { version: server.serverVersion }) : null,
-                    generatedLabel(server) ? t('mcpHub.generatedAt', { time: generatedLabel(server) }) : null,
-                  ].filter(Boolean).reduce((acc: string, part) => (acc ? t('mcpHub.dotJoin', { a: acc, b: part as string }) : (part as string)), '')}
-                </span>
-              ) : null}
-              {server.status === 'generated' ? (
-                <Button type="button" variant="outline" size="xs" onClick={() => void onTools(server.name)}>
-                  {t('mcpHub.tools')}
+      <div className={clsx('grid gap-5', current ? 'lg:grid-cols-[minmax(0,1fr)_400px]' : 'grid-cols-1')}>
+        <div className="flex min-w-0 flex-col gap-2">
+          {filtered.length === 0 ? (
+            <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-border bg-surface px-6 py-12 text-center">
+              <p className="text-[13px] text-muted">{servers.length === 0 ? t('mcpHub.empty') : t('mcpHub.noSearchMatch')}</p>
+              {canManage && servers.length === 0 ? (
+                <Button type="button" variant="brand" size="sm" onClick={() => setShowAdd(true)}>
+                  <Plus className="size-3.5" />
+                  {t('mcpHub.add')}
                 </Button>
               ) : null}
-              <Button type="button" variant="ghost" size="xs" aria-label={t('mcpHub.edit.open')} onClick={() => setEditing(server.name)}>
-                <Pencil className="size-3.5" />
-              </Button>
-              {canManage ? (
-                <>
-                  <span title={generateBlocked(server) ?? undefined}>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="xs"
-                    disabled={busy !== null || generateBlocked(server) !== null}
-                    onClick={() => void act(
-                      `generate:${server.name}`,
-                      () => api.runMcpOperation(server.name, 'generate'),
-                      t('mcpHub.generated', { name: server.name }),
-                    )}
-                  >
-                    {busy === `generate:${server.name}` ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
-                    {server.revision ? t('mcpHub.refresh') : t('mcpHub.generate')}
-                  </Button>
+            </div>
+          ) : (
+            filtered.map((server) => (
+              <button
+                key={server.name}
+                type="button"
+                onClick={() => setSelected(server.name)}
+                className={clsx(
+                  'group flex w-full items-center gap-3 rounded-lg border px-[14px] py-3 text-left transition',
+                  selected === server.name
+                    ? 'border-mint/40 bg-mint-soft shadow-glow-sm-mint'
+                    : 'border-border bg-surface hover:border-border-strong hover:bg-surface-2',
+                )}
+              >
+                <span className="flex size-9 shrink-0 items-center justify-center rounded-[9px] border border-border bg-surface-3 text-muted">
+                  {server.transport === 'stdio' ? <Terminal className="size-4" /> : <Globe className="size-4" />}
+                </span>
+                <span className="flex min-w-0 flex-1 flex-col gap-1">
+                  <span className="flex items-center gap-2">
+                    <span className="truncate font-mono text-[13px] font-semibold text-foreground">{server.name}</span>
+                    <Badge className={clsx('font-mono text-[9px] uppercase', SOURCE_CHIP[server.source ?? 'avibe'])}>
+                      {t(`mcpHub.source.${server.source ?? 'avibe'}`)}
+                    </Badge>
                   </span>
-                  <Switch
-                    checked={server.enabled}
-                    disabled={busy !== null || server.status !== 'generated'}
-                    label={t('mcpHub.enabled')}
-                    onCheckedChange={(next) => void act(`toggle:${server.name}`, () =>
-                      api.runMcpOperation(server.name, next ? 'enable' : 'disable'))}
-                  />
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="xs"
-                    aria-label={t('mcpHub.remove')}
-                    disabled={busy !== null}
-                    onClick={() => {
-                      if (window.confirm(t('mcpHub.removeConfirm', { name: server.name }))) {
-                        void act(`remove:${server.name}`, () => api.removeMcp(server.name));
-                      }
-                    }}
-                  >
-                    <Trash2 className="size-3.5" />
-                  </Button>
-                </>
-              ) : null}
-            </div>
-          ))}
+                  <span className="truncate font-mono text-[11px] text-muted">{server.command || server.url || server.description}</span>
+                  <span className="font-mono text-[10px] text-muted">
+                    {t('mcpHub.toolMeta', { count: server.toolCount ?? 0, transport: transportLabel(server) })}
+                  </span>
+                </span>
+                <ChevronRight className="size-3.5 text-muted" />
+              </button>
+            ))
+          )}
         </div>
-      )}
 
-      {tools ? (
-        <div className="flex flex-col gap-1.5 rounded-xl border border-border bg-surface-2 px-4 py-3">
-          <div className="flex items-center gap-2">
-            <span className="text-[12px] font-semibold text-foreground">{t('mcpHub.toolsOf', { name: tools.name })}</span>
-            <div className="flex-1" />
-            <Button type="button" variant="ghost" size="xs" onClick={() => setTools(null)}>{t('common.close')}</Button>
-          </div>
-          {tools.items.map((tool) => (
-            <div key={tool.name} className="text-[12px]">
-              <span className="font-mono text-foreground">{t('mcpHub.toolCommand', { server: tools.name, tool: tool.name, flags: tool.flags.map((flag) => flag.flag).join(' ') }).trim()}</span>
-              {tool.description ? <div className="text-muted">{tool.description}</div> : null}
+        {current ? (
+          <div className="flex flex-col gap-3.5 self-start rounded-2xl border border-border-strong bg-surface p-5">
+            <div className="flex items-start gap-3">
+              <span className="flex size-10 shrink-0 items-center justify-center rounded-[10px] border border-border bg-surface-3">
+                {current.transport === 'stdio' ? <Terminal className="size-5" /> : <Globe className="size-5" />}
+              </span>
+              <div className="flex min-w-0 flex-1 flex-col">
+                <div className="flex items-center gap-2">
+                  <span className="truncate font-mono text-[16px] font-bold text-foreground">{current.name}</span>
+                  <Badge className={clsx('font-mono text-[9px] uppercase', SOURCE_CHIP[current.source ?? 'avibe'])}>
+                    {t(`mcpHub.source.${current.source ?? 'avibe'}`)}
+                  </Badge>
+                </div>
+                <div className="truncate font-mono text-[11px] text-muted">{current.command || current.url}</div>
+              </div>
+              <Button type="button" variant="ghost" size="icon" className="size-6" onClick={() => setSelected(null)} aria-label={t('common.close')}>
+                <X className="size-3.5" />
+              </Button>
             </div>
-          ))}
-        </div>
-      ) : null}
-
-      {canManage ? (
-        <div className="flex flex-col gap-2 rounded-xl border border-border bg-surface px-4 py-3">
-          <span className="text-[12px] text-muted">{t('mcpHub.pasteHint')}</span>
-          <Textarea
-            value={text}
-            onChange={(event) => {
-              setText(event.target.value);
-              setPreview(null);
-            }}
-            placeholder={t('mcpHub.pastePlaceholder')}
-            className="min-h-[120px] font-mono text-[11.5px]"
-          />
-          {preview ? (
-            <div className="flex flex-col gap-1 text-[12px]">
-              {preview.map((item) => (
-                <div key={item.name} className="font-mono">
-                  {item.exists
-                    ? t('mcpHub.previewExists', { name: item.name, type: item.transport?.type ?? '', exists: t('mcpHub.exists') })
-                    : t('mcpHub.previewItem', { name: item.name, type: item.transport?.type ?? '' })}
+            <div className="flex flex-col gap-1.5">
+              <span className="font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted">{t('mcpHub.tools')}</span>
+              {(current.tools ?? []).map((tool) => (
+                <div key={tool.name} className="rounded-[10px] border border-border bg-surface-3 px-3 py-2">
+                  <div className="font-mono text-[12px] text-foreground">{tool.name}</div>
+                  {tool.description ? <div className="text-[11px] text-muted">{tool.description}</div> : null}
                 </div>
               ))}
             </div>
-          ) : null}
-          <div className="flex flex-wrap items-center gap-2">
-            <label className="flex items-center gap-1.5 text-[12px] text-muted">
-              <input type="checkbox" checked={replace} onChange={(event) => setReplace(event.target.checked)} />
-              {t('mcpHub.replace')}
-            </label>
-            <div className="flex-1" />
-            <Button type="button" variant="outline" size="xs" disabled={!text.trim() || busy !== null} onClick={() => void onParse()}>
-              {t('mcpHub.parse')}
-            </Button>
-            <Button type="button" variant="brand" size="xs" disabled={!preview || busy !== null} onClick={() => void onSave()}>
-              {t('mcpHub.save')}
-            </Button>
+            <div className="rounded-[10px] border border-border bg-surface-3 px-3 py-2.5 font-mono text-[11px] text-muted">
+              vibe mcp {current.name} {'<tool>'}
+            </div>
+            <div className="font-mono text-[10px] text-muted">
+              {current.generatedAt ? t('mcpHub.generatedAt', { time: current.generatedAt }) : null}
+              {current.serverVersion ? ` · ${t('mcpHub.serverVersion', { version: current.serverVersion })}` : null}
+            </div>
+            {canManage ? (
+              <div className="flex items-center gap-2 pt-1">
+                <Button type="button" variant="outline" size="xs" disabled={busy !== null} onClick={() => void onRefreshOne(current.name)}>
+                  {busy === `refresh:${current.name}` ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
+                  {t('mcpHub.refresh')}
+                </Button>
+                <Button type="button" variant="ghost" size="xs" onClick={() => setConfirmDelete(current)}>
+                  <Trash2 className="size-3.5" />
+                  {t('mcpHub.remove')}
+                </Button>
+              </div>
+            ) : null}
           </div>
-        </div>
-      ) : null}
+        ) : null}
+      </div>
 
-      <McpServerDialog
-        key={editing ?? ''}
-        name={editing}
-        canManage={canManage}
-        onClose={() => setEditing(null)}
-        onChanged={refresh}
-        describe={describe}
-        showToast={showToast}
-      />
+      <Dialog open={showAdd} onOpenChange={(open) => (!open ? setShowAdd(false) : undefined)}>
+        <DialogContent className="max-w-lg" closeLabel={t('common.close')}>
+          <DialogTitle>{t('mcpHub.addTitle')}</DialogTitle>
+          <DialogDescription>{t('mcpHub.pasteHint')}</DialogDescription>
+          <Textarea value={addText} onChange={(event) => setAddText(event.target.value)} className="min-h-40 font-mono text-[12px]" placeholder={t('mcpHub.pastePlaceholder')} />
+          {addError ? <div className="text-[12px] text-destructive-ink">{addError}</div> : null}
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setShowAdd(false)}>{t('common.cancel')}</Button>
+            <Button type="button" disabled={busy !== null || !addText.trim()} onClick={() => void onAdd()}>
+              {busy === 'add' ? <Loader2 className="size-3.5 animate-spin" /> : null}
+              {t('mcpHub.add')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={confirmDelete !== null} onOpenChange={(open) => (!open ? setConfirmDelete(null) : undefined)}>
+        <DialogContent className="max-w-md" closeLabel={t('common.close')}>
+          <DialogTitle>{t('mcpHub.removeConfirm', { name: confirmDelete?.name ?? '' })}</DialogTitle>
+          <DialogDescription>
+            {confirmDelete?.source === 'avibe' ? t('mcpHub.removeAvibeHint') : t('mcpHub.removeNativeHint')}
+          </DialogDescription>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setConfirmDelete(null)}>{t('common.cancel')}</Button>
+            <Button type="button" variant="destructive" disabled={busy !== null} onClick={() => void onDelete()}>
+              {t('mcpHub.remove')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };

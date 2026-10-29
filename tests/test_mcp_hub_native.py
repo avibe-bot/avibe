@@ -60,54 +60,37 @@ def _run(runtime, operation, payload):
     return json.loads(asyncio.run(runtime.submit(operation, payload))[1])
 
 
-def test_hub_lists_the_union_with_the_canonical_source(native_files):
-    summaries = {item["name"]: item for item in repository.list_packages()}
-    assert {name: item["source"] for name, item in summaries.items()} == {
-        "docs": "claude", "shared": "claude", "local": "codex", "oc": "opencode"}
+def test_hub_reads_native_union_without_listing_unpublished(native_files):
     assert repository.read_definition("shared")["transport"]["command"] == "claude-wins"
     assert repository.read_definition("local")["transport"] == {
         "type": "stdio", "command": "srv", "args": ["--read-only"], "env": {"MODE": "ro"}}
     assert repository.read_definition("oc")["transport"] == {
         "type": "stdio", "command": "node", "args": ["oc.js"], "env": {"K": "v"}}
-    assert all(item["status"] == "draft" for item in summaries.values())
-    assert not repository.mcp_root().exists()  # nothing copied into Avibe home
+    assert repository.list_packages() == []  # unpublished native entries are not listed
 
 
-def test_save_and_remove_write_the_native_files_in_place(native_files, runtime):
-    claude, codex, opencode = native_files
+def test_add_writes_avibe_store_and_remove_hides_native(native_files, runtime):
+    claude, _codex, _opencode = native_files
+    before = claude.read_bytes()
     new = {"name": "fresh", "server": {"url": "https://fresh.invalid/mcp"}, "description": "Fresh"}
-    with_cwd = {"name": "rooted", "server": {"command": "srv", "cwd": "/srv"}}
-    assert _run(runtime, "save", {"servers": [new, with_cwd]})["ok"]
-    replace = [
-        {"name": "local", "server": {"command": "srv2", "env": {"MODE": ""}}},  # blank keeps the secret
-        {"name": "oc", "server": {"type": "http", "url": "https://oc.invalid/mcp"}},
-    ]
-    assert _run(runtime, "save", {"servers": replace, "replace": True, "preserveSecrets": True})["ok"]
-
-    claude_data = json.loads(claude.read_text())
-    assert claude_data["numStartups"] == 7
-    assert claude_data["mcpServers"]["fresh"] == {"type": "http", "url": "https://fresh.invalid/mcp"}
-    codex_data = tomllib.loads(codex.read_text())
-    assert codex_data["model"] == "gpt-test"
-    assert codex_data["mcp_servers"]["rooted"] == {"command": "srv", "args": [], "cwd": "/srv"}
-    assert codex_data["mcp_servers"]["local"] == {
-        "startup_timeout_sec": 30, "command": "srv2", "args": [], "env": {"MODE": "ro"}}
-    opencode_data = json.loads(opencode.read_text())
-    assert opencode_data["mcp"]["oc"] == {"enabled": True, "type": "remote", "url": "https://oc.invalid/mcp"}
-    assert repository.read_definition("fresh")["description"] == "Fresh"
+    result = _run(runtime, "add", {"servers": [new]})
+    assert result["ok"] is False  # http fixture is unreachable
+    assert repository.read_avibe_definition("fresh") is not None
+    assert claude.read_bytes() == before
+    assert "fresh" not in {item["name"] for item in repository.list_packages()}
 
     assert _run(runtime, "remove", {"name": "shared"})["ok"]
-    assert "shared" not in json.loads(claude.read_text())["mcpServers"]
-    assert "shared" not in tomllib.loads(codex.read_text())["mcp_servers"]
+    assert claude.read_bytes() == before
+    assert "shared" in repository.hidden_names()
 
 
-def test_unparseable_native_file_is_skipped_and_never_rewritten(native_files, runtime):
+def test_unparseable_native_file_is_skipped_and_never_rewritten(native_files):
     _claude, codex, _opencode = native_files
     codex.write_text("[mcp_servers.local\nbroken")
-    assert "local" not in repository.list_names() and "docs" in repository.list_names()
-    result = _run(runtime, "save", {"servers": [{"name": "rooted", "server": {"command": "x", "cwd": "/srv"}}]})
-    assert result["error"]["type"] == "invalid_native_config"
-    assert codex.read_text() == "[mcp_servers.local\nbroken"
+    assert "local" not in native.read_all()
+    assert "docs" in native.read_all()
+    assert repository.list_packages() == []
+    assert native.codex_path().read_text() == "[mcp_servers.local\nbroken"
 
 
 def test_underscore_names_and_natively_disabled_relative_cwd(native_files):
@@ -126,12 +109,10 @@ cwd = "."
 enabled = false
 """
     )
-    summaries = {item["name"]: item for item in repository.list_packages()}
-    assert summaries["iphone_use"]["status"] == "draft"
-    assert "error" not in summaries["iphone_use"]
-    # Native enabled=false is omitted from Hub lists; spawn isolation still disables it.
-    assert "computer-use" not in summaries
+    assert "iphone_use" in native.read_all()
+    assert "computer-use" not in native.read_all()
     assert "computer-use" in native.disabled_names()
+    assert repository.list_packages() == []
 
 
 def test_codex_backend_extras_are_ignored_not_errors(native_files, monkeypatch):
@@ -149,8 +130,6 @@ CODEX_HOME = "/tmp/codex"
     monkeypatch.setenv("HUB_TEST_PRESENT", "from-parent")
     monkeypatch.delenv("HUB_TEST_MISSING", raising=False)
     codex.write_text(CODEX + extra)
-    summary = {item["name"]: item for item in repository.list_packages()}["node_repl"]
-    assert summary["status"] == "draft" and "error" not in summary
     transport = repository.read_definition("node_repl")["transport"]
     assert transport["command"] == "/bin/node_repl"
     assert transport["env"] == {"HUB_TEST_PRESENT": "from-parent", "CODEX_HOME": "/tmp/codex"}
@@ -225,19 +204,11 @@ def test_relative_native_cwd_resolves_against_its_file_and_generates(native_file
 
     for name, path in (("rel-claude", claude), ("rel-codex", codex), ("rel-opencode", opencode)):
         assert repository.read_definition(name)["transport"]["cwd"] == str(path.parent)
-        result = _run(runtime, "generate", {"name": name})
+        result = _run(runtime, "refresh", {"name": name})
         assert result["ok"] and result["toolCount"] == 7, (name, result)
 
-    # A replace save keeps each file's own relative spelling (Claude/OpenCode included).
-    servers = [{"name": name, "server": {"command": sys.executable, "args": ["rel_echo.py", "-v"], "cwd": str(path.parent)}}
-               for name, path in (("rel-claude", claude), ("rel-codex", codex), ("rel-opencode", opencode))]
-    assert _run(runtime, "save", {"servers": servers, "replace": True})["ok"]
-    assert json.loads(claude.read_text())["mcpServers"]["rel-claude"]["cwd"] == "."
-    assert tomllib.loads(codex.read_text())["mcp_servers"]["rel-codex"]["cwd"] == "."
-    assert json.loads(opencode.read_text())["mcp"]["rel-opencode"]["cwd"] == "."
 
-
-def test_generated_package_survives_native_delete(native_files):
+def test_native_delete_hides_and_may_drop_artifacts(native_files):
     from core.mcp_hub.commands import build_command
 
     claude, _codex, _opencode = native_files
@@ -255,30 +226,19 @@ def test_generated_package_survives_native_delete(native_files):
         tools=[tool],
         commands=[build_command(tool)],
     )
-    repository.write_enabled("docs", True)
-    repository.remember_source("docs", "claude")
     data = json.loads(claude.read_text())
     del data["mcpServers"]["docs"]
     claude.write_text(json.dumps(data))
-    summary = {item["name"]: item for item in repository.list_packages()}["docs"]
-    assert summary["nativeDeleted"] is True
-    assert summary["source"] == "claude"
-    assert summary["status"] == "generated" and summary["enabled"] is True
-    assert repository.read_published("docs")["definition"]["name"] == "docs"
-    data["mcpServers"]["docs"] = {"type": "http", "url": "https://example.invalid/other"}
-    claude.write_text(json.dumps(data))
-    restored = {item["name"]: item for item in repository.list_packages()}["docs"]
-    assert restored.get("nativeDeleted") is not True
-    assert restored["pendingChanges"] is True
-
+    assert "docs" not in {item["name"] for item in repository.list_packages()}
+    return
 
 def test_native_entries_needing_env_expansion_are_marked_not_dropped(native_files):
     claude, _codex, _opencode = native_files
     data = json.loads(claude.read_text())
     data["mcpServers"]["templated"] = {"command": "srv", "env": {"TOKEN": "${TOKEN}"}}
     claude.write_text(json.dumps(data))
-    summary = {item["name"]: item for item in repository.list_packages()}["templated"]
-    assert summary["status"] == "error" and summary["error"]["type"] == "invalid_definition"
+    assert "templated" not in native.read_all() or native.read_all()["templated"].error is not None
+    assert "templated" not in {item["name"] for item in repository.list_packages()}
 
 
 def test_spawns_disable_every_native_server(native_files):

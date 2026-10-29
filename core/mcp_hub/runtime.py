@@ -206,6 +206,8 @@ class McpRuntime:
         self._connections: dict[tuple, _Connection] = {}
         self._stdio_open = 0
         self._sweeper: Optional[asyncio.Task] = None
+        self._discover_lock = asyncio.Lock()
+        self._discover_task: Optional[asyncio.Task] = None
 
     # -- thread ---------------------------------------------------------------
 
@@ -292,9 +294,10 @@ class McpRuntime:
     async def handle(self, operation: str, payload: dict[str, Any]) -> tuple[int, bytes]:
         handlers = {
             "save": self._save,
-            "generate": self._generate,
-            "enable": self._enable,
-            "disable": self._disable,
+            "add": self._add,
+            "generate": self._refresh,
+            "refresh": self._refresh,
+            "discover": self._discover_all,
             "remove": self._remove,
             "call": self._call,
         }
@@ -312,6 +315,9 @@ class McpRuntime:
     # -- management -----------------------------------------------------------
 
     async def _save(self, payload: dict[str, Any]) -> bytes:
+        return await self._add(payload)
+
+    async def _add(self, payload: dict[str, Any]) -> bytes:
         replace = payload.get("replace") is True
         preserve = payload.get("preserveSecrets") is True
         definitions = [
@@ -321,16 +327,22 @@ class McpRuntime:
         if not definitions:
             raise McpHubError("usage", "No servers to save.", usage=True)
         saved = []
+        results = []
         for definition in definitions:
             name = definition["name"]
-            async with self._lock(name), self._lock(_NATIVE_FILES):
-                saved.append(await asyncio.to_thread(self._save_one, definition, replace, preserve))
-        return _dumps({"ok": True, "saved": saved})
+            async with self._lock(name):
+                await asyncio.to_thread(self._save_one, definition, replace, preserve)
+            saved.append(name)
+            results.append(json.loads(await self._refresh({"name": name})))
+        failed = next((item for item in results if not item.get("ok")), None)
+        if failed is not None:
+            return _dumps(failed)
+        return _dumps({"ok": True, "saved": saved, **results[-1]})
 
     @staticmethod
     def _save_one(definition: dict[str, Any], replace: bool, preserve: bool) -> str:
         name = definition["name"]
-        exists = name in repository.list_names()
+        exists = repository.read_avibe_definition(name) is not None or repository.read_published(name) is not None
         if exists and not replace:
             raise McpHubError(
                 "exists",
@@ -348,11 +360,10 @@ class McpRuntime:
         repository.write_definition(definition)
         return name
 
-    async def _generate(self, payload: dict[str, Any]) -> bytes:
+    async def _refresh(self, payload: dict[str, Any]) -> bytes:
         name = payload.get("name")
         async with self._lock(name):
             definition = await asyncio.to_thread(repository.read_definition, name)
-            initial = not (repository.package_dir(name) / "current.json").exists()
             snapshot = json.loads(json.dumps(definition))
             if snapshot["transport"]["type"] == STDIO and not snapshot["transport"].get("cwd"):
                 snapshot["transport"]["cwd"] = await asyncio.to_thread(repository.default_cwd)
@@ -363,17 +374,56 @@ class McpRuntime:
                 with anyio.fail_after(GENERATION_TIMEOUT_SECONDS):
                     tools, server_info = await self._discover(snapshot)
             except TimeoutError:
-                raise McpHubError("timeout", "Generation timed out.") from None
+                raise McpHubError("timeout", "Refresh timed out.") from None
             except McpHubError:
                 raise
-            except Exception as exc:
-                raise McpHubError("connection", f"Generation failed: {_describe(exc)}") from None
+            except Exception as cop:
+                raise McpHubError("connection", f"Refresh failed: {_describe(cop)}") from None
             finally:
                 if stdio:
                     self.release_stdio_slot()
-            revision = await asyncio.to_thread(self._publish, name, snapshot, definition, tools, server_info, initial)
+            revision = await asyncio.to_thread(self._publish, name, snapshot, definition, tools, server_info)
             await self._retire_package(name, keep_revision=revision)
             return _dumps({"ok": True, "name": name, "revision": revision, "toolCount": len(tools)})
+
+    async def _discover_all(self, payload: dict[str, Any]) -> bytes:
+        _ = payload
+        async with self._discover_lock:
+            task = self._discover_task
+            if task is None or task.done():
+                task = asyncio.create_task(self._run_discover_pass())
+                self._discover_task = task
+        results = await task
+        return _dumps({"ok": True, "results": results})
+
+    async def _run_discover_pass(self) -> list[dict[str, Any]]:
+        hidden = await asyncio.to_thread(lambda: repository.hidden_names() | native.disabled_names())
+        native_servers = await asyncio.to_thread(native.read_all)
+        names: set[str] = set()
+        root = repository.mcp_root()
+        if root.is_dir():
+            for entry in root.iterdir():
+                if entry.is_dir() and (entry / "definition.json").is_file():
+                    names.add(entry.name)
+        names.update(native_servers)
+        names -= hidden
+        stale = [
+            name
+            for name in repository._generated_names()
+            if name not in names and repository.read_avibe_definition(name) is None
+        ]
+        for name in stale:
+            await asyncio.to_thread(repository.delete_artifacts, name)
+        results: list[dict[str, Any]] = []
+        for name in sorted(names):
+            body = json.loads(await self._refresh({"name": name}))
+            if body.get("ok"):
+                results.append({"name": name, "status": "registered", "toolCount": body.get("toolCount")})
+            else:
+                error = (body.get("error") or {}).get("message") or "failed"
+                logger.warning("MCP discover %s failed: %s", name, error)
+                results.append({"name": name, "status": "failed", "error": error})
+        return results
 
     @staticmethod
     async def _discover(snapshot: dict[str, Any]) -> tuple[list, Any]:
@@ -382,7 +432,7 @@ class McpRuntime:
             return await _list_all_tools(client), client.server_info
 
     @staticmethod
-    def _publish(name, snapshot, definition, tools, server_info, initial) -> str:
+    def _publish(name, snapshot, definition, tools, server_info) -> str:
         descriptors, diagnostics, seen = [], [], set()
         for tool in tools:
             descriptor = tool.model_dump(mode="json", by_alias=True, exclude_none=True)
@@ -412,40 +462,14 @@ class McpRuntime:
             tools=descriptors,
             commands=[mcp_commands.build_command(item) for item in descriptors],
         )
-        if initial:
-            repository.write_enabled(name, True)
-        held = native.read_all().get(name)
-        if held is not None:
-            repository.remember_source(name, held.source)
         return revision
-
-    async def _enable(self, payload: dict[str, Any]) -> bytes:
-        name = payload.get("name")
-        async with self._lock(name):
-            def _apply() -> None:
-                if repository.read_published(name) is None:
-                    repository.read_definition(name)
-                    raise McpHubError("not_generated", f"Generate {name!r} before enabling it.", hint=f"vibe mcp generate {name}")
-                repository.write_enabled(name, True)
-
-            await asyncio.to_thread(_apply)
-        return _dumps({"ok": True, "name": name, "enabled": True})
-
-    async def _disable(self, payload: dict[str, Any]) -> bytes:
-        name = payload.get("name")
-        async with self._lock(name):
-            if repository.read_published(name) is None:
-                await asyncio.to_thread(repository.read_definition, name)
-            await asyncio.to_thread(repository.write_enabled, name, False)
-            await self._retire_package(name)
-        return _dumps({"ok": True, "name": name, "enabled": False})
 
     async def _remove(self, payload: dict[str, Any]) -> bytes:
         name = payload.get("name")
-        async with self._lock(name), self._lock(_NATIVE_FILES):
-            await asyncio.to_thread(repository.remove_package, name)
+        async with self._lock(name):
+            kind = await asyncio.to_thread(repository.remove_package, name)
             await self._retire_package(name)
-        return _dumps({"ok": True, "name": name, "removed": True})
+        return _dumps({"ok": True, "name": name, "removed": True, "kind": kind})
 
     # -- calls ----------------------------------------------------------------
 
@@ -455,8 +479,6 @@ class McpRuntime:
         if published is None:
             repository.read_definition(name)
             raise McpHubError("not_generated", f"MCP server {name!r} has not been generated.", hint="vibe mcp --list")
-        if not repository.read_enabled(name):
-            raise McpHubError("disabled", f"MCP server {name!r} is disabled.", hint="vibe mcp --list")
         descriptor = next((item for item in published["tools"] if item.get("name") == tool), None)
         if descriptor is None:
             raise McpHubError("not_found", f"{name} has no tool {tool!r}.", hint=f"vibe mcp {name} --list")

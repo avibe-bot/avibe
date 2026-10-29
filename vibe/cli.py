@@ -18755,6 +18755,8 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     # calls at Editor like Skills, management Owner-only. This floor is reached
     # only if argparse ever dispatches it.
     ("mcp",): "owner",
+    ("mcp-add",): "owner",
+    ("mcp-discover",): "owner",
 }
 
 #: Argv-level entry points the supervisor and the installer use. They are not
@@ -18877,6 +18879,14 @@ def main():
             from vibe import mcp_cli
 
             sys.exit(mcp_cli.main(argv[1:]))
+        if argv and argv[0] == "mcp-add":
+            from vibe import mcp_cli
+
+            sys.exit(mcp_cli.add_main(argv[1:]))
+        if argv and argv[0] == "mcp-discover":
+            from vibe import mcp_cli
+
+            sys.exit(mcp_cli.discover_main(argv[1:]))
         parser = build_parser()
         args = parser.parse_args()
         _require_command_admission(parser, args)

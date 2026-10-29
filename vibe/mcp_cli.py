@@ -1,7 +1,7 @@
-"""``vibe mcp``: static discovery from generated packages, calls and management via the owner.
+"""``vibe mcp``: per-server discovery and calls. Management is ``vibe mcp-add`` / ``vibe mcp-discover``.
 
-List and help read local artifacts only, so they work offline and with the owner
-down. Calls and management go to the Controller over control IPC.
+List and help read local artifacts only. Calls and management go to the Controller
+over control IPC.
 
 Exit codes: 0 success, 2 usage/argument error, 1 any other failure.
 """
@@ -18,23 +18,23 @@ from core.mcp_hub import repository
 from core.mcp_hub.definition import parse_add_argv, provider_entry
 from core.mcp_hub.errors import McpHubError
 
-MANAGEMENT_COMMANDS = ("add", "generate", "regenerate", "enable", "disable", "remove")
-
 USAGE = """\
 usage:
-  vibe mcp --list [--all] [--format json]
+  vibe mcp --list [--format json]
   vibe mcp <server> --list [--format json]
+  vibe mcp <server> --refresh
+  vibe mcp <server> --remove
   vibe mcp <server> <tool> --help
   vibe mcp <server> <tool> [--<key> <value> ...]
   vibe mcp <server> <tool> --args-json '<object>' | --args-file <path> | --args-stdin
   vibe mcp <server> -- <tool-starting-with-dash> ...
 
 management (Owner):
-  vibe mcp add [--transport stdio|http] [--env KEY=VALUE ...] [--header 'Name: value' ...]
+  vibe mcp-add [--transport stdio|http] [--env KEY=VALUE ...] [--header 'Name: value' ...]
                [--description TEXT] [--cwd DIR] [--replace] <name> -- <command> [args...]
-  vibe mcp add --transport http <name> <url>
-  vibe mcp add --json-stdin [--replace]
-  vibe mcp generate|regenerate|enable|disable|remove <name>
+  vibe mcp-add --transport http <name> <url>
+  vibe mcp-add --json-stdin [--replace]
+  vibe mcp-discover
 """
 
 
@@ -54,27 +54,47 @@ def _fail(error: McpHubError) -> int:
     return 2 if error.usage else 1
 
 
-def _admit(argv: list[str]) -> Optional[int]:
-    """Command admission: management is Owner-only, discovery and calls are Editor."""
-
+def _admit(floor: str) -> Optional[int]:
     from vibe.authorization import InstanceAuthorizationError, require_instance_role
 
-    floor = "owner" if argv and argv[0] in MANAGEMENT_COMMANDS else "editor"
     try:
         require_instance_role(None, floor)
-    except InstanceAuthorizationError as exc:
-        return _fail(McpHubError(exc.code, str(exc)))
+    except InstanceAuthorizationError as cop:
+        return _fail(McpHubError(cop.code, str(cop)))
     return None
 
 
 def main(argv: list[str]) -> int:
-    denied = _admit(argv)
+    denied = _admit("editor")
     if denied is not None:
         return denied
     try:
         return _dispatch(argv)
-    except McpHubError as exc:
-        return _fail(exc)
+    except McpHubError as cop:
+        return _fail(cop)
+
+
+def add_main(argv: list[str]) -> int:
+    denied = _admit("owner")
+    if denied is not None:
+        return denied
+    try:
+        return _add(argv)
+    except McpHubError as cop:
+        return _fail(cop)
+
+
+def discover_main(argv: list[str]) -> int:
+    denied = _admit("owner")
+    if denied is not None:
+        return denied
+    if argv:
+        raise_or = McpHubError("usage", "usage: vibe mcp-discover", usage=True)
+        return _fail(raise_or)
+    try:
+        return _owner("discover", {})
+    except McpHubError as cop:
+        return _fail(cop)
 
 
 def _dispatch(argv: list[str]) -> int:
@@ -82,10 +102,8 @@ def _dispatch(argv: list[str]) -> int:
         print(USAGE, end="")
         return 0 if argv else 2
     head = argv[0]
-    if head == "--list" or head == "--all":
+    if head == "--list":
         return _root_list(argv)
-    if head in MANAGEMENT_COMMANDS:
-        return _manage(head, argv[1:])
     if head.startswith("-"):
         raise McpHubError("usage", f"Unknown option {head}.", hint="vibe mcp --help", usage=True)
     return _server(head, argv[1:])
@@ -109,75 +127,70 @@ def _format_json(options: list[str], allowed: set[str]) -> bool:
 
 
 def _root_list(argv: list[str]) -> int:
-    as_json = _format_json(argv, {"--list", "--all"})
-    packages = repository.list_packages() if "--all" in argv else repository.enabled_generated()
+    as_json = _format_json(argv, {"--list"})
+    packages = repository.list_packages()
     if as_json:
         print(json.dumps({"servers": packages}, ensure_ascii=False, indent=2))
         return 0
     if not packages:
-        print("No MCP servers." if "--all" in argv else "No enabled MCP servers. (vibe mcp --list --all)")
+        print("No MCP servers.")
         return 0
     for item in packages:
-        extras = [item["status"]]
-        if item.get("enabled"):
-            extras.append("enabled")
-        if item.get("nativeDeleted"):
-            extras.append(f"deleted in {item.get('source') or 'native config'}")
-        elif item.get("source"):
-            extras.append(f"from {item['source']}")
-        state = "" if "--all" not in argv else f"  [{', '.join(extras)}]"
-        print(f"{item['name']}  {escape(item.get('description') or '')}{state}".rstrip())
+        extra = f"  [{item.get('source') or 'avibe'}]" if item.get("source") else ""
+        print(f"{item['name']}  {escape(item.get('description') or '')}{extra}".rstrip())
     print("\nNext: vibe mcp <server> --list")
     return 0
 
 
-def _manage(command: str, args: list[str]) -> int:
+def _owner(operation: str, payload: dict[str, Any]) -> int:
     from vibe import internal_client
 
-    if command == "add":
-        if "--json-stdin" in args:
-            position = args.index("--json-stdin")
-            args = args[: position + 1] + [sys.stdin.read()] + args[position + 1 :]
-        definitions, replace = parse_add_argv(args)
-        payload = {
-            "replace": replace,
-            "servers": [
-                {"name": item["name"], "server": provider_entry(item), "description": item.get("description")}
-                for item in definitions
-            ],
-        }
-        operation = "save"
-    else:
-        if len(args) != 1:
-            raise McpHubError("usage", f"usage: vibe mcp {command} <name>", usage=True)
-        payload = {"name": args[0]}
-        operation = "generate" if command == "regenerate" else command
     try:
         response = internal_client.mcp_request_sync(operation, payload)
     except internal_client.InternalServerUnavailable:
         raise McpHubError("unavailable", "The Avibe service is not running.", hint="vibe start") from None
     except internal_client.InternalServerTimeout:
-        raise McpHubError("unknown_outcome", "The Avibe service connection broke; check vibe mcp --list --all.") from None
+        raise McpHubError("unknown_outcome", "The Avibe service connection broke; check vibe mcp --list.") from None
     if not response.get("ok"):
         raise McpHubError.from_payload(response.get("error"))
-    if operation == "save":
-        names = ", ".join(response.get("saved") or [])
-        print(f"Saved {names}. Next: vibe mcp generate <name>")
-    elif operation == "generate":
-        print(f"Generated {response['name']} revision {response['revision']} ({response['toolCount']} tools). "
-              f"Next: vibe mcp {response['name']} --list")
+    if operation == "discover":
+        for item in response.get("results") or []:
+            if item.get("status") == "registered":
+                print(f"{item['name']}: registered ({item.get('toolCount', 0)} tools)")
+            else:
+                print(f"{item['name']}: failed — {item.get('error') or 'unknown'}", file=sys.stderr)
+        return 0
+    if operation in {"add", "save"}:
+        names = ", ".join(response.get("saved") or [response.get("name") or ""])
+        print(f"Registered {names} ({response.get('toolCount', 0)} tools).")
+    elif operation == "refresh":
+        print(f"Refreshed {response['name']} ({response.get('toolCount', 0)} tools).")
     elif operation == "remove":
-        print(f"Removed {response['name']}.")
-    else:
-        print(f"{response['name']} {'enabled' if response.get('enabled') else 'disabled'}.")
+        kind = response.get("kind")
+        extra = " (hidden in Avibe)" if kind == "native" else ""
+        print(f"Removed {response['name']}{extra}.")
     return 0
+
+
+def _add(args: list[str]) -> int:
+    if "--json-stdin" in args:
+        position = args.index("--json-stdin")
+        args = args[: position + 1] + [sys.stdin.read()] + args[position + 1 :]
+    definitions, replace = parse_add_argv(args)
+    payload = {
+        "replace": replace,
+        "servers": [
+            {"name": item["name"], "server": provider_entry(item), "description": item.get("description")}
+            for item in definitions
+        ],
+    }
+    return _owner("add", payload)
 
 
 def _published(name: str) -> dict[str, Any]:
     published = repository.read_published(name)
     if published is None:
-        repository.read_definition(name)
-        raise McpHubError("not_generated", f"{name} has not been generated yet.", hint="vibe mcp --list --all")
+        raise McpHubError("not_found", f"Unknown MCP server {name!r}.", hint="vibe mcp --list")
     return published
 
 
@@ -188,6 +201,20 @@ def _server(name: str, args: list[str]) -> int:
         validate_name(name)
     except McpHubError:
         raise McpHubError("not_found", f"Unknown MCP server {name!r}.", hint="vibe mcp --list") from None
+    if args and args[0] == "--refresh":
+        denied = _admit("owner")
+        if denied is not None:
+            return denied
+        if len(args) != 1:
+            raise McpHubError("usage", "usage: vibe mcp <server> --refresh", usage=True)
+        return _owner("refresh", {"name": name})
+    if args and args[0] == "--remove":
+        denied = _admit("owner")
+        if denied is not None:
+            return denied
+        if len(args) != 1:
+            raise McpHubError("usage", "usage: vibe mcp <server> --remove", usage=True)
+        return _owner("remove", {"name": name})
     if not args or args[0] in {"--list", "--help", "-h", "--format"}:
         return _server_list(name, args)
     if args[0] == "--":
@@ -229,8 +256,6 @@ def _server_list(name: str, args: list[str]) -> int:
             ],
         }, ensure_ascii=False, indent=2))
         return 0
-    if not repository.read_enabled(name):
-        print(f"({name} is disabled; calls are rejected.)", file=sys.stderr)
     for command in published["commands"]:
         print(f"{escape(command['name'])}  {escape(command['description'])[:200]}".rstrip())
     print(f"\nNext: vibe mcp {name} <tool> --help")

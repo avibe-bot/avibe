@@ -9310,18 +9310,18 @@ async def mcp_list(starlette_request: FastAPIRequest):
     return await _mcp_route(starlette_request, mcp_api.list_servers)
 
 
-@app.post("/api/mcp/parse", include_in_schema=False)
-async def mcp_parse(starlette_request: FastAPIRequest):
+@app.post("/api/mcp", include_in_schema=False)
+async def mcp_add(starlette_request: FastAPIRequest):
     from vibe import mcp_api
 
-    return await _mcp_route(starlette_request, lambda: mcp_api.parse(_mcp_body()))
+    return await _mcp_route(starlette_request, lambda: mcp_api.add(_mcp_body()))
 
 
-@app.post("/api/mcp/save", include_in_schema=False)
-async def mcp_save(starlette_request: FastAPIRequest):
+@app.post("/api/mcp/discover", include_in_schema=False)
+async def mcp_discover(starlette_request: FastAPIRequest):
     from vibe import mcp_api
 
-    return await _mcp_route(starlette_request, lambda: mcp_api.save(_mcp_body()))
+    return await _mcp_route(starlette_request, mcp_api.discover)
 
 
 @app.get("/api/mcp/{name}", include_in_schema=False)
@@ -9331,32 +9331,18 @@ async def mcp_detail(name: str, starlette_request: FastAPIRequest):
     return await _mcp_route(starlette_request, mcp_api.detail, name)
 
 
-@app.patch("/api/mcp/{name}", include_in_schema=False)
-async def mcp_update(name: str, starlette_request: FastAPIRequest):
+@app.post("/api/mcp/{name}/refresh", include_in_schema=False)
+async def mcp_refresh(name: str, starlette_request: FastAPIRequest):
     from vibe import mcp_api
 
-    return await _mcp_route(starlette_request, lambda: mcp_api.update(name, _mcp_body()))
-
-
-@app.get("/api/mcp/{name}/tools", include_in_schema=False)
-async def mcp_tools(name: str, starlette_request: FastAPIRequest):
-    from vibe import mcp_api
-
-    return await _mcp_route(starlette_request, mcp_api.tools, name)
-
-
-@app.post("/api/mcp/{name}/{operation}", include_in_schema=False)
-async def mcp_operate(name: str, operation: str, starlette_request: FastAPIRequest):
-    from vibe import mcp_api
-
-    return await _mcp_route(starlette_request, mcp_api.operate, operation, name)
+    return await _mcp_route(starlette_request, mcp_api.refresh, name)
 
 
 @app.delete("/api/mcp/{name}", include_in_schema=False)
 async def mcp_remove(name: str, starlette_request: FastAPIRequest):
     from vibe import mcp_api
 
-    return await _mcp_route(starlette_request, mcp_api.operate, "remove", name)
+    return await _mcp_route(starlette_request, mcp_api.remove, name)
 
 
 # Agent Skills — thin shells over api.* (which wraps the askill CLI). Pure
