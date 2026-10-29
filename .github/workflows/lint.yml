@@ -29,7 +29,7 @@ jobs:
       docs_only: ${{ steps.scope.outputs.docs_only }}
       windows_control_ipc: ${{ steps.scope.outputs.windows_control_ipc }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # Synthetic PR merge + both parents, without downloading all history.
           fetch-depth: 2
@@ -59,7 +59,7 @@ jobs:
     env:
       AVIBE_CI_JUNIT_DIR: ${{ github.workspace }}/ci-junit
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Prepare hermetic UI asset placeholder
         run: |
           mkdir -p ui/dist
@@ -97,7 +97,7 @@ jobs:
     if: needs.changes.outputs.docs_only == 'false'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: '3.12'
@@ -133,7 +133,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: ${{ matrix.python }}
@@ -197,7 +197,7 @@ jobs:
             commands: |
               npm test
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: "22.23.4"
@@ -242,7 +242,7 @@ jobs:
               npm run test:chat-interactions
               npm run test:pdf-preview
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: "22.23.4"
@@ -293,8 +293,8 @@ jobs:
     if: needs.changes.outputs.docs_only == 'false'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: avibe-bot/vibe-show-runtime
           # Producer of the checked-in generated router. Release builds export
@@ -332,7 +332,7 @@ jobs:
     if: needs.changes.outputs.docs_only == 'false'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # Both distributions use VCS-derived versions; a shallow PR merge
           # checkout falls back to 0.1.dev1 instead of the 3.0 release line.
@@ -412,7 +412,7 @@ jobs:
     env:
       AVIBE_CI_JUNIT_DIR: ${{ github.workspace }}/ci-junit
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       # Editable installs require the force-included directory, but unit tests
       # build their own UI fixtures and do not need the production bundle.
@@ -474,7 +474,7 @@ jobs:
     env:
       BASE_SHA: ${{ github.event.pull_request.base.sha }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # The synthetic PR merge and both parents, base included.
           fetch-depth: 2
@@ -586,7 +586,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Prepare minimal UI asset placeholder
         run: |
@@ -626,7 +626,7 @@ jobs:
     env:
       AVIBE_CI_JUNIT_DIR: ${{ github.workspace }}/ci-junit
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # The guard reads each release's migration graph straight out of git. The
           # default shallow checkout fetches no tags, which would leave it with no
@@ -685,7 +685,7 @@ jobs:
     if: needs.changes.outputs.docs_only == 'false'
     runs-on: [self-hosted, Linux, X64, avibe]
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
@@ -711,7 +711,7 @@ jobs:
     env:
       AVIBE_CI_JUNIT_DIR: ${{ github.workspace }}/ci-junit
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
         with:
@@ -826,7 +826,7 @@ jobs:
       matrix:
         runner: ${{ fromJSON(github.event_name == 'pull_request' && '["windows-latest"]' || '["windows-latest","windows-11-arm"]') }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
         with:
@@ -1043,7 +1043,7 @@ jobs:
     env:
       AVIBE_CI_JUNIT_DIR: ${{ github.workspace }}/ci-junit
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
         with:
@@ -1097,7 +1097,7 @@ jobs:
     env:
       AVIBE_CI_JUNIT_DIR: ${{ github.workspace }}/ci-junit
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
@@ -1218,7 +1218,7 @@ jobs:
     env:
       AVIBE_CI_JUNIT_DIR: ${{ github.workspace }}/ci-junit
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Prepare minimal UI asset placeholder
         run: |
