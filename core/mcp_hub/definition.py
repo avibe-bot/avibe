@@ -38,6 +38,13 @@ def validate_name(name: object) -> str:
             field="name",
             usage=True,
         )
+    if name in {".hidden.json", "hidden.json"}:
+        raise McpHubError(
+            "invalid_name",
+            "Server name hidden.json is reserved for Avibe MCP Hub metadata.",
+            field="name",
+            usage=True,
+        )
     return name
 
 
@@ -163,7 +170,33 @@ def parse_provider_json(text: str) -> list[dict[str, Any]]:
     servers = document["mcpServers"]
     if not servers:
         raise _invalid("mcpServers", "mcpServers is empty.")
-    return [definition_from_provider(name, servers[name]) for name in sorted(servers)]
+    parsed: list[dict[str, Any]] = []
+    failures: list[dict[str, str]] = []
+    first_error: McpHubError | None = None
+    for name in sorted(servers):
+        try:
+            parsed.append(definition_from_provider(name, servers[name]))
+        except McpHubError as cop:
+            if first_error is None:
+                first_error = cop
+            failures.append({"name": str(name), "error": cop.message, "type": cop.type})
+    if not parsed:
+        if len(failures) == 1 and first_error is not None:
+            raise first_error
+        raise McpHubError(
+            "invalid_definition",
+            "; ".join(f"{item['name']}: {item['error']}" for item in failures),
+            usage=True,
+        )
+    return ProviderBatch(parsed, failures)
+
+
+class ProviderBatch(list):
+    """Parsed definitions plus any entry-level failures that did not abort the document."""
+
+    def __init__(self, definitions: list[dict[str, Any]], failures: list[dict[str, str]]):
+        super().__init__(definitions)
+        self.failures = failures
 
 
 # ---------------------------------------------------------------------------

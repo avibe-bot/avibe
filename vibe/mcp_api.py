@@ -58,7 +58,18 @@ async def list_servers() -> dict[str, Any]:
 async def add(body: dict[str, Any]) -> dict[str, Any]:
     definitions = parse_provider_json(str(body.get("text") or ""))
     payload = {"replace": body.get("replace") is True, "servers": _servers_payload(definitions)}
-    return await _owner("add", payload)
+    response = await _owner("add", payload)
+    parse_failed = getattr(definitions, "failures", None) or []
+    if parse_failed:
+        failed = list(response.get("failed") or []) + parse_failed
+        response = {**response, "failed": failed, "ok": bool(response.get("added") or response.get("unchanged"))}
+        if failed and not response.get("added"):
+            summary = "; ".join(f"{item['name']}: {item.get('error') or 'failed'}" for item in failed)
+            response["error"] = {"type": "add_failed" if not response.get("unchanged") else "add_partial", "message": summary, "failed": failed}
+        elif failed:
+            summary = "; ".join(f"{item['name']}: {item.get('error') or 'failed'}" for item in failed)
+            response["error"] = {"type": "add_partial", "message": summary, "failed": failed}
+    return response
 
 
 async def detail(name: str) -> dict[str, Any]:

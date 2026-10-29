@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 FORMAT_VERSION = 1
 AVIBE = "avibe"
-_HIDDEN_FILE = "hidden.json"
+_HIDDEN_FILE = ".hidden.json"
 _HIDDEN_LOCK = threading.Lock()
 
 
@@ -454,7 +454,12 @@ def _candidate_names(servers: dict[str, native.NativeServer]) -> set[str]:
             if (entry / "definition.json").is_file():
                 names.add(entry.name)
                 avibe_owned.add(entry.name)
-    names.update(servers)
+    for name in servers:
+        try:
+            validate_name(name)
+        except McpHubError:
+            continue
+        names.add(name)
     hidden = hidden_names() | (native.disabled_names() - avibe_owned)
     return {name for name in names if name not in hidden}
 
@@ -465,9 +470,9 @@ def list_packages() -> list[dict[str, Any]]:
     servers = native.read_all()
     listed: list[dict[str, Any]] = []
     for name in sorted(_candidate_names(servers)):
-        if name not in servers and read_avibe_definition(name) is None:
-            continue
         try:
+            if name not in servers and read_avibe_definition(name) is None:
+                continue
             listed.append(summarize(name, servers))
         except McpHubError:
             continue

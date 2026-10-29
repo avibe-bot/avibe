@@ -197,7 +197,14 @@ def _add(args: list[str]) -> int:
             for item in definitions
         ],
     }
-    return _owner("add", payload)
+    code = _owner("add", payload)
+    parse_failed = getattr(definitions, "failures", None) or []
+    if parse_failed:
+        for item in parse_failed:
+            print(f"error: {item['name']}: {item['error']}", file=sys.stderr)
+        if code == 0:
+            return 1
+    return code
 
 
 def _published(name: str) -> dict[str, Any]:

@@ -79,6 +79,22 @@ def test_page_rejects_unsupported_input_with_field(server, error_type, field):
     assert (caught.value.type, caught.value.field, caught.value.usage) == (error_type, field, True)
 
 
+def test_json_batch_keeps_valid_neighbors_when_one_entry_is_invalid():
+    parsed = parse_provider_json(json.dumps({"mcpServers": {
+        "ok": {"command": "srv"},
+        "bad": {"type": "sse", "url": "http://127.0.0.1:1/sse"},
+    }}))
+    assert [item["name"] for item in parsed] == ["ok"]
+    assert parsed.failures[0]["name"] == "bad"
+
+
+@pytest.mark.parametrize("name", ["hidden.json", ".hidden.json"])
+def test_hidden_registry_name_is_reserved(name):
+    with pytest.raises(McpHubError) as caught:
+        parse_add_argv([name, "--", "srv"])
+    assert caught.value.type == "invalid_name"
+
+
 @pytest.mark.parametrize("name", ["", ".", "..", "a/b", "a\\b", "a\x00b"])
 def test_invalid_names_are_rejected(name):
     with pytest.raises(McpHubError) as caught:

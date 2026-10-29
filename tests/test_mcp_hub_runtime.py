@@ -210,6 +210,15 @@ def test_reader_rereads_current_when_its_revision_was_pruned(generated, monkeypa
     assert repository.read_published("echo")["revision"] == live
 
 
+def test_malformed_avibe_definition_is_omitted_from_the_list(generated):
+    path = repository.package_dir("broken") / "definition.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json")
+    names = {item["name"] for item in repository.list_packages()}
+    assert "echo" in names
+    assert "broken" not in names
+
+
 def test_unreadable_leftover_state_is_ignored(generated):
     state = repository.package_dir("echo") / "state.json"
     state.write_text("{not json")

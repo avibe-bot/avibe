@@ -544,22 +544,20 @@ class McpRuntime:
 
     async def _run_discover_pass(self) -> list[dict[str, Any]]:
         native_servers = await asyncio.to_thread(native.read_all)
-        names: set[str] = set()
-        avibe_owned: set[str] = set()
-        root = repository.mcp_root()
-        if root.is_dir():
-            for entry in root.iterdir():
-                if entry.is_dir() and (entry / "definition.json").is_file():
-                    names.add(entry.name)
-                    avibe_owned.add(entry.name)
-        names.update(native_servers)
-        hidden = await asyncio.to_thread(lambda: repository.hidden_names() | (native.disabled_names() - avibe_owned))
-        names -= hidden
-        stale = [
-            name
-            for name in repository._generated_names()
-            if name not in names and repository.read_avibe_definition(name) is None
-        ]
+        names = await asyncio.to_thread(repository._candidate_names, native_servers)
+        def _stale() -> list[str]:
+            leftover = []
+            for name in repository._generated_names():
+                if name in names:
+                    continue
+                try:
+                    if repository.read_avibe_definition(name) is None:
+                        leftover.append(name)
+                except McpHubError:
+                    leftover.append(name)
+            return leftover
+
+        stale = await asyncio.to_thread(_stale)
         for name in stale:
             await asyncio.to_thread(repository.delete_artifacts, name)
         async def one(name: str) -> dict[str, Any]:
