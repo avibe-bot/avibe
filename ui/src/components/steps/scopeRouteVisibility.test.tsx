@@ -99,7 +99,8 @@ describe('users page rows', () => {
 
     const panel = await screen.findByTestId('panel');
     expect(screen.getByText('Wang').closest('.rounded-xl')?.contains(panel)).toBe(true);
-    expect(search).toBe('');
+    // The router applies the navigation in a later render than the row's state.
+    await waitFor(() => expect(search).toBe(''));
   });
 
   it('shows a save on its row, announces only failures, and says when the session keeps its Agent', async () => {
