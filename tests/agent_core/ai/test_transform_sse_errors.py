@@ -357,22 +357,85 @@ def test_overflow_classifies_cerebras_bodyless_status() -> None:
     assert classify_error(status=400, body="400 status code (no body)").kind == "overflow"
 
 
+@pytest.mark.parametrize("status", [400, 429])
+@pytest.mark.parametrize("representation", ["plain", "json", "json-string"])
 @pytest.mark.parametrize(
-    "body",
+    ("message", "kind", "retryable"),
     [
-        'ThrottlingException: too many tokens',
-        '{"error":{"type":"ThrottlingException","message":"too many tokens"}}',
-        '{"error":{"message":"ThrottlingException: too many tokens"}}',
+        ("Throttling error: Too many tokens, please wait before trying again.", "invalid_request", False),
+        ("Service unavailable: Too many tokens, please wait before trying again.", "server", True),
+        (" \n\ttHrOtTlInG eRrOr: too many tokens\r\n", "invalid_request", False),
+        (" \n\tsErViCe UnAvAiLaBlE: too many tokens\r\n", "server", True),
+        ("ThrottlingException: too many tokens", "invalid_request", False),
+        ("com.amazonaws.bedrock.ThrottlingException: too many tokens", "invalid_request", False),
     ],
 )
-def test_http_400_throttling_is_excluded_from_overflow_without_becoming_rate_limit(body: str) -> None:
-    error = classify_error(status=400, body=body)
-    assert error.kind == "invalid_request"
-    assert error.kind != "overflow"
+def test_non_overflow_prefixes_survive_message_extraction(
+    status: int, representation: str, message: str, kind: str, retryable: bool,
+) -> None:
+    body = {
+        "plain": message,
+        "json": json.dumps({"type": "error", "error": {"type": "invalid_request_error", "message": message}}),
+        "json-string": json.dumps(message),
+    }[representation]
+    if status == 429:
+        kind, retryable = "rate_limit", True
+
+    error = classify_error(status=status, body=body)
+
+    assert error.kind == kind
+    assert error.retryable is retryable
+    assert error.continuable is retryable
+    assert error.message == (message.strip() if representation == "plain" else message)
 
 
-def test_generic_http_400_too_many_tokens_remains_overflow() -> None:
-    assert classify_error(status=400, body="too many tokens").kind == "overflow"
+@pytest.mark.parametrize("as_json", [False, True], ids=["plain", "json"])
+@pytest.mark.parametrize(
+    "message",
+    [
+        "too many tokens",
+        "'Throttling error: too many tokens'",
+        "Request failed: Service unavailable: too many tokens",
+        "too many tokens\nThrottling error: previous attempt",
+        "too many tokens\nService unavailable: previous attempt",
+        "Throttling errorish: too many tokens",
+        "Service unavailableish: too many tokens",
+        "Throttling error without a colon: too many tokens",
+        "Service unavailable without a colon: too many tokens",
+    ],
+)
+def test_non_overflow_prefix_lookalikes_do_not_hide_true_overflow(as_json: bool, message: str) -> None:
+    body = json.dumps({"error": {"message": message}}) if as_json else message
+    assert classify_error(status=400, body=body).kind == "overflow"
+
+
+@pytest.mark.parametrize("prefix", ["Throttling error", "Service unavailable"])
+def test_non_message_json_fields_cannot_supply_a_non_overflow_prefix(prefix: str) -> None:
+    body = json.dumps({"diagnostic": f"{prefix}: previous attempt", "error": {"message": "too many tokens"}}, indent=2)
+    assert classify_error(status=400, body=body).kind == "overflow"
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "message", "kind"),
+    [
+        (400, "ThrottlingException", "too many tokens", "invalid_request"),
+        (400, "context_length_exceeded", "Throttling error: too many tokens", "overflow"),
+        (400, "request_too_large", "Service unavailable: too many tokens", "overflow"),
+        (400, "rate_limit_error", "Throttling error: too many tokens", "rate_limit"),
+        (400, "authentication_error", "Service unavailable: too many tokens", "auth"),
+        (413, "rate_limit_error", "Throttling error: too many tokens", "overflow"),
+        (401, "context_length_exceeded", "Throttling error: too many tokens", "auth"),
+        (503, "context_length_exceeded", "Throttling error: too many tokens", "server"),
+        (429, "context_length_exceeded", "Throttling error: too many tokens", "rate_limit"),
+        (429, "invalid_request_error", "Service unavailable: too many tokens", "rate_limit"),
+        (429, "ThrottlingException", "ThrottlingException: too many tokens", "rate_limit"),
+    ],
+)
+def test_non_overflow_prefixes_preserve_status_and_machine_code_priority(
+    status: int, code: str, message: str, kind: str,
+) -> None:
+    body = json.dumps({"error": {"type": code, "message": message}})
+    assert classify_error(status=status, body=body).kind == kind
 
 
 @pytest.mark.parametrize("status", [401, 403])
