@@ -186,7 +186,8 @@ def _owner(operation: str, payload: dict[str, Any]) -> int:
 
 
 def _add(args: list[str]) -> int:
-    if "--json-stdin" in args:
+    split = args.index("--") if "--" in args else len(args)
+    if "--json-stdin" in args[:split]:
         position = args.index("--json-stdin")
         args = args[: position + 1] + [sys.stdin.read()] + args[position + 1 :]
     definitions, replace = parse_add_argv(args)

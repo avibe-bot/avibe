@@ -429,8 +429,12 @@ class McpRuntime:
     async def _add_one(self, definition: dict[str, Any], replace: bool, preserve: bool) -> dict[str, Any]:
         name = definition["name"]
         async with self._lock(name):
-            previous = await asyncio.to_thread(repository.read_avibe_definition, name)
+            previous = None
+            was_hidden = False
+            saved = False
             try:
+                previous = await asyncio.to_thread(repository.read_avibe_definition, name)
+                was_hidden = name in await asyncio.to_thread(repository.hidden_names)
                 outcome = await asyncio.to_thread(self._save_one, definition, replace, preserve)
                 if outcome == "unchanged":
                     return {"name": name, "status": "unchanged"}
@@ -441,6 +445,7 @@ class McpRuntime:
                         "error": f"{name} already exists with a different definition.",
                         "type": "exists",
                     }
+                saved = True
                 body = json.loads(await self._refresh({"name": name, "waitStdio": True, "locked": True}))
                 if body.get("ok"):
                     return {
@@ -454,7 +459,8 @@ class McpRuntime:
                 error = cop.message
             except Exception as cop:  # noqa: BLE001
                 error = str(cop)
-            await asyncio.to_thread(repository.rollback_avibe_definition, name, previous)
+            if saved:
+                await asyncio.to_thread(repository.rollback_avibe_definition, name, previous, hidden=was_hidden)
             return {"name": name, "status": "failed", "error": error}
 
     @staticmethod
@@ -511,13 +517,23 @@ class McpRuntime:
         if snapshot["transport"]["type"] == STDIO and not snapshot["transport"].get("cwd"):
             snapshot["transport"]["cwd"] = await asyncio.to_thread(repository.default_cwd)
         stdio = snapshot["transport"]["type"] == STDIO
-        if stdio:
-            if wait_stdio:
-                await self.acquire_stdio_slot_wait()
-            else:
-                self.acquire_stdio_slot()
+        deadline = time.monotonic() + GENERATION_TIMEOUT_SECONDS
+        acquired = False
         try:
-            with anyio.fail_after(GENERATION_TIMEOUT_SECONDS):
+            if stdio:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError
+                with anyio.fail_after(remaining):
+                    if wait_stdio:
+                        await self.acquire_stdio_slot_wait()
+                    else:
+                        self.acquire_stdio_slot()
+                acquired = True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError
+            with anyio.fail_after(remaining):
                 tools, server_info = await self._discover(snapshot)
         except TimeoutError:
             raise McpHubError("timeout", "Refresh timed out.") from None
@@ -526,7 +542,7 @@ class McpRuntime:
         except Exception as cop:
             raise McpHubError("connection", f"Refresh failed: {_describe(cop)}") from None
         finally:
-            if stdio:
+            if acquired:
                 self.release_stdio_slot()
         revision = await asyncio.to_thread(self._publish, name, snapshot, definition, tools, server_info)
         await self._retire_package(name, keep_revision=revision)
@@ -565,14 +581,17 @@ class McpRuntime:
                 body = json.loads(await self._refresh({"name": name, "waitStdio": True}))
             except McpHubError as cop:
                 logger.warning("MCP discover %s failed: %s", name, cop.message)
+                await asyncio.to_thread(repository.unlist, name)
                 return {"name": name, "status": "failed", "error": cop.message}
             except Exception as cop:  # noqa: BLE001
                 logger.warning("MCP discover %s failed: %s", name, cop)
+                await asyncio.to_thread(repository.unlist, name)
                 return {"name": name, "status": "failed", "error": str(cop)}
             if body.get("ok"):
                 return {"name": name, "status": "registered", "toolCount": body.get("toolCount")}
             error = (body.get("error") or {}).get("message") or "failed"
             logger.warning("MCP discover %s failed: %s", name, error)
+            await asyncio.to_thread(repository.unlist, name)
             return {"name": name, "status": "failed", "error": error}
 
         return list(await asyncio.gather(*(one(name) for name in sorted(names))))

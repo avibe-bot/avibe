@@ -102,6 +102,15 @@ def test_unparseable_native_file_is_skipped_and_never_rewritten(native_files):
     assert native.codex_path().read_text() == "[mcp_servers.local\nbroken"
 
 
+def test_unreadable_native_bytes_are_skipped_without_aborting_neighbors(native_files):
+    _claude, codex, _opencode = native_files
+    codex.write_bytes(b"\xff\xfe not utf-8")
+    names = native.read_all()
+    assert "local" not in names
+    assert "docs" in names
+    assert repository.list_packages() == []
+
+
 def test_underscore_names_and_natively_disabled_relative_cwd(native_files):
     _claude, codex, _opencode = native_files
     codex.write_text(

@@ -122,6 +122,12 @@ def test_add_rejects_scope_sse_and_oauth_options(argv):
     assert caught.value.usage
 
 
+def test_json_stdin_after_command_separator_is_a_server_argument():
+    definitions, _replace = parse_add_argv(["local", "--", "server", "--json-stdin"])
+    assert definitions[0]["transport"]["command"] == "server"
+    assert definitions[0]["transport"]["args"] == ["--json-stdin"]
+
+
 def test_json_stdin_and_replace():
     text = json.dumps({"mcpServers": {"b": {"command": "srv"}, "a": {"url": "http://127.0.0.1:1/mcp"}}})
     definitions, replace = parse_add_argv(["--replace", "--json-stdin", text])

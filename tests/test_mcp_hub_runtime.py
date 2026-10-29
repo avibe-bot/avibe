@@ -106,6 +106,46 @@ def test_failed_replace_add_restores_previous_avibe_definition(generated):
     assert repository.read_avibe_definition("echo") == previous
 
 
+def test_malformed_existing_definition_does_not_abort_batch_add(runtime):
+    path = repository.package_dir("broken") / "definition.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json")
+    result = _run(runtime, "add", {"servers": [{"name": "broken", "server": {"command": "/nonexistent/x"}}, _server()]})
+    assert result["ok"] is True
+    assert {item["name"] for item in result["added"]} == {"echo"}
+    assert any(item["name"] == "broken" for item in result["failed"])
+
+
+def test_failed_readd_of_hidden_native_stays_hidden(runtime):
+    from core.mcp_hub import native
+
+    claude = native.claude_path()
+    claude.parent.mkdir(parents=True, exist_ok=True)
+    claude.write_text(json.dumps({"mcpServers": {
+        "echo": {"type": "stdio", "command": sys.executable, "args": [FIXTURE]},
+    }}))
+    assert _run(runtime, "discover", {})["ok"]
+    assert _run(runtime, "remove", {"name": "echo"})["ok"]
+    assert "echo" in repository.hidden_names()
+    result = _run(runtime, "add", {"servers": [{"name": "echo", "server": {"command": "/nonexistent/mcp-echo"}}]})
+    assert result["ok"] is False
+    assert "echo" in repository.hidden_names()
+    assert repository.read_published("echo") is None
+
+
+def test_failed_discover_unlists_previous_revision(generated):
+    repository.write_avibe_definition({
+        "name": "echo",
+        "description": "Echo tools",
+        "transport": {"type": "stdio", "command": "/nonexistent/mcp-echo", "args": [FIXTURE]},
+    })
+    result = _run(generated, "discover", {})
+    by_name = {item["name"]: item for item in result["results"]}
+    assert by_name["echo"]["status"] == "failed"
+    assert "echo" not in {item["name"] for item in repository.list_packages()}
+    assert (repository.package_dir("echo") / "revisions").exists()
+
+
 def test_readding_hidden_native_identical_definition_registers_again(runtime):
     from core.mcp_hub import native
 
@@ -259,6 +299,32 @@ def test_cli_treats_help_as_a_server_name(generated, capsys):
     assert "echo  Echo text back" in capsys.readouterr().out
     assert mcp_cli.main(["-h"]) == 0
     assert "usage:" in capsys.readouterr().out
+
+
+def test_mcp_add_does_not_treat_json_stdin_after_separator_as_avibe_option(monkeypatch):
+    from vibe import mcp_cli
+
+    consumed = []
+
+    class FakeStdin:
+        def read(self):
+            consumed.append(True)
+            return "{}"
+
+    captured = []
+
+    def fake_owner(operation, payload):
+        captured.append((operation, payload))
+        return 0
+
+    monkeypatch.setattr(sys, "stdin", FakeStdin())
+    monkeypatch.setattr(mcp_cli, "_owner", fake_owner)
+    monkeypatch.setattr(mcp_cli, "_admit", lambda _floor: None)
+    assert mcp_cli.add_main(["local", "--", "server", "--json-stdin"]) == 0
+    assert consumed == []
+    servers = captured[0][1]["servers"]
+    assert servers[0]["server"]["command"] == "server"
+    assert servers[0]["server"]["args"] == ["--json-stdin"]
 
 
 def test_prompt_index_lists_enabled_servers_and_its_examples_parse(generated, capsys, monkeypatch):

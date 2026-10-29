@@ -69,6 +69,8 @@ def _load(source: str) -> tuple[Path, dict[str, Any]]:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return path, {}
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise _unreadable(source, path, exc) from None
     try:
         if source == CODEX:
             try:

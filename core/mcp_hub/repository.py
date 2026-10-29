@@ -136,19 +136,32 @@ def write_avibe_definition(definition: dict[str, Any]) -> None:
     _write_json(directory / "definition.json", definition)
 
 
-def rollback_avibe_definition(name: str, previous: Optional[dict[str, Any]]) -> None:
+def rollback_avibe_definition(name: str, previous: Optional[dict[str, Any]], *, hidden: bool = False) -> None:
     """Undo an add that failed to refresh: restore the prior Avibe file or delete it."""
 
     validate_name(name)
     path = _avibe_definition_path(name)
     if previous is not None:
         write_avibe_definition(previous)
+        if hidden:
+            hide_name(name)
         return
     if path.is_file():
         path.unlink()
     directory = package_dir(name)
     if directory.is_dir() and not any(directory.iterdir()):
         directory.rmdir()
+    if hidden:
+        hide_name(name)
+
+
+def unlist(name: str) -> None:
+    """Drop ``current.json`` so a failed refresh is not listed, keeping revision files."""
+
+    validate_name(name)
+    path = package_dir(name) / "current.json"
+    if path.is_file():
+        path.unlink()
 
 
 def source_of(name: str) -> Optional[str]:
