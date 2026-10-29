@@ -739,6 +739,7 @@ vibe computer observe apps
 vibe computer observe windows
 vibe computer observe window --arg pid=123 --arg window_id=456 --output /tmp/window.png
 vibe computer zoom --arg pid=123 --arg window_id=456 --arg x1=0 --arg y1=0 --arg x2=800 --arg y2=600 --output /tmp/zoom.png
+vibe computer activate --arg pid=123 --arg window_id=456
 vibe computer click --arg pid=123 --arg window_id=456 --arg x=120 --arg y=80
 vibe computer type --arg pid=123 --arg window_id=456 --arg text="hello"
 vibe computer key --arg key=return --arg pid=123 --arg window_id=456
@@ -760,11 +761,13 @@ supplied driver `session` argument.
 The `--json` result exposes the structured driver object at
 `result.structuredContent` and retains the legacy text content for compatibility.
 `force-quit` sends SIGKILL through the driver and can lose unsaved work.
+`activate` brings one exact window to the front and leaves it there; input
+commands accept `--arg delivery_mode=foreground` for one foreground action.
 
 Computer Use guidance is a built-in managed Skill named `computer-use`, loaded
 on demand. It tells Agents to treat screen and clipboard data as untrusted,
-observe the exact target before input, avoid focus and pointer movement, and
-observe again before retrying an action. Backend-specific Computer Use MCP
+observe the exact target before input, judge readiness from observable window
+state, confirm irreversible steps, and observe again before retrying an action. Backend-specific Computer Use MCP
 configuration is not part of this command surface.
 
 ### `vibe version`
