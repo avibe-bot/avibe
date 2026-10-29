@@ -79,6 +79,7 @@ class CommandHandlers(BaseHandler):
             self._t("command.start.commandStart"),
             self._t("command.start.commandCwd"),
             self._t("command.start.commandSetCwd"),
+            self._t("command.start.commandAgent"),
             self._t("command.start.commandResume"),
             self._t("command.start.commandSetup"),
             self._t("command.start.commandStop", agent=agent_display_name),

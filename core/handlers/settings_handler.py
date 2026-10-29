@@ -4,6 +4,7 @@ import asyncio
 import logging
 import sys
 from typing import Optional
+from urllib.parse import urlencode
 
 from modules.agents import get_agent_display_name
 from modules.agents.catalog import (
@@ -13,6 +14,7 @@ from modules.agents.catalog import (
     implicit_default_rank,
     is_builtin_backend,
 )
+from config.platform_registry import get_platform_descriptor
 from modules.im import MessageContext, InlineKeyboard, InlineButton
 from config.v2_settings import normalize_routing_settings
 from core.modals import (
@@ -44,6 +46,13 @@ def _effort_options(entries) -> list[RouteOption]:
         for entry in entries or []
         if entry.get("value") and entry["value"] != DEFAULT_OPTION_VALUE
     ]
+
+
+def _platform_supports_buttons(platform: str) -> bool:
+    try:
+        return get_platform_descriptor(platform).capabilities.supports_buttons
+    except ValueError:
+        return True
 
 
 class SettingsHandler(BaseHandler):
@@ -102,6 +111,10 @@ class SettingsHandler(BaseHandler):
         """Handle settings command - show settings menu"""
         try:
             platform = context.platform or (context.platform_specific or {}).get("platform") or self.config.platform
+            if not _platform_supports_buttons(platform):
+                # A settings menu needs buttons; the Web settings page is the form.
+                await self._send_web_settings_link(context)
+                return
             # For Slack, use modal dialog
             if platform == "slack":
                 await self._handle_settings_slack(context)
@@ -120,6 +133,28 @@ class SettingsHandler(BaseHandler):
             await self._get_im_client(context).send_message(
                 context, f"❌ {self._t('error.showSettings', error=str(e))}"
             )
+
+    async def _send_web_settings_link(self, context: MessageContext) -> None:
+        """Point a chat that cannot show a settings form at its row on the Web settings page.
+
+        The link opens through Avibe Cloud; without it, the reply says where the page is.
+        """
+        from core.avibe_cloud import workbench_url
+
+        platform = context.platform or (context.platform_specific or {}).get("platform") or self.config.platform
+        is_dm = bool((context.platform_specific or {}).get("is_dm"))
+        if is_dm:
+            query = urlencode({"platform": platform, "user": context.user_id})
+            path, page = f"/settings/platforms/users?{query}", self._t("scopeSettings.pageUsers")
+        else:
+            path, page = "/settings/platforms/groups", self._t("scopeSettings.pageGroups")
+        url = workbench_url(path, self.config)
+        text = (
+            self._t("scopeSettings.openInWebUrl", url=url)
+            if url
+            else self._t("scopeSettings.openInWeb", page=page)
+        )
+        await self._get_im_client(context).send_message(context, text)
 
     async def _handle_settings_traditional(self, context: MessageContext):
         """Handle settings for non-Slack platforms"""
@@ -422,13 +457,13 @@ class SettingsHandler(BaseHandler):
             logger.error(f"Error in handle_info_how_it_works: {e}", exc_info=True)
             await self._get_im_client(context).send_message(context, f"❌ {self._t('error.helpInfoFailed')}")
 
-    async def handle_routing(self, context: MessageContext):
+    async def handle_routing(self, context: MessageContext, args: str = ""):
         """Handle routing command - show agent/model selection"""
         try:
             platform = context.platform or (context.platform_specific or {}).get("platform") or self.config.platform
             im_client = self._get_im_client(context)
             if not hasattr(im_client, "open_routing_modal"):
-                await im_client.send_message(context, self._t("routing.slackOnly"))
+                await self._send_web_settings_link(context)
                 return
             platform_specific = context.platform_specific or {}
             if platform == "slack":

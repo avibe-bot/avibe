@@ -657,6 +657,7 @@
       "commandStart": "/start - Show this welcome message",
       "commandCwd": "/cwd - Show current working directory",
       "commandSetCwd": "/setcwd <path> - Set working directory",
+      "commandAgent": "/agent - Switch the Agent, model, and reasoning effort",
       "commandResume": "/resume - Restore a recent session for this working directory",
       "commandSetup": "/setup [claude|codex|opencode] - Repair backend login/auth",
       "commandStop": "/stop - Interrupt {agent} execution",
@@ -769,7 +770,6 @@
     "resultDesc": "Final execution result (always sent)"
   },
   "routing": {
-    "slackOnly": "🤖 Agent switching is currently only available in Slack. Use Slack Agent Settings to configure routing.",
     "introTitle": "Agent & Model Settings",
     "introDesc": "Choose which Agent this channel uses.",
     "noAgents": "No Agent is available for this channel.",
@@ -778,6 +778,12 @@
       "model": "Model",
       "reasoningEffort": "Reasoning Effort"
     }
+  },
+  "scopeSettings": {
+    "openInWebUrl": "🔗 Change this chat's Agent, model, and other settings on the Web settings page: {url}",
+    "openInWeb": "🔗 On the computer running Avibe, open the Avibe Workbench and go to Settings → Messaging Platforms → {page} to change this chat's Agent, model, and other settings.",
+    "pageUsers": "Direct Messages",
+    "pageGroups": "Groups"
   },
   "message": {
     "ack": "{agent} received, processing...",

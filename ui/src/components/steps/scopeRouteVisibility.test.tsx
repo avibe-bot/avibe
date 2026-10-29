@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ChannelList } from './ChannelList';
 import { UserList } from './UserList';
@@ -76,18 +76,38 @@ describe('users page rows', () => {
       ou_custom: { ...user({ agent_name: null, model: 'gpt-6-astra', reasoning_effort: 'high' }), display_name: 'Custom' },
       ou_agent: { ...user({ agent_name: 'reviewer', model: null, reasoning_effort: null }), display_name: 'Agent' },
     });
-    render(<UserList />);
+    render(<MemoryRouter><UserList /></MemoryRouter>);
 
     expect(await screen.findByText('common.default · vibey/claude-sonnet-5-5 · ou_default')).toBeTruthy();
     expect(screen.getByText('vibey/gpt-6-astra · chat.picker.effortOptions.high · ou_custom')).toBeTruthy();
     expect(screen.getByText('reviewer/gpt-6-astra · chat.picker.effortOptions.low · ou_agent')).toBeTruthy();
   });
 
+  it('opens the row a chat links to, even a disabled one, and drops the link', async () => {
+    serveUsers({
+      ou_1: user({ agent_name: 'vibey', model: null, reasoning_effort: null }),
+      ou_2: { ...user({ agent_name: 'vibey', model: null, reasoning_effort: null }), display_name: 'Wang', enabled: false },
+    });
+    let search = '';
+    const Location = () => { search = useLocation().search; return null; };
+    render(
+      <MemoryRouter initialEntries={['/settings/platforms/users?platform=lark&user=ou_2']}>
+        <UserList />
+        <Location />
+      </MemoryRouter>
+    );
+
+    const panel = await screen.findByTestId('panel');
+    expect(screen.getByText('Wang').closest('.rounded-xl')?.contains(panel)).toBe(true);
+    // The router applies the navigation in a later render than the row's state.
+    await waitFor(() => expect(search).toBe(''));
+  });
+
   it('shows a save on its row, announces only failures, and says when the session keeps its Agent', async () => {
     serveUsers({ ou_1: user({ agent_name: 'vibey', model: null, reasoning_effort: null }) });
     const pending = deferred<object>();
     api.patchScopeSettings.mockReturnValueOnce(pending.promise);
-    render(<UserList />);
+    render(<MemoryRouter><UserList /></MemoryRouter>);
     await userEvent.click(await screen.findByText('Liu'));
 
     await userEvent.click(screen.getByText('route:reviewer'));
@@ -108,7 +128,7 @@ describe('users page rows', () => {
     const route = deferred<object>();
     api.patchScopeSettings.mockReturnValueOnce(route.promise)
       .mockResolvedValueOnce({ ok: true, settings: { ...user({ agent_name: 'reviewer' }), show_message_types: ['assistant', 'toolcall'] } });
-    render(<UserList />);
+    render(<MemoryRouter><UserList /></MemoryRouter>);
     await userEvent.click(await screen.findByText('Liu'));
 
     await userEvent.click(screen.getByText('route:reviewer'));
