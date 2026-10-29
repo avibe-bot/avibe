@@ -352,16 +352,36 @@ boundary.
 ### `vibe data query`
 
 Run one guarded read-only SQL statement against the local SQLite state database.
-Results return 20 rows per page by default and at most 100.
+Results return 20 rows per page by default and at most 100. It is how an Agent
+recalls earlier work in this Session or any other.
 
 ```bash
+vibe data query --sql "select session_id, at, excerpt(text, 'watch list') from transcript where text like '%watch list%' order by at desc" --format text
+vibe data query --sql "select started_at, input, reply from turns where session_id = 'sesk8m4q2p7x' order by started_at" --format text
+vibe data query --sql "select session_id, title from sessions where parent_session_id = 'sesk8m4q2p7x'"
 vibe data query --sql "select group_concat(name, ', ') as tables from pragma_table_list where schema = 'main'"
 vibe data query --sql "select group_concat(name, ', ') as columns from pragma_table_info('run_definitions')"
 vibe data query --sql "PRAGMA table_info(run_definitions)" --limit 100   # with types and keys
 vibe data query --sql "select id, status, created_at from agent_runs order by created_at desc"
 vibe data query --sql-file query.sql --limit 50
-vibe data query --sql "select created_at, author, content_text from messages where session_id = 'sesk8m4q2p7x' order by created_at" --format text
 ```
+
+Three views give every query a stable way into conversation history; the raw
+tables stay queryable:
+
+| View | Columns | Meaning |
+| --- | --- | --- |
+| `sessions` | `session_id`, `title`, `agent_name`, `backend`, `model`, `status`, `workdir`, `created_at`, `last_active_at`, `parent_session_id` | One row per Session. `parent_session_id` is the Session whose Agent started it with `vibe agent run`. |
+| `transcript` | `session_id`, `at`, `role`, `kind`, `text`, `turn_id`, `message_id` | Every message with text, in delivery time `at`. `role` is `user`, `agent`, or `harness` (input Avibe delivered: another Agent's brief, a callback, a Watch or Task); `kind` is the message type, such as `result` for an Agent's reply. |
+| `turns` | `session_id`, `turn_id`, `started_at`, `ended_at`, `outcome`, `input`, `reply` | One row per recorded Agent Turn: the text it was given and its final reply. Older history without Turn records is in `transcript`. |
+
+Two functions help with long text. `excerpt(text, 'term')` returns about 300
+characters of `text` around the first case-insensitive match of `term` (pass a
+third argument for another width); without a match it returns the opening.
+`text REGEXP 'pattern'` matches a Python regular expression, such as
+`'(?i)PR ?#?2868'`. Every text value longer than `--max-chars` (default 2000)
+is cut and ends `…[+N chars]`; the response says how many values were cut, and
+`--max-chars 0` keeps values whole.
 
 `--format text` prints each row as a record for reading long text such as a
 transcript or a message body: a `-[ RECORD n ]` line, then one `column: value`
