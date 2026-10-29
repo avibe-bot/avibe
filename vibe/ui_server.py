@@ -7143,6 +7143,131 @@ def version():
     return jsonify(api.get_version_info())
 
 
+_DESKTOP_UPDATE_ACK_TIMEOUT_SECONDS = 10.0
+_DESKTOP_UPDATE_ACK_POLL_SECONDS = 0.1
+
+
+def _upgrade_confirmation_response(counts: Any):
+    return (
+        jsonify(
+            {
+                "ok": False,
+                "error": "confirmation_required",
+                "counts": counts.as_dict(),
+            }
+        ),
+        409,
+    )
+
+
+async def _wait_for_desktop_update_ack(request_id: str):
+    from vibe.desktop_update_request import acknowledged_remote_request
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _DESKTOP_UPDATE_ACK_TIMEOUT_SECONDS
+    while True:
+        acknowledged = acknowledged_remote_request(request_id)
+        if acknowledged is not None:
+            return acknowledged
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return None
+        await asyncio.sleep(min(_DESKTOP_UPDATE_ACK_POLL_SECONDS, remaining))
+
+
+@app.route("/api/desktop/update/request", methods=["POST"])
+async def desktop_update_request():
+    from vibe import api
+    from vibe.desktop_update_request import (
+        DesktopUpdateRequestError,
+        create_or_reuse_desktop_update_request,
+        expire_desktop_update_request,
+        valid_target_version,
+    )
+    from vibe.sse_broker import broker
+    from vibe.upgrade import is_desktop_managed_runtime
+    from vibe.upgrade_interruptions import count_upgrade_interruptions
+
+    payload = request.json or {}
+    if not isinstance(payload, dict) or not set(payload).issubset(
+        {"target_version", "confirm_interrupt"}
+    ):
+        return jsonify({"ok": False, "error": "invalid_request"}), 422
+    target = valid_target_version(payload.get("target_version"))
+    confirm_interrupt = payload.get("confirm_interrupt", False)
+    if target is None or not isinstance(confirm_interrupt, bool):
+        return jsonify({"ok": False, "error": "invalid_request"}), 422
+    if not is_desktop_managed_runtime():
+        return jsonify({"ok": False, "error": "not_desktop_managed"}), 409
+
+    version = api.get_version_info()
+    if (
+        version.get("managed_by") != "desktop"
+        or version.get("has_update") is not True
+        or version.get("latest") != target
+    ):
+        return jsonify({"ok": False, "error": "no_update_available"}), 409
+
+    interruptions = await count_upgrade_interruptions()
+    if not confirm_interrupt and interruptions.requires_confirmation:
+        return _upgrade_confirmation_response(interruptions)
+
+    try:
+        decision = create_or_reuse_desktop_update_request(target)
+    except DesktopUpdateRequestError as exc:
+        return jsonify({"ok": False, "error": exc.code}), 409
+    if decision.needs_nudge:
+        broker.publish(
+            "desktop.update.requested",
+            {"request_id": decision.request["request_id"]},
+        )
+
+    acknowledged = await _wait_for_desktop_update_ack(
+        decision.request["request_id"]
+    )
+    if acknowledged is None:
+        expire_desktop_update_request(decision.request["request_id"])
+        return (
+            jsonify({"ok": False, "error": "desktop_shell_unavailable"}),
+            503,
+        )
+    status, remote = acknowledged
+    if (
+        remote["phase"] == "failed"
+        and remote["error_code"] == "update_in_progress"
+    ):
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": "update_in_progress",
+                    "request_id": remote["request_id"],
+                }
+            ),
+            409,
+        )
+    if remote["phase"] == "expired":
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": "desktop_shell_unavailable",
+                    "request_id": remote["request_id"],
+                }
+            ),
+            503,
+        )
+    return jsonify(
+        {
+            "ok": True,
+            "request_id": remote["request_id"],
+            "delivery": (
+                "install" if status["remote_install_allowed"] else "prompt"
+            ),
+        }
+    )
+
+
 # =============================================================================
 # POST Endpoints
 # =============================================================================
@@ -8520,10 +8645,23 @@ async def opencode_options():
 
 
 @app.route("/api/upgrade", methods=["POST"])
-def upgrade():
+async def upgrade():
     from vibe import api
+    from vibe.upgrade_interruptions import count_upgrade_interruptions
 
-    result = api.do_upgrade()
+    payload = request.json or {}
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "invalid_request"}), 422
+    confirm_interrupt = payload.get("confirm_interrupt")
+    if "confirm_interrupt" in payload and not isinstance(confirm_interrupt, bool):
+        return jsonify({"ok": False, "error": "invalid_request"}), 422
+    # Missing preserves the released endpoint: old Workbenches continue without
+    # acquiring a new confirmation contract.
+    if confirm_interrupt is False:
+        interruptions = await count_upgrade_interruptions()
+        if interruptions.requires_confirmation:
+            return _upgrade_confirmation_response(interruptions)
+    result = await asyncio.to_thread(api.do_upgrade)
     return jsonify(result)
 
 

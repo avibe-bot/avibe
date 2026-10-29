@@ -14,6 +14,7 @@ newer app never breaks an older Runtime.
 
 from __future__ import annotations
 
+from datetime import datetime
 import json
 import logging
 from pathlib import Path
@@ -30,6 +31,34 @@ UPDATE_STATUS_FILE = "update-status.json"
 class DesktopUpdateStatus(TypedDict):
     latest: str | None
     has_update: bool
+    remote_install_allowed: bool
+    remote_request: "RemoteDesktopUpdateStatus | None"
+
+
+class RemoteDesktopUpdateStatus(TypedDict):
+    request_id: str
+    target: str
+    phase: str
+    progress: int | None
+    error_code: str | None
+    updated_at: str
+
+
+REMOTE_UPDATE_PHASES = frozenset(
+    {
+        "requested",
+        "acknowledged",
+        "awaiting_host",
+        "checking",
+        "downloading",
+        "installing",
+        "restarting",
+        "completed",
+        "failed",
+        "declined",
+        "expired",
+    }
+)
 
 
 def desktop_update_status_path(**kwargs: Any) -> Path:
@@ -51,7 +80,71 @@ def parse_desktop_update_status(payload: object) -> DesktopUpdateStatus | None:
     latest = (latest or "").strip() or None
     if has_update and latest is None:
         return None
-    return {"latest": latest, "has_update": has_update}
+    remote_install_allowed = payload.get("remote_install_allowed", False)
+    if not isinstance(remote_install_allowed, bool):
+        remote_install_allowed = False
+    return {
+        "latest": latest,
+        "has_update": has_update,
+        "remote_install_allowed": remote_install_allowed,
+        "remote_request": _parse_remote_request(payload.get("remote_request")),
+    }
+
+
+def _parse_remote_request(payload: object) -> RemoteDesktopUpdateStatus | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    request_id = payload.get("request_id")
+    target = payload.get("target")
+    phase = payload.get("phase")
+    progress = payload.get("progress")
+    error_code = payload.get("error_code")
+    updated_at = payload.get("updated_at")
+    if (
+        not isinstance(request_id, str)
+        or not request_id.strip()
+        or len(request_id) > 128
+        or not isinstance(target, str)
+        or not target.strip()
+        or len(target) > 96
+        or not isinstance(phase, str)
+        or phase not in REMOTE_UPDATE_PHASES
+        or not (
+            progress is None
+            or (
+                isinstance(progress, int)
+                and not isinstance(progress, bool)
+                and 0 <= progress <= 100
+            )
+        )
+        or not (
+            error_code is None
+            or (
+                isinstance(error_code, str)
+                and bool(error_code.strip())
+                and len(error_code) <= 128
+            )
+        )
+        or not isinstance(updated_at, str)
+        or len(updated_at) > 64
+    ):
+        return None
+    try:
+        parsed_updated_at = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed_updated_at.tzinfo is None:
+        return None
+    return {
+        "request_id": request_id,
+        "target": target,
+        "phase": phase,
+        "progress": progress,
+        "error_code": error_code,
+        "updated_at": updated_at,
+    }
 
 
 def read_desktop_update_status(path: Path | None = None) -> DesktopUpdateStatus | None:

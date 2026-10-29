@@ -411,7 +411,7 @@ export const SettingsLayout: React.FC = () => {
           )}
         </div>
         <div className="flex shrink-0 items-center gap-1">
-          {capabilities.can_manage_instance && (
+          {capabilities.can_read_instance && (
             <div className="md:hidden">
               <VersionBadge />
             </div>

@@ -35,6 +35,19 @@ pub async fn fetch(
     start: usize,
     length: Length,
 ) -> Result<(Vec<u8>, usize), String> {
+    fetch_with_progress(client, sources, start, length, |_received, _total| {}).await
+}
+
+/// Fetches with streamed byte progress. `received` includes bytes retained
+/// across source retries; `total` is exact for `Length::Exact` and the best
+/// response-derived estimate for `Length::AtMost`.
+pub async fn fetch_with_progress(
+    client: &reqwest::Client,
+    sources: &[String],
+    start: usize,
+    length: Length,
+    mut progress: impl FnMut(u64, u64) + Send,
+) -> Result<(Vec<u8>, usize), String> {
     if sources.is_empty() {
         return Err("no download source".into());
     }
@@ -42,7 +55,7 @@ pub async fn fetch(
     let mut last = String::new();
     for attempt in 0..sources.len() * 2 {
         let index = (start + attempt) % sources.len();
-        match continue_from(client, &sources[index], &mut data, length).await {
+        match continue_from(client, &sources[index], &mut data, length, &mut progress).await {
             Ok(()) => return Ok((data, index)),
             Err(Failure::Retry(error)) => last = error,
             Err(Failure::Discard(error)) => {
@@ -54,7 +67,13 @@ pub async fn fetch(
     Err(last)
 }
 
-async fn continue_from(client: &reqwest::Client, url: &str, data: &mut Vec<u8>, length: Length) -> Result<(), Failure> {
+async fn continue_from(
+    client: &reqwest::Client,
+    url: &str,
+    data: &mut Vec<u8>,
+    length: Length,
+    progress: &mut impl FnMut(u64, u64),
+) -> Result<(), Failure> {
     let retry = |error: reqwest::Error| Failure::Retry(format!("download failed: {error}"));
     let mut request = client.get(url);
     if !data.is_empty() {
@@ -81,11 +100,20 @@ async fn continue_from(client: &reqwest::Client, url: &str, data: &mut Vec<u8>, 
     let limit = match length {
         Length::Exact(size) | Length::AtMost(size) => size,
     };
+    let total = match length {
+        Length::Exact(size) => size,
+        Length::AtMost(_) => response
+            .content_length()
+            .map(|remaining| data.len() as u64 + remaining)
+            .unwrap_or(limit),
+    };
+    progress(data.len() as u64, total);
     while let Some(chunk) = response.chunk().await.map_err(retry)? {
         if (data.len() + chunk.len()) as u64 > limit {
             return Err(Failure::Discard("download exceeds its expected size".into()));
         }
         data.extend_from_slice(&chunk);
+        progress(data.len() as u64, total);
     }
     if matches!(length, Length::Exact(size) if data.len() as u64 != size) {
         return Err(Failure::Retry("download ended early".into()));

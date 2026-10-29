@@ -2,7 +2,12 @@
 use tauri::AppHandle;
 
 #[cfg(target_os = "macos")]
-pub fn install(_app: &AppHandle, bytes: &[u8], version: &str) -> Result<(), String> {
+pub fn install_with_before_exit(
+    _app: &AppHandle,
+    bytes: &[u8],
+    version: &str,
+    before_exit: impl FnOnce(),
+) -> Result<(), String> {
     use std::{fs, io::Cursor, process::Command};
     let executable = std::env::current_exe().map_err(|e| e.to_string())?;
     let current = executable
@@ -49,7 +54,10 @@ pub fn install(_app: &AppHandle, bytes: &[u8], version: &str) -> Result<(), Stri
     }
     let backup = staging.path().join("previous.app");
     match replace_with_rollback(current, &replacement, &backup, |a, b| fs::rename(a, b)) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            before_exit();
+            Ok(())
+        }
         Err(error) => {
             // Never let TempDir cleanup erase a backup that restoration could
             // not move back (for example a filesystem failure).
@@ -129,7 +137,12 @@ fn replace_with_rollback(
 }
 
 #[cfg(target_os = "windows")]
-pub fn install(app: &AppHandle, bytes: &[u8], version: &str) -> Result<(), String> {
+pub fn install_with_before_exit(
+    app: &AppHandle,
+    bytes: &[u8],
+    version: &str,
+    before_exit: impl FnOnce(),
+) -> Result<(), String> {
     use std::{
         fs,
         os::windows::process::CommandExt,
@@ -169,8 +182,12 @@ pub fn install(app: &AppHandle, bytes: &[u8], version: &str) -> Result<(), Strin
         .spawn()
         .map_err(|e| e.to_string())?;
     let deadline = Instant::now() + Duration::from_secs(600);
-    while !staging.path().join("ready").exists() {
+    let requires_host = staging.path().join("requires-host");
+    while !staging.path().join("ready").exists() && !requires_host.exists() {
         if child.try_wait().map_err(|e| e.to_string())?.is_some() {
+            if requires_host.exists() {
+                return Err("requires_host".into());
+            }
             return Err("installer preparation failed; current application retained".into());
         }
         if Instant::now() > deadline {
@@ -180,6 +197,11 @@ pub fn install(app: &AppHandle, bytes: &[u8], version: &str) -> Result<(), Strin
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+    if requires_host.exists() {
+        let _ = child.wait();
+        return Err("requires_host".into());
+    }
+    before_exit();
     // The helper has copied the previous install and now waits for this PID.
     // Ownership transfers to it; it reports failures and relaunches the old app.
     let _ = staging.keep();
@@ -188,7 +210,13 @@ pub fn install(app: &AppHandle, bytes: &[u8], version: &str) -> Result<(), Strin
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-pub fn install(_app: &AppHandle, _bytes: &[u8], _version: &str) -> Result<(), String> {
+pub fn install_with_before_exit(
+    _app: &AppHandle,
+    _bytes: &[u8],
+    _version: &str,
+    before_exit: impl FnOnce(),
+) -> Result<(), String> {
+    drop(before_exit);
     Err("unsupported update platform".into())
 }
 

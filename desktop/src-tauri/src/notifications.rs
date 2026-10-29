@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use avibe_runtime_host::notifications::{
     run_notifications, HttpNotificationTransport, NotificationFilter, NotificationGate, NotificationIntent,
@@ -11,9 +12,12 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 use tauri_plugin_notification::NotificationExt;
 
-use crate::{native_catalog_for_locales, MAIN_WINDOW};
+use crate::{native_catalog_for_locales, updater, MAIN_WINDOW};
 
 pub const MENU_ID: &str = "notifications";
+// The Runtime expires an unacknowledged request after ten seconds. This
+// fallback stays below that deadline while SSE remains the normal path.
+const REMOTE_REQUEST_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -88,6 +92,7 @@ fn write_preference(path: &Path, enabled: bool) -> std::io::Result<()> {
 struct Connection {
     origin: LoopbackOrigin,
     task: tauri::async_runtime::JoinHandle<()>,
+    remote_request_poll: tauri::async_runtime::JoinHandle<()>,
 }
 
 pub struct Notifications {
@@ -134,6 +139,7 @@ impl Notifications {
         let observed_generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         if let Some(previous) = connection.take() {
             previous.task.abort();
+            previous.remote_request_poll.abort();
         }
         let Ok(transport) = HttpNotificationTransport::new(origin.clone()) else {
             eprintln!("The desktop notification connection could not be initialized.");
@@ -146,10 +152,17 @@ impl Notifications {
             observed_generation,
         };
         let filter = self.filter.clone();
+        let poll_sink = sink.clone();
         *connection = Some(Connection {
             origin,
             task: tauri::async_runtime::spawn(async move {
                 run_notifications(Arc::new(transport), filter, Arc::new(sink)).await;
+            }),
+            remote_request_poll: tauri::async_runtime::spawn(async move {
+                loop {
+                    poll_sink.desktop_update_requested();
+                    tokio::time::sleep(REMOTE_REQUEST_POLL_INTERVAL).await;
+                }
             }),
         });
     }
@@ -159,6 +172,7 @@ impl Notifications {
         self.generation.fetch_add(1, Ordering::SeqCst);
         if let Some(connection) = connection.take() {
             connection.task.abort();
+            connection.remote_request_poll.abort();
         }
     }
 }
@@ -218,6 +232,12 @@ impl NotificationSink for NativeSink {
                 paint_badge(&sink.app, total);
             }
         });
+    }
+
+    fn desktop_update_requested(&self) {
+        if self.generation.load(Ordering::SeqCst) == self.observed_generation {
+            updater::handle_remote_update_request(&self.app);
+        }
     }
 }
 
@@ -337,6 +357,7 @@ mod tests {
         *state.connection.lock().unwrap() = Some(Connection {
             origin: LoopbackOrigin::parse("http://127.0.0.1:5123").unwrap(),
             task,
+            remote_request_poll: tauri::async_runtime::spawn(std::future::pending()),
         });
         let previous = state.generation.load(Ordering::SeqCst);
         state.stop();

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-update-remote-decline"
+description = "Enables the desktop_update_remote_decline command without any pre-configured scope."
+commands.allow = ["desktop_update_remote_decline"]
+
+[[permission]]
+identifier = "deny-desktop-update-remote-decline"
+description = "Denies the desktop_update_remote_decline command without any pre-configured scope."
+commands.deny = ["desktop_update_remote_decline"]

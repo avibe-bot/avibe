@@ -599,6 +599,7 @@ _MEMBER_HTTP_RULES = tuple(
         ("POST", r"^/api/logs$"),
         ("POST", r"^/api/opencode/options$"),
         ("POST", r"^/api/upgrade$"),
+        ("POST", r"^/api/desktop/update/request$"),
         ("POST", r"^/api/opencode/setup-permission$"),
         ("GET", r"^/api/opencode/permission-status$"),
         ("GET", r"^/api/claude/agents$"),

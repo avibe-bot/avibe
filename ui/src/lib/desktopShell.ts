@@ -140,6 +140,26 @@ export type DesktopUpdateState = {
   channel: 'stable' | 'test';
   skippedVersion: string | null;
   interactive: boolean;
+  remoteInstallAllowed?: boolean;
+  remoteRequest?: {
+    requestId: string;
+    target: string;
+    phase:
+      | 'requested'
+      | 'acknowledged'
+      | 'checking'
+      | 'awaiting_host'
+      | 'downloading'
+      | 'installing'
+      | 'restarting'
+      | 'completed'
+      | 'failed'
+      | 'declined'
+      | 'expired';
+    progress: number | null;
+    errorCode: string | null;
+    updatedAt: string;
+  } | null;
 };
 
 const desktopUpdateInvoke = (): ShellInvoke | null => {
@@ -163,6 +183,7 @@ export type DesktopUpdateShellActions = {
   check: () => Promise<void>;
   install: () => Promise<void>;
   skip: () => Promise<void>;
+  declineRemoteRequest: () => Promise<void>;
 };
 
 export function desktopUpdateShellActions(): DesktopUpdateShellActions | null {
@@ -173,6 +194,33 @@ export function desktopUpdateShellActions(): DesktopUpdateShellActions | null {
     check: async () => { await invoke('desktop_update_check'); },
     install: async () => { await invoke('desktop_update_install'); },
     skip: async () => { await invoke('desktop_update_skip'); },
+    declineRemoteRequest: async () => { await invoke('desktop_update_remote_decline'); },
+  };
+}
+
+export type DesktopRemoteInstallActions = {
+  get: () => Promise<boolean>;
+  set: (enabled: boolean) => Promise<boolean>;
+};
+
+/**
+ * The remote-install preference is shell-owned. The command probe is also the
+ * compatibility boundary: Web pages and older shells simply have no setting.
+ */
+export function desktopRemoteInstallActions(): DesktopRemoteInstallActions | null {
+  const invoke = desktopUpdateInvoke();
+  if (!invoke) return null;
+  return {
+    get: async () => {
+      const value = await invoke('desktop_remote_install_allowed');
+      if (typeof value !== 'boolean') throw new Error('Remote install preference is unavailable');
+      return value;
+    },
+    set: async (enabled) => {
+      const value = await invoke('desktop_remote_install_set', { enabled });
+      if (typeof value !== 'boolean') throw new Error('Remote install preference was not confirmed');
+      return value;
+    },
   };
 }
 

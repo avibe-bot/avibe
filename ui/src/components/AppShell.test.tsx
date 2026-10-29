@@ -139,7 +139,7 @@ vi.mock('./AppsLauncher', async () => {
 vi.mock('./AccountMenu', () => ({ AccountMenu: () => <div data-testid="account-menu" /> }));
 vi.mock('./LanguageSwitcher', () => ({ LanguageSwitcher: () => <div data-testid="language-switcher" /> }));
 vi.mock('./ThemeToggle', () => ({ ThemeToggle: () => <div data-testid="theme-toggle" /> }));
-vi.mock('./VersionBadge', () => ({ VersionBadge: () => null }));
+vi.mock('./VersionBadge', () => ({ VersionBadge: () => <div data-testid="version-badge" /> }));
 vi.mock('./apps/MobileDockDrawer', () => ({
   MobileDockDrawer: () => <div data-testid="mobile-dock-drawer" />,
 }));
@@ -1160,4 +1160,13 @@ describe('AppShell remote Apps access', () => {
     expect(await screen.findByTestId('workbench-surface')).toBeTruthy();
     expect(screen.queryByTestId('library-surface')).toBeNull();
   });
+});
+
+// Read-only members need the host guidance even though no update control is allowed.
+it.each(['editor', 'viewer'])('mounts the version badge for a read-capable %s', async () => {
+  viewport.isDesktop = true;
+  instanceAuth.capabilities.can_manage_instance = false;
+  instanceAuth.capabilities.can_read_instance = true;
+  render(<MemoryRouter initialEntries={['/']}><Routes><Route element={<AppShell />}><Route index element={<div />} /></Route></Routes></MemoryRouter>);
+  expect(await screen.findByTestId('version-badge')).toBeTruthy();
 });

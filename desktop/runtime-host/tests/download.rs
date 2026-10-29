@@ -1,4 +1,4 @@
-use avibe_runtime_host::download::{fetch, Length};
+use avibe_runtime_host::download::{fetch, fetch_with_progress, Length};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
@@ -214,5 +214,28 @@ async fn bytes_beyond_the_expected_size_are_discarded_with_their_source() {
     assert_eq!(
         download(&[&only], 0, Length::AtMost(PAYLOAD.len() as u64)).await,
         Err("download exceeds its expected size".into())
+    );
+}
+
+#[tokio::test]
+async fn streamed_progress_is_monotonic_across_source_resumption_and_reaches_the_exact_length() {
+    let mirror = source([Reply::Cut(9)]);
+    let github = source([Reply::Serve]);
+    let urls = vec![mirror.url.clone(), github.url.clone()];
+    let progress = Arc::new(Mutex::new(Vec::new()));
+    let observed = progress.clone();
+
+    let result = fetch_with_progress(&client(), &urls, 0, EXACT, move |received, total| {
+        observed.lock().unwrap().push((received, total));
+    })
+    .await;
+
+    assert_eq!(result, Ok((PAYLOAD.to_vec(), 1)));
+    let progress = progress.lock().unwrap();
+    assert_eq!(progress.first(), Some(&(0, PAYLOAD.len() as u64)));
+    assert_eq!(progress.last(), Some(&(PAYLOAD.len() as u64, PAYLOAD.len() as u64)));
+    assert!(
+        progress.windows(2).all(|pair| pair[0].0 <= pair[1].0),
+        "progress regressed across source retry: {progress:?}"
     );
 }
