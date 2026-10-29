@@ -1663,6 +1663,239 @@ def test_publication_rejects_source_changes_before_swap(
         publish_builtin_skills(source_root=source, destination_root=destination)
 
 
+@pytest.mark.parametrize("colliding_tokens", [False, True], ids=["real-stat", "colliding-stat"])
+@pytest.mark.parametrize("changed_file", [None, "SKILL.md", "helper.bin"], ids=["unchanged", "skill", "companion"])
+@pytest.mark.parametrize("existing_catalog", [False, True], ids=["first-publish", "replacement"])
+def test_publication_compares_validated_snapshot_with_source_bytes(
+    tmp_path: Path,
+    monkeypatch,
+    colliding_tokens: bool,
+    changed_file: str | None,
+    existing_catalog: bool,
+) -> None:
+    """A same-size rewrite after validation must not publish the stale copy.
+
+    The collision model changes only stat-token observations, not filesystem
+    timestamps or file I/O. Real source/staging bytes are the independent oracle;
+    the unchanged case proves a collision alone does not reject publication.
+    """
+
+    source = tmp_path / "source"
+    destination = tmp_path / "builtin-skills"
+    skill_file = _write_skill(source, "alpha", "alpha", "Alpha", "Old\n")
+    helper = skill_file.parent / "helper.bin"
+    helper.write_bytes(b"\x00\r\n\x1a" * (256 * 1024) + b"Old\n")
+    expected = {path.name: path.read_bytes() for path in (skill_file, helper)}
+    if existing_catalog:
+        _write_skill(destination, "previous", "previous", "Previous")
+    previous = destination.parent / ".builtin-skills.previous"
+    _write_skill(previous, "backup", "backup", "Backup")
+    staging = destination.parent / ".builtin-skills.staging"
+    original_validate = managed_skills._validate_builtin_catalog
+    validated = False
+
+    if colliding_tokens:
+        original_token = managed_skills._stat_token
+
+        def same_interval_token(value):
+            # Preserve real device/inode/size; model equal timestamp observations.
+            return (*original_token(value)[:3], 0, 0)
+
+        monkeypatch.setattr(managed_skills, "_stat_token", same_interval_token)
+
+    def validate_then_rewrite(root):
+        nonlocal validated
+        original_validate(root)
+        if root != staging:
+            return
+        validated = True
+        for filename, data in expected.items():
+            assert (root / "alpha" / filename).read_bytes() == data
+        if changed_file is not None:
+            path = skill_file.parent / changed_file
+            data = expected[changed_file]
+            replacement = data[:-4] + b"New\n"
+            assert replacement != data and len(replacement) == len(data)
+            path.write_bytes(replacement)  # Immediate real rewrite; no timing dependency.
+            assert path.read_bytes() == replacement
+            assert (root / "alpha" / changed_file).read_bytes() == data
+
+    monkeypatch.setattr(managed_skills, "_validate_builtin_catalog", validate_then_rewrite)
+
+    if changed_file is not None:
+        with pytest.raises(RuntimeError, match="source changed"):
+            publish_builtin_skills(source_root=source, destination_root=destination)
+        assert destination.exists() == existing_catalog
+        assert not (destination / "alpha").exists()
+        if existing_catalog:
+            assert (destination / "previous" / "SKILL.md").is_file()
+        assert (previous / "backup" / "SKILL.md").is_file()
+    else:
+        assert publish_builtin_skills(source_root=source, destination_root=destination) == destination
+        for filename, data in expected.items():
+            assert (destination / "alpha" / filename).read_bytes() == data
+    assert validated
+    assert not staging.exists()
+
+
+@pytest.mark.parametrize("descriptor_changes", [False, True], ids=["unchanged", "descriptor-change"])
+def test_publication_compares_timestamps_within_the_same_stat_api(
+    tmp_path: Path,
+    monkeypatch,
+    descriptor_changes: bool,
+) -> None:
+    """Windows path stat can expose birthtime as ctime while fstat exposes change time."""
+
+    source = tmp_path / "source"
+    destination = tmp_path / "builtin-skills"
+    skill_file = _write_skill(source, "alpha", "alpha", "Alpha")
+    expected = skill_file.read_bytes()
+    identity = (skill_file.stat().st_dev, skill_file.stat().st_ino)
+    original_fstat = os.fstat
+    original_validate = managed_skills._validate_builtin_catalog
+    validated = False
+    verification_stats = 0
+
+    class _DescriptorStat:
+        def __init__(self, value, offset):
+            self._value = value
+            self.st_ctime_ns = value.st_ctime_ns + offset
+            self.st_ctime = self.st_ctime_ns / 1_000_000_000
+
+        def __getattr__(self, name):
+            return getattr(self._value, name)
+
+    def fstat(fd):
+        nonlocal verification_stats
+        value = original_fstat(fd)
+        offset = 1_000_000_000
+        if validated and (value.st_dev, value.st_ino) == identity:
+            verification_stats += 1
+            if descriptor_changes and verification_stats > 1:
+                offset += 1
+        # Model different API meanings, without touching filesystem timestamps.
+        return _DescriptorStat(value, offset)
+
+    def validate(root):
+        nonlocal validated
+        original_validate(root)
+        if root == destination.parent / ".builtin-skills.staging":
+            validated = True
+
+    monkeypatch.setattr(managed_skills.os, "fstat", fstat)
+    monkeypatch.setattr(managed_skills, "_validate_builtin_catalog", validate)
+
+    if descriptor_changes:
+        with pytest.raises(RuntimeError, match="source changed"):
+            publish_builtin_skills(source_root=source, destination_root=destination)
+        assert not destination.exists()
+    else:
+        assert publish_builtin_skills(source_root=source, destination_root=destination) == destination
+        assert (destination / "alpha" / "SKILL.md").read_bytes() == expected
+    assert skill_file.read_bytes() == expected
+    assert verification_stats >= 2
+    assert not (destination.parent / ".builtin-skills.staging").exists()
+
+
+@pytest.mark.parametrize("mutation", ["replace", "remove", "symlink", "unreadable"])
+def test_publication_rejects_source_file_changes_after_validation(
+    tmp_path: Path,
+    monkeypatch,
+    mutation: str,
+) -> None:
+    """Final byte verification must retain fail-closed path and cleanup behavior."""
+
+    if mutation == "symlink" and os.name == "nt":
+        pytest.skip("symlink fixture requires POSIX semantics")
+    source = tmp_path / "source"
+    destination = tmp_path / "builtin-skills"
+    skill_file = _write_skill(source, "alpha", "alpha", "Alpha")
+    source_bytes = skill_file.read_bytes()
+    _write_skill(destination, "previous", "previous", "Previous")
+    staging = destination.parent / ".builtin-skills.staging"
+    original_validate = managed_skills._validate_builtin_catalog
+    original_open = managed_skills._open_regular_file
+    validated = False
+
+    def validate_then_change(root):
+        nonlocal validated
+        original_validate(root)
+        if root != staging:
+            return
+        validated = True
+        if mutation == "replace":
+            replacement = tmp_path / "replacement.md"
+            replacement.write_bytes(source_bytes)
+            os.replace(replacement, skill_file)
+        elif mutation == "remove":
+            skill_file.unlink()
+        elif mutation == "symlink":
+            replacement = tmp_path / "replacement.md"
+            replacement.write_bytes(source_bytes)
+            skill_file.unlink()
+            skill_file.symlink_to(replacement)
+
+    def open_unless_unreadable(path, **kwargs):
+        if mutation == "unreadable" and validated and Path(path) == skill_file:
+            # chmod is not a portable permission oracle (Windows/admin/root).
+            raise PermissionError("source became unreadable")
+        return original_open(path, **kwargs)
+
+    monkeypatch.setattr(managed_skills, "_validate_builtin_catalog", validate_then_change)
+    monkeypatch.setattr(managed_skills, "_open_regular_file", open_unless_unreadable)
+
+    with pytest.raises(RuntimeError, match="source changed"):
+        publish_builtin_skills(source_root=source, destination_root=destination)
+
+    assert validated
+    assert (destination / "previous" / "SKILL.md").is_file()
+    assert not (destination / "alpha").exists()
+    assert not staging.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows cannot replace an open file fixture")
+def test_publication_rejects_source_replacement_during_final_read(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Reading a pinned old file must not conceal a newly replaced source path."""
+
+    source = tmp_path / "source"
+    destination = tmp_path / "builtin-skills"
+    skill_file = _write_skill(source, "alpha", "alpha", "Alpha")
+    replacement = tmp_path / "replacement.md"
+    replacement.write_bytes(skill_file.read_bytes())
+    staging = destination.parent / ".builtin-skills.staging"
+    original_validate = managed_skills._validate_builtin_catalog
+    original_open = managed_skills._open_regular_file
+    validated = False
+    replaced = False
+
+    def validate(root):
+        nonlocal validated
+        original_validate(root)
+        if root == staging:
+            validated = True
+
+    def open_then_replace(path, **kwargs):
+        nonlocal replaced
+        result = original_open(path, **kwargs)
+        if validated and not replaced and Path(path) == skill_file:
+            os.replace(replacement, skill_file)
+            replaced = True
+        return result
+
+    monkeypatch.setattr(managed_skills, "_validate_builtin_catalog", validate)
+    monkeypatch.setattr(managed_skills, "_open_regular_file", open_then_replace)
+
+    with pytest.raises(RuntimeError, match="source changed"):
+        publish_builtin_skills(source_root=source, destination_root=destination)
+
+    assert replaced
+    assert not destination.exists()
+    assert not staging.exists()
+
+
 def test_publication_survives_zero_directory_entry_identities(
     tmp_path: Path,
     monkeypatch,
