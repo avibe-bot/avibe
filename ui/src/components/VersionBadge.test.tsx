@@ -1,18 +1,20 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { I18nextProvider } from 'react-i18next';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import i18n from '@/i18n';
 import { VersionBadge } from './VersionBadge';
+import type { DesktopRemoteUpdateResult, VersionInfo, UpgradeResult } from '../context/ApiContext';
 import {
   DESKTOP_OPEN_UPDATES_EVENT,
   DESKTOP_UPDATE_STATE_EVENT,
 } from '../lib/desktopShell';
 
 const api = vi.hoisted(() => ({
-  getVersion: vi.fn(async () => ({ current: '9.9.9', latest: '10.0.0', has_update: true, managed_by: 'desktop' })),
+  getVersion: vi.fn<() => Promise<Partial<VersionInfo> & Pick<VersionInfo, 'current' | 'latest' | 'has_update'>>>(async () => ({ current: '9.9.9', latest: '10.0.0', has_update: true, managed_by: 'desktop' })),
   getConfig: vi.fn(async () => ({ update: { auto_update: true } })),
-  doUpgrade: vi.fn(async () => ({ ok: true, message: 'Upgrade successful', output: null, restarting: false })),
+  requestDesktopUpdate: vi.fn<(...args: unknown[]) => Promise<DesktopRemoteUpdateResult>>(),
+  doUpgrade: vi.fn<(...args: unknown[]) => Promise<UpgradeResult>>(async () => ({ ok: true, message: 'Upgrade successful', output: null, restarting: false })),
 }));
 const defaultDesktopInvoke = vi.hoisted(() => async (command: string) => {
   if (command === 'desktop_update_state') {
@@ -23,9 +25,19 @@ const defaultDesktopInvoke = vi.hoisted(() => async (command: string) => {
 });
 const desktopInvoke = vi.hoisted(() => vi.fn(defaultDesktopInvoke));
 vi.mock('../context/ApiContext', () => ({ useApi: () => api }));
+const authorization = vi.hoisted(() => ({ remote: true, capabilities: { can_manage_instance: true, is_instance_owner: true } }));
+vi.mock('../context/InstanceAuthorizationContext', () => ({ useInstanceAuthorization: () => authorization }));
 vi.mock('../lib/useIsDesktop', () => ({ useIsDesktop: () => true }));
 
+beforeEach(() => {
+  authorization.capabilities.can_manage_instance = true;
+  authorization.capabilities.is_instance_owner = true;
+  api.getVersion.mockReset().mockResolvedValue({ current: '9.9.9', latest: '10.0.0', has_update: true, managed_by: 'desktop' });
+  api.requestDesktopUpdate.mockReset().mockResolvedValue({ ok: true, request_id: 'request-1', delivery: 'prompt' });
+});
+
 afterEach(() => {
+  vi.useRealTimers();
   cleanup();
   vi.clearAllMocks();
   desktopInvoke.mockImplementation(defaultDesktopInvoke);
@@ -238,6 +250,9 @@ describe('desktop version ownership', () => {
     const entry = await screen.findByTitle('v3.2.2-rc.13');
     await vi.waitFor(() => expect(entry.className).toContain('text-gold-ink'));
     expect(api.getVersion).toHaveBeenCalledWith({ cache: false });
+    fireEvent.click(entry);
+    expect(screen.queryByRole('button', { name: i18n.t('dashboard.desktopRemoteUpdateTitle') })).toBeNull();
+    expect(api.requestDesktopUpdate).not.toHaveBeenCalled();
   });
 
   it('uses shell updater ownership even when the adopted Runtime omits managed_by', async () => {
@@ -367,6 +382,7 @@ describe('desktop version ownership', () => {
 
     fireEvent.click(await screen.findByTitle('v9.9.9'));
     fireEvent.click(await screen.findByRole('button', { name: i18n.t('dashboard.upgradeNow') }));
+    fireEvent.click(await screen.findByRole('button', { name: i18n.t('dashboard.desktopRemoteUpdateConfirm') }));
 
     expect(await screen.findByText('Stable launcher repair is still required.')).toBeTruthy();
     expect(screen.queryByText('raw installer transcript')).toBeNull();
@@ -386,6 +402,7 @@ describe('desktop version ownership', () => {
 
     fireEvent.click(await screen.findByTitle('v9.9.9'));
     fireEvent.click(await screen.findByRole('button', { name: i18n.t('dashboard.upgradeNow') }));
+    fireEvent.click(await screen.findByRole('button', { name: i18n.t('dashboard.desktopRemoteUpdateConfirm') }));
 
     expect(await screen.findByText(/deferred activation helper/)).toBeTruthy();
     expect(screen.queryByText('raw deferred helper transcript')).toBeNull();
@@ -404,6 +421,7 @@ describe('desktop version ownership', () => {
 
     fireEvent.click(await screen.findByTitle('v9.9.9'));
     fireEvent.click(await screen.findByRole('button', { name: i18n.t('dashboard.upgradeNow') }));
+    fireEvent.click(await screen.findByRole('button', { name: i18n.t('dashboard.desktopRemoteUpdateConfirm') }));
 
     expect(await screen.findByText(i18n.t('dashboard.upgradeSuccess'))).toBeTruthy();
     expect(screen.queryByText(/installer stdout/)).toBeNull();
@@ -423,8 +441,175 @@ describe('desktop version ownership', () => {
 
     fireEvent.click(await screen.findByTitle('v9.9.9'));
     fireEvent.click(await screen.findByRole('button', { name: i18n.t('dashboard.upgradeNow') }));
+    fireEvent.click(await screen.findByRole('button', { name: i18n.t('dashboard.desktopRemoteUpdateConfirm') }));
 
     expect(await screen.findByText(i18n.t('dashboard.upgradeFailed'))).toBeTruthy();
     expect(screen.queryByText('raw package-manager transcript')).toBeNull();
+  });
+});
+
+// These contracts exercise the request/receipt boundary. Existing updater tests
+// only covered native install/skip and cannot catch remote authorization,
+// counted confirmation, or a disconnected host being mistaken for success.
+const remoteReceipt = (phase: NonNullable<VersionInfo['remote_request']>['phase'], progress: number | null = null): VersionInfo => ({
+  current: '9.9.9', latest: '10.0.0', has_update: true, error: null, managed_by: 'desktop',
+  remote_request: { request_id: 'request-1', target: '10.0.0', phase, progress, error_code: null, updated_at: '2026-10-29T02:00:00Z' },
+});
+
+async function openTimingPopup() {
+  vi.useFakeTimers();
+  render(<I18nextProvider i18n={i18n}><VersionBadge /></I18nextProvider>);
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  fireEvent.click(screen.getByTitle('v9.9.9'));
+}
+
+async function requestFromBrowser() {
+  await openBrowserPopup('v9.9.9');
+  fireEvent.click(screen.getByRole('button', { name: i18n.t('dashboard.desktopRemoteUpdateTitle') }));
+}
+
+function confirmRequest() {
+  fireEvent.click(screen.getByRole('button', { name: i18n.t('dashboard.desktopRemoteUpdateConfirm') }));
+}
+
+describe('remote desktop update contract', () => {
+  it.each(['owner', 'member', 'editor', 'viewer'] as const)('projects %s capability to request controls and guidance', async (role) => {
+    authorization.capabilities.can_manage_instance = role === 'owner' || role === 'member';
+    authorization.capabilities.is_instance_owner = role === 'owner';
+    await openBrowserPopup('v9.9.9');
+    expect(Boolean(screen.queryByRole('button', { name: i18n.t('dashboard.desktopRemoteUpdateTitle') })))
+      .toBe(role === 'owner' || role === 'member');
+    if (role === 'editor' || role === 'viewer') {
+      expect(screen.getByText(i18n.t('dashboard.desktopManagedUpdateMemberHint'))).toBeTruthy();
+      expect(api.getConfig).not.toHaveBeenCalled();
+    }
+    expect(api.requestDesktopUpdate).not.toHaveBeenCalled();
+    expect(api.doUpgrade).not.toHaveBeenCalled();
+  });
+
+  it('checks work on first submit, displays nested counts/unknown, and retries explicitly confirmed', async () => {
+    api.requestDesktopUpdate.mockResolvedValueOnce({ ok: false, error: 'confirmation_required', counts: {
+      agents: 2, watches: 3, tasks: 4, total: 9, unknown: true,
+    } });
+    await requestFromBrowser();
+    expect(screen.getByText(i18n.t('dashboard.desktopRemoteUpdateCheckWork'))).toBeTruthy();
+    confirmRequest();
+    expect(await screen.findByText(i18n.t('dashboard.desktopRemoteUpdateInterruptions', { agents: 2, watches: 3, tasks: 4 }))).toBeTruthy();
+    expect(screen.getByText(i18n.t('dashboard.desktopRemoteUpdateUnknownWork'))).toBeTruthy();
+    expect(api.requestDesktopUpdate).toHaveBeenLastCalledWith('10.0.0', { confirmInterrupt: false });
+    api.getVersion.mockResolvedValue(remoteReceipt('awaiting_host'));
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('dashboard.desktopRemoteUpdateConfirmInterrupt') }));
+    expect(await screen.findByText(i18n.t('dashboard.desktopRemoteUpdateAwaitingHost'))).toBeTruthy();
+    expect(api.requestDesktopUpdate).toHaveBeenLastCalledWith('10.0.0', { confirmInterrupt: true });
+    expect(api.doUpgrade).not.toHaveBeenCalled();
+  });
+
+  it.each(['prompt', 'install'] as const)('shows %s delivery before submitting and follows the authoritative result', async (delivery) => {
+    api.getVersion.mockResolvedValue({ current: '9.9.9', latest: '10.0.0-rc.1', has_update: true, managed_by: 'desktop', remote_install_allowed: delivery === 'install' });
+    api.requestDesktopUpdate.mockResolvedValue({ ok: true, request_id: 'request-1', delivery });
+    await requestFromBrowser();
+    expect(screen.getByText(i18n.t('dashboard.desktopRemoteUpdateConfirmDescription', { delivery: i18n.t(delivery === 'install'
+      ? 'dashboard.desktopRemoteUpdateDeliveryInstall' : 'dashboard.desktopRemoteUpdateDeliveryPrompt') }))).toBeTruthy();
+    api.getVersion.mockResolvedValue({ ...remoteReceipt(delivery === 'install' ? 'downloading' : 'awaiting_host', 42), remote_install_allowed: delivery === 'install' });
+    confirmRequest();
+    expect(await screen.findByText(i18n.t(delivery === 'install' ? 'dashboard.desktopRemoteUpdateDownloading' : 'dashboard.desktopRemoteUpdateAwaitingHost', { progress: 42 }))).toBeTruthy();
+    // SemVer is sent unchanged, even though the badge normalizes display strings.
+    expect(api.requestDesktopUpdate).toHaveBeenCalledWith('10.0.0-rc.1', { confirmInterrupt: false });
+  });
+
+  it.each(['failed', 'declined', 'expired'] as const)('renders terminal %s from a receipt', async (phase) => {
+    api.getVersion.mockResolvedValue(remoteReceipt(phase));
+    await openBrowserPopup('v9.9.9');
+    const key = phase === 'failed' ? 'dashboard.desktopRemoteUpdateFailed' : phase === 'declined'
+      ? 'dashboard.desktopRemoteUpdateDeclined' : 'dashboard.desktopRemoteUpdateExpired';
+    expect(screen.getByText(i18n.t(key))).toBeTruthy();
+    expect(api.getVersion).toHaveBeenCalledTimes(1);
+  });
+
+  it('reconnects after disconnection and requires both the same receipt and resulting version', async () => {
+    api.getVersion.mockResolvedValue(remoteReceipt('installing'));
+    await openTimingPopup();
+    api.getVersion.mockRejectedValue(new Error('disconnected'));
+    await act(() => vi.advanceTimersByTimeAsync(2000));
+    expect(screen.getByText(i18n.t('dashboard.desktopRemoteUpdateRestarting'))).toBeTruthy();
+    api.getVersion.mockResolvedValue({ ...remoteReceipt('completed'), current: '10.0.0' });
+    await act(() => vi.advanceTimersByTimeAsync(2000));
+    expect(screen.getByText(i18n.t('dashboard.desktopRemoteUpdateCompleted', { target: '10.0.0' }))).toBeTruthy();
+    const calls = api.getVersion.mock.calls.length;
+    await act(() => vi.advanceTimersByTimeAsync(10_000));
+    expect(api.getVersion).toHaveBeenCalledTimes(calls);
+  });
+
+  it.each(['unreachable', 'stuck', 'wrong-version', 'hanging-read'] as const)('bounds %s reconnect and never claims success', async (mode) => {
+    const info = remoteReceipt(mode === 'wrong-version' ? 'completed' : 'restarting');
+    api.getVersion.mockResolvedValue(info);
+    await openTimingPopup();
+    if (mode === 'unreachable') api.getVersion.mockRejectedValue(new Error('offline'));
+    if (mode === 'hanging-read') api.getVersion.mockImplementation(() => new Promise(() => {}));
+    await act(() => vi.advanceTimersByTimeAsync(125_000));
+    expect(screen.getByText(i18n.t('dashboard.desktopRemoteUpdateTimedOut'))).toBeTruthy();
+    expect(screen.queryByText(i18n.t('dashboard.desktopRemoteUpdateCompleted', { target: '10.0.0' }))).toBeNull();
+    const calls = api.getVersion.mock.calls.length;
+    await act(() => vi.advanceTimersByTimeAsync(10_000));
+    expect(api.getVersion).toHaveBeenCalledTimes(calls);
+    expect(api.doUpgrade).not.toHaveBeenCalled();
+  });
+
+  it.each(['not_desktop_managed', 'no_update_available', 'update_in_progress', 'desktop_shell_unavailable'] as const)('handles %s without falling back to Runtime upgrade', async (error) => {
+    api.requestDesktopUpdate.mockResolvedValue({ ok: false, error });
+    await requestFromBrowser();
+    confirmRequest();
+    expect(await screen.findByRole('alert')).toBeTruthy();
+    expect(api.doUpgrade).not.toHaveBeenCalled();
+  });
+
+  it.each(['failed', 'declined', 'expired'] as const)('allows retry when a manual refresh discovers %s after timeout', async (phase) => {
+    api.getVersion.mockResolvedValue(remoteReceipt('restarting'));
+    await openTimingPopup();
+    await act(() => vi.advanceTimersByTimeAsync(125_000));
+    expect(screen.getByText(i18n.t('dashboard.desktopRemoteUpdateTimedOut'))).toBeTruthy();
+    api.getVersion.mockResolvedValue(remoteReceipt(phase));
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('dashboard.checkUpdate') }));
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(screen.queryByText(i18n.t('dashboard.desktopRemoteUpdateTimedOut'))).toBeNull();
+    const requestButton = screen.getByRole('button', { name: i18n.t('dashboard.desktopRemoteUpdateTitle') });
+    expect((requestButton as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(requestButton);
+    expect(screen.getByRole('dialog')).toBeTruthy();
+  });
+
+  it('shows local remote context and uses decline rather than global skip', async () => {
+    desktopInvoke.mockImplementation(async (command: string) => command === 'desktop_update_state'
+      ? { phase: 'available', latest: '10.0.0', channel: 'stable', interactive: true, skippedVersion: null,
+        remoteRequest: { requestId: 'request-1', target: '10.0.0', phase: 'awaiting_host', progress: null, errorCode: null, updatedAt: '' } }
+      : undefined);
+    renderInShell('9.9.9', '9.9.9', '10.0.0', true);
+    expect(await screen.findByText(i18n.t('dashboard.desktopRemoteUpdateLocalRequest', { target: '10.0.0' }))).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('dashboard.desktopRemoteUpdateIgnore') }));
+    await vi.waitFor(() => expect(desktopInvoke).toHaveBeenCalledWith('desktop_update_remote_decline'));
+    expect(desktopInvoke).not.toHaveBeenCalledWith('desktop_update_skip');
+    expect(desktopInvoke).not.toHaveBeenCalledWith('desktop_update_check');
+  });
+
+  it('keeps the Member pure-Web upgrade and handles its counted confirmation', async () => {
+    authorization.capabilities.is_instance_owner = false;
+    api.getVersion.mockResolvedValue({ current: '9.9.9', latest: '10.0.0', has_update: true });
+    api.doUpgrade.mockResolvedValueOnce({ ok: false, error: 'confirmation_required', counts: { agents: 1, watches: 0, tasks: 2, total: 3, unknown: false } });
+    await openBrowserPopup('v9.9.9');
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('dashboard.upgradeNow') }));
+    confirmRequest();
+    expect(await screen.findByText(i18n.t('dashboard.desktopRemoteUpdateInterruptions', { agents: 1, watches: 0, tasks: 2 }))).toBeTruthy();
+    expect(api.doUpgrade).toHaveBeenLastCalledWith({ confirmInterrupt: false });
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('dashboard.desktopRemoteUpdateConfirmInterrupt') }));
+    await vi.waitFor(() => expect(api.doUpgrade).toHaveBeenLastCalledWith({ confirmInterrupt: true }));
+    expect(api.requestDesktopUpdate).not.toHaveBeenCalled();
+  });
+
+  it.each(['editor', 'viewer'])('withholds pure-Web upgrade and config reads from %s', async () => {
+    authorization.capabilities.can_manage_instance = false;
+    api.getVersion.mockResolvedValue({ current: '9.9.9', latest: '10.0.0', has_update: true });
+    await openBrowserPopup('v9.9.9');
+    expect(screen.queryByRole('button', { name: i18n.t('dashboard.upgradeNow') })).toBeNull();
+    expect(api.getConfig).not.toHaveBeenCalled();
   });
 });

@@ -17,6 +17,7 @@ import {
 import type { SettingsMenuPlacement } from '../../lib/settingsMenuPlacement';
 import type { TranslationKey } from '../../i18n/types';
 import { useDesktopPetSettings } from '../../lib/useDesktopPetSettings';
+import { DesktopRemoteUpdateSetting } from './DesktopRemoteUpdateSetting';
 
 // The 88px miniature is a drawing OF a theme, not a preview rendered IN one:
 // the Light card has to look light while the app is dark. Source Q8zxF1 builds
@@ -321,6 +322,7 @@ export const SettingsGeneralPage: React.FC = () => {
             )}
           </SettingsPanel>
         )}
+        <DesktopRemoteUpdateSetting />
 
         {/* i3LvLl — the autosave contract, stated once for the whole page. */}
         <div className="flex items-center gap-2 text-[12px] text-muted">

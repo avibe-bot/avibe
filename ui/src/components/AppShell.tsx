@@ -604,7 +604,7 @@ export const AppShell: React.FC = () => {
 
           {/* Version row AYIIj — version on the LEFT, run state on the RIGHT. */}
           <div className="flex items-center justify-between gap-2 px-1 py-0.5">
-            {capabilities.can_manage_instance ? <VersionBadge openUpward /> : <span />}
+            {capabilities.can_read_instance ? <VersionBadge openUpward /> : <span />}
             <span className="flex items-center gap-1.5 text-[10px] text-muted">
               {isRunning ? t('common.running') : t('common.stopped')}
               <span

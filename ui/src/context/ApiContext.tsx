@@ -720,8 +720,12 @@ export type ApiContextType = {
     backend: string,
   ) => Promise<PickerAgentCatalog | null>;
   getLogs: (lines?: number, source?: string) => Promise<{ logs: LogEntry[]; total: number; source: string; sources: LogSource[] }>;
-  getVersion: (options?: { cache?: boolean }) => Promise<VersionInfo>;
-  doUpgrade: () => Promise<UpgradeResult>;
+  getVersion: (options?: { cache?: boolean; background?: boolean; signal?: AbortSignal }) => Promise<VersionInfo>;
+  requestDesktopUpdate: (
+    targetVersion: string,
+    options?: { confirmInterrupt?: boolean },
+  ) => Promise<DesktopRemoteUpdateResult>;
+  doUpgrade: (options?: { confirmInterrupt: boolean }) => Promise<UpgradeResult>;
   browseDirectory: (path: string, showHidden?: boolean) => Promise<{ ok: boolean; path?: string; parent?: string | null; dirs?: { name: string; path: string }[]; error?: string }>;
   browseFavorites: () => Promise<{ ok: boolean; system?: string; favorites?: { key: string; path: string }[]; error?: string }>;
   browseMkdir: (path: string) => Promise<{ path: string }>;
@@ -1937,6 +1941,8 @@ export type VersionInfo = {
   has_update: boolean;
   error: string | null;
   managed_by?: 'desktop';
+  remote_install_allowed?: boolean;
+  remote_request?: DesktopRemoteUpdateRequest | null;
   build?: {
     kind: 'package' | 'source';
     revision?: string;
@@ -1944,13 +1950,66 @@ export type VersionInfo = {
   };
 };
 
-export type UpgradeResult = {
+export type DesktopRemoteUpdatePhase =
+  | 'requested'
+  | 'acknowledged'
+  | 'checking'
+  | 'awaiting_host'
+  | 'downloading'
+  | 'installing'
+  | 'restarting'
+  | 'completed'
+  | 'failed'
+  | 'declined'
+  | 'expired';
+
+export type DesktopRemoteUpdateRequest = {
+  request_id: string;
+  target: string;
+  phase: DesktopRemoteUpdatePhase;
+  progress: number | null;
+  error_code: string | null;
+  updated_at: string;
+};
+
+export type DesktopRemoteUpdateErrorCode =
+  | 'not_desktop_managed'
+  | 'no_update_available'
+  | 'update_in_progress'
+  | 'desktop_shell_unavailable'
+  | 'confirmation_required';
+
+export type DesktopRemoteUpdateResult =
+  | { ok: true; request_id: string; delivery: 'prompt' | 'install' }
+  | UpdateConfirmationRequired
+  | {
+      ok: false;
+      error: Exclude<DesktopRemoteUpdateErrorCode, 'confirmation_required'>;
+      message?: string;
+    };
+
+export type UpdateInterruptionCounts = {
+  agents: number;
+  watches: number;
+  tasks: number;
+  total: number;
+  unknown: boolean;
+};
+
+export type UpdateConfirmationRequired = {
+  ok: false;
+  error: 'confirmation_required';
+  counts: UpdateInterruptionCounts;
+};
+
+export type UpgradeResult = UpdateConfirmationRequired | {
   ok: boolean;
   message: string;
   output: string | null;
   activation_notice?: string | null;
   restarting: boolean;
   code?: string;
+  error?: never;
 };
 
 export type InstallResult = {
@@ -3763,8 +3822,48 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         })
         .catch(() => null),
     getLogs: (lines = 500, source) => postJson('/api/logs', source ? { lines, source } : { lines }),
-    getVersion: (options) => getCachedJson('/api/version', 10_000, options),
-    doUpgrade: () => postJson('/api/upgrade', {}),
+    getVersion: (options) => options?.background
+      ? withApiDeadline(10_000, options.signal, async (signal) => {
+        const response = await apiFetch('/api/version', { signal });
+        // Reconnect failures belong to the update status, not repeated toasts.
+        if (!response.ok) throw new ApiError('Version read unavailable', response.status, null);
+        const payload = await response.json();
+        if (typeof payload?.current !== 'string') throw new Error('Invalid version response');
+        return payload as VersionInfo;
+      })
+      : getCachedJson('/api/version', 10_000, options),
+    requestDesktopUpdate: async (targetVersion, options) => {
+      const { res, payloadJson } = await requestJson(
+        '/api/desktop/update/request',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            target_version: targetVersion,
+            confirm_interrupt: options?.confirmInterrupt ?? false,
+          }),
+        },
+        '/api/desktop/update/request',
+        { handleError: false },
+      );
+      if (!res.ok && !['not_desktop_managed', 'no_update_available', 'update_in_progress',
+        'desktop_shell_unavailable', 'confirmation_required'].includes(payloadJson?.error)) {
+        throw new ApiError('Desktop update request failed', res.status, payloadJson?.error ?? null);
+      }
+      return payloadJson as DesktopRemoteUpdateResult;
+    },
+    doUpgrade: async (options) => {
+      if (!options) return postJson('/api/upgrade', {});
+      const { res, payloadJson } = await requestJson('/api/upgrade', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirm_interrupt: options.confirmInterrupt }),
+      }, '/api/upgrade', { handleError: false });
+      if (!res.ok && payloadJson?.error !== 'confirmation_required') {
+        throw new ApiError('Upgrade request failed', res.status, payloadJson?.error ?? null);
+      }
+      return payloadJson as UpgradeResult;
+    },
     browseDirectory: (path, showHidden) => postJson('/api/browse', { path, show_hidden: showHidden || false }),
     browseFavorites: () => getJson('/api/browse/favorites'),
     browseMkdir: (path) => postJson('/api/browse/mkdir', { path }),

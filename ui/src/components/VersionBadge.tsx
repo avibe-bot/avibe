@@ -1,6 +1,11 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { useApi, type VersionInfo, type UpgradeResult } from '../context/ApiContext';
+import {
+  useApi,
+  type UpdateInterruptionCounts,
+  type VersionInfo,
+  type UpgradeResult,
+} from '../context/ApiContext';
 import { Download, X, RefreshCw, Check, AlertCircle, GitCommitHorizontal } from 'lucide-react';
 import clsx from 'clsx';
 import { ToggleSwitch } from './settings/SettingsPrimitives';
@@ -23,6 +28,8 @@ import {
 } from '../lib/desktopShell';
 import { useIsDesktop } from '../lib/useIsDesktop';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from './ui/dialog';
+import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 
 // Dev / regression builds carry long versions like
 // `3.0.1.dev33+g1df6865a1.d20260608`. Collapse to the release core
@@ -54,9 +61,21 @@ function normalizeVersion(value: string): string {
   ].join('');
 }
 
+type RemoteUpdateConfirmation = {
+  target: string;
+  delivery: 'prompt' | 'install' | 'runtime';
+  counts?: UpdateInterruptionCounts;
+};
+
+const REMOTE_RECONNECT_POLL_MS = 2000;
+const REMOTE_RECONNECT_TIMEOUT_MS = 120_000;
+const REMOTE_REQUEST_TIMEOUT_MS = 35 * 60_000;
+const TERMINAL_REMOTE_PHASES = ['completed', 'failed', 'declined', 'expired'];
+
 export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = false }) => {
   const { t } = useTranslation();
   const api = useApi();
+  const { capabilities } = useInstanceAuthorization();
   const inDesktopShell = isDesktopShell();
   const isDesktop = useIsDesktop();
   const shellActions = React.useMemo(() => desktopUpdateShellActions(), []);
@@ -71,6 +90,12 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   const [upgrading, setUpgrading] = React.useState(false);
   const [restarting, setRestarting] = React.useState(false);
   const [upgradeResult, setUpgradeResult] = React.useState<UpgradeResult | null>(null);
+  const [remoteConfirmation, setRemoteConfirmation] = React.useState<RemoteUpdateConfirmation | null>(null);
+  const [remoteRequesting, setRemoteRequesting] = React.useState(false);
+  const [remoteRequestError, setRemoteRequestError] = React.useState<string | null>(null);
+  const [remoteUpdateTimedOut, setRemoteUpdateTimedOut] = React.useState(false);
+  const [remoteDisconnected, setRemoteDisconnected] = React.useState(false);
+  const [remoteDelivery, setRemoteDelivery] = React.useState<'prompt' | 'install' | null>(null);
   const [autoUpdate, setAutoUpdate] = React.useState<boolean | null>(null);
   const [savingAutoUpdate, setSavingAutoUpdate] = React.useState(false);
   const popupRef = React.useRef<HTMLDivElement>(null);
@@ -115,6 +140,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     try {
       const state = await actions.getState();
       setDesktopUpdateState(state);
+      if (state.remoteRequest?.phase === 'awaiting_host') setIsPopupOpen(true);
       setDesktopUpdaterStatus('available');
       return state;
     } catch (error) {
@@ -167,6 +193,13 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     try {
       const info = await api.getVersion(rereadVersion || nativeStateAvailable ? { cache: false } : undefined);
       setVersionInfo(info);
+      const receipt = info.remote_request;
+      if (receipt && receipt.request_id === versionInfo?.remote_request?.request_id
+        && TERMINAL_REMOTE_PHASES.includes(receipt.phase)
+        && (receipt.phase !== 'completed' || normalizeVersion(info.current) === normalizeVersion(receipt.target))) {
+        setRemoteUpdateTimedOut(false);
+        setRemoteDisconnected(false);
+      }
     } catch (e) {
       console.error('Failed to check version:', e);
     } finally {
@@ -181,7 +214,11 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
       window.__AVIBE_DESKTOP_UPDATES_HANDLED__ = true;
       event.preventDefault();
       setIsPopupOpen(true);
-      void checkVersion(true);
+      void readDesktopUpdateState().then((state) => {
+        if (!state?.remoteRequest || TERMINAL_REMOTE_PHASES.includes(state.remoteRequest.phase)) {
+          void checkVersion(true);
+        }
+      }).catch(() => undefined);
     };
     window.addEventListener(DESKTOP_OPEN_UPDATES_EVENT, handleOpenUpdates);
     return () => window.removeEventListener(DESKTOP_OPEN_UPDATES_EVENT, handleOpenUpdates);
@@ -196,6 +233,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     void listenDesktopUpdateState((state) => {
       if (!active) return;
       setDesktopUpdateState(state);
+      if (state.remoteRequest?.phase === 'awaiting_host') setIsPopupOpen(true);
       setChecking(state.phase === 'checking');
       setUpgrading(['downloading', 'installing'].includes(state.phase));
     }).then((cleanup) => {
@@ -219,7 +257,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     const timer = window.setTimeout(() => {
       void checkVersion();
       // The shell owns updates; it reads the Runtime's version only to show skew.
-      if (!inDesktopShell) void loadAutoUpdateSetting();
+      if (!inDesktopShell && capabilities.can_manage_instance) void loadAutoUpdateSetting();
     }, 0);
     return () => window.clearTimeout(timer);
     // This runs once per mounted badge. The desktop path waits one task so the
@@ -229,34 +267,40 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   }, []);
 
   const handleUpgrade = async () => {
-    setUpgrading(true);
-    setUpgradeResult(null);
-    try {
-      if (isDesktopManaged && desktopActions) {
+    if (isDesktopManaged && desktopActions) {
+      setUpgrading(true);
+      setUpgradeResult(null);
+      try {
         await desktopActions.install();
         await waitForDesktopUpdate();
-        return;
+      } catch (error) {
+        setUpgradeResult({ ok: false, message: String(error), output: null, restarting: false });
+      } finally {
+        setUpgrading(false);
       }
-      const result = await api.doUpgrade();
-      setUpgradeResult(result);
-      if (result.ok) {
-        if (result.restarting) {
-          setRestarting(true);
-          scheduleUpgradeReload(() => {
-            window.location.reload();
-          });
-        } else {
-          setTimeout(() => checkVersion(), 1000);
-        }
-      }
-    } catch (e) {
-      setUpgradeResult({ ok: false, message: String(e), output: null, activation_notice: null, restarting: false });
-    } finally {
-      setUpgrading(false);
+      return;
     }
+    if (!capabilities.can_manage_instance || (isDesktopManaged && !canRequestRemoteUpdate)) return;
+    // Preserve the exact manifest target on the wire; normalization is display-only.
+    const target = versionInfo?.latest;
+    if (!target) return;
+    setRemoteRequestError(null);
+    setIsPopupOpen(false);
+    setRemoteConfirmation({
+      target,
+      delivery: isDesktopManaged
+        ? versionInfo?.remote_install_allowed === true ? 'install' : 'prompt'
+        : 'runtime',
+    });
   };
 
   const isDesktopManaged = inDesktopShell || versionInfo?.managed_by === 'desktop';
+  const remoteDesktopWeb = isDesktopManaged && !inDesktopShell && desktopUpdaterStatus === 'unavailable';
+  const canRequestRemoteUpdate = remoteDesktopWeb && capabilities.can_manage_instance;
+  const remoteRequest = versionInfo?.remote_request ?? null;
+  const remoteRequestActive = Boolean(remoteRequest && !TERMINAL_REMOTE_PHASES.includes(remoteRequest.phase));
+  const localRemoteRequest = desktopUpdateState?.remoteRequest?.phase === 'awaiting_host'
+    ? desktopUpdateState.remoteRequest : null;
   const nativeUpdateStateAvailable = Boolean(desktopActions && desktopUpdateState);
   // A desktop-managed Runtime relays the desktop app's own conclusion. The
   // shell also exposes its in-memory state so a fresh native check lights the
@@ -299,7 +343,11 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   const handleSkipDesktopUpdate = async () => {
     if (!desktopActions) return;
     try {
-      await desktopActions.skip();
+      if (desktopUpdateState?.remoteRequest?.phase === 'awaiting_host') {
+        await desktopActions.declineRemoteRequest();
+      } else {
+        await desktopActions.skip();
+      }
       await readDesktopUpdateState();
       setIsPopupOpen(false);
     } catch (e) {
@@ -313,7 +361,147 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     }
   };
 
+  const submitRemoteUpdateRequest = async () => {
+    if (!remoteConfirmation || !capabilities.can_manage_instance || remoteRequesting) return;
+    const confirmation = remoteConfirmation;
+    setRemoteRequesting(true);
+    setRemoteRequestError(null);
+    try {
+      const options = { confirmInterrupt: Boolean(confirmation.counts) };
+      if (confirmation.delivery === 'runtime') {
+        // Old clients can still omit confirmation. New clients explicitly opt in.
+        const result = await api.doUpgrade(options);
+        if (result.error === 'confirmation_required') {
+          setRemoteConfirmation({ ...confirmation, counts: result.counts });
+          return;
+        }
+        setUpgradeResult(result);
+        if (result.ok && result.restarting) {
+          setRestarting(true);
+          scheduleUpgradeReload(() => window.location.reload());
+        } else if (result.ok) {
+          void checkVersion(true);
+        }
+      } else {
+        if (!isDesktopManaged || desktopActions) return;
+        const result = await api.requestDesktopUpdate(confirmation.target, options);
+        if (!result.ok) {
+          if (result.error === 'confirmation_required') {
+            setRemoteConfirmation({ ...confirmation, counts: result.counts });
+            return;
+          }
+          setRemoteRequestError(result.error);
+          if (result.error === 'update_in_progress') void checkVersion(true);
+        } else {
+          setRemoteDelivery(result.delivery);
+          setRemoteUpdateTimedOut(false);
+          // Keep tracking this receipt even if the host disconnects before its
+          // next version response. An acknowledgement is not installation success.
+          setVersionInfo((previous) => previous && ({
+            ...previous,
+            remote_request: {
+              request_id: result.request_id, target: confirmation.target,
+              phase: 'acknowledged', progress: null, error_code: null,
+              updated_at: new Date().toISOString(),
+            },
+          }));
+        }
+      }
+      setRemoteConfirmation(null);
+      setIsPopupOpen(true);
+    } catch {
+      setRemoteRequestError('request_failed');
+    } finally {
+      setRemoteRequesting(false);
+    }
+  };
+
+  const remoteCompleted = remoteRequest?.phase === 'completed'
+    && normalizeVersion(versionInfo?.current ?? '') === normalizeVersion(remoteRequest.target);
+  const remoteRequestSettled = remoteRequest && TERMINAL_REMOTE_PHASES.includes(remoteRequest.phase)
+    && (remoteRequest.phase !== 'completed' || remoteCompleted);
+  const remoteRequestId = remoteDesktopWeb && !remoteRequestSettled ? remoteRequest?.request_id : undefined;
+  React.useEffect(() => {
+    if (!remoteRequestId) return;
+    let stopped = false;
+    let pollTimer: number | undefined;
+    let reconnectDeadline: number | undefined;
+    let deadlineTimer: number | undefined;
+    const controller = new AbortController();
+    const stop = () => {
+      stopped = true;
+      window.clearTimeout(pollTimer);
+      window.clearTimeout(deadlineTimer);
+      controller.abort();
+    };
+    const timeOut = () => {
+      stop();
+      setRemoteUpdateTimedOut(true);
+    };
+    // Also bound a host that remains reachable but never advances its receipt.
+    deadlineTimer = window.setTimeout(timeOut, REMOTE_REQUEST_TIMEOUT_MS);
+    const startReconnectDeadline = () => {
+      if (reconnectDeadline !== undefined) return;
+      reconnectDeadline = Date.now() + REMOTE_RECONNECT_TIMEOUT_MS;
+      window.clearTimeout(deadlineTimer);
+      deadlineTimer = window.setTimeout(timeOut, REMOTE_RECONNECT_TIMEOUT_MS);
+    };
+    const poll = async () => {
+      try {
+        const fresh = await api.getVersion({ cache: false, background: true, signal: controller.signal });
+        if (stopped) return;
+        const receipt = fresh.remote_request;
+        // A missing/replaced receipt cannot prove this request completed.
+        if (receipt?.request_id === remoteRequestId) {
+          setVersionInfo(fresh);
+          setRemoteUpdateTimedOut(false);
+          setRemoteDisconnected(false);
+          if (receipt.phase === 'restarting') startReconnectDeadline();
+          if (TERMINAL_REMOTE_PHASES.includes(receipt.phase)) {
+            if (receipt.phase !== 'completed' || normalizeVersion(fresh.current) === normalizeVersion(receipt.target)) {
+              setRemoteUpdateTimedOut(false);
+              stop();
+              return;
+            }
+            startReconnectDeadline();
+          }
+        } else {
+          startReconnectDeadline();
+        }
+      } catch {
+        if (stopped) return;
+        setRemoteDisconnected(true);
+        startReconnectDeadline();
+      }
+      if (!stopped) pollTimer = window.setTimeout(() => void poll(), REMOTE_RECONNECT_POLL_MS);
+    };
+    void poll();
+    return stop;
+  }, [api, remoteRequestId]);
+
+  const remoteStatusText = remoteUpdateTimedOut ? t('dashboard.desktopRemoteUpdateTimedOut')
+    : remoteDisconnected || remoteRequest?.phase === 'restarting' ? t('dashboard.desktopRemoteUpdateRestarting')
+      : remoteCompleted ? t('dashboard.desktopRemoteUpdateCompleted', { target: remoteRequest?.target })
+        : remoteRequest?.phase === 'completed' ? t('dashboard.desktopRemoteUpdateVerifying')
+          : remoteRequest?.phase === 'failed' ? t('dashboard.desktopRemoteUpdateFailed')
+            : remoteRequest?.phase === 'declined' ? t('dashboard.desktopRemoteUpdateDeclined')
+              : remoteRequest?.phase === 'expired' ? t('dashboard.desktopRemoteUpdateExpired')
+                : remoteRequest?.phase === 'awaiting_host' ? t('dashboard.desktopRemoteUpdateAwaitingHost')
+                  : remoteRequest?.phase === 'checking' ? t('dashboard.desktopRemoteUpdateChecking')
+                    : remoteRequest?.phase === 'downloading' ? (remoteRequest.progress === null
+                      ? t('dashboard.desktopRemoteUpdateDownloadingUnknown')
+                      : t('dashboard.desktopRemoteUpdateDownloading', { progress: remoteRequest.progress }))
+                      : remoteRequest?.phase === 'installing' ? t('dashboard.desktopRemoteUpdateInstalling')
+                        : t('dashboard.desktopRemoteUpdateRequested');
+  const remoteErrorText = remoteRequestError === 'desktop_shell_unavailable'
+    ? t('dashboard.desktopRemoteUpdateShellUnavailable')
+    : remoteRequestError === 'no_update_available' ? t('dashboard.desktopRemoteUpdateNoUpdate')
+      : remoteRequestError === 'not_desktop_managed' ? t('dashboard.desktopRemoteUpdateNotManaged')
+        : remoteRequestError === 'update_in_progress' ? t('dashboard.desktopRemoteUpdateInProgress')
+          : t('dashboard.desktopRemoteUpdateError');
+
   return (
+    <>
     <Popover open={isPopupOpen} onOpenChange={setIsPopupOpen}>
       <div className="relative" ref={popupRef}>
         {/* Version Badge trigger */}
@@ -368,7 +556,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
                   size="icon"
                   className="h-7 w-7 text-muted hover:text-foreground"
                   onClick={() => checkVersion(true)}
-                  disabled={checking || restarting}
+                  disabled={checking || restarting || (remoteRequestActive && !remoteUpdateTimedOut) || Boolean(localRemoteRequest)}
                   aria-label={refreshLabel}
                   title={refreshLabel}
                 >
@@ -419,8 +607,35 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
                 </div>
               )}
 
+              {localRemoteRequest && (
+                <p className="rounded-md border border-cyan/30 bg-cyan/10 px-3 py-2 text-sm text-cyan-ink">
+                  {t('dashboard.desktopRemoteUpdateLocalRequest', { target: localRemoteRequest.target })}
+                </p>
+              )}
+              {remoteDesktopWeb && (
+                <p className="text-xs text-muted">{t(capabilities.can_manage_instance
+                  ? 'dashboard.desktopManagedUpdateOwnerHint' : 'dashboard.desktopManagedUpdateMemberHint')}</p>
+              )}
+              {remoteDesktopWeb && remoteDelivery && (
+                <p className="text-xs text-muted">{t('dashboard.desktopRemoteUpdateConfirmDescription', {
+                  delivery: t(remoteDelivery === 'install'
+                    ? 'dashboard.desktopRemoteUpdateDeliveryInstall' : 'dashboard.desktopRemoteUpdateDeliveryPrompt'),
+                })}</p>
+              )}
+              {remoteDesktopWeb && remoteRequest && (
+                <div role="status" className="space-y-2 rounded-md border border-border px-3 py-2 text-sm">
+                  <p>{remoteStatusText}</p>
+                  {remoteRequest.phase === 'failed' && remoteRequest.error_code === 'requires_host' && (
+                    <p>{t('dashboard.desktopRemoteUpdateRequiresHost')}</p>
+                  )}
+                </div>
+              )}
+              {remoteRequestError && !remoteConfirmation && (
+                <p role="alert" className="text-sm text-destructive-ink">{remoteErrorText}</p>
+              )}
+
               {/* Update Status */}
-              {!isSourceBuild && (isDesktopManaged && desktopUpdateState?.phase === 'checking' ? (
+              {!isSourceBuild && !(remoteDesktopWeb && remoteRequest) && (isDesktopManaged && desktopUpdateState?.phase === 'checking' ? (
                 <div className="flex items-center gap-2 rounded-md border border-cyan/30 bg-cyan/10 px-3 py-2 text-sm text-cyan-ink">
                   <RefreshCw size={16} className="shrink-0 animate-spin" />
                   <span>{t('dashboard.checking')}</span>
@@ -512,7 +727,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
               )}
 
               {/* Auto Update Toggle: only once the Runtime has said who manages it */}
-              {versionInfo && !isSourceBuild && !isDesktopManaged && autoUpdate !== null && (
+              {versionInfo && capabilities.can_manage_instance && !isSourceBuild && !isDesktopManaged && autoUpdate !== null && (
                 <div className="flex items-center justify-between gap-3 border-t border-border pt-3">
                   <div className="min-w-0">
                     <div className="text-sm text-foreground">{t('dashboard.autoUpdate')}</div>
@@ -534,14 +749,19 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
                 {isDesktopManaged && desktopActions && desktopUpdateState?.phase === 'available' ? (
                   <div className="flex items-center gap-2">
                     <Button variant="ghost" size="xs" onClick={handleSkipDesktopUpdate} disabled={upgrading}>
-                      {t('dashboard.skipUpdate')}
+                      {t(localRemoteRequest ? 'dashboard.desktopRemoteUpdateIgnore' : 'dashboard.skipUpdate')}
                     </Button>
                     <Button variant="brand" size="xs" onClick={handleUpgrade} disabled={upgrading}>
                       <Download size={14} className={upgrading ? 'animate-bounce' : ''} />
                       {upgrading ? t('dashboard.upgrading') : t('dashboard.upgradeNow')}
                     </Button>
                   </div>
-                ) : !isDesktopManaged ? (
+                ) : remoteDesktopWeb && canRequestRemoteUpdate ? (
+                  <Button variant="brand" size="xs" onClick={handleUpgrade} disabled={upgrading || remoteRequesting || remoteRequestActive || remoteUpdateTimedOut}>
+                    <Download size={14} className={remoteRequesting ? 'animate-bounce' : ''} />
+                    {remoteRequesting ? t('dashboard.desktopRemoteUpdateRequesting') : t('dashboard.desktopRemoteUpdateTitle')}
+                  </Button>
+                ) : !isDesktopManaged && capabilities.can_manage_instance ? (
                   <Button variant="brand" size="xs" onClick={handleUpgrade} disabled={upgrading}>
                     <Download size={14} className={upgrading ? 'animate-bounce' : ''} />
                     {upgrading ? t('dashboard.upgrading') : t('dashboard.upgradeNow')}
@@ -553,5 +773,61 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
         )}
       </div>
     </Popover>
+
+    <Dialog
+      open={remoteConfirmation !== null && capabilities.can_manage_instance}
+      onOpenChange={(open) => {
+        if (!open && !remoteRequesting) setRemoteConfirmation(null);
+      }}
+    >
+      <DialogContent className="max-w-md" closeLabel={t('common.close')}>
+        <DialogHeader>
+          <DialogTitle>{t('dashboard.desktopRemoteUpdateConfirmTitle', {
+            target: remoteConfirmation?.target ?? latestVersion ?? '',
+          })}</DialogTitle>
+          <DialogDescription>
+            {t('dashboard.desktopRemoteUpdateConfirmDescription', {
+              delivery: remoteConfirmation?.delivery === 'runtime'
+                ? t('dashboard.runtimeUpdateDelivery')
+                : remoteConfirmation?.delivery === 'install'
+                ? t('dashboard.desktopRemoteUpdateDeliveryInstall')
+                : t('dashboard.desktopRemoteUpdateDeliveryPrompt'),
+            })}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-2 text-sm text-muted">
+          <p>{remoteConfirmation?.counts
+            ? t('dashboard.desktopRemoteUpdateInterruptions', remoteConfirmation.counts)
+            : t('dashboard.desktopRemoteUpdateCheckWork')}</p>
+          {remoteConfirmation?.counts?.unknown && <p>{t('dashboard.desktopRemoteUpdateUnknownWork')}</p>}
+          <p>{t('dashboard.updateInterruptWarning')}</p>
+          {remoteRequestError && <p role="alert" className="text-destructive-ink">{t('dashboard.desktopRemoteUpdateError')}</p>}
+
+        </div>
+        <DialogFooter>
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={() => setRemoteConfirmation(null)}
+            disabled={remoteRequesting}
+          >
+            {t('common.cancel')}
+          </Button>
+          <Button
+            type="button"
+            variant="brand"
+            onClick={() => void submitRemoteUpdateRequest()}
+            disabled={remoteRequesting}
+          >
+            {remoteRequesting
+              ? t('dashboard.desktopRemoteUpdateRequesting')
+              : remoteConfirmation?.counts
+                ? t('dashboard.desktopRemoteUpdateConfirmInterrupt')
+                : t('dashboard.desktopRemoteUpdateConfirm')}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+    </>
   );
 };

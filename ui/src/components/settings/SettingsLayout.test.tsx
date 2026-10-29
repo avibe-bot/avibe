@@ -32,7 +32,7 @@ const api = vi.hoisted(() => {
   };
 });
 const authorization = vi.hoisted(() => ({
-  capabilities: { can_manage_instance: true },
+  capabilities: { can_manage_instance: true, can_read_instance: true },
 }));
 const media = vi.hoisted(() => ({
   matches: false,
