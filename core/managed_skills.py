@@ -1416,7 +1416,13 @@ def _assert_source_unchanged(source: Path, entries: Sequence[_SnapshotEntry], sn
         try:
             source_fd, before = _open_regular_file(entry.path)
             snapshot_fd, copied = _open_regular_file(snapshot.joinpath(*entry.relative.split("/")))
-            if _stat_token(before) != entry.token or copied.st_size != before.st_size:
+            # Windows/Python may give path stat and fstat different ctime meanings.
+            # Compare identity/size across APIs; compare timestamps within each API.
+            if (
+                _directory_identity(before) != entry.token[:2]
+                or before.st_size != entry.token[2]
+                or copied.st_size != before.st_size
+            ):
                 raise RuntimeError(changed)
             # Buffered binary reads handle short reads without comparing different
             # chunk boundaries. Bound the work by the already-enumerated file size.
@@ -1431,7 +1437,7 @@ def _assert_source_unchanged(source: Path, entries: Sequence[_SnapshotEntry], sn
                     remaining -= len(chunk)
                 if current.read(1) or staged.read(1):
                     raise RuntimeError(changed)
-            if _stat_token(os.fstat(source_fd)) != entry.token:
+            if _stat_token(os.fstat(source_fd)) != _stat_token(before):
                 raise RuntimeError(changed)
         except OSError as exc:
             raise RuntimeError(changed) from exc

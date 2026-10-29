@@ -1738,6 +1738,65 @@ def test_publication_compares_validated_snapshot_with_source_bytes(
     assert not staging.exists()
 
 
+@pytest.mark.parametrize("descriptor_changes", [False, True], ids=["unchanged", "descriptor-change"])
+def test_publication_compares_timestamps_within_the_same_stat_api(
+    tmp_path: Path,
+    monkeypatch,
+    descriptor_changes: bool,
+) -> None:
+    """Windows path stat can expose birthtime as ctime while fstat exposes change time."""
+
+    source = tmp_path / "source"
+    destination = tmp_path / "builtin-skills"
+    skill_file = _write_skill(source, "alpha", "alpha", "Alpha")
+    expected = skill_file.read_bytes()
+    identity = (skill_file.stat().st_dev, skill_file.stat().st_ino)
+    original_fstat = os.fstat
+    original_validate = managed_skills._validate_builtin_catalog
+    validated = False
+    verification_stats = 0
+
+    class _DescriptorStat:
+        def __init__(self, value, offset):
+            self._value = value
+            self.st_ctime_ns = value.st_ctime_ns + offset
+            self.st_ctime = self.st_ctime_ns / 1_000_000_000
+
+        def __getattr__(self, name):
+            return getattr(self._value, name)
+
+    def fstat(fd):
+        nonlocal verification_stats
+        value = original_fstat(fd)
+        offset = 1_000_000_000
+        if validated and (value.st_dev, value.st_ino) == identity:
+            verification_stats += 1
+            if descriptor_changes and verification_stats > 1:
+                offset += 1
+        # Model different API meanings, without touching filesystem timestamps.
+        return _DescriptorStat(value, offset)
+
+    def validate(root):
+        nonlocal validated
+        original_validate(root)
+        if root == destination.parent / ".builtin-skills.staging":
+            validated = True
+
+    monkeypatch.setattr(managed_skills.os, "fstat", fstat)
+    monkeypatch.setattr(managed_skills, "_validate_builtin_catalog", validate)
+
+    if descriptor_changes:
+        with pytest.raises(RuntimeError, match="source changed"):
+            publish_builtin_skills(source_root=source, destination_root=destination)
+        assert not destination.exists()
+    else:
+        assert publish_builtin_skills(source_root=source, destination_root=destination) == destination
+        assert (destination / "alpha" / "SKILL.md").read_bytes() == expected
+    assert skill_file.read_bytes() == expected
+    assert verification_stats >= 2
+    assert not (destination.parent / ".builtin-skills.staging").exists()
+
+
 @pytest.mark.parametrize("mutation", ["replace", "remove", "symlink", "unreadable"])
 def test_publication_rejects_source_file_changes_after_validation(
     tmp_path: Path,
