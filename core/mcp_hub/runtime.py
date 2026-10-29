@@ -472,13 +472,17 @@ class McpRuntime:
             existing = repository.read_definition(name)
         except McpHubError:
             existing = repository.read_avibe_definition(name)
-        exists = existing is not None or repository.read_published(name) is not None
-        listed = name not in repository.hidden_names() and repository.read_published(name) is not None
+        published = repository.read_published(name)
+        exists = existing is not None or published is not None
+        listed = name not in repository.hidden_names() and published is not None
         if exists and not replace:
+            published_definition = published["definition"] if published is not None else None
             if (
                 listed
                 and existing is not None
+                and published_definition is not None
                 and McpRuntime._comparable_definition(existing) == McpRuntime._comparable_definition(definition)
+                and McpRuntime._comparable_definition(published_definition) == McpRuntime._comparable_definition(definition)
             ):
                 return "unchanged"
             if listed:

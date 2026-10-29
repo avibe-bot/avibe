@@ -65,7 +65,7 @@ List all servers: `vibe mcp --list`.
 ```
 
 - One line per package, sorted by name; description sanitized to one line, max 160 chars.
-- Description: from the active revision's manifest (user-provided at generation, else a localized generic string); pending unregenerated edits are not shown. Server-provided text is not used.
+- Description: from the published snapshot's manifest (user-provided at add/refresh, else a localized generic string). Server-provided text is not used. There is one snapshot per server; there are no pending edits.
 - List at most 50 servers; if more exist, append the omitted count and `vibe mcp --list`.
 - No tool names, schemas, URLs, commands, credentials or management commands.
 - The block has two fixed parts: stable shared instructions (examples must stay parser-valid), then one `<server>: <description>` line per package, where `<server>` is the exact CLI selector.
@@ -135,35 +135,35 @@ vibe mcp docs --remove
 
 ## 5. Page configuration
 
-Skills & MCP page, MCP tab. No status badges, enable toggle, generate/tools/edit.
+Skills & MCP page, MCP tab. No status badges, enable toggle, or edit dialog.
 
 - Toolbar: 技能 | MCP, search, `+ 添加 MCP`. Header `刷新` = discover all.
 - Row: transport icon, name, command/URL, tool count · transport, source chip (Avibe/Claude/Codex/OpenCode).
 - Detail: connection, tools, `vibe mcp <name> <tool>`, last refreshed. Footer: 刷新 / 删除.
 - Add dialog: JSON textarea, 取消 / 添加. Invalid JSON or failed refresh keeps the dialog open.
-- Delete: Avibe source removes artifacts; native source hides in Avibe (`hidden.json`) and leaves the native file byte-identical.
+- Delete: Avibe source removes artifacts. Native source **hides in Avibe only** (`.hidden.json`); the native file is never touched. Owner-confirmed.
 
 ## 6. Discovery and versions
 
-- Discovery = generate for every Avibe definition and every native source entry (except natively `enabled=false` and Avibe-hidden names). Connect, list tools, publish. Success → registered. Failure → not listed; reason in logs and `vibe mcp-discover`.
+- Discovery = refresh every Avibe definition and every native source entry (except natively `enabled=false` and Avibe-hidden names). Connect, list tools, publish one snapshot. Success → registered. Failure → not listed; reason in logs and `vibe mcp-discover`.
 - Avibe name wins over a native duplicate.
 - A native entry removed or set `enabled=false` disappears at the next discovery; leftover artifacts may be deleted then.
-- Publish = write the full revision directory, then atomically replace `current.json`. Failure leaves the previous revision (if any) but an unsuccessful name is not listed.
+- Publish = write one snapshot directory, then atomically replace `current.json`. A failed refresh unlists the name (`current.json` dropped); revision files may remain for a later retry.
 - Concurrent discover passes join one in-flight task.
-- Keep current + previous revision. Tools with `execution.taskSupport: "required"` are skipped with a diagnostic.
+- Keep exactly one published snapshot per server. Tools with `execution.taskSupport: "required"` are skipped with a diagnostic.
 
 ## 7. Runtime
 
 - **Owner:** the Controller, over existing control IPC. UI and CLI hold no runtimes.
 - **Identity:** existing caller context (`core/caller_context.py`, `AVIBE_SESSION_ID`, …) as used by `vibe task/watch/agent`. No MCP-specific token.
-- **Permission:** instance-global. The local OS user has full rights. Management commands (add/save, generate/regenerate, enable/disable, remove) are Owner-only through the existing CLI command admission, because generating a stdio definition runs an arbitrary local command; list/help (admission runs before any help is rendered) and tool calls use the same floor as using Skills (Editor), matching who sees the prompt index. Remote-context callers thus get exactly the permissions they have elsewhere. No MCP-specific policy.
+- **Permission:** instance-global. The local OS user has full rights. Management commands (add, discover, refresh, remove) are Owner-only through the existing CLI command admission, because refreshing a stdio definition runs an arbitrary local command; list/help (admission runs before any help is rendered) and tool calls use the same floor as using Skills (Editor), matching who sees the prompt index. Remote-context callers thus get exactly the permissions they have elsewhere. No MCP-specific policy.
 - **Connections:** one client connection per (revision, caller session) for every transport — a stdio process, or an HTTP client holding its own `Mcp-Session-Id` (closed with the connection). This matches Claude Code and Codex (one client per session). Context-free calls are one-shot. Calls within one session are serialized on its connection. A connection whose call ends with `unknown_outcome` is closed, never reused. An HTTP `Session not found` (pre-dispatch) closes the client and the call is retried once on a fresh connection.
-- **Limits** (constants): at most 8 stdio processes in total, including generation; at the cap a new connection fails with `capacity`. Idle close 10 min; call timeout 120 s; generation 5 min. HTTP is not capped.
+- **Limits** (constants): at most 8 stdio processes in total, including refresh; batch add/discover wait for a slot, a single tool call fails with `capacity` at the cap. Idle close 10 min; call timeout 120 s; refresh 5 min. HTTP is not capped.
 - Servers that lock a shared resource (e.g. Playwright's default persistent profile) need their own isolation flag in the provider config (`--isolated`); Avibe does not rewrite server argv.
-- **Schemas at call time:** the CLI parses and validates against the published revision only. A new runtime connection lists all `tools/list` pages through the SDK before its first call (same 100-page cap as generation), so the SDK knows every tool's output schema and header annotations; that list never changes the published package.
-- **Calls:** the owner checks enabled state, connects or reuses, sends `tools/call` and returns the result with the revision used. Elicitation/sampling/roots are out of scope: the client's callbacks for them reject; since the tool may already have acted, the call ends as `unknown_outcome`. The owner fixes the revision at admission and validates arguments against it.
-- **Disable/remove/regenerate:** disable/remove block new calls; all three close the package's superseded idle connections at once (busy ones close when their call settles); in-flight work may finish or report unknown outcome.
-- **Event loop:** all MCP SDK sessions run on one dedicated runtime thread with its own event loop, owned by the Controller; the SDK's synchronous result validation therefore never blocks the Controller loop. All other MCP work — argument validation, generation, artifact I/O, result envelope serialization and sizing — also runs off the Controller loop; the Controller loop only hands IPC requests over, per the repo's controller-loop rules.
+- **Schemas at call time:** the CLI parses and validates against the published snapshot only. A new runtime connection lists all `tools/list` pages through the SDK before its first call (same 100-page cap as refresh), so the SDK knows every tool's output schema and header annotations; that list never changes the published package.
+- **Calls:** the owner checks a published snapshot, connects or reuses, sends `tools/call` and returns the result with the revision used. Elicitation/sampling/roots are out of scope: the client's callbacks for them reject; since the tool may already have acted, the call ends as `unknown_outcome`. The owner fixes the revision at admission and validates arguments against it.
+- **Remove/refresh:** remove blocks new calls; remove and a successful refresh close the package's superseded idle connections at once (busy ones close when their call settles); in-flight work may finish or report unknown outcome.
+- **Event loop:** all MCP SDK sessions run on one dedicated runtime thread with its own event loop, owned by the Controller; the SDK's synchronous result validation therefore never blocks the Controller loop. All other MCP work — argument validation, refresh, artifact I/O, result envelope serialization and sizing — also runs off the Controller loop; the Controller loop only hands IPC requests over, per the repo's controller-loop rules.
 
 Result envelope:
 
@@ -191,13 +191,13 @@ Read routes Editor; management Owner. Native async FastAPI → owner IPC.
 
 ## 9. Prior art
 
-Lifecycle follows mcporter `generate-cli` (inspected at [`5362d60`](https://github.com/openclaw/mcporter/blob/5362d60d2e17ca5b2dee3d92f48c0fb7b010abc5/docs/cli-generator.md)): discover at generation, static help, explicit regeneration. Differences: one shared Python runner instead of per-server executables; exact keys with no flag normalization or default insertion.
+CLI shape follows mcporter `generate-cli` (inspected at [`5362d60`](https://github.com/openclaw/mcporter/blob/5362d60d2e17ca5b2dee3d92f48c0fb7b010abc5/docs/cli-generator.md)): discover once, static help, explicit refresh. Differences: one shared Python runner instead of per-server executables; exact keys with no flag normalization or default insertion; one published snapshot, no draft/enable lifecycle.
 
 ## 10. Implementation and acceptance
 
 - **C0** (after authorization): pin SDK, confirm caller-context/IPC fit, SDK protocol negotiation, and the result byte cap. Hermetic temp `AVIBE_HOME` and loopback fixtures.
-- **C1:** repository + parser, generator/publisher, runtime, CLI, prompt index.
-- **C2:** UI/API, i18n, user documentation (adding servers, plaintext credential behavior, regeneration, tool invocation), Ruff and UI build; Incus regression on request.
+- **C1:** repository + parser, publisher, runtime, CLI, prompt index.
+- **C2:** UI/API, i18n, user documentation (adding servers, plaintext credential behavior, refresh, tool invocation), Ruff and UI build; Incus regression on request.
 - **C3:** Disable Claude/Codex/OpenCode native MCP in Avibe sessions. Hub **reads** those backends' config files as a source and stores Avibe-added servers under `<avibe-home>/mcp/`. Spawn isolation is unchanged.
 
 Acceptance:
@@ -205,7 +205,7 @@ Acceptance:
 1. Fresh start with reachable native servers lists and calls them without user action; unreachable ones are absent and `vibe mcp-discover` shows why.
 2. `vibe mcp-discover` and `vibe mcp <name> --refresh` work from CLI and UI; concurrent passes join. Startup discovery never blocks the controller loop or readiness.
 3. Add through page/`vibe mcp-add` writes only the Avibe store and the server appears after the call returns.
-4. Delete of an Avibe server removes it; delete of a native server hides it and leaves the native file byte-identical.
+4. Delete of an Avibe server removes it. Delete of a native server hides it in Avibe only (owner-confirmed); the native file is never touched.
 5. Help/list work with the owner down; schema-to-flag contracts hold; injected prompt examples are parser-tested.
 6. UI matches the Pencil frames; leftover MVP `state.json` enabled flags and drafts load safely (ignored).
 7. Avibe-spawned sessions do not load native MCP (C3 unchanged).

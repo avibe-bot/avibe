@@ -165,6 +165,33 @@ def test_readding_hidden_native_identical_definition_registers_again(runtime):
     assert repository.read_published("echo") is not None
 
 
+def test_native_definition_change_is_not_unchanged_until_published(runtime):
+    from core.mcp_hub import native
+
+    claude = native.claude_path()
+    claude.parent.mkdir(parents=True, exist_ok=True)
+    claude.write_text(json.dumps({"mcpServers": {
+        "echo": {"type": "stdio", "command": sys.executable, "args": [FIXTURE]},
+    }}))
+    assert _run(runtime, "discover", {})["ok"]
+    claude.write_text(json.dumps({"mcpServers": {
+        "echo": {"type": "stdio", "command": sys.executable, "args": [FIXTURE, "--other"]},
+    }}))
+    pasted = {
+        "name": "echo",
+        "server": {"command": sys.executable, "args": [FIXTURE, "--other"]},
+        "description": "Echo tools",
+    }
+    blocked = _run(runtime, "add", {"servers": [pasted]})
+    assert blocked["ok"] is False
+    assert blocked["failed"][0]["type"] == "exists"
+    replaced = _run(runtime, "add", {"servers": [pasted], "replace": True})
+    assert replaced["ok"] is True
+    assert replaced["added"][0]["name"] == "echo"
+    published = repository.read_published("echo")["definition"]
+    assert published["transport"]["args"] == [FIXTURE, "--other"]
+
+
 def test_explicit_cwd_difference_is_exists_not_unchanged(generated):
     same_command = {
         "name": "echo",
