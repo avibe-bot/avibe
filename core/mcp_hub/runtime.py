@@ -458,6 +458,8 @@ class McpRuntime:
     @staticmethod
     def _comparable_definition(definition: dict[str, Any]) -> dict[str, Any]:
         transport = dict(definition.get("transport") or {})
+        if transport.get("type") == STDIO and not transport.get("cwd"):
+            transport["cwd"] = repository.default_cwd()
         return {
             "name": definition.get("name"),
             "description": definition.get("description") or "",
@@ -498,11 +500,11 @@ class McpRuntime:
         if not isinstance(name, str) or not name:
             raise McpHubError("usage", "name is required.", usage=True)
         if payload.get("locked"):
-            return await self._refresh_locked(name, wait_stdio=payload.get("waitStdio") is True)
+            return await self._refresh_locked(name, wait_stdio=payload.get("waitStdio") is True, unlist_on_failure=False)
         async with self._lock(name):
-            return await self._refresh_locked(name, wait_stdio=payload.get("waitStdio") is True)
+            return await self._refresh_locked(name, wait_stdio=payload.get("waitStdio") is True, unlist_on_failure=True)
 
-    async def _refresh_locked(self, name: str, *, wait_stdio: bool) -> bytes:
+    async def _refresh_locked(self, name: str, *, wait_stdio: bool, unlist_on_failure: bool = False) -> bytes:
         definition = await asyncio.to_thread(repository.read_definition, name)
         snapshot = json.loads(json.dumps(definition))
 
@@ -528,10 +530,16 @@ class McpRuntime:
             with anyio.fail_after(remaining):
                 tools, server_info = await self._discover(snapshot)
         except TimeoutError:
+            if unlist_on_failure:
+                await asyncio.to_thread(repository.unlist, name)
             raise McpHubError("timeout", "Refresh timed out.") from None
         except McpHubError:
+            if unlist_on_failure:
+                await asyncio.to_thread(repository.unlist, name)
             raise
         except Exception as cop:
+            if unlist_on_failure:
+                await asyncio.to_thread(repository.unlist, name)
             raise McpHubError("connection", f"Refresh failed: {_describe(cop)}") from None
         finally:
             if acquired:

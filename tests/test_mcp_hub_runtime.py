@@ -138,6 +138,17 @@ def test_failed_readd_of_hidden_native_stays_hidden(runtime):
     assert repository.read_published("echo") is None
 
 
+def test_failed_explicit_refresh_unlists_the_server(generated):
+    repository.write_avibe_definition({
+        "name": "echo",
+        "description": "Echo tools",
+        "transport": {"type": "stdio", "command": "/nonexistent/mcp-echo", "args": [FIXTURE]},
+    })
+    result = _run(generated, "refresh", {"name": "echo", "waitStdio": True})
+    assert result["ok"] is False
+    assert "echo" not in {item["name"] for item in repository.list_packages()}
+
+
 def test_failed_discover_unlists_previous_revision(generated):
     repository.write_avibe_definition({
         "name": "echo",
@@ -195,6 +206,23 @@ def test_native_definition_change_is_not_unchanged_until_published(runtime):
     assert replaced["added"][0]["name"] == "echo"
     published = repository.read_published("echo")["definition"]
     assert published["transport"]["args"] == [FIXTURE, "--other"]
+
+
+def test_identical_native_readd_without_cwd_is_unchanged(runtime):
+    from core.mcp_hub import native
+
+    claude = native.claude_path()
+    claude.parent.mkdir(parents=True, exist_ok=True)
+    claude.write_text(json.dumps({"mcpServers": {
+        "echo": {"type": "stdio", "command": sys.executable, "args": [FIXTURE]},
+    }}))
+    assert _run(runtime, "discover", {})["ok"]
+    result = _run(runtime, "add", {"servers": [{
+        "name": "echo",
+        "server": {"command": sys.executable, "args": [FIXTURE]},
+    }]})
+    assert result["ok"] is True
+    assert result["unchanged"][0]["name"] == "echo"
 
 
 def test_explicit_cwd_difference_is_exists_not_unchanged(generated):
