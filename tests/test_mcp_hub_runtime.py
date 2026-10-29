@@ -243,6 +243,13 @@ def test_oversized_result_is_omitted_but_reported_complete(generated, monkeypatc
     assert result["result"] == {"isError": False}
 
 
+def test_reader_retries_when_refresh_deletes_the_old_snapshot(generated, monkeypatch):
+    live = repository.read_published("echo")["revision"]
+    reads = iter(["gone-revision", live])
+    monkeypatch.setattr(repository, "_current_revision", lambda name: next(reads))
+    assert repository.read_published("echo")["revision"] == live
+
+
 def test_malformed_avibe_definition_is_omitted_from_the_list(generated):
     path = repository.package_dir("broken") / "definition.json"
     path.parent.mkdir(parents=True, exist_ok=True)

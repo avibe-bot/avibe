@@ -119,7 +119,7 @@ def _environment(monkeypatch, history="managed", skill_mode="pages"):
         for name in names
     ] if skill_mode != "empty" else []
     monkeypatch.setattr(managed_skills, "resolve_skills", lambda *_args, **_kwargs: skills)
-    monkeypatch.setattr(mcp_repository, "enabled_generated", lambda: [{"name": "docs", "description": "Docs"}])
+    monkeypatch.setattr(mcp_repository, "list_packages", lambda: [{"name": "docs", "description": "Docs"}])
 
 
 @pytest.mark.parametrize("backend,history,skill_mode", itertools.product(

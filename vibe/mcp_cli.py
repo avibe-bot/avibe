@@ -234,7 +234,7 @@ def _server(name: str, args: list[str]) -> int:
             return denied
         if len(args) != 1:
             raise McpHubError("usage", "usage: vibe mcp <server> --refresh", usage=True)
-        return _owner("refresh", {"name": name})
+        return _owner("refresh", {"name": name, "waitStdio": True})
     if args and args[0] == "--remove":
         denied = _admit("owner")
         if denied is not None:

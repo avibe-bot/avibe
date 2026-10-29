@@ -92,7 +92,7 @@ async def discover() -> dict[str, Any]:
 
 
 async def refresh(name: str) -> dict[str, Any]:
-    return await _owner("refresh", {"name": name})
+    return await _owner("refresh", {"name": name, "waitStdio": True})
 
 
 async def remove(name: str) -> dict[str, Any]:

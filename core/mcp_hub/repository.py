@@ -286,18 +286,22 @@ def _load_revision(name: str, revision: str) -> dict[str, Any]:
 def read_published(name: str) -> Optional[dict[str, Any]]:
     """The active revision as one consistent snapshot, or ``None`` when never generated.
 
-    An unreadable or unknown-format snapshot omits the package.
+    An unreadable or unknown-format snapshot omits the package. A missing
+    revision directory is retried once against a newer ``current.json``.
     """
 
-    revision = _current_revision(name)
-    if revision is None:
-        return None
-    try:
-        return _load_revision(name, revision)
-    except FileNotFoundError:
-        raise McpHubError("invalid_package", f"{name}: revision {revision} is incomplete.") from None
-    except (OSError, ValueError) as exc:
-        raise McpHubError("invalid_package", f"{name}: revision {revision} is unreadable: {exc}") from None
+    for attempt in range(2):
+        revision = _current_revision(name)
+        if revision is None:
+            return None
+        try:
+            return _load_revision(name, revision)
+        except FileNotFoundError:
+            if attempt:
+                raise McpHubError("invalid_package", f"{name}: revision {revision} is incomplete.") from None
+        except (OSError, ValueError) as exc:
+            raise McpHubError("invalid_package", f"{name}: revision {revision} is unreadable: {exc}") from None
+    return None
 
 
 def new_revision_id() -> str:
@@ -329,13 +333,6 @@ def publish(name: str, *, definition: dict[str, Any], manifest: dict[str, Any], 
 # ---------------------------------------------------------------------------
 # Summaries for lists, the prompt index and the UI
 # ---------------------------------------------------------------------------
-
-
-def _comparable(definition: dict[str, Any], *, without_cwd: bool) -> dict[str, Any]:
-    transport = dict(definition.get("transport") or {})
-    if without_cwd:
-        transport.pop("cwd", None)
-    return {**definition, "transport": transport}
 
 
 def summarize(name: str, servers: Optional[dict[str, native.NativeServer]] = None) -> dict[str, Any]:
