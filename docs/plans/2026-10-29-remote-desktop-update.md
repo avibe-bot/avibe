@@ -2,18 +2,22 @@
 
 ## Goal
 
-An Instance Owner using a browser can request an update of a desktop-managed
-host. The request always enters the existing signed Rust updater. By default the
-host prompts a local user before installation. A local desktop-only preference
-may allow the same request to install without another click.
+An Instance Member or Owner using a browser can request an update of a
+desktop-managed host. The request always enters the existing signed Rust
+updater. By default the host prompts a local user before installation. A local
+desktop-only preference may allow the same request to install without another
+click.
 
-This change does not reuse `/api/upgrade`, pip, or uv. It does not add remote
-control of the desktop preference.
+For `managed_by: "desktop"`, this change does not reuse `/api/upgrade`, pip, or
+uv. Non-desktop packaged installs retain the existing Python `/api/upgrade`
+path, and source checkouts retain their existing build-refresh behavior. The
+change does not add remote control of the desktop preference.
 
 ## Trust Boundaries
 
-- `POST /api/desktop/update/request` is explicitly Owner-only and remains behind
-  the existing same-origin and CSRF middleware.
+- `POST /api/desktop/update/request` is explicitly Member-level, like
+  `/api/upgrade`, and remains behind the existing same-origin and CSRF
+  middleware. Editors and Viewers receive the same 403 response.
 - The Runtime is the only component that writes
   `desktop-update-request.json`. A request is written only after authorization,
   interruption confirmation, and desktop-managed availability checks pass.
@@ -43,11 +47,12 @@ control of the desktop preference.
 }
 ```
 
-The Runtime writes the file with create, flush, `fsync`, and atomic replace.
-The only states are `pending` and `expired`. On a ten-second acknowledgement
-timeout, the Runtime atomically changes the matching pending file to `expired`
-before returning `desktop_shell_unavailable`. The shell re-reads the file before
-installation and accepts only the same unexpired pending request.
+The Runtime writes the file with create, flush, `fsync`, and atomic replace
+after the Member role and browser mutation guards pass. The only states are
+`pending` and `expired`. On a ten-second acknowledgement timeout, the Runtime
+atomically changes the matching pending file to `expired` before returning
+`desktop_shell_unavailable`. The shell re-reads the file before installation
+and accepts only the same unexpired pending request.
 
 One request may be active. A retry with the same target while that request is
 non-terminal returns the existing `request_id`; another target returns
@@ -135,6 +140,13 @@ Active interruption counts include running foreground Agent work and queued or
 running Harness Watch and scheduled Task runs. If the controller cannot answer,
 the endpoint fails closed and requires explicit interruption confirmation.
 
+The existing Member-level `POST /api/upgrade` remains the non-desktop packaged
+installer. A new Workbench may send optional `confirm_interrupt: false` and
+receive the same `confirmation_required` response before retrying with `true`.
+An omitted field preserves the legacy behavior and response shape so an old
+cached Workbench continues to upgrade. This PR does not change the endpoint's
+permission level.
+
 ## Shell Behaviour
 
 The shell responds to the SSE nudge and polls the file every 30 seconds as a
@@ -164,16 +176,25 @@ fails fast as `requires_host` when the installation needs elevation.
 
 For `managed_by: "desktop"` without a Tauri bridge:
 
-- Owners see **Update on host**, confirmation, interruption counts, delivery
-  mode, progress, restart/reconnect state, and the terminal result.
-- Other roles see guidance to update in the desktop app on the host and no
-  mutation control.
+- Members and Owners see **Update on host**, confirmation, interruption counts,
+  delivery mode, progress, restart/reconnect state, and the terminal result.
+- Editors and Viewers see guidance to update in the desktop app on the host and
+  no mutation control.
 - During restart, the browser retries `/api/version` and confirms completion by
   the request terminal state and resulting version. A bounded timeout says the
   update was not confirmed and directs the user to the host.
 
 The local desktop Workbench additionally probes the preference IPC. Browsers and
 older shells hide the setting when the capability is absent.
+
+For non-desktop builds:
+
+- a package install keeps the existing Install action and `/api/upgrade` path;
+- a new Workbench shares interruption confirmation and the existing
+  restart/reconnect reload behavior;
+- an old Workbench remains valid because confirmation is opt-in;
+- a source checkout keeps the existing revision refresh and has no install
+  action.
 
 ## Platform Findings and Residuals
 

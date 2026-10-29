@@ -330,6 +330,8 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         ("PUT", "/api/projects/project-1/agents-md"),
         ("GET", "/api/settings"),
         ("GET", "/api/users"),
+        ("POST", "/api/upgrade"),
+        ("POST", "/api/desktop/update/request"),
         ("GET", "/api/remote-access/status"),
         ("GET", "/api/remote-access/network-interfaces"),
         ("POST", "/api/remote-access/optimize-route"),

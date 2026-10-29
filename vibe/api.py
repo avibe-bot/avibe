@@ -6969,6 +6969,10 @@ def get_version_info() -> dict:
             "latest": status["latest"] if status else None,
             "has_update": status["has_update"] if status else False,
             "error": None,
+            "remote_install_allowed": (
+                status["remote_install_allowed"] if status else False
+            ),
+            "remote_request": status["remote_request"] if status else None,
         }
     elif build.kind == "source":
         result = {"current": __version__, "latest": None, "has_update": False, "error": None}
