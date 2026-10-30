@@ -103,27 +103,36 @@ export const modelCapabilities = (status: HostedToolsStatus, sourceId: string, m
   });
 
 /**
- * The executor order to save after moving one shown executor. The saved order may
- * name Sources the read does not show now (refused, or gone for a while); the
- * server keeps those on purpose and skips them, so a move rearranges only the
- * shown ones within the saved list and leaves every hidden id where it was. A
- * shown executor the saved list lacks follows the list, in its new place.
+ * The executor order to save after moving one shown executor from position `from`
+ * to `to` (a drag, or one step of an arrow). The saved order may name Sources the
+ * read does not show now (refused, or gone for a while); the server keeps those on
+ * purpose and skips them, so a move rearranges only the shown ones within the
+ * saved list and leaves every hidden id where it was. A shown executor the saved
+ * list lacks follows the list, in its new place.
  */
-export const executorOrderAfterMove = (
+export const executorOrderAfterReorder = (
   saved: readonly string[] | null,
   shown: readonly string[],
-  index: number,
-  direction: -1 | 1,
+  from: number,
+  to: number,
 ): string[] => {
   const moved = [...shown];
-  const [item] = moved.splice(index, 1);
-  moved.splice(index + direction, 0, item);
+  const [item] = moved.splice(from, 1);
+  moved.splice(to, 0, item);
   if (saved === null) return moved;
   const visible = new Set(shown);
   const next = moved[Symbol.iterator]();
   const merged = saved.map((id) => (visible.has(id) ? next.next().value as string : id));
   return [...merged, ...next];
 };
+
+/** One arrow step: the move from `index` to its neighbor in `direction`. */
+export const executorOrderAfterMove = (
+  saved: readonly string[] | null,
+  shown: readonly string[],
+  index: number,
+  direction: -1 | 1,
+): string[] => executorOrderAfterReorder(saved, shown, index, index + direction);
 
 /**
  * The copy key under `settings.models.tools.image.description` for an image model

@@ -384,7 +384,8 @@ describe('ToolsTab executor order', () => {
     const writing = new Set<HostedToolName>(['web_search']);
     const { rerender } = render(view(before));
     await openAdvanced(user, 'Web search');
-    const status = screen.getByRole('status');
+    // A drag has its own live region; this is the arrows' announcement.
+    const status = screen.getAllByRole('status').find((node) => node.hasAttribute('data-order-moved'))!;
 
     // Refused: nothing moved, so nothing is announced and nothing waits to take focus.
     await user.click(screen.getByRole('button', { name: 'Move relay-gpt up' }));

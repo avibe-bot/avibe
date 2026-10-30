@@ -2504,7 +2504,15 @@
           "moveUp": "Move {{source}} up",
           "moveDown": "Move {{source}} down",
           "moved_one": "Moved {{source}} to position {{position}} of {{count}}.",
-          "moved_other": "Moved {{source}} to position {{position}} of {{count}}."
+          "moved_other": "Moved {{source}} to position {{position}} of {{count}}.",
+          "dragHandle": "Drag to reorder {{source}}, now position {{position}}",
+          "dragInstructions": "Press Space to pick up, the arrow keys to move, and Space to drop; Escape cancels. You can also drag the number with the mouse.",
+          "dragPickedUp": "Picked up {{source}}.",
+          "dragDropped": "Dropped {{source}}.",
+          "dragCancelled": "Cancelled moving {{source}}.",
+          "dragPosition_one": "{{source}}, position {{position}} of {{count}}.",
+          "dragPosition_other": "{{source}}, position {{position}} of {{count}}.",
+          "offPosition": "—"
         },
         "sources": {
           "title": "Status by Source",

@@ -177,14 +177,14 @@
       "avibe/localized-user-text": 1
     },
     "src/components/settings/models/ToolsTab.tsx": {
-      "avibe/localized-user-text": 2
+      "avibe/localized-user-text": 1
     },
     "src/components/settings/models/UsageTab.tsx": {
       "avibe/localized-user-text": 5,
       "react-hooks/set-state-in-effect": 5
     },
     "src/components/settings/models/WebFetchOrder.tsx": {
-      "avibe/localized-user-text": 2
+      "avibe/localized-user-text": 1
     },
     "src/components/settings/models/modelsApi.ts": {
       "no-useless-assignment": 1

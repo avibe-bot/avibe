@@ -2068,6 +2068,23 @@
   font-weight: 400;
 }
 .model-hub-order-ordinal.is-first { background: var(--mint-soft); color: var(--mint-ink); }
+/* A row that can move is dragged by its ordinal: it reads as the position, and invites a grab on hover. */
+.model-hub-order-ordinal.is-handle {
+  border: 0;
+  cursor: grab;
+  touch-action: manipulation;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+.model-hub-order-ordinal.is-handle[aria-disabled='true'] { cursor: default; }
+.model-hub-order-ordinal.is-handle:not([aria-disabled='true']):hover { background: var(--model-hub-wash-14); color: var(--foreground); }
+.model-hub-order-ordinal.is-handle.is-first:not([aria-disabled='true']):hover { background: var(--mint-soft); color: var(--mint-ink); box-shadow: inset 0 0 0 1px var(--mint-ink); }
+.model-hub-order-ordinal.is-handle:focus-visible { outline: 2px solid var(--mint); outline-offset: 1px; }
+.model-hub-tool-executor-row.is-dragging {
+  position: relative;
+  z-index: 10;
+  box-shadow: var(--model-hub-menu-shadow);
+}
+.model-hub-tool-executor-row.is-dragging .model-hub-order-ordinal.is-handle { cursor: grabbing; }
 .model-hub-order-name {
   --model-hub-order-name-size: 12.5px;
   font-size: var(--model-hub-order-name-size);

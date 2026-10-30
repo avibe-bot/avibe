@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { executorOrderAfterMove, modelCapabilities, pairEvidence, refusalSummary } from './hostedTools';
+import { executorOrderAfterMove, executorOrderAfterReorder, modelCapabilities, pairEvidence, refusalSummary } from './hostedTools';
 import type { HostedRefusal, HostedSuccess, HostedToolRunStatus, HostedToolsStatus } from './types';
 
 const RELAY = 'src_relay001';
@@ -96,6 +96,9 @@ describe('hosted-tool status projection', () => {
     // H is saved but not shown now (refused, or gone for a while); C is shown but not saved.
     expect(executorOrderAfterMove(['A', 'H', 'B'], ['A', 'B', 'C'], 2, -1)).toEqual(['A', 'H', 'C', 'B']);
     expect(executorOrderAfterMove(['H', 'A', 'B'], ['A', 'B'], 1, -1)).toEqual(['H', 'B', 'A']);
+    // A drag moves one executor any distance, keeping hidden ids where they were.
+    expect(executorOrderAfterReorder(null, ['A', 'B', 'C', 'D'], 0, 2)).toEqual(['B', 'C', 'A', 'D']);
+    expect(executorOrderAfterReorder(['A', 'H', 'B', 'C'], ['A', 'B', 'C'], 2, 0)).toEqual(['C', 'H', 'A', 'B']);
     // Automatic: the shown order is the whole order.
     expect(executorOrderAfterMove(null, ['A', 'B'], 0, 1)).toEqual(['B', 'A']);
   });
