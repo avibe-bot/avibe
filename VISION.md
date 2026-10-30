@@ -1,4 +1,4 @@
-# Vision: AI as Colleague, Not Tool
+# Vision: AI as Partner, Not Tool
 
 ## The Problem With How We Talk to AI
 
@@ -18,23 +18,23 @@ When you put AI in a terminal, you force humans to adapt to a machine's interact
 
 We choose the latter.
 
-## The Colleague Test
+## The Partner Test
 
-Ask yourself: does your AI pass the colleague test?
+Ask yourself: does your AI pass the partner test?
 
 A **tool** waits for instructions, executes them, and stops.
 
-A **colleague** does what you asked — then keeps thinking. They notice the module next door has the same bug. They feel uneasy about the test coverage. They come back and say "hey, while I was in there, I found three other things we should look at." They get better at their job over time. They care about the product, not just the task.
+A **partner** does what you asked — then keeps thinking. They notice the module next door has the same bug. They feel uneasy about the test coverage. They come back and say "hey, while I was in there, I found three other things we should look at." They get better at their job over time. They care about the product, not just the task.
 
-The gap between tool and colleague isn't capability. Today's AI agents are extraordinarily capable. The gap is **initiative** — the ability to sense that something isn't right and act on it without being told.
+The gap between tool and partner isn't capability. Today's AI agents are extraordinarily capable. The gap is **initiative** — the ability to sense that something isn't right and act on it without being told.
 
 ## Tension-Driven Agency
 
 We call this driving force **tension**: the gap between how things are and how they should be.
 
-A human colleague feels tension when test coverage drops, when error messages confuse users, when a deployment goes out without review. They don't need a ticket for these things. They notice. They act.
+A good human partner feels tension when test coverage drops, when error messages confuse users, when a deployment goes out without review. They don't need a ticket for these things. They notice. They act.
 
-An AI colleague should work the same way. Not running tasks from a queue, but continuously sensing tensions in the codebase, the product, the workflow — and resolving them. User messages aren't commands that start the engine. They're one signal among many in a stream of events the AI is always processing.
+An AI partner should work the same way. Not running tasks from a queue, but continuously sensing tensions in the codebase, the product, the workflow — and resolving them. User messages aren't commands that start the engine. They're one signal among many in a stream of events the AI is always processing.
 
 This is the architecture:
 
@@ -42,7 +42,7 @@ This is the architecture:
 - **Processing**: the AI's continuous inner life — sensing tensions, reasoning about causes, prioritizing what matters, planning actions.
 - **Outbox**: the only way the AI affects the world — explicit, auditable tool calls. Send a message. Modify a file. Notify a human. Every action is traceable.
 
-The AI doesn't start when you talk to it and stop when it's done. It has its own timeline. It's always there, always thinking, always sensing. Like a colleague sitting across the room.
+The AI doesn't start when you talk to it and stop when it's done. It has its own timeline. It's always there, always thinking, always sensing. Like a partner sitting across the room.
 
 ## Why IM, Not a New Interface
 
@@ -58,13 +58,15 @@ Constraints breed clarity.
 
 ## Where We Are
 
-Today, avibe connects AI coding agents to Slack, Discord, and Lark. You can write code from your phone, review PRs from the beach, debug production from a taxi. The plumbing works.
+Today, Avibe turns your computer into a home for an AI partner. Vibey, the partner built into Avibe, lives there beside the official Claude Code, Codex, and OpenCode, and can hand them work.
 
-But the experience is still a remote control. You press buttons. The AI executes. It's useful, but it's not what we're building toward.
+The Harness gives agents a timeline of their own: they schedule work, wait on conditions, run in the background, and come back when something needs you. You reach them from Slack, Discord, Telegram, WeChat, or Lark, or from the Workbench in any browser, where the conversation sits beside files, a terminal, and the Show Pages an agent builds when a message is not enough. And Vibey keeps the thread on long work: compaction after compaction, its memory holds on to the goal, your own words, and the next step.
+
+The agent no longer stops when you stop typing. But most of what it does still starts with you: it schedules what you asked it to schedule and watches what you asked it to watch. It's useful, but it's not yet a partner that notices on its own.
 
 ## Where We're Going
 
-We're building AI that passes the colleague test.
+We're building AI that passes the partner test.
 
 An AI that finishes your refactoring task and then says: "I noticed the session module has the same structural issue. And the error messages in the auth flow are confusing — want me to clean those up too?"
 
@@ -78,12 +80,12 @@ An AI that has goals, not just tasks. That feels tension, not just receives inst
 
 A year ago, building this would have required a team of twenty and a year of work. Today, a single person with AI can build what used to take an army. The engineering barrier is gone. What remains is taste — knowing what to build and why it matters.
 
-We believe the next great interface between humans and AI isn't a new app. It's the apps humans already use, with AI that behaves like the best colleague you've ever had.
+We believe the next great interface between humans and AI isn't a new app. It's the apps humans already use, with AI that behaves like the best partner you've ever worked with.
 
-**This is what avibe is becoming.**
+**This is what Avibe is becoming.**
 
 ---
 
-*avibe is open source. If this vision resonates with you, we'd love your help building it.*
+*Avibe is open source. If this vision resonates with you, we'd love your help building it.*
 
 *[github.com/avibe-bot/avibe](https://github.com/avibe-bot/avibe)*

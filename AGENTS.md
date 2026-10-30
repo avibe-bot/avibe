@@ -8,11 +8,16 @@ Avibe is the local-first Agent OS: one install command turns a machine into the
 runtime an agent lives in, and the user operates that runtime through Web or IM
 surfaces such as Slack, Discord, Telegram, Feishu/Lark, and WeChat.
 
+Positioning: Avibe, the local-first Agent OS, leads; Vibey is its built-in AI
+partner, presented right after the OS; Claude Code, Codex, and OpenCode also
+run unchanged. Public copy calls Vibey an "AI partner" ("AI 伙伴"), never a "colleague".
+
 Current product shape:
 
 - V2 config-driven service with a Web UI setup wizard and settings pages
 - multi-platform message transport with shared core orchestration
-- multi-backend agent routing across OpenCode, Claude Code, and Codex
+- Vibey, the built-in agent (`modules/agents/vibey/`, `core/agent_core/`), plus
+  multi-backend routing to the official OpenCode, Claude Code, and Codex CLIs
 - local Incus-based unified regression environment for real cross-platform verification
 
 ## 2. Design Philosophy and Architecture

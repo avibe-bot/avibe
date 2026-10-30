@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="470" viewBox="0 0 960 470" role="img" aria-label="Vibey memory benchmark. Left: on the same GPT model, after 8 or more compactions, Vibey answers task, rules, and next step 97% correctly, Claude Code 93%, Codex 53%. Right: intent depth, Vibey 81% vs Claude Code 20% and Codex 14% on GPT, 62% vs Pi 25% on Grok 4.6, 36% vs Claude Code 14% on Claude Sonnet 5.5." font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif">
+<title>Vibey memory benchmark. Left: on the same GPT model, after 8 or more compactions, Vibey answers task, rules, and next step 97% correctly, Claude Code 93%, Codex 53%. Right: intent depth, Vibey 81% vs Claude Code 20% and Codex 14% on GPT, 62% vs Pi 25% on Grok 4.6, 36% vs Claude Code 14% on Claude Sonnet 5.5.</title>
+<rect x="0.5" y="0.5" width="959" height="469" rx="14" fill="#0d1117" stroke="#30363d"/>
+<text x="40" y="52" font-size="24" font-weight="700" text-anchor="start" fill="#e6edf3">Vibey remembers why</text>
+<text x="40" y="78" font-size="14" font-weight="400" text-anchor="start" fill="#9198a1">Same transcript, same compaction point, same model for every agent</text>
+<line x1="490" y1="108" x2="490" y2="408" stroke="#262c36"/>
+<text x="40" y="124" font-size="16" font-weight="700" text-anchor="start" fill="#e6edf3">Same GPT model, compaction after compaction</text>
+<text x="40" y="146" font-size="13" font-weight="400" text-anchor="start" fill="#9198a1">Task, rules, and next step answered correctly</text>
+<line x1="84" y1="362" x2="326" y2="362" stroke="#262c36" stroke-dasharray="3 4"/>
+<text x="78" y="366" font-size="12" font-weight="400" text-anchor="end" fill="#9198a1">40%</text>
+<line x1="84" y1="298.667" x2="326" y2="298.667" stroke="#262c36" stroke-dasharray="3 4"/>
+<text x="78" y="302.667" font-size="12" font-weight="400" text-anchor="end" fill="#9198a1">60%</text>
+<line x1="84" y1="235.333" x2="326" y2="235.333" stroke="#262c36" stroke-dasharray="3 4"/>
+<text x="78" y="239.333" font-size="12" font-weight="400" text-anchor="end" fill="#9198a1">80%</text>
+<line x1="84" y1="172" x2="326" y2="172" stroke="#262c36" stroke-dasharray="3 4"/>
+<text x="78" y="176" font-size="12" font-weight="400" text-anchor="end" fill="#9198a1">100%</text>
+<text x="92" y="384" font-size="12.5" font-weight="400" text-anchor="middle" fill="#9198a1">1-3</text>
+<text x="167.333" y="384" font-size="12.5" font-weight="400" text-anchor="middle" fill="#9198a1">4-5</text>
+<text x="242.667" y="384" font-size="12.5" font-weight="400" text-anchor="middle" fill="#9198a1">6-7</text>
+<text x="318" y="384" font-size="12.5" font-weight="400" text-anchor="middle" fill="#9198a1">8+</text>
+<text x="205" y="404" font-size="12" font-weight="400" text-anchor="middle" fill="#9198a1">Compactions so far</text>
+<path d="M92.0,203.4 L167.3,250.5 L242.7,267.3 L318.0,319.9" fill="none" stroke="#94a3b8" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="92.0" cy="203.4" r="4" fill="#94a3b8" stroke="#0d1117" stroke-width="1.5"/>
+<circle cx="167.3" cy="250.5" r="4" fill="#94a3b8" stroke="#0d1117" stroke-width="1.5"/>
+<circle cx="242.7" cy="267.3" r="4" fill="#94a3b8" stroke="#0d1117" stroke-width="1.5"/>
+<circle cx="318.0" cy="319.9" r="4" fill="#94a3b8" stroke="#0d1117" stroke-width="1.5"/>
+<text x="334.0" y="324.9" font-size="14" fill="#e6edf3"><tspan font-weight="600">53%</tspan><tspan fill="#9198a1" dx="6">Codex</tspan></text>
+<path d="M92.0,178.0 L167.3,192.6 L242.7,202.7 L318.0,192.9" fill="none" stroke="#0ea5e9" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="92.0" cy="178.0" r="4" fill="#0ea5e9" stroke="#0d1117" stroke-width="1.5"/>
+<circle cx="167.3" cy="192.6" r="4" fill="#0ea5e9" stroke="#0d1117" stroke-width="1.5"/>
+<circle cx="242.7" cy="202.7" r="4" fill="#0ea5e9" stroke="#0d1117" stroke-width="1.5"/>
+<circle cx="318.0" cy="192.9" r="4" fill="#0ea5e9" stroke="#0d1117" stroke-width="1.5"/>
+<text x="334.0" y="206.9" font-size="14" fill="#e6edf3"><tspan font-weight="600">93%</tspan><tspan fill="#9198a1" dx="6">Claude Code</tspan></text>
+<path d="M92.0,179.0 L167.3,180.2 L242.7,184.4 L318.0,181.5" fill="none" stroke="#7c3aed" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="92.0" cy="179.0" r="4" fill="#7c3aed" stroke="#0d1117" stroke-width="1.5"/>
+<circle cx="167.3" cy="180.2" r="4" fill="#7c3aed" stroke="#0d1117" stroke-width="1.5"/>
+<circle cx="242.7" cy="184.4" r="4" fill="#7c3aed" stroke="#0d1117" stroke-width="1.5"/>
+<circle cx="318.0" cy="181.5" r="4" fill="#7c3aed" stroke="#0d1117" stroke-width="1.5"/>
+<text x="334.0" y="177.5" font-size="14" fill="#e6edf3"><tspan font-weight="700">97%</tspan><tspan fill="#9198a1" dx="6">Vibey</tspan></text>
+<text x="530" y="124" font-size="16" font-weight="700" text-anchor="start" fill="#e6edf3">Knows why, not only what</text>
+<text x="530" y="146" font-size="13" font-weight="400" text-anchor="start" fill="#9198a1">Memory that captures your deeper intent</text>
+<text x="530" y="180" font-size="12" font-weight="600" text-anchor="start" fill="#9198a1">GPT-6 Astra / GPT-6.1 Sol</text>
+<text x="530" y="204" font-size="13" font-weight="600" text-anchor="start" fill="#e6edf3">Vibey</text>
+<rect x="640" y="193" width="220" height="12" rx="6" fill="#161b22"/>
+<rect x="640" y="193" width="177.3" height="12" rx="6" fill="#7c3aed"/>
+<text x="825.32" y="204" font-size="13" font-weight="700" text-anchor="start" fill="#e6edf3">81%</text>
+<text x="530" y="225" font-size="13" font-weight="400" text-anchor="start" fill="#9198a1">Claude Code</text>
+<rect x="640" y="214" width="220" height="12" rx="6" fill="#161b22"/>
+<rect x="640" y="214" width="44.9" height="12" rx="6" fill="#0ea5e9"/>
+<text x="692.88" y="225" font-size="13" font-weight="600" text-anchor="start" fill="#e6edf3">20%</text>
+<text x="530" y="246" font-size="13" font-weight="400" text-anchor="start" fill="#9198a1">Codex</text>
+<rect x="640" y="235" width="220" height="12" rx="6" fill="#161b22"/>
+<rect x="640" y="235" width="31.5" height="12" rx="6" fill="#94a3b8"/>
+<text x="679.46" y="246" font-size="13" font-weight="600" text-anchor="start" fill="#e6edf3">14%</text>
+<text x="530" y="275" font-size="12" font-weight="600" text-anchor="start" fill="#9198a1">Grok 4.6</text>
+<text x="530" y="299" font-size="13" font-weight="600" text-anchor="start" fill="#e6edf3">Vibey</text>
+<rect x="640" y="288" width="220" height="12" rx="6" fill="#161b22"/>
+<rect x="640" y="288" width="136.0" height="12" rx="6" fill="#7c3aed"/>
+<text x="783.96" y="299" font-size="13" font-weight="700" text-anchor="start" fill="#e6edf3">62%</text>
+<text x="530" y="320" font-size="13" font-weight="400" text-anchor="start" fill="#9198a1">Pi</text>
+<rect x="640" y="309" width="220" height="12" rx="6" fill="#161b22"/>
+<rect x="640" y="309" width="55.0" height="12" rx="6" fill="#10b981"/>
+<text x="703" y="320" font-size="13" font-weight="600" text-anchor="start" fill="#e6edf3">25%</text>
+<text x="530" y="349" font-size="12" font-weight="600" text-anchor="start" fill="#9198a1">Claude Sonnet 5.5</text>
+<text x="530" y="373" font-size="13" font-weight="600" text-anchor="start" fill="#e6edf3">Vibey</text>
+<rect x="640" y="362" width="220" height="12" rx="6" fill="#161b22"/>
+<rect x="640" y="362" width="78.1" height="12" rx="6" fill="#7c3aed"/>
+<text x="726.1" y="373" font-size="13" font-weight="700" text-anchor="start" fill="#e6edf3">36%</text>
+<text x="530" y="394" font-size="13" font-weight="400" text-anchor="start" fill="#9198a1">Claude Code</text>
+<rect x="640" y="383" width="220" height="12" rx="6" fill="#161b22"/>
+<rect x="640" y="383" width="29.9" height="12" rx="6" fill="#0ea5e9"/>
+<text x="677.92" y="394" font-size="13" font-weight="600" text-anchor="start" fill="#e6edf3">14%</text>
+<line x1="40" y1="424" x2="920" y2="424" stroke="#262c36"/>
+<text x="40" y="448" font-size="12" font-weight="400" text-anchor="start" fill="#9198a1">GPT 8+: 3 sessions, 14 compaction points  ·  AI-judged, not yet human-reviewed  ·  Method and limits: docs.avibe.bot/agents/vibey-memory-benchmark</text>
+</svg>
