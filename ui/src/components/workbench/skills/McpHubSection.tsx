@@ -20,6 +20,32 @@ const SOURCE_CHIP: Record<string, string> = {
   opencode: 'border-cyan/40 bg-cyan/10 text-cyan-ink',
 };
 
+/** True when paste includes an HTTP MCP server that Hub can OAuth-login. */
+export function pasteMayNeedOAuthLogin(text: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (!parsed || typeof parsed !== 'object') return false;
+    const servers = (parsed as { mcpServers?: unknown }).mcpServers;
+    const entries =
+      servers && typeof servers === 'object' && !Array.isArray(servers)
+        ? Object.values(servers as Record<string, unknown>)
+        : [parsed];
+    return entries.some(isOAuthEligiblePasteServer);
+  } catch {
+    return false;
+  }
+}
+
+function isOAuthEligiblePasteServer(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const server = value as Record<string, unknown>;
+  const url = typeof server.url === 'string' && server.url.trim();
+  if (!url || server.command) return false;
+  const headers = server.headers;
+  if (!headers || typeof headers !== 'object' || Array.isArray(headers)) return true;
+  return !Object.keys(headers as Record<string, unknown>).some((key) => key.toLowerCase() === 'authorization');
+}
+
 function McpToolCard({
   name,
   description,
@@ -90,7 +116,7 @@ export const McpHubSection: React.FC = () => {
   const [showAdd, setShowAdd] = useState(false);
   const [addText, setAddText] = useState('');
   const [addError, setAddError] = useState<string | null>(null);
-  const [loginFor, setLoginFor] = useState<McpServerSummary | null>(null);
+  const [loginFor, setLoginFor] = useState<{ name: string } | null>(null);
   const [authorizeUrl, setAuthorizeUrl] = useState<string | null>(null);
   const [callbackText, setCallbackText] = useState('');
   const [confirmDelete, setConfirmDelete] = useState<McpServerSummary | null>(null);
@@ -186,7 +212,7 @@ export const McpHubSection: React.FC = () => {
       }
       navigatePreparedTab(tab, res.authorizeUrl);
       if (res.mode !== 'direct') {
-        setLoginFor({ name: server.name } as McpServerSummary);
+        setLoginFor({ name: server.name });
         setAuthorizeUrl(res.authorizeUrl ?? null);
       }
     } catch {
@@ -228,7 +254,7 @@ export const McpHubSection: React.FC = () => {
     } finally { setBusy(null); }
   };
   const onAdd = async () => {
-    const tab = openPreparedTab();
+    const tab = pasteMayNeedOAuthLogin(addText) ? openPreparedTab() : null;
     setBusy('add');
     setAddError(null);
     try {
