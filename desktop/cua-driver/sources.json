@@ -4,7 +4,7 @@
     "version": "0.31.0",
     "tag": "cua-driver-rs-v0.31.0",
     "source_commit": "5272e492d61b96caf08e3bf434d91126c1f3dccc",
-    "tool_snapshot_sha256": "0af1e40dbf8d48303c25d969fa54b54ccff5d0c36f2f7966b4f04964c13e5ba0",
+    "tool_snapshot_sha256": "37b99238c5f59a64ddece25467aa51148ac6267baa928cbb5d3404196d9d4c71",
     "license": "MIT",
     "release_base_url": "https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.31.0",
     "release_checksums_asset": "checksums.txt",
@@ -20,19 +20,20 @@
       "root": "cua-5272e492d61b96caf08e3bf434d91126c1f3dccc"
     },
     "patch": {
-      "variant": "avibe-raw-single-click-v1",
+      "variant": "avibe-raw-single-click-reopen-v2",
       "file": "patches/0001-macos-raw-single-click.patch",
-      "sha256": "4409c946b353bedf3846af5b58dc32ed7cce792e9188842f3fa7d49cc01f011b",
-      "contract": "click.click_mode=raw; embedded parent-liveness cleanup",
+      "sha256": "8f7904f35d000bd0327622e428955b27a125a0ffd7ccbf175f77983b9aeded21",
+      "contract": "click.click_mode=raw; embedded parent-liveness cleanup; running launch_app uses kAEReopenApplication ('rapp') without activation; cold and new-instance launch use 'oapp'",
       "upstream_refs": [
         "https://github.com/trycua/cua/pull/3922",
         "https://github.com/trycua/cua/pull/3539",
         "https://github.com/trycua/cua/pull/4632",
         "https://github.com/trycua/cua/pull/4208",
         "https://github.com/trycua/cua/issues/4350",
-        "https://github.com/trycua/cua/issues/2874"
+        "https://github.com/trycua/cua/issues/2874",
+        "https://github.com/trycua/cua/pull/6198"
       ],
-      "upgrade_plan": "Drop this patch when an upstream release exposes both an opt-in raw count=1 macOS click selector with the same default-compatible contract and terminal embedded parent-liveness cleanup; otherwise rebase it onto the next pinned source commit and rerun the hit-test and lifecycle acceptance."
+      "upgrade_plan": "Drop the reopen hunk when an upstream cua-driver release includes the running launch_app kAEReopenApplication ('rapp') behavior; keep the raw-click and embedded parent-liveness hunks until their upstream contracts are released, then rebase the remaining single patch and rerun the macOS acceptance checks."
     }
   },
   "managed_policy": "policy.yaml",

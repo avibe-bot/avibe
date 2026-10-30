@@ -8,6 +8,7 @@ import pytest
 
 from core.computer_use import (
     COMPUTER_USE_STATE_DIR_ENV,
+    COMPUTER_USE_APPROVED_TOOL_SNAPSHOTS,
     COMPUTER_USE_TOOL_SNAPSHOT_SHA256,
     COMPUTER_USE_TOOL_NAMES,
     SnapshotVerifier,
@@ -79,6 +80,9 @@ def test_tool_snapshot_digest_matches_core_and_manifest_pins() -> None:
 
     assert actual == COMPUTER_USE_TOOL_SNAPSHOT_SHA256
     assert actual == manifest["driver"]["tool_snapshot_sha256"]
+    assert "0af1e40dbf8d48303c25d969fa54b54ccff5d0c36f2f7966b4f04964c13e5ba0" in COMPUTER_USE_APPROVED_TOOL_SNAPSHOTS
+    assert "edf496838092b2fa21807724b30308c4e9a90a404c9a9b7783a299b71e427144" in COMPUTER_USE_APPROVED_TOOL_SNAPSHOTS
+    assert COMPUTER_USE_APPROVED_TOOL_SNAPSHOTS[actual] == frozenset(COMPUTER_USE_TOOL_NAMES)
 
     mutated = bytearray(snapshot_bytes)
     mutated[0] ^= 1

@@ -6,7 +6,7 @@ for this variant. The package workflow downloads the pinned source archive,
 verifies its SHA-256, applies the patch recorded in `sources.json`, builds the
 requested macOS target, and records the resulting provenance.
 
-## `avibe-raw-single-click-v1`
+## `avibe-raw-single-click-reopen-v2`
 
 Patch: `patches/0001-macos-raw-single-click.patch`
 
@@ -20,6 +20,12 @@ This patch adds the opt-in `click.click_mode` selector:
   uses the existing routed CGEvent path;
 - unknown values and invalid combinations return structured
   `invalid_arguments`.
+
+The patch also changes macOS `launch_app` for an already-running application: it
+sends `kAEReopenApplication` (`aevt/rapp`) while preserving `activates=false`;
+cold launches and explicit new-instance launches continue to send
+`kAEOpenApplication` (`aevt/oapp`). Bundle-ID and name lookup share this event
+selection. The URL handoff path remains unchanged.
 
 The patch also adds the test-owned AppKit hollow-AX target and its ignored
 background acceptance harness. The target reports AX presses separately from
@@ -51,13 +57,16 @@ with these semantics. The relevant discussions are:
 - [Issue #2874](https://github.com/trycua/cua/issues/2874)
 
 The exact patch SHA-256, source archive SHA-256, tool snapshot SHA-256,
-contract, and upgrade plan are duplicated in `sources.json`. The release
+contract, and upgrade plan are duplicated in `sources.json`. The reopen hunk is
+tracked by upstream PR #6198 and is removed after a release containing that
+contract; the raw-click and parent-liveness hunks have independent upgrade
+conditions. The release
 provenance uses schema 2 and includes those hashes plus the prepared binary
 hash and post-signing packaged hash.
 
-When upstream exposes both an opt-in raw `count=1` macOS click selector with
-the same default-compatible contract and terminal embedded parent-liveness
-cleanup, remove this patch and pin the upstream release. Otherwise, rebase the
+When an upstream release includes the running-app `rapp` launch contract,
+remove only that hunk. Keep the raw-click and parent-liveness hunks until their
+corresponding upstream contracts are released. Otherwise, rebase the single
 patch onto the next pinned source commit, rerun the fixture and lifecycle
 acceptance, refresh the source and snapshot hashes, and review the Avibe
 forwarding admission again.

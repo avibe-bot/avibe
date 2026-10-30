@@ -166,6 +166,7 @@ def pinned_driver_source() -> dict:
         "patch_variant": source["patch"]["variant"],
         "patch_file": source["patch"]["file"],
         "patch_sha256": source["patch"]["sha256"],
+        "patch_contract": source["patch"]["contract"],
         "tool_snapshot_sha256": source["tool_snapshot_sha256"],
     }
 
@@ -213,6 +214,7 @@ def driver_provenance(
         "patch_variant",
         "patch_file",
         "patch_sha256",
+        "patch_contract",
         "tool_snapshot_sha256",
     )
     if (
@@ -346,6 +348,7 @@ def verify(directory: Path, tag: str, source_sha: str, *, updater_enabled: bool 
                 "patch_variant",
                 "patch_file",
                 "patch_sha256",
+                "patch_contract",
                 "tool_snapshot_sha256",
             )
             legacy_hashes = (

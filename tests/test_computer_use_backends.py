@@ -135,12 +135,15 @@ def test_computer_use_skill_bounds_no_effect_recovery_and_viewport_evidence() ->
     assert "Foreground input restores the previous frontmost window" in recovery
     assert "`activate()` leaves the target frontmost" in recovery
 
-    # Missing visibility or unverified focus requires owner recovery, not a loop.
-    stop_rule = recovery.split("- If ", 1)[1].split("- Treat ", 1)[0]
-    for condition in ("no on-screen window", "unverified", "focused=false", "off-screen"):
-        assert condition in stop_rule
-    assert "stop and ask the owner to show the window" in stop_rule
-    assert "Do not loop `launch()` or `activate()`" in stop_rule
+    # Missing visibility gets one bounded reopen attempt, then owner recovery.
+    assert "When no on-screen window matches" in recovery
+    launch = recovery.index("call `app.launch()` once")
+    wait_for = recovery.index("`app.waitFor({ onScreen: true })`")
+    stop = recovery.index("stop and ask the owner")
+    assert launch < wait_for < stop
+    assert "If no window appears" in recovery
+    assert "activation stays unverified" in recovery
+    assert "Never loop" in recovery
 
     assert "`status: unverifiable` as unknown, not proof of effect" in recovery
     assert "compare a second observation against a stable signature" in recovery
