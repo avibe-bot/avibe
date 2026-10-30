@@ -396,6 +396,49 @@ async def test_reload_omits_only_old_deferred_search_cards(isolated_state, stop_
     )
 
 
+@pytest.mark.parametrize("later_turn", [None, "same", "different"])
+def test_pending_native_trace_is_reprojected_from_its_response_without_rewriting_it(isolated_state, later_turn):
+    """Old card text lost the response error; a same-Turn later response proves a retry, not a later user turn."""
+    from core.agent_core.messages import AssistantMessage, HostedAction, HostedNative, HostedRecord, HostedSummary, HostedToolBlock, Origin, TextBlock, message_to_dict
+
+    engine = create_sqlite_engine()
+    sid = "ses_interrupted"
+    partial = AssistantMessage(
+        content=(HostedToolBlock(id="ws_cut", tool="web_search", action=HostedAction(type="other", name="web_search_call"),
+                                 record=HostedRecord(status="pending"), native=HostedNative(source_id="src_relaygpt1", payload=({"type": "web_search_call"},))),),
+        origin=Origin(provider="openai", api="openai_responses", model="test-model"), stop_reason="error",
+        error_message="Our servers are currently overloaded. secret detail", hosted_summary=HostedSummary(),
+    )
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(conn, scope, sid, mid="m_user", mtype="user", author="user", created_at="2026-06-01T10:00:00Z", text="q", source="user")
+        _msg(conn, scope, sid, mid="m_partial", mtype="assistant", author="agent", created_at="2026-06-01T10:00:01Z",
+             metadata={"turn_id": "same"}, content={"model": {"message": message_to_dict(partial)}})
+        conn.execute(messages.update().where(messages.c.id == "m_partial").values(context_seq=1))
+        card = {"version": 1, "call_id": "ws_cut", "tool": "web_search", "mode": "native", "status": "pending",
+                "action": "other", "subject": "web_search_call", "response_id": "m_partial", "sources": [], "images": []}
+        conn.execute(agent_events.insert().values(
+            id="e_cut", scope_id=scope, session_id=sid, platform="avibe", event_type="tool_call", visibility="trace",
+            content_text="old interrupted line", content_json=json.dumps({"kind": "toolcall", "hosted": card}),
+            metadata_json=json.dumps({"precedes_message_id": "m_partial"}), source="agent",
+            created_at="2026-06-01T10:00:02Z", updated_at="2026-06-01T10:00:02Z",
+        ))
+        if later_turn:
+            later = AssistantMessage(content=(TextBlock(text="done"),), origin=partial.origin, stop_reason="stop")
+            _msg(conn, scope, sid, mid="m_later", mtype="result", author="agent", created_at="2026-06-01T10:00:03Z", text="done",
+                 metadata={"turn_id": later_turn}, content={"model": {"message": message_to_dict(later)}})
+            conn.execute(messages.update().where(messages.c.id == "m_later").values(context_seq=2))
+    with engine.connect() as conn:
+        groups = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
+        rows = [row for group in groups for row in agent_activity_service.get_turn_group(conn, session_id=sid, group_id=group["id"])["rows"]]
+        [shown] = [row["hosted"] for row in rows if row.get("hosted")]
+        assert not shown.get("subject")
+        assert shown["interruption"] == "overloaded"
+        assert bool(shown.get("retried")) == (later_turn == "same")
+        assert "secret" not in json.dumps(shown)
+        assert json.loads(conn.execute(select(agent_events.c.content_json).where(agent_events.c.id == "e_cut")).scalar())["hosted"] == card
+
+
 def test_a_native_hosted_card_stays_with_its_response_at_the_scan_window_edge(isolated_state, monkeypatch):
     """The card sorts just ahead of its response, but belongs to the window that response is in.
 

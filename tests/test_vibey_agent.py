@@ -1310,6 +1310,69 @@ async def test_a_transient_failure_continues_from_the_same_transcript_without_a_
     assert harness.controller.terminals[-1]["is_error"] is False
 
 
+@pytest.mark.parametrize("platform", ["avibe", "telegram"])
+@pytest.mark.parametrize("language", ["en", "zh"])
+async def test_interrupted_native_search_emits_immediately_and_only_web_projects_a_proven_retry(
+    engine, session, tmp_path, published, continuation_policy, monkeypatch, platform, language,
+):
+    """The real delivery path emits once before recovery; read-time evidence never rewrites IM or stored cards."""
+    from core.agent_core.ai.provider import ProviderError
+    from storage import agent_activity_service
+
+    continuation_policy(initial_delay_s=0)
+    monkeypatch.setattr("core.message_mirror._activity_streaming_enabled", lambda: True)
+    partial = AssistantMessage(
+        content=(HostedToolBlock(
+            id="ws_cut", tool="web_search", action=HostedAction(type="other", name="web_search_call"),
+            record=HostedRecord(status="pending"),
+            native=HostedNative(source_id="src_relaygpt1", payload=({"type": "web_search_call", "status": "in_progress"},)),
+        ),), origin=ORIGIN, stop_reason="error", error_message="Our servers are currently overloaded.",
+        hosted_summary=HostedSummary(),
+    )
+    entered, release = asyncio.Event(), asyncio.Event()
+    async def recover(request, cancel):
+        entered.set()
+        await release.wait()
+        yield Done(assistant("recovered"))
+
+    harness = _Harness(engine, tmp_path, platform, [
+        [ProviderError("server", partial.error_message, False, partial=partial, continuable=True)], recover,
+    ], language=language)
+    harness.controller.im_client.supports_message_editing = lambda context=None: False
+    running = asyncio.create_task(harness.agent.handle_message(harness.request("search")))
+    def cards():
+        with engine.connect() as conn:
+            groups = agent_activity_service.list_turn_groups(conn, session_id=SESSION)["groups"]
+            return [row["hosted"] for group in groups for row in agent_activity_service.get_turn_group(
+                conn, session_id=SESSION, group_id=group["id"],
+            )["rows"] if row.get("hosted")]
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        [before] = cards()
+        assert before["interruption"] == "overloaded" and not before.get("retried")
+        assert not before.get("subject")
+    finally:
+        release.set()
+        await asyncio.wait_for(running, timeout=10)
+    [after] = cards()
+    assert after["retried"] is True
+    with engine.connect() as conn:
+        traces = conn.execute(select(agent_events.c.content_json, agent_events.c.content_text).where(
+            agent_events.c.session_id == SESSION, agent_events.c.event_type == "tool_call",
+        )).all()
+    [(raw, line)] = [(raw, line) for raw, line in traces if json.loads(raw).get("hosted")]
+    stored = json.loads(raw)["hosted"]
+    assert stored["interruption"] == "overloaded" and "retried" not in stored
+    assert line == ("🔎 Web search · Model response interrupted: upstream overloaded" if language == "en"
+                    else "🔎 网页搜索 · 模型回复中断：上游服务过载")
+    if platform == "telegram":
+        assert harness.controller.im_client.sent.count(line) == 1
+    else:
+        live = [payload["content"]["hosted"] for name, payload in published
+                if name == "message.new" and (payload.get("content") or {}).get("hosted")]
+        assert live == [stored]
+
+
 @pytest.mark.parametrize("output", ["text", "thinking", "tool", "complete-tool", "search"])
 @pytest.mark.parametrize("refusal", ["prefill", "encrypted"])
 @pytest.mark.parametrize("again", [False, True])

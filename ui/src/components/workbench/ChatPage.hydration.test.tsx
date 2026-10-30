@@ -990,6 +990,35 @@ describe('ChatPage transcript hydration', () => {
     expect(screen.getByText('second active step')).toBeTruthy();
   });
 
+  it('refreshes live interrupted searches from the same durable projection used on reload', async () => {
+    // SSE arrival itself is not retry evidence: only the read-side projection can add it.
+    mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
+    mocks.api.getSessionBootstrap.mockResolvedValue({
+      ...bootstrapPayload('session-new'), config: { ui: { show_agent_activity: true } },
+    });
+    render(<MemoryRouter initialEntries={['/chat/session-new']}><Routes>
+      <Route path="/chat/:sessionId" element={<ChatPage />} />
+    </Routes></MemoryRouter>);
+    await waitFor(() => expect(mocks.api.getSessionActivity).toHaveBeenCalled());
+    const hosted = { version: 1, call_id: 'ws_cut', tool: 'web_search', mode: 'native', status: 'pending',
+      action: 'other', interruption: 'overloaded', sources: [], images: [] };
+    act(() => {
+      mocks.events?.onTurnStart({ session_id: 'session-new' });
+      mocks.events?.onMessageNew({ ...projectedMessage('cut', 'cut off'), author: 'agent', type: 'tool_call',
+        content: { hosted } });
+    });
+    expect(screen.getByText('chat.agentActivity.hosted.interruption.message')).toBeTruthy();
+    mocks.api.getSessionActivity.mockClear();
+    const group = { id: 'cut', anchor_message_id: null, anchor_position: 'after', open: true, status: 'interrupted', steps: 2, duration_ms: null };
+    mocks.api.getSessionActivity.mockResolvedValue({ groups: [group] });
+    mocks.api.getSessionActivityGroup.mockResolvedValue({ ...group, rows: [{
+      id: 'cut', kind: 'tool_call', text: 'cut off', created_at: '2026-08-15T00:00:00Z', hosted: { ...hosted, retried: true },
+    }] });
+    act(() => mocks.events?.onMessageNew({ ...projectedMessage('later', 'continued'), author: 'agent', type: 'assistant' }));
+    await waitFor(() => expect(mocks.api.getSessionActivity).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByText(/chat.agentActivity.hosted.interruption.retried/)).toBeTruthy());
+  });
+
   describe.each([false, true])('restart notice with Activity enabled=%s', (activityEnabled) => {
     it.each(['live', 'bootstrap'])('keeps newer work thinking after a %s notice', async (delivery) => {
       // MESSAGE-DELIVERY-030: cover both message.new and a persisted reload.

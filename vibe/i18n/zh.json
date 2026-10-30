@@ -1765,6 +1765,12 @@
     "listSeparator": "、",
     "itemSeparator": "；",
     "switch": "{failed}，已改用 {provider}",
+    "interruption": {
+      "message": "模型回复中断：{reason}",
+      "overloaded": "上游服务过载",
+      "disconnected": "连接中断",
+      "upstream": "上游服务异常"
+    },
     "status": {
       "failed": "失败：{error}",
       "incomplete": "未完成：{error}",

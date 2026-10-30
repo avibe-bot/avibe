@@ -246,6 +246,40 @@ def test_a_source_no_browser_should_open_is_named_but_not_linked():
     ]
 
 
+@pytest.mark.parametrize(
+    ("error", "category", "en", "zh"),
+    [
+        ("Our servers are currently overloaded. Please try again later.", "overloaded", "upstream overloaded", "上游服务过载"),
+        ("stream disconnected before completion", "disconnected", "stream disconnected", "连接中断"),
+        ("private upstream error: https://secret.invalid/?token=private", "upstream", "upstream error", "上游服务异常"),
+    ],
+)
+def test_pending_native_search_explains_response_interruption_without_a_provider_subject(error, category, en, zh):
+    """MH-HOSTED-UI-014: pending calls inherit a sanitized response failure, not a fake query.
+
+    Existing status tests cover only the call record, not an error on its owning response.
+    """
+    message = replace(
+        _message(
+            replace(_search("ws_cut", "unused", status="pending"), action=HostedAction(type="other", name="web_search_call")),
+            summary=HostedSummary(),
+        ),
+        stop_reason="error", error_message=error,
+    )
+    [activity] = native_activities(message)
+    assert activity.subject is None
+    assert activity.to_payload() == {**FIXTURE["native_interrupted"], "interruption": category}
+    assert error not in json.dumps(activity.to_payload())
+    assert hosted_line(activity, "en") == f"🔎 Web search · Model response interrupted: {en}"
+    assert hosted_line(activity, "zh") == f"🔎 网页搜索 · 模型回复中断：{zh}"
+    # No reason is invented on success, and completed calls keep their own outcome.
+    [successful] = native_activities(replace(message, stop_reason="stop", error_message=None))
+    assert "interruption" not in successful.to_payload()
+    [completed] = native_activities(replace(message, content=(_search("ws_done", "known query"),)))
+    assert "interruption" not in completed.to_payload()
+    assert completed.subject == "known query"
+
+
 @pytest.mark.parametrize("stop_reason", ["tool_use", "error", "aborted"])
 async def test_deferred_search_has_no_card_or_share_of_an_earlier_search_cost(stop_reason):
     """The producer omits only a deferred call; stream cuts keep interrupted cards.

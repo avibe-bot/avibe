@@ -423,6 +423,12 @@ export const HostedToolRow: React.FC<{ card: HostedActivity }> = ({ card }) => {
         {count && <span className="hidden shrink-0 text-[11px] text-muted sm:inline">{count}</span>}
         <ChevronRight className={clsx('size-3.5 shrink-0 text-muted transition-transform', open && 'rotate-90')} aria-hidden="true" />
       </button>
+      {card.interruption && (
+        <p className="mx-1.5 mb-1 flex flex-wrap gap-x-2 px-1.5 text-[11px] text-muted" data-hosted-interruption={card.call_id}>
+          <span>{t('chat.agentActivity.hosted.interruption.message', { reason: t(`chat.agentActivity.hosted.interruption.${card.interruption}`) })}</span>
+          {card.retried && <span>{t('chat.agentActivity.hosted.interruption.retriedLabel')}</span>}
+        </p>
+      )}
       <HostedAttemptNotes card={card} />
       <FallbackNote card={card} />
       {open && <HostedDetail card={card} />}

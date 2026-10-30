@@ -128,6 +128,11 @@ export const activityRowFromMessage = (msg: WorkbenchMessage): ActivityRow => ({
   hosted: hostedActivityFrom((msg.content as { hosted?: unknown } | null | undefined)?.hosted),
 });
 
+// A retry is never inferred from SSE order. Ask the durable projection to refresh
+// interrupted native cards when subsequent activity arrives; reload uses it too.
+export const hasUnconfirmedHostedInterruption = (rows: ActivityRow[]): boolean =>
+  rows.some((row) => row.hosted?.interruption !== undefined && !row.hosted.retried);
+
 // ===== Live running-card buffer: a pure state machine (state, not timing) =====
 // The live buffer drives ONLY the in-flight running card; all SETTLED groups come
 // from the durable endpoint. Each Activity phase is tagged with a monotonic GENERATION so

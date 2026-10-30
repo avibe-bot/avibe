@@ -145,6 +145,7 @@ import { ActivityCard, ActivityChip } from './AgentActivityGroup';
 import {
   activityGroupsForForeground,
   activityRowFromMessage,
+  hasUnconfirmedHostedInterruption,
   groupFromWire,
   initialLiveActivity,
   isActivityMessageType,
@@ -1740,6 +1741,7 @@ export const ChatPage: React.FC = () => {
         // activity buffer.
         if (showAgentActivityRef.current && isActivityMessageType(msg.type)) {
           if (!historicalWindowRef.current) ingestActivityRow(msg);
+          if (hasUnconfirmedHostedInterruption(liveStateRef.current.rows)) scheduleActivityRefresh();
           return;
         }
         if (!isTranscriptMessage(msg)) return;

@@ -1765,6 +1765,12 @@
     "listSeparator": ", ",
     "itemSeparator": "; ",
     "switch": "{failed}; switched to {provider}",
+    "interruption": {
+      "message": "Model response interrupted: {reason}",
+      "overloaded": "upstream overloaded",
+      "disconnected": "stream disconnected",
+      "upstream": "upstream error"
+    },
     "status": {
       "failed": "failed: {error}",
       "incomplete": "incomplete: {error}",

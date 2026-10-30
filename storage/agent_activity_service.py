@@ -41,10 +41,11 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from core.agent_core.hosted_continuations import pending_hosted
 from core.agent_core.messages import AssistantMessage, message_from_dict
+from core.hosted_activity import native_activities
 from core.backend_failure import is_backend_failure_notification
 from storage import agent_events_service, messages_service
 from storage.models import message_deliveries, messages, session_turns
@@ -250,11 +251,14 @@ def _event_emit_micros(event: dict[str, Any], ts: datetime) -> int:
     return anchor - 1 if isinstance(precedes, str) and precedes else anchor
 
 
-def _without_deferred_traces(conn, session_id: str, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Old releases emitted interrupted cards for calls Anthropic deferred, which never ran.
+def _project_native_traces(
+    conn, session_id: str, events: list[dict[str, Any]], retained_message_ids: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    """Read-only repair of released pending cards, using their own committed response.
 
-    Suppress only that exact shape, using each trace's own response. No fragment
-    merging or position changes; every other pending/terminal card stays as written.
+    Deferred calls still disappear (#2926). A later canonical response in the same
+    Turn proves a retry; timestamps, narration and a new user Turn do not. Both
+    reads seek bounded retained ids, never scan a Session's growing history.
     """
     candidates = {}
     for event in events:
@@ -265,19 +269,47 @@ def _without_deferred_traces(conn, session_id: str, events: list[dict[str, Any]]
                 candidates[event["id"]] = (response_id, card.get("call_id"))
     if not candidates:
         return events
-    deferred = set()
-    for row_id, owner_session, raw in conn.execute(select(messages.c.id, messages.c.session_id, messages.c.content_json).where(
-        messages.c.id.in_({owner for owner, _ in candidates.values()})
+    latest: dict[str, int] = {}
+    for turn_id, seq in conn.execute(select(
+        func.json_extract(messages.c.metadata_json, "$.turn_id"), messages.c.context_seq,
+    ).where(
+        messages.c.id.in_(retained_message_ids), messages.c.session_id == session_id,
+        messages.c.context_seq.is_not(None),
+        func.json_extract(messages.c.content_json, "$.model.message.role") == "assistant",
     )):
+        if isinstance(turn_id, str) and turn_id:
+            latest[turn_id] = max(latest.get(turn_id, -1), seq)
+    deferred = set()
+    projected = {}
+    for row_id, owner_session, raw, metadata, seq in conn.execute(select(
+        messages.c.id, messages.c.session_id, messages.c.content_json, messages.c.metadata_json, messages.c.context_seq,
+    ).where(messages.c.id.in_({owner for owner, _ in candidates.values()}))):
         if owner_session != session_id:
             continue
         try:
             message = message_from_dict(json.loads(raw or "{}")["model"]["message"])
-        except (KeyError, TypeError, ValueError):
+            turn_id = (json.loads(metadata or "{}") or {}).get("turn_id")
+        except (KeyError, TypeError, ValueError, AttributeError):
             continue
         if isinstance(message, AssistantMessage):
             deferred.update((row_id, call_id) for call_id in pending_hosted(message))
-    return [event for event in events if candidates.get(event["id"]) not in deferred]
+            for activity in native_activities(message, response_id=row_id):
+                if activity.status == "pending":
+                    fields = {"action": activity.action, "subject": activity.subject, "interruption": activity.interruption}
+                    if activity.interruption and isinstance(turn_id, str) and seq is not None and latest.get(turn_id, -1) > seq:
+                        fields["retried"] = True
+                    projected[row_id, activity.call_id] = fields
+    result = []
+    for event in events:
+        owner = candidates.get(event["id"])
+        if owner in deferred:
+            continue
+        if owner in projected:
+            content = event["content"]
+            card = {**content["hosted"], **projected[owner]}
+            event = {**event, "content": {**content, "hosted": {key: value for key, value in card.items() if value is not None}}}
+        result.append(event)
+    return result
 
 
 def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, Any]]:
@@ -297,7 +329,7 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
         limit=EVENT_SCAN_LIMIT,
         newest_first=True,
     )
-    events = _without_deferred_traces(conn, session_id, events)
+    events = _project_native_traces(conn, session_id, events, tuple(str(msg["id"]) for msg in msgs))
     message_ids = tuple(
         str(message["id"])
         for message in msgs
