@@ -283,6 +283,11 @@ test.describe('workbench home geometry', () => {
         if (url.pathname === '/api/dock') return route.fulfill({ json: {
           dock: { order: ['files', 'terminal', 'editor', 'library'], pins: [] },
         } });
+        if (url.pathname === '/api/macos/login-session') return route.fulfill({ json: { ok: true, state: 'healthy' } });
+        // The home composer starts a new Session at the remembered fast-mode default.
+        if (url.pathname === '/api/workbench/prefs') return route.fulfill({ json: {
+          ok: true, background_work_banner_enabled: true, fast_mode_default: false,
+        } });
         if (inheritedReads.has(url.pathname)) return route.fallback();
         unknown.push(`${request.method()} ${request.url()}`);
         return route.abort();
