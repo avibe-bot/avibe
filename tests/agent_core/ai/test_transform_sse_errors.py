@@ -358,7 +358,7 @@ def test_overflow_classifies_cerebras_bodyless_status() -> None:
 
 
 @pytest.mark.parametrize("status", [400, 429])
-@pytest.mark.parametrize("representation", ["plain", "json", "json-string"])
+@pytest.mark.parametrize("representation", ["plain", "json", "json-string", "json-invalid-request"])
 @pytest.mark.parametrize(
     ("message", "kind", "retryable"),
     [
@@ -375,11 +375,17 @@ def test_non_overflow_prefixes_survive_message_extraction(
 ) -> None:
     body = {
         "plain": message,
-        "json": json.dumps({"type": "error", "error": {"type": "invalid_request_error", "message": message}}),
+        "json": json.dumps({"type": "error", "error": {"message": message}}),
         "json-string": json.dumps(message),
+        "json-invalid-request": json.dumps(
+            {"type": "error", "error": {"type": "invalid_request_error", "message": message}}
+        ),
     }[representation]
     if status == 429:
         kind, retryable = "rate_limit", True
+    elif representation == "json-invalid-request":
+        # Excluding overflow does not make a typed request rejection transient, even if its text says unavailable.
+        kind, retryable = "invalid_request", False
 
     error = classify_error(status=status, body=body)
 
@@ -419,6 +425,16 @@ def test_non_message_json_fields_cannot_supply_a_non_overflow_prefix(prefix: str
     ("status", "code", "message", "kind"),
     [
         (400, "ThrottlingException", "too many tokens", "invalid_request"),
+        (None, "invalid_request_error", "Service unavailable: too many tokens", "invalid_request"),
+        (None, "invalid_request_error", "Throttling error: too many tokens", "invalid_request"),
+        (None, "upstream_request_invalid", "Service unavailable: too many tokens", "invalid_request"),
+        (None, "upstream_request_invalid", "Throttling error: too many tokens", "invalid_request"),
+        (400, "upstream_request_invalid", "Service unavailable: too many tokens", "invalid_request"),
+        (400, "upstream_request_invalid", "Throttling error: too many tokens", "invalid_request"),
+        (None, "invalid_request_error", "too many tokens", "overflow"),
+        (400, "invalid_request_error", "too many tokens", "overflow"),
+        (None, "upstream_request_invalid", "too many tokens", "overflow"),
+        (400, "upstream_request_invalid", "too many tokens", "overflow"),
         (400, "context_length_exceeded", "Throttling error: too many tokens", "overflow"),
         (400, "request_too_large", "Service unavailable: too many tokens", "overflow"),
         (400, "rate_limit_error", "Throttling error: too many tokens", "rate_limit"),
@@ -432,10 +448,13 @@ def test_non_message_json_fields_cannot_supply_a_non_overflow_prefix(prefix: str
     ],
 )
 def test_non_overflow_prefixes_preserve_status_and_machine_code_priority(
-    status: int, code: str, message: str, kind: str,
+    status: int | None, code: str, message: str, kind: str,
 ) -> None:
     body = json.dumps({"error": {"type": code, "message": message}})
-    assert classify_error(status=status, body=body).kind == kind
+    error = classify_error(status=status, body=body)
+    assert error.kind == kind
+    assert error.retryable is (kind in {"rate_limit", "server"})
+    assert error.continuable is (kind in {"rate_limit", "server"})
 
 
 @pytest.mark.parametrize("status", [401, 403])
