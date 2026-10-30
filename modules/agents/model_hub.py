@@ -1165,6 +1165,22 @@ class ModelHubRuntimeRouter:
                 terminal_turn_id=terminal_turn_id,
             )
 
+    def has_proxied_hosted_candidate(self, turn_id: Optional[str], tool: str) -> bool:
+        """Whether this Turn froze at least one enabled proxy executor for ``tool``.
+
+        The executor order is a Turn fact held by the gateway correlation, not a
+        mutable route flag.  Native-search recovery consults this read-only view
+        before switching a hop; a tool with no proxy candidate keeps its existing
+        retry/failure behavior.
+        """
+
+        if self.turn_gateway is None:
+            return False
+        frozen = self.turn_gateway.correlation.turn_hosted_tools(turn_id)
+        if frozen is None:
+            return False
+        return any(slot.enabled for slot in frozen.executors.get(tool, ()))
+
     def snapshot(self) -> ModelHubConfig:
         """Load the configuration one turn resolves and launches against.
 

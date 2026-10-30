@@ -2364,8 +2364,12 @@ PARTIAL_ERROR_MESSAGE_CHARS = 1000
 def _partial_with_error(error: ProviderError) -> ProviderError:
     """The provider's error text on the partial it leaves; a Stop's partial needs none."""
     partial = error.partial
-    if partial is None or partial.error_message is not None or error.kind == "aborted" or not error.message:
+    if partial is None or error.kind == "aborted":
         return error
+    if partial.error_kind != error.kind:
+        partial = replace(partial, error_kind=error.kind)
+    if partial.error_message is not None or not error.message:
+        return replace(error, partial=partial)
     return replace(error, partial=replace(partial, error_message=error.message))
 
 

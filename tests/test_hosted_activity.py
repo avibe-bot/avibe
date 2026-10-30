@@ -206,6 +206,22 @@ def proxy_fallback():
     )
 
 
+def test_repeated_native_interruptions_are_explained_on_the_proxy_card_and_line():
+    activity = proxy_activity(
+        ToolCallBlock(id="call_switch", name="web_search", arguments={"query": "Avibe release"}),
+        HostedResult(
+            record=HostedRecord(status="completed", sources=POSTS[:1]),
+            execution=XAI,
+            route_switch="native_interrupted",
+        ),
+        source_names=NAMES,
+    )
+
+    assert activity.to_payload()["route_switch"] == "native_interrupted"
+    assert "Native search was interrupted; switched to xAI." in hosted_line(activity, "en")
+    assert "自带搜索中断，已改用 xAI。" in hosted_line(activity, "zh")
+
+
 @pytest.mark.parametrize(
     "build",
     [native_web_search, proxy_x_search, direct_image, proxy_failed, proxy_unreachable, proxy_retried, proxy_fallback],

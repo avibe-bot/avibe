@@ -745,6 +745,9 @@ class HostedResult:
     #: A search call that ran as its function only because the turn's own Source refused it natively; absent when it
     #: ran where it was declared, or where the vendor never offers the tool natively.
     fallback_from: Optional[HostedFallback] = None
+    #: A presentation-only reason for a proxied call selected after repeated native interruptions. This is not refusal
+    #: evidence. Carried in process; persisted in tool-result details, never the canonical message wire.
+    route_switch: Optional[str] = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.record, (HostedRecord, WebFetchRecord)):
@@ -752,6 +755,9 @@ class HostedResult:
         _require(self.execution, ProxyExecution, "proxy execution", optional=True)
         _require(self.action, HostedAction, "hosted result action", optional=True)
         _require(self.fallback_from, HostedFallback, "hosted fallback", optional=True)
+        _require(self.route_switch, str, "hosted route switch", optional=True)
+        if self.route_switch is not None and self.route_switch != "native_interrupted":
+            raise ValueError(f"unknown hosted route switch: {self.route_switch}")
         if self.execution is None and self.record.status != "failed":
             raise ValueError("a hosted result without an execution is a failed record")
 
@@ -839,6 +845,9 @@ class AssistantMessage:
     #: credential generation), when known: its opaque payloads go back only to a hop of that identity, since an account
     #: refuses another's ciphertext (``cross-provider.md``). Credential-free.
     source_identity: Optional[str] = None
+    #: Provider classification carried to the store as response-row metadata, not a canonical message field.
+    #: A later hop can distinguish transient cut-offs without interpreting provider wording as capability evidence.
+    error_kind: Optional[str] = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         _require_blocks(self.content, (TextBlock, ThinkingBlock, ToolCallBlock, HostedToolBlock), "assistant message")
@@ -848,6 +857,7 @@ class AssistantMessage:
         _require(self.error_message, str, "error_message", optional=True)
         _require(self.hosted_summary, HostedSummary, "hosted_summary", optional=True)
         _require_text(self.source_identity, "source_identity", optional=True)
+        _require(self.error_kind, str, "error_kind", optional=True)
         hosted = any(isinstance(block, HostedToolBlock) for block in self.content)
         if hosted != (self.hosted_summary is not None):
             raise ValueError("a hosted summary is present exactly when the message has hosted tool blocks")

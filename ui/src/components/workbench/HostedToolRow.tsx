@@ -429,6 +429,12 @@ export const HostedToolRow: React.FC<{ card: HostedActivity }> = ({ card }) => {
           {card.retried && <span>{t('chat.agentActivity.hosted.interruption.retriedLabel')}</span>}
         </p>
       )}
+      {hostedCompleted(card) && card.route_switch === 'native_interrupted' && runnerLabel(card, t) && (
+        <p className="mx-1.5 mb-1 mt-0.5 flex items-center gap-1.5 rounded-md border border-gold/40 bg-gold/10 px-2.5 py-1.5 text-[11px] text-foreground" data-hosted-route-switch={card.call_id}>
+          <TriangleAlert className="size-3 shrink-0 text-gold-ink" aria-hidden="true" />
+          {t('chat.agentActivity.hosted.nativeInterrupted', { provider: runnerLabel(card, t) })}
+        </p>
+      )}
       <HostedAttemptNotes card={card} />
       <FallbackNote card={card} />
       {open && <HostedDetail card={card} />}

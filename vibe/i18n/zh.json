@@ -1697,6 +1697,7 @@
       "proxy": "由 {provider} 代理",
       "proxyModel": "由 {provider} 代理（{model}）",
       "fallback": "{source} 不支持，已改用 {provider}",
+      "nativeInterrupted": "自带搜索中断，已改用 {provider}。",
       "direct": "{provider} 直连"
     },
     "count": {

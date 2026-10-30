@@ -45,6 +45,7 @@ from storage.models import agent_sessions, messages
 
 EnvironmentSource = Callable[[str], Mapping[str, EnvironmentValue]]
 ResponseObserver = Callable[[str, str, AssistantMessage, Optional[bool], tuple[HostedImage, ...]], None]
+ResponseMetadata = Callable[[str, AssistantMessage], Mapping[str, Any]]
 
 #: How long consumption waits for an accepted steer's row before failing the run.
 INPUT_ROW_TIMEOUT_S = 10.0
@@ -62,12 +63,14 @@ class AdapterTranscriptStore:
         *,
         environment: EnvironmentSource,
         on_response: ResponseObserver,
+        response_metadata: Optional[ResponseMetadata] = None,
         input_row_timeout_s: float = INPUT_ROW_TIMEOUT_S,
     ) -> None:
         self._store = store
         self._engine = engine
         self._environment = environment
         self._on_response = on_response
+        self._response_metadata = response_metadata
         self._input_row_timeout_s = input_row_timeout_s
         # Per Session, the environment the projected context shows; evicted by ``forget`` when
         # the adapter retires the Session's runtime, and when a checkpoint commits.
@@ -116,6 +119,12 @@ class AdapterTranscriptStore:
     async def load_turn(self, session_id: str, turn_id: str) -> Sequence[ContextEntry]:
         return await self._store.load_turn(session_id, turn_id)
 
+    async def load_turn_response_metadata(
+        self, session_id: str, turn_id: str
+    ) -> Sequence[tuple[Mapping[str, Any], Optional[AssistantMessage]]]:
+        """Small response facts; only legacy rows need their canonical body decoded."""
+        return await self._store.load_turn_response_metadata(session_id, turn_id)
+
     async def consume_input(self, session_id: str, message_id: str, message: UserMessage) -> ContextEntry:
         await self._await_input_row(session_id, message_id)
         previous = self._env_state.get(session_id)
@@ -153,6 +162,7 @@ class AdapterTranscriptStore:
             replied=replied,
             images=images,
             superseded=superseded,
+            metadata=self._response_metadata(session_id, message) if self._response_metadata else None,
             agent_name=self._agents.get(session_id),
             turn_id=self._turns.get(session_id),
         )
