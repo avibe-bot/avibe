@@ -6497,7 +6497,10 @@
       "unsupported_transport_sse": "SSE is not supported; use a Streamable HTTP URL.",
       "invalid_callback": "This OAuth callback is invalid or expired.",
       "auth_required": "MCP login is required.",
-      "oauth": "MCP login could not be completed: {{message}}"
+      "oauth": "MCP login could not be completed: {{message}}",
+      "usage": "{{message}}",
+      "add_failed": "{{message}}",
+      "add_partial": "{{message}}"
     },
     "addedCount": "Added {{count}} MCP servers.",
     "addedPartial": "Added {{count}}; failed: {{failed}}",

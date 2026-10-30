@@ -11,6 +11,7 @@ import { Badge } from '../../ui/badge';
 import { Button } from '../../ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from '../../ui/dialog';
 import { Textarea } from '../../ui/textarea';
+import { openLinkInNewContext } from '../../../lib/pwaNavigation';
 
 const SOURCE_CHIP: Record<string, string> = {
   avibe: 'border-gold/40 bg-gold/[0.12] text-gold-ink',
@@ -172,7 +173,7 @@ export const McpHubSection: React.FC = () => {
         return;
       }
       setLoginFor(server); setAuthorizeUrl(res.authorizeUrl ?? null);
-      if (res.authorizeUrl) window.open(res.authorizeUrl, '_blank', 'noopener,noreferrer');
+      if (res.authorizeUrl) openLinkInNewContext(res.authorizeUrl, 'noopener,noreferrer');
     } finally { setBusy(null); }
   };
 
@@ -387,7 +388,7 @@ export const McpHubSection: React.FC = () => {
         <DialogContent className="max-w-lg" closeLabel={t('common.close')}>
           <DialogTitle>{t('mcpHub.loginTitle')}</DialogTitle>
           <DialogDescription>{t('mcpHub.loginHint')}</DialogDescription>
-          {authorizeUrl ? <Button type="button" variant="outline" onClick={() => window.open(authorizeUrl, '_blank', 'noopener,noreferrer')}>{t('mcpHub.openAuthorize')}</Button> : null}
+          {authorizeUrl ? <Button type="button" variant="outline" onClick={() => openLinkInNewContext(authorizeUrl, 'noopener,noreferrer')}>{t('mcpHub.openAuthorize')}</Button> : null}
           <Textarea value={callbackText} onChange={(event) => setCallbackText(event.target.value)} className="min-h-20 font-mono text-[12px]" placeholder={t('mcpHub.callbackPlaceholder')} />
           <DialogFooter><Button type="button" variant="outline" onClick={() => setLoginFor(null)}>{t('common.cancel')}</Button><Button type="button" disabled={!callbackText.trim() || busy !== null} onClick={() => void onCompleteLogin()}>{t('mcpHub.completeLogin')}</Button></DialogFooter>
         </DialogContent>

@@ -121,10 +121,14 @@ def test_malformed_json_add_returns_top_level_error_without_batch_arrays(owner):
     [
         ("GET", "/api/mcp", "editor"),
         ("GET", "/api/mcp/echo", "editor"),
+        ("GET", "/api/mcp/oauth/callback", "viewer"),
         ("POST", "/api/mcp", "owner"),
         ("POST", "/api/mcp/discover", "owner"),
         ("POST", "/api/mcp/echo/refresh", "owner"),
         ("DELETE", "/api/mcp/echo", "owner"),
+        ("POST", "/api/mcp/echo/oauth/start", "owner"),
+        ("POST", "/api/mcp/echo/oauth/complete", "owner"),
+        ("POST", "/api/mcp/echo/oauth/logout", "owner"),
     ],
 )
 def test_route_roles(method, path, role):

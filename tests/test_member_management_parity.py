@@ -98,6 +98,9 @@ _RETAINED_OWNER_ROUTES = {
     ("POST", "/api/mcp/discover"),
     ("POST", "/api/mcp/{name}/refresh"),
     ("DELETE", "/api/mcp/{name}"),
+    ("POST", "/api/mcp/{name}/oauth/start"),
+    ("POST", "/api/mcp/{name}/oauth/complete"),
+    ("POST", "/api/mcp/{name}/oauth/logout"),
     ("PUT", "/api/permissions/authorized-users"),
     ("PUT", "/api/permissions/projects/{project_id}/access"),
     ("PUT", "/api/permissions/resources/{resource_kind}/{resource_id}/access"),
@@ -123,7 +126,7 @@ def test_complete_registered_api_management_inventory():
         for method in (getattr(route, "methods", None) or ())
         if method not in {"HEAD", "OPTIONS"}
     }
-    assert len(endpoints) == 303  # master 297 + 6 MCP Hub routes, classified in tests/test_mcp_hub_api.py
+    assert len(endpoints) == 307  # master 297 + 10 MCP Hub routes, classified in tests/test_mcp_hub_api.py
     # Editors who use Vault read avault's authorization state; the handler admits only
     # instance managers to raise the Keychain dialog on the host.
     for method in ("GET", "POST"):

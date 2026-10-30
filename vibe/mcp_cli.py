@@ -251,14 +251,12 @@ def _server(name: str, args: list[str]) -> int:
             if len(args) != 1:
                 raise McpHubError("usage", "usage: vibe mcp <server> --login", usage=True)
             payload = {"name": name, "cli": True}
-            try:
-                from config.v2_config import V2Config
-                cloud = V2Config.load().remote_access.vibe_cloud
-                if cloud.enabled and cloud.public_url:
-                    payload["cloudOrigin"] = str(cloud.public_url).rstrip("/")
-                payload["port"] = int(V2Config.load().ui.setup_port)
-            except Exception:
-                pass
+            from config.v2_config import V2Config
+            loaded = V2Config.load()
+            cloud = loaded.remote_access.vibe_cloud
+            if cloud.enabled and cloud.public_url:
+                payload["cloudOrigin"] = str(cloud.public_url).rstrip("/")
+            payload["port"] = int(loaded.ui.setup_port)
             return _oauth_owner("oauth_start", payload)
         if option == "--login-complete":
             if len(args) != 2:

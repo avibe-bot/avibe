@@ -9555,11 +9555,8 @@ async def mcp_oauth_start(name: str, starlette_request: FastAPIRequest):
     from vibe import mcp_api
     def start():
         body = _mcp_body()
-        try:
-            from config.v2_config import V2Config
-            body["port"] = int(V2Config.load().ui.setup_port)
-        except Exception:
-            body["port"] = 5123
+        from config.v2_config import V2Config
+        body["port"] = int(V2Config.load().ui.setup_port)
         return mcp_api.oauth_start(name, body, _current_origin())
     return await _mcp_route(starlette_request, start)
 

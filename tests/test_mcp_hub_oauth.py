@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import threading
 import time
 from urllib.parse import parse_qs, urlparse
@@ -33,6 +34,7 @@ class _LoopbackOauth:
         self.resource_status = 200
         self.refresh_status = 200
         self.refresh_error = "invalid_grant"
+        self.tool_error: str | None = None
         self.codes: dict[str, str] = {}
         self._server: uvicorn.Server | None = None
         self._thread: threading.Thread | None = None
@@ -146,6 +148,8 @@ class _LoopbackOauth:
         elif method == "tools/list":
             result = {"tools": [{"name": "echo", "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}}}]}
         elif method == "tools/call":
+            if self.tool_error:
+                return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "error": {"code": -32002, "message": self.tool_error}})
             result = {"content": [{"type": "text", "text": payload.get("params", {}).get("arguments", {}).get("text", "")}]}
         else:
             result = {}
@@ -204,16 +208,22 @@ def test_redirect_mode_obeys_oauth_loopback_rule():
         ("http://127.0.0.1:5123", "direct", "http://127.0.0.1:5123/api/mcp/oauth/callback"),
         ("http://localhost:5123", "direct", "http://localhost:5123/api/mcp/oauth/callback"),
         ("https://cloud.example", "direct", "https://cloud.example/api/mcp/oauth/callback"),
-        ("http://192.168.1.20:5123", "paste", "http://127.0.0.1:5123/api/mcp/oauth/callback"),
-        ("http://host.lan:5123", "paste", "http://127.0.0.1:5123/api/mcp/oauth/callback"),
-        (None, "paste", "http://127.0.0.1:5123/api/mcp/oauth/callback"),
+        ("http://192.168.1.20:5123", "paste", "http://127.0.0.1:5123/api/mcp/oauth/callback", 5123),
+        ("http://host.lan:5123", "paste", "http://127.0.0.1:5123/api/mcp/oauth/callback", 5123),
+        (None, "paste", "http://127.0.0.1:5123/api/mcp/oauth/callback", 5123),
     ]
-    for origin, mode, redirect in cases:
-        assert oauth.redirect_mode(origin) == (mode, redirect)
+    for origin, mode, redirect, *port in cases:
+        kwargs = {"port": port[0]} if port else {}
+        assert oauth.redirect_mode(origin, **kwargs) == (mode, redirect)
 
 
 def test_redirect_mode_uses_configured_loopback_port():
     assert oauth.redirect_mode("http://192.168.1.20:9000", port=7777)[1] == "http://127.0.0.1:7777/api/mcp/oauth/callback"
+
+
+def test_redirect_mode_requires_port_for_paste():
+    with pytest.raises(Exception, match="loopback setup port"):
+        oauth.redirect_mode("http://192.168.1.20:9000")
 
 
 def test_definition_accepts_only_phase_one_oauth_options():
@@ -235,6 +245,8 @@ def test_storage_filters_client_by_provider_redirect_and_client_id_is_used(tmp_p
         definition = definition_from_provider("suno", {"url": "https://api.example/mcp", "oauth": {"clientId": "fixed"}})
         provider = oauth.make_provider("suno", definition, "https://cloud.example/api/mcp/oauth/callback", redirect_handler=lambda _: None, callback_handler=lambda: None)
         assert provider.context.client_info.client_id == "fixed"
+        await provider._initialize()
+        assert provider.context.client_info.client_id == "fixed"
 
     asyncio.run(exercise())
 
@@ -243,9 +255,9 @@ def test_runtime_caches_one_provider_per_server(runtime):
     definition = definition_from_provider("suno", {"url": "https://api.example/mcp"})
 
     async def exercise():
-        first = await runtime._oauth_provider(definition)
-        second = await runtime._oauth_provider(definition)
-        assert first is second
+        first, second = await asyncio.gather(runtime._oauth_provider(definition), runtime._oauth_provider(definition))
+        third = await runtime._oauth_provider(definition)
+        assert first is second is third
 
     asyncio.run(exercise())
 
@@ -295,6 +307,7 @@ def test_first_contact_oauth_401_publishes_needs_login(runtime, loopback):
     added = _run(runtime, "add", {"servers": [{"name": "suno", "server": {"url": f"{loopback.origin}/mcp"}}]})
     assert added["ok"]
     assert added["added"][0]["toolCount"] == 0
+    assert added["added"][0]["auth"] == "needs_login"
     listed = repository.list_packages()[0]
     assert listed["auth"] == "needs_login"
     assert "suno" not in "".join(block.text for block in build_mcp_prompt_blocks())
@@ -361,6 +374,7 @@ def test_call_time_resource_401_is_auth_required_without_replay(runtime, loopbac
     called = _run(runtime, "call", {"name": "suno", "tool": "echo", "arguments": {"text": "hi"}})
     assert called["error"]["type"] == "auth_required"
     assert loopback.mcp_posts == before + 1
+    assert repository.list_packages()[0]["auth"] == "needs_login"
 
 
 def test_concurrent_calls_share_one_token_refresh(runtime, loopback):
@@ -423,3 +437,32 @@ def test_logout_republishes_needs_login_without_tokens(runtime, loopback):
     assert not oauth.oauth_path("suno").exists()
     dump = json.dumps(listed)
     assert "access-" not in dump and "refresh-" not in dump
+
+
+def test_stdio_logout_is_rejected(runtime, tmp_path):
+    definition = definition_from_provider("echo", {"command": sys.executable, "args": ["-c", "pass"]})
+    repository.write_definition(definition)
+    logged_out = _run(runtime, "oauth_logout", {"name": "echo"})
+    assert logged_out["ok"] is False
+    assert logged_out["error"]["type"] == "usage"
+
+
+def test_remove_cancels_pending_login(runtime, loopback):
+    _run(runtime, "add", {"servers": [{"name": "suno", "server": {"url": f"{loopback.origin}/mcp"}}]})
+    started = _run(runtime, "oauth_start", {"name": "suno", "origin": "http://127.0.0.1:5123", "port": 5123})
+    state = parse_qs(urlparse(started["authorizeUrl"]).query)["state"][0]
+    removed = _run(runtime, "remove", {"name": "suno"})
+    assert removed["ok"]
+    rejected = _run(runtime, "oauth_callback", {"state": state, "code": "late"})
+    assert rejected["ok"] is False
+    assert rejected["error"]["type"] == "invalid_callback"
+
+
+def test_tool_error_containing_auth_stays_tool_error(runtime, loopback):
+    url = f"{loopback.origin}/mcp"
+    repository.write_definition(definition_from_provider("suno", {"url": url}))
+    _seed_tokens("suno", url, expires_at=time.time() + 3600)
+    assert _run(runtime, "refresh", {"name": "suno"})["ok"]
+    loopback.tool_error = "auth failed for user"
+    called = _run(runtime, "call", {"name": "suno", "tool": "echo", "arguments": {"text": "hi"}})
+    assert called["error"]["type"] == "tool_error"

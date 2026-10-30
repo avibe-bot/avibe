@@ -98,7 +98,14 @@ async def refresh(name: str) -> dict[str, Any]:
 async def remove(name: str) -> dict[str, Any]:
     return await _owner("remove", {"name": name})
 async def oauth_start(name: str, body: dict[str, Any], origin: str | None = None) -> dict[str, Any]:
-    return await _owner("oauth_start", {"name": name, "origin": origin})
+    payload: dict[str, Any] = {"name": name, "origin": origin}
+    if body.get("port") is not None:
+        payload["port"] = body["port"]
+    if body.get("cli") is True:
+        payload["cli"] = True
+    if body.get("cloudOrigin"):
+        payload["cloudOrigin"] = body["cloudOrigin"]
+    return await _owner("oauth_start", payload)
 
 
 async def oauth_callback(body: dict[str, Any]) -> dict[str, Any]:

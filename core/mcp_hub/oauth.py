@@ -98,7 +98,7 @@ class AvibeOAuthProvider(OAuthClientProvider):
                 except Exception:
                     logger.warning("Ignoring invalid stored MCP OAuth metadata")
         configured = getattr(self, "_configured_client_info", None)
-        if configured is not None and self.context.client_info is None:
+        if configured is not None:
             self.context.client_info = configured
 
     async def _handle_token_response(self, response) -> None:
@@ -118,12 +118,16 @@ class AvibeOAuthProvider(OAuthClientProvider):
         return ok
 
 
-def redirect_mode(origin: str | None, *, cloud_origin: str | None = None, cli: bool = False, port: int = 5123) -> tuple[str, str]:
+def redirect_mode(origin: str | None, *, cloud_origin: str | None = None, cli: bool = False, port: int | None = None) -> tuple[str, str]:
     candidate = cloud_origin if cli and cloud_origin else origin
     parsed = urlparse(candidate or "")
     host = (parsed.hostname or "").lower()
     direct = parsed.scheme == "https" or (parsed.scheme == "http" and host in {"localhost", "127.0.0.1", "::1"})
-    return ("direct", f"{parsed.scheme}://{parsed.netloc}/api/mcp/oauth/callback") if direct else ("paste", f"http://127.0.0.1:{port}/api/mcp/oauth/callback")
+    if direct:
+        return ("direct", f"{parsed.scheme}://{parsed.netloc}/api/mcp/oauth/callback")
+    if port is None:
+        raise McpHubError("usage", "A loopback setup port is required for MCP OAuth paste-mode redirects.")
+    return ("paste", f"http://127.0.0.1:{int(port)}/api/mcp/oauth/callback")
 
 
 def parse_callback_url(value: str) -> dict[str, str]:
@@ -147,5 +151,5 @@ def make_provider(name: str, definition: dict, redirect_uri: str, *, redirect_ha
     )
     if isinstance(oauth.get("clientId"), str) and oauth["clientId"]:
         provider.context.client_info = OAuthClientInformationFull(client_id=oauth["clientId"], redirect_uris=[redirect_uri])
-        provider.context._configured_client_info = provider.context.client_info
+        provider._configured_client_info = provider.context.client_info
     return provider
