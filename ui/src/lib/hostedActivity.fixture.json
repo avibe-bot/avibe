@@ -19,6 +19,20 @@
     "images": [],
     "cost": { "basis": "list", "usd": 0.01, "calls": 1 }
   },
+  "native_interrupted": {
+    "version": 1,
+    "call_id": "ws_cut",
+    "tool": "web_search",
+    "mode": "native",
+    "status": "pending",
+    "action": "other",
+    "provider": "anthropic",
+    "source_id": "src_relayclaude",
+    "model": "claude-opus-5-5",
+    "sources": [],
+    "images": [],
+    "interruption": "overloaded"
+  },
   "proxy_x_search": {
     "version": 1,
     "call_id": "call_x1",

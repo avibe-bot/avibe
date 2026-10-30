@@ -53,6 +53,32 @@ const row = (callId: string) => document.querySelector(`[data-hosted-call="${cal
 afterEach(() => cleanup());
 
 describe('hosted tool cards', () => {
+  it.each(['en', 'zh'] as const)('explains interrupted responses without inventing a subject in %s, live and reloaded', (lng) => {
+    for (const [interruption, reason] of [
+      ['overloaded', lng === 'en' ? 'upstream overloaded' : '上游服务过载'],
+      ['disconnected', lng === 'en' ? 'stream disconnected' : '连接中断'],
+      ['upstream', lng === 'en' ? 'upstream error' : '上游服务异常'],
+    ]) {
+      for (const retried of [false, true]) {
+        renderGroup([{
+          ...fixture.native_interrupted, subject: 'web_search_call', interruption, retried,
+        }], lng);
+        const card = row('ws_cut');
+        expect(card.textContent).not.toContain('web_search_call');
+        within(card).getByText(`${lng === 'en' ? 'Model response interrupted: ' : '模型回复中断：'}${reason}`);
+        expect(card.textContent?.includes(lng === 'en' ? 'retried automatically' : '已自动重试')).toBe(retried);
+        fireEvent.click(within(card).getByRole('button'));
+        expect(card.textContent).not.toMatch(/Ran natively|Native ·|原生|web_search_call/);
+        cleanup();
+      }
+    }
+  });
+
+  it('suppresses a provider item type even when an old card has no action field', () => {
+    renderGroup([{ ...fixture.native_interrupted, action: undefined, subject: 'web_search_call' }]);
+    expect(row('ws_cut').textContent).not.toContain('web_search_call');
+  });
+
   it.each(['en', 'zh'] as const)('WF-1: historical fetch is readable, counted by characters and inert in %s', (lng) => {
     const content = 'Hello 😀';
     renderGroup([{

@@ -186,6 +186,8 @@ class HostedActivity:
     switch: Optional[HostedSwitch] = None
     # Policy refusal: the service ids already sent this URL; empty means no forwarding.
     policy_sources: Optional[tuple[str, ...]] = None
+    # Display-only category of the owning model response's failure, never provider text.
+    interruption: Optional[Literal["overloaded", "disconnected", "upstream"]] = None
 
     @property
     def completed(self) -> bool:
@@ -225,6 +227,7 @@ class HostedActivity:
             "duration_ms": self.duration_ms,
             "response_id": self.response_id,
             "executor_kind": self.executor_kind,
+            "interruption": self.interruption,
         }
         payload.update({key: value for key, value in optional.items() if value is not None})
         if self.policy_sources is not None:
@@ -307,11 +310,29 @@ def _image_payload(image: HostedImage) -> dict[str, Any]:
 def _subject(action: HostedAction) -> tuple[Optional[str], tuple[str, ...]]:
     if action.type == "search" and action.queries:
         return action.queries[0], tuple(action.queries[1:])
-    for name in ("query", "prompt", "pattern", "url", "ref", "name"):
+    # ``other.name`` names a provider item type, not the subject of the action.
+    for name in ("query", "prompt", "pattern", "url", "ref"):
         value = getattr(action, name)
         if value:
             return value, ()
     return None, ()
+
+
+def response_interruption(message: AssistantMessage) -> Optional[Literal["overloaded", "disconnected", "upstream"]]:
+    """A deliberately small, sanitized display vocabulary, not a retry decision.
+
+    The model error belongs to pending calls only. Completed calls and Anthropic
+    deferred exchanges keep their existing outcome. No provider diagnostic leaves
+    this boundary, even when it contains URLs, request ids or credentials.
+    """
+    if message.stop_reason != "error":
+        return None
+    error = (message.error_message or "").lower()
+    if "overloaded" in error or "overloaded_error" in error:
+        return "overloaded"
+    if "stream disconnected" in error or "stream ended" in error or "connection reset" in error:
+        return "disconnected"
+    return "upstream"
 
 
 def native_activities(
@@ -373,6 +394,7 @@ def native_activities(
                 cost=summary.cost if last and summary is not None else None,
                 cost_calls=len(blocks),
                 response_id=response_id,
+                interruption=response_interruption(message) if block.record.status == "pending" else None,
             )
         )
     return activities
@@ -792,6 +814,11 @@ def hosted_line(activity: HostedActivity, lang: str, *, escape: Callable[[str], 
         parts[0] += " " + (subject if activity.fetch is not None else i18n_t("hostedTools.quoted", lang, subject=subject))
     if activity.completed:
         parts.extend(_ran(activity, lang, escape))
+    elif activity.interruption is not None:
+        parts.append(i18n_t(
+            "hostedTools.interruption.message", lang,
+            reason=i18n_t(f"hostedTools.interruption.{activity.interruption}", lang),
+        ))
     elif activity.policy_sources is not None:
         names = {a.source_id: a.label for a in activity.attempts or ()}
         providers = i18n_t("hostedTools.listSeparator", lang).join(

@@ -79,6 +79,10 @@ export type HostedActivity = {
   error?: string;
   /** The stable code of a reason Avibe worded itself, shown in the reader's language. */
   error_code?: string;
+  /** Sanitized category of the owning response failure; not the search's own error. */
+  interruption?: 'overloaded' | 'disconnected' | 'upstream';
+  /** Read-time evidence: a later committed response in the same Turn. Never predicted by IM. */
+  retried?: boolean;
   /** The query, prompt, page or thread the call named. */
   subject?: string;
   action?: string;
@@ -142,6 +146,14 @@ const fetchFrom = (raw: unknown): WebFetchRecord | undefined => {
   return record as unknown as WebFetchRecord;
 };
 
+const PROVIDER_ITEM_SUBJECTS = new Set([
+  'web_search_call', 'web_search_tool_result', 'server_tool_use', 'custom_tool_call',
+]);
+const nativeSubject = (card: Record<string, unknown>): string | undefined => {
+  if (card.mode !== 'native' || card.action === 'other' || PROVIDER_ITEM_SUBJECTS.has(card.subject as string)) return undefined;
+  return typeof card.subject === 'string' ? card.subject : undefined;
+};
+
 /** The card a row carries, or undefined for anything that is not one this client reads. */
 export const hostedActivityFrom = (raw: unknown): HostedActivity | undefined => {
   if (!raw || typeof raw !== 'object') return undefined;
@@ -152,6 +164,11 @@ export const hostedActivityFrom = (raw: unknown): HostedActivity | undefined => 
   if (typeof card.status !== 'string' || !STATUSES.includes(card.status)) return undefined;
   const projected = {
     ...(card as unknown as HostedActivity),
+    // Released native ``other`` cards used their provider item type as a fake subject.
+    subject: nativeSubject(card),
+    interruption: card.mode === 'native' && card.status === 'pending' && ['overloaded', 'disconnected', 'upstream'].includes(card.interruption as string)
+      ? card.interruption as HostedActivity['interruption'] : undefined,
+    retried: card.retried === true,
     sources: Array.isArray(card.sources) ? (card.sources as HostedActivitySource[]).filter((s) => typeof s?.url === 'string' || typeof s?.title === 'string') : [],
     images: Array.isArray(card.images) ? (card.images as HostedActivityImage[]).filter((i) => typeof i?.path === 'string') : [],
     attempts: Array.isArray(card.attempts) ? card.attempts.map(attemptFrom).filter((attempt): attempt is HostedActivityAttempt => attempt !== undefined) : undefined,
