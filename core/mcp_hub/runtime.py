@@ -355,8 +355,9 @@ class McpRuntime:
             return None
         name = definition["name"]
         provider = self._oauth_providers.get(name)
-        if provider is not None:
-            return provider
+        if provider is not None and getattr(getattr(provider, "context", None), "server_url", None) != transport["url"]:
+            self._oauth_providers.pop(name, None)
+            provider = None
         async def _redirect(_url: str) -> None:
             raise McpHubError("auth_required", "MCP OAuth login is required.", hint=f"vibe mcp {name} --login")
         async def _callback():
