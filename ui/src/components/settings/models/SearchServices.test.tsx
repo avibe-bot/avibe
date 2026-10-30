@@ -16,6 +16,7 @@ import { createSourceCollectionReadAuthority } from './collectionReadAuthority';
 import { ApiCallError, modelsApi } from './modelsApi';
 import type { SourceMutationSettlement, TrackSourceMutation } from './mutationSettlement';
 import { readyRegion } from './regionRead';
+import { formatSmallUsd } from './format';
 import { keylessExaSource } from './searchServices';
 import { ACTIVE_SEARCH, KEYLESS_ACTIVE_SEARCH, SEARCH_SOURCES } from './searchServices.fixtures';
 import { SourceDetailPanel } from './SourceDetailPanel';
@@ -134,11 +135,14 @@ describe('search service activation and mixed order', () => {
     const locale = i18n.cloneInstance({ lng });
     render(wrap(<ToolsTab read={readyRegion({ tools: [KEYLESS_ACTIVE_SEARCH] })} sources={SEARCH_SOURCES} pending={new Set()} onSave={vi.fn()} onClear={vi.fn()} onRetry={vi.fn()} />, lng));
     expect(screen.getByText(locale.t('settings.models.searchServices.vendorName.exa-mcp'))).toBeTruthy();
-    expect(screen.getByText(locale.t('settings.models.searchServices.keylessReady'))).toBeTruthy();
     expect(screen.getByText(locale.t('settings.models.searchServices.keylessResults', { count: 5 }))).toBeTruthy();
-    expect(screen.getByText(locale.t('settings.models.searchServices.free'))).toBeTruthy();
     const keylessRow = document.querySelector('[data-executor="src_exakeyless"]') as HTMLElement;
-    expect(within(keylessRow).getByText(locale.t('settings.models.searchServices.use'))).toBeTruthy();
+    // The price says free; that it needs no key is its tooltip, not a second pill.
+    expect(within(keylessRow).getByText(locale.t('settings.models.searchServices.free')).getAttribute('title')).toBe(locale.t('settings.models.searchServices.noKey'));
+    expect(within(keylessRow).queryByText(locale.t('settings.models.searchServices.keylessReady'))).toBeNull();
+    // The switch is labelled for assistive tech, with no visible caption beside it.
+    expect(within(keylessRow).getByRole('switch', { name: locale.t('settings.models.searchServices.use') })).toBeTruthy();
+    expect(within(keylessRow).queryByText(locale.t('settings.models.searchServices.use'))).toBeNull();
     expect(keylessRow.textContent).not.toMatch(/使用供应商|Uses .* key|invalid key|Replace key|密钥无效/i);
     cleanup();
     const { onViewOrder } = addDialog(KEYLESS_ACTIVE_SEARCH, lng);
@@ -154,12 +158,14 @@ describe('search service activation and mixed order', () => {
     render(wrap(<ToolsTab read={readyRegion({ tools: [KEYLESS_ACTIVE_SEARCH] })} sources={SEARCH_SOURCES} pending={new Set()} onSave={vi.fn()} onClear={vi.fn()} onRetry={vi.fn()} />, lng));
     const keylessRow = document.querySelector('[data-executor="src_exakeyless"]') as HTMLElement;
     const keylessPrice = KEYLESS_ACTIVE_SEARCH.executor_candidates.find((row) => row.source_id === 'src_exakeyless')!.price!;
-    expect(within(keylessRow).getByText(locale.t('settings.models.searchServices.builtInPrice') as string)).toBeTruthy();
-    expect(keylessRow.textContent).not.toContain(listPrice(keylessPrice.as_of));
-    // A paid service keeps its dated list-price link.
+    const free = within(keylessRow).getByText(locale.t('settings.models.searchServices.free') as string);
+    expect(free.getAttribute('title')).not.toContain(listPrice(keylessPrice.as_of));
+    expect(within(keylessRow).queryByRole('link')).toBeNull();
+    // A paid service's price links its vendor's dated list price.
     const paid = KEYLESS_ACTIVE_SEARCH.executor_candidates.find((row) => row.kind === 'service' && (row.price?.usd_per_1k ?? 0) > 0)!;
     const paidRow = document.querySelector(`[data-executor="${paid.source_id}"]`) as HTMLElement;
-    expect(within(paidRow).getByRole('link', { name: listPrice(paid.price!.as_of) })).toBeTruthy();
+    const link = within(paidRow).getByRole('link', { name: locale.t('settings.models.searchServices.price', { usd: formatSmallUsd(paid.price!.usd_per_1k) }) as string });
+    expect(link.getAttribute('title')).toBe(listPrice(paid.price!.as_of));
     cleanup();
     addDialog(KEYLESS_ACTIVE_SEARCH, lng);
     const builtInCard = screen.getByRole('region', { name: locale.t('settings.models.searchServices.vendorName.exa-mcp') as string });
@@ -268,11 +274,13 @@ describe('search service activation and mixed order', () => {
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Move Exa up' })));
   });
 
-  it.each([true, false])('explains the native preference %s and compares live catalog prices with no service added', (prefer_native) => {
+  it.each([true, false])('explains the native preference %s, and leaves the automatic order to the heading\'s hint', async (prefer_native) => {
     tab({ ...newVendors(), prefer_native });
     expect(screen.getByText(prefer_native ? /When Claude, GPT or Grok/ : /Every model uses the search order below/)).toBeTruthy();
-    expect(screen.getByText(/List prices: DeepSeek \$0.75.*Tavily \$8.*Exa \$7/)).toBeTruthy();
     expect(screen.queryByText(/full page|page content|\$1/)).toBeNull();
+    expect(screen.queryByText(/Automatic:/)).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: 'About the search order' }));
+    expect(screen.getByText(/Automatic:/)).toBeTruthy();
   });
 
   it('adds the shared dialog entry to Sources only on the active read, and renders search Sources without model claims', async () => {

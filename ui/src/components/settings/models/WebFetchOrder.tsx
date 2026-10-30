@@ -1,12 +1,15 @@
 import * as React from 'react';
 import { useTranslation } from 'react-i18next';
-import { ArrowDown, ArrowUp, LockKeyhole, Plus, RotateCcw } from 'lucide-react';
+import { LockKeyhole, Plus, RotateCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { ToggleSwitch } from '../SettingsPrimitives';
-import { SearchVendorGlyph } from './SearchServiceParts';
+import { cn } from '@/lib/utils';
+import { ModelHubInfoHint } from './ModelHubInfoHint';
+import { OrderPrice, SearchVendorGlyph } from './SearchServiceParts';
+import { OrderStepper } from './OrderStepper';
 import { executorOrderAfterMove } from './hostedTools';
-import { cooldownTime, formatMonthDay } from './format';
+import { cooldownTime, formatMonthDay, formatSmallUsd } from './format';
 import { sourceStatePresentation } from './sourceStatePresentation';
 import { fetchVendorForSource } from './webFetch';
 import type { HostedFetchExecutorCandidate, HostedToolPut, HostedWebFetchToolStatus, Source } from './types';
@@ -19,7 +22,21 @@ const FetchPrice: React.FC<{ candidate: HostedFetchExecutorCandidate }> = ({ can
   </span>;
 };
 
-const FetchStatus: React.FC<{ candidate: HostedFetchExecutorCandidate; tool: HostedWebFetchToolStatus }> = ({ candidate, tool }) => {
+/** A fetch row's price, one line in the row's price column; what it is (local, built in, list price) is its tooltip. */
+const FetchOrderPrice: React.FC<{ candidate: HostedFetchExecutorCandidate }> = ({ candidate }) => {
+  const { t } = useTranslation();
+  const { price } = candidate;
+  if (price.usd_per_1k === 0) {
+    return <OrderPrice text={t('settings.models.searchServices.free')} title={t(candidate.kind === 'local' ? 'settings.models.webFetch.localPrice' : 'settings.models.searchServices.noKey')} />;
+  }
+  return <OrderPrice
+    text={t('settings.models.webFetch.price', { usd: formatSmallUsd(price.usd_per_1k) })}
+    title={t(candidate.model_id === 'tavily/extract' ? 'settings.models.webFetch.tavilyPriceTitle' : 'settings.models.searchServices.priceDate', { date: price.as_of })}
+    href={price.url}
+  />;
+};
+
+const FetchStatus: React.FC<{ candidate: HostedFetchExecutorCandidate; tool: HostedWebFetchToolStatus; inRow?: boolean }> = ({ candidate, tool, inRow = false }) => {
   const { t, i18n } = useTranslation();
   const vendor = fetchVendorForSource(tool, candidate.source_id);
   const success = tool.status.verified.find((row) => row.source_id === candidate.source_id && row.model_id === candidate.model_id);
@@ -29,7 +46,7 @@ const FetchStatus: React.FC<{ candidate: HostedFetchExecutorCandidate; tool: Hos
     : candidate.cooldown_until ? t('settings.models.searchServices.cooldown', { time: cooldownTime(candidate.cooldown_until, i18n.language) })
     : bad && state.key ? t(state.key, state.values)
     : success ? t('settings.models.tools.pair.ok', { date: formatMonthDay(success.at) })
-    : vendor?.facts.built_in && candidate.kind !== 'local' ? t('settings.models.searchServices.keylessReady') : null;
+    : vendor?.facts.built_in && candidate.kind !== 'local' && !inRow ? t('settings.models.searchServices.keylessReady') : null;
   return text ? <span className={`model-hub-pill border ${!candidate.settings.enabled ? 'model-hub-accent-pill--neutral' : candidate.cooldown_until || bad ? 'model-hub-status-gold' : 'model-hub-status-mint'}`}>{text}</span> : null;
 };
 
@@ -89,26 +106,37 @@ export const WebFetchOrder: React.FC<{
     onSave({ executor_order: next });
   };
   return <div className="flex flex-col gap-3 border-t border-border p-4">
-    <div className="flex items-center justify-between gap-3"><h4 className="font-semibold">{t('settings.models.webFetch.order')}</h4><Button variant="outline" size="xs" disabled={pending} onClick={() => onSave({ executor_order: null })}><RotateCcw aria-hidden />{t('settings.models.tools.order.reset')}</Button></div>
-    <p className="model-hub-tool-note">{t('settings.models.webFetch.caption')}</p>
+    <div className="flex items-start justify-between gap-3">
+      <div className="flex min-w-0 flex-col gap-0.5">
+        <span className="flex items-center gap-1.5">
+          <h4 className="font-semibold">{t('settings.models.webFetch.order')}</h4>
+          <ModelHubInfoHint label={t('settings.models.webFetch.orderAbout') as string} content={<span className="flex flex-col gap-2"><span>{t('settings.models.webFetch.orderDefault')}</span><span>{t('settings.models.webFetch.egress')}</span></span>} />
+        </span>
+        <p className="model-hub-tool-note">{t('settings.models.webFetch.caption')}</p>
+      </div>
+      {tool.executor_order !== null && <Button variant="outline" size="xs" disabled={pending} onClick={() => onSave({ executor_order: null })}><RotateCcw aria-hidden />{t('settings.models.tools.order.reset')}</Button>}
+    </div>
     <ol ref={list} className="flex flex-col gap-1.5" aria-label={t('settings.models.webFetch.order')}>
       {rows.map((row, index) => {
         const vendor = fetchVendorForSource(tool, row.source_id);
         const label = name(row.source_id);
-        return <li key={row.source_id} data-executor={row.source_id} className="model-hub-tool-executor-row grid items-center rounded-lg border border-border bg-background">
-          <span className="model-hub-order-ordinal">{row.settings.enabled ? index + 1 : '—'}</span>
-          <div className="flex min-w-0 items-center gap-3"><SearchVendorGlyph vendor={vendor?.id ?? 'local'} /><div className="flex min-w-0 flex-col gap-1">
-            <div className="flex flex-wrap items-center gap-2"><button type="button" data-search-source={row.source_id} className="truncate text-left font-semibold hover:underline" onClick={(event) => vendor?.facts.built_in && vendor.id !== 'exa-mcp' ? setDetail(row.source_id) : onOpen?.(row.source_id, event.currentTarget)}>{label}</button><span className="model-hub-pill model-hub-accent-pill--cyan border">{t(row.kind === 'local' ? 'settings.models.webFetch.local' : 'settings.models.webFetch.kind')}</span><FetchStatus candidate={row} tool={tool} /></div>
-            <p className="model-hub-tool-note">{t(`settings.models.webFetch.row.${vendor?.id}`, { defaultValue: row.model_id })}</p>
+        const off = !row.settings.enabled;
+        return <li key={row.source_id} data-executor={row.source_id} className={cn('model-hub-tool-executor-row grid items-center rounded-lg border border-border bg-background', off && 'is-off')}>
+          <span className="flex items-center gap-1.5">
+            <OrderStepper label={label} canUp={!off && index > 0} canDown={!off && index < enabled.length - 1} pending={pending} onMove={(direction) => move(index, direction)} />
+            <span className={cn('model-hub-order-ordinal', index === 0 && !off && 'is-first')}>{off ? '—' : index + 1}</span>
+          </span>
+          <div className="flex min-w-0 items-center gap-3"><SearchVendorGlyph vendor={vendor?.id ?? 'local'} /><div className="flex min-w-0 flex-col gap-0.5">
+            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1"><button type="button" data-search-source={row.source_id} className="truncate text-left font-semibold hover:underline" onClick={(event) => vendor?.facts.built_in && vendor.id !== 'exa-mcp' ? setDetail(row.source_id) : onOpen?.(row.source_id, event.currentTarget)}>{label}</button><FetchStatus candidate={row} tool={tool} inRow /></div>
+            <p className="model-hub-tool-note truncate">{t(`settings.models.webFetch.row.${vendor?.id}`, { defaultValue: row.model_id })}</p>
             {row.kind !== 'local' && row.cooldown_until && <Button variant="outline" size="xs" className="self-start" disabled={pending} onClick={() => onRetry?.(row.source_id)}>{t('settings.models.searchServices.retry')}</Button>}
           </div></div>
-          <FetchPrice candidate={row} />
-          <span className="flex items-center gap-1"><span className="model-hub-tool-note mr-2 hidden xl:inline">{t('settings.models.webFetch.use')}</span><ToggleSwitch enabled={row.settings.enabled} disabled={pending} label={t('settings.models.webFetch.use')} onClick={() => onSave({ services: { [row.source_id]: { enabled: !row.settings.enabled } } })} />{([-1, 1] as const).map((direction) => <Button key={direction} type="button" variant="ghost" size="icon" data-direction={direction} className="model-hub-route-action model-hub-order-row-action" aria-label={t(direction < 0 ? 'settings.models.tools.order.moveUp' : 'settings.models.tools.order.moveDown', { source: label })} disabled={!row.settings.enabled || (direction < 0 ? index === 0 : index === enabled.length - 1)} aria-disabled={pending || undefined} onClick={() => move(index, direction)}>{direction < 0 ? <ArrowUp aria-hidden /> : <ArrowDown aria-hidden />}</Button>)}</span>
+          <FetchOrderPrice candidate={row} />
+          <span className="model-hub-order-switch"><ToggleSwitch enabled={!off} disabled={pending} label={t('settings.models.webFetch.use')} onClick={() => onSave({ services: { [row.source_id]: { enabled: off } } })} /></span>
         </li>;
       })}
     </ol>
-    <p className="model-hub-tool-note">{t('settings.models.webFetch.egress')}</p>
-    <div className="flex flex-wrap items-center justify-between gap-3"><Button variant="outline" size="sm" disabled={pending} onClick={(event) => onAdd?.(event.currentTarget)}><Plus aria-hidden />{t('settings.models.webFetch.add')}</Button><p className="model-hub-tool-note flex items-start gap-2"><LockKeyhole className="mt-0.5 size-3.5 shrink-0" aria-hidden />{t('settings.models.webFetch.custody')}</p></div>
+    <div className="flex flex-wrap items-center justify-between gap-3"><Button variant="outline" size="sm" disabled={pending} onClick={(event) => onAdd?.(event.currentTarget)}><Plus aria-hidden />{t('settings.models.webFetch.add')}</Button><p className="model-hub-tool-note flex items-center gap-1.5" title={t('settings.models.webFetch.custody') as string}><LockKeyhole className="size-3.5 shrink-0" aria-hidden />{t('settings.models.searchServices.custodyShort')}</p></div>
     {detail && <Dialog open onOpenChange={(open) => { if (!open) setDetail(null); }}><DialogContent className="max-w-xl border-border-strong bg-surface" closeLabel={t('common.close')}><DialogHeader><DialogTitle>{name(detail)}</DialogTitle><DialogDescription>{t('settings.models.webFetch.custody')}</DialogDescription></DialogHeader><FetchServiceSettings sourceId={detail} tool={tool} pending={pending} onSave={onSave} onRetry={(id) => onRetry?.(id)} /></DialogContent></Dialog>}
   </div>;
 };

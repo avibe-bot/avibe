@@ -11,14 +11,16 @@ export const ModelHubInfoHint: React.FC<{
   align?: 'start' | 'center' | 'end';
 }> = ({ label, content, className, align = 'start' }) => {
   const [open, setOpen] = React.useState(false);
+  // A mouse over the trigger has already opened the hint; its click must not toggle it shut again.
+  const hovering = React.useRef(false);
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover open={open} onOpenChange={(next) => setOpen(next || hovering.current)}>
       <PopoverTrigger asChild>
         <button
           type="button"
           aria-label={label}
-          onPointerEnter={(event) => { if (event.pointerType === 'mouse') setOpen(true); }}
-          onPointerLeave={(event) => { if (event.pointerType === 'mouse') setOpen(false); }}
+          onPointerEnter={(event) => { if (event.pointerType === 'mouse') { hovering.current = true; setOpen(true); } }}
+          onPointerLeave={(event) => { if (event.pointerType === 'mouse') { hovering.current = false; setOpen(false); } }}
           className={cn('inline-flex size-4 shrink-0 items-center justify-center rounded-full text-muted outline-none transition hover:text-foreground focus-visible:text-foreground', className)}
         >
           <Info className="size-3.5" />

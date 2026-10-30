@@ -2561,7 +2561,16 @@
           "listNoteExtras": "API 标价 · {{extras}}",
           "extra": "另加 {{price}}",
           "extraSeparator": "，",
-          "unknown": "暂无标价"
+          "unknown": "暂无标价",
+          "executorTitle": "API 标价 · {{date}} · 另计 {{model}} 的 token",
+          "includedShort": "订阅内含",
+          "per1k": {
+            "call": "${{usd}} / 千次",
+            "search": "${{usd}} / 千次",
+            "post": "${{usd}} / 千条帖子",
+            "profile": "${{usd}} / 千个账号",
+            "fetch": "${{usd}} / 千次读取"
+          }
         },
         "footnote": "费用按厂商 API 标价估算，中转的实际账单可能不同；订阅不另计费。Claude 订阅不能运行这些工具。",
         "saveFailed": "{{toolInline}}设置未能保存，请重试。",
@@ -2581,7 +2590,7 @@
           "jina-reader": "https://r.jina.ai/"
         },
         "order": "读取顺序",
-        "caption": "模型调用 web_fetch 时按这个顺序读取；失败自动换下一个。默认：本机 → 已配置服务 → Exa（免费） → Jina Reader（免费）；可调整顺序。",
+        "caption": "按此顺序读取网页，失败换下一个。",
         "use": "用于网页读取",
         "unused": "未用于网页读取",
         "kind": "读取服务",
@@ -2599,12 +2608,12 @@
           "jina-reader": "Jina Reader（免费）"
         },
         "row": {
-          "local": "Chrome 150 指纹 · HTML / PDF / 文本 · 不执行 JS",
+          "local": "HTML / PDF / 文本 · 不执行 JS",
           "tavily": "用 Tavily 的密钥 · Extract 基础",
           "exa": "用 Exa 的密钥 · Contents",
           "deepseek": "用官方 DeepSeek 的密钥 · Fetch",
-          "exa-mcp": "与网页搜索共用按 IP 的限流",
-          "jina-reader": "每分钟 20 次 · 由 Jina 渲染 JS · 默认最后兜底"
+          "exa-mcp": "与网页搜索共用限流",
+          "jina-reader": "可渲染 JS · 每分钟 20 次"
         },
         "localDetail": "默认使用 Chrome 150 浏览器画像、HTTP/2。原生传输无法加载时改用普通 HTTP/2，并在调用记录中标记原因。不执行 JavaScript，不读取用户 Cookie 或登录凭据。支持 HTML、PDF、纯文本、Markdown 和 JSON。",
         "limits": "整条调用最长 180 秒，每次尝试 30 秒；本机文本上限 16 MiB，PDF 32 MiB；给模型的完整结果最多 12,000 估算 token（48,000 UTF-8 字节），超出会明确截断。",
@@ -2614,7 +2623,10 @@
         "endpoint": "接口",
         "tavilyPrice": "5 个网址 1 credit（摊算）",
         "localPrice": "从你的机器直接读取",
-        "builtInPrice": "内置 · 无需密钥或设置"
+        "builtInPrice": "内置 · 无需密钥或设置",
+        "orderAbout": "关于读取顺序",
+        "orderDefault": "默认顺序：本机 → 已配置服务 → Exa（免费）→ Jina Reader（免费）。",
+        "tavilyPriceTitle": "5 个网址 1 credit（摊算）· API 标价 · {{date}}"
       },
       "searchServices": {
         "subtitle": "Vibey 在对话中可使用的工具。搜索会把查询发给执行它的厂商或搜索服务，失败时可能改由顺序中的下一个重试；图片提示词会发给图片模型的厂商。按量付费的供应商和搜索服务按各自的规则计费。",
@@ -2622,8 +2634,8 @@
         "nativeOn": "Claude、GPT、Grok 等自己能搜时直接用，结果和引用由模型厂商给出。",
         "nativeOff": "所有模型都按下面的顺序搜索，包括能自带搜索的模型。",
         "order": "搜索顺序",
-        "orderNative": "模型不能自带搜索时，按这个顺序执行；失败后自动换下一个。",
-        "orderAll": "所有模型都按这个顺序执行；失败后自动换下一个。",
+        "orderNative": "模型不能自带搜索时，按此顺序执行，失败换下一个。",
+        "orderAll": "所有模型都按此顺序执行，失败换下一个。",
         "orderAuto": "自动：搜索服务在前，模型代搜在后。",
         "orderAutoKeyless": "自动：已添加的搜索服务 → 已启用的官方 DeepSeek → Exa（免费） → 模型代搜；可上下调整。",
         "orderCustom": "已手动调整顺序。",
@@ -2636,7 +2648,6 @@
         "retry": "立即重试",
         "add": "添加搜索服务",
         "addVendor": "添加 {{vendor}}",
-        "empty": "添加搜索服务，会在模型代搜之前搜索。标价：{{prices}}。套餐和实际账单可能不同。",
         "price": "${{usd}} / 千次",
         "free": "免费",
         "freeTier": "免费；按 IP 限流",
@@ -2645,8 +2656,6 @@
         "keylessResults_other": "{{count}} 个结果 · 按 IP 限流",
         "keylessCooldown": "暂时限流 · 稍后重试",
         "keylessCooldownUntil": "冷却至 {{time}}",
-        "keylessEmpty": "Exa（免费）已内置，无需密钥，在模型代搜之前搜索。添加的搜索服务会排在它前面。标价：{{prices}}。套餐和实际账单可能不同。",
-        "vendorPrice": "{{vendor}} ${{usd}} / 千次",
         "priceDate": "API 标价 · {{date}}",
         "builtInPrice": "内置 · 无需密钥或设置",
         "priceNote": "价格为目录标注日期的 API 标价，免费额度、套餐与实际账单可能不同。",
@@ -2703,7 +2712,11 @@
           "tavily": "为 AI Agent 设计的基础网页搜索，返回与搜索词相关的片段。",
           "exa": "语义网页搜索，查询相关的高亮片段已包含在搜索价格中。",
           "exa-mcp": "无需密钥的 Exa 搜索，免费但按 IP 限流；无需设置。"
-        }
+        },
+        "noKey": "无需密钥",
+        "priceFootnote": "价格为 API 标价；模型代搜另计模型 token，实际以账单为准。",
+        "custodyShort": "密钥只保存在网关，不会交给模型",
+        "orderAbout": "关于搜索顺序"
       },
       "capability": {
         "readFailed": "未能读取此供应商的工具能力。",

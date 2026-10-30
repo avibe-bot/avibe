@@ -15,6 +15,25 @@ import { usageHasNoPrice, type ServiceMonth } from './usageProjection';
 import { VendorGlyph } from './vendorGlyph';
 import type { HostedExecutorCandidate, HostedSearchServiceVendor, HostedServiceListPrice, HostedToolPut, HostedWebSearchToolStatus, Source } from './types';
 
+/**
+ * An order row's price: one line in the row's aligned price column. What it is (list price and its date, what is
+ * billed besides) is its tooltip; a list price opens the vendor's pricing page.
+ */
+export const OrderPrice: React.FC<{ text: string; title?: string; href?: string; muted?: boolean }> = ({ text, title, href, muted = false }) => {
+  const className = cn('model-hub-order-price', muted && 'is-muted');
+  return href
+    ? <a href={href} target="_blank" rel="noopener noreferrer" title={title} className={className}>{text}</a>
+    : <span title={title} className={className}>{text}</span>;
+};
+
+/** A search service's price in an order row: free for a built-in service, else its list price per thousand searches. */
+export const SearchServiceOrderPrice: React.FC<{ price: HostedServiceListPrice }> = ({ price }) => {
+  const { t } = useTranslation();
+  return price.usd_per_1k === 0
+    ? <OrderPrice text={t('settings.models.searchServices.free')} title={t('settings.models.searchServices.noKey')} />
+    : <OrderPrice text={t('settings.models.searchServices.price', { usd: formatSmallUsd(price.usd_per_1k) })} title={t('settings.models.searchServices.priceDate', { date: price.as_of })} href={price.url} />;
+};
+
 export const SearchVendorGlyph: React.FC<{ vendor: string }> = ({ vendor }) => (
   <span className="model-hub-accent-tile--cyan model-hub-accent-ink--cyan flex size-8 shrink-0 items-center justify-center rounded-lg">
     <VendorGlyph vendor={vendor} />
@@ -38,7 +57,9 @@ export const SearchCandidateStatus: React.FC<{
   candidate: HostedExecutorCandidate;
   tool: HostedWebSearchToolStatus;
   source?: Source;
-}> = ({ candidate, tool, source }) => {
+  /** In an order row, whose price already says a built-in service is free: only a state worth noticing shows. */
+  inRow?: boolean;
+}> = ({ candidate, tool, source, inRow = false }) => {
   const { t, i18n } = useTranslation();
   const state = candidate.kind === 'service' ? candidate.state : source?.state;
   const success = tool.status.verified.find((row) => row.source_id === candidate.source_id && row.model_id === candidate.model_id);
@@ -50,9 +71,10 @@ export const SearchCandidateStatus: React.FC<{
   if (!candidateEnabled(candidate)) {
     text = t('settings.models.searchServices.unused');
     tone = 'model-hub-accent-pill--neutral';
-  } else if (keyless) {
+  } else if (keyless && (until || !inRow)) {
     // The built-in service has no credential health or key repair. Only its
-    // service cooldown and per-row switch can override the free status.
+    // service cooldown and per-row switch can override the free status; a row,
+    // whose price says free, shows its latest success instead.
     text = until ? t('settings.models.searchServices.keylessCooldown') : t('settings.models.searchServices.keylessReady');
     if (until) tone = 'model-hub-status-gold';
   } else if (state && (state.status === 'needs_action' || state.status === 'error' || state.status === 'cooldown')) {

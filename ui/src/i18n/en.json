@@ -2561,7 +2561,16 @@
           "listNoteExtras": "At API price · {{extras}}",
           "extra": "+ {{price}}",
           "extraSeparator": " · ",
-          "unknown": "No list price"
+          "unknown": "No list price",
+          "executorTitle": "API list price · {{date}} · plus {{model}} tokens",
+          "includedShort": "Included",
+          "per1k": {
+            "call": "${{usd}} / 1k searches",
+            "search": "${{usd}} / 1k searches",
+            "post": "${{usd}} / 1k posts",
+            "profile": "${{usd}} / 1k profiles",
+            "fetch": "${{usd}} / 1k fetches"
+          }
         },
         "footnote": "Costs are estimated at the vendor's API price, and a relay may bill differently. Subscriptions add no charge. A Claude subscription can't run these tools.",
         "saveFailed": "Couldn't save the {{toolInline}} setting. Please retry.",
@@ -2581,7 +2590,7 @@
           "jina-reader": "https://r.jina.ai/"
         },
         "order": "Fetch order",
-        "caption": "When the model calls web_fetch, try in this order; move on after failure. Default: local → configured services → Exa (free) → Jina Reader (free); reorder as needed.",
+        "caption": "Pages are read in this order; a failure tries the next.",
         "use": "Use for web fetch",
         "unused": "Not used for web fetch",
         "kind": "Fetch service",
@@ -2599,12 +2608,12 @@
           "jina-reader": "Jina Reader (free)"
         },
         "row": {
-          "local": "Chrome 150 fingerprint · HTML / PDF / text · no JS",
+          "local": "HTML / PDF / text · no JS",
           "tavily": "Uses the Tavily key · basic Extract",
           "exa": "Uses the Exa key · Contents",
           "deepseek": "Uses the official DeepSeek key · Fetch",
-          "exa-mcp": "Shares IP limits with web search",
-          "jina-reader": "20 per minute · Jina renders JS · default last fallback"
+          "exa-mcp": "Shares limits with web search",
+          "jina-reader": "Renders JS · 20 per minute"
         },
         "localDetail": "Defaults to the Chrome 150 browser profile and HTTP/2. If native transport cannot load, plain HTTP/2 is used and the call records the reason. No JavaScript execution, user cookies or login credentials. Supports HTML, PDF, plain text, Markdown and JSON.",
         "limits": "180 seconds per chain, 30 seconds per attempt; local text up to 16 MiB, PDF 32 MiB. The complete model-facing result is capped at 12,000 estimated tokens (48,000 UTF-8 bytes); any cut is explicit.",
@@ -2614,7 +2623,10 @@
         "endpoint": "Endpoint",
         "tavilyPrice": "1 credit per 5 URLs (amortized)",
         "localPrice": "Read directly from your machine",
-        "builtInPrice": "Built in · no key or setup"
+        "builtInPrice": "Built in · no key or setup",
+        "orderAbout": "About the fetch order",
+        "orderDefault": "Default order: Local → configured services → Exa (free) → Jina Reader (free).",
+        "tavilyPriceTitle": "1 credit per 5 URLs (amortized) · API list price · {{date}}"
       },
       "searchServices": {
         "subtitle": "Tools Vibey can use in a conversation. Searches send the query to the vendor or search service that runs them; a failure may retry with the next one in the search order. Image prompts go to the image model's vendor. Metered providers and search services bill under their own rules.",
@@ -2622,8 +2634,8 @@
         "nativeOn": "When Claude, GPT or Grok can search natively, use it directly. The model vendor supplies the results and citations.",
         "nativeOff": "Every model uses the search order below, including models that can search natively.",
         "order": "Search order",
-        "orderNative": "Used when the model cannot search natively. A failure tries the next entry.",
-        "orderAll": "Used for every model. A failure tries the next entry.",
+        "orderNative": "Used when the model can't search natively; a failure tries the next.",
+        "orderAll": "Every model uses this order; a failure tries the next.",
         "orderAuto": "Automatic: search services first, then model executors.",
         "orderAutoKeyless": "Automatic: your added search services → enabled official DeepSeek → Exa (free) → model executors; use the arrows to reorder.",
         "orderCustom": "Customized order.",
@@ -2636,7 +2648,6 @@
         "retry": "Retry now",
         "add": "Add search service",
         "addVendor": "Add {{vendor}}",
-        "empty": "Add a search service to search before model executors. List prices: {{prices}}. Plans and actual bills may differ.",
         "price": "${{usd}} / 1k searches",
         "free": "Free",
         "freeTier": "Free; IP rate-limited",
@@ -2645,8 +2656,6 @@
         "keylessResults_other": "{{count}} results · IP rate-limited",
         "keylessCooldown": "Rate-limited · retry later",
         "keylessCooldownUntil": "Paused until {{time}}",
-        "keylessEmpty": "Exa (free) is built in, needs no key, and searches before model executors. Added search services precede it. List prices: {{prices}}. Plans and actual bills may differ.",
-        "vendorPrice": "{{vendor}} ${{usd}} / 1k searches",
         "priceDate": "API list price · {{date}}",
         "builtInPrice": "Built in · no key or setup",
         "priceNote": "Prices are the catalog's dated API list prices. Free allowances, plans and actual bills may differ.",
@@ -2703,7 +2712,11 @@
           "tavily": "Basic web search with query-relevant snippets, designed for AI agents.",
           "exa": "Semantic web search with query-relevant highlights included in the search price.",
           "exa-mcp": "Keyless Exa search. Free and IP rate-limited; no key or setup is required."
-        }
+        },
+        "noKey": "No key needed",
+        "priceFootnote": "Prices are API list prices. Model executors also use model tokens; your bill is final.",
+        "custodyShort": "Keys stay in the gateway, never with the model",
+        "orderAbout": "About the search order"
       },
       "capability": {
         "readFailed": "Couldn't read this Source's tool capabilities.",
