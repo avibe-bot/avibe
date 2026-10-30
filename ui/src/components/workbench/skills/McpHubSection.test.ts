@@ -10,7 +10,8 @@ describe('McpHubSection OAuth start link', () => {
     expect(source).toMatch(/target="_blank"/);
     expect(source).toMatch(/rel="noopener"/);
     expect(source).not.toMatch(/noreferrer/);
-    expect(source).toMatch(/\/api\/mcp\/\$\{encodeURIComponent\(name\)\}\/oauth\/start/);
+    expect(source).toMatch(/\/api\/mcp\//);
+    expect(source).toMatch(/\/oauth\/start/);
   });
 
   it('does not preallocate a blank tab or call window.open', () => {

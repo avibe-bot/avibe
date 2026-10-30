@@ -138,6 +138,19 @@ describe('McpHubSection add OAuth', () => {
     expect(listMcpServers.mock.calls.length).toBeGreaterThan(1);
   });
 
+  it('renders the row login control as a start-link with href, target, and rel', async () => {
+    listMcpServers.mockResolvedValue({
+      ok: true,
+      oauthMode: 'direct',
+      servers: [{ name: 'suno', auth: 'needs_login', source: 'avibe', transport: 'http', toolCount: 0, url: 'https://api.suno.com/mcp' }],
+    });
+    renderHub();
+    const login = await screen.findByRole('link', { name: en.mcpHub.login });
+    expect(login.getAttribute('href')).toBe('http://127.0.0.1:5123/api/mcp/suno/oauth/start');
+    expect(login.getAttribute('target')).toBe('_blank');
+    expect(login.getAttribute('rel')).toBe('noopener');
+  });
+
   it('selects the returned server once then lets another click take over', async () => {
     listMcpServers.mockResolvedValue({
       ok: true,
