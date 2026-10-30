@@ -145,10 +145,18 @@ describe('McpHubSection add OAuth', () => {
       servers: [{ name: 'suno', auth: 'needs_login', source: 'avibe', transport: 'http', toolCount: 0, url: 'https://api.suno.com/mcp' }],
     });
     renderHub();
-    const login = await screen.findByRole('link', { name: en.mcpHub.login });
-    expect(login.getAttribute('href')).toBe('http://127.0.0.1:5123/api/mcp/suno/oauth/start');
-    expect(login.getAttribute('target')).toBe('_blank');
-    expect(login.getAttribute('rel')).toBe('noopener');
+    const rowLogin = await screen.findByRole('link', { name: en.mcpHub.login });
+    expect(rowLogin.getAttribute('href')).toBe('http://127.0.0.1:5123/api/mcp/suno/oauth/start');
+    expect(rowLogin.getAttribute('target')).toBe('_blank');
+    expect(rowLogin.getAttribute('rel')).toBe('noopener');
+    fireEvent.click(screen.getByRole('button', { name: /suno/ }));
+    const logins = screen.getAllByRole('link', { name: en.mcpHub.login });
+    expect(logins).toHaveLength(2);
+    for (const login of logins) {
+      expect(login.getAttribute('href')).toBe('http://127.0.0.1:5123/api/mcp/suno/oauth/start');
+      expect(login.getAttribute('target')).toBe('_blank');
+      expect(login.getAttribute('rel')).toBe('noopener');
+    }
   });
 
   it('selects the returned server once then lets another click take over', async () => {
