@@ -1171,7 +1171,13 @@ def _backend_auto_update_checker(monkeypatch, tmp_path, sqlite_schema_db_factory
     return checker
 
 
-def test_backend_auto_update_retries_a_release_until_it_lands_or_its_install_fails(
+def _settled(checker, **releases):
+    """Releases first seen long enough ago to install unattended."""
+    seen_at = time.time() - update_checker.BACKEND_RELEASE_SETTLE_SECONDS - 1
+    checker.state.backend_releases_seen = {name: {"version": v, "at": seen_at} for name, v in releases.items()}
+
+
+def test_backend_auto_update_retries_a_release_until_it_lands_or_its_attempts_run_out(
     monkeypatch, tmp_path, sqlite_schema_db_factory
 ):
     admissions = []
@@ -1188,25 +1194,33 @@ def test_backend_auto_update_retries_a_release_until_it_lands_or_its_install_fai
             return result
 
     runtimes = {
-        "codex": {"auto_update": True, "has_update": True, "latest_version": "1.1.0"},
-        "claude": {"auto_update": False, "has_update": True, "latest_version": "2.0.0"},
-        "opencode": {"auto_update": True, "has_update": False, "latest_version": "1.0.0"},
+        "codex": {"auto_update": True, "has_update": True, "latest_version": "1.1.0", "status": "ok"},
+        "claude": {"auto_update": False, "has_update": True, "latest_version": "2.0.0", "status": "ok"},
+        "opencode": {"auto_update": True, "has_update": False, "latest_version": "1.0.0", "status": "ok"},
     }
     install_results = [
         {"ok": False, "code": "install_locked", "message": "Another Codex installation is already running."},
         {"ok": True},
         {"ok": False, "code": "install_failed", "message": "Could not upgrade Codex."},
+        {"ok": False, "code": "install_failed", "message": "Could not upgrade Codex."},
+        {"ok": False, "code": "install_failed", "message": "Could not upgrade Codex."},
         {"ok": True},
     ]
     installs = []
 
-    def install(name):
-        installs.append(name)
+    def install(name, **kwargs):
+        installs.append((name, kwargs))
         return install_results.pop(0)
 
     checker = _backend_auto_update_checker(
         monkeypatch, tmp_path, sqlite_schema_db_factory, _Coordinator(), runtimes, install
     )
+
+    # A release just published waits until it has settled.
+    asyncio.run(checker._do_check())
+    assert admissions == []
+    assert checker.state.backend_releases_seen["codex"]["version"] == "1.1.0"
+    _settled(checker, codex="1.1.0")
 
     # A message inside the quiet window defers every backend, like Avibe's own update.
     checker.state.last_activity_at = time.time() - 60
@@ -1221,16 +1235,113 @@ def test_backend_auto_update_retries_a_release_until_it_lands_or_its_install_fai
     coordinator_state["refresh_fails"] = True
     asyncio.run(checker._do_check())  # the install fails, then so does the refresh
     coordinator_state["refresh_fails"] = False
-    asyncio.run(checker._do_check())  # the failed release is not retried
+    asyncio.run(checker._do_check())  # the second attempt fails
+    asyncio.run(checker._do_check())  # the third attempt fails
+    asyncio.run(checker._do_check())  # the release is not tried a fourth time
 
-    assert admissions == ["codex"] * 4
-    assert installs == ["codex"] * 3
-    assert update_checker.UpdateState.load().backend_auto_update_attempts == {"codex": "1.1.0"}
+    assert admissions == ["codex"] * 6
+    # Each install is pinned to the release that settled, never whatever is latest by then.
+    assert installs == [("codex", {"version": "1.1.0"})] * 5
+    assert update_checker.UpdateState.load().backend_auto_update_attempts == {
+        "codex": {"version": "1.1.0", "count": 3}
+    }
 
     runtimes["codex"]["latest_version"] = "1.2.0"
-    asyncio.run(checker._do_check())  # a newer release is tried again
+    asyncio.run(checker._do_check())  # a newer release settles first
+    _settled(checker, codex="1.2.0")
+    asyncio.run(checker._do_check())  # and is then tried again
 
-    assert installs == ["codex"] * 4
+    assert installs[-1] == ("codex", {"version": "1.2.0"})
+
+
+# An installer can also fail or time out after removing the launcher.
+@pytest.mark.parametrize("left", ["broken", "missing"])
+def test_an_upgrade_that_leaves_the_cli_unable_to_start_restores_the_release_it_replaced(
+    monkeypatch, tmp_path, sqlite_schema_db_factory, left
+):
+    """npm reports an install whose native binary failed to download as a success, so the
+    upgrade's readback finds a CLI that cannot start: Codex 0.166.0 left one on a
+    machine that had run 0.165.0. The working release goes back in the same idle
+    window, and the upgrade is tried again on a later check."""
+
+    class _Coordinator:
+        async def run_when_idle(self, backend, operation):
+            return await operation()
+
+    codex = {"auto_update": True, "has_update": True, "latest_version": "0.166.0",
+             "current_version": "0.165.0", "status": "ok"}
+    runtimes = {
+        "codex": codex,
+        "claude": {"auto_update": False, "status": "ok"},
+        "opencode": {"auto_update": False, "status": "ok"},
+    }
+    installs = []
+
+    def install(name, version=None):
+        installs.append(version)
+        if version == "0.166.0":  # the upgrade: npm exits 0 without the binary
+            codex.update(status=left, installed=left != "missing", current_version=None, has_update=False)
+            return {"ok": False, "code": "cli_readback_failed", "message": "cannot start"}
+        codex.update(status="ok", installed=True, current_version=version, has_update=True)
+        return {"ok": True}
+
+    checker = _backend_auto_update_checker(
+        monkeypatch, tmp_path, sqlite_schema_db_factory, _Coordinator(), runtimes, install
+    )
+    _settled(checker, codex="0.166.0")
+
+    asyncio.run(checker._do_check())
+
+    # The upgrade is pinned to the release that settled, the restore to the one it replaced.
+    assert installs == ["0.166.0", "0.165.0"]
+    assert (codex["status"], codex["current_version"]) == ("ok", "0.165.0")
+    assert checker.state.backend_auto_update_attempts == {"codex": {"version": "0.166.0", "count": 1}}
+
+    def upgrade(name, version=None):
+        installs.append(version)
+        codex.update(current_version="0.166.0", has_update=False)
+        return {"ok": True}
+
+    monkeypatch.setattr("vibe.api.install_agent", upgrade)
+    asyncio.run(checker._do_check())
+
+    assert installs == ["0.166.0", "0.165.0", "0.166.0"]
+    assert codex["current_version"] == "0.166.0"
+
+
+def test_a_cli_that_cannot_start_is_repaired_without_waiting_for_a_release(
+    monkeypatch, tmp_path, sqlite_schema_db_factory
+):
+    """A CLI broken before this check (by an earlier upgrade, or by hand) has no version to
+    compare, so it never looked outdated and was never touched again."""
+
+    class _Coordinator:
+        async def run_when_idle(self, backend, operation):
+            return await operation()
+
+    codex = {"auto_update": True, "has_update": False, "latest_version": "0.166.0",
+             "current_version": None, "status": "broken"}
+    runtimes = {
+        "codex": codex,
+        "claude": {"auto_update": True, "has_update": False, "latest_version": "2.0.0", "status": "missing"},
+        "opencode": {"auto_update": False, "status": "ok"},
+    }
+    installs = []
+
+    def install(name, version=None):
+        installs.append((name, version))
+        return {"ok": False, "code": "cli_readback_failed", "message": "cannot start"}
+
+    checker = _backend_auto_update_checker(
+        monkeypatch, tmp_path, sqlite_schema_db_factory, _Coordinator(), runtimes, install
+    )
+
+    for _ in range(4):
+        asyncio.run(checker._do_check())
+
+    # The repair reinstalls the latest release through install_agent, which repairs a broken
+    # CLI; it has no working release to restore, and stops after the release's attempts.
+    assert installs == [("codex", "0.166.0")] * update_checker.BACKEND_AUTO_UPDATE_MAX_ATTEMPTS
 
 
 def test_backend_auto_update_stops_admitting_backends_once_a_message_arrives(
@@ -1243,26 +1354,35 @@ def test_backend_auto_update_stops_admitting_backends_once_a_message_arrives(
             admissions.append(backend)
             return await operation()
 
-    def install(name):
+    def install(name, **_kwargs):
         # The first backend's install outlasts the quiet window.
         checker.record_activity()
         return {"ok": True}
 
     runtimes = {
-        name: {"auto_update": True, "has_update": True, "latest_version": "9.0.0"}
+        name: {"auto_update": True, "has_update": True, "latest_version": "9.0.0", "status": "ok"}
         for name in ("codex", "claude", "opencode")
     }
     checker = _backend_auto_update_checker(
         monkeypatch, tmp_path, sqlite_schema_db_factory, _Coordinator(), runtimes, install
     )
+    _settled(checker, codex="9.0.0", claude="9.0.0", opencode="9.0.0")
 
     asyncio.run(checker._do_check())
 
     assert len(admissions) == 1
 
 
-@pytest.mark.parametrize("attempts", [None, ["codex"]])
-def test_update_state_without_backend_attempts_loads_released_fields(monkeypatch, tmp_path, attempts):
+@pytest.mark.parametrize(
+    "attempts,loaded",
+    [
+        (None, {}),
+        (["codex"], {}),
+        # Released versions recorded the one failed release as its version string.
+        ({"codex": "0.166.0"}, {"codex": {"version": "0.166.0", "count": 1}}),
+    ],
+)
+def test_update_state_without_backend_attempts_loads_released_fields(monkeypatch, tmp_path, attempts, loaded):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     released = {
         "notified_version": "3.0.3",
@@ -1284,4 +1404,5 @@ def test_update_state_without_backend_attempts_loads_released_fields(monkeypatch
 
     assert state.notified_version == "3.0.3"
     assert state.last_activity_at == 1767225600.0
-    assert state.backend_auto_update_attempts == {}
+    assert state.backend_auto_update_attempts == loaded
+    assert state.backend_releases_seen == {}

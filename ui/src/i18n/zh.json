@@ -3957,7 +3957,7 @@
     "restartSuccess": "已请求重启",
     "restartFailed": "重启失败",
     "autoUpdate": "自动更新",
-    "autoUpdateHint": "该后端空闲时自动安装新版本"
+    "autoUpdateHint": "新版本发布满 6 小时后，在该后端空闲时自动安装；无法启动的 CLI 会被自动修复"
   },
   "channelList": {
     "eyebrow": "群组",
