@@ -81,6 +81,7 @@ def native_available() -> tuple[bool, str | None]:
 class TransferBudget:
     wire: int = 0
     decoded: int = 0
+    on_response: Callable[[int], None] | None = None
 
 
 @dataclass
@@ -104,6 +105,13 @@ class _Receiver:
     header_bytes: int = 0
     native_decoded: bool = False
 
+    def received_status(self, status: int) -> None:
+        self.status = status
+        if status >= 200 and self.budget.on_response is not None:
+            # Publish before reading the body: a later timeout/size abort must
+            # not erase the last observed status in parent-owned diagnostics.
+            self.budget.on_response(status)
+
     def header(self, data: bytes) -> int:
         self.header_bytes += len(data)
         if self.header_bytes > HEADER_LIMIT:
@@ -114,7 +122,7 @@ class _Receiver:
             self.headers.clear()
             self.limit = TEXT_LIMIT
             try:
-                self.status = int(data.split()[1])
+                self.received_status(int(data.split()[1]))
             except (ValueError, IndexError):
                 raise FetchFailure("fetch_target_unreadable") from None
         elif b":" in data:
@@ -314,7 +322,7 @@ def httpx_hop(target: CheckedTarget, headers: dict, budget: TransferBudget, time
     with httpx.Client(transport=PinnedTransport(target), trust_env=False, follow_redirects=False,
                       timeout=httpx.Timeout(timeout, connect=min(5, timeout)), headers=headers) as client:
         with client.stream("GET", target.address.url, extensions={"trace": trace}) as response:
-            receiver.status = response.status_code
+            receiver.received_status(response.status_code)
             for k, v in response.headers.raw:
                 receiver.header(k + b":" + v + b"\r\n")
             receiver.header(b"\r\n")

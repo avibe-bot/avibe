@@ -189,6 +189,13 @@ def _url_matches(value: Any, requested_url: str) -> bool:
     )
 
 
+def _jina_target_error(body: Mapping[str, Any] | None) -> bool:
+    # Reader's documented FormattedPageDto.httpStatus is the crawled target's
+    # status, unlike the API's outer code/status. Never parse content or warning.
+    status = _path(body, "data.httpStatus")
+    return isinstance(status, (int, float)) and not isinstance(status, bool) and 400 <= status <= 599 and status == int(status)
+
+
 def _content(service: Mapping[str, Any], body: Mapping[str, Any] | None) -> tuple[str | None, str | None, str | None, bool]:
     result = service.get("result") if isinstance(service.get("result"), Mapping) else {}
     content = _path(body, result.get("content"))
@@ -377,6 +384,8 @@ def map_fetch_response(
         uncertain = sent and not free
     elif status != 200:
         code = "service_unavailable" if status is None or status >= 500 else "service_refused"
+    elif vendor == "jina-reader" and _jina_target_error(body):
+        code, target_failure = "fetch_target_unreadable", True
     elif vendor in {"tavily", "exa", "deepseek"}:
         outcome, content, title, provider_truncated = _configured_content(service, body, requested_url)
         if outcome == "malformed":
