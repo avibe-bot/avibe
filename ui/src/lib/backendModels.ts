@@ -22,9 +22,13 @@ export interface BackendModels {
    *  `effort_menu`): the efforts left out above, and by Source id the hops that
    *  refuse one the others still serve. Hub catalogs only. */
   effortMenus?: Record<string, EffortMenu>;
-  /** The models a turn would run on at its vendor's fast tier (Model Hub's
-   *  `fast_mode`). Hub catalogs only: a Direct backend offers none. */
+  /** The models a fast turn asks for its vendor's fast tier on (Model Hub's
+   *  `fast_mode`), minus those whose last fast response did not confirm it ran.
+   *  Hub catalogs only: a Direct backend offers none. */
   fastModels?: string[];
+  /** The models whose hop was asked for the fast tier and whose last fast
+   *  response did not confirm it ran (`fast_mode_confirmed: false`). */
+  fastUnconfirmed?: string[];
   /** True while a background remote-catalog refresh may produce a newer snapshot. */
   catalogRefreshPending?: boolean;
   /** Model Hub gave no answer (the read failed, or the server predates the read),
@@ -59,6 +63,7 @@ const hubCatalogModels = (agent: PickerAgentCatalog | null, backend: string): Ba
   const reasoningOptions = Object.create(null) as Record<string, { value: string; label: string }[]>;
   const effortMenus = Object.create(null) as Record<string, EffortMenu>;
   const fastModels: string[] = [];
+  const fastUnconfirmed: string[] = [];
   for (const id of models) {
     const row = rows.get(id);
     if (!row) continue;
@@ -73,9 +78,9 @@ const hubCatalogModels = (agent: PickerAgentCatalog | null, backend: string): Ba
       ? []
       : row.reasoning_efforts.filter((effort) => !omitted.has(effort)).map((effort) => ({ value: effort, label: effort }));
     if (row.effort_menu) effortMenus[id] = row.effort_menu;
-    if (row.fast_mode === true) fastModels.push(id);
+    if (row.fast_mode === true) (row.fast_mode_confirmed === false ? fastUnconfirmed : fastModels).push(id);
   }
-  return { models, modelLabels, reasoningOptions, effortMenus, fastModels };
+  return { models, modelLabels, reasoningOptions, effortMenus, fastModels, fastUnconfirmed };
 };
 
 /**
@@ -148,9 +153,14 @@ export async function fetchBackendModels(
  * from Model Hub's persisted catalog only. A backend Hub does not serve, or
  * whose catalog it cannot answer, offers none.
  */
-export async function fetchBackendFastModels(api: ApiContextType, backend: string): Promise<string[]> {
-  return hubCatalogModels(await api.readModelHubAgentCatalogForModelPicker(backend), backend)?.fastModels ?? [];
+export async function fetchBackendFastModels(api: ApiContextType, backend: string): Promise<FastModels> {
+  const hub = hubCatalogModels(await api.readModelHubAgentCatalogForModelPicker(backend), backend);
+  return { offered: hub?.fastModels ?? [], unconfirmed: hub?.fastUnconfirmed ?? [] };
 }
+
+/** Where a backend's models stand on the fast tier: asked for and not
+ *  contradicted, or asked for and not confirmed by the last fast response. */
+export type FastModels = { offered: string[]; unconfirmed: string[] };
 
 export async function fetchBackendModelLabels(
   api: ApiContextType,

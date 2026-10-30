@@ -45,8 +45,10 @@ vi.mock('../../context/ApiContext', async (importOriginal) => ({
 let catalogReasoning: Record<string, { value: string; label: string }[]> = {};
 let catalogMenus: Record<string, { omitted: string[]; not_on: Record<string, string[]> }> = {};
 let catalogLabels: Record<string, string> = {};
-// The models a Hub catalog says run at their vendor's fast tier.
+// The models a Hub catalog asks for their vendor's fast tier on, and those whose
+// last fast response did not confirm it ran.
 let catalogFast: string[] = [];
+let catalogFastUnconfirmed: string[] = [];
 // How many catalog reads were made, and whether the next ones wait to be answered.
 let catalogReads = 0;
 let deferReads = false;
@@ -65,6 +67,7 @@ vi.mock('../../lib/backendModels', async (importOriginal) => ({
       reasoningOptions: Record<string, { value: string; label: string }[]>;
       effortMenus?: Record<string, { omitted: string[]; not_on: Record<string, string[]> }>;
       fastModels?: string[];
+      fastUnconfirmed?: string[];
       hubUnread?: true;
       catalogRefreshPending: boolean;
     }) => void,
@@ -77,7 +80,9 @@ vi.mock('../../lib/backendModels', async (importOriginal) => ({
       // As the real loader answers: only a Hub catalog carries effort menus.
       ...(hubUnread
         ? { hubUnread: true as const }
-        : hubMode === 'hub' ? { effortMenus: catalogMenus, fastModels: catalogFast } : {}),
+        : hubMode === 'hub'
+          ? { effortMenus: catalogMenus, fastModels: catalogFast, fastUnconfirmed: catalogFastUnconfirmed }
+          : {}),
       catalogRefreshPending: false,
     });
     if (deferReads) pendingReads.push(answer);
@@ -604,6 +609,7 @@ describe('AgentRoutePicker compact presentation', () => {
     catalogReasoning = {};
     catalogMenus = {};
     catalogFast = [];
+    catalogFastUnconfirmed = [];
     window.localStorage.clear();
     sourceNames = null;
     hubMode = 'direct';
@@ -633,6 +639,23 @@ describe('AgentRoutePicker compact presentation', () => {
       </MemoryRouter>
     );
   };
+
+  it('says so where the last fast response did not confirm the fast tier ran, and keeps the choice', async () => {
+    // Opus's hop is asked for the fast tier, but a relay answered at the standard one.
+    hubMode = 'hub';
+    catalogReasoning = { sonnet: [{ value: 'low', label: 'low' }], opus: [{ value: 'low', label: 'low' }] };
+    catalogFastUnconfirmed = ['opus'];
+    const user = userEvent.setup();
+    render(<FastOwner initial={{ ...CLAUDE_ROUTE, model: 'opus' }} initialSpeed="fast" onSpeed={vi.fn()} />);
+    await openMenu(user);
+    const toggle = screen.getByRole('button', { name: 'chat.picker.fast' }) as HTMLButtonElement;
+    expect(toggle.disabled).toBe(true);
+    expect(toggle.getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByRole('tooltip').textContent).toContain('chat.picker.fastUnconfirmed');
+    // No mark: nothing says the route runs fast. A touch screen reads why.
+    expect(screen.queryByLabelText('chat.picker.fastOn')).toBeNull();
+    expect(screen.getByText('chat.picker.fastUnconfirmedCaption')).not.toBeNull();
+  });
 
   it("judges Fast on the Agent's model for a route that names none", async () => {
     // A Session that materialized its Agent at the first turn keeps no model of its own.

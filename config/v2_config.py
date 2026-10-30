@@ -2733,6 +2733,7 @@ class ModelHubBackendModelConfig:
             "routeable",
             "effort_menu",
             "fast_mode",
+            "fast_mode_confirmed",
         }
         if set(payload) - allowed:
             raise ValueError("Config 'model_hub.agents.models' contains unknown fields")

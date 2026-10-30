@@ -55,6 +55,7 @@ from .resolver import parse_model_hub_timestamp
 from .stream_wire import (
     ProtocolSSEState,
     ProtocolUsageReport,
+    ServedTier,
     StreamTerminalOutcome,
     render_protocol_terminal_event,
     render_protocol_terminal_frame,
@@ -355,6 +356,22 @@ class _TurnExecution:
                 or self.handle_outcome.stream_started
             )
         return self.handle is not None
+
+    @property
+    def served_tier(self) -> tuple[bool, ServedTier | None]:
+        """Whether upstream served this call in full, and the processing tier its response named.
+
+        Asked in the same order as the usage report: the engine's tracker, then
+        this gateway's, then a buffered outcome. Only a served response says which
+        tier ran; a call that failed or was cut says nothing about it.
+        """
+
+        for state in (self.upstream_observation, self.wire_state):
+            if state is not None and state.terminal_outcome == "served":
+                return True, state.served_tier
+        if self.handle_outcome is not None and self.handle_outcome.kind is RawOutcomeKind.SUCCESS:
+            return True, self.handle_outcome.served_tier
+        return False, None
 
     @property
     def owes_metering(self) -> bool:
@@ -1714,6 +1731,12 @@ class ModelHubTurnGateway:
             return
         resolved = execution.resolved
         assert resolved is not None
+        if resolved.fast_requested:
+            # The response, not the request, says whether the fast tier ran: a
+            # relay may drop the field or serve a standard tier (fast_mode.py).
+            served, tier = execution.served_tier
+            if served:
+                self.service.fast_tier_observations.observe(resolved.source_id, resolved.model_id, tier == "fast")
         usage = execution.reported_usage
         execution.usage_write = self._usage_writer.record(
             source_id=resolved.source_id,

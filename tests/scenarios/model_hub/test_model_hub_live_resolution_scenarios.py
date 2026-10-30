@@ -4,7 +4,7 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -92,6 +92,8 @@ class AdapterResult:
     body: bytes | None = None
     stream_started: bool = False
     recovery_verified: bool = False
+    # The processing tier a served response names (stream_wire.ServedTierPaths).
+    served_tier: str | None = None
 
 
 class ScenarioClock:
@@ -193,6 +195,7 @@ class AdapterBoundaryFake:
             model_id=model_id,
             source_id=source_id,
             recovery_verified=result.recovery_verified,
+            served_tier=result.served_tier,
         )
         return InvokeHandle(outcome, result.body)
 
@@ -1654,6 +1657,89 @@ def test_mh_fast_002_refused_fast_tier_is_served_at_the_standard_tier(
                 adapter.invocations, adapter.requests,
             )] == [("src_chatgpt1", "priority"), ("src_chatgpt1", None)]
             assert store.load().sources[0].state.status != "cooldown"
+        finally:
+            await gateway.close()
+
+    asyncio.run(exercise())
+
+
+def _responses_sse(service_tier: str) -> bytes:
+    """A served Responses stream whose completed response names the tier it ran at."""
+
+    completed = {"type": "response.completed", "response": {"status": "completed", "service_tier": service_tier}}
+    return (
+        b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"OK"}\n\n'
+        + b"event: response.completed\ndata: " + json.dumps(completed).encode() + b"\n\n"
+    )
+
+
+@pytest.mark.parametrize("stream", [False, True], ids=["buffered", "streamed"])
+def test_mh_fast_004_the_response_confirms_whether_the_fast_tier_ran(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+) -> None:
+    """MH-FAST-004: a relay is asked for the fast tier too, and its responses decide whether the menu says it ran."""
+
+    from vibe import models_dev_catalog
+
+    monkeypatch.setattr(models_dev_catalog, "_refresh_in_background", lambda: False)
+    model_id = _requested_model("codex")
+    _cache_fast_modes({model_id: {"service_tier": "priority"}})
+
+    def served(tier: str) -> AdapterResult:
+        # A buffered body was classified by the engine, which read its tier; a
+        # stream's tier is read by the gateway from the frames it forwards.
+        if stream:
+            return AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=_responses_sse(tier), stream_started=True)
+        return AdapterResult(
+            RawOutcomeKind.SUCCESS, status=200, body=b'{"ok":true}',
+            served_tier="fast" if tier == "priority" else "standard",
+        )
+
+    async def exercise() -> None:
+        adapter = AdapterBoundaryFake([
+            # The relay drops the field and serves the standard tier.
+            served("default"),
+            # Later it passes the field through.
+            served("priority"),
+            # A standard turn there says nothing about the fast tier.
+            served("default"),
+        ])
+        relay = replace(
+            _source("src_relay1"), vendor="openai", protocol="openai_responses", base_url="https://relay.example/v1",
+        )
+        store = MemoryStore(_config(relay))
+        service = _service(
+            tmp_path, store, adapter, now=lambda: datetime(2026, 10, 30, tzinfo=timezone.utc),
+        )
+        gateway = ModelHubTurnGateway(service)
+        router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+
+        def menu() -> tuple[bool, bool | None]:
+            row = next(row for row in service.get_agent_sources("codex")["catalog_models"] if row["id"] == model_id)
+            return row["fast_mode"], row["fast_mode_confirmed"]
+
+        async def turn(turn_id: str, speed: str | None) -> None:
+            launch = await router.resolve(
+                "codex", model_id, process_scope="scenario-fast", turn_id=turn_id, speed=speed,
+            )
+            status, _body = await _post_turn(
+                launch,
+                endpoint="responses",
+                payload={"model": launch.runtime_model, "input": [], "stream": stream},
+            )
+            assert status == 200
+
+        try:
+            assert menu() == (True, None)
+            await turn("turn_fast_1", "fast")
+            assert menu() == (True, False)
+            await turn("turn_fast_2", "fast")
+            assert menu() == (True, True)
+            await turn("turn_standard", None)
+            assert menu() == (True, True)
+            assert [request.get("service_tier") for request in adapter.requests] == ["priority", "priority", None]
         finally:
             await gateway.close()
 

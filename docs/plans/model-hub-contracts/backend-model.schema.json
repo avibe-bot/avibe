@@ -111,7 +111,11 @@
     },
     "fast_mode": {
       "type": "boolean",
-      "description": "Server-derived on Agent reads, accepted and dropped on write like effort_menu. Whether a turn on this model reaches its vendor's fast tier on the hop that normally serves it (docs/plans/fast-mode.md): that hop's Source is the model's first-party vendor's own upstream and the vendor's models.dev entry names the tier's request field. False for an Agent in Direct mode and for OpenCode, whose requests name no turn."
+      "description": "Server-derived on Agent reads, accepted and dropped on write like effort_menu. Whether a fast turn on this model asks for its vendor's fast tier on the hop that normally serves it (docs/plans/fast-mode.md): that hop's Source is a Hub API key or subscription speaking the model's first-party vendor's protocol, and the vendor's models.dev entry names the tier's request field. False for an Agent in Direct mode and for OpenCode, whose requests name no turn."
+    },
+    "fast_mode_confirmed": {
+      "type": ["boolean", "null"],
+      "description": "Server-derived on Agent reads, accepted and dropped on write like effort_menu. What the last fast response on that hop reported since the service started: true when it named the vendor's fast tier, false when it named another tier or none (as a relay that drops the field answers), null when no fast request has been served there, or when fast_mode is false."
     }
   }
 }

@@ -235,7 +235,7 @@ from .provenance import (
     produce_turn_outcome,
 )
 from .opaque_provenance import OpaqueProvenanceRegistry, filter_opaque_history
-from .fast_mode import FAST_SPEED, FastModeCatalog, load_fast_mode_catalog
+from .fast_mode import FAST_SPEED, FastModeCatalog, FastTierObservations, load_fast_mode_catalog
 from .request import ModelHubRequest, without_opaque_history
 from .reasoning_tiers import catalog_wire_efforts, rederive_persisted_tiers, resolve_reasoning_tiers
 from .stream_wire import ProtocolSSEState, ProtocolUsageReport
@@ -842,7 +842,16 @@ class _InvocationUnsupported(_InvocationPlanChanged):
         self.reason = reason
 
 
-_FAST_REFUSAL_STATUSES = frozenset({400, 403, 429})
+# 422: a relay that validates the body refuses a field it does not know.
+_FAST_REFUSAL_STATUSES = frozenset({400, 403, 422, 429})
+
+
+def _asks_fast_tier(
+    catalog: FastModeCatalog | None, source: ModelHubSourceConfig, model_id: str, request: Any,
+) -> bool:
+    """Whether an attempt of this request on this hop carries the vendor's fast-tier field."""
+
+    return catalog is not None and catalog.body_for(source, model_id, getattr(request, "protocol", None)) is not None
 
 
 def _fast_tier_refused(outcome: Optional[RawCallOutcome]) -> bool:
@@ -1056,6 +1065,9 @@ class ResolvedInvocation:
     # Vibey: the catalog tools the request declared natively, which a served
     # response may prove ran (``vibey-hosted-tools.md`` §3.2).
     hosted_calls: frozenset[str] = frozenset()
+    # This hop's request asked for the vendor's fast tier, so its served response
+    # confirms or not that it ran fast (``docs/plans/fast-mode.md``).
+    fast_requested: bool = False
 
 
 @dataclass(frozen=True)
@@ -1636,6 +1648,9 @@ class ModelHubService:
         # Which (Source, model) attempts offer a vendor's fast tier; read off the
         # loop when a fast request arrives, rebuilt only when models.dev changes.
         self._fast_mode_catalog = FastModeCatalog()
+        # Whether each Source and model served the last fast request fast, as its
+        # response reported; the gateway records it when a fast call settles served.
+        self.fast_tier_observations = FastTierObservations()
         self._oauth_start_tasks: dict[
             tuple[str, str, OAuthChannel], asyncio.Task[dict]
         ] = {}
@@ -6244,9 +6259,11 @@ class ModelHubService:
             fast_catalog = None
         elif fast_catalog is None:
             fast_catalog = self._fast_mode_catalog
-        fast_models = {
-            model.id: fast_catalog is not None and self._offers_fast_mode(backend, model_resolutions[model.id], fast_catalog)
+        # Each menu model's fast-tier hop, and what that hop's last fast response said.
+        fast_hops = {
+            model.id: self._fast_mode_hop(backend, model_resolutions[model.id], fast_catalog)
             for model in menu_models
+            if fast_catalog is not None
         }
         # Only Hub turns reach the evidence; a Direct Agent's menu is the backend's own.
         effort_menus = {
@@ -6349,7 +6366,16 @@ class ModelHubService:
             "model_supply": model_supply if agent.mode == "hub" else None,
             "named_agents": named_agents,
             "catalog_models": [
-                {**model, "effort_menu": effort_menus[model["id"]], "fast_mode": fast_models.get(model["id"], False)}
+                {
+                    **model,
+                    "effort_menu": effort_menus[model["id"]],
+                    "fast_mode": fast_hops.get(model["id"]) is not None,
+                    "fast_mode_confirmed": (
+                        self.fast_tier_observations.confirmed(*hop)
+                        if (hop := fast_hops.get(model["id"])) is not None
+                        else None
+                    ),
+                }
                 for model in self._catalog_models_payload(agent)
             ],
             "builtin_models": builtin_models,
@@ -7197,11 +7223,13 @@ class ModelHubService:
         return self.hosted_evidence().unsupported(source, model_id, feature)
 
     @staticmethod
-    def _offers_fast_mode(backend: BackendName, resolution: ModelHubTurnResolution, catalog: FastModeCatalog) -> bool:
-        """Whether a turn on this menu model would reach its vendor's fast tier on the hop that normally serves it.
+    def _fast_mode_hop(
+        backend: BackendName, resolution: ModelHubTurnResolution, catalog: FastModeCatalog,
+    ) -> tuple[str, str] | None:
+        """The Source and model a turn on this menu model would ask for its vendor's fast tier on, or None.
 
         The first candidate hop is the one a turn starts on; a fallback to a hop
-        without the tier runs at the standard tier. OpenCode's shared server
+        without the field runs at the standard tier. OpenCode's shared server
         names no turn on its requests, so its turns carry no Session's choice.
         """
 
@@ -7210,9 +7238,11 @@ class ModelHubService:
             None,
         )
         if hop is None:
-            return False
+            return None
         protocol = hop.source.protocol if backend == "vibey" else _FIXED_BACKEND_PROTOCOLS.get(backend)
-        return catalog.body_for(hop.source, hop.model_id, protocol) is not None
+        if catalog.body_for(hop.source, hop.model_id, protocol) is None:
+            return None
+        return hop.source.id, hop.model_id
 
     def _effort_menu(
         self, backend: BackendName, model: ModelHubBackendModelConfig, resolution: ModelHubTurnResolution, now: datetime
@@ -11020,8 +11050,8 @@ class ModelHubService:
                         registry=self.opaque_provenance,
                     )
                 if fast_catalog is not None:
-                    # Read on this final snapshot: a hop gains the fast tier only
-                    # where its exact Source and model offer one.
+                    # Read on this final snapshot: a hop asks for the fast tier only
+                    # where its exact Source and model can carry the field.
                     fast_body = fast_catalog.body_for(source, model_id, getattr(request, "protocol", None))
                     if fast_body is not None:
                         attempt_request = _with_body_fields(attempt_request, fast_body)
@@ -11068,10 +11098,11 @@ class ModelHubService:
         hosted: HostedContent = HostedContent(),
         fast_catalog: FastModeCatalog | None = None,
     ) -> tuple[InvokeHandle, Optional[RawCallOutcome], asyncio.CancelledError | None]:
-        """``fast_catalog`` puts each attempt that offers it on its vendor's fast tier
-        (docs/plans/fast-mode.md); a fast attempt refused before any output is
+        """``fast_catalog`` asks each attempt that can carry it for its vendor's fast
+        tier (docs/plans/fast-mode.md); a fast attempt refused before any output is
         retried once on the same hop at the standard tier, and only that retry's
-        outcome reaches classification."""
+        outcome reaches classification. Whether the tier ran is the response's to
+        say, recorded by the gateway when the call settles."""
 
         acquired_handle: InvokeHandle | None = None
         generation: int | None = None
@@ -11165,10 +11196,9 @@ class ModelHubService:
                 raise cancelled
 
         if (
-            fast_catalog is not None
-            and cancelled is None
+            cancelled is None
             and _fast_tier_refused(outcome)
-            and fast_catalog.body_for(source, model_id, getattr(request, "protocol", None)) is not None
+            and _asks_fast_tier(fast_catalog, source, model_id, request)
         ):
             # The fast tier is an upgrade, not a requirement: an account without
             # it (no usage credits, an organization that disabled it, its own
@@ -11594,6 +11624,7 @@ class ModelHubService:
                     origin=origin,
                     source_identity=identity,
                     hosted_calls=frozenset(tool for tool, _type in hosted.calls),
+                    fast_requested=_asks_fast_tier(fast_catalog, source, target_model, request),
                 )
             decision = await self._classify_source_outcome(source, outcome)
             learned = await self._learn_capability_evidence(source, target_model, request, outcome)
@@ -11662,6 +11693,7 @@ class ModelHubService:
                         origin=origin,
                         source_identity=identity,
                         hosted_calls=frozenset(tool for tool, _type in hosted.calls),
+                        fast_requested=_asks_fast_tier(fast_catalog, source, target_model, request),
                     )
                 decision = classify_outcome(outcome, refresh_attempted=True)
                 learned = await self._learn_capability_evidence(source, target_model, request, outcome)
@@ -11718,6 +11750,7 @@ class ModelHubService:
                     verification_pending=verification_pending,
                     origin=origin,
                     source_identity=identity,
+                    fast_requested=_asks_fast_tier(fast_catalog, source, target_model, request),
                 )
             if (
                 pinned_hop is not None

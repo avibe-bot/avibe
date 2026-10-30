@@ -20,7 +20,7 @@ from enum import Enum
 import re
 from typing import Any, AsyncIterator, Awaitable, Callable, Final, Literal, Mapping, Protocol, Sequence
 
-from .stream_wire import ProtocolSSEState, ProtocolUsageReport
+from .stream_wire import ProtocolSSEState, ProtocolUsageReport, ServedTier
 
 ENGINE_TRANSPORT_TIMEOUT_SECONDS: Final = 60.0
 # Model invocation/observation is a narrower domain than stored Sources.
@@ -303,6 +303,9 @@ class RawCallOutcome:
     # The search tools whose own completed item a served response carried, for
     # the positive evidence written at settlement (``vibey-hosted-tools.md`` §3.2).
     hosted_tools: frozenset[str] = frozenset()
+    # The processing tier a served response reports (``docs/plans/fast-mode.md``),
+    # for confirming that a fast request ran fast; None when it names none.
+    served_tier: ServedTier | None = None
     # The response header name is retained in lowercase so relay ``x-request-id``
     # and provider ``request-id`` values cannot be conflated. The client and
     # provenance writer re-validate this tuple before persistence.

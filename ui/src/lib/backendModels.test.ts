@@ -148,6 +148,7 @@ describe('fetchBackendModels in gateway mode', () => {
     expect(await fetchBackendModels(api, 'vibey')).toEqual({
       models: ['local-model'], modelLabels: { 'local-model': 'Local model' }, reasoningOptions: { 'local-model': [] }, effortMenus: {},
       fastModels: [],
+      fastUnconfirmed: [],
     });
     expect(readModelHubAgentCatalogForModelPicker).toHaveBeenCalledWith('vibey');
     readModelHubAgentCatalogForModelPicker.mockResolvedValue(null);
@@ -176,8 +177,10 @@ describe('fetchBackendModels in gateway mode', () => {
               supports_reasoning: true,
               reasoning_efforts: ['low', 'high'],
             }),
-            // A turn on beta would reach its vendor's fast tier.
-            { ...model('beta'), fast_mode: true },
+            // A fast turn on beta asks for its vendor's fast tier, and one on
+            // gamma did too, but gamma's last fast response did not confirm it ran.
+            { ...model('beta'), fast_mode: true, fast_mode_confirmed: true },
+            { ...model('gamma'), fast_mode: true, fast_mode_confirmed: false },
           ],
         }),
       ),
@@ -188,17 +191,19 @@ describe('fetchBackendModels in gateway mode', () => {
 
     expect(claudeModels).not.toHaveBeenCalled();
     expect(result).toEqual({
-      models: ['alpha', 'beta'],
+      models: ['alpha', 'beta', 'gamma'],
       modelLabels: { alpha: 'Alpha' },
       reasoningOptions: {
         alpha: [{ value: 'low', label: 'low' }, { value: 'high', label: 'high' }],
         // Present and empty: `beta` states it does not reason, and only a key
         // the catalog never wrote may fall back to the generic ladder.
         beta: [],
+        gamma: [],
       },
       // No row states an effort menu, so nothing is left out or marked.
       effortMenus: {},
       fastModels: ['beta'],
+      fastUnconfirmed: ['gamma'],
     });
   });
 
@@ -366,6 +371,7 @@ describe('fetchBackendModels in gateway mode', () => {
       reasoningOptions: {},
       effortMenus: {},
       fastModels: [],
+      fastUnconfirmed: [],
     });
     expect(codexModels).not.toHaveBeenCalled();
   });
