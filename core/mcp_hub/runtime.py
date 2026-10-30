@@ -397,7 +397,7 @@ class McpRuntime:
     async def _add(self, payload: dict[str, Any]) -> bytes:
         replace = payload.get("replace") is True
         definitions = [
-            definition_from_provider(item.get("name"), item.get("server"), description=item.get("description"))
+            definition_from_provider(item.get("name"), item.get("server"))
             for item in payload.get("servers") or []
         ]
         if not definitions:
@@ -462,7 +462,6 @@ class McpRuntime:
             transport["cwd"] = repository.default_cwd()
         return {
             "name": definition.get("name"),
-            "description": definition.get("description") or "",
             "transport": transport,
         }
 
@@ -619,11 +618,7 @@ class McpRuntime:
             descriptors.append(descriptor)
         descriptors.sort(key=lambda item: item["name"])
         manifest: dict[str, Any] = {
-            "description": normalize_description(
-                definition.get("description")
-                or getattr(server_info, "description", None)
-                or getattr(server_info, "title", None)
-            ),
+            "description": normalize_description(getattr(server_info, "description", None)),
             "generatedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
         version = getattr(server_info, "version", None)

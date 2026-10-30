@@ -65,10 +65,10 @@ List all servers: `vibe mcp --list`.
 ```
 
 - One line per package, sorted by name; description sanitized to one line, max 160 chars.
-- Description: from the published snapshot's manifest, chosen at refresh and never read live: the user-provided `--description` / paste description, else the server's initialize `serverInfo.description`, else `serverInfo.title`, else the fixed English `Tools from an MCP server.` (owner decision; the prompt is English, so the fallback is not localized). There is one snapshot per server; there are no pending edits.
+- Description: only the server-reported `serverInfo.description` from initialize, sanitized and frozen in the published snapshot's manifest at refresh, never read live (owner decision). There is no user-provided description and no fallback text: a server without one is listed as `- <server>`. There is one snapshot per server; there are no pending edits.
 - List at most 50 servers; if more exist, append the omitted count and `vibe mcp --list`.
 - No tool names, schemas, URLs, commands, credentials or management commands.
-- The block has two fixed parts: stable shared instructions (examples must stay parser-valid), then one `<server>: <description>` line per package, where `<server>` is the exact CLI selector.
+- The block has two fixed parts: stable shared instructions (examples must stay parser-valid), then one `<server>: <description>` line per package (`<server>` alone when the server reports no description), where `<server>` is the exact CLI selector.
 - Disable/remove takes effect on the next prompt build; new calls are rejected immediately even if a running turn still sees the old list.
 - The index grants nothing: every call rechecks the published revision at the owner.
 
@@ -128,7 +128,7 @@ vibe mcp docs --refresh
 vibe mcp docs --remove
 ```
 
-- `vibe mcp-add` uses the Claude Code `mcp add` subset plus `--description`, `--cwd`, `--replace`, `--json-stdin`. It writes only the Avibe store, then refreshes that name; the call returns after refresh.
+- `vibe mcp-add` uses the Claude Code `mcp add` subset plus `--cwd`, `--replace`, `--json-stdin`. It writes only the Avibe store, then refreshes that name; the call returns after refresh.
 - `vibe mcp-discover` runs one full pass (joins an in-flight pass) and prints registered / failed + reason. Controller startup runs the same pass in the background, off the controller loop.
 - Names: empty, `.`/`..`, NUL, `/`/`\\` rejected. Management verbs are not reserved names.
 - Owner-only: mcp-add, mcp-discover, `--refresh`, `--remove`. Editor: list/help/call.

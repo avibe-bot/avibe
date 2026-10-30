@@ -30,7 +30,7 @@ def _run(runtime: McpRuntime, operation: str, payload: dict) -> dict:
 
 
 def _server(command: str = sys.executable) -> dict:
-    return {"name": "echo", "server": {"command": command, "args": [FIXTURE]}, "description": "Echo tools"}
+    return {"name": "echo", "server": {"command": command, "args": [FIXTURE]}}
 
 
 @pytest.fixture
@@ -79,7 +79,7 @@ def test_batch_add_registers_neighbors_and_rolls_back_the_failure(runtime):
 
     good = _server()
     bad = {"name": "github", "server": {"command": "/nonexistent/mcp-github"}}
-    other = {"name": "zeta", "server": {"command": sys.executable, "args": [FIXTURE]}, "description": "Z"}
+    other = {"name": "zeta", "server": {"command": sys.executable, "args": [FIXTURE]}}
     result = _run(runtime, "add", {"servers": [good, bad, other]})
     names = {item["name"] for item in result["added"]}
     failed = {item["name"]: item["error"] for item in result["failed"]}
@@ -141,7 +141,6 @@ def test_failed_readd_of_hidden_native_stays_hidden(runtime):
 def test_failed_explicit_refresh_unlists_the_server(generated):
     repository.write_avibe_definition({
         "name": "echo",
-        "description": "Echo tools",
         "transport": {"type": "stdio", "command": "/nonexistent/mcp-echo", "args": [FIXTURE]},
     })
     result = _run(generated, "refresh", {"name": "echo", "waitStdio": True})
@@ -152,7 +151,6 @@ def test_failed_explicit_refresh_unlists_the_server(generated):
 def test_failed_discover_unlists_previous_revision(generated):
     repository.write_avibe_definition({
         "name": "echo",
-        "description": "Echo tools",
         "transport": {"type": "stdio", "command": "/nonexistent/mcp-echo", "args": [FIXTURE]},
     })
     result = _run(generated, "discover", {})
@@ -196,7 +194,6 @@ def test_native_definition_change_is_not_unchanged_until_published(runtime):
     pasted = {
         "name": "echo",
         "server": {"command": sys.executable, "args": [FIXTURE, "--other"]},
-        "description": "Echo tools",
     }
     blocked = _run(runtime, "add", {"servers": [pasted]})
     assert blocked["ok"] is False
@@ -229,7 +226,6 @@ def test_explicit_cwd_difference_is_exists_not_unchanged(generated):
     same_command = {
         "name": "echo",
         "server": {"command": sys.executable, "args": [FIXTURE], "cwd": "/tmp/mcp-other-cwd"},
-        "description": "Echo tools",
     }
     result = _run(generated, "add", {"servers": [same_command]})
     assert result["ok"] is False
@@ -406,14 +402,14 @@ def test_prompt_index_lists_enabled_servers_and_its_examples_parse(generated, ca
     ("server_info", "line"),
     [
         ({"description": "Search\n  the\tdocs", "title": "Docs"}, "- docs: Search the docs"),
-        ({"title": "Docs " + "x" * 200}, "- docs: Docs " + "x" * 155),
-        ({}, "- docs: Tools from an MCP server."),
+        ({"description": "x" * 200}, "- docs: " + "x" * 160),
+        ({"title": "Docs"}, "- docs"),
     ],
 )
-def test_prompt_line_uses_server_description_then_title_then_fallback(runtime, server_info, line):
+def test_prompt_line_shows_only_the_server_reported_description(runtime, server_info, line):
     from types import SimpleNamespace
 
-    definition = {"name": "docs", "description": "", "transport": {"type": "streamable_http", "url": "https://example.invalid/mcp"}}
+    definition = {"name": "docs", "transport": {"type": "streamable_http", "url": "https://example.invalid/mcp"}}
     repository.write_avibe_definition(definition)
     McpRuntime._publish("docs", definition, definition, [], SimpleNamespace(version=None, **server_info))
     assert line in build_mcp_prompt_block().text.splitlines()

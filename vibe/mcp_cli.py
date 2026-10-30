@@ -31,7 +31,7 @@ usage:
 
 management (Owner):
   vibe mcp-add [--transport stdio|http] [--env KEY=VALUE ...] [--header 'Name: value' ...]
-               [--description TEXT] [--cwd DIR] [--replace] <name> -- <command> [args...]
+               [--cwd DIR] [--replace] <name> -- <command> [args...]
   vibe mcp-add --transport http <name> <url>
   vibe mcp-add --json-stdin [--replace]
   vibe mcp-discover
@@ -200,7 +200,7 @@ def _add(args: list[str]) -> int:
     payload = {
         "replace": replace,
         "servers": [
-            {"name": item["name"], "server": provider_entry(item), "description": item.get("description")}
+            {"name": item["name"], "server": provider_entry(item)}
             for item in definitions
         ],
     }

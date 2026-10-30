@@ -12,8 +12,6 @@ from core.prompt_registry import RenderedPromptBlock, render_prompt_block
 logger = logging.getLogger(__name__)
 
 PROMPT_SERVER_LIMIT = 50
-# The prompt is English whatever the UI locale.
-GENERIC_DESCRIPTION = "Tools from an MCP server."
 
 
 def build_mcp_prompt_block() -> Optional[RenderedPromptBlock]:
@@ -29,10 +27,10 @@ def build_mcp_prompt_block() -> Optional[RenderedPromptBlock]:
         return None
     if not packages:
         return None
-    rows = [
-        f"- {item['name']}: {normalize_description(item.get('description')) or GENERIC_DESCRIPTION}"
-        for item in packages[:PROMPT_SERVER_LIMIT]
-    ]
+    rows = []
+    for item in packages[:PROMPT_SERVER_LIMIT]:
+        description = normalize_description(item.get("description"))
+        rows.append(f"- {item['name']}: {description}" if description else f"- {item['name']}")
     omitted = len(packages) - PROMPT_SERVER_LIMIT
     if omitted > 0:
         rows.append(f"- … {omitted} more; run `vibe mcp --list`.")
