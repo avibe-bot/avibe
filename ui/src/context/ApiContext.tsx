@@ -569,6 +569,7 @@ export interface McpServerSummary {
   revision?: string | null;
   generatedAt?: string;
   serverVersion?: string;
+  auth?: 'none' | 'needs_login' | 'ok';
   toolCount?: number;
   tools?: { name: string; description?: string }[];
   diagnostics?: string[];
@@ -591,7 +592,8 @@ export interface McpDefinition {
   };
 }
 export interface McpResult { ok: boolean; error?: McpError }
-export interface McpParsedServer { name: string; exists: boolean; transport?: { type: string } }
+export type McpOAuthStartResult = McpResult & { authorizeUrl?: string; mode?: 'direct' | 'paste' };
+export type McpOAuthMutationResult = McpResult & { name?: string };
 export interface McpTool { name: string; description?: string; inputSchema?: unknown; flags: { flag: string; kind: string; required: boolean }[] }
 
 export type ApiContextType = {
@@ -945,13 +947,15 @@ export type ApiContextType = {
     saved?: string[];
     name?: string;
     toolCount?: number;
-    added?: { name: string; toolCount?: number }[];
-    unchanged?: { name: string }[];
+    added?: { name: string; toolCount?: number; auth?: McpServerSummary['auth'] }[];
+    unchanged?: { name: string; auth?: McpServerSummary['auth'] }[];
     failed?: { name: string; error?: string; type?: string }[];
   }>;
   discoverMcp: () => Promise<McpResult & { results?: { name: string; status: string; error?: string; toolCount?: number }[] }>;
   refreshMcp: (name: string) => Promise<McpResult & { name?: string; toolCount?: number }>;
   removeMcp: (name: string) => Promise<McpResult>;
+  loginMcp: (name: string) => Promise<McpOAuthStartResult>;
+  completeMcpLogin: (name: string, callbackUrl: string) => Promise<McpOAuthMutationResult>;
   getMcpServer: (name: string) => Promise<McpResult & { server?: McpServerSummary; tools?: McpTool[] }>;
   previewSkillSource: (source: string, params?: { projectId?: string }) => Promise<SkillsPreviewResult>;
   addSkill: (payload: { source: string; scope: SkillScope; projectId?: string; backends?: string[]; all?: boolean; skill?: string; copy?: boolean }) => Promise<SkillsMutationResult>;
@@ -4336,6 +4340,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     discoverMcp: () => postJson('/api/mcp/discover', {}, { handleError: false }),
     refreshMcp: (name) => postJson(`/api/mcp/${encodeURIComponent(name)}/refresh`, {}, { handleError: false }),
     removeMcp: (name) => deleteJson(`/api/mcp/${encodeURIComponent(name)}`, undefined, { handleError: false }),
+    loginMcp: (name) => postJson(`/api/mcp/${encodeURIComponent(name)}/oauth/start`, {}, { handleError: false }),
+    completeMcpLogin: (name, callbackUrl) => postJson(`/api/mcp/${encodeURIComponent(name)}/oauth/complete`, { callbackUrl }, { handleError: false }),
     getMcpServer: (name) => getJson(`/api/mcp/${encodeURIComponent(name)}`, { handleError: false }),
     previewSkillSource: (source, params) =>
       postJson('/api/skills/preview', { source, project_id: params?.projectId }),

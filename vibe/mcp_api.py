@@ -13,7 +13,7 @@ from core.mcp_hub import repository
 from core.mcp_hub.definition import parse_provider_json, provider_entry
 from core.mcp_hub.errors import McpHubError
 
-_STATUS = {"usage": 400, "not_found": 404, "exists": 409, "unavailable": 503, "unknown_outcome": 502}
+_STATUS = {"usage": 400, "not_found": 404, "exists": 409, "unavailable": 503, "unknown_outcome": 502, "auth_required": 401, "invalid_callback": 400, "oauth": 400, "internal": 500}
 
 
 def _error(exc: McpHubError) -> tuple[dict[str, Any], int]:
@@ -49,6 +49,8 @@ async def run(handler, *args) -> tuple[dict[str, Any], int]:
         return await handler(*args), 200
     except McpHubError as cop:
         return _error(cop)
+    except Exception as exc:  # noqa: BLE001 - Web MCP must not leak a string envelope
+        return _error(McpHubError("internal", str(exc) or "Unexpected MCP Hub error."))
 
 
 async def list_servers() -> dict[str, Any]:
@@ -97,3 +99,24 @@ async def refresh(name: str) -> dict[str, Any]:
 
 async def remove(name: str) -> dict[str, Any]:
     return await _owner("remove", {"name": name})
+async def oauth_start(name: str, body: dict[str, Any], origin: str | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {"name": name, "origin": origin}
+    if body.get("port") is not None:
+        payload["port"] = body["port"]
+    if body.get("cli") is True:
+        payload["cli"] = True
+    if body.get("cloudOrigin"):
+        payload["cloudOrigin"] = body["cloudOrigin"]
+    return await _owner("oauth_start", payload)
+
+
+async def oauth_callback(body: dict[str, Any]) -> dict[str, Any]:
+    return await _owner("oauth_callback", body)
+
+
+async def oauth_complete(name: str, callback_url: str) -> dict[str, Any]:
+    return await _owner("oauth_complete", {"name": name, "callbackUrl": callback_url})
+
+
+async def oauth_logout(name: str) -> dict[str, Any]:
+    return await _owner("oauth_logout", {"name": name})

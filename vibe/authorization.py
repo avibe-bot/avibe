@@ -465,6 +465,7 @@ _VIEWER_HTTP_RULES = tuple(
         r"^/api/show-pages$",
         r"^/api/show-pages/[^/]+/access$",
         r"^/api/show-pages/[^/]+/icon$",
+        r"^/api/mcp/oauth/callback$",
     )
 )
 

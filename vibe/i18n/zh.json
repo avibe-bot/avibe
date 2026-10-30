@@ -1796,5 +1796,7 @@
         "unsupported": "参考图片 {path} 是 {mime}，无法发送。"
       }
     }
-  }
+  },
+  "mcp_oauth_callback_success": "MCP OAuth 登录已完成，可以关闭此标签页。",
+  "mcp_oauth_callback_failure": "MCP OAuth 登录未完成，请返回 Avibe 重试。"
 }

@@ -177,6 +177,47 @@ def test_auth_setup_catalog_priorities_reference_live_scenarios():
     assert set(catalog.get("next_priority", [])) <= live_ids
 
 
+def test_mcp_hub_oauth_login_completes_through_owner_callback(tmp_path):
+    """Scenario: AUTH-SETUP-135 — add publishes needs_login, login grant completes, tools appear."""
+    from tests.scenario_harness.core import BaseScenarioHarness, ScenarioExpect, ScenarioRunner
+    from tests.test_mcp_hub_oauth import _LoopbackOauth, _run
+    from core.mcp_hub import repository
+    from core.mcp_hub.runtime import McpRuntime
+    from tests.ui_server_test_helpers import save_config
+
+    save_config(tmp_path).save()
+    loopback = _LoopbackOauth()
+    loopback.start()
+    runtime = McpRuntime()
+    harness = BaseScenarioHarness()
+    runner = ScenarioRunner(harness)
+    started = {}
+
+    def start(_h):
+        added = _run(runtime, "add", {"servers": [{"name": "suno", "server": {"url": f"{loopback.origin}/mcp"}}]})
+        assert added["ok"] and added["added"][0]["auth"] == "needs_login"
+        assert repository.list_packages()[0]["auth"] == "needs_login"
+        started.update(_run(runtime, "oauth_start", {"name": "suno", "origin": "http://127.0.0.1:5123", "port": 5123}))
+        assert started["ok"] and started["mode"] == "direct"
+
+    def complete(_h):
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(started["authorizeUrl"]).query)
+        done = _run(runtime, "oauth_callback", {"state": query["state"][0], "code": "code-1", "iss": loopback.origin})
+        assert done["ok"]
+        listed = repository.list_packages()[0]
+        assert listed["auth"] == "ok" and listed["toolCount"] == 1
+
+    try:
+        start(harness)
+        runner.history.append("start")
+        complete(harness)
+        runner.history.append("complete")
+        ScenarioExpect.step_history(runner, ["start", "complete"])
+    finally:
+        runtime.stop()
+        loopback.stop()
+
+
 @pytest.mark.parametrize("vendor", ["openai", "anthropic", "gemini", "kimi", "xai"])
 @pytest.mark.parametrize("identity_case", ["valid", "invalid_utf8", "token_whitespace"])
 def test_subscription_identity_survives_oauth_completion_and_http_replay(monkeypatch, tmp_path, vendor, identity_case):

@@ -24,6 +24,8 @@ usage:
   vibe mcp <server> --list [--format json]
   vibe mcp <server> --refresh
   vibe mcp <server> --remove
+  vibe mcp <server> --login-complete '<callback URL>'
+  vibe mcp <server> --logout
   vibe mcp <server> <tool> --help
   vibe mcp <server> <tool> [--<key> <value> ...]
   vibe mcp <server> <tool> --args-json '<object>' | --args-file <path> | --args-stdin
@@ -240,6 +242,30 @@ def _server(name: str, args: list[str]) -> int:
         validate_name(name)
     except McpHubError:
         raise McpHubError("not_found", f"Unknown MCP server {name!r}.", hint="vibe mcp --list") from None
+    if args and args[0] in {"--login", "--logout", "--login-complete"}:
+        denied = _admit("owner")
+        if denied is not None:
+            return denied
+        option = args[0]
+        if option == "--login":
+            if len(args) != 1:
+                raise McpHubError("usage", "usage: vibe mcp <server> --login", usage=True)
+            payload = {"name": name, "cli": True}
+            from config.v2_config import V2Config
+            loaded = V2Config.load()
+            cloud = loaded.remote_access.vibe_cloud
+            if cloud.enabled and cloud.public_url:
+                payload["cloudOrigin"] = str(cloud.public_url).rstrip("/")
+            payload["port"] = int(loaded.ui.setup_port)
+            return _oauth_owner("oauth_start", payload)
+        if option == "--login-complete":
+            if len(args) != 2:
+                raise McpHubError("usage", "usage: vibe mcp <server> --login-complete '<callback URL>'", usage=True)
+            return _oauth_owner("oauth_complete", {"name": name, "callbackUrl": args[1]})
+        if len(args) != 1:
+            raise McpHubError("usage", "usage: vibe mcp <server> --logout", usage=True)
+        return _oauth_owner("oauth_logout", {"name": name})
+
     if args and args[0] == "--refresh":
         denied = _admit("owner")
         if denied is not None:
@@ -282,6 +308,23 @@ def _server(name: str, args: list[str]) -> int:
     return _call(name, tool, arguments)
 
 
+def _oauth_owner(operation: str, payload: dict[str, Any]) -> int:
+    from vibe import internal_client
+    try:
+        response = internal_client.mcp_request_sync(operation, payload)
+    except internal_client.InternalServerUnavailable:
+        raise McpHubError("unavailable", "The Avibe service is not running.", hint="vibe start") from None
+    if not response.get("ok"):
+        raise McpHubError.from_payload(response.get("error"))
+    if operation == "oauth_start":
+        print(response.get("authorizeUrl", ""))
+        if response.get("mode") == "paste":
+            print("After authorization, paste the callback URL with --login-complete.", file=sys.stderr)
+    elif operation == "oauth_complete":
+        print("MCP OAuth login completed.")
+    else:
+        print("MCP OAuth tokens removed.")
+    return 0
 def _server_list(name: str, args: list[str]) -> int:
     as_json = _format_json(args, {"--list", "--help", "-h"})
     published = _published(name)

@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ChevronDown, ChevronRight, Globe, Loader2, Plus, RefreshCw, Search, Terminal, Trash2, X } from 'lucide-react';
 import clsx from 'clsx';
@@ -11,6 +11,8 @@ import { Badge } from '../../ui/badge';
 import { Button } from '../../ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from '../../ui/dialog';
 import { Textarea } from '../../ui/textarea';
+import { pasteMayNeedOAuthLogin, preparedTabNeedsAuthorizeFallback } from '../../../lib/mcpPaste';
+import { navigatePreparedTab, openLinkInNewContext, openPreparedTab } from '../../../lib/pwaNavigation';
 
 const SOURCE_CHIP: Record<string, string> = {
   avibe: 'border-gold/40 bg-gold/[0.12] text-gold-ink',
@@ -82,21 +84,35 @@ export const McpHubSection: React.FC = () => {
   const canManage = capabilities.is_instance_owner;
   const [servers, setServers] = useState<McpServerSummary[]>([]);
   const [search, setSearch] = useState('');
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(() => new URLSearchParams(window.location.search).get('mcp'));
   const [expandedFor, setExpandedFor] = useState<string | null>(null);
   const [expandedTools, setExpandedTools] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [addText, setAddText] = useState('');
   const [addError, setAddError] = useState<string | null>(null);
+  const [loginFor, setLoginFor] = useState<{ name: string } | null>(null);
+  const [authorizeUrl, setAuthorizeUrl] = useState<string | null>(null);
+  const [callbackText, setCallbackText] = useState('');
   const [confirmDelete, setConfirmDelete] = useState<McpServerSummary | null>(null);
+  const loginInFlight = useRef(false);
+
   if (expandedFor !== selected) {
     setExpandedFor(selected);
     setExpandedTools({});
   }
 
   const describe = useCallback(
-    (error?: McpError) => (error ? t(`mcpHub.errors.${error.type}`, { defaultValue: error.message, message: error.message }) : t('mcpHub.failed')),
+    (error?: McpError | string) => {
+      if (typeof error === 'string' && error.trim()) return error;
+      if (error && typeof error === 'object') {
+        const type = typeof error.type === 'string' ? error.type.trim() : '';
+        const message = typeof error.message === 'string' ? error.message : '';
+        if (type) return t(`mcpHub.errors.${type}`, { defaultValue: message || t('mcpHub.failed'), message });
+        if (message) return message;
+      }
+      return t('mcpHub.failed');
+    },
     [t],
   );
 
@@ -110,6 +126,13 @@ export const McpHubSection: React.FC = () => {
     }
   }, [api, describe, showToast, t]);
 
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('oauth') === 'success') {
+      showToast(t('mcpHub.loginComplete'), 'success');
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, [load, showToast, t]);
   const [listed, setListed] = useState(false);
   if (!listed) {
     setListed(true);
@@ -151,7 +174,74 @@ export const McpHubSection: React.FC = () => {
     }
   };
 
+  const startLogin = async (server: Pick<McpServerSummary, 'name'>, tab: Window | null) => {
+    setBusy(`login:${server.name}`);
+    loginInFlight.current = true;
+    try {
+      const res = await api.loginMcp(server.name);
+      if (!res.ok) {
+        navigatePreparedTab(tab, null);
+        showToast(describe(res.error), 'error');
+        loginInFlight.current = false;
+        return;
+      }
+      const authorize = res.authorizeUrl ?? null;
+      if (authorize && !preparedTabNeedsAuthorizeFallback(tab)) {
+        navigatePreparedTab(tab, authorize);
+      } else {
+        navigatePreparedTab(tab, null);
+      }
+      if (authorize && preparedTabNeedsAuthorizeFallback(tab)) {
+        setLoginFor({ name: server.name });
+        setAuthorizeUrl(authorize);
+        showToast(t('mcpHub.authorizeFallback'), 'error', {
+          label: t('mcpHub.openAuthorize'),
+          onClick: () => openLinkInNewContext(authorize, 'noopener,noreferrer'),
+        });
+      } else if (res.mode !== 'direct') {
+        setLoginFor({ name: server.name });
+        setAuthorizeUrl(authorize);
+      }
+    } catch {
+      navigatePreparedTab(tab, null);
+      showToast(t('mcpHub.failed'), 'error');
+      loginInFlight.current = false;
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const onLogin = (server: McpServerSummary) => {
+    const tab = openPreparedTab();
+    void startLogin(server, tab);
+  };
+
+  useEffect(() => {
+    const refreshIfWaiting = () => {
+      if (!loginInFlight.current || document.visibilityState !== 'visible') return;
+      loginInFlight.current = false;
+      void load();
+    };
+    window.addEventListener('focus', refreshIfWaiting);
+    document.addEventListener('visibilitychange', refreshIfWaiting);
+    return () => {
+      window.removeEventListener('focus', refreshIfWaiting);
+      document.removeEventListener('visibilitychange', refreshIfWaiting);
+    };
+  }, [load]);
+
+  const onCompleteLogin = async () => {
+    if (!loginFor) return;
+    setBusy(`login:${loginFor.name}`);
+    try {
+      const res = await api.completeMcpLogin(loginFor.name, callbackText);
+      if (!res.ok) { showToast(describe(res.error), 'error'); return; }
+      setLoginFor(null); setAuthorizeUrl(null); setCallbackText(''); await load();
+      showToast(t('mcpHub.loginComplete'), 'success');
+    } finally { setBusy(null); }
+  };
   const onAdd = async () => {
+    const tab = pasteMayNeedOAuthLogin(addText) ? openPreparedTab() : null;
     setBusy('add');
     setAddError(null);
     try {
@@ -174,6 +264,7 @@ export const McpHubSection: React.FC = () => {
       const toast = inline;
       const hasBatch = Boolean(res.added || res.unchanged || res.failed);
       if (!succeeded) {
+        navigatePreparedTab(tab, null);
         setAddError(hasBatch ? inline : describe(res.error));
         return;
       }
@@ -184,7 +275,17 @@ export const McpHubSection: React.FC = () => {
       } else {
         showToast(t('mcpHub.succeededCount', { count: succeeded }), 'success');
       }
+      const needsLogin = [...added, ...unchanged].find((item) => item.auth === 'needs_login');
+      if (needsLogin) {
+        await startLogin(needsLogin, tab);
+        await load();
+        return;
+      }
+      navigatePreparedTab(tab, null);
       await load();
+    } catch {
+      navigatePreparedTab(tab, null);
+      showToast(t('mcpHub.failed'), 'error');
     } finally {
       setBusy(null);
     }
@@ -279,7 +380,24 @@ export const McpHubSection: React.FC = () => {
                     {t('mcpHub.toolMeta', { count: server.toolCount ?? 0, transport: transportLabel(server) })}
                   </span>
                 </span>
-                <ChevronRight className="size-3.5 text-muted" />
+                    {server.auth === 'needs_login' ? (
+                      <span
+                        role="button"
+                        tabIndex={0}
+                        className="inline-flex h-6 items-center rounded-md border border-border bg-surface px-2 font-mono text-[10px] font-semibold uppercase text-foreground hover:bg-surface-2"
+                        onClick={(event) => { event.stopPropagation(); void onLogin(server); }}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter' || event.key === ' ') {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            void onLogin(server);
+                          }
+                        }}
+                      >
+                        {t('mcpHub.login')}
+                      </span>
+                    ) : null}
+                    <ChevronRight className="size-3.5 text-muted" />
               </button>
             ))
           )}
@@ -330,6 +448,7 @@ export const McpHubSection: React.FC = () => {
                     ? t('mcpHub.serverVersion', { version: current.serverVersion })
                     : null}
             </div>
+            {current.auth === 'needs_login' ? <Button type="button" variant="brand" size="sm" onClick={() => void onLogin(current)}>{t('mcpHub.login')}</Button> : null}
             {canManage ? (
               <div className="flex items-center gap-2 pt-1">
                 <Button type="button" variant="outline" size="xs" disabled={busy !== null} onClick={() => void onRefreshOne(current.name)}>
@@ -345,6 +464,16 @@ export const McpHubSection: React.FC = () => {
           </div>
         ) : null}
       </div>
+
+      <Dialog open={loginFor !== null} onOpenChange={(open) => (!open ? setLoginFor(null) : undefined)}>
+        <DialogContent className="max-w-lg" closeLabel={t('common.close')}>
+          <DialogTitle>{t('mcpHub.loginTitle')}</DialogTitle>
+          <DialogDescription>{t('mcpHub.loginHint')}</DialogDescription>
+          {authorizeUrl ? <Button type="button" variant="outline" onClick={() => openLinkInNewContext(authorizeUrl, 'noopener,noreferrer')}>{t('mcpHub.openAuthorize')}</Button> : null}
+          <Textarea value={callbackText} onChange={(event) => setCallbackText(event.target.value)} className="min-h-20 font-mono text-[12px]" placeholder={t('mcpHub.callbackPlaceholder')} />
+          <DialogFooter><Button type="button" variant="outline" onClick={() => setLoginFor(null)}>{t('common.cancel')}</Button><Button type="button" disabled={!callbackText.trim() || busy !== null} onClick={() => void onCompleteLogin()}>{t('mcpHub.completeLogin')}</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={showAdd} onOpenChange={(open) => (!open ? setShowAdd(false) : undefined)}>
         <DialogContent className="max-w-lg" closeLabel={t('common.close')}>

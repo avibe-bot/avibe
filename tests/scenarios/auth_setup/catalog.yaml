@@ -641,4 +641,11 @@ scenarios:
       - tests/test_avault_agent.py
       - tests/test_local_deps.py
       - ui/src/components/ui/avault-authorization-notice.test.tsx
+  - id: AUTH-SETUP-135
+    name: MCP Hub HTTP OAuth login publishes needs_login then completes through the owner callback
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_mcp_hub_oauth_login_completes_through_owner_callback
 next_priority: []

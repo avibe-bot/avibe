@@ -6516,7 +6516,14 @@
       "timeout": "The MCP server timed out.",
       "capacity": "Too many MCP server processes are running; try again later.",
       "not_found": "Unknown MCP server.",
-      "unsupported_transport_sse": "SSE is not supported; use a Streamable HTTP URL."
+      "unsupported_transport_sse": "SSE is not supported; use a Streamable HTTP URL.",
+      "invalid_callback": "This OAuth callback is invalid or expired.",
+      "auth_required": "MCP login is required.",
+      "oauth": "MCP login could not be completed: {{message}}",
+      "usage": "{{message}}",
+      "add_failed": "{{message}}",
+      "add_partial": "{{message}}",
+      "internal": "MCP operation failed."
     },
     "addedCount": "Added {{count}} MCP servers.",
     "addedPartial": "Added {{count}}; failed: {{failed}}",
@@ -6525,6 +6532,14 @@
     "succeededCount": "{{count}} succeeded",
     "failedCount": "{{count}} failed:",
     "failedLine": "{{name}} — {{error}}",
-    "callHint": "vibe mcp {{name}} <tool>"
+    "callHint": "vibe mcp {{name}} <tool>",
+    "login": "Log in",
+    "loginTitle": "Log in to MCP server",
+    "loginHint": "Authorize in the new tab, then paste the callback URL here when needed.",
+    "openAuthorize": "Open authorization",
+    "authorizeFallback": "The authorization tab could not be opened. Use Open authorization to continue.",
+    "callbackPlaceholder": "Paste the callback URL",
+    "completeLogin": "Complete login",
+    "loginComplete": "MCP login completed"
   }
 }

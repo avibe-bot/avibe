@@ -1,6 +1,6 @@
 # Avibe MCP Hub MVP design
 
-> Status: implemented (instance-global Hub). Official latest stable Python MCP SDK, no OAuth, no generated Skills.
+> Status: implemented (instance-global Hub). Official latest stable Python MCP SDK, no generated Skills. OAuth: see `docs/plans/mcp-hub-oauth.md`.
 > Model: auto-discover reachable servers and register them; no draft/enable lifecycle.
 > Principle: smallest complete design; reuse existing caller context, IPC, credentials, i18n and owner lifecycle; no speculative defenses.
 > Design source of truth: `avibe-docs/design.pen`, frames `avibe — Skills & MCP · …`.
@@ -24,7 +24,7 @@ vibe mcp-add → Avibe store + refresh that name
 
 In scope: stdio and Streamable HTTP, auto-discovery, plaintext env/header configuration, static help/list, shared runtime, structured/multimodal results.
 
-Out of scope: OAuth, SSE (explicit `unsupported_transport_sse` error), project scope, Skill generation, resources/prompts, sampling, update detection, auto-install/upgrade of server software, package sharing/import.
+Out of scope: OAuth (now `docs/plans/mcp-hub-oauth.md`), SSE (explicit `unsupported_transport_sse` error), project scope, Skill generation, resources/prompts, sampling, update detection, auto-install/upgrade of server software, package sharing/import.
 
 ## 2. Package on disk
 
