@@ -104,44 +104,64 @@ call → per-server token manager (§5) supplies a fresh Bearer per HTTP request
 
 ## 5. Token refresh
 
-The SDK provider's refresh is not usable across Controller restarts (verified in `mcp` 2.3.0
-`client/auth/oauth2.py`):
+### 5.1 Prior art (read from source, 2026-10-30)
 
-- Expiry is kept only in memory (`token_expiry_time` from `expires_in` at receipt). After a
-  restart `_initialize` loads tokens without an expiry, so an expired access token is sent as valid.
-- On a 401 the provider does not try the refresh token; it runs discovery and full
-  re-authorization, i.e. a restart with an expired access token would force a new browser login.
-- Proactive refresh without in-memory AS metadata falls back to `<server origin>/token`. For Suno
-  that is `https://api.suno.com/token` → 404; the real endpoint is
-  `https://studio-api-prod.suno.com/api/v2/external/oauth/token/`.
+| | Claude Code 2.1.314 (bundled JS) | Codex (`openai/codex@d7b77a5`, `codex-rs/rmcp-client`, rmcp `e5698cb`) | OpenCode (`anomalyco/opencode@f29e281`, `packages/core/src/mcp/oauth.ts`) |
+|---|---|---|---|
+| Persisted expiry | absolute `expiresAt` | absolute `expires_at` (ms) | absolute `expires`, converted back to `expires_in` on load |
+| AS metadata after restart | persisted `discoveryState` (AS URL + metadata) | re-resolved at connection start | SDK discovery state |
+| When | proactive inside `tokens()` when <= 300 s left | before every client operation, 30 s skew | SDK |
+| In-process dedupe | one `_refreshInProgress` promise | `RefreshCredentialLock` | single-flight keyed by token URL + client_id + refresh_token |
+| Cross-process | `mcp-refresh-<key>.lock` (stale 60 s), then re-read for a winner's fresh tokens | `mcp-oauth-locks/<sha>.lock`, then authoritative re-read | none |
+| Request 401 | needs-auth; remembers the rejected access token and stops sending it | rmcp: one silent refresh, retry once only if the token changed, else challenge; Codex then returns "Authentication required" without replaying | SDK; `UnauthorizedError` → needs_auth |
+| Refresh rejected | needs-auth (`mcp_oauth_token_refresh_failed`) | retire refresh token **only if it still matches the one presented** | delete credential **only if it still holds the presented refresh token** |
+| Transient failure | keep and return current tokens | propagate, retry later | SDK |
+| Caller cancellation | — | refresh runs in an owned task so cancellation cannot lose a rotated token; 45 s timeout | — |
+| Background timer | no | no | no |
+| Logout | revokes at the AS revocation endpoint | — | — |
 
-So Avibe owns refresh with a small per-server **token manager** in the MCP runtime:
+The Python SDK's own provider is not usable as-is across restarts (`mcp` 2.3.0
+`client/auth/oauth2.py`): expiry lives only in memory; a 401 triggers full re-authorization
+instead of a refresh; without in-memory AS metadata, refresh falls back to `<server origin>/token`
+(Suno: `https://api.suno.com/token` → 404; real endpoint
+`https://studio-api-prod.suno.com/api/v2/external/oauth/token/`). Claude Code and Codex both
+wrap their SDKs for the same reasons.
 
-- **Persisted inputs** (§6): absolute `expiresAt`, `refreshToken`, client credentials, the AS
-  `issuer` + `token_endpoint` and the RFC 8707 `resource` captured at login. Refresh needs no
-  rediscovery.
-- **One manager per server, one `asyncio.Lock`**, on the runtime loop. Every HTTP connection of
-  that server (all Sessions, refresh/discovery passes) reads the token from it. The Controller is
-  the only process that refreshes (UI/CLI hold no runtimes), so there is a single writer.
-- **Per request, not per connection.** HTTP connections attach an `httpx.Auth` that asks the
-  manager for the current token on every request, so a Session connection kept open past the
-  access-token lifetime keeps working.
-- **Lazy, with skew.** Refresh when `now >= expiresAt - 60s` (no `expiresAt` → treat as valid until
-  a 401). Under the lock, re-check after acquiring so N waiters cause one refresh.
-- **401 at request time** → force one refresh, resend once. A 401 means the server rejected the
-  request before executing it, so the resend is safe even for `tools/call`. A second 401 →
-  `auth_required`.
-- **Rotation.** Persist the new token set (`write_atomic`) before releasing the lock and before
-  using the new access token. A response without `refresh_token` keeps the old one; without
-  `scope` keeps the old scope (RFC 6749 §6).
+### 5.2 Avibe design
+
+The SDK `OAuthClientProvider` is used only for interactive login. A per-server **token manager**
+in the MCP runtime owns refresh, following Claude Code where the three clients differ.
+
+- **Persisted inputs** (§6): absolute `expiresAt`, refresh token, the issuing `clientId`, AS
+  `issuer` + `tokenEndpoint` (+ `revocationEndpoint`) and RFC 8707 `resource` captured at login
+  (Claude Code persists discovery state too). Refresh needs no rediscovery.
+- **Single writer, no file lock.** Claude Code and Codex need cross-process lockfiles because
+  many CLI processes share one store. In Avibe only the Controller's MCP runtime reads or writes
+  `oauth.json` (CLI/UI go through IPC), so refresh, login completion and logout serialize on one
+  `asyncio.Lock` per server on the runtime loop. Waiters re-check expiry after acquiring the lock,
+  so N concurrent callers cause one token request.
+- **Per request.** HTTP connections attach an `httpx.Auth` that asks the manager for the token on
+  every request, so a Session connection held open past the access-token lifetime keeps working.
+- **Proactive, 300 s skew** (Claude Code): refresh when `expiresAt - now <= 300 s`. No
+  `expiresAt` → use the token until a 401. No background timer (none of the three has one).
+- **Owned refresh task** (Codex): the refresh + persist runs as its own task with a 45 s timeout;
+  a caller timing out or being cancelled never discards a rotated refresh token.
+- **Rotation.** Persist (`write_atomic`) before the new access token is used. A response without
+  `refresh_token` / `scope` keeps the previous one (RFC 6749 §6). If the write fails, keep the new
+  set in memory, log, and retry the write on the next use.
+- **Request 401** (rmcp): refresh once under the lock; resend once only if that produced a
+  different access token; otherwise `auth_required`. The server rejected the request before
+  running it, so the resend is safe for `tools/call`. A rejected access token is not sent again.
 - **Failure classes.**
-  - `400 invalid_grant` / `invalid_client` / `401` from the token endpoint → refresh token dead:
-    drop tokens (keep client), status `needs_login`, call returns `auth_required`.
-  - Network error, `5xx`, `429` → transient: keep tokens, call fails `connection`; next call retries.
-  - Expired and no `refresh_token` (AS did not grant `offline_access`) → `auth_required`.
-- **No background refresh timer.** Lazy refresh covers use; a refresh token that expires from
-  idleness just needs a new login. Revisit only if a real server needs keep-alive.
-- Tokens never enter logs; token-endpoint errors log status + `error` code only.
+  - Token endpoint `400 invalid_grant` / `invalid_client` / `401` → refresh token dead. Drop it
+    **only if `oauth.json` still holds the refresh token that was presented** (Codex/OpenCode
+    compare-and-retire), keep the client, status `needs_login`, call returns `auth_required`.
+  - Network error, `5xx`, `429`, timeout → transient. Keep tokens; if the access token has not
+    actually expired yet, use it (Claude Code); otherwise fail `connection`, retry on next use.
+  - Expired and no refresh token (no `offline_access` grant) → `auth_required`.
+- **Logout** revokes refresh then access token at `revocationEndpoint` when advertised
+  (best effort, Claude Code), then deletes `oauth.json`.
+- Logs carry status and OAuth `error` code only, never token values.
 
 ## 6. Storage
 
@@ -150,7 +170,7 @@ So Avibe owns refresh with a small per-server **token manager** in the MCP runti
 ```json
 {"schemaVersion": 1, "serverUrl": "https://api.suno.com/mcp",
  "resource": "https://api.suno.com/mcp",
- "authServer": {"issuer": "…", "tokenEndpoint": "…"},
+ "authServer": {"issuer": "…", "tokenEndpoint": "…", "revocationEndpoint": "…"},
  "tokens": {"accessToken": "…", "refreshToken": "…", "expiresAt": 1793345230, "scope": "…",
             "clientId": "…"},
  "clients": [{"clientId": "…", "clientSecret": null, "tokenEndpointAuthMethod": "none",
