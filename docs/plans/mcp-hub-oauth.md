@@ -97,7 +97,7 @@ browser authorizes → AS redirects to redirect_uri?code&state&iss
   → direct: UI route → IPC → controller resolves the pending login
   → paste:  dialog / `vibe mcp suno --login-complete '<url>'` → same IPC
   → SDK exchanges token → storage saves → refresh → tools published
-call → per-server token manager (§5) supplies a fresh Bearer per HTTP request
+call → shared per-server provider (§5) attaches Bearer per request, refreshes before expiry
      → refresh token rejected → envelope error.type = auth_required, hint `vibe mcp suno --login`
 ```
 
