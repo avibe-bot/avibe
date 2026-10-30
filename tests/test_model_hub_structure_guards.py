@@ -1281,6 +1281,7 @@ def test_machine_error_field_access_has_one_extractor() -> None:
         type_readers = {
             "request.py": ("_plain_history", "declared_tool_types", "replays_history_items"),
             "fetch_services.py": ("_mcp_payload",),
+            "service_diagnostics.py": ("_mcp_crawl_error_tag",),
         }
         functions = _functions(tree) if path.name in type_readers else {}
         history_nodes = {
