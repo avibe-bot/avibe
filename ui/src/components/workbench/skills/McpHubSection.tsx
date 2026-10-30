@@ -315,7 +315,23 @@ export const McpHubSection: React.FC = () => {
                     {t('mcpHub.toolMeta', { count: server.toolCount ?? 0, transport: transportLabel(server) })}
                   </span>
                 </span>
-                    {server.auth === 'needs_login' ? <Button type="button" size="xs" variant="outline" onClick={(event) => { event.stopPropagation(); void onLogin(server); }}>{t('mcpHub.login')}</Button> : null}
+                    {server.auth === 'needs_login' ? (
+                      <span
+                        role="button"
+                        tabIndex={0}
+                        className="inline-flex h-6 items-center rounded-md border border-border bg-surface px-2 font-mono text-[10px] font-semibold uppercase text-foreground hover:bg-surface-2"
+                        onClick={(event) => { event.stopPropagation(); void onLogin(server); }}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter' || event.key === ' ') {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            void onLogin(server);
+                          }
+                        }}
+                      >
+                        {t('mcpHub.login')}
+                      </span>
+                    ) : null}
                     <ChevronRight className="size-3.5 text-muted" />
               </button>
             ))

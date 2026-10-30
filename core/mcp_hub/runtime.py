@@ -240,6 +240,15 @@ def _http_status(exc: BaseException, *, _seen: Optional[set[int]] = None) -> Opt
     return _http_status(cause, _seen=seen) if isinstance(cause, BaseException) else None
 
 
+def _explicit_authorization(definition: dict[str, Any]) -> bool:
+    headers = (definition.get("transport") or {}).get("headers") or {}
+    return any(key.lower() == "authorization" for key in headers)
+
+
+def _oauth_eligible(definition: dict[str, Any]) -> bool:
+    return (definition.get("transport") or {}).get("type") == HTTP and not _explicit_authorization(definition)
+
+
 def _oauth_challenge(exc: BaseException, *, _seen: Optional[set[int]] = None) -> bool:
     """Recognize a protected-resource OAuth challenge through exception causes."""
     seen = _seen if _seen is not None else set()
@@ -337,7 +346,7 @@ class McpRuntime:
         self._discover_lock = asyncio.Lock()
         self._discover_task: Optional[asyncio.Task] = None
         self._oauth_providers: dict[str, Any] = {}
-        self._pending_logins: dict[str, tuple[str, asyncio.Future]] = {}
+        self._pending_logins: dict[str, dict[str, Any]] = {}
         self._oauth_tasks: dict[str, asyncio.Task] = {}
         self._oauth_logins: set[str] = set()
         self._oauth_provider_locks: dict[str, asyncio.Lock] = {}
@@ -422,7 +431,7 @@ class McpRuntime:
 
     async def _oauth_provider(self, definition: dict[str, Any]):
         transport = definition.get("transport") or {}
-        if transport.get("type") != HTTP or any(key.lower() == "authorization" for key in transport.get("headers") or {}):
+        if not _oauth_eligible(definition):
             return None
         name = definition["name"]
         lock = self._oauth_provider_locks.setdefault(name, asyncio.Lock())
@@ -663,7 +672,7 @@ class McpRuntime:
                 await asyncio.to_thread(repository.unlist, name)
             raise McpHubError("timeout", "Refresh timed out.") from None
         except McpHubError as cop:
-            if definition.get("transport", {}).get("type") == HTTP and not any(key.lower() == "authorization" for key in definition.get("transport", {}).get("headers", {})) and cop.type in {"auth_required", "oauth"} and name not in self._oauth_logins:
+            if _oauth_eligible(definition) and cop.type in {"auth_required", "oauth"} and name not in self._oauth_logins:
                 revision = await asyncio.to_thread(self._publish_needs_login, name, definition)
                 return _dumps({"ok": True, "name": name, "revision": revision, "toolCount": 0, "auth": "needs_login"})
             if unlist_on_failure:
@@ -671,9 +680,7 @@ class McpRuntime:
             raise
         except Exception as cop:
             hub = _hub_error(cop)
-            http = definition.get("transport", {}).get("type") == HTTP
-            headers = definition.get("transport", {}).get("headers", {})
-            if http and name not in self._oauth_logins and not any(key.lower() == "authorization" for key in headers) and (
+            if _oauth_eligible(definition) and name not in self._oauth_logins and (
                 (hub is not None and hub.type in {"auth_required", "oauth"}) or _oauth_challenge(cop)
             ):
                 revision = await asyncio.to_thread(self._publish_needs_login, name, definition)
@@ -772,7 +779,7 @@ class McpRuntime:
             "generatedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
         version = getattr(server_info, "version", None)
-        if snapshot.get("transport", {}).get("type") == HTTP and not any(key.lower() == "authorization" for key in snapshot.get("transport", {}).get("headers", {})):
+        if _oauth_eligible(snapshot):
             manifest["auth"] = "ok"
         if version:
             manifest["serverInfo"] = {"version": str(version)}
@@ -791,8 +798,8 @@ class McpRuntime:
         name = payload.get("name")
         definition = await asyncio.to_thread(repository.read_definition, name)
         transport = definition.get("transport") or {}
-        if transport.get("type") != HTTP:
-            raise McpHubError("usage", "OAuth login is only available for HTTP MCP servers.", usage=True)
+        if not _oauth_eligible(definition):
+            raise McpHubError("usage", "OAuth login is only available for HTTP MCP servers without an Authorization header.", usage=True)
         async with self._lock(name):
             previous = self._oauth_tasks.pop(name, None)
             for state, item in list(self._pending_logins.items()):
@@ -843,6 +850,10 @@ class McpRuntime:
         async def run_login() -> None:
             try:
                 await self._refresh_locked(name, wait_stdio=False, unlist_on_failure=False)
+            except asyncio.CancelledError:
+                if not url_future.done():
+                    url_future.cancel()
+                raise
             except Exception as cop:
                 if not url_future.done():
                     url_future.set_exception(cop)
@@ -904,8 +915,8 @@ class McpRuntime:
     async def _oauth_logout(self, payload: dict[str, Any]) -> bytes:
         name = payload.get("name")
         definition = await asyncio.to_thread(repository.read_definition, name)
-        if definition.get("transport", {}).get("type") != HTTP:
-            raise McpHubError("usage", "OAuth logout is only available for HTTP MCP servers.", usage=True)
+        if not _oauth_eligible(definition):
+            raise McpHubError("usage", "OAuth logout is only available for HTTP MCP servers without an Authorization header.", usage=True)
         async with self._lock(name):
             await self._cancel_login(name)
             await self._retire_package(name)
@@ -1017,13 +1028,10 @@ class McpRuntime:
                     hub = _hub_error(exc)
                     if hub is not None:
                         raise hub from None
-                    headers = definition["transport"].get("headers") or {}
                     from mcp import MCPError
 
-                    if (
-                        definition["transport"]["type"] == HTTP
-                        and not any(key.lower() == "authorization" for key in headers)
-                        and (_http_status(exc) == 401 or (isinstance(exc, MCPError) and getattr(exc.error, "code", None) == 401))
+                    if _oauth_eligible(definition) and (
+                        _http_status(exc) == 401 or (isinstance(exc, MCPError) and getattr(exc.error, "code", None) == 401)
                     ):
                         raise McpHubError(
                             "auth_required",

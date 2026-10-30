@@ -447,6 +447,22 @@ def test_stdio_logout_is_rejected(runtime, tmp_path):
     assert logged_out["error"]["type"] == "usage"
 
 
+def test_authorization_header_logout_is_rejected(runtime, loopback):
+    added = _run(runtime, "add", {"servers": [{"name": "suno", "server": {
+        "url": f"{loopback.origin}/mcp",
+        "headers": {"Authorization": f"Bearer {loopback.access}"},
+    }}]})
+    assert added["ok"] and added["added"][0]["toolCount"] == 1
+    before = repository.list_packages()[0]
+    assert before.get("auth") != "needs_login"
+    logged_out = _run(runtime, "oauth_logout", {"name": "suno"})
+    assert logged_out["ok"] is False
+    assert logged_out["error"]["type"] == "usage"
+    after = repository.list_packages()[0]
+    assert after.get("auth") != "needs_login"
+    assert after["toolCount"] == 1
+
+
 def test_remove_cancels_pending_login(runtime, loopback):
     _run(runtime, "add", {"servers": [{"name": "suno", "server": {"url": f"{loopback.origin}/mcp"}}]})
     started = _run(runtime, "oauth_start", {"name": "suno", "origin": "http://127.0.0.1:5123", "port": 5123})
