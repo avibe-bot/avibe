@@ -2504,7 +2504,15 @@
           "moveUp": "上移 {{source}}",
           "moveDown": "下移 {{source}}",
           "moved_one": "已将 {{source}} 移到第 {{position}} 位，共 {{count}} 位。",
-          "moved_other": "已将 {{source}} 移到第 {{position}} 位，共 {{count}} 位。"
+          "moved_other": "已将 {{source}} 移到第 {{position}} 位，共 {{count}} 位。",
+          "dragHandle": "拖动调整 {{source}} 的位置，当前第 {{position}} 位",
+          "dragInstructions": "按空格键抓起，方向键移动，再按空格键放下，Escape 取消。也可以用鼠标按住序号拖动。",
+          "dragPickedUp": "已抓起 {{source}}。",
+          "dragDropped": "已放下 {{source}}。",
+          "dragCancelled": "已取消移动 {{source}}。",
+          "dragPosition_one": "{{source}}，第 {{position}} 位，共 {{count}} 位。",
+          "dragPosition_other": "{{source}}，第 {{position}} 位，共 {{count}} 位。",
+          "offPosition": "—"
         },
         "sources": {
           "title": "各供应商状态",

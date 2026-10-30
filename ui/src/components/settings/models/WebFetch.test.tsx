@@ -3,7 +3,7 @@
 // Search-only tests cannot catch fetch becoming a saved search override or a
 // catalog badge invented for a search-only Source.
 import * as React from 'react';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
@@ -98,4 +98,53 @@ it.each([false, true])('adds only catalog-backed Search/Fetch badges, active=%s'
     expect(within(builtin).getByRole('button', { name: /查看读取顺序/ })).toBeTruthy();
     expect(within(builtin).queryByRole('button', { name: /添加/ })).toBeNull();
   }
+});
+
+
+describe('dragging an order by its ordinal', () => {
+  // jsdom lays nothing out; give each order row the box it would have, one under the other, so the drag's keyboard
+  // sensor can find the row below.
+  const layout = () => vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+    const row = this.closest('[data-executor]');
+    const index = row ? [...row.parentElement!.children].indexOf(row) : -1;
+    const top = index < 0 ? 0 : index * 60;
+    return { x: 0, y: top, top, left: 0, width: 600, height: index < 0 ? 0 : 52, right: 600, bottom: top + (index < 0 ? 0 : 52), toJSON: () => ({}) } as DOMRect;
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it('makes each switched-on row\'s number its handle, and a switched-off row has none', () => {
+    const tool = structuredClone(fetch);
+    tool.executor_candidates[3].settings.enabled = false;
+    render(wrap(<ToolsTab read={readyRegion({ tools: [tool] })} sources={SEARCH_SOURCES} pending={new Set()} onSave={vi.fn()} onClear={vi.fn()} onRetry={vi.fn()} />));
+    const rows = within(screen.getByRole('list', { name: '读取顺序' })).getAllByRole('listitem');
+    const handle = within(rows[0]).getByRole('button', { name: '拖动调整 本机 的位置，当前第 1 位' });
+    expect(handle.textContent).toBe('1');
+    expect(handle.getAttribute('aria-roledescription')).toBe('sortable');
+    expect(within(rows[3]).queryByRole('button', { name: /^拖动调整/ })).toBeNull();
+    expect(within(rows[3]).getByText('—')).toBeTruthy();
+  });
+
+  it('holds the order still while a save is out', () => {
+    render(wrap(<ToolsTab read={readyRegion({ tools: [fetch] })} sources={SEARCH_SOURCES} pending={new Set(['web_fetch'] as const)} onSave={vi.fn()} onClear={vi.fn()} onRetry={vi.fn()} />));
+    expect(within(screen.getByRole('list', { name: '读取顺序' })).queryAllByRole('button', { name: /^拖动调整/ })).toEqual([]);
+  });
+
+  it('picks a row up with Space, moves it with the arrows, and saves once on drop', async () => {
+    layout();
+    const save = vi.fn();
+    render(wrap(<ToolsTab read={readyRegion({ tools: [fetch] })} sources={SEARCH_SOURCES} pending={new Set()} onSave={save} onClear={vi.fn()} onRetry={vi.fn()} />));
+    const list = screen.getByRole('list', { name: '读取顺序' });
+    within(list).getByRole('button', { name: '拖动调整 本机 的位置，当前第 1 位' }).focus();
+    await userEvent.keyboard(' ');
+    await userEvent.keyboard('{ArrowDown}');
+    await userEvent.keyboard('{ArrowDown}');
+    expect(save).not.toHaveBeenCalled();
+    await userEvent.keyboard(' ');
+    expect(save.mock.calls).toEqual([
+      ['web_fetch', { executor_order: ['src_tavily01', 'src_exakeyless', 'src_localfetch', 'src_jinakeyless'] }],
+    ]);
+    // The dropped order shows while the save is out, instead of jumping back first.
+    expect(within(list).getAllByRole('listitem').map((row) => row.getAttribute('data-executor')))
+      .toEqual(['src_tavily01', 'src_exakeyless', 'src_localfetch', 'src_jinakeyless']);
+  });
 });

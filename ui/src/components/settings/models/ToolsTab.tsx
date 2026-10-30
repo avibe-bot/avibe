@@ -14,11 +14,12 @@ import { Select } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 import { ToggleSwitch } from '../SettingsPrimitives';
 import { cooldownTime, formatMonthDay, formatNameList, formatSmallUsd } from './format';
-import { executorOrderAfterMove, imageModelCopyKey, pairEvidence, refusalSummary, type PairEvidence, type RefusalSummary } from './hostedTools';
+import { executorOrderAfterMove, executorOrderAfterReorder, imageModelCopyKey, pairEvidence, refusalSummary, type PairEvidence, type RefusalSummary } from './hostedTools';
 import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
 import { KEYLESS_EXA_SOURCE_ID, candidateEnabled, searchServicesActive, serviceVendorForSource, webSearchTool } from './searchServices';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { OrderStepper } from './OrderStepper';
+import { OrderOrdinal, SortableOrderList } from './SortableOrderList';
 import { OrderPrice, SearchCandidateStatus, SearchServiceOrderPrice, SearchVendorGlyph } from './SearchServiceParts';
 import { WebFetchOrder } from './WebFetchOrder';
 import { fetchVendorForSource, webFetchTool } from './webFetch';
@@ -183,6 +184,14 @@ const ExecutorOrder: React.FC<{ tool: HostedSearchToolStatus; lookup: SourceLook
   const candidates = tool.executor_candidates;
   const movable = candidates.filter(candidateEnabled);
   const custom = tool.executor_order !== null;
+  const candidateName = (candidate: HostedExecutorCandidate): string => {
+    if (candidate.kind === 'service' && candidate.source_id === KEYLESS_EXA_SOURCE_ID) return t('settings.models.searchServices.vendorName.exa-mcp') as string;
+    const vendor = candidate.kind === 'service'
+      ? activeWeb?.service_vendors?.find((item) => item.source_ids.includes(candidate.source_id))
+      : undefined;
+    return lookup.source(candidate.source_id)?.display_name
+      ?? (vendor ? t(`settings.models.searchServices.vendorName.${vendor.id}`, { defaultValue: vendor.name }) as string : lookup.name(candidate.source_id));
+  };
   // A move is announced, and focus follows the moved row, only once the server's
   // order shows it. One that did not land (refused, or lost and reconciled to
   // another order) is dropped once its write has been out and settled, without
@@ -250,15 +259,25 @@ const ExecutorOrder: React.FC<{ tool: HostedSearchToolStatus; lookup: SourceLook
       {candidates.length === 0
         ? <p className="model-hub-tool-note flex items-start gap-2"><Info className="mt-px size-[13px] shrink-0" aria-hidden />{t('settings.models.tools.order.empty', { toolInline })}</p>
         : (
-            <ol ref={list} className="flex flex-col gap-1.5" aria-label={t(activeWeb ? 'settings.models.searchServices.order' : 'settings.models.tools.order.title') as string}>
-              {candidates.map((candidate, index) => {
+            <SortableOrderList
+              rows={candidates}
+              idOf={(candidate) => candidate.source_id}
+              nameOf={candidateName}
+              isOn={candidateEnabled}
+              pending={pending}
+              label={t(activeWeb ? 'settings.models.searchServices.order' : 'settings.models.tools.order.title') as string}
+              listRef={list}
+              rowClassName={(candidate) => cn('model-hub-tool-executor-row grid items-center rounded-lg border border-border bg-background', !candidateEnabled(candidate) && 'is-off')}
+              rowAttrs={(candidate) => ({ 'data-executor': candidate.source_id })}
+              onReorder={(shown, from, to) => { setRequested(null); onSave(tool.name, { executor_order: executorOrderAfterReorder(tool.executor_order, shown, from, to) }); }}
+            >
+              {(candidate, index, handle) => {
                 const source = lookup.source(candidate.source_id);
                 const vendor = candidate.kind === 'service'
                   ? activeWeb?.service_vendors?.find((item) => item.source_ids.includes(candidate.source_id))
                   : undefined;
                 const keyless = candidate.kind === 'service' && candidate.source_id === KEYLESS_EXA_SOURCE_ID;
-                const name = keyless ? t('settings.models.searchServices.vendorName.exa-mcp') as string : source?.display_name
-                  ?? (vendor ? t(`settings.models.searchServices.vendorName.${vendor.id}`, { defaultValue: vendor.name }) as string : lookup.name(candidate.source_id));
+                const name = candidateName(candidate);
                 const cooldown = candidate.kind === 'service' && candidate.cooldown_until !== null
                   ? cooldownTime(candidate.cooldown_until, i18n.language)
                   : null;
@@ -280,8 +299,8 @@ const ExecutorOrder: React.FC<{ tool: HostedSearchToolStatus; lookup: SourceLook
                   />
                 );
                 return (
-                  <li key={candidate.source_id} className={cn('model-hub-tool-executor-row grid items-center rounded-lg border border-border bg-background', switchedOff && 'is-off')} data-executor={candidate.source_id}>
-                    <span className="flex items-center gap-1.5">{stepper}<span className={cn('model-hub-order-ordinal', index === 0 && !switchedOff && 'is-first')}>{switchedOff ? '—' : index + 1}</span></span>
+                  <>
+                    <span className="flex items-center gap-1.5">{stepper}<OrderOrdinal index={index} off={switchedOff} handle={handle} name={name} /></span>
                     {activeWeb ? <div className="flex min-w-0 items-center gap-3">
                       {source ? <SearchVendorGlyph vendor={source.vendor} /> : candidate.kind === 'service' ? <SearchVendorGlyph vendor={vendor?.id ?? candidate.model_id} /> : <SourceGlyph source={source} />}
                       <div className="flex min-w-0 flex-col gap-0.5">
@@ -312,12 +331,13 @@ const ExecutorOrder: React.FC<{ tool: HostedSearchToolStatus; lookup: SourceLook
                           : { executors: { [candidate.source_id]: { enabled: switchedOff } } })}
                       />
                     )}</span>
-                  </li>
+                  </>
                 );
-              })}
-            </ol>
+              }}
+            </SortableOrderList>
           )}
-      <span role="status" className="sr-only">{landed && t('settings.models.tools.order.moved', { source: lookup.name(requested.sourceId), position: requested.position, count: requested.count })}</span>
+      {/* The arrows' announcement; a drag is announced by the drag context's own live region. */}
+      <span role="status" data-order-moved className="sr-only">{landed && t('settings.models.tools.order.moved', { source: lookup.name(requested.sourceId), position: requested.position, count: requested.count })}</span>
     </div>
   );
 };

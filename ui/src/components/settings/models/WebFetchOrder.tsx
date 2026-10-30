@@ -8,7 +8,8 @@ import { cn } from '@/lib/utils';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { OrderPrice, SearchVendorGlyph } from './SearchServiceParts';
 import { OrderStepper } from './OrderStepper';
-import { executorOrderAfterMove } from './hostedTools';
+import { executorOrderAfterMove, executorOrderAfterReorder } from './hostedTools';
+import { OrderOrdinal, SortableOrderList } from './SortableOrderList';
 import { cooldownTime, formatMonthDay, formatSmallUsd } from './format';
 import { sourceStatePresentation } from './sourceStatePresentation';
 import { fetchVendorForSource } from './webFetch';
@@ -116,15 +117,26 @@ export const WebFetchOrder: React.FC<{
       </div>
       {tool.executor_order !== null && <Button variant="outline" size="xs" disabled={pending} onClick={() => onSave({ executor_order: null })}><RotateCcw aria-hidden />{t('settings.models.tools.order.reset')}</Button>}
     </div>
-    <ol ref={list} className="flex flex-col gap-1.5" aria-label={t('settings.models.webFetch.order')}>
-      {rows.map((row, index) => {
+    <SortableOrderList
+      rows={rows}
+      idOf={(row) => row.source_id}
+      nameOf={(row) => name(row.source_id)}
+      isOn={(row) => row.settings.enabled}
+      pending={pending}
+      label={t('settings.models.webFetch.order')}
+      listRef={list}
+      rowClassName={(row) => cn('model-hub-tool-executor-row grid items-center rounded-lg border border-border bg-background', !row.settings.enabled && 'is-off')}
+      rowAttrs={(row) => ({ 'data-executor': row.source_id })}
+      onReorder={(shown, from, to) => onSave({ executor_order: executorOrderAfterReorder(tool.executor_order, shown, from, to) })}
+    >
+      {(row, index, handle) => {
         const vendor = fetchVendorForSource(tool, row.source_id);
         const label = name(row.source_id);
         const off = !row.settings.enabled;
-        return <li key={row.source_id} data-executor={row.source_id} className={cn('model-hub-tool-executor-row grid items-center rounded-lg border border-border bg-background', off && 'is-off')}>
+        return <>
           <span className="flex items-center gap-1.5">
             <OrderStepper label={label} canUp={!off && index > 0} canDown={!off && index < enabled.length - 1} pending={pending} onMove={(direction) => move(index, direction)} />
-            <span className={cn('model-hub-order-ordinal', index === 0 && !off && 'is-first')}>{off ? '—' : index + 1}</span>
+            <OrderOrdinal index={index} off={off} handle={handle} name={label} />
           </span>
           <div className="flex min-w-0 items-center gap-3"><SearchVendorGlyph vendor={vendor?.id ?? 'local'} /><div className="flex min-w-0 flex-col gap-0.5">
             <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1"><button type="button" data-search-source={row.source_id} className="truncate text-left font-semibold hover:underline" onClick={(event) => vendor?.facts.built_in && vendor.id !== 'exa-mcp' ? setDetail(row.source_id) : onOpen?.(row.source_id, event.currentTarget)}>{label}</button><FetchStatus candidate={row} tool={tool} inRow /></div>
@@ -133,9 +145,9 @@ export const WebFetchOrder: React.FC<{
           </div></div>
           <FetchOrderPrice candidate={row} />
           <span className="model-hub-order-switch"><ToggleSwitch enabled={!off} disabled={pending} label={t('settings.models.webFetch.use')} onClick={() => onSave({ services: { [row.source_id]: { enabled: off } } })} /></span>
-        </li>;
-      })}
-    </ol>
+        </>;
+      }}
+    </SortableOrderList>
     <div className="flex flex-wrap items-center justify-between gap-3"><Button variant="outline" size="sm" disabled={pending} onClick={(event) => onAdd?.(event.currentTarget)}><Plus aria-hidden />{t('settings.models.webFetch.add')}</Button><p className="model-hub-tool-note flex items-center gap-1.5" title={t('settings.models.webFetch.custody') as string}><LockKeyhole className="size-3.5 shrink-0" aria-hidden />{t('settings.models.searchServices.custodyShort')}</p></div>
     {detail && <Dialog open onOpenChange={(open) => { if (!open) setDetail(null); }}><DialogContent className="max-w-xl border-border-strong bg-surface" closeLabel={t('common.close')}><DialogHeader><DialogTitle>{name(detail)}</DialogTitle><DialogDescription>{t('settings.models.webFetch.custody')}</DialogDescription></DialogHeader><FetchServiceSettings sourceId={detail} tool={tool} pending={pending} onSave={onSave} onRetry={(id) => onRetry?.(id)} /></DialogContent></Dialog>}
   </div>;
