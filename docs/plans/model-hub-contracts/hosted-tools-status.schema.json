@@ -126,7 +126,14 @@
         "model_id": { "type": "string", "minLength": 1 },
         "billing": { "enum": ["monthly", "metered"] },
         "relay": { "type": "boolean", "description": "A non-official endpoint is priced at its vendor's API price." },
-        "price": { "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/ListPrice" }] }
+        "price": { "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/ListPrice" }] },
+        "settings": {
+          "type": "object",
+          "description": "Web search only: the executor's switch. Off ends the order and is never tried; X search candidates carry none.",
+          "required": ["enabled"],
+          "additionalProperties": false,
+          "properties": { "enabled": { "type": "boolean" } }
+        }
       }
     },
     "ServiceExecutor": {

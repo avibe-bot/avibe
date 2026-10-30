@@ -50,7 +50,7 @@ const hubAgent = (enabled = true) => ({
   system_prompt: null, created_at: '', metadata: { builtin_default: true },
 });
 const hubChain = (modelId: string) => ({
-  contract_version: 22, backend: 'claude', model_id: 'opus-5',
+  contract_version: 23, backend: 'claude', model_id: 'opus-5',
   manual_override: { hops: [{ source_id: 'src_a', model_id: modelId }] },
   route_origin: 'manual', current: { source_id: 'src_a', model_id: modelId },
   chain: [{ source_id: 'src_a', model_id: modelId, channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }],
@@ -354,7 +354,7 @@ describe('assistant installation presentation', () => {
     mock.api.getVibeAgent.mockResolvedValue({ ok: true, agent });
     mock.models.listSources.mockResolvedValue([]);
     const chain = {
-      contract_version: 22, backend: 'claude', model_id: 'opus-5',
+      contract_version: 23, backend: 'claude', model_id: 'opus-5',
       manual_override: { hops: [{ source_id: 'src_a', model_id: 'opus-5' }, { source_id: 'src_b', model_id: 'opus-5' }] },
       route_origin: 'manual', current: { source_id: 'src_a', model_id: 'opus-5' },
       chain: [

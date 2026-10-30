@@ -291,6 +291,14 @@ async def test_concurrent_different_fields_and_sources_are_not_lost(tmp_path):
     ("web_search", {"services": {TAVILY: {"unknown": True}}}),
     ("web_search", {"services": {GONE: {"results": 5}}}),
     ("web_search", {"services": {MODEL: {"enabled": True}}}),
+    # A model executor's switch: only a Source that lists a web-search executor model, only ``enabled``.
+    ("web_search", {"executors": None}),
+    ("web_search", {"executors": {TAVILY: {"enabled": False}}}),
+    ("web_search", {"executors": {GONE: {"enabled": False}}}),
+    ("web_search", {"executors": {MODEL: {}}}),
+    ("web_search", {"executors": {MODEL: {"enabled": 0}}}),
+    ("web_search", {"executors": {MODEL: {"enabled": False, "results": 3}}}),
+    ("x_search", {"executors": {MODEL: {"enabled": False}}}),
     ("x_search", {"prefer_native": False}), ("image_generate", {"services": {}}),
 ])
 @pytest.mark.asyncio
@@ -367,6 +375,41 @@ async def test_role_metadata_drops_removed_sources_on_load_and_real_deletion(tmp
     assert V2ModelHubConfigStore().load().hosted_tools["web_search"].to_payload() == written
 
 
+@pytest.mark.asyncio
+async def test_a_model_executor_switch_saves_only_its_opt_out_and_ends_the_order(tmp_path):
+    """vibey-hosted-tools.md §6: a model executor turned off for web search ends the effective order, the saved order
+    untouched; on is the default, so turning it back on, or null, leaves nothing saved."""
+
+    service, path, _ = _disk_service(tmp_path, _config({
+        "executor_order": [MODEL, TAVILY], "executor_order_kinds": {MODEL: "model", TAVILY: "service"},
+    }))
+    baseline = _web(service)["effective_order"]
+    assert baseline[-1] != MODEL
+    await service.set_hosted_tool("web_search", {"executors": {MODEL: {"enabled": False}}})
+    web = _web(service)
+    assert next(c for c in web["executor_candidates"] if c["source_id"] == MODEL)["settings"] == {"enabled": False}
+    assert web["effective_order"] == [*(sid for sid in baseline if sid != MODEL), MODEL]
+    assert web["executor_order"] == [MODEL, TAVILY]
+    assert V2ModelHubConfigStore().load().hosted_tools["web_search"].to_payload()["executors"] == {
+        MODEL: {"enabled": False},
+    }
+    for back_on in ({"enabled": True}, None):
+        await service.set_hosted_tool("web_search", {"executors": {MODEL: {"enabled": False}}})
+        await service.set_hosted_tool("web_search", {"executors": {MODEL: back_on}})
+        web = _web(service)
+        assert next(c for c in web["executor_candidates"] if c["source_id"] == MODEL)["settings"] == {"enabled": True}
+        assert web["effective_order"] == baseline
+        assert "executors" not in V2ModelHubConfigStore().load().hosted_tools["web_search"].to_payload()
+    # X search keeps no switch: its candidates carry none.
+    x_search = next(t for t in service.hosted_tools_status()["hosted_tools"]["tools"] if t["name"] == "x_search")
+    assert all("settings" not in candidate for candidate in x_search["executor_candidates"])
+
+
+def test_only_an_extant_sources_opt_out_is_loaded():
+    config = _config({"executors": {MODEL: {"enabled": False}, GONE: {"enabled": False}, TAVILY: {"enabled": True}}})
+    assert config.hosted_tools["web_search"].to_payload()["executors"] == {MODEL: {"enabled": False}}
+
+
 def test_removed_source_settings_are_ignored_before_validation():
     config = _config({"services": {GONE: "obsolete", TAVILY: {"results": 6}}})
     assert config.hosted_tools["web_search"].enabled
@@ -374,7 +417,8 @@ def test_removed_source_settings_are_ignored_before_validation():
 
 
 @pytest.mark.parametrize("field,value", [("prefer_native", None), ("services", None),
-                                        ("services", {TAVILY: {"enabled": None}})])
+                                        ("services", {TAVILY: {"enabled": None}}),
+                                        ("executors", []), ("executors", {MODEL: {"enabled": None}})])
 def test_damaged_optional_settings_disable_only_web_search(field, value):
     config = _config({"executor_order": [TAVILY], field: value})
     assert not config.hosted_tools["web_search"].enabled
@@ -486,11 +530,13 @@ def test_rc12_loader_preserves_tool_switch_and_orders_but_drops_service_override
     released = runpy.run_path(str(Path(__file__).parent / "fixtures/model_hub/released_rc12_hosted_tools.py"))
     section = _config({"enabled": False, "prefer_native": False, "executor_order": [MODEL, DEEPSEEK],
                        "executor_order_kinds": {MODEL: "model", DEEPSEEK: "service"},
-                       "services": {DEEPSEEK: {"enabled": False}}, "service_order": [TAVILY]}).to_payload()
+                       "services": {DEEPSEEK: {"enabled": False}}, "service_order": [TAVILY],
+                       "executors": {MODEL: {"enabled": False}}}).to_payload()
     loaded = released["_hosted_tools_from_payload"](section)
     written = loaded["web_search"].to_payload()
     assert written == {"enabled": False, "executor_order": [MODEL, DEEPSEEK], "service_order": [TAVILY]}
-    assert all(field in caplog.text for field in ("prefer_native", "services", "executor_order_kinds"))
+    # An older release ignores a model executor's opt-out too (contract v23's downgrade boundary).
+    assert all(field in caplog.text for field in ("prefer_native", "services", "executor_order_kinds", "executors"))
     assert "service_order" not in caplog.text
     section["hosted_tools"]["web_search"] = written
     upgraded = ModelHubConfig.from_payload(section)

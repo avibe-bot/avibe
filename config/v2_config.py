@@ -3332,6 +3332,42 @@ def _search_service_settings_from_payload(
 
 
 @dataclass(frozen=True)
+class ModelHubExecutorSettings:
+    """A model executor Source's saved web-search choice (``vibey-hosted-tools.md`` §6): on unless turned off."""
+
+    enabled: bool = True
+
+    @classmethod
+    def from_payload(cls, payload: object) -> "ModelHubExecutorSettings":
+        if not isinstance(payload, dict):
+            raise ValueError("Config 'model_hub.hosted_tools.web_search.executors' entries must be objects")
+        if set(payload) - {"enabled"}:
+            logger.warning("Config 'model_hub.hosted_tools.web_search.executors' ignores unknown fields")
+        enabled = payload.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise ValueError("Config search executor enabled must be a boolean")
+        return cls(enabled=enabled)
+
+    def to_payload(self) -> dict[str, Any]:
+        return {"enabled": self.enabled}
+
+
+def _executor_settings_from_payload(
+    payload: object, sources: Optional[list[ModelHubSourceConfig]]
+) -> dict[str, ModelHubExecutorSettings]:
+    if not isinstance(payload, dict) or any(not is_model_hub_source_id(key) for key in payload):
+        raise ValueError("Config 'model_hub.hosted_tools.web_search.executors' must map Source ids to settings")
+    live = {source.id for source in sources} if sources is not None else None
+    # Removed Sources have no settings; an extant Source keeps its opt-out while it lists no executor model, so the
+    # choice holds if it lists one again. Only an opt-out is a choice: on is the default.
+    return {
+        source_id: saved
+        for source_id, raw in payload.items()
+        if (live is None or source_id in live) and not (saved := ModelHubExecutorSettings.from_payload(raw)).enabled
+    }
+
+
+@dataclass(frozen=True)
 class ModelHubFetchServiceSettings:
     """Fetch-only partial consent; search settings never authorize a page read."""
 
@@ -3400,6 +3436,8 @@ class ModelHubHostedToolConfig:
     prefer_native: bool = True
     services: Mapping[str, ModelHubSearchServiceSettings | ModelHubFetchServiceSettings] = field(default_factory=dict)
     executor_order_kinds: Optional[Mapping[str, str]] = None
+    # ``web_search`` only: model executor Sources the user turned off (§6), by Source id.
+    executors: Mapping[str, ModelHubExecutorSettings] = field(default_factory=dict)
 
     @classmethod
     def from_payload(
@@ -3413,7 +3451,7 @@ class ModelHubHostedToolConfig:
         if tool == "web_fetch":
             known |= {"executor_order", "services", "executor_order_kinds"}
         elif tool == "web_search":
-            known |= {"executor_order", "service_order", "prefer_native", "services", "executor_order_kinds"}
+            known |= {"executor_order", "service_order", "prefer_native", "services", "executor_order_kinds", "executors"}
         elif tool in MODEL_HUB_SEARCH_TOOLS:
             known.add("executor_order")
         else:
@@ -3448,6 +3486,10 @@ class ModelHubHostedToolConfig:
                 _executor_order_kinds_from_payload(payload["executor_order_kinds"], order, sources, tool=tool)
                 if tool in {"web_search", "web_fetch"} and "executor_order_kinds" in payload else None
             ),
+            executors=(
+                _executor_settings_from_payload(payload["executors"], sources)
+                if tool == "web_search" and "executors" in payload else {}
+            ),
             default_image=(
                 ModelHubImageModelChoice.from_payload(payload["default_model"], tool=tool) if has_default else None
             ),
@@ -3470,6 +3512,8 @@ class ModelHubHostedToolConfig:
                 source_id: kind for source_id, kind in self.executor_order_kinds.items()
                 if source_id in (self.executor_order or ())
             }
+        if self.executors:
+            out["executors"] = {source_id: saved.to_payload() for source_id, saved in self.executors.items()}
         return out
 
 

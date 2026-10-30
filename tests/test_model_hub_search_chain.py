@@ -1273,7 +1273,7 @@ def test_retry_http_client_rpc_clears_only_the_service_fence_with_plain_success(
     response = client.post(f"/api/models/hosted-tools/web_search/services/{EXA}/retry", json={},
                            headers=csrf_headers(client, "http://127.0.0.1:15131"))
     assert response.status_code == 200
-    assert response.get_json() == {"ok": True, "contract_version": 22}
+    assert response.get_json() == {"ok": True, "contract_version": 23}
     assert calls == [("clear_service_cooldown", {"source_id": EXA, "service_id": None})]
     assert not service._service_cooldowns.current(source, "exa/search", generation)
     assert service.store.load().sources[0].state == source.state
@@ -1296,6 +1296,24 @@ async def test_blocked_model_executor_keeps_its_own_remedy_beside_a_disabled_ser
     ]
     assert "execution" not in result
     _hosted_result("web_search", result)
+
+
+@pytest.mark.asyncio
+async def test_a_model_executor_turned_off_is_never_tried_even_when_saved_first(tmp_path, monkeypatch):
+    """vibey-hosted-tools.md §6: the turn freezes a turned-off model executor at the end, off, and the chain skips it."""
+
+    service = owner(tmp_path, ("exa",), model=True,
+                    web={"executor_order": [MODEL, EXA], "executors": {MODEL: {"enabled": False}}})
+    turn = service.freeze_turn_hosted_tools(service.store.load())
+    assert [(slot.source_id, slot.enabled) for slot in turn.executors["web_search"]] == [
+        (EXA, True), (KEYLESS_EXA_SOURCE_ID, False), (MODEL, False),
+    ]
+    answers(monkeypatch, service, wire(status=500))
+    result = await run(service, turn=turn)
+    assert result["record"]["attempts"][-1] == {
+        "source_id": MODEL, "label": next(s for s in service.store.load().sources if s.id == MODEL).display_name,
+        "kind": "model", "outcome": "skipped", "skipped": "disabled",
+    }
 
 
 @pytest.mark.asyncio

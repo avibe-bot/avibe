@@ -1,6 +1,17 @@
 # Model Hub contracts
 
-Status: **contract_version 22**, 2026-10-27: Gemini API keys on the native `google` protocol
+Status: **contract_version 23**, 2026-10-30: a switch for each web-search model executor
+(`../vibey-hosted-tools.md` §6). `gh-v3.2.4rc1` and `rc2` carry v22, so this opens v23.
+- `web_search` gains saved `executors`: `{<source_id>: {"enabled": false}}` for each model executor Source the user
+  turned off. On is the default and is never saved. A turned-off executor ends the effective order with the
+  turned-off services and is never tried; its frozen turn slot is `enabled: false`, skipped as `disabled`.
+- The Tools read's web-search model candidates carry `settings: {enabled}` (`hosted-tools-status.schema.json`);
+  X search candidates carry none. `PUT /api/models/hosted-tools/web_search` takes an `executors` patch:
+  `{"enabled": bool}`, or null for the default, only for a Source that lists a web-search executor model.
+- **Downgrade:** a release before v23 ignores `executors` with a warning, so a turned-off executor runs again
+  there until the user upgrades.
+
+It builds on v22 (2026-10-27): Gemini API keys on the native `google` protocol
 (`../vibey-gemini-native.md` §3). `gh-v3.2.3rc8` through `rc12` carry v21, so this opens v22.
 - The `gemini` catalog row pins `google` on `https://generativelanguage.googleapis.com`; a `google` Source's vendor is
   `custom` or `gemini` (`source.schema.json`, `source-create.schema.json`, `google-protocol.md`).
@@ -407,7 +418,7 @@ comparison. A gate may not report success by comparing stale input with itself.
 
 ## Version closure
 
-`contract_version` 22 must coexist in all registered version locations on the same tested head:
+`contract_version` 23 must coexist in all registered version locations on the same tested head:
 
 - `mirror-registry.json`
 - `agent-chain.schema.json`

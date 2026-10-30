@@ -9,7 +9,7 @@ import { ToggleSwitch } from '../SettingsPrimitives';
 import { Field } from './dialogFields';
 import { atLeast, cooldownTime, formatCost, formatCount, formatMonthDay, formatSmallUsd, formatUsd } from './format';
 import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
-import { KEYLESS_EXA_SOURCE_ID, serviceSettings } from './searchServices';
+import { KEYLESS_EXA_SOURCE_ID, candidateEnabled, serviceSettings } from './searchServices';
 import { sourceStatePresentation } from './sourceStatePresentation';
 import { usageHasNoPrice, type ServiceMonth } from './usageProjection';
 import { VendorGlyph } from './vendorGlyph';
@@ -47,7 +47,7 @@ export const SearchCandidateStatus: React.FC<{
   let tone = 'model-hub-status-mint';
   const until = candidate.kind === 'service' ? candidate.cooldown_until : null;
   const time = until ? cooldownTime(until, i18n.language) : null;
-  if (candidate.kind === 'service' && !candidate.settings.enabled) {
+  if (!candidateEnabled(candidate)) {
     text = t('settings.models.searchServices.unused');
     tone = 'model-hub-accent-pill--neutral';
   } else if (keyless) {

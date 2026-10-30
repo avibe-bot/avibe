@@ -16,7 +16,7 @@ import { ToggleSwitch } from '../SettingsPrimitives';
 import { cooldownTime, formatMonthDay, formatNameList, formatSmallUsd } from './format';
 import { executorOrderAfterMove, imageModelCopyKey, pairEvidence, refusalSummary, type PairEvidence, type RefusalSummary } from './hostedTools';
 import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
-import { KEYLESS_EXA_SOURCE_ID, searchServicesActive, serviceVendorForSource, webSearchTool } from './searchServices';
+import { KEYLESS_EXA_SOURCE_ID, candidateEnabled, searchServicesActive, serviceVendorForSource, webSearchTool } from './searchServices';
 import { SearchCandidateStatus, SearchServicePrice, SearchVendorGlyph } from './SearchServiceParts';
 import { WebFetchOrder } from './WebFetchOrder';
 import { fetchVendorForSource, webFetchTool } from './webFetch';
@@ -174,7 +174,7 @@ const ExecutorOrder: React.FC<{ tool: HostedSearchToolStatus; lookup: SourceLook
   const toolInline = t(`settings.models.tools.tool.${tool.name}.inline`) as string;
   const activeWeb = tool.name === 'web_search' && searchServicesActive(tool) ? tool : null;
   const candidates = tool.executor_candidates;
-  const movable = candidates.filter((candidate) => candidate.kind !== 'service' || candidate.settings.enabled);
+  const movable = candidates.filter(candidateEnabled);
   const custom = tool.executor_order !== null;
   // A move is announced, and focus follows the moved row, only once the server's
   // order shows it. One that did not land (refused, or lost and reconciled to
@@ -215,7 +215,7 @@ const ExecutorOrder: React.FC<{ tool: HostedSearchToolStatus; lookup: SourceLook
     setRequested({
       sourceId: shown[index],
       direction,
-      expected: [...executorOrderAfterMove(null, shown, index, direction), ...candidates.filter((candidate) => candidate.kind === 'service' && !candidate.settings.enabled).map((candidate) => candidate.source_id)].join('\n'),
+      expected: [...executorOrderAfterMove(null, shown, index, direction), ...candidates.filter((candidate) => !candidateEnabled(candidate)).map((candidate) => candidate.source_id)].join('\n'),
       position: index + direction + 1,
       count: shown.length,
       sent: false,
@@ -252,9 +252,11 @@ const ExecutorOrder: React.FC<{ tool: HostedSearchToolStatus; lookup: SourceLook
                 const cooldown = candidate.kind === 'service' && candidate.cooldown_until !== null
                   ? cooldownTime(candidate.cooldown_until, i18n.language)
                   : null;
-                const disabledService = candidate.kind === 'service' && !candidate.settings.enabled;
+                const switchedOff = !candidateEnabled(candidate);
+                // A web-search model executor carries its switch on a server that has one (contract v23).
+                const modelSwitch = candidate.kind === 'model' ? candidate.settings : undefined;
                 const arrow = (direction: -1 | 1) => {
-                  const blocked = disabledService || (direction === -1 ? index === 0 : index === movable.length - 1);
+                  const blocked = switchedOff || (direction === -1 ? index === 0 : index === movable.length - 1);
                   return (
                     <Button
                       ref={(node) => {
@@ -279,7 +281,7 @@ const ExecutorOrder: React.FC<{ tool: HostedSearchToolStatus; lookup: SourceLook
                 };
                 return (
                   <li key={candidate.source_id} className="model-hub-tool-executor-row grid items-center rounded-lg border border-border bg-background" data-executor={candidate.source_id}>
-                    <span className={cn('model-hub-order-ordinal', index === 0 && 'is-first')}>{disabledService ? '—' : index + 1}</span>
+                    <span className={cn('model-hub-order-ordinal', index === 0 && 'is-first')}>{switchedOff ? '—' : index + 1}</span>
                     {activeWeb ? <div className="flex min-w-0 items-center gap-3">
                       {source ? <SearchVendorGlyph vendor={source.vendor} /> : candidate.kind === 'service' ? <SearchVendorGlyph vendor={vendor?.id ?? candidate.model_id} /> : <SourceGlyph source={source} />}
                       <div className="flex min-w-0 flex-col gap-1">
@@ -287,13 +289,15 @@ const ExecutorOrder: React.FC<{ tool: HostedSearchToolStatus; lookup: SourceLook
                           {candidate.kind === 'service' ? <button type="button" data-search-source={candidate.source_id} className="truncate text-left font-semibold text-foreground hover:underline" onClick={(event) => onOpenService?.(candidate.source_id, event.currentTarget)}>{name}</button> : <span className="truncate font-semibold text-foreground">{name}</span>}
                           <span className={cn('model-hub-pill border', candidate.kind === 'service' ? ACCENT_PILL.cyan : ACCENT_PILL.muted)}>{t(candidate.kind === 'service' ? 'settings.models.searchServices.kind' : 'settings.models.searchServices.modelKind')}</span>
                           <SearchCandidateStatus candidate={candidate} tool={activeWeb} source={source} />
-                          {candidate.kind === 'service' && <span className="inline-flex items-center gap-2">
+                          {(candidate.kind === 'service' || modelSwitch) && <span className="inline-flex items-center gap-2">
                             <span className="model-hub-tool-note">{t('settings.models.searchServices.use')}</span>
                             <ToggleSwitch
-                              enabled={candidate.settings.enabled}
+                              enabled={!switchedOff}
                               disabled={pending}
                               label={t('settings.models.searchServices.use') as string}
-                              onClick={() => onSave('web_search', { services: { [candidate.source_id]: { enabled: !candidate.settings.enabled } } })}
+                              onClick={() => onSave('web_search', candidate.kind === 'service'
+                                ? { services: { [candidate.source_id]: { enabled: switchedOff } } }
+                                : { executors: { [candidate.source_id]: { enabled: switchedOff } } })}
                             />
                           </span>}
                         </div>

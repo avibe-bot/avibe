@@ -10,8 +10,8 @@
 // and the PR records the server implementation and feature-flag activation
 // edge. The client never synthesizes a fallback payload shape.
 
-export const CONTRACT_VERSION = 22 as const;
-export const PERSISTED_TURN_CONTRACT_VERSIONS = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22] as const;
+export const CONTRACT_VERSION = 23 as const;
+export const PERSISTED_TURN_CONTRACT_VERSIONS = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23] as const;
 export const AGENT_CHAIN_CONTRACT_VERSION = CONTRACT_VERSION;
 export const PROBE_RESULT_CONTRACT_VERSION = CONTRACT_VERSION;
 
@@ -1174,6 +1174,8 @@ export type HostedModelExecutorCandidate = {
   relay: boolean;
   /** Null when no list price is known, never zero. */
   price: HostedToolListPrice | null;
+  /** Web search only: the executor's switch. Off ends the order and is never tried. Absent (X search) is on. */
+  settings?: { enabled: boolean };
 };
 
 /** A search service's catalog list price, in searches rather than model calls. */
@@ -1285,6 +1287,8 @@ export type HostedToolPut = {
   prefer_native?: boolean;
   /** web_search only; null removes a Source override or one of its saved fields. */
   services?: Record<string, { [K in keyof HostedSearchServiceSettings]?: HostedSearchServiceSettings[K] | null } | null>;
+  /** web_search only: a model executor's switch; null (or on) restores the default, on. */
+  executors?: Record<string, { enabled: boolean } | null>;
   executor_order?: string[] | null;
   default_model?: HostedModelRef | null;
 };
