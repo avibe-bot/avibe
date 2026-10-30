@@ -11,7 +11,7 @@ import stat
 import unicodedata
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence, TypeVar
 
 import yaml
 
@@ -37,6 +37,7 @@ SKILL_XDG_CONFIG_HOME_ENV = "AVIBE_SKILL_XDG_CONFIG_HOME"
 
 CATALOG_PAGE_SIZE = 25
 CATALOG_PAGE_MAX_BYTES = 16 * 1024
+T = TypeVar("T")
 CATALOG_DESCRIPTION_MAX_CHARS = 1024
 FRONTMATTER_MAX_BYTES = 64 * 1024
 SKILL_BODY_MAX_BYTES = 256 * 1024
@@ -1008,42 +1009,37 @@ def resolve_skills(
     return sorted(winners.values(), key=lambda skill: skill.name)
 
 
-def _catalog_pages(skills: Sequence[ManagedSkill]) -> list[list[ManagedSkill]]:
-    pages: list[list[ManagedSkill]] = []
-    current: list[ManagedSkill] = []
+def catalog_page_of(items: Sequence[T], row: Callable[[T], str], page: int) -> tuple[Sequence[T], int | None]:
+    """One prompt catalog page: at most ``CATALOG_PAGE_SIZE`` rows and ``CATALOG_PAGE_MAX_BYTES``, never empty."""
+
+    if isinstance(page, bool) or page < 1:
+        raise ValueError("page must be a positive integer")
+    pages: list[list[T]] = []
+    current: list[T] = []
     current_bytes = 0
-    for skill in sorted(
-        skills,
-        key=lambda item: (
-            item.name.casefold(),
-            item.name,
-            item.description,
-            str(item.directory),
-        ),
-    ):
-        if skill.disable_model_invocation:
-            continue
-        row = f"- {skill.name}: {skill.description}"
-        row_bytes = len(row.encode("utf-8")) + (1 if current else 0)
+    for item in items:
+        line = row(item)
+        row_bytes = len(line.encode("utf-8")) + (1 if current else 0)
         if current and (len(current) >= CATALOG_PAGE_SIZE or current_bytes + row_bytes > CATALOG_PAGE_MAX_BYTES):
             pages.append(current)
             current = []
             current_bytes = 0
-            row_bytes = len(row.encode("utf-8"))
-        current.append(skill)
+            row_bytes = len(line.encode("utf-8"))
+        current.append(item)
         current_bytes += row_bytes
     if current:
         pages.append(current)
-    return pages
-
-
-def catalog_page(skills: Sequence[ManagedSkill], page: int) -> tuple[Sequence[ManagedSkill], int | None]:
-    if isinstance(page, bool) or page < 1:
-        raise ValueError("page must be a positive integer")
-    pages = _catalog_pages(skills)
     if page > len(pages):
         return (), None
     return pages[page - 1], page + 1 if page < len(pages) else None
+
+
+def catalog_page(skills: Sequence[ManagedSkill], page: int) -> tuple[Sequence[ManagedSkill], int | None]:
+    listed = sorted(
+        (skill for skill in skills if not skill.disable_model_invocation),
+        key=lambda item: (item.name.casefold(), item.name, item.description, str(item.directory)),
+    )
+    return catalog_page_of(listed, lambda skill: f"- {skill.name}: {skill.description}", page)
 
 
 def _skill_list_rows(entries: Sequence[ManagedSkill]) -> list[str]:

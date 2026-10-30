@@ -168,9 +168,11 @@ def classify_error(
             status=status,
             partial=partial,
         )
+    # Anchored overflow exclusions belong to the extracted message, not its JSON envelope. Keep the body afterward
+    # for other evidence, such as ThrottlingException type markers, without accepting incidental later prefixes.
     kind = _classify_kind(
         status=status,
-        message=f"{body}\n{message}",
+        message=f"{message.strip()}\n{body}",
         exc=exc,
         code=effective_code,
     )

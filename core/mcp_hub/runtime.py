@@ -24,7 +24,7 @@ import anyio
 
 from core.mcp_hub import commands as mcp_commands
 from core.mcp_hub import native, repository
-from core.mcp_hub.definition import HTTP, STDIO, definition_from_provider
+from core.mcp_hub.definition import HTTP, STDIO, definition_from_provider, normalize_description
 from core.mcp_hub.errors import McpHubError
 
 logger = logging.getLogger(__name__)
@@ -105,6 +105,18 @@ async def _enter_client(definition: dict[str, Any], stack: contextlib.AsyncExitS
         if not _closed_during_handshake(exc):
             raise
     return await stack.enter_async_context(_client_for(definition, stack, mode="legacy"))
+
+
+def _first_sentence(text: Optional[str]) -> Optional[str]:
+    """The server instructions up to the first sentence end or line break."""
+
+    if not isinstance(text, str):
+        return None
+    text = text.strip()
+    ends = [index + 1 for index in (text.find(". "), text.find(".\n"), text.find("。")) if index >= 0]
+    if "\n" in text:
+        ends.append(text.index("\n"))
+    return text[: min(ends)] if ends else text
 
 
 async def _list_all_tools(client) -> list:
@@ -397,7 +409,7 @@ class McpRuntime:
     async def _add(self, payload: dict[str, Any]) -> bytes:
         replace = payload.get("replace") is True
         definitions = [
-            definition_from_provider(item.get("name"), item.get("server"), description=item.get("description"))
+            definition_from_provider(item.get("name"), item.get("server"))
             for item in payload.get("servers") or []
         ]
         if not definitions:
@@ -462,7 +474,6 @@ class McpRuntime:
             transport["cwd"] = repository.default_cwd()
         return {
             "name": definition.get("name"),
-            "description": definition.get("description") or "",
             "transport": transport,
         }
 
@@ -528,7 +539,7 @@ class McpRuntime:
             if remaining <= 0:
                 raise TimeoutError
             with anyio.fail_after(remaining):
-                tools, server_info = await self._discover(snapshot)
+                tools, server_info, instructions = await self._discover(snapshot)
         except TimeoutError:
             if unlist_on_failure:
                 await asyncio.to_thread(repository.unlist, name)
@@ -544,7 +555,7 @@ class McpRuntime:
         finally:
             if acquired:
                 self.release_stdio_slot()
-        revision = await asyncio.to_thread(self._publish, name, snapshot, definition, tools, server_info)
+        revision = await asyncio.to_thread(self._publish, name, snapshot, definition, tools, server_info, instructions)
         await self._retire_package(name, keep_revision=revision)
         return _dumps({"ok": True, "name": name, "revision": revision, "toolCount": len(tools)})
 
@@ -598,13 +609,13 @@ class McpRuntime:
         return list(await asyncio.gather(*(one(name) for name in sorted(names))))
 
     @staticmethod
-    async def _discover(snapshot: dict[str, Any]) -> tuple[list, Any]:
+    async def _discover(snapshot: dict[str, Any]) -> tuple[list, Any, Optional[str]]:
         async with contextlib.AsyncExitStack() as stack:
             client = await _enter_client(snapshot, stack)
-            return await _list_all_tools(client), client.server_info
+            return await _list_all_tools(client), client.server_info, client.instructions
 
     @staticmethod
-    def _publish(name, snapshot, definition, tools, server_info) -> str:
+    def _publish(name, snapshot, definition, tools, server_info, instructions=None) -> str:
         descriptors, diagnostics, seen = [], [], set()
         for tool in tools:
             descriptor = tool.model_dump(mode="json", by_alias=True, exclude_none=True)
@@ -619,7 +630,9 @@ class McpRuntime:
             descriptors.append(descriptor)
         descriptors.sort(key=lambda item: item["name"])
         manifest: dict[str, Any] = {
-            "description": definition.get("description") or "",
+            "description": normalize_description(
+                getattr(server_info, "description", None) or _first_sentence(instructions)
+            ),
             "generatedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
         version = getattr(server_info, "version", None)

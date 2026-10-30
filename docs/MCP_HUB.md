@@ -61,10 +61,11 @@ Env and header values are stored as given. URLs with `user:pass@` are rejected; 
 
 ## Call tools
 
-Agents see registered servers in their system prompt and discover tools on demand:
+Agents see registered servers in their system prompt and discover tools on demand. Each server's line shows the description the server itself reports, or else the first sentence of its instructions, captured when Avibe refreshes it; a server with neither is listed by name only. The list is paged like Skills (25 servers per page); the prompt shows page 1 and `vibe mcp --list --page N` shows the rest:
 
 ```bash
 vibe mcp --list
+vibe mcp --list --page 2
 vibe mcp docs --list
 vibe mcp docs search --help
 vibe mcp docs search --query 'async Python' --limit 5

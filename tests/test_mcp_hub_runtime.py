@@ -15,12 +15,16 @@ import pytest
 
 from core.mcp_hub import repository
 from core.mcp_hub import runtime as mcp_runtime
-from core.mcp_hub.prompt import build_mcp_prompt_block
+from core.mcp_hub.prompt import build_mcp_prompt_blocks
 from core.mcp_hub.runtime import McpRuntime
 from tests.ui_server_test_helpers import save_config
 
 
 FIXTURE = str(Path(__file__).parent / "fixtures" / "mcp_echo_server.py")
+
+
+def _prompt() -> str:
+    return "".join(block.text for block in build_mcp_prompt_blocks())
 
 
 def _run(runtime: McpRuntime, operation: str, payload: dict) -> dict:
@@ -30,7 +34,7 @@ def _run(runtime: McpRuntime, operation: str, payload: dict) -> dict:
 
 
 def _server(command: str = sys.executable) -> dict:
-    return {"name": "echo", "server": {"command": command, "args": [FIXTURE]}, "description": "Echo tools"}
+    return {"name": "echo", "server": {"command": command, "args": [FIXTURE]}}
 
 
 @pytest.fixture
@@ -79,7 +83,7 @@ def test_batch_add_registers_neighbors_and_rolls_back_the_failure(runtime):
 
     good = _server()
     bad = {"name": "github", "server": {"command": "/nonexistent/mcp-github"}}
-    other = {"name": "zeta", "server": {"command": sys.executable, "args": [FIXTURE]}, "description": "Z"}
+    other = {"name": "zeta", "server": {"command": sys.executable, "args": [FIXTURE]}}
     result = _run(runtime, "add", {"servers": [good, bad, other]})
     names = {item["name"] for item in result["added"]}
     failed = {item["name"]: item["error"] for item in result["failed"]}
@@ -141,7 +145,6 @@ def test_failed_readd_of_hidden_native_stays_hidden(runtime):
 def test_failed_explicit_refresh_unlists_the_server(generated):
     repository.write_avibe_definition({
         "name": "echo",
-        "description": "Echo tools",
         "transport": {"type": "stdio", "command": "/nonexistent/mcp-echo", "args": [FIXTURE]},
     })
     result = _run(generated, "refresh", {"name": "echo", "waitStdio": True})
@@ -152,7 +155,6 @@ def test_failed_explicit_refresh_unlists_the_server(generated):
 def test_failed_discover_unlists_previous_revision(generated):
     repository.write_avibe_definition({
         "name": "echo",
-        "description": "Echo tools",
         "transport": {"type": "stdio", "command": "/nonexistent/mcp-echo", "args": [FIXTURE]},
     })
     result = _run(generated, "discover", {})
@@ -196,7 +198,6 @@ def test_native_definition_change_is_not_unchanged_until_published(runtime):
     pasted = {
         "name": "echo",
         "server": {"command": sys.executable, "args": [FIXTURE, "--other"]},
-        "description": "Echo tools",
     }
     blocked = _run(runtime, "add", {"servers": [pasted]})
     assert blocked["ok"] is False
@@ -229,7 +230,6 @@ def test_explicit_cwd_difference_is_exists_not_unchanged(generated):
     same_command = {
         "name": "echo",
         "server": {"command": sys.executable, "args": [FIXTURE], "cwd": "/tmp/mcp-other-cwd"},
-        "description": "Echo tools",
     }
     result = _run(generated, "add", {"servers": [same_command]})
     assert result["ok"] is False
@@ -317,7 +317,7 @@ def test_future_format_revision_is_not_listed(generated):
     manifest = repository.package_dir("echo") / "revisions" / published["revision"] / "manifest.json"
     manifest.write_text(json.dumps({"formatVersion": 99}))
     assert "echo" not in {item["name"] for item in repository.list_packages()}
-    assert build_mcp_prompt_block() is None
+    assert _prompt() == ""
 
 
 def test_cli_list_and_help_work_with_the_owner_down(generated, capsys):
@@ -325,7 +325,7 @@ def test_cli_list_and_help_work_with_the_owner_down(generated, capsys):
 
     generated.stop()
     assert mcp_cli.main(["--list"]) == 0
-    assert "echo  Echo tools" in capsys.readouterr().out
+    assert "- echo: Echo tools" in capsys.readouterr().out
     assert mcp_cli.main(["echo", "--list"]) == 0
     assert "echo  Echo text back" in capsys.readouterr().out
     assert mcp_cli.main(["echo", "echo", "--help"]) == 0
@@ -388,7 +388,7 @@ def test_mcp_add_does_not_treat_json_stdin_after_separator_as_avibe_option(monke
 def test_prompt_index_lists_enabled_servers_and_its_examples_parse(generated, capsys, monkeypatch):
     from vibe import mcp_cli
 
-    text = build_mcp_prompt_block().text
+    text = _prompt()
     assert "- echo: Echo tools" in text
     examples = re.findall(r"`(vibe mcp[^`]*)`", text)
     assert examples
@@ -400,6 +400,55 @@ def test_prompt_index_lists_enabled_servers_and_its_examples_parse(generated, ca
         assert mcp_cli.main(argv) == 0, example
     assert sent == [("echo", "echo")]
 
+
+
+def _publish_docs(name="docs", instructions=None, **server_info):
+    from types import SimpleNamespace
+
+    definition = {"name": name, "transport": {"type": "streamable_http", "url": "https://example.invalid/mcp"}}
+    repository.write_avibe_definition(definition)
+    McpRuntime._publish(name, definition, definition, [], SimpleNamespace(version=None, **server_info), instructions)
+
+
+@pytest.mark.parametrize(
+    ("server_info", "instructions", "line"),
+    [
+        ({"description": "Search\n  the\tdocs"}, "Ignored. Text", "- docs: Search the docs"),
+        ({"description": "x" * 200}, None, "- docs: " + "x" * 160),
+        ({}, "Look up docs. Then cite them.", "- docs: Look up docs."),
+        ({}, "Look up docs\nand cite them.", "- docs: Look up docs"),
+        ({}, "查询文档。然后引用。", "- docs: 查询文档。"),
+        ({"title": "Docs"}, None, "- docs"),
+    ],
+)
+def test_prompt_line_uses_server_description_then_first_instruction_sentence(runtime, server_info, instructions, line):
+    _publish_docs(instructions=instructions, **server_info)
+    assert line in _prompt().splitlines()
+
+
+def test_prompt_and_list_page_like_the_skills_catalog(runtime, capsys, monkeypatch):
+    from core.managed_skills import CATALOG_PAGE_SIZE
+    from vibe import mcp_cli
+
+    for index in range(CATALOG_PAGE_SIZE + 1):
+        _publish_docs(f"s{index:02d}")
+    text = _prompt()
+    lines = text.splitlines()
+    assert sum(line.startswith("- s") for line in lines) == CATALOG_PAGE_SIZE
+    assert "Use `vibe mcp --list --page 2` only when more discovery is useful" in text
+    assert "More servers are available. Run `vibe mcp --list --page 2` to view more." in lines
+    monkeypatch.setattr(mcp_cli, "_admit", lambda _floor: None)
+    for example in sorted(set(re.findall(r"`(vibe mcp --list[^`]*)`", text))):
+        assert mcp_cli.main(shlex.split(example)[2:]) == 0, example
+    capsys.readouterr()
+    assert mcp_cli.main(["--list", "--page", "2", "--format", "json"]) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert [item["name"] for item in second["servers"]] == [f"s{CATALOG_PAGE_SIZE:02d}"]
+    assert second["nextPage"] is None
+    assert mcp_cli.main(["--list"]) == 0
+    first = capsys.readouterr().out
+    assert "- s00" in first and "Run `vibe mcp --list --page 2` to view more." in first
+    assert mcp_cli.main(["--list", "--page", "0"]) == 2
 
 
 @pytest.mark.parametrize(("argv", "allowed"), [(["--list"], True), (["echo", "--refresh"], False)])

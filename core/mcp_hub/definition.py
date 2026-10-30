@@ -21,7 +21,6 @@ HTTP = "streamable_http"
 
 _STDIO_TYPES = {None, "stdio"}
 _HTTP_TYPES = {"http", "streamable-http", "streamable_http"}
-_PROVIDER_FIELDS = {"type", "command", "args", "env", "cwd", "url", "headers", "enabled", "description"}
 _PLACEHOLDER = re.compile(r"\$\{[^}]*\}")
 _ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
@@ -79,7 +78,7 @@ def _string_map(value: object, field: str, key_pattern: re.Pattern[str]) -> dict
 
 
 def normalize_description(value: object) -> str:
-    """One line, at most 160 characters; used for the prompt index and lists."""
+    """One line, at most 160 characters; the server-reported prompt description."""
 
     if value is None:
         return ""
@@ -88,7 +87,7 @@ def normalize_description(value: object) -> str:
     return " ".join(value.split())[:DESCRIPTION_MAX]
 
 
-def definition_from_provider(name: str, server: object, *, description: object = None) -> dict[str, Any]:
+def definition_from_provider(name: str, server: object) -> dict[str, Any]:
     """Normalize one provider ``mcpServers`` entry into a persisted definition."""
 
     validate_name(name)
@@ -107,12 +106,9 @@ def definition_from_provider(name: str, server: object, *, description: object =
     has_url = "url" in server
     if has_command and has_url:
         raise _invalid("url", "Use either command (stdio) or url (Streamable HTTP), not both.")
-    if description is None:
-        description = server.get("description")
     definition: dict[str, Any] = {
         "schemaVersion": SCHEMA_VERSION,
         "name": name,
-        "description": normalize_description(description),
     }
     if has_url or kind in _HTTP_TYPES:
         if kind not in _HTTP_TYPES | {None}:
@@ -221,7 +217,6 @@ def parse_add_argv(argv: list[str]) -> tuple[list[dict[str, Any]], bool]:
     transport = "stdio"
     env: dict[str, str] = {}
     headers: dict[str, str] = {}
-    description: Optional[str] = None
     cwd: Optional[str] = None
     replace = False
     json_text: Optional[str] = None
@@ -261,8 +256,6 @@ def parse_add_argv(argv: list[str]) -> tuple[list[dict[str, Any]], bool]:
             if not sep:
                 raise McpHubError("usage", f"--header expects 'Name: value', got {item!r}.", usage=True)
             headers[key.strip()] = val.strip()
-        elif option == "--description":
-            description = inline if eq else value_of(option)
         elif option == "--cwd":
             cwd = inline if eq else value_of(option)
         elif option == "--replace":
@@ -276,7 +269,7 @@ def parse_add_argv(argv: list[str]) -> tuple[list[dict[str, Any]], bool]:
         index += 1
 
     if json_text is not None:
-        if positionals or command is not None or env or headers or description or cwd:
+        if positionals or command is not None or env or headers or cwd:
             raise McpHubError("usage", "--json-stdin takes no other server arguments.", usage=True)
         return parse_provider_json(json_text), replace
     if not positionals:
@@ -309,7 +302,7 @@ def parse_add_argv(argv: list[str]) -> tuple[list[dict[str, Any]], bool]:
             server["env"] = env
         if cwd is not None:
             server["cwd"] = cwd
-    return [definition_from_provider(name, server, description=description)], replace
+    return [definition_from_provider(name, server)], replace
 
 
 def provider_entry(definition: dict[str, Any]) -> dict[str, Any]:

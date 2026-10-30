@@ -1796,8 +1796,5 @@
         "unsupported": "参考图片 {path} 是 {mime}，无法发送。"
       }
     }
-  },
-  "mcp": {
-    "genericDescription": "来自 MCP 服务器的工具。"
   }
 }

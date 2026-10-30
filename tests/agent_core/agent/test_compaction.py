@@ -25,6 +25,7 @@ from core.agent_core.agent.events import (
     AssistantTextDelta,
     CompactionFailed,
     CompactionFinished,
+    CompactionStarted,
     ContextExhausted,
     MessageCommitted,
     RunEnded,
@@ -949,6 +950,40 @@ async def test_two_ineffective_checkpoints_stop_compaction_for_the_run():
     # The request that no longer fits is dropped instead, with no model call, and the run completes.
     assert [(event.reason, event.mode) for event in finished[2:]] == [("overflow", "dropped")]
     assert events[-1].reason == "completed"
+
+
+@pytest.mark.parametrize(
+    ("prefix", "ending", "attempts"),
+    [("Throttling error", "error", 3), ("Service unavailable", "completed", 4)],
+)
+async def test_json_non_overflow_errors_use_ordinary_handling_without_context_relief(prefix, ending, attempts):
+    # Enough context for the overflow ladder to checkpoint, but below the proactive threshold. Feed the real
+    # classifier's outcome into the loop, not a hand-written ProviderError that assumes classification is correct.
+    refusal = classify_error(
+        status=400,
+        body=json.dumps(anthropic_error(f"{prefix}: Too many tokens, please wait before trying again.")),
+        protocol="anthropic",
+    )
+    model = Model(
+        [call("read", "r0", path="f"), call("read", "r1", path="f"), [refusal], [Done(assistant("done"))]],
+        [[Done(assistant(CHECKPOINT))]],
+    )
+    agent = make_agent(model, tools=[reader(tokens(4_000))], retry=RetryPolicy(initial_delay_s=0))
+
+    events = await run(agent)
+
+    assert not model.checkpoint_requests
+    assert not any(
+        isinstance(event, (CompactionStarted, CompactionFinished, CompactionFailed, ContextExhausted)) for event in events
+    )
+    rows = await agent.store.load("session")
+    assert not any(row.kind in {"compaction", "context_edit"} for row in rows)
+    assert len(model.conversation_requests) == attempts
+    assert events[-1].reason == ending
+    if ending == "completed":
+        assert model.conversation_requests[-1] == model.conversation_requests[-2]
+    else:
+        assert [event.kind for event in events if isinstance(event, AgentError)] == ["invalid_request"]
 
 
 OVERFLOW = ProviderError("overflow", "prompt is too long: 40000 tokens > 32000 maximum", False, status=400)

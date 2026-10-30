@@ -190,15 +190,15 @@ def _native_enabled(source: str, entry: dict[str, Any]) -> bool:
     return entry.get("enabled") is not False
 
 
-def _from_native(source: str, name: str, entry: dict[str, Any], path: Path, description: Optional[str]) -> dict[str, Any]:
+def _from_native(source: str, name: str, entry: dict[str, Any], path: Path) -> dict[str, Any]:
     server = _READERS[source](entry)
     cwd = server.get("cwd")
     if isinstance(cwd, str) and cwd.strip():
         server["cwd"] = _resolve_cwd(path, cwd)
-    return definition_from_provider(name, server, description=description)
+    return definition_from_provider(name, server)
 
 
-def read_all(descriptions: Optional[dict[str, str]] = None) -> dict[str, NativeServer]:
+def read_all() -> dict[str, NativeServer]:
     """The union of native servers; the first source holding a name is canonical.
 
     A file that cannot be parsed is skipped; one bad entry only marks that server.
@@ -206,7 +206,6 @@ def read_all(descriptions: Optional[dict[str, str]] = None) -> dict[str, NativeS
     backend's own off switch. Spawn isolation still disables remaining names.
     """
 
-    descriptions = descriptions or {}
     servers: dict[str, NativeServer] = {}
     for source in SOURCES:
         try:
@@ -223,7 +222,7 @@ def read_all(descriptions: Optional[dict[str, str]] = None) -> dict[str, NativeS
                     raise McpHubError("invalid_definition", f"{source} entry {name!r} is not an object.")
                 if not _native_enabled(source, entry):
                     continue
-                definition = _from_native(source, str(name), entry, path, descriptions.get(str(name)))
+                definition = _from_native(source, str(name), entry, path)
                 servers[str(name)] = NativeServer(
                     str(name), source, path, definition, None, has_cwd="cwd" in entry
                 )

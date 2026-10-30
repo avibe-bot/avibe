@@ -1796,8 +1796,5 @@
         "unsupported": "The reference image {path} is {mime}, which cannot be sent."
       }
     }
-  },
-  "mcp": {
-    "genericDescription": "Tools from an MCP server."
   }
 }

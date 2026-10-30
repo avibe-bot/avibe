@@ -6,7 +6,7 @@ import time
 
 from mcp.server.mcpserver import MCPServer
 
-server = MCPServer("avibe-echo", version="0.1.0")
+server = MCPServer("avibe-echo", description="Echo tools", version="0.1.0")
 
 
 @server.tool(description="Echo text back, optionally repeated.")
