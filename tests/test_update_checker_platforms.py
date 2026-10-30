@@ -1254,8 +1254,10 @@ def test_backend_auto_update_retries_a_release_until_it_lands_or_its_attempts_ru
     assert installs[-1] == ("codex", {"version": "1.2.0"})
 
 
+# An installer can also fail or time out after removing the launcher.
+@pytest.mark.parametrize("left", ["broken", "missing"])
 def test_an_upgrade_that_leaves_the_cli_unable_to_start_restores_the_release_it_replaced(
-    monkeypatch, tmp_path, sqlite_schema_db_factory
+    monkeypatch, tmp_path, sqlite_schema_db_factory, left
 ):
     """npm reports an install whose native binary failed to download as a success, so the
     upgrade's readback finds a CLI that cannot start: Codex 0.166.0 left one on a
@@ -1278,9 +1280,9 @@ def test_an_upgrade_that_leaves_the_cli_unable_to_start_restores_the_release_it_
     def install(name, version=None):
         installs.append(version)
         if version == "0.166.0":  # the upgrade: npm exits 0 without the binary
-            codex.update(status="broken", current_version=None, has_update=False)
+            codex.update(status=left, installed=left != "missing", current_version=None, has_update=False)
             return {"ok": False, "code": "cli_readback_failed", "message": "cannot start"}
-        codex.update(status="ok", current_version=version, has_update=True)
+        codex.update(status="ok", installed=True, current_version=version, has_update=True)
         return {"ok": True}
 
     checker = _backend_auto_update_checker(

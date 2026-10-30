@@ -634,12 +634,13 @@ class UpdateChecker:
         return now - seen["at"] >= BACKEND_RELEASE_SETTLE_SECONDS
 
     async def _restore_backend(self, name: str, previous: str) -> str:
-        """Repair a CLI a failed upgrade left unable to start, back to the release that ran before it."""
+        """Put back the release that ran before a failed upgrade left the CLI unable to start or removed it."""
         from vibe import api
 
         try:
             runtime = await asyncio.to_thread(api.get_backend_runtime, name)
-            if runtime.get("status") != "broken":
+            # An installer that failed or timed out can also leave no launcher at all.
+            if runtime.get("status") not in {"broken", "missing"}:
                 return "not_needed"
             restored = await asyncio.to_thread(api.install_agent, name, version=previous)
         except Exception as exc:  # noqa: BLE001
