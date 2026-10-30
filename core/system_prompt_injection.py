@@ -247,11 +247,9 @@ def build_system_prompt_blocks(
             context,
             fallback_platform=fallback_platform,
         ))
-    from core.mcp_hub.prompt import build_mcp_prompt_block
+    from core.mcp_hub.prompt import build_mcp_prompt_blocks
 
-    mcp_block = build_mcp_prompt_block()
-    if mcp_block is not None:
-        blocks.append(mcp_block)
+    blocks.extend(build_mcp_prompt_blocks())
     if skills is not None:
         from core.managed_skills import render_skill_catalog_blocks
 

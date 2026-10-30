@@ -56,17 +56,16 @@ Use `vibe mcp <server> --list` to discover available tools.
 Use `vibe mcp <server> <tool> --help` to inspect arguments before calling.
 Call tools with `vibe mcp <server> <tool> [arguments]`.
 Help and lists read local snapshots; tool calls access the MCP server.
+Only call servers listed here or returned by `vibe mcp --list`; do not guess server names.
 
 Available servers:
 - context7: Find current library documentation and code examples.
 - github: Work with GitHub repositories, issues, and pull requests.
-
-List all servers: `vibe mcp --list`.
 ```
 
 - One line per package, sorted by name; description sanitized to one line, max 160 chars.
-- Description: only the server-reported `serverInfo.description` from initialize, sanitized and frozen in the published snapshot's manifest at refresh, never read live (owner decision). There is no user-provided description and no fallback text: a server without one is listed as `- <server>`. There is one snapshot per server; there are no pending edits.
-- List at most 50 servers; if more exist, append the omitted count and `vibe mcp --list`.
+- Description: the server-reported `serverInfo.description`, else the first sentence of the initialize `instructions` (cut at the first `. `, `.\n`, `。` or line break), sanitized and frozen in the published snapshot's manifest at refresh, never read live (owner decision). There is no user-provided description and no fallback text: a server with neither is listed as `- <server>`. There is one snapshot per server; there are no pending edits.
+- Paged exactly like the Skills catalog (shared `catalog_page_of`): each page holds at most 25 rows (`CATALOG_PAGE_SIZE`) within `CATALOG_PAGE_MAX_BYTES`, always at least one. The prompt shows page 1; when more exist it adds a hint before the rows ("Use `vibe mcp --list --page 2` only when more discovery is useful; ordinary tasks do not require scanning every page.") and ends with "More servers are available. Run `vibe mcp --list --page {next_page}` to view more." `vibe mcp --list --page N` prints that page with the same rows and notice; `--format json` adds `nextPage`.
 - No tool names, schemas, URLs, commands, credentials or management commands.
 - The block has two fixed parts: stable shared instructions (examples must stay parser-valid), then one `<server>: <description>` line per package (`<server>` alone when the server reports no description), where `<server>` is the exact CLI selector.
 - Disable/remove takes effect on the next prompt build; new calls are rejected immediately even if a running turn still sees the old list.
