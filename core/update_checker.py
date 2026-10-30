@@ -49,6 +49,14 @@ UPDATE_BUTTON_ACTION_ID = "vibe_update_now"
 MIN_CHECK_INTERVAL_MINUTES = 1
 MANAGED_DEPENDENCY_CHECK_INTERVAL_MINUTES = 60
 
+# A backend CLI release is installed unattended only once it has been seen for this
+# long. A package can be visible before its whole release is: Codex 0.166.0 published
+# its macOS arm64 binary 3 minutes, and its Windows arm64 one 19 minutes, after the
+# version npm called latest, and npm installs a missing optional binary as success.
+BACKEND_RELEASE_SETTLE_SECONDS = 6 * 3600
+# Unattended installs of one backend release, each on its own check.
+BACKEND_AUTO_UPDATE_MAX_ATTEMPTS = 3
+
 # Grace period after sending an update notification before auto-update can proceed (in minutes).
 # This gives admins time to read the notification and decide whether to update manually.
 NOTIFICATION_GRACE_PERIOD_MINUTES = 10
@@ -144,6 +152,26 @@ def _format_release_version_link(version: str, platform: str = "markdown") -> st
     return f"[{version_text}]({url})"
 
 
+def _backend_attempts(value: Any) -> Dict[str, Dict[str, Any]]:
+    """Released versions recorded one failed release per backend as its version string."""
+    attempts: Dict[str, Dict[str, Any]] = {}
+    for name, entry in (value or {}).items() if isinstance(value, dict) else ():
+        if isinstance(entry, str):
+            entry = {"version": entry, "count": 1}
+        if isinstance(entry, dict) and isinstance(entry.get("version"), str) and type(entry.get("count")) is int:
+            attempts[str(name)] = {"version": entry["version"], "count": entry["count"]}
+    return attempts
+
+
+def _backend_releases_seen(value: Any) -> Dict[str, Dict[str, Any]]:
+    seen: Dict[str, Dict[str, Any]] = {}
+    for name, entry in (value or {}).items() if isinstance(value, dict) else ():
+        at = entry.get("at") if isinstance(entry, dict) else None
+        if isinstance(entry, dict) and isinstance(entry.get("version"), str) and type(at) in (int, float):
+            seen[str(name)] = {"version": entry["version"], "at": float(at)}
+    return seen
+
+
 @dataclass
 class UpdateState:
     """Persistent state for update tracking."""
@@ -156,9 +184,11 @@ class UpdateState:
     blocked_auto_update_reason: Optional[str] = None
     blocked_auto_update_at: Optional[str] = None
     blocked_auto_update_current_version: Optional[str] = None
-    # Backend name -> the release its unattended upgrade last ran for, so a
-    # release that fails to install is not retried on every check.
-    backend_auto_update_attempts: Dict[str, str] = field(default_factory=dict)
+    # Backend name -> {"version", "count"}: the failed unattended installs of the
+    # release last tried, so one that keeps failing stops being retried.
+    backend_auto_update_attempts: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    # Backend name -> {"version", "at"}: when the backend's latest release was first seen.
+    backend_releases_seen: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     @classmethod
     def load(cls) -> "UpdateState":
@@ -167,7 +197,6 @@ class UpdateState:
             return cls()
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            attempts = data.get("backend_auto_update_attempts")
             return cls(
                 notified_version=data.get("notified_version"),
                 notified_at=data.get("notified_at"),
@@ -177,11 +206,8 @@ class UpdateState:
                 blocked_auto_update_reason=data.get("blocked_auto_update_reason"),
                 blocked_auto_update_at=data.get("blocked_auto_update_at"),
                 blocked_auto_update_current_version=data.get("blocked_auto_update_current_version"),
-                backend_auto_update_attempts=(
-                    {str(name): str(version) for name, version in attempts.items()}
-                    if isinstance(attempts, dict)
-                    else {}
-                ),
+                backend_auto_update_attempts=_backend_attempts(data.get("backend_auto_update_attempts")),
+                backend_releases_seen=_backend_releases_seen(data.get("backend_releases_seen")),
             )
         except Exception as e:
             logger.warning(f"Failed to load update state: {e}")
@@ -201,6 +227,7 @@ class UpdateState:
                 "blocked_auto_update_at": self.blocked_auto_update_at,
                 "blocked_auto_update_current_version": self.blocked_auto_update_current_version,
                 "backend_auto_update_attempts": self.backend_auto_update_attempts,
+                "backend_releases_seen": self.backend_releases_seen,
             }
             write_atomic(path, json.dumps(data, indent=2))
         except Exception as e:
@@ -520,7 +547,14 @@ class UpdateChecker:
             logger.warning("askill managed dependency reconcile raised: %s", exc, exc_info=True)
 
     async def _reconcile_backend_auto_updates(self) -> None:
-        """Upgrade opted-in backend CLIs, each only while no turn is using it."""
+        """Upgrade opted-in backend CLIs, each only while no turn is using it.
+
+        A CLI the installer leaves unable to start is restored at once: npm
+        reports an install whose native binary failed to download as a success,
+        so an upgrade can turn a working CLI into one that cannot run. A broken
+        CLI is repaired, a release is installed only once it has settled, and
+        each release gets a bounded number of attempts.
+        """
         coordinator = getattr(self.controller, "backend_restart_coordinator", None)
         if coordinator is None:
             return
@@ -534,46 +568,88 @@ class UpdateChecker:
             try:
                 runtime = await asyncio.to_thread(api.get_backend_runtime, backend)
                 latest = runtime.get("latest_version")
+                broken = runtime.get("status") == "broken"
                 if not (
                     runtime.get("ok")
                     and runtime.get("enabled")
                     and runtime.get("auto_update")
                     and runtime.get("installed")
-                    and runtime.get("has_update")
+                    and (broken or runtime.get("has_update"))
                     and latest
-                ) or self.state.backend_auto_update_attempts.get(backend) == latest:
+                ):
+                    continue
+                if not broken and not self._backend_release_settled(backend, latest):
+                    continue
+                attempt = self.state.backend_auto_update_attempts.get(backend)
+                if attempt and attempt["version"] == latest and attempt["count"] >= BACKEND_AUTO_UPDATE_MAX_ATTEMPTS:
                     continue
                 # Checked per backend: a message may arrive during an earlier install.
                 if not self._quiet_for_idle_window():
                     return
+                # The release that runs now, which a failed upgrade restores.
+                working = None if broken else runtime.get("current_version")
 
-                async def install(name: str = backend, release: str = latest) -> dict:
+                async def install(name: str = backend, release: str = latest, previous: Optional[str] = working) -> dict:
                     try:
                         result = await asyncio.to_thread(api.install_agent, name)
                     except Exception as exc:  # noqa: BLE001
                         result = {"ok": False, "message": str(exc) or type(exc).__name__}
-                    # A failed release is not retried unattended. It is recorded
-                    # before the refresh, whose own failure must not undo that.
-                    # A success needs no record: the next check sees whether it
-                    # actually reached the release, and tries again if not.
-                    if not result.get("ok") and result.get("code") != "install_locked":
-                        self.state.backend_auto_update_attempts[name] = release
-                        self.state.save()
+                    if result.get("ok") or result.get("code") == "install_locked":
+                        return result
+                    # Recorded before the restore and the refresh, whose own failures must
+                    # not undo it. A success needs no record: the next check sees whether
+                    # it actually reached the release, and tries again if not.
+                    attempt = self.state.backend_auto_update_attempts.get(name)
+                    count = attempt["count"] + 1 if attempt and attempt["version"] == release else 1
+                    self.state.backend_auto_update_attempts[name] = {"version": release, "count": count}
+                    self.state.save()
+                    if previous:
+                        result = {**result, "restore": await self._restore_backend(name, previous)}
                     return result
 
                 result = await coordinator.run_when_idle(backend, install)
+                action = "repair" if broken else f"auto-update to {latest}"
                 if result is None:
-                    logger.info("Backend %s auto-update to %s deferred: backend is busy", backend, latest)
+                    logger.info("Backend %s %s deferred: backend is busy", backend, action)
                 elif result.get("code") == "install_locked":
-                    logger.info("Backend %s auto-update to %s deferred: another install is running", backend, latest)
+                    logger.info("Backend %s %s deferred: another install is running", backend, action)
                 elif not result.get("ok"):
-                    logger.warning("Backend %s auto-update to %s failed: %s", backend, latest, result.get("message"))
+                    logger.warning("Backend %s %s failed: %s", backend, action, result.get("message"))
                 elif (await asyncio.to_thread(api.get_backend_runtime, backend)).get("has_update"):
                     logger.info("Backend %s installer left it behind %s; retrying on a later check", backend, latest)
                 else:
-                    logger.info("Backend %s auto-updated to %s", backend, latest)
+                    logger.info("Backend %s %s succeeded", backend, action)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Backend %s auto-update failed: %s", backend, exc, exc_info=True)
+
+    def _backend_release_settled(self, backend: str, release: str) -> bool:
+        """Whether ``release`` has been seen for ``BACKEND_RELEASE_SETTLE_SECONDS``; records when it first was."""
+        seen = self.state.backend_releases_seen.get(backend)
+        now = time.time()
+        if seen is None or seen["version"] != release:
+            self.state.backend_releases_seen[backend] = {"version": release, "at": now}
+            self.state.save()
+            return False
+        return now - seen["at"] >= BACKEND_RELEASE_SETTLE_SECONDS
+
+    async def _restore_backend(self, name: str, previous: str) -> str:
+        """Repair a CLI a failed upgrade left unable to start, back to the release that ran before it."""
+        from vibe import api
+
+        try:
+            runtime = await asyncio.to_thread(api.get_backend_runtime, name)
+            if runtime.get("status") != "broken":
+                return "not_needed"
+            restored = await asyncio.to_thread(api.install_agent, name, repair_version=previous)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Backend %s restore after a failed upgrade raised: %s", name, exc)
+            return "failed"
+        if restored.get("ok"):
+            logger.warning("Backend %s upgrade left it unable to start; restored %s", name, previous)
+            return "restored"
+        logger.error("Backend %s upgrade left it unable to start, and restoring %s failed: %s",
+                     name, previous, restored.get("message"))
+        return "failed"
 
     async def _get_version_info_async(self) -> Dict[str, Any]:
         """Get version info asynchronously."""

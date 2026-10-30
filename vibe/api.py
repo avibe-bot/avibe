@@ -8146,11 +8146,14 @@ def _run_desktop_backend_install(name: str, truncate_output) -> dict:
     }
 
 
-def install_agent(name: str) -> dict:
+def install_agent(name: str, *, repair_version: str | None = None) -> dict:
     """Install (or upgrade) an agent CLI tool, one install per backend at a time.
 
     Settings runs this in the UI process and backend auto-update in the
     controller, so only a file lock keeps two installers off one CLI.
+    ``repair_version`` is the release a repair of a broken npm installation
+    reinstalls, such as the one an unattended upgrade replaced; other sources
+    reinstall their current release.
     """
     if not supports_install(name):
         return {"ok": False, "message": f"Unknown agent: {name}"}
@@ -8166,7 +8169,7 @@ def install_agent(name: str) -> dict:
             "path": None,
         }
     try:
-        return _install_agent(name)
+        return _install_agent(name, repair_version=repair_version)
     finally:
         lock.release()
 
@@ -8181,7 +8184,7 @@ def _cli_repair_refusal(name: str, *, conflict: bool = False) -> dict:
     }
 
 
-def _repair_broken_cli(name: str, selected: str, truncate_output) -> dict:
+def _repair_broken_cli(name: str, selected: str, truncate_output, *, version: str | None = None) -> dict:
     source = identify_repair_source(name, selected)
     if source is None:
         return _cli_repair_refusal(name)
@@ -8190,7 +8193,10 @@ def _repair_broken_cli(name: str, selected: str, truncate_output) -> dict:
         npm = resolve_cli_path("npm")
         if not npm:
             return _cli_repair_refusal(name)
-        cmd = [npm, "install", "--global", "--prefix", str(source.prefix), source.package]
+        # A pinned release is the one npm already fetched whole for this
+        # platform; its native package is in the npm cache.
+        package = f"{source.package}@{version}" if version else source.package
+        cmd = [npm, "install", "--global", "--prefix", str(source.prefix), package]
         command_env = _command_env_for(npm)
     elif source.kind == "brew":
         brew = source.prefix / "bin" / "brew"
@@ -8240,7 +8246,7 @@ def _native_vendor_install_target(name: str) -> str | None:
     return None
 
 
-def _install_agent(name: str) -> dict:
+def _install_agent(name: str, *, repair_version: str | None = None) -> dict:
     """Install (or upgrade) an agent CLI tool.
 
     Existing installations keep their install method and their selected
@@ -8332,7 +8338,7 @@ def _install_agent(name: str) -> dict:
     if health["status"] in {"broken", "unknown"} or (health["status"] == "missing" and configured_path != name):
         if health["status"] == "unknown":
             return _cli_repair_refusal(name)
-        return _repair_broken_cli(name, health["path"] or configured_path, _truncate_output)
+        return _repair_broken_cli(name, health["path"] or configured_path, _truncate_output, version=repair_version)
     existing_path = health["path"]
     if existing_path:
         readback_validator = None

@@ -232,8 +232,10 @@ def test_npm_provenance_preserves_global_prefix(tmp_path, backend, package):
         ("opencode", "opencode-ai", "1.2.15"),
     ],
 )
+# A repair can pin the release an unattended upgrade replaced (core.update_checker).
+@pytest.mark.parametrize("repair_version", [None, "1.0.0"])
 def test_broken_npm_cli_is_repaired_by_its_prefix_not_self_update(
-    native_case, monkeypatch, backend, package, version_output
+    native_case, monkeypatch, backend, package, version_output, repair_version
 ):
     c = native_case
     prefix = c["home"] / "owned npm prefix"
@@ -256,9 +258,10 @@ def test_broken_npm_cli_is_repaired_by_its_prefix_not_self_update(
     )
     monkeypatch.setattr(api, "_configured_agent_cli_path", lambda _name: str(alias))
     monkeypatch.setattr(api, "resolve_cli_path", lambda name, **_: str(npm) if name == "npm" else str(alias))
-    result = api.install_agent(backend)
+    result = api.install_agent(backend, repair_version=repair_version)
     assert result["ok"], result
-    assert json.loads(calls.read_text()) == ["install", "--global", "--prefix", str(prefix), package]
+    spec = f"{package}@{repair_version}" if repair_version else package
+    assert json.loads(calls.read_text()) == ["install", "--global", "--prefix", str(prefix), spec]
     assert old.read_text().splitlines() == ["--version"]
     assert c["persist"] == [(backend, str(alias))]
     assert result["detection"]["status"] == "ok" and result["detection"]["path"] == str(alias)

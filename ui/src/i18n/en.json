@@ -3957,7 +3957,7 @@
     "restartSuccess": "Restart requested",
     "restartFailed": "Restart failed",
     "autoUpdate": "Auto Update",
-    "autoUpdateHint": "Install new releases once this backend is idle"
+    "autoUpdateHint": "Install a new release once it has been out for 6 hours and this backend is idle; a CLI that cannot start is repaired"
   },
   "channelList": {
     "eyebrow": "Groups",
