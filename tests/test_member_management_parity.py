@@ -98,7 +98,7 @@ _RETAINED_OWNER_ROUTES = {
     ("POST", "/api/mcp/discover"),
     ("POST", "/api/mcp/{name}/refresh"),
     ("DELETE", "/api/mcp/{name}"),
-    ("POST", "/api/mcp/{name}/oauth/start"),
+    ("GET", "/api/mcp/{name}/oauth/start"),
     ("POST", "/api/mcp/{name}/oauth/complete"),
     ("POST", "/api/mcp/{name}/oauth/logout"),
     ("PUT", "/api/permissions/authorized-users"),

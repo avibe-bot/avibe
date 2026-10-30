@@ -202,11 +202,25 @@ vibe mcp suno --login-complete '<callback URL>'
 vibe mcp suno --logout
 ```
 
-API: `POST /api/mcp/{name}/oauth/start` (body carries nothing; origin from request) →
-`{authorizeUrl, mode}`; `GET /api/mcp/oauth/callback` (session-exempt, §3); `POST /api/mcp/{name}/oauth/complete`
+API: `GET /api/mcp/{name}/oauth/start` is Owner-only and starts the grant from `_current_origin()`
+plus `ui.setup_port`. It is a GET because the Web login control is a plain link. CSRF: only
+`Sec-Fetch-Site: same-origin` (in-app click) or `none` (desktop shell handing the URL to the
+system browser) may start a pending login; `cross-site`, `same-site`, and a missing header
+return a 403 HTML page and create no pending login. Success is 302 to the AS authorize URL;
+failure is a small i18n HTML page (same shape as the callback page), not JSON. Runtime
+`oauth_start` remains for CLI/IM. `GET /api/mcp` includes per-request `oauthMode: "direct"|"paste"`
+from `redirect_mode(_current_origin(), port=setup_port)` so the UI does not re-derive the origin
+rule. `GET /api/mcp/oauth/callback` (session-exempt, §3); `POST /api/mcp/{name}/oauth/complete`
 `{callbackUrl}`; `POST /api/mcp/{name}/oauth/logout`. Summary gains `auth: none|needs_login|ok`.
 
-UI: needs-login rows show a login action. Direct and paste both open the authorize URL in a **new tab** (preallocate `about:blank` synchronously on click, then `location.replace` after start returns — never `window.location.assign` on the Avibe tab, never raw `window.open` after `await`). Avibe stays in the original tab; the callback 302s the authorize tab back to Skills & MCP. Adding an HTTP server that returns `auth: needs_login` starts this login immediately. Paste mode still shows a dialog with a paste box. Strings via i18n.
+UI: needs-login rows and the detail panel render Log in as
+`<a href={origin}/api/mcp/{name}/oauth/start target="_blank" rel="noopener noreferrer">`
+styled as a button. No `window.open`, no `about:blank`, no await before opening. Avibe stays in
+the original tab; the callback 302s the authorize tab to `/skills?mcp=…&oauth=success`, and the
+original tab `load()`s on `focus`/`visibilitychange`. Paste mode also opens the existing paste
+dialog in the original tab when the link is clicked. After add, if a result has `needs_login`,
+keep the add dialog open and show "<name> needs login → Go to authorization" using the same
+link for the first such server; do not auto-open. Strings via i18n.
 
 Definition: accept Claude-format `oauth: {clientId?, scopes?}` on HTTP entries; other `oauth`
 keys ignored (not rejected), per native extras policy.

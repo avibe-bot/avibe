@@ -166,10 +166,65 @@ def test_malformed_json_add_returns_top_level_error_without_batch_arrays(owner):
         ("POST", "/api/mcp/discover", "owner"),
         ("POST", "/api/mcp/echo/refresh", "owner"),
         ("DELETE", "/api/mcp/echo", "owner"),
-        ("POST", "/api/mcp/echo/oauth/start", "owner"),
+        ("GET", "/api/mcp/echo/oauth/start", "owner"),
         ("POST", "/api/mcp/echo/oauth/complete", "owner"),
         ("POST", "/api/mcp/echo/oauth/logout", "owner"),
     ],
 )
 def test_route_roles(method, path, role):
     assert http_authorization_policy(method, path).minimum_role == role
+
+
+@pytest.fixture
+def oauth_server(owner):
+    from tests.test_mcp_hub_oauth import _LoopbackOauth
+
+    server = _LoopbackOauth()
+    server.start()
+    try:
+        status, _ = __import__("asyncio").run(
+            owner.submit("add", {"servers": [{"name": "suno", "server": {"url": f"{server.origin}/mcp"}}]})
+        )
+        assert status == 200
+        yield server
+    finally:
+        server.stop()
+
+
+@pytest.mark.parametrize("fetch_site", ["same-origin", "none"])
+def test_oauth_start_link_redirects_to_authorize_url(owner, oauth_server, fetch_site):
+    response = app.test_client().get("/api/mcp/suno/oauth/start", headers={"Sec-Fetch-Site": fetch_site})
+    assert response.status_code == 302
+    assert response.headers["Location"].startswith(f"{oauth_server.origin}/authorize?")
+    assert len(owner._pending_logins) == 1
+
+
+@pytest.mark.parametrize("fetch_site", ["cross-site", "same-site", None])
+def test_oauth_start_link_rejects_cross_site_without_pending_login(owner, oauth_server, fetch_site):
+    headers = {"Sec-Fetch-Site": fetch_site} if fetch_site else {}
+    response = app.test_client().get("/api/mcp/suno/oauth/start", headers=headers)
+    assert response.status_code == 403
+    assert response.headers["Content-Type"].startswith("text/html")
+    assert owner._pending_logins == {}
+
+
+def test_list_reports_oauth_mode_for_request_origin(owner):
+    from vibe import mcp_api
+
+    assert app.test_client().get("/api/mcp").get_json()["oauthMode"] == "direct"
+    modes = {
+        origin: __import__("asyncio").run(mcp_api.list_servers(origin, 5123))["oauthMode"]
+        for origin in ("http://127.0.0.1:5123", "https://avibe.example", "http://192.168.1.20:5123")
+    }
+    assert modes == {
+        "http://127.0.0.1:5123": "direct",
+        "https://avibe.example": "direct",
+        "http://192.168.1.20:5123": "paste",
+    }
+
+
+def test_oauth_start_unknown_server_renders_html_error(owner):
+    response = app.test_client().get("/api/mcp/missing/oauth/start", headers={"Sec-Fetch-Site": "same-origin"})
+    assert response.status_code == 400
+    assert response.headers["Content-Type"].startswith("text/html")
+    assert owner._pending_logins == {}
