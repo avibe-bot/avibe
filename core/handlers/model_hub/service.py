@@ -842,10 +842,7 @@ class _InvocationUnsupported(_InvocationPlanChanged):
         self.reason = reason
 
 
-
 _FAST_REFUSAL_STATUSES = frozenset({400, 403, 429})
-# The protocol each native backend speaks to the gateway; Vibey speaks its hop's.
-_FAST_REQUEST_PROTOCOLS: Final[Mapping[str, str]] = {"claude": "anthropic", "codex": "openai_responses"}
 
 
 def _fast_tier_refused(outcome: Optional[RawCallOutcome]) -> bool:
@@ -5969,6 +5966,7 @@ class ModelHubService:
         config = self.store.load()
         return self._agent_payload(
             config, self._agent(config, backend), live_recovery=self.recovery.annotations(config),
+            fast_catalog=self._load_fast_mode_catalog(),
         )
 
     async def read_agent_sources(self, backend: str) -> dict:
@@ -5980,7 +5978,11 @@ class ModelHubService:
         config = await asyncio.to_thread(self.store.load)
         agent = self._agent(config, backend)
         live_recovery = self.recovery.annotations(config)
-        return await asyncio.to_thread(self._agent_payload, config, agent, live_recovery=live_recovery)
+        return await asyncio.to_thread(
+            lambda: self._agent_payload(
+                config, agent, live_recovery=live_recovery, fast_catalog=self._load_fast_mode_catalog(),
+            )
+        )
 
     async def set_agent_chain(self, backend: str, model_id: object, payload: object) -> dict:
         if (
@@ -6193,7 +6195,13 @@ class ModelHubService:
     def _agent_payload(
         self, config: ModelHubConfig, agent: ModelHubAgentSupplyConfig,
         *, live_recovery: Mapping[str, SourceRecoveryAnnotation] | None = None,
+        fast_catalog: FastModeCatalog | None = None,
     ) -> dict:
+        """``fast_catalog`` is a freshly read fast-tier index, from a caller off the loop.
+
+        Without one, the payload uses the index last read, which takes no I/O:
+        mutation responses are built on the controller loop.
+        """
         backend = cast(BackendName, agent.backend)
         hidden = self._hidden_retired_model_ids(agent)
         builtin_models = (
@@ -6232,7 +6240,10 @@ class ModelHubService:
             for model_id, model_resolution in model_resolutions.items()
         ]
         # A Direct Agent's turns never reach the gateway that applies the fast tier.
-        fast_catalog = load_fast_mode_catalog() if agent.mode == "hub" else None
+        if agent.mode != "hub":
+            fast_catalog = None
+        elif fast_catalog is None:
+            fast_catalog = self._fast_mode_catalog
         fast_models = {
             model.id: fast_catalog is not None and self._offers_fast_mode(backend, model_resolutions[model.id], fast_catalog)
             for model in menu_models
@@ -6609,8 +6620,9 @@ class ModelHubService:
     def list_agents(self) -> list[dict]:
         config = self.store.load()
         live_recovery = self.recovery.annotations(config)
+        fast_catalog = self._load_fast_mode_catalog()
         return [
-            self._agent_payload(config, config.agents[backend], live_recovery=live_recovery)
+            self._agent_payload(config, config.agents[backend], live_recovery=live_recovery, fast_catalog=fast_catalog)
             for backend in MODEL_HUB_BACKENDS
         ]
 
@@ -7199,7 +7211,7 @@ class ModelHubService:
         )
         if hop is None:
             return False
-        protocol = hop.source.protocol if backend == "vibey" else _FAST_REQUEST_PROTOCOLS.get(backend)
+        protocol = hop.source.protocol if backend == "vibey" else _FIXED_BACKEND_PROTOCOLS.get(backend)
         return catalog.body_for(hop.source, hop.model_id, protocol) is not None
 
     def _effort_menu(
@@ -11189,7 +11201,12 @@ class ModelHubService:
 
         if getattr(request, "speed", None) != FAST_SPEED:
             return None
-        self._fast_mode_catalog = await asyncio.to_thread(load_fast_mode_catalog)
+        return await asyncio.to_thread(self._load_fast_mode_catalog)
+
+    def _load_fast_mode_catalog(self) -> FastModeCatalog:
+        """Read the fast-tier index and keep it for payloads built on the loop. Reads files: off the loop only."""
+
+        self._fast_mode_catalog = load_fast_mode_catalog()
         return self._fast_mode_catalog
 
     async def _settle_cancelled_attempt(

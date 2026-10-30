@@ -5061,6 +5061,35 @@ async def _idle_mode_guard(backends, *, external_processes=True):
     yield verify_idle
 
 
+def test_agent_payload_built_on_the_loop_reads_no_fast_mode_catalog(tmp_path, monkeypatch):
+    """A mode switch answers with the Agent payload built on the controller loop; the fast-tier index it
+    shows is the one last read, never a file read there (fast_mode.py)."""
+
+    import threading
+
+    from core.handlers.model_hub import service as service_module
+
+    loop_reads = []
+
+    def load():
+        loop_reads.append(threading.current_thread() is threading.main_thread())
+        return service_module.FastModeCatalog()
+
+    monkeypatch.setattr(service_module, "load_fast_mode_catalog", load)
+    service, store, _adapter = _service(tmp_path)
+    service.migration_home = tmp_path / "native-home"
+    service.migration_guard = _idle_mode_guard
+    store.config.agents["claude"].mode = "direct"
+
+    switched = asyncio.run(service.set_agent_mode("claude", "hub"))
+
+    assert switched["mode"] == "hub"
+    assert True not in loop_reads
+    # A synchronous read, which the read routes serve off the loop, refreshes it.
+    service.get_agent_sources("claude")
+    assert loop_reads[-1:] == [True]
+
+
 def test_direct_to_hub_changes_only_mode(tmp_path):
     service, store, _adapter = _service(tmp_path)
     service.migration_home = tmp_path / "native-home"

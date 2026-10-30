@@ -85,9 +85,10 @@ export function useRememberedModelLabel(backend: string, model: string | null | 
 
 // Which models run at their vendor's fast tier, for a closed picker's fast-mode
 // mark: it shows only while the Session asks for the fast tier AND its model
-// would get it. Remembered the same way as labels, from every catalog answer a
-// picker reads; a Session that asks for the fast tier on a backend this browser
-// has never seen an answer for costs one read of Model Hub's persisted catalog.
+// would get it. Remembered from every catalog answer a picker reads, so the mark
+// paints from the first frame. Unlike a label, the answer follows routing, which
+// Settings or another client may have changed since it was stored: a picker that
+// needs it reads Model Hub's persisted catalog once per backend per page load.
 
 const FAST_STORAGE_KEY = 'avibe.fast-models.v1';
 
@@ -135,17 +136,17 @@ const subscribeFast = (listener: () => void) => {
 };
 
 /** Whether `model` runs at its vendor's fast tier as far as this browser knows;
- *  reads the backend's answer once when `wanted` and none is known. */
+ *  when `wanted`, reads the backend's answer again once per page load. */
 export function useRememberedFastModel(backend: string, model: string | null | undefined, wanted: boolean): boolean {
   const api = useApi();
   const known = useSyncExternalStore(subscribeFast, () => (backend ? currentFast()[backend] ?? null : null));
   useEffect(() => {
-    if (!wanted || !backend || known !== null || fastReadThisLoad.has(backend)) return;
+    if (!wanted || !backend || fastReadThisLoad.has(backend)) return;
     fastReadThisLoad.add(backend);
     fetchBackendFastModels(api, backend).then(
       (models) => rememberFastModels(backend, models),
       () => undefined,
     );
-  }, [api, backend, known, wanted]);
+  }, [api, backend, wanted]);
   return Boolean(model && known?.includes(model));
 }

@@ -89,3 +89,33 @@ describe('remembered model labels', () => {
     expect(api.readOpencodeOptionsForModelPicker).not.toHaveBeenCalled();
   });
 });
+
+describe('remembered fast-tier models', () => {
+  const hubCatalog = (fast: string[]) => ({
+    backend: 'claude',
+    mode: 'hub',
+    catalog_models: ['claude-opus-5-5', 'claude-sonnet-5-5'].map((id) => ({
+      id, origin: 'builtin', display_name: null, models_dev_id: null, context_window: null, max_output_tokens: null,
+      input_modalities: [], output_modalities: [], supports_tools: null, supports_reasoning: null, reasoning_efforts: [],
+      locked: false, routeable: true, fast_mode: fast.includes(id),
+    })),
+  });
+
+  it('paints from a stored answer, then reads it again once per load since routing may have moved', async () => {
+    // Stored while the route went through a relay: no fast tier then.
+    window.localStorage.setItem('avibe.fast-models.v1', JSON.stringify({ claude: [] }));
+    api.readModelHubAgentCatalogForModelPicker.mockResolvedValue(hubCatalog(['claude-opus-5-5']));
+    const { useRememberedFastModel } = await freshMemory();
+
+    const { result, rerender } = renderHook(({ wanted }) => useRememberedFastModel('claude', 'claude-opus-5-5', wanted), {
+      initialProps: { wanted: false },
+    });
+    expect(result.current).toBe(false);
+    expect(api.readModelHubAgentCatalogForModelPicker).not.toHaveBeenCalled();
+
+    rerender({ wanted: true });
+    await waitFor(() => expect(result.current).toBe(true));
+    rerender({ wanted: true });
+    expect(api.readModelHubAgentCatalogForModelPicker).toHaveBeenCalledTimes(1);
+  });
+});

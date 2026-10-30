@@ -610,9 +610,13 @@ describe('AgentRoutePicker compact presentation', () => {
   });
 
   // An owner of both the route and its speed, applying each pick at once.
-  const FastOwner: React.FC<{ initial: AgentRouteValue; onSpeed: (speed: 'fast' | null) => void }> = ({ initial, onSpeed }) => {
+  const FastOwner: React.FC<{
+    initial: AgentRouteValue;
+    initialSpeed?: 'fast' | null;
+    onSpeed: (speed: 'fast' | null) => void;
+  }> = ({ initial, initialSpeed = null, onSpeed }) => {
     const [route, setRoute] = useState<AgentRouteValue>(initial);
-    const [speed, setSpeed] = useState<'fast' | null>(null);
+    const [speed, setSpeed] = useState<'fast' | null>(initialSpeed);
     return (
       <MemoryRouter>
         <AgentRoutePicker
@@ -629,6 +633,19 @@ describe('AgentRoutePicker compact presentation', () => {
       </MemoryRouter>
     );
   };
+
+  it("judges Fast on the Agent's model for a route that names none", async () => {
+    // A Session that materialized its Agent at the first turn keeps no model of its own.
+    hubMode = 'hub';
+    catalogReasoning = { sonnet: [{ value: 'low', label: 'low' }], opus: [{ value: 'low', label: 'low' }] };
+    catalogFast = ['sonnet'];
+    const user = userEvent.setup();
+    render(<FastOwner initial={{ ...CLAUDE_ROUTE, model: null }} initialSpeed="fast" onSpeed={vi.fn()} />);
+    await openMenu(user);
+    // The claude Agent's default model is sonnet, which runs fast.
+    expect((screen.getByRole('button', { name: 'chat.picker.fast' }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByLabelText('chat.picker.fastOn')).not.toBeNull();
+  });
 
   it('offers Fast only where the model runs fast, marks the trigger while it does, and keeps the choice across a model without it', async () => {
     hubMode = 'hub';

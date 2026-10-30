@@ -197,7 +197,10 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   // on a model without it keeps the choice for the next model that has it.
   const fastControls = compact && Boolean(onSpeedChange);
   const fastOn = speed === 'fast';
-  const fastOffered = useRememberedFastModel(backend, currentModel, fastControls && (fastOn || open));
+  // The model a turn runs on: the route's own, else its Agent's default, which a
+  // Session that materialized its Agent at the first turn keeps without copying.
+  const effectiveModel = currentModel || displayedAgent?.model || null;
+  const fastOffered = useRememberedFastModel(backend, effectiveModel, fastControls && (fastOn || open));
   const fastActive = fastControls && fastOn && fastOffered;
   const currentAgentLabel = displayedAgent?.display_name || currentAgent;
   const triggerLabel = (routeIsDefault && defaultLabel) || currentAgentLabel || defaultLabel || t('chat.pickAgent');
