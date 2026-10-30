@@ -20,11 +20,14 @@ const verticalOnly: Modifier = ({ transform }) => ({ ...transform, x: 0 });
 
 const SortableRow: React.FC<{
   id: string;
+  /** No drag can start now (a save is out); the handle stays mounted, so a keyboard user keeps their place. */
   disabled: boolean;
+  /** The row has a handle at all: a list of one has nothing to reorder. */
+  handled: boolean;
   className: string;
   attrs: Record<string, string>;
   children: (handle: OrderDragHandle) => React.ReactNode;
-}> = ({ id, disabled, className, attrs, children }) => {
+}> = ({ id, disabled, handled, className, attrs, children }) => {
   const reducedMotion = useReducedMotion();
   const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } = useSortable({
     id,
@@ -38,7 +41,8 @@ const SortableRow: React.FC<{
       className={cn(className, isDragging && 'is-dragging')}
       style={{ transform: CSS.Translate.toString(transform), transition }}
     >
-      {children(disabled ? null : { ...attributes, ...listeners, ref: setActivatorNodeRef })}
+      {/* Disabled, the handle keeps its node and focus with no listeners and aria-disabled set. */}
+      {children(handled ? { ...attributes, ...listeners, ref: setActivatorNodeRef } : null)}
     </li>
   );
 };
@@ -87,7 +91,7 @@ export function SortableOrderList<Row>({
     const row = byId.get(String(id));
     return row ? nameOf(row) : '';
   };
-  const fixed = pending || ids.length < 2;
+  const handled = ids.length >= 2;
   return (
     <DndContext
       sensors={sensors}
@@ -119,7 +123,7 @@ export function SortableOrderList<Row>({
           {ids.map((id, index) => {
             const row = byId.get(id)!;
             return (
-              <SortableRow key={id} id={id} disabled={fixed} className={rowClassName(row)} attrs={rowAttrs(row)}>
+              <SortableRow key={id} id={id} disabled={pending || !handled} handled={handled} className={rowClassName(row)} attrs={rowAttrs(row)}>
                 {(handle) => children(row, index, handle)}
               </SortableRow>
             );
