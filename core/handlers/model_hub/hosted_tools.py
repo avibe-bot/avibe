@@ -35,6 +35,7 @@ from config.v2_config import (
     ModelHubConfig,
     ModelHubHostedToolConfig,
     ModelHubImageModelChoice,
+    ModelHubExecutorSettings,
     ModelHubSearchServiceSettings,
     ModelHubSourceConfig,
     hosted_tool_setting,
@@ -260,10 +261,17 @@ def executor_candidates(
 def _search_chain(
     config: ModelHubConfig, setting: ModelHubHostedToolConfig, models: Mapping[str, ExecutorCandidate],
 ) -> tuple[ExecutorCandidate, ...]:
-    """One role per Source; stale/unnamed service roles precede the first model, without a config write."""
+    """One role per Source; stale/unnamed service roles precede the first model, without a config write.
+
+    A role the user turned off, a service's or a model executor's, follows every other at the end, never tried. A
+    model executor turned off is placed as if on, then moved to the end, so the others keep their places.
+    """
 
     services: dict[str, ExecutorCandidate] = {}
-    remaining = dict(models)
+    remaining = {
+        source_id: replace(candidate, settings={"enabled": source_id not in setting.executors})
+        for source_id, candidate in models.items()
+    }
     disabled: list[ExecutorCandidate] = []
     ordered = _vibey_order(config)
     keyless = model_hub_keyless_exa_source() if KEYLESS_EXA_ACTIVE else None
@@ -316,8 +324,10 @@ def _search_chain(
     named_ids = {candidate.source.id for candidate in named}
     additions = [c for sid, c in services.items() if sid not in named_ids]
     position = next((i for i, c in enumerate(named) if c.kind == "model"), len(named))
-    return tuple(named[:position] + additions + named[position:]
-                 + [c for sid, c in remaining.items() if sid not in named_ids] + disabled)
+    chain = (named[:position] + additions + named[position:]
+             + [c for sid, c in remaining.items() if sid not in named_ids] + disabled)
+    off = [candidate for candidate in chain if candidate.kind == "model" and not candidate.settings["enabled"]]
+    return tuple([candidate for candidate in chain if candidate not in off] + off)
 
 
 def listed_executor_model(source: ModelHubSourceConfig, tool: str, *, spec_for: SpecLookup) -> Optional[str]:
@@ -749,6 +759,8 @@ def hosted_tools_status(
                     "billing": candidate.source.billing,
                     "relay": is_relay(candidate.source),
                     "price": _price_payload(candidate.price),
+                    # The web-search switch (§6); X search keeps none.
+                    **({"settings": dict(candidate.settings)} if candidate.settings is not None else {}),
                 }
                 if candidate.kind == "model" else _service_candidate_payload(
                     candidate.source, setting,
@@ -829,7 +841,7 @@ def apply_hosted_tool_put(config: ModelHubConfig, tool: str, payload: object) ->
     if tool == "web_fetch":
         allowed.add("services")
     if tool == "web_search":
-        allowed |= {"prefer_native", "services"}
+        allowed |= {"prefer_native", "services", "executors"}
     if not isinstance(payload, dict) or not payload or set(payload) - allowed:
         raise HostedToolSettingRefused("invalid_parameter", 400)
     changes: dict[str, Any] = {}
@@ -849,6 +861,8 @@ def apply_hosted_tool_put(config: ModelHubConfig, tool: str, payload: object) ->
                 changes["services"] = patch_fetch_services(config, payload["services"])
             else:
                 changes["services"] = _patch_search_services(config, payload["services"])
+        if "executors" in payload:
+            changes["executors"] = _patch_executors(config, payload["executors"])
         if "executor_order" in payload:
             order = payload["executor_order"]
             changes["executor_order"] = None if order is None else model_hub_executor_order(order, tool=tool)
@@ -900,6 +914,36 @@ def _patch_search_services(config: ModelHubConfig, payload: object) -> dict[str,
             saved[source_id] = parsed
         else:
             saved.pop(source_id, None)
+    return saved
+
+
+def _patch_executors(config: ModelHubConfig, payload: object) -> dict[str, ModelHubExecutorSettings]:
+    """A Source-keyed patch of model executors' web-search switches: ``{"enabled": bool}``, or null for the default.
+
+    Only a Source that lists a web-search executor model takes a switch; on is the default, so only an opt-out is
+    saved.
+    """
+
+    if not isinstance(payload, dict):
+        raise ValueError("executors must be a Source-keyed patch")
+    saved = dict(hosted_tool_setting(config, "web_search").executors)
+    live = {source.id: source for source in config.sources}
+    for source_id, patch in payload.items():
+        if not is_model_hub_source_id(source_id):
+            raise ValueError("executors keys must be Source ids")
+        if patch is None:
+            saved.pop(source_id, None)
+            continue
+        source = live.get(source_id)
+        if (
+            source is None or not isinstance(patch, dict) or set(patch) != {"enabled"}
+            or listed_executor_model(source, "web_search", spec_for=hosted_tool_spec) is None
+        ):
+            raise ValueError("executors must name a web-search executor Source and its switch")
+        if ModelHubExecutorSettings.from_payload(patch).enabled:
+            saved.pop(source_id, None)
+        else:
+            saved[source_id] = ModelHubExecutorSettings(enabled=False)
     return saved
 
 

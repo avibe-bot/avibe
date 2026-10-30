@@ -236,6 +236,7 @@ The evidence store, its record and its owner are the capability model's §3. v2 
   | `enabled` | boolean; absent means **on** |
   | `executor_order` | search tools only, optional: Source ids in the order the user wants executors tried. Absent means fully automatic (§6). Ids that no longer name a Source are skipped. |
   | `default_model` | `image_generate` only, optional: `{source_id, model_id}`. Absent, or naming a model no longer available, means the first available model in catalog order (§7.2). |
+  | `executors` | `web_search` only, optional (amended 2026-10-30, contract v23): `{<source_id>: {"enabled": false}}` for each model executor Source the user turned off with its **Use for web search** switch. On is the default and is never saved; a removed Source's entry is dropped on load. A release before v23 ignores the field, so the executor runs again there. |
 
   - **Absence means on.** The section is absent on every released config, so an upgrade from 3.2.0 turns every
     tool on (owner decision, §0). A tool key the loader does not know is ignored with a warning.
@@ -642,7 +643,9 @@ These rules are C-1 rows in `cross-provider.md` and per-protocol rows in `conver
      call nobody asked for must not guess.
   2. Order: the turn's frozen effective order, which is the user's `executor_order` when set, then the remaining
      candidates in Vibey's Source order, as they stood at the turn's first resolution. A Source added mid-turn joins
-     from the next turn.
+     from the next turn. A model executor the user turned off for web search (`executors`, §3.3) is placed as if on and
+     then moved to the end, after the turned-off services, so the others keep their places; its frozen slot is
+     `enabled: false`, and the chain skips it as `disabled` without calling it (amended 2026-10-30).
   3. The gateway admits each candidate on the final snapshot, under the mutation lock, at the moment it calls it
      (`runs_on`, identity, no negative `call` evidence), so a config change during the chain moves on instead of
      calling a removed or re-identified Source. This is the same per-request admission every model request of the

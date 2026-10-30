@@ -1,4 +1,4 @@
-import type { HostedSearchServiceVendor, HostedToolsStatus, HostedWebSearchToolStatus, Source, SourceState } from './types';
+import type { HostedExecutorCandidate, HostedSearchServiceVendor, HostedToolsStatus, HostedWebSearchToolStatus, Source, SourceState } from './types';
 
 export const KEYLESS_EXA_SOURCE_ID = 'src_exakeyless';
 export const KEYLESS_EXA_VENDOR_ID = 'exa-mcp';
@@ -40,3 +40,7 @@ export const serviceSettings = (tool: HostedWebSearchToolStatus, vendor: HostedS
     results: tool.services[sourceId]?.results ?? Math.min(5, vendor.results_max),
   };
 };
+
+/** Whether the chain may try this candidate: a service's switch, or a web-search model executor's; absent is on. */
+export const candidateEnabled = (candidate: HostedExecutorCandidate): boolean =>
+  candidate.kind === 'service' ? candidate.settings.enabled : candidate.settings?.enabled ?? true;

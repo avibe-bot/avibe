@@ -65,7 +65,7 @@ const vibeyAgent = (model: string | null) => ({
   system_prompt: null, created_at: '', metadata: { builtin_default: true, lock_delete: true },
 });
 const chain = (modelId: string) => ({
-  contract_version: 22, backend: 'vibey', model_id: modelId,
+  contract_version: 23, backend: 'vibey', model_id: modelId,
   manual_override: null, route_origin: 'automatic', current: { source_id: 'src_openai', model_id: modelId },
   chain: [{ source_id: 'src_openai', model_id: modelId, channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }],
   supply_state: 'ok',

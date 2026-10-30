@@ -54,7 +54,7 @@
   "additionalProperties": false,
   "properties": {
     "contract_version": {
-      "enum": [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22],
+      "enum": [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23],
       "$comment": "The only versioned object written to disk, so released versions form a set rather than a constant. Historical records validate after the existing persistence-read normalization of retired reasons; tests/fixtures/model_hub/released_v5_permission_denied.json exercises that boundary, not raw-file validation. Reading preserves the writer generation and requires no new route fields. New records carry the terminal member. Other versioned objects are ephemeral envelopes pinned to that value alone.",
       "description": "Generation that wrote this record. Readers retain every supported released value, apply existing retired-reason normalization independently of version, and do not require route_origin or manual_override."
     },
@@ -527,7 +527,7 @@
   ],
   "examples": [
     {
-      "contract_version": 22,
+      "contract_version": 23,
       "turn_id": "turn_01k9x2m4",
       "ts": "2026-07-29T06:32:11Z",
       "agent": "claude",
@@ -552,7 +552,7 @@
       "blockers": []
     },
     {
-      "contract_version": 22,
+      "contract_version": 23,
       "turn_id": "turn_01k9x33p",
       "ts": "2026-07-29T06:41:02Z",
       "agent": "opencode",
@@ -573,7 +573,7 @@
       "blockers": []
     },
     {
-      "contract_version": 22,
+      "contract_version": 23,
       "turn_id": "turn_01k9x3zq",
       "ts": "2026-07-29T06:48:20Z",
       "agent": "codex",
@@ -593,7 +593,7 @@
       ]
     },
     {
-      "contract_version": 22,
+      "contract_version": 23,
       "turn_id": "turn_01k9x4b7",
       "ts": "2026-07-29T07:02:44Z",
       "agent": "claude",
@@ -613,7 +613,7 @@
       "blockers": []
     },
     {
-      "contract_version": 22,
+      "contract_version": 23,
       "turn_id": "turn_modelmissing01",
       "ts": "2026-09-05T17:31:10Z",
       "agent": "claude",
@@ -635,7 +635,7 @@
       "blockers": []
     },
     {
-      "contract_version": 22,
+      "contract_version": 23,
       "turn_id": "turn_01k9x5ca",
       "ts": "2026-07-29T07:08:00Z",
       "agent": "codex",

@@ -174,6 +174,36 @@ describe('search service activation and mixed order', () => {
     expect(onSave).toHaveBeenCalledWith('web_search', { services: { src_exakeyless: { enabled: false } } });
   });
 
+  it('switches a web-search model executor off and on, and a switched-off one ends the order without moves', async () => {
+    const model = ACTIVE_SEARCH.executor_candidates.find((row) => row.kind === 'model')!;
+    const onSave = vi.fn();
+    // A server with the switch (contract v23) sends it on each web-search model executor.
+    tab({ ...ACTIVE_SEARCH, executor_candidates: ACTIVE_SEARCH.executor_candidates.map((row) => (row.kind === 'model' ? { ...row, settings: { enabled: true } } : row)) }, onSave);
+    const row = () => document.querySelector(`[data-executor="${model.source_id}"]`) as HTMLElement;
+    await userEvent.click(within(row()).getByRole('switch', { name: 'Use for web search' }));
+    expect(onSave).toHaveBeenCalledWith('web_search', { executors: { [model.source_id]: { enabled: false } } });
+    cleanup();
+
+    const off = { ...model, settings: { enabled: false } };
+    const save = vi.fn();
+    tab({
+      ...ACTIVE_SEARCH,
+      effective_order: [...ACTIVE_SEARCH.effective_order.filter((id) => id !== model.source_id), model.source_id],
+      executor_candidates: [...ACTIVE_SEARCH.executor_candidates.filter((row) => row !== model), off],
+    }, save);
+    expect(within(row()).getByText('—')).toBeTruthy();
+    expect(within(row()).getByText('Not used for search')).toBeTruthy();
+    for (const button of within(row()).getAllByRole('button', { name: /^Move / })) expect((button as HTMLButtonElement).disabled).toBe(true);
+    await userEvent.click(within(row()).getByRole('switch', { name: 'Use for web search' }));
+    expect(save).toHaveBeenCalledWith('web_search', { executors: { [model.source_id]: { enabled: true } } });
+  });
+
+  it('shows no switch on a model executor from a server without one', () => {
+    tab();
+    const model = ACTIVE_SEARCH.executor_candidates.find((row) => row.kind === 'model')!;
+    expect(within(document.querySelector(`[data-executor="${model.source_id}"]`) as HTMLElement).queryByRole('switch')).toBeNull();
+  });
+
   it('opens the built-in keyless detail without key or removal actions', () => {
     const candidate = KEYLESS_ACTIVE_SEARCH.executor_candidates.find((row) => row.source_id === 'src_exakeyless');
     const vendor = KEYLESS_ACTIVE_SEARCH.service_vendors?.find((row) => row.id === 'exa-mcp');
