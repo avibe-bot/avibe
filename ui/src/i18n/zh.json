@@ -6516,6 +6516,7 @@
     "loginTitle": "登录 MCP 服务器",
     "loginHint": "在新标签页中授权；如有需要，将回调 URL 粘贴到这里。",
     "openAuthorize": "打开授权页面",
+    "authorizeFallback": "无法打开授权标签页。请点击「打开授权页面」继续。",
     "callbackPlaceholder": "粘贴回调 URL",
     "completeLogin": "完成登录",
     "loginComplete": "MCP 登录完成"

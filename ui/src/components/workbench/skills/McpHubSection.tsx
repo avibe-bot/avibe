@@ -11,6 +11,7 @@ import { Badge } from '../../ui/badge';
 import { Button } from '../../ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from '../../ui/dialog';
 import { Textarea } from '../../ui/textarea';
+import { pasteMayNeedOAuthLogin, preparedTabNeedsAuthorizeFallback } from '../../../lib/mcpPaste';
 import { navigatePreparedTab, openLinkInNewContext, openPreparedTab } from '../../../lib/pwaNavigation';
 
 const SOURCE_CHIP: Record<string, string> = {
@@ -19,32 +20,6 @@ const SOURCE_CHIP: Record<string, string> = {
   codex: 'border-violet/40 bg-violet/10 text-violet',
   opencode: 'border-cyan/40 bg-cyan/10 text-cyan-ink',
 };
-
-/** True when paste includes an HTTP MCP server that Hub can OAuth-login. */
-export function pasteMayNeedOAuthLogin(text: string): boolean {
-  try {
-    const parsed: unknown = JSON.parse(text);
-    if (!parsed || typeof parsed !== 'object') return false;
-    const servers = (parsed as { mcpServers?: unknown }).mcpServers;
-    const entries =
-      servers && typeof servers === 'object' && !Array.isArray(servers)
-        ? Object.values(servers as Record<string, unknown>)
-        : [parsed];
-    return entries.some(isOAuthEligiblePasteServer);
-  } catch {
-    return false;
-  }
-}
-
-function isOAuthEligiblePasteServer(value: unknown): boolean {
-  if (!value || typeof value !== 'object') return false;
-  const server = value as Record<string, unknown>;
-  const url = typeof server.url === 'string' && server.url.trim();
-  if (!url || server.command) return false;
-  const headers = server.headers;
-  if (!headers || typeof headers !== 'object' || Array.isArray(headers)) return true;
-  return !Object.keys(headers as Record<string, unknown>).some((key) => key.toLowerCase() === 'authorization');
-}
 
 function McpToolCard({
   name,
@@ -210,10 +185,22 @@ export const McpHubSection: React.FC = () => {
         loginInFlight.current = false;
         return;
       }
-      navigatePreparedTab(tab, res.authorizeUrl);
-      if (res.mode !== 'direct') {
+      const authorize = res.authorizeUrl ?? null;
+      if (authorize && !preparedTabNeedsAuthorizeFallback(tab)) {
+        navigatePreparedTab(tab, authorize);
+      } else {
+        navigatePreparedTab(tab, null);
+      }
+      if (authorize && preparedTabNeedsAuthorizeFallback(tab)) {
         setLoginFor({ name: server.name });
-        setAuthorizeUrl(res.authorizeUrl ?? null);
+        setAuthorizeUrl(authorize);
+        showToast(t('mcpHub.authorizeFallback'), 'error', {
+          label: t('mcpHub.openAuthorize'),
+          onClick: () => openLinkInNewContext(authorize, 'noopener,noreferrer'),
+        });
+      } else if (res.mode !== 'direct') {
+        setLoginFor({ name: server.name });
+        setAuthorizeUrl(authorize);
       }
     } catch {
       navigatePreparedTab(tab, null);

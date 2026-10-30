@@ -605,10 +605,14 @@ class McpRuntime:
         transport = dict(definition.get("transport") or {})
         if transport.get("type") == STDIO and not transport.get("cwd"):
             transport["cwd"] = repository.default_cwd()
-        return {
+        comparable = {
             "name": definition.get("name"),
             "transport": transport,
         }
+        oauth = definition.get("oauth")
+        if isinstance(oauth, dict):
+            comparable["oauth"] = {key: oauth.get(key) for key in ("clientId", "scopes")}
+        return comparable
 
     @staticmethod
     def _save_one(definition: dict[str, Any], replace: bool) -> str:

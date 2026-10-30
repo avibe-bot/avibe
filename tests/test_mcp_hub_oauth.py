@@ -262,6 +262,25 @@ def test_runtime_caches_one_provider_per_server(runtime):
     asyncio.run(exercise())
 
 
+def test_readd_with_new_oauth_client_id_is_exists_not_unchanged(runtime, loopback):
+    url = f"{loopback.origin}/mcp"
+    first = _run(runtime, "add", {"servers": [{"name": "suno", "server": {"url": url, "oauth": {"clientId": "old"}}}]})
+    assert first["ok"] is True
+    blocked = _run(runtime, "add", {"servers": [{"name": "suno", "server": {"url": url, "oauth": {"clientId": "new"}}}]})
+    assert blocked["ok"] is False
+    assert blocked["failed"][0]["type"] == "exists"
+    replaced = _run(runtime, "add", {"servers": [{"name": "suno", "server": {"url": url, "oauth": {"clientId": "new"}}}], "replace": True})
+    assert replaced["ok"] is True
+    saved = repository.read_avibe_definition("suno")
+    assert saved["oauth"]["clientId"] == "new"
+
+    async def cached_client():
+        provider = await runtime._oauth_provider(saved)
+        return provider.context.client_info.client_id
+
+    assert asyncio.run(cached_client()) == "new"
+
+
 def test_oauth_provider_cache_invalidates_on_client_id_change(runtime):
     first_def = definition_from_provider("suno", {"url": "https://api.example/mcp", "oauth": {"clientId": "old"}})
     second_def = definition_from_provider("suno", {"url": "https://api.example/mcp", "oauth": {"clientId": "new"}})

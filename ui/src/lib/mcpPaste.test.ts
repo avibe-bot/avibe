@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { pasteMayNeedOAuthLogin } from './McpHubSection';
+import { pasteMayNeedOAuthLogin, preparedTabNeedsAuthorizeFallback } from './mcpPaste';
 
 describe('pasteMayNeedOAuthLogin', () => {
   it('is true for an HTTP URL server without Authorization', () => {
@@ -59,5 +59,19 @@ describe('pasteMayNeedOAuthLogin', () => {
 
   it('is false when JSON cannot be parsed', () => {
     expect(pasteMayNeedOAuthLogin('{not json')).toBe(false);
+  });
+});
+
+describe('preparedTabNeedsAuthorizeFallback', () => {
+  it('falls back when the popup was blocked', () => {
+    expect(preparedTabNeedsAuthorizeFallback(null)).toBe(true);
+  });
+
+  it('falls back when the prepared tab was closed before navigation', () => {
+    expect(preparedTabNeedsAuthorizeFallback({ closed: true } as Window)).toBe(true);
+  });
+
+  it('does not fall back for an open prepared tab', () => {
+    expect(preparedTabNeedsAuthorizeFallback({ closed: false } as Window)).toBe(false);
   });
 });
