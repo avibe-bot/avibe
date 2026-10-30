@@ -256,7 +256,7 @@ def test_native_load_failure_selects_honest_transport_before_send(local_fixture,
 
 
 @pytest.mark.parametrize("status,code,terminal", [
-    (401, "fetch_refused", True), (403, "fetch_challenge", False),
+    (401, "fetch_refused", True), (403, "fetch_target_unreadable", False),
     (404, "fetch_target_unreadable", False), (410, "fetch_target_unreadable", False),
     (429, "service_rate_limited", False), (503, "fetch_unavailable", False),
 ])
@@ -276,6 +276,31 @@ def test_503_explicit_challenge_has_no_transient_host_class(local_fixture):
     responses["https://example.com/"] = HopResponse(503, [("cf-mitigated", "challenge")], b"challenge")
     with pytest.raises(FetchFailure, match="fetch_challenge"):
         worker.fetch_document("https://example.com/", "en", events.append)
+
+
+@pytest.mark.parametrize("status,header,value,code", [
+    (202, "x-amzn-waf-action", "challenge", "fetch_challenge"),
+    (405, "x-amzn-waf-action", "captcha", "fetch_challenge"),
+    (200, "X-Amzn-Waf-Action", "CHALLENGE", "fetch_challenge"),
+    (401, "x-amzn-waf-action", "captcha", "fetch_challenge"),
+    (429, "x-amzn-waf-action", "challenge", "fetch_challenge"),
+    (302, "x-amzn-waf-action", "challenge", "fetch_challenge"),
+    (503, "cf-mitigated", "challenge", "fetch_challenge"),
+    (200, "cf-mitigated", "challenge", "fetch_challenge"),
+    (202, "x-amzn-waf-action", "allow", "fetch_target_unreadable"),
+    (405, "unrelated", "captcha", "fetch_target_unreadable"),
+    (503, "cf-mitigated", "other", "fetch_unavailable"),
+    (403, "cf-mitigated", "other", "fetch_target_unreadable"),
+    (403, "cf-mitigated", "challenge", "fetch_challenge"),
+])
+def test_explicit_waf_challenge_headers_on_any_status(local_fixture, status, header, value, code):
+    """Header facts, not page prose or a broad status set, identify challenges."""
+    responses, calls, _, events = local_fixture
+    responses["https://example.com/"] = HopResponse(status, [(header, value)], b"")
+    with pytest.raises(FetchFailure) as raised:
+        worker.fetch_document("https://example.com/", "en", events.append)
+    assert raised.value.code == code and not raised.value.terminal
+    assert len(calls) == 1
 
 
 def test_redirect_to_private_terminates_without_second_connect(local_fixture):

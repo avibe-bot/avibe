@@ -60,6 +60,34 @@ async def test_jina_builtin_fetch_is_admitted_with_reader_headers():
     assert limited.cooling and not limited.target_failure
 
 
+@pytest.mark.parametrize("target_status", [400, 401, 403, 404, 408, 429, 500, 599])
+def test_jina_target_http_error_is_not_completed_content(target_status):
+    """Reader FormattedPageDto.httpStatus describes the target, not API health."""
+    jina = next(item for item in fetch_service_catalog() if item["vendor"] == "jina-reader")
+    mapped = map_fetch_response(
+        jina, SearchResponse(200, {}, json.dumps({"code": 200, "data": {
+            "httpStatus": target_status, "content": "404: Not Found", "url": "https://example.com/",
+        }}).encode()), requested_url="https://example.com/", sent=True, say=lambda key, **_: key,
+    )
+    assert mapped.record["status"] == "failed"
+    assert mapped.record["error_code"] == "fetch_target_unreadable"
+    assert mapped.target_failure and not mapped.cooling and mapped.blocker is None
+    assert mapped.cost.usd == 0 and not mapped.billable and not mapped.uncertain
+
+
+@pytest.mark.parametrize("target_status", [None, 200, 399, "404", True, 600])
+def test_jina_never_guesses_target_error_from_content_or_warning(target_status):
+    jina = next(item for item in fetch_service_catalog() if item["vendor"] == "jina-reader")
+    mapped = map_fetch_response(
+        jina, SearchResponse(200, {}, json.dumps({"data": {
+            "httpStatus": target_status, "content": "404: Not Found",
+            "warning": "Target URL returned error 404: Not Found",
+        }}).encode()), requested_url="https://example.com/", sent=True, say=lambda key, **_: key,
+    )
+    assert mapped.record["status"] == "completed"
+    assert mapped.record["content"] == "404: Not Found"
+
+
 def test_exa_mcp_markdown_text_block_preserves_page_text_and_leading_metadata():
     exa = next(item for item in fetch_service_catalog() if item["vendor"] == "exa-mcp")
     text = "# Example page\nURL: https://example.com/page\nPublished: 2026-10-25\nAuthor: Example\n\n# Body\nURL: https://example.com/in-page\n"
@@ -163,6 +191,52 @@ async def test_failed_fetch_service_attempt_logs_redacted_transport_facts(tmp_pa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("text,is_error,expected_cause,expected_code", [
+    ("Error fetching URL(s): https://private.example/x?q=secret: CRAWL_LIVECRAWL_TIMEOUT", True,
+     "CRAWL_LIVECRAWL_TIMEOUT", "fetch_target_unreadable"),
+    ("Error fetching URL(s): https://private.example/x: CRAWL_NOT_FOUND", True,
+     "CRAWL_NOT_FOUND", "fetch_target_unreadable"),
+    ("Error fetching URL(s): https://private.example/CRAWL_FROM_URL: CRAWL_NOT_FOUND", True,
+     "CRAWL_NOT_FOUND", "fetch_target_unreadable"),
+    ("Error fetching URL(s): https://private.example/CRAWL_FROM_URL", True,
+     "mcp_isError=true", "fetch_target_unreadable"),
+    ("Error fetching URL(s): https://private.example/x: CRAWL_" + "A" * 41, True,
+     "mcp_isError=true", "fetch_target_unreadable"),
+    ("Error fetching URL(s): https://private.example/x: CRAWL_ERROR_123", True,
+     "mcp_isError=true", "fetch_target_unreadable"),
+    ("secret page body", True, "mcp_isError=true", "service_unavailable"),
+    ("An article discussing CRAWL_NOT_FOUND", False, None, None),
+])
+async def test_exa_keyless_fetch_logs_only_bounded_error_wrapper_tag(tmp_path, caplog, text, is_error, expected_cause, expected_code):
+    """An error wrapper supplies a cause, not a URL/prose or service cooldown."""
+    service, config = _service(
+        tmp_path, enabled={LOCAL: False, EXA: False, FREE_EXA: True, JINA: False}, order=(FREE_EXA,),
+    )
+    caplog.set_level(logging.WARNING, logger="core.handlers.model_hub.service_diagnostics")
+
+    async def fetch(*args, on_sent):
+        await on_sent()
+        return SearchResponse(200, {}, json.dumps({"result": {
+            "isError": is_error, "content": [{"type": "text", "text": text}],
+        }}).encode())
+
+    service.adapter.fetch = fetch
+    result = await service.run_hosted_tool(
+        "web_fetch", {"arguments": {"url": "https://private.example/x?q=secret"}},
+        turn=service.freeze_turn_hosted_tools(config),
+    )
+    assert result["record"].get("error_code") == expected_code
+    records = [r for r in caplog.records if r.name == "core.handlers.model_hub.service_diagnostics"]
+    assert len(records) == (0 if expected_cause is None else 1)
+    if records:
+        message = records[0].getMessage()
+        assert f"transport_cause={expected_cause} elapsed_ms=" in message
+        assert "private.example" not in message and "secret" not in message and "https://" not in message
+    if expected_code == "fetch_target_unreadable":
+        assert service._service_cooldowns.until(model_hub_builtin_source(FREE_EXA), "exa/mcp", service.now()) is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("sid,status,body,expected,delay", [
     (FREE_EXA, 429, {}, "service_rate_limited", 600),
     (FREE_EXA, 500, {}, "service_unavailable", 30),
@@ -184,6 +258,7 @@ async def test_failed_fetch_service_attempt_logs_redacted_transport_facts(tmp_pa
     (JINA, 500, {}, "service_unavailable", 60),
     (JINA, 401, {}, "service_refused", None),
     (JINA, 403, {}, "service_refused", None),
+    (JINA, 200, {"data": {"httpStatus": 404, "content": "404: Not Found"}}, "fetch_target_unreadable", None),
 ])
 async def test_keyless_response_settles_real_shared_cooldown_and_free_usage(tmp_path, sid, status, body, expected, delay):
     """Mapper-only checks missed the lost admission generation and generic MCP refusal branch."""

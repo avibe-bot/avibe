@@ -6,6 +6,7 @@ only bounded facts (never cookies, headers, or credentials).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -173,7 +174,8 @@ def fetch_document(url: str, locale: str, exchange, *, remaining_seconds: float 
         exchange({"event": "phase", "phase": "fetch"})
         return result
 
-    budget, cookies, seen = TransferBudget(), OriginCookies(), set()
+    budget = TransferBudget(on_response=lambda status: exchange({"event": "response", "http_status": status}))
+    cookies, seen = OriginCookies(), set()
     native, reason = native_available()
     exchange({"event": "transport", "transport_degraded": not native, "transport_degraded_reason": reason})
     hop = curl_hop if native else httpx_hop
@@ -196,11 +198,16 @@ def fetch_document(url: str, locale: str, exchange, *, remaining_seconds: float 
         resolve(current)  # Policy precedes even a host-cooldown skip.
         exchange({"event": "host", "host": address.host})
         target = resolve(current)
-        if target.address.url in seen:
+        cookie = cookies.header(address)
+        # Only effective cookies for this URL may justify a revisit. Unrelated
+        # origins/paths and refreshed expiry timestamps cannot disguise a loop.
+        visit = (target.address.url, hashlib.sha256(cookie.encode("utf-8")).digest())
+        if visit in seen:
+            exchange({"event": "phase", "phase": "loop"})
             raise FetchFailure("fetch_target_unreadable")
-        seen.add(target.address.url)
+        seen.add(visit)
         headers = request_headers(degraded=not native, locale=locale, previous_origin=previous, target=target)
-        if cookie := cookies.header(address):
+        if cookie:
             headers["Cookie"] = cookie
         stage = "fetch"
         allowance = max(0.01, deadline - time.monotonic())
@@ -208,12 +215,19 @@ def fetch_document(url: str, locale: str, exchange, *, remaining_seconds: float 
 
         def mark_hop_sent():
             nonlocal hop_sent
-            on_sent()
-            hop_sent = True
+            if not hop_sent:
+                on_sent()
+                exchange({"event": "hop"})
+                hop_sent = True
 
         try:
             response = hop(target, headers, budget, allowance, mark_hop_sent)
             cookies.receive(address, response.headers)
+            # Explicit WAF headers are authoritative on any status (including
+            # AWS's 202/405). Do not broaden status-only detection or scan prose.
+            if (response.header("cf-mitigated").strip().lower() == "challenge"
+                    or response.header("x-amzn-waf-action").strip().lower() in {"challenge", "captcha"}):
+                raise FetchFailure("fetch_challenge")
             if response.status == 401:
                 raise FetchFailure("fetch_refused", terminal=True)
             if response.status == 429:
@@ -226,10 +240,8 @@ def fetch_document(url: str, locale: str, exchange, *, remaining_seconds: float 
                 # Always gate the selected redirect, even at the hop bound.
                 resolve(current)
                 continue
-            if response.status in {404, 410, 408}:
+            if response.status in {403, 404, 410, 408}:
                 raise FetchFailure("fetch_target_unreadable")
-            if response.status == 403 or (response.status == 503 and response.header("cf-mitigated").lower() == "challenge"):
-                raise FetchFailure("fetch_challenge")
             if response.status != 200:
                 raise FetchFailure("fetch_unavailable" if response.status >= 500 else "fetch_target_unreadable",
                                    retry_after=response.header("retry-after") or None)
@@ -283,6 +295,7 @@ def fetch_document(url: str, locale: str, exchange, *, remaining_seconds: float 
                 break
             raise FetchFailure(code, cooldown_suppressed=suppressed) from None
     else:
+        exchange({"event": "phase", "phase": "loop"})
         raise FetchFailure("fetch_target_unreadable")
     for field in ("follow_url", "follow_kind"):
         result.pop(field, None)

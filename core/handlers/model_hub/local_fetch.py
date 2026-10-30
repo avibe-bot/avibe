@@ -22,6 +22,7 @@ import psutil
 from .async_owner import await_owned_task
 from core.web_fetch_worker.policy import FetchFailure, parse_url
 from .retry import retry_after_deadline
+from .service_diagnostics import log_local_failure
 
 
 _WORKER = "import sys; sys.path.insert(0, sys.argv.pop(1)); from core.web_fetch_worker.worker import main; main()"
@@ -107,10 +108,19 @@ class LocalFetchEngine:
         return {"error_code": code, "terminal": False, "cooldown_suppressed": code == "fetch_timeout"}
 
     async def _run(self, operation, url, *, deadline, locale="en", on_sent=None):
+        started_at = time.monotonic()
         state = {"operation": operation, "sent": False, "host": None, "held_host": None, "slot": False,
-                 "waiting": True, "phase": "policy" if operation == "gate" else "admission"}
+                 "waiting": True, "phase": "policy" if operation == "gate" else "admission",
+                 "http_status": None, "hop_count": 0}
         try:
-            return await self._run_owned(operation, url, state, deadline=deadline, locale=locale, on_sent=on_sent)
+            result = await self._run_owned(operation, url, state, deadline=deadline, locale=locale, on_sent=on_sent)
+            if operation == "fetch" and result.get("error_code") and (state["sent"] or not result.get("skipped")):
+                await log_local_failure(
+                    error_code=result["error_code"], http_status=state["http_status"], hop_count=state["hop_count"],
+                    phase=state["phase"], transport_degraded=state.get("transport", {}).get("transport_degraded"),
+                    elapsed_ms=round((time.monotonic() - started_at) * 1000),
+                )
+            return result
         finally:
             # Publish the settled host-health outcome before waking any waiter.
             # Child reaping completes inside _run_owned on success/timeout/Stop.
@@ -219,6 +229,10 @@ class LocalFetchEngine:
                         if until > time.time():
                             return {"error_code": "fetch_unavailable", "skipped": "cooling", "terminal": False,
                                     "retry_at": datetime.fromtimestamp(until, timezone.utc).isoformat()}
+                    elif kind == "response":
+                        state["http_status"] = event["http_status"]
+                    elif kind == "hop":
+                        state["hop_count"] += 1
                     elif kind == "phase":
                         state["phase"] = event["phase"]
                     elif kind == "fallback":

@@ -302,7 +302,8 @@ tested. No service restart or user installation is part of this design lane.
 
 One chain deadline: **180 s**; each local/service attempt: **30 s**, including
 DNS, lock wait, redirects and extraction; connect/TLS: **5 s** within that.
-Local: five redirect hops, 16 MiB HTML/text/JSON or 32 MiB PDF, separately counted
+Local: at most six fetches (the initial request plus five redirects/follows),
+16 MiB HTML/text/JSON or 32 MiB PDF, separately counted
 on the wire and after decompression across all hops/alternates. Bound headers
 (64 KiB per hop, including informational headers/trailers), URLs and cookies (64 entries, 4 KiB each); reject oversized announced
 lengths and abort streamed unknown lengths at the same cap. Native libcurl
@@ -337,10 +338,18 @@ credential, custom proxy or user secret. A fresh in-memory jar accepts only vali
 cookies received in this redirect chain, sends them only back to the issuing
 origin (stricter than Domain matching), and is discarded; no cookies or headers
 in logs/history. Never forward them to an API executor. Referer is absent.
+Loop detection keys each normalized URL by a digest of the effective outgoing
+cookie header for that URL. A callback that changes an origin's applicable
+cookies can revisit the original page; unrelated-origin/path cookies or expiry
+refreshes with the same outgoing value cannot buy another visit. Remember every
+visited state, including older states if cookies cycle back. The six-fetch bound
+and policy/DNS gate on every hop stay unchanged: four sign-in redirects plus the
+final document use five fetches. Cookie digests are worker-local and never logged.
 No JS, iframe requests, images or other subresources. No separate `robots.txt`
 preflight for a user-selected page: recommendation avoids a second crawl/policy
 surface; respect direct refusals and 429 advice. This is not an assertion that
-sites permit automated access.
+sites permit automated access. HTTP challenge classification requires an explicit
+known WAF header (§6); a bare 403 is a target failure, not evidence of verification.
 
 | Input | Local normalization |
 | --- | --- |
@@ -530,6 +539,17 @@ is Markdown, with title/URL metadata when present. Do not use
 engines); no OCR, screenshots, proxy/cookie headers, generated captions or script
 injection. Default Reader renders JS server-side. Provider truncation uses §4.
 
+Target-error mapping rechecked **2026-10-30** against `https://jina.ai/reader/`,
+`https://docs.jina.ai/` and its `https://docs.jina.ai/openapi.json`. The Reader JSON
+response references `FormattedPageDto`, whose optional numeric `httpStatus`
+(and `httpStatusText`) describes the crawled page. On an API HTTP 200, an integral
+`data.httpStatus` in 400–599 is `fetch_target_unreadable`, even with nonempty
+`data.content`; it is not a service failure or shared cooldown. Never use the
+outer API `code`, free-form `warning`, or phrases in `data.content` as target
+status evidence. Missing/malformed target status is not evidence of an HTTP
+error; the existing content checks still apply. No live Jina API call is needed
+to validate this mapping.
+
 The Reader page lists **20 RPM without a key**, per-IP/key limits; the API docs'
 general bearer-auth examples do not negate that specific keyless table. Reserve
 an in-memory rolling-minute slot before send (20 per runtime, not per Session);
@@ -583,13 +603,39 @@ is a no-send `service_busy` skip, not a provider fault, cost or shared cooldown.
 | Invalid argument / address refusal / DNS failure or full DNS allowance expiry | terminal, no third-party forwarding; preserve any earlier sent attempts |
 | Local attempt budget exhausted during admission/revalidation | no-send `service_busy` skip, or `fetch_timeout` after a local send; no cooldown; re-gate only the original requested URL before the next candidate |
 | Usable content | end with completed record |
-| Local 403/503 challenge, JS shell, empty page, unsupported type | next enabled candidate, no local retry/headless path |
-| Local 404/410, connect/TLS/timeout/server failure | next; bounded host cooldown where transient |
+| Local explicit WAF challenge, JS shell, empty page, unsupported type | next enabled candidate, no local retry/headless path |
+| Local bare 403/404/410, connect/TLS/timeout/server failure | next; bounded host cooldown where transient |
 | Local 401/login wall | terminal `fetch_refused`, no forwarding or credential access |
 | Configured 401 / catalog credential-403; 402; named spend limit | Source needs-action with existing generation fences, next |
 | Provider URL refusal / proven target failure | `service_refused` / `fetch_target_unreadable`, next; no service health write |
 | 429 | rate-limit attempt + scope-specific cooldown above, next **without sleeping**; server advice never shortened |
 | Service redirect, unexpected HTTP error, timeout, malformed/oversized response | existing `service_unavailable`/`service_unreadable`, next |
+
+Local HTTP challenge detection recognizes `cf-mitigated: challenge` and
+`x-amzn-waf-action: challenge` / `captcha` on **any** HTTP status (including AWS
+202/405), before ordinary status handling. There is **no status-only challenge
+set**: bare 403 and unmarked 202/405 are non-terminal target-unreadable failures;
+unmarked 503 is unavailable.
+No new page-body phrase matching or JS/WAF bypass is introduced.
+
+The shared `service_diagnostics` owner writes exactly one WARNING per failed
+local attempt (not a policy-only gate, no-send skip, Stop, success, or retained
+HTML success). It includes only `tool=web_fetch`, `source_id=src_localfetch`,
+`error_code`, last observed `http_status` (None before any response), `hop_count`
+(number of HTTP requests sent, including the initial request), `cause`, transport
+(`native`/`degraded`; `unknown` only if worker startup failed before selection),
+and `elapsed_ms`. Causes are closed categories: `loop` (including hop exhaustion),
+`http_status` (including HTTP exchange failures), `challenge`, `extract_empty`
+(including unusable/rejected extraction), `timeout`, `dns`, or `policy`.
+The parent receives status before body reading so timeout/size aborts retain it.
+These are internal IPC/log facts only, not persisted record/attempt fields; no
+contract version change. Never log URL, host, query, cookie/digest, headers,
+exception prose or body content. For Exa MCP failures, `isError: true` plus the
+`Error fetching URL(s): <url>: <tag>` wrapper can supply a bounded terminal tag
+matching `CRAWL_[A-Z_]{1,40}` as `transport_cause`. Neither successful document
+text nor tag-looking URL paths/queries may supply it. Missing/invalid tags keep
+`mcp_isError=true`; this diagnostic does not change target-failure settlement or
+introduce a service cooldown. Wrapper shape rechecked by the owner on 2026-10-30.
 
 Use existing stable service codes, adding `service_busy` for no-send contention
 and `fetch_target_unreadable` for the target boundary. Local adds `fetch_url_blocked`,
@@ -805,7 +851,8 @@ Checked 2026-10-24; implementation re-verifies its pinned versions before shippi
   pricing: `https://exa.ai/pricing`.
 - DeepSeek: `https://api-docs.deepseek.com/guides/search/`.
 - Anthropic: `https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-fetch-tool`.
-- Jina: `https://jina.ai/reader/`, `https://docs.jina.ai/`, `https://jina.ai/legal/`.
+- Jina: `https://jina.ai/reader/`, `https://docs.jina.ai/`,
+  `https://docs.jina.ai/openapi.json`, `https://jina.ai/legal/`.
 - curl_cffi wheel manifest: `https://pypi.org/pypi/curl-cffi/0.16.3/json`;
   pinned adapter: `https://github.com/lexiforest/curl_cffi/tree/v0.16.3/curl_cffi`;
   libcurl pin: `https://curl.se/libcurl/c/CURLOPT_RESOLVE.html`.

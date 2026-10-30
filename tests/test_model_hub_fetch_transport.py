@@ -5,6 +5,8 @@ exercise real libcurl/HTTPcore sockets, not a mock implementing the pin policy.
 """
 import gzip
 import io
+import logging
+import time
 import zlib
 import socket
 import threading
@@ -13,8 +15,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import httpcore
 import pytest
 
-from core.web_fetch_worker import transport
-from core.web_fetch_worker.policy import CheckedTarget, FetchFailure, FetchURL
+from core.handlers.model_hub import local_fetch
+from core.web_fetch_worker import transport, worker
+from core.web_fetch_worker.policy import CheckedTarget, FetchFailure, FetchURL, parse_url
 
 
 # Static codec fixtures keep optional Python codecs out of every install/test
@@ -38,6 +41,50 @@ def stub():
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             requests.append((self.path, dict(self.headers)))
+            if self.path.startswith(("/gemini-api/", "/oauth2", "/o/oauth2/", "/loop")):
+                port = self.server.server_port
+                routes = {
+                    "/gemini-api/docs/thought-signatures": "/oauth2authorize",
+                    "/oauth2authorize": f"http://accounts.example:{port}/o/oauth2/v2/auth",
+                    "/o/oauth2/v2/auth": f"http://public.example:{port}/oauth2callback",
+                    "/oauth2callback": "/gemini-api/docs/thought-signatures",
+                    "/loop": "/loop",
+                }
+                if self.path == "/gemini-api/docs/thought-signatures" and "signin=autosignin" in self.headers.get("Cookie", ""):
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/markdown")
+                    self.end_headers()
+                    self.wfile.write(b"# Thought signatures | Gemini API\n\nA readable public document.")
+                else:
+                    self.send_response(302)
+                    self.send_header("Location", routes[self.path])
+                    if self.path == "/oauth2callback":
+                        self.send_header("Set-Cookie", "signin=autosignin; Path=/; HttpOnly")
+                    self.end_headers()
+                return
+            if self.path == "/challenge":
+                self.send_response(202)
+                self.send_header("x-amzn-waf-action", "challenge")
+                self.end_headers()
+                return
+            if self.path == "/empty":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.end_headers()
+                return
+            if self.path == "/slow-body":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", "10")
+                self.end_headers()
+                time.sleep(2)
+                return
+            if self.path.startswith("/diagnostic"):
+                self.send_response(302)
+                self.send_header("Location", "/status/404")
+                self.send_header("Set-Cookie", "private-cookie=never-log-this; Path=/")
+                self.end_headers()
+                return
             if self.path.startswith("/encoded/") or self.path == "/wire-padding":
                 if self.path == "/wire-padding":
                     stream = io.BytesIO()
@@ -110,6 +157,86 @@ def stub():
         server.shutdown()
         thread.join()
         server.server_close()
+
+
+@pytest.mark.parametrize("native", [True, False])
+def test_cookie_setting_signin_redirect_revisits_original_url(stub, monkeypatch, native):
+    """WF-LOCAL-002: real sockets reproduce four redirects, then a cookie-only 200.
+
+    The URL-only loop guard rejects the last request; ordinary redirect tests
+    never revisit a URL after the origin's outgoing cookie header changes.
+    """
+    if native:
+        pytest.importorskip("curl_cffi")
+    port, requests = stub
+    gates, events = [], []
+
+    def resolve(url):
+        gates.append(url)
+        return CheckedTarget(parse_url(url), ("127.0.0.1",))
+
+    monkeypatch.setattr(worker, "resolve_target", resolve)
+    monkeypatch.setattr(transport, "native_available", lambda: (native, None if native else "native_library_unavailable"))
+    url = f"http://public.example:{port}/gemini-api/docs/thought-signatures"
+    result = worker.fetch_document(url, "en", events.append)
+    assert result["final_url"] == url and "Thought signatures" in result["content"]
+    assert len(requests) == 5  # Four redirects plus final fetch fits six-fetch bound.
+    assert requests[-1][1]["Cookie"] == "signin=autosignin"
+    assert all("Cookie" not in headers for _, headers in requests[:-1])
+    assert len([event for event in events if event["event"] == "sent"]) == 1
+    assert all(f"http://{headers['Host']}{path}" in gates for path, headers in requests)
+    requests.clear()
+    with pytest.raises(FetchFailure, match="fetch_target_unreadable"):
+        worker.fetch_document(f"http://public.example:{port}/loop", "en", events.append)
+    assert len(requests) == 1  # No cookie change: a genuine loop is still rejected.
+
+
+@pytest.mark.parametrize("native", [True, False])
+@pytest.mark.parametrize("path,status,hops,cause,code", [
+    ("/diagnostic?private-query=do-not-log", 404, 2, "http_status", "fetch_target_unreadable"),
+    ("/loop", 302, 1, "loop", "fetch_target_unreadable"),
+    ("/challenge", 202, 1, "challenge", "fetch_challenge"),
+    ("/empty", 200, 1, "extract_empty", "fetch_target_unreadable"),
+    ("/slow-body", 200, 1, "timeout", "fetch_timeout"),
+])
+async def test_local_failure_logs_one_redacted_warning_from_real_worker(stub, monkeypatch, caplog, native, path, status, hops, cause, code):
+    """The worker/parent IPC must preserve facts without persisting URL or headers."""
+    if native:
+        pytest.importorskip("curl_cffi")
+    port, _ = stub
+    script = '''import sys
+sys.path.insert(0, sys.argv.pop(1))
+from core.web_fetch_worker import worker, transport
+from core.web_fetch_worker.policy import CheckedTarget, parse_url
+worker.resolve_target = lambda url: CheckedTarget(parse_url(url), ("127.0.0.1",))
+transport.native_available = lambda: (NATIVE, None if NATIVE else "native_library_unavailable")
+original_hop = transport.curl_hop if NATIVE else transport.httpx_hop
+def bounded_hop(target, headers, budget, timeout, on_sent):
+    if target.address.url.endswith("/slow-body"):
+        timeout = 1  # Transport timeout starts after worker startup, not before it.
+    return original_hop(target, headers, budget, timeout, on_sent)
+if NATIVE:
+    transport.curl_hop = bounded_hop
+else:
+    transport.httpx_hop = bounded_hop
+worker.main()
+'''.replace("NATIVE", repr(native))
+    monkeypatch.setattr(local_fetch, "_WORKER", script)
+    caplog.set_level(logging.WARNING, logger="core.handlers.model_hub.service_diagnostics")
+    url = f"http://public.example:{port}{path}"
+    result = await local_fetch.LocalFetchEngine().fetch(url, deadline=time.monotonic() + 10)
+    assert result["error_code"] == code
+    records = [r for r in caplog.records if r.name == "core.handlers.model_hub.service_diagnostics"]
+    assert len(records) == 1 and records[0].levelno == logging.WARNING
+    message = records[0].getMessage()
+    for field in ("tool=web_fetch", "source_id=src_localfetch", f"error_code={code}",
+                  f"http_status={status}", f"hop_count={hops}", f"cause={cause}",
+                  f"transport={'native' if native else 'degraded'}", "elapsed_ms="):
+        assert field in message
+    assert int(message.split("elapsed_ms=")[1].split()[0]) >= 0
+    for private in (url, "public.example", "accounts.example", "private-query", "private-cookie", "never-log-this", "not gzip"):
+        assert private not in message
+    assert "http_status" not in result and "hop_count" not in result and "cause" not in result
 
 
 @pytest.mark.parametrize("native", [True, False])
