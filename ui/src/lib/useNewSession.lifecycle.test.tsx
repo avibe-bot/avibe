@@ -4,6 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { ComposerAttachment } from '../components/workbench/Composer';
 const mocks = vi.hoisted(() => ({
   create: vi.fn(), upload: vi.fn(), fetch: vi.fn(), events: undefined as undefined | (() => void),
+  fastDefault: false, setFastDefault: vi.fn(),
   projects: [
     { id: '中文项目', capabilities: { can_chat: true }, created_at: '2026-09-19T00:00:00Z' },
     { id: '其他项目', capabilities: { can_chat: true }, created_at: '2026-09-18T00:00:00Z' },
@@ -15,6 +16,8 @@ const api = {
     mocks.events = onAuthorizationChanged;
     return () => {};
   },
+  getWorkbenchPrefs: async () => ({ background_work_banner_enabled: true, fast_mode_default: mocks.fastDefault }),
+  setFastModeDefault: mocks.setFastDefault,
 };
 vi.mock('../context/ApiContext', () => ({ useApi: () => api }));
 vi.mock('../context/WorkbenchProjectsContext', () => ({ useWorkbenchProjectsTree: () => ({ projects: mocks.projects, projectsError: null, createSessionForProject: mocks.create }) }));
@@ -28,6 +31,8 @@ beforeEach(() => {
   mocks.create.mockReset().mockImplementation(async () => ({ id: `session-${mocks.create.mock.calls.length}` }));
   mocks.upload.mockReset().mockResolvedValue({ token: 'token', name: '中文.txt', mime: 'text/plain', size: 6, kind: 'file', url: '/api/media/token' });
   mocks.fetch.mockReset().mockResolvedValue(new Response('{}', { status: 201 }));
+  mocks.fastDefault = false;
+  mocks.setFastDefault.mockReset().mockResolvedValue({});
 });
 afterEach(cleanup);
 it('creates and submits once from a same-tick double send, only after explicit input', async () => {
@@ -195,4 +200,19 @@ it.each(['success', 'uncertain'])('already admitted POST %s survives suspension 
   }
   expect(mocks.create).toHaveBeenCalledTimes(1);
   expect(mocks.fetch).toHaveBeenCalledTimes(1);
+});
+
+it('starts at the remembered fast default, creates with it, and makes a change the next default', async () => {
+  mocks.fastDefault = true;
+  const { result } = mount();
+  await waitFor(() => expect(result.current.speed).toBe('fast'));
+  await waitFor(() => expect(result.current.loaded).toBe(true));
+  await act(async () => { await result.current.send('快一点'); });
+  expect(mocks.create).toHaveBeenLastCalledWith('中文项目', { speed: 'fast' });
+  expect(mocks.setFastDefault).not.toHaveBeenCalled();
+
+  act(() => result.current.setSpeed(null));
+  expect(mocks.setFastDefault).toHaveBeenLastCalledWith(false);
+  await act(async () => { await result.current.send('标准速度'); });
+  expect(mocks.create).toHaveBeenLastCalledWith('中文项目', {});
 });

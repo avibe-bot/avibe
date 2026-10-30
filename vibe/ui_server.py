@@ -6848,9 +6848,17 @@ def workbench_prefs_put():
     from vibe import api
 
     payload = request.json or {}
-    raw = payload.get("background_work_banner_enabled")
-    enabled = bool(raw) if raw is not None else None
-    return jsonify(api.set_workbench_prefs(background_work_banner_enabled=enabled))
+
+    def flag(name: str) -> bool | None:
+        raw = payload.get(name)
+        return bool(raw) if raw is not None else None
+
+    return jsonify(
+        api.set_workbench_prefs(
+            background_work_banner_enabled=flag("background_work_banner_enabled"),
+            fast_mode_default=flag("fast_mode_default"),
+        )
+    )
 
 
 @app.route("/api/csrf-token", methods=["GET"])
@@ -9965,10 +9973,13 @@ def sessions_create():
                 reasoning_effort=payload.get("reasoning_effort"),
                 title=payload.get("title"),
                 metadata=metadata,
+                speed=payload.get("speed"),
                 authorization_context=getattr(g, "authorization_context", None),
             )
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
+    except ValueError as err:
+        return jsonify({"error": str(err)}), 400
     except workbench_sessions_service.ProjectAccessDeniedError as err:
         code = err.code
         message = t("error.projectAccessDenied", _request_ui_language())
@@ -10722,6 +10733,7 @@ async def sessions_update(session_id: str):
             "agent_variant",
             "model",
             "reasoning_effort",
+            "speed",
             "visibility",
             "pinned",
             "scope_id",

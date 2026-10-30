@@ -45,6 +45,8 @@ vi.mock('../../context/ApiContext', async (importOriginal) => ({
 let catalogReasoning: Record<string, { value: string; label: string }[]> = {};
 let catalogMenus: Record<string, { omitted: string[]; not_on: Record<string, string[]> }> = {};
 let catalogLabels: Record<string, string> = {};
+// The models a Hub catalog says run at their vendor's fast tier.
+let catalogFast: string[] = [];
 // How many catalog reads were made, and whether the next ones wait to be answered.
 let catalogReads = 0;
 let deferReads = false;
@@ -62,6 +64,7 @@ vi.mock('../../lib/backendModels', async (importOriginal) => ({
       modelLabels: Record<string, string>;
       reasoningOptions: Record<string, { value: string; label: string }[]>;
       effortMenus?: Record<string, { omitted: string[]; not_on: Record<string, string[]> }>;
+      fastModels?: string[];
       hubUnread?: true;
       catalogRefreshPending: boolean;
     }) => void,
@@ -72,7 +75,9 @@ vi.mock('../../lib/backendModels', async (importOriginal) => ({
       modelLabels: catalogLabels,
       reasoningOptions: catalogReasoning,
       // As the real loader answers: only a Hub catalog carries effort menus.
-      ...(hubUnread ? { hubUnread: true as const } : hubMode === 'hub' ? { effortMenus: catalogMenus } : {}),
+      ...(hubUnread
+        ? { hubUnread: true as const }
+        : hubMode === 'hub' ? { effortMenus: catalogMenus, fastModels: catalogFast } : {}),
       catalogRefreshPending: false,
     });
     if (deferReads) pendingReads.push(answer);
@@ -598,8 +603,83 @@ describe('AgentRoutePicker compact presentation', () => {
     cleanup();
     catalogReasoning = {};
     catalogMenus = {};
+    catalogFast = [];
+    window.localStorage.clear();
     sourceNames = null;
     hubMode = 'direct';
+  });
+
+  // An owner of both the route and its speed, applying each pick at once.
+  const FastOwner: React.FC<{
+    initial: AgentRouteValue;
+    initialSpeed?: 'fast' | null;
+    onSpeed: (speed: 'fast' | null) => void;
+  }> = ({ initial, initialSpeed = null, onSpeed }) => {
+    const [route, setRoute] = useState<AgentRouteValue>(initial);
+    const [speed, setSpeed] = useState<'fast' | null>(initialSpeed);
+    return (
+      <MemoryRouter>
+        <AgentRoutePicker
+          presentation="compact"
+          value={route}
+          agents={AGENTS}
+          onChange={(patch) => setRoute((prev) => ({ ...prev, ...patch }))}
+          speed={speed}
+          onSpeedChange={(next) => {
+            setSpeed(next);
+            onSpeed(next);
+          }}
+        />
+      </MemoryRouter>
+    );
+  };
+
+  it("judges Fast on the Agent's model for a route that names none", async () => {
+    // A Session that materialized its Agent at the first turn keeps no model of its own.
+    hubMode = 'hub';
+    catalogReasoning = { sonnet: [{ value: 'low', label: 'low' }], opus: [{ value: 'low', label: 'low' }] };
+    catalogFast = ['sonnet'];
+    const user = userEvent.setup();
+    render(<FastOwner initial={{ ...CLAUDE_ROUTE, model: null }} initialSpeed="fast" onSpeed={vi.fn()} />);
+    await openMenu(user);
+    // The claude Agent's default model is sonnet, which runs fast.
+    expect((screen.getByRole('button', { name: 'chat.picker.fast' }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByLabelText('chat.picker.fastOn')).not.toBeNull();
+  });
+
+  it('offers Fast only where the model runs fast, marks the trigger while it does, and keeps the choice across a model without it', async () => {
+    hubMode = 'hub';
+    catalogReasoning = { sonnet: [{ value: 'low', label: 'low' }], opus: [{ value: 'low', label: 'low' }] };
+    catalogFast = ['opus'];
+    const user = userEvent.setup();
+    const onSpeed = vi.fn();
+    render(<FastOwner initial={{ ...CLAUDE_ROUTE, model: 'opus' }} onSpeed={onSpeed} />);
+    const mark = () => screen.queryByLabelText('chat.picker.fastOn');
+    expect(mark()).toBeNull();
+
+    await openMenu(user);
+    const toggle = () => screen.getByRole('button', { name: 'chat.picker.fast' });
+    expect(toggle().getAttribute('aria-pressed')).toBe('false');
+    // Hover or focus explains what it does.
+    expect(screen.getByRole('tooltip').textContent).toContain('chat.picker.fastDescription');
+    await user.click(toggle());
+    expect(onSpeed).toHaveBeenLastCalledWith('fast');
+    expect(toggle().getAttribute('aria-pressed')).toBe('true');
+    expect(mark()).not.toBeNull();
+
+    // A model without a fast tier keeps the choice but neither runs fast nor offers the toggle.
+    await user.click(screen.getByRole('button', { name: /^sonnet/ }));
+    expect(mark()).toBeNull();
+    expect(toggle().getAttribute('aria-pressed')).toBe('true');
+    expect((toggle() as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole('tooltip').textContent).toContain('chat.picker.fastUnavailable');
+
+    // Back on a model with one, the remembered choice runs fast again.
+    await user.click(screen.getByRole('button', { name: /^opus/ }));
+    expect(mark()).not.toBeNull();
+    await user.click(toggle());
+    expect(onSpeed).toHaveBeenLastCalledWith(null);
+    expect(mark()).toBeNull();
   });
 
   const effortGroup = () => within(screen.getByRole('radiogroup', { name: 'chat.picker.effort' }));

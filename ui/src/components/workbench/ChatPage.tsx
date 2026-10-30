@@ -3662,6 +3662,7 @@ interface ChatRoutePickerProps {
 // Read-only sessions never mount it — their header names the frozen route.
 const ChatRoutePicker: React.FC<ChatRoutePickerProps> = ({ session, agents, defaultAgentName, onPatch, patchSaving, working }) => {
   const { t } = useTranslation();
+  const api = useApi();
   const defaultAgent = defaultAgentName ? agents.find((agent) => agent.name === defaultAgentName) : null;
   // Mirrors update_session's guard. A session with a NATIVE conversation can
   // still move to another backend: the server replaces the conversation and
@@ -3720,6 +3721,12 @@ const ChatRoutePicker: React.FC<ChatRoutePickerProps> = ({ session, agents, defa
       isDefaultRoute={inheritsDefault}
       triggerClassName="max-w-[min(60vw,360px)]"
       align="end"
+      speed={session.speed ?? null}
+      onSpeedChange={(speed) => {
+        onPatch({ speed });
+        // The latest choice is where the next new Session starts.
+        void api.setFastModeDefault(speed === 'fast').catch(() => undefined);
+      }}
     />
   );
 };

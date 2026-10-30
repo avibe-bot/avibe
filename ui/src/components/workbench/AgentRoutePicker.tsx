@@ -1,17 +1,22 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { Check, ChevronDown, ChevronLeft, ChevronRight, Loader2, Plus, Search, Sparkles } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
-import type { VibeAgentBrief } from '../../context/ApiContext';
+import type { SessionSpeed, VibeAgentBrief } from '../../context/ApiContext';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import type { EffortMenu } from '../settings/models/types';
 import { loadBackendModelsWithRefresh, modelOptionLabel, supersedesHubAnswer, useAddModelExit } from '../../lib/backendModels';
 import { isEffortSupported, refusedSavedEffort, resolveEffortOptions } from '../../lib/effortOptions';
 import { useSourceNames } from '../../lib/useSourceNames';
-import { rememberModelLabels, useRememberedModelLabel } from '../../lib/modelLabelMemory';
+import {
+  rememberFastModels,
+  rememberModelLabels,
+  useRememberedFastModel,
+  useRememberedModelLabel,
+} from '../../lib/modelLabelMemory';
 import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { ResponsiveMenu } from '../ui/responsive-menu';
@@ -74,6 +79,12 @@ interface AgentRoutePickerProps {
    *  Model Hub exit does not call it: Settings opens over this surface, and a
    *  host suspends under it with its draft intact, as it does for any visit. */
   onNavigateAway?: () => void;
+  /** The route's processing tier (compact only, docs/plans/fast-mode.md). With
+   *  ``onSpeedChange`` the menu offers the Fast toggle beside the effort, and the
+   *  closed trigger marks a route that runs fast. Applied by the owner, like
+   *  ``onChange``. */
+  speed?: SessionSpeed;
+  onSpeedChange?: (speed: SessionSpeed) => void;
 }
 
 type ReasoningOption = { value: string; label: string };
@@ -102,6 +113,8 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   presentation = 'columns',
   modal,
   onNavigateAway,
+  speed = null,
+  onSpeedChange,
 }) => {
   const { t } = useTranslation();
   const api = useApi();
@@ -179,6 +192,16 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   // The closed trigger names the model as the menu does, from labels remembered
   // across pickers and loads; the raw id stays one hover away.
   const currentModelLabel = useRememberedModelLabel(backend, currentModel) ?? currentModel;
+  // Fast mode is the route's to ask for and the model's hop's to grant: the mark
+  // and the toggle follow whether this model would actually run fast, so asking
+  // on a model without it keeps the choice for the next model that has it.
+  const fastControls = compact && Boolean(onSpeedChange);
+  const fastOn = speed === 'fast';
+  // The model a turn runs on: the route's own, else its Agent's default, which a
+  // Session that materialized its Agent at the first turn keeps without copying.
+  const effectiveModel = currentModel || displayedAgent?.model || null;
+  const fastOffered = useRememberedFastModel(backend, effectiveModel, fastControls && (fastOn || open));
+  const fastActive = fastControls && fastOn && fastOffered;
   const currentAgentLabel = displayedAgent?.display_name || currentAgent;
   const triggerLabel = (routeIsDefault && defaultLabel) || currentAgentLabel || defaultLabel || t('chat.pickAgent');
   const agentLabel = currentAgentLabel || defaultLabel || t('chat.pickAgent');
@@ -272,6 +295,8 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
         setModelLabelsByBackend((prev) => ({ ...prev, [backend]: modelLabels ?? {} }));
         // Closed pickers anywhere name their model from this answer.
         rememberModelLabels(backend, modelLabels ?? {});
+        // An unread Hub says nothing about which models run fast.
+        if (!result.hubUnread) rememberFastModels(backend, result.fastModels ?? []);
       },
       () => {
         loadedBackends.delete(backend);
@@ -510,11 +535,16 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
           {/* In-flight feedback replaces the chevron rather than greying the menu:
               the pick is already applied, so the user is watching a save, not
               waiting for their click to take effect. */}
-          {saving ? (
-            <Loader2 className="ml-auto size-3 shrink-0 animate-spin text-muted" aria-label={t('common.saving')} />
-          ) : (
-            <ChevronDown className="ml-auto size-3 shrink-0 text-muted" />
-          )}
+          <span className="ml-auto flex shrink-0 items-center gap-0.5">
+            {/* Outside the wrapping parts, so the mark never gives way: it says the
+                route costs more, which a narrow row must not hide. */}
+            {fastActive && <FastMark data-fast-mark="" aria-label={t('chat.picker.fastOn')} className="text-gold/60" />}
+            {saving ? (
+              <Loader2 className="size-3 shrink-0 animate-spin text-muted" aria-label={t('common.saving')} />
+            ) : (
+              <ChevronDown className="size-3 shrink-0 text-muted" />
+            )}
+          </span>
         </Button>
   );
 
@@ -612,9 +642,24 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
             );
           })}
         </RouteColumn>
-        {showEffortColumn && (
+        {(showEffortColumn || fastControls) && (
           <div className="border-t border-border p-3">
-            <div className="pb-2 text-[10px] font-bold uppercase tracking-[0.1em] text-muted">{t('chat.picker.effort')}</div>
+            <div className={clsx('flex items-center', showEffortColumn && 'pb-2')}>
+              <span className="text-[10px] font-bold uppercase tracking-[0.1em] text-muted">
+                {showEffortColumn ? t('chat.picker.effort') : t('chat.picker.speed')}
+              </span>
+              {fastControls && (
+                <FastToggle
+                  on={fastOn}
+                  offered={fastOffered}
+                  active={fastActive}
+                  disabled={loadingModels}
+                  onToggle={() => onSpeedChange?.(fastOn ? null : 'fast')}
+                />
+              )}
+            </div>
+            {showEffortColumn && (
+            <>
             {/* One tap per effort, wrapping when a model states many. Hints that
                 a column would print under each row are listed below instead. */}
             <div
@@ -648,6 +693,15 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
                 </p>
               ) : null;
             })}
+            </>
+            )}
+            {/* A touch screen has no hover for the toggle's explanation: it is
+                written out while the route runs fast. */}
+            {fastActive && (
+              <p className="pt-1.5 text-[10px] leading-snug text-muted [@media(hover:hover)]:hidden">
+                {t('chat.picker.fastCaption')}
+              </p>
+            )}
           </div>
         )}
       </div>
@@ -867,5 +921,58 @@ const ModelName: React.FC<{ label: string }> = ({ label }) => {
       <span className="text-muted">{label.slice(0, cut + 1)}</span>
       {label.slice(cut + 1)}
     </>
+  );
+};
+
+// The fast-mode bolt: a slim filled glyph, quiet enough to sit beside the
+// chevron without competing with the route's name. Colour comes from the caller.
+const FAST_BOLT_PATH = 'M13.6 2.2 6.4 13.1h5l-1.5 8.7 7.7-11.4h-5.2z';
+
+const FastMark: React.FC<React.SVGProps<SVGSVGElement>> = ({ className, ...props }) => (
+  <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden={props['aria-label'] ? undefined : true} className={clsx('size-[11px] shrink-0', className)} {...props}>
+    <path d={FAST_BOLT_PATH} />
+  </svg>
+);
+
+// The Fast toggle beside the effort heading. Hover or focus explains it; a
+// model whose hop offers no fast tier keeps the choice but cannot change it here.
+const FastToggle: React.FC<{
+  on: boolean;
+  offered: boolean;
+  active: boolean;
+  disabled?: boolean;
+  onToggle: () => void;
+}> = ({ on, offered, active, disabled, onToggle }) => {
+  const { t } = useTranslation();
+  const tipId = useId();
+  return (
+    <span className="group/fast relative ml-auto">
+      <button
+        type="button"
+        aria-pressed={on}
+        aria-describedby={tipId}
+        disabled={disabled || !offered}
+        onClick={onToggle}
+        className={clsx(
+          'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-semibold transition-colors',
+          'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-cyan/60 disabled:cursor-not-allowed disabled:opacity-50',
+          active ? 'border-gold/30 bg-gold-soft text-gold-ink/80' : 'border-border text-muted hover:text-foreground',
+        )}
+      >
+        <FastMark className={active ? 'text-gold/60' : undefined} />
+        {t('chat.picker.fast')}
+      </button>
+      <span
+        id={tipId}
+        role="tooltip"
+        className="pointer-events-none absolute bottom-full right-0 z-50 mb-1.5 w-56 rounded-md bg-foreground px-2.5 py-2 text-[11px] leading-snug text-background opacity-0 shadow-md transition-opacity group-hover/fast:opacity-100 group-focus-within/fast:opacity-100"
+      >
+        <span className="block font-semibold">{t('chat.picker.fastTitle')}</span>
+        <span className="block">{t('chat.picker.fastDescription')}</span>
+        <span className="block text-background/65">
+          {offered ? t('chat.picker.fastScope') : t('chat.picker.fastUnavailable')}
+        </span>
+      </span>
+    </span>
   );
 };

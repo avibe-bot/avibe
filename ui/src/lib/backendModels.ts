@@ -22,6 +22,9 @@ export interface BackendModels {
    *  `effort_menu`): the efforts left out above, and by Source id the hops that
    *  refuse one the others still serve. Hub catalogs only. */
   effortMenus?: Record<string, EffortMenu>;
+  /** The models a turn would run on at its vendor's fast tier (Model Hub's
+   *  `fast_mode`). Hub catalogs only: a Direct backend offers none. */
+  fastModels?: string[];
   /** True while a background remote-catalog refresh may produce a newer snapshot. */
   catalogRefreshPending?: boolean;
   /** Model Hub gave no answer (the read failed, or the server predates the read),
@@ -55,6 +58,7 @@ const hubCatalogModels = (agent: PickerAgentCatalog | null, backend: string): Ba
   const modelLabels = Object.create(null) as Record<string, string>;
   const reasoningOptions = Object.create(null) as Record<string, { value: string; label: string }[]>;
   const effortMenus = Object.create(null) as Record<string, EffortMenu>;
+  const fastModels: string[] = [];
   for (const id of models) {
     const row = rows.get(id);
     if (!row) continue;
@@ -69,8 +73,9 @@ const hubCatalogModels = (agent: PickerAgentCatalog | null, backend: string): Ba
       ? []
       : row.reasoning_efforts.filter((effort) => !omitted.has(effort)).map((effort) => ({ value: effort, label: effort }));
     if (row.effort_menu) effortMenus[id] = row.effort_menu;
+    if (row.fast_mode === true) fastModels.push(id);
   }
-  return { models, modelLabels, reasoningOptions, effortMenus };
+  return { models, modelLabels, reasoningOptions, effortMenus, fastModels };
 };
 
 /**
@@ -138,6 +143,15 @@ export async function fetchBackendModels(
  * catalog, or Claude/Codex's cached catalog snapshot. OpenCode's live list is
  * never read here — it may start OpenCode, and it carries no labels anyway.
  */
+/**
+ * The models a backend's turns would run on at their vendor's fast tier, read
+ * from Model Hub's persisted catalog only. A backend Hub does not serve, or
+ * whose catalog it cannot answer, offers none.
+ */
+export async function fetchBackendFastModels(api: ApiContextType, backend: string): Promise<string[]> {
+  return hubCatalogModels(await api.readModelHubAgentCatalogForModelPicker(backend), backend)?.fastModels ?? [];
+}
+
 export async function fetchBackendModelLabels(
   api: ApiContextType,
   backend: string,

@@ -9,12 +9,15 @@ import { open, serveProduct } from './support';
 const SESSION_ID = 'route-trigger-fixture';
 const EFFORTS = ['low', 'medium', 'high', 'xhigh'].map((value) => ({ value, label: value }));
 
-async function serveChat(page: Page, { running, agentName = 'pm-claude' }: { running: boolean; agentName?: string }) {
+async function serveChat(
+  page: Page,
+  { running, agentName = 'pm-claude', fast = false }: { running: boolean; agentName?: string; fast?: boolean },
+) {
   const denied = await serveProduct(page);
   const session = {
     id: SESSION_ID, scope_id: 'fixture', project_id: 'proj-1', title: 'Route trigger',
     agent_id: 'agt-pm', agent_name: agentName, agent_backend: 'claude', model: 'claude-opus-4-7',
-    reasoning_effort: 'xhigh', status: 'active', agent_status: running ? 'running' : 'idle', pinned: false,
+    reasoning_effort: 'xhigh', speed: fast ? 'fast' : null, status: 'active', agent_status: running ? 'running' : 'idle', pinned: false,
     workdir: '/fixture/work', native_session_id: 'native-1', metadata: {},
     created_at: '2026-10-26T00:00:00Z', updated_at: '2026-10-26T00:00:00Z',
   };
@@ -34,8 +37,16 @@ async function serveChat(page: Page, { running, agentName = 'pm-claude' }: { run
   await page.route(`**/api/sessions/${SESSION_ID}/activity**`, (route) => route.fulfill({ json: { groups: [] } }));
   await page.route(`**/api/inbox/${SESSION_ID}/read`, (route) => route.fulfill({ json: { ok: true } }));
   await page.route('**/api/asr/status', (route) => route.fulfill({ json: { available: true } }));
-  // The closed trigger names the model by its catalog label.
-  await page.route('**/api/models/agents/**', (route) => route.fulfill({ json: { ok: false } }));
+  // The closed trigger names the model by its catalog label. A fast route reads
+  // Model Hub's catalog, which says the model reaches its vendor's fast tier.
+  await page.route('**/api/models/agents/**', (route) => route.fulfill({ json: fast
+    ? { ok: true, agent: { backend: 'claude', mode: 'hub', catalog_models: [{
+      id: 'claude-opus-4-7', origin: 'builtin', display_name: 'Claude Opus 4.7', models_dev_id: null,
+      context_window: null, max_output_tokens: null, input_modalities: [], output_modalities: [],
+      supports_tools: null, supports_reasoning: true, reasoning_efforts: ['low', 'medium', 'high', 'xhigh'],
+      locked: false, routeable: true, effort_menu: { omitted: [], not_on: {} }, fast_mode: true,
+    }] } }
+    : { ok: false } }));
   await page.route('**/api/claude/models', (route) => route.fulfill({ json: {
     ok: true,
     models: ['claude-opus-4-7', 'claude-sonnet-4-6'],
@@ -140,5 +151,25 @@ test('a name wider than a crowded phone row keeps its beginning and ends in an e
   expect(await agent.evaluate((node) => node.scrollWidth > node.clientWidth)).toBe(true);
   expect(await shownDetails(parts)).toEqual([]);
   await page.screenshot({ path: 'e2e/.artifacts/workbench-general/shots/composer-route-trigger-long-name.png' });
+  expect(denied).toEqual([]);
+});
+
+test('a route that runs fast keeps its mark beside the chevron when a crowded phone row drops detail', async ({ page }) => {
+  const denied = await serveChat(page, { running: true, fast: true });
+  await page.setViewportSize({ width: 320, height: 760 });
+  await open(page, `/chat/${SESSION_ID}`);
+  await expect(page.getByRole('button', { name: 'Stop', exact: true })).toBeVisible();
+  await page.locator('main [contenteditable="true"]').last().click();
+  await page.keyboard.type('Run the next step after this one');
+  await expect(page.getByRole('button', { name: 'Send to queue', exact: true })).toBeVisible();
+
+  const trigger = page.locator('main').getByRole('button', { name: /pm-claude/ });
+  const mark = trigger.locator('[data-fast-mark]');
+  await expect(mark).toBeVisible();
+  // The mark says the route costs more: detail gives way, the mark does not.
+  const parts = trigger.locator('[data-route-trigger-parts]');
+  expect(await shownDetails(parts)).not.toContain('effort');
+  expect(inside((await mark.boundingBox())!, (await trigger.boundingBox())!)).toBe(true);
+  await page.screenshot({ path: 'e2e/.artifacts/workbench-general/shots/composer-route-trigger-fast.png' });
   expect(denied).toEqual([]);
 });

@@ -1534,3 +1534,150 @@ def test_opencode_refuses_an_unlisted_model_its_retained_route_cannot_address(
         }
 
     asyncio.run(exercise())
+
+
+def _cache_fast_modes(fast_models: dict[str, dict[str, str]]) -> None:
+    """A models.dev copy in this test's state dir whose OpenAI entries offer these fast-tier bodies."""
+
+    from vibe import models_dev_catalog
+
+    models_dev_catalog._write_cache({
+        "url": models_dev_catalog.DEFAULT_MODELS_DEV_URL,
+        "fetched_at": 0,
+        "catalog": {
+            "openai": {
+                "models": {
+                    model_id: {"experimental": {"modes": {"fast": {"provider": {"body": body}}}}}
+                    for model_id, body in fast_models.items()
+                }
+            }
+        },
+    })
+
+
+@pytest.mark.parametrize(
+    ("session_speed", "catalog_body", "expected_tier"),
+    [
+        ("fast", {"service_tier": "priority"}, "priority"),
+        # A Session at the standard tier sends nothing extra.
+        (None, {"service_tier": "priority"}, None),
+        # A model its vendor offers no fast tier for runs at the standard tier.
+        ("fast", None, None),
+        # A catalog entry asking for any other field is not applied.
+        ("fast", {"service_tier": "priority", "store": "true"}, None),
+    ],
+    ids=["fast", "standard-session", "model-without-fast", "foreign-field"],
+)
+def test_mh_fast_001_session_speed_reaches_the_hop_that_offers_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    session_speed: str | None,
+    catalog_body: dict[str, str] | None,
+    expected_tier: str | None,
+) -> None:
+    """MH-FAST-001: a fast Session's turn asks its hop for the vendor's fast tier only where that hop offers one."""
+
+    from vibe import models_dev_catalog
+
+    monkeypatch.setattr(models_dev_catalog, "_refresh_in_background", lambda: False)
+    model_id = _requested_model("codex")
+    _cache_fast_modes({model_id: catalog_body} if catalog_body is not None else {})
+
+    async def exercise() -> None:
+        adapter = AdapterBoundaryFake(
+            [AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"ok":true}')]
+        )
+        store = MemoryStore(_config(_source("src_chatgpt1", kind="subscription")))
+        service = _service(
+            tmp_path, store, adapter, now=lambda: datetime(2026, 10, 30, tzinfo=timezone.utc),
+        )
+        gateway = ModelHubTurnGateway(service)
+        router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+        controller = SimpleNamespace(model_hub_runtime=router)
+        context = SimpleNamespace(platform_specific={
+            "agent_session_target": {"id": "ses_fast", "metadata": {"speed": session_speed} if session_speed else {}},
+        })
+        try:
+            launch = await resolve_model_hub_launch(
+                controller, "codex", model_id,
+                process_scope="scenario-fast", context=context, turn_id="turn_fast",
+            )
+            status, body = await _post_turn(
+                launch,
+                endpoint="responses",
+                payload={"model": launch.runtime_model, "input": [], "stream": False},
+            )
+            assert (status, body) == (200, b'{"ok":true}')
+            assert [request.get("service_tier") for request in adapter.requests] == [expected_tier]
+        finally:
+            await gateway.close()
+
+    asyncio.run(exercise())
+
+
+def test_mh_fast_002_refused_fast_tier_is_served_at_the_standard_tier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MH-FAST-002: an upstream that refuses the fast tier before output serves the turn at the standard tier, and its Source stays routable."""
+
+    from vibe import models_dev_catalog
+
+    monkeypatch.setattr(models_dev_catalog, "_refresh_in_background", lambda: False)
+    model_id = _requested_model("codex")
+    _cache_fast_modes({model_id: {"service_tier": "priority"}})
+
+    async def exercise() -> None:
+        adapter = AdapterBoundaryFake([
+            # Anthropic answers an account without usage credits this way; any
+            # refusal before output gets the same single standard retry.
+            AdapterResult(RawOutcomeKind.HTTP_ERROR, status=429, code="rate_limit_error"),
+            AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"ok":true}'),
+        ])
+        store = MemoryStore(_config(_source("src_chatgpt1", kind="subscription")))
+        service = _service(
+            tmp_path, store, adapter, now=lambda: datetime(2026, 10, 30, tzinfo=timezone.utc),
+        )
+        gateway = ModelHubTurnGateway(service)
+        router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+        try:
+            launch = await router.resolve(
+                "codex", model_id, process_scope="scenario-fast", turn_id="turn_fast", speed="fast",
+            )
+            status, body = await _post_turn(
+                launch,
+                endpoint="responses",
+                payload={"model": launch.runtime_model, "input": [], "stream": False},
+            )
+            assert (status, body) == (200, b'{"ok":true}')
+            assert [(source, request.get("service_tier")) for (source, _model, _origin), request in zip(
+                adapter.invocations, adapter.requests,
+            )] == [("src_chatgpt1", "priority"), ("src_chatgpt1", None)]
+            assert store.load().sources[0].state.status != "cooldown"
+        finally:
+            await gateway.close()
+
+    asyncio.run(exercise())
+
+
+def test_mh_fast_003_model_menu_marks_the_models_a_turn_would_run_fast_on(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MH-FAST-003: each Hub menu model says whether a turn on it would reach the fast tier on its serving hop."""
+
+    from vibe import models_dev_catalog
+
+    monkeypatch.setattr(models_dev_catalog, "_refresh_in_background", lambda: False)
+    fast_model = _requested_model("codex")
+    _cache_fast_modes({fast_model: {"service_tier": "priority"}})
+    store = MemoryStore(_config(_source("src_chatgpt1", kind="subscription")))
+    service = _service(
+        tmp_path, store, AdapterBoundaryFake([]), now=lambda: datetime(2026, 10, 30, tzinfo=timezone.utc),
+    )
+
+    menu = {row["id"]: row["fast_mode"] for row in service.get_agent_sources("codex")["catalog_models"]}
+    assert menu[fast_model] is True
+    assert any(offered is False for model, offered in menu.items() if model != fast_model)
+    # OpenCode's shared server names no turn on its requests, so no Session choice reaches it.
+    assert not any(row["fast_mode"] for row in service.get_agent_sources("opencode")["catalog_models"])

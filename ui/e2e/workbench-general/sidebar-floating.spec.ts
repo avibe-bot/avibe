@@ -39,6 +39,10 @@ async function serveProduct(page: Page, lang: Lang = 'en') {
       dock: { order: ['files', 'terminal', 'editor', 'library'], pins: [] },
     } });
     if (path === '/api/macos/login-session') return route.fulfill({ json: { ok: true, state: 'healthy' } });
+    // The home composer starts a new Session at the remembered fast-mode default.
+    if (path === '/api/workbench/prefs') return route.fulfill({ json: {
+      ok: true, background_work_banner_enabled: true, fast_mode_default: false,
+    } });
     if (inheritedReads.has(path)) return route.fallback();
     audit.unknown.push(`${request.method()} ${request.url()}`);
     return route.abort();

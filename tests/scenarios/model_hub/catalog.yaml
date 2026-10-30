@@ -2248,6 +2248,24 @@ scenarios:
     kind: compatibility
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_effort_001_unknown_capability_preserves_intent_and_turn_completes
+  - id: MH-FAST-001
+    name: A fast Session's turn asks its hop for the vendor's fast tier only where that hop offers one
+    status: covered
+    kind: routing
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_fast_001_session_speed_reaches_the_hop_that_offers_it
+  - id: MH-FAST-002
+    name: A fast tier refused before output is served at the standard tier and its Source stays routable
+    status: covered
+    kind: recovery
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_fast_002_refused_fast_tier_is_served_at_the_standard_tier
+  - id: MH-FAST-003
+    name: Each Hub menu model says whether a turn on it would reach the fast tier on its serving hop
+    status: covered
+    kind: projection
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_fast_003_model_menu_marks_the_models_a_turn_would_run_fast_on
   - id: MH-TURN-RESULT-001
     name: All terminal outcomes are closed schema-valid provenance products
     status: covered
