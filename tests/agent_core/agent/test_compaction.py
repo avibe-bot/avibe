@@ -953,15 +953,26 @@ async def test_two_ineffective_checkpoints_stop_compaction_for_the_run():
 
 
 @pytest.mark.parametrize(
-    ("prefix", "ending", "attempts"),
-    [("Throttling error", "error", 3), ("Service unavailable", "completed", 4)],
+    ("prefix", "code", "ending", "attempts"),
+    [
+        ("Throttling error", None, "error", 3),
+        ("Service unavailable", None, "completed", 4),
+        ("Throttling error", "invalid_request_error", "error", 3),
+        ("Service unavailable", "invalid_request_error", "error", 3),
+        ("Throttling error", "upstream_request_invalid", "error", 3),
+        ("Service unavailable", "upstream_request_invalid", "error", 3),
+    ],
 )
-async def test_json_non_overflow_errors_use_ordinary_handling_without_context_relief(prefix, ending, attempts):
+async def test_json_non_overflow_errors_use_ordinary_handling_without_context_relief(prefix, code, ending, attempts):
     # Enough context for the overflow ladder to checkpoint, but below the proactive threshold. Feed the real
     # classifier's outcome into the loop, not a hand-written ProviderError that assumes classification is correct.
+    # Only the untyped service message uses the transient heuristic; explicit request codes forbid replay.
+    error = {"message": f"{prefix}: Too many tokens, please wait before trying again."}
+    if code is not None:
+        error["type"] = code
     refusal = classify_error(
         status=400,
-        body=json.dumps(anthropic_error(f"{prefix}: Too many tokens, please wait before trying again.")),
+        body=json.dumps({"type": "error", "error": error}),
         protocol="anthropic",
     )
     model = Model(
