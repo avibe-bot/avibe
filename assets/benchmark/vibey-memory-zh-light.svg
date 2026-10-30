@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="470" viewBox="0 0 960 470" role="img" aria-label="Vibey 记忆评测。左：同一个 GPT 模型上，压缩 8 次以上后，Vibey 答对任务、规则和下一步的比例为 97%，Claude Code 93%，Codex 53%。右：深层意图，GPT 上 Vibey 81%、Claude Code 20%、Codex 14%；Grok 4.6 上 Vibey 62%、Pi 25%；Claude Sonnet 5.5 上 Vibey 36%、Claude Code 14%。" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif">
+<title>Vibey 记忆评测。左：同一个 GPT 模型上，压缩 8 次以上后，Vibey 答对任务、规则和下一步的比例为 97%，Claude Code 93%，Codex 53%。右：深层意图，GPT 上 Vibey 81%、Claude Code 20%、Codex 14%；Grok 4.6 上 Vibey 62%、Pi 25%；Claude Sonnet 5.5 上 Vibey 36%、Claude Code 14%。</title>
+<rect x="0.5" y="0.5" width="959" height="469" rx="14" fill="#ffffff" stroke="#d0d7de"/>
+<text x="40" y="52" font-size="24" font-weight="700" text-anchor="start" fill="#1f2328">记得你为什么</text>
+<text x="40" y="78" font-size="14" font-weight="400" text-anchor="start" fill="#59636e">每个 Agent 都用同一段对话记录、同一个压缩点、同一个模型</text>
+<line x1="490" y1="108" x2="490" y2="408" stroke="#e6eaef"/>
+<text x="40" y="124" font-size="16" font-weight="700" text-anchor="start" fill="#1f2328">同一个 GPT 模型，一次次压缩之后</text>
+<text x="40" y="146" font-size="13" font-weight="400" text-anchor="start" fill="#59636e">答对任务、规则和下一步的比例</text>
+<line x1="84" y1="362" x2="326" y2="362" stroke="#e6eaef" stroke-dasharray="3 4"/>
+<text x="78" y="366" font-size="12" font-weight="400" text-anchor="end" fill="#59636e">40%</text>
+<line x1="84" y1="298.667" x2="326" y2="298.667" stroke="#e6eaef" stroke-dasharray="3 4"/>
+<text x="78" y="302.667" font-size="12" font-weight="400" text-anchor="end" fill="#59636e">60%</text>
+<line x1="84" y1="235.333" x2="326" y2="235.333" stroke="#e6eaef" stroke-dasharray="3 4"/>
+<text x="78" y="239.333" font-size="12" font-weight="400" text-anchor="end" fill="#59636e">80%</text>
+<line x1="84" y1="172" x2="326" y2="172" stroke="#e6eaef" stroke-dasharray="3 4"/>
+<text x="78" y="176" font-size="12" font-weight="400" text-anchor="end" fill="#59636e">100%</text>
+<text x="92" y="384" font-size="12.5" font-weight="400" text-anchor="middle" fill="#59636e">1-3</text>
+<text x="167.333" y="384" font-size="12.5" font-weight="400" text-anchor="middle" fill="#59636e">4-5</text>
+<text x="242.667" y="384" font-size="12.5" font-weight="400" text-anchor="middle" fill="#59636e">6-7</text>
+<text x="318" y="384" font-size="12.5" font-weight="400" text-anchor="middle" fill="#59636e">8+</text>
+<text x="205" y="404" font-size="12" font-weight="400" text-anchor="middle" fill="#59636e">已压缩次数</text>
+<path d="M92.0,203.4 L167.3,250.5 L242.7,267.3 L318.0,319.9" fill="none" stroke="#94a3b8" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="92.0" cy="203.4" r="4" fill="#94a3b8" stroke="#ffffff" stroke-width="1.5"/>
+<circle cx="167.3" cy="250.5" r="4" fill="#94a3b8" stroke="#ffffff" stroke-width="1.5"/>
+<circle cx="242.7" cy="267.3" r="4" fill="#94a3b8" stroke="#ffffff" stroke-width="1.5"/>
+<circle cx="318.0" cy="319.9" r="4" fill="#94a3b8" stroke="#ffffff" stroke-width="1.5"/>
+<text x="334.0" y="324.9" font-size="14" fill="#1f2328"><tspan font-weight="600">53%</tspan><tspan fill="#59636e" dx="6">Codex</tspan></text>
+<path d="M92.0,178.0 L167.3,192.6 L242.7,202.7 L318.0,192.9" fill="none" stroke="#0ea5e9" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="92.0" cy="178.0" r="4" fill="#0ea5e9" stroke="#ffffff" stroke-width="1.5"/>
+<circle cx="167.3" cy="192.6" r="4" fill="#0ea5e9" stroke="#ffffff" stroke-width="1.5"/>
+<circle cx="242.7" cy="202.7" r="4" fill="#0ea5e9" stroke="#ffffff" stroke-width="1.5"/>
+<circle cx="318.0" cy="192.9" r="4" fill="#0ea5e9" stroke="#ffffff" stroke-width="1.5"/>
+<text x="334.0" y="206.9" font-size="14" fill="#1f2328"><tspan font-weight="600">93%</tspan><tspan fill="#59636e" dx="6">Claude Code</tspan></text>
+<path d="M92.0,179.0 L167.3,180.2 L242.7,184.4 L318.0,181.5" fill="none" stroke="#7c3aed" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="92.0" cy="179.0" r="4" fill="#7c3aed" stroke="#ffffff" stroke-width="1.5"/>
+<circle cx="167.3" cy="180.2" r="4" fill="#7c3aed" stroke="#ffffff" stroke-width="1.5"/>
+<circle cx="242.7" cy="184.4" r="4" fill="#7c3aed" stroke="#ffffff" stroke-width="1.5"/>
+<circle cx="318.0" cy="181.5" r="4" fill="#7c3aed" stroke="#ffffff" stroke-width="1.5"/>
+<text x="334.0" y="177.5" font-size="14" fill="#1f2328"><tspan font-weight="700">97%</tspan><tspan fill="#59636e" dx="6">Vibey</tspan></text>
+<text x="530" y="124" font-size="16" font-weight="700" text-anchor="start" fill="#1f2328">不只记得做什么，还记得为什么</text>
+<text x="530" y="146" font-size="13" font-weight="400" text-anchor="start" fill="#59636e">记忆抓住你深层意图的比例</text>
+<text x="530" y="180" font-size="12" font-weight="600" text-anchor="start" fill="#59636e">GPT-6 Astra / GPT-6.1 Sol</text>
+<text x="530" y="204" font-size="13" font-weight="600" text-anchor="start" fill="#1f2328">Vibey</text>
+<rect x="640" y="193" width="220" height="12" rx="6" fill="#eff2f5"/>
+<rect x="640" y="193" width="177.3" height="12" rx="6" fill="#7c3aed"/>
+<text x="825.32" y="204" font-size="13" font-weight="700" text-anchor="start" fill="#1f2328">81%</text>
+<text x="530" y="225" font-size="13" font-weight="400" text-anchor="start" fill="#59636e">Claude Code</text>
+<rect x="640" y="214" width="220" height="12" rx="6" fill="#eff2f5"/>
+<rect x="640" y="214" width="44.9" height="12" rx="6" fill="#0ea5e9"/>
+<text x="692.88" y="225" font-size="13" font-weight="600" text-anchor="start" fill="#1f2328">20%</text>
+<text x="530" y="246" font-size="13" font-weight="400" text-anchor="start" fill="#59636e">Codex</text>
+<rect x="640" y="235" width="220" height="12" rx="6" fill="#eff2f5"/>
+<rect x="640" y="235" width="31.5" height="12" rx="6" fill="#94a3b8"/>
+<text x="679.46" y="246" font-size="13" font-weight="600" text-anchor="start" fill="#1f2328">14%</text>
+<text x="530" y="275" font-size="12" font-weight="600" text-anchor="start" fill="#59636e">Grok 4.6</text>
+<text x="530" y="299" font-size="13" font-weight="600" text-anchor="start" fill="#1f2328">Vibey</text>
+<rect x="640" y="288" width="220" height="12" rx="6" fill="#eff2f5"/>
+<rect x="640" y="288" width="136.0" height="12" rx="6" fill="#7c3aed"/>
+<text x="783.96" y="299" font-size="13" font-weight="700" text-anchor="start" fill="#1f2328">62%</text>
+<text x="530" y="320" font-size="13" font-weight="400" text-anchor="start" fill="#59636e">Pi</text>
+<rect x="640" y="309" width="220" height="12" rx="6" fill="#eff2f5"/>
+<rect x="640" y="309" width="55.0" height="12" rx="6" fill="#10b981"/>
+<text x="703" y="320" font-size="13" font-weight="600" text-anchor="start" fill="#1f2328">25%</text>
+<text x="530" y="349" font-size="12" font-weight="600" text-anchor="start" fill="#59636e">Claude Sonnet 5.5</text>
+<text x="530" y="373" font-size="13" font-weight="600" text-anchor="start" fill="#1f2328">Vibey</text>
+<rect x="640" y="362" width="220" height="12" rx="6" fill="#eff2f5"/>
+<rect x="640" y="362" width="78.1" height="12" rx="6" fill="#7c3aed"/>
+<text x="726.1" y="373" font-size="13" font-weight="700" text-anchor="start" fill="#1f2328">36%</text>
+<text x="530" y="394" font-size="13" font-weight="400" text-anchor="start" fill="#59636e">Claude Code</text>
+<rect x="640" y="383" width="220" height="12" rx="6" fill="#eff2f5"/>
+<rect x="640" y="383" width="29.9" height="12" rx="6" fill="#0ea5e9"/>
+<text x="677.92" y="394" font-size="13" font-weight="600" text-anchor="start" fill="#1f2328">14%</text>
+<line x1="40" y1="424" x2="920" y2="424" stroke="#e6eaef"/>
+<text x="40" y="448" font-size="12" font-weight="400" text-anchor="start" fill="#59636e">GPT 8+ 组：3 个会话、14 个压缩点  ·  AI 评审，尚未人工复核  ·  方法与局限：docs.avibe.bot/zh/agents/vibey-memory-benchmark</text>
+</svg>
