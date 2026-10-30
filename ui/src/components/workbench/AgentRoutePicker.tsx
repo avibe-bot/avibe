@@ -934,7 +934,8 @@ const FastMark: React.FC<React.SVGProps<SVGSVGElement>> = ({ className, ...props
   </svg>
 );
 
-// The Fast toggle beside the effort heading. Hover or focus explains it; a
+// The Fast toggle beside the effort heading. Hover or keyboard focus explains
+// it; a click's focus does not, so the tip never lingers over the model list. A
 // model whose hop offers no fast tier keeps the choice but cannot change it here.
 const FastToggle: React.FC<{
   on: boolean;
@@ -965,7 +966,7 @@ const FastToggle: React.FC<{
       <span
         id={tipId}
         role="tooltip"
-        className="pointer-events-none absolute bottom-full right-0 z-50 mb-1.5 w-56 rounded-md bg-foreground px-2.5 py-2 text-[11px] leading-snug text-background opacity-0 shadow-md transition-opacity group-hover/fast:opacity-100 group-focus-within/fast:opacity-100"
+        className="pointer-events-none absolute bottom-full right-0 z-50 mb-1.5 w-56 rounded-md bg-foreground px-2.5 py-2 text-[11px] leading-snug text-background opacity-0 shadow-md transition-opacity group-hover/fast:opacity-100 group-has-[:focus-visible]/fast:opacity-100"
       >
         <span className="block font-semibold">{t('chat.picker.fastTitle')}</span>
         <span className="block">{t('chat.picker.fastDescription')}</span>
