@@ -55,12 +55,18 @@ class HostedToolRoute:
     declaration: Optional[Mapping[str, Any]] = None
     include: tuple[str, ...] = ()
     refused: bool = False
+    #: Internal reason this request selected a recovery proxy, never refusal/capability evidence.
+    route_switch: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.mode not in ("native", "proxy"):
             raise ValueError(f"unknown hosted tool mode: {self.mode!r}")
         if not isinstance(self.replay, bool) or not isinstance(self.refused, bool):
             raise ValueError("hosted replay and refused must be booleans")
+        if self.route_switch is not None and self.route_switch != "native_interrupted":
+            raise ValueError(f"unknown hosted route switch: {self.route_switch}")
+        if self.route_switch is not None and self.mode != "proxy":
+            raise ValueError("a route switch must use a proxy hosted tool")
         if self.refused and self.mode != "proxy":
             raise ValueError("a tool its Source refused runs as its function")
         if self.mode == "proxy":

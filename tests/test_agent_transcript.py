@@ -19,8 +19,15 @@ from sqlalchemy import select
 
 from core.agent_core.messages import (
     AssistantMessage,
+    HostedAction,
+    HostedNative,
+    HostedRecord,
+    HostedResult,
+    HostedSummary,
+    HostedToolBlock,
     ImageBlock,
     Origin,
+    ProxyExecution,
     TextBlock,
     ThinkingBlock,
     ToolCallBlock,
@@ -257,6 +264,48 @@ async def test_every_kind_round_trips_in_one_order_attributed_to_the_turn(engine
         ("context_edit", "context"),
         ("context_compaction", "context"),
     ]
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_recovery_facts_survive_without_changing_message_contract(engine, legacy) -> None:
+    with engine.begin() as conn:
+        home = _scope(conn, "C-native-recovery")
+        _session(conn, "ses_native_recovery", home)
+        first = _accepted_turn(conn, "ses_native_recovery", home, "search", "turn_native_recovery")
+    block = HostedToolBlock(
+        id="ws_recovery",
+        tool="web_search",
+        action=HostedAction(type="search", queries=("Avibe",)),
+        record=HostedRecord(status="pending"),
+        native=HostedNative("src_recovery1", ({"type": "web_search_call", "id": "ws_recovery"},)),
+    )
+    message = AssistantMessage(
+        content=(block,),
+        origin=ORIGIN,
+        stop_reason="error",
+        error_message="Our servers are currently overloaded",
+        hosted_summary=HostedSummary(),
+        error_kind="overloaded",
+    )
+    store = SQLiteTranscriptStore(engine)
+    await store.consume_input("ses_native_recovery", first, _user("search"))
+    metadata = None if legacy else {"native_search_recovery": {
+        "error_kind": "overloaded", "interrupted": ["web_search"], "proxied": [],
+    }}
+    written = await store.append_response("ses_native_recovery", message, final=False, metadata=metadata)
+    facts = await store.load_turn_response_metadata("ses_native_recovery", "turn_native_recovery")
+    assert len(facts) == 1
+    recorded, original = facts[0]
+    if legacy:
+        assert original == message
+    else:
+        assert original is None  # no canonical body needed for new rows
+        assert recorded["native_search_recovery"] == metadata["native_search_recovery"]
+    with engine.connect() as conn:
+        row = conn.execute(select(messages).where(messages.c.id == written.row_id)).mappings().one()
+    model = json.loads(row["content_json"])["model"]["message"]
+    assert "error_kind" not in model
+    assert "native_search_recovery" not in model
 
 
 async def test_a_stored_unknown_native_hosted_row_loads_through_the_transcript_owner(engine):

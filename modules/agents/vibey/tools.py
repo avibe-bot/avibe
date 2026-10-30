@@ -158,6 +158,8 @@ class HostedTool:
             # The hop's own Source would run the tool but refused it, so this call is a fallback from it (C-6
             # ``refused``): the card and the IM line say so.
             hosted = replace(hosted, fallback_from=HostedFallback(endpoint.source_id))
+        elif route is not None and route.route_switch is not None:
+            hosted = replace(hosted, route_switch=route.route_switch)
         query = arguments.get("query")
         return _result(self.spec.name, hosted, query=query if isinstance(query, str) else None)
 
@@ -364,7 +366,8 @@ def _result(tool: str, hosted: HostedResult, *, query: Optional[str], notes: Seq
 
     text = record_text(tool, hosted.record, query=query, notes=notes)
     failed = hosted.record.status in ("failed", "incomplete")
-    return ToolResult(content=(TextBlock(text),), is_error=failed, hosted=hosted)
+    details = {"hosted_route_switch": hosted.route_switch} if hosted.route_switch is not None else {}
+    return ToolResult(content=(TextBlock(text),), is_error=failed, hosted=hosted, details=details)
 
 
 async def _gateway_call(

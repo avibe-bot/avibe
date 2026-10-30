@@ -5390,6 +5390,7 @@
         "listSeparator": ", ",
         "itemSeparator": "; ",
         "switch": "{{failed}}; switched to {{provider}}",
+        "nativeInterrupted": "Native search was interrupted; switched to {{provider}}.",
         "interruption": {
           "message": "Model response interrupted: {{reason}}",
           "overloaded": "upstream overloaded",

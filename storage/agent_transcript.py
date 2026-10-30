@@ -234,6 +234,39 @@ class SQLiteTranscriptStore:
         """Load one durable Turn's own context, excluding older history and fork ancestry."""
         return await asyncio.to_thread(self._load, session_id, turn_id=turn_id)
 
+    async def load_turn_response_metadata(
+        self, session_id: str, turn_id: str
+    ) -> Sequence[tuple[Mapping[str, Any], Optional[AssistantMessage]]]:
+        """Read response recovery facts through the Turn index, never tool outputs.
+
+        Newly written rows need only their small metadata. Older rows have no
+        recovery projection, so decode their original immutable response instead.
+        """
+        def work() -> list[tuple[Mapping[str, Any], Optional[AssistantMessage]]]:
+            query = text(
+                "SELECT id, metadata_json, "
+                "CASE WHEN json_type(metadata_json, '$.native_search_recovery') IS NULL "
+                "THEN content_json END AS legacy_content "
+                "FROM messages INDEXED BY ix_messages_turn_id "
+                f"WHERE session_id = :session_id AND ({MESSAGE_TURN_ID_SQL}) = :turn_id "
+                "AND context_seq IS NOT NULL AND type IN :response_types ORDER BY context_seq"
+            ).bindparams(bindparam("response_types", expanding=True))
+            result = []
+            with self._engine.connect() as conn:
+                rows = conn.execute(query, {
+                    "session_id": session_id, "turn_id": turn_id, "response_types": RESPONSE_TYPES,
+                }).mappings()
+                for row in rows:
+                    metadata = _json_object(row["metadata_json"], row["id"])
+                    message = None
+                    if row["legacy_content"] is not None:
+                        model = _versioned(_json_object(row["legacy_content"], row["id"]).get("model"), row["id"])
+                        message = _message(model.get("message"), AssistantMessage, row["id"])
+                    result.append((metadata, message))
+            return result
+
+        return await asyncio.to_thread(work)
+
     async def consume_input(self, session_id: str, message_id: str, message: UserMessage) -> ContextEntry:
         if not isinstance(message, UserMessage):
             raise TypeError("consume_input takes a UserMessage")
@@ -283,6 +316,7 @@ class SQLiteTranscriptStore:
         replied: Optional[bool] = None,
         images: Sequence[HostedImage] = (),
         superseded: bool = False,
+        metadata: Optional[Mapping[str, Any]] = None,
         agent_name: Optional[str] = None,
         turn_id: Optional[str] = None,
     ) -> ContextEntry:
@@ -299,6 +333,9 @@ class SQLiteTranscriptStore:
         def work(conn: Connection) -> ContextEntry:
             origin = _turn_origin(conn, session_id, agent_name, turn_id)
             seq = _next_context_seq(conn, session_id)
+            row_metadata = dict(metadata or {})
+            if origin.turn_id:
+                row_metadata["turn_id"] = origin.turn_id
             row = messages_service.append(
                 conn,
                 scope_id=origin.scope_id,
@@ -312,7 +349,7 @@ class SQLiteTranscriptStore:
                 ),
                 text=display_text,
                 content={"model": model},
-                metadata={"turn_id": origin.turn_id} if origin.turn_id else None,
+                metadata=row_metadata or None,
             )
             conn.execute(messages.update().where(messages.c.id == row["id"]).values(context_seq=seq))
             _register_images(conn, origin.scope_id, session_id, message)
