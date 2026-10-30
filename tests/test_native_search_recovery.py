@@ -16,7 +16,7 @@ from core.agent_core.messages import (
 )
 from modules.agents.model_hub import ModelHubRuntimeRouter
 from modules.agents.vibey.agent import VibeyAgent, _Run
-from modules.agents.vibey.native_search_recovery import native_search_interruptions, should_switch
+from modules.agents.vibey.native_search_recovery import should_switch, turn_recovery_facts
 from tests.agent_core.fakes import assistant
 from tests.test_vibey_agent import (  # noqa: F401 -- shared real-store/Delivery harness and fixtures
     SESSION, _Harness, _NATIVE_SEARCH, continuation_policy, engine, published, session,
@@ -39,6 +39,10 @@ def _entry(message, seq=1):
     return ContextEntry("session", seq, "response", f"row-{seq}", message=message)
 
 
+def _interruptions(entries):
+    return turn_recovery_facts(({}, entry.message) for entry in entries)[0]
+
+
 def test_counts_responses_not_calls_and_only_pending_native_calls_of_each_tool():
     repeated = _response()
     entries = [
@@ -48,23 +52,23 @@ def test_counts_responses_not_calls_and_only_pending_native_calls_of_each_tool()
         _entry(_response(pending=False), 4),
         _entry(_response(stop_reason="stop"), 5),
     ]
-    assert native_search_interruptions(entries) == {"web_search": 1, "x_search": 1}
+    assert _interruptions(entries) == {"web_search": 1, "x_search": 1}
 
 
 @pytest.mark.parametrize("kind", ["overloaded", "server", "network", "stalled", "interrupted"])
 def test_counts_transient_class_even_when_error_text_names_no_class(kind):
     message = replace(_response(error_kind=kind), error_message="upstream failed")
-    assert native_search_interruptions([_entry(message)]) == {"web_search": 1}
+    assert _interruptions([_entry(message)]) == {"web_search": 1}
 
 
 @pytest.mark.parametrize("kind", ["auth", "invalid_request", "rate_limit", "unknown", "aborted", "overflow"])
 def test_nontransient_class_wins_over_provider_wording(kind):
-    assert not native_search_interruptions([_entry(_response(error_kind=kind))])
+    assert not _interruptions([_entry(_response(error_kind=kind))])
 
 
 def test_released_explicit_overload_rows_still_count_but_ambiguous_errors_do_not():
-    assert native_search_interruptions([_entry(_response(error_kind=None))]) == {"web_search": 1}
-    assert not native_search_interruptions([_entry(replace(_response(error_kind=None), error_message="failed"))])
+    assert _interruptions([_entry(_response(error_kind=None))]) == {"web_search": 1}
+    assert not _interruptions([_entry(replace(_response(error_kind=None), error_message="failed"))])
 
 
 def test_switch_threshold_and_last_retry_override():
@@ -284,3 +288,26 @@ async def test_only_one_reserve_per_episode_even_if_a_different_native_tool_then
     assert len(harness.provider.requests) == 3
     assert [r.endpoint.hosted_tools["web_search"].mode for r in harness.provider.requests] == ["native", "native", "proxy"]
     assert all(r.endpoint.hosted_tools["x_search"].mode == "native" for r in harness.provider.requests)
+
+
+@pytest.mark.parametrize("reserve", [False, True])
+async def test_in_place_retry_cannot_restore_native_after_an_early_switch(
+    engine, session, tmp_path, published, continuation_policy, monkeypatch, reserve,
+):
+    continuation_policy(initial_delay_s=0)
+    monkeypatch.setattr("modules.agents.vibey.agent._MAX_AUTO_CONTINUATIONS", 1)
+    native = ProviderError("overloaded", "overloaded", False, partial=_response(), continuable=True)
+    scripts = [[ProviderError("server", "server error", False, continuable=True)]] if reserve else []
+    scripts += [
+        [native], [ProviderError("server", "503 before output", True)],
+        [Done(assistant(calls=(ToolCallBlock("echo-after-retry", "echo", {}),)))],
+        [Done(assistant("recovered"))],
+    ]
+    harness = _Harness(engine, tmp_path, "avibe", scripts)
+    harness.controller.hub_hosted_tools = {"web_search": _NATIVE_SEARCH}
+    harness.controller.model_hub_runtime.has_proxied_hosted_candidate = lambda *_: True
+    await harness.agent.handle_message(harness.request("work"))
+    assert not harness.controller.terminals[-1]["is_error"]
+    assert [r.endpoint.hosted_tools["web_search"].mode for r in harness.provider.requests] == (
+        ["native"] * (2 if reserve else 1) + ["proxy"] * 3
+    )

@@ -869,6 +869,14 @@ class VibeyAgent(BaseAgent):
             return selection
         rows = await self.store.load_turn_response_metadata(turn.session_id, turn.turn_id)
         counts, previously_proxied = turn_recovery_facts(rows)
+        # The current immutable hop also covers retries before a response commits
+        # (503/no output, pin re-resolution, overflow relief). Do not lose an early
+        # switch when the loop replaces its latest attempt with an uncommitted one.
+        current = getattr(turn.router, "current", None)
+        previously_proxied.update(
+            tool for tool, route in getattr(getattr(current, "endpoint", None), "hosted_tools", {}).items()
+            if route.mode == "proxy" and route.route_switch == "native_interrupted"
+        )
         just_interrupted = interrupted_native_searches(getattr(turn.agent, "last_attempt_response", None))
         last_retry = self._last_permitted_auto_retry(turn)
         switched = {

@@ -66,7 +66,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Literal, Mapping, Optional, Sequence, TypeVar
 
@@ -262,9 +262,6 @@ class SQLiteTranscriptStore:
                     if row["legacy_content"] is not None:
                         model = _versioned(_json_object(row["legacy_content"], row["id"]).get("model"), row["id"])
                         message = _message(model.get("message"), AssistantMessage, row["id"])
-                        kind = metadata.get("native_search_error_kind")
-                        if isinstance(kind, str):
-                            message = replace(message, error_kind=kind)
                     result.append((metadata, message))
             return result
 
@@ -339,8 +336,6 @@ class SQLiteTranscriptStore:
             row_metadata = dict(metadata or {})
             if origin.turn_id:
                 row_metadata["turn_id"] = origin.turn_id
-            if message.error_kind is not None:
-                row_metadata["native_search_error_kind"] = message.error_kind
             row = messages_service.append(
                 conn,
                 scope_id=origin.scope_id,
@@ -987,7 +982,7 @@ def _context_entries(conn: Connection, session_id: str) -> list[ContextEntry]:
 def _context_rows(conn: Connection, session_id: str, bound: Optional[int]) -> list[ContextEntry]:
     entries: list[ContextEntry] = []
     for table, columns, to_entry in (
-        (messages, (messages.c.type, messages.c.metadata_json), _message_entry),
+        (messages, (messages.c.type,), _message_entry),
         (agent_events, (agent_events.c.event_type, agent_events.c.visibility), _event_entry),
     ):
         conditions = [table.c.session_id == session_id, table.c.context_seq.is_not(None)]
@@ -1006,7 +1001,7 @@ def _turn_context_entries(conn: Connection, session_id: str, turn_id: str) -> li
     """Read one Turn through its owner indexes, without loading Session history or forks."""
     entries: list[ContextEntry] = []
     for table, index, owner, columns, to_entry in (
-        ("messages", "ix_messages_turn_id", MESSAGE_TURN_ID_SQL, "metadata_json, type", _message_entry),
+        ("messages", "ix_messages_turn_id", MESSAGE_TURN_ID_SQL, "type", _message_entry),
         ("agent_events", "ix_agent_events_turn_sequence_id", "turn_id", "event_type, visibility", _event_entry),
     ):
         query = text(
@@ -1021,7 +1016,7 @@ def _turn_context_entries(conn: Connection, session_id: str, turn_id: str) -> li
         entries.extend(to_entry(session_id, row) for row in conn.execute(query, params).mappings())
     # Inputs are owned by Deliveries, not response metadata. Include accepted steers as barriers in this Turn.
     query = text(
-        "SELECT messages.id, messages.context_seq, messages.content_json, messages.metadata_json, messages.created_at, messages.type "
+        "SELECT messages.id, messages.context_seq, messages.content_json, messages.created_at, messages.type "
         "FROM message_deliveries INDEXED BY ix_message_deliveries_turn "
         "CROSS JOIN messages ON messages.id = message_deliveries.message_id "
         "WHERE message_deliveries.turn_id = :turn_id AND message_deliveries.state = 'accepted' "
@@ -1043,11 +1038,6 @@ def _message_entry(session_id: str, row: Mapping[str, Any]) -> ContextEntry:
         raise TranscriptError(f"context row {row_id} has message type {row['type']!r}")
     payload = _versioned(_json_object(row["content_json"], row_id).get("model"), row_id)
     message = _message(payload.get("message"), expected, row_id)
-    if kind == "response":
-        metadata = _json_object(row.get("metadata_json"), row_id)
-        candidate = metadata.get("native_search_error_kind")
-        if isinstance(candidate, str):
-            message = replace(message, error_kind=candidate)
     return ContextEntry(
         session_id, row["context_seq"], kind, row_id, message=message, payload=payload, created_at=_epoch(row["created_at"])
     )
@@ -1060,14 +1050,6 @@ def _event_entry(session_id: str, row: Mapping[str, Any]) -> ContextEntry:
         raise TranscriptError(f"context row {row_id} is a {row['visibility']} {row['event_type']!r} event")
     payload = _versioned(_json_object(row["content_json"], row_id), row_id)
     message = _message(payload.get("message"), ToolResultMessage, row_id) if kind == "tool_result" else None
-    details = payload.get("details")
-    route_switch = details.get("hosted_route_switch") if isinstance(details, Mapping) else None
-    if (
-        isinstance(message, ToolResultMessage)
-        and message.hosted is not None
-        and route_switch == "native_interrupted"
-    ):
-        message = replace(message, hosted=replace(message.hosted, route_switch=route_switch))
     return ContextEntry(
         session_id, row["context_seq"], kind, row_id, message=message, payload=payload, created_at=_epoch(row["created_at"])
     )

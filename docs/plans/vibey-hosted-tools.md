@@ -401,7 +401,9 @@ first. The decision is per tool and Turn-scoped:
   recovery-proxy routes. This immutable per-response route fact is necessary:
   after an early switch below four, a successful response resets the episode
   budget but must not restore native search within the same Turn, including after
-  restart. Hop resolution reads these small facts, not the Turn's tool outputs;
+  restart. Before a response commits, the router's existing current hop retains
+  the switch through in-place retries and re-resolution. Hop resolution reads
+  small response facts, not the Turn's tool outputs;
   only legacy response bodies need decoding. The display explanation uses the
   existing tool-result `details` map. No frozen contract, settings, or mutable
   Turn-level switch flag is added.

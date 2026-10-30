@@ -11,7 +11,6 @@ from collections import Counter
 from typing import Any, Iterable, Mapping, Optional
 
 from core.agent_core.ai.errors import classify_error
-from core.agent_core.harness.store import ContextEntry
 from core.agent_core.messages import AssistantMessage, HostedToolBlock
 
 NATIVE_SEARCH_SWITCH_THRESHOLD = 4
@@ -47,16 +46,10 @@ def interrupted_native_searches(message: Optional[AssistantMessage]) -> set[str]
     }
 
 
-def native_search_interruptions(entries: Iterable[ContextEntry]) -> Counter[str]:
-    counts: Counter[str] = Counter()
-    for entry in entries:
-        counts.update(interrupted_native_searches(entry.message))
-    return counts
-
-
 def response_recovery_metadata(message: AssistantMessage, proxied: Iterable[str] = ()) -> dict[str, Any]:
     """Small projection beside the response, outside the frozen canonical payload."""
     return {"native_search_recovery": {
+        "error_kind": message.error_kind,
         "interrupted": sorted(interrupted_native_searches(message)),
         "proxied": sorted(SEARCH_TOOLS.intersection(proxied)),
     }}
