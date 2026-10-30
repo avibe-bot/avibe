@@ -8,7 +8,8 @@ const source = readFileSync(fileURLToPath(new URL('./McpHubSection.tsx', import.
 describe('McpHubSection OAuth start link', () => {
   it('renders login as a new-tab start-link anchor', () => {
     expect(source).toMatch(/target="_blank"/);
-    expect(source).toMatch(/rel="noopener noreferrer"/);
+    expect(source).toMatch(/rel="noopener"/);
+    expect(source).not.toMatch(/noreferrer/);
     expect(source).toMatch(/\/api\/mcp\/\$\{encodeURIComponent\(name\)\}\/oauth\/start/);
   });
 

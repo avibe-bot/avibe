@@ -215,16 +215,24 @@ def test_oauth_start_link_allows_missing_fetch_site_with_same_origin_referer(own
     assert response.status_code == 302
     assert len(owner._pending_logins) == 1
 
+
+def test_oauth_start_link_rejects_missing_fetch_site_without_same_origin_referer(owner, oauth_server):
     foreign = app.test_client().get(
         "/api/mcp/suno/oauth/start",
         headers={"Referer": "https://evil.example/skills"},
     )
     assert foreign.status_code == 403
+    assert owner._pending_logins == {}
 
+    missing = app.test_client().get("/api/mcp/suno/oauth/start")
+    assert missing.status_code == 403
+    assert owner._pending_logins == {}
 
-def test_oauth_start_link_rejects_missing_fetch_site_without_referer(owner, oauth_server):
-    response = app.test_client().get("/api/mcp/suno/oauth/start")
-    assert response.status_code == 403
+    scheme_mismatch = app.test_client().get(
+        "/api/mcp/suno/oauth/start",
+        headers={"Referer": "https://127.0.0.1/skills"},
+    )
+    assert scheme_mismatch.status_code == 403
     assert owner._pending_logins == {}
 
 

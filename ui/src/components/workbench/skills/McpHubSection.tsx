@@ -32,7 +32,7 @@ function LoginLink({
     <a
       href={oauthStartHref(name)}
       target="_blank"
-      rel="noopener noreferrer"
+      rel="noopener"
       className={className}
       onClick={() => onActivate(name)}
     >

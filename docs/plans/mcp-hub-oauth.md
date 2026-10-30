@@ -216,7 +216,7 @@ rule. `GET /api/mcp/oauth/callback` (session-exempt, §3); `POST /api/mcp/{name}
 `{callbackUrl}`; `POST /api/mcp/{name}/oauth/logout`. Summary gains `auth: none|needs_login|ok`.
 
 UI: needs-login rows and the detail panel render Log in as
-`<a href={origin}/api/mcp/{name}/oauth/start target="_blank" rel="noopener noreferrer">`
+`<a href={origin}/api/mcp/{name}/oauth/start target="_blank" rel="noopener">`
 styled as a button. No `window.open`, no `about:blank`, no await before opening. Avibe stays in
 the original tab; the callback 302s the authorize tab to `/skills?mcp=…&oauth=success`, and the
 original tab `load()`s on `focus`/`visibilitychange`. Paste mode also opens the existing paste

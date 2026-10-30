@@ -9579,21 +9579,22 @@ def _mcp_oauth_start_allowed(starlette_request: FastAPIRequest) -> bool:
         return False
     referer = starlette_request.headers.get("Referer") or ""
     try:
-        return urlparse(referer).netloc == starlette_request.url.netloc and bool(starlette_request.url.netloc)
+        parsed = urlparse(referer)
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        return bool(parsed.scheme and parsed.netloc) and origin == _current_origin()
     except ValueError:
         return False
 
 
 @app.get("/api/mcp/{name}/oauth/start", include_in_schema=False)
 async def mcp_oauth_start(name: str, starlette_request: FastAPIRequest):
-    if not _mcp_oauth_start_allowed(starlette_request):
-        return _mcp_oauth_page("mcp_oauth_start_rejected", 403)
-
     async def start():
         from starlette.responses import RedirectResponse
 
         from vibe import mcp_api
 
+        if not _mcp_oauth_start_allowed(starlette_request):
+            return _mcp_oauth_page("mcp_oauth_start_rejected", 403)
         body, _status = await mcp_api.run(mcp_api.oauth_start, name, {"port": _mcp_setup_port()}, _current_origin())
         if body.get("ok") and body.get("authorizeUrl"):
             return RedirectResponse(body["authorizeUrl"], status_code=302)
