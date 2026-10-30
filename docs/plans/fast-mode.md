@@ -87,7 +87,8 @@ the Hub believes that report rather than the request:
 
 - Anthropic reports `usage.speed` (`fast` or `standard`). OpenAI reports
   `service_tier` on the completed response or on every Chat chunk (`priority`
-  for its fast tier). The stream tracker and the buffered projection read it
+  for its fast tier). In a Responses stream only the completed event counts:
+  `response.created` may echo the request even where the field was dropped. The stream tracker and the buffered projection read it
   (`stream_wire.ServedTierPaths`) into `ProtocolSSEState.served_tier` and
   `RawCallOutcome.served_tier`.
 - The resolution marks a hop whose request asked for the tier

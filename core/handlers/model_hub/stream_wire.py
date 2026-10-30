@@ -546,6 +546,10 @@ class ServedTierPaths:
 
     paths: tuple[JSONPath, ...]
     fast_value: str
+    # Only the stream's terminal frame states the tier that ran: an earlier one
+    # (Responses ``response.created``) may echo the request, which a relay that
+    # dropped the field can still do. A terminal that names no tier confirms none.
+    settled_by_terminal: bool = False
 
 
 @dataclass(frozen=True)
@@ -849,7 +853,9 @@ PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
         ),
         # https://platform.openai.com/docs/api-reference/responses/object#responses/object-service_tier
         # The terminal event nests the completed response; a buffered response is it.
-        served_tier=ServedTierPaths(paths=(("response", "service_tier"), ("service_tier",)), fast_value="priority"),
+        served_tier=ServedTierPaths(
+            paths=(("response", "service_tier"), ("service_tier",)), fast_value="priority", settled_by_terminal=True,
+        ),
     ),
     "openai_chat": ProtocolStreamTaxonomy(
         terminal_envelopes=(
@@ -1689,9 +1695,8 @@ class ProtocolSSEState:
     error_code_candidates: tuple[str, ...] = ()
     error_message: str | None = field(default=None, repr=False)
     hosted_tools: frozenset[str] = frozenset()
-    # The tier the stream last named before its terminal: OpenAI repeats it on
-    # every chat chunk and settles it on the completed response; Anthropic
-    # reports it in usage.
+    # The tier the stream named: OpenAI repeats it on every Chat chunk and states
+    # it on the completed Responses event alone; Anthropic reports it in usage.
     served_tier: ServedTier | None = None
 
     def __post_init__(self) -> None:
@@ -1749,7 +1754,11 @@ class ProtocolSSEState:
             self.model_output_started = True
         if observation.hosted_tools:
             self.hosted_tools |= observation.hosted_tools
-        if observation.served_tier is not None:
+        tier_paths = PROTOCOL_STREAM_TAXONOMY[self.protocol].served_tier
+        if tier_paths is not None and tier_paths.settled_by_terminal:
+            if observation.outcome is not None:
+                self.served_tier = observation.served_tier
+        elif observation.served_tier is not None:
             self.served_tier = observation.served_tier
         if observation.usage is not None:
             self.usage = (

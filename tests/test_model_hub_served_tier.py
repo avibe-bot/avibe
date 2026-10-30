@@ -38,13 +38,13 @@ def _anthropic_stream(speed: str | None) -> tuple[dict, ...]:
     )
 
 
-def _responses_stream(tier: str | None) -> tuple[dict, ...]:
+def _responses_stream(tier: str | None, echoed: str = "auto") -> tuple[dict, ...]:
     completed = {"status": "completed", "usage": {"input_tokens": 9, "output_tokens": 5}}
     if tier is not None:
         completed["service_tier"] = tier
     return (
         # The created event echoes what was asked; only the completed one says what ran.
-        {"type": "response.created", "response": {"status": "in_progress", "service_tier": "auto"}},
+        {"type": "response.created", "response": {"status": "in_progress", "service_tier": echoed}},
         {"type": "response.output_text.delta", "delta": "OK"},
         {"type": "response.completed", "response": completed},
     )
@@ -63,13 +63,18 @@ def test_anthropic_stream_reports_the_speed_it_served(speed, expected):
 
 
 @pytest.mark.parametrize(
-    ("tier", "expected"),
-    # A response that never names its tier keeps what the created event echoed,
-    # which is not the fast tier either.
-    [("priority", "fast"), ("default", "standard"), ("flex", "standard"), (None, "standard")],
+    ("tier", "echoed", "expected"),
+    [
+        ("priority", "priority", "fast"),
+        ("default", "priority", "standard"),
+        ("flex", "auto", "standard"),
+        # Only the completed response says what ran: a relay may echo the request
+        # on the created event and then name no tier, which confirms none.
+        (None, "priority", None),
+    ],
 )
-def test_responses_stream_reports_the_tier_it_served(tier, expected):
-    state = _streamed("openai_responses", *_responses_stream(tier))
+def test_responses_stream_reports_the_tier_it_served(tier, echoed, expected):
+    state = _streamed("openai_responses", *_responses_stream(tier, echoed))
     assert state.terminal_outcome == "served"
     assert state.served_tier == expected
 
