@@ -56,6 +56,26 @@ its frame, with neither usable visual content nor useful controls, is not ready
 yet: observe again while the state keeps changing, and report what you observed
 once it stops changing or the timeout ends.
 
+## No-effect recovery and viewport content
+
+- Default to background input. If a second observation shows no effect, do not
+  repeat the same foreground click immediately: first `await win.activate()`,
+  then re-observe that this exact window is on screen and focused before
+  retrying that one action. Use `delivery_mode: "foreground"` for the retry if
+  background input still has no effect. Foreground input restores the previous
+  frontmost window; `activate()` leaves the target frontmost.
+- If no on-screen window matches, or activation is unverified, reports
+  `focused=false`, or leaves the window off-screen: stop and ask the owner to
+  show the window. Do not loop `launch()` or `activate()` or invent a reopen
+  path for a hidden window.
+- Treat driver `status: unverifiable` as unknown, not proof of effect. After
+  input, compare a second observation against a stable signature (title,
+  selected row, or visible text). Allow only one retry after verified activation;
+  if the effect is still absent or unknown, stop.
+- For virtualized content, the tree and screenshot describe the current viewport,
+  not the full document. Scrolling replaces that content: observe and capture
+  what you need as you scroll; do not assume earlier rows remain in the tree.
+
 ## SDK cheat-sheet
 
 ```js
@@ -76,12 +96,9 @@ await avibe.notify("Draft is ready");
 await avibe.confirm("Send this message to Ana?");    // throws ConfirmRefused on no
 ```
 
-- Input uses background delivery by default and leaves the owner's frontmost
-  window and pointer alone. Some apps ignore background input: when an
-  observation shows no effect, repeat that one action with
-  `delivery_mode: "foreground"`, which fronts the window, acts, and restores the
-  previous frontmost window. Use `activate()` when the window must stay in
-  front across several actions; it does not restore the previous window.
+- Background delivery leaves the owner's frontmost window and pointer alone.
+  For no-effect input, follow the activation and observation procedure above
+  before retrying; foreground delivery alone is not proof of effect.
 - Window selectors: a title shared by off-screen siblings resolves with
   `onScreen: true`; `windowId` picks an exact id from `observe windows`;
   `index` orders matches front to back.
