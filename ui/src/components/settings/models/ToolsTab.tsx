@@ -154,7 +154,8 @@ const ExecutorPrice: React.FC<{ candidate: HostedExecutorCandidate }> = ({ candi
   }));
   const title = [t('settings.models.tools.cost.executorTitle', { date: price.as_of, model: candidate.model_id }), ...extras]
     .join(t('settings.models.tools.cost.extraSeparator'));
-  return <OrderPrice text={t('settings.models.searchServices.price', { usd: formatSmallUsd(price.usd_per_1k) })} title={title} href={price.url} />;
+  // Per thousand of the unit billed: a search or call reads as a search, an X search post as a post.
+  return <OrderPrice text={t(`settings.models.tools.cost.per1k.${price.unit}`, { usd: formatSmallUsd(price.usd_per_1k) })} title={title} href={price.url} />;
 };
 
 /** What the search order's ⓘ explains: how the automatic order is built, and where the built-in service sends a query. */

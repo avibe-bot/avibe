@@ -2563,7 +2563,14 @@
           "extraSeparator": "，",
           "unknown": "暂无标价",
           "executorTitle": "API 标价 · {{date}} · 另计 {{model}} 的 token",
-          "includedShort": "订阅内含"
+          "includedShort": "订阅内含",
+          "per1k": {
+            "call": "${{usd}} / 千次",
+            "search": "${{usd}} / 千次",
+            "post": "${{usd}} / 千条帖子",
+            "profile": "${{usd}} / 千个账号",
+            "fetch": "${{usd}} / 千次读取"
+          }
         },
         "footnote": "费用按厂商 API 标价估算，中转的实际账单可能不同；订阅不另计费。Claude 订阅不能运行这些工具。",
         "saveFailed": "{{toolInline}}设置未能保存，请重试。",

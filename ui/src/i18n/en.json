@@ -2563,7 +2563,14 @@
           "extraSeparator": " · ",
           "unknown": "No list price",
           "executorTitle": "API list price · {{date}} · plus {{model}} tokens",
-          "includedShort": "Included"
+          "includedShort": "Included",
+          "per1k": {
+            "call": "${{usd}} / 1k searches",
+            "search": "${{usd}} / 1k searches",
+            "post": "${{usd}} / 1k posts",
+            "profile": "${{usd}} / 1k profiles",
+            "fetch": "${{usd}} / 1k fetches"
+          }
         },
         "footnote": "Costs are estimated at the vendor's API price, and a relay may bill differently. Subscriptions add no charge. A Claude subscription can't run these tools.",
         "saveFailed": "Couldn't save the {{toolInline}} setting. Please retry.",
