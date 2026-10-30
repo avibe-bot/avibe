@@ -837,8 +837,7 @@ class McpRuntime:
                         future.cancel()
             if previous is not None and not previous.done():
                 previous.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await previous
+                await asyncio.gather(previous, return_exceptions=True)
             stored_client = (await asyncio.to_thread(mcp_oauth.read_state, name, transport["url"])).get("client")
             if isinstance(stored_client, dict) and redirect_uri not in [str(item) for item in stored_client.get("redirect_uris") or []]:
                 await asyncio.to_thread(mcp_oauth.AvibeTokenStorage(name, transport["url"]).drop_client)
@@ -898,10 +897,10 @@ class McpRuntime:
                             self._pending_logins.pop(state, None)
             task = asyncio.create_task(run_login(), name=f"mcp-oauth-{name}")
             self._oauth_tasks[name] = task
-        try:
-            url = await asyncio.wait_for(url_future, 30)
-        except TimeoutError:
-            raise McpHubError("oauth", "OAuth authorization URL was not created.") from None
+            try:
+                url = await asyncio.wait_for(url_future, 30)
+            except TimeoutError:
+                raise McpHubError("oauth", "OAuth authorization URL was not created.") from None
         return _dumps({"ok": True, "name": name, "authorizeUrl": url, "mode": mode})
 
     async def _oauth_callback(self, payload: dict[str, Any]) -> bytes:
@@ -933,8 +932,7 @@ class McpRuntime:
                     future.cancel()
         if task is not None and not task.done():
             task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+            await asyncio.gather(task, return_exceptions=True)
         self._oauth_logins.discard(name)
         self._oauth_providers.pop(name, None)
 

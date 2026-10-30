@@ -392,12 +392,22 @@ def test_call_time_resource_401_is_auth_required_without_replay(runtime, loopbac
     assert repository.list_packages()[0]["auth"] == "needs_login"
 
 
-def test_concurrent_call_time_auth_required_keeps_valid_package(runtime, loopback):
+def test_concurrent_call_time_auth_required_keeps_valid_package(runtime, loopback, monkeypatch):
     url = f"{loopback.origin}/mcp"
     repository.write_definition(definition_from_provider("suno", {"url": url}))
     _seed_tokens("suno", url, expires_at=time.time() + 3600)
     assert _run(runtime, "refresh", {"name": "suno"})["ok"]
     loopback.resource_status = 401
+    original = repository.publish
+    needs_login = []
+
+    def counted(*args, **kwargs):
+        revision = original(*args, **kwargs)
+        if (kwargs.get("manifest") or {}).get("auth") == "needs_login":
+            needs_login.append(revision)
+        return revision
+
+    monkeypatch.setattr(repository, "publish", counted)
 
     async def many():
         results = await asyncio.gather(*[
@@ -408,6 +418,7 @@ def test_concurrent_call_time_auth_required_keeps_valid_package(runtime, loopbac
 
     bodies = asyncio.run(many())
     assert all(body["error"]["type"] == "auth_required" for body in bodies)
+    assert len(needs_login) == 1
     published = repository.read_published("suno")
     assert published is not None
     assert published["manifest"]["auth"] == "needs_login"
@@ -466,25 +477,26 @@ def test_overlapping_oauth_start_keeps_only_latest_grant(runtime, loopback):
     payload = {"name": "suno", "origin": "http://127.0.0.1:5123", "port": 5123}
 
     async def both():
-        first, second = await asyncio.gather(
-            runtime.submit("oauth_start", payload),
-            runtime.submit("oauth_start", payload),
+        first, second = await asyncio.wait_for(
+            asyncio.gather(
+                runtime.submit("oauth_start", payload),
+                runtime.submit("oauth_start", payload),
+            ),
+            5,
         )
-        return json.loads(first[1]), json.loads(second[1]), list(runtime._pending_logins)
+        return json.loads(first[1]), json.loads(second[1])
 
-    first, second, pending = asyncio.run(both())
-    bodies = [first, second]
-    ok = [body for body in bodies if body.get("ok")]
-    assert ok
+    first, second = asyncio.run(both())
+    assert first["ok"] and second["ok"]
+    first_state = parse_qs(urlparse(first["authorizeUrl"]).query)["state"][0]
+    second_state = parse_qs(urlparse(second["authorizeUrl"]).query)["state"][0]
+    pending = list(runtime._pending_logins)
     assert len(pending) == 1
     winner = pending[0]
-    for body in ok:
-        state = parse_qs(urlparse(body["authorizeUrl"]).query)["state"][0]
-        if state == winner:
-            continue
-        rejected = _run(runtime, "oauth_callback", {"state": state, "code": "late"})
-        assert rejected["ok"] is False
-        assert rejected["error"]["type"] == "invalid_callback"
+    loser = first_state if winner == second_state else second_state
+    rejected = _run(runtime, "oauth_callback", {"state": loser, "code": "late"})
+    assert rejected["ok"] is False
+    assert rejected["error"]["type"] == "invalid_callback"
     accepted = _run(runtime, "oauth_callback", {"state": winner, "code": "code-2", "iss": loopback.origin})
     assert accepted["ok"]
 
