@@ -165,7 +165,7 @@ export const McpHubSection: React.FC = () => {
   const onLogin = async (server: McpServerSummary) => {
     setBusy(`login:${server.name}`);
     try {
-      const res = await api.loginMcp(server.name, window.location.origin);
+      const res = await api.loginMcp(server.name);
       if (!res.ok) { showToast(describe(res.error), 'error'); return; }
       if (res.mode === 'direct' && res.authorizeUrl) {
         window.location.assign(res.authorizeUrl);

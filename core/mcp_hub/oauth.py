@@ -41,8 +41,8 @@ def _write(name: str, value: dict) -> None:
 
 
 class AvibeTokenStorage:
-    def __init__(self, name: str, server_url: str) -> None:
-        self.name, self.server_url = name, server_url
+    def __init__(self, name: str, server_url: str, redirect_uri: str | None = None) -> None:
+        self.name, self.server_url, self.redirect_uri = name, server_url, redirect_uri
 
     def raw(self) -> dict:
         return read_state(self.name, self.server_url)
@@ -61,6 +61,10 @@ class AvibeTokenStorage:
         await asyncio.to_thread(_write, self.name, value)
     async def get_client_info(self) -> OAuthClientInformationFull | None:
         value = (await asyncio.to_thread(self.raw)).get("client")
+        if isinstance(value, dict) and self.redirect_uri is not None:
+            uris = [str(item) for item in value.get("redirect_uris") or []]
+            if self.redirect_uri not in uris:
+                return None
         return OAuthClientInformationFull.model_validate(value) if isinstance(value, dict) else None
 
     async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:
@@ -68,10 +72,10 @@ class AvibeTokenStorage:
         value.update(schemaVersion=1, serverUrl=self.server_url, client=client_info.model_dump(mode="json"))
         await asyncio.to_thread(_write, self.name, value)
 
-    async def clear_client(self) -> None:
-        value = await asyncio.to_thread(self.raw)
+    def drop_client(self) -> None:
+        value = self.raw()
         value.pop("client", None)
-        await asyncio.to_thread(_write, self.name, value)
+        _write(self.name, value)
 
     async def clear_tokens(self) -> None:
         value = await asyncio.to_thread(self.raw)
@@ -93,7 +97,9 @@ class AvibeOAuthProvider(OAuthClientProvider):
                     setattr(self.context, attr, model.model_validate(raw[key]))
                 except Exception:
                     logger.warning("Ignoring invalid stored MCP OAuth metadata")
-        self._initialized = True
+        configured = getattr(self, "_configured_client_info", None)
+        if configured is not None and self.context.client_info is None:
+            self.context.client_info = configured
 
     async def _handle_token_response(self, response) -> None:
         await super()._handle_token_response(response)
@@ -106,12 +112,8 @@ class AvibeOAuthProvider(OAuthClientProvider):
 
     async def _handle_refresh_response(self, response) -> bool:
         status = getattr(response, "status_code", 0)
-        try:
-            body = json.loads((await response.aread()).decode("utf-8"))
-        except Exception:
-            body = {}
         ok = await super()._handle_refresh_response(response)
-        if not ok and (status == 401 or (status == 400 and body.get("error") in {"invalid_grant", "invalid_client"})):
+        if not ok and status in {400, 401}:
             await self.context.storage.clear_tokens()
         return ok
 
@@ -134,12 +136,16 @@ def parse_callback_url(value: str) -> dict[str, str]:
     return result
 
 
-def make_provider(name: str, definition: dict, redirect_uri: str, *, redirect_handler, callback_handler) -> AvibeOAuthProvider:
+def make_provider(name: str, definition: dict, redirect_uri: str, *, redirect_handler, callback_handler, filter_redirect: bool = True) -> AvibeOAuthProvider:
     transport = definition["transport"]
     oauth = definition.get("oauth") or {}
-    return AvibeOAuthProvider(
+    provider = AvibeOAuthProvider(
         transport["url"],
         OAuthClientMetadata(redirect_uris=[redirect_uri], client_name="Avibe MCP Hub", application_type="native", token_endpoint_auth_method="none", scope=oauth.get("scopes")),
-        AvibeTokenStorage(name, transport["url"]),
+        AvibeTokenStorage(name, transport["url"], redirect_uri if filter_redirect else None),
         redirect_handler=redirect_handler, callback_handler=callback_handler,
     )
+    if isinstance(oauth.get("clientId"), str) and oauth["clientId"]:
+        provider.context.client_info = OAuthClientInformationFull(client_id=oauth["clientId"], redirect_uris=[redirect_uri])
+        provider.context._configured_client_info = provider.context.client_info
+    return provider
