@@ -1,6 +1,7 @@
 """Durable OAuth primitives for HTTP MCP Hub servers."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -27,7 +28,7 @@ def delete_oauth(name: str) -> None:
         pass
 
 
-def _read(name: str, server_url: str) -> dict:
+def read_state(name: str, server_url: str) -> dict:
     try:
         value = json.loads(oauth_path(name).read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, ValueError):
@@ -44,41 +45,46 @@ class AvibeTokenStorage:
         self.name, self.server_url = name, server_url
 
     def raw(self) -> dict:
-        return _read(self.name, self.server_url)
+        return read_state(self.name, self.server_url)
 
     async def get_tokens(self) -> OAuthToken | None:
-        value = self.raw().get("tokens")
+        value = (await asyncio.to_thread(self.raw)).get("tokens")
         return OAuthToken.model_validate(value) if isinstance(value, dict) else None
 
     async def set_tokens(self, tokens: OAuthToken) -> None:
-        value = self.raw()
+        value = await asyncio.to_thread(self.raw)
         value.update(schemaVersion=1, serverUrl=self.server_url, tokens=tokens.model_dump(mode="json"))
         if tokens.expires_in is not None:
             value["expiresAt"] = int(time.time()) + int(tokens.expires_in)
-        _write(self.name, value)
-
+        else:
+            value.pop("expiresAt", None)
+        await asyncio.to_thread(_write, self.name, value)
     async def get_client_info(self) -> OAuthClientInformationFull | None:
-        value = self.raw().get("client")
+        value = (await asyncio.to_thread(self.raw)).get("client")
         return OAuthClientInformationFull.model_validate(value) if isinstance(value, dict) else None
 
     async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:
-        value = self.raw()
+        value = await asyncio.to_thread(self.raw)
         value.update(schemaVersion=1, serverUrl=self.server_url, client=client_info.model_dump(mode="json"))
-        _write(self.name, value)
+        await asyncio.to_thread(_write, self.name, value)
+
+    async def clear_client(self) -> None:
+        value = await asyncio.to_thread(self.raw)
+        value.pop("client", None)
+        await asyncio.to_thread(_write, self.name, value)
 
     async def clear_tokens(self) -> None:
-        value = self.raw()
+        value = await asyncio.to_thread(self.raw)
         value.pop("tokens", None)
         value.pop("expiresAt", None)
-        _write(self.name, value)
-
+        await asyncio.to_thread(_write, self.name, value)
 
 class AvibeOAuthProvider(OAuthClientProvider):
     """SDK provider with persisted expiry, AS metadata and PRM."""
 
     async def _initialize(self) -> None:
         await super()._initialize()
-        raw = self.context.storage.raw() if hasattr(self.context.storage, "raw") else {}
+        raw = await asyncio.to_thread(self.context.storage.raw) if hasattr(self.context.storage, "raw") else {}
         if raw.get("expiresAt") is not None:
             self.context.token_expiry_time = float(raw["expiresAt"])
         for key, attr, model in (("authServerMetadata", "oauth_metadata", OAuthMetadata), ("resourceMetadata", "protected_resource_metadata", ProtectedResourceMetadata)):
@@ -87,51 +93,27 @@ class AvibeOAuthProvider(OAuthClientProvider):
                     setattr(self.context, attr, model.model_validate(raw[key]))
                 except Exception:
                     logger.warning("Ignoring invalid stored MCP OAuth metadata")
-        if self.context.client_info is not None:
-            registered = [str(uri) for uri in (self.context.client_info.redirect_uris or [])]
-            requested = [str(uri) for uri in (self.context.client_metadata.redirect_uris or [])]
-            if not any(uri in registered for uri in requested):
-                self.context.client_info = None
         self._initialized = True
 
     async def _handle_token_response(self, response) -> None:
         await super()._handle_token_response(response)
-        raw = self.context.storage.raw()
+        raw = await asyncio.to_thread(self.context.storage.raw)
         if self.context.oauth_metadata is not None:
             raw["authServerMetadata"] = self.context.oauth_metadata.model_dump(mode="json")
         if self.context.protected_resource_metadata is not None:
             raw["resourceMetadata"] = self.context.protected_resource_metadata.model_dump(mode="json")
-        _write(self.context.storage.name, raw)
+        await asyncio.to_thread(_write, self.context.storage.name, raw)
 
     async def _handle_refresh_response(self, response) -> bool:
-        prior = self.context.current_tokens
         status = getattr(response, "status_code", 0)
-        if status != 200:
-            if status in {400, 401}:
-                try:
-                    payload = json.loads((await response.aread()).decode("utf-8"))
-                except Exception:
-                    payload = {}
-                if status == 401 or payload.get("error") in {"invalid_grant", "invalid_client"}:
-                    await self.context.storage.clear_tokens()
-                    self.context.clear_tokens()
-            else:
-                self.context.current_tokens = prior
-            return False
         try:
-            token_response = OAuthToken.model_validate_json(await response.aread())
-            if token_response.scope is None and prior is not None:
-                token_response.scope = prior.scope
-            if token_response.refresh_token is None and prior is not None:
-                token_response.refresh_token = prior.refresh_token
-            self.context.current_tokens = token_response
-            self.context.update_token_expiry(token_response)
-            await self.context.storage.set_tokens(token_response)
-            return True
+            body = json.loads((await response.aread()).decode("utf-8"))
         except Exception:
-            self.context.current_tokens = prior
-            logger.exception("Invalid MCP OAuth refresh response")
-            return False
+            body = {}
+        ok = await super()._handle_refresh_response(response)
+        if not ok and (status == 401 or (status == 400 and body.get("error") in {"invalid_grant", "invalid_client"})):
+            await self.context.storage.clear_tokens()
+        return ok
 
 
 def redirect_mode(origin: str | None, *, cloud_origin: str | None = None, cli: bool = False, port: int = 5123) -> tuple[str, str]:

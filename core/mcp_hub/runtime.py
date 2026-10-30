@@ -73,27 +73,12 @@ def _client_for(definition: dict[str, Any], stack: contextlib.AsyncExitStack, mo
     info = Implementation(name="avibe", version="1")
     if transport["type"] == STDIO:
         params = StdioServerParameters(
-            command=transport["command"],
-            args=list(transport.get("args") or []),
-            env=dict(transport.get("env") or {}) or None,
-            cwd=transport.get("cwd"),
+            command=transport["command"], args=list(transport.get("args") or []),
+            env=dict(transport.get("env") or {}) or None, cwd=transport.get("cwd"),
         )
         return Client(params, client_info=info, mode=mode)
-    oauth_provider = auth
-    if oauth_provider is None and transport["type"] == HTTP and definition.get("oauth"):
-        async def _redirect(_url: str) -> None:
-            raise McpHubError("auth_required", "MCP OAuth login is required.", hint=f"vibe mcp {definition['name']} --login")
-        async def _callback():
-            raise McpHubError("auth_required", "MCP OAuth login is required.")
-        redirect_uri = "http://127.0.0.1:5123/api/mcp/oauth/callback"
-        stored = mcp_oauth._read(definition["name"], transport["url"]).get("client")
-        if isinstance(stored, dict) and stored.get("redirect_uris"):
-            redirect_uri = str(stored["redirect_uris"][0])
-        oauth_provider = mcp_oauth.make_provider(
-            definition["name"], definition, redirect_uri,
-            redirect_handler=_redirect, callback_handler=_callback,
-        )
-    http_client = create_mcp_http_client(headers=dict(transport.get("headers") or {}), auth=oauth_provider)
+    headers = dict(transport.get("headers") or {})
+    http_client = create_mcp_http_client(headers=headers, auth=auth)
     stack.push_async_callback(http_client.aclose)
     return Client(streamable_http_client(transport["url"], http_client=http_client), client_info=info, mode=mode)
 
@@ -183,7 +168,7 @@ class _Connection:
     async def _run(self) -> None:
         try:
             async with contextlib.AsyncExitStack() as stack:
-                client = await _enter_client(self.definition, stack)
+                client = await _enter_client(self.definition, stack, auth=await self.runtime._oauth_provider(self.definition))
                 # The SDK learns every tool's output schema before the first call.
                 await _list_all_tools(client)
                 self._ready.set_result(client)
@@ -284,6 +269,7 @@ class McpRuntime:
         self._discover_task: Optional[asyncio.Task] = None
         self._oauth_providers: dict[str, Any] = {}
         self._pending_logins: dict[str, tuple[str, asyncio.Future]] = {}
+        self._oauth_tasks: dict[str, asyncio.Task] = {}
 
     # -- thread ---------------------------------------------------------------
 
@@ -362,6 +348,24 @@ class McpRuntime:
     def forget(self, connection: _Connection) -> None:
         if self._connections.get(connection.key) is connection:
             del self._connections[connection.key]
+
+    async def _oauth_provider(self, definition: dict[str, Any]):
+        transport = definition.get("transport") or {}
+        if transport.get("type") != HTTP or any(key.lower() == "authorization" for key in transport.get("headers") or {}):
+            return None
+        name = definition["name"]
+        provider = self._oauth_providers.get(name)
+        if provider is not None:
+            return provider
+        async def _redirect(_url: str) -> None:
+            raise McpHubError("auth_required", "MCP OAuth login is required.", hint=f"vibe mcp {name} --login")
+        async def _callback():
+            raise McpHubError("auth_required", "MCP OAuth login is required.")
+        raw = await asyncio.to_thread(mcp_oauth.read_state, name, transport["url"])
+        redirect_uri = str((raw.get("client") or {}).get("redirect_uris", ["http://127.0.0.1:5123/api/mcp/oauth/callback"])[0])
+        provider = mcp_oauth.make_provider(name, definition, redirect_uri, redirect_handler=_redirect, callback_handler=_callback)
+        self._oauth_providers[name] = provider
+        return provider
 
     def _lock(self, name: str) -> asyncio.Lock:
         return self._package_locks.setdefault(name, asyncio.Lock())
@@ -567,15 +571,14 @@ class McpRuntime:
                 await asyncio.to_thread(repository.unlist, name)
             raise McpHubError("timeout", "Refresh timed out.") from None
         except McpHubError as cop:
-            if unlist_on_failure and definition.get("oauth") and cop.type in {"auth_required", "oauth"}:
-                await asyncio.to_thread(self._publish_needs_login, name, definition)
-            elif unlist_on_failure:
+            if definition.get("transport", {}).get("type") == HTTP and not any(key.lower() == "authorization" for key in definition.get("transport", {}).get("headers", {})) and cop.type in {"auth_required", "oauth"}:
+                revision = await asyncio.to_thread(self._publish_needs_login, name, definition)
+                return _dumps({"ok": True, "name": name, "revision": revision, "toolCount": 0, "auth": "needs_login"})
+            if unlist_on_failure:
                 await asyncio.to_thread(repository.unlist, name)
             raise
         except Exception as cop:
-            if unlist_on_failure and definition.get("oauth") and "401" in str(cop):
-                await asyncio.to_thread(self._publish_needs_login, name, definition)
-            elif unlist_on_failure:
+            if unlist_on_failure:
                 await asyncio.to_thread(repository.unlist, name)
             raise McpHubError("connection", f"Refresh failed: {_describe(cop)}") from None
         finally:
@@ -634,15 +637,14 @@ class McpRuntime:
 
         return list(await asyncio.gather(*(one(name) for name in sorted(names))))
 
-    @staticmethod
-    async def _discover(snapshot: dict[str, Any]) -> tuple[list, Any, Optional[str]]:
+    async def _discover(self, snapshot: dict[str, Any]) -> tuple[list, Any, Optional[str]]:
         async with contextlib.AsyncExitStack() as stack:
-            client = await _enter_client(snapshot, stack)
+            client = await _enter_client(snapshot, stack, auth=await self._oauth_provider(snapshot))
             return await _list_all_tools(client), client.server_info, client.instructions
 
     @staticmethod
-    def _publish_needs_login(name: str, definition: dict[str, Any]) -> None:
-        repository.publish(name, definition=definition, manifest={"description": "", "auth": "needs_login"}, tools=[], commands=[])
+    def _publish_needs_login(name: str, definition: dict[str, Any]) -> str:
+        return repository.publish(name, definition=definition, manifest={"description": "", "auth": "needs_login"}, tools=[], commands=[])
     @staticmethod
     def _publish(name, snapshot, definition, tools, server_info, instructions=None) -> str:
         descriptors, diagnostics, seen = [], [], set()
@@ -665,6 +667,8 @@ class McpRuntime:
             "generatedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
         version = getattr(server_info, "version", None)
+        if snapshot.get("transport", {}).get("type") == HTTP and not any(key.lower() == "authorization" for key in snapshot.get("transport", {}).get("headers", {})):
+            manifest["auth"] = "ok"
         if version:
             manifest["serverInfo"] = {"version": str(version)}
         if diagnostics:
@@ -682,12 +686,19 @@ class McpRuntime:
         name = payload.get("name")
         definition = await asyncio.to_thread(repository.read_definition, name)
         transport = definition.get("transport") or {}
-        if transport.get("type") != HTTP or not definition.get("oauth"):
+        if transport.get("type") != HTTP:
             raise McpHubError("usage", "OAuth login is only available for HTTP MCP servers.", usage=True)
+        async with self._lock(name):
+            previous = self._oauth_tasks.pop(name, None)
+            if previous is not None and not previous.done():
+                previous.cancel()
         mode, redirect_uri = mcp_oauth.redirect_mode(payload.get("origin"), cloud_origin=payload.get("cloudOrigin"), cli=payload.get("cli") is True, port=int(payload.get("port") or 5123))
+        stored_client = (await asyncio.to_thread(mcp_oauth.read_state, name, transport["url"])).get("client")
+        if isinstance(stored_client, dict) and redirect_uri not in [str(item) for item in stored_client.get("redirect_uris") or []]:
+            await asyncio.to_thread(mcp_oauth.AvibeTokenStorage(name, transport["url"]).clear_client)
         url_future = asyncio.get_running_loop().create_future()
         callback_future = asyncio.get_running_loop().create_future()
-        record = {"name": name, "callback": callback_future, "url": url_future, "redirect_uri": redirect_uri, "mode": mode}
+        record = {"name": name, "callback": callback_future, "url": url_future, "redirect_uri": redirect_uri, "mode": mode, "returnUrl": f"{payload.get('origin') or '/'}?mcp={name}&oauth=success"}
 
         async def redirect_handler(url: str) -> None:
             parsed = urlparse(url)
@@ -700,16 +711,15 @@ class McpRuntime:
                 url_future.set_result(url)
 
         async def callback_handler():
-            return await callback_future
+            with anyio.fail_after(600):
+                return await callback_future
 
         provider = mcp_oauth.make_provider(name, definition, redirect_uri, redirect_handler=redirect_handler, callback_handler=callback_handler)
+        self._oauth_providers[name] = provider
         async def run_login() -> None:
             try:
                 async with contextlib.AsyncExitStack() as stack:
-                    client = await _enter_client(definition, stack, auth=provider)
-                    tools = await _list_all_tools(client)
-                    revision = await asyncio.to_thread(self._publish, name, definition, definition, tools, client.server_info, client.instructions)
-                    await self._retire_package(name, keep_revision=revision)
+                    await self._refresh_locked(name, wait_stdio=False, unlist_on_failure=True)
             except Exception as exc:
                 if not url_future.done():
                     url_future.set_exception(exc)
@@ -718,7 +728,8 @@ class McpRuntime:
                 for state, item in list(self._pending_logins.items()):
                     if item is record:
                         self._pending_logins.pop(state, None)
-        asyncio.create_task(run_login(), name=f"mcp-oauth-{name}")
+        task = asyncio.create_task(run_login(), name=f"mcp-oauth-{name}")
+        self._oauth_tasks[name] = task
         try:
             url = await asyncio.wait_for(url_future, 30)
         except TimeoutError:
@@ -732,7 +743,13 @@ class McpRuntime:
             raise McpHubError("invalid_callback", "This OAuth callback is unknown or already used.")
         from mcp.shared.auth import AuthorizationCodeResult
         item["callback"].set_result(AuthorizationCodeResult(code=payload.get("code"), state=state, iss=payload.get("iss")))
-        return _dumps({"ok": True})
+        task = self._oauth_tasks.get(item.get("name"))
+        if task is not None:
+            try:
+                await asyncio.wait_for(asyncio.shield(task), 600)
+            except Exception as exc:
+                raise McpHubError("oauth", "MCP OAuth login failed.") from exc
+        return _dumps({"ok": True, "redirect": item.get("returnUrl")})
 
     async def _oauth_complete(self, payload: dict[str, Any]) -> bytes:
         values = mcp_oauth.parse_callback_url(str(payload.get("callbackUrl") or ""))
@@ -740,6 +757,10 @@ class McpRuntime:
 
     async def _oauth_logout(self, payload: dict[str, Any]) -> bytes:
         name = payload.get("name")
+        task = self._oauth_tasks.pop(name, None)
+        if task is not None and not task.done():
+            task.cancel()
+        await self._retire_package(name)
         await asyncio.to_thread(mcp_oauth.delete_oauth, name)
         self._oauth_providers.pop(name, None)
         return _dumps({"ok": True, "name": name})
@@ -749,6 +770,7 @@ class McpRuntime:
         async with self._lock(name):
             kind = await asyncio.to_thread(repository.remove_package, name)
             await self._retire_package(name)
+            self._oauth_providers.pop(name, None)
         return _dumps({"ok": True, "name": name, "removed": True, "kind": kind})
 
 
@@ -789,8 +811,6 @@ class McpRuntime:
                         raise McpHubError("unknown_outcome", "The MCP HTTP session was lost; do not retry blindly.") from None
                     continue
                 except Exception as exc:
-                    if definition.get("oauth") and ("401" in _describe(exc) or "OAuth" in _describe(exc) or "auth" in _describe(exc).lower()):
-                        raise McpHubError("auth_required", "MCP OAuth authentication is required.", hint=f"vibe mcp {name} --login") from exc
                     raise
                 return await asyncio.to_thread(self._result_envelope, name, revision, tool, result)
         except McpHubError as exc:

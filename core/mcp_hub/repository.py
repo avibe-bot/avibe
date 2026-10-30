@@ -364,11 +364,7 @@ def summarize(name: str, servers: Optional[dict[str, native.NativeServer]] = Non
             command = " ".join([transport.get("command") or "", *(transport.get("args") or [])]).strip()
         else:
             url = str(transport.get("url") or "")
-    if transport.get("type") == "streamable_http" and definition.get("oauth"):
-        auth = mcp_oauth._read(name, str(transport.get("url") or ""))
-        summary_auth = "ok" if isinstance(auth.get("tokens"), dict) else "needs_login"
-    else:
-        summary_auth = "none"
+    summary_auth = manifest.get("auth", "none")
     return {
         "name": name,
         "auth": summary_auth,

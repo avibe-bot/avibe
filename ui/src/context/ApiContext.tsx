@@ -592,7 +592,8 @@ export interface McpDefinition {
   };
 }
 export interface McpResult { ok: boolean; error?: McpError }
-export interface McpParsedServer { name: string; exists: boolean; transport?: { type: string } }
+export type McpOAuthStartResult = McpResult & { authorizeUrl?: string; mode?: 'direct' | 'paste' };
+export type McpOAuthMutationResult = McpResult & { name?: string };
 export interface McpTool { name: string; description?: string; inputSchema?: unknown; flags: { flag: string; kind: string; required: boolean }[] }
 
 export type ApiContextType = {
@@ -953,9 +954,9 @@ export type ApiContextType = {
   discoverMcp: () => Promise<McpResult & { results?: { name: string; status: string; error?: string; toolCount?: number }[] }>;
   refreshMcp: (name: string) => Promise<McpResult & { name?: string; toolCount?: number }>;
   removeMcp: (name: string) => Promise<McpResult>;
-  loginMcp: (name: string, origin?: string) => Promise<any>;
-  completeMcpLogin: (name: string, callbackUrl: string) => Promise<any>;
-  logoutMcp: (name: string) => Promise<any>;
+  loginMcp: (name: string, origin?: string) => Promise<McpOAuthStartResult>;
+  completeMcpLogin: (name: string, callbackUrl: string) => Promise<McpOAuthMutationResult>;
+  logoutMcp: (name: string) => Promise<McpOAuthMutationResult>;
   getMcpServer: (name: string) => Promise<McpResult & { server?: McpServerSummary; tools?: McpTool[] }>;
   previewSkillSource: (source: string, params?: { projectId?: string }) => Promise<SkillsPreviewResult>;
   addSkill: (payload: { source: string; scope: SkillScope; projectId?: string; backends?: string[]; all?: boolean; skill?: string; copy?: boolean }) => Promise<SkillsMutationResult>;

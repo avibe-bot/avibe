@@ -6494,7 +6494,10 @@
       "timeout": "MCP 服务器超时。",
       "capacity": "运行中的 MCP 服务器进程过多，请稍后重试。",
       "not_found": "未知 MCP 服务器。",
-      "unsupported_transport_sse": "不支持 SSE；请使用 Streamable HTTP 地址。"
+      "unsupported_transport_sse": "不支持 SSE；请使用 Streamable HTTP 地址。",
+      "invalid_callback": "OAuth 回调无效或已过期。",
+      "auth_required": "需要登录 MCP。",
+      "oauth": "MCP 登录未完成：{{message}}"
     },
     "addedCount": "已添加 {{count}} 个。",
     "addedPartial": "已添加 {{count}} 个；失败：{{failed}}",

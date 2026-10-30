@@ -9550,6 +9550,7 @@ async def mcp_remove(name: str, starlette_request: FastAPIRequest):
     return await _mcp_route(starlette_request, mcp_api.remove, name)
 
 
+@app.post("/api/mcp/{name}/oauth/start", include_in_schema=False)
 async def mcp_oauth_start(name: str, starlette_request: FastAPIRequest):
     from vibe import mcp_api
     return await _mcp_route(starlette_request, lambda: mcp_api.oauth_start(name, _mcp_body(), _current_origin()))
@@ -9558,15 +9559,19 @@ async def mcp_oauth_start(name: str, starlette_request: FastAPIRequest):
 @app.get("/api/mcp/oauth/callback", include_in_schema=False)
 async def mcp_oauth_callback(starlette_request: FastAPIRequest):
     from vibe import mcp_api
-    query = {key: value for key, value in request.query_params.items()}
+    query = {key: value for key, value in starlette_request.query_params.items()}
     body, status = await mcp_api.run(mcp_api.oauth_callback, query)
-    return jsonify(body), status
+    if body.get("redirect"):
+        from starlette.responses import RedirectResponse
+        return RedirectResponse(body["redirect"], status_code=302)
+    message = "MCP OAuth login completed. You can close this tab." if body.get("ok") else "MCP OAuth login could not be completed. Return to Avibe and try again."
+    return Response(content=f"<!doctype html><title>MCP OAuth</title><main><p>{message}</p></main>", status_code=status, media_type="text/html")
 
 
 @app.post("/api/mcp/{name}/oauth/complete", include_in_schema=False)
 async def mcp_oauth_complete(name: str, starlette_request: FastAPIRequest):
     from vibe import mcp_api
-    body = _mcp_body()
+    body = await starlette_request.json()
     return await _mcp_route(starlette_request, lambda: mcp_api.oauth_complete(name, str(body.get("callbackUrl") or "")))
 
 

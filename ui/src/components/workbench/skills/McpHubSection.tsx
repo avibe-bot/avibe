@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ChevronDown, ChevronRight, Globe, Loader2, Plus, RefreshCw, Search, Terminal, Trash2, X } from 'lucide-react';
 import clsx from 'clsx';
@@ -82,7 +82,7 @@ export const McpHubSection: React.FC = () => {
   const canManage = capabilities.is_instance_owner;
   const [servers, setServers] = useState<McpServerSummary[]>([]);
   const [search, setSearch] = useState('');
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(() => new URLSearchParams(window.location.search).get('mcp'));
   const [expandedFor, setExpandedFor] = useState<string | null>(null);
   const [expandedTools, setExpandedTools] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState<string | null>(null);
@@ -114,6 +114,13 @@ export const McpHubSection: React.FC = () => {
     }
   }, [api, describe, showToast, t]);
 
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('oauth') === 'success') {
+      showToast(t('mcpHub.loginComplete'), 'success');
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, [load, showToast, t]);
   const [listed, setListed] = useState(false);
   if (!listed) {
     setListed(true);
@@ -160,6 +167,10 @@ export const McpHubSection: React.FC = () => {
     try {
       const res = await api.loginMcp(server.name, window.location.origin);
       if (!res.ok) { showToast(describe(res.error), 'error'); return; }
+      if (res.mode === 'direct' && res.authorizeUrl) {
+        window.location.assign(res.authorizeUrl);
+        return;
+      }
       setLoginFor(server); setAuthorizeUrl(res.authorizeUrl ?? null);
       if (res.authorizeUrl) window.open(res.authorizeUrl, '_blank', 'noopener,noreferrer');
     } finally { setBusy(null); }

@@ -98,7 +98,7 @@ async def refresh(name: str) -> dict[str, Any]:
 async def remove(name: str) -> dict[str, Any]:
     return await _owner("remove", {"name": name})
 async def oauth_start(name: str, body: dict[str, Any], origin: str | None = None) -> dict[str, Any]:
-    return await _owner("oauth_start", {"name": name, "origin": origin, **body})
+    return await _owner("oauth_start", {"name": name, "origin": origin})
 
 
 async def oauth_callback(body: dict[str, Any]) -> dict[str, Any]:

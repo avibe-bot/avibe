@@ -23,7 +23,7 @@ usage:
   vibe mcp --list [--page N] [--format json]
   vibe mcp <server> --list [--format json]
   vibe mcp <server> --refresh
-  vibe mcp <server> --login [--origin URL]
+  vibe mcp <server> --remove
   vibe mcp <server> --login-complete '<callback URL>'
   vibe mcp <server> --logout
   vibe mcp <server> <tool> --help
@@ -251,6 +251,13 @@ def _server(name: str, args: list[str]) -> int:
             if len(args) > 3:
                 raise McpHubError("usage", "usage: vibe mcp <server> --login [--origin URL]", usage=True)
             payload = {"name": name, "cli": True}
+            try:
+                from config.v2_config import V2Config
+                cloud = V2Config.load().remote_access.vibe_cloud
+                if cloud.enabled and cloud.public_url:
+                    payload["cloudOrigin"] = str(cloud.public_url).rstrip("/")
+            except Exception:
+                pass
             if len(args) == 3 and args[1] == "--origin":
                 payload["origin"] = args[2]
             return _oauth_owner("oauth_start", payload)

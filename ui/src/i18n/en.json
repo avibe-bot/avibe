@@ -6494,7 +6494,10 @@
       "timeout": "The MCP server timed out.",
       "capacity": "Too many MCP server processes are running; try again later.",
       "not_found": "Unknown MCP server.",
-      "unsupported_transport_sse": "SSE is not supported; use a Streamable HTTP URL."
+      "unsupported_transport_sse": "SSE is not supported; use a Streamable HTTP URL.",
+      "invalid_callback": "This OAuth callback is invalid or expired.",
+      "auth_required": "MCP login is required.",
+      "oauth": "MCP login could not be completed: {{message}}"
     },
     "addedCount": "Added {{count}} MCP servers.",
     "addedPartial": "Added {{count}}; failed: {{failed}}",

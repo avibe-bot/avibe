@@ -67,7 +67,7 @@ vibe mcp suno --login-complete '<callback URL>'
 vibe mcp suno --logout
 ```
 
-Avibe uses a direct callback for HTTPS and loopback HTTP. LAN or other plain-HTTP access uses paste mode: authorize in the new tab, copy the callback URL from the address bar, and paste it into the dialog or `--login-complete`. Tokens and the dynamic client registration are stored in `<avibe-home>/mcp/<name>/oauth.json`, an owner-private plaintext file with mode `0600`; it is never shown in lists, help, API responses, or logs. Removing or logging out deletes it.
+Avibe uses a direct callback for HTTPS and loopback HTTP: the browser stays in the current tab and returns to the MCP page after login. LAN or other plain-HTTP access uses paste mode: authorize in the new tab, copy the callback URL from the address bar, and paste it into the small login dialog or `--login-complete`. Tokens and the dynamic client registration are stored in `<avibe-home>/mcp/<name>/oauth.json`, an owner-private plaintext file with mode `0600`; it is never shown in lists, help, API responses, or logs. Removing or logging out deletes it.
 
 
 Env and header values are stored as given. URLs with `user:pass@` are rejected; put credentials in an `Authorization` header.
