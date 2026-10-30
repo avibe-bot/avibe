@@ -1,6 +1,7 @@
 # MCP Hub OAuth
 
-> Status: spec, owner decisions recorded 2026-10-30. Extends `docs/plans/mcp-hub-mvp.md`.
+> Status: spec, owner decisions recorded 2026-10-30; design review (advisor, codex-astra) folded in §11.
+> Extends `docs/plans/mcp-hub-mvp.md`.
 > Reference server: `{"mcpServers": {"suno": {"url": "https://api.suno.com/mcp"}}}`.
 
 ## 1. Background
@@ -69,12 +70,16 @@ legal redirect targets:
 Consequences:
 
 - **Origin derivation** reuses `_current_origin()`; no new trust in `Host`/`X-Forwarded-*`.
-- **Client registration is per redirect URI.** Storage returns the saved DCR client only when its
-  `redirect_uris` contains this login's URI; otherwise the SDK re-registers. Switching between
-  localhost and Cloud therefore works without manual reset; the token set is shared.
-- **Callback auth.** `/api/mcp/oauth/callback` stays behind the normal UI session (no exemption).
-  The Cloud session cookie is `SameSite=Lax`, so the AS's top-level GET redirect carries it. The
-  `state` value is the binding to a pending login; unknown/expired/used `state` is rejected.
+- **One stored client.** Storage returns the saved DCR client only when its `redirect_uris`
+  contains this login's URI; otherwise it returns none, the SDK re-registers, and the new client
+  replaces the old one. A redirect change always comes with a new login, so no client list.
+- **Callback auth = the pending `state`.** `GET /api/mcp/oauth/callback` is exempt from the UI
+  session, like the existing Cloud `/auth/callback` (`vibe/ui_server.py` `_remote_auth_exempt_path`
+  and its unauthenticated rate limit): a login started from CLI/IM, or opened on another device,
+  has no browser session. The route only forwards `code`/`state`/`iss` over IPC; the runtime
+  accepts it only for a live pending login with that exact `state` (SDK-generated, 32 bytes), and
+  the PKCE verifier never leaves the runtime. Unknown/expired/used `state` → generic error page.
+  Starting, pasting and logging out stay Owner-only.
 - **The pasted URL is validated** against the pending login: same `state`, path
   `/api/mcp/oauth/callback`; `code`, `state`, `iss` are extracted from its query. Host/port are not
   required to match (the user may paste from another device).
@@ -96,11 +101,15 @@ call → per-server token manager (§5) supplies a fresh Bearer per HTTP request
      → refresh token rejected → envelope error.type = auth_required, hint `vibe mcp suno --login`
 ```
 
-- The SDK's grant suspends inside `callback_handler`; it awaits a Future that the callback/paste
-  IPC resolves. Pending logins are in controller memory, single-use, 10-minute TTL, one per
-  server (a new start cancels the previous).
-- The SDK `OAuthClientProvider` is used **only for interactive login** (discovery, DCR, PKCE,
-  code exchange). Calls and refresh never go through it; see §5.
+- The SDK's grant suspends inside `callback_handler`; it awaits a Future (with
+  `anyio.fail_after(600)`) that the callback/paste IPC resolves. Pending logins are a
+  `dict[state → Future]` in the **MCP runtime loop** (`core/mcp_hub/runtime.py`; the Future must be
+  created on that loop), single-use, one per server (a new start cancels the previous).
+- **needs_login fits the publish model** (`_refresh_locked` currently unlists on failure, and
+  `summarize`/`list_packages`/prompt read published snapshots): a 401 carrying an OAuth challenge
+  publishes a **zero-tool snapshot whose manifest has `auth: "needs_login"`**. Lists show it with a
+  login action; `core/mcp_hub/prompt.py` skips it; calls return `auth_required`. A successful
+  login republishes normally.
 
 ## 5. Token refresh
 
@@ -129,38 +138,32 @@ wrap their SDKs for the same reasons.
 
 ### 5.2 Avibe design
 
-The SDK `OAuthClientProvider` is used only for interactive login. A per-server **token manager**
-in the MCP runtime owns refresh, following Claude Code where the three clients differ.
+Reuse the SDK provider for everything; fix its three restart gaps in a thin subclass.
 
-- **Persisted inputs** (§6): absolute `expiresAt`, refresh token, the issuing `clientId`, AS
-  `issuer` + `tokenEndpoint` (+ `revocationEndpoint`) and RFC 8707 `resource` captured at login
-  (Claude Code persists discovery state too). Refresh needs no rediscovery.
-- **Single writer, no file lock.** Claude Code and Codex need cross-process lockfiles because
-  many CLI processes share one store. In Avibe only the Controller's MCP runtime reads or writes
-  `oauth.json` (CLI/UI go through IPC), so refresh, login completion and logout serialize on one
-  `asyncio.Lock` per server on the runtime loop. Waiters re-check expiry after acquiring the lock,
-  so N concurrent callers cause one token request.
-- **Per request.** HTTP connections attach an `httpx.Auth` that asks the manager for the token on
-  every request, so a Session connection held open past the access-token lifetime keeps working.
-- **Proactive, 300 s skew** (Claude Code): refresh when `expiresAt - now <= 300 s`. No
-  `expiresAt` → use the token until a 401. No background timer (none of the three has one).
-- **Owned refresh task** (Codex): the refresh + persist runs as its own task with a 45 s timeout;
-  a caller timing out or being cancelled never discards a rotated refresh token.
-- **Rotation.** Persist (`write_atomic`) before the new access token is used. A response without
-  `refresh_token` / `scope` keeps the previous one (RFC 6749 §6). If the write fails, keep the new
-  set in memory, log, and retry the write on the next use.
-- **Request 401** (rmcp): refresh once under the lock; resend once only if that produced a
-  different access token; otherwise `auth_required`. The server rejected the request before
-  running it, so the resend is safe for `tools/call`. A rejected access token is not sent again.
-- **Failure classes.**
-  - Token endpoint `400 invalid_grant` / `invalid_client` / `401` → refresh token dead. Drop it
-    **only if `oauth.json` still holds the refresh token that was presented** (Codex/OpenCode
-    compare-and-retire), keep the client, status `needs_login`, call returns `auth_required`.
-  - Network error, `5xx`, `429`, timeout → transient. Keep tokens; if the access token has not
-    actually expired yet, use it (Claude Code); otherwise fail `connection`, retry on next use.
-  - Expired and no refresh token (no `offline_access` grant) → `auth_required`.
-- **Logout** revokes refresh then access token at `revocationEndpoint` when advertised
-  (best effort, Claude Code), then deletes `oauth.json`.
+- `AvibeOAuthProvider(OAuthClientProvider)`, **one instance per server**, shared by every HTTP
+  connection of that server (`_client_for` passes it as `auth=` to `create_mcp_http_client`).
+  Its `context.lock` already serializes the auth flow, so N concurrent requests cause one refresh;
+  a provider is an httpx `Auth`, so the token is attached per request and long-lived Session
+  connections pick up refreshed tokens.
+- Override `_initialize()` to restore from `oauth.json`: tokens, client, absolute `expiresAt` →
+  `context.token_expiry_time`, AS metadata → `context.oauth_metadata`, PRM →
+  `context.protected_resource_metadata`. Proactive refresh then uses the real `token_endpoint`
+  (SDK refreshes when expired; the SDK's own RFC 6749 §6 carry-forward of `refresh_token`/`scope`
+  and save-before-use apply as is).
+- `TokenStorage.set_tokens` writes absolute `expiresAt` (from `expires_in`) plus the current AS
+  metadata / PRM via `write_atomic` (0600). A write failure is logged and raised; no retry state.
+- Override `_handle_refresh_response`: on `400 invalid_grant` / `invalid_client` / `401` from the
+  token endpoint, also delete the tokens from `oauth.json` (keep the client), so the next call does
+  not hit the token endpoint again; status becomes `needs_login`. Network / `5xx` / `429`: keep tokens.
+- Call-time providers have a `redirect_handler` that raises `McpHubError("auth_required")`. A 401
+  at call time (revoked or unrefreshable token) therefore ends as `auth_required` with the hint
+  `vibe mcp <name> --login`; **no automatic replay of `tools/call`** (a 401 is not guaranteed to
+  precede side effects). The pre-dispatch `Session not found` retry in `runtime.py` is unchanged.
+- No background timer, no owned refresh task, no write-retry, no token revocation at logout
+  (phase 1 `--logout` deletes `oauth.json`), no rejected-token memory, no cross-process lock
+  (only the Controller's MCP runtime touches `oauth.json`).
+- These overrides touch SDK private members; `mcp` is pinned `<3`, and the hermetic test
+  (§10) exercises restart → refresh so an SDK change fails CI rather than users.
 - Logs carry status and OAuth `error` code only, never token values.
 
 ## 6. Storage
@@ -169,18 +172,19 @@ in the MCP runtime owns refresh, following Claude Code where the three clients d
 
 ```json
 {"schemaVersion": 1, "serverUrl": "https://api.suno.com/mcp",
- "resource": "https://api.suno.com/mcp",
- "authServer": {"issuer": "…", "tokenEndpoint": "…", "revocationEndpoint": "…"},
- "tokens": {"accessToken": "…", "refreshToken": "…", "expiresAt": 1793345230, "scope": "…",
-            "clientId": "…"},
- "clients": [{"clientId": "…", "clientSecret": null, "tokenEndpointAuthMethod": "none",
-              "redirectUris": ["…"], "issuer": "…"}]}
+ "tokens": {"access_token": "…", "refresh_token": "…", "scope": "…", "token_type": "Bearer"},
+ "expiresAt": 1793345230,
+ "client": {"client_id": "…", "redirect_uris": ["…"], "issuer": "…"},
+ "authServerMetadata": {"issuer": "…", "token_endpoint": "…", "…": "…"},
+ "resourceMetadata": {"resource": "https://api.suno.com/mcp", "authorization_servers": ["…"]}}
 ```
 
-- `clients` holds one DCR registration per redirect URI (§3). A refresh token is bound to the
-  client that obtained it, so refresh authenticates as `tokens.clientId`, not the latest client.
+`tokens` / `client` / metadata are the SDK models' own JSON (`OAuthToken`,
+`OAuthClientInformationFull`, `OAuthMetadata`, `ProtectedResourceMetadata`).
+
 - Not in `definition.json` or `revisions/`; never printed by list/help/API.
-- Ignored (treated as absent) when `serverUrl` differs from the definition URL.
+- Ignored (treated as absent) when `serverUrl` differs from the definition URL, so a changed
+  native URL never receives the old bearer token.
 - Deleted on `--remove` / hide, and by `--logout`.
 - Native-source OAuth servers get their own Avibe login; native token stores are not read.
 
@@ -200,7 +204,7 @@ vibe mcp suno --logout
 ```
 
 API: `POST /api/mcp/{name}/oauth/start` (body carries nothing; origin from request) →
-`{authorizeUrl, mode}`; `GET /api/mcp/oauth/callback`; `POST /api/mcp/{name}/oauth/complete`
+`{authorizeUrl, mode}`; `GET /api/mcp/oauth/callback` (session-exempt, §3); `POST /api/mcp/{name}/oauth/complete`
 `{callbackUrl}`; `POST /api/mcp/{name}/oauth/logout`. Summary gains `auth: none|needs_login|ok`.
 
 UI: needs-login rows show a login action; the login dialog opens the authorize URL in a new tab,
@@ -211,7 +215,7 @@ keys ignored (not rejected), per native extras policy.
 
 ## 9. Out of scope (phase 1)
 
-Pre-registered secrets and fixed callback port, CIMD, keychain/Vault storage, OAuth for SSE,
+Pre-registered secrets and fixed callback port, CIMD, token revocation at logout, keychain/Vault storage, OAuth for SSE,
 client-credentials grant, step-up UX beyond the SDK default, borrowing native clients' tokens.
 
 ## 10. Acceptance
@@ -222,10 +226,25 @@ client-credentials grant, step-up UX beyond the SDK default, borrowing native cl
 4. Log in from `http://<LAN IP>:5123` → paste mode; pasting the address-bar URL completes.
 5. `vibe mcp suno --login` / `--login-complete` work from CLI and from an Agent in IM.
 6. Expired access token refreshes transparently, including after a Controller restart and on a
-   Session connection held open past expiry; revoked refresh token → `auth_required`, status
-   `needs_login`; token-endpoint outage → `connection`, tokens kept.
+   Session connection held open past expiry; rejected refresh token → tokens deleted, status
+   `needs_login`, call `auth_required`; token-endpoint outage → tokens kept.
 7. N concurrent calls across Sessions on an expired token cause exactly one token-endpoint request;
-   a rotated refresh token is persisted before use.
+   a rotated refresh token is persisted before use. A call-time 401 never replays `tools/call`.
 8. `--logout` / `--remove` delete `oauth.json`; tokens never appear in logs, list, help, or API.
 9. Tests: hermetic loopback AS + MCP fixture covering 401→login→call, redirect-mode selection
-   table, per-redirect client reuse, pasted-URL validation, refresh-failure mapping, restart-then-refresh, 401-resend-once.
+   table, per-redirect client reuse, pasted-URL validation, refresh-failure mapping, restart-then-refresh, session-exempt callback state check.
+
+## 11. Design review (2026-10-30)
+
+advisor and codex-astra both returned approve-with-cuts. Applied:
+
+- Reuse the SDK provider for refresh via `_initialize` / `_handle_refresh_response` overrides
+  instead of a separate token manager (advisor; codex-astra had judged a manager necessary only
+  because the SDK does not restore expiry/metadata, which the override solves).
+- Cut: owned refresh task, write-failure retry, logout revocation, compare-before-retire,
+  rejected-token memory, 401 resend, per-redirect client list.
+- Fixed: callback must be session-exempt and bound by `state` (codex-astra); pending logins live on
+  the MCP runtime loop and needs_login is a zero-tool published snapshot (advisor).
+- Kept against one cut proposal: `serverUrl` binding (codex-astra) — one comparison prevents
+  sending a bearer token to a changed URL.
+
