@@ -105,3 +105,47 @@ def test_computer_use_skill_states_readiness_and_restrictions_not_permissions() 
     for retired in ("require_bind", "Never take focus", "focus_shortcut_forbidden"):
         assert retired not in body
     assert "verify, `await avibe.confirm(...)`, verify\n   again, then act" in body
+
+
+def test_computer_use_skill_bounds_no_effect_recovery_and_viewport_evidence() -> None:
+    """Guard no-effect recovery; readiness coverage alone misses blind retries."""
+
+    body = Path("skills/computer-use/SKILL.md").read_text(encoding="utf-8")
+    first_screen = " ".join("\n".join(body.splitlines()[:80]).split())
+    assert "## No-effect recovery and viewport content" in first_screen
+    recovery = " ".join(
+        body.split("## No-effect recovery and viewport content", 1)[1]
+        .split("\n## ", 1)[0]
+        .split()
+    )
+    assert recovery in first_screen
+    assert "Default to background input" in recovery
+
+    # A no-effect observation gates activation, exact-window verification, then retry.
+    steps = (
+        "second observation shows no effect",
+        "do not repeat the same foreground click immediately",
+        "await win.activate()",
+        "re-observe that this exact window is on screen and focused",
+        "retrying that one action",
+    )
+    positions = [recovery.index(step) for step in steps]
+    assert positions == sorted(positions)
+    assert 'Use `delivery_mode: "foreground"` for the retry if background' in recovery
+    assert "Foreground input restores the previous frontmost window" in recovery
+    assert "`activate()` leaves the target frontmost" in recovery
+
+    # Missing visibility or unverified focus requires owner recovery, not a loop.
+    stop_rule = recovery.split("- If ", 1)[1].split("- Treat ", 1)[0]
+    for condition in ("no on-screen window", "unverified", "focused=false", "off-screen"):
+        assert condition in stop_rule
+    assert "stop and ask the owner to show the window" in stop_rule
+    assert "Do not loop `launch()` or `activate()`" in stop_rule
+
+    assert "`status: unverifiable` as unknown, not proof of effect" in recovery
+    assert "compare a second observation against a stable signature" in recovery
+    assert "only one retry after verified activation" in recovery
+    assert "if the effect is still absent or unknown, stop" in recovery
+    assert "current viewport, not the full document" in recovery
+    assert "observe and capture what you need as you scroll" in recovery
+    assert "do not assume earlier rows remain in the tree" in recovery
