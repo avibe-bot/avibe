@@ -116,6 +116,8 @@ export const McpHubSection: React.FC = () => {
   const [addResult, setAddResult] = useState<{ names: string[]; failedLines: string[] } | null>(null);
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<string | null>(() => new URLSearchParams(window.location.search).get('mcp'));
+  const returnMcp = new URLSearchParams(window.location.search).get('mcp');
+  if (returnMcp && selected !== returnMcp) setSelected(returnMcp);
   const [expandedFor, setExpandedFor] = useState<string | null>(null);
   const [expandedTools, setExpandedTools] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState<string | null>(null);
@@ -278,14 +280,15 @@ export const McpHubSection: React.FC = () => {
         oauthMode,
         desktopShell: isDesktopShell(),
       });
+      if (action.kind === 'assign') {
+        closeAdd();
+        window.location.assign(oauthStartHref(action.name));
+        return;
+      }
       if (failed.length) {
         showToast(inline, 'error', { label: t('common.close'), onClick: () => undefined });
       } else {
         showToast(t('mcpHub.succeededCount', { count: succeeded }), 'success');
-      }
-      if (action.kind === 'assign') {
-        window.location.assign(oauthStartHref(action.name));
-        return;
       }
       if (action.kind === 'list') {
         setAddResult({ names: action.names, failedLines });
