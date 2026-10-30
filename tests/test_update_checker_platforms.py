@@ -1240,7 +1240,8 @@ def test_backend_auto_update_retries_a_release_until_it_lands_or_its_attempts_ru
     asyncio.run(checker._do_check())  # the release is not tried a fourth time
 
     assert admissions == ["codex"] * 6
-    assert installs == [("codex", {})] * 5
+    # Each install is pinned to the release that settled, never whatever is latest by then.
+    assert installs == [("codex", {"version": "1.1.0"})] * 5
     assert update_checker.UpdateState.load().backend_auto_update_attempts == {
         "codex": {"version": "1.1.0", "count": 3}
     }
@@ -1250,7 +1251,7 @@ def test_backend_auto_update_retries_a_release_until_it_lands_or_its_attempts_ru
     _settled(checker, codex="1.2.0")
     asyncio.run(checker._do_check())  # and is then tried again
 
-    assert installs == [("codex", {})] * 6
+    assert installs[-1] == ("codex", {"version": "1.2.0"})
 
 
 def test_an_upgrade_that_leaves_the_cli_unable_to_start_restores_the_release_it_replaced(
@@ -1274,12 +1275,12 @@ def test_an_upgrade_that_leaves_the_cli_unable_to_start_restores_the_release_it_
     }
     installs = []
 
-    def install(name, repair_version=None):
-        installs.append(repair_version)
-        if repair_version is None:  # the upgrade: npm exits 0 without the binary
+    def install(name, version=None):
+        installs.append(version)
+        if version == "0.166.0":  # the upgrade: npm exits 0 without the binary
             codex.update(status="broken", current_version=None, has_update=False)
             return {"ok": False, "code": "cli_readback_failed", "message": "cannot start"}
-        codex.update(status="ok", current_version=repair_version, has_update=True)
+        codex.update(status="ok", current_version=version, has_update=True)
         return {"ok": True}
 
     checker = _backend_auto_update_checker(
@@ -1289,19 +1290,20 @@ def test_an_upgrade_that_leaves_the_cli_unable_to_start_restores_the_release_it_
 
     asyncio.run(checker._do_check())
 
-    assert installs == [None, "0.165.0"]
+    # The upgrade is pinned to the release that settled, the restore to the one it replaced.
+    assert installs == ["0.166.0", "0.165.0"]
     assert (codex["status"], codex["current_version"]) == ("ok", "0.165.0")
     assert checker.state.backend_auto_update_attempts == {"codex": {"version": "0.166.0", "count": 1}}
 
-    def upgrade(name, repair_version=None):
-        installs.append(repair_version)
+    def upgrade(name, version=None):
+        installs.append(version)
         codex.update(current_version="0.166.0", has_update=False)
         return {"ok": True}
 
     monkeypatch.setattr("vibe.api.install_agent", upgrade)
     asyncio.run(checker._do_check())
 
-    assert installs == [None, "0.165.0", None]
+    assert installs == ["0.166.0", "0.165.0", "0.166.0"]
     assert codex["current_version"] == "0.166.0"
 
 
@@ -1324,8 +1326,8 @@ def test_a_cli_that_cannot_start_is_repaired_without_waiting_for_a_release(
     }
     installs = []
 
-    def install(name, repair_version=None):
-        installs.append((name, repair_version))
+    def install(name, version=None):
+        installs.append((name, version))
         return {"ok": False, "code": "cli_readback_failed", "message": "cannot start"}
 
     checker = _backend_auto_update_checker(
@@ -1335,9 +1337,9 @@ def test_a_cli_that_cannot_start_is_repaired_without_waiting_for_a_release(
     for _ in range(4):
         asyncio.run(checker._do_check())
 
-    # The repair reinstalls through install_agent, which repairs a broken CLI; it has no
-    # working release to restore, and stops after the release's attempts.
-    assert installs == [("codex", None)] * update_checker.BACKEND_AUTO_UPDATE_MAX_ATTEMPTS
+    # The repair reinstalls the latest release through install_agent, which repairs a broken
+    # CLI; it has no working release to restore, and stops after the release's attempts.
+    assert installs == [("codex", "0.166.0")] * update_checker.BACKEND_AUTO_UPDATE_MAX_ATTEMPTS
 
 
 def test_backend_auto_update_stops_admitting_backends_once_a_message_arrives(

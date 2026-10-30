@@ -591,7 +591,8 @@ class UpdateChecker:
 
                 async def install(name: str = backend, release: str = latest, previous: Optional[str] = working) -> dict:
                     try:
-                        result = await asyncio.to_thread(api.install_agent, name)
+                        # Pinned: the installer must not take a newer release that has not settled.
+                        result = await asyncio.to_thread(api.install_agent, name, version=release)
                     except Exception as exc:  # noqa: BLE001
                         result = {"ok": False, "message": str(exc) or type(exc).__name__}
                     if result.get("ok") or result.get("code") == "install_locked":
@@ -640,7 +641,7 @@ class UpdateChecker:
             runtime = await asyncio.to_thread(api.get_backend_runtime, name)
             if runtime.get("status") != "broken":
                 return "not_needed"
-            restored = await asyncio.to_thread(api.install_agent, name, repair_version=previous)
+            restored = await asyncio.to_thread(api.install_agent, name, version=previous)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Backend %s restore after a failed upgrade raised: %s", name, exc)
             return "failed"

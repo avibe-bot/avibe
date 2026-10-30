@@ -651,7 +651,9 @@ def _codex_cli_supports_update(codex_path: str) -> bool:
     return re.search(r"(?m)^\s*update\s+", output) is not None
 
 
-def _codex_upgrade_command(existing_path: str) -> tuple[list[str], dict[str, str] | None] | dict:
+def _codex_upgrade_command(
+    existing_path: str, *, version: str | None = None
+) -> tuple[list[str], dict[str, str] | None] | dict:
     brew_path = resolve_cli_path("brew")
     npm_install = _is_npm_codex_install(existing_path)
     if brew_path:
@@ -689,7 +691,9 @@ def _codex_upgrade_command(existing_path: str) -> tuple[list[str], dict[str, str
                 "message": "Codex npm global prefix could not be determined; no upgrade was started.",
                 "output": None,
             }
-        return [npm_path, "install", "-g", "@openai/codex"], command_env
+        # Unversioned, npm installs whatever is ``latest`` now, which may be newer
+        # than the release the caller approved.
+        return [npm_path, "install", "-g", f"@openai/codex@{version}" if version else "@openai/codex"], command_env
 
     if _codex_cli_supports_update(existing_path):
         return [existing_path, "update"], None
@@ -8146,14 +8150,15 @@ def _run_desktop_backend_install(name: str, truncate_output) -> dict:
     }
 
 
-def install_agent(name: str, *, repair_version: str | None = None) -> dict:
+def install_agent(name: str, *, version: str | None = None) -> dict:
     """Install (or upgrade) an agent CLI tool, one install per backend at a time.
 
     Settings runs this in the UI process and backend auto-update in the
     controller, so only a file lock keeps two installers off one CLI.
-    ``repair_version`` is the release a repair of a broken npm installation
-    reinstalls, such as the one an unattended upgrade replaced; other sources
-    reinstall their current release.
+    ``version`` pins the release where the installation's source can: a Codex
+    npm install or upgrade, and a repair of a broken npm installation. Backend
+    auto-update passes the release it approved, or the one a failed upgrade
+    replaced. Self-updaters and Homebrew install what their source publishes.
     """
     if not supports_install(name):
         return {"ok": False, "message": f"Unknown agent: {name}"}
@@ -8169,7 +8174,7 @@ def install_agent(name: str, *, repair_version: str | None = None) -> dict:
             "path": None,
         }
     try:
-        return _install_agent(name, repair_version=repair_version)
+        return _install_agent(name, version=version)
     finally:
         lock.release()
 
@@ -8246,7 +8251,7 @@ def _native_vendor_install_target(name: str) -> str | None:
     return None
 
 
-def _install_agent(name: str, *, repair_version: str | None = None) -> dict:
+def _install_agent(name: str, *, version: str | None = None) -> dict:
     """Install (or upgrade) an agent CLI tool.
 
     Existing installations keep their install method and their selected
@@ -8338,7 +8343,7 @@ def _install_agent(name: str, *, repair_version: str | None = None) -> dict:
     if health["status"] in {"broken", "unknown"} or (health["status"] == "missing" and configured_path != name):
         if health["status"] == "unknown":
             return _cli_repair_refusal(name)
-        return _repair_broken_cli(name, health["path"] or configured_path, _truncate_output, version=repair_version)
+        return _repair_broken_cli(name, health["path"] or configured_path, _truncate_output, version=version)
     existing_path = health["path"]
     if existing_path:
         readback_validator = None
@@ -8359,7 +8364,7 @@ def _install_agent(name: str, *, repair_version: str | None = None) -> dict:
             cmd = [existing_path, "upgrade"]
             command_env = None
         elif name == "codex":
-            upgrade = _codex_upgrade_command(existing_path)
+            upgrade = _codex_upgrade_command(existing_path, version=version)
             if isinstance(upgrade, dict):
                 return upgrade
             cmd, command_env = upgrade
@@ -8427,7 +8432,7 @@ def _install_agent(name: str, *, repair_version: str | None = None) -> dict:
         # package source that does not require OS package-manager privileges.
         npm_path = resolve_cli_path("npm")
         if npm_path:
-            cmd = [npm_path, "install", "-g", "@openai/codex"]
+            cmd = [npm_path, "install", "-g", f"@openai/codex@{version}" if version else "@openai/codex"]
             command_env = _codex_npm_install_env(npm_path)
             if command_env is None:
                 return {

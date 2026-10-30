@@ -258,7 +258,7 @@ def test_broken_npm_cli_is_repaired_by_its_prefix_not_self_update(
     )
     monkeypatch.setattr(api, "_configured_agent_cli_path", lambda _name: str(alias))
     monkeypatch.setattr(api, "resolve_cli_path", lambda name, **_: str(npm) if name == "npm" else str(alias))
-    result = api.install_agent(backend, repair_version=repair_version)
+    result = api.install_agent(backend, version=repair_version)
     assert result["ok"], result
     spec = f"{package}@{repair_version}" if repair_version else package
     assert json.loads(calls.read_text()) == ["install", "--global", "--prefix", str(prefix), spec]
@@ -321,8 +321,12 @@ def test_healthy_upgrade_certifies_only_the_selected_executable(native_case, mon
 
 @pytest.mark.parametrize("fresh", [False, True])
 @pytest.mark.parametrize("outcome", ["missing", "broken", "healthy"])
-def test_codex_npm_certifies_its_declared_prefix_not_an_old_healthy_cli(native_case, monkeypatch, fresh, outcome):
+@pytest.mark.parametrize("version", [None, "0.162.1"])
+def test_codex_npm_certifies_its_declared_prefix_not_an_old_healthy_cli(
+    native_case, monkeypatch, fresh, outcome, version
+):
     c = native_case
+    calls = c["home"] / "npm-install-args.json"
     old = executable(c["home"] / "old/lib/node_modules/@openai/codex/bin/codex.js", 'print("codex-cli 0.161.0")\n')
     destination = c["home"] / ".local/bin/codex"
     installed = c["home"] / "npm-finished"
@@ -342,6 +346,7 @@ def test_codex_npm_certifies_its_declared_prefix_not_an_old_healthy_cli(native_c
         c["tools"] / "npm",
         'import os,sys\nfrom pathlib import Path\nif sys.argv[1:]==["config","get","prefix"]:\n print("/fixture/different-global-prefix");sys.exit(0)\n'
         + install_body
+        + f"Path({str(calls)!r}).write_text(__import__('json').dumps(sys.argv[1:]))\n"
         + f"Path({str(installed)!r}).touch()\n",
     )
     configured = "codex" if fresh else str(old)
@@ -359,8 +364,11 @@ def test_codex_npm_certifies_its_declared_prefix_not_an_old_healthy_cli(native_c
         return str(old) if binary in {"codex", str(old)} else None
 
     monkeypatch.setattr(api, "resolve_cli_path", resolve)
-    result = api.install_agent("codex")
+    result = api.install_agent("codex", version=version)
     assert installed.exists()
+    # A pinned upgrade installs that release, not whatever npm calls latest by then.
+    spec = f"@openai/codex@{version}" if version else "@openai/codex"
+    assert json.loads(calls.read_text()) == ["install", "-g", spec]
     assert old.exists()  # the old selected/discovered CLI is still healthy
     assert api.resolve_cli_path("codex") == str(old)  # old fallback would certify it
     if outcome == "healthy":
