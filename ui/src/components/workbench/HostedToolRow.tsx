@@ -426,7 +426,7 @@ export const HostedToolRow: React.FC<{ card: HostedActivity }> = ({ card }) => {
       {card.interruption && (
         <p className="mx-1.5 mb-1 flex flex-wrap gap-x-2 px-1.5 text-[11px] text-muted" data-hosted-interruption={card.call_id}>
           <span>{t('chat.agentActivity.hosted.interruption.message', { reason: t(`chat.agentActivity.hosted.interruption.${card.interruption}`) })}</span>
-          {card.retried && <span>· {t('chat.agentActivity.hosted.interruption.retried')}</span>}
+          {card.retried && <span>{t('chat.agentActivity.hosted.interruption.retriedLabel')}</span>}
         </p>
       )}
       <HostedAttemptNotes card={card} />

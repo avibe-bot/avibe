@@ -150,7 +150,8 @@ const PROVIDER_ITEM_SUBJECTS = new Set([
   'web_search_call', 'web_search_tool_result', 'server_tool_use', 'custom_tool_call',
 ]);
 const nativeSubject = (card: Record<string, unknown>): string | undefined => {
-  if (card.mode !== 'native' || card.action === 'other' || PROVIDER_ITEM_SUBJECTS.has(card.subject as string)) return undefined;
+  if (card.mode !== 'native') return typeof card.subject === 'string' ? card.subject : undefined;
+  if (card.action === 'other' || PROVIDER_ITEM_SUBJECTS.has(card.subject as string)) return undefined;
   return typeof card.subject === 'string' ? card.subject : undefined;
 };
 

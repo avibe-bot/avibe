@@ -5395,7 +5395,8 @@
           "overloaded": "upstream overloaded",
           "disconnected": "stream disconnected",
           "upstream": "upstream error",
-          "retried": "retried automatically"
+          "retried": "retried automatically",
+          "retriedLabel": "· retried automatically"
         },
         "status": {
           "failed": "Failed",

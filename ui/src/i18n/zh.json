@@ -5395,7 +5395,8 @@
           "overloaded": "上游服务过载",
           "disconnected": "连接中断",
           "upstream": "上游服务异常",
-          "retried": "已自动重试"
+          "retried": "已自动重试",
+          "retriedLabel": "· 已自动重试"
         },
         "status": {
           "failed": "失败",

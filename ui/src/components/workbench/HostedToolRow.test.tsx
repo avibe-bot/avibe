@@ -130,6 +130,7 @@ describe('hosted tool cards', () => {
     within(native).getByText('2 sources');
 
     const proxy = row('call_x1');
+    within(proxy).getByText('from:OpenAI within_time:7d');
     within(proxy).getByText('Via xAI proxy · grok-4.6');
     within(proxy).getByText('$0.11');
     within(proxy).getByText('2 posts');
@@ -171,6 +172,7 @@ describe('hosted tool cards', () => {
     }]);
     const image = row('call_ig1');
     within(image).getByText('image_generate');
+    within(image).getByText(fixture.direct_image.subject);
     within(image).getByText('gpt-image-2 · relay-gpt');
     within(image).getByText('1 image · 1536×1024');
     expect(image.textContent).not.toMatch(/\$/);
