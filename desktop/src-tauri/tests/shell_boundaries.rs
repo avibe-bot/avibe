@@ -415,6 +415,16 @@ fn window_frames_are_restored_before_show_without_document_or_remote_authority()
 }
 
 #[test]
+fn the_main_window_leaves_file_drops_to_html5_handlers() {
+    let window = &config()["app"]["windows"][0];
+    assert_eq!(
+        window["dragDropEnabled"],
+        Value::Bool(false),
+        "the main window must not intercept file drops with Tauri's native handler"
+    );
+}
+
+#[test]
 fn product_bundles_have_an_explicit_private_runtime_gate() {
     let cargo = read_to_string(&crate_dir().join("Cargo.toml"));
     let source = shipping_source("src/lib.rs");
