@@ -18,9 +18,10 @@ pub const COMPUTER_USE_STATE_FILE: &str = "computer-use.json";
 pub const COMPUTER_USE_LOCK_FILE: &str = "computer-use.lock";
 pub const COMPUTER_USE_SOCKET_FILE: &str = "cua-driver.sock";
 pub const COMPUTER_USE_DRIVER_VERSION: &str = "0.31.0";
-pub const COMPUTER_USE_TOOL_SNAPSHOT_SHA256: &str = "f446154884a6ac3e3126c1d6ca4a886c8d1caea7f41449124a9ad5ca47e9c7fe";
+pub const COMPUTER_USE_TOOL_SNAPSHOT_SHA256: &str = "d46448a2f8a03c7be23d52c8089f5a86b3abb61add102b950170d89cc238a944";
 pub const COMPUTER_USE_APPROVED_TOOL_SNAPSHOT_SHA256: &[&str] = &[
     COMPUTER_USE_TOOL_SNAPSHOT_SHA256,
+    "f446154884a6ac3e3126c1d6ca4a886c8d1caea7f41449124a9ad5ca47e9c7fe",
     "1614e37e369df122b2bb74be4d1c790f304c9325d3b57b301deb62f8c11e8fd6",
     "37b99238c5f59a64ddece25467aa51148ac6267baa928cbb5d3404196d9d4c71",
     "0af1e40dbf8d48303c25d969fa54b54ccff5d0c36f2f7966b4f04964c13e5ba0",
@@ -704,6 +705,8 @@ mod tests {
         let actual = lower_hex(&Sha256::digest(SNAPSHOT));
         assert_eq!(actual, COMPUTER_USE_TOOL_SNAPSHOT_SHA256);
         assert!(COMPUTER_USE_APPROVED_TOOL_SNAPSHOT_SHA256.contains(&actual.as_str()));
+        assert!(COMPUTER_USE_APPROVED_TOOL_SNAPSHOT_SHA256
+            .contains(&"f446154884a6ac3e3126c1d6ca4a886c8d1caea7f41449124a9ad5ca47e9c7fe"));
         assert!(COMPUTER_USE_APPROVED_TOOL_SNAPSHOT_SHA256
             .contains(&"1614e37e369df122b2bb74be4d1c790f304c9325d3b57b301deb62f8c11e8fd6"));
         assert!(COMPUTER_USE_APPROVED_TOOL_SNAPSHOT_SHA256

@@ -4,7 +4,7 @@
     "version": "0.31.0",
     "tag": "cua-driver-rs-v0.31.0",
     "source_commit": "5272e492d61b96caf08e3bf434d91126c1f3dccc",
-    "tool_snapshot_sha256": "f446154884a6ac3e3126c1d6ca4a886c8d1caea7f41449124a9ad5ca47e9c7fe",
+    "tool_snapshot_sha256": "d46448a2f8a03c7be23d52c8089f5a86b3abb61add102b950170d89cc238a944",
     "license": "MIT",
     "release_base_url": "https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.31.0",
     "release_checksums_asset": "checksums.txt",
@@ -22,7 +22,7 @@
     "patch": {
       "variant": "avibe-raw-single-click-reopen-v2",
       "file": "patches/0001-macos-raw-single-click.patch",
-      "sha256": "16f51086d59bb4418507fa694b724ba9abf42e4d2d586c175052d3045232663f",
+      "sha256": "c464b2cbd3416aeb15dffee396bc0dcf5aa0b01748af8dd79bd84c9a2f58125e",
       "contract": "click.click_mode=raw; embedded parent-liveness cleanup; running launch_app uses kAEReopenApplication ('rapp') without activation; cold and new-instance launch use 'oapp'",
       "upstream_refs": [
         "https://github.com/trycua/cua/pull/3922",

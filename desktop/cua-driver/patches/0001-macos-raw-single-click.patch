@@ -669,35 +669,6 @@
  }
  
  /// Launch a bundle with URL handoff. Mirrors Swift's
-@@ -783,7 +784,7 @@
- 
- #[cfg(test)]
- mod tests {
--    use super::{finder_folder_handoff, merge_app_lists, AppInfo};
-+    use super::{background_launch_config, finder_folder_handoff, merge_app_lists, AppInfo};
- 
-     fn app(name: &str, pid: i32, bundle: Option<&str>, running: bool) -> AppInfo {
-         AppInfo {
-@@ -798,6 +799,19 @@
-         }
-     }
- 
-+    #[test]
-+    fn bundle_and_name_launches_share_background_launch_config() {
-+        let bundle_route = background_launch_config(Some("com.example.App".to_owned()));
-+        let name_route = background_launch_config(Some("com.example.App".to_owned()));
-+
-+        assert_eq!(
-+            bundle_route.apple_event_bundle_id,
-+            name_route.apple_event_bundle_id
-+        );
-+        assert!(!bundle_route.creates_new_instance);
-+        assert!(!name_route.creates_new_instance);
-+    }
-+
-     fn states(pairs: &[(&str, i32, bool, Option<&str>)]) -> super::RunningAppStates {
-         pairs.iter().fold(
-             super::RunningAppStates::new(),
 --- a/libs/cua-driver/rust/crates/platform-macos/src/apps/nsworkspace.rs	2026-09-30 23:15:43
 +++ b/libs/cua-driver/rust/crates/platform-macos/src/apps/nsworkspace.rs	2026-10-30 22:04:35
 @@ -14,15 +14,15 @@

@@ -34,7 +34,7 @@ COMPUTER_USE_STATE_DIR_ENV = "AVIBE_COMPUTER_USE_STATE_DIR"
 COMPUTER_USE_STATE_FILE = "computer-use.json"
 COMPUTER_USE_LOCK_FILE = "computer-use.lock"
 COMPUTER_USE_TOOL_SNAPSHOT_SHA256 = (
-    "f446154884a6ac3e3126c1d6ca4a886c8d1caea7f41449124a9ad5ca47e9c7fe"
+    "d46448a2f8a03c7be23d52c8089f5a86b3abb61add102b950170d89cc238a944"
 )
 
 COMPUTER_USE_TOOL_NAMES = (
@@ -74,6 +74,9 @@ COMPUTER_USE_TOOL_NAMES = (
 # a newer Runtime they adopt keeps Computer Use available without activation.
 COMPUTER_USE_APPROVED_TOOL_SNAPSHOTS: Mapping[str, frozenset[str]] = {
     COMPUTER_USE_TOOL_SNAPSHOT_SHA256: frozenset(COMPUTER_USE_TOOL_NAMES),
+    "f446154884a6ac3e3126c1d6ca4a886c8d1caea7f41449124a9ad5ca47e9c7fe": frozenset(
+        COMPUTER_USE_TOOL_NAMES
+    ),
     "1614e37e369df122b2bb74be4d1c790f304c9325d3b57b301deb62f8c11e8fd6": frozenset(
         COMPUTER_USE_TOOL_NAMES
     ),
