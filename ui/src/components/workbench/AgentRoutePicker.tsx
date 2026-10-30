@@ -193,14 +193,16 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   // across pickers and loads; the raw id stays one hover away.
   const currentModelLabel = useRememberedModelLabel(backend, currentModel) ?? currentModel;
   // Fast mode is the route's to ask for and the model's hop's to grant: the mark
-  // and the toggle follow whether this model would actually run fast, so asking
-  // on a model without it keeps the choice for the next model that has it.
+  // and the toggle follow whether this model's hop is asked for the fast tier
+  // and its last fast response did not say otherwise, so asking on a model
+  // without it keeps the choice for the next model that has it.
   const fastControls = compact && Boolean(onSpeedChange);
   const fastOn = speed === 'fast';
   // The model a turn runs on: the route's own, else its Agent's default, which a
   // Session that materialized its Agent at the first turn keeps without copying.
   const effectiveModel = currentModel || displayedAgent?.model || null;
-  const fastOffered = useRememberedFastModel(backend, effectiveModel, fastControls && (fastOn || open));
+  const fastState = useRememberedFastModel(backend, effectiveModel, fastControls && (fastOn || open));
+  const fastOffered = fastState === 'offered';
   const fastActive = fastControls && fastOn && fastOffered;
   const currentAgentLabel = displayedAgent?.display_name || currentAgent;
   const triggerLabel = (routeIsDefault && defaultLabel) || currentAgentLabel || defaultLabel || t('chat.pickAgent');
@@ -296,7 +298,9 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
         // Closed pickers anywhere name their model from this answer.
         rememberModelLabels(backend, modelLabels ?? {});
         // An unread Hub says nothing about which models run fast.
-        if (!result.hubUnread) rememberFastModels(backend, result.fastModels ?? []);
+        if (!result.hubUnread) {
+          rememberFastModels(backend, { offered: result.fastModels ?? [], unconfirmed: result.fastUnconfirmed ?? [] });
+        }
       },
       () => {
         loadedBackends.delete(backend);
@@ -652,6 +656,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
                 <FastToggle
                   on={fastOn}
                   offered={fastOffered}
+                  unconfirmed={fastState === 'unconfirmed'}
                   active={fastActive}
                   disabled={loadingModels}
                   onToggle={() => onSpeedChange?.(fastOn ? null : 'fast')}
@@ -696,10 +701,10 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
             </>
             )}
             {/* A touch screen has no hover for the toggle's explanation: it is
-                written out while the route runs fast. */}
-            {fastActive && (
+                written out while the route asks for the fast tier. */}
+            {fastControls && fastOn && (fastOffered || fastState === 'unconfirmed') && (
               <p className="pt-1.5 text-[10px] leading-snug text-muted [@media(hover:hover)]:hidden">
-                {t('chat.picker.fastCaption')}
+                {fastOffered ? t('chat.picker.fastCaption') : t('chat.picker.fastUnconfirmedCaption')}
               </p>
             )}
           </div>
@@ -936,14 +941,16 @@ const FastMark: React.FC<React.SVGProps<SVGSVGElement>> = ({ className, ...props
 
 // The Fast toggle beside the effort heading. Hover or keyboard focus explains
 // it; a click's focus does not, so the tip never lingers over the model list. A
-// model whose hop offers no fast tier keeps the choice but cannot change it here.
+// model whose hop offers no fast tier, or whose last fast response did not
+// confirm it ran, keeps the choice but cannot change it here.
 const FastToggle: React.FC<{
   on: boolean;
   offered: boolean;
+  unconfirmed: boolean;
   active: boolean;
   disabled?: boolean;
   onToggle: () => void;
-}> = ({ on, offered, active, disabled, onToggle }) => {
+}> = ({ on, offered, unconfirmed, active, disabled, onToggle }) => {
   const { t } = useTranslation();
   const tipId = useId();
   return (
@@ -971,7 +978,11 @@ const FastToggle: React.FC<{
         <span className="block font-semibold">{t('chat.picker.fastTitle')}</span>
         <span className="block">{t('chat.picker.fastDescription')}</span>
         <span className="block text-background/65">
-          {offered ? t('chat.picker.fastScope') : t('chat.picker.fastUnavailable')}
+          {offered
+            ? t('chat.picker.fastScope')
+            : unconfirmed
+              ? t('chat.picker.fastUnconfirmed')
+              : t('chat.picker.fastUnavailable')}
         </span>
       </span>
     </span>

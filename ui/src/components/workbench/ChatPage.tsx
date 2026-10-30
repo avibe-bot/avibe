@@ -20,6 +20,7 @@ import { apiFetch } from '../../lib/apiFetch';
 import { readChatViewMode, writeChatViewMode } from '../../lib/chatViewMemory';
 import { normalizeChatMessageFontSize } from '../../lib/chatDisplay';
 import { setConfigField } from '../../lib/configMutations';
+import { refreshFastModels } from '../../lib/modelLabelMemory';
 import { annotationStandIn, annotationTitleKey, readAnnotationView } from '../../lib/annotationView';
 import { isAgentActivityBoundaryMessage, isRetriedFailureNotice, isRetryableFailureNotice, isTerminalAgentMessage, offersContinueOnVibey, isTranscriptMessage, shouldRefreshAgentActivityForMessage } from '../../lib/chatMessageTypes';
 import { chatRowKind, drawsEmptyBodyPlaceholder, isAgentAuthored } from '../../lib/chatRowKind';
@@ -3678,6 +3679,14 @@ const ChatRoutePicker: React.FC<ChatRoutePickerProps> = ({ session, agents, defa
   // settles. Idle blank-backend rows with a native (legacy, pre-backfill) stay
   // enabled: the server allows their one-time "initial pin".
   const concreteBackend = session.agent_backend?.trim() || null;
+  // A fast turn's response confirms or contradicts the fast tier on its hop, so
+  // the picker reads that answer again when one ends: the mark follows what ran.
+  const fastBackend = session.speed === 'fast' ? (concreteBackend ?? defaultAgent?.backend ?? null) : null;
+  const wasWorkingRef = useRef(working);
+  useEffect(() => {
+    if (wasWorkingRef.current && !working && fastBackend) refreshFastModels(api, fastBackend);
+    wasWorkingRef.current = working;
+  }, [api, fastBackend, working]);
   const nativeBound = Boolean(session.native_session_id);
   const pendingForkBackend =
     !session.native_session_id &&

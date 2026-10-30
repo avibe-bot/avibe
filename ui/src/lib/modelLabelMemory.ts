@@ -1,7 +1,7 @@
 import { useEffect, useSyncExternalStore } from 'react';
 
-import { useApi } from '../context/ApiContext';
-import { fetchBackendFastModels, fetchBackendModelLabels } from './backendModels';
+import { useApi, type ApiContextType } from '../context/ApiContext';
+import { fetchBackendFastModels, fetchBackendModelLabels, type FastModels } from './backendModels';
 
 // Friendly model names ("Opus 5.5") for closed pickers, which otherwise only
 // know the raw id the route stores. Every catalog answer a picker already reads
@@ -83,16 +83,26 @@ export function useRememberedModelLabel(backend: string, model: string | null | 
   return label;
 }
 
-// Which models run at their vendor's fast tier, for a closed picker's fast-mode
-// mark: it shows only while the Session asks for the fast tier AND its model
-// would get it. Remembered from every catalog answer a picker reads, so the mark
-// paints from the first frame. Unlike a label, the answer follows routing, which
-// Settings or another client may have changed since it was stored: a picker that
-// needs it reads Model Hub's persisted catalog once per backend per page load.
+// Where each model stands on its vendor's fast tier, for a closed picker's
+// fast-mode mark: it shows only while the Session asks for the fast tier AND its
+// model's hop is asked for it without its last fast response saying otherwise.
+// Remembered from every catalog answer a picker reads, so the mark paints from
+// the first frame. Unlike a label, the answer follows routing and what the last
+// fast response reported, which Settings, another client or the last turn may
+// have changed since it was stored: a picker that needs it reads Model Hub's
+// persisted catalog once per backend per page load, and again when a fast turn
+// ends (refreshFastModels).
 
-const FAST_STORAGE_KEY = 'avibe.fast-models.v1';
+const FAST_STORAGE_KEY = 'avibe.fast-models.v2';
 
-type FastByBackend = Record<string, string[]>;
+type FastByBackend = Record<string, FastModels>;
+
+/** Where a model stands: offered, asked for but not confirmed by its last fast
+ *  response, or neither (no fast tier on its hop, or not known yet). */
+export type FastModelState = 'offered' | 'unconfirmed' | null;
+
+const isModelList = (value: unknown): value is string[] =>
+  Array.isArray(value) && value.every((model) => typeof model === 'string');
 
 function readStoredFast(): FastByBackend {
   try {
@@ -100,8 +110,9 @@ function readStoredFast(): FastByBackend {
     const parsed = raw ? (JSON.parse(raw) as unknown) : null;
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
     const out = Object.create(null) as FastByBackend;
-    for (const [backend, models] of Object.entries(parsed as Record<string, unknown>)) {
-      if (Array.isArray(models) && models.every((model) => typeof model === 'string')) out[backend] = models;
+    for (const [backend, entry] of Object.entries(parsed as Record<string, unknown>)) {
+      const { offered, unconfirmed } = (entry ?? {}) as Record<string, unknown>;
+      if (isModelList(offered) && isModelList(unconfirmed)) out[backend] = { offered, unconfirmed };
     }
     return out;
   } catch {
@@ -115,12 +126,12 @@ const fastReadThisLoad = new Set<string>();
 
 const currentFast = (): FastByBackend => (fastByBackend ??= readStoredFast());
 
-/** Record a backend's complete answer of fast-tier models, replacing what was known for it. */
-export function rememberFastModels(backend: string, models: readonly string[]): void {
+/** Record a backend's complete fast-tier answer, replacing what was known for it. */
+export function rememberFastModels(backend: string, models: FastModels): void {
   if (!backend) return;
   fastReadThisLoad.add(backend);
   const next = Object.assign(Object.create(null), currentFast()) as FastByBackend;
-  next[backend] = [...models];
+  next[backend] = { offered: [...models.offered], unconfirmed: [...models.unconfirmed] };
   fastByBackend = next;
   try {
     window.localStorage.setItem(FAST_STORAGE_KEY, JSON.stringify(next));
@@ -130,23 +141,36 @@ export function rememberFastModels(backend: string, models: readonly string[]): 
   for (const listener of fastListeners) listener();
 }
 
+/** Read a backend's fast-tier answer again now, as after a fast turn whose
+ *  response may have confirmed or contradicted it. */
+export function refreshFastModels(api: ApiContextType, backend: string): void {
+  if (!backend) return;
+  fastReadThisLoad.add(backend);
+  fetchBackendFastModels(api, backend).then(
+    (models) => rememberFastModels(backend, models),
+    () => undefined,
+  );
+}
+
 const subscribeFast = (listener: () => void) => {
   fastListeners.add(listener);
   return () => fastListeners.delete(listener);
 };
 
-/** Whether `model` runs at its vendor's fast tier as far as this browser knows;
+/** Where `model` stands on its vendor's fast tier as far as this browser knows;
  *  when `wanted`, reads the backend's answer again once per page load. */
-export function useRememberedFastModel(backend: string, model: string | null | undefined, wanted: boolean): boolean {
+export function useRememberedFastModel(
+  backend: string,
+  model: string | null | undefined,
+  wanted: boolean,
+): FastModelState {
   const api = useApi();
   const known = useSyncExternalStore(subscribeFast, () => (backend ? currentFast()[backend] ?? null : null));
   useEffect(() => {
     if (!wanted || !backend || fastReadThisLoad.has(backend)) return;
-    fastReadThisLoad.add(backend);
-    fetchBackendFastModels(api, backend).then(
-      (models) => rememberFastModels(backend, models),
-      () => undefined,
-    );
+    refreshFastModels(api, backend);
   }, [api, backend, wanted]);
-  return Boolean(model && known?.includes(model));
+  if (!model || !known) return null;
+  if (known.offered.includes(model)) return 'offered';
+  return known.unconfirmed.includes(model) ? 'unconfirmed' : null;
 }

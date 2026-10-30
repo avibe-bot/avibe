@@ -1,4 +1,4 @@
-"""Which Model Hub attempts may ask for a vendor's fast tier (core/handlers/model_hub/fast_mode.py)."""
+"""Which Model Hub attempts ask for a vendor's fast tier, and what their responses confirmed (fast_mode.py)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from core.handlers.model_hub.fast_mode import FastModeCatalog
+from core.handlers.model_hub.fast_mode import FastModeCatalog, FastTierObservations
 
 _VENDOR_MAP = {
     "families": [
@@ -45,8 +45,13 @@ def _source(vendor="openai", protocol="openai_responses", kind="api_key", base_u
         (_source("anthropic", "anthropic", "subscription"), "claude-opus-5-5", "anthropic", {"speed": "fast"}),
         # A dated or context-tagged spelling of a listed model is the same model.
         (_source("anthropic", "anthropic"), "claude-opus-5-5[1m]", "anthropic", {"speed": "fast"}),
-        # A relay or custom endpoint may front any deployment.
-        (_source(base_url="https://relay.example/v1"), "gpt-5.6-sol", "openai_responses", None),
+        # A relay is asked too, whatever vendor its Source names: its response
+        # says whether the tier ran (FastTierObservations).
+        (_source(base_url="https://relay.example/v1"), "gpt-5.6-sol", "openai_responses", {"service_tier": "priority"}),
+        (_source("anthropic", "anthropic", base_url="https://relay.example"), "claude-opus-5-5", "anthropic",
+         {"speed": "fast"}),
+        (_source("custom-relay", "openai_chat", base_url="https://relay.example/v1"), "gpt-5.6-sol", "openai_chat",
+         {"service_tier": "priority"}),
         # The native CLI's own login never reaches the gateway.
         (_source(kind="subscription", supply_channel="native_cli"), "gpt-5.6-sol", "openai_responses", None),
         # Never translated across protocols to reach a fast tier.
@@ -58,7 +63,9 @@ def _source(vendor="openai", protocol="openai_responses", kind="api_key", base_u
         (_source("xai", "openai_responses"), "grok-5", "openai_responses", None),
     ],
 )
-def test_fast_tier_is_offered_only_by_the_models_own_vendor_upstream(source, model, request_protocol, expected):
+def test_fast_tier_is_asked_for_on_hub_sources_speaking_the_models_vendor_protocol(
+    source, model, request_protocol, expected,
+):
     assert _CATALOG.body_for(source, model, request_protocol) == expected
 
 
@@ -75,3 +82,28 @@ def test_catalog_entries_asking_for_other_fields_are_not_applied():
         _VENDOR_MAP,
     )
     assert catalog.bodies == {}
+
+
+def test_the_last_fast_response_on_a_hop_is_what_counts():
+    observations = FastTierObservations()
+    assert observations.confirmed("src_relay", "gpt-5.6-sol") is None
+    observations.observe("src_relay", "gpt-5.6-sol", False)
+    assert observations.confirmed("src_relay", "gpt-5.6-sol") is False
+    # The relay started honouring the field: its next fast response says so.
+    observations.observe("src_relay", "gpt-5.6-sol", True)
+    assert observations.confirmed("src_relay", "gpt-5.6-sol") is True
+    # Per Source and model.
+    assert observations.confirmed("src_relay", "gpt-6-astra") is None
+    assert observations.confirmed("src_other", "gpt-5.6-sol") is None
+
+
+def test_observations_stay_bounded_by_dropping_the_longest_unused():
+    observations = FastTierObservations()
+    limit = FastTierObservations._LIMIT
+    for index in range(limit):
+        observations.observe("src", f"model-{index}", True)
+    observations.observe("src", "model-0", False)  # refreshed: now the newest
+    observations.observe("src", "one-more", True)
+    assert observations.confirmed("src", "model-1") is None
+    assert observations.confirmed("src", "model-0") is False
+    assert observations.confirmed("src", "one-more") is True

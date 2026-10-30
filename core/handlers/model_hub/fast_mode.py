@@ -12,16 +12,22 @@ covers new models without a release:
 - Anthropic (Claude Opus): ``speed: "fast"`` on Messages requests. The engine
   adds the beta header a model needs.
 
-Only that vendor's own upstream honours the field: an API key on the vendor's
-official endpoint, or the vendor's subscription held by the Model Hub. A request
-is never translated across protocols to reach a fast tier. Reading the catalog
-never fetches: an absent or unreadable copy offers fast mode nowhere.
+The field is sent on every Hub Source that speaks the vendor's own protocol: an
+API key, on the vendor's endpoint or a relay, or a subscription the Model Hub
+holds. Whether it took effect is the response's to say, not ours to assume: the
+vendor reports the tier it served (``usage.speed``, ``service_tier``), and a
+relay may drop the field or serve a standard tier. ``FastTierObservations``
+keeps what the last fast request on each Source and model reported, so the
+picker can say where fast mode was not confirmed. A request is never translated
+across protocols to reach a fast tier. Reading the catalog never fetches: an
+absent or unreadable copy offers fast mode nowhere.
 """
 
 from __future__ import annotations
 
 import logging
 import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Final, Mapping, Optional
 
@@ -85,31 +91,28 @@ class FastModeCatalog:
         return max(matches, key=lambda item: len(item[0]))[1] if matches else None
 
     def body_for(self, source: Any, model_id: str, request_protocol: Optional[str]) -> Optional[Mapping[str, str]]:
-        """The body fields that put this exact attempt on its vendor's fast tier, or None where none applies."""
+        """The body fields that ask for this exact attempt's fast tier, or None where none applies.
+
+        The model's first-party vendor decides the field, and the Source must speak
+        that vendor's protocol, unchanged from the request's. Where the Source
+        points (official endpoint or relay) does not matter here: the response
+        says whether the tier was served.
+        """
 
         if not model_id or getattr(source, "supply_channel", None) != "hub":
             return None
-        vendor = getattr(source, "vendor", None)
+        if getattr(source, "kind", None) not in ("api_key", "subscription"):
+            return None
         protocol = getattr(source, "protocol", None)
-        if (
-            vendor not in _VENDOR_PROTOCOLS
-            or protocol not in _VENDOR_PROTOCOLS[vendor]
-            or request_protocol != protocol
-        ):
+        if request_protocol != protocol:
             return None
-        if getattr(source, "kind", None) == "api_key":
-            base_url = getattr(source, "base_url", None)
-            if base_url is not None:
-                from vibe.model_hub_runtime.api_key_vendors import is_official_api_key_endpoint
-
-                if not is_official_api_key_endpoint(vendor, base_url):
-                    return None
-        elif getattr(source, "kind", None) != "subscription":
-            return None
-        models = self.bodies.get(vendor) or {}
         for candidate in dict.fromkeys((model_id, catalog_model_id(model_id))):
-            if self.first_party(candidate) == vendor and candidate in models:
-                return models[candidate]
+            vendor = self.first_party(candidate)
+            if vendor is None or protocol not in _VENDOR_PROTOCOLS[vendor]:
+                continue
+            body = (self.bodies.get(vendor) or {}).get(candidate)
+            if body is not None:
+                return body
         return None
 
 
@@ -123,6 +126,35 @@ def _fast_body(entry: Any, field_name: str) -> Optional[Mapping[str, str]]:
         return None
     value = body[field_name]
     return {field_name: value} if isinstance(value, str) and value.strip() else None
+
+
+class FastTierObservations:
+    """Whether the last fast request on each Source and model was served fast, as the response reported.
+
+    True when the response named the vendor's fast tier; False when it named
+    another tier or none, which is how a relay that drops the field answers.
+    Absent until a fast request on that hop is served. Only the latest answer
+    counts, so a Source that starts honouring the field is confirmed by its next
+    fast request. Process memory, bounded; a restart forgets it.
+    """
+
+    _LIMIT: Final = 512
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._confirmed: OrderedDict[tuple[str, str], bool] = OrderedDict()
+
+    def observe(self, source_id: str, model_id: str, confirmed: bool) -> None:
+        key = (source_id, model_id)
+        with self._lock:
+            self._confirmed.pop(key, None)
+            self._confirmed[key] = confirmed
+            while len(self._confirmed) > self._LIMIT:
+                self._confirmed.popitem(last=False)
+
+    def confirmed(self, source_id: str, model_id: str) -> Optional[bool]:
+        with self._lock:
+            return self._confirmed.get((source_id, model_id))
 
 
 _LOCK = threading.Lock()

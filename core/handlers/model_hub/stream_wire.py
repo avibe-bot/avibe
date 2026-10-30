@@ -380,6 +380,9 @@ def _google_terminal_event(key: str, message: str, _next_sequence_number: int) -
 
 
 StreamTerminalOutcome = Literal["served", "failed_terminal"]
+# The processing tier a response reports having served (docs/plans/fast-mode.md):
+# the vendor's fast tier, or any other tier it names.
+ServedTier = Literal["fast", "standard"]
 ProtocolObservationOutcome = Literal["served", "failed_terminal", "protocol_error"]
 ErrorEnvelopePath = tuple[str, ...]
 
@@ -528,6 +531,21 @@ class ProtocolObservation:
     error_message: str | None = field(default=None, repr=False)
     # Search tools whose own completed hosted item this response carried (§3.2).
     hosted_tools: frozenset[str] = frozenset()
+    # The tier this frame or buffered response reports having served, if it names one.
+    served_tier: ServedTier | None = None
+
+
+@dataclass(frozen=True)
+class ServedTierPaths:
+    """Where a protocol reports the processing tier it served, and the value that names the fast tier.
+
+    Anthropic reports ``usage.speed`` (``fast`` or ``standard``); OpenAI reports
+    ``service_tier`` (``priority`` for its fast tier, else ``default``, ``flex``,
+    ``scale``). Any other value names a tier that is not the fast one.
+    """
+
+    paths: tuple[JSONPath, ...]
+    fast_value: str
 
 
 @dataclass(frozen=True)
@@ -607,6 +625,7 @@ class ProtocolStreamTaxonomy:
     buffered_output_array_path: JSONPath | None = None
     buffered_terminal_string_paths: tuple[JSONPath, ...] = ()
     hosted_items: HostedItemPaths | None = None
+    served_tier: ServedTierPaths | None = None
 
 
 PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
@@ -707,6 +726,8 @@ PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
             cache_write_paths=(("cache_creation_input_tokens",),),
             cache_write_1h_paths=(("cache_creation", "ephemeral_1h_input_tokens"),),
         ),
+        # https://platform.claude.com/docs/en/build-with-claude/fast-mode#checking-which-speed-was-used
+        served_tier=ServedTierPaths(paths=(("message", "usage", "speed"), ("usage", "speed")), fast_value="fast"),
     ),
     "openai_responses": ProtocolStreamTaxonomy(
         terminal_envelopes=(
@@ -826,6 +847,9 @@ PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
             cache_write_30m_paths=(("input_tokens_details", "cache_write_tokens_details", "ttl_30m_tokens"),),
             cache_write_12h_paths=(("input_tokens_details", "cache_write_tokens_details", "ttl_12h_tokens"),),
         ),
+        # https://platform.openai.com/docs/api-reference/responses/object#responses/object-service_tier
+        # The terminal event nests the completed response; a buffered response is it.
+        served_tier=ServedTierPaths(paths=(("response", "service_tier"), ("service_tier",)), fast_value="priority"),
     ),
     "openai_chat": ProtocolStreamTaxonomy(
         terminal_envelopes=(
@@ -894,6 +918,9 @@ PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
             cached_input_paths=(("prompt_tokens_details", "cached_tokens"),),
             output_paths=(("completion_tokens",),),
         ),
+        # https://platform.openai.com/docs/api-reference/chat/object#chat/object-service_tier
+        # Every streamed chunk repeats it.
+        served_tier=ServedTierPaths(paths=(("service_tier",),), fast_value="priority"),
     ),
     # The engine's images endpoints (vibey-hosted-tools.md §7.4): a buffered JSON
     # answer only; ``image_generate`` never streams, so nothing here is streamed.
@@ -1152,6 +1179,8 @@ def _protocol_projection_paths(protocol: str) -> frozenset[JSONPath]:
         items = taxonomy.hosted_items
         paths.update((*items.event_item, *leaf) for leaf in items.leaves)
         paths.update((*items.buffered_items, "*", *leaf) for leaf in items.leaves)
+    if taxonomy.served_tier is not None:
+        paths.update(taxonomy.served_tier.paths)
     for container_path in taxonomy.usage.container_paths:
         for leaf_paths in (
             taxonomy.usage.input_paths,
@@ -1266,6 +1295,7 @@ class ProtocolFactProjector:
             return ProtocolObservation(outcome="served" if not streamed else None)
 
         usage = _usage_from_scalar_paths(self.taxonomy.usage, self._scalars)
+        served_tier = self._served_tier()
         hosted_tools = self._hosted_tools(streamed=streamed)
         model_output_started = any(
             envelope.event_name == event_name and self._selector_matches(envelope)
@@ -1297,6 +1327,7 @@ class ProtocolFactProjector:
                     not matched_paths
                     and _buffered_recovery_verified(self.taxonomy, self._scalars, self._arrays, self._nonempty)
                 ),
+                served_tier=served_tier,
             )
 
         for envelope in self.taxonomy.terminal_envelopes:
@@ -1346,6 +1377,7 @@ class ProtocolFactProjector:
                 ),
                 recovery_verified=model_output_started or envelope.terminal_outcome == "served",
                 hosted_tools=hosted_tools,
+                served_tier=served_tier,
             )
         return ProtocolObservation(
             model_output_started=model_output_started,
@@ -1353,7 +1385,20 @@ class ProtocolFactProjector:
             usage=usage,
             recovery_verified=model_output_started,
             hosted_tools=hosted_tools,
+            served_tier=served_tier,
         )
+
+    def _served_tier(self) -> ServedTier | None:
+        """The tier this frame or buffered response names, by the protocol's own value for its fast tier."""
+
+        declared = self.taxonomy.served_tier
+        if declared is None:
+            return None
+        for path in declared.paths:
+            value = self._scalars.get(path)
+            if isinstance(value, str) and value.strip():
+                return "fast" if value.strip() == declared.fast_value else "standard"
+        return None
 
     def _hosted_tools(self, *, streamed: bool) -> frozenset[str]:
         """The search tools whose own completed item this event or buffered response carries."""
@@ -1644,6 +1689,10 @@ class ProtocolSSEState:
     error_code_candidates: tuple[str, ...] = ()
     error_message: str | None = field(default=None, repr=False)
     hosted_tools: frozenset[str] = frozenset()
+    # The tier the stream last named before its terminal: OpenAI repeats it on
+    # every chat chunk and settles it on the completed response; Anthropic
+    # reports it in usage.
+    served_tier: ServedTier | None = None
 
     def __post_init__(self) -> None:
         self.tokenizer = SSEObservationTokenizer(self.protocol)
@@ -1700,6 +1749,8 @@ class ProtocolSSEState:
             self.model_output_started = True
         if observation.hosted_tools:
             self.hosted_tools |= observation.hosted_tools
+        if observation.served_tier is not None:
+            self.served_tier = observation.served_tier
         if observation.usage is not None:
             self.usage = (
                 observation.usage if self.usage is None else self.usage.merge(observation.usage)
@@ -1744,6 +1795,7 @@ class ProtocolSSEState:
                 recovery_verified=self.reached_model,
                 error_message=self.error_message,
                 hosted_tools=self.hosted_tools if self.terminal_outcome == "served" else frozenset(),
+                served_tier=self.served_tier,
             )
         return None
 

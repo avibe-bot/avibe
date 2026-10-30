@@ -247,8 +247,11 @@ export type EffortMenu = { omitted: string[]; not_on: Record<string, string[]> }
 /** A catalog row as the model picker reads it. */
 export type PickerCatalogModel = BackendModel & {
   effort_menu?: EffortMenu;
-  /** Whether a turn on this model reaches its vendor's fast tier on the hop that normally serves it. */
+  /** Whether a fast turn on this model asks for its vendor's fast tier on the hop that normally serves it. */
   fast_mode?: boolean;
+  /** What that hop's last fast response reported: true ran fast, false did not
+   *  confirm it (a relay may drop the field), null not seen yet. */
+  fast_mode_confirmed?: boolean | null;
 };
 
 /** The model picker's read of one backend's catalog (`GET /api/models/agents/<backend>/models`). */

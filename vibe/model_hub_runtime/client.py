@@ -53,6 +53,7 @@ from core.handlers.model_hub.stream_wire import (
     ProtocolObservation,
     ProtocolSSEState,
     ProtocolUsageReport,
+    ServedTier,
     observe_buffered_protocol_response,
 )
 from vibe.model_hub_runtime.api_key_vendors import (
@@ -2032,6 +2033,7 @@ def _reduce_protocol_observation(
             usage=observation.usage,
             recovery_verified=observation.recovery_verified,
             hosted_tools=observation.hosted_tools,
+            served_tier=observation.served_tier,
         )
     if observation.outcome == "failed_terminal":
         projected_types = tuple(
@@ -2209,6 +2211,7 @@ def _outcome(
     os_errno: int | None = None,
     rejection: UpstreamRejection | None = None,
     hosted_tools: frozenset[str] = frozenset(),
+    served_tier: ServedTier | None = None,
 ) -> RawCallOutcome:
     return RawCallOutcome(
         kind=kind,
@@ -2227,6 +2230,7 @@ def _outcome(
         os_errno=os_errno,
         rejection=rejection,
         hosted_tools=hosted_tools,
+        served_tier=served_tier,
     )
 
 
