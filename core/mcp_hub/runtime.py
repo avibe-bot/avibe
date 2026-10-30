@@ -24,7 +24,7 @@ import anyio
 
 from core.mcp_hub import commands as mcp_commands
 from core.mcp_hub import native, repository
-from core.mcp_hub.definition import HTTP, STDIO, definition_from_provider
+from core.mcp_hub.definition import HTTP, STDIO, definition_from_provider, normalize_description
 from core.mcp_hub.errors import McpHubError
 
 logger = logging.getLogger(__name__)
@@ -619,7 +619,11 @@ class McpRuntime:
             descriptors.append(descriptor)
         descriptors.sort(key=lambda item: item["name"])
         manifest: dict[str, Any] = {
-            "description": definition.get("description") or "",
+            "description": normalize_description(
+                definition.get("description")
+                or getattr(server_info, "description", None)
+                or getattr(server_info, "title", None)
+            ),
             "generatedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
         version = getattr(server_info, "version", None)

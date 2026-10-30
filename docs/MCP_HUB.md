@@ -61,7 +61,7 @@ Env and header values are stored as given. URLs with `user:pass@` are rejected; 
 
 ## Call tools
 
-Agents see registered servers in their system prompt and discover tools on demand:
+Agents see registered servers in their system prompt and discover tools on demand. Each server's line uses your `--description` if you gave one, else the description or title the server reports when Avibe refreshes it, else `Tools from an MCP server.`:
 
 ```bash
 vibe mcp --list

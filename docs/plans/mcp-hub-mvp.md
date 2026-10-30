@@ -55,7 +55,7 @@ The shared system prompt gets a short discovery index (outside `core/managed_ski
 Use `vibe mcp <server> --list` to discover available tools.
 Use `vibe mcp <server> <tool> --help` to inspect arguments before calling.
 Call tools with `vibe mcp <server> <tool> [arguments]`.
-Help and lists read local generated definitions; tool calls access the MCP server.
+Help and lists read local snapshots; tool calls access the MCP server.
 
 Available servers:
 - context7: Find current library documentation and code examples.
@@ -65,7 +65,7 @@ List all servers: `vibe mcp --list`.
 ```
 
 - One line per package, sorted by name; description sanitized to one line, max 160 chars.
-- Description: from the published snapshot's manifest (user-provided at add/refresh, else a localized generic string). Server-provided text is not used. There is one snapshot per server; there are no pending edits.
+- Description: from the published snapshot's manifest, chosen at refresh and never read live: the user-provided `--description` / paste description, else the server's initialize `serverInfo.description`, else `serverInfo.title`, else the fixed English `Tools from an MCP server.` (owner decision; the prompt is English, so the fallback is not localized). There is one snapshot per server; there are no pending edits.
 - List at most 50 servers; if more exist, append the omitted count and `vibe mcp --list`.
 - No tool names, schemas, URLs, commands, credentials or management commands.
 - The block has two fixed parts: stable shared instructions (examples must stay parser-valid), then one `<server>: <description>` line per package, where `<server>` is the exact CLI selector.

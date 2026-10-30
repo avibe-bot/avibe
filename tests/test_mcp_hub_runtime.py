@@ -402,6 +402,23 @@ def test_prompt_index_lists_enabled_servers_and_its_examples_parse(generated, ca
 
 
 
+@pytest.mark.parametrize(
+    ("server_info", "line"),
+    [
+        ({"description": "Search\n  the\tdocs", "title": "Docs"}, "- docs: Search the docs"),
+        ({"title": "Docs " + "x" * 200}, "- docs: Docs " + "x" * 155),
+        ({}, "- docs: Tools from an MCP server."),
+    ],
+)
+def test_prompt_line_uses_server_description_then_title_then_fallback(runtime, server_info, line):
+    from types import SimpleNamespace
+
+    definition = {"name": "docs", "description": "", "transport": {"type": "streamable_http", "url": "https://example.invalid/mcp"}}
+    repository.write_avibe_definition(definition)
+    McpRuntime._publish("docs", definition, definition, [], SimpleNamespace(version=None, **server_info))
+    assert line in build_mcp_prompt_block().text.splitlines()
+
+
 @pytest.mark.parametrize(("argv", "allowed"), [(["--list"], True), (["echo", "--refresh"], False)])
 def test_editor_discovers_but_cannot_manage(generated, argv, allowed, capsys):
     from vibe import mcp_cli
