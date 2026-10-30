@@ -64,9 +64,9 @@ once it stops changing or the timeout ends.
   retrying that one action. Use `delivery_mode: "foreground"` for the retry if
   background input still has no effect. Foreground input restores the previous
   frontmost window; `activate()` leaves the target frontmost.
-- When no on-screen window matches, call `app.launch()` once, then
-  `app.waitFor({ onScreen: true })`. If no window appears, or activation stays
-  unverified, stop and ask the owner. Never loop.
+- When no on-screen window matches, call `const launched = await app.launch()`
+  once, then `await launched.app.waitFor({ onScreen: true })`. If no window
+  appears, or activation stays unverified, stop and ask the owner. Never loop.
 - Treat driver `status: unverifiable` as unknown, not proof of effect. After
   input, compare a second observation against a stable signature (title,
   selected row, or visible text). Allow only one retry after verified activation;

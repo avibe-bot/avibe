@@ -137,8 +137,8 @@ def test_computer_use_skill_bounds_no_effect_recovery_and_viewport_evidence() ->
 
     # Missing visibility gets one bounded reopen attempt, then owner recovery.
     assert "When no on-screen window matches" in recovery
-    launch = recovery.index("call `app.launch()` once")
-    wait_for = recovery.index("`app.waitFor({ onScreen: true })`")
+    launch = recovery.index("call `const launched = await app.launch()` once")
+    wait_for = recovery.index("`await launched.app.waitFor({ onScreen: true })`")
     stop = recovery.index("stop and ask the owner")
     assert launch < wait_for < stop
     assert "If no window appears" in recovery
