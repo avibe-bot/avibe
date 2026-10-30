@@ -80,6 +80,7 @@ class OpenCodeRuntimeConfigInvalidError(RuntimeError):
 
 def managed_opencode_runtime_config_content(
     raw: str | bytes | None,
+    disabled_mcp: Dict[str, Any] | None = None,
 ) -> str:
     """Apply Avibe-owned OpenCode runtime policy without mutating user config."""
 
@@ -124,6 +125,14 @@ def managed_opencode_runtime_config_content(
     # Computer Use is exposed through ``vibe computer`` and must never be
     # reintroduced from a stale user or runtime configuration.
     managed_mcp.pop("avibe_computer", None)
+    # Native MCP is off in Avibe sessions; agents call MCP through ``vibe mcp``
+    # (core/mcp_hub/native.py supplies the user's entries with enabled=false).
+    for name, entry in (disabled_mcp or {}).items():
+        current = managed_mcp.get(name)
+        managed_mcp[name] = {**(current if isinstance(current, dict) else entry), "enabled": False}
+    for name, entry in list(managed_mcp.items()):
+        if isinstance(entry, dict):
+            managed_mcp[name] = {**entry, "enabled": False}
     if managed_mcp:
         payload["mcp"] = managed_mcp
     else:

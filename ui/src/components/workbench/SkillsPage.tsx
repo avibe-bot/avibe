@@ -15,6 +15,7 @@ import { SkillDetailPanel } from './skills/SkillDetailPanel';
 import { ProjectPicker } from './skills/ProjectPicker';
 import { AddSkillDialog } from './skills/AddSkillDialog';
 import { BrowseRegistryDialog } from './skills/BrowseRegistryDialog';
+import { McpHubSection } from './skills/McpHubSection';
 import { errorMessage } from '@/lib/errorMessage';
 import { Badge } from '../ui/badge';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
@@ -28,7 +29,9 @@ export const SkillsPage: React.FC = () => {
   const { capabilities } = useInstanceAuthorization();
   const canManage = capabilities.can_use_skills;
 
+  const [pageTab, setPageTab] = useState<'skills' | 'mcp'>('skills');
   const [scope, setScope] = useState<SkillScope>('global');
+  const showMcp = pageTab === 'mcp';
   const [projects, setProjects] = useState<WorkbenchProject[]>([]);
   const [projectId, setProjectId] = useState<string | null>(null);
   const [skills, setSkills] = useState<SkillBrief[]>([]);
@@ -228,7 +231,7 @@ export const SkillsPage: React.FC = () => {
       <CapabilityTabs />
       <WorkbenchPageHeader
         icon={<WandSparkles className="size-5" />}
-        title={t('skills.title')}
+        title={t('skills.pageTitle')}
         subtitle={t('skills.subtitle')}
         actions={
           <Button type="button" variant="outline" size="xs" onClick={() => refresh()} disabled={loading}>
@@ -239,6 +242,16 @@ export const SkillsPage: React.FC = () => {
       />
 
       <div className="flex flex-wrap items-center gap-2.5">
+        <SegmentedRadio<'skills' | 'mcp'>
+          value={pageTab}
+          onChange={setPageTab}
+          ariaLabel={t('skills.pageTitle')}
+          options={[
+            { id: 'skills', label: t('skills.tabSkills') },
+            { id: 'mcp', label: t('skills.tabMcp') },
+          ]}
+        />
+        {showMcp ? null : (
         <SegmentedRadio<SkillScope>
           value={scope}
           onChange={setScope}
@@ -248,6 +261,9 @@ export const SkillsPage: React.FC = () => {
             { id: 'project', label: t('skills.scopeProject') },
           ]}
         />
+        )}
+        {showMcp ? null : (
+        <>
         {scope === 'project' && projects.length > 0 ? (
           <ProjectPicker projects={projects} value={projectId} onChange={setProjectId} />
         ) : null}
@@ -279,6 +295,8 @@ export const SkillsPage: React.FC = () => {
             {t('skills.remoteReadOnly')}
           </Badge>
         ) : null}
+        </>
+        )}
       </div>
 
       {scope === 'project' && activeProject?.folder_path ? (
@@ -290,6 +308,8 @@ export const SkillsPage: React.FC = () => {
         </div>
       ) : null}
 
+      {showMcp ? <McpHubSection /> : (
+      <>
       {error ? (
         <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive-ink">{error}</div>
       ) : null}
@@ -388,6 +408,8 @@ export const SkillsPage: React.FC = () => {
             />
           ) : null}
         </div>
+      )}
+      </>
       )}
 
       {projectCanManage && showAdd ? (

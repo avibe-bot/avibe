@@ -13,6 +13,7 @@ from modules.claude_sdk_compat import (
     ToolResultBlock,
 )
 from config.v2_compat import ClaudeCompatConfig
+from vibe.claude_config import CLAUDE_NATIVE_MCP_DISABLED
 from modules.im.formatters import BaseMarkdownFormatter, SlackFormatter
 
 
@@ -28,6 +29,7 @@ class ClaudeClient:
             cwd=config.cwd,
             system_prompt=config.system_prompt,
             max_buffer_size=CLAUDE_SDK_MAX_BUFFER_SIZE,
+            **CLAUDE_NATIVE_MCP_DISABLED,
         )  # type: ignore[arg-type]
 
     def format_message(

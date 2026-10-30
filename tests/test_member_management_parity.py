@@ -93,6 +93,11 @@ def management_http(tmp_path, monkeypatch):
 # This inventory describes retained effects independently of the policy rules.
 # A newly registered Owner-only management route must be consciously classified.
 _RETAINED_OWNER_ROUTES = {
+    # MCP Hub management runs arbitrary local commands: Owner-only (plan §7).
+    ("POST", "/api/mcp"),
+    ("POST", "/api/mcp/discover"),
+    ("POST", "/api/mcp/{name}/refresh"),
+    ("DELETE", "/api/mcp/{name}"),
     ("PUT", "/api/permissions/authorized-users"),
     ("PUT", "/api/permissions/projects/{project_id}/access"),
     ("PUT", "/api/permissions/resources/{resource_kind}/{resource_id}/access"),
@@ -118,7 +123,7 @@ def test_complete_registered_api_management_inventory():
         for method in (getattr(route, "methods", None) or ())
         if method not in {"HEAD", "OPTIONS"}
     }
-    assert len(endpoints) == 297
+    assert len(endpoints) == 303  # master 297 + 6 MCP Hub routes, classified in tests/test_mcp_hub_api.py
     # Editors who use Vault read avault's authorization state; the handler admits only
     # instance managers to raise the Keychain dialog on the host.
     for method in ("GET", "POST"):

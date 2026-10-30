@@ -37,7 +37,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Optional, TYPE_CHECKING
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 
 from config import paths
 from core import control_ipc
@@ -1712,6 +1712,21 @@ def create_app(
             response.update(exc.data)
             return JSONResponse(status_code=exc.status, content=response)
         return {"ok": True, "result": result}
+
+    @app.post("/internal/mcp")
+    async def _mcp(request: Request) -> Any:
+        """Hand MCP Hub operations to the controller-owned runtime thread."""
+
+        body = await _safe_json(request)
+        operation = body.get("operation") if isinstance(body, dict) else None
+        payload = body.get("payload") if isinstance(body, dict) else None
+        if not isinstance(operation, str) or not isinstance(payload, dict):
+            return JSONResponse(status_code=400, content={"ok": False, "error": {"type": "usage"}})
+        runtime = getattr(controller, "mcp_runtime", None)
+        if runtime is None:
+            return JSONResponse(status_code=503, content={"ok": False, "error": {"type": "unavailable"}})
+        status, content = await runtime.submit(operation, payload)
+        return Response(content=content, status_code=status, media_type="application/json")
 
     @app.get("/internal/events")
     async def _events() -> Any:

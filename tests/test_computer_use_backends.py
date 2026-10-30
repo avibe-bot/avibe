@@ -42,7 +42,7 @@ def test_opencode_runtime_cleanup_removes_stale_computer_use_mcp_only() -> None:
     )
 
     assert payload["mcp"] == {
-        "notes": {"type": "local", "command": ["notes"]},
+        "notes": {"type": "local", "command": ["notes"], "enabled": False},
     }
 
 

@@ -150,7 +150,7 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             ) : (
               <XCircle size={18} />
             )}
-            <span className="text-sm font-medium">{toast.message}</span>
+            <span className="max-w-sm whitespace-pre-wrap text-sm font-medium">{toast.message}</span>
             {toast.repeats > 0 && (
               <span className="ml-1 rounded-full bg-current/15 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums opacity-80">
                 ×{toast.repeats + 1}

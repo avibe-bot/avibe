@@ -557,6 +557,43 @@ export type TunnelConnectivityDiagnostics = {
   error?: string;
 };
 
+// MCP Hub (/api/mcp*): static packages generated from MCP servers.
+export interface McpServerSummary {
+  name: string;
+  description?: string;
+  transport?: string;
+  source?: 'avibe' | 'claude' | 'codex' | 'opencode';
+  sourcePath?: string;
+  command?: string;
+  url?: string;
+  revision?: string | null;
+  generatedAt?: string;
+  serverVersion?: string;
+  toolCount?: number;
+  tools?: { name: string; description?: string }[];
+  diagnostics?: string[];
+}
+export interface McpError { type: string; message: string; field?: string; hint?: string }
+/** Masked definition from GET /api/mcp/{name}: env/header values are always blank. */
+export interface McpDefinition {
+  name: string;
+  description?: string;
+  transport: {
+    type: 'stdio' | 'streamable_http';
+    command?: string;
+    args?: string[];
+    cwd?: string;
+    url?: string;
+    env?: Record<string, string>;
+    headers?: Record<string, string>;
+    has_env?: Record<string, boolean>;
+    has_headers?: Record<string, boolean>;
+  };
+}
+export interface McpResult { ok: boolean; error?: McpError }
+export interface McpParsedServer { name: string; exists: boolean; transport?: { type: string } }
+export interface McpTool { name: string; description?: string; inputSchema?: unknown; flags: { flag: string; kind: string; required: boolean }[] }
+
 export type ApiContextType = {
   /** `cache: false` reads past the 30-second config cache, for a surface (the
    *  desktop pet) that must see a setup another window just finished. */
@@ -903,6 +940,19 @@ export type ApiContextType = {
   importVibeAgents: (payload: { from?: NativeCliBackend; name?: string; all?: boolean; file?: string; backend?: string }) => Promise<{ ok: boolean; imported?: any[]; skipped?: any[]; error?: string; code?: string; message?: string }>;
   // Agent Skills — thin shells over the askill CLI (see /api/skills*).
   listSkills: (params?: { scope?: SkillScope | 'all'; projectId?: string; backends?: string[] }) => Promise<SkillsListResult>;
+  listMcpServers: () => Promise<McpResult & { servers?: McpServerSummary[] }>;
+  addMcp: (text: string) => Promise<McpResult & {
+    saved?: string[];
+    name?: string;
+    toolCount?: number;
+    added?: { name: string; toolCount?: number }[];
+    unchanged?: { name: string }[];
+    failed?: { name: string; error?: string; type?: string }[];
+  }>;
+  discoverMcp: () => Promise<McpResult & { results?: { name: string; status: string; error?: string; toolCount?: number }[] }>;
+  refreshMcp: (name: string) => Promise<McpResult & { name?: string; toolCount?: number }>;
+  removeMcp: (name: string) => Promise<McpResult>;
+  getMcpServer: (name: string) => Promise<McpResult & { server?: McpServerSummary; tools?: McpTool[] }>;
   previewSkillSource: (source: string, params?: { projectId?: string }) => Promise<SkillsPreviewResult>;
   addSkill: (payload: { source: string; scope: SkillScope; projectId?: string; backends?: string[]; all?: boolean; skill?: string; copy?: boolean }) => Promise<SkillsMutationResult>;
   removeSkill: (name: string, params?: { scope?: SkillScope; projectId?: string; backends?: string[] }) => Promise<SkillsMutationResult>;
@@ -4281,6 +4331,12 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const qs = search.toString();
       return getCachedJson(qs ? `/api/skills?${qs}` : '/api/skills', 5_000);
     },
+    listMcpServers: () => getJson('/api/mcp', { handleError: false }),
+    addMcp: (text) => postJson('/api/mcp', { text }, { handleError: false }),
+    discoverMcp: () => postJson('/api/mcp/discover', {}, { handleError: false }),
+    refreshMcp: (name) => postJson(`/api/mcp/${encodeURIComponent(name)}/refresh`, {}, { handleError: false }),
+    removeMcp: (name) => deleteJson(`/api/mcp/${encodeURIComponent(name)}`, undefined, { handleError: false }),
+    getMcpServer: (name) => getJson(`/api/mcp/${encodeURIComponent(name)}`, { handleError: false }),
     previewSkillSource: (source, params) =>
       postJson('/api/skills/preview', { source, project_id: params?.projectId }),
     addSkill: (payload) =>

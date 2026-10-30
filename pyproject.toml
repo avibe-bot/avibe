@@ -101,6 +101,8 @@ dependencies = [
     # (storage/vault_addresses.py); cryptography ships neither.
     "pycryptodome>=3.20",
     "prometheus-client>=0.20.0",
+    # MCP Hub client (docs/plans/mcp-hub-mvp.md); 2.x is the current stable line.
+    "mcp>=2.3.0,<3",
 ]
 
 [project.urls]

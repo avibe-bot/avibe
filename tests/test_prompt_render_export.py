@@ -12,6 +12,7 @@ import pytest
 from markdown_it import MarkdownIt
 
 from config import paths
+from core.mcp_hub import repository as mcp_repository
 from core import managed_skills, show_git
 from core.managed_skills import ManagedSkill
 from core.prompt_registry import PROMPT_MODULES, prompt_text
@@ -120,6 +121,7 @@ def _environment(monkeypatch, history="managed", skill_mode="pages"):
         for name in names
     ] if skill_mode != "empty" else []
     monkeypatch.setattr(managed_skills, "resolve_skills", lambda *_args, **_kwargs: skills)
+    monkeypatch.setattr(mcp_repository, "list_packages", lambda: [{"name": "docs", "description": "Docs"}])
 
 
 @pytest.mark.parametrize("backend,history,skill_mode", itertools.product(
@@ -552,6 +554,8 @@ def test_approved_guidance_changes_preserve_all_other_injection_bytes(monkeypatc
         "skills-prompt",
         "skills-manual-prompt",
         "codex-skill-reuse",
+        # New MCP Hub discovery index (docs/plans/mcp-hub-mvp.md §3).
+        "mcp-capabilities-prompt",
     }
     for backend, history, skill_mode in itertools.product(
         ("claude", "codex", "opencode"), ("off", "managed", "self-managed"), ("empty", "manual", "pages"),

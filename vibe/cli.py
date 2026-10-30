@@ -16860,6 +16860,11 @@ def _cmd_restart_with_delay(delay_seconds: float) -> int:
 def build_parser():
     parser = VibeArgumentParser(prog="vibe")
     subparsers = parser.add_subparsers(dest="command")
+    # ``vibe mcp`` is dispatched from raw argv in ``main`` (server and tool names
+    # are dynamic); this entry only lists it in ``vibe --help``.
+    subparsers.add_parser("mcp", help="Discover and call generated MCP server tools (vibe mcp --help)", add_help=False)
+    subparsers.add_parser("mcp-add", help="Add MCP servers to the Avibe Hub (vibe mcp-add --help)", add_help=False)
+    subparsers.add_parser("mcp-discover", help="Discover native MCP servers and register reachable ones", add_help=False)
 
     stop_parser = subparsers.add_parser("stop", help="Stop all services")
     stop_parser.add_argument(
@@ -19004,6 +19009,13 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("data", "query"): "editor",
     ("data", "skill-usage"): "editor",
     ("data", "retention"): "member",
+    # ``vibe mcp`` admits itself from raw argv (vibe/mcp_cli.py): discovery and
+    # calls at Editor like Skills, management Owner-only. This floor is reached
+    # only if argparse ever dispatches it. ``mcp-add`` / ``mcp-discover`` are
+    # listed in ``vibe --help`` with add_help=False and also dispatched from argv.
+    ("mcp",): "owner",
+    ("mcp-add",): "owner",
+    ("mcp-discover",): "owner",
 }
 
 #: Argv-level entry points the supervisor and the installer use. They are not
@@ -19122,6 +19134,18 @@ def main():
             sys.exit(_dispatch_deferred_upgrade_activation(argv[1:]))
         if argv and argv[0] == "__activate-install":
             sys.exit(_dispatch_installer_activation(argv[1:]))
+        if argv and argv[0] == "mcp":
+            from vibe import mcp_cli
+
+            sys.exit(mcp_cli.main(argv[1:]))
+        if argv and argv[0] == "mcp-add":
+            from vibe import mcp_cli
+
+            sys.exit(mcp_cli.add_main(argv[1:]))
+        if argv and argv[0] == "mcp-discover":
+            from vibe import mcp_cli
+
+            sys.exit(mcp_cli.discover_main(argv[1:]))
         parser = build_parser()
         args = parser.parse_args()
         _require_command_admission(parser, args)
