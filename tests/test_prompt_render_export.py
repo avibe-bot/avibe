@@ -121,7 +121,8 @@ def _environment(monkeypatch, history="managed", skill_mode="pages"):
         for name in names
     ] if skill_mode != "empty" else []
     monkeypatch.setattr(managed_skills, "resolve_skills", lambda *_args, **_kwargs: skills)
-    monkeypatch.setattr(mcp_repository, "list_packages", lambda: [{"name": "docs", "description": "Docs"}])
+    servers = [{"name": f"docs-{index:02}", "description": "Docs"} for index in range(26 if skill_mode == "pages" else 1)]
+    monkeypatch.setattr(mcp_repository, "list_packages", lambda: servers)
 
 
 @pytest.mark.parametrize("backend,history,skill_mode", itertools.product(
@@ -556,6 +557,9 @@ def test_approved_guidance_changes_preserve_all_other_injection_bytes(monkeypatc
         "codex-skill-reuse",
         # New MCP Hub discovery index (docs/plans/mcp-hub-mvp.md §3).
         "mcp-capabilities-prompt",
+        "mcp-catalog",
+        "mcp-pagination-prompt",
+        "mcp-more-notice",
     }
     for backend, history, skill_mode in itertools.product(
         ("claude", "codex", "opencode"), ("off", "managed", "self-managed"), ("empty", "manual", "pages"),

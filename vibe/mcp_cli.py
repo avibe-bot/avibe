@@ -20,7 +20,7 @@ from core.mcp_hub.errors import McpHubError
 
 USAGE = """\
 usage:
-  vibe mcp --list [--format json]
+  vibe mcp --list [--page N] [--format json]
   vibe mcp <server> --list [--format json]
   vibe mcp <server> --refresh
   vibe mcp <server> --remove
@@ -31,7 +31,7 @@ usage:
 
 management (Owner):
   vibe mcp-add [--transport stdio|http] [--env KEY=VALUE ...] [--header 'Name: value' ...]
-               [--description TEXT] [--cwd DIR] [--replace] <name> -- <command> [args...]
+               [--cwd DIR] [--replace] <name> -- <command> [args...]
   vibe mcp-add --transport http <name> <url>
   vibe mcp-add --json-stdin [--replace]
   vibe mcp-discover
@@ -133,17 +133,29 @@ def _format_json(options: list[str], allowed: set[str]) -> bool:
 
 
 def _root_list(argv: list[str]) -> int:
+    from core.managed_skills import catalog_page_of
+    from core.mcp_hub.prompt import server_row
+
+    page = 1
+    if "--page" in argv:
+        position = argv.index("--page")
+        value = argv[position + 1] if position + 1 < len(argv) else ""
+        if not value.isdigit() or int(value) < 1:
+            raise McpHubError("usage", "--page takes a positive integer.", usage=True)
+        page = int(value)
+        argv = argv[:position] + argv[position + 2 :]
     as_json = _format_json(argv, {"--list"})
-    packages = repository.list_packages()
+    entries, next_page = catalog_page_of(repository.list_packages(), server_row, page)
     if as_json:
-        print(json.dumps({"servers": packages}, ensure_ascii=False, indent=2))
+        print(json.dumps({"servers": list(entries), "nextPage": next_page}, ensure_ascii=False, indent=2))
         return 0
-    if not packages:
+    if not entries:
         print("No MCP servers.")
         return 0
-    for item in packages:
-        extra = f"  [{item.get('source') or 'avibe'}]" if item.get("source") else ""
-        print(f"{item['name']}  {escape(item.get('description') or '')}{extra}".rstrip())
+    for item in entries:
+        print(escape(server_row(item)))
+    if next_page is not None:
+        print(f"\nMore servers are available. Run `vibe mcp --list --page {next_page}` to view more.")
     print("\nNext: vibe mcp <server> --list")
     return 0
 
@@ -200,7 +212,7 @@ def _add(args: list[str]) -> int:
     payload = {
         "replace": replace,
         "servers": [
-            {"name": item["name"], "server": provider_entry(item), "description": item.get("description")}
+            {"name": item["name"], "server": provider_entry(item)}
             for item in definitions
         ],
     }

@@ -366,7 +366,7 @@ def summarize(name: str, servers: Optional[dict[str, native.NativeServer]] = Non
         "name": name,
         "source": source,
         "sourcePath": source_path,
-        "description": manifest.get("description") or (definition.get("description") if isinstance(definition, dict) else "") or "",
+        "description": manifest.get("description") or "",
         "transport": transport.get("type") if isinstance(transport, dict) else None,
         "command": command,
         "url": url,

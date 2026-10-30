@@ -39,7 +39,7 @@ async def _owner(operation: str, payload: dict[str, Any]) -> dict[str, Any]:
 
 def _servers_payload(definitions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
-        {"name": item["name"], "server": provider_entry(item), "description": item.get("description")}
+        {"name": item["name"], "server": provider_entry(item)}
         for item in definitions
     ]
 
