@@ -1697,6 +1697,7 @@
       "proxy": "via {provider} proxy",
       "proxyModel": "via {provider} proxy ({model})",
       "fallback": "{source} doesn't support it, now using {provider}",
+      "nativeInterrupted": "Native search was interrupted; switched to {provider}.",
       "direct": "direct ({provider})"
     },
     "count": {

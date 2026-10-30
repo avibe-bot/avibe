@@ -376,6 +376,64 @@ failover, and is refused unpinned (C-6 item 7). What changes is what happens aft
   never swaps declarations or converts history. C-6 item 6's opaque thinking strip still applies to unpinned
   requests only.
 
+### 3.6 Repeated native-search interruptions (owner decision 2026-10-30)
+
+When a native `web_search` (and `x_search` where the frozen Turn has a proxy
+executor) is repeatedly cut off by the upstream, Vibey retries the native route
+first. The decision is per tool and Turn-scoped:
+
+- Count committed responses in this Turn whose `stop_reason` is `error`, whose
+  persisted upstream class is transient (`overloaded`, `server`, `network`,
+  `stalled` or `interrupted`), and whose native call for that tool is still
+  pending. Counts for another tool do not contribute.
+- The first three qualifying failures keep the native declaration. On the
+  fourth, later hops of this Turn declare the same-named function tool and use
+  the frozen proxy executor order. If the existing recovery budget makes the
+  next hop the last permitted retry before its deadline or attempt cap, the
+  switch happens on that last permitted retry instead of spending it natively.
+  A tool with no frozen proxy candidate keeps its existing retry/failure path.
+- This is not a refusal: it writes no negative capability/refusal evidence, does
+  not change the native preference or Tools-tab refusal state, and a new Turn
+  starts native again. The provider error class travels with the partial in
+  process and commits as response-row metadata (not a new canonical message
+  field); older rows use only explicitly classifiable error wording. New response
+  metadata projects the qualifying interrupted tools and the request's actual
+  recovery-proxy routes. This immutable per-response route fact is necessary:
+  after an early switch below four, a successful response resets the episode
+  budget but must not restore native search within the same Turn, including after
+  restart. Hop resolution reads these small facts, not the Turn's tool outputs;
+  only legacy response bodies need decoding. The display explanation uses the
+  existing tool-result `details` map. No frozen contract, settings, or mutable
+  Turn-level switch flag is added.
+- Two existing recovery budgets are distinct. Model Hub has a 120-second
+  recovery window, 30/60/120-second server-error delays (with jitter), and a
+  one-second admission margin. It cannot retry a stream already committed to
+  the client; those cut-offs are recovered by Vibey's transcript continuations.
+  Vibey normally allows five continuations, with 0.5/1/2/4/8-second backoff and a
+  120-second window starting at the first continuable failure. This budget belongs
+  to a **failure episode**: any successfully committed model response ends it and
+  resets both elapsed time and attempt count; consecutive failures share it.
+  Request duration and recovery work spend the window; `Retry-After` remains a
+  floor and Stop owns the wait. The last admitted continuation switches early
+  only for a tool still pending in the **just-failed response**, with a proxy
+  candidate. Older interruptions never grant extra retries for unrelated errors.
+  A long streamed request can itself overrun the window, or the first native
+  interruption can occur on the last normal attempt. The one explicit exception
+  to both normal limits is **at most one proxied reserve request per episode**,
+  qualified by that same just-failed native call and candidate. It consumes the
+  episode's final slot, never renews either budget, and a failed reserve cannot
+  obtain another one, even for a different tool. The Turn-wide count is used only
+  for the ordinary four-failure threshold. Model Hub's per-request budget is
+  unchanged.
+- Earlier completed native items stay in context. Because the current route is
+  now function-only, the existing cross-mode replay transform downgrades those
+  items to portable ordinary call/result content; it does not invent refusal
+  evidence. OpenAI Responses and Anthropic adapters follow the same rule.
+
+The Web card and IM line name the proxy without claiming a failure count (for
+example, “Native search was interrupted; switched to Exa (free).” /
+“自带搜索中断，已改用 Exa（免费）。”).
+
 ## 4. Vibey responsibilities
 
 ### 4.1 Request building

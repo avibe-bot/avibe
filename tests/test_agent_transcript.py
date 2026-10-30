@@ -19,8 +19,15 @@ from sqlalchemy import select
 
 from core.agent_core.messages import (
     AssistantMessage,
+    HostedAction,
+    HostedNative,
+    HostedRecord,
+    HostedResult,
+    HostedSummary,
+    HostedToolBlock,
     ImageBlock,
     Origin,
+    ProxyExecution,
     TextBlock,
     ThinkingBlock,
     ToolCallBlock,
@@ -257,6 +264,64 @@ async def test_every_kind_round_trips_in_one_order_attributed_to_the_turn(engine
         ("context_edit", "context"),
         ("context_compaction", "context"),
     ]
+
+
+async def test_transient_error_kind_survives_transcript_boundary_without_changing_message_contract(engine) -> None:
+    with engine.begin() as conn:
+        home = _scope(conn, "C-native-recovery")
+        _session(conn, "ses_native_recovery", home)
+        first = _accepted_turn(conn, "ses_native_recovery", home, "search", "turn_native_recovery")
+    block = HostedToolBlock(
+        id="ws_recovery",
+        tool="web_search",
+        action=HostedAction(type="search", queries=("Avibe",)),
+        record=HostedRecord(status="pending"),
+        native=HostedNative("src_recovery1", ({"type": "web_search_call", "id": "ws_recovery"},)),
+    )
+    message = AssistantMessage(
+        content=(block,),
+        origin=ORIGIN,
+        stop_reason="error",
+        error_message="Our servers are currently overloaded",
+        hosted_summary=HostedSummary(),
+        error_kind="overloaded",
+    )
+    store = SQLiteTranscriptStore(engine)
+    await store.consume_input("ses_native_recovery", first, _user("search"))
+    written = await store.append_response("ses_native_recovery", message, final=False)
+    loaded = await store.load_turn("ses_native_recovery", "turn_native_recovery")
+    response = next(entry for entry in loaded if entry.row_id == written.row_id)
+
+    assert isinstance(response.message, AssistantMessage)
+    assert response.message.error_kind == "overloaded"
+    with engine.connect() as conn:
+        row = conn.execute(select(messages).where(messages.c.id == written.row_id)).mappings().one()
+    model = json.loads(row["content_json"])["model"]["message"]
+    assert "error_kind" not in model
+    assert json.loads(row["metadata_json"])["native_search_error_kind"] == "overloaded"
+
+    result = ToolResultMessage(
+        tool_call_id="call_proxy",
+        tool_name="web_search",
+        content=(text("proxy result"),),
+        hosted=HostedResult(
+            record=HostedRecord(status="completed"),
+            execution=ProxyExecution(
+                executor_origin=ORIGIN,
+                executor_source_id="src_recovery1",
+                executor_billing="metered",
+            ),
+            route_switch="native_interrupted",
+        ),
+    )
+    await store.append_tool_result(
+        "ses_native_recovery", result, details={"hosted_route_switch": "native_interrupted"}
+    )
+    loaded = await store.load_turn("ses_native_recovery", "turn_native_recovery")
+    recovered_result = next(entry.message for entry in loaded if entry.kind == "tool_result")
+    assert isinstance(recovered_result, ToolResultMessage)
+    assert recovered_result.hosted is not None
+    assert recovered_result.hosted.route_switch == "native_interrupted"
 
 
 async def test_a_stored_unknown_native_hosted_row_loads_through_the_transcript_owner(engine):

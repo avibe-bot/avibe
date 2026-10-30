@@ -53,6 +53,22 @@ const row = (callId: string) => document.querySelector(`[data-hosted-call="${cal
 afterEach(() => cleanup());
 
 describe('hosted tool cards', () => {
+  it.each(['en', 'zh'] as const)('explains the transient native-to-Exa switch without a refusal in %s', (lng) => {
+    const payload = {
+      ...fixture.proxy_x_search, tool: 'web_search', call_id: 'switched-search',
+      source_id: 'src_exakeyless', provider: 'exa', source_name: 'Exa', executor_kind: 'service',
+      model: undefined, route_switch: 'native_interrupted',
+    };
+    for (const record of [payload, JSON.parse(JSON.stringify(payload))]) {
+      renderGroup([record], lng);
+      const card = row('switched-search');
+      within(card).getByText(lng === 'en'
+        ? 'Native search was interrupted; switched to Exa (free).'
+        : '自带搜索中断，已改用 Exa（免费）。');
+      expect(card.textContent).not.toMatch(/doesn't support|不支持/);
+      cleanup();
+    }
+  });
   it.each(['en', 'zh'] as const)('explains interrupted responses without inventing a subject in %s, live and reloaded', (lng) => {
     for (const [interruption, reason] of [
       ['overloaded', lng === 'en' ? 'upstream overloaded' : '上游服务过载'],

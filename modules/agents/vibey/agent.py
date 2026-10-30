@@ -57,7 +57,7 @@ from core.agent_core.agent.events import (
 )
 from core.agent_core.agent.hooks import AgentInput
 from core.agent_core.agent.loop import Agent
-from core.agent_core.agent.models import ModelSelection
+from core.agent_core.agent.models import ModelSelection, RetryPolicy
 from core.agent_core.agent.recovery import settle_open_calls
 from core.agent_core.harness.context import ContextConfig
 from core.agent_core.harness.projection import open_tool_calls
@@ -106,6 +106,9 @@ from modules.agents.vibey.errors import error_text
 from modules.agents.vibey.instructions import load_instruction_files, project_context
 from modules.agents.vibey.media import MediaSnapshots
 from modules.agents.vibey.models import HubModelRouter, ProviderFactory, registry_providers, selection_from_hop
+from modules.agents.vibey.native_search_recovery import (
+    SEARCH_TOOLS, interrupted_native_searches, response_recovery_metadata, should_switch, turn_recovery_facts,
+)
 from modules.agents.vibey.prompt import EnvironmentValue, current_environment, system_prompt
 from modules.agents.vibey.store import AdapterTranscriptStore
 from modules.agents.vibey.tools import ToolSuite, hosted_tools, local_tool_suite
@@ -215,10 +218,10 @@ class _Run:
     committed_display: Optional[str] = None
     # Steer attempts ``Agent.steer`` accepted into this run: reconcile's in-process evidence.
     accepted_steers: set[str] = field(default_factory=set)
-    # Automatic transcript-only continuations already spent by this Turn. The
-    # initial model call is not counted; the limit is five additional attempts.
+    # Automatic continuations in this failure episode. Success resets both fields;
+    # the initial call is not counted. One proxy reserve may spend the final slot
+    # beyond the normal cap, but never reopens the native window.
     continuations: int = 0
-    # One elapsed window from the first continuable failure, shared by every outer continuation.
     continuation_started_at: Optional[float] = None
     stop_requested: bool = False
     stop_event: asyncio.Event = field(default_factory=asyncio.Event)
@@ -269,6 +272,7 @@ class VibeyAgent(BaseAgent):
             self._engine,
             environment=self._environment,
             on_response=self._on_response,
+            response_metadata=self._response_metadata,
         )
         self._providers = providers or registry_providers(media_loader=self.media)
         # The client of the Turn's other gateway calls (the hosted-tool executor); None opens one per call.
@@ -434,7 +438,9 @@ class VibeyAgent(BaseAgent):
             resume_turn_inputs = None
             async for event in stream:
                 await self._on_event(turn, event)
-            if self._can_auto_continue(turn) and turn.continuations < _MAX_AUTO_CONTINUATIONS:
+            if self._can_auto_continue(turn) and (
+                turn.continuations < _MAX_AUTO_CONTINUATIONS or await self._native_search_switch_available(turn)
+            ):
                 if turn.continuation_started_at is None:
                     turn.continuation_started_at = time.monotonic()
                 # Finish T2 before asking the same Agent to build its next request.
@@ -556,10 +562,11 @@ class VibeyAgent(BaseAgent):
         )
 
     async def _wait_auto_continue(self, run: _Run) -> bool:
-        """Honor the provider's delay floor and one elapsed budget, with Stop owning the wait.
+        """Honor Retry-After and one failure episode's budget, with Stop owning the wait.
 
-        The initial run is not in this window. Subsequent runs and recovery work spend it, not just backoff.
-        Expiry prevents another continuation, but never interrupts a run already doing useful work.
+        Success ends the episode. Consecutive failures spend one window, including
+        request duration and recovery work, not just backoff. Expiry never interrupts
+        a running request; a qualifying cut-off may spend one final proxy reserve.
         """
         if run.stop_requested:
             run.reason = "aborted"
@@ -571,7 +578,11 @@ class VibeyAgent(BaseAgent):
         backoff = min(policy.max_delay_s, policy.initial_delay_s * 2**run.continuations)
         delay = max(backoff, run.cause.retry_after_s or 0.0)
         if elapsed + delay >= policy.max_elapsed_s:
-            return False
+            # A streamed native request can itself consume the remaining window. Reserve one final
+            # proxy attempt rather than ending before the alternate path was tried; its normal delay
+            # (including Retry-After) still holds, and a proxy failure gets no renewed window.
+            if not await self._native_search_switch_available(run):
+                return False
         try:
             await asyncio.wait_for(run.stop_event.wait(), timeout=delay)
         except asyncio.TimeoutError:
@@ -579,7 +590,13 @@ class VibeyAgent(BaseAgent):
         if run.stop_requested:
             run.reason = "aborted"
             return False
-        return time.monotonic() - run.continuation_started_at < policy.max_elapsed_s
+        if time.monotonic() - run.continuation_started_at >= policy.max_elapsed_s:
+            if not await self._native_search_switch_available(run):
+                return False
+            # Spend the episode's final reserve slot, even if time expired before
+            # the ordinary attempt cap. A second tool cannot obtain another reserve.
+            run.continuations = _MAX_AUTO_CONTINUATIONS
+        return True
 
     def _accept_native_start(self, request: AgentRequest, session_id: str) -> None:
         # The native start records the request this Turn runs with, which a restart rerun keeps.
@@ -835,9 +852,77 @@ class VibeyAgent(BaseAgent):
                 raise
             bind_launch(context, launch)
             # Every resolved hop, the first and each retry's, carries the output the Agent asks for on it.
-            return budgeted(selection_from_hop(launch.to_hop_resolution()))
+            selection = budgeted(selection_from_hop(launch.to_hop_resolution()))
+            return await self._native_search_recovery_route(turn, selection)
 
         return HubModelRouter(resolve, self._providers, first=await resolve())
+
+    async def _native_search_recovery_route(self, turn: _Run, selection: ModelSelection) -> ModelSelection:
+        """Derive a per-tool route from this Turn's immutable committed response facts."""
+        native = {
+            tool for tool, route in selection.endpoint.hosted_tools.items()
+            if tool in SEARCH_TOOLS and route.mode == "native"
+        }
+        runtime = getattr(self.controller, "model_hub_runtime", None)
+        candidate = getattr(runtime, "has_proxied_hosted_candidate", None)
+        if not native or not callable(candidate):
+            return selection
+        rows = await self.store.load_turn_response_metadata(turn.session_id, turn.turn_id)
+        counts, previously_proxied = turn_recovery_facts(rows)
+        just_interrupted = interrupted_native_searches(getattr(turn.agent, "last_attempt_response", None))
+        last_retry = self._last_permitted_auto_retry(turn)
+        switched = {
+            tool for tool in native
+            if candidate(turn.turn_id, tool) and (
+                tool in previously_proxied
+                or should_switch(counts[tool], last_permitted_retry=last_retry and tool in just_interrupted)
+            )
+        }
+        return self._with_native_search_proxy_routes(selection, switched) if switched else selection
+
+    async def _native_search_switch_available(self, turn: _Run) -> bool:
+        """A reserve is for this just-failed native call, at most once per episode."""
+        if turn.continuations > _MAX_AUTO_CONTINUATIONS:
+            return False
+        just_interrupted = interrupted_native_searches(getattr(turn.agent, "last_attempt_response", None))
+        if not just_interrupted:
+            return False
+        runtime = getattr(self.controller, "model_hub_runtime", None)
+        candidate = getattr(runtime, "has_proxied_hosted_candidate", None)
+        current = getattr(getattr(turn, "router", None), "current", None)
+        routes = getattr(getattr(current, "endpoint", None), "hosted_tools", {})
+        return bool(callable(candidate) and any(
+            tool in routes and routes[tool].mode == "native" and candidate(turn.turn_id, tool)
+            for tool in just_interrupted
+        ))
+
+    @staticmethod
+    def _with_native_search_proxy_routes(selection: ModelSelection, switched: set[str]) -> ModelSelection:
+        hosted = {
+            tool: replace(
+                route,
+                mode="proxy",
+                replay=False,
+                declaration=None,
+                include=(),
+                route_switch="native_interrupted",
+            ) if tool in switched else route
+            for tool, route in selection.endpoint.hosted_tools.items()
+        }
+        return replace(selection, endpoint=replace(selection.endpoint, hosted_tools=hosted))
+
+    @staticmethod
+    def _last_permitted_auto_retry(turn: _Run) -> bool:
+        """Whether this continuation is the last retry the existing budget admits."""
+
+        if turn.continuation_started_at is None:
+            return False
+        policy = turn.agent.retry if turn.agent is not None else RetryPolicy()
+        if turn.continuations >= _MAX_AUTO_CONTINUATIONS:
+            return True
+        elapsed = time.monotonic() - turn.continuation_started_at
+        backoff = min(policy.max_delay_s, policy.initial_delay_s * 2**turn.continuations)
+        return elapsed + backoff >= policy.max_elapsed_s
 
     def _start_agent(
         self,
@@ -1793,7 +1878,12 @@ class VibeyAgent(BaseAgent):
             raw = conn.execute(select(agent_events.c.content_json).where(agent_events.c.id == event_id)).scalar()
         if not raw:
             return None
-        message = message_from_dict((json.loads(raw) or {}).get("message") or {})
+        payload = json.loads(raw) or {}
+        message = message_from_dict(payload.get("message") or {})
+        if isinstance(message, ToolResultMessage) and message.hosted is not None:
+            details = payload.get("details")
+            if isinstance(details, Mapping) and details.get("hosted_route_switch") == "native_interrupted":
+                message = replace(message, hosted=replace(message.hosted, route_switch="native_interrupted"))
         return message if isinstance(message, ToolResultMessage) else None
 
     async def _emit_tool_started(self, run: _Run, event: ToolStarted) -> None:
@@ -1818,6 +1908,15 @@ class VibeyAgent(BaseAgent):
         except Exception:
             logger.exception("Vibey could not show tool %s", name)
 
+    def _response_metadata(self, session_id: str, message: AssistantMessage) -> dict[str, Any]:
+        run = self._run_for(session_id, None)
+        current = getattr(getattr(run, "router", None), "current", None)
+        routes = getattr(getattr(current, "endpoint", None), "hosted_tools", {})
+        return response_recovery_metadata(message, (
+            tool for tool, route in routes.items()
+            if route.mode == "proxy" and route.route_switch == "native_interrupted"
+        ))
+
     def _on_response(
         self,
         session_id: str,
@@ -1831,6 +1930,9 @@ class VibeyAgent(BaseAgent):
         if run is None:
             return
         run.responses[row_id] = message
+        if message.stop_reason not in {"error", "aborted"}:
+            run.continuations = 0
+            run.continuation_started_at = None
         if replied is not None:
             run.replied[row_id] = replied
         if images:

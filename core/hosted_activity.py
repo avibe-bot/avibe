@@ -184,6 +184,8 @@ class HostedActivity:
     executor_kind: Optional[Literal["service", "model", "local"]] = None
     fetch: Optional[WebFetchRecord] = None
     switch: Optional[HostedSwitch] = None
+    # Presentation-only explanation for a proxy hop selected after repeated native interruptions.
+    route_switch: Optional[Literal["native_interrupted"]] = None
     # Policy refusal: the service ids already sent this URL; empty means no forwarding.
     policy_sources: Optional[tuple[str, ...]] = None
     # Display-only category of the owning model response's failure, never provider text.
@@ -228,6 +230,7 @@ class HostedActivity:
             "response_id": self.response_id,
             "executor_kind": self.executor_kind,
             "interruption": self.interruption,
+            "route_switch": self.route_switch,
         }
         payload.update({key: value for key, value in optional.items() if value is not None})
         if self.policy_sources is not None:
@@ -598,6 +601,7 @@ def proxy_activity(
         fallback_source_name=(
             source_names(result.fallback_from.source_id) if result.fallback_from is not None else None
         ),
+        route_switch=result.route_switch,
         cost_at_least=at_least,
         attempts=attempts,
         executor_kind=kind,
@@ -687,6 +691,12 @@ def _ran(activity: HostedActivity, lang: str, escape: Callable[[str], str]) -> l
         more = _count(activity, lang) if len(activity.images) > 1 else None
         return [_untrusted(activity.model, escape) if activity.model else None, size, more]
     vendor = _runner_label(activity, lang, escape)
+    if vendor and activity.mode == "proxy" and activity.route_switch == "native_interrupted":
+        return [
+            i18n_t("hostedTools.mode.nativeInterrupted", lang, provider=vendor),
+            _switch_text(activity, lang, escape) if activity.switch is not None else None,
+            _count(activity, lang),
+        ]
     if vendor and activity.mode == "proxy" and activity.fallback_source_id is not None:
         # Why it ran by proxy: the turn's own Source refused the native tool (§8.3, mockup 06).
         refused_by = _untrusted(activity.fallback_source_name or activity.fallback_source_id, escape)

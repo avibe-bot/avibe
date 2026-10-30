@@ -466,6 +466,16 @@ class Agent:
             self._outcome.primary("aborted")
             self._ctx.cancel.cancel(reason)
 
+    @property
+    def last_attempt_response(self) -> Optional[AssistantMessage]:
+        """The latest conversation attempt's committed response, not an earlier attempt's.
+
+        An output-free failure returns None, even when an earlier attempt in this
+        run committed a partial. Adapters use this fact to qualify continuation.
+        """
+        attempt = next((item for item in reversed(self._attempts) if item.purpose == "conversation"), None)
+        return deepcopy(attempt.message) if attempt is not None and attempt.committed else None
+
     def snapshot(self) -> Snapshot:
         """A committed cut, including only state that can be restored there."""
         seq = self._rows[-1].context_seq if self._rows else 0

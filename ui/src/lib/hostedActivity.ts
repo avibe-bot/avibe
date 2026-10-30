@@ -103,6 +103,8 @@ export type HostedActivity = {
   duration_ms?: number;
   /** The Source that refused to run this search natively, so it ran by proxy instead; absent otherwise. */
   fallback_from?: { source_id: string; source_name?: string };
+  /** Why this proxy route was chosen for the current Turn, not a refusal or capability fact. */
+  route_switch?: 'native_interrupted';
   /** Every candidate a search chain reached; absent for a record that has none, as a model-only chain's. */
   attempts?: HostedActivityAttempt[];
   policy_sources?: string[];
@@ -169,6 +171,7 @@ export const hostedActivityFrom = (raw: unknown): HostedActivity | undefined => 
     subject: nativeSubject(card),
     interruption: card.mode === 'native' && card.status === 'pending' && ['overloaded', 'disconnected', 'upstream'].includes(card.interruption as string)
       ? card.interruption as HostedActivity['interruption'] : undefined,
+    route_switch: card.route_switch === 'native_interrupted' ? ('native_interrupted' as const) : undefined,
     retried: card.retried === true,
     sources: Array.isArray(card.sources) ? (card.sources as HostedActivitySource[]).filter((s) => typeof s?.url === 'string' || typeof s?.title === 'string') : [],
     images: Array.isArray(card.images) ? (card.images as HostedActivityImage[]).filter((i) => typeof i?.path === 'string') : [],

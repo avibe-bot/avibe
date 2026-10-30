@@ -5390,6 +5390,7 @@
         "listSeparator": "、",
         "itemSeparator": "；",
         "switch": "{{failed}}，已改用 {{provider}}",
+        "nativeInterrupted": "自带搜索中断，已改用 {{provider}}。",
         "interruption": {
           "message": "模型回复中断：{{reason}}",
           "overloaded": "上游服务过载",

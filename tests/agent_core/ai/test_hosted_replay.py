@@ -222,6 +222,71 @@ async def test_a_continuation_of_a_model_whose_id_is_no_header_value_is_pinned_t
     httpx.Request("POST", wire.url, headers=wire.headers, json=wire.body)
 
 
+@pytest.mark.parametrize("protocol", ["openai_responses", "anthropic"])
+async def test_transient_switch_preserves_completed_native_history_as_portable_content(protocol):
+    from modules.agents.vibey.agent import VibeyAgent
+
+    selection = ModelSelection(_endpoint(protocol, replay=True), ModelCapabilities())
+    switched = VibeyAgent._with_native_search_proxy_routes(selection, {"web_search"})
+    request = _request(switched.endpoint, _searched(protocol))
+    wire = await build_wire_request(request, gateway=True)
+
+    assert not _verbatim(protocol, wire.body)
+    assert PIN_SOURCE_HEADER not in wire.headers
+    assert "https://avibe.bot/r" in json.dumps(wire.body)
+    declaration, = wire.body["tools"]
+    assert declaration["name"] == "web_search"
+    assert declaration.get("type") != "web_search"
+    assert not switched.endpoint.hosted_tools["web_search"].refused
+
+    # Both real adapters parse a continuation on this request without a server-tool declaration.
+    def gateway(incoming):
+        body = json.loads(incoming.content)
+        assert not _verbatim(protocol, body)
+        return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                              text="".join("data: " + json.dumps(event) + "\n\n" for event in _ANSWERED[protocol]))
+
+    from core.agent_core.ai.provider import Done
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        events = [event async for event in create_adapter(protocol, client=client, gateway=True).stream(request, CancelToken())]
+    assert isinstance(events[-1], Done)
+
+
+@pytest.mark.parametrize("protocol", ["openai_responses", "anthropic"])
+async def test_pending_native_cutoff_retains_upstream_class_without_new_wire_fields(protocol):
+    from core.agent_core.messages import message_to_dict
+
+    if protocol == "openai_responses":
+        prefix = [
+            {"type": "response.created", "response": {"status": "in_progress"}},
+            {"type": "response.output_item.added", "output_index": 0,
+             "item": {"id": "ws_1", "type": "web_search_call", "status": "in_progress"}},
+        ]
+        error = {"type": "response.failed", "response": {"status": "failed", "error": {
+            "type": "server_error", "message": "Our servers are currently overloaded"}}}
+    else:
+        prefix = [
+            {"type": "message_start", "message": {"usage": {"input_tokens": 1}}},
+            {"type": "content_block_start", "index": 0, "content_block": USE},
+        ]
+        error = {"type": "error", "error": {"type": "overloaded_error", "message": "upstream busy"}}
+    body = "".join("data: " + json.dumps(event) + "\n\n" for event in [*prefix, error])
+    headers = {"content-type": "text/event-stream", "x-avibe-served-hop": json.dumps({
+        "provider": MODELS[protocol][0], "api": protocol, "model": MODELS[protocol][1], "source": SOURCE,
+    })}
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, text=body, headers=headers))) as client:
+        events = [event async for event in create_adapter(protocol, client=client, gateway=True).stream(
+            _request(_endpoint(protocol, replay=True)), CancelToken()
+        )]
+    terminal = events[-1]
+    assert isinstance(terminal, ProviderError)
+    assert terminal.partial is not None
+    assert terminal.partial.error_kind == terminal.kind
+    assert terminal.kind in {"overloaded", "server"}
+    assert any(isinstance(block, HostedToolBlock) and block.record.status == "pending" for block in terminal.partial.content)
+    assert "error_kind" not in message_to_dict(terminal.partial)
+
+
 _PIN_UNAVAILABLE = {"type": "error", "error": {"type": "model_hub_pin_unavailable", "code": "pin_unavailable"}}
 _ANSWERED = {
     "openai_responses": (

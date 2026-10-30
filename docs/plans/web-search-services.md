@@ -1,8 +1,10 @@
 # Web search services
 
 Status: **design**, 2026-10-19. Direction and the six product decisions in §0 are owner-approved (2026-10-19 15:38).
-- Scope: Vibey's `web_search` through Model Hub. `x_search`, `image_generate`, Claude Code, Codex and OpenCode are
-  unchanged.
+- Scope: Vibey's `web_search` through Model Hub; the shared native-interruption recovery rule in hosted tools §3.6 also
+  applies to `x_search` when a proxied candidate is available. Other `image_generate`, Claude Code, Codex and OpenCode
+  behavior is unchanged.
+- Repeated native-search cut-offs are Turn-scoped and never capability/refusal evidence; see [`vibey-hosted-tools.md`](vibey-hosted-tools.md) §3.6.
 - Extends [`vibey-hosted-tools.md`](vibey-hosted-tools.md) (design v2). Every rule there holds unless this document
   says otherwise; section references like "hosted tools §6" point into it. Phase-2 page reading is specified in
   [`web-fetch.md`](web-fetch.md), which reuses these conventions and governs `web_fetch` wherever it is more
