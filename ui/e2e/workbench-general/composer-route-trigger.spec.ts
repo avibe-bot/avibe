@@ -173,3 +173,31 @@ test('a route that runs fast keeps its mark beside the chevron when a crowded ph
   await page.screenshot({ path: 'e2e/.artifacts/workbench-general/shots/composer-route-trigger-fast.png' });
   expect(denied).toEqual([]);
 });
+
+test('the Fast tooltip explains on hover and keyboard focus, and does not linger after a click', async ({ page }) => {
+  const denied = await serveChat(page, { running: false, fast: true });
+  await page.route('**/api/workbench/prefs', (route) => route.fulfill({ json: {
+    ok: true, background_work_banner_enabled: true, fast_mode_default: true,
+  } }));
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await open(page, `/chat/${SESSION_ID}`);
+  await page.locator('main').getByRole('button', { name: /pm-claude/ }).click();
+  const fast = page.getByRole('button', { name: 'Fast', exact: true });
+  await expect(fast).toBeEnabled();
+  const tip = page.getByRole('tooltip').filter({ hasText: 'Fast mode' });
+  const opacity = () => tip.evaluate((node) => Number(getComputedStyle(node).opacity));
+
+  await fast.hover();
+  await expect.poll(opacity).toBe(1);
+  // A click leaves the button focused; the tooltip must not stay over the model list.
+  await fast.click();
+  await page.mouse.move(0, 0);
+  await expect(fast).toBeFocused();
+  await expect.poll(opacity).toBe(0);
+  // Reaching it from the keyboard still explains it.
+  await page.keyboard.press('Shift+Tab');
+  await page.keyboard.press('Tab');
+  await expect(fast).toBeFocused();
+  await expect.poll(opacity).toBe(1);
+  expect(denied).toEqual([]);
+});
