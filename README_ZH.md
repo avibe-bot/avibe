@@ -24,7 +24,7 @@ Avibe 是本地优先的 Agent OS：工作台、持久任务、Model Hub、Show 
 
 <br/>
 
-<!-- Hero image: replace this one path when the Vibey screenshot is ready. -->
+<!-- Screenshot slot: workbench-vibey -->
 <img src="assets/screenshots/v4/workbench-chat-zh.png" alt="Avibe Workbench——在浏览器里和本地 Agent 对话、查看执行过程并直接回应" />
 
 ## 开始使用
@@ -82,6 +82,10 @@ Vibey 会安排定时任务、用 Watch 等结果、在后台把活儿干完，�
 
 浏览器里的 Workbench、手机、Slack、Discord、Telegram、微信、飞书——同一个 Vibey，同一台机器。文字说不清的时候，它直接用 Show Page 回答你：一个活的仪表盘、流程图或报告，你可以指着它提意见。→ [Show Pages](https://docs.avibe.bot/zh/concepts/show-pages)
 
+在 Avibe 桌面 app（测试中）里，Vibey 还会在桌面上留一个小窗：按住它说话，卡片上就能看到它在做什么，包括它发起的后台运行、Watch 和定时任务。
+
+<!-- Screenshot slot: vibey-mini (not delivered yet; text only until then) -->
+
 这三点底下，是实打实的动手能力。Vibey 会读、写、改文件，运行命令（macOS 和 Linux 上用 `bash`，原生 Windows 上用 PowerShell），互不依赖的工具调用同时运行；还能把一件事的不同部分交给 Claude Code、Codex 或 OpenCode。→ [Vibey 文档](https://docs.avibe.bot/zh/agents/vibey)
 
 ---
@@ -101,6 +105,7 @@ Avibe 用 OS 里的一个个部件逐条解决，你带来的每个 agent 也都
 
 文件、编辑器、终端开成窗口，和对话并排摆在同一个浏览器标签页里；agent 做出来的应用和 Show Page 就开在旁边。用着用着你会忘了这是网页——它更像一个操作系统。
 
+<!-- Screenshot slot: apps-library -->
 <img src="assets/screenshots/v4/apps-library-zh.png" alt="Avibe 多窗口 Workbench，同时打开文件、终端和编辑器" />
 
 ### 🔀 Model Hub——你付费的每一份订阅，组成一支队
@@ -112,11 +117,17 @@ Avibe 用 OS 里的一个个部件逐条解决，你带来的每个 agent 也都
 - **额度见底？下一个已经接上了。** 某个来源在开始回答前撞上额度、限流或网络故障，路由里的下一个来源直接接手这次请求。首选来源恢复后，下一轮对话自动切回去。
 - **一键搬家。** 已经在支持的 CLI 里登录过？你点头，登录就迁过来。凭据和路由都留在你的机器上。
 
+<!-- Screenshot slot: model-hub-routes -->
 <img src="assets/screenshots/v4/model-hub-routes-zh.png" alt="Model Hub 路由视图：四个上游来源连到 Claude Code、Codex 和 OpenCode，每个 agent 混用 GPT 和 Claude 模型，其中一个 Codex 模型已由备用来源自动接管" />
 
 **每份套餐值多少，一清二楚。** 按模型和来源看用量，按官方 API 价格折成钱；Claude 和 ChatGPT 订阅还能实时盯住 5 小时和每周额度。*维护者机器上真实的一天：24 小时约 6.8 亿 token，按官方 API 价格折合约 $540。*
 
+<!-- Screenshot slot: model-hub-usage -->
 <img src="assets/screenshots/v4/model-hub-usage-zh.png" alt="Model Hub 用量视图：24 小时 token 总量、请求数、缓存占比、折合 API 价格和按小时的用量趋势" />
+
+**Vibey 的工具。** 网页搜索和网页读取开箱即用：搜索有内置、免 Key 的 Exa（免费）兜底，网页读取先在你自己的机器上尝试。在**模型 > 工具**里，可以添加 Tavily、Exa 或 DeepSeek 作为搜索服务、排好顺序，或者关掉某个工具；X 搜索和图片生成由支持它们的来源执行。
+
+<!-- Screenshot slot: model-hub-tools (not delivered yet; text only until then) -->
 
 ### ⏰ Harness——你睡觉，它上班
 
@@ -126,16 +137,19 @@ Avibe 用 OS 里的一个个部件逐条解决，你带来的每个 agent 也都
 - *"为这个故障单独开个调查会话，结论汇报回这个频道。"*
 - *"CI 挂了就总结日志；过了就告诉我这个 PR 能不能合。"*
 
+<!-- Screenshot slot: harness-tasks -->
 <img src="assets/screenshots/v4/harness-tasks-zh.png" alt="Agent Harness 定时任务，展示调度、Agent、会话和投递详情" />
 
 ### 🎨 Show Pages——能指着说的回答
 
 要仪表盘、流程图、diff、报告，还是一个小应用？agent 交给你的是一个活的网页，而不是一大段文字。点一个元素、框一块区域、在截图上标几条批注，说一句你想要什么，agent 就改页面，或者就在你指的地方回答。页面可以私有，可以只分享给指定的人，也可以发布成一个好记的链接；常用的固定到应用栏，点开就是一个 app。
 
+<!-- Screenshot slot: show-page -->
 <img src="assets/screenshots/v4/show-page-zh.png" alt="Show Page 评审：评论锚定在页面元素上，Agent 回复在页面上" />
 
 ### 📱 手机和聊天软件——人离开工位，伙伴照样在手
 
+<!-- Screenshot slot: workbench-vibey-mobile -->
 <img src="assets/screenshots/v4/workbench-mobile-zh.png" alt="手机上的 Avibe Workbench" width="270" align="right" />
 
 活儿在你的机器上跑，你不用守着它。想开窗口就用 Workbench；想快就在 Slack、Discord、Telegram、微信或飞书里发一条消息——连到的是同一批 Agent、同一台机器。
@@ -151,6 +165,8 @@ Avibe 用 OS 里的一个个部件逐条解决，你带来的每个 agent 也都
 
 API Key 或 token 添加一次——缺了哪个，Agent 也能发请求让你在浏览器里补上。Agent 按名字取用，Avibe 把它递给需要它的命令、认证请求或签名操作。Vault 的响应永远不包含密钥值；接收密钥的命令仍需避免把它打印出来。passkey 保护托管在 sandbox 完整性门禁落地前仍未上线。
 
+<!-- Screenshot slot: vaults (not delivered yet; text only until then) -->
+
 **还有**——thread 即会话，随时接着聊 · agent 需要你拍板时弹按钮和表单 · 丰富的附件，应用内直接预览，音频就地播放 · 键盘快捷键 · 后端一键升级。
 
 ---
@@ -161,6 +177,7 @@ Claude Code、Codex、OpenCode 以官方 CLI 的身份照原样运行——就�
 
 Vibey 能给它们派活：让 Claude Code 写一个改动、Codex 来 review、OpenCode 跑测试，最后由它把结果汇报给你。**Runs** 把整条协作链画成一张图：谁发起了哪个后台会话、结果汇报给谁、每个节点背后的执行历史。
 
+<!-- Screenshot slot: agents-graph -->
 <img src="assets/screenshots/v4/agents-graph-zh.png" alt="Avibe Agent 运行关系图，展示父会话把工作委派给 Claude Code、Codex 和 OpenCode 后台会话" />
 
 设置向导会找到你已经装好的 agent，选中的缺哪个就装哪个；想自己装，见 [Agent](#agent)。

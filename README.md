@@ -24,7 +24,7 @@ Avibe is the local-first Agent OS: a Workbench, durable tasks, Model Hub, Show P
 
 <br/>
 
-<!-- Hero image: replace this one path when the Vibey screenshot is ready. -->
+<!-- Screenshot slot: workbench-vibey -->
 <img src="assets/screenshots/v4/workbench-chat-en.png" alt="The Avibe Workbench — chat with a local agent, inspect its work, and respond without leaving the browser" />
 
 ## Get started
@@ -82,6 +82,10 @@ Vibey schedules Tasks, waits on Watches, and runs work in the background, then c
 
 The browser Workbench, your phone, Slack, Discord, Telegram, WeChat, or Lark / Feishu — the same Vibey on the same machine. When text is not enough, it answers with a Show Page: a live dashboard, diagram, or report you can point at and comment on. → [Show Pages](https://docs.avibe.bot/concepts/show-pages)
 
+In the Avibe desktop app (in testing), Vibey also keeps a small window on your desktop: hold it and speak, and its cards show what it's doing, including the runs, Watches, and Tasks it has started.
+
+<!-- Screenshot slot: vibey-mini (not delivered yet; text only until then) -->
+
 Under all three, it does the hands-on work. Vibey reads, writes, and edits files, runs commands (`bash` on macOS and Linux, PowerShell on native Windows) with independent tool calls running at the same time, and hands parts of a job to Claude Code, Codex, or OpenCode. → [Vibey docs](https://docs.avibe.bot/agents/vibey)
 
 ---
@@ -101,6 +105,7 @@ Avibe answers each one with a part of the OS, and every agent you bring gets the
 
 Files, editor, and terminal open as windows beside your chat, all in one browser tab, with the apps and Show Pages your agent builds opening right next to them. It stops feeling like a web page and starts feeling like an operating system.
 
+<!-- Screenshot slot: apps-library -->
 <img src="assets/screenshots/v4/apps-library-en.png" alt="Avibe's multi-window Workbench with Files, Terminal, and Editor open together" />
 
 ### 🔀 Model Hub — every plan you pay for, on the same team
@@ -112,11 +117,17 @@ Your Claude, ChatGPT, Gemini, Kimi, and xAI subscriptions and your API keys — 
 - **Plan runs dry? The next one picks it up.** If a source hits a quota, rate limit, or network failure before it starts answering, the next source in your route takes the request. Once your first choice recovers, the next turn goes back to it.
 - **Move in with one click.** Already signed in to a supported CLI? Bring that login over with your explicit OK. Credentials and routes stay on your machine.
 
+<!-- Screenshot slot: model-hub-routes -->
 <img src="assets/screenshots/v4/model-hub-routes-en.png" alt="Model Hub routes view: four upstream sources wired to Claude Code, Codex, and OpenCode, each agent mixing GPT and Claude models, with one Codex model taken over by a backup source" />
 
 **Know what your plans are worth.** Usage by model and source, priced at official API rates, plus live 5-hour and weekly quotas for Claude and ChatGPT subscriptions. *One real day on the maintainer's machine: ~680M tokens, worth ~$540 at official API prices.*
 
+<!-- Screenshot slot: model-hub-usage -->
 <img src="assets/screenshots/v4/model-hub-usage-en.png" alt="Model Hub usage view with 24-hour token totals, request count, cache share, API-price value, and an hourly usage trend" />
+
+**Tools for Vibey.** Web search and web fetch work out of the box: search can fall back to the built-in, keyless Exa (free), and fetch tries your own machine first. In **Models > Tools**, add Tavily, Exa, or DeepSeek as search services, set their order, or switch a tool off; X search and image generation run on sources that offer them.
+
+<!-- Screenshot slot: model-hub-tools (not delivered yet; text only until then) -->
 
 ### ⏰ Harness — it works while you sleep
 
@@ -126,16 +137,19 @@ Four durable primitives — **run, schedule, watch, and inspect** — let an age
 - *"Start a separate investigation session for this incident, but report the conclusion to this channel."*
 - *"If CI fails, summarize the logs; if it passes, tell me whether the PR is mergeable."*
 
+<!-- Screenshot slot: harness-tasks -->
 <img src="assets/screenshots/v4/harness-tasks-en.png" alt="Agent Harness task list with schedule, Agent ownership, session, and delivery details" />
 
 ### 🎨 Show Pages — answers you can point at
 
 Ask for a dashboard, flowchart, diff, report, or small app, and get a live page instead of a wall of text. Click an element, box a region, or mark up a screenshot, say what you want, and the agent reworks the page or answers right where you pointed. Keep a page private, share it with specific people, or publish it at a link you'll remember; pin your favorites to the Dock and they open like apps.
 
+<!-- Screenshot slot: show-page -->
 <img src="assets/screenshots/v4/show-page-en.png" alt="Show Page review with anchored comments and Agent replies on the page" />
 
 ### 📱 Phone and chat apps — leave your desk, keep your partner
 
+<!-- Screenshot slot: workbench-vibey-mobile -->
 <img src="assets/screenshots/v4/workbench-mobile-en.png" alt="Avibe Workbench on mobile" width="270" align="right" />
 
 Your machine does the work; you don't have to babysit it. Open the Workbench when you want windows, or send a message in Slack, Discord, Telegram, WeChat, or Lark / Feishu when that's faster — same Agents, same machine.
@@ -151,6 +165,8 @@ Your machine does the work; you don't have to babysit it. Open the Workbench whe
 
 Add an API key or token once, or let an Agent request a missing one for you to fill in from the browser. Agents use it by name, and Avibe hands it to the command, authenticated request, or signing operation that needs it. Vault responses never include the secret value; commands receiving it must still avoid printing it. Passkey-protected custody stays pre-launch until the sandbox integrity gate is enforced.
 
+<!-- Screenshot slot: vaults (not delivered yet; text only until then) -->
+
 **Plus** — thread = session, picks up where you left off · interactive buttons and forms when the agent needs a decision · rich attachments with in-app preview and inline audio · keyboard shortcuts · one-click backend updates.
 
 ---
@@ -161,6 +177,7 @@ Claude Code, Codex, and OpenCode run as their official CLIs — the same ones yo
 
 Vibey can hand them work: ask it to have Claude Code build a change, Codex review it, and OpenCode test it, and it reports the result back to you. **Runs** draws the whole chain as a graph: who started each background Session, where it reports back, and the history behind every node.
 
+<!-- Screenshot slot: agents-graph -->
 <img src="assets/screenshots/v4/agents-graph-en.png" alt="Avibe Agent run graph showing a parent Session delegating work to Claude Code, Codex, and OpenCode background Sessions" />
 
 The setup wizard finds the agents you already have and installs the ones you pick; to install one yourself, see [Agents](#agents).
