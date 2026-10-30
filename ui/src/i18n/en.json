@@ -6541,6 +6541,7 @@
     "completeLogin": "Complete login",
     "needsLoginAfterAdd": "{{name}} needs login",
     "goAuthorize": "Go to authorization",
+    "addResultHint": "These servers need login before their tools are available.",
     "loginComplete": "MCP login completed"
   }
 }

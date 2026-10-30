@@ -7,6 +7,8 @@ import { useApi } from '../../../context/ApiContext';
 import type { McpError, McpServerSummary } from '../../../context/ApiContext';
 import { useToast } from '../../../context/ToastContext';
 import { useInstanceAuthorization } from '../../../context/InstanceAuthorizationContext';
+import { isDesktopShell } from '../../../lib/desktopShell';
+import { mcpAddOauthAction } from '../../../lib/mcpAddOauth';
 import { Badge } from '../../ui/badge';
 import { Button } from '../../ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from '../../ui/dialog';
@@ -111,7 +113,7 @@ export const McpHubSection: React.FC = () => {
   const canManage = capabilities.is_instance_owner;
   const [servers, setServers] = useState<McpServerSummary[]>([]);
   const [oauthMode, setOauthMode] = useState<'direct' | 'paste'>('direct');
-  const [needsLoginAfterAdd, setNeedsLoginAfterAdd] = useState<string | null>(null);
+  const [addResult, setAddResult] = useState<{ names: string[]; failedLines: string[] } | null>(null);
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<string | null>(() => new URLSearchParams(window.location.search).get('mcp'));
   const [expandedFor, setExpandedFor] = useState<string | null>(null);
@@ -234,10 +236,17 @@ export const McpHubSection: React.FC = () => {
       showToast(t('mcpHub.loginComplete'), 'success');
     } finally { setBusy(null); }
   };
+  const closeAdd = () => {
+    setShowAdd(false);
+    setAddText('');
+    setAddError(null);
+    setAddResult(null);
+  };
+
   const onAdd = async () => {
     setBusy('add');
     setAddError(null);
-    setNeedsLoginAfterAdd(null);
+    setAddResult(null);
     try {
       const res = await api.addMcp(addText);
       const added = res.added ?? [];
@@ -255,25 +264,35 @@ export const McpHubSection: React.FC = () => {
         failed.length ? t('mcpHub.failedCount', { count: failed.length }) : null,
         ...failedLines,
       ].filter(Boolean).join('\n');
-      const toast = inline;
       const hasBatch = Boolean(res.added || res.unchanged || res.failed);
       if (!succeeded) {
         setAddError(hasBatch ? inline : describe(res.error));
         return;
       }
+      const names = [...added, ...unchanged]
+        .filter((item) => item.auth === 'needs_login')
+        .map((item) => item.name);
+      const action = mcpAddOauthAction({
+        names,
+        failedCount: failed.length,
+        oauthMode,
+        desktopShell: isDesktopShell(),
+      });
       if (failed.length) {
-        showToast(toast, 'error', { label: t('common.close'), onClick: () => undefined });
+        showToast(inline, 'error', { label: t('common.close'), onClick: () => undefined });
       } else {
         showToast(t('mcpHub.succeededCount', { count: succeeded }), 'success');
       }
-      const needsLogin = [...added, ...unchanged].find((item) => item.auth === 'needs_login');
-      if (needsLogin) {
-        setNeedsLoginAfterAdd(needsLogin.name);
+      if (action.kind === 'assign') {
+        window.location.assign(oauthStartHref(action.name));
+        return;
+      }
+      if (action.kind === 'list') {
+        setAddResult({ names: action.names, failedLines });
         await load();
         return;
       }
-      setShowAdd(false);
-      setAddText('');
+      closeAdd();
       await load();
     } catch {
       showToast(t('mcpHub.failed'), 'error');
@@ -321,7 +340,7 @@ export const McpHubSection: React.FC = () => {
               {busy === 'discover' ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
               {t('mcpHub.refreshAll')}
             </Button>
-            <Button type="button" variant="brand" size="xs" onClick={() => { setShowAdd(true); setAddError(null); }}>
+            <Button type="button" variant="brand" size="xs" onClick={() => { setShowAdd(true); setAddError(null); setAddResult(null); }}>
               <Plus className="size-3.5" />
               {t('mcpHub.add')}
             </Button>
@@ -460,27 +479,43 @@ export const McpHubSection: React.FC = () => {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={showAdd} onOpenChange={(open) => (!open ? setShowAdd(false) : undefined)}>
+      <Dialog open={showAdd} onOpenChange={(open) => (!open ? closeAdd() : undefined)}>
         <DialogContent className="max-w-lg" closeLabel={t('common.close')}>
           <DialogTitle>{t('mcpHub.addTitle')}</DialogTitle>
-          <DialogDescription>{t('mcpHub.addSubtitle')}</DialogDescription>
-          <Textarea value={addText} onChange={(event) => setAddText(event.target.value)} className="min-h-40 font-mono text-[12px]" placeholder={t('mcpHub.pastePlaceholder')} />
-          <p className="text-[11px] text-muted">{t('mcpHub.pasteHint')}</p>
-          {addError ? <div className="whitespace-pre-wrap text-[12px] text-destructive-ink">{addError}</div> : null}
-          {needsLoginAfterAdd ? (
-            <p className="flex items-center gap-2 text-[12px] text-foreground">
-              <span>{t('mcpHub.needsLoginAfterAdd', { name: needsLoginAfterAdd })}</span>
-              <LoginLink name={needsLoginAfterAdd} className={buttonVariants({ variant: 'brand', size: 'xs' })} onActivate={onActivateLogin}>
-                {t('mcpHub.goAuthorize')}
-              </LoginLink>
-            </p>
-          ) : null}
+          <DialogDescription>{addResult ? t('mcpHub.addResultHint') : t('mcpHub.addSubtitle')}</DialogDescription>
+          {addResult ? (
+            <div className="flex flex-col gap-2">
+              {addResult.names.map((name) => (
+                <p key={name} className="flex items-center gap-2 text-[12px] text-foreground">
+                  <span>{t('mcpHub.needsLoginAfterAdd', { name })}</span>
+                  <LoginLink name={name} className={buttonVariants({ variant: 'brand', size: 'xs' })} onActivate={onActivateLogin}>
+                    {t('mcpHub.goAuthorize')}
+                  </LoginLink>
+                </p>
+              ))}
+              {addResult.failedLines.map((line) => (
+                <div key={line} className="text-[12px] text-destructive-ink">{line}</div>
+              ))}
+            </div>
+          ) : (
+            <>
+              <Textarea value={addText} onChange={(event) => setAddText(event.target.value)} className="min-h-40 font-mono text-[12px]" placeholder={t('mcpHub.pastePlaceholder')} />
+              <p className="text-[11px] text-muted">{t('mcpHub.pasteHint')}</p>
+              {addError ? <div className="whitespace-pre-wrap text-[12px] text-destructive-ink">{addError}</div> : null}
+            </>
+          )}
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setShowAdd(false)}>{t('common.cancel')}</Button>
-            <Button type="button" disabled={busy !== null || !addText.trim()} onClick={() => void onAdd()}>
-              {busy === 'add' ? <Loader2 className="size-3.5 animate-spin" /> : null}
-              {t('mcpHub.add')}
-            </Button>
+            {addResult ? (
+              <Button type="button" variant="brand" onClick={() => { closeAdd(); void load(); }}>{t('common.done')}</Button>
+            ) : (
+              <>
+                <Button type="button" variant="outline" onClick={closeAdd}>{t('common.cancel')}</Button>
+                <Button type="button" disabled={busy !== null || !addText.trim()} onClick={() => void onAdd()}>
+                  {busy === 'add' ? <Loader2 className="size-3.5 animate-spin" /> : null}
+                  {t('mcpHub.add')}
+                </Button>
+              </>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>

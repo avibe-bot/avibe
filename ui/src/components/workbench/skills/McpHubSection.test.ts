@@ -18,8 +18,10 @@ describe('McpHubSection OAuth start link', () => {
     expect(source).not.toMatch(/about:blank/);
   });
 
-  it('keeps the add dialog open with a go-authorize start link after needs_login', () => {
+  it('keeps the add result copy and go-authorize start links', () => {
     expect(source).toMatch(/mcpHub\.goAuthorize/);
     expect(source).toMatch(/mcpHub\.needsLoginAfterAdd/);
+    expect(source).toMatch(/mcpHub\.addResultHint/);
+    expect(source).toMatch(/common\.done/);
   });
 });

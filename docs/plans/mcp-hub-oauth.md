@@ -220,9 +220,12 @@ UI: needs-login rows and the detail panel render Log in as
 styled as a button. No `window.open`, no `about:blank`, no await before opening. Avibe stays in
 the original tab; the callback 302s the authorize tab to `/skills?mcp=…&oauth=success`, and the
 original tab `load()`s on `focus`/`visibilitychange`. Paste mode also opens the existing paste
-dialog in the original tab when the link is clicked. After add, if a result has `needs_login`,
-keep the add dialog open and show "<name> needs login → Go to authorization" using the same
-link for the first such server; do not auto-open. Strings via i18n.
+dialog in the original tab when the link is clicked. After add, among added/unchanged `needs_login` servers: exactly one, Web, `oauthMode=direct`,
+not desktop shell, and no failures → close the dialog and `location.assign` the start URL in
+the current tab (callback 302s back to `/skills?mcp=<name>&oauth=success`). Two or more, any
+failures, paste mode, or desktop shell → result state: hide the paste box, list each
+"<name> needs login → Go to authorization" start link, footer Done. Zero → close and toast.
+Strings via i18n.
 
 Definition: accept Claude-format `oauth: {clientId?, scopes?}` on HTTP entries; other `oauth`
 keys ignored (not rejected), per native extras policy.

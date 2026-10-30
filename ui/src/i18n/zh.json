@@ -6541,6 +6541,7 @@
     "completeLogin": "完成登录",
     "needsLoginAfterAdd": "{{name}} 需要登录",
     "goAuthorize": "前往授权",
+    "addResultHint": "这些服务器需要登录后才能提供工具。",
     "loginComplete": "MCP 登录完成"
   }
 }
