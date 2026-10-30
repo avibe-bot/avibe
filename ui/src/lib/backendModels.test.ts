@@ -147,6 +147,7 @@ describe('fetchBackendModels in gateway mode', () => {
     const api = { readModelHubAgentCatalogForModelPicker, claudeModels, codexModels, readOpencodeOptionsForModelPicker } as unknown as ApiContextType;
     expect(await fetchBackendModels(api, 'vibey')).toEqual({
       models: ['local-model'], modelLabels: { 'local-model': 'Local model' }, reasoningOptions: { 'local-model': [] }, effortMenus: {},
+      fastModels: [],
     });
     expect(readModelHubAgentCatalogForModelPicker).toHaveBeenCalledWith('vibey');
     readModelHubAgentCatalogForModelPicker.mockResolvedValue(null);
@@ -175,7 +176,8 @@ describe('fetchBackendModels in gateway mode', () => {
               supports_reasoning: true,
               reasoning_efforts: ['low', 'high'],
             }),
-            model('beta'),
+            // A turn on beta would reach its vendor's fast tier.
+            { ...model('beta'), fast_mode: true },
           ],
         }),
       ),
@@ -196,6 +198,7 @@ describe('fetchBackendModels in gateway mode', () => {
       },
       // No row states an effort menu, so nothing is left out or marked.
       effortMenus: {},
+      fastModels: ['beta'],
     });
   });
 
@@ -362,6 +365,7 @@ describe('fetchBackendModels in gateway mode', () => {
       modelLabels: {},
       reasoningOptions: {},
       effortMenus: {},
+      fastModels: [],
     });
     expect(codexModels).not.toHaveBeenCalled();
   });

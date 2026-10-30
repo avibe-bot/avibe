@@ -108,6 +108,10 @@
           }
         }
       }
+    },
+    "fast_mode": {
+      "type": "boolean",
+      "description": "Server-derived on Agent reads, accepted and dropped on write like effort_menu. Whether a turn on this model reaches its vendor's fast tier on the hop that normally serves it (docs/plans/fast-mode.md): that hop's Source is the model's first-party vendor's own upstream and the vendor's models.dev entry names the tier's request field. False for an Agent in Direct mode and for OpenCode, whose requests name no turn."
     }
   }
 }

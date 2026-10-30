@@ -169,6 +169,8 @@ export const NewSessionSheet: React.FC<NewSessionSheetProps> = ({ open, onClose,
                 disabled={ns.sending}
                 align="end"
                 triggerClassName="max-w-[min(60vw,360px)]"
+                speed={ns.speed}
+                onSpeedChange={ns.setSpeed}
                 modal
                 onNavigateAway={close}
               />

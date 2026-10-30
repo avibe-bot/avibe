@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { useApi } from '../context/ApiContext';
 import { useWorkbenchProjectsTree } from '../context/WorkbenchProjectsContext';
-import type { ApiContextType, VibeAgentBrief, WorkbenchProject, WorkbenchSessionCreate } from '../context/ApiContext';
+import type { ApiContextType, SessionSpeed, VibeAgentBrief, WorkbenchProject, WorkbenchSessionCreate } from '../context/ApiContext';
 import { sortProjectsByRecent } from './projectOrder';
 import { apiFetch } from './apiFetch';
 import { uploadWorkbenchAttachment, workbenchUploadErrorTranslationKey, WorkbenchUploadError, type WorkbenchUploadResult } from './workbenchUpload';
@@ -51,6 +51,10 @@ export interface NewSessionState {
   effectiveDefaultAgentName: string | null;
   agentRoute: AgentRouteSelection;
   setAgentRoute: (patch: AgentRouteSelection) => void;
+  /** Whether the new Session runs fast: starts at the remembered default, and a
+   *  change here becomes that default. */
+  speed: SessionSpeed;
+  setSpeed: (speed: SessionSpeed) => void;
   /** Creates the selected session, uploads staged files, submits once, then
    * returns the navigation target. Failures leave the caller's draft intact. */
   send: (text: string, attachments?: ComposerAttachment[]) => Promise<{ sessionId: string } | null>;
@@ -165,6 +169,33 @@ export function useNewSession({ active = true, loadErrorText, createFailedText, 
   const [agents, setAgents] = useState<VibeAgentBrief[]>([]);
   const [defaultAgentName, setDefaultAgentName] = useState<string | null>(null);
   const [agentProjectionLoaded, setAgentProjectionLoaded] = useState(false);
+  // Fast mode starts where the last picker choice left it (docs/plans/fast-mode.md):
+  // read again as the surface becomes active, since a chat's picker may have moved it.
+  const [speed, setSpeedState] = useState<SessionSpeed>(null);
+  const speedPickedRef = useRef(false);
+  const speedActive = active && surfaceActive;
+  useEffect(() => {
+    if (!speedActive) return;
+    speedPickedRef.current = false;
+    let cancelled = false;
+    api.getWorkbenchPrefs().then(
+      (prefs) => {
+        if (!cancelled && !speedPickedRef.current) setSpeedState(prefs?.fast_mode_default ? 'fast' : null);
+      },
+      () => undefined,
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [api, speedActive]);
+  const setSpeed = useCallback(
+    (next: SessionSpeed) => {
+      speedPickedRef.current = true;
+      setSpeedState(next);
+      void api.setFastModeDefault(next === 'fast').catch(() => undefined);
+    },
+    [api],
+  );
   // The user's explicit pick in the composer; {} = "no pick, follow the
   // project/global default". Kept separate from the effective route (below) so
   // the project default can be derived live instead of copied into state.
@@ -342,6 +373,7 @@ export function useNewSession({ active = true, loadErrorText, createFailedText, 
       }
       if (routeForCreate.model) overrides.model = routeForCreate.model;
       if (routeForCreate.reasoning_effort) overrides.reasoning_effort = routeForCreate.reasoning_effort;
+      if (speed === 'fast') overrides.speed = 'fast';
       const selection = JSON.stringify([target.id, overrides]);
       try {
         let pending = pendingSessionRef.current;
@@ -421,7 +453,7 @@ export function useNewSession({ active = true, loadErrorText, createFailedText, 
         }
       }
     },
-    [loaded, target, routeForCreate, agents, createSessionForProject, createFailedText, errorText],
+    [loaded, target, routeForCreate, speed, agents, createSessionForProject, createFailedText, errorText],
   );
 
   // The dialog already committed the row through the provider (fenced against a
@@ -449,6 +481,8 @@ export function useNewSession({ active = true, loadErrorText, createFailedText, 
     effectiveDefaultAgentName,
     agentRoute,
     setAgentRoute: applyAgentRoute,
+    speed,
+    setSpeed,
     send,
     upsertSelectProject,
   };

@@ -598,6 +598,7 @@ class ModelHubTurnGateway:
         primary_origin: HopOrigin | None = None,
         primary_identity: str | None = None,
         hosted_tools: TurnHostedTools | None = None,
+        speed: str | None = None,
     ) -> tuple[str, str]:
         if backend not in MODEL_HUB_BACKENDS:
             raise ModelHubError("mapping_target_unavailable", status=409)
@@ -647,6 +648,7 @@ class ModelHubTurnGateway:
                     primary_origin=primary_origin,
                     primary_identity=primary_identity,
                     hosted_tools=hosted_tools,
+                    speed=speed,
                 )
             except PreparedGatewayRouteConflict:
                 raise ModelHubError("mapping_target_unavailable", status=409) from None
@@ -1231,6 +1233,7 @@ class ModelHubTurnGateway:
                             )
                             if pin_source_id else None
                         ),
+                        speed=self.correlation.turn_speed(terminalizer.turn_id),
                     ),
                     stream=stream,
                     supply_channel="hub",

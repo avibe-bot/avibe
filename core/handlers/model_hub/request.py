@@ -35,6 +35,7 @@ class ModelHubRequest(dict[str, Any]):
         primary_origin: HopOrigin | None = None,
         pinned_hop: tuple[str, str | None] | None = None,
         pin_identity_claim: Callable[[str, bool], bool] | None = None,
+        speed: str | None = None,
     ) -> None:
         super().__init__(payload)
         self.protocol = protocol
@@ -51,6 +52,18 @@ class ModelHubRequest(dict[str, Any]):
         # content may go there under it. A turn's first claim binds the
         # identity; a continuation needs one already bound.
         self.pin_identity_claim = pin_identity_claim
+        # The turn's processing tier: ``"fast"`` asks each attempt for its
+        # vendor's fast tier where that exact hop offers one (fast_mode.py).
+        self.speed = speed
+
+    def with_payload(self, payload: Mapping[str, Any]) -> "ModelHubRequest":
+        """The same request metadata over another body."""
+
+        return ModelHubRequest(
+            payload, protocol=self.protocol, headers=self.headers,
+            primary_origin=self.primary_origin, pinned_hop=self.pinned_hop,
+            pin_identity_claim=self.pin_identity_claim, speed=self.speed,
+        )
 
 
 _OPAQUE_FIELDS = frozenset({"signature", "thoughtSignature", "thought_signature", "encrypted_content"})
@@ -119,11 +132,7 @@ def without_opaque_history(request: Mapping[str, Any]) -> Mapping[str, Any]:
         if field in payload:
             payload[field] = _plain_history(payload[field])
     if isinstance(request, ModelHubRequest):
-        return ModelHubRequest(
-            payload, protocol=request.protocol, headers=request.headers,
-            primary_origin=request.primary_origin, pinned_hop=request.pinned_hop,
-            pin_identity_claim=request.pin_identity_claim,
-        )
+        return request.with_payload(payload)
     return payload
 
 

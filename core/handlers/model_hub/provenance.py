@@ -731,6 +731,10 @@ class TurnTrace:
     # Vibey: the hosted tools the turn's first resolution froze, with each
     # search tool's executor order. Written once; settings apply next turn.
     hosted_tools: Optional[TurnHostedTools] = None
+    # The processing tier the turn's first resolution asked for (``"fast"`` or
+    # None, fast_mode.py). Written once; a Session's change applies next turn.
+    speed: Optional[str] = None
+    speed_recorded: bool = False
     # Vibey: per Source, the identity digest the turn's native content is bound
     # to, claimed by its first admitted pinned request. Each entry is written once.
     pinned_identities: dict[str, str] = field(default_factory=dict)
@@ -1393,6 +1397,16 @@ class TurnCorrelationRegistry:
             trace = self._traces.get(normalized)
             return trace.hosted_tools if trace is not None else None
 
+    def turn_speed(self, turn_id: Optional[str]) -> Optional[str]:
+        """The processing tier a turn's first resolution asked for; None for standard or an untracked turn."""
+
+        normalized = str(turn_id or "").strip()
+        if not normalized:
+            return None
+        with self._lock:
+            trace = self._traces.get(normalized)
+            return trace.speed if trace is not None else None
+
     def live_hosted_turn(
         self, *, backend: str, token: str, request_metadata: Mapping[str, str] | None,
     ) -> tuple[str, TurnHostedTools | None] | None:
@@ -1669,6 +1683,7 @@ class TurnCorrelationRegistry:
         turn_id: str,
         route: PreparedGatewayRoute,
         hosted_tools: TurnHostedTools | None = None,
+        speed: Optional[str] = None,
     ) -> bool:
         trace = self._traces.setdefault(
             turn_id,
@@ -1703,6 +1718,9 @@ class TurnCorrelationRegistry:
         trace.gateway_model_id = route.resolved_model_id
         if trace.hosted_tools is None:
             trace.hosted_tools = hosted_tools
+        if not trace.speed_recorded:
+            trace.speed = speed
+            trace.speed_recorded = True
         return True
 
     def prepare_gateway_turn(
@@ -1719,11 +1737,13 @@ class TurnCorrelationRegistry:
         primary_origin: HopOrigin | None = None,
         primary_identity: str | None = None,
         hosted_tools: TurnHostedTools | None = None,
+        speed: str | None = None,
     ) -> str:
         """Register a route and return its legacy credential or explicit handle.
 
-        ``hosted_tools`` is what a Vibey turn's first resolution froze; the
-        turn keeps the first it is given.
+        ``hosted_tools`` is what a Vibey turn's first resolution froze, and
+        ``speed`` the processing tier it asked for; the turn keeps the first
+        it is given.
         """
 
         with self._lock:
@@ -1766,6 +1786,7 @@ class TurnCorrelationRegistry:
                         turn_id=normalized_turn_id,
                         route=prepared,
                         hosted_tools=hosted_tools,
+                        speed=speed,
                     )
                 return launch_token
 
@@ -1815,6 +1836,7 @@ class TurnCorrelationRegistry:
                 turn_id=route_turn_id,
                 route=prepared,
                 hosted_tools=hosted_tools,
+                speed=speed,
             )
             return launch_token
 

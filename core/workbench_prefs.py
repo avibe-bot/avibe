@@ -29,3 +29,21 @@ def set_background_work_banner_enabled(enabled: bool, *, db_path: Path | None = 
     value = bool(enabled)
     set_state_meta(BACKGROUND_WORK_BANNER_KEY, value, db_path=db_path)
     return value
+
+
+# Whether a new Web Session starts with fast mode on (docs/plans/fast-mode.md):
+# the last choice made in a Web model picker. Default OFF.
+FAST_MODE_DEFAULT_KEY = "workbench.fast_mode_default"
+
+
+def get_fast_mode_default(*, db_path: Path | None = None) -> bool:
+    """Whether new Web Sessions start with fast mode on. Absent/malformed → OFF."""
+    raw = get_state_meta(FAST_MODE_DEFAULT_KEY, db_path=db_path)
+    return raw if isinstance(raw, bool) else False
+
+
+def set_fast_mode_default(enabled: bool, *, db_path: Path | None = None) -> bool:
+    """Persist the new-Session fast-mode default. Returns the stored boolean."""
+    value = bool(enabled)
+    set_state_meta(FAST_MODE_DEFAULT_KEY, value, db_path=db_path)
+    return value

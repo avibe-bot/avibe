@@ -2060,27 +2060,28 @@ def set_dock_order(
 
 def get_workbench_prefs() -> dict:
     """Global workbench toggles the UI reads (state_meta-backed)."""
-    from core.workbench_prefs import get_background_work_banner_enabled
+    from core.workbench_prefs import get_background_work_banner_enabled, get_fast_mode_default
 
     return {
         "ok": True,
         "background_work_banner_enabled": get_background_work_banner_enabled(),
+        "fast_mode_default": get_fast_mode_default(),
     }
 
 
-def set_workbench_prefs(*, background_work_banner_enabled: Optional[bool] = None) -> dict:
+def set_workbench_prefs(
+    *,
+    background_work_banner_enabled: Optional[bool] = None,
+    fast_mode_default: Optional[bool] = None,
+) -> dict:
     """Persist provided workbench toggles; omitted fields are left untouched."""
-    from core.workbench_prefs import (
-        get_background_work_banner_enabled,
-        set_background_work_banner_enabled,
-    )
+    from core.workbench_prefs import set_background_work_banner_enabled, set_fast_mode_default
 
     if background_work_banner_enabled is not None:
         set_background_work_banner_enabled(bool(background_work_banner_enabled))
-    return {
-        "ok": True,
-        "background_work_banner_enabled": get_background_work_banner_enabled(),
-    }
+    if fast_mode_default is not None:
+        set_fast_mode_default(bool(fast_mode_default))
+    return get_workbench_prefs()
 
 
 def _vibe_agent_payload(agent, *, brief: bool = False, remote_safe: bool = False) -> dict:

@@ -245,7 +245,11 @@ export type BackendModel = {
 export type EffortMenu = { omitted: string[]; not_on: Record<string, string[]> };
 
 /** A catalog row as the model picker reads it. */
-export type PickerCatalogModel = BackendModel & { effort_menu?: EffortMenu };
+export type PickerCatalogModel = BackendModel & {
+  effort_menu?: EffortMenu;
+  /** Whether a turn on this model reaches its vendor's fast tier on the hop that normally serves it. */
+  fast_mode?: boolean;
+};
 
 /** The model picker's read of one backend's catalog (`GET /api/models/agents/<backend>/models`). */
 export type PickerAgentCatalog = Pick<AgentSupply, 'backend' | 'mode'> & { catalog_models?: PickerCatalogModel[] | null };

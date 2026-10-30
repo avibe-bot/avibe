@@ -34,6 +34,23 @@ def test_banner_pref_api_round_trip(monkeypatch, tmp_path):
     ] is True
 
 
+def test_new_session_fast_mode_default_round_trip(monkeypatch, tmp_path):
+    """Where a new Web Session's fast mode starts: the last picker choice, OFF until one is made."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    from storage.importer import ensure_sqlite_state
+
+    ensure_sqlite_state()
+
+    assert api.get_workbench_prefs()["fast_mode_default"] is False
+    assert api.set_workbench_prefs(fast_mode_default=True)["fast_mode_default"] is True
+    # Another toggle leaves it alone, and it leaves the other toggle alone.
+    prefs = api.set_workbench_prefs(background_work_banner_enabled=False)
+    assert (prefs["fast_mode_default"], prefs["background_work_banner_enabled"]) == (True, False)
+    assert api.set_workbench_prefs(fast_mode_default=False)["fast_mode_default"] is False
+
+
 def test_banner_pref_get_route_defaults_on(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)

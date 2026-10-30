@@ -543,14 +543,7 @@ def filter_opaque_history(
         if isinstance(result.get("contents"), list):
             result["contents"] = _filter_google_contents(result["contents"], registry, identity)
     if isinstance(payload, ModelHubRequest):
-        return ModelHubRequest(
-            result,
-            protocol=payload.protocol,
-            headers=payload.headers,
-            primary_origin=payload.primary_origin,
-            pinned_hop=payload.pinned_hop,
-            pin_identity_claim=payload.pin_identity_claim,
-        )
+        return payload.with_payload(result)
     return result
 
 

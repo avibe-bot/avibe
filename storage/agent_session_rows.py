@@ -45,6 +45,18 @@ INBOX_SESSION_VISIBILITIES: tuple[str, ...] = ("foreground", "system")
 
 PRIVATE_AGENT_RUN_SCOPE_TYPE = "private_agent_run"
 SESSION_PROJECT_BASE_METADATA_KEY = "project_base"
+#: ``metadata_json`` key holding a Session's processing tier: ``"fast"`` asks its
+#: turns for the vendor's fast tier (docs/plans/fast-mode.md); absent is standard.
+SESSION_SPEED_METADATA_KEY = "speed"
+SESSION_SPEED_FAST = "fast"
+
+
+def session_speed(metadata: Any) -> str | None:
+    """The processing tier a Session's metadata names: ``"fast"``, or None for standard."""
+
+    if not isinstance(metadata, dict):
+        return None
+    return SESSION_SPEED_FAST if metadata.get(SESSION_SPEED_METADATA_KEY) == SESSION_SPEED_FAST else None
 
 logger = logging.getLogger(__name__)
 

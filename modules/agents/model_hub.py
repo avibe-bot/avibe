@@ -20,7 +20,9 @@ from urllib.parse import urlsplit
 from config import paths
 from config.atomic_io import write_atomic
 from config.v2_config import MODEL_HUB_BACKENDS, ModelHubConfig, ModelHubSourceConfig
+from core.agent_session_context import session_speed_for_context
 from core.handlers.model_hub.capability_evidence import identity_digest
+from core.handlers.model_hub.fast_mode import normalized_speed
 from core.ordered_worker import OrderedWorker
 from core.handlers.model_hub.classification import ResolutionDecision
 from core.handlers.model_hub.events import (
@@ -333,6 +335,8 @@ async def resolve_model_hub_launch(
     router = getattr(controller, "model_hub_runtime", None)
     resolver = getattr(router, "resolve", None)
     if callable(resolver):
+        # The Session this turn runs in may ask for its vendors' fast tier.
+        speed = session_speed_for_context(context)
         if turn_id is None:
             # Only the Turn's own dispatch task is found this way; a caller resolving
             # from another task (Vibey's later model calls) names its Turn itself.
@@ -347,6 +351,7 @@ async def resolve_model_hub_launch(
                 process_scope=process_scope,
                 turn_id=turn_id,
                 **snapshot,
+                **({"speed": speed} if speed is not None else {}),
             )
         except ModelHubError as exc:
             failure = _localized_launch_error(
@@ -905,6 +910,7 @@ class ModelHubRuntimeRouter:
         hosted_tools: TurnHostedTools | None = None,
         request_scoped: bool | None = None,
         primary_identity: str | None = None,
+        speed: str | None = None,
     ) -> tuple[str, str]:
         if self.turn_gateway is not None:
             return await self.turn_gateway.endpoint(
@@ -924,6 +930,7 @@ class ModelHubRuntimeRouter:
                 **({"primary_origin": primary_origin} if primary_origin is not None else {}),
                 **({"primary_identity": primary_identity} if primary_identity is not None else {}),
                 **({"hosted_tools": hosted_tools} if hosted_tools is not None else {}),
+                **({"speed": speed} if speed is not None else {}),
             )
         await self.service._ensure_engine_synced()
         status = await self.service._engine_call(self.service.adapter.start())
@@ -1202,7 +1209,10 @@ class ModelHubRuntimeRouter:
         process_scope: Optional[str] = None,
         turn_id: Optional[str] = None,
         config: ModelHubConfig | None = None,
+        speed: Optional[str] = None,
     ) -> ModelHubLaunch:
+        """``speed`` is the turn's processing tier (``"fast"`` or None), kept on the gateway turn it opens."""
+
         requested_model = str(requested_model or "").strip()
         config = config if config is not None else self.service.store.load()
         if backend == "vibey" and (
@@ -1333,6 +1343,7 @@ class ModelHubRuntimeRouter:
                 primary_identity=identity,
                 # The executor endpoint runs only what the turn froze.
                 hosted_tools=frozen,
+                speed=normalized_speed(speed),
             )
             if self.turn_gateway is None:
                 prefix = await self._source_prefix(source.id)

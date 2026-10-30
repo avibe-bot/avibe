@@ -298,6 +298,17 @@ def load_models_dev_catalog_with_date() -> tuple[dict[str, Any], float | None, b
     return {}, None, _refresh_in_background()
 
 
+def cached_models_dev_stamp() -> tuple[str, int, int] | None:
+    """The cached copy's path, modification time and size, or None without one: a reader's cheap check for a new copy."""
+
+    path = _cache_path()
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return str(path), stat.st_mtime_ns, stat.st_size
+
+
 def cached_models_dev_catalog() -> dict[str, Any]:
     """The cached copy as it stands, stale or not, and never a fetch.
 

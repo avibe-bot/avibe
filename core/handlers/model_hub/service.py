@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Collection, Iterable, Literal, Mapping, NamedTuple, Optional, Protocol, cast
+from typing import Any, Awaitable, Callable, Collection, Final, Iterable, Literal, Mapping, NamedTuple, Optional, Protocol, cast
 
 from sqlalchemy import func, literal_column, select
 
@@ -235,6 +235,7 @@ from .provenance import (
     produce_turn_outcome,
 )
 from .opaque_provenance import OpaqueProvenanceRegistry, filter_opaque_history
+from .fast_mode import FAST_SPEED, FastModeCatalog, load_fast_mode_catalog
 from .request import ModelHubRequest, without_opaque_history
 from .reasoning_tiers import catalog_wire_efforts, rederive_persisted_tiers, resolve_reasoning_tiers
 from .stream_wire import ProtocolSSEState, ProtocolUsageReport
@@ -840,6 +841,33 @@ class _InvocationUnsupported(_InvocationPlanChanged):
         super().__init__(reason)
         self.reason = reason
 
+
+
+_FAST_REFUSAL_STATUSES = frozenset({400, 403, 429})
+# The protocol each native backend speaks to the gateway; Vibey speaks its hop's.
+_FAST_REQUEST_PROTOCOLS: Final[Mapping[str, str]] = {"claude": "anthropic", "codex": "openai_responses"}
+
+
+def _fast_tier_refused(outcome: Optional[RawCallOutcome]) -> bool:
+    """A failed call refused before any output, as a vendor answers a fast tier it will not grant.
+
+    The vendors give that refusal no code of its own (Anthropic answers 429
+    ``rate_limit_error`` without usage credits), so any such refusal of a fast
+    attempt earns one standard retry; the retry's own outcome is classified.
+    """
+
+    return (
+        outcome is not None
+        and not outcome.stream_started
+        and outcome.http_status in _FAST_REFUSAL_STATUSES
+    )
+
+
+def _with_body_fields(request: Mapping[str, Any], fields: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The request with these top-level body fields set, its metadata kept."""
+
+    payload = {**request, **fields}
+    return request.with_payload(payload) if isinstance(request, ModelHubRequest) else payload
 
 def _pinned_hop(request: Any, backend: str) -> tuple[str, str | None] | None:
     """The exact (Source, model) a Vibey request is pinned to (``x-avibe-pin-source``), if any."""
@@ -1608,6 +1636,9 @@ class ModelHubService:
             lambda _backend, _source: True
         )
         self._mutation_lock = asyncio.Lock()
+        # Which (Source, model) attempts offer a vendor's fast tier; read off the
+        # loop when a fast request arrives, rebuilt only when models.dev changes.
+        self._fast_mode_catalog = FastModeCatalog()
         self._oauth_start_tasks: dict[
             tuple[str, str, OAuthChannel], asyncio.Task[dict]
         ] = {}
@@ -6200,6 +6231,12 @@ class ModelHubService:
             }
             for model_id, model_resolution in model_resolutions.items()
         ]
+        # A Direct Agent's turns never reach the gateway that applies the fast tier.
+        fast_catalog = load_fast_mode_catalog() if agent.mode == "hub" else None
+        fast_models = {
+            model.id: fast_catalog is not None and self._offers_fast_mode(backend, model_resolutions[model.id], fast_catalog)
+            for model in menu_models
+        }
         # Only Hub turns reach the evidence; a Direct Agent's menu is the backend's own.
         effort_menus = {
             model.id: (
@@ -6301,7 +6338,8 @@ class ModelHubService:
             "model_supply": model_supply if agent.mode == "hub" else None,
             "named_agents": named_agents,
             "catalog_models": [
-                {**model, "effort_menu": effort_menus[model["id"]]} for model in self._catalog_models_payload(agent)
+                {**model, "effort_menu": effort_menus[model["id"]], "fast_mode": fast_models.get(model["id"], False)}
+                for model in self._catalog_models_payload(agent)
             ],
             "builtin_models": builtin_models,
         }
@@ -7145,6 +7183,24 @@ class ModelHubService:
         if feature is None:
             return False
         return self.hosted_evidence().unsupported(source, model_id, feature)
+
+    @staticmethod
+    def _offers_fast_mode(backend: BackendName, resolution: ModelHubTurnResolution, catalog: FastModeCatalog) -> bool:
+        """Whether a turn on this menu model would reach its vendor's fast tier on the hop that normally serves it.
+
+        The first candidate hop is the one a turn starts on; a fallback to a hop
+        without the tier runs at the standard tier. OpenCode's shared server
+        names no turn on its requests, so its turns carry no Session's choice.
+        """
+
+        hop = next(
+            (hop for hop in resolution.candidate_hops if hop.source is not None and hop.model_id is not None),
+            None,
+        )
+        if hop is None:
+            return False
+        protocol = hop.source.protocol if backend == "vibey" else _FAST_REQUEST_PROTOCOLS.get(backend)
+        return catalog.body_for(hop.source, hop.model_id, protocol) is not None
 
     def _effort_menu(
         self, backend: BackendName, model: ModelHubBackendModelConfig, resolution: ModelHubTurnResolution, now: datetime
@@ -10849,6 +10905,7 @@ class ModelHubService:
         on_admitted: Callable[[int], None] | None = None,
         recovery_request: RecoveryRequest | None = None,
         hosted: HostedContent = HostedContent(),
+        fast_catalog: FastModeCatalog | None = None,
     ) -> InvokeHandle:
         while True:
             await self._mutation_lock.acquire()
@@ -10950,6 +11007,12 @@ class ModelHubService:
                         identity=identity,
                         registry=self.opaque_provenance,
                     )
+                if fast_catalog is not None:
+                    # Read on this final snapshot: a hop gains the fast tier only
+                    # where its exact Source and model offer one.
+                    fast_body = fast_catalog.body_for(source, model_id, getattr(request, "protocol", None))
+                    if fast_body is not None:
+                        attempt_request = _with_body_fields(attempt_request, fast_body)
                 if self._engine_synced:
                     if recovery_request is not None and recovery_request.expired:
                         raise _RecoveryWindowClosed
@@ -10991,7 +11054,13 @@ class ModelHubService:
         on_admitted: Callable[[int], None] | None = None,
         recovery_request: RecoveryRequest | None = None,
         hosted: HostedContent = HostedContent(),
+        fast_catalog: FastModeCatalog | None = None,
     ) -> tuple[InvokeHandle, Optional[RawCallOutcome], asyncio.CancelledError | None]:
+        """``fast_catalog`` puts each attempt that offers it on its vendor's fast tier
+        (docs/plans/fast-mode.md); a fast attempt refused before any output is
+        retried once on the same hop at the standard tier, and only that retry's
+        outcome reaches classification."""
+
         acquired_handle: InvokeHandle | None = None
         generation: int | None = None
 
@@ -11038,6 +11107,7 @@ class ModelHubService:
                     on_admitted=admitted,
                     recovery_request=recovery_request,
                     hosted=hosted,
+                    fast_catalog=fast_catalog,
                 )
             except InvokeCancelledError as cancelled:
                 await meter_observed(cancelled.observed, None)
@@ -11082,7 +11152,45 @@ class ModelHubService:
                 self.recovery.release(source.id, generation)
                 raise cancelled
 
+        if (
+            fast_catalog is not None
+            and cancelled is None
+            and _fast_tier_refused(outcome)
+            and fast_catalog.body_for(source, model_id, getattr(request, "protocol", None)) is not None
+        ):
+            # The fast tier is an upgrade, not a requirement: an account without
+            # it (no usage credits, an organization that disabled it, its own
+            # rate limit) is still served at the standard tier, and the refusal
+            # never reads as the Source failing.
+            logger.info(
+                "Model Hub fast tier refused before output; retrying at the standard tier",
+                extra={"source_id": source.id, "model_id": model_id, "http_status": outcome.http_status},
+            )
+            self.recovery.release(source.id, generation)
+            return await self._invoke(
+                source=source,
+                model_id=model_id,
+                request=request,
+                stream=stream,
+                backend=backend,
+                requested_model_id=requested_model_id,
+                excluded_source_ids=excluded_source_ids,
+                excluded_hops=excluded_hops,
+                supply_channel=supply_channel,
+                exact_retry=True,
+                on_admitted=on_admitted,
+                recovery_request=recovery_request,
+                hosted=hosted,
+            )
         return handle, outcome, cancelled
+
+    async def _fast_mode_catalog_for(self, request: Mapping[str, Any]) -> FastModeCatalog | None:
+        """The fast-tier index for a request that asks for one, else None."""
+
+        if getattr(request, "speed", None) != FAST_SPEED:
+            return None
+        self._fast_mode_catalog = await asyncio.to_thread(load_fast_mode_catalog)
+        return self._fast_mode_catalog
 
     async def _settle_cancelled_attempt(
         self,
@@ -11258,6 +11366,7 @@ class ModelHubService:
             raise ModelHubError(
                 "hosted_content_unpinned", status=422, turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
             )
+        fast_catalog = await self._fast_mode_catalog_for(request)
         engine_prepared = False
         # An entirely unsupported Google request must not reconcile the engine
         # or custody. Supported hops drain the journal in demand preparation.
@@ -11425,6 +11534,7 @@ class ModelHubService:
                     on_admitted=admitted,
                     recovery_request=recovery_request,
                     hosted=hosted,
+                    fast_catalog=fast_catalog,
                 )
             except _InvocationUnsupported as skipped:
                 if pinned_hop is not None:
@@ -11501,6 +11611,7 @@ class ModelHubService:
                         on_admitted=admitted,
                         recovery_request=recovery_request,
                         hosted=hosted,
+                        fast_catalog=fast_catalog,
                     )
                 except _InvocationPlanChanged:
                     if attempt_observer is not None:

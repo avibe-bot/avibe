@@ -184,6 +184,8 @@ export const Workbench: React.FC = () => {
               disabled={ns.sending}
               align="end"
               triggerClassName="max-w-[min(60vw,360px)]"
+              speed={ns.speed}
+              onSpeedChange={ns.setSpeed}
             />
           }
           onSend={send}

@@ -76,7 +76,15 @@ export type ScopeSettingsPatchResult = {
 // Global workbench toggles persisted server-side in state_meta. Currently just
 // the background-work banner switch (spec req 2); read by ChatPage (to gate the
 // banner) and the Harness page (the toggle card).
-export type WorkbenchPrefs = { ok?: boolean; background_work_banner_enabled: boolean };
+export type WorkbenchPrefs = {
+  ok?: boolean;
+  background_work_banner_enabled: boolean;
+  /** Whether a new Web Session starts with fast mode on: the last choice made in a model picker. */
+  fast_mode_default?: boolean;
+};
+
+/** A Session's processing tier: ``fast`` asks its turns for the vendor's fast tier; null is standard. */
+export type SessionSpeed = 'fast' | null;
 
 // One backend's *global* instructions file, surfaced by the Global Prompts
 // editor. ``backend`` is an agent backend id (claude / opencode / codex).
@@ -659,6 +667,8 @@ export type ApiContextType = {
   getWorkbenchPrefs: () => Promise<WorkbenchPrefs>;
   /** Persist the background-work banner global toggle; resolves to updated prefs. */
   setBackgroundWorkBannerEnabled: (enabled: boolean) => Promise<WorkbenchPrefs>;
+  /** Persist whether new Web Sessions start with fast mode on; resolves to updated prefs. */
+  setFastModeDefault: (enabled: boolean) => Promise<WorkbenchPrefs>;
   getBindCodes: () => Promise<any>;
   createBindCode: (type: string, expiresAt?: string) => Promise<any>;
   deleteBindCode: (code: string) => Promise<any>;
@@ -1056,6 +1066,8 @@ export type WorkbenchSession = {
   agent_variant: string | null;
   model: string | null;
   reasoning_effort: string | null;
+  /** Optional because payloads cached by an older client predate the field. */
+  speed?: SessionSpeed;
   status: string;
   /** Storage projection, not a user preference: ``foreground`` = an ordinary chat,
    *  ``background`` = hidden and undelivered, ``system`` = a row the RUNTIME owns
@@ -1105,6 +1117,7 @@ export type WorkbenchSessionCreate = {
   agent_variant?: string;
   model?: string;
   reasoning_effort?: string;
+  speed?: 'fast';
   title?: string;
   metadata?: Record<string, unknown>;
 };
@@ -1118,6 +1131,7 @@ export type WorkbenchSessionUpdate = {
   agent_variant: string;
   model: string | null;
   reasoning_effort: string | null;
+  speed: SessionSpeed;
   pinned: boolean;
 };
 
@@ -3737,6 +3751,22 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         },
         'PUT /api/workbench/prefs',
       );
+      return payloadJson;
+    },
+    setFastModeDefault: async (enabled) => {
+      // A remembered preference, written behind the pick it follows: a failure
+      // only leaves the next new Session on the previous default.
+      const { payloadJson } = await requestJson(
+        '/api/workbench/prefs',
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fast_mode_default: enabled }),
+        },
+        'PUT /api/workbench/prefs',
+        { handleError: false, clearCache: false },
+      );
+      readCacheRef.current.delete('/api/workbench/prefs');
       return payloadJson;
     },
     getBindCodes: () => getJson('/api/bind-codes'),

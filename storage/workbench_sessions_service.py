@@ -37,9 +37,12 @@ from storage.agent_session_rows import (
     TERMINAL_SWITCH_BACKEND,
     insert_superseded_native_snapshot,
     SESSION_PROJECT_BASE_METADATA_KEY,
+    SESSION_SPEED_FAST,
+    SESSION_SPEED_METADATA_KEY,
     WORKSPACE_NOTICE_SESSION_ID,
     create_agent_session_row,
     new_session_id,
+    session_speed,
     normalize_workdir,
     normalize_session_project_base,
     reserve_write_lock,
@@ -108,6 +111,7 @@ def _row_to_payload(
 ) -> dict[str, Any]:
     metadata = _load_metadata(row.get("metadata_json"))
     metadata.pop(SESSION_PROJECT_BASE_METADATA_KEY, None)
+    speed = session_speed(metadata)
     if not include_local_details:
         metadata = {}
     return {
@@ -125,6 +129,8 @@ def _row_to_payload(
         "agent_variant": row.get("agent_variant"),
         "model": row.get("model"),
         "reasoning_effort": row.get("reasoning_effort"),
+        # The Session's processing tier: "fast" or null (standard).
+        "speed": speed,
         "status": row.get("status"),
         "visibility": row.get("visibility") or "foreground",
         "pinned": bool(row.get("pinned")),
@@ -154,6 +160,17 @@ def _load_metadata(value: Any) -> dict[str, Any]:
 
 def _dumps_metadata(metadata: dict[str, Any]) -> str:
     return json.dumps(metadata)
+
+
+def _apply_session_speed(metadata: dict[str, Any], speed: Any) -> None:
+    """Write a Session's processing tier: ``"fast"``, or None/empty for the standard tier."""
+
+    if speed is None or speed == "":
+        metadata.pop(SESSION_SPEED_METADATA_KEY, None)
+    elif speed == SESSION_SPEED_FAST:
+        metadata[SESSION_SPEED_METADATA_KEY] = SESSION_SPEED_FAST
+    else:
+        raise ValueError(f"invalid session speed: {speed!r}")
 
 
 def _has_runtime_management_access(context: AuthorizationContext) -> bool:
@@ -465,6 +482,7 @@ def create_session(
     workdir: Optional[str] = None,
     visibility: str = "foreground",
     metadata: Optional[dict[str, Any]] = None,
+    speed: Optional[str] = None,
     authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
     user_context: Any = None,
     workdir_prepared: bool = False,
@@ -619,6 +637,8 @@ def create_session(
     metadata_payload = {"created_via": "workbench"}
     if metadata:
         metadata_payload.update(metadata)
+    if speed is not None:
+        _apply_session_speed(metadata_payload, speed)
 
     session_id = str(session_id or new_session_id(conn))
     if scope_id is None:
@@ -654,7 +674,7 @@ MAIN_SESSION_METADATA_KEY = "kind"
 MAIN_SESSION_METADATA_VALUE = "main"
 MAIN_SESSION_WORKDIR_DIRNAME = "main"
 MAIN_SESSION_WORKDIR_COMPONENT = "owner"
-MAIN_SESSION_UPDATABLE_FIELDS = frozenset({"model", "reasoning_effort", "title", "pinned"})
+MAIN_SESSION_UPDATABLE_FIELDS = frozenset({"model", "reasoning_effort", "speed", "title", "pinned"})
 
 
 class MainSessionArchivedError(PermissionError):
@@ -991,6 +1011,7 @@ def update_session(
     agent_variant: Any = _UNSET,
     model: Any = _UNSET,
     reasoning_effort: Any = _UNSET,
+    speed: Any = _UNSET,
     visibility: Any = _UNSET,
     pinned: Any = _UNSET,
     scope_id: Any = _UNSET,
@@ -1037,6 +1058,7 @@ def update_session(
             ("agent_variant", agent_variant),
             ("model", model),
             ("reasoning_effort", reasoning_effort),
+            ("speed", speed),
             ("visibility", visibility),
             ("pinned", pinned),
             ("scope_id", scope_id),
@@ -1261,6 +1283,9 @@ def update_session(
         values["model"] = model or None
     if reasoning_effort is not _UNSET:
         values["reasoning_effort"] = reasoning_effort or None
+    if speed is not _UNSET:
+        _apply_session_speed(existing_metadata, speed)
+        values["metadata_json"] = _dumps_metadata(existing_metadata)
     if visibility is not _UNSET:
         visibility_value = str(visibility or "").strip()
         # ASSIGNABLE, not the full storage vocabulary: ``system`` is a runtime

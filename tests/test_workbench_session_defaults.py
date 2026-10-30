@@ -200,3 +200,30 @@ def test_folderless_project_session_snapshots_process_cwd(engine, tmp_path, monk
         )
 
     assert session["workdir"] == str(tmp_path)
+
+
+def test_session_speed_is_stored_with_the_session_and_read_by_dispatch(engine, tmp_path):
+    """A Session's fast mode survives create and update and reaches the turns dispatched from its row."""
+
+    from types import SimpleNamespace
+
+    from core.agent_session_context import session_speed_for_context
+
+    def dispatched(session):
+        # Dispatch copies the Session row onto the turn's context (internal_server).
+        return session_speed_for_context(SimpleNamespace(platform_specific={"agent_session_target": session}))
+
+    created = _project_with_default(engine, tmp_path)
+    with engine.begin() as conn:
+        session = workbench_sessions_service.create_session(
+            conn, scope_id=created["scope_id"], agent_backend="", speed="fast",
+        )
+        assert (session["speed"], dispatched(session)) == ("fast", "fast")
+        standard = workbench_sessions_service.update_session(conn, session["id"], speed=None)
+        assert (standard["speed"], dispatched(standard)) == (None, None)
+        # Another edit leaves the choice alone.
+        fast = workbench_sessions_service.update_session(conn, session["id"], speed="fast")
+        renamed = workbench_sessions_service.update_session(conn, session["id"], title="Renamed")
+        assert (fast["speed"], renamed["speed"], dispatched(renamed)) == ("fast", "fast", "fast")
+        with pytest.raises(ValueError):
+            workbench_sessions_service.update_session(conn, session["id"], speed="turbo")

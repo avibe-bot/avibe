@@ -159,6 +159,8 @@ window.fetch = async (input, init) => {
     if (control.messageMode === 'rejected') return reply({ state: 'retired', dispatch_error: 'dispatch_failed' }, 502);
     return reply({ id: 'message-1', type: 'user', ...body }, 201);
   }
+  // The new-session composer starts from the remembered fast-mode default.
+  if (path === '/api/workbench/prefs') return reply({ ok: true, background_work_banner_enabled: true, fast_mode_default: false });
   if (path === '/api/asr/status') return reply({ available: true, max_file_bytes: 25_000_000 });
   if (path === '/api/cloud/token') return reply({ error: 'fixture local ASR only' }, 503);
   if (path === '/api/asr/transcribe') {
