@@ -1737,6 +1737,14 @@ def pin_refusal(assembler: StreamAssembler, endpoint: ModelEndpoint, handed_back
     return replace(error, retryable=False, continuable=False, after_thinking=False, refusal=refusal)
 
 
+def search_history_endpoint(endpoint: ModelEndpoint) -> ModelEndpoint:
+    """Keep native execution and in-flight exchanges; only completed historical web searches become portable."""
+    route = endpoint.hosted_tools.get("web_search")
+    if route is None or not route.replay:
+        return endpoint
+    return replace(endpoint, hosted_tools={**endpoint.hosted_tools, "web_search": replace(route, replay=False)})
+
+
 def portable_endpoint(endpoint: ModelEndpoint) -> ModelEndpoint:
     """``endpoint`` in portable form (§3.5): never pinned, and every hosted tool as its function, so a request carries
     no native declaration and replays no native payload. The hop's Source and identity stay for attribution: a response

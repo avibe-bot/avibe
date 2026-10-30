@@ -439,7 +439,9 @@ scenarios:
       - tests/agent_core/ai/test_hosted_replay.py::test_pin_unavailable_ends_the_pinned_send_as_a_refusal_with_no_output
       - tests/agent_core/ai/test_hosted_replay.py::test_refusals_are_answered_within_their_bounds_and_portable_rendering_is_the_last_resort
       - tests/agent_core/ai/test_hosted_replay.py::test_an_opaque_payload_refusal_ends_the_send_as_a_refusal_of_its_source_identity
-      - tests/agent_core/ai/test_hosted_replay.py::test_an_opaque_payload_another_account_refuses_is_sent_portably_from_then_on_in_the_session
+      - tests/agent_core/ai/test_hosted_replay.py::test_a_refused_payload_is_demoted_without_disabling_unrelated_native_content
+      - tests/agent_core/ai/test_search_history_recovery.py::test_only_completed_history_is_demoted_and_the_client_tool_is_not_rerun
+      - tests/test_vibey_agent.py::test_search_history_repair_after_partial_output_does_not_republish_or_reexecute
       - tests/agent_core/ai/test_hosted_replay.py::test_a_refusal_of_what_the_session_already_demoted_stands_as_the_error
       - tests/agent_core/ai/test_hosted_replay.py::test_anthropic_thinking_fallback_is_scoped_to_manual_claude_tool_loops
       - tests/agent_core/ai/test_hosted_replay.py::test_a_session_whose_signatures_were_refused_still_finishes_tool_loops_with_thinking_on

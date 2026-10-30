@@ -1310,6 +1310,86 @@ async def test_a_transient_failure_continues_from_the_same_transcript_without_a_
     assert harness.controller.terminals[-1]["is_error"] is False
 
 
+@pytest.mark.parametrize("output", ["text", "thinking", "tool", "complete-tool", "search"])
+@pytest.mark.parametrize("refusal", ["prefill", "encrypted"])
+@pytest.mark.parametrize("again", [False, True])
+async def test_search_history_repair_after_partial_output_does_not_republish_or_reexecute(
+    engine, session, tmp_path, published, continuation_policy, output, refusal, again, monkeypatch
+):
+    """The real parser/loop/SQLite/delivery path preserves executed client results after a streamed refusal.
+
+    Failed deltas were never a completed response. Repair the request before committing one, rather than publishing
+    a failed narration/search card and then redoing it through an outer transcript continuation.
+    """
+    import httpx
+    from modules.agents.vibey.models import registry_providers
+    from tests.agent_core.ai import test_hosted_replay as replay
+    from tests.agent_core.ai.test_search_history_recovery import (
+        PREFILL, SEARCH_ERROR, LIVE_USE, completed_stream, failed_stream, mixed_stream,
+    )
+
+    continuation_policy(initial_delay_s=0)
+    monkeypatch.setattr("core.message_mirror._activity_streaming_enabled", lambda: True)
+    seen = []
+    detail = PREFILL if refusal == "prefill" else SEARCH_ERROR
+    served = {"provider": "test-provider", "api": "anthropic", "model": "test-model", "source": replay.SOURCE}
+    headers = {"content-type": "text/event-stream", "x-avibe-served-hop": json.dumps(served)}
+
+    def gateway(request):
+        seen.append(json.loads(request.content))
+        if len(seen) == 1:
+            body = replay._searched_and_answered()
+        elif len(seen) == 2:
+            body = mixed_stream()
+        elif len(seen) == 3:
+            body = failed_stream(detail, output)
+        elif len(seen) == 4 and not again:
+            body = completed_stream()
+        else:
+            return httpx.Response(400, json=replay._anthropic_refusal(detail, via_gateway=True))
+        return httpx.Response(200, headers=headers, text=body)
+
+    read = FakeTool("read")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        harness = _Harness(
+            engine, tmp_path, "telegram", [], tools=[read],
+            providers=registry_providers(media_loader=None, client=client),
+        )
+        harness.controller.hub_source_id = replay.SOURCE
+        harness.controller.im_client.supports_message_editing = lambda context=None: False
+        harness.controller.hub_hosted_tools = {"web_search": {
+            "native": "assumed", "declaration": {"type": "web_search_20250305", "name": "web_search"},
+            "include": [], "replay": "assumed",
+        }}
+        await harness.agent.handle_message(harness.request("search"))
+        original = tuple(await harness.context_rows())
+        await harness.agent.handle_message(harness.request("read and search"))
+
+    assert len(seen) == 4
+    assert len(read.calls) == 1  # The interrupted tool parameters never execute; the completed tool never reruns.
+    assert seen[2]["messages"][-2:] == seen[3]["messages"][-2:]
+    blocks = replay._history_items("anthropic", seen[3])
+    assert LIVE_USE in blocks and replay.RESULT not in blocks
+    assert seen[2]["tools"] == seen[3]["tools"]
+    rows = await harness.context_rows()
+    assert tuple(rows[:len(original)]) == original
+    partials = [row.message for row in rows if row.kind == "response" and row.message.stop_reason == "error"]
+    assert partials == []
+    assert not any(row.kind == "replay_refusal" for row in rows)  # No new persisted shape; rollback remains readable.
+    assert not any("partial answer" in line for line in harness.controller.im_client.sent)
+    assert sum("next release" in line for line in harness.controller.im_client.sent) == (0 if again else 1)
+    with engine.connect() as conn:
+        assert conn.execute(select(agent_events.c.id).where(
+            agent_events.c.session_id == SESSION, agent_events.c.event_type == "model_attempt"
+        )).first() is not None  # The discarded attempt's usage still has an owner.
+    assert harness.controller.terminals[-1]["is_error"] is again
+    if not again:
+        assert harness.rows("notify") == []
+        assert harness.controller.im_client.sent[-1] == "ok"
+    if output in {"tool", "complete-tool"}:
+        assert not any(row.kind == "tool_result" and row.message.tool_call_id == "toolu_unfinished" for row in rows)
+
+
 async def test_a_silent_stop_resumes_the_same_transcript_without_a_notice(
     engine, session, tmp_path, published, continuation_policy
 ) -> None:

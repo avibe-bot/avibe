@@ -348,13 +348,16 @@ async def test_an_opaque_payload_refusal_ends_the_send_as_a_refusal_of_its_sourc
     the send with an opaque refusal of the request's Source identity and the kinds the provider named, pinned or not
     (§3.5). Any other 400 is the ordinary error."""
 
-    request = _request(_endpoint(protocol, replay=True, native=native))
+    history = (_searched(protocol), UserMessage((TextBlock("next turn"),))) if protocol == "anthropic" and payloads == ("hosted",) else ()
+    request = _request(_endpoint(protocol, replay=True, native=native), *history)
 
     sent, events = await _send(request, lambda _: httpx.Response(400, text=body))
 
     (error,) = events
     assert len(sent) == 1 and isinstance(error, ProviderError) and error.status == 400 and not error.retryable
     expected = Refusal("opaque_refused", SOURCE, IDENTITY, payloads=payloads) if payloads else None
+    if history:
+        expected = Refusal("search_history", SOURCE, IDENTITY, "web_search", "replay") if native else None
     assert error.refusal == expected
 
 
@@ -625,14 +628,14 @@ async def _session(
     [(_SEARCH_REFUSAL, '"opaque"', "sig-account-a"), (_SIGNATURE_REFUSAL, "sig-account-a", '"opaque"')],
     ids=["search-result", "thinking-signature"],
 )
-async def test_an_opaque_payload_another_account_refuses_is_sent_portably_from_then_on_in_the_session(
+async def test_a_refused_payload_is_demoted_without_disabling_unrelated_native_content(
     refusal, demoted, kept, via_gateway
 ):
     """A relay can serve a later turn from another upstream account, which cannot read the search results or thinking
     signatures the first minted; Anthropic then refuses the request before any output, naming what it refused. The
-    Session's native search replays verbatim while that is accepted; once refused, the turn is sent again once without
-    that kind of payload from that Source identity, in its portable form, and succeeds. The Session keeps the
-    refusal: its next turn is portable from its first request, with no failed attempt. Only the kind refused goes."""
+    Session's native search replays verbatim while accepted; once refused, the turn is sent again once without the
+    refused history, and succeeds. Signature restrictions persist; history-only search trials remain run-local.
+    Only the kind refused goes."""
 
     def answer(turn: int, attempt: int) -> httpx.Response:
         if turn == 1:
@@ -653,8 +656,10 @@ async def test_an_opaque_payload_another_account_refuses_is_sent_portably_from_t
     if demoted == '"opaque"':
         # The search in its portable form: the query and the source, readable, with no encrypted data.
         assert "avibe release" in bodies[2][1] and "https://avibe.bot/r" in bodies[2][1]
-    # The next turn: portable from its first request.
-    assert len(bodies[3]) == 1 and demoted not in bodies[3][0] and kept in bodies[3][0]
+    # Signature rejection keeps its existing Session-wide restriction. History-only search repair is run-local;
+    # the gateway may learn replay evidence separately, but this fake gateway does not, so a new turn probes again.
+    assert len(bodies[3]) == 1 and kept in bodies[3][0]
+    assert (demoted not in bodies[3][0]) is (refusal == _SIGNATURE_REFUSAL)
 
 
 async def test_a_refusal_of_what_the_session_already_demoted_stands_as_the_error():

@@ -359,6 +359,14 @@ failover, and is refused unpinned (C-6 item 7). What changes is what happens aft
     **every** opaque payload of that Source identity dropped for the rest of the turn: signatures, encrypted reasoning
     and native hosted payloads, since the refusal does not say which one failed. Once per (turn, identity); no
     evidence is written (§3.2).
+- **Anthropic search compatibility is request-scoped** (C-2 `provider.md`, `search-history-recovery.md`). A precise
+  ciphertext/citation rejection must correspond to native search ciphertext actually sent. The exact prefill error
+  allows only a guarded trial on a valid mixed server/client continuation with completed native search history; it
+  is not a permanent capability diagnosis. Once per identity per run, render that history with `replay=False` on the
+  same hop, preserving native execution and the in-flight exchange. An explicit refusal of remaining current
+  ciphertext can still use the existing hosted-opaque fallback. Both paths may replace an uncommitted failed partial
+  in the model-request loop: audit usage, do not publish duplicate narration/search cards or rerun completed client
+  tools. The history-only decision stays in memory; no new persisted refusal payload or gateway evidence rule is added.
 - **The cost is one cold prompt prefix.** Dropping a native declaration changes the tools block, so the resend and
   the next turns start a new cache prefix: once per (Source, model, tool), since evidence is per model (another
   model of the same Source may run the tool), when the refusal is first learned, and again only

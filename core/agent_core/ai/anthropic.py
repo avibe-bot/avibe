@@ -55,6 +55,7 @@ from core.agent_core.ai.provider import (
     ProviderError,
     MediaLoader,
 )
+from core.agent_core.ai.search_recovery import search_replay_refusal
 from core.agent_core.cancel import CancelToken
 from core.agent_core.hosted_continuations import pending_hosted
 from core.agent_core.ai.transform import in_flight_position, native_replay
@@ -895,6 +896,14 @@ class AnthropicAdapter(ProviderAdapter):
                         if event is REFUSED:
                             rejected = True
                             break
+                        if isinstance(event, ProviderError):
+                            repair = search_replay_refusal(event, sending, wire.body)
+                            if repair != event.refusal:
+                                event = replace(event, refusal=repair)
+                            if repair is not None:
+                                # The Agent owns bounds and retries of uncommitted output. The adapter only
+                                # identifies a changed request, equally for HTTP refusals and streamed errors.
+                                event = replace(event, retryable=False, continuable=False, after_thinking=False)
                         yield event
                 finally:
                     await driver.aclose()

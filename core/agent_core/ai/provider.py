@@ -237,8 +237,8 @@ class ProviderError:
     #: The response streamed thinking and nothing else before this error (``THINKING_DROP_RETRY_KINDS``): it is
     #: ``retryable``, and the loop retries it at most once per request (``provider.md``).
     after_thinking: bool = False
-    #: A refusal before any output, which the loop answers by rendering the request again (``vibey-hosted-tools.md``
-    #: §3.5), never by the generic retry.
+    #: A provider refusal which can change how history is rendered (``vibey-hosted-tools.md`` §3.5).
+    #: Most require no output. Corroborated search refusals also permit repair of an uncommitted partial.
     refusal: Optional["Refusal"] = None
     #: Permission to continue from the committed transcript, not replay this request. False by default:
     #: only a classified transient failure grants it, even when streaming makes ``retryable`` false.
@@ -251,17 +251,19 @@ class ProviderError:
 
 @dataclass(frozen=True)
 class Refusal:
-    """Why a request was refused before any output, so the next attempt renders it differently (§3.5).
+    """Why a refused request can be rendered differently on the next attempt (§3.5).
 
     ``pin_unavailable``: the gateway handed a pinned request back; ``tool`` and ``aspect`` name the narrow hosted rule
     that fired, when one did. ``opaque_refused``: the provider refused an opaque payload a response of this Source
     identity minted, replayed under an account that cannot read it (a key change, or a relay serving from another
     account); ``payloads`` says which kind (``OPAQUE_PAYLOADS``): Anthropic names it, xAI's "Could not decrypt the
     provided encrypted_content" does not, so it is both. ``source_id`` and ``source_identity`` are the refused
-    request's hop.
+    request's hop. ``search_history`` is a narrower Anthropic compatibility recovery: only completed historical
+    web searches become portable; in-flight content and native tool declarations stay intact. It is a run-local
+    replay decision, not a claim that the Source cannot execute searches or that a relay account changed.
     """
 
-    kind: Literal["pin_unavailable", "opaque_refused"]
+    kind: Literal["pin_unavailable", "opaque_refused", "search_history"]
     source_id: Optional[str] = None
     source_identity: Optional[str] = None
     tool: Optional[str] = None
