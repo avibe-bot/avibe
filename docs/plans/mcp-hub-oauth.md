@@ -205,8 +205,10 @@ vibe mcp suno --logout
 API: `GET /api/mcp/{name}/oauth/start` is Owner-only and starts the grant from `_current_origin()`
 plus `ui.setup_port`. It is a GET because the Web login control is a plain link. CSRF: only
 `Sec-Fetch-Site: same-origin` (in-app click) or `none` (desktop shell handing the URL to the
-system browser) may start a pending login; `cross-site`, `same-site`, and a missing header
-return a 403 HTML page and create no pending login. Success is 302 to the AS authorize URL;
+system browser) may start a pending login. A missing header is allowed only when `Referer`
+is same-origin (plain HTTP LAN origins omit Fetch Metadata). `cross-site`, `same-site`, a
+cross-origin Referer, and a missing header with no Referer return a 403 HTML page and
+create no pending login. Success is 302 to the AS authorize URL;
 failure is a small i18n HTML page (same shape as the callback page), not JSON. Runtime
 `oauth_start` remains for CLI/IM. `GET /api/mcp` includes per-request `oauthMode: "direct"|"paste"`
 from `redirect_mode(_current_origin(), port=setup_port)` so the UI does not re-derive the origin

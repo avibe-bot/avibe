@@ -199,12 +199,32 @@ def test_oauth_start_link_redirects_to_authorize_url(owner, oauth_server, fetch_
     assert len(owner._pending_logins) == 1
 
 
-@pytest.mark.parametrize("fetch_site", ["cross-site", "same-site", None])
+@pytest.mark.parametrize("fetch_site", ["cross-site", "same-site"])
 def test_oauth_start_link_rejects_cross_site_without_pending_login(owner, oauth_server, fetch_site):
-    headers = {"Sec-Fetch-Site": fetch_site} if fetch_site else {}
-    response = app.test_client().get("/api/mcp/suno/oauth/start", headers=headers)
+    response = app.test_client().get("/api/mcp/suno/oauth/start", headers={"Sec-Fetch-Site": fetch_site})
     assert response.status_code == 403
     assert response.headers["Content-Type"].startswith("text/html")
+    assert owner._pending_logins == {}
+
+
+def test_oauth_start_link_allows_missing_fetch_site_with_same_origin_referer(owner, oauth_server):
+    response = app.test_client().get(
+        "/api/mcp/suno/oauth/start",
+        headers={"Referer": "http://127.0.0.1/skills"},
+    )
+    assert response.status_code == 302
+    assert len(owner._pending_logins) == 1
+
+    foreign = app.test_client().get(
+        "/api/mcp/suno/oauth/start",
+        headers={"Referer": "https://evil.example/skills"},
+    )
+    assert foreign.status_code == 403
+
+
+def test_oauth_start_link_rejects_missing_fetch_site_without_referer(owner, oauth_server):
+    response = app.test_client().get("/api/mcp/suno/oauth/start")
+    assert response.status_code == 403
     assert owner._pending_logins == {}
 
 

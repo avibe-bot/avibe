@@ -9566,12 +9566,27 @@ def _mcp_oauth_page(message_key: str, status: int) -> Response:
 # The Web login button is a plain link, so this GET starts a grant. Only a
 # same-origin navigation or one with no initiator (the desktop shell handing the
 # link to the system browser) may start it; cross-site requests are CSRF.
+# Fetch Metadata is omitted on non-trustworthy HTTP origins (LAN paste mode);
+# those navigations still send a same-origin Referer.
 _MCP_OAUTH_START_FETCH_SITES = {"same-origin", "none"}
+
+
+def _mcp_oauth_start_allowed(starlette_request: FastAPIRequest) -> bool:
+    site = (starlette_request.headers.get("Sec-Fetch-Site") or "").lower()
+    if site in _MCP_OAUTH_START_FETCH_SITES:
+        return True
+    if site:
+        return False
+    referer = starlette_request.headers.get("Referer") or ""
+    try:
+        return urlparse(referer).netloc == starlette_request.url.netloc and bool(starlette_request.url.netloc)
+    except ValueError:
+        return False
 
 
 @app.get("/api/mcp/{name}/oauth/start", include_in_schema=False)
 async def mcp_oauth_start(name: str, starlette_request: FastAPIRequest):
-    if (starlette_request.headers.get("Sec-Fetch-Site") or "").lower() not in _MCP_OAUTH_START_FETCH_SITES:
+    if not _mcp_oauth_start_allowed(starlette_request):
         return _mcp_oauth_page("mcp_oauth_start_rejected", 403)
 
     async def start():
