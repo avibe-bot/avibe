@@ -6501,7 +6501,8 @@
       "oauth": "MCP login could not be completed: {{message}}",
       "usage": "{{message}}",
       "add_failed": "{{message}}",
-      "add_partial": "{{message}}"
+      "add_partial": "{{message}}",
+      "internal": "MCP operation failed."
     },
     "addedCount": "Added {{count}} MCP servers.",
     "addedPartial": "Added {{count}}; failed: {{failed}}",

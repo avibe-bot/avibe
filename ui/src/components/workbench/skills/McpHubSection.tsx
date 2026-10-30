@@ -11,7 +11,7 @@ import { Badge } from '../../ui/badge';
 import { Button } from '../../ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from '../../ui/dialog';
 import { Textarea } from '../../ui/textarea';
-import { openLinkInNewContext } from '../../../lib/pwaNavigation';
+import { navigatePreparedTab, openLinkInNewContext, openPreparedTab } from '../../../lib/pwaNavigation';
 
 const SOURCE_CHIP: Record<string, string> = {
   avibe: 'border-gold/40 bg-gold/[0.12] text-gold-ink',
@@ -94,6 +94,7 @@ export const McpHubSection: React.FC = () => {
   const [authorizeUrl, setAuthorizeUrl] = useState<string | null>(null);
   const [callbackText, setCallbackText] = useState('');
   const [confirmDelete, setConfirmDelete] = useState<McpServerSummary | null>(null);
+  const loginInFlight = useRef(false);
 
   if (expandedFor !== selected) {
     setExpandedFor(selected);
@@ -101,7 +102,16 @@ export const McpHubSection: React.FC = () => {
   }
 
   const describe = useCallback(
-    (error?: McpError) => (error ? t(`mcpHub.errors.${error.type}`, { defaultValue: error.message, message: error.message }) : t('mcpHub.failed')),
+    (error?: McpError | string) => {
+      if (typeof error === 'string' && error.trim()) return error;
+      if (error && typeof error === 'object') {
+        const type = typeof error.type === 'string' ? error.type.trim() : '';
+        const message = typeof error.message === 'string' ? error.message : '';
+        if (type) return t(`mcpHub.errors.${type}`, { defaultValue: message || t('mcpHub.failed'), message });
+        if (message) return message;
+      }
+      return t('mcpHub.failed');
+    },
     [t],
   );
 
@@ -163,19 +173,49 @@ export const McpHubSection: React.FC = () => {
     }
   };
 
-  const onLogin = async (server: McpServerSummary) => {
+  const startLogin = async (server: Pick<McpServerSummary, 'name'>, tab: Window | null) => {
     setBusy(`login:${server.name}`);
+    loginInFlight.current = true;
     try {
       const res = await api.loginMcp(server.name);
-      if (!res.ok) { showToast(describe(res.error), 'error'); return; }
-      if (res.mode === 'direct' && res.authorizeUrl) {
-        window.location.assign(res.authorizeUrl);
+      if (!res.ok) {
+        navigatePreparedTab(tab, null);
+        showToast(describe(res.error), 'error');
+        loginInFlight.current = false;
         return;
       }
-      setLoginFor(server); setAuthorizeUrl(res.authorizeUrl ?? null);
-      if (res.authorizeUrl) openLinkInNewContext(res.authorizeUrl, 'noopener,noreferrer');
-    } finally { setBusy(null); }
+      navigatePreparedTab(tab, res.authorizeUrl);
+      if (res.mode !== 'direct') {
+        setLoginFor({ name: server.name } as McpServerSummary);
+        setAuthorizeUrl(res.authorizeUrl ?? null);
+      }
+    } catch {
+      navigatePreparedTab(tab, null);
+      showToast(t('mcpHub.failed'), 'error');
+      loginInFlight.current = false;
+    } finally {
+      setBusy(null);
+    }
   };
+
+  const onLogin = (server: McpServerSummary) => {
+    const tab = openPreparedTab();
+    void startLogin(server, tab);
+  };
+
+  useEffect(() => {
+    const refreshIfWaiting = () => {
+      if (!loginInFlight.current || document.visibilityState !== 'visible') return;
+      loginInFlight.current = false;
+      void load();
+    };
+    window.addEventListener('focus', refreshIfWaiting);
+    document.addEventListener('visibilitychange', refreshIfWaiting);
+    return () => {
+      window.removeEventListener('focus', refreshIfWaiting);
+      document.removeEventListener('visibilitychange', refreshIfWaiting);
+    };
+  }, [load]);
 
   const onCompleteLogin = async () => {
     if (!loginFor) return;
@@ -188,6 +228,7 @@ export const McpHubSection: React.FC = () => {
     } finally { setBusy(null); }
   };
   const onAdd = async () => {
+    const tab = openPreparedTab();
     setBusy('add');
     setAddError(null);
     try {
@@ -210,6 +251,7 @@ export const McpHubSection: React.FC = () => {
       const toast = inline;
       const hasBatch = Boolean(res.added || res.unchanged || res.failed);
       if (!succeeded) {
+        navigatePreparedTab(tab, null);
         setAddError(hasBatch ? inline : describe(res.error));
         return;
       }
@@ -220,7 +262,17 @@ export const McpHubSection: React.FC = () => {
       } else {
         showToast(t('mcpHub.succeededCount', { count: succeeded }), 'success');
       }
+      const needsLogin = [...added, ...unchanged].find((item) => item.auth === 'needs_login');
+      if (needsLogin) {
+        await startLogin(needsLogin, tab);
+        await load();
+        return;
+      }
+      navigatePreparedTab(tab, null);
       await load();
+    } catch {
+      navigatePreparedTab(tab, null);
+      showToast(t('mcpHub.failed'), 'error');
     } finally {
       setBusy(null);
     }

@@ -648,7 +648,14 @@ class McpRuntime:
         async with self._lock(name):
             return await self._refresh_locked(name, wait_stdio=payload.get("waitStdio") is True, unlist_on_failure=True)
 
-    async def _refresh_locked(self, name: str, *, wait_stdio: bool, unlist_on_failure: bool = False) -> bytes:
+    async def _refresh_locked(
+        self,
+        name: str,
+        *,
+        wait_stdio: bool,
+        unlist_on_failure: bool = False,
+        lock_publish: bool = False,
+    ) -> bytes:
         definition = await asyncio.to_thread(repository.read_definition, name)
         snapshot = json.loads(json.dumps(definition))
 
@@ -701,8 +708,16 @@ class McpRuntime:
         finally:
             if acquired:
                 self.release_stdio_slot()
-        revision = await asyncio.to_thread(self._publish, name, snapshot, definition, tools, server_info, instructions)
-        await self._retire_package(name, keep_revision=revision)
+        async def _publish_revision() -> str:
+            revision = await asyncio.to_thread(self._publish, name, snapshot, definition, tools, server_info, instructions)
+            await self._retire_package(name, keep_revision=revision)
+            return revision
+
+        if lock_publish:
+            async with self._lock(name):
+                revision = await _publish_revision()
+        else:
+            revision = await _publish_revision()
         return _dumps({"ok": True, "name": name, "revision": revision, "toolCount": len(tools)})
 
     async def _discover_all(self, payload: dict[str, Any]) -> bytes:
@@ -874,7 +889,7 @@ class McpRuntime:
             self._oauth_logins.add(name)
             async def run_login() -> None:
                 try:
-                    await self._refresh_locked(name, wait_stdio=False, unlist_on_failure=False)
+                    await self._refresh_locked(name, wait_stdio=False, unlist_on_failure=False, lock_publish=True)
                 except asyncio.CancelledError:
                     if not url_future.done():
                         url_future.set_exception(McpHubError("oauth", "OAuth authorization URL was not created."))

@@ -58,8 +58,7 @@ legal redirect targets:
 **Rule.** A login gets one redirect URI chosen at start and kept with the pending login:
 
 - **direct** — origin is `https`, or `http` on a loopback host (`127.0.0.1`, `localhost`, `[::1]`):
-  `redirect_uri = <origin>/api/mcp/oauth/callback`. The AS redirects the browser there and the
-  login completes without user action.
+  `redirect_uri = <origin>/api/mcp/oauth/callback`. The AS redirects that tab there. Avibe itself stays in the original tab.
 - **paste** — anything else: `redirect_uri = http://127.0.0.1:<ui.setup_port>/api/mcp/oauth/callback`.
   If the browser happens to run on the Avibe host it completes directly. Otherwise the browser
   lands on an unreachable page; paste mode tells the user to copy that address-bar URL
@@ -207,7 +206,7 @@ API: `POST /api/mcp/{name}/oauth/start` (body carries nothing; origin from reque
 `{authorizeUrl, mode}`; `GET /api/mcp/oauth/callback` (session-exempt, §3); `POST /api/mcp/{name}/oauth/complete`
 `{callbackUrl}`; `POST /api/mcp/{name}/oauth/logout`. Summary gains `auth: none|needs_login|ok`.
 
-UI: needs-login rows show a login action. Direct mode navigates the current tab to the authorize URL; the callback returns to the MCP page. Paste mode shows a small dialog with an authorize button and callback URL input. Strings via i18n.
+UI: needs-login rows show a login action. Direct and paste both open the authorize URL in a **new tab** (preallocate `about:blank` synchronously on click, then `location.replace` after start returns — never `window.location.assign` on the Avibe tab, never raw `window.open` after `await`). Avibe stays in the original tab; the callback 302s the authorize tab back to Skills & MCP. Adding an HTTP server that returns `auth: needs_login` starts this login immediately. Paste mode still shows a dialog with a paste box. Strings via i18n.
 
 Definition: accept Claude-format `oauth: {clientId?, scopes?}` on HTTP entries; other `oauth`
 keys ignored (not rejected), per native extras policy.

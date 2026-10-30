@@ -501,6 +501,41 @@ def test_overlapping_oauth_start_keeps_only_latest_grant(runtime, loopback):
     assert accepted["ok"]
 
 
+def test_login_completion_serializes_publish_with_refresh(runtime, loopback, monkeypatch):
+    _run(runtime, "add", {"servers": [{"name": "suno", "server": {"url": f"{loopback.origin}/mcp"}}]})
+    started = _run(runtime, "oauth_start", {"name": "suno", "origin": "http://127.0.0.1:5123", "port": 5123})
+    state = parse_qs(urlparse(started["authorizeUrl"]).query)["state"][0]
+    original = repository.publish
+    concurrent = 0
+    peak = 0
+
+    def counted(*args, **kwargs):
+        nonlocal concurrent, peak
+        concurrent += 1
+        peak = max(peak, concurrent)
+        try:
+            return original(*args, **kwargs)
+        finally:
+            concurrent -= 1
+
+    monkeypatch.setattr(repository, "publish", counted)
+
+    async def both():
+        return await asyncio.gather(
+            runtime.submit("oauth_callback", {"state": state, "code": "code-1", "iss": loopback.origin}),
+            runtime.submit("refresh", {"name": "suno"}),
+        )
+
+    asyncio.run(both())
+    assert peak == 1
+    published = repository.read_published("suno")
+    assert published is not None
+    current = repository.package_dir("suno") / "revisions"
+    survivors = [path for path in current.iterdir() if path.is_dir()]
+    assert len(survivors) == 1
+    assert survivors[0].name == published["revision"]
+
+
 def test_logout_republishes_needs_login_without_tokens(runtime, loopback):
     url = f"{loopback.origin}/mcp"
     repository.write_definition(definition_from_provider("suno", {"url": url}))

@@ -20,6 +20,7 @@ import {
   type ViewportPoint,
 } from '../../lib/showPageLaunch';
 import { isDesktopShell } from '../../lib/desktopShell';
+import { navigatePreparedTab, openPreparedTab } from '../../lib/pwaNavigation';
 import { isDesktopViewport } from '../../lib/useIsDesktop';
 import { useRouteSurfaceWindowEvent } from '../../lib/routeSurfaceActivity';
 import { Button } from '../ui/button';
@@ -123,18 +124,13 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
     if (!linkHref) return;
     // Open synchronously inside the click gesture, then navigate after ensure;
     // otherwise popup blockers reject window.open after the awaited request.
-    const tab = window.open('about:blank', '_blank');
+    const tab = openPreparedTab();
     if (!tab) return;
-    try {
-      tab.opener = null;
-    } catch {
-      // Some browser WindowProxy implementations expose a read-only opener.
-    }
     if (!(await prepare())) {
       tab.close();
       return;
     }
-    if (!tab.closed) tab.location.replace(linkHref);
+    navigatePreparedTab(tab, linkHref);
   }, [clearHoverTimer, linkHref, prepare]);
 
   const pinToDock = useCallback(async () => {

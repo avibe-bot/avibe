@@ -104,6 +104,46 @@ def test_all_failed_batch_returns_per_server_reasons_and_identical_readd_is_unch
     assert "Unexpected MCP Hub response" not in json.dumps(none_body)
 
 
+def test_needs_login_package_lists_and_details_without_500(owner):
+    definition = {
+        "name": "suno",
+        "transport": {"type": "http", "url": "https://api.example/mcp"},
+    }
+    repository.write_definition(definition)
+    repository.publish(
+        "suno",
+        definition=definition,
+        manifest={"description": "", "auth": "needs_login"},
+        tools=[],
+        commands=[],
+    )
+    client = app.test_client()
+    listed = client.get("/api/mcp")
+    assert listed.status_code == 200
+    body = listed.get_json()
+    assert body["ok"] is True
+    assert body["servers"][0]["auth"] == "needs_login"
+    detail = client.get("/api/mcp/suno")
+    assert detail.status_code == 200
+    payload = detail.get_json()
+    assert payload["ok"] is True
+    assert payload["server"]["auth"] == "needs_login"
+    assert payload.get("tools") == []
+
+
+def test_mcp_run_wraps_unexpected_errors_as_internal_object():
+    from vibe import mcp_api
+
+    async def boom():
+        raise RuntimeError("disk full")
+
+    body, status = __import__("asyncio").run(mcp_api.run(boom))
+    assert status == 500
+    assert body["ok"] is False
+    assert body["error"]["type"] == "internal"
+    assert "disk full" in body["error"]["message"]
+
+
 def test_malformed_json_add_returns_top_level_error_without_batch_arrays(owner):
     client = app.test_client()
     headers = csrf_headers(client)

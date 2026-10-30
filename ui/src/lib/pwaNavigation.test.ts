@@ -6,7 +6,9 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import {
   internalPwaLinkTarget,
+  navigatePreparedTab,
   openLinkInNewContext,
+  openPreparedTab,
   shouldBlockPwaLoopbackLink,
 } from './pwaNavigation';
 
@@ -246,10 +248,26 @@ describe('programmatic PWA navigation', () => {
       .sort((left, right) => left.path.localeCompare(right.path));
 
     expect(directCalls).toEqual([
-      { path: 'components/workbench/ShowPageLaunchControl.tsx', count: 1 },
-      { path: 'lib/pwaNavigation.ts', count: 1 },
+      { path: 'lib/pwaNavigation.ts', count: 2 },
     ]);
+  });
 
+  it('does not navigate the Avibe tab for MCP OAuth', () => {
+    const text = readFileSync(new URL('../components/workbench/skills/McpHubSection.tsx', import.meta.url), 'utf8');
+    expect(text).not.toMatch(/location\.assign/);
+  });
+
+  it('preallocates a blank tab and severs opener before later navigation', () => {
+    const tab = { opener: {} as Window, closed: false, close: vi.fn(), location: { replace: vi.fn() } };
+    const nativeOpen = vi.fn(() => tab);
+    vi.stubGlobal('window', { open: nativeOpen });
+    expect(openPreparedTab()).toBe(tab);
+    expect(nativeOpen).toHaveBeenCalledWith('about:blank', '_blank');
+    expect(tab.opener).toBeNull();
+    navigatePreparedTab(tab as unknown as Window, 'https://as.example/authorize');
+    expect(tab.location.replace).toHaveBeenCalledWith('https://as.example/authorize');
+    navigatePreparedTab(tab as unknown as Window, null);
+    expect(tab.close).toHaveBeenCalled();
   });
 
   it('severs the opener of every preallocated blank tab', () => {

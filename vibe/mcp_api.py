@@ -13,7 +13,7 @@ from core.mcp_hub import repository
 from core.mcp_hub.definition import parse_provider_json, provider_entry
 from core.mcp_hub.errors import McpHubError
 
-_STATUS = {"usage": 400, "not_found": 404, "exists": 409, "unavailable": 503, "unknown_outcome": 502, "auth_required": 401, "invalid_callback": 400, "oauth": 400}
+_STATUS = {"usage": 400, "not_found": 404, "exists": 409, "unavailable": 503, "unknown_outcome": 502, "auth_required": 401, "invalid_callback": 400, "oauth": 400, "internal": 500}
 
 
 def _error(exc: McpHubError) -> tuple[dict[str, Any], int]:
@@ -49,6 +49,8 @@ async def run(handler, *args) -> tuple[dict[str, Any], int]:
         return await handler(*args), 200
     except McpHubError as cop:
         return _error(cop)
+    except Exception as exc:  # noqa: BLE001 - Web MCP must not leak a string envelope
+        return _error(McpHubError("internal", str(exc) or "Unexpected MCP Hub error."))
 
 
 async def list_servers() -> dict[str, Any]:

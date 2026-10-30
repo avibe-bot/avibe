@@ -6501,7 +6501,8 @@
       "oauth": "MCP 登录未完成：{{message}}",
       "usage": "{{message}}",
       "add_failed": "{{message}}",
-      "add_partial": "{{message}}"
+      "add_partial": "{{message}}",
+      "internal": "MCP 操作失败。"
     },
     "addedCount": "已添加 {{count}} 个。",
     "addedPartial": "已添加 {{count}} 个；失败：{{failed}}",
