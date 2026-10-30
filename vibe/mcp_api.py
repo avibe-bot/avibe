@@ -13,7 +13,7 @@ from core.mcp_hub import repository
 from core.mcp_hub.definition import parse_provider_json, provider_entry
 from core.mcp_hub.errors import McpHubError
 
-_STATUS = {"usage": 400, "not_found": 404, "exists": 409, "unavailable": 503, "unknown_outcome": 502}
+_STATUS = {"usage": 400, "not_found": 404, "exists": 409, "unavailable": 503, "unknown_outcome": 502, "auth_required": 401, "invalid_callback": 400, "oauth": 400}
 
 
 def _error(exc: McpHubError) -> tuple[dict[str, Any], int]:
@@ -97,3 +97,17 @@ async def refresh(name: str) -> dict[str, Any]:
 
 async def remove(name: str) -> dict[str, Any]:
     return await _owner("remove", {"name": name})
+async def oauth_start(name: str, body: dict[str, Any], origin: str | None = None) -> dict[str, Any]:
+    return await _owner("oauth_start", {"name": name, "origin": origin, **body})
+
+
+async def oauth_callback(body: dict[str, Any]) -> dict[str, Any]:
+    return await _owner("oauth_callback", body)
+
+
+async def oauth_complete(name: str, callback_url: str) -> dict[str, Any]:
+    return await _owner("oauth_complete", {"name": name, "callbackUrl": callback_url})
+
+
+async def oauth_logout(name: str) -> dict[str, Any]:
+    return await _owner("oauth_logout", {"name": name})

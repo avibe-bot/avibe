@@ -6503,6 +6503,13 @@
     "succeededCount": "成功 {{count}} 个",
     "failedCount": "失败 {{count}} 个：",
     "failedLine": "{{name}} — {{error}}",
-    "callHint": "vibe mcp {{name}} <tool>"
+    "callHint": "vibe mcp {{name}} <tool>",
+    "login": "登录",
+    "loginTitle": "登录 MCP 服务器",
+    "loginHint": "在新标签页中授权；如有需要，将回调 URL 粘贴到这里。",
+    "openAuthorize": "打开授权页面",
+    "callbackPlaceholder": "粘贴回调 URL",
+    "completeLogin": "完成登录",
+    "loginComplete": "MCP 登录完成"
   }
 }

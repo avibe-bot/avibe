@@ -121,6 +121,11 @@ def definition_from_provider(name: str, server: object) -> dict[str, Any]:
             "url": _validate_url(server.get("url")),
             "headers": _string_map(server.get("headers"), "headers", _HEADER_NAME),
         }
+        oauth = server.get("oauth")
+        if isinstance(oauth, dict):
+            selected = {key: oauth[key] for key in ("clientId", "scopes") if key in oauth and isinstance(oauth[key], str)}
+            if selected:
+                definition["oauth"] = selected
         return definition
     if kind not in _STDIO_TYPES:
         raise _invalid("type", f"Unsupported transport type {kind!r}.")
@@ -313,6 +318,8 @@ def provider_entry(definition: dict[str, Any]) -> dict[str, Any]:
         entry: dict[str, Any] = {"type": "http", "url": transport["url"]}
         if transport.get("headers"):
             entry["headers"] = transport["headers"]
+        if definition.get("oauth"):
+            entry["oauth"] = dict(definition["oauth"])
         return entry
     entry = {"command": transport["command"], "args": list(transport.get("args") or [])}
     for field in ("env", "cwd"):

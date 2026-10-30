@@ -1687,6 +1687,7 @@ def _remote_auth_exempt_path() -> bool:
         path == "/health"
         or path == "/auth/login"
         or path == "/auth/callback"
+        or path == "/api/mcp/oauth/callback"
         or path == "/auth/show-identity/callback"
         or path == "/auth/logout"
         or path == "/api/session"
@@ -1710,6 +1711,7 @@ def _remote_auth_exempt_before_host_validation() -> bool:
         request.path
         in {
             "/auth/callback",
+            "/api/mcp/oauth/callback",
             "/auth/logout",
             "/api/session",
             "/api/csrf-token",
@@ -9545,8 +9547,33 @@ async def mcp_refresh(name: str, starlette_request: FastAPIRequest):
 @app.delete("/api/mcp/{name}", include_in_schema=False)
 async def mcp_remove(name: str, starlette_request: FastAPIRequest):
     from vibe import mcp_api
-
     return await _mcp_route(starlette_request, mcp_api.remove, name)
+
+
+async def mcp_oauth_start(name: str, starlette_request: FastAPIRequest):
+    from vibe import mcp_api
+    return await _mcp_route(starlette_request, lambda: mcp_api.oauth_start(name, _mcp_body(), _current_origin()))
+
+
+@app.get("/api/mcp/oauth/callback", include_in_schema=False)
+async def mcp_oauth_callback(starlette_request: FastAPIRequest):
+    from vibe import mcp_api
+    query = {key: value for key, value in request.query_params.items()}
+    body, status = await mcp_api.run(mcp_api.oauth_callback, query)
+    return jsonify(body), status
+
+
+@app.post("/api/mcp/{name}/oauth/complete", include_in_schema=False)
+async def mcp_oauth_complete(name: str, starlette_request: FastAPIRequest):
+    from vibe import mcp_api
+    body = _mcp_body()
+    return await _mcp_route(starlette_request, lambda: mcp_api.oauth_complete(name, str(body.get("callbackUrl") or "")))
+
+
+@app.post("/api/mcp/{name}/oauth/logout", include_in_schema=False)
+async def mcp_oauth_logout(name: str, starlette_request: FastAPIRequest):
+    from vibe import mcp_api
+    return await _mcp_route(starlette_request, mcp_api.oauth_logout, name)
 
 
 # Agent Skills — thin shells over api.* (which wraps the askill CLI). Pure

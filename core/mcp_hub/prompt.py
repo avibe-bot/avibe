@@ -29,7 +29,7 @@ def build_mcp_prompt_blocks() -> list[RenderedPromptBlock]:
     except Exception:
         logger.warning("MCP prompt index unavailable", exc_info=True)
         return []
-    entries, next_page = catalog_page_of(packages, server_row, 1)
+    entries, next_page = catalog_page_of([item for item in packages if item.get("auth") != "needs_login"], server_row, 1)
     if not entries:
         return []
     blocks = [render_prompt_block("mcp-capabilities-prompt")]

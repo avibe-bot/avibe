@@ -569,6 +569,7 @@ export interface McpServerSummary {
   revision?: string | null;
   generatedAt?: string;
   serverVersion?: string;
+  auth?: 'none' | 'needs_login' | 'ok';
   toolCount?: number;
   tools?: { name: string; description?: string }[];
   diagnostics?: string[];
@@ -952,6 +953,9 @@ export type ApiContextType = {
   discoverMcp: () => Promise<McpResult & { results?: { name: string; status: string; error?: string; toolCount?: number }[] }>;
   refreshMcp: (name: string) => Promise<McpResult & { name?: string; toolCount?: number }>;
   removeMcp: (name: string) => Promise<McpResult>;
+  loginMcp: (name: string, origin?: string) => Promise<any>;
+  completeMcpLogin: (name: string, callbackUrl: string) => Promise<any>;
+  logoutMcp: (name: string) => Promise<any>;
   getMcpServer: (name: string) => Promise<McpResult & { server?: McpServerSummary; tools?: McpTool[] }>;
   previewSkillSource: (source: string, params?: { projectId?: string }) => Promise<SkillsPreviewResult>;
   addSkill: (payload: { source: string; scope: SkillScope; projectId?: string; backends?: string[]; all?: boolean; skill?: string; copy?: boolean }) => Promise<SkillsMutationResult>;
@@ -4336,6 +4340,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     discoverMcp: () => postJson('/api/mcp/discover', {}, { handleError: false }),
     refreshMcp: (name) => postJson(`/api/mcp/${encodeURIComponent(name)}/refresh`, {}, { handleError: false }),
     removeMcp: (name) => deleteJson(`/api/mcp/${encodeURIComponent(name)}`, undefined, { handleError: false }),
+    loginMcp: (name, origin) => postJson(`/api/mcp/${encodeURIComponent(name)}/oauth/start`, { origin }, { handleError: false }),
+    completeMcpLogin: (name, callbackUrl) => postJson(`/api/mcp/${encodeURIComponent(name)}/oauth/complete`, { callbackUrl }, { handleError: false }),
+    logoutMcp: (name) => postJson(`/api/mcp/${encodeURIComponent(name)}/oauth/logout`, {}, { handleError: false }),
     getMcpServer: (name) => getJson(`/api/mcp/${encodeURIComponent(name)}`, { handleError: false }),
     previewSkillSource: (source, params) =>
       postJson('/api/skills/preview', { source, project_id: params?.projectId }),

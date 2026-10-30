@@ -89,7 +89,11 @@ export const McpHubSection: React.FC = () => {
   const [showAdd, setShowAdd] = useState(false);
   const [addText, setAddText] = useState('');
   const [addError, setAddError] = useState<string | null>(null);
+  const [loginFor, setLoginFor] = useState<McpServerSummary | null>(null);
+  const [authorizeUrl, setAuthorizeUrl] = useState<string | null>(null);
+  const [callbackText, setCallbackText] = useState('');
   const [confirmDelete, setConfirmDelete] = useState<McpServerSummary | null>(null);
+
   if (expandedFor !== selected) {
     setExpandedFor(selected);
     setExpandedTools({});
@@ -151,6 +155,26 @@ export const McpHubSection: React.FC = () => {
     }
   };
 
+  const onLogin = async (server: McpServerSummary) => {
+    setBusy(`login:${server.name}`);
+    try {
+      const res = await api.loginMcp(server.name, window.location.origin);
+      if (!res.ok) { showToast(describe(res.error), 'error'); return; }
+      setLoginFor(server); setAuthorizeUrl(res.authorizeUrl ?? null);
+      if (res.authorizeUrl) window.open(res.authorizeUrl, '_blank', 'noopener,noreferrer');
+    } finally { setBusy(null); }
+  };
+
+  const onCompleteLogin = async () => {
+    if (!loginFor) return;
+    setBusy(`login:${loginFor.name}`);
+    try {
+      const res = await api.completeMcpLogin(loginFor.name, callbackText);
+      if (!res.ok) { showToast(describe(res.error), 'error'); return; }
+      setLoginFor(null); setAuthorizeUrl(null); setCallbackText(''); await load();
+      showToast(t('mcpHub.loginComplete'), 'success');
+    } finally { setBusy(null); }
+  };
   const onAdd = async () => {
     setBusy('add');
     setAddError(null);
@@ -279,7 +303,8 @@ export const McpHubSection: React.FC = () => {
                     {t('mcpHub.toolMeta', { count: server.toolCount ?? 0, transport: transportLabel(server) })}
                   </span>
                 </span>
-                <ChevronRight className="size-3.5 text-muted" />
+                    {server.auth === 'needs_login' ? <Button type="button" size="xs" variant="outline" onClick={(event) => { event.stopPropagation(); void onLogin(server); }}>{t('mcpHub.login')}</Button> : null}
+                    <ChevronRight className="size-3.5 text-muted" />
               </button>
             ))
           )}
@@ -330,6 +355,7 @@ export const McpHubSection: React.FC = () => {
                     ? t('mcpHub.serverVersion', { version: current.serverVersion })
                     : null}
             </div>
+            {current.auth === 'needs_login' ? <Button type="button" variant="brand" size="sm" onClick={() => void onLogin(current)}>{t('mcpHub.login')}</Button> : null}
             {canManage ? (
               <div className="flex items-center gap-2 pt-1">
                 <Button type="button" variant="outline" size="xs" disabled={busy !== null} onClick={() => void onRefreshOne(current.name)}>
@@ -345,6 +371,16 @@ export const McpHubSection: React.FC = () => {
           </div>
         ) : null}
       </div>
+
+      <Dialog open={loginFor !== null} onOpenChange={(open) => (!open ? setLoginFor(null) : undefined)}>
+        <DialogContent className="max-w-lg" closeLabel={t('common.close')}>
+          <DialogTitle>{t('mcpHub.loginTitle')}</DialogTitle>
+          <DialogDescription>{t('mcpHub.loginHint')}</DialogDescription>
+          {authorizeUrl ? <Button type="button" variant="outline" onClick={() => window.open(authorizeUrl, '_blank', 'noopener,noreferrer')}>{t('mcpHub.openAuthorize')}</Button> : null}
+          <Textarea value={callbackText} onChange={(event) => setCallbackText(event.target.value)} className="min-h-20 font-mono text-[12px]" placeholder={t('mcpHub.callbackPlaceholder')} />
+          <DialogFooter><Button type="button" variant="outline" onClick={() => setLoginFor(null)}>{t('common.cancel')}</Button><Button type="button" disabled={!callbackText.trim() || busy !== null} onClick={() => void onCompleteLogin()}>{t('mcpHub.completeLogin')}</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={showAdd} onOpenChange={(open) => (!open ? setShowAdd(false) : undefined)}>
         <DialogContent className="max-w-lg" closeLabel={t('common.close')}>

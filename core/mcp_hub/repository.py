@@ -22,6 +22,7 @@ from typing import Any, Optional
 from config import paths
 from config.atomic_io import write_atomic
 from core.mcp_hub import native
+from core.mcp_hub import oauth as mcp_oauth
 from core.mcp_hub.definition import validate_name
 from core.mcp_hub.errors import McpHubError
 from core.private_fs import ensure_private_directory
@@ -196,6 +197,7 @@ def remove_package(name: str) -> str:
     """Avibe source: delete artifacts. Native source: hide in Avibe only."""
 
     validate_name(name)
+    mcp_oauth.delete_oauth(name)
     if read_avibe_definition(name) is not None:
         directory = package_dir(name)
         if directory.exists():
@@ -362,8 +364,14 @@ def summarize(name: str, servers: Optional[dict[str, native.NativeServer]] = Non
             command = " ".join([transport.get("command") or "", *(transport.get("args") or [])]).strip()
         else:
             url = str(transport.get("url") or "")
+    if transport.get("type") == "streamable_http" and definition.get("oauth"):
+        auth = mcp_oauth._read(name, str(transport.get("url") or ""))
+        summary_auth = "ok" if isinstance(auth.get("tokens"), dict) else "needs_login"
+    else:
+        summary_auth = "none"
     return {
         "name": name,
+        "auth": summary_auth,
         "source": source,
         "sourcePath": source_path,
         "description": manifest.get("description") or "",

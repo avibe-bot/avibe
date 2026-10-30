@@ -6503,6 +6503,13 @@
     "succeededCount": "{{count}} succeeded",
     "failedCount": "{{count}} failed:",
     "failedLine": "{{name}} — {{error}}",
-    "callHint": "vibe mcp {{name}} <tool>"
+    "callHint": "vibe mcp {{name}} <tool>",
+    "login": "Log in",
+    "loginTitle": "Log in to MCP server",
+    "loginHint": "Authorize in the new tab, then paste the callback URL here when needed.",
+    "openAuthorize": "Open authorization",
+    "callbackPlaceholder": "Paste the callback URL",
+    "completeLogin": "Complete login",
+    "loginComplete": "MCP login completed"
   }
 }
