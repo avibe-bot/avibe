@@ -15,6 +15,7 @@ import { McpHubSection } from './McpHubSection';
 const listMcpServers = vi.fn();
 const addMcp = vi.fn();
 const assign = vi.fn();
+const replaceState = vi.fn();
 
 vi.mock('../../../context/ApiContext', async (original) => ({
   ...(await original<typeof import('../../../context/ApiContext')>()),
@@ -72,6 +73,7 @@ beforeEach(() => {
   listMcpServers.mockReset();
   addMcp.mockReset();
   assign.mockReset();
+  replaceState.mockReset();
   listMcpServers.mockResolvedValue({
     ok: true,
     oauthMode: 'direct',
@@ -87,6 +89,7 @@ beforeEach(() => {
       assign,
     },
   });
+  vi.spyOn(window.history, 'replaceState').mockImplementation(replaceState);
 });
 
 afterEach(() => {
@@ -133,5 +136,35 @@ describe('McpHubSection add OAuth', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: en.common.done }));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     expect(listMcpServers.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it('selects the returned server once then lets another click take over', async () => {
+    listMcpServers.mockResolvedValue({
+      ok: true,
+      oauthMode: 'direct',
+      servers: [
+        { name: 'suno', auth: 'ok', source: 'avibe', transport: 'http', toolCount: 1 },
+        { name: 'echo', auth: 'ok', source: 'avibe', transport: 'stdio', toolCount: 1 },
+      ],
+    });
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: {
+        origin: 'http://127.0.0.1:5123',
+        pathname: '/skills',
+        search: '?mcp=suno&oauth=success',
+        href: 'http://127.0.0.1:5123/skills?mcp=suno&oauth=success',
+        assign,
+      },
+    });
+    renderHub();
+    const suno = await screen.findByRole('button', { name: /suno/ });
+    await waitFor(() => {
+      expect(suno.className).toContain('border-mint');
+      expect(replaceState).toHaveBeenCalledWith({}, '', '/skills');
+    });
+    fireEvent.click(screen.getByRole('button', { name: /echo/ }));
+    expect(screen.getByRole('button', { name: /echo/ }).className).toContain('border-mint');
+    expect(suno.className).not.toContain('border-mint');
   });
 });

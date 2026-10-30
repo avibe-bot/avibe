@@ -116,8 +116,6 @@ export const McpHubSection: React.FC = () => {
   const [addResult, setAddResult] = useState<{ names: string[]; failedLines: string[] } | null>(null);
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<string | null>(() => new URLSearchParams(window.location.search).get('mcp'));
-  const returnMcp = new URLSearchParams(window.location.search).get('mcp');
-  if (returnMcp && selected !== returnMcp) setSelected(returnMcp);
   const [expandedFor, setExpandedFor] = useState<string | null>(null);
   const [expandedTools, setExpandedTools] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState<string | null>(null);
@@ -165,6 +163,8 @@ export const McpHubSection: React.FC = () => {
     const params = new URLSearchParams(window.location.search);
     if (params.get('oauth') === 'success') {
       showToast(t('mcpHub.loginComplete'), 'success');
+    }
+    if (params.has('mcp') || params.has('oauth')) {
       window.history.replaceState({}, '', window.location.pathname);
     }
   }, [load, showToast, t]);
