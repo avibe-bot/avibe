@@ -31,19 +31,34 @@ it('shows the numbered automatic order after search and saves only the field cha
   const rows = within(card).getAllByRole('listitem');
   expect(rows.map((row) => row.getAttribute('data-executor'))).toEqual(['src_localfetch', 'src_tavily01', 'src_exakeyless', 'src_jinakeyless']);
   expect(card.textContent).toContain('最近一次由 本机');
-  expect(card.textContent).toContain('默认最后兜底');
-  expect(card.textContent).toContain('出口 IP');
-  expect(card.textContent).toContain('密钥由网关保管');
-  expect(card.textContent).toContain('$1.6 / 千页');
+  expect(card.textContent).toContain('可渲染 JS');
+  expect(card.textContent).toContain('密钥只保存在网关');
+  // One line per price, in the row's price column; a list price opens the vendor's page.
+  expect(within(rows[1]).getByRole('link', { name: '$1.60 / 千页' })).toBeTruthy();
+  // The default order and where a read goes are the heading's ⓘ, not text under the list.
+  expect(card.textContent).not.toContain('出口 IP');
+  // Hovered and then clicked, the hint stays open.
+  const about = within(card).getByRole('button', { name: '关于读取顺序' });
+  await userEvent.click(about);
+  expect(screen.getByText(/出口 IP/)).toBeTruthy();
+  await userEvent.unhover(about);
   expect(within(card).queryByText('优先使用模型自身的搜索')).toBeNull();
+  // The order is automatic, so there is nothing to reset.
+  expect(within(card).queryByRole('button', { name: '恢复自动' })).toBeNull();
   await userEvent.click(within(rows[0]).getByRole('switch'));
   await userEvent.click(within(rows[3]).getByRole('button', { name: /上移/ }));
-  await userEvent.click(within(card).getByRole('button', { name: '恢复自动' }));
   expect(save.mock.calls).toEqual([
     ['web_fetch', { services: { src_localfetch: { enabled: false } } }],
     ['web_fetch', { executor_order: ['src_localfetch', 'src_tavily01', 'src_jinakeyless', 'src_exakeyless'] }],
-    ['web_fetch', { executor_order: null }],
   ]);
+});
+
+it('offers a reset only once the fetch order is customized', async () => {
+  const save = vi.fn();
+  const custom = { ...fetch, executor_order: ['src_tavily01', 'src_localfetch'] };
+  render(wrap(<ToolsTab read={readyRegion({ tools: [custom] })} sources={SEARCH_SOURCES} pending={new Set()} onSave={save} onClear={vi.fn()} onRetry={vi.fn()} />));
+  await userEvent.click(within(screen.getByRole('region', { name: '网页读取' })).getByRole('button', { name: '恢复自动' }));
+  expect(save).toHaveBeenCalledWith('web_fetch', { executor_order: null });
 });
 
 it('keeps disabled rows visible and immovable, with no key/remove or global local retry', async () => {

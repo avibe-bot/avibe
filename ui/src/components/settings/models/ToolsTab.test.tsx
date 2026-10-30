@@ -455,11 +455,14 @@ describe('ToolsTab executor order', () => {
 
     await user.click(within(card('网页搜索')).getByRole('button', { name: /^高级/ }));
     const [grok, relay, subscription] = within(card('网页搜索')).getAllByRole('listitem');
-    expect(grok.textContent).toContain('$0.005 / 次API 标价 · 另加 $0.005 / 条帖子');
+    // Every row's price is one line in the same unit, per thousand; what else it means is its tooltip.
+    const price = within(grok).getByRole('link', { name: '$5.00 / 千次' });
+    expect(price.getAttribute('title')).toBe(`API 标价 · ${PRICED.as_of} · 另计 grok-fast 的 token，另加 $0.005 / 条帖子`);
+    expect(price.getAttribute('href')).toBe(PRICED.url);
     expect(relay.textContent).toContain('暂无标价');
     expect(relay.textContent).not.toContain('$0');
     // A subscription is never billed per call, whatever list price its vendor has.
-    expect(subscription.textContent).toContain('订阅内含不另计费');
+    expect(within(subscription).getByText('订阅内含').getAttribute('title')).toBe('不另计费');
   });
 });
 

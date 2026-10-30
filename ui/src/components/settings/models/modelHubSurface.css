@@ -2242,12 +2242,60 @@
   row-gap: 6px;
   padding: var(--model-hub-tool-row-pad-y) var(--model-hub-tool-row-pad-x);
 }
-.model-hub-tool-executor-row { grid-template-columns: auto minmax(0, 1fr) minmax(0, auto) auto; }
+/* An order row: position (arrows, ordinal), identity, price, switch. The price and switch columns have one width in
+   every row, so prices line up down the list whatever their text, and each switch sits at the row's end. */
+.model-hub-tool-executor-row {
+  --model-hub-order-price-width: 8.5rem;
+  --model-hub-order-switch-width: 36px;
+  grid-template-columns: auto minmax(0, 1fr) var(--model-hub-order-price-width) var(--model-hub-order-switch-width);
+}
+.model-hub-tool-executor-row.is-off > :nth-child(2),
+.model-hub-tool-executor-row.is-off > :nth-child(3) { opacity: 0.55; }
+.model-hub-order-price {
+  justify-self: end;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: var(--model-hub-usage-cell-size);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  line-height: 18px;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+a.model-hub-order-price { text-underline-offset: 2px; }
+a.model-hub-order-price:hover { text-decoration: underline; }
+.model-hub-order-price.is-muted { color: var(--model-hub-usage-note-ink); font-weight: 400; }
+.model-hub-order-switch { display: flex; justify-content: flex-end; }
+.model-hub-order-stepper { display: flex; flex-direction: column; }
+.model-hub-order-step {
+  display: inline-flex;
+  width: 18px;
+  height: 14px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  color: var(--model-hub-usage-note-ink);
+}
+.model-hub-order-step svg { width: 12px; height: 12px; }
+.model-hub-order-step:hover:not(:disabled) { background: var(--model-hub-wash-14); color: var(--foreground); }
+.model-hub-order-step:focus-visible { outline: 2px solid var(--mint); outline-offset: 0; }
+.model-hub-order-step:disabled { opacity: 0.3; }
+.model-hub-order-kind {
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--model-hub-usage-note-ink);
+  font-size: var(--model-hub-usage-note-size);
+  line-height: 16px;
+}
 .model-hub-tool-pair-row { grid-template-columns: minmax(0, 1fr) minmax(0, auto) auto; }
 /* Below md a row stacks: identity, then its state or price, then its actions. */
 @media (max-width: 767px) {
   .model-hub-tool-executor-row { grid-template-columns: auto minmax(0, 1fr) auto; }
   .model-hub-tool-executor-row > :nth-child(3) { grid-column: 2 / -1; grid-row: 2; }
+  .model-hub-tool-executor-row > .model-hub-order-price { justify-self: start; }
   .model-hub-tool-pair-row { grid-template-columns: minmax(0, 1fr) auto; }
   .model-hub-tool-pair-row > :nth-child(2) { grid-column: 1 / -1; grid-row: 2; }
 }
