@@ -230,9 +230,9 @@ async def test_a_cancelled_request_is_kept_as_cancelled(store):
     assert meta["state"] == "cancelled" and meta["outcome"]["kind"] == "cancelled"
 
 
-async def test_a_request_whose_consumer_stopped_reading_stays_unknown_never_a_success(store):
-    """No outcome is known: the pending entry written before the send stays, reads ``unknown``, and nothing else is
-    scheduled for it."""
+async def test_a_request_whose_consumer_stopped_reading_is_unknown_to_every_reader(store, tmp_path):
+    """No outcome is known, and never a success: the entry is marked ``unknown`` on disk, so another process (the
+    CLI) sees the same state while the owner still runs, not ``pending``."""
 
     body = _response(_text("partial"), stop_reason="end_turn", input_tokens=1, output_tokens=1)
     sent, _ = await _run(
@@ -244,8 +244,93 @@ async def test_a_request_whose_consumer_stopped_reading_stays_unknown_never_a_su
     )
 
     (meta,) = _kept(store)
-    assert meta["state"] == "unknown" and "outcome" not in meta and "finished_at" not in meta
+    on_disk = json.loads((store.path(meta["id"]) / META_FILE).read_text())
+    assert on_disk["state"] == "unknown" and on_disk["outcome"]["kind"] == "unknown"
     assert (store.path(meta["id"]) / REQUEST_FILE).read_bytes() == sent[0].content
+
+
+async def test_a_request_still_streaming_is_pending_to_every_reader(store):
+    """The other side of the same rule: while the stream is open the entry is active and reads ``pending``."""
+
+    body = _response(_text("partial"), stop_reason="end_turn", input_tokens=1, output_tokens=1)
+    seen: list[tuple[str, str, bool]] = []
+
+    def look(event: Any) -> bool:
+        if not seen:
+            (meta,) = _kept(store)
+            on_disk = json.loads((store.path(meta["id"]) / META_FILE).read_text())
+            # This process reads its active set; another process reads the disk and whether the owner lives.
+            seen.append((meta["state"], on_disk["state"], request_artifacts._owner_alive(on_disk["owner"])))
+        return False
+
+    await _run(
+        _anthropic_hub_request(), lambda _: httpx.Response(200, headers=_served(), text=body), store, gateway=True,
+        consume=look,
+    )
+
+    assert seen == [("pending", "pending", True)]
+    assert _kept(store) == []
+
+
+async def test_a_request_cancelled_while_its_pending_write_runs_is_never_active_or_sent(store, monkeypatch):
+    """The write finishes on its own thread after the cancellation: the entry it wrote is released and marked
+    ``not_sent``, so retention does not keep it for the process's life and no reader sees it pending."""
+
+    entered, release = threading.Event(), threading.Event()
+    begin = RequestArtifactStore.begin
+
+    def slow(self, meta, body):
+        entered.set()
+        release.wait(5)
+        return begin(self, meta, body)
+
+    monkeypatch.setattr(RequestArtifactStore, "begin", slow)
+    sent: list[httpx.Request] = []
+    task = asyncio.create_task(_run(_direct_request("anthropic"), lambda wire: sent.append(wire) or httpx.Response(400), store))
+    await asyncio.to_thread(entered.wait, 5)
+    task.cancel()
+    await asyncio.sleep(0)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert sent == []
+    (meta,) = _kept(store)
+    assert meta["state"] == "unknown" and meta["outcome"]["kind"] == "not_sent"
+    assert meta["id"] not in request_artifacts._ACTIVE
+
+
+class _PrefixThenReset(httpx.AsyncByteStream):
+    def __init__(self, prefix: bytes) -> None:
+        self.prefix = prefix
+
+    async def __aiter__(self):
+        yield self.prefix
+        raise httpx.ReadError("connection reset")
+
+
+async def test_a_capture_only_read_that_fails_keeps_the_errors_own_classification(store):
+    """Past the 64 KiB the error is classified by, reading is for the capture alone: a reset there leaves the error
+    exactly as it is without capture, and the capture says it stopped."""
+
+    message = "prompt is too long: 250000 tokens > 200000 maximum"
+    prefix = json.dumps({"type": "error", "error": {"type": "invalid_request_error", "message": message}}).encode()
+    prefix += b" " * (64 * 1024)
+
+    def answer(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, headers={"content-type": "application/json"}, stream=_PrefixThenReset(prefix))
+
+    _, plain = await _run(_direct_request("anthropic"), answer, None)
+    _, captured = await _run(_direct_request("anthropic"), answer, store)
+
+    assert isinstance(plain[-1], ProviderError)
+    assert (captured[-1].kind, captured[-1].message, captured[-1].status) == (
+        plain[-1].kind, plain[-1].message, plain[-1].status,
+    )
+    (meta,) = _kept(store)
+    assert meta["outcome"]["kind"] == "http_error" and meta["outcome"]["exception_type"] is None
+    assert meta["response"]["read_error"] == "ReadError" and not meta["response"]["read_to_end"]
+    assert (store.path(meta["id"]) / RESPONSE_FILE).read_bytes() == prefix
 
 
 async def test_nothing_is_written_outside_a_capture_scope(tmp_path):
@@ -289,7 +374,8 @@ def _write(store: RequestArtifactStore, *, created_at: str, size: int = 10, owne
            state: str = "failed") -> str:
     meta = {"state": state, "created_at": created_at, "owner": owner or {"pid": 0, "started": None}}
     artifact_id = store.begin(meta, b"x" * size)
-    store.abandon(artifact_id)
+    # Written as found on disk: not this process's active attempt, whatever its recorded state and owner.
+    request_artifacts._ACTIVE.discard(artifact_id)
     return artifact_id
 
 

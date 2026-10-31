@@ -18,8 +18,11 @@ Lifecycle:
 - A semantically successful attempt is deleted: a ``Done``, or an Anthropic ``pause_turn`` sub-request that ended
   normally.
 - Every other ending is kept, marked failed or cancelled.
-- An attempt that never reached an ending stays ``pending`` on disk. It is shown as ``unknown`` once its owner
-  process is gone, or once it is no longer active in the owning process. It is never treated as a success.
+- An attempt whose consumer closed it, or whose task was cancelled, before any ending is marked ``unknown`` by a
+  shielded write its driver awaits; one cancelled before it was sent is marked ``unknown`` (``not_sent``).
+- An attempt its process never got to mark (a crash, or a second cancellation during that write) stays ``pending``
+  on disk. It reads as ``unknown`` once its owner process is gone, or, in the owner, once it is no longer active.
+  It is never treated as a success.
 
 Files are ``0600`` in ``0700`` directories and created with ``O_EXCL | O_NOFOLLOW``. All filesystem work runs on one
 private worker thread, never on the event loop. A failure to record never changes the request's outcome; it is
@@ -193,6 +196,8 @@ class ResponseCapture:
         self.headers: dict[str, str] = {}
         self.total = 0
         self.read_to_end = False
+        #: What stopped a read made only for the capture (an exception type, or ``cancelled``).
+        self.read_error: str | None = None
         self._head = bytearray()
         self._tail: deque[bytes] = deque()
         self._tail_size = 0
@@ -230,6 +235,9 @@ class ResponseCapture:
     def finish(self) -> None:
         self.read_to_end = True
 
+    def interrupted(self, reason: str) -> None:
+        self.read_error = reason
+
     def _tail_bytes(self) -> bytes:
         return b"".join(self._tail)[-STREAM_TAIL_BYTES:]
 
@@ -245,6 +253,7 @@ class ResponseCapture:
             "headers": dict(self.headers),
             "read_bytes": self.total,
             "read_to_end": self.read_to_end,
+            "read_error": self.read_error,
             "captured_bytes": captured,
             "truncated": omitted > 0,
         }
@@ -340,12 +349,19 @@ class RequestArtifactStore:
             _ACTIVE.discard(artifact_id)
         self.prune()
 
-    def abandon(self, artifact_id: str) -> None:
-        """The attempt ended without a known outcome (its consumer closed or its task was cancelled). Nothing is
-        written: the pending entry already on disk reads as ``unknown`` from now on."""
+    def abandon(self, artifact_id: str, kind: str = UNKNOWN) -> None:
+        """The attempt ended with no known outcome: its consumer closed it or its task was cancelled (``unknown``),
+        or it was cancelled before it was sent (``not_sent``). It is no longer active, and every reader, in any
+        process, sees ``unknown``."""
 
         with _ACTIVE_LOCK:
             _ACTIVE.discard(artifact_id)
+        directory = self.path(artifact_id)
+        meta = self.meta(artifact_id)
+        meta["state"] = UNKNOWN
+        meta["outcome"] = {"kind": kind, "error_kind": None, "http_status": None, "exception_type": None}
+        meta["finished_at"] = _now()
+        _replace_private(directory / META_FILE, _encode(meta))
 
     # -- reads -------------------------------------------------------------------------------------------------
 
@@ -566,13 +582,26 @@ class RequestAttempt:
         except Exception as exc:
             _record_failure("keep a failed request", exc)
 
-    def abandon(self) -> None:
-        """No outcome is known; the durable pending entry stays and reads as ``unknown``. Nothing is scheduled."""
+    def release(self) -> None:
+        """No longer active in this process, at once and without I/O: retention may treat it as ended."""
+
+        with _ACTIVE_LOCK:
+            _ACTIVE.discard(self.id)
+
+    async def abandon(self) -> None:
+        """No outcome is known: mark the durable entry ``unknown`` for every reader. The write is shielded and owned
+        by the caller's await; if that await is cancelled again, the write already queued still completes."""
 
         if self.ended:
             return
         self.ended = True
-        self.store.abandon(self.id)
+        self.release()
+        try:
+            await asyncio.shield(_off_loop(self.store.abandon, self.id))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _record_failure("mark an interrupted request", exc)
 
 
 async def begin_attempt(request: Any, *, endpoint: Any, protocol: str) -> RequestAttempt | None:
@@ -603,11 +632,40 @@ async def begin_attempt(request: Any, *, endpoint: Any, protocol: str) -> Reques
                 "body_sha256": hashlib.sha256(body).hexdigest(),
             },
         }
-        artifact_id = await _off_loop(scope.store.begin, meta, body)
+    except Exception as exc:
+        _record_failure("record a pending request", exc)
+        return None
+    written = asyncio.get_running_loop().run_in_executor(_worker(), scope.store.begin, meta, body)
+    try:
+        artifact_id = await asyncio.shield(written)
+    except asyncio.CancelledError:
+        # Cancelled while the write ran: it may still finish, and what it wrote was never sent. Release it as soon
+        # as it does, then mark it for every reader before the cancellation goes on.
+        written.add_done_callback(_release_unsent)
+        await _settle_unsent(scope.store, written)
+        raise
     except Exception as exc:
         _record_failure("record a pending request", exc)
         return None
     return RequestAttempt(scope.store, artifact_id)
+
+
+def _release_unsent(written: asyncio.Future[str]) -> None:
+    if not written.cancelled() and written.exception() is None:
+        with _ACTIVE_LOCK:
+            _ACTIVE.discard(written.result())
+
+
+async def _settle_unsent(store: RequestArtifactStore, written: asyncio.Future[str]) -> None:
+    try:
+        artifact_id = await asyncio.shield(written)
+        await asyncio.shield(_off_loop(store.abandon, artifact_id, "not_sent"))
+    except asyncio.CancelledError:
+        # Cancelled again: the entry is released in memory (``_release_unsent``) and stays pending on disk until
+        # its owner exits, when every reader sees it as unknown.
+        pass
+    except Exception as exc:
+        _record_failure("mark an unsent request", exc)
 
 
 def _record_failure(action: str, exc: BaseException) -> None:

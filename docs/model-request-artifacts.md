@@ -21,13 +21,12 @@ Anthropic Messages, OpenAI Responses, OpenAI Chat Completions, and Google.
    - Every other ending is kept with its outcome: an HTTP error (including the gateway's `pin_unavailable` 409 and
      an HTTP 400 that leads to a resend), a stream that returned HTTP 200 but ended with an error or a stall, a
      network failure, or a cancellation. HTTP 200 alone is not success.
-3. **A request with no known ending** stays `pending` on disk:
-   - its consumer stopped reading;
-   - its task was cancelled before a terminal;
-   - the process died.
-
-   `vibe model-requests` shows it as `unknown` once it is no longer being sent, or once its owner process is gone. It
-   is never treated as a success.
+3. **A request with no known ending** is marked `unknown`, never success:
+   - its consumer stopped reading, or its task was cancelled before a terminal (the driver awaits a shielded write
+     that marks it, visible to every reader at once);
+   - it was cancelled while its pending write ran, before it was sent (`unknown`, outcome `not_sent`);
+   - the process died, or was cancelled again during that write: the entry stays `pending` on disk, and
+     `vibe model-requests` shows it as `unknown` once its owner process is gone.
 
 Outside a Vibey Turn nothing is captured: the library default is off, so tests and other callers stay hermetic.
 
@@ -61,10 +60,13 @@ response header (kept in `meta.json`) and the Model Hub provenance of the same T
   It never holds a credential or any other header, and never an error message: a provider's message can echo the
   prompt, tools, or a credential. The response body is in `response.bin`.
 - **`response.bin`**:
-  - An HTTP error body is kept from its start, up to 4 MiB.
+  - An HTTP error body is kept from its start, up to 4 MiB. Reading past the first 64 KiB, which the error's
+    classification uses, is for the artifact only: each such read waits at most 10 s, and a stall, reset, or
+    cancellation there only marks the capture incomplete (`read_error`). The error is classified exactly as without
+    capture.
   - A stream (HTTP 2xx) keeps its first 64 KiB and its last 1 MiB, so the terminal error event of a long response
     survives.
-  - Any cut is stated in `meta.json` (`truncated`, `truncation`, `omitted_bytes`, `read_to_end`).
+  - Any cut is stated in `meta.json` (`truncated`, `truncation`, `omitted_bytes`, `read_to_end`, `read_error`).
 
 The files can contain prompts, tool output, and attachments. Directories are `0700`, files `0600`. Files are
 created with `O_EXCL | O_NOFOLLOW`, and a store path that is a symbolic link is refused.

@@ -2041,10 +2041,10 @@ async def drive_sse_stream(
                 yield terminal
     finally:
         assembler.end_driver()
-        if attempt is not None:
-            # Ended without a terminal (its consumer closed it, or its task was cancelled): the pending entry
-            # already on disk stays and reads as unknown.
-            attempt.abandon()
+        if attempt is not None and not attempt.ended:
+            # Ended without a terminal (its consumer closed it, or its task was cancelled): never active again,
+            # whatever the cleanup below does. Its durable entry is marked unknown at the end.
+            attempt.release()
         async def close_opened_response() -> None:
             if opening is None:
                 return
@@ -2078,6 +2078,8 @@ async def drive_sse_stream(
                     cleanup.add_done_callback(_consume_task_result)
 
                 opening.add_done_callback(close_late_response)
+        if attempt is not None and not attempt.ended:
+            await attempt.abandon()
 
 
 def _attempt_failure_kind(error: ProviderError, response: httpx.Response | None) -> str:
@@ -2184,24 +2186,35 @@ async def read_response_body(
     """Read an error body through the shared cancellation owner with a byte cap.
 
     The text returned is at most ``max_bytes``. ``capture`` receives the raw bytes as read, and reading goes on past
-    ``max_bytes`` until the body ends or the capture holds its own limit.
+    ``max_bytes`` until the body ends or the capture holds its own limit. That reading is for the capture alone: it
+    waits at most ``CLEANUP_TIMEOUT_S`` per read, and whatever ends it (a stall, a reset, a cancellation) only marks
+    the capture incomplete. The text and so the error's classification are what they would be without capture.
     """
 
     iterator = response.aiter_bytes().__aiter__()
     chunks: list[bytes] = []
     size = 0
     while size < max_bytes or (capture is not None and not capture.full):
+        capture_only = size >= max_bytes
         try:
             chunk = await _await_network(
                 iterator.__anext__(),
                 cancel,
-                timeout_s=PROVIDER_SILENCE_TIMEOUT_S,
+                timeout_s=CLEANUP_TIMEOUT_S if capture_only else PROVIDER_SILENCE_TIMEOUT_S,
             )
         except StopAsyncIteration:
             if capture is not None:
                 capture.finish()
             break
+        except Exception as exc:
+            if not capture_only or capture is None:
+                raise
+            capture.interrupted(type(exc).__name__)
+            break
         if chunk is None:
+            if capture_only and capture is not None:
+                capture.interrupted("cancelled")
+                break
             return None
         if not chunk:
             continue
