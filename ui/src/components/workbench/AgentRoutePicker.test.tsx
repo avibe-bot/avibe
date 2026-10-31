@@ -640,21 +640,36 @@ describe('AgentRoutePicker compact presentation', () => {
     );
   };
 
-  it('says so where the last fast response did not confirm the fast tier ran, and keeps the choice', async () => {
+  it('keeps Fast switchable where the last fast response did not confirm it, and marks it hollow with a note', async () => {
     // Opus's hop is asked for the fast tier, but a relay answered at the standard one.
     hubMode = 'hub';
     catalogReasoning = { sonnet: [{ value: 'low', label: 'low' }], opus: [{ value: 'low', label: 'low' }] };
     catalogFastUnconfirmed = ['opus'];
     const user = userEvent.setup();
-    render(<FastOwner initial={{ ...CLAUDE_ROUTE, model: 'opus' }} initialSpeed="fast" onSpeed={vi.fn()} />);
+    const onSpeed = vi.fn();
+    render(<FastOwner initial={{ ...CLAUDE_ROUTE, model: 'opus' }} initialSpeed="fast" onSpeed={onSpeed} />);
+    const solid = () => screen.queryByLabelText('chat.picker.fastOn');
+    const hollow = () => screen.queryByLabelText('chat.picker.fastOnUnconfirmed');
+
     await openMenu(user);
-    const toggle = screen.getByRole('button', { name: 'chat.picker.fast' }) as HTMLButtonElement;
-    expect(toggle.disabled).toBe(true);
-    expect(toggle.getAttribute('aria-pressed')).toBe('true');
+    // The trigger says Fast is on but not confirmed: a hollow bolt, never the filled one.
+    expect(hollow()?.getAttribute('data-fast-mark')).toBe('unconfirmed');
+    expect(solid()).toBeNull();
+    const toggle = () => screen.getByRole('button', { name: 'chat.picker.fast' }) as HTMLButtonElement;
+    expect(toggle().disabled).toBe(false);
+    expect(toggle().getAttribute('aria-pressed')).toBe('true');
     expect(screen.getByRole('tooltip').textContent).toContain('chat.picker.fastUnconfirmed');
-    // No mark: nothing says the route runs fast. A touch screen reads why.
-    expect(screen.queryByLabelText('chat.picker.fastOn')).toBeNull();
-    expect(screen.getByText('chat.picker.fastUnconfirmedCaption')).not.toBeNull();
+    // Every device reads why, not only a touch screen.
+    expect(screen.getByText('chat.picker.fastUnconfirmedNote')).not.toBeNull();
+
+    // The user can stop paying for it, and try it again.
+    await user.click(toggle());
+    expect(onSpeed).toHaveBeenLastCalledWith(null);
+    expect(hollow()).toBeNull();
+    expect(screen.queryByText('chat.picker.fastUnconfirmedNote')).toBeNull();
+    await user.click(toggle());
+    expect(onSpeed).toHaveBeenLastCalledWith('fast');
+    expect(hollow()).not.toBeNull();
   });
 
   it("judges Fast on the Agent's model for a route that names none", async () => {

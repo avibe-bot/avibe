@@ -11,7 +11,9 @@ const EFFORTS = ['low', 'medium', 'high', 'xhigh'].map((value) => ({ value, labe
 
 async function serveChat(
   page: Page,
-  { running, agentName = 'pm-claude', fast = false }: { running: boolean; agentName?: string; fast?: boolean },
+  { running, agentName = 'pm-claude', fast = false, confirmed = null }: {
+    running: boolean; agentName?: string; fast?: boolean; confirmed?: boolean | null;
+  },
 ) {
   const denied = await serveProduct(page);
   const session = {
@@ -45,6 +47,7 @@ async function serveChat(
       context_window: null, max_output_tokens: null, input_modalities: [], output_modalities: [],
       supports_tools: null, supports_reasoning: true, reasoning_efforts: ['low', 'medium', 'high', 'xhigh'],
       locked: false, routeable: true, effort_menu: { omitted: [], not_on: {} }, fast_mode: true,
+      fast_mode_confirmed: confirmed,
     }] } }
     : { ok: false } }));
   await page.route('**/api/claude/models', (route) => route.fulfill({ json: {
@@ -154,8 +157,12 @@ test('a name wider than a crowded phone row keeps its beginning and ends in an e
   expect(denied).toEqual([]);
 });
 
-test('a route that runs fast keeps its mark beside the chevron when a crowded phone row drops detail', async ({ page }) => {
-  const denied = await serveChat(page, { running: true, fast: true });
+for (const { label, confirmed, markAttr } of [
+  { label: 'runs fast', confirmed: true, markAttr: '' },
+  // Asked for, not confirmed by the last response: the hollow bolt holds the same slot.
+  { label: 'asks for an unconfirmed fast tier', confirmed: false, markAttr: 'unconfirmed' },
+]) test(`a route that ${label} keeps its mark beside the chevron when a crowded phone row drops detail`, async ({ page }) => {
+  const denied = await serveChat(page, { running: true, fast: true, confirmed });
   await page.setViewportSize({ width: 320, height: 760 });
   await open(page, `/chat/${SESSION_ID}`);
   await expect(page.getByRole('button', { name: 'Stop', exact: true })).toBeVisible();
@@ -166,11 +173,12 @@ test('a route that runs fast keeps its mark beside the chevron when a crowded ph
   const trigger = page.locator('main').getByRole('button', { name: /pm-claude/ });
   const mark = trigger.locator('[data-fast-mark]');
   await expect(mark).toBeVisible();
+  await expect(mark).toHaveAttribute('data-fast-mark', markAttr);
   // The mark says the route costs more: detail gives way, the mark does not.
   const parts = trigger.locator('[data-route-trigger-parts]');
   expect(await shownDetails(parts)).not.toContain('effort');
   expect(inside((await mark.boundingBox())!, (await trigger.boundingBox())!)).toBe(true);
-  await page.screenshot({ path: 'e2e/.artifacts/workbench-general/shots/composer-route-trigger-fast.png' });
+  await page.screenshot({ path: `e2e/.artifacts/workbench-general/shots/composer-route-trigger-fast${markAttr ? `-${markAttr}` : ''}.png` });
   expect(denied).toEqual([]);
 });
 

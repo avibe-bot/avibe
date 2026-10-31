@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
-import { Check, ChevronDown, ChevronLeft, ChevronRight, Loader2, Plus, Search, Sparkles } from 'lucide-react';
+import { Check, ChevronDown, ChevronLeft, ChevronRight, Loader2, Plus, Search, Sparkles, TriangleAlert } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
@@ -192,10 +192,11 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   // The closed trigger names the model as the menu does, from labels remembered
   // across pickers and loads; the raw id stays one hover away.
   const currentModelLabel = useRememberedModelLabel(backend, currentModel) ?? currentModel;
-  // Fast mode is the route's to ask for and the model's hop's to grant: the mark
-  // and the toggle follow whether this model's hop is asked for the fast tier
-  // and its last fast response did not say otherwise, so asking on a model
-  // without it keeps the choice for the next model that has it.
+  // Fast mode is the route's to ask for and the response's to confirm. The toggle
+  // works wherever the model's hop is asked for the fast tier, confirmed or not;
+  // the mark says which: a filled bolt where the last fast response ran fast, a
+  // hollow one where it did not confirm it. A model without the tier keeps the
+  // choice for the next model that has it.
   const fastControls = compact && Boolean(onSpeedChange);
   const fastOn = speed === 'fast';
   // The model a turn runs on: the route's own, else its Agent's default, which a
@@ -204,6 +205,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   const fastState = useRememberedFastModel(backend, effectiveModel, fastControls && (fastOn || open));
   const fastOffered = fastState === 'offered';
   const fastActive = fastControls && fastOn && fastOffered;
+  const fastUnconfirmed = fastControls && fastOn && fastState === 'unconfirmed';
   const currentAgentLabel = displayedAgent?.display_name || currentAgent;
   const triggerLabel = (routeIsDefault && defaultLabel) || currentAgentLabel || defaultLabel || t('chat.pickAgent');
   const agentLabel = currentAgentLabel || defaultLabel || t('chat.pickAgent');
@@ -543,6 +545,9 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
             {/* Outside the wrapping parts, so the mark never gives way: it says the
                 route costs more, which a narrow row must not hide. */}
             {fastActive && <FastMark data-fast-mark="" aria-label={t('chat.picker.fastOn')} className="text-gold/60" />}
+            {fastUnconfirmed && (
+              <FastMark data-fast-mark="unconfirmed" aria-label={t('chat.picker.fastOnUnconfirmed')} hollow className="text-gold/70" />
+            )}
             {saving ? (
               <Loader2 className="size-3 shrink-0 animate-spin text-muted" aria-label={t('common.saving')} />
             ) : (
@@ -657,7 +662,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
                   on={fastOn}
                   offered={fastOffered}
                   unconfirmed={fastState === 'unconfirmed'}
-                  active={fastActive}
+                  active={fastActive || fastUnconfirmed}
                   disabled={loadingModels}
                   onToggle={() => onSpeedChange?.(fastOn ? null : 'fast')}
                 />
@@ -702,9 +707,17 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
             )}
             {/* A touch screen has no hover for the toggle's explanation: it is
                 written out while the route asks for the fast tier. */}
-            {fastControls && fastOn && (fastOffered || fastState === 'unconfirmed') && (
+            {fastActive && (
               <p className="pt-1.5 text-[10px] leading-snug text-muted [@media(hover:hover)]:hidden">
-                {fastOffered ? t('chat.picker.fastCaption') : t('chat.picker.fastUnconfirmedCaption')}
+                {t('chat.picker.fastCaption')}
+              </p>
+            )}
+            {/* Not a hover detail: the Session pays for a tier it may not be
+                getting, so every device reads it while Fast is on. */}
+            {fastUnconfirmed && (
+              <p className="flex items-start gap-1 pt-1.5 text-[10px] leading-snug text-gold-ink">
+                <TriangleAlert aria-hidden className="mt-px size-3 shrink-0" />
+                <span>{t('chat.picker.fastUnconfirmedNote')}</span>
               </p>
             )}
           </div>
@@ -930,19 +943,28 @@ const ModelName: React.FC<{ label: string }> = ({ label }) => {
 };
 
 // The fast-mode bolt: a slim filled glyph, quiet enough to sit beside the
-// chevron without competing with the route's name. Colour comes from the caller.
+// chevron without competing with the route's name. Hollow while the last fast
+// response did not confirm the tier: asked for, not filled. Colour comes from
+// the caller.
 const FAST_BOLT_PATH = 'M13.6 2.2 6.4 13.1h5l-1.5 8.7 7.7-11.4h-5.2z';
 
-const FastMark: React.FC<React.SVGProps<SVGSVGElement>> = ({ className, ...props }) => (
-  <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden={props['aria-label'] ? undefined : true} className={clsx('size-[11px] shrink-0', className)} {...props}>
-    <path d={FAST_BOLT_PATH} />
+const FastMark: React.FC<React.SVGProps<SVGSVGElement> & { hollow?: boolean }> = ({ className, hollow, ...props }) => (
+  <svg
+    viewBox="0 0 24 24"
+    fill={hollow ? 'none' : 'currentColor'}
+    aria-hidden={props['aria-label'] ? undefined : true}
+    className={clsx('size-[11px] shrink-0', className)}
+    {...props}
+  >
+    <path d={FAST_BOLT_PATH} {...(hollow ? { stroke: 'currentColor', strokeWidth: 1.8, strokeLinejoin: 'round' as const } : {})} />
   </svg>
 );
 
 // The Fast toggle beside the effort heading. Hover or keyboard focus explains
-// it; a click's focus does not, so the tip never lingers over the model list. A
-// model whose hop offers no fast tier, or whose last fast response did not
-// confirm it ran, keeps the choice but cannot change it here.
+// it; a click's focus does not, so the tip never lingers over the model list.
+// It stays switchable where the last fast response did not confirm the tier: a
+// user may try it, or stop paying for it. Only a model whose hop offers no fast
+// tier keeps the choice without changing it here.
 const FastToggle: React.FC<{
   on: boolean;
   offered: boolean;
@@ -959,7 +981,7 @@ const FastToggle: React.FC<{
         type="button"
         aria-pressed={on}
         aria-describedby={tipId}
-        disabled={disabled || !offered}
+        disabled={disabled || !(offered || unconfirmed)}
         onClick={onToggle}
         className={clsx(
           'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-semibold transition-colors',
@@ -967,7 +989,7 @@ const FastToggle: React.FC<{
           active ? 'border-gold/30 bg-gold-soft text-gold-ink/80' : 'border-border text-muted hover:text-foreground',
         )}
       >
-        <FastMark className={active ? 'text-gold/60' : undefined} />
+        <FastMark hollow={on && unconfirmed} className={active ? (unconfirmed ? 'text-gold/70' : 'text-gold/60') : undefined} />
         {t('chat.picker.fast')}
       </button>
       <span
