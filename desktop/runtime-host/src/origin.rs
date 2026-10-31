@@ -13,12 +13,20 @@
 
 use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use url::{Host, Url};
 
 /// Port of the Vite dev server that serves the bootstrap UI during `npm run tauri dev`.
 /// Must match `desktop/vite.config.ts` and `build.devUrl` in `tauri.conf.json`.
 pub const DEV_SERVER_PORT: u16 = 1420;
+
+/// The bundled WebView may report its initial document before Tauri's local
+/// asset URL has committed. Keep setup bounded while allowing that transition
+/// to complete.
+pub const SHELL_UI_URL_TIMEOUT: Duration = Duration::from_secs(5);
+const SHELL_UI_URL_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum OriginError {
@@ -169,6 +177,48 @@ pub fn is_shell_ui_url(url: &Url) -> bool {
         },
         _ => false,
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ShellUiUrlWaitError {
+    #[error("failed to read the desktop window URL: {0}")]
+    Read(String),
+    #[error("the Avibe desktop window did not load its bundled bootstrap page before timeout; last URL: {last_url}")]
+    TimedOut { last_url: String },
+}
+
+/// Returns the first shell URL reported by a WebView, allowing transient
+/// non-shell URLs while its bundled document commits.
+///
+/// The URL reader is injected so the timing contract can be tested without a
+/// native WebView. A timeout still performs one final read, making the error
+/// name the URL observed at the end of the bounded wait.
+pub fn wait_for_shell_ui_url<F>(mut read_url: F, timeout: Duration) -> Result<Url, ShellUiUrlWaitError>
+where
+    F: FnMut() -> Result<Url, String>,
+{
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        let url = read_url().map_err(ShellUiUrlWaitError::Read)?;
+        if is_shell_ui_url(&url) {
+            return Ok(url);
+        }
+        let last_url = display_url(&url);
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(ShellUiUrlWaitError::TimedOut { last_url });
+        }
+        thread::sleep(SHELL_UI_URL_POLL_INTERVAL.min(remaining));
+    }
+}
+
+fn display_url(url: &Url) -> String {
+    let mut display = url.clone();
+    display.set_query(None);
+    display.set_fragment(None);
+    display.to_string()
 }
 
 #[cfg(test)]
@@ -334,6 +384,59 @@ mod tests {
         // A different loopback port is never the shell, in either build profile.
         let other = Url::parse("http://localhost:5123/").expect("test url parses");
         assert!(!is_shell_ui_url(&other));
+    }
+
+    #[test]
+    fn an_already_committed_shell_url_proceeds_without_polling() {
+        let shell = Url::parse("http://tauri.localhost/index.html").expect("test URL parses");
+        let mut reads = 0;
+
+        let result = wait_for_shell_ui_url(
+            || {
+                reads += 1;
+                Ok(shell.clone())
+            },
+            Duration::from_secs(1),
+        );
+
+        assert_eq!(result, Ok(shell));
+        assert_eq!(reads, 1);
+    }
+
+    #[test]
+    fn a_transient_non_shell_url_is_rechecked_until_the_shell_commits() {
+        let mut urls = [
+            "about:blank",
+            "http://127.0.0.1:5123/",
+            "http://tauri.localhost/index.html",
+        ]
+        .into_iter()
+        .map(|raw| Url::parse(raw).expect("test URL parses"));
+
+        let result = wait_for_shell_ui_url(
+            || Ok(urls.next().expect("the reader is called only until success")),
+            Duration::from_secs(1),
+        );
+
+        assert_eq!(
+            result,
+            Ok(Url::parse("http://tauri.localhost/index.html").expect("test URL parses"))
+        );
+    }
+
+    #[test]
+    fn a_timeout_reports_the_last_url_without_query_or_fragment() {
+        let last = Url::parse("http://127.0.0.1:5123/loading?token=secret#fragment").expect("test URL parses");
+
+        let error = wait_for_shell_ui_url(|| Ok(last.clone()), Duration::from_millis(25))
+            .expect_err("a non-shell URL must time out");
+
+        assert_eq!(
+            error,
+            ShellUiUrlWaitError::TimedOut {
+                last_url: "http://127.0.0.1:5123/loading".to_owned(),
+            }
+        );
     }
 
     /// The port the shell's own UI is served from is the one loopback port a

@@ -49,7 +49,10 @@ pub use launcher::{
     LaunchWatch, LaunchedRuntime, ResolvedRuntimeLauncher, RuntimeLauncher, DESKTOP_BACKENDS_ROOT_ENV,
     DESKTOP_NPM_CLI_ENV, DESKTOP_RUNTIME_ROOT_ENV, UV_TOOL_BIN_DIR_ENV, VIBE_PATH_ENV,
 };
-pub use origin::{is_shell_ui_url, LoopbackOrigin, OriginError, DEV_SERVER_PORT};
+pub use origin::{
+    is_shell_ui_url, wait_for_shell_ui_url, LoopbackOrigin, OriginError, ShellUiUrlWaitError, DEV_SERVER_PORT,
+    SHELL_UI_URL_TIMEOUT,
+};
 pub use private_runtime::{PrivateRuntimeBundle, PrivateRuntimeError, RuntimeBundleManifest};
 pub use status::{BootstrapNotice, BootstrapNoticeCode, BootstrapPhase, BootstrapStatus};
 

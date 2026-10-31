@@ -605,7 +605,8 @@ fn post_navigation_recovery_stays_in_the_unprivileged_rust_shell() {
     // Handing a predecessor's Runtime over stops it, so only the app launch and
     // the user's Try again may ask for it; every recovery path must not.
     assert_eq!(source.matches("BootstrapTrigger::Launch").count(), 1);
-    assert!(source.contains("spawn_bootstrap(app.handle().clone(), BootstrapTrigger::Launch)"));
+    assert!(source.contains("start_bootstrap_when_shell_url_ready"));
+    assert!(source.contains("spawn_bootstrap(app, BootstrapTrigger::Launch)"));
     assert_eq!(source.matches("BootstrapTrigger::Retry").count(), 1);
     assert!(source.contains("Ok(spawn_bootstrap(app, BootstrapTrigger::Retry))"));
     assert!(
@@ -1146,7 +1147,7 @@ fn updates_have_one_native_owner_and_one_scoped_workbench_control_path() {
     // The shell downloads and verifies updates itself; the Workbench only
     // invokes the shell's existing state machine.
     assert!(!source.contains("tauri_plugin_updater"));
-    assert!(source.contains("updater::check(app.handle().clone(), false)"));
+    assert!(source.contains("updater::check(app.clone(), false)"));
     assert!(source.contains("updater::MENU_ID =>"));
     assert!(source.contains("url.as_str() == updater::OPEN_URL"));
     assert!(updater.contains("MessageDialogButtons::YesNoCancelCustom"));

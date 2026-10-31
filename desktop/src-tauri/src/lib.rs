@@ -45,8 +45,8 @@ use avibe_runtime_host::default_runtime_host;
 #[cfg(feature = "bundled-runtime")]
 use avibe_runtime_host::{bundled_runtime_host, BootstrapLog, RemovalOutcome, BOOTSTRAP_LOG_NAME};
 use avibe_runtime_host::{
-    is_shell_ui_url, BootstrapNotice, BootstrapNoticeCode, BootstrapPhase, BootstrapStatus, BootstrapTrigger,
-    CliOutcome, LoopbackOrigin, RuntimeHost, StatusSink,
+    is_shell_ui_url, wait_for_shell_ui_url, BootstrapNotice, BootstrapNoticeCode, BootstrapPhase, BootstrapStatus,
+    BootstrapTrigger, CliOutcome, LoopbackOrigin, RuntimeHost, StatusSink, SHELL_UI_URL_TIMEOUT,
 };
 use serde::Deserialize;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, MenuItemKind, PredefinedMenuItem, Submenu};
@@ -323,11 +323,11 @@ struct Shell {
     dialog_pending: AtomicBool,
     exit_authorized: AtomicBool,
     exit_cleanup_started: AtomicBool,
-    bootstrap_url: Url,
+    bootstrap_url: Arc<Mutex<Option<Url>>>,
 }
 
 impl Shell {
-    fn new(host: RuntimeHost, bootstrap_url: Url) -> Self {
+    fn new(host: RuntimeHost) -> Self {
         Self {
             host: Arc::new(host),
             latest: Arc::new(Mutex::new(None)),
@@ -338,8 +338,24 @@ impl Shell {
             dialog_pending: AtomicBool::new(false),
             exit_authorized: AtomicBool::new(false),
             exit_cleanup_started: AtomicBool::new(false),
-            bootstrap_url,
+            bootstrap_url: Arc::new(Mutex::new(None)),
         }
+    }
+
+    fn set_bootstrap_url(&self, bootstrap_url: Url) -> bool {
+        self.bootstrap_url
+            .lock()
+            .map(|mut current| {
+                *current = Some(bootstrap_url);
+            })
+            .is_ok()
+    }
+
+    fn is_bootstrap_ready(&self) -> bool {
+        self.bootstrap_url
+            .lock()
+            .map(|current| current.is_some())
+            .unwrap_or(false)
     }
 }
 
@@ -1344,6 +1360,9 @@ fn computer_use_guide_controller(window: &WebviewWindow) -> Result<tauri::State<
 /// The return value is part of the retry contract: the bootstrap page must not
 /// hide its Retry action when another run still owns the activity.
 fn spawn_bootstrap(app: AppHandle, trigger: BootstrapTrigger) -> bool {
+    if !app.state::<Shell>().is_bootstrap_ready() {
+        return false;
+    }
     let activity = app.state::<Shell>().activity.clone();
     if activity
         .compare_exchange(ACTIVITY_IDLE, ACTIVITY_BOOTSTRAP, Ordering::SeqCst, Ordering::SeqCst)
@@ -1596,9 +1615,14 @@ fn return_to_bootstrap(app: &AppHandle) -> bool {
 /// Restores the exact bootstrap URL captured before the first navigation. It is
 /// a bundled Tauri page in production and the fixed Vite dev URL in development.
 fn restore_bootstrap_view(app: &AppHandle) -> bool {
-    let (bootstrap_url, latest) = {
+    let (Some(bootstrap_url), latest) = ({
         let shell = app.state::<Shell>();
-        (shell.bootstrap_url.clone(), shell.latest.clone())
+        (
+            shell.bootstrap_url.lock().ok().and_then(|url| url.clone()),
+            shell.latest.clone(),
+        )
+    }) else {
+        return false;
     };
     if !is_shell_ui_url(&bootstrap_url) {
         return false;
@@ -1676,6 +1700,33 @@ fn ensure_main_window(app: &AppHandle) -> Option<WebviewWindow> {
         macos_new_context::install(&window);
     }
     Some(window)
+}
+
+fn start_bootstrap_when_shell_url_ready(
+    app: AppHandle,
+    window: WebviewWindow,
+    #[cfg(feature = "bundled-runtime")] bootstrap_log: BootstrapLog,
+) {
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = wait_for_shell_ui_url(|| window.url().map_err(|error| error.to_string()), SHELL_UI_URL_TIMEOUT);
+        match result {
+            Ok(bootstrap_url) => {
+                if !app.state::<Shell>().set_bootstrap_url(bootstrap_url) {
+                    eprintln!("the Avibe desktop shell could not store its bundled bootstrap URL");
+                    app.exit(101);
+                    return;
+                }
+                updater::check(app.clone(), false);
+                let _ = spawn_bootstrap(app, BootstrapTrigger::Launch);
+            }
+            Err(error) => {
+                #[cfg(feature = "bundled-runtime")]
+                bootstrap_log.record("shell.bootstrap_url", &[("error", error.to_string())]);
+                eprintln!("{error}");
+                app.exit(101);
+            }
+        }
+    });
 }
 
 /// Tells the Workbench, before any of its scripts run, that it is rendered by
@@ -2374,14 +2425,8 @@ pub fn run() {
             let window = ensure_main_window(app.handle()).ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::NotFound, "the Avibe desktop window is missing")
             })?;
-            let bootstrap_url = window.url()?;
-            if !is_shell_ui_url(&bootstrap_url) {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "the Avibe desktop window did not load its bundled bootstrap page",
-                )
-                .into());
-            }
+            #[cfg(feature = "bundled-runtime")]
+            let bootstrap_log = BootstrapLog::at(app.path().app_local_data_dir()?.join(BOOTSTRAP_LOG_NAME));
             let host = {
                 #[cfg(feature = "bundled-runtime")]
                 {
@@ -2389,9 +2434,7 @@ pub fn run() {
                         app.path().resource_dir()?.join("runtime"),
                         app.path().app_local_data_dir()?.join("runtime"),
                         app.path().app_local_data_dir()?.join("backends"),
-                        // Beside the Runtime it describes, so a user asked for
-                        // "the log next to your Avibe runtime folder" finds it.
-                        BootstrapLog::at(app.path().app_local_data_dir()?.join(BOOTSTRAP_LOG_NAME)),
+                        bootstrap_log.clone(),
                     )?
                 }
                 #[cfg(not(feature = "bundled-runtime"))]
@@ -2399,7 +2442,7 @@ pub fn run() {
                     default_runtime_host()?
                 }
             };
-            app.manage(Shell::new(host, bootstrap_url));
+            app.manage(Shell::new(host));
             #[cfg(target_os = "macos")]
             app.manage(computer_use::Controller::start(app.handle()));
             app.manage(notifications::Notifications::new(
@@ -2428,8 +2471,10 @@ pub fn run() {
             pet::apply_shortcuts(app.handle());
             #[cfg(target_os = "macos")]
             refresh_computer_use_control(app.handle());
-            updater::check(app.handle().clone(), false);
-            let _ = spawn_bootstrap(app.handle().clone(), BootstrapTrigger::Launch);
+            #[cfg(feature = "bundled-runtime")]
+            start_bootstrap_when_shell_url_ready(app.handle().clone(), window, bootstrap_log);
+            #[cfg(not(feature = "bundled-runtime"))]
+            start_bootstrap_when_shell_url_ready(app.handle().clone(), window);
             Ok(())
         })
         .run(tauri::generate_context!())
