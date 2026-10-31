@@ -104,6 +104,7 @@ _STREAM_IDLE_BOUNDED_SOURCES = frozenset({("anthropic", "anthropic"), ("openai",
 _OFFICIAL_BASE_URLS = official_api_key_base_urls()
 logger = logging.getLogger(__name__)
 _ProjectedJSON = TypeVar("_ProjectedJSON")
+_IOResult = TypeVar("_IOResult")
 
 _ENGINE_HEADER_VALUE_MAX_LENGTH = 128
 _RETRY_AFTER_MS_MAX = 365 * 24 * 60 * 60 * 1000
@@ -636,21 +637,32 @@ class EngineClient:
         if request_protocol == "anthropic":
             headers.setdefault("anthropic-version", "2023-06-01")
 
+        measured = False
         idle_bound: float | None = None
+        first_response_bound: float | None = None
+        manual_read_bound: float | None = None
         if stream:
             measured = (
                 request_protocol == source.protocol
                 and (source.vendor, source.protocol) in _STREAM_IDLE_BOUNDED_SOURCES
             )
-            # A caller that holds no bound of its own before model output hands
-            # it over: until then the gateway withholds the whole response,
-            # heartbeats included, so only this read sees the upstream's bytes.
+            # The measured bound protects gaps between response bytes. Vibey has
+            # an explicit 600s caller-owned patience budget; use that larger
+            # budget only until the first response byte so a remote relay can
+            # finish receiving a large request body without weakening the
+            # measured 120s inter-byte protection after the stream starts.
             idle_bound = _STREAM_IDLE_TIMEOUT_SECONDS if measured else silence_bound_s
+            if measured:
+                first_response_bound = max(idle_bound or 0.0, silence_bound_s or 0.0)
+                manual_read_bound = idle_bound
         timeout = aiohttp.ClientTimeout(
             total=None,
             connect=self.timeout,
             sock_connect=self.timeout,
-            sock_read=idle_bound,
+            # Measured streams use explicit per-phase reads below: their first
+            # response may use the caller's larger prelude budget, while later
+            # reads retain the measured inter-byte bound.
+            sock_read=None if measured else idle_bound,
         )
         # Connecting to the local engine is bounded. Once connected, inference
         # can take any duration; completion, transport failure, or owner
@@ -677,6 +689,9 @@ class EngineClient:
             trace.on_request_chunk_sent.append(request_sent)
             trace_configs.append(trace)
         session = aiohttp.ClientSession(timeout=timeout, trust_env=False, trace_configs=trace_configs)
+        prelude_deadline = (
+            time.monotonic() + first_response_bound if first_response_bound is not None else None
+        )
         response: aiohttp.ClientResponse | None = None
         retry_after: str | None = None
         retry_after_ms: int | None = None
@@ -731,12 +746,17 @@ class EngineClient:
             ))
 
         try:
-            response = await session.post(
+            request = session.post(
                 self._url(endpoint),
                 data=encoded,
                 headers=headers,
                 allow_redirects=False,
             )
+            if first_response_bound is None:
+                response = await request
+            else:
+                remaining = max(0.001, (prelude_deadline or time.monotonic()) - time.monotonic())
+                response = await _await_engine_io(request, timeout=remaining)
             response_correlation_ids = sanitize_response_correlation_ids(response.headers)
             if response.status >= 300:
                 response_received_at = datetime.now(timezone.utc)
@@ -826,7 +846,12 @@ class EngineClient:
                 await session.close()
                 return ended(outcome)
 
-            first = await response.content.read(_STREAM_CHUNK_BYTES)
+            first_read_timeout = (
+                None
+                if prelude_deadline is None
+                else max(0.001, prelude_deadline - time.monotonic())
+            )
+            first = await _read_content_chunk(response.content, timeout=first_read_timeout)
             if not first:
                 response.close()
                 await session.close()
@@ -890,6 +915,7 @@ class EngineClient:
                 wire_state=wire_state,
                 source=source,
                 model_id=model_id,
+                read_timeout=manual_read_bound,
                 response_correlation_ids=response_correlation_ids,
             )
             model_output_started = wire_state.model_output_started
@@ -912,6 +938,7 @@ class EngineClient:
                 source=source,
                 model_id=model_id,
                 protocol=request_protocol,
+                read_timeout=manual_read_bound,
                 outcome_future=outcome_future,
                 wire_state=wire_state,
                 on_transport_done=on_transport_done,
@@ -1801,6 +1828,38 @@ class _ResponseTooLarge(Exception):
     """A response grew past the bound its request protocol sets."""
 
 
+async def _await_engine_io(awaitable: Awaitable[_IOResult], *, timeout: float | None) -> _IOResult:
+    """Bound one I/O wait without losing owner cancellation to a completed read.
+
+    Python 3.10/3.11 wait_for can swallow cancellation if its inner task has
+    just completed. wait keeps owner cancellation authoritative; we still own
+    and drain the I/O task before its session or response can be closed.
+    """
+
+    if timeout is None:
+        return await awaitable
+    operation = asyncio.ensure_future(awaitable)
+    try:
+        done, _ = await asyncio.wait({operation}, timeout=timeout)
+        if not done:
+            raise asyncio.TimeoutError
+        return operation.result()
+    except BaseException:
+        operation.cancel()
+        await asyncio.gather(operation, return_exceptions=True)
+        raise
+
+
+async def _read_content_chunk(
+    content: aiohttp.StreamReader,
+    *,
+    timeout: float | None,
+) -> bytes:
+    """Read one engine chunk, optionally applying a caller-owned idle bound."""
+
+    return await _await_engine_io(content.read(_STREAM_CHUNK_BYTES), timeout=timeout)
+
+
 async def _read_response_into(
     content: aiohttp.StreamReader,
     target: _StreamPrelude,
@@ -1824,6 +1883,7 @@ async def _read_stream_prelude(
     wire_state: ProtocolSSEState,
     source: SourceRecord,
     model_id: str,
+    read_timeout: float | None,
     response_correlation_ids: tuple[tuple[str, str], ...] = (),
 ) -> RawCallOutcome | None:
     """Buffer transport metadata until the sole first-model-output fact.
@@ -1843,7 +1903,7 @@ async def _read_stream_prelude(
         )
         if outcome is not None:
             return replace(outcome, response_correlation_ids=response_correlation_ids)
-        chunk = await response.content.read(_STREAM_CHUNK_BYTES)
+        chunk = await _read_content_chunk(response.content, timeout=read_timeout)
         if not chunk:
             completion = _observed_stream_terminal_outcome(
                 wire_state,
@@ -1896,6 +1956,7 @@ async def _response_stream(
     source: SourceRecord,
     model_id: str,
     protocol: str,
+    read_timeout: float | None,
     outcome_future: asyncio.Future[RawCallOutcome],
     wire_state: ProtocolSSEState,
     response_correlation_ids: tuple[tuple[str, str], ...] = (),
@@ -1906,7 +1967,7 @@ async def _response_stream(
         async for chunk in prelude.chunks():
             yield chunk
         prelude.close()
-        async for chunk in response.content.iter_chunked(_STREAM_CHUNK_BYTES):
+        while chunk := await _read_content_chunk(response.content, timeout=read_timeout):
             if chunk:
                 await wire_state.observe_async(chunk)
                 yield chunk

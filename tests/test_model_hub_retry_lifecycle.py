@@ -1243,9 +1243,10 @@ def test_a_silent_engine_stream_is_cancelled_and_retried_at_its_idle_bound(
 @pytest.mark.parametrize(
     "origin,vendor,source_protocol,bound",
     [
-        # Vibey's own bound, which Vibey no longer applies to the wait for response headers.
+        # An unmeasured Source keeps Vibey's caller-owned bound.
         ("vibey", "xai", "openai_responses", "caller"),
-        # A measured Source keeps its shorter bound for every caller.
+        # A measured Anthropic stream keeps its shorter inter-byte bound after
+        # the first response byte; Vibey's larger bound applies only before it.
         ("vibey", "anthropic", "anthropic", "idle"),
         # A native caller keeps its own bound, and an unmeasured Source stays unbounded here.
         ("codex", "xai", "openai_responses", None),
@@ -1257,10 +1258,9 @@ def test_vibey_hands_its_silence_bound_to_the_engine_read(
     """MH-RUNTIME-013: before model output only the engine read sees the upstream, so it holds Vibey's bound.
 
     The gateway withholds the response, heartbeats included, until the first
-    model output, and a model that thinks without streaming its thinking sends
-    nothing else for as long as it thinks. Vibey therefore bounds no wait for
-    response headers itself; the engine read applies Vibey's silence bound to
-    every stream the measured Source table leaves unbounded.
+    model output. Vibey therefore gives the engine its 600-second caller-owned
+    pre-response patience; a measured Source resumes its shorter 120-second
+    inter-byte bound after the first response byte.
     """
     idle, caller = 0.3, 0.8
     monkeypatch.setattr(engine_client_module, "_STREAM_IDLE_TIMEOUT_SECONDS", idle)
@@ -1305,5 +1305,60 @@ def test_vibey_hands_its_silence_bound_to_the_engine_read(
         assert body == b""
         expected = caller if bound == "caller" else idle
         assert len(stalled_for) == 1 and expected * 0.9 <= stalled_for[0] < min(expected + 0.4, caller * 2)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("vendor,protocol", [("anthropic", "anthropic"), ("openai", "openai_responses")])
+@pytest.mark.parametrize("origin", ["vibey", "native"])
+@pytest.mark.parametrize("phase", ["headers", "first_byte", "split_prelude"])
+def test_measured_stream_prelude_uses_one_caller_budget_until_first_byte(
+    monkeypatch, tmp_path, vendor, protocol, origin, phase,
+):
+    """MH-RUNTIME-013: slow relay preludes use caller patience, not a fresh budget per phase.
+
+    Vibey can wait beyond measured idle for headers or the first body byte;
+    native callers cannot. Splitting the delay across headers and body must
+    not reset the budget. The existing idle test covers later byte gaps.
+    """
+
+    idle, caller = 0.3, 0.8
+    delay = (idle + caller) / 2
+    monkeypatch.setattr(engine_client_module, "_STREAM_IDLE_TIMEOUT_SECONDS", idle)
+    monkeypatch.setattr(engine_adapter_module, "PROVIDER_SILENCE_TIMEOUT_S", caller)
+
+    async def run() -> None:
+        source = _source("src_slowheaders", "Slow prelude", vendor=vendor, protocol=protocol)
+        service, _clock, _models = configured_service(tmp_path, sources=[source])
+        metadata, output, terminal, _buffered = WIRE[protocol]
+
+        async def respond(request: web.Request) -> web.StreamResponse:
+            await request.json()
+            if phase in {"headers", "split_prelude"}:
+                await asyncio.sleep(delay)
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await response.prepare(request)
+            if phase in {"first_byte", "split_prelude"}:
+                await asyncio.sleep(delay)
+            await response.write(metadata + output + terminal)
+            await response.write_eof()
+            return response
+
+        caller_origin = origin if origin == "vibey" else "claude" if protocol == "anthropic" else "codex"
+        async with loopback_engine(tmp_path, service, respond) as (adapter, _engine_client):
+            handle = await asyncio.wait_for(
+                adapter.invoke(source.id, "shared-model", {"stream": True}, True, caller_origin),
+                timeout=3,
+            )
+            body = b"".join([chunk async for chunk in handle.stream]) if handle.stream is not None else b""
+            outcome = await asyncio.wait_for(handle.outcome(), timeout=3)
+            assert adapter._active_transports == 0
+
+        if origin == "vibey" and phase != "split_prelude":
+            assert outcome.kind == RawOutcomeKind.SUCCESS
+            assert body == metadata + output + terminal
+        else:
+            assert outcome.kind == RawOutcomeKind.TIMEOUT
+            assert body == b""
 
     asyncio.run(run())

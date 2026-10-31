@@ -3366,8 +3366,9 @@ class CLIProxyEngineAdapter:
                 request_headers=getattr(request, "headers", None),
                 on_transport_done=release,
                 on_request_sent=request_sent,
-                # Vibey waits on the gateway without a bound of its own until the
-                # response headers, which the gateway sends at the first model output.
+                # Vibey gives measured streams its larger caller-owned pre-response
+                # patience; the engine resumes the measured inter-byte bound once
+                # the first response byte arrives.
                 silence_bound_s=PROVIDER_SILENCE_TIMEOUT_S if origin == "vibey" else None,
             )
             if handle.outcome_available and engine_disowned_call(await handle.outcome()):

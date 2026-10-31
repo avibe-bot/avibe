@@ -73,9 +73,9 @@ def test_connected_inference_waits_for_its_owner(
             timeout = kwargs["timeout"]
             # Elapsed time never ends inference; only a stream's silence does (MH-RUNTIME-013).
             assert timeout.total is None
-            # Gateway Sources name their vendor; the bare client fixture is a custom vendor.
-            idle_bounded = streaming and entrypoint == "gateway" and protocol in {"anthropic", "openai_responses"}
-            assert timeout.sock_read == (client_module._STREAM_IDLE_TIMEOUT_SECONDS if idle_bounded else None)
+            # Measured streams apply their phase-specific bounds around reads rather
+            # than through aiohttp's single session-level sock_read timer.
+            assert timeout.sock_read is None
             assert timeout.connect == timeout.sock_connect == CONNECT_TIMEOUT_SECONDS
             session = real_session(**kwargs)
             sessions.append(session)
