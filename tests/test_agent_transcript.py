@@ -19,6 +19,7 @@ from sqlalchemy import select
 
 from core.agent_core.messages import (
     AssistantMessage,
+    HOSTED_RENDER_EPOCH,
     HostedAction,
     HostedNative,
     HostedRecord,
@@ -37,6 +38,7 @@ from core.agent_core.messages import (
     text,
 )
 from config.paths import get_sqlite_state_path
+from modules.agents.vibey.store import AdapterTranscriptStore
 from storage import message_deliveries, messages_service
 from storage.agent_transcript import SQLiteTranscriptStore, TranscriptError, resolve_fork_point
 from storage.db import create_sqlite_engine
@@ -306,6 +308,35 @@ async def test_recovery_facts_survive_without_changing_message_contract(engine, 
     model = json.loads(row["content_json"])["model"]["message"]
     assert "error_kind" not in model
     assert "native_search_recovery" not in model
+
+
+async def test_hosted_render_epoch_is_response_metadata_not_canonical_message_content(engine):
+    with engine.begin() as conn:
+        home = _scope(conn, "C-hosted-render-epoch")
+        _session(conn, "ses_hosted_render_epoch", home)
+        consumed = _row(conn, "ses_hosted_render_epoch", home, "go")
+    store = AdapterTranscriptStore(
+        SQLiteTranscriptStore(engine),
+        engine,
+        environment=lambda _: {},
+        on_response=lambda *_: None,
+        response_metadata=lambda *_: {
+            "hosted_render_epoch": HOSTED_RENDER_EPOCH,
+            "future_metadata": "ignored by the model payload",
+        },
+    )
+    await store.consume_input("ses_hosted_render_epoch", consumed, _user("go"))
+    written = await store.append_response("ses_hosted_render_epoch", _assistant("stored"), final=True)
+
+    loaded = list(await store.load("ses_hosted_render_epoch"))
+    restored = loaded[1].message
+    assert isinstance(restored, AssistantMessage)
+    assert restored.hosted_render_epoch == HOSTED_RENDER_EPOCH
+    with engine.connect() as conn:
+        row = conn.execute(select(messages).where(messages.c.id == written.row_id)).mappings().one()
+    model = json.loads(row["content_json"])["model"]["message"]
+    assert "hosted_render_epoch" not in model
+    assert "future_metadata" not in model
 
 
 async def test_a_stored_unknown_native_hosted_row_loads_through_the_transcript_owner(engine):

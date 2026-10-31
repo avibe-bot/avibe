@@ -68,6 +68,7 @@ from core.agent_core.ai.transform import in_flight_position
 from core.agent_core.tools.base import CallInstance
 from core.agent_core.tools.jobs import call_instance
 from core.agent_core.messages import (
+    HOSTED_RENDER_EPOCH,
     HOSTED_RESULT_TOOLS,
     HostedImage,
     IMAGE_MIME_TYPES,
@@ -1972,10 +1973,13 @@ class VibeyAgent(BaseAgent):
         run = self._run_for(session_id, None)
         current = getattr(getattr(run, "router", None), "current", None)
         routes = getattr(getattr(current, "endpoint", None), "hosted_tools", {})
-        return response_recovery_metadata(message, (
-            tool for tool, route in routes.items()
-            if route.mode == "proxy" and route.route_switch == "native_interrupted"
-        ))
+        return {
+            **response_recovery_metadata(message, (
+                tool for tool, route in routes.items()
+                if route.mode == "proxy" and route.route_switch == "native_interrupted"
+            )),
+            "hosted_render_epoch": HOSTED_RENDER_EPOCH,
+        }
 
     def _on_response(
         self,

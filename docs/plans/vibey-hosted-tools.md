@@ -373,6 +373,7 @@ failover, and is refused unpinned (C-6 item 7). What changes is what happens aft
   model of the same Source may run the tool), when the refusal is first learned, and again only
   after the record is cleared (by the user or a stamp change) and the tool is tried natively once more. The upstream is not called twice
   for nothing: a refusal before output costs no output tokens.
+- **Hosted-refusal rendering is versioned.** When an Anthropic hop has explicit `opaque_refused(hosted)` evidence and the refused hosted call is still pending (so Vibey did not execute it), a response written with `hosted_render_epoch=2` omits that call from the portable assistant wire instead of inventing an Avibe `no result` text. This applies only to that refusal state; completed, failed, incomplete, other protocols and ordinary portable fallbacks keep their existing rendering. The epoch lives in response-row metadata, never in the canonical message payload. A later signed-thinking response without the new epoch keeps the suffix on the old renderer, so upgrading cannot rewrite an already-signed history halfway through a Session; once all later signed responses carry epoch 2, new responses use the omission renderer consistently.
 - **The gateway never rewrites hosted content.** Vibey renders every request from its canonical records; the gateway
   never swaps declarations or converts history. C-6 item 6's opaque thinking strip still applies to unpinned
   requests only.

@@ -12,7 +12,7 @@ import itertools
 
 import pytest
 
-from core.agent_core.ai.provider import ModelEndpoint, ModelRequest
+from core.agent_core.ai.provider import HostedToolRoute, ModelEndpoint, ModelRequest
 from tests.agent_core.ai._wire import build_wire_request
 from core.agent_core.ai.transform import SYNTHETIC_TOOL_RESULT, transform_messages
 from core.agent_core.messages import (
@@ -166,6 +166,119 @@ def _comparable(sent: list[dict], expected: list[dict]) -> list[dict]:
 
 def _transformed(*history):
     return list(transform_messages(history, target=Origin("anthropic", "anthropic", "claude-opus-5-5")))
+
+
+def test_a_refused_pending_hosted_call_is_omitted_without_touching_signed_thinking():
+    target = Origin("anthropic", "anthropic", "claude-opus-5-5")
+    pending = _hosted("ws_pending", "web_search", HostedAction("search", queries=("q",)), HostedRecord(status="pending"))
+    thinking = ThinkingBlock(text="", signature="signed")
+    client = ToolCallBlock("toolu_read", "read", {"path": "a"})
+    response = AssistantMessage(
+        (thinking, pending, client), target, "tool_use", hosted_summary=HostedSummary(), source_identity="identity",
+        hosted_render_epoch=2,
+    )
+    endpoint = ModelEndpoint(
+        "anthropic", "http://hub.invalid/vibey/v1", target.model, "hub-token", provider="anthropic",
+        source_id=SOURCE, source_identity="identity",
+        hosted_tools={"web_search": HostedToolRoute("native", True, declaration={"type": "web_search_20250305"})},
+        opaque_refused=frozenset({("identity", "hosted")}),
+    )
+
+    result = transform_messages(
+        (UserMessage((TextBlock("go"),)), response, ToolResultMessage("toolu_read", "read", (TextBlock("contents"),))),
+        target=target,
+        protocol="anthropic",
+        endpoint=endpoint,
+    )
+
+    sent = result.messages[1]
+    assert isinstance(sent, AssistantMessage)
+    assert sent.content == (thinking, client)
+    assert not any(isinstance(block, TextBlock) and "no result" in block.text for block in sent.content)
+
+
+def test_refused_pending_hosted_render_keeps_legacy_shape_until_later_signed_history_is_new():
+    target = Origin("anthropic", "anthropic", "claude-opus-5-5")
+    pending = _hosted("ws_pending", "web_search", HostedAction("search", queries=("q",)), HostedRecord(status="pending"))
+    response = AssistantMessage(
+        (ThinkingBlock(text="", signature="signed"), ToolCallBlock("toolu_read", "read", {}), pending),
+        target, "tool_use", hosted_summary=HostedSummary(), source_identity="identity", hosted_render_epoch=2,
+    )
+    later = AssistantMessage(
+        (ThinkingBlock(text="later", signature="older-signature"), TextBlock(text="later")), target, "stop"
+    )
+    endpoint = ModelEndpoint(
+        "anthropic", "http://hub.invalid/vibey/v1", target.model, "hub-token", provider="anthropic",
+        source_id=SOURCE, source_identity="identity",
+        hosted_tools={"web_search": HostedToolRoute("native", True, declaration={"type": "web_search_20250305"})},
+        opaque_refused=frozenset({("identity", "hosted")}),
+    )
+
+    result = transform_messages(
+        (UserMessage((TextBlock("go"),)), response, ToolResultMessage("toolu_read", "read", (TextBlock("contents"),)), later),
+        target=target,
+        protocol="anthropic",
+        endpoint=endpoint,
+    )
+
+    sent = result.messages[1]
+    assert isinstance(sent, AssistantMessage)
+    assert any(isinstance(block, TextBlock) and block.text.endswith("(no result)") for block in sent.content)
+
+
+def test_legacy_refused_pending_response_stays_legacy_after_new_epoch_history():
+    target = Origin("anthropic", "anthropic", "claude-opus-5-5")
+    pending = _hosted("ws_pending", "web_search", HostedAction("search", queries=("q",)), HostedRecord(status="pending"))
+    response = AssistantMessage(
+        (ThinkingBlock(text="", signature="signed"), pending),
+        target, "tool_use", hosted_summary=HostedSummary(), source_identity="identity",
+    )
+    later = AssistantMessage(
+        (ThinkingBlock(text="later", signature="new-signature"), TextBlock(text="later")), target, "stop",
+        hosted_render_epoch=2,
+    )
+    endpoint = ModelEndpoint(
+        "anthropic", "http://hub.invalid/vibey/v1", target.model, "hub-token", provider="anthropic",
+        source_id=SOURCE, source_identity="identity",
+        hosted_tools={"web_search": HostedToolRoute("native", True, declaration={"type": "web_search_20250305"})},
+        opaque_refused=frozenset({("identity", "hosted")}),
+    )
+
+    result = transform_messages(
+        (UserMessage((TextBlock("go"),)), response, later),
+        target=target,
+        protocol="anthropic",
+        endpoint=endpoint,
+    )
+
+    sent = result.messages[1]
+    assert isinstance(sent, AssistantMessage)
+    assert any(isinstance(block, ToolCallBlock) for block in sent.content)
+
+
+def test_refused_pending_hosted_b_does_not_change_non_anthropic_targets():
+    target = Origin("google", "openai_chat", "gemini-3-pro")
+    pending = _hosted("ws_pending", "web_search", HostedAction("search", queries=("q",)), HostedRecord(status="pending"))
+    response = AssistantMessage(
+        (ThinkingBlock(text="", signature="signed"), pending, ToolCallBlock("toolu_read", "read", {})),
+        Origin("anthropic", "anthropic", "claude-opus-5-5"), "tool_use", hosted_summary=HostedSummary(),
+        source_identity="identity", hosted_render_epoch=2,
+    )
+    endpoint = ModelEndpoint(
+        "openai_chat", "http://hub.invalid/v1", target.model, "hub-token", provider="google",
+        source_id=SOURCE, source_identity="identity", hosted_tools={}, opaque_refused=frozenset({("identity", "hosted")}),
+    )
+
+    result = transform_messages(
+        (UserMessage((TextBlock("go"),)), response, ToolResultMessage("toolu_read", "read", (TextBlock("contents"),))),
+        target=target,
+        protocol="openai_chat",
+        endpoint=endpoint,
+    )
+
+    sent = result.messages[1]
+    assert isinstance(sent, AssistantMessage)
+    assert any(isinstance(block, TextBlock) and block.text.endswith("(no result)") for block in sent.content)
 
 
 def test_every_hosted_call_is_its_own_synthetic_call_and_a_page_action_says_what_it_did():
