@@ -82,6 +82,7 @@ def test_all_collection_commands_share_bounded_pagination_contract() -> None:
         ("data", "query"),
         ("task", "list"),
         ("watch", "list"),
+        ("model-requests", "list"),
     }
     fixed_page_commands = {("skill", "list")}
     parser = cli.build_parser()

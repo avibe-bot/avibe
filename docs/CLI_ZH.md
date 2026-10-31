@@ -476,6 +476,21 @@ vibe runs show                         # 在 Avibe Agent shell 内查看调用�
 `other_outputs`；投递记账、turn 与进程 id，以及其他字段的副本都不输出。`--brief`
 只输出与 `vibe runs list` 相同的精简行，用于查看状态。
 
+### `vibe model-requests`
+
+查看 Vibey 因请求未成功而保留下来的模型请求：发送时的原始字节、结果，以及读到的原始响应。
+
+```bash
+vibe model-requests list                       # 最新的在前；--session-id、--state 缩小范围，--page、--limit 分页
+vibe model-requests show mr_20261031T140102Z_0a1b2c3d4e5f
+vibe model-requests export mr_20261031T140102Z_0a1b2c3d4e5f --to ~/private/requests
+```
+
+`list` 和 `show` 只输出元数据，不输出请求或响应正文。`export` 把一条请求的文件复制到新建的私有目录
+`<dir>/<id>/`。这些文件可能包含提示词和工具输出。保留哪些内容、保留多久，以及为什么这是发给本机
+Model Hub 的字节而不是 provider 收到的字节，见
+[Model request artifacts](model-request-artifacts.md)。
+
 ### `vibe task`
 
 创建、查看、更新、立即执行、暂停、恢复或删除定时任务。
