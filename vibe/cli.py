@@ -1039,6 +1039,31 @@ _PROMPT_RENDER_INPUT_ERRORS = {
 }
 
 
+def cmd_debug_request_preview(args) -> int:
+    """Print only structural metadata and private artifact paths, never the prepared request."""
+    from vibe.authorization import require_instance_role
+    from vibe.internal_client import request_preview
+
+    try:
+        require_instance_role(None, "owner")
+        response = asyncio.run(request_preview(args.session_id, context_seq=args.context_seq))
+        if response["status_code"] != 200:
+            print("Request preview failed; check Owner access, the Vibey Session and current model configuration.", file=sys.stderr)
+            return 1
+        payload = response["body"]
+        # An allowlist makes future IPC payload growth unable to leak diagnostic contents to stdout.
+        keys = (
+            "kind", "status", "reason", "mode", "auth", "session_id", "context_seq", "requested_context_seq",
+            "transition_required", "transition", "missing_tool_results", "wire_prepared", "body_bytes", "body_sha256",
+            "artifact_dir", "manifest_path", "request_body_path",
+        )
+        print(json.dumps({key: payload[key] for key in keys if key in payload}, ensure_ascii=False, indent=2))
+        return 0
+    except Exception:
+        print("Request preview unavailable; no model request was sent.", file=sys.stderr)
+        return 1
+
+
 def cmd_debug_prompt(args) -> int:
     """Export all authored sources, optionally with the production rendering."""
 
@@ -17259,7 +17284,7 @@ def build_parser():
         "debug",
         help="Inspect internal Avibe state",
     )
-    debug_subparsers = debug_parser.add_subparsers(dest="debug_command", metavar="{prompt}")
+    debug_subparsers = debug_parser.add_subparsers(dest="debug_command", metavar="{prompt,request}")
     debug_subparsers.required = True
     debug_prompt_parser = debug_subparsers.add_parser(
         "prompt",
@@ -17285,6 +17310,20 @@ def build_parser():
         help="Export format",
     )
     _add_json_noop(debug_prompt_export_parser)
+    debug_request_parser = debug_subparsers.add_parser("request", help="Inspect a model request without sending it")
+    debug_request_subparsers = debug_request_parser.add_subparsers(dest="request_debug_command", required=True)
+    debug_request_preview = debug_request_subparsers.add_parser(
+        "preview", help="Reconstruct a Vibey Session's committed context with current configuration (Owner only)",
+        description=(
+            "Create owner-private request artifacts without calling a provider or changing the Session. "
+            "Uses current Agent/system/tools/route configuration, not historical sent bytes. "
+            "Queued inputs are excluded; context transitions and missing tool results are reported, not executed. "
+            "Authentication is unbound. Requires the local controller; no Web forwarding route exists."
+        ),
+    )
+    debug_request_preview.add_argument("--session-id", required=True, help="Existing active Vibey Session ID")
+    debug_request_preview.add_argument("--context-seq", type=_non_negative_int, help="Inclusive committed context cutoff")
+    _add_json_noop(debug_request_preview)
     runtime_parser = subparsers.add_parser(
         "runtime",
         help="Inspect and prepare managed runtimes",
@@ -19061,6 +19100,7 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     # authored files, and have no role contract to repair here.
     ("screenshot",): None,
     ("debug", "prompt", "export"): None,
+    ("debug", "request", "preview"): "owner",
     # Runtime, configuration and retention are operational management.
     (): "member",
     ("start",): "member",
@@ -19340,6 +19380,8 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
             _print_task_error(exc, help_command="vibe computer --help")
             sys.exit(1)
     if args.command == "debug":
+        if args.debug_command == "request":
+            sys.exit(cmd_debug_request_preview(args))
         sys.exit(cmd_debug_prompt(args))
     if args.command == "doctor":
         sys.exit(cmd_doctor(args))
