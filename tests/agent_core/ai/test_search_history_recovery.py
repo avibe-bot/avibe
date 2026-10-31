@@ -133,6 +133,24 @@ async def test_prefill_is_not_an_unconditional_search_refusal(case, transport):
     assert error.refusal is None or error.refusal.kind != "search_history"
 
 
+async def test_a_refused_request_logs_its_shape_and_none_of_its_content(caplog):
+    """A 400 that depends on how the conversation ends (a prefill) cannot be diagnosed from the error alone: the
+    adapter logs the request's roles and block types, never a text, id, signature, input, or result."""
+
+    request = mixed_request()
+    response = httpx.Response(400, json=replay._anthropic_refusal(PREFILL, via_gateway=False))
+
+    with caplog.at_level("WARNING", logger="core.agent_core.ai.anthropic"):
+        await replay._send(request, lambda _: response)
+
+    (record,) = [record for record in caplog.records if "refused a request with HTTP 400" in record.getMessage()]
+    logged = record.getMessage()
+    assert "tail=" in logged and "assistant[thinking,server_tool_use,tool_use] user[tool_result]" in logged
+    assert "results_only_after_assistant=True" in logged and f"source={replay.SOURCE}" in logged
+    for content in ("read first", "live-signature", "next release", "toolu_read", "srvtoolu_live", "saved result"):
+        assert content not in logged
+
+
 def mixed_stream(*, completed=False):
     events = (
         {"type": "message_start", "message": {"usage": {"input_tokens": 5}}},
