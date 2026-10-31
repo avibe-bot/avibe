@@ -12,10 +12,11 @@
 
 use std::env;
 use std::ffi::{OsStr, OsString};
+use std::fmt;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{mpsc, Arc, OnceLock};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -24,6 +25,7 @@ use crate::bootstrap_log::BootstrapLog;
 use crate::login_path::{login_shell_path, LoginPath};
 use crate::origin::LoopbackOrigin;
 use crate::private_runtime::{InstalledPrivateRuntime, PrivateRuntimeBundle, PrivateRuntimeError};
+use crate::receipt::{ReceiptEvent, StartupReceiptStream};
 use crate::status::BootstrapNoticeCode;
 /// Environment variable that points the shell at a specific `vibe` executable.
 ///
@@ -59,6 +61,7 @@ pub const DESKTOP_BACKENDS_ROOT_ENV: &str = "AVIBE_DESKTOP_BACKENDS_ROOT";
 /// same Runtime. The shell owns a WebView for exactly this purpose, so it always
 /// opts out.
 const START_ARGS: [&str; 2] = ["start", "--no-open-browser"];
+const DESKTOP_START_ARGS: [&str; 3] = ["start", "--no-open-browser", "--desktop-receipt"];
 /// Lets this start stop another desktop Runtime that serves this home. `vibe
 /// start` refuses that handover without it.
 const HAND_OVER_ARG: &str = "--hand-over";
@@ -236,6 +239,9 @@ pub trait ResolvedRuntimeLauncher: Send + Sync {
         CliOutcome::Unrunnable
     }
 
+    /// Records a bounded bootstrap milestone without affecting the outcome.
+    fn record_bootstrap_event(&self, _event: &str) {}
+
     fn prune_superseded(&self) {}
 }
 
@@ -273,8 +279,22 @@ impl LaunchExit {
 
 /// Whether the launcher process itself survived long enough to do its job.
 /// Empty means "still running, or not observable".
-#[derive(Debug, Clone, Default)]
-pub struct LaunchWatch(Arc<OnceLock<LaunchExit>>);
+#[derive(Clone)]
+pub struct LaunchWatch(Arc<LaunchWatchState>);
+
+struct LaunchWatchState {
+    exit: OnceLock<LaunchExit>,
+    receipt: Mutex<Option<StartupReceiptStream>>,
+}
+
+impl Default for LaunchWatch {
+    fn default() -> Self {
+        Self(Arc::new(LaunchWatchState {
+            exit: OnceLock::new(),
+            receipt: Mutex::new(None),
+        }))
+    }
+}
 
 impl LaunchWatch {
     /// A watch that has already seen the launcher exit. For launchers that learn
@@ -287,7 +307,7 @@ impl LaunchWatch {
 
     /// The exit seen, if the launcher has exited.
     pub fn exit(&self) -> Option<LaunchExit> {
-        self.0.get().copied()
+        self.0.exit.get().copied()
     }
 
     /// True only once the launcher has been *seen* to exit non-zero.
@@ -302,11 +322,47 @@ impl LaunchWatch {
 
     /// Neither outcome has been seen: the launcher may still be starting pieces.
     pub fn pending(&self) -> bool {
-        self.0.get().is_none()
+        self.0.exit.get().is_none()
+    }
+
+    pub fn receipt_capable(&self) -> bool {
+        self.0.receipt.lock().map(|receipt| receipt.is_some()).unwrap_or(false)
+    }
+
+    pub fn receipt_event(&self) -> Option<ReceiptEvent> {
+        self.0
+            .receipt
+            .lock()
+            .ok()?
+            .as_ref()
+            .and_then(StartupReceiptStream::try_next)
+    }
+
+    pub(crate) fn with_receipt(receipt: StartupReceiptStream) -> Self {
+        let watch = Self::default();
+        *watch.0.receipt.lock().expect("launch receipt lock") = Some(receipt);
+        watch
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_receipt_and_exit(receipt: StartupReceiptStream, exit: LaunchExit) -> Self {
+        let watch = Self::with_receipt(receipt);
+        watch.record(exit);
+        watch
     }
 
     fn record(&self, exit: LaunchExit) {
-        let _ = self.0.set(exit);
+        let _ = self.0.exit.set(exit);
+    }
+}
+
+impl fmt::Debug for LaunchWatch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LaunchWatch")
+            .field("exit", &self.exit())
+            .field("receipt_capable", &self.receipt_capable())
+            .finish()
     }
 }
 
@@ -507,9 +563,26 @@ impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
         let hand_over = hand_over && identified;
         let login_path = self.login_path();
         let started = Instant::now();
-        let child = spawn_detached(&self.command, hand_over, login_path).map_err(LaunchError::Spawn)?;
+        let mut child = if identified {
+            spawn_detached_with_receipt(&self.command, hand_over, login_path, true)
+        } else {
+            spawn_detached(&self.command, hand_over, login_path)
+        }
+        .map_err(LaunchError::Spawn)?;
         let pid = child.id();
-        let watch = LaunchWatch::default();
+        let watch = if identified {
+            let stdout = child.stdout.take().ok_or_else(|| {
+                let _ = child.kill();
+                let _ = child.wait();
+                LaunchError::Spawn(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "desktop startup receipt pipe was not created",
+                ))
+            })?;
+            LaunchWatch::with_receipt(StartupReceiptStream::spawn(stdout, self.log.clone()))
+        } else {
+            LaunchWatch::default()
+        };
 
         // Reap the launcher process so it cannot linger as a zombie. `vibe start`
         // returns once the Runtime daemons are up; those daemons are grandchildren
@@ -555,6 +628,10 @@ impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
             &self.log,
             "runtime.remove_backends",
         )
+    }
+
+    fn record_bootstrap_event(&self, event: &str) {
+        self.log.record(event, &[]);
     }
 
     fn prune_superseded(&self) {
@@ -1082,11 +1159,28 @@ fn spawn_detached(
     hand_over: bool,
     login_path: &LoginPath,
 ) -> std::io::Result<std::process::Child> {
+    spawn_detached_with_receipt(runtime, hand_over, login_path, false)
+}
+
+fn spawn_detached_with_receipt(
+    runtime: &RuntimeCommand,
+    hand_over: bool,
+    login_path: &LoginPath,
+    receipt_capable: bool,
+) -> std::io::Result<std::process::Child> {
     let inherited_path = match login_path {
         LoginPath::Resolved(path) => Some(path.as_os_str()),
         LoginPath::Inherited(_) => None,
     };
-    let mut command = lifecycle_command(runtime, &START_ARGS, inherited_path);
+    let args = if receipt_capable {
+        &DESKTOP_START_ARGS[..]
+    } else {
+        &START_ARGS[..]
+    };
+    let mut command = lifecycle_command(runtime, args, inherited_path);
+    if receipt_capable {
+        command.stdout(Stdio::piped());
+    }
     if hand_over {
         command.arg(HAND_OVER_ARG);
     }
@@ -1758,11 +1852,21 @@ mod tests {
         // CLI may predate the flag, and would refuse the start.
         for (identified_launcher, hand_over, expected) in [
             (false, true, &["start", "--no-open-browser", "shell=1"][..]),
-            (true, false, &["start", "--no-open-browser", "shell=1"][..]),
+            (
+                true,
+                false,
+                &["start", "--no-open-browser", "--desktop-receipt", "shell=1"][..],
+            ),
             (
                 true,
                 true,
-                &["start", "--no-open-browser", "--hand-over", "shell=1"][..],
+                &[
+                    "start",
+                    "--no-open-browser",
+                    "--desktop-receipt",
+                    "--hand-over",
+                    "shell=1",
+                ][..],
             ),
         ] {
             let dir = scratch_dir("launch");

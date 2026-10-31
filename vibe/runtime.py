@@ -2477,6 +2477,40 @@ def wait_for_ui_server(host: str, port: int, timeout: float = 5.0) -> bool:
     return ui_server_healthy(host, port)
 
 
+def wait_for_desktop_startup_ready(
+    service_pid: int,
+    host: str,
+    port: int,
+    *,
+    timeout: float = SERVICE_SLOW_START_TIMEOUT_SECONDS,
+) -> int | None:
+    """Wait for the UI and Controller together under one startup deadline.
+
+    ``/ready`` is the existing combined UI/Controller readiness contract. The
+    service owner lookup is still required to return the authoritative process
+    for status and rollback; it never becomes a second readiness predicate.
+    """
+
+    deadline = time.monotonic() + max(0.0, timeout)
+    current_pid = service_pid
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        owner_pid = resolve_service_owner_pid(include_starting=False)
+        if owner_pid is not None:
+            current_pid = owner_pid
+        if ui_server_healthy(host, port, timeout=min(0.5, remaining)):
+            if owner_pid is not None or service_instance_started(current_pid):
+                return current_pid
+        if not pid_alive(current_pid) and owner_pid is None:
+            return None
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        time.sleep(min(0.1, remaining))
+
+
 def _is_ui_server_command(command: str) -> bool:
     return "vibe.ui_server" in command and "run_ui_server" in command
 
