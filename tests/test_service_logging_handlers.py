@@ -98,7 +98,7 @@ def test_spawn_background_detaches_stdin(monkeypatch, tmp_path):
     sink_paths: list[Path] = []
 
     monkeypatch.setattr(runtime.paths, "get_runtime_dir", lambda: tmp_path)
-    monkeypatch.setattr(runtime, "isolated_subprocess_kwargs", lambda: {"creationflags": 0x200})
+    monkeypatch.setattr(runtime, "isolated_subprocess_kwargs", lambda *, console=True: {"creationflags": 0x200})
 
     class FakeSink:
         def __init__(self, path: Path):
@@ -141,7 +141,7 @@ def test_runtime_log_sink_uses_platform_isolation(monkeypatch, tmp_path):
             captured["kwargs"] = kwargs
 
     monkeypatch.setattr(runtime.subprocess, "Popen", FakePopen)
-    monkeypatch.setattr(runtime, "isolated_subprocess_kwargs", lambda: {"creationflags": 0x200})
+    monkeypatch.setattr(runtime, "isolated_subprocess_kwargs", lambda *, console=True: {"creationflags": 0x200})
 
     runtime._spawn_runtime_log_sink(tmp_path / "runtime.log")
 
@@ -154,7 +154,7 @@ def test_generic_background_spawn_uses_platform_isolation(monkeypatch, tmp_path)
     sink_paths: list[Path] = []
 
     monkeypatch.setattr(runtime.paths, "get_runtime_dir", lambda: tmp_path)
-    monkeypatch.setattr(runtime, "isolated_subprocess_kwargs", lambda: {"creationflags": 0x200})
+    monkeypatch.setattr(runtime, "isolated_subprocess_kwargs", lambda *, console=True: {"creationflags": 0x200})
 
     class FakeSink:
         def __init__(self, path: Path):
