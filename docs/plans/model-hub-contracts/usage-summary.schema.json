@@ -219,6 +219,10 @@
         "excluded_service_requests": {
           "$ref": "#/definitions/Count",
           "description": "Billable search requests whose service has no current catalog price, so they are excluded from api_cost_usd. Present exactly when `pricing` is."
+        },
+        "fast_requests": {
+          "$ref": "#/definitions/Count",
+          "description": "Requests among `requests` whose response said they ran at the vendor's fast tier (Anthropic `usage.speed: \"fast\"`, OpenAI `service_tier: \"priority\"`; docs/plans/fast-mode.md). Their tokens are valued at the model's fast-tier rates, or at its standard rates as a lower bound where the price table lists none. Present only when at least one such request is in the aggregate."
         }
       }
     },
@@ -294,6 +298,9 @@
         },
         "api_cost_lower_bound": {
           "$ref": "#/definitions/Counters/properties/api_cost_lower_bound"
+        },
+        "fast_requests": {
+          "$ref": "#/definitions/Counters/properties/fast_requests"
         }
       }
     },
@@ -464,6 +471,9 @@
         },
         "api_cost_lower_bound": {
           "$ref": "#/definitions/Counters/properties/api_cost_lower_bound"
+        },
+        "fast_requests": {
+          "$ref": "#/definitions/Counters/properties/fast_requests"
         }
       }
     },
@@ -537,6 +547,9 @@
         "priced": {
           "description": "Whether a price was found for this model. Present exactly when `pricing` is; false means the UI shows no price for it and its tokens are in excluded_tokens.",
           "type": "boolean"
+        },
+        "fast_requests": {
+          "$ref": "#/definitions/Counters/properties/fast_requests"
         }
       }
     },
@@ -673,6 +686,9 @@
         },
         "excluded_service_requests": {
           "$ref": "#/definitions/Count"
+        },
+        "fast_requests": {
+          "$ref": "#/definitions/Counters/properties/fast_requests"
         }
       }
     },

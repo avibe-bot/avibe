@@ -124,6 +124,10 @@ class ModelPrice:
     # Higher rates past a context size, as (size, rates) by ascending size. A call
     # whose context input exceeds a size is billed whole at that tier's rates.
     context_tiers: tuple[tuple[int, "ModelPrice"], ...] = ()
+    # The vendor's fast tier (docs/plans/fast-mode.md), from models.dev
+    # `experimental.modes.fast.cost`: a call its response says ran fast is billed
+    # at these rates, read by the same rules. None when the table lists none.
+    fast: Optional["ModelPrice"] = None
 
 
 def _bounded(value: object, ceiling: float) -> Optional[float]:
@@ -144,8 +148,11 @@ def _price(value: object) -> Optional[float]:
     return _bounded(value, _MAX_PRICE_PER_MTOK)
 
 
-def model_price(cost: object) -> Optional[ModelPrice]:
+def model_price(cost: object, *, fast_cost: object = None) -> Optional[ModelPrice]:
     """Read one models.dev-shaped `cost` object, or None when it has no usable price.
+
+    ``fast_cost`` is the same model's fast-tier `cost`, read by the same rules into
+    ``ModelPrice.fast``; it never prices a model whose standard price is missing.
 
     Input and output are required. A missing cache member falls back to what the
     tokens are otherwise: a cache read or write is input.
@@ -173,7 +180,10 @@ def model_price(cost: object) -> Optional[ModelPrice]:
         legacy = _flat_price(cost.get("context_over_200k"))
         if legacy is not None:
             tiers[_LEGACY_CONTEXT_TIER_SIZE] = legacy
-    return replace(price, context_tiers=tuple(sorted(tiers.items()))) if tiers else price
+    if tiers:
+        price = replace(price, context_tiers=tuple(sorted(tiers.items())))
+    fast = model_price(fast_cost) if fast_cost is not None else None
+    return replace(price, fast=fast) if fast is not None else price
 
 
 def context_tier_size(price: Optional[ModelPrice], context_input_tokens: int) -> int:
@@ -271,8 +281,14 @@ def _first_party(model_id: str, vendor_map: Mapping[str, Any]) -> Optional[str]:
     return max(matches, key=lambda item: len(item["prefix"]))["vendor_id"]
 
 
-def _first_party_costs(catalog: Mapping[str, Any], vendor_map: Mapping[str, Any]) -> dict[str, dict[str, object]]:
-    """Each first-party provider's `cost` objects by model key: the part of the catalog a price is read from."""
+def _first_party_costs(
+    catalog: Mapping[str, Any], vendor_map: Mapping[str, Any],
+) -> dict[str, dict[str, tuple[object, object]]]:
+    """Each first-party provider's standard and fast-tier `cost` objects by model key.
+
+    The part of the catalog a price is read from. The fast one is the entry's
+    `experimental.modes.fast.cost`, None when it lists none.
+    """
 
     families = vendor_map.get("families")
     vendors = {
@@ -285,8 +301,17 @@ def _first_party_costs(catalog: Mapping[str, Any], vendor_map: Mapping[str, Any]
         provider = catalog.get(vendor)
         models = provider.get("models") if isinstance(provider, Mapping) else None
         if isinstance(models, Mapping):
-            costs[vendor] = {key: entry.get("cost") for key, entry in models.items() if isinstance(entry, Mapping)}
+            costs[vendor] = {
+                key: (entry.get("cost"), _fast_cost(entry)) for key, entry in models.items() if isinstance(entry, Mapping)
+            }
     return costs
+
+
+def _fast_cost(entry: Mapping[str, Any]) -> object:
+    modes = entry.get("experimental")
+    modes = modes.get("modes") if isinstance(modes, Mapping) else None
+    fast = modes.get("fast") if isinstance(modes, Mapping) else None
+    return fast.get("cost") if isinstance(fast, Mapping) else None
 
 
 def plan_key(vendor: str, plan: Optional[str]) -> Optional[str]:
@@ -337,7 +362,7 @@ class PriceTable:
         # controller loop (at startup, then on the usage writer's thread), so a
         # lookup on the loop is a dictionary read however large the catalog is.
         self._prices: dict[str, dict[str, Optional[ModelPrice]]] = {
-            vendor: {key: model_price(cost) for key, cost in costs.items()}
+            vendor: {key: model_price(cost, fast_cost=fast_cost) for key, (cost, fast_cost) in costs.items()}
             for vendor, costs in _first_party_costs(catalog, vendor_map).items()
         }
         self._vendor_map = vendor_map
@@ -457,7 +482,11 @@ class Cost:
 
 
 def row_cost(row: Mapping[str, Any], price: Optional[ModelPrice]) -> Cost:
-    """Price one ledger row's counters at one model's price, in the row's context tier."""
+    """Price one ledger row's counters at one model's price, in the row's context tier and speed.
+
+    A fast row (`speed: "fast"`) is valued at the model's fast-tier rates; where
+    the table lists none, at its standard rates, as a floor.
+    """
 
     input_tokens = int(row.get("input_tokens") or 0)
     output_tokens = int(row.get("output_tokens") or 0)
@@ -466,6 +495,12 @@ def row_cost(row: Mapping[str, Any], price: Optional[ModelPrice]) -> Cost:
     unreported = int(row.get("requests") or 0) > int(row.get("token_reports") or 0)
     if price is None:
         return Cost(excluded_tokens=input_tokens + output_tokens, api_cost_lower_bound=unreported)
+    fast_unpriced = False
+    if row.get("speed") == "fast":
+        if price.fast is not None:
+            price = price.fast
+        else:
+            fast_unpriced = True
     price = context_tier_price(price, int(row.get("context_tier") or 0))
     cache_read = min(int(row.get("cached_input_tokens") or 0), input_tokens)
     cache_write = min(int(row.get("cache_write_input_tokens") or 0), input_tokens - cache_read)
@@ -488,7 +523,9 @@ def row_cost(row: Mapping[str, Any], price: Optional[ModelPrice]) -> Cost:
     ttl_uncaptured = int(row.get("cache_write_ttl_uncaptured_reports") or 0) > 0
     return Cost(
         api_cost_usd=usd,
-        api_cost_lower_bound=unreported or ttl_uncaptured or (uncaptured and price.charges_cache_writes),
+        api_cost_lower_bound=(
+            unreported or fast_unpriced or ttl_uncaptured or (uncaptured and price.charges_cache_writes)
+        ),
     )
 
 

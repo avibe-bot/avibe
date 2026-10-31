@@ -1132,9 +1132,9 @@ def test_a_price_table_parses_every_price_when_built_and_none_on_lookup(monkeypa
     parsed = []
     original = pricing.model_price
 
-    def counting(cost):
+    def counting(cost, **kwargs):
         parsed.append(cost)
-        return original(cost)
+        return original(cost, **kwargs)
 
     monkeypatch.setattr(pricing, "model_price", counting)
     table = _table(overrides={"models": {"house-model": {"input": 1, "output": 2}, "relay-opus": {"alias": "claude-opus-5"}}})

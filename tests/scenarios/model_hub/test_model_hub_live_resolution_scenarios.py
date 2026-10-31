@@ -1679,7 +1679,7 @@ def test_mh_fast_004_the_response_confirms_whether_the_fast_tier_ran(
     monkeypatch: pytest.MonkeyPatch,
     stream: bool,
 ) -> None:
-    """MH-FAST-004: a relay is asked for the fast tier too, and its responses decide whether the menu says it ran."""
+    """MH-FAST-004: a relay is asked for the fast tier too, and its responses decide whether the menu says it ran and what usage bills as fast."""
 
     from vibe import models_dev_catalog
 
@@ -1740,6 +1740,9 @@ def test_mh_fast_004_the_response_confirms_whether_the_fast_tier_ran(
             await turn("turn_standard", None)
             assert menu() == (True, True)
             assert [request.get("service_tier") for request in adapter.requests] == ["priority", "priority", None]
+            # Usage follows the same report: only the call that ran fast is billed as fast.
+            model = service.usage_summary(days=1)["sources"][0]["models"][0]
+            assert (model["requests"], model.get("fast_requests")) == (3, 1)
         finally:
             await gateway.close()
 
