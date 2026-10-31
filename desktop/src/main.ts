@@ -12,6 +12,7 @@ import './styles.css'
  */
 type BootstrapPhase = 'probing' | 'starting' | 'ready' | 'failed'
 type NoticeCode =
+  | 'preparing'
   | 'probing'
   | 'adopted'
   | 'starting'
@@ -54,6 +55,7 @@ declare const __DESKTOP_BOOTSTRAP_CATALOGS__: Record<'en' | 'zh', BootstrapCatal
 
 const STATUS_EVENT = 'bootstrap-status'
 const NOTICE_CODES: ReadonlySet<string> = new Set<NoticeCode>([
+  'preparing',
   'probing',
   'adopted',
   'starting',
@@ -82,7 +84,7 @@ const locale = selectLocale(navigator.languages)
 const catalog = __DESKTOP_BOOTSTRAP_CATALOGS__[locale]
 
 root.lang = locale
-messageEl.textContent = catalog.notices.probing
+messageEl.textContent = catalog.notices.preparing
 retryEl.textContent = catalog.retry
 helpEl.textContent = catalog.installationHelp
 

@@ -5,6 +5,7 @@ const expectedNoticeCodes = [
   'adopted',
   'invalid_origin',
   'launcher_exited',
+  'preparing',
   'probing',
   'ready',
   'ready_timeout',

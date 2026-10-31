@@ -32,6 +32,7 @@ impl BootstrapPhase {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BootstrapNoticeCode {
+    Preparing,
     Probing,
     Adopted,
     Starting,
@@ -89,6 +90,17 @@ pub struct BootstrapStatus {
 }
 
 impl BootstrapStatus {
+    /// Runtime preparation precedes discovery of a validated origin.
+    pub fn preparing() -> Self {
+        Self {
+            phase: BootstrapPhase::Probing,
+            origin: String::new(),
+            attempt: 0,
+            notice: BootstrapNotice::new(BootstrapNoticeCode::Preparing),
+            retryable: false,
+        }
+    }
+
     pub fn probing(origin: &LoopbackOrigin, attempt: u32) -> Self {
         Self {
             phase: BootstrapPhase::Probing,
@@ -200,8 +212,25 @@ mod tests {
     }
 
     #[test]
+    fn preparation_has_no_endpoint_or_probe_attempt_and_is_not_terminal() {
+        let status = BootstrapStatus::preparing();
+        assert!(!status.phase.is_terminal());
+        assert_eq!(
+            serde_json::to_value(status).unwrap(),
+            serde_json::json!({
+                "phase": "probing",
+                "origin": "",
+                "attempt": 0,
+                "notice": { "code": "preparing" },
+                "retryable": false,
+            })
+        );
+    }
+
+    #[test]
     fn every_notice_code_uses_its_contract_spelling() {
         let cases = [
+            (BootstrapNoticeCode::Preparing, "preparing"),
             (BootstrapNoticeCode::Probing, "probing"),
             (BootstrapNoticeCode::Adopted, "adopted"),
             (BootstrapNoticeCode::Starting, "starting"),

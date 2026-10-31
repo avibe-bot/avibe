@@ -1255,7 +1255,7 @@ def _spawn_runtime_log_sink(path: Path) -> subprocess.Popen:
         stderr=subprocess.DEVNULL,
         cwd=str(get_working_dir()),
         close_fds=True,
-        **isolated_subprocess_kwargs(),
+        **isolated_subprocess_kwargs(console=False),
     )
 
 
@@ -1372,7 +1372,7 @@ def _spawn_owned_process(
             cwd=str(get_working_dir()),
             close_fds=True,
             env=independent_process_env(env),
-            **isolated_subprocess_kwargs(),
+            **isolated_subprocess_kwargs(console=False),
         )
         # Closing can fail too, so it happens inside this region and before the
         # handover: once the caller owns the child, nothing here can raise.

@@ -6,6 +6,7 @@
     "shellUnavailable": "The Avibe desktop shell stopped responding. Quit and open Avibe again.",
     "genericFailure": "Avibe could not connect to its Runtime.",
     "notices": {
+      "preparing": "Preparing the Avibe Runtime… This can take a few minutes the first time.",
       "probing": "Looking for a running Avibe Runtime…",
       "adopted": "Connected to the Avibe Runtime already running on this machine.",
       "starting": "Starting the Avibe Runtime…",

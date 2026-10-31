@@ -395,6 +395,7 @@ impl RuntimeHost {
     /// Runs the state machine once and returns its terminal status.
     pub async fn bootstrap(&self, sink: &dyn StatusSink, trigger: BootstrapTrigger) -> BootstrapStatus {
         let run = self.launched_runtime().begin_run();
+        publish(sink, BootstrapStatus::preparing());
         let (origin, resolved_launcher) = match self.resolve_origin().await {
             Ok(resolved) => resolved,
             Err(error) => {

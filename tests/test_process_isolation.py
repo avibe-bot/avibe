@@ -15,6 +15,7 @@ import psutil
 import pytest
 
 from core import watch_worker
+from core import process_isolation
 from core.process_isolation import (
     KILL_SIGNAL,
     PROCESS_IDENTITY_ENV,
@@ -89,6 +90,29 @@ def test_background_console_program_opens_no_console_window() -> None:
         **isolated_subprocess_kwargs(console=False),
     )
     assert result.stdout.strip() == "0"
+
+
+@pytest.mark.parametrize("marker", ["AVIBE_DESKTOP_SHELL", "AVIBE_DESKTOP_MANAGED_RUNTIME"])
+@pytest.mark.parametrize("value", [None, "", "0", "false", "off", "1", "true", "yes", "on", " TRUE "])
+@pytest.mark.parametrize("console", [True, False])
+def test_windows_console_policy_preserves_cli_default_and_hides_desktop_children(
+    monkeypatch: pytest.MonkeyPatch, marker: str, value: str | None, console: bool
+) -> None:
+    desktop_env = {}
+    if value is not None:
+        desktop_env[marker] = value
+    # Replace only this module's os reference: changing os.name globally can
+    # make pathlib and pytest select Windows implementations on a POSIX host.
+    monkeypatch.setattr(process_isolation, "os", SimpleNamespace(name="nt", environ=desktop_env))
+    monkeypatch.setattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
+    monkeypatch.setattr(subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+
+    kwargs = isolated_subprocess_kwargs() if console else isolated_subprocess_kwargs(console=False)
+
+    flags = kwargs["creationflags"]
+    assert flags & subprocess.CREATE_NEW_PROCESS_GROUP
+    desktop_managed = value is not None and value.strip().lower() in {"1", "true", "yes", "on"}
+    assert bool(flags & subprocess.CREATE_NO_WINDOW) == (desktop_managed or not console)
 
 
 def test_process_identity_reads_inherited_worker_marker(monkeypatch: pytest.MonkeyPatch) -> None:

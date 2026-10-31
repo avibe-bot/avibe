@@ -6,6 +6,7 @@
     "shellUnavailable": "Avibe 桌面端已停止响应，请退出后重新打开。",
     "genericFailure": "Avibe 无法连接到 Runtime。",
     "notices": {
+      "preparing": "正在准备 Avibe Runtime… 首次启动可能需要几分钟。",
       "probing": "正在查找运行中的 Avibe Runtime…",
       "adopted": "已连接到本机正在运行的 Avibe Runtime。",
       "starting": "正在启动 Avibe Runtime…",

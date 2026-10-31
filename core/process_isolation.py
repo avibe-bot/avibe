@@ -248,11 +248,16 @@ def isolated_subprocess_kwargs(*, console: bool = True) -> dict[str, Any]:
     ``console=False`` is for a console program that only ever runs in the
     background. On Windows it then gets no console window, which a parent with
     no console of its own -- the desktop app starts the service that way --
-    would otherwise open for it.
+    would otherwise open for it. Desktop-managed processes always use this
+    policy, including callers that leave ``console`` at its CLI default.
     """
     if os.name == "nt":
         flags = subprocess.CREATE_NEW_PROCESS_GROUP
-        if not console:
+        desktop_managed = any(
+            os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+            for name in ("AVIBE_DESKTOP_SHELL", "AVIBE_DESKTOP_MANAGED_RUNTIME")
+        )
+        if not console or desktop_managed:
             flags |= subprocess.CREATE_NO_WINDOW
         return {"creationflags": flags}
     return {"start_new_session": True}

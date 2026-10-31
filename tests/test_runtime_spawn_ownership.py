@@ -10,15 +10,42 @@ reaped -- not on a mock having been called.
 from __future__ import annotations
 
 import errno
+import io
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from core import process_isolation
 from vibe import runtime
 
 MARKER = "avibe-spawn-ownership-probe"
+
+
+def test_background_spawn_and_all_its_helpers_are_windowless_without_desktop_markers(monkeypatch, tmp_path):
+    """The owning spawn boundary applies its policy to the entire child tree."""
+    monkeypatch.setattr(process_isolation, "os", SimpleNamespace(name="nt", environ={}))
+    monkeypatch.setattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
+    monkeypatch.setattr(subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+    monkeypatch.setattr(runtime.paths, "get_runtime_dir", lambda: tmp_path / "runtime")
+    monkeypatch.setattr(runtime, "get_working_dir", lambda: tmp_path)
+    spawned = []
+
+    def popen(args, **kwargs):
+        child = SimpleNamespace(stdin=io.BytesIO())
+        spawned.append((child, kwargs))
+        return child
+
+    monkeypatch.setattr(runtime.subprocess, "Popen", popen)
+    child = runtime._spawn_owned_process(["fixture-runtime"], "stdout.log", "stderr.log", {})
+
+    assert len(spawned) > 1, "exercise both the owned child and its helpers"
+    assert child is spawned[-1][0]
+    for _, kwargs in spawned:
+        assert kwargs["creationflags"] & subprocess.CREATE_NO_WINDOW
+        assert kwargs["creationflags"] & subprocess.CREATE_NEW_PROCESS_GROUP
 
 
 class _Spawned(list):

@@ -612,7 +612,7 @@ def _spawn_owned_installer(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            **isolated_subprocess_kwargs(),
+            **isolated_subprocess_kwargs(console=False),
         )
         identity = capture_spawned_process_identity(process.pid, marker)
         owned = _OwnedInstaller(process, worker_fingerprint, identity)
