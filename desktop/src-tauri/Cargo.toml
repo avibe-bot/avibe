@@ -52,6 +52,8 @@ async-trait.workspace = true
 tauri = { version = "2", features = ["tray-icon", "macos-private-api", "test"] }
 
 [target.'cfg(windows)'.dependencies]
+# Match Tauri's Known Folder lookup without initializing the GUI.
+dirs = "6"
 # The pet's drag: the primary button's state and a one-step window frame.
 windows-sys = { version = "0.61", features = [
   "Win32_UI_Input_KeyboardAndMouse",
