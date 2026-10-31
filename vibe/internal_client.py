@@ -1095,6 +1095,34 @@ async def turn_state(session_id: str, *, socket_path: Optional[Path] = None) -> 
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
 
 
+async def request_preview(
+    session_id: str,
+    *,
+    context_seq: int | None = None,
+    socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    """Ask the controller to reconstruct locally; only a safe artifact summary crosses back."""
+    from core.handlers.request_preview import preview_caller
+
+    # Check and capture the invoking principal before any IPC operation. Never drop remote claims.
+    caller = preview_caller()
+    endpoint = await _resolve_endpoint_async(socket_path)
+    try:
+        async with httpx.AsyncClient(
+            transport=_async_transport(endpoint), base_url=endpoint.base_url,
+            headers=endpoint.headers, timeout=httpx.Timeout(60.0, connect=0.5),
+        ) as client:
+            response = await client.post("/internal/debug/request/preview", json={
+                "session_id": session_id, "context_seq": context_seq, "caller": caller,
+            })
+            _validate_response(response, endpoint)
+    except httpx.ReadTimeout as exc:
+        raise InternalServerTimeout("Request preview timed out") from exc
+    except _SOCKET_CONNECT_ERRORS as exc:
+        raise InternalServerUnavailable("Request preview controller unavailable") from exc
+    return {"status_code": response.status_code, "body": response.json() if response.content else {}}
+
+
 async def list_running_agents(
     *,
     run_ids: Optional[list[str]] = None,

@@ -57,6 +57,7 @@ from core.agent_core.agent.events import (
 )
 from core.agent_core.agent.hooks import AgentInput
 from core.agent_core.agent.loop import Agent
+from core.agent_core.agent.preview import RequestPreview
 from core.agent_core.agent.models import ModelSelection, RetryPolicy
 from core.agent_core.agent.recovery import settle_open_calls
 from core.agent_core.harness.context import ContextConfig
@@ -942,17 +943,32 @@ class VibeyAgent(BaseAgent):
         builtin_agent: bool,
         instructions: str = "",
     ) -> None:
-        """The Turn's loop, over its router, tools, system prompt, and the environment its commands run in.
+        turn.agent = self._build_agent(
+            turn.request, turn.session_id, turn.router, cwd, sections, environment,
+            builtin_agent=builtin_agent, instructions=instructions,
+        )
+        turn.cwd = cwd
 
-        The bash rule names ``rg`` only when that environment's PATH finds it. That PATH is the service's
-        PATH plus the installed managed tools, which change only on an install or upgrade, so a Session's
-        Turns keep one system prompt, which changes only when ripgrep's availability or an instruction file does.
+    def _build_agent(
+        self,
+        request: AgentRequest,
+        session_id: str,
+        router: HubModelRouter,
+        cwd: str,
+        sections: str,
+        environment: Mapping[str, str],
+        *,
+        builtin_agent: bool,
+        instructions: str = "",
+    ) -> Agent:
+        """Production construction shared with detached previews; this does not register or start a Turn.
+
+        The bash rule names ``rg`` only when the command environment's PATH finds it.
         """
-        request, session_id = turn.request, turn.session_id
         suite = self._tools()
         agent = Agent(
             session_id=session_id,
-            models=turn.router,
+            models=router,
             tools=(),
             hooks=(),
             store=self.store,
@@ -971,7 +987,7 @@ class VibeyAgent(BaseAgent):
         # Job-backed tools receive the loop's tracking wrapper, so Stop kills foreground commands.
         tools = mark_skill_loads(
             (
-                *hosted_tools(turn.router, self._gateway_client, self.media, language=self._language),
+                *hosted_tools(router, self._gateway_client, self.media, language=self._language),
                 *suite.create_tools(agent.jobs, self.media.image_sink(session_id)),
             )
         )
@@ -984,7 +1000,34 @@ class VibeyAgent(BaseAgent):
             rg=finds_rg,
             project_context=instructions,
         )
-        turn.agent, turn.cwd = agent, cwd
+        return agent
+
+    async def preview_request(
+        self, session_id: str, request: AgentRequest, *, context_seq: int | None = None,
+    ) -> RequestPreview:
+        """Reconstruct from current configuration without binding a runtime, consuming input, or activating supply."""
+        model = request.subagent_model or request.vibe_agent_model
+        if not model:
+            raise ValueError("request_preview_model_unset")
+        launch = await self.controller.model_hub_runtime.describe_vibey_request(model)
+        selected = budgeted(selection_from_hop(launch.to_hop_resolution()))
+
+        async def no_resolve() -> ModelSelection:
+            raise RuntimeError("A preview must not resolve a model route")
+
+        router = HubModelRouter(no_resolve, self._providers, first=selected)
+        cwd = request.working_path
+        sections, _ = await self._avibe_sections(request, cwd)
+        builtin_agent = await asyncio.to_thread(self._is_builtin_agent, request)
+        environment = await asyncio.to_thread(self._turn_environment, request, cwd)
+        instructions = await asyncio.to_thread(_project_instructions, cwd)
+        agent = self._build_agent(
+            request, session_id, router, cwd, sections, environment,
+            builtin_agent=builtin_agent, instructions=instructions,
+        )
+        return await agent.dry_tick(
+            selected=selected, context_seq=context_seq, gateway=True, media_loader=self.media,
+        )
 
     async def _on_event(self, run: _Run, event: AgentEvent) -> None:
         if isinstance(event, MessageCommitted):

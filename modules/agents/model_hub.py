@@ -839,14 +839,16 @@ class ModelHubRuntimeRouter:
         *,
         supply_channel: Literal["hub"] | None = None,
     ) -> tuple[ModelHubConfig, ModelHubTurnResolution]:
-        resolution = resolve_model_hub_turn(
-            config,
-            backend,
-            requested_model,
-            now=self.service.now(),
-            unavailable_source_ids=self._unavailable_native_source_ids(config, backend),
-            supply_channel=supply_channel,
-            live_recovery=self.service.recovery_annotations(config),
+        resolution = await asyncio.to_thread(
+            lambda: resolve_model_hub_turn(
+                config,
+                backend,
+                requested_model,
+                now=self.service.now(),
+                unavailable_source_ids=self._unavailable_native_source_ids(config, backend),
+                supply_channel=supply_channel,
+                live_recovery=self.service.recovery_annotations(config),
+            )
         )
         waitable = resolution.self_healing_hops("hub")
         if self.turn_gateway is not None and resolution.source is None and waitable:
@@ -1201,6 +1203,61 @@ class ModelHubRuntimeRouter:
         config = config if config is not None else self.service.store.load()
         return cast(TurnMode, config.agents[backend].mode)
 
+    def _describe_launch(
+        self, config: ModelHubConfig, backend: BackendName, requested_model: str,
+        resolution: ModelHubTurnResolution,
+    ) -> ModelHubLaunch:
+        """Route facts only, shared by production activation and read-only diagnostics."""
+        source = resolution.source
+        if source is None:
+            raise ModelHubError("mapping_target_unavailable", status=409)
+        model = next((model for model in config.agents[backend].models if model.id == requested_model), None)
+        hub = source.supply_channel != "native_cli"
+        return ModelHubLaunch(
+            backend=backend, channel="hub" if hub else "native_cli",
+            requested_model=requested_model, target_model=resolution.target_model,
+            runtime_model=resolution.target_model, source_id=source.id,
+            context_window=model.context_window if model is not None else None,
+            max_output_tokens=model.max_output_tokens if model is not None else None,
+            supports_tools=model.supports_tools if model is not None else None,
+            supports_reasoning=model.supports_reasoning if model is not None else None,
+            reasoning_efforts=(
+                tuple(model.reasoning_efforts) if model is not None and model.supports_reasoning is not False else ()
+            ),
+            protocol=source.protocol if hub else None,
+            provider=source.vendor if hub else None,
+            cache_ttl=resolution.cache_ttl if hub else None,
+            cache_ttl_wire=resolution.cache_ttl_wire if hub else False,
+            supports_images=(
+                "image" in model.input_modalities if hub and model is not None and model.input_modalities else None
+            ),
+            source_identity=identity_digest(source) if hub else None,
+            context_price_steps=(self.service.context_price_steps(resolution.target_model) if backend == "vibey" else ()),
+        )
+
+    async def describe_vibey_request(self, requested_model: str) -> ModelHubLaunch:
+        """Describe current supply without activating a gateway, issuing credentials or emitting events.
+
+        The inert address and token are explicit unbound placeholders for wire preparation, not credentials.
+        Unlike resolve(), an unavailable route does not update supply state or hold a Session's input.
+        """
+        config = await asyncio.to_thread(self.snapshot)
+        if config.agents["vibey"].mode != "hub" or self.turn_gateway is None:
+            raise ModelHubError("mapping_target_unavailable", status=409)
+        requested_model = str(requested_model or "").strip()
+        config, resolution = await self._resolve_turn(config, "vibey", requested_model)
+        if resolution.source is None or resolution.source.supply_channel != "hub":
+            raise ModelHubError("mapping_target_unavailable", status=409)
+        description = self._describe_launch(config, "vibey", requested_model, resolution)
+        frozen = await asyncio.to_thread(self.service.freeze_turn_hosted_tools, config)
+        hosted = await asyncio.to_thread(
+            self.service.hosted_tools_for_hop, resolution.source, resolution.target_model, frozen,
+        )
+        return replace(
+            description, hosted_tools=hosted,
+            gateway_base_url="http://request-preview.invalid/vibey", gateway_token="auth-unbound",
+        )
+
     async def resolve(
         self,
         backend: BackendName,
@@ -1240,32 +1297,7 @@ class ModelHubRuntimeRouter:
 
         target_model = resolution.target_model
         source = resolution.source
-        backend_model = next(
-            (
-                model
-                for model in config.agents[backend].models
-                if model.id == requested_model
-            ),
-            None,
-        )
-        context_window = (
-            backend_model.context_window if backend_model is not None else None
-        )
-        max_output_tokens = (
-            backend_model.max_output_tokens if backend_model is not None else None
-        )
-        supports_tools = (
-            backend_model.supports_tools if backend_model is not None else None
-        )
-        supports_reasoning = (
-            backend_model.supports_reasoning if backend_model is not None else None
-        )
-        reasoning_efforts = (
-            tuple(backend_model.reasoning_efforts)
-            if backend_model is not None
-            and backend_model.supports_reasoning is not False
-            else ()
-        )
+        description = self._describe_launch(config, backend, requested_model, resolution)
         self._last_supply_state[(backend, requested_model)] = ("ok", None)
         if source.supply_channel == "native_cli":
             if self.service.revocations.list():
@@ -1274,21 +1306,9 @@ class ModelHubRuntimeRouter:
                 except ModelHubError:
                     # Native launch is independent; the durable journal retries later.
                     pass
-            launch = ModelHubLaunch(
-                backend=backend,
-                channel="native_cli",
-                requested_model=requested_model,
-                target_model=target_model,
-                runtime_model=target_model,
-                source_id=source.id,
-                context_window=context_window,
-                max_output_tokens=max_output_tokens,
-                supports_tools=supports_tools,
-                supports_reasoning=supports_reasoning,
-                reasoning_efforts=reasoning_efforts,
-                settlement_generation=self.service._reserve_settlement_generation(
-                    source.id
-                ),
+            launch = replace(
+                description,
+                settlement_generation=self.service._reserve_settlement_generation(source.id),
             )
             if self.turn_gateway is not None:
                 self.turn_gateway.correlation.begin_native_attempt(
@@ -1366,35 +1386,13 @@ class ModelHubRuntimeRouter:
             elif self.turn_gateway is not None and backend == "vibey" and str(turn_id or "").strip():
                 # Vibey names its turn on every gateway request (HopResolution.request_headers).
                 request_metadata = {VIBEY_TURN_HEADER: str(turn_id).strip()}
-            launch = ModelHubLaunch(
-                backend=backend,
-                channel="hub",
-                requested_model=requested_model,
-                target_model=target_model,
+            launch = replace(
+                description,
                 runtime_model=runtime_model,
-                source_id=source.id,
                 gateway_base_url=gateway_base_url,
                 gateway_token=gateway_token,
                 gateway_request_metadata=request_metadata,
-                context_window=context_window,
-                max_output_tokens=max_output_tokens,
-                supports_tools=supports_tools,
-                supports_reasoning=supports_reasoning,
-                reasoning_efforts=reasoning_efforts,
-                protocol=source.protocol,
-                provider=source.vendor,
-                cache_ttl=resolution.cache_ttl,
-                cache_ttl_wire=resolution.cache_ttl_wire,
-                supports_images=(
-                    "image" in backend_model.input_modalities
-                    if backend_model is not None and backend_model.input_modalities
-                    else None
-                ),
                 hosted_tools=hosted_tools,
-                source_identity=identity,
-                context_price_steps=(
-                    self.service.context_price_steps(target_model) if backend == "vibey" else ()
-                ),
             )
         self._emit_transition(launch, config)
         return launch

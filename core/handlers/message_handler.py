@@ -440,19 +440,16 @@ class MessageHandler(BaseHandler):
             # the VibeAgent's own defaults — otherwise the header's model /
             # effort picker would be cosmetic: persisted and displayed but never
             # actually routed to the backend.
-            session_target_model = (
-                session_target.get("model") if isinstance(session_target, dict) else None
-            ) or resolved_target.get("model")
-            session_target_reasoning = (
-                session_target.get("reasoning_effort") if isinstance(session_target, dict) else None
-            ) or resolved_target.get("reasoning_effort")
-            # The model / effort this turn ACTUALLY runs with — the same
-            # precedence the request is built on below.
-            effective_model = session_target_model or scope_model_override or (
-                vibe_agent.model if vibe_agent else None
-            )
-            effective_reasoning_effort = session_target_reasoning or scope_reasoning_override or (
-                vibe_agent.reasoning_effort if vibe_agent else None
+            from core.agent_session_context import session_model_settings
+
+            effective_model, effective_reasoning_effort, explicit_overrides = session_model_settings(
+                session_target if isinstance(session_target, dict) else None,
+                fallback_model=resolved_target.get("model") or scope_model_override or (
+                    vibe_agent.model if vibe_agent else None
+                ),
+                fallback_reasoning_effort=resolved_target.get("reasoning_effort") or scope_reasoning_override or (
+                    vibe_agent.reasoning_effort if vibe_agent else None
+                ),
             )
             materialized_agent_identity = bool(
                 vibe_agent
@@ -460,23 +457,6 @@ class MessageHandler(BaseHandler):
                 and not session_target.get("agent_id")
                 and not session_target.get("agent_name")
             )
-            # A session may pin a setting to NOTHING on purpose. The cascade above
-            # cannot express that: every `or` reads NULL as "inherit", which is the
-            # correct reading for the whole existing table and the WRONG one for a
-            # preserved `create_once` rebind, whose whole point is that the session
-            # it replaced pinned no model and must keep pinning none (D3). Only
-            # sessions carrying the explicit-override marker are re-read here, so
-            # the global meaning of NULL is untouched -- reinterpreting it would
-            # silently re-route every session that is merely inheriting.
-            explicit_overrides: set[str] = set()
-            if isinstance(session_target, dict):
-                from storage.session_reclaim import explicit_override_names
-
-                explicit_overrides = explicit_override_names(session_target.get("metadata"))
-            if "model" in explicit_overrides:
-                effective_model = session_target.get("model")
-            if "reasoning_effort" in explicit_overrides:
-                effective_reasoning_effort = session_target.get("reasoning_effort")
             # Materialize the resolved route into EMPTY Workbench session
             # columns at turn start. A session created on an inherited default
             # carries NULLs (dispatch resolves the live Agent default); without
