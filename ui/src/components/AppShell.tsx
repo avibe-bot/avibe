@@ -541,7 +541,7 @@ export const AppShell: React.FC = () => {
           settingsCoversSidebar && 'invisible pointer-events-none',
         )}
       >
-        <DesktopDragRegion className="absolute left-0 -right-px top-0 border-b border-border bg-[var(--sidebar-background)]" />
+        <DesktopDragRegion className="absolute left-0 -right-px top-0 bg-[var(--sidebar-background)]" />
         <div className="flex min-h-0 flex-1 flex-col">
           {isDesktop && (
             <RouteSurfaceActivityBoundary active={!settingsCoversSidebar}>

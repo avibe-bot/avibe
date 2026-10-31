@@ -16,14 +16,14 @@ export function DesktopWindowChrome({ enabled, hidden, children }: {
           data-desktop-window-chrome=""
           hidden={hidden}
           inert={hidden || undefined}
-          className="fixed inset-x-0 top-0 z-30 h-[var(--shell-titlebar-inset)] border-b border-border bg-background"
+          className="fixed inset-x-0 top-0 z-30 h-[var(--shell-titlebar-inset)]"
         >
           {/* Native traffic lights occupy the left of the sidebar; its remaining
               width is a drag target. No transparent overlay covers controls. */}
           <div
             aria-hidden="true"
             data-tauri-drag-region={desktopDragRegion()}
-            className="absolute inset-y-0 left-0 w-[var(--app-sidebar-w)] select-none bg-[var(--sidebar-background)]"
+            className="absolute inset-y-0 left-0 w-[var(--app-sidebar-w)] select-none"
           />
           <div
             ref={setSlot}

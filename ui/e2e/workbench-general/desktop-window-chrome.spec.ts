@@ -144,7 +144,8 @@ for (const desktop of [false, true]) {
       expect(topBounds?.y).toBe(0);
       expect(topBounds?.height).toBe(28);
       expect(topBounds?.width).toBe((await sidebar.boundingBox())?.width);
-      await expect(topRow).toHaveCSS('border-bottom-width', '1px');
+      await expect(topRow).toHaveCSS('border-bottom-width', '0px');
+      await expect(sidebar).toHaveCSS('border-right-width', '1px');
       const brandMark = brand.locator('img');
       const brandMarkBounds = await brandMark.boundingBox();
       expect(brandMarkBounds?.x).toBeCloseTo((await sidebar.boundingBox())!.x + 16, 0);
