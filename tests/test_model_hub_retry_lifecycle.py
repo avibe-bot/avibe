@@ -1243,9 +1243,10 @@ def test_a_silent_engine_stream_is_cancelled_and_retried_at_its_idle_bound(
 @pytest.mark.parametrize(
     "origin,vendor,source_protocol,bound",
     [
-        # Vibey's own bound, which Vibey no longer applies to the wait for response headers.
+        # An unmeasured Source keeps Vibey's caller-owned bound.
         ("vibey", "xai", "openai_responses", "caller"),
-        # A measured Source keeps its shorter bound for every caller.
+        # A measured Anthropic stream keeps its shorter inter-byte bound after
+        # the first response byte; Vibey's larger bound applies only before it.
         ("vibey", "anthropic", "anthropic", "idle"),
         # A native caller keeps its own bound, and an unmeasured Source stays unbounded here.
         ("codex", "xai", "openai_responses", None),
@@ -1257,10 +1258,9 @@ def test_vibey_hands_its_silence_bound_to_the_engine_read(
     """MH-RUNTIME-013: before model output only the engine read sees the upstream, so it holds Vibey's bound.
 
     The gateway withholds the response, heartbeats included, until the first
-    model output, and a model that thinks without streaming its thinking sends
-    nothing else for as long as it thinks. Vibey therefore bounds no wait for
-    response headers itself; the engine read applies Vibey's silence bound to
-    every stream the measured Source table leaves unbounded.
+    model output. Vibey therefore gives the engine its 600-second caller-owned
+    pre-response patience; a measured Source resumes its shorter 120-second
+    inter-byte bound after the first response byte.
     """
     idle, caller = 0.3, 0.8
     monkeypatch.setattr(engine_client_module, "_STREAM_IDLE_TIMEOUT_SECONDS", idle)
@@ -1305,5 +1305,36 @@ def test_vibey_hands_its_silence_bound_to_the_engine_read(
         assert body == b""
         expected = caller if bound == "caller" else idle
         assert len(stalled_for) == 1 and expected * 0.9 <= stalled_for[0] < min(expected + 0.4, caller * 2)
+
+    asyncio.run(run())
+
+
+def test_vibey_allows_slow_anthropic_response_headers_with_caller_bound(monkeypatch, tmp_path):
+    """A slow relay body read may exceed the measured idle bound before headers arrive."""
+
+    idle, caller = 0.3, 0.8
+    monkeypatch.setattr(engine_client_module, "_STREAM_IDLE_TIMEOUT_SECONDS", idle)
+    monkeypatch.setattr(engine_adapter_module, "PROVIDER_SILENCE_TIMEOUT_S", caller)
+
+    async def run() -> None:
+        source = _source("src_slowheaders", "Slow headers", vendor="anthropic", protocol="anthropic")
+        service, _clock, _models = configured_service(tmp_path, sources=[source])
+        metadata, output, terminal, _buffered = WIRE["anthropic"]
+
+        async def respond(request: web.Request) -> web.Response:
+            await request.json()
+            await asyncio.sleep((idle + caller) / 2)
+            return web.Response(body=metadata + output + terminal, content_type="text/event-stream")
+
+        async with loopback_engine(tmp_path, service, respond) as (adapter, _engine_client):
+            handle = await asyncio.wait_for(
+                adapter.invoke(source.id, "shared-model", {"stream": True}, True, "vibey"),
+                timeout=3,
+            )
+            body = b"".join([chunk async for chunk in handle.stream]) if handle.stream is not None else b""
+            outcome = await asyncio.wait_for(handle.outcome(), timeout=3)
+
+        assert outcome.kind == RawOutcomeKind.SUCCESS
+        assert body == metadata + output + terminal
 
     asyncio.run(run())

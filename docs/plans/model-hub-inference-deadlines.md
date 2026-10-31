@@ -287,9 +287,8 @@ was dead or its upstream stuck was not recorded.
 
 - A streamed request to a Source in the table below ends when the engine sends
   the gateway no byte for **120 s**. Every byte restarts the bound: data events,
-  pings and comments alike. It runs from the moment the request body is written,
-  so it covers the wait for response headers too. A paused read, while the
-  downstream caller is slower than the engine, does not count.
+  pings and comments alike. Native callers apply it from the moment the
+  request body is written, so it covers the wait for response headers too.
 - When the bound runs out, the gateway closes the engine connection. The engine
   cancels its upstream request through its request context; measured on the
   shipped v8.0.23-3 engine, the upstream saw the disconnect within 0.02 s.
@@ -412,3 +411,16 @@ HTTP status its error handling keys on.
   reaches Vibey as `interrupted` rather than `stalled`.
 - A persistently silent unmeasured Source still costs about two 600 s attempts
   (Model Hub recovery), as before (Vibey's own stall and one continuation).
+
+## Remote relay request-body prelude (2026-10-31)
+
+The 2026-10-31 relay investigation found Anthropic requests that spent nearly
+120 s in the relay's request-body read before the caller cancelled the
+connection. For Vibey, the engine now uses its existing 600 s caller-owned
+budget for the request/response prelude when it exceeds the measured 120 s
+bound. Once the first response byte arrives, measured Anthropic streams retain
+the 120 s per-read idle bound. Native callers retain the 120 s prelude bound.
+
+This is a client-side resilience margin, not proof that a relay is healthy. The
+relay still needs its own request-body idle timeout, phase diagnostics, and
+attempt-ID propagation; those changes are tracked in the relay project.
