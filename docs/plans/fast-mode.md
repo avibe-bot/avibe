@@ -125,14 +125,19 @@ without losing a count. Pricing details: `docs/plans/model-hub-capability-model.
   again when a fast turn ends.
 - The compact picker's Fast toggle sits beside the effort heading. Its hover and
   keyboard-focus tooltip says what it does. While fast mode is on, a touch screen
-  shows the same line under the efforts. On a model without the tier, or one
-  whose last fast response did not confirm it ran, the toggle keeps the
-  Session's choice but is disabled, the trigger shows no mark, and the tooltip
-  (or, on a touch screen, the line under the efforts) says which.
+  shows the same line under the efforts. On a model without the tier, the
+  toggle keeps the Session's choice but is disabled, the trigger shows no mark,
+  and the tooltip says so.
+- Where the model's hop is asked for the tier but its last fast response did not
+  confirm it ran (owner decision, 2026-10-31), the toggle stays switchable: the
+  user may try it, or stop paying for it. While fast mode is on there, the
+  trigger shows the bolt hollow, the toggle's bolt is hollow too, and a line
+  under the efforts says the provider did not confirm it, on every device. The
+  field keeps being sent, so the bolt fills in once a reply confirms it.
 - The trigger's mark, a slim bolt in light amber, sits beside the chevron,
-  outside the parts a narrow row drops. It shows only while the Session asks for
-  the fast tier, its model's hop is asked for it, and that hop's last fast
-  response did not say otherwise.
+  outside the parts a narrow row drops. It is filled while the Session asks for
+  the fast tier and its model's hop last confirmed it (or has not answered yet),
+  and hollow while that hop's last fast response did not confirm it.
 
 ## Not in this change
 
