@@ -67,14 +67,14 @@ for (const desktop of [false, true]) {
       await expect(page.locator('[data-desktop-window-chrome] [data-chat-header]')).toHaveCount(1);
       await expect(page.locator('main [data-chat-header]')).toHaveCount(0);
       const bounds = await page.locator('[data-desktop-window-chrome]').boundingBox();
-      expect(bounds).toEqual({ x: 0, y: 0, width: 1200, height: 48 });
+      expect(bounds).toEqual({ x: 0, y: 0, width: 1200, height: 28 });
       // Every rendered drag surface is confined to the same top row, including
       // the sidebar clearance. The transcript and composer never join it.
       for (const region of await page.locator('[data-tauri-drag-region]').all()) {
         const rect = await region.boundingBox();
         if (rect) {
           expect(rect.y).toBeGreaterThanOrEqual(0);
-          expect(rect.y + rect.height).toBeLessThanOrEqual(48);
+          expect(rect.y + rect.height).toBeLessThanOrEqual(28);
         }
         await expect(region).toHaveAttribute('data-tauri-drag-region', '');
       }
@@ -142,9 +142,10 @@ for (const desktop of [false, true]) {
       const topRow = sidebar.locator(':scope > [data-tauri-drag-region]');
       const topBounds = await topRow.boundingBox();
       expect(topBounds?.y).toBe(0);
-      expect(topBounds?.height).toBe(48);
+      expect(topBounds?.height).toBe(28);
       expect(topBounds?.width).toBe((await sidebar.boundingBox())?.width);
-      await expect(topRow).toHaveCSS('border-bottom-width', '1px');
+      await expect(topRow).toHaveCSS('border-bottom-width', '0px');
+      await expect(sidebar).toHaveCSS('border-right-width', '1px');
       const brandMark = brand.locator('img');
       const brandMarkBounds = await brandMark.boundingBox();
       expect(brandMarkBounds?.x).toBeCloseTo((await sidebar.boundingBox())!.x + 16, 0);
