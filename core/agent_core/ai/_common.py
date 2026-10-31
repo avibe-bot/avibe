@@ -28,6 +28,7 @@ from core.agent_core.ai.errors import (
 from core.agent_core.ai.hosted import MAX_HOSTED_COUNTERS
 from core.agent_core.ai.image_limits import LoadedImage, fit_image
 from core.agent_core.ai.request_artifacts import RequestAttempt, ResponseCapture, begin_attempt
+from core.agent_core.ai.request_artifacts import settle as settle_attempt
 from core.agent_core.ai.sse import SSEEvent, SSEParseError, SSEParser
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import (
@@ -1885,9 +1886,7 @@ async def drive_sse_stream(
     assembler.begin_driver()
     try:
         try:
-            if cancel.cancelled:
-                candidate = assembler.aborted(cancel.reason)
-            else:
+            if not cancel.cancelled:
                 # The transport bounds only connecting; the wait for response
                 # headers is the provider's silence, bounded below, or the
                 # gateway's to bound (``PROVIDER_SILENCE_TIMEOUT_S``).
@@ -1900,6 +1899,12 @@ async def drive_sse_stream(
                 )
                 # Durable before it is sent: a crash mid-request leaves it pending, never a success.
                 attempt = await begin_attempt(request, endpoint=endpoint, protocol=assembler.protocol)
+            if cancel.cancelled:
+                # Stopped before the send, possibly while the pending write ran: nothing goes out.
+                if attempt is not None:
+                    await attempt.not_sent()
+                candidate = assembler.aborted(cancel.reason)
+            else:
                 capture = attempt.capture if attempt is not None else None
                 # Retain the opening task even if cancellation wins the await:
                 # its successful result still belongs to this driver's finally.
@@ -2041,10 +2046,9 @@ async def drive_sse_stream(
                 yield terminal
     finally:
         assembler.end_driver()
-        if attempt is not None and not attempt.ended:
-            # Ended without a terminal (its consumer closed it, or its task was cancelled): never active again,
-            # whatever the cleanup below does. Its durable entry is marked unknown at the end.
-            attempt.release()
+        # Ended without a terminal (its consumer closed it, or its task was cancelled): out of the active set and
+        # its ``unknown`` state queued now, whatever the cleanup below does; that write is awaited at the end.
+        abandoning = attempt.abandon() if attempt is not None else None
         async def close_opened_response() -> None:
             if opening is None:
                 return
@@ -2078,8 +2082,7 @@ async def drive_sse_stream(
                     cleanup.add_done_callback(_consume_task_result)
 
                 opening.add_done_callback(close_late_response)
-        if attempt is not None and not attempt.ended:
-            await attempt.abandon()
+        await settle_attempt(abandoning)
 
 
 def _attempt_failure_kind(error: ProviderError, response: httpx.Response | None) -> str:
@@ -2185,48 +2188,35 @@ async def read_response_body(
 ) -> str | None:
     """Read an error body through the shared cancellation owner with a byte cap.
 
-    The text returned is at most ``max_bytes``. ``capture`` receives the raw bytes as read, and reading goes on past
-    ``max_bytes`` until the body ends or the capture holds its own limit. That reading is for the capture alone: it
-    waits at most ``CLEANUP_TIMEOUT_S`` per read, and whatever ends it (a stall, a reset, a cancellation) only marks
-    the capture incomplete. The text and so the error's classification are what they would be without capture.
+    ``capture`` sees every chunk this read takes, and nothing more: it never reads on its own, so the text, the
+    error's classification, and the time it takes are what they are without capture.
     """
 
     iterator = response.aiter_bytes().__aiter__()
     chunks: list[bytes] = []
     size = 0
-    while size < max_bytes or (capture is not None and not capture.full):
-        capture_only = size >= max_bytes
+    while size < max_bytes:
         try:
             chunk = await _await_network(
                 iterator.__anext__(),
                 cancel,
-                timeout_s=CLEANUP_TIMEOUT_S if capture_only else PROVIDER_SILENCE_TIMEOUT_S,
+                timeout_s=PROVIDER_SILENCE_TIMEOUT_S,
             )
         except StopAsyncIteration:
             if capture is not None:
                 capture.finish()
             break
-        except Exception as exc:
-            if not capture_only or capture is None:
-                raise
-            capture.interrupted(type(exc).__name__)
-            break
         if chunk is None:
-            if capture_only and capture is not None:
-                capture.interrupted("cancelled")
-                break
             return None
         if not chunk:
             continue
         if capture is not None:
             capture.feed(chunk)
-        if size >= max_bytes:
-            continue
         remaining = max_bytes - size
         piece = bytes(chunk[:remaining])
         chunks.append(piece)
         size += len(piece)
-        if len(piece) < len(chunk) and capture is None:
+        if len(piece) < len(chunk):
             break
     return b"".join(chunks).decode("utf-8", errors="replace")
 

@@ -14,19 +14,25 @@ Anthropic Messages, OpenAI Responses, OpenAI Chat Completions, and Google.
 
 1. **Before the request is sent**, its pending artifact is written: `request.bin` (the `httpx.Request.content` that
    is then sent, byte for byte) and `meta.json`.
-2. **When it ends**, it is resolved in one of two ways:
+2. **When it ends**, it is resolved in one of these ways:
    - A semantically successful request is deleted. That means one that produced a complete response (`Done`), or an
      Anthropic `pause_turn` sub-request that ended normally. Its continuation is a separate request with its own
      artifact.
-   - Every other ending is kept with its outcome: an HTTP error (including the gateway's `pin_unavailable` 409 and
-     an HTTP 400 that leads to a resend), a stream that returned HTTP 200 but ended with an error or a stall, a
-     network failure, or a cancellation. HTTP 200 alone is not success.
-3. **A request with no known ending** is marked `unknown`, never success:
-   - its consumer stopped reading, or its task was cancelled before a terminal (the driver awaits a shielded write
-     that marks it, visible to every reader at once);
-   - it was cancelled while its pending write ran, before it was sent (`unknown`, outcome `not_sent`);
-   - the process died, or was cancelled again during that write: the entry stays `pending` on disk, and
-     `vibe model-requests` shows it as `unknown` once its owner process is gone.
+   - One that ended in an error is kept as `failed`: an HTTP error (including the gateway's `pin_unavailable` 409
+     and an HTTP 400 that leads to a resend), a stream that returned HTTP 200 but ended with an error or a stall,
+     or a network failure. HTTP 200 alone is not success. A turn stopped mid-request is `cancelled`.
+   - One stopped before it was sent is `cancelled` with outcome `not_sent`. A Stop that arrives during the
+     pending write is checked before the send, so it never causes provider work.
+   - One closed with no known outcome is `unknown`: its consumer stopped reading, or its task was cancelled before
+     a terminal.
+3. **Every ending goes through one path.** The attempt leaves this process's active set and the write of its final
+   state is queued on the worker in the same synchronous step, so no later cancellation can skip it. The driver
+   then awaits that write, shielded: cancelling the await leaves the write to run, and a failure of the write is
+   logged, never raised into the request. Whichever comes second, a pending write landing or a cancellation that
+   interrupted it, settles the attempt as `cancelled` / `not_sent`.
+4. **An attempt whose final state was never written** stays `pending` on disk: the process died first.
+   `vibe model-requests` shows it as `unknown` once its owner process is gone (pid and process start time). It is
+   never treated as a success.
 
 Outside a Vibey Turn nothing is captured: the library default is off, so tests and other callers stay hermetic.
 
@@ -60,16 +66,24 @@ response header (kept in `meta.json`) and the Model Hub provenance of the same T
   It never holds a credential or any other header, and never an error message: a provider's message can echo the
   prompt, tools, or a credential. The response body is in `response.bin`.
 - **`response.bin`**:
-  - An HTTP error body is kept from its start, up to 4 MiB. Reading past the first 64 KiB, which the error's
-    classification uses, is for the artifact only: each such read waits at most 10 s, and a stall, reset, or
-    cancellation there only marks the capture incomplete (`read_error`). The error is classified exactly as without
-    capture.
+  The capture only sees bytes the transport reads anyway. It never reads on its own, so the error's classification
+  and timing are what they are without it.
+  - An HTTP error body is kept as far as it is read to classify the error: its first 64 KiB, plus the rest of the
+    last chunk read, up to 1 MiB. A larger body is **expected to be incomplete**, with `read_to_end: false`.
   - A stream (HTTP 2xx) keeps its first 64 KiB and its last 1 MiB, so the terminal error event of a long response
     survives.
-  - Any cut is stated in `meta.json` (`truncated`, `truncation`, `omitted_bytes`, `read_to_end`, `read_error`).
+  - `meta.json` states completeness and any cut: `read_to_end`, `truncated`, `truncation`, `omitted_bytes`. The
+    request body, by contrast, is always complete.
 
-The files can contain prompts, tool output, and attachments. Directories are `0700`, files `0600`. Files are
-created with `O_EXCL | O_NOFOLLOW`, and a store path that is a symbolic link is refused.
+The files can contain prompts, tool output, and attachments. The store root and every export directory are made
+owner-private by `core.private_fs`:
+- on POSIX, `0700` directories and `0600` files;
+- on Windows, a protected DACL that grants only this user and SYSTEM, set when the directory is created and
+  inherited by everything created inside.
+
+Files are created with `O_EXCL | O_NOFOLLOW`, and a store or export path that is a symbolic link is refused. The
+Windows path is exercised by `core.private_fs`'s own Windows tests; this feature's tests check the same
+`private_fs.is_private` contract on the platform they run on.
 
 ## Retention
 

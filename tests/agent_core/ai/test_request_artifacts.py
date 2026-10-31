@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import stat
 import subprocess
 import sys
 import threading
@@ -34,6 +33,7 @@ from core.agent_core.ai.request_artifacts import (
     RequestArtifactStore,
     capture_model_requests,
 )
+from core import private_fs
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import TextBlock, UserMessage
 from tests.agent_core.ai.test_hosted_pause_turn import _request as _anthropic_hub_request
@@ -128,10 +128,8 @@ async def test_a_refused_request_keeps_the_exact_bytes_sent_with_typed_facts_onl
     assert meta["response"]["read_to_end"] and not meta["response"]["truncated"]
     text = (directory / META_FILE).read_text()
     assert SECRET not in text and PROMPT not in text and "?" not in meta["request"]["url"]
-    assert stat.S_IMODE(os.stat(store.root).st_mode) == 0o700
-    assert stat.S_IMODE(os.stat(directory).st_mode) == 0o700
-    for name in (REQUEST_FILE, RESPONSE_FILE, META_FILE):
-        assert stat.S_IMODE(os.stat(directory / name).st_mode) == 0o600
+    for path in (store.root, directory, *(directory / name for name in (REQUEST_FILE, RESPONSE_FILE, META_FILE))):
+        assert private_fs.is_private(path, os.lstat(path).st_mode), path
 
 
 async def test_a_request_that_never_got_a_response_is_kept_as_a_network_error(store):
@@ -272,10 +270,7 @@ async def test_a_request_still_streaming_is_pending_to_every_reader(store):
     assert _kept(store) == []
 
 
-async def test_a_request_cancelled_while_its_pending_write_runs_is_never_active_or_sent(store, monkeypatch):
-    """The write finishes on its own thread after the cancellation: the entry it wrote is released and marked
-    ``not_sent``, so retention does not keep it for the process's life and no reader sees it pending."""
-
+def _blocked_begin(monkeypatch) -> tuple[threading.Event, threading.Event]:
     entered, release = threading.Event(), threading.Event()
     begin = RequestArtifactStore.begin
 
@@ -285,19 +280,101 @@ async def test_a_request_cancelled_while_its_pending_write_runs_is_never_active_
         return begin(self, meta, body)
 
     monkeypatch.setattr(RequestArtifactStore, "begin", slow)
+    return entered, release
+
+
+async def _drain_worker() -> None:
+    await asyncio.get_running_loop().run_in_executor(request_artifacts._worker(), lambda: None)
+
+
+@pytest.mark.parametrize("landed_first", [False, True], ids=["cancelled-before-write-lands", "write-lands-first"])
+async def test_a_task_cancelled_while_its_pending_write_runs_sends_nothing_and_settles_it(store, monkeypatch, landed_first):
+    """Whichever comes second, the write landing or the cancellation, settles the attempt: never sent, never active,
+    and ``cancelled`` / ``not_sent`` for every reader."""
+
+    loop = asyncio.get_running_loop()
+    entered, release = threading.Event(), threading.Event()
+    tasks: list[asyncio.Task] = []
+    begin = RequestArtifactStore.begin
+
+    def slow(self, meta, body):
+        entered.set()
+        release.wait(5)
+        artifact_id = begin(self, meta, body)
+        if landed_first:
+            # Queued on the loop before the write's own result: the task sees the cancellation after it landed.
+            loop.call_soon_threadsafe(tasks[0].cancel)
+        return artifact_id
+
+    monkeypatch.setattr(RequestArtifactStore, "begin", slow)
     sent: list[httpx.Request] = []
-    task = asyncio.create_task(_run(_direct_request("anthropic"), lambda wire: sent.append(wire) or httpx.Response(400), store))
+    tasks.append(asyncio.create_task(
+        _run(_direct_request("anthropic"), lambda wire: sent.append(wire) or httpx.Response(400), store)
+    ))
     await asyncio.to_thread(entered.wait, 5)
-    task.cancel()
-    await asyncio.sleep(0)
+    if not landed_first:
+        tasks[0].cancel()
+        await asyncio.sleep(0)
     release.set()
     with pytest.raises(asyncio.CancelledError):
-        await task
+        await tasks[0]
+    await _drain_worker()
 
     assert sent == []
     (meta,) = _kept(store)
-    assert meta["state"] == "unknown" and meta["outcome"]["kind"] == "not_sent"
+    assert meta["state"] == "cancelled" and meta["outcome"]["kind"] == "not_sent"
     assert meta["id"] not in request_artifacts._ACTIVE
+
+
+async def test_a_turn_stopped_while_its_pending_write_runs_sends_nothing(store, monkeypatch):
+    """A Stop (the CancelToken) that arrives during the pending write is seen before the send: no provider work."""
+
+    entered, release = _blocked_begin(monkeypatch)
+    cancel = CancelToken()
+    sent: list[httpx.Request] = []
+
+    async def stop() -> None:
+        await asyncio.to_thread(entered.wait, 5)
+        cancel.cancel("stop")
+        release.set()
+
+    stopping = asyncio.create_task(stop())
+    _, events = await _run(
+        _direct_request("anthropic"), lambda wire: sent.append(wire) or httpx.Response(400), store, cancel=cancel
+    )
+    await stopping
+
+    assert sent == [] and isinstance(events[-1], ProviderError) and events[-1].kind == "aborted"
+    (meta,) = _kept(store)
+    assert meta["state"] == "cancelled" and meta["outcome"]["kind"] == "not_sent"
+    assert meta["id"] not in request_artifacts._ACTIVE
+
+
+async def test_a_final_write_queued_behind_other_work_survives_its_tasks_cancellation(store):
+    """Cancelling the task that awaits an ending does not cancel the queued write: it still runs, and the attempt
+    is out of ``_ACTIVE`` from the moment it ended."""
+
+    gate = threading.Event()
+    blocker: list[Any] = []
+
+    def answer(_: httpx.Request) -> httpx.Response:
+        # Occupy the single worker so the ending's write has to queue behind it.
+        blocker.append(request_artifacts._worker().submit(gate.wait, 5))
+        return httpx.Response(400, json=REFUSAL)
+
+    task = asyncio.create_task(_run(_direct_request("anthropic"), answer, store))
+    while not blocker or request_artifacts._worker()._work_queue.qsize() == 0:
+        await asyncio.sleep(0.005)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    (pending,) = _kept(store)
+    assert pending["id"] not in request_artifacts._ACTIVE
+    gate.set()
+    await _drain_worker()
+
+    (meta,) = _kept(store)
+    assert meta["state"] == "failed" and meta["outcome"]["http_status"] == 400
 
 
 class _PrefixThenReset(httpx.AsyncByteStream):
@@ -309,9 +386,10 @@ class _PrefixThenReset(httpx.AsyncByteStream):
         raise httpx.ReadError("connection reset")
 
 
-async def test_a_capture_only_read_that_fails_keeps_the_errors_own_classification(store):
-    """Past the 64 KiB the error is classified by, reading is for the capture alone: a reset there leaves the error
-    exactly as it is without capture, and the capture says it stopped."""
+async def test_an_error_body_is_kept_as_far_as_classification_read_it_and_no_further(store):
+    """Capture only sees the reads the transport makes anyway: past the 64 KiB the error is classified by, nothing
+    more is read, so a body that would fail later changes neither the error nor its timing, and the artifact says
+    the body was not read to its end."""
 
     message = "prompt is too long: 250000 tokens > 200000 maximum"
     prefix = json.dumps({"type": "error", "error": {"type": "invalid_request_error", "message": message}}).encode()
@@ -329,7 +407,7 @@ async def test_a_capture_only_read_that_fails_keeps_the_errors_own_classificatio
     )
     (meta,) = _kept(store)
     assert meta["outcome"]["kind"] == "http_error" and meta["outcome"]["exception_type"] is None
-    assert meta["response"]["read_error"] == "ReadError" and not meta["response"]["read_to_end"]
+    assert not meta["response"]["read_to_end"] and not meta["response"]["truncated"]
     assert (store.path(meta["id"]) / RESPONSE_FILE).read_bytes() == prefix
 
 
@@ -434,8 +512,8 @@ def test_an_attempt_is_read_only_from_the_store_and_exported_into_a_new_private_
 
     assert target == destination / artifact_id
     assert (target / REQUEST_FILE).read_bytes() == b"x" * 10
-    assert stat.S_IMODE(os.stat(target).st_mode) == 0o700
-    assert stat.S_IMODE(os.stat(target / REQUEST_FILE).st_mode) == 0o600
+    for path in (target, *target.iterdir()):
+        assert private_fs.is_private(path, os.lstat(path).st_mode), path
     with pytest.raises(FileExistsError):
         store.export(artifact_id, destination)
     link = tmp_path / "link"

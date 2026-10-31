@@ -7,34 +7,40 @@ Each attempt is one directory under the store root:
 
 - ``request.bin``: ``httpx.Request.content`` exactly as sent, never re-serialized.
 - ``meta.json``: typed facts only. These are the hop (protocol, provider, model, Source), the URL without its query
-  or userinfo, allowlisted headers, the body's size and sha256, the Session and Turn, the outcome, the HTTP status,
-  and the error kind. Never a credential, never an error message: a provider's message can echo the request.
-- ``response.bin``: the raw response bytes as read, when there were any. An HTTP error body is kept from its start
-  up to ``ERROR_BODY_LIMIT``. A stream keeps its first ``STREAM_HEAD_BYTES`` and last ``STREAM_TAIL_BYTES``, so a
-  terminal error event survives. ``meta.json`` states any truncation.
+  or userinfo, allowlisted headers, the body's size and sha256, the Session and Turn, the state and outcome, the
+  HTTP status, and the error kind. Never a credential, never an error message: a provider's message can echo the
+  request.
+- ``response.bin``: the raw response bytes the transport read anyway, never a read of its own. An HTTP error body
+  is what classification read (its first 64 KiB); a stream keeps its first ``STREAM_HEAD_BYTES`` and last
+  ``STREAM_TAIL_BYTES``, so a terminal error event survives. ``meta.json`` says whether the body was read to its
+  end and what was cut.
 
-Lifecycle:
-- The pending attempt is written before the request is sent.
-- A semantically successful attempt is deleted: a ``Done``, or an Anthropic ``pause_turn`` sub-request that ended
-  normally.
-- Every other ending is kept, marked failed or cancelled.
-- An attempt whose consumer closed it, or whose task was cancelled, before any ending is marked ``unknown`` by a
-  shielded write its driver awaits; one cancelled before it was sent is marked ``unknown`` (``not_sent``).
-- An attempt its process never got to mark (a crash, or a second cancellation during that write) stays ``pending``
-  on disk. It reads as ``unknown`` once its owner process is gone, or, in the owner, once it is no longer active.
-  It is never treated as a success.
+Lifecycle. ``_ACTIVE`` holds the attempts this process may still send or stream; retention never removes one.
+- ``begin`` writes the pending attempt (and adds it to ``_ACTIVE``) before the request is sent.
+- Every ending goes through one path, ``RequestAttempt._queue``: in one synchronous step the attempt leaves
+  ``_ACTIVE`` and the write of its final state is queued on the worker, so no later cancellation can skip it. The
+  driver awaits that write shielded (``settle``); cancelling the await leaves the write to run, and the write's own
+  failure is logged. Endings:
+  - a semantically successful request is deleted: a ``Done``, or an Anthropic ``pause_turn`` sub-request that
+    ended normally;
+  - one that ended in an error is kept as ``failed``, or ``cancelled`` when the turn was stopped;
+  - one stopped before it was sent is kept as ``cancelled`` with outcome ``not_sent``;
+  - one whose consumer closed it, or whose task was cancelled, before any ending is ``unknown``.
+- An attempt whose final state was never written (the process died first) stays ``pending`` on disk. It reads ``unknown`` once its owner process is gone, or, in the owner, once it is no
+  longer active. It is never treated as a success.
 
-Files are ``0600`` in ``0700`` directories and created with ``O_EXCL | O_NOFOLLOW``. All filesystem work runs on one
-private worker thread, never on the event loop. A failure to record never changes the request's outcome; it is
-logged without payload.
+The store root and every export directory are made owner-private by ``core.private_fs`` (on Windows, a protected
+DACL inherited by everything created inside). Files are created with ``O_EXCL | O_NOFOLLOW``. All filesystem work
+runs on one private worker thread, never on the event loop. A failure to record never changes the request's
+outcome; it is logged without payload.
 
-Retention defaults to 7 days and 256 MiB. Expired or over-quota attempts are removed oldest first. An attempt still
-active in a live process is never removed.
+Retention defaults to 7 days and 256 MiB. Expired or over-quota attempts are removed oldest first.
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import json
 import logging
@@ -58,13 +64,15 @@ from urllib.parse import urlsplit, urlunsplit
 
 import psutil
 
+from core.private_fs import ensure_private_directory
+
 logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
 DEFAULT_RETENTION_S = 7 * 24 * 60 * 60
 DEFAULT_QUOTA_BYTES = 256 * 1024 * 1024
-#: An HTTP error body is kept whole up to this size; anything after it is cut and the cut stated.
-ERROR_BODY_LIMIT = 4 * 1024 * 1024
+#: An HTTP error body is kept as far as it was read, up to this size; anything after it is cut and the cut stated.
+ERROR_BODY_LIMIT = 1024 * 1024
 #: A stream (HTTP 2xx) keeps its start and its end; the middle of a long one is dropped and the drop stated.
 STREAM_HEAD_BYTES = 64 * 1024
 STREAM_TAIL_BYTES = 1024 * 1024
@@ -196,8 +204,6 @@ class ResponseCapture:
         self.headers: dict[str, str] = {}
         self.total = 0
         self.read_to_end = False
-        #: What stopped a read made only for the capture (an exception type, or ``cancelled``).
-        self.read_error: str | None = None
         self._head = bytearray()
         self._tail: deque[bytes] = deque()
         self._tail_size = 0
@@ -211,12 +217,6 @@ class ResponseCapture:
     @property
     def head_limit(self) -> int:
         return STREAM_HEAD_BYTES if self._streaming else ERROR_BODY_LIMIT
-
-    @property
-    def full(self) -> bool:
-        """An error body past its limit: reading more would only be dropped."""
-
-        return not self._streaming and self.total > ERROR_BODY_LIMIT
 
     def feed(self, chunk: bytes) -> None:
         if not chunk:
@@ -235,8 +235,6 @@ class ResponseCapture:
     def finish(self) -> None:
         self.read_to_end = True
 
-    def interrupted(self, reason: str) -> None:
-        self.read_error = reason
 
     def _tail_bytes(self) -> bytes:
         return b"".join(self._tail)[-STREAM_TAIL_BYTES:]
@@ -253,7 +251,6 @@ class ResponseCapture:
             "headers": dict(self.headers),
             "read_bytes": self.total,
             "read_to_end": self.read_to_end,
-            "read_error": self.read_error,
             "captured_bytes": captured,
             "truncated": omitted > 0,
         }
@@ -278,20 +275,21 @@ class RequestArtifactStore:
         self.root = Path(root)
         self.retention_s = retention_s
         self.quota_bytes = quota_bytes
-        self._pruned_once = False
+        self._ready = False
 
     # -- paths -------------------------------------------------------------------------------------------------
 
     def _ensure_root(self) -> Path:
-        try:
-            info = os.lstat(self.root)
-        except FileNotFoundError:
-            os.makedirs(self.root, mode=0o700, exist_ok=True)
-            info = os.lstat(self.root)
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-            raise ArtifactStoreError(f"{self.root} is not a private directory")
-        if stat.S_IMODE(info.st_mode) & 0o077:
-            os.chmod(self.root, 0o700)
+        """The root, owner-private (``core.private_fs``): created so, or repaired, once per store object. A link or
+        a non-directory in its place is refused."""
+
+        if not self._ready:
+            ensure_private_directory(self.root)
+            if self.root.is_symlink():
+                raise ArtifactStoreError(f"{self.root} is not a private directory")
+            self._ready = True
+            # What earlier processes left behind is pruned once, before this one adds to it.
+            self.prune()
         return self.root
 
     def path(self, artifact_id: str) -> Path:
@@ -312,10 +310,6 @@ class RequestArtifactStore:
         """Write a pending attempt and return its id; it is active in this process until ``end`` or ``abandon``."""
 
         root = self._ensure_root()
-        if not self._pruned_once:
-            # What earlier processes left behind is pruned once, before this process adds to it.
-            self._pruned_once = True
-            self.prune()
         artifact_id = _new_id()
         partial = root / f".{artifact_id}.partial"
         os.mkdir(partial, 0o700)
@@ -329,8 +323,6 @@ class RequestArtifactStore:
     def succeed(self, artifact_id: str) -> None:
         """A semantically successful attempt is not kept."""
 
-        with _ACTIVE_LOCK:
-            _ACTIVE.discard(artifact_id)
         self._remove(self.path(artifact_id))
 
     def fail(self, artifact_id: str, outcome: Mapping[str, Any], capture: ResponseCapture | None) -> None:
@@ -345,20 +337,15 @@ class RequestArtifactStore:
         if capture is not None:
             meta["response"] = capture.summary()
         _replace_private(directory / META_FILE, _encode(meta))
-        with _ACTIVE_LOCK:
-            _ACTIVE.discard(artifact_id)
         self.prune()
 
-    def abandon(self, artifact_id: str, kind: str = UNKNOWN) -> None:
-        """The attempt ended with no known outcome: its consumer closed it or its task was cancelled (``unknown``),
-        or it was cancelled before it was sent (``not_sent``). It is no longer active, and every reader, in any
-        process, sees ``unknown``."""
+    def close(self, artifact_id: str, *, state: str, kind: str) -> None:
+        """An attempt that ended with no response to keep: stopped before it was sent (``cancelled``,
+        ``not_sent``), or closed with no known outcome (``unknown``). Every reader, in any process, sees it."""
 
-        with _ACTIVE_LOCK:
-            _ACTIVE.discard(artifact_id)
         directory = self.path(artifact_id)
         meta = self.meta(artifact_id)
-        meta["state"] = UNKNOWN
+        meta["state"] = state
         meta["outcome"] = {"kind": kind, "error_kind": None, "http_status": None, "exception_type": None}
         meta["finished_at"] = _now()
         _replace_private(directory / META_FILE, _encode(meta))
@@ -465,11 +452,16 @@ class RequestArtifactStore:
         destination = Path(destination).expanduser()
         if destination.is_symlink():
             raise ArtifactStoreError(f"{destination} is a symbolic link")
-        destination.mkdir(mode=0o700, parents=True, exist_ok=True)
+        destination.mkdir(parents=True, exist_ok=True)
         if destination.is_symlink() or not destination.is_dir():
             raise ArtifactStoreError(f"{destination} is not a directory")
         target = destination / artifact_id
-        os.mkdir(target, 0o700)
+        if os.path.lexists(target):
+            raise FileExistsError(f"{target} already exists")
+        # Owner-private from its creation (on Windows a protected, inherited DACL): the files below start private.
+        ensure_private_directory(target)
+        if target.is_symlink() or any(target.iterdir()):
+            raise ArtifactStoreError(f"{target} is not a new private directory")
         for name in _FILES:
             path = source / name
             try:
@@ -540,8 +532,10 @@ def _worker() -> ThreadPoolExecutor:
         return _executor
 
 
-async def _off_loop(function: Callable[..., _T], *args: Any) -> _T:
-    return await asyncio.get_running_loop().run_in_executor(_worker(), function, *args)
+def _submit(function: Callable[..., _T], *args: Any) -> asyncio.Future[_T]:
+    """Queue ``function`` on the artifact worker; the caller owns the returned future."""
+
+    return asyncio.get_running_loop().run_in_executor(_worker(), functools.partial(function, *args))
 
 
 class RequestAttempt:
@@ -555,19 +549,15 @@ class RequestAttempt:
         self.exception_type: str | None = None
         self.ended = False
 
+    def release(self) -> None:
+        """No longer sent or streamed by this process, at once and without I/O. Idempotent."""
+
+        _release(self.id)
+
     async def succeeded(self) -> None:
-        if self.ended:
-            return
-        self.ended = True
-        try:
-            await _off_loop(self.store.succeed, self.id)
-        except Exception as exc:
-            _record_failure("remove a successful request", exc)
+        await self._end("remove a successful request", self.store.succeed, self.id)
 
     async def failed(self, *, kind: str, error_kind: str | None = None, status: int | None = None) -> None:
-        if self.ended:
-            return
-        self.ended = True
         outcome: dict[str, Any] = {
             "state": CANCELLED if kind == "cancelled" else FAILED,
             "outcome": {
@@ -577,35 +567,55 @@ class RequestAttempt:
                 "exception_type": self.exception_type,
             },
         }
-        try:
-            await _off_loop(self.store.fail, self.id, outcome, self.capture)
-        except Exception as exc:
-            _record_failure("keep a failed request", exc)
+        await self._end("keep a failed request", self.store.fail, self.id, outcome, self.capture)
 
-    def release(self) -> None:
-        """No longer active in this process, at once and without I/O: retention may treat it as ended."""
+    async def not_sent(self) -> None:
+        """Stopped before it was sent: the request never went out."""
 
-        with _ACTIVE_LOCK:
-            _ACTIVE.discard(self.id)
+        await self._end("keep an unsent request", functools.partial(self.store.close, state=CANCELLED, kind="not_sent"), self.id)
 
-    async def abandon(self) -> None:
-        """No outcome is known: mark the durable entry ``unknown`` for every reader. The write is shielded and owned
-        by the caller's await; if that await is cancelled again, the write already queued still completes."""
+    def abandon(self) -> asyncio.Future[Any] | None:
+        """Closed with no known outcome (its consumer stopped reading, or its task was cancelled): queue the write
+        that marks it ``unknown`` at once, without awaiting, so nothing the caller still has to do can keep it from
+        being queued. The caller awaits the returned future (``settle``)."""
+
+        return self._queue("mark an interrupted request", functools.partial(self.store.close, state=UNKNOWN, kind=UNKNOWN), self.id)
+
+    async def _end(self, action: str, write: Callable[..., Any], *args: Any) -> None:
+        await settle(self._queue(action, write, *args))
+
+    def _queue(self, action: str, write: Callable[..., Any], *args: Any) -> asyncio.Future[Any] | None:
+        """The one way an attempt ends: out of ``_ACTIVE`` at once, then its final state written on the worker.
+        Whatever the write does, its outcome is retrieved and a failure logged, never raised into the request."""
 
         if self.ended:
-            return
+            return None
         self.ended = True
         self.release()
-        try:
-            await asyncio.shield(_off_loop(self.store.abandon, self.id))
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            _record_failure("mark an interrupted request", exc)
+        written = _submit(write, *args)
+        written.add_done_callback(functools.partial(_log_write_failure, action))
+        return written
+
+
+async def settle(written: asyncio.Future[Any] | None) -> None:
+    """Await an ending's write, shielded: cancelling this await leaves the queued write to run."""
+
+    if written is None:
+        return
+    try:
+        await asyncio.shield(written)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        pass  # logged by the write's done-callback
 
 
 async def begin_attempt(request: Any, *, endpoint: Any, protocol: str) -> RequestAttempt | None:
-    """Record ``request`` (an ``httpx.Request``) as pending before it is sent, when a capture scope is active."""
+    """Record ``request`` (an ``httpx.Request``) as pending before it is sent, when a capture scope is active.
+
+    Cancelled while the write runs, the write still finishes on the worker; what it wrote was never sent, so it is
+    taken out of ``_ACTIVE`` when it lands and then kept as ``cancelled`` / ``not_sent``, both on the worker.
+    """
 
     scope = _SCOPE.get()
     if scope is None:
@@ -635,37 +645,63 @@ async def begin_attempt(request: Any, *, endpoint: Any, protocol: str) -> Reques
     except Exception as exc:
         _record_failure("record a pending request", exc)
         return None
-    written = asyncio.get_running_loop().run_in_executor(_worker(), scope.store.begin, meta, body)
+    store = scope.store
+    ticket = _PendingWrite()
+    written = _submit(ticket.write, store, meta, body)
+    written.add_done_callback(functools.partial(_log_write_failure, "record a pending request"))
     try:
         artifact_id = await asyncio.shield(written)
     except asyncio.CancelledError:
-        # Cancelled while the write ran: it may still finish, and what it wrote was never sent. Release it as soon
-        # as it does, then mark it for every reader before the cancellation goes on.
-        written.add_done_callback(_release_unsent)
-        await _settle_unsent(scope.store, written)
+        ticket.cancel(store)
         raise
-    except Exception as exc:
-        _record_failure("record a pending request", exc)
-        return None
-    return RequestAttempt(scope.store, artifact_id)
+    except Exception:
+        return None  # logged by the done-callback
+    return RequestAttempt(store, artifact_id)
 
 
-def _release_unsent(written: asyncio.Future[str]) -> None:
-    if not written.cancelled() and written.exception() is None:
-        with _ACTIVE_LOCK:
-            _ACTIVE.discard(written.result())
+class _PendingWrite:
+    """A pending write and the cancellation of the request it records, in either order: whichever comes second
+    settles the attempt as ``cancelled`` / ``not_sent`` (on the worker) and takes it out of ``_ACTIVE``."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._cancelled = False
+        self._artifact_id: str | None = None
+
+    def write(self, store: RequestArtifactStore, meta: dict[str, Any], body: bytes) -> str:
+        artifact_id = store.begin(meta, body)
+        with self._lock:
+            self._artifact_id = artifact_id
+            cancelled = self._cancelled
+        if cancelled:
+            _release(artifact_id)
+            store.close(artifact_id, state=CANCELLED, kind="not_sent")
+        return artifact_id
+
+    def cancel(self, store: RequestArtifactStore) -> None:
+        with self._lock:
+            self._cancelled = True
+            landed = self._artifact_id
+        if landed is None:
+            return  # the write settles it when it lands
+        _release(landed)
+        settled = _submit(functools.partial(store.close, state=CANCELLED, kind="not_sent"), landed)
+        settled.add_done_callback(functools.partial(_log_write_failure, "keep an unsent request"))
 
 
-async def _settle_unsent(store: RequestArtifactStore, written: asyncio.Future[str]) -> None:
-    try:
-        artifact_id = await asyncio.shield(written)
-        await asyncio.shield(_off_loop(store.abandon, artifact_id, "not_sent"))
-    except asyncio.CancelledError:
-        # Cancelled again: the entry is released in memory (``_release_unsent``) and stays pending on disk until
-        # its owner exits, when every reader sees it as unknown.
-        pass
-    except Exception as exc:
-        _record_failure("mark an unsent request", exc)
+def _release(artifact_id: str) -> None:
+    with _ACTIVE_LOCK:
+        _ACTIVE.discard(artifact_id)
+
+
+def _log_write_failure(action: str, written: Any) -> None:
+    """Retrieve a worker write's outcome, so none goes unobserved, and log a failure without payload."""
+
+    if written.cancelled():
+        return
+    exc = written.exception()
+    if exc is not None:
+        _record_failure(action, exc)
 
 
 def _record_failure(action: str, exc: BaseException) -> None:
