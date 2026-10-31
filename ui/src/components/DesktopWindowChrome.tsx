@@ -2,7 +2,18 @@ import { useState, type ReactNode } from 'react';
 import { DesktopWindowChromeContext } from '../context/DesktopWindowChromeContext';
 import { desktopDragRegion } from '../lib/desktopShell';
 
-/** A window-level home for the existing chat toolbar, beside native traffic lights. */
+/**
+ * A window-level home for the existing chat toolbar, beside native traffic lights.
+ *
+ * Native chrome stacking contract:
+ *
+ * | region | boundary | precedence |
+ * | safe strip | y < Hn (`--shell-titlebar-inset`) | native chrome / resizer |
+ * | workbench | y >= Hn | WindowLayer (z-20) > toolbar (z-18) |
+ *
+ * Ht (`--desktop-chat-toolbar-h`, 48px) remains the toolbar's layout height.
+ * It must not become the WindowLayer safety boundary.
+ */
 export function DesktopWindowChrome({ enabled, hidden, children }: {
   enabled: boolean;
   hidden: boolean;
@@ -16,7 +27,7 @@ export function DesktopWindowChrome({ enabled, hidden, children }: {
           data-desktop-window-chrome=""
           hidden={hidden}
           inert={hidden || undefined}
-          className="fixed inset-x-0 top-0 z-30 h-[var(--desktop-chat-toolbar-h)]"
+          className="fixed inset-x-0 top-0 z-[18] h-[var(--desktop-chat-toolbar-h)]"
         >
           {/* Native traffic lights occupy the left of the sidebar; its remaining
               width is a drag target. No transparent overlay covers controls. */}

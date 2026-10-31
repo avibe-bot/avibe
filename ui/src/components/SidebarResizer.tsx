@@ -40,9 +40,9 @@ type Gesture = {
  * The sidebar's right divider, made draggable. On native macOS the strip owns
  * the neutral line too and sits outside the aside's stacking context. Its
  * existing hover/focus/gesture states color one border from top to bottom.
- * The native strip is split at the toolbar's lower edge so floating app windows
- * stay above the resize edge in the content area while the edge still clears
- * the native chrome above it. Both segments share this component's gesture and
+ * The native strip is split at the native safe boundary so floating app windows
+ * stay above the resize edge in the workbench while the edge still clears the
+ * native chrome above it. Both segments share this component's gesture and
  * visual state; Web keeps one strip over the aside's own divider.
  */
 export const SidebarResizer = ({ nativeChrome = false, hidden = false, elevated = false }: {
@@ -196,11 +196,11 @@ export const SidebarResizer = ({ nativeChrome = false, hidden = false, elevated 
     );
   }
 
-  // The top segment clears the native chrome. The lower segment normally stays
-  // below WindowLayer (z-20), so a floating app window can cover both its paint
-  // and its hit strip once it crosses the sidebar boundary. Settings raises it
-  // temporarily while the WindowLayer is hidden, preserving the existing
-  // inline-settings resize interaction.
+  // The top segment clears the native chrome through Hn. The lower segment
+  // normally stays below WindowLayer (z-20), so a floating app window can cover
+  // both its paint and its hit strip once it crosses the sidebar boundary.
+  // Settings raises it temporarily while the WindowLayer is hidden, preserving
+  // the existing inline-settings resize interaction.
   return (
     <>
       <div
@@ -212,7 +212,7 @@ export const SidebarResizer = ({ nativeChrome = false, hidden = false, elevated 
         data-sidebar-resizer="true"
         className={clsx(
           commonClass,
-          'fixed left-[calc(var(--app-sidebar-w)-8px)] top-0 z-[31] h-[var(--desktop-chat-toolbar-h)] border-border',
+          'fixed left-[calc(var(--app-sidebar-w)-8px)] top-0 z-[31] h-[var(--shell-titlebar-inset)] border-border',
         )}
       />
       <div
@@ -222,7 +222,7 @@ export const SidebarResizer = ({ nativeChrome = false, hidden = false, elevated 
         tabIndex={-1}
         className={clsx(
           commonClass,
-          'fixed bottom-0 left-[calc(var(--app-sidebar-w)-8px)] top-[var(--desktop-chat-toolbar-h)] border-border',
+          'fixed bottom-0 left-[calc(var(--app-sidebar-w)-8px)] top-[var(--shell-titlebar-inset)] border-border',
           elevated ? 'z-[31]' : 'z-[19]',
         )}
       />
