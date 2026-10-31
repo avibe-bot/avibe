@@ -605,7 +605,8 @@ fn post_navigation_recovery_stays_in_the_unprivileged_rust_shell() {
     // Handing a predecessor's Runtime over stops it, so only the app launch and
     // the user's Try again may ask for it; every recovery path must not.
     assert_eq!(source.matches("BootstrapTrigger::Launch").count(), 1);
-    assert!(source.contains("spawn_bootstrap(app.handle().clone(), BootstrapTrigger::Launch)"));
+    assert!(source.contains("start_bootstrap_when_shell_url_ready"));
+    assert!(source.contains("spawn_bootstrap(app, BootstrapTrigger::Launch)"));
     assert_eq!(source.matches("BootstrapTrigger::Retry").count(), 1);
     assert!(source.contains("Ok(spawn_bootstrap(app, BootstrapTrigger::Retry))"));
     assert!(
@@ -960,6 +961,31 @@ fn every_quit_boundary_reuses_one_bounded_computer_use_cleanup() {
 }
 
 #[test]
+fn fatal_startup_exit_authorizes_tauri_exit_code() {
+    let source = shipping_source("src/lib.rs");
+    let fatal_exit = source
+        .split("fn exit_shell_with_code(")
+        .nth(1)
+        .expect("fatal shell exit helper")
+        .split("fn claim_exit_cleanup(")
+        .next()
+        .expect("fatal shell exit body");
+    assert!(fatal_exit.contains("if !claim_exit_cleanup(app)"));
+    assert!(fatal_exit.contains("authorize_exit(app)"));
+    assert!(fatal_exit.contains("app.exit(code)"));
+
+    let bootstrap = source
+        .split("fn start_bootstrap_when_shell_url_ready(")
+        .nth(1)
+        .expect("startup bootstrap handoff")
+        .split("/// Tells the Workbench")
+        .next()
+        .expect("startup bootstrap body");
+    assert_eq!(bootstrap.matches("exit_shell_with_code(&app, 101)").count(), 2);
+    assert!(!bootstrap.contains("app.exit(101)"));
+}
+
+#[test]
 fn native_tray_copy_has_locale_and_placeholder_parity() {
     let root = crate_dir().join("../../ui/src/i18n");
     let english = read_json(root.join("en.json"));
@@ -1146,7 +1172,7 @@ fn updates_have_one_native_owner_and_one_scoped_workbench_control_path() {
     // The shell downloads and verifies updates itself; the Workbench only
     // invokes the shell's existing state machine.
     assert!(!source.contains("tauri_plugin_updater"));
-    assert!(source.contains("updater::check(app.handle().clone(), false)"));
+    assert!(source.contains("updater::check(app.clone(), false)"));
     assert!(source.contains("updater::MENU_ID =>"));
     assert!(source.contains("url.as_str() == updater::OPEN_URL"));
     assert!(updater.contains("MessageDialogButtons::YesNoCancelCustom"));
