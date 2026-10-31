@@ -526,8 +526,13 @@ never dropped.
 **`pause_turn`.** Unchanged from v1 as implemented (orchestrator decision, 2026-10-14):
 - The Anthropic adapter continues a paused response internally, at most 5 continuations, each pinned to the Source
   that served the paused response. It never re-renders a continuation in portable form.
-- A continuation that Source answers `pin_unavailable`, a pause of a send that carried no pin, or a 6th pause ends
-  the response with one terminal `ProviderError(kind="interrupted")` whose partial keeps all assembled content.
+- A continuation goes out only as the first send plus the paused response exactly as served: same `system`, `tools`,
+  and earlier messages, cache markers aside. A render that changes any of it (a hosted call or thinking the Session can
+  no longer send back after a replay refusal, or an earlier message rendered differently) is not sent, since it would
+  be a different request whose assistant tail the provider takes as a prefill.
+- A continuation that Source answers `pin_unavailable`, a pause of a send that carried no pin, a continuation that
+  cannot go out as served, or a 6th pause ends the response with one terminal `ProviderError(kind="interrupted")`
+  whose partial keeps all assembled content.
 - The merged message carries the final continuation's usage; `hosted_summary` sums counts and cost and deduplicates
   `cited_sources` by URL. Pending calls carry over by tool-call id, so each call stays one block.
 - The merged message is verified only when every response in it was verified and reported the same origin.

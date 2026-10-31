@@ -16,7 +16,12 @@ import httpx
 import pytest
 
 from core.agent_core.ai._common import PIN_MODEL_HEADER, PIN_SOURCE_HEADER, portable_endpoint
-from core.agent_core.ai.anthropic import MAX_PAUSE_CONTINUATIONS, PAUSE_LIMIT_MESSAGE, PAUSE_UNSERVED_MESSAGE
+from core.agent_core.ai.anthropic import (
+    MAX_PAUSE_CONTINUATIONS,
+    PAUSE_ALTERED_MESSAGE,
+    PAUSE_LIMIT_MESSAGE,
+    PAUSE_UNSERVED_MESSAGE,
+)
 from core.agent_core.ai.provider import Done, HostedToolRoute, ModelEndpoint, ModelRequest, ProviderError
 from core.agent_core.ai.registry import create_adapter
 from core.agent_core.cancel import CancelToken
@@ -238,6 +243,35 @@ async def test_a_response_paused_past_the_bound_ends_interrupted_and_keeps_every
     assert isinstance(error, ProviderError) and error.kind == "interrupted" and error.message == PAUSE_LIMIT_MESSAGE
     assert [block.text for block in error.partial.content] == [f"step {n}" for n in range(1, len(sent) + 1)]
     assert error.partial.usage == Usage(input_tokens=10, output_tokens=1)
+    assert sum(isinstance(event, (Done, ProviderError)) for event in events) == 1
+
+
+@pytest.mark.parametrize("refused", ["hosted", "signature"])
+async def test_a_paused_response_the_session_cannot_send_back_as_served_ends_interrupted_without_a_continuation(
+    refused,
+):
+    """§4.3: a continuation is the first send plus the paused response exactly as served. When the Session can no
+    longer send part of it back, because the provider refused that identity's hosted payloads or thinking signatures,
+    the continuation would be a different request ending in an assistant turn the provider takes as a prefill. The
+    response ends ``interrupted`` with what it has, and nothing more is sent."""
+
+    identity = "sha256:served"
+    request = _request()
+    request = replace(
+        request,
+        endpoint=replace(request.endpoint, source_identity=identity, opaque_refused=frozenset({(identity, refused)})),
+    )
+
+    def answer(number: int) -> httpx.Response:
+        body = _response(_thinking(), _use(), stop_reason="pause_turn", input_tokens=100, output_tokens=10, searches=1)
+        return httpx.Response(200, headers=_served(), text=body)
+
+    sent, events = await _stream(answer, request)
+
+    assert len(sent) == 1
+    error = events[-1]
+    assert isinstance(error, ProviderError) and error.kind == "interrupted" and error.message == PAUSE_ALTERED_MESSAGE
+    assert [type(block) for block in error.partial.content] == [ThinkingBlock, HostedToolBlock]
     assert sum(isinstance(event, (Done, ProviderError)) for event in events) == 1
 
 

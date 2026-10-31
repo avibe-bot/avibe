@@ -243,7 +243,7 @@ async def test_a_rejected_ttl_is_retried_once_without_it_and_remembered_for_the_
         assert [type(event) for event in terminals] == [Done if retry_accepted else ProviderError]
         assert retry_accepted or terminals[0].status == 400
     # Logged once per route, not once per request.
-    assert len([record for record in caplog.records if record.name == "core.agent_core.ai.anthropic"]) == 3
+    assert len([record for record in caplog.records if "prompt-cache TTL" in record.getMessage()]) == 3
 
 
 @pytest.mark.parametrize(

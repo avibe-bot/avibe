@@ -80,6 +80,8 @@ MAX_PAUSE_CONTINUATIONS = 5
 PAUSE_LIMIT_MESSAGE = f"the provider paused the turn more than {MAX_PAUSE_CONTINUATIONS} times"
 #: A paused response continues only on the Source that served it, pinned there (§4.3 as implemented).
 PAUSE_UNSERVED_MESSAGE = "the Source that served the paused turn cannot continue it"
+#: A continuation goes out only as the first send plus the paused response exactly as served (§4.3).
+PAUSE_ALTERED_MESSAGE = "the paused turn cannot be sent back as it was served"
 _MAX_CACHE_BREAKPOINTS = 4
 # A Claude route caches its static prefix, the tools and then the system prompt, for an hour (``_prefix_ttl``); the
 # conversation's breakpoints keep the default five minutes. Anthropic evaluates breakpoints as tools, system, messages
@@ -863,6 +865,9 @@ class AnthropicAdapter(ProviderAdapter):
                     yield terminal
             sending = request
             continuations = 0
+            # The first send's prepared messages and images: every continuation must send exactly them plus the
+            # response so far, as served (§4.3).
+            first_sent: tuple[tuple[Any, ...], Mapping[str, LoadedImage]] | None = None
             while True:
                 # The lifetime ``wire_request`` gives the prefix: the default once this route has rejected the field.
                 prefix_ttl = _prefix_ttl(sending)
@@ -897,6 +902,8 @@ class AnthropicAdapter(ProviderAdapter):
                             rejected = True
                             break
                         if isinstance(event, ProviderError):
+                            if event.status == 400:
+                                _log_refused_request_shape(sending, wire.body, continuations)
                             repair = search_replay_refusal(event, sending, wire.body)
                             if repair != event.refusal:
                                 event = replace(event, refusal=repair)
@@ -942,6 +949,8 @@ class AnthropicAdapter(ProviderAdapter):
                         if terminal is not None:
                             yield terminal
                         return
+                    if first_sent is None:
+                        first_sent = (transformed_messages, loaded_images)
                     continuations += 1
                     response_usage = None
                     carried_counts, response_counts = _summed(carried_counts, response_counts), {}
@@ -971,10 +980,65 @@ class AnthropicAdapter(ProviderAdapter):
                         yield terminal
                     return
                 transformed_messages, loaded_images = prepared
+                if first_sent is not None and _binding_prefix(
+                    sending, transformed_messages, loaded_images
+                ) != _binding_prefix(request, (*first_sent[0], so_far), first_sent[1]):
+                    # The provider continues the paused response from exactly what it sent and served: anything this
+                    # render changed (a hosted call or thinking the Session can no longer send back, an earlier
+                    # message rendered differently) would make it a different request, or an assistant prefill.
+                    # The response ends with what it has instead (§4.3).
+                    terminal = assembler.terminal(assembler.error(PAUSE_ALTERED_MESSAGE, kind="interrupted"))
+                    if terminal is not None:
+                        yield terminal
+                    return
         except Exception as exc:
             terminal = assembler.terminal(assembler.exception(exc))
             if terminal is not None:
                 yield terminal
+
+
+def _binding_prefix(
+    request: ModelRequest, messages: tuple[Any, ...], loaded_images: Mapping[str, LoadedImage] | None
+) -> dict[str, Any]:
+    """What a Messages request's replayed content is bound to: its ``system``, ``tools`` and ``messages``, without
+    cache markers, which are not part of it. ``messages`` go through the payload builder unchanged, so an untransformed
+    response among them renders exactly as served."""
+
+    payload = build_messages_payload(replace(request, cache="none"), messages, loaded_images=loaded_images)
+    return {key: payload.get(key) for key in ("system", "tools", "messages")}
+
+
+def _block_types(content: Any) -> list[str]:
+    if not isinstance(content, list):
+        return ["text"]
+    return [str(block.get("type")) if isinstance(block, Mapping) else "?" for block in content]
+
+
+def _log_refused_request_shape(request: ModelRequest, body: Mapping[str, Any], continuation: int) -> None:
+    """Log the structure of a request the provider refused with HTTP 400, never its content.
+
+    A refusal that depends on how the conversation ends (an assistant prefill, a tool pairing) cannot be diagnosed
+    from the error alone. Roles and block types, counts, and the hop name the shape without any text, id, or input.
+    """
+
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return
+    last = next((index for index in range(len(messages) - 1, -1, -1) if messages[index].get("role") == "assistant"), None)
+    after = messages[last + 1 :] if last is not None else []
+    tail = " ".join(f"{message.get('role')}[{','.join(_block_types(message.get('content')))}]" for message in messages[-4:])
+    thinking = body.get("thinking")
+    logger.warning(
+        "Anthropic refused a request with HTTP 400: source=%s model=%s continuation=%s messages=%s thinking=%s "
+        "tail=%s results_only_after_assistant=%s",
+        request.endpoint.source_id,
+        request.endpoint.model_id,
+        continuation,
+        len(messages),
+        thinking.get("type") if isinstance(thinking, Mapping) else None,
+        tail,
+        bool(after) and all(set(_block_types(message.get("content"))) == {"tool_result"} for message in after),
+    )
 
 
 def _continues_unthought_tool_loop(messages: list[dict[str, Any]]) -> bool:
