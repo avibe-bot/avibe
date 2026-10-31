@@ -248,11 +248,16 @@ def isolated_subprocess_kwargs(*, console: bool = True) -> dict[str, Any]:
     ``console=False`` is for a console program that only ever runs in the
     background. On Windows it then gets no console window, which a parent with
     no console of its own -- the desktop app starts the service that way --
-    would otherwise open for it.
+    would otherwise open for it. Desktop-managed processes always use this
+    policy, including callers that leave ``console`` at its CLI default.
     """
     if os.name == "nt":
         flags = subprocess.CREATE_NEW_PROCESS_GROUP
-        if not console:
+        desktop_managed = any(
+            os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+            for name in ("AVIBE_DESKTOP_SHELL", "AVIBE_DESKTOP_MANAGED_RUNTIME")
+        )
+        if not console or desktop_managed:
             flags |= subprocess.CREATE_NO_WINDOW
         return {"creationflags": flags}
     return {"start_new_session": True}
@@ -552,11 +557,6 @@ def _terminate_windows_process_tree(
     expected_identity: PersistedProcessIdentity,
     terminate_timeout: float,
 ) -> bool:
-    control_signal = getattr(signal, "CTRL_BREAK_EVENT", None)
-    if control_signal is None:
-        logger.error("Refusing to terminate %s because Windows process-group signaling is unavailable", label)
-        return False
-
     try:
         process, live_identity = _open_process_identity(expected_identity.pid)
     except psutil.NoSuchProcess:
@@ -571,13 +571,18 @@ def _terminate_windows_process_tree(
         return False
 
     victims = _windows_process_tree(process)
-    try:
-        process.send_signal(control_signal)
-    except psutil.NoSuchProcess:
-        return True
-    except (psutil.Error, OSError):
-        logger.debug("Failed to signal the Windows process group for %s", label, exc_info=True)
-        return False
+    control_signal = getattr(signal, "CTRL_BREAK_EVENT", None)
+    if control_signal is not None:
+        try:
+            process.send_signal(control_signal)
+        except psutil.NoSuchProcess:
+            # The captured descendants can still be alive after their leader exits.
+            pass
+        except (psutil.Error, OSError):
+            # Windowless desktop children do not share a console with this
+            # process. A failed console signal does not revoke the verified
+            # identity: continue to the bounded, PID-reuse-safe psutil cleanup.
+            logger.debug("Could not send a console signal to %s; checking its process tree", label, exc_info=True)
 
     _gone, alive = psutil.wait_procs(victims, timeout=terminate_timeout)
     if not alive:

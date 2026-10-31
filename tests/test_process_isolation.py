@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import psutil
 import pytest
 
-from core import watch_worker
+from core import process_isolation, watch_worker
 from core.process_isolation import (
     KILL_SIGNAL,
     PROCESS_IDENTITY_ENV,
@@ -89,6 +89,29 @@ def test_background_console_program_opens_no_console_window() -> None:
         **isolated_subprocess_kwargs(console=False),
     )
     assert result.stdout.strip() == "0"
+
+
+@pytest.mark.parametrize("marker", ["AVIBE_DESKTOP_SHELL", "AVIBE_DESKTOP_MANAGED_RUNTIME"])
+@pytest.mark.parametrize("value", [None, "", "0", "false", "off", "1", "true", "yes", "on", " TRUE "])
+@pytest.mark.parametrize("console", [True, False])
+def test_windows_console_policy_preserves_cli_default_and_hides_desktop_children(
+    monkeypatch: pytest.MonkeyPatch, marker: str, value: str | None, console: bool
+) -> None:
+    desktop_env = {}
+    if value is not None:
+        desktop_env[marker] = value
+    # Replace only this module's os reference: changing os.name globally can
+    # make pathlib and pytest select Windows implementations on a POSIX host.
+    monkeypatch.setattr(process_isolation, "os", SimpleNamespace(name="nt", environ=desktop_env))
+    monkeypatch.setattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
+    monkeypatch.setattr(subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+
+    kwargs = isolated_subprocess_kwargs() if console else isolated_subprocess_kwargs(console=False)
+
+    flags = kwargs["creationflags"]
+    assert flags & subprocess.CREATE_NEW_PROCESS_GROUP
+    desktop_managed = value is not None and value.strip().lower() in {"1", "true", "yes", "on"}
+    assert bool(flags & subprocess.CREATE_NO_WINDOW) == (desktop_managed or not console)
 
 
 def test_process_identity_reads_inherited_worker_marker(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -347,6 +370,71 @@ def test_terminate_process_tree_by_pid_refuses_current_process(monkeypatch: pyte
             expected_identity=_persisted_identity(),
         )
         is False
+    )
+
+
+@pytest.mark.parametrize("console_signal", ["unavailable", "not_attached", "leader_exited", "ignored"])
+@pytest.mark.parametrize("terminate_works", [True, False])
+def test_windows_recovery_reaps_verified_descendants_without_a_console(
+    monkeypatch: pytest.MonkeyPatch, console_signal: str, terminate_works: bool
+) -> None:
+    class Process:
+        def __init__(self, pid):
+            self.pid = pid
+            self.alive = True
+
+        def children(self, *, recursive):
+            assert recursive
+            return [child]
+
+        def send_signal(self, _signal):
+            if console_signal == "not_attached":
+                raise OSError("no shared console")
+            if console_signal == "leader_exited":
+                self.alive = False
+                raise psutil.NoSuchProcess(self.pid)
+
+        def terminate(self):
+            if terminate_works:
+                self.alive = False
+
+        def kill(self):
+            self.alive = False
+
+    leader = Process(12345)
+    child = Process(12346)
+    monkeypatch.setattr(process_isolation, "os", SimpleNamespace(name="nt", getpid=lambda: 99999))
+    monkeypatch.setattr(process_isolation, "_open_process_identity", lambda _pid: (leader, _live_identity()))
+    monkeypatch.setattr(signal, "CTRL_BREAK_EVENT", None if console_signal == "unavailable" else 1, raising=False)
+    monkeypatch.setattr(
+        psutil, "wait_procs",
+        lambda victims, *, timeout: ([p for p in victims if not p.alive], [p for p in victims if p.alive]),
+    )
+
+    assert terminate_process_tree_by_pid(
+        leader.pid, logging.getLogger(__name__), "stale windowless worker",
+        expected_identity=_persisted_identity(), terminate_timeout=0,
+    )
+    assert not leader.alive
+    assert not child.alive, "a console failure or an exited leader must not leave descendants alive"
+
+
+def test_windows_recovery_cannot_force_terminate_a_worker_whose_marker_changed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(process_isolation, "os", SimpleNamespace(name="nt", getpid=lambda: 99999))
+    identities = iter([_live_identity(), _live_identity(worker_fingerprint=fingerprint_process_marker("replacement"))])
+    monkeypatch.setattr(
+        process_isolation, "_open_process_identity",
+        lambda _pid: (SimpleNamespace(pid=12345), next(identities)),
+    )
+    monkeypatch.setattr(
+        process_isolation, "_windows_process_tree",
+        lambda _process: pytest.fail("a changed marker must stop recovery before any signaling"),
+    )
+
+    assert not terminate_process_tree_by_pid(
+        12345, logging.getLogger(__name__), "changed worker", expected_identity=_persisted_identity(),
     )
 
 

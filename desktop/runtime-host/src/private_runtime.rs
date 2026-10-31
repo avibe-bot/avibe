@@ -2,8 +2,8 @@
 //!
 //! Product packages carry one target-specific ZIP plus an embedded manifest.
 //! Production trust comes from the desktop application's code signature; the
-//! first launch then verifies the archive before extracting it into a versioned
-//! user-data directory. The application bundle is never mutated, and an update
+//! installer or first launch verifies the archive before extracting it into a
+//! versioned user-data directory. The application bundle is never mutated, and an update
 //! can install a successor without replacing files used by a running daemon.
 
 use std::ffi::OsStr;
@@ -128,6 +128,30 @@ pub struct PrivateRuntimeBundle {
     /// Where trees are installed: `install_root` itself, or its
     /// [`TREES_DIR_NAME`] directory.
     trees_root: PathBuf,
+}
+
+/// Prepare the Windows installer's adjacent bundle in the shell's app-data root.
+///
+/// Both paths come from the installed executable and OS directory lookup, never
+/// command-line arguments. This shares the lazy launcher's verification and slot
+/// lifecycle, but never prunes superseded slots or starts a Runtime.
+pub fn prepare_installed_runtime(
+    executable: &Path,
+    app_local_data_dir: &Path,
+) -> Result<InstalledPrivateRuntime, PrivateRuntimeError> {
+    let resource_dir = executable.parent().filter(|path| path.is_absolute()).ok_or_else(|| {
+        PrivateRuntimeError::Install(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid executable directory",
+        ))
+    })?;
+    if !app_local_data_dir.is_absolute() {
+        return Err(PrivateRuntimeError::Install(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid application data directory",
+        )));
+    }
+    PrivateRuntimeBundle::new(resource_dir.join("runtime"), app_local_data_dir.join("runtime")).prepare()
 }
 
 impl PrivateRuntimeBundle {
@@ -889,6 +913,58 @@ mod tests {
         )
         .expect("manifest");
         manifest
+    }
+
+    #[test]
+    fn installer_preparation_and_lazy_launch_share_the_same_verified_slot() {
+        let root = scratch("installer-prepare");
+        let manifest = write_bundle(&root, None);
+        let installation = root.join("Program Files").join("Avibe 测试");
+        fs::create_dir_all(&installation).unwrap();
+        fs::rename(root.join("bundle"), installation.join("runtime")).unwrap();
+        let app_data = root.join("Local App Data").join("bot.avibe.desktop");
+        let executable = installation.join("avibe-desktop.exe");
+        let predecessor = app_data.join("runtime").join("old-version").join("old-digest");
+        fs::create_dir_all(&predecessor).unwrap();
+        fs::write(predecessor.join("running"), b"keep this Runtime").unwrap();
+
+        let prepared = prepare_installed_runtime(&executable, &app_data).unwrap();
+        assert!(!prepared.reused);
+        assert!(prepared.root.starts_with(app_data.join("runtime")));
+        assert!(prepared.root.ends_with(&manifest.archive_sha256[..16]));
+        assert!(!prepared.root.starts_with(&installation));
+
+        let again = prepare_installed_runtime(&executable, &app_data).unwrap();
+        let lazy = PrivateRuntimeBundle::new(installation.join("runtime"), app_data.join("runtime"))
+            .prepare()
+            .unwrap();
+        assert!(again.reused && lazy.reused);
+        assert_eq!(prepared.root, again.root);
+        assert_eq!(prepared.root, lazy.root);
+        assert_eq!(fs::read(predecessor.join("running")).unwrap(), b"keep this Runtime");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn installer_preparation_fails_closed_on_invalid_paths_or_bundle() {
+        let root = scratch("installer-failure");
+        let app_data = root.join("local-data");
+        let executable = root.join("app").join("avibe-desktop.exe");
+        assert!(prepare_installed_runtime(Path::new("relative.exe"), &app_data).is_err());
+        assert!(prepare_installed_runtime(&executable, Path::new("relative")).is_err());
+        assert!(matches!(
+            prepare_installed_runtime(&executable, &app_data),
+            Err(PrivateRuntimeError::ManifestUnavailable(_))
+        ));
+        write_bundle(&root, None);
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::rename(root.join("bundle"), root.join("app/runtime")).unwrap();
+        fs::write(root.join("app/runtime/runtime.zip"), b"corrupt archive").unwrap();
+        assert!(matches!(
+            prepare_installed_runtime(&executable, &app_data),
+            Err(PrivateRuntimeError::ArchiveVerification)
+        ));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -53,7 +53,9 @@ pub use origin::{
     is_shell_ui_url, wait_for_shell_ui_url, LoopbackOrigin, OriginError, ShellUiUrlWaitError, DEV_SERVER_PORT,
     SHELL_UI_URL_TIMEOUT,
 };
-pub use private_runtime::{PrivateRuntimeBundle, PrivateRuntimeError, RuntimeBundleManifest};
+pub use private_runtime::{
+    prepare_installed_runtime, PrivateRuntimeBundle, PrivateRuntimeError, RuntimeBundleManifest,
+};
 pub use status::{BootstrapNotice, BootstrapNoticeCode, BootstrapPhase, BootstrapStatus};
 
 /// The host the shipped desktop shell uses: real HTTP probing, the installed

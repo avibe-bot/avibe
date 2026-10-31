@@ -115,8 +115,19 @@ put `$AVIBE_DESKTOP_RUNTIME_ROOT/bin` first after your PATH changes when that
 variable is set. Codex's caller-context `BASH_ENV` injection does not run in zsh
 and is not a fallback for this case.
 
-The first launch verifies the embedded Runtime archive and installs it
-atomically below the operating system's application-data directory. Installs
+Windows NSIS installation eagerly prepares the embedded Runtime after copying
+the app, including during silent `/UPDATE` transactions. The installed executable's
+`--prepare-runtime` mode verifies and extracts the archive before any GUI or
+single-instance initialization, into the same `%LOCALAPPDATA%\bot.avibe.desktop\runtime`
+tree used by the shell. Preparation failure fails installation; unattended
+installations return a nonzero exit without a dialog so the updater can report
+failure and roll back the app.
+
+First launch retains the lazy integrity and repair fallback for legacy installs,
+interrupted installations, and missing or damaged Runtime slots. macOS DMG,
+non-NSIS, and development paths remain lazy. Whenever preparation is necessary,
+the bootstrap page says that it is preparing the Runtime and that first-time
+preparation can take a few minutes. Installs
 are versioned and content-addressed, so application updates never replace files
 used by a running Runtime. The extracted tree is hashed before its slot is
 published. A later launch reuses it after checking its file set, sizes, and

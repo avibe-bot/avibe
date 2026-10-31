@@ -384,6 +384,54 @@ async fn boot(host: &RuntimeHost, trigger: BootstrapTrigger) -> BootstrapStatus 
     host.bootstrap(&Recorder::default(), trigger).await
 }
 
+#[tokio::test]
+async fn preparation_is_visible_before_resolution_and_probing_waits_for_it() {
+    struct HeldLauncher {
+        recorder: Arc<Recorder>,
+        entered: Notify,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl RuntimeLauncher for HeldLauncher {
+        fn resolve(&self) -> Result<Arc<dyn ResolvedRuntimeLauncher>, LaunchError> {
+            // Check at entry, rather than after resolve has had time to run.
+            assert_eq!(self.recorder.statuses(), vec![BootstrapStatus::preparing()]);
+            self.entered.notify_one();
+            self.release
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .expect("test releases resolution");
+            FakeLauncher::working().resolve()
+        }
+    }
+
+    let recorder = Arc::new(Recorder::default());
+    let (release, receiver) = std::sync::mpsc::channel();
+    let launcher = Arc::new(HeldLauncher {
+        recorder: recorder.clone(),
+        entered: Notify::new(),
+        release: Mutex::new(receiver),
+    });
+    let probe = FakeProbe::healthy_from(1);
+    let host = RuntimeHost::new(probe.clone(), launcher.clone(), fast_settings());
+    let recording = recorder.clone();
+    let run = tokio::spawn(async move { host.bootstrap(recording.as_ref(), Launch).await });
+    tokio::time::timeout(Duration::from_secs(5), launcher.entered.notified())
+        .await
+        .expect("resolution entered");
+
+    let held_statuses = recorder.statuses();
+    let held_probe_calls = probe.calls();
+    release.send(()).unwrap();
+    let terminal = run.await.unwrap();
+
+    assert_eq!(held_statuses, vec![BootstrapStatus::preparing()]);
+    assert_eq!(held_probe_calls, 0, "no endpoint probes while preparation is blocked");
+    assert_eq!(terminal.phase, BootstrapPhase::Ready);
+    assert_eq!(recorder.statuses()[1], BootstrapStatus::probing(&origin(), 1));
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_cold_link_is_consumed_only_after_ready_navigation_commits_and_never_replayed() {
     let launcher = FakeLauncher::working();
@@ -467,7 +515,10 @@ async fn an_already_running_runtime_is_adopted_without_starting_anything() {
     assert_eq!(status.attempt, 1);
     assert_eq!(launcher.calls(), 0, "an adopted Runtime must never be re-started");
     assert_eq!(probe.calls(), 1);
-    assert_eq!(recorder.phases(), vec![BootstrapPhase::Probing, BootstrapPhase::Ready]);
+    assert_eq!(
+        recorder.phases(),
+        vec![BootstrapPhase::Probing, BootstrapPhase::Probing, BootstrapPhase::Ready]
+    );
     assert!(!host.has_launched());
     assert!(!host.has_owned_runtime(), "an untagged Runtime is never this app's");
     assert!(launcher.verbs().is_empty(), "an untagged Runtime is never stopped");
@@ -719,6 +770,7 @@ async fn an_absent_runtime_is_started_and_adopted_once_it_answers() {
     assert_eq!(
         recorder.phases(),
         vec![
+            BootstrapPhase::Probing,
             BootstrapPhase::Probing,
             BootstrapPhase::Starting,
             BootstrapPhase::Starting,
@@ -1496,7 +1548,7 @@ async fn a_non_loopback_origin_fails_immediately_and_is_not_retryable() {
     assert_eq!(status.attempt, 0);
     assert_eq!(probe.calls(), 0, "a rejected origin is never contacted");
     assert_eq!(launcher.calls(), 0);
-    assert_eq!(recorder.phases(), vec![BootstrapPhase::Failed]);
+    assert_eq!(recorder.phases(), vec![BootstrapPhase::Probing, BootstrapPhase::Failed]);
     // The rejected value is unvalidated input on its way to a WebView, so it is
     // dropped and represented only by a typed notice.
     assert!(status.origin.is_empty(), "got {:?}", status.origin);
@@ -1522,7 +1574,10 @@ async fn an_override_origin_is_adopted_only_and_never_starts_the_default_runtime
     assert_eq!(status.notice.code, BootstrapNoticeCode::RuntimeNotFound);
     assert_eq!(probe.calls(), 1, "the override origin is probed directly");
     assert_eq!(launcher.calls(), 0, "override mode must not launch the default Runtime");
-    assert_eq!(recorder.phases(), vec![BootstrapPhase::Probing, BootstrapPhase::Failed]);
+    assert_eq!(
+        recorder.phases(),
+        vec![BootstrapPhase::Probing, BootstrapPhase::Probing, BootstrapPhase::Failed]
+    );
 }
 
 #[tokio::test(start_paused = true)]

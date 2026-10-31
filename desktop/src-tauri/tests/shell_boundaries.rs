@@ -50,10 +50,62 @@ fn shipping_text(source: &str) -> String {
 
 #[test]
 fn source_checks_read_a_windows_checkout_as_the_same_text() {
-    let checkout = read_to_string(&crate_dir().join("src/lib.rs")).replace("\r\n", "\n");
-    let windows = checkout.replace('\n', "\r\n");
-    assert_eq!(shipping_text(&windows), shipping_text(&checkout));
-    assert!(!shipping_source("src/lib.rs").contains('\r'));
+    for relative in ["src/lib.rs", "windows/hooks.nsh"] {
+        let checkout = read_to_string(&crate_dir().join(relative)).replace("\r\n", "\n");
+        let windows = checkout.replace('\n', "\r\n");
+        assert_eq!(shipping_text(&windows), shipping_text(&checkout));
+        assert!(!shipping_source(relative).contains('\r'));
+    }
+}
+
+#[test]
+fn installer_preparation_exits_before_the_gui_and_preserves_normal_startup() {
+    let entrypoint = shipping_source("src/main.rs");
+    assert!(entrypoint.contains("windows_subsystem = \"windows\""));
+    assert!(entrypoint.contains("#[cfg(windows)]\n    if let Some(code) = prepare_runtime::run()"));
+    let helper = entrypoint.find("prepare_runtime::run()").unwrap();
+    let exit = entrypoint.find("std::process::exit(code)").unwrap();
+    let gui = entrypoint.find("avibe_desktop_lib::run()").unwrap();
+    assert!(helper < exit && exit < gui);
+
+    let preparation = shipping_source("src/prepare_runtime.rs");
+    assert!(preparation.contains("std::env::current_exe()"));
+    assert!(preparation.contains("dirs::data_local_dir()"));
+    assert!(preparation.contains("avibe_runtime_host::prepare_installed_runtime(&executable, &app_data)"));
+    assert!(!preparation.contains("tauri::Builder") && !preparation.contains("avibe_desktop_lib::run"));
+    let launcher = shipping_source("../runtime-host/src/launcher.rs");
+    assert!(
+        launcher.contains("self.bundle.prepare()"),
+        "lazy integrity and repair must remain available"
+    );
+}
+
+#[test]
+fn nsis_prepares_after_copy_and_fails_without_dialogs_in_unattended_modes() {
+    let config = config();
+    let nsis = &config["bundle"]["windows"]["nsis"];
+    assert_eq!(nsis["installerHooks"], "./windows/hooks.nsh");
+    assert_eq!(nsis["languages"], serde_json::json!(["English", "SimpChinese"]));
+    let hook = shipping_source(nsis["installerHooks"].as_str().unwrap());
+    assert!(hook.contains("!macro NSIS_HOOK_POSTINSTALL"));
+    assert!(hook.contains(r#"ExecWait '"$INSTDIR\${MAINBINARYNAME}.exe" --prepare-runtime' $0"#));
+    assert!(hook.contains("ClearErrors") && hook.contains("${If} ${Errors}"));
+    assert!(hook.contains("${If} $0 != 0"));
+    let dialog = hook.find("MessageBox").unwrap();
+    for condition in [
+        "${IfNot} ${Silent}",
+        "${AndIf} $UpdateMode != 1",
+        "${AndIf} $PassiveMode != 1",
+    ] {
+        assert!(hook.find(condition).unwrap() < dialog);
+    }
+    assert!(hook.contains("SetErrorLevel 1\n    Abort"));
+    assert!(!hook.contains("ExecShell") && !hook.contains(" /UPDATE"));
+    for key in ["AvibeRuntimePreparing", "AvibeRuntimePrepareFailed"] {
+        for language in [1033, 2052] {
+            assert!(hook.contains(&format!("LangString {key} {language} ")));
+        }
+    }
 }
 
 #[test]

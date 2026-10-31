@@ -60,6 +60,12 @@
     "resources": {
       "resources/runtime/": "runtime/"
     },
+    "windows": {
+      "nsis": {
+        "installerHooks": "./windows/hooks.nsh",
+        "languages": ["English", "SimpChinese"]
+      }
+    },
     "macOS": {
       "hardenedRuntime": true,
       "entitlements": "Entitlements.plist"

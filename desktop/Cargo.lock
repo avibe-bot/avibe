@@ -234,6 +234,7 @@ dependencies = [
  "async-trait",
  "avibe-runtime-host",
  "block2",
+ "dirs 6.0.0",
  "flate2",
  "objc2",
  "objc2-app-kit",
