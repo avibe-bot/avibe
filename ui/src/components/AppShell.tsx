@@ -534,14 +534,15 @@ export const AppShell: React.FC = () => {
         aria-hidden={settingsCoversSidebar || undefined}
         inert={settingsCoversSidebar || undefined}
         className={clsx(
-          'fixed inset-y-0 left-0 z-10 hidden w-[var(--app-sidebar-w)] flex-col justify-between gap-6 border-r border-border bg-[var(--sidebar-background)] px-4 pb-4 md:flex',
+          'fixed inset-y-0 left-0 z-10 hidden w-[var(--app-sidebar-w)] flex-col justify-between gap-6 bg-[var(--sidebar-background)] px-4 pb-4 md:flex',
+          desktopDragRegion() === undefined && 'border-r border-border',
           desktopDragRegion() !== undefined
             ? 'pt-[calc(1rem+var(--shell-titlebar-inset))]'
             : 'pt-[calc(0.625rem+var(--shell-titlebar-inset))]',
           settingsCoversSidebar && 'invisible pointer-events-none',
         )}
       >
-        <DesktopDragRegion className="absolute left-0 -right-px top-0 bg-[var(--sidebar-background)]" />
+        <DesktopDragRegion className="absolute inset-x-0 top-0 bg-[var(--sidebar-background)]" />
         <div className="flex min-h-0 flex-1 flex-col">
           {isDesktop && (
             <RouteSurfaceActivityBoundary active={!settingsCoversSidebar}>
@@ -617,8 +618,13 @@ export const AppShell: React.FC = () => {
             Desktop-only like the tree above it: below md the shell has no sidebar
             edge to drag, and unmounting here is what ends a gesture that was live
             when the viewport crossed the breakpoint. */}
-        {isDesktop && <SidebarResizer />}
+        {isDesktop && desktopDragRegion() === undefined && <SidebarResizer />}
       </aside>
+      )}
+      {/* One native resize edge owns both neutral and active paint above chrome.
+          Keep it mounted while Settings hides the sidebar to retain its width. */}
+      {!chromeless && isDesktop && desktopDragRegion() !== undefined && (
+        <SidebarResizer nativeChrome hidden={settingsCoversSidebar} />
       )}
 
       {/* Chat and Search are fixed full-screen surfaces with their own header

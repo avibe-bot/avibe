@@ -37,12 +37,15 @@ type Gesture = {
 };
 
 /**
- * The sidebar's right divider, made draggable. It draws no handle of its own:
- * the strip is an invisible grab area whose right border lands on the sidebar's
- * own 1px divider, so hover, keyboard focus and an active drag recolor that one
- * line and nothing else.
+ * The sidebar's right divider, made draggable. On native macOS the strip owns
+ * the neutral line too and sits outside the aside's stacking context, above
+ * the window chrome. Its existing hover/focus/gesture states color one border
+ * from top to bottom. Web keeps the strip over the aside's own divider.
  */
-export const SidebarResizer = () => {
+export const SidebarResizer = ({ nativeChrome = false, hidden = false }: {
+  nativeChrome?: boolean;
+  hidden?: boolean;
+}) => {
   const { t } = useTranslation();
   const [width, setWidth] = useState(readWidth);
   const [maxWidth, setMaxWidth] = useState(() => maxSidebarWidth(currentViewportWidth()));
@@ -134,6 +137,7 @@ export const SidebarResizer = () => {
   return (
     <div
       role="separator"
+      hidden={hidden}
       aria-orientation="vertical"
       aria-label={t('appShell.resizeSidebar')}
       aria-valuenow={width}
@@ -144,6 +148,7 @@ export const SidebarResizer = () => {
       // outside itself and would otherwise close the moment this edge — which
       // its own left edge follows — was grabbed.
       data-sidebar-resizer="true"
+      data-settings-interaction-owner={nativeChrome || undefined}
       data-dragging={dragging || undefined}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
@@ -156,9 +161,12 @@ export const SidebarResizer = () => {
       // does not win the browser's touch-action negotiation, so with the default
       // the native pan claims the finger and cancels the drag part-way.
       className={clsx(
-        'absolute inset-y-0 -right-px z-10 w-2 cursor-col-resize touch-none border-r border-transparent outline-none transition-colors',
-        'hover:border-cyan focus-visible:border-cyan',
-        dragging && 'border-cyan',
+        'inset-y-0 w-2 cursor-col-resize touch-none border-r outline-none transition-colors',
+        nativeChrome
+          ? 'fixed left-[calc(var(--app-sidebar-w)-8px)] z-[31] border-border'
+          : 'absolute -right-px z-10 border-transparent',
+        'hover:border-mint/30 focus-visible:border-mint/30',
+        dragging && 'border-mint/30',
       )}
     />
   );

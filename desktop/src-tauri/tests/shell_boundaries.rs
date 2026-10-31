@@ -816,7 +816,7 @@ fn the_macos_overlay_title_bar_keeps_its_layout_and_defaults_to_no_inset() {
     assert_eq!(window["titleBarStyle"], "Overlay");
     assert_eq!(window["hiddenTitle"], true);
     assert_eq!(window["trafficLightPosition"]["x"], 12);
-    assert_eq!(window["trafficLightPosition"]["y"], 14);
+    assert_eq!(window["trafficLightPosition"]["y"], 24);
     // Bootstrap management and window gestures have separate capability grants.
     assert!(!read_to_string(&crate_dir().join("capabilities/bootstrap.json")).contains("start-dragging"));
     let css = read_to_string(&crate_dir().join("../../ui/src/index.css"));

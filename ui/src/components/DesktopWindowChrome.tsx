@@ -16,7 +16,7 @@ export function DesktopWindowChrome({ enabled, hidden, children }: {
           data-desktop-window-chrome=""
           hidden={hidden}
           inert={hidden || undefined}
-          className="fixed inset-x-0 top-0 z-30 h-[var(--shell-titlebar-inset)]"
+          className="fixed inset-x-0 top-0 z-30 h-[var(--desktop-chat-toolbar-h)]"
         >
           {/* Native traffic lights occupy the left of the sidebar; its remaining
               width is a drag target. No transparent overlay covers controls. */}

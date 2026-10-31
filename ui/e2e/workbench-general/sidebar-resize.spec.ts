@@ -48,16 +48,6 @@ const dragEdge = async (page: Page, ...offsets: number[]) => {
   await page.mouse.up();
 };
 
-/** What `var(--cyan)` actually computes to in this theme. */
-const cyanOf = (page: Page) => page.evaluate(() => {
-  const probe = document.createElement('span');
-  probe.style.color = 'var(--cyan)';
-  document.body.append(probe);
-  const value = getComputedStyle(probe).color;
-  probe.remove();
-  return value;
-});
-
 const TRANSPARENT = 'rgba(0, 0, 0, 0)';
 
 /** The line's colour once its own transition has settled on it. */
@@ -121,13 +111,17 @@ test.describe('sidebar resizing', () => {
     expect(denied).toEqual([]);
   });
 
-  test('recolors the divider and nothing else', async ({ page }) => {
+  for (const theme of ['light', 'dark'] as const) {
+  test(`recolors the divider and nothing else (${theme})`, async ({ page }) => {
     const denied = await serveProduct(page);
     await page.setViewportSize(DESKTOP);
-    await open(page, '/');
+    await open(page, '/agents', { theme });
+    const agents = page.getByRole('link', { name: 'Agents', exact: true });
+    await expect(agents).toBeVisible();
+    const agentsBorder = await agents.evaluate((element) => getComputedStyle(element).borderRightColor);
+    await open(page, '/', { theme });
     await expect(page.locator(SIDEBAR)).toBeVisible();
 
-    const cyan = await cyanOf(page);
     const sidebarBorder = () => page.locator(SIDEBAR).evaluate(
       (node) => getComputedStyle(node).borderRightColor,
     );
@@ -150,7 +144,7 @@ test.describe('sidebar resizing', () => {
     expect(strip.x + strip.width).toBe(MIN);
 
     await page.locator(SEPARATOR).hover();
-    await expectEdgeLine(page, cyan);
+    await expectEdgeLine(page, agentsBorder);
     // Still only a line: no box, no ornament, no width change.
     expect(await edgeStyle(page)).toMatchObject({
       cursor: 'col-resize',
@@ -171,7 +165,7 @@ test.describe('sidebar resizing', () => {
     await page.mouse.move(startX, startY);
     await page.mouse.down();
     await page.mouse.move(startX + 500, startY + 300, { steps: 8 });
-    await expectEdgeLine(page, cyan);
+    await expectEdgeLine(page, agentsBorder);
     await page.mouse.up();
     await page.mouse.move(startX + 500, startY + 300);
     await expectEdgeLine(page, TRANSPARENT);
@@ -187,10 +181,11 @@ test.describe('sidebar resizing', () => {
     expect(await page.locator(SEPARATOR).evaluate((node) => [
       node === document.activeElement, node.matches(':focus-visible'),
     ])).toEqual([true, true]);
-    await expectEdgeLine(page, cyan);
+    await expectEdgeLine(page, agentsBorder);
 
     expect(denied).toEqual([]);
   });
+  }
 
   test('adjusts the real layout from the keyboard within the same bounds', async ({ page }) => {
     const denied = await serveProduct(page);
