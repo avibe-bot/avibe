@@ -50,10 +50,12 @@ fn shipping_text(source: &str) -> String {
 
 #[test]
 fn source_checks_read_a_windows_checkout_as_the_same_text() {
-    let checkout = read_to_string(&crate_dir().join("src/lib.rs")).replace("\r\n", "\n");
-    let windows = checkout.replace('\n', "\r\n");
-    assert_eq!(shipping_text(&windows), shipping_text(&checkout));
-    assert!(!shipping_source("src/lib.rs").contains('\r'));
+    for relative in ["src/lib.rs", "windows/hooks.nsh"] {
+        let checkout = read_to_string(&crate_dir().join(relative)).replace("\r\n", "\n");
+        let windows = checkout.replace('\n', "\r\n");
+        assert_eq!(shipping_text(&windows), shipping_text(&checkout));
+        assert!(!shipping_source(relative).contains('\r'));
+    }
 }
 
 #[test]
@@ -84,7 +86,7 @@ fn nsis_prepares_after_copy_and_fails_without_dialogs_in_unattended_modes() {
     let nsis = &config["bundle"]["windows"]["nsis"];
     assert_eq!(nsis["installerHooks"], "./windows/hooks.nsh");
     assert_eq!(nsis["languages"], serde_json::json!(["English", "SimpChinese"]));
-    let hook = read_to_string(&crate_dir().join(nsis["installerHooks"].as_str().unwrap()));
+    let hook = shipping_source(nsis["installerHooks"].as_str().unwrap());
     assert!(hook.contains("!macro NSIS_HOOK_POSTINSTALL"));
     assert!(hook.contains(r#"ExecWait '"$INSTDIR\${MAINBINARYNAME}.exe" --prepare-runtime' $0"#));
     assert!(hook.contains("ClearErrors") && hook.contains("${If} ${Errors}"));
