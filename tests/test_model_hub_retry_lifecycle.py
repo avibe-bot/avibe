@@ -1309,32 +1309,56 @@ def test_vibey_hands_its_silence_bound_to_the_engine_read(
     asyncio.run(run())
 
 
-def test_vibey_allows_slow_anthropic_response_headers_with_caller_bound(monkeypatch, tmp_path):
-    """A slow relay body read may exceed the measured idle bound before headers arrive."""
+@pytest.mark.parametrize("vendor,protocol", [("anthropic", "anthropic"), ("openai", "openai_responses")])
+@pytest.mark.parametrize("origin", ["vibey", "native"])
+@pytest.mark.parametrize("phase", ["headers", "first_byte", "split_prelude"])
+def test_measured_stream_prelude_uses_one_caller_budget_until_first_byte(
+    monkeypatch, tmp_path, vendor, protocol, origin, phase,
+):
+    """MH-RUNTIME-013: slow relay preludes use caller patience, not a fresh budget per phase.
+
+    Vibey can wait beyond measured idle for headers or the first body byte;
+    native callers cannot. Splitting the delay across headers and body must
+    not reset the budget. The existing idle test covers later byte gaps.
+    """
 
     idle, caller = 0.3, 0.8
+    delay = (idle + caller) / 2
     monkeypatch.setattr(engine_client_module, "_STREAM_IDLE_TIMEOUT_SECONDS", idle)
     monkeypatch.setattr(engine_adapter_module, "PROVIDER_SILENCE_TIMEOUT_S", caller)
 
     async def run() -> None:
-        source = _source("src_slowheaders", "Slow headers", vendor="anthropic", protocol="anthropic")
+        source = _source("src_slowheaders", "Slow prelude", vendor=vendor, protocol=protocol)
         service, _clock, _models = configured_service(tmp_path, sources=[source])
-        metadata, output, terminal, _buffered = WIRE["anthropic"]
+        metadata, output, terminal, _buffered = WIRE[protocol]
 
-        async def respond(request: web.Request) -> web.Response:
+        async def respond(request: web.Request) -> web.StreamResponse:
             await request.json()
-            await asyncio.sleep((idle + caller) / 2)
-            return web.Response(body=metadata + output + terminal, content_type="text/event-stream")
+            if phase in {"headers", "split_prelude"}:
+                await asyncio.sleep(delay)
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await response.prepare(request)
+            if phase in {"first_byte", "split_prelude"}:
+                await asyncio.sleep(delay)
+            await response.write(metadata + output + terminal)
+            await response.write_eof()
+            return response
 
+        caller_origin = origin if origin == "vibey" else "claude" if protocol == "anthropic" else "codex"
         async with loopback_engine(tmp_path, service, respond) as (adapter, _engine_client):
             handle = await asyncio.wait_for(
-                adapter.invoke(source.id, "shared-model", {"stream": True}, True, "vibey"),
+                adapter.invoke(source.id, "shared-model", {"stream": True}, True, caller_origin),
                 timeout=3,
             )
             body = b"".join([chunk async for chunk in handle.stream]) if handle.stream is not None else b""
             outcome = await asyncio.wait_for(handle.outcome(), timeout=3)
+            assert adapter._active_transports == 0
 
-        assert outcome.kind == RawOutcomeKind.SUCCESS
-        assert body == metadata + output + terminal
+        if origin == "vibey" and phase != "split_prelude":
+            assert outcome.kind == RawOutcomeKind.SUCCESS
+            assert body == metadata + output + terminal
+        else:
+            assert outcome.kind == RawOutcomeKind.TIMEOUT
+            assert body == b""
 
     asyncio.run(run())

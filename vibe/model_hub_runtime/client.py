@@ -104,6 +104,7 @@ _STREAM_IDLE_BOUNDED_SOURCES = frozenset({("anthropic", "anthropic"), ("openai",
 _OFFICIAL_BASE_URLS = official_api_key_base_urls()
 logger = logging.getLogger(__name__)
 _ProjectedJSON = TypeVar("_ProjectedJSON")
+_IOResult = TypeVar("_IOResult")
 
 _ENGINE_HEADER_VALUE_MAX_LENGTH = 128
 _RETRY_AFTER_MS_MAX = 365 * 24 * 60 * 60 * 1000
@@ -755,7 +756,7 @@ class EngineClient:
                 response = await request
             else:
                 remaining = max(0.001, (prelude_deadline or time.monotonic()) - time.monotonic())
-                response = await asyncio.wait_for(request, timeout=remaining)
+                response = await _await_engine_io(request, timeout=remaining)
             response_correlation_ids = sanitize_response_correlation_ids(response.headers)
             if response.status >= 300:
                 response_received_at = datetime.now(timezone.utc)
@@ -1827,6 +1828,28 @@ class _ResponseTooLarge(Exception):
     """A response grew past the bound its request protocol sets."""
 
 
+async def _await_engine_io(awaitable: Awaitable[_IOResult], *, timeout: float | None) -> _IOResult:
+    """Bound one I/O wait without losing owner cancellation to a completed read.
+
+    Python 3.10/3.11 wait_for can swallow cancellation if its inner task has
+    just completed. wait keeps owner cancellation authoritative; we still own
+    and drain the I/O task before its session or response can be closed.
+    """
+
+    if timeout is None:
+        return await awaitable
+    operation = asyncio.ensure_future(awaitable)
+    try:
+        done, _ = await asyncio.wait({operation}, timeout=timeout)
+        if not done:
+            raise asyncio.TimeoutError
+        return operation.result()
+    except BaseException:
+        operation.cancel()
+        await asyncio.gather(operation, return_exceptions=True)
+        raise
+
+
 async def _read_content_chunk(
     content: aiohttp.StreamReader,
     *,
@@ -1834,9 +1857,7 @@ async def _read_content_chunk(
 ) -> bytes:
     """Read one engine chunk, optionally applying a caller-owned idle bound."""
 
-    if timeout is None:
-        return await content.read(_STREAM_CHUNK_BYTES)
-    return await asyncio.wait_for(content.read(_STREAM_CHUNK_BYTES), timeout=timeout)
+    return await _await_engine_io(content.read(_STREAM_CHUNK_BYTES), timeout=timeout)
 
 
 async def _read_response_into(

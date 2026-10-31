@@ -202,6 +202,7 @@ def test_stream_prelude_replays_large_keepalive_history_before_output() -> None:
             wire_state=state,
             source=source,
             model_id="claude-sonnet-4-5",
+            read_timeout=None,
         )
         payload = b"".join([chunk async for chunk in prelude.chunks()])
         prelude.close()
@@ -639,6 +640,7 @@ def test_stream_prelude_retains_metadata_until_model_output() -> None:
                 wire_state=state,
                 source=source,
                 model_id="claude-sonnet-4-5",
+                read_timeout=None,
             )
             assert outcome is None
             assert state.model_output_started
@@ -6923,12 +6925,13 @@ def test_engine_client_marks_loopback_stream_disconnect_as_engine_down(
 ) -> None:
     async def run() -> None:
         class Content:
-            async def read(self, _size: int) -> bytes:
-                return b'data: {"choices":[{"delta":{"content":"first"}}]}\n\n'
+            reads = 0
 
-            async def iter_chunked(self, _size: int):
+            async def read(self, _size: int) -> bytes:
+                self.reads += 1
+                if self.reads == 1:
+                    return b'data: {"choices":[{"delta":{"content":"first"}}]}\n\n'
                 raise client_module.aiohttp.ClientConnectionError("loopback engine closed")
-                yield b""
 
         class Response:
             status = 200
@@ -7121,13 +7124,14 @@ def test_engine_client_keeps_served_after_terminal_marker_then_disconnect(
     terminal_chunk: bytes,
 ) -> None:
     async def run() -> None:
+        chunks = iter((output_chunk, terminal_chunk))
+
         class Content:
             async def read(self, _size: int) -> bytes:
-                return output_chunk
-
-            async def iter_chunked(self, _size: int):
-                yield terminal_chunk
-                raise client_module.aiohttp.ClientConnectionError("late disconnect")
+                try:
+                    return next(chunks)
+                except StopIteration:
+                    raise client_module.aiohttp.ClientConnectionError("late disconnect") from None
 
         class Response:
             status = 200
@@ -7254,13 +7258,11 @@ def test_engine_client_transparently_forwards_unvalidated_stream_data(
             b'event: response.completed\ndata: {"type":"response.completed","sequence_number":2}\n\n'
         )
 
+        chunks = iter((output, invalid_chunk, terminal))
+
         class Content:
             async def read(self, _size: int) -> bytes:
-                return output
-
-            async def iter_chunked(self, _size: int):
-                yield invalid_chunk
-                yield terminal
+                return next(chunks, b"")
 
         class Response:
             status = 200
@@ -7453,13 +7455,11 @@ def test_engine_client_recognizes_responses_failure_terminals(
             separators=(",", ":"),
         ).encode()
 
+        chunks = iter((b"event: " + event_type.encode() + b"\ndata: " + terminal + b"\n\n",))
+
         class Content:
             async def read(self, _size: int) -> bytes:
-                return b"event: " + event_type.encode() + b"\ndata: " + terminal + b"\n\n"
-
-            async def iter_chunked(self, _size: int):
-                if False:
-                    yield b""
+                return next(chunks, b"")
 
         class Response:
             status = 200
@@ -7609,9 +7609,8 @@ def test_downstream_close_after_chat_finish_reason_does_not_fabricate_success() 
         wire_state.observe(first)
 
         class Content:
-            async def iter_chunked(self, _size: int):
-                if False:
-                    yield b""
+            async def read(self, _size: int) -> bytes:
+                return b""
 
         class Response:
             status = 200
@@ -7644,6 +7643,7 @@ def test_downstream_close_after_chat_finish_reason_does_not_fabricate_success() 
             source=source,
             model_id="model-a",
             protocol="openai_chat",
+            read_timeout=None,
             outcome_future=outcome_future,
             wire_state=wire_state,
         )
@@ -7663,13 +7663,11 @@ def test_engine_client_keeps_success_after_a_later_complete_frame(
         terminal = b'event: response.completed\ndata: {"type":"response.completed"}\n\n'
         extra = b'data: {"type":"response.output_text.delta"}\n\n'
 
+        chunks = iter((first, terminal, extra))
+
         class Content:
             async def read(self, _size: int) -> bytes:
-                return first
-
-            async def iter_chunked(self, _size: int):
-                yield terminal
-                yield extra
+                return next(chunks, b"")
 
         class Response:
             status = 200
@@ -8275,6 +8273,90 @@ def test_engine_client_cancellation_closes_pre_handle_resources(
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("phase", ["headers", "first_byte", "stream_body"])
+def test_engine_client_owner_cancellation_wins_completed_io(
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    """MH-RUNTIME-013: Stop wins a same-loop I/O completion, including Python 3.10/3.11.
+
+    Blocking-read cancellation tests miss wait_for's old completed-inner-task
+    race: it could return that result after the owner's cancellation arrived.
+    """
+
+    async def run() -> None:
+        released = []
+        output = b'event: content_block_delta\ndata: {"type":"content_block_delta"}\n\n'
+        terminal = b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+
+        class Content:
+            reads = 0
+
+            async def read(self, _size: int) -> bytes:
+                self.reads += 1
+                current = "first_byte" if self.reads == 1 else "stream_body"
+                if phase == current and self.reads <= 2:
+                    asyncio.get_running_loop().call_soon(owner.cancel)
+                return output if self.reads == 1 else terminal if self.reads == 2 else b""
+
+        class Response:
+            status = 200
+            content = Content()
+            headers = {"Content-Type": "text/event-stream"}
+            closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        response = Response()
+
+        class Session:
+            closed = False
+
+            async def post(self, *_args, **_kwargs):
+                if phase == "headers":
+                    asyncio.get_running_loop().call_soon(owner.cancel)
+                return response
+
+            async def close(self) -> None:
+                self.closed = True
+
+        session = Session()
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: session)
+        source = SourceRecord(
+            source_id="src_fixture123", vendor="anthropic", protocol="anthropic",
+            base_url="https://api.example.test/v1", credential_ref="cred_fixture123",
+            allowed_origins=(), model_ids=("model-a",), prefix="source-fixture123",
+        )
+        client = EngineClient(EngineConnection("http://127.0.0.1:15220", "management", "gateway"))
+
+        async def consume() -> None:
+            handle = await client.invoke(
+                source, "model-a", {}, stream=True, on_transport_done=lambda: released.append(True),
+            )
+            try:
+                assert handle.stream is not None
+                async for _chunk in handle.stream:
+                    pass
+            finally:
+                await handle.close_stream()
+
+        owner = asyncio.create_task(consume())
+        try:
+            done, _ = await asyncio.wait({owner}, timeout=1)
+            assert owner in done, "owner cancellation was swallowed and left a live request"
+            with pytest.raises(asyncio.CancelledError):
+                await owner
+            assert session.closed
+            assert phase == "headers" or response.closed
+            assert released
+        finally:
+            owner.cancel()
+            await asyncio.gather(owner, return_exceptions=True)
+
+    asyncio.run(run())
+
+
 def test_buffered_projection_drains_before_its_spool_is_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -8357,13 +8439,11 @@ def test_closing_an_unstarted_stream_publishes_an_observed_terminal(
             b'"response":{"usage":{"input_tokens":12,"output_tokens":3}}}\n\n'
         )
 
+        chunks = iter((first,))
+
         class Content:
             async def read(self, _size: int) -> bytes:
-                return first
-
-            async def iter_chunked(self, _size: int):
-                if False:
-                    yield b""
+                return next(chunks, b"")
 
         class Response:
             status = 200
@@ -8520,10 +8600,9 @@ def test_slow_source_prelude_is_bounded_without_blocking_other_routes(
                     blocked.set()
                     await never.wait()
                     return b""
-                return fast_output
-
-            async def iter_chunked(self, _size: int):
-                yield fast_terminal
+                if self.reads == 1:
+                    return fast_output
+                return fast_terminal if self.reads == 2 else b""
 
         class Response:
             status = 200
