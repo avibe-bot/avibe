@@ -2911,7 +2911,7 @@ export const ChatPage: React.FC = () => {
           there). */}
       <div
         ref={chatSurfaceRef}
-        style={windowChrome ? { paddingTop: '48px' } : undefined}
+        style={windowChrome ? { paddingTop: 'var(--shell-titlebar-inset)' } : undefined}
         className="fixed inset-x-0 bottom-0 top-[var(--macos-stale-login-session-notice-h,0px)] z-40 flex flex-col bg-background pt-[env(safe-area-inset-top)] md:relative md:inset-auto md:z-auto md:-mx-10 md:-my-8 md:h-[var(--app-vvh)] md:bg-transparent md:pt-0"
         onKeyDown={annotation.handleShortcutKeyDown}
         onPointerDownCapture={focusCanvas}

@@ -349,7 +349,7 @@ visibility, and routes are not restored. An absent or corrupt store uses the
 centered 1200×800 default.
 
 On macOS the main window uses an overlay title bar with a hidden title. The
-traffic lights are centered in the 48px top row. The complete chat toolbar sits
+traffic lights are centered in the 28px top row. The complete chat toolbar sits
 beside them, with the same 1080px content width and responsive gutters as the web
 toolbar, transcript and composer. Back, title editing, agent/model/effort selection,
 Visualize and sharing keep their existing handlers and state. There is no extra
@@ -369,7 +369,7 @@ not a locally emulated macOS double-click preference.
 
 The shell publishes `--shell-titlebar-inset: 28px` and
 `__AVIBE_DESKTOP_DRAG__` before page scripts run. The native sidebar and chat
-override that clearance to 48px for the window toolbar. The native frame stays
+use that clearance for the window toolbar. The native frame stays
 transparent even when an adopted Runtime serves older UI without drag metadata;
 pages that predate drag regions need a Runtime UI update to provide those gestures.
 The metadata declarations remain for older shells, but the current Workbench

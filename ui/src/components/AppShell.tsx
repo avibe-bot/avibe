@@ -513,7 +513,6 @@ export const AppShell: React.FC = () => {
     {/* Chromeless (single-app tab): the locked full-viewport column applies on DESKTOP too —
         the app fills the browser area exactly, with nothing to scroll around it. */}
     <div
-      style={windowChrome && !settingsOpen ? { '--shell-titlebar-inset': '48px' } as React.CSSProperties : undefined}
       className={clsx(
         'flex h-[var(--app-shell-h)] flex-col overflow-hidden bg-background text-foreground',
         !chromeless && 'md:block md:h-auto md:min-h-screen md:overflow-visible'
@@ -534,9 +533,6 @@ export const AppShell: React.FC = () => {
       <aside
         aria-hidden={settingsCoversSidebar || undefined}
         inert={settingsCoversSidebar || undefined}
-        // Keep the native sidebar at the chat toolbar's height on every route.
-        // Scope the clearance here so home-page controls keep their own layout.
-        style={desktopDragRegion() !== undefined ? { '--shell-titlebar-inset': '48px' } as React.CSSProperties : undefined}
         className={clsx(
           'fixed inset-y-0 left-0 z-10 hidden w-[var(--app-sidebar-w)] flex-col justify-between gap-6 border-r border-border bg-[var(--sidebar-background)] px-4 pb-4 md:flex',
           desktopDragRegion() !== undefined
