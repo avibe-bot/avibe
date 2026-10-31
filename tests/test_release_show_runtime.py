@@ -52,6 +52,30 @@ def test_release_bundle_keeps_native_shell_separate_from_router_export(workflow_
     }
 
 
+#: GitHub-hosted runner labels that build each Show Runtime platform natively, by OS and architecture. Retired
+#: images (``macos-13``; ``macos-14``, browned out from 2026-10 and removed on 2026-11-02 per
+#: actions/runner-images#13518) are absent: a release matrix entry on one is cancelled and the release fails.
+SUPPORTED_RUNNERS = {
+    "linux-x64": {"ubuntu-latest", "ubuntu-24.04"},
+    "linux-arm64": {"ubuntu-24.04-arm"},
+    "darwin-x64": {"macos-15-intel"},
+    "darwin-arm64": {"macos-15", "macos-26"},
+    "win32-x64": {"windows-latest", "windows-2025"},
+    "win32-arm64": {"windows-11-arm"},
+}
+
+
+@pytest.mark.parametrize("workflow_name", WORKFLOWS)
+def test_each_show_runtime_bundle_builds_on_a_supported_runner_of_its_own_platform(workflow_name: str) -> None:
+    """A bundle installs its platform's native packages (esbuild, Rollup, Tailwind's oxide) on the runner that
+    builds it, so each platform needs a live runner of that OS and architecture."""
+
+    matrix = _workflow(workflow_name)["jobs"]["show-runtime-bundles"]["strategy"]["matrix"]["include"]
+
+    for entry in matrix:
+        assert entry["os"] in SUPPORTED_RUNNERS[entry["artifact"]], entry
+
+
 @pytest.mark.parametrize("workflow_name", WORKFLOWS)
 @pytest.mark.parametrize("template_failure", [False, True])
 def test_release_router_export_preserves_bytes_cleanup_and_failure(

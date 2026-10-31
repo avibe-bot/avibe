@@ -308,7 +308,7 @@ versions. Prefer the committed lockfile: it also pins transitive dependencies,
 which exact top-level versions do not.
 
 **(b) Create the archive deterministically, cross-platform.** The build matrix
-runs on `ubuntu-latest`, `ubuntu-24.04-arm`, `macos-15-intel`, `macos-14`,
+runs on `ubuntu-latest`, `ubuntu-24.04-arm`, `macos-15-intel`, `macos-15`,
 `windows-latest`, and `windows-11-arm`. GNU-tar-only flags such as
 `--sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner` work on the Ubuntu
 runners and fail on the macOS and Windows ones (bsdtar). Use a Node
