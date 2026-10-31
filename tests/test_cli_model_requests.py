@@ -10,6 +10,7 @@ import json
 import os
 import stat
 import sys
+from datetime import datetime, timezone
 
 import pytest
 
@@ -35,7 +36,7 @@ def kept() -> str:
     store = RequestArtifactStore(paths.get_model_request_artifacts_dir())
     meta = {
         "state": "pending",
-        "created_at": "2026-10-31T00:00:00+00:00",
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "owner": {"pid": os.getpid(), "started": None},
         "session_id": "ses_one",
         "turn_id": "trn_one",

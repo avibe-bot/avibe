@@ -16,17 +16,22 @@ Each attempt is one directory under the store root:
   end and what was cut.
 
 Lifecycle. ``_ACTIVE`` holds the attempts this process may still send or stream; retention never removes one.
-- ``begin`` writes the pending attempt (and adds it to ``_ACTIVE``) before the request is sent.
+- ``begin`` writes the pending attempt (and adds it to ``_ACTIVE``) before the request is sent. The send waits for
+  that write at most ``ARTIFACT_WAIT_S`` and never past a Stop: a Stop sends nothing (``cancelled`` / ``not_sent``),
+  and a stalled write is given up and the request sent untracked (``unknown`` / ``untracked``), settled when the
+  write lands.
 - Every ending goes through one path, ``RequestAttempt._queue``: in one synchronous step the attempt leaves
   ``_ACTIVE`` and the write of its final state is queued on the worker, so no later cancellation can skip it. The
-  driver awaits that write shielded (``settle``); cancelling the await leaves the write to run, and the write's own
-  failure is logged. Endings:
+  write runs to its end whoever waits for it, its outcome retrieved by a done-callback. The driver waits for a
+  terminal's write at most ``ARTIFACT_WAIT_S`` and never past a Stop; on a closed or cancelled stream it does not
+  wait at all. Endings:
   - a semantically successful request is deleted: a ``Done``, or an Anthropic ``pause_turn`` sub-request that
     ended normally;
   - one that ended in an error is kept as ``failed``, or ``cancelled`` when the turn was stopped;
   - one stopped before it was sent is kept as ``cancelled`` with outcome ``not_sent``;
   - one whose consumer closed it, or whose task was cancelled, before any ending is ``unknown``.
-- An attempt whose final state was never written (the process died first) stays ``pending`` on disk. It reads ``unknown`` once its owner process is gone, or, in the owner, once it is no
+- An attempt whose final state was never written (the process died first) stays ``pending`` on disk. It reads
+  ``unknown`` once its owner process is gone, or, in the owner, once it is no
   longer active. It is never treated as a success.
 
 The store root and every export directory are made owner-private by ``core.private_fs`` (on Windows, a protected
@@ -85,6 +90,9 @@ _PARTIAL_GRACE_S = 60 * 60
 #: Retention runs at the store's own writes, never on a timer: after every kept ending, and at any other write once
 #: this long has passed since the last run. An attempt that expires is removed at the first write after that.
 MAINTENANCE_INTERVAL_S = 10 * 60
+#: The longest a request, its terminal, or its cleanup waits for an artifact write. A write still running then goes
+#: on in the worker (its outcome still retrieved); the request does not wait for diagnostics any longer.
+ARTIFACT_WAIT_S = 10.0
 
 REQUEST_FILE = "request.bin"
 RESPONSE_FILE = "response.bin"
@@ -573,8 +581,9 @@ def _submit(function: Callable[..., _T], *args: Any) -> asyncio.Future[_T]:
 
 
 class RequestAttempt:
-    """One sent request's artifact, driven by ``drive_sse_stream``. Every step is best effort: a failure to record
-    is logged without payload and never reaches the request's outcome."""
+    """One sent request's artifact, driven by ``drive_sse_stream``. Every ending is queued synchronously and returns
+    the write's future; how long the request waits for it (never past a Stop) is the driver's decision. Every step
+    is best effort: a failure to record is logged without payload and never reaches the request's outcome."""
 
     def __init__(self, store: RequestArtifactStore, artifact_id: str) -> None:
         self.store = store
@@ -583,15 +592,12 @@ class RequestAttempt:
         self.exception_type: str | None = None
         self.ended = False
 
-    def release(self) -> None:
-        """No longer sent or streamed by this process, at once and without I/O. Idempotent."""
+    def succeeded(self) -> asyncio.Future[Any] | None:
+        return self._queue("remove a successful request", self.store.succeed, self.id)
 
-        _release(self.id)
-
-    async def succeeded(self) -> None:
-        await self._end("remove a successful request", self.store.succeed, self.id)
-
-    async def failed(self, *, kind: str, error_kind: str | None = None, status: int | None = None) -> None:
+    def failed(
+        self, *, kind: str, error_kind: str | None = None, status: int | None = None
+    ) -> asyncio.Future[Any] | None:
         outcome: dict[str, Any] = {
             "state": CANCELLED if kind == "cancelled" else FAILED,
             "outcome": {
@@ -601,55 +607,62 @@ class RequestAttempt:
                 "exception_type": self.exception_type,
             },
         }
-        await self._end("keep a failed request", self.store.fail, self.id, outcome, self.capture)
+        return self._queue("keep a failed request", self.store.fail, self.id, outcome, self.capture)
 
-    async def not_sent(self) -> None:
+    def not_sent(self) -> asyncio.Future[Any] | None:
         """Stopped before it was sent: the request never went out."""
 
-        await self._end("keep an unsent request", functools.partial(self.store.close, state=CANCELLED, kind="not_sent"), self.id)
+        return self._queue(
+            "keep an unsent request", functools.partial(self.store.close, state=CANCELLED, kind="not_sent"), self.id
+        )
 
     def abandon(self) -> asyncio.Future[Any] | None:
-        """Closed with no known outcome (its consumer stopped reading, or its task was cancelled): queue the write
-        that marks it ``unknown`` at once, without awaiting, so nothing the caller still has to do can keep it from
-        being queued. The caller awaits the returned future (``settle``)."""
+        """Closed with no known outcome: its consumer stopped reading, or its task was cancelled."""
 
-        return self._queue("mark an interrupted request", functools.partial(self.store.close, state=UNKNOWN, kind=UNKNOWN), self.id)
-
-    async def _end(self, action: str, write: Callable[..., Any], *args: Any) -> None:
-        await settle(self._queue(action, write, *args))
+        return self._queue(
+            "mark an interrupted request", functools.partial(self.store.close, state=UNKNOWN, kind=UNKNOWN), self.id
+        )
 
     def _queue(self, action: str, write: Callable[..., Any], *args: Any) -> asyncio.Future[Any] | None:
-        """The one way an attempt ends: out of ``_ACTIVE`` at once, then its final state written on the worker.
-        Whatever the write does, its outcome is retrieved and a failure logged, never raised into the request."""
+        """The one way an attempt ends: out of ``_ACTIVE`` and its final state queued on the worker, in one
+        synchronous step, so no later cancellation can skip it. The write runs to its end whoever waits for it; its
+        outcome is retrieved by a done-callback and a failure logged, never raised into the request."""
 
         if self.ended:
             return None
         self.ended = True
-        self.release()
+        _release(self.id)
         written = _submit(write, *args)
         written.add_done_callback(functools.partial(_log_write_failure, action))
         return written
 
 
-async def settle(written: asyncio.Future[Any] | None) -> None:
-    """Await an ending's write, shielded: cancelling this await leaves the queued write to run."""
+class PendingBegin:
+    """A pending write queued before a send. The driver waits for it (never past a Stop or ``ARTIFACT_WAIT_S``),
+    then takes the attempt it wrote, or gives it up: cancelled before the send (``cancelled`` / ``not_sent``), or
+    sent without it because it stalled (``unknown`` / ``untracked``)."""
 
-    if written is None:
-        return
-    try:
-        await asyncio.shield(written)
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        pass  # logged by the write's done-callback
+    def __init__(self, store: RequestArtifactStore, ticket: "_PendingWrite", written: asyncio.Future[str]) -> None:
+        self.store = store
+        self.written = written
+        self._ticket = ticket
+
+    def attempt(self) -> RequestAttempt | None:
+        written = self.written
+        if not written.done() or written.cancelled() or written.exception() is not None:
+            return None
+        return RequestAttempt(self.store, written.result())
+
+    def give_up(self, *, sent: bool) -> None:
+        if sent:
+            self._ticket.give_up(self.store, state=UNKNOWN, kind="untracked")
+        else:
+            self._ticket.give_up(self.store, state=CANCELLED, kind="not_sent")
 
 
-async def begin_attempt(request: Any, *, endpoint: Any, protocol: str) -> RequestAttempt | None:
-    """Record ``request`` (an ``httpx.Request``) as pending before it is sent, when a capture scope is active.
-
-    Cancelled while the write runs, the write still finishes on the worker; what it wrote was never sent, so it is
-    taken out of ``_ACTIVE`` when it lands and then kept as ``cancelled`` / ``not_sent``, both on the worker.
-    """
+def begin_attempt(request: Any, *, endpoint: Any, protocol: str) -> PendingBegin | None:
+    """Queue ``request`` (an ``httpx.Request``) as a pending attempt, when a capture scope is active. The caller
+    waits for ``PendingBegin.written`` before it sends."""
 
     scope = _SCOPE.get()
     if scope is None:
@@ -679,48 +692,42 @@ async def begin_attempt(request: Any, *, endpoint: Any, protocol: str) -> Reques
     except Exception as exc:
         _record_failure("record a pending request", exc)
         return None
-    store = scope.store
     ticket = _PendingWrite()
-    written = _submit(ticket.write, store, meta, body)
+    written = _submit(ticket.write, scope.store, meta, body)
     written.add_done_callback(functools.partial(_log_write_failure, "record a pending request"))
-    try:
-        artifact_id = await asyncio.shield(written)
-    except asyncio.CancelledError:
-        ticket.cancel(store)
-        raise
-    except Exception:
-        return None  # logged by the done-callback
-    return RequestAttempt(store, artifact_id)
+    return PendingBegin(scope.store, ticket, written)
 
 
 class _PendingWrite:
-    """A pending write and the cancellation of the request it records, in either order: whichever comes second
-    settles the attempt as ``cancelled`` / ``not_sent`` (on the worker) and takes it out of ``_ACTIVE``."""
+    """A pending write that its request may give up: whichever comes second, the write landing or the giving up,
+    settles it on the worker and takes it out of ``_ACTIVE``."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._cancelled = False
+        self._given_up: tuple[str, str] | None = None
         self._artifact_id: str | None = None
 
     def write(self, store: RequestArtifactStore, meta: dict[str, Any], body: bytes) -> str:
         artifact_id = store.begin(meta, body)
         with self._lock:
             self._artifact_id = artifact_id
-            cancelled = self._cancelled
-        if cancelled:
+            given_up = self._given_up
+        if given_up is not None:
             _release(artifact_id)
-            store.close(artifact_id, state=CANCELLED, kind="not_sent")
+            store.close(artifact_id, state=given_up[0], kind=given_up[1])
         return artifact_id
 
-    def cancel(self, store: RequestArtifactStore) -> None:
+    def give_up(self, store: RequestArtifactStore, *, state: str, kind: str) -> None:
         with self._lock:
-            self._cancelled = True
+            if self._given_up is not None:
+                return
+            self._given_up = (state, kind)
             landed = self._artifact_id
         if landed is None:
             return  # the write settles it when it lands
         _release(landed)
-        settled = _submit(functools.partial(store.close, state=CANCELLED, kind="not_sent"), landed)
-        settled.add_done_callback(functools.partial(_log_write_failure, "keep an unsent request"))
+        settled = _submit(functools.partial(store.close, state=state, kind=kind), landed)
+        settled.add_done_callback(functools.partial(_log_write_failure, "settle a pending request"))
 
 
 def _release(artifact_id: str) -> None:
@@ -736,6 +743,10 @@ def _log_write_failure(action: str, written: Any) -> None:
     exc = written.exception()
     if exc is not None:
         _record_failure(action, exc)
+
+
+def note_slow_artifact_write() -> None:
+    logger.warning("An artifact write is still running after %ss; not waiting for it", ARTIFACT_WAIT_S)
 
 
 def _record_failure(action: str, exc: BaseException) -> None:

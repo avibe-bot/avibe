@@ -27,8 +27,13 @@ from core.agent_core.ai.errors import (
 )
 from core.agent_core.ai.hosted import MAX_HOSTED_COUNTERS
 from core.agent_core.ai.image_limits import LoadedImage, fit_image
-from core.agent_core.ai.request_artifacts import RequestAttempt, ResponseCapture, begin_attempt
-from core.agent_core.ai.request_artifacts import settle as settle_attempt
+from core.agent_core.ai.request_artifacts import (
+    ARTIFACT_WAIT_S,
+    RequestAttempt,
+    ResponseCapture,
+    begin_attempt,
+    note_slow_artifact_write,
+)
 from core.agent_core.ai.sse import SSEEvent, SSEParseError, SSEParser
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import (
@@ -1897,12 +1902,22 @@ async def drive_sse_stream(
                     headers=headers,
                     timeout=httpx.Timeout(None, connect=CONNECT_TIMEOUT_S),
                 )
-                # Durable before it is sent: a crash mid-request leaves it pending, never a success.
-                attempt = await begin_attempt(request, endpoint=endpoint, protocol=assembler.protocol)
+                # Durable before it is sent: a crash mid-request leaves it pending, never a success. A Stop ends
+                # the wait at once and nothing is sent; a write that stalls past its bound is not waited for.
+                pending = begin_attempt(request, endpoint=endpoint, protocol=assembler.protocol)
+                if pending is not None:
+                    try:
+                        await _await_artifact(pending.written, cancel)
+                    except asyncio.CancelledError:
+                        pending.give_up(sent=False)
+                        raise
+                    attempt = pending.attempt()
+                    if attempt is None:
+                        pending.give_up(sent=not cancel.cancelled)
             if cancel.cancelled:
                 # Stopped before the send, possibly while the pending write ran: nothing goes out.
                 if attempt is not None:
-                    await attempt.not_sent()
+                    attempt.not_sent()
                 candidate = assembler.aborted(cancel.reason)
             else:
                 capture = attempt.capture if attempt is not None else None
@@ -1946,7 +1961,9 @@ async def drive_sse_stream(
                             # The pinned Source cannot serve this content; nothing reached a model. The adapter
                             # decides what follows (§3.5, §4.3), so no terminal is committed here.
                             if attempt is not None:
-                                await attempt.failed(kind="pin_unavailable", status=response.status_code)
+                                await _await_artifact(
+                                    attempt.failed(kind="pin_unavailable", status=response.status_code), cancel
+                                )
                             yield handed_back
                             return
                         else:
@@ -1957,7 +1974,9 @@ async def drive_sse_stream(
                             )
                             if refused is not None and refused(candidate):
                                 if attempt is not None:
-                                    await attempt.failed(kind="http_error", error_kind=candidate.kind)
+                                    await _await_artifact(
+                                        attempt.failed(kind="http_error", error_kind=candidate.kind), cancel
+                                    )
                                 yield REFUSED
                                 return
                             refused_payloads = opaque_refusal(body or "") if response.status_code == 400 else ()
@@ -1996,7 +2015,7 @@ async def drive_sse_stream(
                                 break
                             if item is PAUSE_TURN and attempt is not None:
                                 # A paused response's request ended normally; its continuation is another request.
-                                await attempt.succeeded()
+                                await _await_artifact(attempt.succeeded(), cancel)
                             yield item
                             if isinstance(item, HandOff):
                                 return
@@ -2031,14 +2050,16 @@ async def drive_sse_stream(
                 candidate = replace(candidate, retryable=False, continuable=False)
             # Decided before the artifact's write is awaited: diagnostic storage never counts as provider silence.
             if attempt is not None:
-                if isinstance(candidate, Done):
-                    await attempt.succeeded()
-                else:
-                    await attempt.failed(
+                await _await_artifact(
+                    attempt.succeeded()
+                    if isinstance(candidate, Done)
+                    else attempt.failed(
                         kind=_attempt_failure_kind(candidate, response),
                         error_kind=candidate.kind,
                         status=response.status_code if response is not None else None,
-                    )
+                    ),
+                    cancel,
+                )
             # Translator terminals are candidates, not public errors. Commit
             # and sanitize exactly once at the shared driver boundary.
             assembler.end_driver()
@@ -2047,9 +2068,10 @@ async def drive_sse_stream(
                 yield terminal
     finally:
         assembler.end_driver()
-        # Ended without a terminal (its consumer closed it, or its task was cancelled): out of the active set and
-        # its ``unknown`` state queued now, whatever the cleanup below does; that write is awaited at the end.
-        abandoning = attempt.abandon() if attempt is not None else None
+        if attempt is not None:
+            # Ended without a terminal (its consumer closed it, or its task was cancelled): out of the active set
+            # and its ``unknown`` state queued, synchronously. Nothing here waits for diagnostics.
+            attempt.abandon()
         async def close_opened_response() -> None:
             if opening is None:
                 return
@@ -2083,7 +2105,23 @@ async def drive_sse_stream(
                     cleanup.add_done_callback(_consume_task_result)
 
                 opening.add_done_callback(close_late_response)
-        await settle_attempt(abandoning)
+
+
+async def _await_artifact(written: asyncio.Future[Any] | None, cancel: CancelToken) -> None:
+    """Wait for an artifact write: at most ``ARTIFACT_WAIT_S``, and never past a Stop (the CancelToken, or this
+    task's cancellation). The write itself always runs to its end on the artifact worker, which retrieves its
+    outcome; diagnostics never hold up a request, its terminal, or a Stop."""
+
+    if written is None:
+        return
+    try:
+        await _await_network(asyncio.shield(written), cancel, timeout_s=ARTIFACT_WAIT_S)
+    except ProviderStalled:
+        note_slow_artifact_write()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        pass  # logged by the write's done-callback
 
 
 def _attempt_failure_kind(error: ProviderError, response: httpx.Response | None) -> str:

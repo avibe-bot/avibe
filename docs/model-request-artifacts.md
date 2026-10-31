@@ -13,7 +13,10 @@ Every model request a Vibey Turn sends goes through the shared transport. This c
 Anthropic Messages, OpenAI Responses, OpenAI Chat Completions, and Google.
 
 1. **Before the request is sent**, its pending artifact is written: `request.bin` (the `httpx.Request.content` that
-   is then sent, byte for byte) and `meta.json`.
+   is then sent, byte for byte) and `meta.json`. The send waits for that write at most 10 s, and never past a Stop.
+   - A Stop during the write sends nothing, and the attempt is kept as `cancelled` with outcome `not_sent`.
+   - A write that stalls longer is not waited for: the request goes out untracked, and the write is settled as
+     `unknown` with outcome `untracked` when it lands.
 2. **When it ends**, it is resolved in one of these ways:
    - A semantically successful request is deleted. That means one that produced a complete response (`Done`), or an
      Anthropic `pause_turn` sub-request that ended normally. Its continuation is a separate request with its own
@@ -21,15 +24,16 @@ Anthropic Messages, OpenAI Responses, OpenAI Chat Completions, and Google.
    - One that ended in an error is kept as `failed`: an HTTP error (including the gateway's `pin_unavailable` 409
      and an HTTP 400 that leads to a resend), a stream that returned HTTP 200 but ended with an error or a stall,
      or a network failure. HTTP 200 alone is not success. A turn stopped mid-request is `cancelled`.
-   - One stopped before it was sent is `cancelled` with outcome `not_sent`. A Stop that arrives during the
-     pending write is checked before the send, so it never causes provider work.
+   - One stopped before it was sent is `cancelled` with outcome `not_sent`, so it never caused provider work.
    - One closed with no known outcome is `unknown`: its consumer stopped reading, or its task was cancelled before
      a terminal.
 3. **Every ending goes through one path.** The attempt leaves this process's active set and the write of its final
-   state is queued on the worker in the same synchronous step, so no later cancellation can skip it. The driver
-   then awaits that write, shielded: cancelling the await leaves the write to run, and a failure of the write is
-   logged, never raised into the request. Whichever comes second, a pending write landing or a cancellation that
-   interrupted it, settles the attempt as `cancelled` / `not_sent`.
+   state is queued on the worker in the same synchronous step, so no later cancellation can skip it. The write
+   always runs to its end on the worker, which retrieves its outcome and logs a failure, never raising it into the
+   request.
+   - Before yielding a terminal, the driver waits for that write at most 10 s, and never past a Stop.
+   - A stream that is closed or cancelled does not wait at all: its `unknown` write is only queued.
+   - Whichever comes second, a pending write landing or the request giving it up, settles the attempt.
 4. **An attempt whose final state was never written** stays `pending` on disk: the process died first.
    `vibe model-requests` shows it as `unknown` once its owner process is gone (pid and process start time). It is
    never treated as a success.
@@ -112,8 +116,15 @@ Trade-offs:
 
 ## Runtime cost and failure isolation
 
-All filesystem work runs on one private worker thread, never on the controller's event loop. Each request waits
-only for its pending write before it is sent, and for its own removal or finalization when it ends.
+All filesystem work runs on one private worker thread, never on the controller's event loop. Waits on that worker
+are bounded:
+- before the send, a request waits for its pending write, for at most 10 s;
+- before its terminal, for its own removal or finalization, for at most 10 s;
+- a Stop (the CancelToken, or the reading task's cancellation through the Agent loop's `RunScope`) ends either wait
+  at once;
+- a closed or cancelled stream's cleanup never waits.
+
+Diagnostics can therefore delay a request by at most that bound, and a Stop not at all.
 
 If the store cannot be written (full disk, a non-directory in its place), the request proceeds exactly as it would
 without capture. A warning names only the failed step and the exception type.

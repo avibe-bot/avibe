@@ -92,7 +92,10 @@ async def _run(
     if store is None:
         return sent, await stream()
     with capture_model_requests(store, session_id="ses_artifacts", turn_id="trn_artifacts", version="9.9.9"):
-        return sent, await stream()
+        events = await stream()
+    # A Stop or a closed stream does not wait for its artifact's write; it lands once the worker gets to it.
+    await _drain_worker()
+    return sent, events
 
 
 def _kept(store: RequestArtifactStore) -> list[dict[str, Any]]:
@@ -505,7 +508,7 @@ def test_retention_drops_expired_and_oldest_attempts_but_never_an_active_one(tmp
 
 def test_an_attempt_is_read_only_from_the_store_and_exported_into_a_new_private_directory(tmp_path):
     store = RequestArtifactStore(tmp_path / "requests")
-    artifact_id = _write(store, created_at="2026-10-31T00:00:00+00:00")
+    artifact_id = _write(store, created_at=_meta_now()["created_at"])
     destination = tmp_path / "export"
 
     target = store.export(artifact_id, destination)
@@ -550,7 +553,7 @@ def test_every_kept_ending_applies_retention_and_never_removes_an_active_attempt
     itself, but never an attempt this process is still sending."""
 
     store = RequestArtifactStore(tmp_path / "requests", quota_bytes=1)
-    _write(store, created_at="2026-10-31T00:00:00+00:00")
+    _write(store, created_at=_meta_now()["created_at"])
     active = store.begin(_meta_now(), b"in flight")
     ending_id = store.begin(_meta_now(), b"ending")
     try:
@@ -642,3 +645,184 @@ def test_a_streams_kept_end_stays_within_its_bound_whatever_the_chunking(chunks)
     summary = capture.summary()
     assert summary["captured_bytes"] == len(kept)
     assert summary["omitted_bytes"] == len(stream) - len(kept) and summary["truncation"] == "middle"
+
+
+
+# -- Stop through the Agent loop's real owner (``RunScope.call``) while the artifact worker is held ------------------
+
+
+class _Held:
+    """The artifact worker held by a gate, as a stalled filesystem would hold it."""
+
+    def __init__(self) -> None:
+        self.gate = threading.Event()
+        self.blocker: Any = None
+
+    def hold(self) -> None:
+        self.blocker = request_artifacts._worker().submit(self.gate.wait, 30)
+
+    async def release(self) -> None:
+        self.gate.set()
+        await _drain_worker()
+
+
+async def _drive_in_run_scope(request: ModelRequest, answer, store, *, cancel: CancelToken, stop, ready):
+    """Read the adapter stream the way the Agent loop does, each step owned by ``RunScope.call``; ``stop`` is called
+    once ``ready()`` says the driver waits on the held worker."""
+
+    from core.agent_core.agent.lifecycle import RunAborted, RunScope
+
+    scope = RunScope(cancel)
+    events: list[Any] = []
+    async with httpx.AsyncClient(transport=httpx.MockTransport(answer)) as client:
+        adapter = create_adapter(request.endpoint.protocol, client=client, gateway=False)
+        with capture_model_requests(store, session_id="ses_artifacts", turn_id="trn_artifacts"):
+            stream = adapter.stream(request, cancel)
+            iterator = stream.__aiter__()
+
+            async def read() -> None:
+                while True:
+                    try:
+                        events.append(await scope.call(iterator.__anext__))
+                    except StopAsyncIteration:
+                        return
+
+            reading = asyncio.create_task(read())
+            while not ready() and not reading.done():
+                await asyncio.sleep(0.005)
+            assert not reading.done()
+            started = asyncio.get_running_loop().time()
+            await stop(reading)
+            try:
+                await asyncio.wait_for(reading, timeout=2)
+            except (asyncio.CancelledError, RunAborted):
+                pass
+            elapsed = asyncio.get_running_loop().time() - started
+    return events, elapsed
+
+
+class _Hanging(httpx.AsyncByteStream):
+    """A stream that sends its start and then nothing, as a slow model does."""
+
+    def __init__(self, first: bytes, started: threading.Event) -> None:
+        self.first = first
+        self.started = started
+
+    async def __aiter__(self):
+        yield self.first
+        self.started.set()
+        await asyncio.Event().wait()
+
+
+@pytest.mark.parametrize("stop_kind", ["cancel_token", "task_cancel"])
+@pytest.mark.parametrize("phase", ["pending_write", "streaming", "final_write"])
+async def test_a_stop_ends_at_once_while_the_artifact_worker_is_held(store, monkeypatch, stop_kind, phase):
+    """With the worker held (a stalled filesystem), a Stop through the loop's owner ends the read at once, in every
+    phase: a held pending write sends nothing; a stream cut mid-way only queues its ``unknown`` write; a held final
+    write is left to run. Once the worker is free, every write lands and nothing stays active."""
+
+    held = _Held()
+    sent: list[httpx.Request] = []
+    entered = threading.Event()
+    if phase == "pending_write":
+        begin = RequestArtifactStore.begin
+
+        def gated(self, meta, body):
+            entered.set()
+            held.gate.wait(30)
+            return begin(self, meta, body)
+
+        monkeypatch.setattr(RequestArtifactStore, "begin", gated)
+        ready = entered.is_set
+    else:
+        # The failure's write is queued behind the held worker.
+        ready = lambda: request_artifacts._worker()._work_queue.qsize() > 0  # noqa: E731
+
+    started = threading.Event()
+    if phase == "streaming":
+        ready = lambda: started.is_set() and held.blocker is not None  # noqa: E731
+
+    def answer(wire: httpx.Request) -> httpx.Response:
+        sent.append(wire)
+        held.hold()  # every later write queues behind this
+        if phase == "streaming":
+            first = b'data: {"type": "message_start", "message": {"usage": {"input_tokens": 1}}}\n\n'
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=_Hanging(first, started))
+        return httpx.Response(400, json=REFUSAL)
+
+    cancel = CancelToken()
+
+    async def stop(reading: asyncio.Task) -> None:
+        if stop_kind == "cancel_token":
+            cancel.cancel("stop")
+        else:
+            reading.cancel()
+
+    _, elapsed = await _drive_in_run_scope(
+        _direct_request("anthropic"), answer, store, cancel=cancel, stop=stop, ready=ready
+    )
+
+    assert elapsed < 1.5
+    await held.release()
+    (meta,) = _kept(store)
+    assert meta["id"] not in request_artifacts._ACTIVE
+    if phase == "pending_write":
+        assert sent == [] and meta["state"] == "cancelled" and meta["outcome"]["kind"] == "not_sent"
+    elif phase == "streaming":
+        # Cut by the task (``unknown``), or by the driver's own CancelToken check first (``cancelled``).
+        assert len(sent) == 1 and meta["state"] in {"unknown", "cancelled"}
+    else:
+        assert len(sent) == 1 and meta["state"] == "failed" and meta["outcome"]["http_status"] == 400
+
+
+async def test_a_consumer_that_closes_the_stream_never_waits_for_the_held_worker(store):
+    """A consumer's ``aclose`` queues the ``unknown`` write and returns: nothing in the driver's cleanup waits for
+    diagnostics. The write lands once the worker is free."""
+
+    held = _Held()
+    body = _response(_text("partial"), stop_reason="end_turn", input_tokens=1, output_tokens=1)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda _: httpx.Response(200, headers=_served(), text=body)
+    )) as client:
+        adapter = create_adapter("anthropic", client=client, gateway=True)
+        with capture_model_requests(store, session_id="ses_artifacts", turn_id="trn_artifacts"):
+            stream = adapter.stream(_anthropic_hub_request(), CancelToken())
+            await stream.__anext__()
+            held.hold()
+            await asyncio.wait_for(stream.aclose(), timeout=1)
+
+    await held.release()
+    (meta,) = _kept(store)
+    assert meta["state"] == "unknown" and meta["id"] not in request_artifacts._ACTIVE
+
+
+async def test_a_pending_write_that_stalls_past_its_bound_lets_the_request_go_untracked(store, monkeypatch):
+    """Diagnostics never hold a request back for long: past ``ARTIFACT_WAIT_S`` the request is sent without
+    waiting, its outcome is the same, and the late write lands as ``unknown`` / ``untracked``, never active."""
+
+    monkeypatch.setattr(request_artifacts, "ARTIFACT_WAIT_S", 0.05)
+    from core.agent_core.ai import _common
+
+    monkeypatch.setattr(_common, "ARTIFACT_WAIT_S", 0.05)
+    gate = threading.Event()
+    begin = RequestArtifactStore.begin
+
+    def stalled(self, meta, body):
+        gate.wait(30)
+        return begin(self, meta, body)
+
+    monkeypatch.setattr(RequestArtifactStore, "begin", stalled)
+
+    def answer(_: httpx.Request) -> httpx.Response:
+        # Sent while the write still stalls; it lands only now.
+        assert not gate.is_set()
+        gate.set()
+        return httpx.Response(400, json=REFUSAL)
+
+    sent, events = await _run(_direct_request("anthropic"), answer, store)
+
+    assert len(sent) == 1 and isinstance(events[-1], ProviderError) and events[-1].status == 400
+    (meta,) = _kept(store)
+    assert meta["state"] == "unknown" and meta["outcome"]["kind"] == "untracked"
+    assert meta["id"] not in request_artifacts._ACTIVE
