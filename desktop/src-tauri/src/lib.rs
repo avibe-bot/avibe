@@ -43,10 +43,10 @@ use avibe_runtime_host::deep_link::{DeepLinkNavigation, DeepLinks};
 #[cfg(not(feature = "bundled-runtime"))]
 use avibe_runtime_host::default_runtime_host;
 #[cfg(feature = "bundled-runtime")]
-use avibe_runtime_host::{bundled_runtime_host, BootstrapLog, RemovalOutcome, BOOTSTRAP_LOG_NAME};
+use avibe_runtime_host::{bundled_runtime_host, RemovalOutcome, BOOTSTRAP_LOG_NAME};
 use avibe_runtime_host::{
-    is_shell_ui_url, wait_for_shell_ui_url, BootstrapNotice, BootstrapNoticeCode, BootstrapPhase, BootstrapStatus,
-    BootstrapTrigger, CliOutcome, LoopbackOrigin, RuntimeHost, StatusSink, SHELL_UI_URL_TIMEOUT,
+    is_shell_ui_url, wait_for_shell_ui_url, BootstrapLog, BootstrapNotice, BootstrapNoticeCode, BootstrapPhase,
+    BootstrapStatus, BootstrapTrigger, CliOutcome, LoopbackOrigin, RuntimeHost, StatusSink, SHELL_UI_URL_TIMEOUT,
 };
 use serde::Deserialize;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, MenuItemKind, PredefinedMenuItem, Submenu};
@@ -315,6 +315,7 @@ fn native_uninstall_catalog() -> NativeUninstallCatalog {
 /// needs without borrowing from the managed state across an await point.
 struct Shell {
     host: Arc<RuntimeHost>,
+    diagnostics: BootstrapLog,
     latest: Arc<Mutex<Option<BootstrapStatus>>>,
     activity: Arc<AtomicU8>,
     active_origin: Arc<Mutex<Option<LoopbackOrigin>>>,
@@ -327,9 +328,10 @@ struct Shell {
 }
 
 impl Shell {
-    fn new(host: RuntimeHost) -> Self {
+    fn new(host: RuntimeHost, diagnostics: BootstrapLog) -> Self {
         Self {
             host: Arc::new(host),
+            diagnostics,
             latest: Arc::new(Mutex::new(None)),
             activity: Arc::new(AtomicU8::new(ACTIVITY_IDLE)),
             active_origin: Arc::new(Mutex::new(None)),
@@ -1493,6 +1495,9 @@ fn open_workbench(app: &AppHandle, ready: &BootstrapStatus, activity: Arc<Atomic
             .publish(workbench_navigation_failure_status(ready, &origin));
             return;
         }
+        app.state::<Shell>()
+            .diagnostics
+            .record("runtime.start.navigation", &[("outcome", "success".to_owned())]);
         match complete_workbench_handoff(&activity, &window_generation, observed_generation) {
             WorkbenchHandoff::Monitor => {
                 commit_deep_link_navigation(app, &navigation, true, observed_generation);
@@ -2450,7 +2455,9 @@ pub fn run() {
                     default_runtime_host()?
                 }
             };
-            app.manage(Shell::new(host));
+            #[cfg(not(feature = "bundled-runtime"))]
+            let bootstrap_log = BootstrapLog::disabled();
+            app.manage(Shell::new(host, bootstrap_log));
             #[cfg(target_os = "macos")]
             app.manage(computer_use::Controller::start(app.handle()));
             app.manage(notifications::Notifications::new(

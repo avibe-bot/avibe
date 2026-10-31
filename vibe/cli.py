@@ -13944,12 +13944,38 @@ def _handover_superseded_desktop_runtime(*, allowed: bool) -> int:
     return 0
 
 
-def cmd_start(*, open_browser: bool | None = None, hand_over: bool = False):
+def cmd_start(
+    *,
+    open_browser: bool | None = None,
+    hand_over: bool = False,
+    desktop_receipt: bool = False,
+):
     _guard_cli_default_state_migration()
     paths.ensure_data_dirs()
     config = _ensure_config()
+    receipt_origin = None
+    receipt_bind_host = None
+    if desktop_receipt:
+        from vibe.desktop_runtime import desktop_origin
+
+        receipt_bind_host = runtime.effective_ui_bind_host(config)
+        receipt_origin = desktop_origin(receipt_bind_host, config.ui.setup_port)
+
+    def emit_receipt(outcome: str, reason: str | None = None) -> None:
+        if receipt_origin is None:
+            return
+        from vibe.desktop_startup import emit_desktop_start_receipt
+
+        emit_desktop_start_receipt(
+            origin=receipt_origin,
+            outcome=outcome,  # type: ignore[arg-type]
+            reason=reason,
+        )
+
     handover_status = _handover_superseded_desktop_runtime(allowed=hand_over)
     if handover_status:
+        if desktop_receipt:
+            emit_receipt("failed", "handover_refused" if handover_status == 3 else "handover_failed")
         return handover_status
     # Before anything is announced: a start refused here leaves the status, and
     # everything running, as it found them. The start below claims again what
@@ -13958,6 +13984,8 @@ def cmd_start(*, open_browser: bool | None = None, hand_over: bool = False):
         runtime.claim_desktop_runtime_start()
     except runtime.DesktopRuntimeClaimRefused as refusal:
         _print_provenance_refusal("claim", refusal)
+        if desktop_receipt:
+            emit_receipt("failed", "runtime_claim_refused")
         return 3
 
     has_configured_platform_credentials = getattr(config, "has_configured_platform_credentials", None)
@@ -13973,6 +14001,7 @@ def cmd_start(*, open_browser: bool | None = None, hand_over: bool = False):
 
     service_start = runtime.ProcessStartInfo()
     ui_start = runtime.ProcessStartInfo()
+    startup_committed = False
     # Everything from here to the end of the start is one region under one
     # invariant: nothing THIS invocation created may survive a start that did not
     # finish. Both processes count. A service left behind is adopted as `reused`
@@ -13997,17 +14026,21 @@ def cmd_start(*, open_browser: bool | None = None, hand_over: bool = False):
     # the service and then waits for it to take the lock, and a Ctrl-C in that
     # wait left a live, reserved service that no rollback had been asked about.
     try:
-        service_pid = runtime.start_service(
-            wait_for_ready=False,
-            start_info=service_start,
-        )
+        service_kwargs = {
+            "wait_for_ready": False,
+            "start_info": service_start,
+        }
+        startup_deadline = None
+        if desktop_receipt:
+            service_kwargs["initial_ready_timeout"] = 0
+            startup_deadline = time.monotonic() + runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS
+        service_pid = runtime.start_service(**service_kwargs)
         service_reused = service_start.reused
-        bind_host = runtime.effective_ui_bind_host(config)
-        ui_pid = runtime.start_ui(
-            bind_host,
-            config.ui.setup_port,
-            start_info=ui_start,
-        )
+        bind_host = receipt_bind_host if receipt_bind_host is not None else runtime.effective_ui_bind_host(config)
+        ui_kwargs = {"start_info": ui_start}
+        if desktop_receipt:
+            ui_kwargs["wait_for_ready"] = False
+        ui_pid = runtime.start_ui(bind_host, config.ui.setup_port, **ui_kwargs)
         if ui_pid is None:
             # No pid means start_ui found a stale UI it could not stop and refused
             # to start a replacement that would only die on bind. Nothing below can
@@ -14032,10 +14065,19 @@ def cmd_start(*, open_browser: bool | None = None, hand_over: bool = False):
         # on the raw pid start_service handed back: under a delegated user scope that
         # pid can be a launcher that never takes the lock, so wait_for_service_ready
         # adopts and returns the real owner instead of stalling the full timeout.
-        resolved_pid = runtime.wait_for_service_ready(
-            service_pid,
-            timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS,
-        )
+        if desktop_receipt:
+            assert startup_deadline is not None
+            resolved_pid = runtime.wait_for_desktop_startup_ready(
+                service_pid,
+                bind_host,
+                config.ui.setup_port,
+                timeout=max(0.0, startup_deadline - time.monotonic()),
+            )
+        else:
+            resolved_pid = runtime.wait_for_service_ready(
+                service_pid,
+                timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS,
+            )
         service_ready = resolved_pid is not None
         if resolved_pid is not None:
             runtime.claim_ready_service(resolved_pid, started_pid=service_pid)
@@ -14066,6 +14108,21 @@ def cmd_start(*, open_browser: bool | None = None, hand_over: bool = False):
             if not opened:
                 print(f"(Tip) Could not auto-open a browser. Open this URL manually: {ui_url}")
                 print("")
+        if desktop_receipt:
+            from vibe.install_generations import collect_install_generations
+
+            try:
+                if service_ready:
+                    collect_install_generations(cache_running_vibe_path())
+            except Exception:
+                logger.warning("Desktop startup housekeeping failed after Runtime became ready", exc_info=True)
+            # Readiness and ownership are complete here. From this point on,
+            # stdout transport is only an observation channel for the shell;
+            # closing that channel must never roll back a Runtime that this
+            # invocation has already started or adopted.
+            startup_committed = True
+            emit_receipt("ready")
+            return 0
     except BaseException as exc:
         # The invariant is that this invocation leaves running nothing it
         # created -- not just the service. The region starts two processes, and
@@ -14102,12 +14159,19 @@ def cmd_start(*, open_browser: bool | None = None, hand_over: bool = False):
         # leaves evidence; either way the start has failed. Under a desktop
         # Runtime id only the processes this start created are stopped, so one
         # another Runtime started meanwhile is left running.
-        runtime.roll_back_start(service_start, ui_start)
+        if not startup_committed:
+            runtime.roll_back_start(service_start, ui_start)
+        if desktop_receipt and not startup_committed:
+            reason = "runtime_not_ready" if isinstance(exc, RuntimeError) else "startup_failed"
+            try:
+                emit_receipt("failed", reason)
+            except Exception:
+                logger.warning("Could not write the desktop startup failure receipt", exc_info=True)
         if isinstance(exc, runtime.DesktopRuntimeClaimRefused):
             _print_provenance_refusal("claim", exc)
             return 3
         raise
-    if service_ready:
+    if service_ready and not desktop_receipt:
         from vibe.install_generations import collect_install_generations
 
         collect_install_generations(cache_running_vibe_path())
@@ -16886,6 +16950,7 @@ def build_parser():
         help="Start this install even though a newer one was activated since.",
     )
     start_parser.add_argument("--hand-over", action="store_true", help=argparse.SUPPRESS)
+    start_parser.add_argument("--desktop-receipt", action="store_true", help=argparse.SUPPRESS)
     # The desktop shell's own entry points: runnable, but never listed.
     desktop_parser = subparsers.add_parser("desktop")
     desktop_subparsers = desktop_parser.add_subparsers(dest="desktop_command", required=True)
@@ -19162,7 +19227,10 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
     if args.command == "start":
         if _generation_downgrade_blocks("start", allow_downgrade=args.allow_downgrade):
             sys.exit(1)
-        sys.exit(cmd_start(open_browser=args.open_browser, hand_over=args.hand_over))
+        start_kwargs = {"open_browser": args.open_browser, "hand_over": args.hand_over}
+        if args.desktop_receipt:
+            start_kwargs["desktop_receipt"] = True
+        sys.exit(cmd_start(**start_kwargs))
     if args.command == "desktop" and args.desktop_command == "endpoint":
         sys.exit(cmd_desktop_endpoint())
     if args.command == "desktop" and args.desktop_command == "remove-backends":

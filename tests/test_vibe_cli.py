@@ -4301,6 +4301,164 @@ def test_start_parser_accepts_no_open_browser():
     assert args.open_browser is False
 
 
+def test_start_parser_accepts_hidden_desktop_receipt():
+    parser = cli.build_parser()
+    args = parser.parse_args(["start", "--desktop-receipt"])
+
+    assert args.command == "start"
+    assert args.desktop_receipt is True
+
+
+def test_desktop_receipt_frame_has_bounded_utf8_schema():
+    from vibe.desktop_startup import desktop_start_receipt_line
+
+    frame = desktop_start_receipt_line(
+        origin="http://127.0.0.1:5123",
+        outcome="failed",
+        reason="startup_failed",
+    )
+
+    assert frame.startswith("@avibe-desktop-start:")
+    assert frame.endswith("\n")
+    assert len(frame.encode("utf-8")) <= 4096
+    assert json.loads(frame.removeprefix("@avibe-desktop-start:")) == {
+        "schema_version": 1,
+        "outcome": "failed",
+        "origin": "http://127.0.0.1:5123",
+        "reason": "startup_failed",
+    }
+
+
+def test_desktop_receipt_start_shares_readiness_and_does_not_wait_twice(monkeypatch, capsys):
+    config = SimpleNamespace(
+        has_configured_platform_credentials=lambda: True,
+        ui=SimpleNamespace(setup_host="127.0.0.1", setup_port=5123, open_browser=False),
+    )
+    calls = []
+
+    monkeypatch.setattr(cli.paths, "ensure_data_dirs", lambda: None)
+    monkeypatch.setattr(cli, "_guard_cli_default_state_migration", lambda: None)
+    monkeypatch.setattr(cli, "_ensure_config", lambda: config)
+    monkeypatch.setattr(cli, "_handover_superseded_desktop_runtime", lambda **kwargs: 0)
+    monkeypatch.setattr(cli.runtime, "claim_desktop_runtime_start", lambda: None)
+    monkeypatch.setattr(cli, "_write_status", lambda *args: None)
+    monkeypatch.setattr(cli.runtime, "write_status", lambda *args: None)
+    monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda _config: "127.0.0.1")
+    monkeypatch.setattr(cli, "_in_ssh_session", lambda: False)
+    monkeypatch.setattr(cli, "_open_browser", lambda _url: pytest.fail("desktop mode must not open a browser"))
+    monkeypatch.setattr(cli.runtime, "claim_ready_service", lambda *args, **kwargs: None)
+    monkeypatch.setattr("vibe.install_generations.collect_install_generations", lambda *_args: None)
+
+    def start_service(**kwargs):
+        calls.append(("service", kwargs))
+        kwargs["start_info"].capture(1234, reused=False)
+        return 1234
+
+    def start_ui(host, port, **kwargs):
+        calls.append(("ui", host, port, kwargs))
+        kwargs["start_info"].capture(5678, reused=False)
+        return 5678
+
+    def wait_ready(pid, host, port, *, timeout):
+        calls.append(("ready", pid, host, port, timeout))
+        return 1234
+
+    monkeypatch.setattr(cli.runtime, "start_service", start_service)
+    monkeypatch.setattr(cli.runtime, "start_ui", start_ui)
+    monkeypatch.setattr(cli.runtime, "wait_for_desktop_startup_ready", wait_ready)
+
+    assert cli.cmd_start(open_browser=False, desktop_receipt=True) == 0
+
+    service_call = calls[0][1]
+    ui_call = calls[1][3]
+    ready_call = calls[2]
+    assert service_call["wait_for_ready"] is False
+    assert service_call["initial_ready_timeout"] == 0
+    assert ui_call["wait_for_ready"] is False
+    assert ready_call[:4] == ("ready", 1234, "127.0.0.1", 5123)
+    assert ready_call[4] > 0
+    assert "@avibe-desktop-start:" in capsys.readouterr().out
+
+
+def test_desktop_receipt_failure_is_emitted_after_rollback(monkeypatch, capsys):
+    config = SimpleNamespace(
+        has_configured_platform_credentials=lambda: True,
+        ui=SimpleNamespace(setup_host="127.0.0.1", setup_port=5123, open_browser=False),
+    )
+    stopped = []
+
+    monkeypatch.setattr(cli.paths, "ensure_data_dirs", lambda: None)
+    monkeypatch.setattr(cli, "_guard_cli_default_state_migration", lambda: None)
+    monkeypatch.setattr(cli, "_ensure_config", lambda: config)
+    monkeypatch.setattr(cli, "_handover_superseded_desktop_runtime", lambda **kwargs: 0)
+    monkeypatch.setattr(cli.runtime, "claim_desktop_runtime_start", lambda: None)
+    monkeypatch.setattr(cli, "_write_status", lambda *args: None)
+    monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda _config: "127.0.0.1")
+    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: 1234)
+    monkeypatch.setattr(
+        cli.runtime,
+        "start_ui",
+        lambda host, port, **kwargs: (_ for _ in ()).throw(RuntimeError("ui failed")),
+    )
+    monkeypatch.setattr(
+        cli.runtime,
+        "roll_back_start",
+        lambda service, ui: stopped.append((service, ui)),
+    )
+
+    with pytest.raises(RuntimeError, match="ui failed"):
+        cli.cmd_start(open_browser=False, desktop_receipt=True)
+
+    output = capsys.readouterr().out
+    assert '"outcome":"failed"' in output
+    assert '"reason":"runtime_not_ready"' in output
+    assert len(stopped) == 1
+
+
+def test_desktop_receipt_transport_failure_after_commit_keeps_runtime(monkeypatch):
+    config = SimpleNamespace(
+        has_configured_platform_credentials=lambda: True,
+        ui=SimpleNamespace(setup_host="127.0.0.1", setup_port=5123, open_browser=False),
+    )
+    rolled_back = []
+
+    monkeypatch.setattr(cli.paths, "ensure_data_dirs", lambda: None)
+    monkeypatch.setattr(cli, "_guard_cli_default_state_migration", lambda: None)
+    monkeypatch.setattr(cli, "_ensure_config", lambda: config)
+    monkeypatch.setattr(cli, "_handover_superseded_desktop_runtime", lambda **kwargs: 0)
+    monkeypatch.setattr(cli.runtime, "claim_desktop_runtime_start", lambda: None)
+    monkeypatch.setattr(cli, "_write_status", lambda *args: None)
+    monkeypatch.setattr(cli.runtime, "write_status", lambda *args: None)
+    monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda _config: "127.0.0.1")
+    monkeypatch.setattr(cli, "_in_ssh_session", lambda: True)
+    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: 1234)
+    monkeypatch.setattr(cli.runtime, "start_ui", lambda host, port, **kwargs: 5678)
+    monkeypatch.setattr(cli.runtime, "wait_for_desktop_startup_ready", lambda *args, **kwargs: 1234)
+    monkeypatch.setattr(cli.runtime, "claim_ready_service", lambda *args, **kwargs: None)
+    monkeypatch.setattr("vibe.install_generations.collect_install_generations", lambda *_args: None)
+    monkeypatch.setattr(cli.runtime, "roll_back_start", lambda *args: rolled_back.append(args))
+    monkeypatch.setattr(
+        "vibe.desktop_startup.emit_desktop_start_receipt",
+        lambda **kwargs: (_ for _ in ()).throw(BrokenPipeError()),
+    )
+
+    with pytest.raises(BrokenPipeError):
+        cli.cmd_start(open_browser=False, desktop_receipt=True)
+
+    assert rolled_back == []
+
+
+def test_desktop_receipt_pre_resolution_failure_has_no_receipt(monkeypatch, capsys):
+    monkeypatch.setattr(cli.paths, "ensure_data_dirs", lambda: None)
+    monkeypatch.setattr(cli, "_guard_cli_default_state_migration", lambda: None)
+    monkeypatch.setattr(cli, "_ensure_config", lambda: (_ for _ in ()).throw(RuntimeError("config failed")))
+
+    with pytest.raises(RuntimeError, match="config failed"):
+        cli.cmd_start(open_browser=False, desktop_receipt=True)
+
+    assert "@avibe-desktop-start:" not in capsys.readouterr().out
+
+
 @pytest.mark.parametrize(
     ("arguments", "expected"),
     [
@@ -4321,8 +4479,18 @@ def test_stop_parser_and_main_route_each_stop_mode(monkeypatch, arguments, expec
     assert calls == [expected]
 
 
-@pytest.mark.parametrize(("arguments", "hand_over"), [(["start"], False), (["start", "--hand-over"], True)])
-def test_only_a_start_asked_to_hand_over_may_replace_another_desktop_runtime(monkeypatch, arguments, hand_over):
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        (["start"], {"open_browser": None, "hand_over": False}),
+        (["start", "--hand-over"], {"open_browser": None, "hand_over": True}),
+        (
+            ["start", "--desktop-receipt"],
+            {"open_browser": None, "hand_over": False, "desktop_receipt": True},
+        ),
+    ],
+)
+def test_start_parser_and_main_route_desktop_modes(monkeypatch, arguments, expected):
     calls = []
     monkeypatch.setattr(cli.sys, "argv", ["vibe", *arguments])
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: None)
@@ -4333,7 +4501,7 @@ def test_only_a_start_asked_to_hand_over_may_replace_another_desktop_runtime(mon
         cli.main()
 
     assert exited.value.code == 0
-    assert calls == [{"open_browser": None, "hand_over": hand_over}]
+    assert calls == [expected]
 
 
 def test_remote_parser_accepts_pairing_command():
