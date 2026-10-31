@@ -2738,14 +2738,15 @@ class UsageWriter:
         `"fast"` only when the call's response said it ran at the fast tier.
         """
 
+        speed = FAST_SPEED if speed == FAST_SPEED else None
         return self._queue(
             UsageCall(
                 source_id=source_id,
                 model_id=model_id,
                 usage=usage,
                 at=at,
-                context_tier=self._context_tier(model_id, usage),
-                speed=FAST_SPEED if speed == FAST_SPEED else None,
+                context_tier=self._context_tier(model_id, usage, speed),
+                speed=speed,
             )
         )
 
@@ -2877,13 +2878,20 @@ class UsageWriter:
                 if not queued.done.done():
                     queued.done.set_result(None)
 
-    def _context_tier(self, model_id: str, usage: Optional[ProtocolUsageReport]) -> int:
-        """The tier the held price table puts one call in; the base tier without usage or a table."""
+    def _context_tier(self, model_id: str, usage: Optional[ProtocolUsageReport], speed: Optional[str] = None) -> int:
+        """The tier the held price table puts one call in; the base tier without usage or a table.
+
+        A fast call is placed by the fast rates' own context sizes, the rates its
+        row is valued at; where the table lists no fast rates, by the standard ones.
+        """
 
         held = self._prices
         if usage is None or held is None:
             return 0
-        return context_tier_size(held[0].price(model_id), usage.input_tokens)
+        price = held[0].price(model_id)
+        if speed == FAST_SPEED and price is not None and price.fast is not None:
+            price = price.fast
+        return context_tier_size(price, usage.input_tokens)
 
     def _prices_due(self) -> bool:
         """Whether the next flush re-reads the price table: none held, too old, or still being fetched."""

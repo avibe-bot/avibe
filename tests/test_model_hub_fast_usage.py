@@ -169,3 +169,39 @@ def test_a_call_the_resolver_meters_is_billed_at_the_tier_its_outcome_reported(t
     asyncio.run(meter())
     totals = ledger.summary(days=1, now=NOW)["totals"]
     assert (totals["requests"], totals["fast_requests"]) == (2, 1)
+
+
+def test_a_fast_call_is_placed_by_the_fast_rates_own_context_sizes(tmp_path):
+    """Flat standard rates, fast rates that rise past 100K: a 150K fast call is billed in that fast tier."""
+
+    import asyncio
+
+    from core.handlers.model_hub.usage import UsageWriter
+
+    catalog = {"anthropic": {"models": {"claude-opus-9": {
+        "cost": {"input": 5, "output": 25},
+        "experimental": {"modes": {"fast": {"cost": {
+            "input": 10, "output": 50,
+            "tiers": [{"input": 20, "output": 100, "tier": {"type": "context", "size": 100_000}}],
+        }}}},
+    }}}}
+
+    def table() -> PriceTable:
+        return PriceTable(catalog=catalog, vendor_map=VENDOR_MAP, overrides={}, price_table_date="2026-10-31")
+
+    ledger = BoundedUsageLedger(tmp_path / "usage.json", now=lambda: NOW)
+    usage = ProtocolUsageReport.of(input_tokens=150_000, cached_input_tokens=0, output_tokens=0)
+
+    async def record() -> None:
+        writer = UsageWriter(ledger, price_table=table)
+        writer.record(source_id="src_a", model_id="claude-opus-9", usage=usage, at=NOW, speed="fast")
+        writer.record(source_id="src_a", model_id="claude-opus-9", usage=usage, at=NOW)
+        assert await writer.drain(timeout=5) == 0
+
+    asyncio.run(record())
+    rows = {row.get("speed", ""): row for row in json.loads(ledger.path.read_text(encoding="utf-8"))}
+    assert rows["fast"].get("context_tier") == 100_000
+    assert "context_tier" not in rows[""]
+    summary = ledger.summary(days=1, now=NOW, prices=table())
+    # 150K at the fast tier's $20, plus 150K at the flat standard $5.
+    assert summary["totals"]["api_cost_usd"] == pytest.approx(150_000 * 20 / 1e6 + 150_000 * 5 / 1e6)
