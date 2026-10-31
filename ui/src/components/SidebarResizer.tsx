@@ -38,19 +38,26 @@ type Gesture = {
 
 /**
  * The sidebar's right divider, made draggable. On native macOS the strip owns
- * the neutral line too and sits outside the aside's stacking context, above
- * the window chrome. Its existing hover/focus/gesture states color one border
- * from top to bottom. Web keeps the strip over the aside's own divider.
+ * the neutral line too and sits outside the aside's stacking context. Its
+ * existing hover/focus/gesture states color one border from top to bottom.
+ * The native strip is split at the toolbar's lower edge so floating app windows
+ * stay above the resize edge in the content area while the edge still clears
+ * the native chrome above it. Both segments share this component's gesture and
+ * visual state; Web keeps one strip over the aside's own divider.
  */
-export const SidebarResizer = ({ nativeChrome = false, hidden = false }: {
+export const SidebarResizer = ({ nativeChrome = false, hidden = false, elevated = false }: {
   nativeChrome?: boolean;
   hidden?: boolean;
+  elevated?: boolean;
 }) => {
   const { t } = useTranslation();
   const [width, setWidth] = useState(readWidth);
   const [maxWidth, setMaxWidth] = useState(() => maxSidebarWidth(currentViewportWidth()));
   const [dragging, setDragging] = useState(false);
+  const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
   const gesture = useRef<Gesture | null>(null);
+  const highlighted = dragging || hovered || focused;
 
   const apply = useCallback((next: number) => {
     const clamped = clampWidth(next);
@@ -115,6 +122,15 @@ export const SidebarResizer = ({ nativeChrome = false, hidden = false }: {
     document.body.style.userSelect = 'none';
   };
 
+  const onPointerEnter = () => setHovered(true);
+
+  const onPointerLeave = () => {
+    if (!gesture.current) setHovered(false);
+  };
+
+  const onFocus = () => setFocused(true);
+  const onBlur = () => setFocused(false);
+
   const onPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
     const active = gesture.current;
     if (!active || active.pointerId !== event.pointerId) return;
@@ -134,40 +150,82 @@ export const SidebarResizer = ({ nativeChrome = false, hidden = false }: {
     apply(next);
   };
 
+  const commonProps = {
+    hidden,
+    'aria-valuenow': width,
+    'aria-valuemin': MIN_SIDEBAR_WIDTH,
+    'aria-valuemax': maxWidth,
+    'data-dragging': dragging || undefined,
+    'data-settings-interaction-owner': nativeChrome || undefined,
+    onPointerDown,
+    onPointerMove,
+    onPointerUp: endGesture,
+    onPointerCancel: endGesture,
+    onLostPointerCapture: endGesture,
+    onPointerEnter,
+    onPointerLeave,
+    onFocus,
+    onBlur,
+    onKeyDown,
+  };
+
+  const commonClass = clsx(
+    'w-2 cursor-col-resize touch-none border-r outline-none transition-colors',
+    'hover:border-mint/30 focus-visible:border-mint/30',
+    highlighted && 'border-mint/30',
+  );
+
+  if (!nativeChrome) {
+    return (
+      <div
+        {...commonProps}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label={t('appShell.resizeSidebar')}
+        tabIndex={0}
+        // Read by the Settings overlay, which is dismissed by an interaction
+        // outside itself and would otherwise close the moment this edge — which
+        // its own left edge follows — was grabbed.
+        data-sidebar-resizer="true"
+        // `touch-none` is load-bearing wherever a touchscreen reports the desktop
+        // breakpoint — a tablet in landscape, a convertible laptop. Pointer capture
+        // does not win the browser's touch-action negotiation, so with the default
+        // the native pan claims the finger and cancels the drag part-way.
+        className={clsx(commonClass, 'absolute inset-y-0 -right-px z-10 border-transparent')}
+      />
+    );
+  }
+
+  // The top segment clears the native chrome. The lower segment normally stays
+  // below WindowLayer (z-20), so a floating app window can cover both its paint
+  // and its hit strip once it crosses the sidebar boundary. Settings raises it
+  // temporarily while the WindowLayer is hidden, preserving the existing
+  // inline-settings resize interaction.
   return (
-    <div
-      role="separator"
-      hidden={hidden}
-      aria-orientation="vertical"
-      aria-label={t('appShell.resizeSidebar')}
-      aria-valuenow={width}
-      aria-valuemin={MIN_SIDEBAR_WIDTH}
-      aria-valuemax={maxWidth}
-      tabIndex={0}
-      // Read by the Settings overlay, which is dismissed by an interaction
-      // outside itself and would otherwise close the moment this edge — which
-      // its own left edge follows — was grabbed.
-      data-sidebar-resizer="true"
-      data-settings-interaction-owner={nativeChrome || undefined}
-      data-dragging={dragging || undefined}
-      onPointerDown={onPointerDown}
-      onPointerMove={onPointerMove}
-      onPointerUp={endGesture}
-      onPointerCancel={endGesture}
-      onLostPointerCapture={endGesture}
-      onKeyDown={onKeyDown}
-      // `touch-none` is load-bearing wherever a touchscreen reports the desktop
-      // breakpoint — a tablet in landscape, a convertible laptop. Pointer capture
-      // does not win the browser's touch-action negotiation, so with the default
-      // the native pan claims the finger and cancels the drag part-way.
-      className={clsx(
-        'inset-y-0 w-2 cursor-col-resize touch-none border-r outline-none transition-colors',
-        nativeChrome
-          ? 'fixed left-[calc(var(--app-sidebar-w)-8px)] z-[31] border-border'
-          : 'absolute -right-px z-10 border-transparent',
-        'hover:border-mint/30 focus-visible:border-mint/30',
-        dragging && 'border-mint/30',
-      )}
-    />
+    <>
+      <div
+        {...commonProps}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label={t('appShell.resizeSidebar')}
+        tabIndex={0}
+        data-sidebar-resizer="true"
+        className={clsx(
+          commonClass,
+          'fixed left-[calc(var(--app-sidebar-w)-8px)] top-0 z-[31] h-[var(--desktop-chat-toolbar-h)] border-border',
+        )}
+      />
+      <div
+        {...commonProps}
+        aria-hidden="true"
+        data-sidebar-resizer-content="true"
+        tabIndex={-1}
+        className={clsx(
+          commonClass,
+          'fixed bottom-0 left-[calc(var(--app-sidebar-w)-8px)] top-[var(--desktop-chat-toolbar-h)] border-border',
+          elevated ? 'z-[31]' : 'z-[19]',
+        )}
+      />
+    </>
   );
 };

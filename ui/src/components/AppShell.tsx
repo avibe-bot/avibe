@@ -624,7 +624,7 @@ export const AppShell: React.FC = () => {
       {/* One native resize edge owns both neutral and active paint above chrome.
           Keep it mounted while Settings hides the sidebar to retain its width. */}
       {!chromeless && isDesktop && desktopDragRegion() !== undefined && (
-        <SidebarResizer nativeChrome hidden={settingsCoversSidebar} />
+        <SidebarResizer nativeChrome hidden={settingsCoversSidebar} elevated={settingsOpen} />
       )}
 
       {/* Chat and Search are fixed full-screen surfaces with their own header
