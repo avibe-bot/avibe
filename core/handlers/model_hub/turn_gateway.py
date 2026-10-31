@@ -358,6 +358,19 @@ class _TurnExecution:
         return self.handle is not None
 
     @property
+    def reported_tier(self) -> ServedTier | None:
+        """The processing tier the response named, whichever shape it answered in and however it ended.
+
+        The same owners in the same order as the usage report, because it is the
+        rate those tokens are billed at.
+        """
+
+        for state in (self.upstream_observation, self.wire_state):
+            if state is not None and state.served_tier is not None:
+                return state.served_tier
+        return self.handle_outcome.served_tier if self.handle_outcome is not None else None
+
+    @property
     def served_tier(self) -> tuple[bool, ServedTier | None]:
         """Whether upstream served this call in full, and the processing tier its response named.
 
@@ -1743,6 +1756,7 @@ class ModelHubTurnGateway:
             model_id=resolved.model_id,
             usage=usage,
             at=execution.completed_at or self._now(),
+            speed=execution.reported_tier,
         )
         await self._usage_writer.wait_recorded(execution.usage_write)
 

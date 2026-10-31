@@ -11322,6 +11322,10 @@ class ModelHubService:
         """
 
         usage = _call_usage(outcome, observed)
+        # The tier the response named prices its tokens; Avibe never assumes one.
+        tier = outcome.served_tier if outcome is not None else None
+        if tier is None and observed is not None:
+            tier = observed.served_tier
         reached_model = (
             outcome is not None
             and (outcome.kind is RawOutcomeKind.SUCCESS or outcome.stream_started)
@@ -11334,6 +11338,7 @@ class ModelHubService:
                 model_id=model_id,
                 usage=usage,
                 at=at or self.now(),
+                speed=tier,
             )
         )
 

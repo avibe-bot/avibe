@@ -102,6 +102,19 @@ the Hub believes that report rather than the request:
   its next fast response. The record is process memory, bounded; after a
   restart, a hop is unknown until its next fast response.
 
+### Usage
+
+The usage ledger bills what the response said, like the confirmation does. A
+call whose response named the fast tier is recorded in its own row
+(`speed: "fast"`, beside the context tier in the row's identity; standard rows
+keep the released shape). Valuation prices a fast row at the model's models.dev
+`experimental.modes.fast.cost` rates, in the row's context tier, or at its
+standard rates as a lower bound where the table lists none. Every published
+aggregate (totals, Sources, models, days and buckets) counts `fast_requests`
+beside `requests`, present only once a fast request joins it. A released reader
+treats a fast row as a standard one, merging it into that day's standard row
+without losing a count. Pricing details: `docs/plans/model-hub-capability-model.md` §6.2.
+
 ### Picker
 
 - The Hub Agent read states, on each catalog model, whether a fast turn on it
@@ -126,8 +139,6 @@ the Hub believes that report rather than the request:
 - Per-turn cost estimates. The tooltip says the price is higher; the
   multiplier differs by vendor and plan.
 - Fast mode for Direct-mode Agents, OpenCode, and the IM settings surfaces.
-- Recording the served tier in usage records, and pricing fast requests there.
-  The tier is read on every call; the usage ledger does not keep it yet.
 
 ## Validation
 
@@ -139,6 +150,9 @@ the Hub believes that report rather than the request:
   says the tier ran).
 - Units: the served tier each protocol reports, streamed and buffered
   (`tests/test_model_hub_served_tier.py`), and the observation record.
+- Fast-tier usage (`tests/test_model_hub_fast_usage.py`): fast rates, rows,
+  `fast_requests` in every aggregate, the schema, and both metering owners.
+  `MH-FAST-004` also checks that only the call that ran fast is billed as fast.
 - Units: the hop rule (`tests/test_model_hub_fast_mode.py`), the Session field
   and its dispatch read, the preference, the picker, and the new-session flow.
 - Browser: the mark stays visible on a crowded 320px phone row.

@@ -47,6 +47,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Callable, Final, Mapping, Optional, Sequence
 
+from .fast_mode import FAST_SPEED
 from .identifiers import persisted_ledger_key, usage_ledger_key
 from .pricing import Cost, ModelPrice, PriceTable, ServiceCost, context_tier_size, row_cost, service_row_cost
 from .state_file import write_state_document
@@ -797,6 +798,13 @@ def _normalize_row(row: object) -> Optional[dict]:
     context_tier = row.get("context_tier", 0)
     if not isinstance(context_tier, int) or isinstance(context_tier, bool) or context_tier < 0:
         return None
+    # The same for the processing tier: a call its response said ran at the
+    # vendor's fast tier is billed at fast rates (docs/plans/fast-mode.md).
+    # Absent on every standard-tier row and on every row a released version wrote,
+    # which reads a fast row as a standard one and keeps every count.
+    speed = row.get("speed")
+    if speed is not None and speed != FAST_SPEED:
+        return None
     legacy_cache_write_shape = any(key not in row for key in _NEW_CACHE_WRITE_KEYS)
     if legacy_cache_write_shape:
         row = {**_released_cache_write_counters(row), **row}
@@ -812,6 +820,7 @@ def _normalize_row(row: object) -> Optional[dict]:
         "model_id": model_id,
         # Written only past the base tier, so a base row keeps the released shape.
         **({"context_tier": context_tier} if context_tier else {}),
+        **({"speed": speed} if speed else {}),
         **counters,
     }
     if legacy_cache_write_shape:
@@ -1095,6 +1104,7 @@ def _bucket_rows(
             key, {"source_id": row["source_id"], "model_id": row["model_id"], **_empty_totals()}
         )
         _accumulate(target, row)
+        _count_fast(target, row)
         if prices is not None:
             costs.setdefault(key, Cost()).add(row_cost(row, _row_price(row, prices, keyed_model_labels)))
     service_rows = [
@@ -1197,23 +1207,36 @@ def _cache_write_increment(usage: Optional[ProtocolUsageReport]) -> dict[str, in
     }
 
 
-def _row_key(row: dict) -> tuple[str, str, str, int, bool, str]:
-    """A row is one day of one model on one Source, in one context tier.
+def _row_key(row: dict) -> tuple[str, str, str, int, bool, str, str]:
+    """A row is one day of one model on one Source, in one context tier and processing tier.
 
     Or of one hosted service/tool on one Source. The boolean keeps model and
-    service identities apart; the final tool keeps shared Exa search/fetch
-    attribution separate without changing its service/cooldown identity.
+    service identities apart; the tool keeps shared Exa search/fetch attribution
+    separate without changing its service/cooldown identity. The last member is a
+    model row's speed (`"fast"`, else empty), so calls billed at fast rates never
+    share a row with standard ones.
     """
 
     if _is_service(row):
-        return (row["day"], row["source_id"], row["service_id"], 0, True, row.get("tool", "web_search"))
-    return (row["day"], row["source_id"], row["model_id"], row.get("context_tier", 0), False, "")
+        return (row["day"], row["source_id"], row["service_id"], 0, True, row.get("tool", "web_search"), "")
+    return (row["day"], row["source_id"], row["model_id"], row.get("context_tier", 0), False, "", row.get("speed", ""))
 
 
 def _empty_totals(*, service: bool = False) -> dict:
     if service:
         return {**{key: 0 for key in _SERVICE_COUNTER_KEYS}, "reported_usd": 0.0}
     return {key: 0 for key in _COUNTER_KEYS}
+
+
+def _count_fast(target: dict, row: dict) -> None:
+    """Publish how many of an aggregate's requests ran at the vendor's fast tier.
+
+    Present only once a fast row joins, so an aggregate without one keeps the
+    released shape. Read-side only: no persisted row carries it.
+    """
+
+    if row.get("speed") == FAST_SPEED:
+        target["fast_requests"] = target.get("fast_requests", 0) + row["requests"]
 
 
 def _accumulate(target: dict, row: dict) -> None:
@@ -1403,6 +1426,7 @@ def _model_increment(
         "source_id": source_key,
         "model_id": model_key,
         "context_tier": call.context_tier,
+        **({"speed": call.speed} if call.speed else {}),
         "requests": call.requests,
         "token_reports": call.requests if usage is not None else 0,
         "input_tokens": usage.input_tokens if usage else 0,
@@ -1617,6 +1641,7 @@ class BoundedUsageLedger:
         model_id: str,
         usage: Optional[ProtocolUsageReport],
         at: datetime,
+        speed: Optional[str] = None,
     ) -> None:
         """Fold one metered upstream call into its day's row.
 
@@ -1635,7 +1660,7 @@ class BoundedUsageLedger:
         metered later than the write that records it.
         """
 
-        self.record_many((UsageCall(source_id=source_id, model_id=model_id, usage=usage, at=at),))
+        self.record_many((UsageCall(source_id=source_id, model_id=model_id, usage=usage, at=at, speed=speed),))
 
     def record_many(self, calls: Sequence["UsageCall | ServiceUsageCall"]) -> None:
         """Fold a batch of metered calls into their days' rows in one transaction.
@@ -2027,6 +2052,7 @@ class BoundedUsageLedger:
                 )
                 continue
             _accumulate(totals, row)
+            _count_fast(totals, row)
             cost = (
                 None
                 if prices is None
@@ -2045,6 +2071,7 @@ class BoundedUsageLedger:
                 },
             )
             _accumulate(source, row)
+            _count_fast(source, row)
             priced(source, cost)
             source["last_metered_at"] = _newer_timestamp(
                 source["last_metered_at"],
@@ -2059,12 +2086,14 @@ class BoundedUsageLedger:
                 },
             )
             _accumulate(model, row)
+            _count_fast(model, row)
             priced(model, cost)
             if prices is not None:
                 model["priced"] = _row_price(row, prices, keyed_model_labels) is not None
 
             day = by_day.setdefault(row["day"], {"day": row["day"], **_empty_totals()})
             _accumulate(day, row)
+            _count_fast(day, row)
             priced(day, cost)
 
         published_services = []
@@ -2274,6 +2303,7 @@ class BoundedUsageLedger:
                         **({"service_id": row["service_id"], **({"tool": row["tool"]} if "tool" in row else {})}
                            if service else {"model_id": row["model_id"]}),
                         **({"context_tier": row["context_tier"]} if "context_tier" in row else {}),
+                        **({"speed": row["speed"]} if "speed" in row else {}),
                         **_empty_totals(service=service),
                         "last_metered_at": None,
                     }
@@ -2436,6 +2466,9 @@ class UsageCall:
     # The context tier the call was billed in (`pricing.context_tier_size`), 0 for
     # the base rates. Decided per call, since a folded row can no longer tell.
     context_tier: int = 0
+    # `"fast"` when the call's response said it ran at the vendor's fast tier, so it
+    # is billed at fast rates; None for the standard tier.
+    speed: Optional[str] = None
 
     def __post_init__(self) -> None:
         # An init field intentionally survives dataclasses.replace during a fold.
@@ -2444,13 +2477,14 @@ class UsageCall:
             object.__setattr__(self, "owner_day", local_usage_day(self.at).isoformat())
 
     @property
-    def fold_key(self) -> tuple[str, str, str, str, int, bool]:
+    def fold_key(self) -> tuple[str, str, str, str, int, str, bool]:
         """What makes two calls one daily row and one hourly slice.
 
         The ledger's own row key plus whether tokens were reported, which is the
         part that keeps a fold arithmetically identical to the calls it replaces.
-        The row key includes the context tier, so calls billed at different rates
-        never fold: one call's tier would otherwise price the other's tokens.
+        The row key includes the context tier and the speed, so calls billed at
+        different rates never fold: one call's tier would otherwise price the
+        other's tokens.
         The hour is part of the queue key so a flush cannot merge calls from
         different hours before the ledger sees their temporal identity. The local
         date must also remain: a UTC hour can cross local midnight, and folding
@@ -2463,6 +2497,7 @@ class UsageCall:
             self.source_id,
             self.model_id,
             self.context_tier,
+            self.speed or "",
             self.usage is not None,
         )
 
@@ -2680,6 +2715,7 @@ class UsageWriter:
         model_id: str,
         usage: Optional[ProtocolUsageReport],
         at: datetime,
+        speed: Optional[str] = None,
     ) -> "asyncio.Future[None]":
         """Own one call and queue it, handing back what will finish it.
 
@@ -2698,7 +2734,8 @@ class UsageWriter:
 
         The call's context tier is decided here from the price table the writer
         holds, a lookup in memory. A writer built without a table, or holding one
-        without tiers (no models.dev copy yet), records the base tier.
+        without tiers (no models.dev copy yet), records the base tier. `speed` is
+        `"fast"` only when the call's response said it ran at the fast tier.
         """
 
         return self._queue(
@@ -2708,6 +2745,7 @@ class UsageWriter:
                 usage=usage,
                 at=at,
                 context_tier=self._context_tier(model_id, usage),
+                speed=FAST_SPEED if speed == FAST_SPEED else None,
             )
         )
 
