@@ -557,11 +557,6 @@ def _terminate_windows_process_tree(
     expected_identity: PersistedProcessIdentity,
     terminate_timeout: float,
 ) -> bool:
-    control_signal = getattr(signal, "CTRL_BREAK_EVENT", None)
-    if control_signal is None:
-        logger.error("Refusing to terminate %s because Windows process-group signaling is unavailable", label)
-        return False
-
     try:
         process, live_identity = _open_process_identity(expected_identity.pid)
     except psutil.NoSuchProcess:
@@ -576,13 +571,18 @@ def _terminate_windows_process_tree(
         return False
 
     victims = _windows_process_tree(process)
-    try:
-        process.send_signal(control_signal)
-    except psutil.NoSuchProcess:
-        return True
-    except (psutil.Error, OSError):
-        logger.debug("Failed to signal the Windows process group for %s", label, exc_info=True)
-        return False
+    control_signal = getattr(signal, "CTRL_BREAK_EVENT", None)
+    if control_signal is not None:
+        try:
+            process.send_signal(control_signal)
+        except psutil.NoSuchProcess:
+            # The captured descendants can still be alive after their leader exits.
+            pass
+        except (psutil.Error, OSError):
+            # Windowless desktop children do not share a console with this
+            # process. A failed console signal does not revoke the verified
+            # identity: continue to the bounded, PID-reuse-safe psutil cleanup.
+            logger.debug("Could not send a console signal to %s; checking its process tree", label, exc_info=True)
 
     _gone, alive = psutil.wait_procs(victims, timeout=terminate_timeout)
     if not alive:

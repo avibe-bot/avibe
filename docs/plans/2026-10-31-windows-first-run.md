@@ -14,6 +14,10 @@ either marker, callers retain the existing console default. Explicit background
 spawns (owned Runtime children, their log sinks, and desktop backend installers)
 request no console even when desktop environment markers are absent. POSIX
 session isolation and the Rust launcher's detached lifecycle remain unchanged.
+Persisted Windows worker recovery still verifies the worker marker before
+touching its process tree. An unavailable or failed console signal must not
+prevent bounded forced cleanup of that verified tree, including descendants
+captured before the leader exited.
 
 ## Validation
 
@@ -24,6 +28,8 @@ session isolation and the Rust launcher's detached lifecycle remain unchanged.
   plus the existing Windows `GetConsoleWindow` probe.
 - Exercise the owned-process spawn boundary without creating a real service;
   every child it creates must request windowless isolation.
+- Exercise persisted worker cleanup without a shared console: verified trees
+  are reaped, while a changed identity blocks signaling and forced termination.
 - Run focused Rust/Python tests, Ruff, desktop i18n/build and UI build gates.
 - On the next Windows rc, verify the preparation sentence during first-run
   extraction and zero extra Python console windows after the workbench appears,
