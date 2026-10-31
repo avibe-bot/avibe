@@ -18,6 +18,7 @@ from core.agent_core.ai.provider import ModelEndpoint, OpaquePayload
 from core.agent_core.messages import (
     AssistantMessage,
     AssistantContent,
+    HOSTED_RENDER_EPOCH,
     HostedToolBlock,
     ImageBlock,
     Message,
@@ -147,7 +148,11 @@ def transform_messages(
             endpoint=endpoint, target=target, protocol=target_protocol
         )
         hosted = {} if verbatim else portable_hosted(
-            message, in_flight=in_flight, interrupted=SYNTHETIC_TOOL_RESULT, parallel_group=position in parallel_groups
+            message,
+            in_flight=in_flight,
+            interrupted=SYNTHETIC_TOOL_RESULT,
+            parallel_group=position in parallel_groups,
+            omit_pending=_omit_refused_pending(message, position, messages, endpoint, target_protocol),
         )
         # The synthetic results of the current run of hosted calls, and the assistant parts they split off.
         results: list[ToolResultMessage] = []
@@ -167,6 +172,8 @@ def transform_messages(
                 continue
             if isinstance(block, HostedToolBlock):
                 portable = hosted[id(block)]
+                if portable.kind == "omit":
+                    continue
                 if portable.kind == "in_place":
                     split()
                     content.append(TextBlock(text=portable.text))
@@ -330,6 +337,37 @@ def in_flight_position(messages: list[Message] | tuple[Message, ...]) -> int | N
             return None
         return raw_position
     return None
+
+
+def _has_signed_thinking(message: AssistantMessage) -> bool:
+    return any(isinstance(block, ThinkingBlock) and block.signature is not None for block in message.content)
+
+
+def _omit_refused_pending(
+    message: AssistantMessage,
+    position: int,
+    messages: tuple[Message, ...],
+    endpoint: ModelEndpoint | None,
+    protocol: str,
+) -> bool:
+    """Select B after an explicit hosted-payload refusal without changing old signed history back and forth.
+
+    A response's own marker says that the new renderer was available when it was committed, but it does not say how
+    that response rendered its predecessors. Later signed responses are the binding evidence: if any later one is an
+    old unmarked response, this response retains the released X* rendering; otherwise B is stable for this suffix.
+    """
+
+    if protocol != "anthropic" or endpoint is None or message.source_identity is None:
+        return False
+    if (message.source_identity, "hosted") not in endpoint.opaque_refused:
+        return False
+    if message.hosted_render_epoch != HOSTED_RENDER_EPOCH:
+        return False
+    return all(
+        not _has_signed_thinking(later) or later.hosted_render_epoch == HOSTED_RENDER_EPOCH
+        for later in messages[position + 1 :]
+        if isinstance(later, AssistantMessage)
+    )
 
 
 def _opaque_admitted(message: AssistantMessage, endpoint: ModelEndpoint | None, payload: OpaquePayload) -> bool:

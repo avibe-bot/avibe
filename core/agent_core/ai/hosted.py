@@ -549,7 +549,12 @@ class PortableHosted(NamedTuple):
 
 
 def portable_hosted(
-    message: AssistantMessage, *, in_flight: bool, interrupted: str, parallel_group: bool = False
+    message: AssistantMessage,
+    *,
+    in_flight: bool,
+    interrupted: str,
+    parallel_group: bool = False,
+    omit_pending: bool = False,
 ) -> dict[int, PortableHosted]:
     """Each hosted call of a replayed response in portable form (§4.4, §5), keyed by the block's identity.
 
@@ -561,6 +566,9 @@ def portable_hosted(
     The posts the answer cites are listed once, on its first call that was not cut off, whichever form it takes.
     ``interrupted`` is the result of a synthetic call cut off with its turn. A deferred mixed ``parallel_group``
     is rendered intact by the caller, so calls after a client call can also be synthetic without splitting it.
+    ``omit_pending`` selects B after an explicit hosted-payload refusal: an unexecuted pending native call is omitted
+    rather than represented by Avibe-authored ``no result`` text. Completed, failed and incomplete records retain
+    their portable result semantics.
     """
 
     blocks = [block for block in message.content if isinstance(block, HostedToolBlock)]
@@ -573,6 +581,9 @@ def portable_hosted(
             in_place = in_place or (not parallel_group and isinstance(block, ToolCallBlock))
             continue
         cited = summary.cited_sources if summary is not None and block is owner else ()
+        if omit_pending and block.record.status == "pending":
+            plan[id(block)] = PortableHosted("omit")
+            continue
         if in_place:
             plan[id(block)] = PortableHosted("in_place", text=in_place_text(block, cited=cited))
             continue

@@ -23,6 +23,11 @@ PROTOCOLS: tuple[str, ...] = ("anthropic", "openai_chat", "openai_responses", "g
 StopReason = Literal["stop", "length", "tool_use", "refusal", "safety", "aborted", "error"]
 STOP_REASONS: tuple[str, ...] = ("stop", "length", "tool_use", "refusal", "safety", "aborted", "error")
 
+#: The persisted response metadata epoch for the hosted-refusal wire renderer. It is deliberately not part of
+#: the canonical message payload: older releases ignore the row metadata, while this build uses it to keep a
+#: response's historical rendering stable across later requests.
+HOSTED_RENDER_EPOCH = 2
+
 IMAGE_MIME_TYPES: tuple[str, ...] = ("image/png", "image/jpeg", "image/gif", "image/webp")
 
 _LARGE_REF_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -848,6 +853,9 @@ class AssistantMessage:
     #: Provider classification carried to the store as response-row metadata, not a canonical message field.
     #: A later hop can distinguish transient cut-offs without interpreting provider wording as capability evidence.
     error_kind: Optional[str] = field(default=None, compare=False, repr=False)
+    #: The response-row metadata epoch used by the hosted-refusal renderer. This transient fact is loaded from the
+    #: response metadata and is intentionally omitted from ``message_to_dict`` / the canonical transcript payload.
+    hosted_render_epoch: Optional[int] = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         _require_blocks(self.content, (TextBlock, ThinkingBlock, ToolCallBlock, HostedToolBlock), "assistant message")
