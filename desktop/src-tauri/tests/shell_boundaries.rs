@@ -961,6 +961,31 @@ fn every_quit_boundary_reuses_one_bounded_computer_use_cleanup() {
 }
 
 #[test]
+fn fatal_startup_exit_authorizes_tauri_exit_code() {
+    let source = shipping_source("src/lib.rs");
+    let fatal_exit = source
+        .split("fn exit_shell_with_code(")
+        .nth(1)
+        .expect("fatal shell exit helper")
+        .split("fn claim_exit_cleanup(")
+        .next()
+        .expect("fatal shell exit body");
+    assert!(fatal_exit.contains("if !claim_exit_cleanup(app)"));
+    assert!(fatal_exit.contains("authorize_exit(app)"));
+    assert!(fatal_exit.contains("app.exit(code)"));
+
+    let bootstrap = source
+        .split("fn start_bootstrap_when_shell_url_ready(")
+        .nth(1)
+        .expect("startup bootstrap handoff")
+        .split("/// Tells the Workbench")
+        .next()
+        .expect("startup bootstrap body");
+    assert_eq!(bootstrap.matches("exit_shell_with_code(&app, 101)").count(), 2);
+    assert!(!bootstrap.contains("app.exit(101)"));
+}
+
+#[test]
 fn native_tray_copy_has_locale_and_placeholder_parity() {
     let root = crate_dir().join("../../ui/src/i18n");
     let english = read_json(root.join("en.json"));

@@ -875,6 +875,14 @@ fn exit_shell(app: &AppHandle) {
     app.exit(0);
 }
 
+fn exit_shell_with_code(app: &AppHandle, code: i32) {
+    if !claim_exit_cleanup(app) {
+        return;
+    }
+    authorize_exit(app);
+    app.exit(code);
+}
+
 fn claim_exit_cleanup(app: &AppHandle) -> bool {
     claim_exit_cleanup_flag(&app.state::<Shell>().exit_cleanup_started)
 }
@@ -1713,7 +1721,7 @@ fn start_bootstrap_when_shell_url_ready(
             Ok(bootstrap_url) => {
                 if !app.state::<Shell>().set_bootstrap_url(bootstrap_url) {
                     eprintln!("the Avibe desktop shell could not store its bundled bootstrap URL");
-                    app.exit(101);
+                    exit_shell_with_code(&app, 101);
                     return;
                 }
                 updater::check(app.clone(), false);
@@ -1723,7 +1731,7 @@ fn start_bootstrap_when_shell_url_ready(
                 #[cfg(feature = "bundled-runtime")]
                 bootstrap_log.record("shell.bootstrap_url", &[("error", error.to_string())]);
                 eprintln!("{error}");
-                app.exit(101);
+                exit_shell_with_code(&app, 101);
             }
         }
     });
