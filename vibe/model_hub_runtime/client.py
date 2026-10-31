@@ -688,6 +688,9 @@ class EngineClient:
             trace.on_request_chunk_sent.append(request_sent)
             trace_configs.append(trace)
         session = aiohttp.ClientSession(timeout=timeout, trust_env=False, trace_configs=trace_configs)
+        prelude_deadline = (
+            time.monotonic() + first_response_bound if first_response_bound is not None else None
+        )
         response: aiohttp.ClientResponse | None = None
         retry_after: str | None = None
         retry_after_ms: int | None = None
@@ -751,7 +754,8 @@ class EngineClient:
             if first_response_bound is None:
                 response = await request
             else:
-                response = await asyncio.wait_for(request, timeout=first_response_bound)
+                remaining = max(0.001, (prelude_deadline or time.monotonic()) - time.monotonic())
+                response = await asyncio.wait_for(request, timeout=remaining)
             response_correlation_ids = sanitize_response_correlation_ids(response.headers)
             if response.status >= 300:
                 response_received_at = datetime.now(timezone.utc)
@@ -841,7 +845,12 @@ class EngineClient:
                 await session.close()
                 return ended(outcome)
 
-            first = await _read_content_chunk(response.content, timeout=first_response_bound)
+            first_read_timeout = (
+                None
+                if prelude_deadline is None
+                else max(0.001, prelude_deadline - time.monotonic())
+            )
+            first = await _read_content_chunk(response.content, timeout=first_read_timeout)
             if not first:
                 response.close()
                 await session.close()
