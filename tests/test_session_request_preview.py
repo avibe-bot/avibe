@@ -27,7 +27,7 @@ from core.internal_server import _build_session_context, create_app
 from core.vibe_agents import VibeAgentStore
 from modules.agents.model_hub import ModelHubRuntimeRouter
 from storage import messages_service
-from storage.models import agent_sessions, messages
+from storage.models import agent_sessions, messages, scope_settings
 from tests.agent_core.fakes import assistant
 from tests.test_internal_server import _build_controller_double
 from tests.test_model_hub_l3 import _source
@@ -202,6 +202,41 @@ def test_preview_and_dispatch_share_explicit_null_resolution(preview_host, engin
     )[0 if field == "model" else 1] is None
 
 
+async def test_preview_uses_stored_project_base_over_current_scope(preview_host, engine, monkeypatch, tmp_path):
+    host = preview_host
+    await commit_input(host)
+    stored_project = tmp_path / "stored-project"
+    cwd = stored_project / "session"
+    cwd.mkdir(parents=True)
+    stored_skill = stored_project / ".agents" / "skills" / "stored-bound-skill" / "SKILL.md"
+    stored_skill.parent.mkdir(parents=True)
+    stored_skill.write_text("---\nname: stored-bound-skill\ndescription: Stored boundary\n---\nStored body\n")
+    scope_skill = tmp_path / ".agents" / "skills" / "scope-skill" / "SKILL.md"
+    scope_skill.parent.mkdir(parents=True)
+    scope_skill.write_text("---\nname: scope-skill\ndescription: Current scope\n---\nScope body\n")
+    with engine.begin() as conn:
+        scope_id = conn.execute(select(agent_sessions.c.scope_id).where(agent_sessions.c.id == SESSION)).scalar_one()
+        conn.execute(update(agent_sessions).where(agent_sessions.c.id == SESSION).values(
+            workdir=str(cwd), metadata_json=json.dumps({"project_base": str(stored_project)}),
+        ))
+        conn.execute(update(scope_settings).where(scope_settings.c.scope_id == scope_id).values(workdir=str(tmp_path)))
+    context = _build_session_context(SESSION)
+    request = request_preview.build_preview_request(host.controller, context)
+    assert request.context.platform_specific["agent_run_target"]["project_base"] == str(stored_project)
+    sections, _ = await host.harness.agent._avibe_sections(request, cwd=str(cwd))
+    assert "stored-bound-skill" in sections
+    assert "scope-skill" not in sections
+    remove = deny_effects(host, monkeypatch)
+    try:
+        response = await invoke(host)
+    finally:
+        remove()
+    assert response.status_code == 200
+    body = Path(response.json()["request_body_path"]).read_bytes()
+    assert b"stored-bound-skill" in body
+    assert b"scope-skill" not in body
+
+
 async def test_route_description_matches_production_without_credential_activation(preview_host, monkeypatch):
     host = preview_host
     before = host.service.store.config.to_payload()
@@ -218,7 +253,6 @@ async def test_route_description_matches_production_without_credential_activatio
     launched = await host.router.resolve("vibey", "menu-alias", process_scope="fixture", turn_id="fixture-turn")
     assert replace(launched, gateway_base_url=described.gateway_base_url, gateway_token="auth-unbound", gateway_request_metadata={}) == described
     host.router._gateway_credentials.assert_awaited_once()
-
 
 @pytest.mark.parametrize("caller", [None, {}, {"kind": "remote"}, {"kind": "remote", "resource_user_context": {}}, {"kind": "local", "extra": True}])
 async def test_ipc_missing_or_malformed_authority_cannot_inherit_owner(monkeypatch, caller):

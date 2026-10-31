@@ -37,4 +37,4 @@ Existing core dry-tick tests own request bytes and context-transition selection;
 - Pending client tool outcomes and required context transitions produce metadata only, not a sendable HTTP body.
 - Authentication and gateway route activation remain unbound. The output must not be sent as-is.
 - Private IPC is an OS-user trust boundary. Explicit caller provenance is mandatory in this new endpoint; remote snapshots are revalidated, never replaced by daemon authority. An explicit local declaration represents the existing standalone host Owner path, not remote anonymous fallback.
-- PR #3103 independently adds artifact/replay capabilities. This branch uses only the already-merged #3102 interface; reconcile parser changes only after #3103 merges.
+- PR #3103 independently adds model-request artifact capture and `list|show|export` capabilities. Debug replay with preview is a separate follow-up; reconcile parser changes only after #3103 merges.

@@ -839,15 +839,18 @@ class ModelHubRuntimeRouter:
         *,
         supply_channel: Literal["hub"] | None = None,
     ) -> tuple[ModelHubConfig, ModelHubTurnResolution]:
+        now = self.service.now()
+        unavailable_source_ids = self._unavailable_native_source_ids(config, backend)
+        live_recovery = self.service.recovery_annotations(config)
         resolution = await asyncio.to_thread(
             lambda: resolve_model_hub_turn(
                 config,
                 backend,
                 requested_model,
-                now=self.service.now(),
-                unavailable_source_ids=self._unavailable_native_source_ids(config, backend),
+                now=now,
+                unavailable_source_ids=unavailable_source_ids,
                 supply_channel=supply_channel,
-                live_recovery=self.service.recovery_annotations(config),
+                live_recovery=live_recovery,
             )
         )
         waitable = resolution.self_healing_hops("hub")

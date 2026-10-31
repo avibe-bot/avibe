@@ -57,8 +57,8 @@ def build_preview_request(controller: Any, context: Any) -> AgentRequest:
     """Read the same durable Agent and setting defaults as dispatch, without materializing any of them."""
     from sqlalchemy import select
 
-    from storage.agent_session_rows import SESSION_PROJECT_BASE_METADATA_KEY, normalize_session_project_base
-    from storage.models import scope_settings
+    from core.services.agent_run_target import session_project_base_from_row
+    from storage.models import agent_sessions, scope_settings
 
     target = (context.platform_specific or {}).get("agent_session_target")
     if not isinstance(target, dict) or target.get("agent_backend") != "vibey":
@@ -77,18 +77,18 @@ def build_preview_request(controller: Any, context: Any) -> AgentRequest:
     model, effort, explicit = session_model_settings(
         target, fallback_model=agent.model, fallback_reasoning_effort=agent.reasoning_effort,
     )
-    metadata = target.get("metadata") or {}
-    project_base = normalize_session_project_base(cwd, metadata.get(SESSION_PROJECT_BASE_METADATA_KEY))
-    if project_base is None:
-        from core.services import sessions
-        from storage.db import get_cached_sqlite_engine
+    project_base = None
+    from storage.db import get_cached_sqlite_engine
 
-        with get_cached_sqlite_engine().connect() as conn:
-            row = sessions.get_session(conn, session_id)
-            scope_workdir = conn.execute(
-                select(scope_settings.c.workdir).where(scope_settings.c.scope_id == row.get("scope_id"))
-            ).scalar_one_or_none()
-        project_base = normalize_session_project_base(cwd, scope_workdir)
+    with get_cached_sqlite_engine().connect() as conn:
+        row = conn.execute(select(agent_sessions).where(agent_sessions.c.id == session_id)).mappings().one_or_none()
+        if row is None:
+            raise ValueError("request_preview_session_missing")
+        row = dict(row)
+        row["_scope_workdir"] = conn.execute(
+            select(scope_settings.c.workdir).where(scope_settings.c.scope_id == row.get("scope_id"))
+        ).scalar_one_or_none()
+    project_base = session_project_base_from_row(row, cwd)
     # Bind only this detached context, so shared Skill discovery uses the production project boundary.
     context.platform_specific["agent_run_target"] = {**target, "agent_session_id": session_id, "project_base": project_base}
     return AgentRequest(
@@ -152,7 +152,9 @@ def export_preview(preview: RequestPreview, *, requested_context_seq: int | None
         raise PermissionError("request_preview_artifact_not_private")
     directory = Path(tempfile.mkdtemp(prefix="preview-", dir=root))
     try:
-        ensure_private_directory(directory, repair=False)
+        directory_mode = directory.lstat().st_mode
+        if stat.S_ISLNK(directory_mode) or not stat.S_ISDIR(directory_mode) or not is_private(directory, directory_mode):
+            raise PermissionError("request_preview_artifact_not_private")
         _private_write(directory / "manifest.json", (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode())
         if preview.wire is not None:
             _private_write(directory / "request.body.json", preview.wire.body)
