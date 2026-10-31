@@ -6549,9 +6549,11 @@
     "loginTitle": "Log in to MCP server",
     "loginHint": "Authorize in the new tab, then paste the callback URL here when needed.",
     "openAuthorize": "Open authorization",
-    "authorizeFallback": "The authorization tab could not be opened. Use Open authorization to continue.",
     "callbackPlaceholder": "Paste the callback URL",
     "completeLogin": "Complete login",
+    "needsLoginAfterAdd": "{{name}} needs login",
+    "goAuthorize": "Go to authorization",
+    "addResultHint": "These servers need login before their tools are available.",
     "loginComplete": "MCP login completed"
   }
 }

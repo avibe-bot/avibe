@@ -600,7 +600,6 @@ export interface McpDefinition {
   };
 }
 export interface McpResult { ok: boolean; error?: McpError }
-export type McpOAuthStartResult = McpResult & { authorizeUrl?: string; mode?: 'direct' | 'paste' };
 export type McpOAuthMutationResult = McpResult & { name?: string };
 export interface McpTool { name: string; description?: string; inputSchema?: unknown; flags: { flag: string; kind: string; required: boolean }[] }
 
@@ -952,7 +951,7 @@ export type ApiContextType = {
   importVibeAgents: (payload: { from?: NativeCliBackend; name?: string; all?: boolean; file?: string; backend?: string }) => Promise<{ ok: boolean; imported?: any[]; skipped?: any[]; error?: string; code?: string; message?: string }>;
   // Agent Skills — thin shells over the askill CLI (see /api/skills*).
   listSkills: (params?: { scope?: SkillScope | 'all'; projectId?: string; backends?: string[] }) => Promise<SkillsListResult>;
-  listMcpServers: () => Promise<McpResult & { servers?: McpServerSummary[] }>;
+  listMcpServers: () => Promise<McpResult & { servers?: McpServerSummary[]; oauthMode?: 'direct' | 'paste' }>;
   addMcp: (text: string) => Promise<McpResult & {
     saved?: string[];
     name?: string;
@@ -964,7 +963,6 @@ export type ApiContextType = {
   discoverMcp: () => Promise<McpResult & { results?: { name: string; status: string; error?: string; toolCount?: number }[] }>;
   refreshMcp: (name: string) => Promise<McpResult & { name?: string; toolCount?: number }>;
   removeMcp: (name: string) => Promise<McpResult>;
-  loginMcp: (name: string) => Promise<McpOAuthStartResult>;
   completeMcpLogin: (name: string, callbackUrl: string) => Promise<McpOAuthMutationResult>;
   getMcpServer: (name: string) => Promise<McpResult & { server?: McpServerSummary; tools?: McpTool[] }>;
   previewSkillSource: (source: string, params?: { projectId?: string }) => Promise<SkillsPreviewResult>;
@@ -4370,7 +4368,6 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     discoverMcp: () => postJson('/api/mcp/discover', {}, { handleError: false }),
     refreshMcp: (name) => postJson(`/api/mcp/${encodeURIComponent(name)}/refresh`, {}, { handleError: false }),
     removeMcp: (name) => deleteJson(`/api/mcp/${encodeURIComponent(name)}`, undefined, { handleError: false }),
-    loginMcp: (name) => postJson(`/api/mcp/${encodeURIComponent(name)}/oauth/start`, {}, { handleError: false }),
     completeMcpLogin: (name, callbackUrl) => postJson(`/api/mcp/${encodeURIComponent(name)}/oauth/complete`, { callbackUrl }, { handleError: false }),
     getMcpServer: (name) => getJson(`/api/mcp/${encodeURIComponent(name)}`, { handleError: false }),
     previewSkillSource: (source, params) =>

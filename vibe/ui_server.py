@@ -9521,7 +9521,7 @@ async def _mcp_route(starlette_request: FastAPIRequest, handler, *args):
 async def mcp_list(starlette_request: FastAPIRequest):
     from vibe import mcp_api
 
-    return await _mcp_route(starlette_request, mcp_api.list_servers)
+    return await _mcp_route(starlette_request, lambda: mcp_api.list_servers(_current_origin(), _mcp_setup_port()))
 
 
 @app.post("/api/mcp", include_in_schema=False)
@@ -9558,15 +9558,57 @@ async def mcp_remove(name: str, starlette_request: FastAPIRequest):
     return await _mcp_route(starlette_request, mcp_api.remove, name)
 
 
-@app.post("/api/mcp/{name}/oauth/start", include_in_schema=False)
+def _mcp_setup_port() -> int:
+    from config.v2_config import V2Config
+
+    return int(V2Config.load().ui.setup_port)
+
+
+def _mcp_oauth_page(message_key: str, status: int) -> Response:
+    from vibe.i18n import t as i18n_t
+
+    message = html.escape(i18n_t(message_key))
+    return Response(content=f"<!doctype html><title>MCP OAuth</title><main><p>{message}</p></main>", status_code=status, media_type="text/html")
+
+
+# The Web login button is a plain link, so this GET starts a grant. Only a
+# same-origin navigation or one with no initiator (the desktop shell handing the
+# link to the system browser) may start it; cross-site requests are CSRF.
+# Fetch Metadata is omitted on non-trustworthy HTTP origins (LAN paste mode);
+# those navigations still send a same-origin Referer.
+_MCP_OAUTH_START_FETCH_SITES = {"same-origin", "none"}
+
+
+def _mcp_oauth_start_allowed(starlette_request: FastAPIRequest) -> bool:
+    site = (starlette_request.headers.get("Sec-Fetch-Site") or "").lower()
+    if site in _MCP_OAUTH_START_FETCH_SITES:
+        return True
+    if site:
+        return False
+    referer = starlette_request.headers.get("Referer") or ""
+    try:
+        parsed = urlparse(referer)
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        return bool(parsed.scheme and parsed.netloc) and origin == _current_origin()
+    except ValueError:
+        return False
+
+
+@app.get("/api/mcp/{name}/oauth/start", include_in_schema=False)
 async def mcp_oauth_start(name: str, starlette_request: FastAPIRequest):
-    from vibe import mcp_api
-    def start():
-        body = _mcp_body()
-        from config.v2_config import V2Config
-        body["port"] = int(V2Config.load().ui.setup_port)
-        return mcp_api.oauth_start(name, body, _current_origin())
-    return await _mcp_route(starlette_request, start)
+    async def start():
+        from starlette.responses import RedirectResponse
+
+        from vibe import mcp_api
+
+        if not _mcp_oauth_start_allowed(starlette_request):
+            return _mcp_oauth_page("mcp_oauth_start_rejected", 403)
+        body, _status = await mcp_api.run(mcp_api.oauth_start, name, {"port": _mcp_setup_port()}, _current_origin())
+        if body.get("ok") and body.get("authorizeUrl"):
+            return RedirectResponse(body["authorizeUrl"], status_code=302)
+        return _mcp_oauth_page("mcp_oauth_start_failure", 400)
+
+    return await _dispatch_native_ui_request(starlette_request, start)
 
 
 @app.get("/api/mcp/oauth/callback", include_in_schema=False)
@@ -9577,9 +9619,7 @@ async def mcp_oauth_callback(starlette_request: FastAPIRequest):
     if body.get("redirect"):
         from starlette.responses import RedirectResponse
         return RedirectResponse(body["redirect"], status_code=302)
-    from vibe.i18n import t as i18n_t
-    message = i18n_t("mcp_oauth_callback_success" if body.get("ok") else "mcp_oauth_callback_failure")
-    return Response(content=f"<!doctype html><title>MCP OAuth</title><main><p>{message}</p></main>", status_code=status, media_type="text/html")
+    return _mcp_oauth_page("mcp_oauth_callback_success" if body.get("ok") else "mcp_oauth_callback_failure", status)
 
 
 @app.post("/api/mcp/{name}/oauth/complete", include_in_schema=False)

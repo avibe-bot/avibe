@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ChevronDown, ChevronRight, Globe, Loader2, Plus, RefreshCw, Search, Terminal, Trash2, X } from 'lucide-react';
 import clsx from 'clsx';
@@ -7,12 +7,41 @@ import { useApi } from '../../../context/ApiContext';
 import type { McpError, McpServerSummary } from '../../../context/ApiContext';
 import { useToast } from '../../../context/ToastContext';
 import { useInstanceAuthorization } from '../../../context/InstanceAuthorizationContext';
+import { isDesktopShell } from '../../../lib/desktopShell';
+import { mcpAddOauthAction } from '../../../lib/mcpAddOauth';
 import { Badge } from '../../ui/badge';
 import { Button } from '../../ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from '../../ui/dialog';
 import { Textarea } from '../../ui/textarea';
-import { pasteMayNeedOAuthLogin, preparedTabNeedsAuthorizeFallback } from '../../../lib/mcpPaste';
-import { navigatePreparedTab, openLinkInNewContext, openPreparedTab } from '../../../lib/pwaNavigation';
+import { buttonVariants } from '../../ui/button-variants';
+
+function oauthStartHref(name: string): string {
+  return `${window.location.origin}/api/mcp/${encodeURIComponent(name)}/oauth/start`;
+}
+
+function LoginLink({
+  name,
+  className,
+  children,
+  onActivate,
+}: {
+  name: string;
+  className?: string;
+  children: ReactNode;
+  onActivate: (name: string) => void;
+}) {
+  return (
+    <a
+      href={oauthStartHref(name)}
+      target="_blank"
+      rel="noopener"
+      className={className}
+      onClick={() => onActivate(name)}
+    >
+      {children}
+    </a>
+  );
+}
 
 const SOURCE_CHIP: Record<string, string> = {
   avibe: 'border-gold/40 bg-gold/[0.12] text-gold-ink',
@@ -83,6 +112,8 @@ export const McpHubSection: React.FC = () => {
   const { capabilities } = useInstanceAuthorization();
   const canManage = capabilities.is_instance_owner;
   const [servers, setServers] = useState<McpServerSummary[]>([]);
+  const [oauthMode, setOauthMode] = useState<'direct' | 'paste'>('direct');
+  const [addResult, setAddResult] = useState<{ names: string[]; failedLines: string[] } | null>(null);
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<string | null>(() => new URLSearchParams(window.location.search).get('mcp'));
   const [expandedFor, setExpandedFor] = useState<string | null>(null);
@@ -92,7 +123,6 @@ export const McpHubSection: React.FC = () => {
   const [addText, setAddText] = useState('');
   const [addError, setAddError] = useState<string | null>(null);
   const [loginFor, setLoginFor] = useState<{ name: string } | null>(null);
-  const [authorizeUrl, setAuthorizeUrl] = useState<string | null>(null);
   const [callbackText, setCallbackText] = useState('');
   const [confirmDelete, setConfirmDelete] = useState<McpServerSummary | null>(null);
   const loginInFlight = useRef(false);
@@ -119,7 +149,10 @@ export const McpHubSection: React.FC = () => {
   const load = useCallback(async () => {
     try {
       const res = await api.listMcpServers();
-      if (res.ok) setServers(res.servers ?? []);
+      if (res.ok) {
+        setServers(res.servers ?? []);
+        if (res.oauthMode === 'direct' || res.oauthMode === 'paste') setOauthMode(res.oauthMode);
+      }
       else showToast(describe(res.error), 'error');
     } catch {
       showToast(t('mcpHub.failed'), 'error');
@@ -130,6 +163,8 @@ export const McpHubSection: React.FC = () => {
     const params = new URLSearchParams(window.location.search);
     if (params.get('oauth') === 'success') {
       showToast(t('mcpHub.loginComplete'), 'success');
+    }
+    if (params.has('mcp') || params.has('oauth')) {
       window.history.replaceState({}, '', window.location.pathname);
     }
   }, [load, showToast, t]);
@@ -174,46 +209,9 @@ export const McpHubSection: React.FC = () => {
     }
   };
 
-  const startLogin = async (server: Pick<McpServerSummary, 'name'>, tab: Window | null) => {
-    setBusy(`login:${server.name}`);
+  const onActivateLogin = (name: string) => {
     loginInFlight.current = true;
-    try {
-      const res = await api.loginMcp(server.name);
-      if (!res.ok) {
-        navigatePreparedTab(tab, null);
-        showToast(describe(res.error), 'error');
-        loginInFlight.current = false;
-        return;
-      }
-      const authorize = res.authorizeUrl ?? null;
-      if (authorize && !preparedTabNeedsAuthorizeFallback(tab)) {
-        navigatePreparedTab(tab, authorize);
-      } else {
-        navigatePreparedTab(tab, null);
-      }
-      if (authorize && preparedTabNeedsAuthorizeFallback(tab)) {
-        setLoginFor({ name: server.name });
-        setAuthorizeUrl(authorize);
-        showToast(t('mcpHub.authorizeFallback'), 'error', {
-          label: t('mcpHub.openAuthorize'),
-          onClick: () => openLinkInNewContext(authorize, 'noopener,noreferrer'),
-        });
-      } else if (res.mode !== 'direct') {
-        setLoginFor({ name: server.name });
-        setAuthorizeUrl(authorize);
-      }
-    } catch {
-      navigatePreparedTab(tab, null);
-      showToast(t('mcpHub.failed'), 'error');
-      loginInFlight.current = false;
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const onLogin = (server: McpServerSummary) => {
-    const tab = openPreparedTab();
-    void startLogin(server, tab);
+    if (oauthMode === 'paste') setLoginFor({ name });
   };
 
   useEffect(() => {
@@ -236,14 +234,21 @@ export const McpHubSection: React.FC = () => {
     try {
       const res = await api.completeMcpLogin(loginFor.name, callbackText);
       if (!res.ok) { showToast(describe(res.error), 'error'); return; }
-      setLoginFor(null); setAuthorizeUrl(null); setCallbackText(''); await load();
+      setLoginFor(null); setCallbackText(''); await load();
       showToast(t('mcpHub.loginComplete'), 'success');
     } finally { setBusy(null); }
   };
+  const closeAdd = () => {
+    setShowAdd(false);
+    setAddText('');
+    setAddError(null);
+    setAddResult(null);
+  };
+
   const onAdd = async () => {
-    const tab = pasteMayNeedOAuthLogin(addText) ? openPreparedTab() : null;
     setBusy('add');
     setAddError(null);
+    setAddResult(null);
     try {
       const res = await api.addMcp(addText);
       const added = res.added ?? [];
@@ -261,30 +266,38 @@ export const McpHubSection: React.FC = () => {
         failed.length ? t('mcpHub.failedCount', { count: failed.length }) : null,
         ...failedLines,
       ].filter(Boolean).join('\n');
-      const toast = inline;
       const hasBatch = Boolean(res.added || res.unchanged || res.failed);
       if (!succeeded) {
-        navigatePreparedTab(tab, null);
         setAddError(hasBatch ? inline : describe(res.error));
         return;
       }
-      setShowAdd(false);
-      setAddText('');
+      const names = [...added, ...unchanged]
+        .filter((item) => item.auth === 'needs_login')
+        .map((item) => item.name);
+      const action = mcpAddOauthAction({
+        names,
+        failedCount: failed.length,
+        oauthMode,
+        desktopShell: isDesktopShell(),
+      });
+      if (action.kind === 'assign') {
+        closeAdd();
+        window.location.assign(oauthStartHref(action.name));
+        return;
+      }
       if (failed.length) {
-        showToast(toast, 'error', { label: t('common.close'), onClick: () => undefined });
+        showToast(inline, 'error', { label: t('common.close'), onClick: () => undefined });
       } else {
         showToast(t('mcpHub.succeededCount', { count: succeeded }), 'success');
       }
-      const needsLogin = [...added, ...unchanged].find((item) => item.auth === 'needs_login');
-      if (needsLogin) {
-        await startLogin(needsLogin, tab);
+      if (action.kind === 'list') {
+        setAddResult({ names: action.names, failedLines });
         await load();
         return;
       }
-      navigatePreparedTab(tab, null);
+      closeAdd();
       await load();
     } catch {
-      navigatePreparedTab(tab, null);
       showToast(t('mcpHub.failed'), 'error');
     } finally {
       setBusy(null);
@@ -330,7 +343,7 @@ export const McpHubSection: React.FC = () => {
               {busy === 'discover' ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
               {t('mcpHub.refreshAll')}
             </Button>
-            <Button type="button" variant="brand" size="xs" onClick={() => { setShowAdd(true); setAddError(null); }}>
+            <Button type="button" variant="brand" size="xs" onClick={() => { setShowAdd(true); setAddError(null); setAddResult(null); }}>
               <Plus className="size-3.5" />
               {t('mcpHub.add')}
             </Button>
@@ -381,20 +394,14 @@ export const McpHubSection: React.FC = () => {
                   </span>
                 </span>
                     {server.auth === 'needs_login' ? (
-                      <span
-                        role="button"
-                        tabIndex={0}
+                      <span onClick={(event) => event.stopPropagation()}>
+                      <LoginLink
+                        name={server.name}
                         className="inline-flex h-6 items-center rounded-md border border-border bg-surface px-2 font-mono text-[10px] font-semibold uppercase text-foreground hover:bg-surface-2"
-                        onClick={(event) => { event.stopPropagation(); void onLogin(server); }}
-                        onKeyDown={(event) => {
-                          if (event.key === 'Enter' || event.key === ' ') {
-                            event.preventDefault();
-                            event.stopPropagation();
-                            void onLogin(server);
-                          }
-                        }}
+                        onActivate={onActivateLogin}
                       >
                         {t('mcpHub.login')}
+                      </LoginLink>
                       </span>
                     ) : null}
                     <ChevronRight className="size-3.5 text-muted" />
@@ -448,7 +455,7 @@ export const McpHubSection: React.FC = () => {
                     ? t('mcpHub.serverVersion', { version: current.serverVersion })
                     : null}
             </div>
-            {current.auth === 'needs_login' ? <Button type="button" variant="brand" size="sm" onClick={() => void onLogin(current)}>{t('mcpHub.login')}</Button> : null}
+            {current.auth === 'needs_login' ? <LoginLink name={current.name} className={buttonVariants({ variant: 'brand', size: 'sm' })} onActivate={onActivateLogin}>{t('mcpHub.login')}</LoginLink> : null}
             {canManage ? (
               <div className="flex items-center gap-2 pt-1">
                 <Button type="button" variant="outline" size="xs" disabled={busy !== null} onClick={() => void onRefreshOne(current.name)}>
@@ -469,25 +476,49 @@ export const McpHubSection: React.FC = () => {
         <DialogContent className="max-w-lg" closeLabel={t('common.close')}>
           <DialogTitle>{t('mcpHub.loginTitle')}</DialogTitle>
           <DialogDescription>{t('mcpHub.loginHint')}</DialogDescription>
-          {authorizeUrl ? <Button type="button" variant="outline" onClick={() => openLinkInNewContext(authorizeUrl, 'noopener,noreferrer')}>{t('mcpHub.openAuthorize')}</Button> : null}
+          {loginFor ? <LoginLink name={loginFor.name} className={buttonVariants({ variant: 'outline' })} onActivate={onActivateLogin}>{t('mcpHub.openAuthorize')}</LoginLink> : null}
           <Textarea value={callbackText} onChange={(event) => setCallbackText(event.target.value)} className="min-h-20 font-mono text-[12px]" placeholder={t('mcpHub.callbackPlaceholder')} />
           <DialogFooter><Button type="button" variant="outline" onClick={() => setLoginFor(null)}>{t('common.cancel')}</Button><Button type="button" disabled={!callbackText.trim() || busy !== null} onClick={() => void onCompleteLogin()}>{t('mcpHub.completeLogin')}</Button></DialogFooter>
         </DialogContent>
       </Dialog>
 
-      <Dialog open={showAdd} onOpenChange={(open) => (!open ? setShowAdd(false) : undefined)}>
+      <Dialog open={showAdd} onOpenChange={(open) => (!open ? closeAdd() : undefined)}>
         <DialogContent className="max-w-lg" closeLabel={t('common.close')}>
           <DialogTitle>{t('mcpHub.addTitle')}</DialogTitle>
-          <DialogDescription>{t('mcpHub.addSubtitle')}</DialogDescription>
-          <Textarea value={addText} onChange={(event) => setAddText(event.target.value)} className="min-h-40 font-mono text-[12px]" placeholder={t('mcpHub.pastePlaceholder')} />
-          <p className="text-[11px] text-muted">{t('mcpHub.pasteHint')}</p>
-          {addError ? <div className="whitespace-pre-wrap text-[12px] text-destructive-ink">{addError}</div> : null}
+          <DialogDescription>{addResult ? t('mcpHub.addResultHint') : t('mcpHub.addSubtitle')}</DialogDescription>
+          {addResult ? (
+            <div className="flex flex-col gap-2">
+              {addResult.names.map((name) => (
+                <p key={name} className="flex items-center gap-2 text-[12px] text-foreground">
+                  <span>{t('mcpHub.needsLoginAfterAdd', { name })}</span>
+                  <LoginLink name={name} className={buttonVariants({ variant: 'brand', size: 'xs' })} onActivate={onActivateLogin}>
+                    {t('mcpHub.goAuthorize')}
+                  </LoginLink>
+                </p>
+              ))}
+              {addResult.failedLines.map((line) => (
+                <div key={line} className="text-[12px] text-destructive-ink">{line}</div>
+              ))}
+            </div>
+          ) : (
+            <>
+              <Textarea value={addText} onChange={(event) => setAddText(event.target.value)} className="min-h-40 font-mono text-[12px]" placeholder={t('mcpHub.pastePlaceholder')} />
+              <p className="text-[11px] text-muted">{t('mcpHub.pasteHint')}</p>
+              {addError ? <div className="whitespace-pre-wrap text-[12px] text-destructive-ink">{addError}</div> : null}
+            </>
+          )}
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setShowAdd(false)}>{t('common.cancel')}</Button>
-            <Button type="button" disabled={busy !== null || !addText.trim()} onClick={() => void onAdd()}>
-              {busy === 'add' ? <Loader2 className="size-3.5 animate-spin" /> : null}
-              {t('mcpHub.add')}
-            </Button>
+            {addResult ? (
+              <Button type="button" variant="brand" onClick={() => { closeAdd(); void load(); }}>{t('common.done')}</Button>
+            ) : (
+              <>
+                <Button type="button" variant="outline" onClick={closeAdd}>{t('common.cancel')}</Button>
+                <Button type="button" disabled={busy !== null || !addText.trim()} onClick={() => void onAdd()}>
+                  {busy === 'add' ? <Loader2 className="size-3.5 animate-spin" /> : null}
+                  {t('mcpHub.add')}
+                </Button>
+              </>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>
