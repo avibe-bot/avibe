@@ -1,6 +1,6 @@
 import { desktopDragRegion } from '../lib/desktopShell';
 import { DesktopDragRegion } from './DesktopDragRegion';
-import { forwardRef, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactElement, type Ref } from 'react';
+import { forwardRef, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps, type CSSProperties, type ReactElement, type Ref } from 'react';
 import { ArrowLeft, ArrowRight, LoaderCircle, RefreshCw } from 'lucide-react';
 import { Button } from './ui/button';
 import { AccessTiles } from './onboarding/AccessTiles';
@@ -270,6 +270,15 @@ const ProvidersEntry = forwardRef<SetupScreenHandle, ProvidersScreenProps & { on
     const { active } = props;
     useEffect(() => { if (active) onEnter(); }, [active, onEnter]);
     return <ProvidersScreen ref={ref} {...props} />;
+  },
+);
+
+/** Provider writes change supply blocks; each arrival needs the server's current answer. */
+const AssistantsEntry = forwardRef<SetupScreenHandle, ComponentProps<typeof AgentDetection> & { onEnter: () => void }>(
+  function AssistantsEntry({ onEnter, ...props }, ref) {
+    const { active } = props;
+    useEffect(() => { if (active) onEnter(); }, [active, onEnter]);
+    return <AgentDetection ref={ref} {...props} />;
   },
 );
 
@@ -561,7 +570,7 @@ export function Wizard() {
               onNext={(next) => { setData((previous) => ({ ...previous, ...Object(next) })); props.onNavigate(SETUP_REGISTERED_SCREENS[1]); }} />
           : id === 'providers'
           ? <ProvidersEntry ref={ref} {...props} agentReads={setupAgentReads} onEnter={enterProviders} />
-          : <AgentDetection ref={ref} data={data ?? {}} active={props.active} onActionChange={props.onActionChange}
+          : <AssistantsEntry ref={ref} data={data ?? {}} active={props.active} onEnter={load} onActionChange={props.onActionChange}
               flowState={props.flowState} setFlowState={props.setFlowState} onNavigate={props.onNavigate} agentReads={setupAgentReads}
               onNext={complete} />}
       />
