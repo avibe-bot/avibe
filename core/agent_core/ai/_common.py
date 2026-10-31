@@ -2018,15 +2018,6 @@ async def drive_sse_stream(
             candidate = assembler.exception(exc)
 
         if candidate is not None:
-            if attempt is not None:
-                if isinstance(candidate, Done):
-                    await attempt.succeeded()
-                else:
-                    await attempt.failed(
-                        kind=_attempt_failure_kind(candidate, response),
-                        error_kind=candidate.kind,
-                        status=response.status_code if response is not None else None,
-                    )
             if (
                 isinstance(candidate, ProviderError)
                 and sent_at is not None
@@ -2038,6 +2029,16 @@ async def drive_sse_stream(
                 # long again, so the failure ends the turn: neither replayed nor
                 # continued.
                 candidate = replace(candidate, retryable=False, continuable=False)
+            # Decided before the artifact's write is awaited: diagnostic storage never counts as provider silence.
+            if attempt is not None:
+                if isinstance(candidate, Done):
+                    await attempt.succeeded()
+                else:
+                    await attempt.failed(
+                        kind=_attempt_failure_kind(candidate, response),
+                        error_kind=candidate.kind,
+                        status=response.status_code if response is not None else None,
+                    )
             # Translator terminals are candidates, not public errors. Commit
             # and sanitize exactly once at the shared driver boundary.
             assembler.end_driver()

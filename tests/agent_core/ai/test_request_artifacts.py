@@ -535,3 +535,110 @@ async def test_concurrent_requests_each_keep_their_own_bytes(store):
 
     kept = {store.path(meta["id"]).joinpath(REQUEST_FILE).read_bytes() for meta in _kept(store)}
     assert kept == {sent[0].content for sent, _ in results}
+
+
+def _meta_now(state: str = "pending") -> dict[str, Any]:
+    from datetime import datetime, timezone
+
+    return {"state": state, "created_at": datetime.now(timezone.utc).isoformat(),
+            "owner": {"pid": os.getpid(), "started": request_artifacts._process_start(os.getpid())}}
+
+
+@pytest.mark.parametrize("ending", ["failed", "not_sent", "unknown"])
+def test_every_kept_ending_applies_retention_and_never_removes_an_active_attempt(tmp_path, ending):
+    """With a quota smaller than any attempt, each kept ending removes what it can: older finished attempts and
+    itself, but never an attempt this process is still sending."""
+
+    store = RequestArtifactStore(tmp_path / "requests", quota_bytes=1)
+    _write(store, created_at="2026-10-31T00:00:00+00:00")
+    active = store.begin(_meta_now(), b"in flight")
+    ending_id = store.begin(_meta_now(), b"ending")
+    try:
+        request_artifacts._release(ending_id)  # as ``RequestAttempt._queue`` does before the write
+        if ending == "failed":
+            store.fail(ending_id, {"state": "failed", "outcome": {"kind": "http_error"}}, None)
+        else:
+            state = "cancelled" if ending == "not_sent" else "unknown"
+            store.close(ending_id, state=state, kind=ending)
+
+        assert {meta["id"] for meta in store.entries()} == {active}
+    finally:
+        request_artifacts._release(active)
+
+
+def test_a_process_with_only_successes_still_expires_old_attempts_at_its_writes(tmp_path, monkeypatch):
+    """No timer: retention runs at the store's writes, and at the first one after the maintenance interval a
+    successful request's removal also removes what has expired."""
+
+    clock = [1000.0]
+    monkeypatch.setattr(request_artifacts, "_monotonic", lambda: clock[0])
+    store = RequestArtifactStore(tmp_path / "requests", retention_s=3600)
+    expired = _write(store, created_at="2026-01-01T00:00:00+00:00")
+    first = store.begin(_meta_now(), b"ok")
+    store.succeed(first)
+    # Within the interval since the last run (the first write's): kept for now.
+    assert expired in {meta["id"] for meta in store.entries()}
+
+    clock[0] += request_artifacts.MAINTENANCE_INTERVAL_S
+    second = store.begin(_meta_now(), b"ok")
+    store.succeed(second)
+
+    assert store.entries() == []
+
+
+async def test_waiting_for_the_artifact_write_never_counts_as_provider_silence(tmp_path, monkeypatch):
+    """The silence policy is decided before the artifact's final write is awaited: an error just inside the silence
+    bound keeps its recovery permissions even when the write takes longer than what is left of the bound."""
+
+    from core.agent_core.ai import _common
+
+    clock = [5000.0]
+
+    class Clock:
+        def __getattr__(self, name: str) -> Any:
+            import time
+
+            return getattr(time, name)
+
+        @staticmethod
+        def monotonic() -> float:
+            return clock[0]
+
+    monkeypatch.setattr(_common, "time", Clock())
+    fail = RequestArtifactStore.fail
+
+    def slow_fail(self, *args, **kwargs):
+        clock[0] += 10  # the worker's write, past the rest of the bound
+        return fail(self, *args, **kwargs)
+
+    monkeypatch.setattr(RequestArtifactStore, "fail", slow_fail)
+
+    def answer(_: httpx.Request) -> httpx.Response:
+        clock[0] += _common.PROVIDER_SILENCE_TIMEOUT_S - 1
+        return httpx.Response(503, json={"type": "error", "error": {"type": "overloaded_error", "message": "busy"}})
+
+    _, plain = await _run(_direct_request("anthropic"), answer, None)
+    _, captured = await _run(_direct_request("anthropic"), answer, RequestArtifactStore(tmp_path / "requests"))
+
+    assert plain[-1].retryable or plain[-1].continuable
+    assert (captured[-1].retryable, captured[-1].continuable) == (plain[-1].retryable, plain[-1].continuable)
+
+
+@pytest.mark.parametrize("chunks", [[3 * STREAM_TAIL_BYTES], [STREAM_TAIL_BYTES // 3 + 7] * 7, [10, 3 * STREAM_TAIL_BYTES, 5]],
+                         ids=["one-large-chunk", "many-chunks", "large-between-small"])
+def test_a_streams_kept_end_stays_within_its_bound_whatever_the_chunking(chunks):
+    capture = request_artifacts.ResponseCapture()
+    capture.response(200, {})
+    stream = bytes(index % 251 for index in range(STREAM_HEAD_BYTES + sum(chunks)))
+    capture.feed(stream[:STREAM_HEAD_BYTES])
+    offset = STREAM_HEAD_BYTES
+    for size in chunks:
+        capture.feed(stream[offset:offset + size])
+        offset += size
+        assert capture._tail_size <= STREAM_TAIL_BYTES and sum(map(len, capture._tail)) == capture._tail_size
+
+    kept = capture.body()
+    assert kept == stream[:STREAM_HEAD_BYTES] + stream[-STREAM_TAIL_BYTES:]
+    summary = capture.summary()
+    assert summary["captured_bytes"] == len(kept)
+    assert summary["omitted_bytes"] == len(stream) - len(kept) and summary["truncation"] == "middle"

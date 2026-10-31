@@ -34,7 +34,10 @@ DACL inherited by everything created inside). Files are created with ``O_EXCL | 
 runs on one private worker thread, never on the event loop. A failure to record never changes the request's
 outcome; it is logged without payload.
 
-Retention defaults to 7 days and 256 MiB. Expired or over-quota attempts are removed oldest first.
+Retention defaults to 7 days and 256 MiB. It runs at the store's own writes, never on a timer: after every kept
+ending, and at any other write once ``MAINTENANCE_INTERVAL_S`` has passed. Each run removes expired attempts, then
+the oldest finished ones while over the quota (strictly: one larger than the quota goes too). An active attempt is
+never removed.
 """
 
 from __future__ import annotations
@@ -51,6 +54,7 @@ import shutil
 import stat
 import threading
 import time
+from time import monotonic as _monotonic
 from collections import deque
 from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -78,6 +82,9 @@ STREAM_HEAD_BYTES = 64 * 1024
 STREAM_TAIL_BYTES = 1024 * 1024
 #: An interrupted write leaves a ``.partial`` directory; one this old belongs to no live write.
 _PARTIAL_GRACE_S = 60 * 60
+#: Retention runs at the store's own writes, never on a timer: after every kept ending, and at any other write once
+#: this long has passed since the last run. An attempt that expires is removed at the first write after that.
+MAINTENANCE_INTERVAL_S = 10 * 60
 
 REQUEST_FILE = "request.bin"
 RESPONSE_FILE = "response.bin"
@@ -227,23 +234,37 @@ class ResponseCapture:
             self._head += chunk[:room]
             chunk = chunk[room:]
         if chunk and self._streaming:
+            if len(chunk) >= STREAM_TAIL_BYTES:
+                # One chunk fills the tail alone: only its end is kept, never the chunk itself.
+                self._tail.clear()
+                self._tail.append(bytes(chunk[-STREAM_TAIL_BYTES:]))
+                self._tail_size = STREAM_TAIL_BYTES
+                return
             self._tail.append(bytes(chunk))
             self._tail_size += len(chunk)
-            while self._tail and self._tail_size - len(self._tail[0]) >= STREAM_TAIL_BYTES:
-                self._tail_size -= len(self._tail.popleft())
+            # Held strictly within the bound: whole chunks drop first, then the start of the oldest one left.
+            while self._tail_size > STREAM_TAIL_BYTES:
+                excess = self._tail_size - STREAM_TAIL_BYTES
+                first = self._tail[0]
+                if len(first) <= excess:
+                    self._tail.popleft()
+                    self._tail_size -= len(first)
+                else:
+                    self._tail[0] = first[excess:]
+                    self._tail_size -= excess
 
     def finish(self) -> None:
         self.read_to_end = True
 
 
     def _tail_bytes(self) -> bytes:
-        return b"".join(self._tail)[-STREAM_TAIL_BYTES:]
+        return b"".join(self._tail)
 
     def body(self) -> bytes:
         return bytes(self._head) + self._tail_bytes()
 
     def summary(self) -> dict[str, Any]:
-        tail = min(self._tail_size, STREAM_TAIL_BYTES)
+        tail = self._tail_size
         captured = len(self._head) + tail
         omitted = self.total - captured
         summary: dict[str, Any] = {
@@ -276,6 +297,7 @@ class RequestArtifactStore:
         self.retention_s = retention_s
         self.quota_bytes = quota_bytes
         self._ready = False
+        self._retained_at: float | None = None
 
     # -- paths -------------------------------------------------------------------------------------------------
 
@@ -288,9 +310,18 @@ class RequestArtifactStore:
             if self.root.is_symlink():
                 raise ArtifactStoreError(f"{self.root} is not a private directory")
             self._ready = True
-            # What earlier processes left behind is pruned once, before this one adds to it.
-            self.prune()
+            # What earlier processes left behind is pruned before this one adds to it.
+            self._retain(force=True)
         return self.root
+
+    def _retain(self, *, force: bool) -> None:
+        """Apply retention at a write: always after a kept ending, otherwise once per ``MAINTENANCE_INTERVAL_S``."""
+
+        now = _monotonic()
+        if not force and self._retained_at is not None and now - self._retained_at < MAINTENANCE_INTERVAL_S:
+            return
+        self._retained_at = now
+        self.prune()
 
     def path(self, artifact_id: str) -> Path:
         if not ARTIFACT_ID.match(artifact_id):
@@ -310,6 +341,7 @@ class RequestArtifactStore:
         """Write a pending attempt and return its id; it is active in this process until ``end`` or ``abandon``."""
 
         root = self._ensure_root()
+        self._retain(force=False)
         artifact_id = _new_id()
         partial = root / f".{artifact_id}.partial"
         os.mkdir(partial, 0o700)
@@ -324,6 +356,7 @@ class RequestArtifactStore:
         """A semantically successful attempt is not kept."""
 
         self._remove(self.path(artifact_id))
+        self._retain(force=False)
 
     def fail(self, artifact_id: str, outcome: Mapping[str, Any], capture: ResponseCapture | None) -> None:
         """Keep the attempt with its outcome and the response read, then apply retention."""
@@ -337,7 +370,7 @@ class RequestArtifactStore:
         if capture is not None:
             meta["response"] = capture.summary()
         _replace_private(directory / META_FILE, _encode(meta))
-        self.prune()
+        self._retain(force=True)
 
     def close(self, artifact_id: str, *, state: str, kind: str) -> None:
         """An attempt that ended with no response to keep: stopped before it was sent (``cancelled``,
@@ -349,6 +382,7 @@ class RequestArtifactStore:
         meta["outcome"] = {"kind": kind, "error_kind": None, "http_status": None, "exception_type": None}
         meta["finished_at"] = _now()
         _replace_private(directory / META_FILE, _encode(meta))
+        self._retain(force=True)
 
     # -- reads -------------------------------------------------------------------------------------------------
 

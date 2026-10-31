@@ -87,19 +87,28 @@ Windows path is exercised by `core.private_fs`'s own Windows tests; this feature
 
 ## Retention
 
-The defaults are 7 days and 256 MiB. Retention is applied when a failed request is kept, and once when a process
-first records a request:
+The defaults are 7 days and 256 MiB. Retention runs at the store's own writes, never on a timer:
 
-- Expired attempts are removed.
-- Over the quota, the oldest finished or unknown attempts are removed first.
-- An attempt still being sent by a live process is never removed. Liveness is the owner's pid together with its
-  process start time, so a reused pid does not count.
+- after every attempt that is kept, whether `failed`, `cancelled`, or `unknown`;
+- when a process first records a request;
+- at any other write (a new request, or the removal of a successful one) once 10 minutes have passed since the last
+  run.
+
+An attempt that expires is therefore removed at the first write after it does. A process that sends nothing
+removes nothing; the next one to write does.
+
+Each run removes expired attempts, and then, while the store is over its quota, the oldest finished or unknown
+attempts. The quota is strict for those: a single kept attempt larger than the quota is removed as soon as it is
+kept. An attempt still being sent by a live process is never removed (liveness is the owner's pid together with its
+process start time, so a reused pid does not count). While requests are in flight, the store can therefore exceed
+the quota by their size.
 
 Trade-offs:
 - A week covers the time between noticing a failure and studying it.
 - 256 MiB holds dozens of the largest real requests (several MiB each with long contexts or images) without
   growing without bound.
-- Retention never blocks a request. A single request larger than the quota is still kept while older ones go.
+- Retention is part of the write it runs in, on the artifact worker. A run scans the store, which the quota keeps
+  small, so it can add a few milliseconds to that write. It never changes a request's outcome.
 
 ## Runtime cost and failure isolation
 
