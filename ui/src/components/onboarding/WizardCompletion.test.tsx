@@ -17,7 +17,7 @@ const mock = vi.hoisted(() => ({ control: vi.fn(), toast: vi.fn(), permission: v
   // the collection authority, the lifecycle helper and the take-over dialog underneath
   // them are the real ones, which is what makes the journey below the journey rather
   // than a direct mount of the third screen.
-  models: { listSources: vi.fn(), listAgents: vi.fn(), refreshAgentPresence: vi.fn(), scanMigration: vi.fn(), getRuntimeStatus: vi.fn(), createApiKeySource: vi.fn(), getAgentChain: vi.fn(), previewAgentChain: vi.fn(), putAgentChain: vi.fn() },
+  models: { listSources: vi.fn(), listAgents: vi.fn(), refreshAgentPresence: vi.fn(), scanMigration: vi.fn(), getRuntimeStatus: vi.fn(), createApiKeySource: vi.fn(), getAgentChain: vi.fn(), getAgentChains: vi.fn(), previewAgentChain: vi.fn(), putAgentChain: vi.fn() },
 }));
 vi.mock('../../context/ApiContext', async (importOriginal) => ({ ...await importOriginal<typeof import('../../context/ApiContext')>(), useApi: () => mock.api }));
 vi.mock('@/lib/apiFetch', async (importOriginal) => ({ ...await importOriginal<typeof import('@/lib/apiFetch')>(), apiFetch: mock.apiFetch }));
@@ -119,6 +119,19 @@ function serveAgents(defaultName: string | null, agents: Array<{ name: string; b
 }
 /** The baseline candidate: an ordinary shipped Claude Agent on a routed backend. */
 const CLAUDE_AGENT = { id: 'cl-1', name: 'claude-agent', backend: 'claude' as const, enabled: true, archived: false, source: 'builtin' };
+/** Only Vibey can admit entry, so stale supply blocks cannot hide behind a ready CLI. */
+function serveBuiltinOnly() {
+  serveAgents('vibey', [{ name: 'vibey', backend: 'vibey', model: 'gpt-5.6-sol' }]);
+  mock.api.detectCli.mockResolvedValue({ found: false, status: 'missing', path: null });
+  mock.api.getBackendConnection.mockImplementation(async (backend: AgentBackend) => ({
+    ok: true, backend, enabled: true, installed: backend === 'vibey', auth: 'api_key',
+    application: 'applied', ready: backend === 'vibey', entry_eligible: backend === 'vibey', supply_mode: 'hub',
+  }));
+  mock.models.getAgentChains.mockResolvedValue([{
+    backend: 'vibey', model_id: 'gpt-5.6-sol',
+    chain: [{ source_id: HUB_SOURCE.id, model_id: 'gpt-5.6-sol' }],
+  }]);
+}
 let running: boolean;
 beforeEach(() => {
   vi.resetAllMocks(); running = true; mock.manageAccess = true;
@@ -858,6 +871,8 @@ describe('the registered journey', () => {
   });
 
   it('AUTH-SETUP-126: requires source readback before the shell can continue to assistants', async () => {
+    serveConfig(baseConfig({ agent_supply_blocks: { vibey: 'no_source' } }));
+    serveBuiltinOnly();
     mock.models.listSources.mockResolvedValue([]);
     mount();
     fireEvent.click(await screen.findByRole('button', { name: 'Get started' }));
@@ -893,8 +908,48 @@ describe('the registered journey', () => {
     await waitFor(() => expect(primaryAction().textContent).toContain(en.onboarding.providers.actionContinue));
     expect(primaryAction().hasAttribute('disabled')).toBe(false);
     expect(screenId()).toBe('providers');
+    // The write changed the server, but the Wizard and cached API still hold no_source.
+    // Hold the fresh response to prove entry waits for it, then clears only that block.
+    let confirmConfig!: (response: Response) => void;
+    const configRead = vi.fn(() => new Promise<Response>((resolve) => { confirmConfig = resolve; }));
+    serveFreshOnly(configRead);
     fireEvent.click(primaryAction());
     await waitFor(() => expect(screenId()).toBe('assistants'));
+    await waitFor(() => expect(configRead).toHaveBeenCalledOnce());
+    expect(primaryAction().hasAttribute('disabled')).toBe(true);
+    expect(mock.apiFetch.mock.calls.at(-1)).toEqual(['/api/config', { cache: 'no-store' }]);
+    await act(async () => {
+      serveFreshOnly(async () => jsonResponse(baseConfig({ agent_supply_blocks: {} })));
+      confirmConfig(jsonResponse(baseConfig({ agent_supply_blocks: {} })));
+    });
+    const vibey = within(document.querySelector('.onboarding-assistant[data-backend="vibey"]') as HTMLElement);
+    await waitFor(() => expect(vibey.queryByText(en.onboarding.setup.noteNoSource.replace('{{name}}', 'Vibey'))).toBeNull());
+    expect(await vibey.findByText('gpt-5.6-sol')).toBeTruthy();
+    expect(vibey.getByText(en.onboarding.setup.noteEnabled)).toBeTruthy();
+    await waitFor(() => expect(primaryAction().hasAttribute('disabled')).toBe(false));
+    fireEvent.click(primaryAction());
+    expect(await screen.findByTestId('destination')).toBeTruthy();
+  });
+
+  it.each([
+    ['no_source', 'noteNoSource', {}],
+    ['gateway_off', 'noteGatewayOff', { model_hub: { enabled: false } }],
+    ['hub_disabled', 'noteHubDisabled', { capabilities: { model_hub: { enabled: false } } }],
+  ] as const)('AUTH-SETUP-126: arrival preserves the current server block %s', async (block, note, prerequisite) => {
+    serveBuiltinOnly();
+    await arriveAtProviders();
+    mock.models.listSources.mockResolvedValue([]);
+    const configRead = vi.fn(async () => jsonResponse(baseConfig({
+      ...prerequisite, agent_supply_blocks: { vibey: block },
+    })));
+    serveFreshOnly(configRead);
+    fireEvent.click(primaryAction());
+    await waitFor(() => expect(configRead).toHaveBeenCalledOnce());
+    const vibey = within(document.querySelector('.onboarding-assistant[data-backend="vibey"]') as HTMLElement);
+    expect(await vibey.findByText(en.onboarding.setup[note].replace('{{name}}', 'Vibey'))).toBeTruthy();
+    if (block === 'no_source') expect(primaryAction().hasAttribute('disabled')).toBe(true);
+    else expect(primaryAction().textContent).toContain(en.common.retry);
+    expectNoForwardWrite();
   });
 
   it('establishes the controller on arrival at the second screen, never on mount', async () => {
