@@ -5968,3 +5968,37 @@ async def test_a_final_whose_cited_text_is_all_silent_stays_silent(engine, sessi
 
     assert not any(CHANGELOG in item for item in harness.controller.im_client.sent)
     assert not any(CHANGELOG in (row["content_text"] or "") for row in harness.rows("result") + harness.rows("assistant"))
+
+
+async def test_a_turns_failed_model_request_is_kept_with_its_session_and_turn(engine, session, tmp_path, published):
+    """Production wiring: every model request a Vibey Turn sends is captured under the agent's state directory and
+    tagged with its Session and Turn; the successful Turn's request is gone, the refused one stays byte-exact."""
+    import httpx
+    from core.agent_core.ai.request_artifacts import REQUEST_FILE
+    from modules.agents.vibey.models import registry_providers
+    from tests.agent_core.ai import test_hosted_replay as replay
+
+    sent: list[bytes] = []
+    headers = {"content-type": "text/event-stream", "x-avibe-served-hop": json.dumps(
+        {"provider": "test-provider", "api": "anthropic", "model": "test-model", "source": replay.SOURCE}
+    )}
+
+    def gateway(request):
+        sent.append(request.content)
+        if len(sent) == 1:
+            return httpx.Response(200, headers=headers, text=replay._sse("anthropic", replay._ANSWERED["anthropic"]))
+        return httpx.Response(400, json={"type": "error", "error": {"type": "invalid_request_error", "message": "no"}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        harness = _Harness(engine, tmp_path, "telegram", [], providers=registry_providers(media_loader=None, client=client))
+        await harness.agent.handle_message(harness.request("first"))
+        assert harness.agent.request_artifacts.entries() == []
+        failing = harness.request("second")
+        await harness.agent.handle_message(failing)
+
+    store = harness.agent.request_artifacts
+    assert store.root == tmp_path / "agent_core" / "model-requests"
+    (meta,) = store.entries()
+    assert meta["session_id"] == SESSION and meta["turn_id"] == _turn(failing.context)
+    assert meta["state"] == "failed" and meta["outcome"]["http_status"] == 400
+    assert (store.path(meta["id"]) / REQUEST_FILE).read_bytes() == sent[-1]

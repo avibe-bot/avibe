@@ -62,6 +62,7 @@ from core.agent_core.agent.recovery import settle_open_calls
 from core.agent_core.harness.context import ContextConfig
 from core.agent_core.harness.projection import open_tool_calls
 from core.agent_core.hosted_continuations import pending_hosted
+from core.agent_core.ai.request_artifacts import RequestArtifactStore, capture_model_requests
 from core.agent_core.ai.transform import in_flight_position
 from core.agent_core.tools.base import CallInstance
 from core.agent_core.tools.jobs import call_instance
@@ -267,6 +268,11 @@ class VibeyAgent(BaseAgent):
         state = Path(state_dir) if state_dir is not None else paths.get_state_dir() / "agent_core"
         self._state_dir = state
         self.media = MediaSnapshots(self._engine, state / "media")
+        # The exact bytes of every model request a Turn sends, kept when it does not succeed (``request_artifacts``).
+        self.request_artifacts = RequestArtifactStore(state / "model-requests")
+        from vibe import __version__
+
+        self._version = __version__
         self.store = AdapterTranscriptStore(
             SQLiteTranscriptStore(self._engine, render=self._display_source),
             self._engine,
@@ -318,7 +324,10 @@ class VibeyAgent(BaseAgent):
         turn = _Run(request, session_id, turn_id, self._instance)
         async with self._held(session_id, run=turn) as runtime:
             try:
-                await self._run_turn(runtime, turn, input_id)
+                with capture_model_requests(
+                    self.request_artifacts, session_id=session_id, turn_id=turn_id, version=self._version
+                ):
+                    await self._run_turn(runtime, turn, input_id)
             except Exception as error:
                 if turn.settled:
                     # Raised during or after settlement (its emits, or a failure notice): the

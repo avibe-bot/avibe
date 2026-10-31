@@ -27,6 +27,7 @@ from core.agent_core.ai.errors import (
 )
 from core.agent_core.ai.hosted import MAX_HOSTED_COUNTERS
 from core.agent_core.ai.image_limits import LoadedImage, fit_image
+from core.agent_core.ai.request_artifacts import RequestAttempt, ResponseCapture, begin_attempt
 from core.agent_core.ai.sse import SSEEvent, SSEParseError, SSEParser
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import (
@@ -1818,8 +1819,11 @@ def _header_value(value: str) -> bool:
 async def iter_sse_events(
     response: httpx.Response,
     cancel: CancelToken,
+    *,
+    capture: ResponseCapture | None = None,
 ) -> AsyncIterator[SSEEvent]:
-    """Yield SSE events while allowing a CancelToken to interrupt a stalled read."""
+    """Yield SSE events while allowing a CancelToken to interrupt a stalled read. ``capture`` receives the raw bytes
+    as they are read."""
 
     parser = SSEParser()
     iterator = response.aiter_bytes().__aiter__()
@@ -1833,9 +1837,13 @@ async def iter_sse_events(
                 timeout_s=PROVIDER_SILENCE_TIMEOUT_S,
             )
         except StopAsyncIteration:
+            if capture is not None:
+                capture.finish()
             break
         if chunk is None:
             return
+        if capture is not None:
+            capture.feed(chunk)
         for event in parser.feed(chunk):
             yield event
     for event in parser.finish():
@@ -1872,6 +1880,8 @@ async def drive_sse_stream(
     opening: asyncio.Task[httpx.Response] | None = None
     candidate: Done | ProviderError | None = None
     sent_at: float | None = None
+    # The request's bytes, kept until it succeeds (``request_artifacts``), when a capture scope is active.
+    attempt: RequestAttempt | None = None
     assembler.begin_driver()
     try:
         try:
@@ -1888,6 +1898,9 @@ async def drive_sse_stream(
                     headers=headers,
                     timeout=httpx.Timeout(None, connect=CONNECT_TIMEOUT_S),
                 )
+                # Durable before it is sent: a crash mid-request leaves it pending, never a success.
+                attempt = await begin_attempt(request, endpoint=endpoint, protocol=assembler.protocol)
+                capture = attempt.capture if attempt is not None else None
                 # Retain the opening task even if cancellation wins the await:
                 # its successful result still belongs to this driver's finally.
                 sent_at = time.monotonic()
@@ -1897,16 +1910,20 @@ async def drive_sse_stream(
                     cancel,
                     timeout_s=None if gateway else PROVIDER_SILENCE_TIMEOUT_S,
                 )
+                if response is not None and capture is not None:
+                    capture.response(response.status_code, response.headers)
                 if response is None:
                     candidate = assembler.aborted(cancel.reason)
                 elif not 200 <= response.status_code < 300:
                     # HTTP errors already identify their outcome. Resolving a
                     # served hop first could mask auth/rate limits (or stall).
                     try:
-                        body = await read_response_body(response, cancel)
+                        body = await read_response_body(response, cancel, capture=capture)
                     except (GeneratorExit, asyncio.CancelledError):
                         raise
                     except Exception as exc:
+                        if attempt is not None:
+                            attempt.exception_type = type(exc).__name__
                         candidate = assembler.exception(
                             exc,
                             status=response.status_code,
@@ -1923,6 +1940,8 @@ async def drive_sse_stream(
                         ):
                             # The pinned Source cannot serve this content; nothing reached a model. The adapter
                             # decides what follows (§3.5, §4.3), so no terminal is committed here.
+                            if attempt is not None:
+                                await attempt.failed(kind="pin_unavailable", status=response.status_code)
                             yield handed_back
                             return
                         else:
@@ -1932,6 +1951,8 @@ async def drive_sse_stream(
                                 headers=response.headers,
                             )
                             if refused is not None and refused(candidate):
+                                if attempt is not None:
+                                    await attempt.failed(kind="http_error", error_kind=candidate.kind)
                                 yield REFUSED
                                 return
                             refused_payloads = opaque_refusal(body or "") if response.status_code == 400 else ()
@@ -1964,10 +1985,13 @@ async def drive_sse_stream(
                             resolved_origin.source_id,
                             resolved_origin.source_identity,
                         )
-                        async for item in translate(iter_sse_events(response, cancel)):
+                        async for item in translate(iter_sse_events(response, cancel, capture=capture)):
                             if isinstance(item, (Done, ProviderError)):
                                 candidate = item
                                 break
+                            if item is PAUSE_TURN and attempt is not None:
+                                # A paused response's request ended normally; its continuation is another request.
+                                await attempt.succeeded()
                             yield item
                             if isinstance(item, HandOff):
                                 return
@@ -1980,11 +2004,24 @@ async def drive_sse_stream(
         except (GeneratorExit, asyncio.CancelledError):
             raise
         except (OutputBudgetExceeded, SSEParseError, ToolIdentityError) as exc:
+            if attempt is not None:
+                attempt.exception_type = type(exc).__name__
             candidate = assembler.error(str(exc), kind="invalid_request")
         except Exception as exc:
+            if attempt is not None:
+                attempt.exception_type = type(exc).__name__
             candidate = assembler.exception(exc)
 
         if candidate is not None:
+            if attempt is not None:
+                if isinstance(candidate, Done):
+                    await attempt.succeeded()
+                else:
+                    await attempt.failed(
+                        kind=_attempt_failure_kind(candidate, response),
+                        error_kind=candidate.kind,
+                        status=response.status_code if response is not None else None,
+                    )
             if (
                 isinstance(candidate, ProviderError)
                 and sent_at is not None
@@ -2004,6 +2041,10 @@ async def drive_sse_stream(
                 yield terminal
     finally:
         assembler.end_driver()
+        if attempt is not None:
+            # Ended without a terminal (its consumer closed it, or its task was cancelled): the pending entry
+            # already on disk stays and reads as unknown.
+            attempt.abandon()
         async def close_opened_response() -> None:
             if opening is None:
                 return
@@ -2037,6 +2078,18 @@ async def drive_sse_stream(
                     cleanup.add_done_callback(_consume_task_result)
 
                 opening.add_done_callback(close_late_response)
+
+
+def _attempt_failure_kind(error: ProviderError, response: httpx.Response | None) -> str:
+    """How a kept request ended, as a closed token: never the error's message, which can echo the request."""
+
+    if error.kind == "aborted":
+        return "cancelled"
+    if response is None:
+        return "network_error"
+    if not 200 <= response.status_code < 300:
+        return "http_error"
+    return "stream_error"
 
 
 async def _await_network(
@@ -2126,13 +2179,18 @@ async def read_response_body(
     cancel: CancelToken,
     *,
     max_bytes: int = 64 * 1024,
+    capture: ResponseCapture | None = None,
 ) -> str | None:
-    """Read an error body through the shared cancellation owner with a byte cap."""
+    """Read an error body through the shared cancellation owner with a byte cap.
+
+    The text returned is at most ``max_bytes``. ``capture`` receives the raw bytes as read, and reading goes on past
+    ``max_bytes`` until the body ends or the capture holds its own limit.
+    """
 
     iterator = response.aiter_bytes().__aiter__()
     chunks: list[bytes] = []
     size = 0
-    while size < max_bytes:
+    while size < max_bytes or (capture is not None and not capture.full):
         try:
             chunk = await _await_network(
                 iterator.__anext__(),
@@ -2140,16 +2198,22 @@ async def read_response_body(
                 timeout_s=PROVIDER_SILENCE_TIMEOUT_S,
             )
         except StopAsyncIteration:
+            if capture is not None:
+                capture.finish()
             break
         if chunk is None:
             return None
         if not chunk:
             continue
+        if capture is not None:
+            capture.feed(chunk)
+        if size >= max_bytes:
+            continue
         remaining = max_bytes - size
         piece = bytes(chunk[:remaining])
         chunks.append(piece)
         size += len(piece)
-        if len(piece) < len(chunk):
+        if len(piece) < len(chunk) and capture is None:
             break
     return b"".join(chunks).decode("utf-8", errors="replace")
 
