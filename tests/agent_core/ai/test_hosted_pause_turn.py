@@ -329,7 +329,9 @@ async def test_a_continuation_whose_route_refuses_the_cache_lifetime_is_sent_aga
 
     first, refused, retried = (json.loads(wire.content) for wire in sent)
     assert '"ttl"' in json.dumps(refused) and '"ttl"' not in json.dumps(retried)
-    assert refused["messages"] == retried["messages"]
+    assert refused["messages"] != retried["messages"]
+    assert refused["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+    assert retried["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}
     message = events[-1].message
     assert [block.text for block in message.content if isinstance(block, TextBlock)] == ["part 1", "part 3"]
     assert message.usage == Usage(input_tokens=10, output_tokens=1)
