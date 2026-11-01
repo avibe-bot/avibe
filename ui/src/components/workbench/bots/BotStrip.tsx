@@ -27,8 +27,12 @@ import { Markdown } from '../../ui/markdown';
 import { Popover, PopoverAnchor, PopoverContent } from '../../ui/popover';
 import { BotAvatar } from '../../ui/bot-avatar';
 
-const SLOT_WIDTH = 52;
+// A slot is 50px wide (the 40px avatar, its 2px ring, and room for the name) with
+// 4px between slots and 2px of padding at either end: the main Bot, two more,
+// and "Add" fill the default 216px sidebar column exactly.
+const SLOT_WIDTH = 50;
 const SLOT_GAP = 4;
+const STRIP_PADDING = 4;
 
 const horizontalOnly: Modifier = ({ transform }) => ({ ...transform, y: 0 });
 
@@ -64,7 +68,7 @@ export const BotStrip: React.FC<{
 
   // Inline while every avatar and "Add" fit; pinned "Add" once they do not.
   const slots = bots.length + 1;
-  const inline = rowWidth === null || slots * SLOT_WIDTH + (slots - 1) * SLOT_GAP <= rowWidth;
+  const inline = rowWidth === null || slots * SLOT_WIDTH + (slots - 1) * SLOT_GAP + STRIP_PADDING <= rowWidth;
 
   const updateFade = useCallback(() => {
     const scroller = scrollerRef.current;
@@ -103,7 +107,7 @@ export const BotStrip: React.FC<{
   });
 
   const addSlot = (
-    <div className="flex w-[52px] shrink-0 flex-col items-center gap-1">
+    <div className="flex w-[50px] shrink-0 flex-col items-center gap-1">
       <button
         type="button"
         onClick={() => openProfile({ kind: 'create' })}
@@ -314,7 +318,7 @@ const BotSlot: React.FC<BotSlotProps & { drag?: SlotDrag }> = ({ bot, name, unre
         <div
           ref={setSlotNode}
           data-bot-handle={bot.handle}
-          className={clsx('flex w-[52px] shrink-0 flex-col items-center gap-1', isDragging && 'z-10 opacity-80')}
+          className={clsx('flex w-[50px] shrink-0 flex-col items-center gap-1', isDragging && 'z-10 opacity-80')}
           style={drag ? { transform: CSS.Translate.toString(drag.transform), transition: drag.transition } : undefined}
           onMouseEnter={queueOpen}
           onMouseLeave={queueClose}

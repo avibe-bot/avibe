@@ -133,6 +133,10 @@ for (const theme of ['light', 'dark'] as const) {
     await expect(strip.getByRole('button', { name: '首席安全官，2 条未读' })).toContainText('2');
     const add = strip.getByRole('button', { name: '添加伙伴' });
     expect((await add.boundingBox())!.x).toBeGreaterThan((await slots.last().boundingBox())!.x);
+    // Three Bots and Add fit the default column: nothing scrolls or fades.
+    const row = slots.first().locator('xpath=..');
+    expect(await row.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
+    await expect(row).not.toHaveClass(/bot-strip-fade/);
     await page.mouse.move(900, 600);
     await sidebar.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-strip-${theme}.png` });
 
