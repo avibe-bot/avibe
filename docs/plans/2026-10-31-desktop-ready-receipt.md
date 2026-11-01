@@ -201,6 +201,12 @@ sinks, then proves receipt-pipe EOF after launcher exit while both spawned
 children acknowledge a later liveness request. The fixture owns all child
 state and stops them with bounded test controls. It does not mock pipe reads,
 Popen, log-sink setup, descriptor inheritance, or process isolation.
+Its HTTP listener binds a numeric loopback address without reverse DNS.
+The macOS CI initialization stack exposed `HTTPServer.server_bind` waiting in
+`socket.getfqdn`; a DNS trap reproduces the original fixture failure and the
+corrected fixture reaches READY and EOF with that lookup forbidden. This
+changes fixture setup only, outside the measured startup interval, and leaves
+the 15-second initialization and 1-second post-exit EOF checks intact.
 
 Windows CI covers the native pipe reader and shell build. Packaged cold/warm
 NSIS launch, release-matched identity/handover, UI/controller failures, and

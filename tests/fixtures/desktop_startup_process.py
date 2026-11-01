@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import TCPServer
 from types import SimpleNamespace
 
 # A slow import or listener initialization must identify its blocking call in
@@ -74,7 +75,15 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+class LoopbackHTTPServer(ThreadingHTTPServer):
+    def server_bind(self):
+        # HTTPServer's display-name lookup performs reverse DNS even for
+        # 127.0.0.1. The fixture needs only the numeric bound address.
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
+server = LoopbackHTTPServer(("127.0.0.1", 0), Handler)
 thread = threading.Thread(target=server.serve_forever, daemon=True)
 thread.start()
 port = server.server_address[1]
