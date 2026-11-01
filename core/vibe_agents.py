@@ -2092,21 +2092,28 @@ def _main_bot_record() -> dict[str, Any]:
     return {"handle": MAIN_BOT_HANDLE, "display_name": "", "avatar": None, "position": 0}
 
 
+def _agent_metadata(agent: Any) -> Mapping[str, Any]:
+    metadata = getattr(agent, "metadata", None)
+    return metadata if isinstance(metadata, Mapping) else {}
+
+
 def agent_bot_record(agent: VibeAgent) -> Optional[dict[str, Any]]:
     """The Agent's Bot fields while it is a Bot: a record with a handle and no ``removed_at``."""
-    record = agent.metadata.get(BOT_METADATA_KEY)
+    record = _agent_metadata(agent).get(BOT_METADATA_KEY)
     if not isinstance(record, dict) or not str(record.get("handle") or "").strip() or record.get("removed_at"):
         return None
     return record
 
 
 def is_bot_agent(agent: VibeAgent) -> bool:
-    return agent.archived_at is None and agent_bot_record(agent) is not None
+    return getattr(agent, "archived_at", None) is None and agent_bot_record(agent) is not None
 
 
 def is_main_bot_agent(agent: VibeAgent) -> bool:
     """The main Bot's Agent: store-made (``source == "builtin"``) and marked by the store."""
-    return agent.source == "builtin" and agent.metadata.get(BUILTIN_BOT_METADATA_KEY) == MAIN_BOT_HANDLE
+    return getattr(agent, "source", None) == "builtin" and _agent_metadata(agent).get(BUILTIN_BOT_METADATA_KEY) == (
+        MAIN_BOT_HANDLE
+    )
 
 
 def is_builtin_default_agent(agent: VibeAgent) -> bool:
