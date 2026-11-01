@@ -3738,7 +3738,14 @@ const ChatRoutePicker: React.FC<ChatRoutePickerProps> = ({ session, agents, defa
     ? concreteBackend
     : pendingForkBackend ?? (backendLocked ? concreteBackend : null);
   const canClearToDefault = !lockAgent && !backendLocked && !nativeBound;
-  const pickableAgents = lockAgent ? agents.filter((agent) => agent.name === session.agent_name) : agents;
+  // A Bot's conversation names its Bot on the picker, as everywhere else in chat.
+  const { botForSession, displayName: botDisplayName } = useBots();
+  const routeBot = lockAgent ? botForSession(session.id) : undefined;
+  const pickableAgents = lockAgent
+    ? agents
+      .filter((agent) => agent.name === session.agent_name)
+      .map((agent) => (routeBot ? { ...agent, display_name: botDisplayName(routeBot) } : agent))
+    : agents;
   const pickerDisabled = working && !concreteBackend && !pendingForkBackend;
   const defaultRoute = defaultAgent
     ? {
@@ -4949,6 +4956,8 @@ export const ThinkingBubble: React.FC<{
   statusLabel?: string | null;
 }> = ({ session, agentDisplayName, agentBackend = null, onShowActivity, statusLabel }) => {
   const { t } = useTranslation();
+  const { botForSession, displayName: botDisplayName } = useBots();
+  const replyBot = botForSession(session.id);
   const dots = (
     <div className="flex items-center gap-1 py-0.5">
       <span className="vr-typing-dot size-1.5 rounded-full bg-mint" />
@@ -4960,9 +4969,13 @@ export const ThinkingBubble: React.FC<{
     <div className="flex w-full justify-start">
       <div className="group/message flex max-w-[min(92%,860px)] flex-col items-start gap-1">
         <div className="flex items-center gap-2 px-0.5">
-          <RoleAvatar tone="mint"><BackendAvatar backend={agentBackend ?? session.agent_backend ?? ''} /></RoleAvatar>
+          {replyBot ? (
+            <BotAvatar avatar={replyBot.avatar} name={botDisplayName(replyBot)} size={24} />
+          ) : (
+            <RoleAvatar tone="mint"><BackendAvatar backend={agentBackend ?? session.agent_backend ?? ''} /></RoleAvatar>
+          )}
           <span className="text-[11px] font-medium text-muted">
-            {statusLabel || agentDisplayName || session.agent_name || t('chat.thinking')}
+            {statusLabel || (replyBot ? botDisplayName(replyBot) : null) || agentDisplayName || session.agent_name || t('chat.thinking')}
           </span>
         </div>
         {onShowActivity ? (
@@ -5046,6 +5059,11 @@ export const MessageRow = memo(function MessageRow({
   // row's memo, so a personal↔organization change repaints the transcript
   // without the page having to re-create every row's props.
   const { instanceKind } = useInstanceAuthorization();
+  // In a Bot's conversation the replies are the Bot's own (docs/plans/bots.md D2:
+  // the display name is what chat shows), so its head carries the Bot's avatar
+  // and display name rather than the Agent's name.
+  const { botForSession, displayName: botDisplayName } = useBots();
+  const replyBot = botForSession(session.id);
   // Harness rows are collapsed by default; the Transcript holds which are open.
   const expanded = harnessOpen;
 
@@ -5367,13 +5385,17 @@ export const MessageRow = memo(function MessageRow({
   // ----- Agent / boundary / system: left-aligned bubble with identity header -----
   const agentIdentity = isAgent || isBoundary;
   const name = agentIdentity
-    ? agentDisplayName || session.agent_name || message.author_name
+    ? (replyBot ? botDisplayName(replyBot) : null) || agentDisplayName || session.agent_name || message.author_name
     : message.author_name;
   return (
     <div data-message-id={message.id} className={rowClass('justify-start')}>
       <div className="group/message flex max-w-[min(92%,860px)] flex-col items-start gap-1">
         <div className="flex items-center gap-2 px-0.5">
-          <RoleAvatar tone={isAgent ? 'mint' : 'muted'}>{agentIdentity ? <BackendAvatar backend={agentBackend ?? session.agent_backend ?? ''} /> : <Info />}</RoleAvatar>
+          {agentIdentity && replyBot ? (
+            <BotAvatar avatar={replyBot.avatar} name={botDisplayName(replyBot)} size={24} />
+          ) : (
+            <RoleAvatar tone={isAgent ? 'mint' : 'muted'}>{agentIdentity ? <BackendAvatar backend={agentBackend ?? session.agent_backend ?? ''} /> : <Info />}</RoleAvatar>
+          )}
           {name && <span className="text-[11px] font-medium text-muted">{name}</span>}
         </div>
         {bodyNode || attachmentsNode ? (

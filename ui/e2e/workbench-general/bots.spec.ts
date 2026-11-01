@@ -91,7 +91,14 @@ async function serveBots(page: Page, lang: Lang, bots: FixtureBot[]) {
     };
     await page.route(`**/api/sessions/${sessionId}/bootstrap`, (route) => route.fulfill({ json: {
       session, capabilities: { can_chat: true }, agents: AGENTS, default_agent_name: 'vibey', config: { ui: {} },
-      messages: [], queued: [], next_after_id: null, next_before_id: null,
+      // The main Bot's conversation has one reply; the others start empty.
+      messages: bot.handle === 'main' ? [{
+        id: 'msg-main-reply', scope_id: null, session_id: sessionId, platform: 'avibe', author: 'agent', type: 'result',
+        source: 'agent', author_id: null, author_name: null, native_message_id: null, parent_native_message_id: null,
+        text: 'The launch checklist is on track.', content: { text: 'The launch checklist is on track.' },
+        metadata: { author_agent_id: 'agt-main', author_backend: 'vibey' }, created_at: ago(5), updated_at: ago(5),
+      }] : [],
+      queued: [], next_after_id: null, next_before_id: null,
       draft: { text: '', updated_at: null }, turn_state: turnState,
     } }));
     await page.route(`**/api/sessions/${sessionId}`, (route) => route.fulfill({ json: session }));
@@ -224,8 +231,8 @@ for (const theme of ['light', 'dark'] as const) {
     // The empty conversation shows the Bot's role; the open Bot carries the ring.
     await expect(page.locator('main')).toContainText('依赖与权限的安全审计，每周汇报');
     await expect(page.getByRole('button', { name: '首席安全官, 2 unread', exact: true })).toHaveAttribute('aria-current', 'page');
-    // The composer moves the model only: the Agent is the Bot's, named but not offered.
-    await page.locator('main').getByRole('button', { name: /^cso/ }).click();
+    // The composer moves the model only: the Agent is the Bot's, named by the Bot but not offered.
+    await page.locator('main').getByRole('button', { name: /^首席安全官/ }).click();
     await expect(page.getByText('Model', { exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: /^Agent/ })).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'New agent' })).toHaveCount(0);
@@ -344,6 +351,20 @@ test('on a short window the dialog scrolls to its footer', async ({ page }) => {
   const add = dialog.getByRole('button', { name: 'Add Bot' });
   await add.scrollIntoViewIfNeeded();
   await expect(add).toBeInViewport();
+  expect(denied).toEqual([]);
+});
+
+test("a Bot's replies and its route read as the Bot, not its Agent", async ({ page }) => {
+  const { denied } = await serveBots(page, 'en', [MAIN, CSO, PM]);
+  await page.setViewportSize(DESKTOP);
+  await open(page, '/chat/ses_main', { lang: 'en' });
+  const reply = page.locator('[data-message-id="msg-main-reply"]');
+  await expect(reply).toContainText('The launch checklist is on track.');
+  // D2: chat shows the display name (the main Bot's default, here) with its avatar.
+  await expect(reply).toContainText('Vibey');
+  await expect(reply).not.toContainText('main');
+  await expect(reply.locator('.bot-avatar-mascot')).toHaveCount(1);
+  await expect(page.locator('main').getByRole('button', { name: /^Vibey/ })).toBeVisible();
   expect(denied).toEqual([]);
 });
 
