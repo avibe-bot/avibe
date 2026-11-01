@@ -15,7 +15,8 @@ path retain their existing contracts.
 ## Change contract
 
 - **CLI:** `vibe start --desktop-receipt` is hidden and opt-in. The bundled
-  Runtime uses it together with `--no-open-browser`; ordinary callers do not
+  Runtime uses it together with `--no-open-browser` and hidden
+  `--desktop-ready-timeout <seconds>` carrying the shell-validated budget; ordinary callers do not
   receive or depend on the new line.
 - **Wire framing:** Python writes at most one line beginning with
   `@avibe-desktop-start:` followed by compact UTF-8 JSON and `\n` on stdout.
@@ -60,7 +61,7 @@ path retain their existing contracts.
   dependency with `trust_env=False` and `follow_redirects=False`, and probes
   only the exact loopback `/ready`. LAN `/health` is not a desktop gate.
   Each entire response (including its body, bounded to 1024 bytes) is bounded
-  by the smaller of 500 ms and the remaining deadline; streamed bytes cannot
+  by the smaller of 5 seconds and the remaining deadline; streamed bytes cannot
   reset that budget. Service provenance still passes through the existing
   `claim_ready_service`. Rust owns desktop policy, receipt validation, the bounded
   attempt budget, adoption/handover rules, and the final `/ready`
@@ -130,6 +131,65 @@ evidence.
 
 ## Verification
 
+### Review breaker scope (2026-11-01)
+
+The orchestrator independently confirmed the second findings-bearing head and
+authorized one combined correction: preserve the replaced Rust probe's 5-second
+whole-response allowance, pass the shell's validated startup timeout to Python,
+and acknowledge an already-presented FAILED result on its retained attempt.
+No identity, stop authority, ownership, rollback, or platform transport changes
+are part of this correction. Tests must cover healthy 700 ms / 2.5 s responses,
+one non-resetting total deadline, the shell override reaching actual cmd_start,
+and retained-attempt transitions before and after helper exit. The compatibility
+inventory below will record every preserved or intentional difference against
+master `bc6cd410ccb26cacc5fbd422f8198371bd272892`.
+
+
+### Replaced-wait compatibility inventory
+
+All old locations below refer to that frozen master commit, not this branch's
+moving line numbers. The final Rust presence probe and its identity classifier
+remain in place; Python supplies readiness observation, never ownership.
+
+| Property | Old Rust behavior / master source | New producer and consumer behavior | Status / reason | Pinning evidence |
+| --- | --- | --- | --- | --- |
+| Whole-response request budget | 5 s, `desktop/runtime-host/src/bootstrap.rs:40`; reqwest total timeout in `health.rs:48` | `min(5 s, remaining)` around the entire HTTP response, including streamed body | Preserved; the accidental 500 ms cap is removed | `test_desktop_startup_readiness_uses_direct_no_redirect_http` real 700 ms and 2.5 s healthy responses; drip case below |
+| Poll cadence / first probe | Sleep 500 ms before each Rust request, `bootstrap.rs:507` | Immediate Python observation, then 100 ms between incomplete observations; the existing Python readiness cadence remains | Intentionally changed: consolidate onto Python's existing cadence without delaying early readiness behind a new 500 ms sleep | Repeated actual `cmd_start_receipt_admission`; `starting` and transport-error cases require multiple requests under one budget |
+| Default total budget / override | 120 s; `AVIBE_DESKTOP_READY_TIMEOUT_SECONDS`, integer 1..600; invalid values ignored, `bootstrap.rs:24`, `:33`, `:80`, `:94` | Shell still parses/validates it. `launch_with_ready_timeout` passes the resolved duration using `--desktop-ready-timeout`; actual CLI parser routes it to cmd_start | Preserved, including overrides above 120 s. Python no longer silently hard-codes 120 s for a shell-selected duration | `a_timeout_override_must_be_a_positive_bounded_number_of_seconds`; real `cmd_start_receipt_timeout_override` (env → shell settings → host → production argv builder → Python parser/actual wait), CLI 1/600 s remaining-budget cases; OS argv contract |
+| Deadline across retries / phases | One outer deadline; checked before sleep/probe, `bootstrap.rs:507` (a final probe could overrun it) | One producer deadline covers service/UI launch and remaining HTTP wait. Each request/sleep is capped by remaining time. Shell observation and final verification also cannot reset their deadline; a still-live helper is retained when shell observation expires | Preserved non-resetting budget, intentionally stricter bound on the last request. Interpreter/config/handover work retains its existing lifecycle limits; observation timeout grants no kill authority | `test_desktop_ready_request_body_has_one_deadline_and_size_bound`; CLI shared-readiness test; final-probe deadline and retained-helper tests |
+| Proxy / redirects | `.no_proxy()`, redirect policy none, `health.rs:49` | `trust_env=False`, `follow_redirects=False`; only exact loopback `/ready`, not LAN `/health` | Preserved | Real inherited-proxy traps and redirect listener tests |
+| Refused connection / timeout / incomplete response | Refused → Absent; other errors → Unknown, `health.rs:65`; both keep waiting while helper is viable, `bootstrap.rs:514` | HTTP failure or non-affirmative payload keeps waiting while the service is viable, spending remaining budget. Service death still fails via existing Python cleanup | Preserved retry classification, with existing Python service-death cleanup retained | Controlled HTTPX connection/timeout errors; `starting`, `malformed`, `drip` body cases; cmd_start created/reused rollback tests |
+| HTTP / payload / identity | Strict successful schema, product, boolean and identity format; 503 identity mismatch is non-ready, `health.rs:75`, `:135`, `:170` | Shared Python strict payload predicate; only affirmative `/ready` can produce READY. Initial/final Rust `Presence` checks still enforce Mine/Foreign/Unmanaged and recovery policy | Preserved. Receipt never substitutes for the final current endpoint/identity check | Existing payload/identity fixtures, malformed body, final-presence contradiction, adoption/recovery tests |
+| Origin | Literal safe loopback via `origin.rs:58`; URL origin canonicalization | Python supplies config-derived endpoint; receipt parsed through the same Rust boundary, including default port and IPv6 | Preserved | `receipt_origin_comparison_uses_the_loopback_canonical_form` (IPv4 + IPv6); Python origin tests; unsafe origin boundary tests |
+| Response encoding / size | UTF-8 only, maximum 1024 bytes; reject oversized Content-Length and streamed bodies, `health.rs:9`, `:106` | Raw identity-encoded bytes and explicit UTF-8 decode (no implicit decompression), 1024-byte header/body bound before accumulation; same whole-response timeout even with drip output | Preserved; inventory also closed Python bytes-JSON auto-detection and missing early Content-Length rejection | `utf16`, `compressed`, `oversized`, `oversized-stream`, `drip` cases in the real HTTP body-bound test |
+| Attempt failure / Retry | A previously unseen nonzero exit is reported once; live helper retained, `bootstrap.rs:557`, `:571` | Origin-valid FAILED is acknowledged on that attempt after publication. A live helper remains deduped; once it exits, first Retry releases its slot and launches exactly once. Unreported exits retain their old notice/Retry semantics | Preserved user-visible Retry behavior with receipt-before-exit ordering accounted for | `retained_receipt_attempt_transitions_preserve_first_retry_and_live_deduplication` |
+
+The only intentional differences in the moved wait are the existing Python
+100 ms cadence / immediate observation, and stricter enforcement of the last
+request's remaining deadline. Neither weakens usable-state evidence or makes
+an observation timeout authority to stop reused state.
+
+### Retained-attempt transition inventory
+
+The table test covers each exit as generic failure, handover refusal, and
+handover failure; the acknowledgement lives on the attempt's LaunchWatch and
+cannot transfer to a newer attempt. Origin validation precedes acknowledgement.
+
+| First observation | Retry while helper is live | First Retry after nonzero exit |
+| --- | --- | --- |
+| Valid FAILED receipt, already published | Same failure, no duplicate launcher | Release slot and launch once in this Retry |
+| Wrong-origin FAILED | Refuse, no duplicate launcher | Report previously unseen exit; following Retry may launch |
+| EOF without receipt | Refuse, no duplicate launcher | Report previously unseen exit once |
+| Observation deadline / cancelled receipt observation | No overlapping helper | Report previously unseen exit once |
+| Healthy attempt, Runtime still ready | Adopt live Runtime | Adopt live Runtime; late helper exit cannot revoke readiness |
+| Legacy helper without receipts | Retain while pending | Preserve old notice and subsequent-Retry behavior |
+
+Explicit Stop/newer-run races continue to be pinned separately by
+`a_newer_attempt_or_stop_fences_a_receipts_in_flight_final_probe` and the existing
+stop/ownership fence tests. A cancelled observation is not Runtime Stop.
+
+### Verification gates
+
 1. Parser-backed Python CLI tests cover the hidden invocation and preserve
    ordinary `vibe start` semantics.
 2. Python tests exercise complete, failed, duplicate, and cleanup outcomes.
@@ -170,9 +230,9 @@ production 500 ms legacy polling interval, all reached successful admission:
 
 | Scenario | Legacy admission (ms) | Receipt admission (ms) | Rust probes, legacy → receipt |
 | --- | --- | --- | --- |
-| Early ready | 509.2, 504.6, 505.0 | 107.3, 92.9, 92.9 | 2 → 2 |
-| Controller delayed 1.1 s | 1518.1, 1518.3, 1516.6 | 1152.2, 1161.9, 1181.1 | 4 → 2 |
-| Housekeeping delayed 1.2 s | 504.8, 505.7, 507.0 | 94.2, 92.7, 92.6 | 2 → 2 |
+| Early ready | 505.0, 507.1, 510.7 | 106.8, 94.7, 93.5 | 2 → 2 |
+| Controller delayed 1.1 s | 1526.6, 1517.0, 1516.5 | 1158.2, 1160.9, 1157.4 | 4 → 2 |
+| Housekeeping delayed 1.2 s | 505.3, 504.4, 504.5 | 93.5, 92.2, 96.9 | 2 → 2 |
 
 Admission means `RuntimeHost` permits navigation, not rendered WebView latency.
 The initial adoption probe is included. Python used one `/ready` for early and
@@ -181,7 +241,7 @@ probes. Baseline additionally called `/health` on each Python poll; candidate
 made zero `/health` requests. All cases started one fixture service and one
 fixture UI, then reused the live endpoint on Retry without another launch.
 Candidate admission preceded housekeeping completion in every delayed sample
-(the helper completed around 1292.9–1294.3 ms). The former 30 ms comparison is a
+(the helper completed around 1293.1–1311.2 ms). The former 30 ms comparison is a
 **timeout/probe-count test only**, not time-to-ready performance evidence.
 
 Run the integration gate explicitly (ignored in ordinary Cargo tests because it

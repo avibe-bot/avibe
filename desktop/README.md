@@ -80,13 +80,20 @@ product logic.
    Python's desktop readiness requests also bypass configured proxies and refuse
    redirects. Only the exact loopback `/ready` is required; LAN `/health` is
    not a desktop readiness gate. Each complete HTTP response, including its
-   body, spends the remaining startup deadline. The UI starts without waiting
+   UTF-8 body (at most 1 KiB), is limited to the smaller of five seconds and
+   the remaining startup deadline. The shell passes its validated
+   `AVIBE_DESKTOP_READY_TIMEOUT_SECONDS` setting to the bundled CLI using
+   `--desktop-ready-timeout`; Python shares that budget across startup and its
+   readiness observations. The UI starts without waiting
    for service readiness so the existing startup
    parallelism remains. Optional install-generation cleanup runs after the
    receipt is flushed and cannot delay Workbench admission. This receipt removes
    duplicate Rust readiness polling; it does not promise a cold-start time
    reduction on Windows. Packaged Windows acceptance still needs the release
    artifact and manual launch checks.
+   After a failed receipt is displayed, a still-running helper is retained to
+   prevent overlapping starts. Once it exits, the first Try again starts a new
+   attempt without displaying that old failure a second time.
 6. After navigation, probes the same exact origin every two seconds. Three
    consecutive failures return the WebView to the bundled bootstrap and rerun
    adoption/startup; a transient miss does not replace the Workbench.

@@ -155,16 +155,29 @@ install_generations.collect_install_generations = housekeeping_work
 (scratch / "endpoint.tmp").replace(scratch / "endpoint")
 faulthandler.cancel_dump_traceback_later()
 try:
-    assert sys.stdin.readline().strip() == "start"
+    invocation = sys.stdin.readline().strip()
     started = time.monotonic()
     args = cli.build_parser().parse_args(
         ["start", "--no-open-browser"] + (["--desktop-receipt"] if mode == "receipt" else [])
+        if invocation == "start" else json.loads(invocation)
     )
-    result = cli.cmd_start(open_browser=args.open_browser, desktop_receipt=args.desktop_receipt)
+    try:
+        result = cli.cmd_start(
+            open_browser=args.open_browser,
+            desktop_receipt=args.desktop_receipt,
+            desktop_ready_timeout=args.desktop_ready_timeout,
+        )
+    except RuntimeError:
+        if case != "budget":
+            raise
+        result = 1
+    trace["result"] = result
+    trace["ready_timeout"] = args.desktop_ready_timeout
     trace["helper_work_ms"] = (time.monotonic() - started) * 1000
     (scratch / "trace.json").write_text(json.dumps(trace), encoding="utf-8")
-    assert result == 0
+    assert result == (1 if case == "budget" else 0)
     assert sys.stdin.readline().strip() == "done"
+    sys.exit(result)
 finally:
     server.shutdown()
     server.server_close()

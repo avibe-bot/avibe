@@ -14082,6 +14082,7 @@ def cmd_start(
     open_browser: bool | None = None,
     hand_over: bool = False,
     desktop_receipt: bool = False,
+    desktop_ready_timeout: float | None = None,
 ):
     _guard_cli_default_state_migration()
     paths.ensure_data_dirs()
@@ -14166,7 +14167,10 @@ def cmd_start(
         startup_deadline = None
         if desktop_receipt:
             service_kwargs["initial_ready_timeout"] = 0
-            startup_deadline = time.monotonic() + runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS
+            startup_deadline = time.monotonic() + (
+                runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS
+                if desktop_ready_timeout is None else desktop_ready_timeout
+            )
         service_pid = runtime.start_service(**service_kwargs)
         service_reused = service_start.reused
         bind_host = receipt_bind_host if receipt_bind_host is not None else runtime.effective_ui_bind_host(config)
@@ -17101,6 +17105,7 @@ def build_parser():
     )
     start_parser.add_argument("--hand-over", action="store_true", help=argparse.SUPPRESS)
     start_parser.add_argument("--desktop-receipt", action="store_true", help=argparse.SUPPRESS)
+    start_parser.add_argument("--desktop-ready-timeout", type=_non_negative_float, help=argparse.SUPPRESS)
     # The desktop shell's own entry points: runnable, but never listed.
     desktop_parser = subparsers.add_parser("desktop")
     desktop_subparsers = desktop_parser.add_subparsers(dest="desktop_command", required=True)
@@ -19445,6 +19450,8 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
         start_kwargs = {"open_browser": args.open_browser, "hand_over": args.hand_over}
         if args.desktop_receipt:
             start_kwargs["desktop_receipt"] = True
+            if args.desktop_ready_timeout is not None:
+                start_kwargs["desktop_ready_timeout"] = args.desktop_ready_timeout
         sys.exit(cmd_start(**start_kwargs))
     if args.command == "desktop" and args.desktop_command == "endpoint":
         sys.exit(cmd_desktop_endpoint())

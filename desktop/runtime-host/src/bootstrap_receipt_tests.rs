@@ -19,6 +19,7 @@ struct Fixture {
     receipt: bool,
     launches: AtomicUsize,
     descendants: bool,
+    expected_failure: bool,
 }
 
 impl Fixture {
@@ -95,6 +96,7 @@ impl Fixture {
             receipt,
             launches: AtomicUsize::new(0),
             descendants: case == "eof",
+            expected_failure: case == "budget",
         })
     }
 
@@ -104,7 +106,12 @@ impl Fixture {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
             if let Some(status) = child.try_wait().unwrap() {
-                assert!(status.success());
+                assert_eq!(
+                    status.success(),
+                    !self.expected_failure,
+                    "{}",
+                    diagnostic_tail(&self.scratch.join("stderr.log"))
+                );
                 break;
             }
             assert!(
@@ -204,6 +211,13 @@ impl ResolvedRuntimeLauncher for Arc<Fixture> {
         Ok(self.origin.clone())
     }
     fn launch(&self, _hand_over: bool) -> Result<LaunchedRuntime, LaunchError> {
+        self.launch_with_ready_timeout(false, DEFAULT_READY_TIMEOUT)
+    }
+    fn launch_with_ready_timeout(
+        &self,
+        _hand_over: bool,
+        ready_timeout: Duration,
+    ) -> Result<LaunchedRuntime, LaunchError> {
         self.launches.fetch_add(1, Ordering::SeqCst);
         let mut child = self.child.lock().unwrap();
         let watch = if self.receipt {
@@ -214,7 +228,19 @@ impl ResolvedRuntimeLauncher for Arc<Fixture> {
         } else {
             LaunchWatch::default()
         };
-        writeln!(child.stdin.as_mut().unwrap(), "start").unwrap();
+        if self.receipt {
+            // Use the exact argument builder used by the bundled launcher, then
+            // let the actual Python parser and cmd_start consume its budget.
+            let args = crate::launcher::desktop_start_arguments(ready_timeout);
+            writeln!(
+                child.stdin.as_mut().unwrap(),
+                "{}",
+                serde_json::to_string(&args).unwrap()
+            )
+            .unwrap();
+        } else {
+            writeln!(child.stdin.as_mut().unwrap(), "start").unwrap();
+        }
         Ok(LaunchedRuntime { pid: child.id(), watch })
     }
     fn expected_runtime_id(&self) -> Option<&str> {
@@ -223,6 +249,40 @@ impl ResolvedRuntimeLauncher for Arc<Fixture> {
     fn record_bootstrap_event(&self, event: &str) {
         BootstrapLog::at(self.scratch.join("bootstrap.log")).record(event, &[]);
     }
+}
+
+#[tokio::test]
+#[ignore = "requires repository Python and AVIBE_DESKTOP_READY_TIMEOUT_SECONDS=1"]
+async fn cmd_start_receipt_timeout_override() {
+    let settings = RuntimeHostSettings::from_env();
+    assert_eq!(
+        settings.ready_timeout,
+        Duration::from_secs(1),
+        "run with the documented shell override"
+    );
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_owned();
+    let fixture = Fixture::start(&root, "budget", true, 2.5, 0.0, 0);
+    let probe = Arc::new(HttpHealthProbe::new(settings.probe_timeout).unwrap());
+    let host = RuntimeHost::new(probe, Arc::new(fixture.clone()), settings);
+    let status = host.bootstrap(&DiscardStatus, BootstrapTrigger::Launch).await;
+    assert_eq!(
+        status.phase,
+        BootstrapPhase::Failed,
+        "the override expires before Controller readiness"
+    );
+    let trace = fixture.finish();
+    assert_eq!(trace["ready_timeout"], 1.0);
+    assert_eq!(
+        trace["result"], 1,
+        "the producer also expires, rather than keeping its old 120s budget"
+    );
+    assert!(trace["helper_work_ms"].as_f64().unwrap() < 1800.0);
+    assert_eq!(fixture.launches.load(Ordering::SeqCst), 1);
 }
 struct CountProbe {
     inner: HttpHealthProbe,

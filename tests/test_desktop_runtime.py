@@ -527,13 +527,18 @@ def test_ui_server_readiness_reuses_wildcard_listener(monkeypatch):
     ]
 
 
-def test_desktop_startup_readiness_uses_direct_no_redirect_http(monkeypatch):
+@pytest.mark.parametrize("response_delay", [0.0, 0.7, 2.5])
+def test_desktop_startup_readiness_uses_direct_no_redirect_http(monkeypatch, response_delay):
+    """Healthy Controller responses may use the former Rust probe's budget."""
+    import time
+
     requests = []
     proxy_requests = []
 
     class RuntimeHandler(BaseHTTPRequestHandler):
         def do_GET(self):
             requests.append(self.path)
+            time.sleep(response_delay)
             if self.path == "/health":
                 body = b""
             elif self.path == "/ready":
@@ -545,7 +550,10 @@ def test_desktop_startup_readiness_uses_direct_no_redirect_http(monkeypatch):
             self.send_response(200)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
         def log_message(self, *_args):
             return
@@ -581,7 +589,7 @@ def test_desktop_startup_readiness_uses_direct_no_redirect_http(monkeypatch):
             1234,
             "127.0.0.1",
             runtime_port,
-            timeout=2.0,
+            timeout=4.0,
         ) == 1234
     finally:
         runtime_server.shutdown()
@@ -632,25 +640,70 @@ def test_desktop_startup_readiness_rejects_redirects(monkeypatch):
     assert requests == ["/ready"]
 
 
-@pytest.mark.parametrize("response_kind", ["drip", "oversized"])
+@pytest.mark.parametrize("error_type", ["ConnectError", "ReadTimeout"])
+def test_desktop_readiness_retries_transport_errors_within_one_budget(monkeypatch, error_type):
+    import httpx
+    import time
+
+    observations = []
+
+    def fail_request(request):
+        observations.append(request.url.path)
+        raise getattr(httpx, error_type)("test transport failure", request=request)
+
+    client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx, "AsyncClient",
+        lambda **kwargs: client(transport=httpx.MockTransport(fail_request), **kwargs),
+    )
+    monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda **_kwargs: 1234)
+    monkeypatch.setattr(runtime, "pid_alive", lambda _pid: True)
+    started = time.monotonic()
+    assert runtime.wait_for_desktop_startup_ready(
+        1234, "127.0.0.1", 5123, timeout=0.2,
+    ) is None
+    assert time.monotonic() - started < 0.5
+    assert len(observations) >= 2
+    assert set(observations) == {"/ready"}
+
+
+@pytest.mark.parametrize(
+    "response_kind", ["drip", "oversized", "oversized-stream", "starting", "utf16", "compressed", "malformed"],
+)
 def test_desktop_ready_request_body_has_one_deadline_and_size_bound(monkeypatch, response_kind):
     """A peer sending bytes must not restart the whole observation budget."""
     import time
 
     completed = threading.Event()
+    requests = []
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
+            requests.append(time.monotonic())
             body = (
                 b'{"schema_version":1,"product":"avibe","ready":true}' + b" " * 1100
-                if response_kind == "oversized"
+                if response_kind in {"oversized", "oversized-stream"}
                 else b'{"schema_version":1,"product":"avibe","ready":true}'
             )
-            self.send_response(200)
-            self.send_header("Content-Length", str(len(body)))
+            if response_kind == "starting":
+                time.sleep(0.02)
+                body = b'{"schema_version":1,"product":"avibe","ready":false,"code":"controller_unavailable"}'
+            elif response_kind == "utf16":
+                body = body.decode().encode("utf-16")
+            elif response_kind == "malformed":
+                body = b'{"ready":true}'
+            elif response_kind == "compressed":
+                import gzip
+
+                body = gzip.compress(body)
+            self.send_response(503 if response_kind == "starting" else 200)
+            if response_kind == "compressed":
+                self.send_header("Content-Encoding", "gzip")
+            if response_kind != "oversized-stream":
+                self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             try:
-                if response_kind == "oversized":
+                if response_kind != "drip":
                     self.wfile.write(body)
                 else:
                     for byte in body:
@@ -676,6 +729,8 @@ def test_desktop_ready_request_body_has_one_deadline_and_size_bound(monkeypatch,
             1234, "127.0.0.1", server.server_address[1], timeout=0.2,
         ) is None
         assert time.monotonic() - started < 0.5
+        if response_kind == "starting":
+            assert len(requests) >= 2, "retries consume the original total deadline"
         assert completed.wait(2)
     finally:
         server.shutdown()

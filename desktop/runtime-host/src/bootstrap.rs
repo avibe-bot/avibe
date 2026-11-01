@@ -642,7 +642,7 @@ impl RuntimeHost {
                     return publish(sink, receipt_invalid(&origin, attempt));
                 }
                 if receipt.outcome == StartupReceiptOutcome::Failed {
-                    return publish(
+                    let status = publish(
                         sink,
                         BootstrapStatus::failed(
                             &origin,
@@ -651,6 +651,10 @@ impl RuntimeHost {
                             true,
                         ),
                     );
+                    // Keep the live helper's retry slot, but do not display the
+                    // same terminal failure again when its exit is reaped.
+                    watch.acknowledge_receipt_failure();
+                    return status;
                 }
                 if let Some(code) = self.clear_failed_launch() {
                     return publish(
@@ -907,14 +911,14 @@ impl RuntimeHost {
             // Spawning the helper is evidence that a Runtime may exist even
             // when the helper later reports failure. Keep that fact separate
             // from retry deduplication and stop authority.
-            state.attempt = Some(launcher.launch(hand_over)?);
+            state.attempt = Some(launcher.launch_with_ready_timeout(hand_over, self.settings.ready_timeout)?);
             state.runtime_may_be_running = true;
         }
         Ok(())
     }
 
-    /// A failed helper releases its retry slot and nothing else. Returns the
-    /// notice its exit calls for.
+    /// A failed helper releases its retry slot and nothing else. Report its
+    /// exit only when this attempt has not already published a valid FAILED.
     fn clear_failed_launch(&self) -> Option<BootstrapNoticeCode> {
         let mut state = self.launched_runtime();
         let code = match state.attempt.as_ref()?.watch.exit()? {
@@ -923,8 +927,9 @@ impl RuntimeHost {
             LaunchExit::HandoverFailed => BootstrapNoticeCode::RuntimeStopFailed,
             LaunchExit::Failed => BootstrapNoticeCode::LauncherExited,
         };
+        let presented = state.attempt.as_ref()?.watch.receipt_failure_presented();
         state.attempt = None;
-        Some(code)
+        (!presented).then_some(code)
     }
 
     /// Readiness timeout releases only a completed helper, never the liveness
@@ -1330,19 +1335,21 @@ mod tests {
 
     #[test]
     fn receipt_origin_comparison_uses_the_loopback_canonical_form() {
-        let expected = LoopbackOrigin::parse("http://127.0.0.1").expect("default HTTP port");
-        let explicit_default = ready_receipt("http://127.0.0.1:80");
-        let distinct = ready_receipt("http://127.0.0.1:81");
+        for host in ["127.0.0.1", "[::1]"] {
+            let expected = LoopbackOrigin::parse(&format!("http://{host}")).expect("default HTTP port");
+            let explicit_default = ready_receipt(&format!("http://{host}:80"));
+            let distinct = ready_receipt(&format!("http://{host}:81"));
 
-        let ReceiptEvent::Receipt(explicit_default) = explicit_default else {
-            unreachable!("test receipt is a receipt event");
-        };
-        let ReceiptEvent::Receipt(distinct) = distinct else {
-            unreachable!("test receipt is a receipt event");
-        };
+            let ReceiptEvent::Receipt(explicit_default) = explicit_default else {
+                unreachable!("test receipt is a receipt event");
+            };
+            let ReceiptEvent::Receipt(distinct) = distinct else {
+                unreachable!("test receipt is a receipt event");
+            };
 
-        assert!(receipt_matches_origin(&explicit_default, &expected));
-        assert!(!receipt_matches_origin(&distinct, &expected));
+            assert!(receipt_matches_origin(&explicit_default, &expected));
+            assert!(!receipt_matches_origin(&distinct, &expected));
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -1731,7 +1738,9 @@ mod tests {
 
     #[test]
     fn a_timeout_override_must_be_a_positive_bounded_number_of_seconds() {
+        assert_eq!(parse_timeout("1"), Some(Duration::from_secs(1)));
         assert_eq!(parse_timeout("30"), Some(Duration::from_secs(30)));
+        assert_eq!(parse_timeout("600"), Some(Duration::from_secs(600)));
         assert_eq!(parse_timeout("  30  "), Some(Duration::from_secs(30)));
         for rejected in ["", "0", "-1", "abc", "30s", "1e3", "601", "18446744073709551616"] {
             assert_eq!(parse_timeout(rejected), None, "override {rejected:?}");

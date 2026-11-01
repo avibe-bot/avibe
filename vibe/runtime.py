@@ -159,6 +159,8 @@ _PENDING_SQLITE_BACKUP_READINESS: tuple[Path, str, tuple[str, ...], datetime] | 
 _SERVICE_START_PROCESSES: dict[int, subprocess.Popen] = {}
 # /ready can spend up to two seconds in the Controller health probe.
 UI_ADOPTION_PROBE_TIMEOUT_SECONDS = 3.0
+# Preserve the desktop host's DEFAULT_PROBE_TIMEOUT when Python owns the wait.
+DESKTOP_READY_PROBE_TIMEOUT_SECONDS = 5.0
 
 
 def _rounded_seconds(seconds: float) -> float:
@@ -2507,14 +2509,21 @@ def wait_for_desktop_startup_ready(
     async def observe(client):
         # The combined exact-origin /ready predicate includes the usable UI,
         # service owner and Controller IPC. LAN /health is not a desktop gate.
-        async with client.stream("GET", f"{origin}/ready") as response:
-            body = bytearray()
-            async for chunk in response.aiter_bytes():
-                body.extend(chunk)
-                if len(body) > 1024:
+        async with client.stream("GET", f"{origin}/ready", headers={"Accept-Encoding": "identity"}) as response:
+            length = response.headers.get("content-length")
+            if length is not None:
+                try:
+                    if int(length) > 1024:
+                        return False
+                except ValueError:
                     return False
+            body = bytearray()
+            async for chunk in response.aiter_raw():
+                if len(body) + len(chunk) > 1024:
+                    return False
+                body.extend(chunk)
             try:
-                return _ui_ready_payload_state(response.status_code, json.loads(body)) is True
+                return _ui_ready_payload_state(response.status_code, json.loads(body.decode("utf-8"))) is True
             except (ValueError, UnicodeDecodeError):
                 return False
 
@@ -2531,7 +2540,9 @@ def wait_for_desktop_startup_ready(
                 try:
                     # Bound the entire request including headers and streamed
                     # body, not a fresh socket timeout for each received byte.
-                    ready = await asyncio.wait_for(observe(client), min(0.5, remaining))
+                    ready = await asyncio.wait_for(
+                        observe(client), min(DESKTOP_READY_PROBE_TIMEOUT_SECONDS, remaining),
+                    )
                 except (httpx.HTTPError, TimeoutError, OSError):
                     ready = False
                 if ready and time.monotonic() < deadline:

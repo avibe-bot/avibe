@@ -4329,7 +4329,8 @@ def test_desktop_receipt_frame_has_bounded_utf8_schema():
     }
 
 
-def test_desktop_receipt_start_shares_readiness_and_does_not_wait_twice(monkeypatch, capsys):
+@pytest.mark.parametrize("ready_timeout", [None, 1.0, 600.0])
+def test_desktop_receipt_start_shares_readiness_and_does_not_wait_twice(monkeypatch, capsys, ready_timeout):
     config = SimpleNamespace(
         has_configured_platform_credentials=lambda: True,
         ui=SimpleNamespace(setup_host="127.0.0.1", setup_port=5123, open_browser=False),
@@ -4367,7 +4368,7 @@ def test_desktop_receipt_start_shares_readiness_and_does_not_wait_twice(monkeypa
     monkeypatch.setattr(cli.runtime, "start_ui", start_ui)
     monkeypatch.setattr(cli.runtime, "wait_for_desktop_startup_ready", wait_ready)
 
-    assert cli.cmd_start(open_browser=False, desktop_receipt=True) == 0
+    assert cli.cmd_start(open_browser=False, desktop_receipt=True, desktop_ready_timeout=ready_timeout) == 0
 
     service_call = calls[0][1]
     ui_call = calls[1][3]
@@ -4376,7 +4377,8 @@ def test_desktop_receipt_start_shares_readiness_and_does_not_wait_twice(monkeypa
     assert service_call["initial_ready_timeout"] == 0
     assert ui_call["wait_for_ready"] is False
     assert ready_call[:4] == ("ready", 1234, "127.0.0.1", 5123)
-    assert ready_call[4] > 0
+    expected_budget = 120.0 if ready_timeout is None else ready_timeout
+    assert expected_budget - 0.5 < ready_call[4] <= expected_budget
     assert "@avibe-desktop-start:" in capsys.readouterr().out
 
 
@@ -4517,6 +4519,10 @@ def test_stop_parser_and_main_route_each_stop_mode(monkeypatch, arguments, expec
         (
             ["start", "--desktop-receipt"],
             {"open_browser": None, "hand_over": False, "desktop_receipt": True},
+        ),
+        (
+            ["start", "--no-open-browser", "--desktop-receipt", "--desktop-ready-timeout", "600"],
+            {"open_browser": False, "hand_over": False, "desktop_receipt": True, "desktop_ready_timeout": 600.0},
         ),
     ],
 )
