@@ -40,6 +40,13 @@ function agentNameHandle(name: string): string {
 
 
 
+/** The add/edit dialog wherever the shell mounts it: open on the provider's request. */
+export const BotProfileDialogHost: React.FC = () => {
+  const { enabled, profileRequest, closeProfile } = useBots();
+  if (!enabled) return null;
+  return <BotProfileDialog request={profileRequest} onClose={closeProfile} />;
+};
+
 export const BotProfileDialog: React.FC<{ request: BotProfileRequest | null; onClose: () => void }> = ({
   request,
   onClose,
@@ -152,7 +159,15 @@ const BotProfileForm: React.FC<{ request: BotProfileRequest; onClose: () => void
     const timer = window.setTimeout(() => void suggest(name, roleRef.current), 600);
     return () => window.clearTimeout(timer);
   }, [creatingNew, handleEdited, name, suggest]);
-  useEffect(() => () => suggestionRef.current?.controller.abort(), []);
+  // Closing the form cancels what it was doing: a suggestion in flight, and a
+  // create still waiting for its handle, which then never sends.
+  const closedRef = useRef(false);
+  const submitControllerRef = useRef<AbortController | null>(null);
+  useEffect(() => () => {
+    closedRef.current = true;
+    suggestionRef.current?.controller.abort();
+    submitControllerRef.current?.abort();
+  }, []);
 
   const handleError = handleDraft !== null && handleDraft !== '' && !BOT_HANDLE_RE.test(handleDraft)
     ? t('bots.dialog.handleInvalid')
@@ -214,9 +229,25 @@ const BotProfileForm: React.FC<{ request: BotProfileRequest; onClose: () => void
       // transliteration, which reads worse for a CJK name.
       let chosenHandle: string | null = handleEdited ? handleDraft?.trim() || null : null;
       if (!handleEdited) {
-        chosenHandle = handle.status === 'ready' && handle.forName === trimmedName
-          ? handle.handle
-          : await suggest(trimmedName, role);
+        if (handle.status === 'ready' && handle.forName === trimmedName) {
+          chosenHandle = handle.handle;
+        } else {
+          // Its own request, not the field's: a later keystroke's suggestion must not
+          // cancel the create, and only closing the form may.
+          const controller = new AbortController();
+          submitControllerRef.current = controller;
+          try {
+            const suggestion = await api.suggestBotHandle(
+              { display_name: trimmedName, role: role.trim() },
+              { signal: controller.signal },
+            );
+            chosenHandle = suggestion.handle || null;
+          } catch {
+            // A failed suggestion leaves the handle to the server.
+            chosenHandle = null;
+          }
+          if (closedRef.current || controller.signal.aborted) return;
+        }
       }
       let bot = await api.createBot({
         display_name: trimmedName,
@@ -332,7 +363,7 @@ const BotProfileForm: React.FC<{ request: BotProfileRequest; onClose: () => void
 
   return (
     <DialogContent
-      className="max-w-[460px] gap-0 overflow-hidden p-0 max-md:p-0"
+      className="max-w-[460px] gap-0 p-0 max-md:p-0"
       closeLabel={t('common.close')}
       onOpenAutoFocus={(event) => {
         // The name field asks for focus itself; on the Agent tab the list leads.

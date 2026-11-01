@@ -6,7 +6,6 @@ import { useApi } from './ApiContext';
 import { BotsContext, type BotProfileRequest, type BotRuntimeStatus, type BotsState } from './BotsContext';
 import { useInstanceAuthorization } from './InstanceAuthorizationContext';
 import { botDisplayName, orderBots, type Bot } from '../lib/bots';
-import { BotProfileDialog } from '../components/workbench/bots/BotProfileDialog';
 
 /** Owns the Owner's Bot list (`GET /api/bots`) and each Bot Session's running state.
  *
@@ -140,13 +139,10 @@ export const BotsProvider = ({ children }: { children: ReactNode }) => {
       openProfile: (request) => {
         if (enabled) setProfileRequest(request);
       },
+      profileRequest: enabled ? profileRequest : null,
+      closeProfile: () => setProfileRequest(null),
     };
-  }, [enabled, ownerBots, loaded, ownerStatuses, mainDefault, refresh, moveBot]);
+  }, [enabled, ownerBots, loaded, ownerStatuses, mainDefault, refresh, moveBot, profileRequest]);
 
-  return (
-    <BotsContext.Provider value={value}>
-      {children}
-      {enabled && <BotProfileDialog request={profileRequest} onClose={() => setProfileRequest(null)} />}
-    </BotsContext.Provider>
-  );
+  return <BotsContext.Provider value={value}>{children}</BotsContext.Provider>;
 };

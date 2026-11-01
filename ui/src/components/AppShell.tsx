@@ -16,6 +16,7 @@ import { useWorkbenchInbox } from '../context/WorkbenchInboxContext';
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 import { VersionBadge } from './VersionBadge';
 import { WorkbenchSidebar } from './workbench/WorkbenchSidebar';
+import { BotProfileDialogHost } from './workbench/bots/BotProfileDialog';
 import { SidebarResizer } from './SidebarResizer';
 import { AppsLauncher } from './AppsLauncher';
 import { ErrorBoundary } from './ui/error-boundary';
@@ -731,6 +732,14 @@ export const AppShell: React.FC = () => {
           />
         </RouteSurfaceActivityBoundary>
       )}
+
+      {/* The Bots add/edit dialog (docs/plans/bots.md D5), opened from the strip,
+          a Bot's conversation, or the Agents page. It is modal over the whole
+          shell, so any Settings placement suspends it with its form intact (the
+          model picker's Add model exit opens Settings over it). */}
+      <RouteSurfaceActivityBoundary active={!settingsOpen}>
+        <BotProfileDialogHost />
+      </RouteSurfaceActivityBoundary>
 
       {/* ⌘K message-search palette. Mounted shell-wide; the sidebar field is the
           Workbench entry point. */}

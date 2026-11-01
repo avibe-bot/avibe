@@ -271,6 +271,62 @@ test('adding a Bot sends the generated handle, its role, and the emoji avatar, t
   expect(denied).toEqual([]);
 });
 
+test('closing the dialog while a create waits for its handle sends nothing', async ({ page }) => {
+  const { denied } = await serveBots(page, 'en', [MAIN, CSO, PM]);
+  const created: unknown[] = [];
+  await page.route('**/api/bots', (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    created.push(route.request().postDataJSON());
+    return route.fulfill({ status: 201, json: { ok: true, bot: payload(CSO, 3) } });
+  });
+  await page.setViewportSize(DESKTOP);
+  await open(page, '/', { lang: 'en' });
+  await sidebarOf(page).getByRole('button', { name: 'Add a Bot' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Add a Bot' });
+  await dialog.getByRole('textbox').first().fill('首席安全官');
+  // Add before the handle exists: the create waits for one, then the user leaves.
+  await dialog.getByRole('button', { name: 'Add Bot' }).click();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  await page.waitForTimeout(2000);
+  expect(created).toEqual([]);
+  await expect(page).toHaveURL(/\/$/);
+  expect(denied).toEqual([]);
+});
+
+test('Settings opening over the dialog suspends it with the form intact', async ({ page }) => {
+  const { denied } = await serveBots(page, 'en', [MAIN, CSO, PM]);
+  await page.setViewportSize(DESKTOP);
+  await open(page, '/', { lang: 'en' });
+  await sidebarOf(page).getByRole('button', { name: 'Add a Bot' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Add a Bot' });
+  await dialog.getByRole('textbox').first().fill('Researcher');
+  // The model picker's Add model exit is an in-app route change to Settings; the
+  // sidebar's Settings link makes the same one (clicked through the modal's inert layer).
+  await page.locator('aside [data-settings-toggle="true"]').evaluate((node: HTMLElement) => node.click());
+  await expect(page.locator('[data-settings-overlay="true"]')).toBeVisible();
+  await expect(dialog).toBeHidden();
+  await page.keyboard.press('Escape');
+  await expect(page.locator('[data-settings-overlay="true"]')).toBeHidden();
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole('textbox').first()).toHaveValue('Researcher');
+  expect(denied).toEqual([]);
+});
+
+test('on a short window the dialog scrolls to its footer', async ({ page }) => {
+  const { denied } = await serveBots(page, 'en', [MAIN, CSO, PM]);
+  await page.setViewportSize({ width: 1000, height: 420 });
+  await open(page, '/', { lang: 'en' });
+  await sidebarOf(page).getByRole('button', { name: 'Add a Bot' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Add a Bot' });
+  await expect(dialog).toBeVisible();
+  expect(await dialog.evaluate((node) => node.scrollHeight > node.clientHeight && getComputedStyle(node).overflowY === 'auto')).toBe(true);
+  const add = dialog.getByRole('button', { name: 'Add Bot' });
+  await add.scrollIntoViewIfNeeded();
+  await expect(add).toBeInViewport();
+  expect(denied).toEqual([]);
+});
+
 test('with more Bots than fit, the strip scrolls and Add stays pinned at the right', async ({ page }) => {
   const { denied } = await serveBots(page, 'en', [MAIN, CSO, PM, ...EXTRA]);
   await page.setViewportSize(DESKTOP);

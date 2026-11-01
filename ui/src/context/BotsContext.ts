@@ -34,6 +34,10 @@ export interface BotsState {
   /** Open the one add/edit dialog: the strip's Add slot, a Bot's Edit profile, and
    *  the Agents page's "Set as Bot" all land here. */
   openProfile: (request: BotProfileRequest) => void;
+  /** What the dialog is open on, if anything. The shell mounts the dialog under
+   *  its route-activity boundary, so Settings opening over it suspends it. */
+  profileRequest: BotProfileRequest | null;
+  closeProfile: () => void;
 }
 
 const EMPTY: BotsState = {
@@ -49,6 +53,8 @@ const EMPTY: BotsState = {
   refresh: async () => undefined,
   moveBot: async () => false,
   openProfile: () => undefined,
+  profileRequest: null,
+  closeProfile: () => undefined,
 };
 
 export const BotsContext = createContext<BotsState>(EMPTY);
