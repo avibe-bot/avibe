@@ -773,7 +773,8 @@ vibe bot remove cso
 - `list` prints every Bot, the main Bot first. `show` prints one by handle.
 - `create` makes a Vibey Agent named after the handle and makes it a Bot.
   `--handle` is lowercase ASCII, 2 to 24 letters, digits, or hyphens, starting
-  with a letter; `main`, `memory`, and `ops` are reserved. Without `--handle`
+  with a letter and not ending with a hyphen; `main`, `memory`, and `ops` are
+  reserved. Without `--handle`
   the handle comes from the name: an ASCII name is normalized, any other name
   is transliterated, and a taken handle gets `-2`. Without `--model` the Bot
   follows the main Bot's model and effort.

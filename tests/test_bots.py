@@ -178,7 +178,13 @@ def test_generated_handles_add_a_suffix_on_collision(service):
 
 @pytest.mark.parametrize(
     ("handle", "code"),
-    [("Bad Handle", "bot_handle_invalid"), ("a", "bot_handle_invalid"), ("memory", "bot_handle_reserved")],
+    [
+        ("Bad Handle", "bot_handle_invalid"),
+        ("a", "bot_handle_invalid"),
+        # An Agent name never ends in a hyphen, so the Bot's Agent could not be named after this one.
+        ("researcher-", "bot_handle_invalid"),
+        ("memory", "bot_handle_reserved"),
+    ],
 )
 def test_a_chosen_handle_is_checked_never_rewritten(service, handle, code):
     from core.bots import BotError
@@ -372,3 +378,12 @@ def test_the_cli_session_list_hides_removed_bots_and_other_members_bots(service)
         member_ids = {row["id"] for row in list_sessions_page(conn, limit=50, authorization_context=member).items}
     assert shown.session_id in owner_ids and removed.session_id not in owner_ids
     assert not {shown.session_id, removed.session_id} & member_ids
+
+
+def test_bot_change_events_reach_only_the_owner():
+    from vibe.authorization import AuthorizationContext, can_receive_workbench_event, instance_owner_context
+
+    assert can_receive_workbench_event(instance_owner_context(), "bots.changed")
+    for role in ("member", "editor", "viewer"):
+        member = AuthorizationContext(instance_role=role, is_remote=True, subject="m1")
+        assert not can_receive_workbench_event(member, "bots.changed")

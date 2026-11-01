@@ -98,7 +98,9 @@ def bot_directory(handle: str) -> Path:
 
 
 def is_valid_handle(handle: Any) -> bool:
-    return isinstance(handle, str) and BOT_HANDLE_PATTERN.fullmatch(handle) is not None
+    """D2's pattern, and no trailing hyphen: a new Bot's Agent is named after its handle, and an Agent name never
+    ends in one, so such a handle could never be created."""
+    return isinstance(handle, str) and BOT_HANDLE_PATTERN.fullmatch(handle) is not None and not handle.endswith("-")
 
 
 def normalize_handle(text: Any) -> Optional[str]:
@@ -174,7 +176,8 @@ def require_new_handle(conn: Connection, handle: str, *, agent_id: Optional[str]
     if not is_valid_handle(handle):
         raise BotError(
             "bot_handle_invalid",
-            f"'{handle}' is not a valid Bot handle: 2 to 24 lowercase letters, digits, or hyphens, starting with a letter",
+            f"'{handle}' is not a valid Bot handle: 2 to 24 lowercase letters, digits, or hyphens, starting with a "
+            "letter and not ending with a hyphen",
             handle=handle,
         )
     if handle in RESERVED_BOT_HANDLES:

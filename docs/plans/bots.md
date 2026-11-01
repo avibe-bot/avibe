@@ -58,8 +58,9 @@ own. A Session has none of these; a Bot has all three.
   1. an ASCII name is normalized (`Researcher` to `researcher`);
   2. otherwise the main Bot's model, at its lowest reasoning effort, proposes
      an English codename from the display name and role, accepted only if it
-     matches `^[a-z][a-z0-9-]{1,23}$` (首席安全官 to `cso`); the request waits
-     at most 5 seconds;
+     matches `^[a-z][a-z0-9-]{1,23}$` and does not end with a hyphen (an
+     Agent name never does) (首席安全官 to `cso`); the request waits at most
+     5 seconds;
   3. if no model answers in time or the output is invalid, transliterate with
      `anyascii` (ISC license; 小爱 to `xiaoai`);
   4. on a collision add `-2`, and skip reserved names.

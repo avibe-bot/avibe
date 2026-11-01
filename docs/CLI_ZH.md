@@ -626,7 +626,7 @@ vibe bot remove cso
 
 - `list` 列出所有伙伴，主伙伴在最前；`show` 按 handle 显示一个伙伴。
 - `create` 新建一个以 handle 命名的 Vibey Agent，并把它设为伙伴。`--handle` 是小写
-  ASCII，2 到 24 个字母、数字或连字符，以字母开头；`main`、`memory`、`ops` 已保留。
+  ASCII，2 到 24 个字母、数字或连字符，以字母开头、不以连字符结尾；`main`、`memory`、`ops` 已保留。
   不传 `--handle` 时，handle 由名字生成：ASCII 名字会被规范化，其他名字会被转写，
   被占用时加 `-2`。不传 `--model` 时，伙伴沿用主伙伴的模型和推理强度。
 - `set` 把一个已启用的现有 Vibey Agent 设为伙伴。它的 handle 就是 Agent 名称；

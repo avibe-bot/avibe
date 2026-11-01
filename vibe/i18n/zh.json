@@ -397,7 +397,7 @@
     "bots": {
       "sessionProtected": "伙伴的对话由 Avibe 管理：不能归档，标题跟随伙伴的名字。",
       "bot_not_found": "找不到伙伴 `@{handle}`。",
-      "bot_handle_invalid": "`{handle}` 不是有效的标识。请使用 2 到 24 个小写字母、数字或连字符，并以字母开头。",
+      "bot_handle_invalid": "`{handle}` 不是有效的标识。请使用 2 到 24 个小写字母、数字或连字符，以字母开头，且不以连字符结尾。",
       "bot_handle_reserved": "标识 `{handle}` 已保留给内置伙伴。",
       "bot_handle_taken": "标识 `{handle}` 已被占用。",
       "bot_display_name_required": "请给伙伴起个名字。",

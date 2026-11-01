@@ -30,6 +30,7 @@ def conn(monkeypatch, tmp_path):
         ("首席安全官", "cso", ("cso", "model")),
         ("首席安全官", "`CSO`", ("cso", "model")),
         ("首席安全官", "Chief Security Officer", ("shouxianquanguan", "transliteration")),
+        ("首席安全官", "cso-", ("shouxianquanguan", "transliteration")),
         ("首席安全官", None, ("shouxianquanguan", "transliteration")),
         ("小爱", "ops", ("ops-2", "model")),
     ],
