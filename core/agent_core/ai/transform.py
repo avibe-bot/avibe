@@ -19,6 +19,7 @@ from core.agent_core.messages import (
     AssistantMessage,
     AssistantContent,
     HOSTED_RENDER_EPOCH,
+    HOSTED_RENDER_RULE,
     HostedToolBlock,
     ImageBlock,
     Message,
@@ -40,6 +41,8 @@ class TransformResult:
 
     messages: tuple[Message, ...]
     tool_call_id_map: Mapping[str, str]
+    #: Store row ids whose legacy pending tails were actually omitted in this compilation.
+    hosted_render_omitted: tuple[str, ...] = ()
 
     @property
     def id_map(self) -> Mapping[str, str]:
@@ -103,6 +106,7 @@ def transform_messages(
     pending_tool_ids: dict[str, list[str]] = {}
     suppressed_tool_result_ids: set[str] = set()
     transformed: list[Message] = []
+    omitted_rows: list[str] = []
 
     for position, message in enumerate(messages):
         if isinstance(message, UserMessage):
@@ -152,7 +156,9 @@ def transform_messages(
             in_flight=in_flight,
             interrupted=SYNTHETIC_TOOL_RESULT,
             parallel_group=position in parallel_groups,
-            omit_pending=_omit_refused_pending(message, position, messages, endpoint, target_protocol),
+            omit_pending=_omit_refused_pending(
+                message, position, messages, endpoint, target_protocol, parallel_group=position in parallel_groups
+            ),
         )
         # The synthetic results of the current run of hosted calls, and the assistant parts they split off.
         results: list[ToolResultMessage] = []
@@ -236,6 +242,11 @@ def transform_messages(
         if message.stop_reason in {"aborted", "error"}:
             suppressed_tool_result_ids.update(turn_tool_ids)
             continue
+        if (
+            message.hosted_render_epoch is None and message.transcript_row_id is not None
+            and any(portable.kind == "omit" for portable in hosted.values())
+        ):
+            omitted_rows.append(message.transcript_row_id)
         for source_id, wire_ids in turn_tool_ids.items():
             pending_tool_ids.setdefault(source_id, []).extend(wire_ids)
         split()
@@ -248,7 +259,9 @@ def transform_messages(
             transformed.extend(results)
 
     transformed = _insert_synthetic_results(transformed)
-    return TransformResult(messages=tuple(transformed), tool_call_id_map=dict(id_map))
+    return TransformResult(
+        messages=tuple(transformed), tool_call_id_map=dict(id_map), hosted_render_omitted=tuple(omitted_rows),
+    )
 
 
 def _complete_hosted_history(
@@ -349,24 +362,56 @@ def _omit_refused_pending(
     messages: tuple[Message, ...],
     endpoint: ModelEndpoint | None,
     protocol: str,
+    *,
+    parallel_group: bool = False,
 ) -> bool:
-    """Select B after an explicit hosted-payload refusal without changing old signed history back and forth.
+    """Keep rc8's marked history stable; migrate only an unbound legacy mixed tail.
 
-    A response's own marker says that the new renderer was available when it was committed, but it does not say how
-    that response rendered its predecessors. Later signed responses are the binding evidence: if any later one is an
-    old unmarked response, this response retains the released X* rendering; otherwise B is stable for this suffix.
+    The first signed successor commits the renderer that bound this prefix. Rule 3 must name this predecessor's
+    store row as actually omitted: neither the running version nor a provider call id is binding evidence.
+    No historical metadata is changed. Prefix-only compaction keeps a predecessor with its first successor.
     """
 
     if protocol != "anthropic" or endpoint is None or message.source_identity is None:
         return False
     if (message.source_identity, "hosted") not in endpoint.opaque_refused:
         return False
-    if message.hosted_render_epoch != HOSTED_RENDER_EPOCH:
+    later_messages = messages[position + 1 :]
+    if message.hosted_render_epoch == HOSTED_RENDER_EPOCH:
+        # This is the released rc8 predicate, including its treatment of partials. Do not apply the new guard or
+        # successor filtering to marked rows: existing signed history may already bind precisely that rendering.
+        return all(
+            not _has_signed_thinking(later) or later.hosted_render_epoch == HOSTED_RENDER_EPOCH
+            for later in later_messages
+            if isinstance(later, AssistantMessage)
+        )
+    if (
+        parallel_group or message.hosted_render_epoch is not None or message.hosted_render_rule is not None
+        or message.transcript_row_id is None
+    ):
+        return False  # No migration without a stable row identity; unknown versions and grouped results stay intact.
+
+    client_seen = pending_seen = False
+    for block in message.content:
+        if isinstance(block, ToolCallBlock):
+            client_seen = True
+        elif isinstance(block, HostedToolBlock) and block.record.status == "pending":
+            if not client_seen:
+                return False  # Only remove existing trailing in-place text, never a synthetic call/result pair.
+            pending_seen = True
+        elif pending_seen and isinstance(block, ThinkingBlock) and block.signature is not None:
+            return False  # This includes redacted thinking: its opaque data is held in signature.
+    if not pending_seen:
         return False
-    return all(
-        not _has_signed_thinking(later) or later.hosted_render_epoch == HOSTED_RENDER_EPOCH
-        for later in messages[position + 1 :]
-        if isinstance(later, AssistantMessage)
+
+    successor = next(
+        (later for later in later_messages if isinstance(later, AssistantMessage)
+         and later.stop_reason not in {"error", "aborted"} and _has_signed_thinking(later)),
+        None,
+    )
+    return successor is None or (
+        successor.hosted_render_epoch == HOSTED_RENDER_EPOCH and successor.hosted_render_rule == HOSTED_RENDER_RULE
+        and message.transcript_row_id in successor.hosted_render_omitted
     )
 
 

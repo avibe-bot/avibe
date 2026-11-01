@@ -20,6 +20,7 @@ from sqlalchemy import select
 from core.agent_core.messages import (
     AssistantMessage,
     HOSTED_RENDER_EPOCH,
+    HOSTED_RENDER_RULE,
     HostedAction,
     HostedNative,
     HostedRecord,
@@ -315,15 +316,16 @@ async def test_hosted_render_epoch_is_response_metadata_not_canonical_message_co
         home = _scope(conn, "C-hosted-render-epoch")
         _session(conn, "ses_hosted_render_epoch", home)
         consumed = _row(conn, "ses_hosted_render_epoch", home, "go")
+    from modules.agents.vibey.agent import VibeyAgent
+
+    agent = object.__new__(VibeyAgent)
+    agent._run_for = lambda *_: None
     store = AdapterTranscriptStore(
         SQLiteTranscriptStore(engine),
         engine,
         environment=lambda _: {},
         on_response=lambda *_: None,
-        response_metadata=lambda *_: {
-            "hosted_render_epoch": HOSTED_RENDER_EPOCH,
-            "future_metadata": "ignored by the model payload",
-        },
+        response_metadata=agent._response_metadata,
     )
     await store.consume_input("ses_hosted_render_epoch", consumed, _user("go"))
     written = await store.append_response("ses_hosted_render_epoch", _assistant("stored"), final=True)
@@ -332,11 +334,149 @@ async def test_hosted_render_epoch_is_response_metadata_not_canonical_message_co
     restored = loaded[1].message
     assert isinstance(restored, AssistantMessage)
     assert restored.hosted_render_epoch == HOSTED_RENDER_EPOCH
+    assert restored.hosted_render_rule is None  # The running version alone is not evidence of a migration.
+    assert written.message.hosted_render_rule is None
+    assert restored.hosted_render_omitted == ()
+    assert restored.transcript_row_id == written.message.transcript_row_id == written.row_id
     with engine.connect() as conn:
         row = conn.execute(select(messages).where(messages.c.id == written.row_id)).mappings().one()
     model = json.loads(row["content_json"])["model"]["message"]
     assert "hosted_render_epoch" not in model
-    assert "future_metadata" not in model
+    assert "hosted_render_rule" not in model
+    assert "hosted_render_omitted" not in model
+    assert "transcript_row_id" not in model
+
+
+@pytest.mark.parametrize("initial_refused", [(), ("old-a",), ("old-a", "old-b")])
+@pytest.mark.parametrize("paused", [False, True])
+async def test_legacy_binding_records_actual_wire_before_later_refusals(engine, initial_refused, paused):
+    """MH-HOSTED-VIBEY-003: a later refusal cannot rewrite the prefix of an already signed response.
+
+    Version-only fixtures missed this: use the real adapter and metadata writer, including a request which
+    migrates one legacy tail but not its sibling (even with reused provider ids), and a signed pause inside
+    the same response.
+    """
+    from dataclasses import replace
+
+    import httpx
+
+    from core.agent_core.ai.provider import Done
+    from modules.agents.vibey.agent import VibeyAgent
+    from tests.agent_core.ai._wire import build_wire_request
+    from tests.agent_core.ai.test_hosted_pause_turn import _request, _response, _served, _stream, _text, _thinking
+
+    sid = "ses_actual_render_binding"
+    with engine.begin() as conn:
+        home = _scope(conn, "C-actual-render-binding")
+        _session(conn, sid, home)
+        consumed = _row(conn, sid, home, "go")
+    raw_store = SQLiteTranscriptStore(engine)
+    await raw_store.consume_input(sid, consumed, _user("go"))
+    for i, identity in enumerate(("old-a", "old-b")):
+        legacy = AssistantMessage(
+            (
+                ToolCallBlock(f"client-{i}", "read", {"path": "a"}),
+                HostedToolBlock(
+                    id="reused-hosted-id", tool="web_search", action=HostedAction("search", queries=(f"q-{i}",)),
+                    record=HostedRecord(status="pending"),
+                    native=HostedNative(source_id="src_served00001", payload=({
+                        "type": "server_tool_use", "id": "reused-hosted-id", "name": "web_search", "input": {},
+                    },)),
+                ),
+            ),
+            ORIGIN, "tool_use", hosted_summary=HostedSummary(), source_identity=identity,
+        )
+        await raw_store.append_response(sid, legacy, final=False)
+        await raw_store.append_tool_result(
+            sid, ToolResultMessage(f"client-{i}", "read", (TextBlock("settled"),)), details={},
+        )
+    initial_entries = list(await raw_store.load(sid))
+    request = _request()
+    request = replace(
+        request, messages=tuple(entry.message for entry in initial_entries),
+        endpoint=replace(request.endpoint, source_identity="current",
+                         opaque_refused=frozenset((identity, "hosted") for identity in initial_refused)),
+    )
+
+    def answer(number):
+        return httpx.Response(200, headers=_served(), text=_response(
+            *([_thinking()] if number == 1 else []), _text("next"),
+            stop_reason="pause_turn" if paused and number == 1 else "end_turn", input_tokens=100, output_tokens=10,
+        ))
+
+    sent, events = await _stream(answer, request)
+    assert isinstance(events[-1], Done), events[-1]
+    assert len(sent) == (2 if paused else 1)
+    initial = json.loads(sent[0].content)
+    for i, identity in enumerate(("old-a", "old-b")):
+        blocks = initial["messages"][1 + 2 * i]["content"]
+        assert any(block.get("text", "").endswith("(no result)") for block in blocks) == (identity not in initial_refused)
+    if paused:
+        assert json.loads(sent[1].content)["messages"][:-1] == initial["messages"]
+
+    agent = object.__new__(VibeyAgent)
+    agent._run_for = lambda *_: None
+    store = AdapterTranscriptStore(raw_store, engine, environment=lambda _: {}, on_response=lambda *_: None,
+                                   response_metadata=agent._response_metadata)
+    await store.append_response(sid, events[-1].message, final=True)
+    restored = list(await store.load(sid))
+    assert restored[:-1] == initial_entries  # The migration never rewrites old rows.
+    evidence = tuple(entry.row_id for entry in initial_entries if isinstance(entry.message, AssistantMessage)
+                     and entry.message.source_identity in initial_refused)
+    assert restored[-1].message.hosted_render_omitted == evidence
+    assert restored[-1].message.hosted_render_rule == (HOSTED_RENDER_RULE if evidence else None)
+    with engine.connect() as conn:
+        row = conn.execute(select(messages).where(messages.c.id == restored[-1].row_id)).mappings().one()
+    canonical = json.loads(row["content_json"])["model"]["message"]
+    assert not {"hosted_render_omitted", "hosted_render_rule", "transcript_row_id"} & canonical.keys()
+    # The Session learns both refusals only after the signed successor was generated and committed.
+    replay = await build_wire_request(replace(
+        request, messages=tuple(entry.message for entry in restored),
+        endpoint=replace(request.endpoint, opaque_refused=frozenset({("old-a", "hosted"), ("old-b", "hosted")})),
+    ), gateway=True)
+    assert replay.body["messages"][:len(initial["messages"])] == initial["messages"]
+
+
+@pytest.mark.parametrize(("value", "expected"), [(None, None), (True, None), ("3", None), ({}, None), (3, 3), (4, 4)])
+async def test_optional_hosted_render_rule_metadata_does_not_break_historical_load(engine, value, expected):
+    with engine.begin() as conn:
+        home = _scope(conn, "C-render-rule")
+        _session(conn, "ses_render_rule", home)
+        consumed = _row(conn, "ses_render_rule", home, "go")
+    store = SQLiteTranscriptStore(engine)
+    await store.consume_input("ses_render_rule", consumed, _user("go"))
+    written = await store.append_response("ses_render_rule", _assistant("stored"), final=True)
+    with engine.begin() as conn:
+        conn.execute(messages.update().where(messages.c.id == written.row_id).values(
+            metadata_json=json.dumps({"hosted_render_epoch": 2, "hosted_render_rule": value}),
+        ))
+    loaded = list(await store.load("ses_render_rule"))
+    assert loaded[1].message.hosted_render_epoch == 2
+    assert loaded[1].message.hosted_render_rule == expected
+    assert loaded[1].payload == written.payload
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(None, ()), (True, ()), ("row", ()), ({}, ()), ([1], ()), (["row", None], ()), ([""], ()),
+     ([], ()), (["row"], ("row",))],
+)
+async def test_optional_hosted_render_evidence_loads_fail_closed(engine, value, expected):
+    with engine.begin() as conn:
+        home = _scope(conn, "C-render-evidence")
+        _session(conn, "ses_render_evidence", home)
+        consumed = _row(conn, "ses_render_evidence", home, "go")
+    store = SQLiteTranscriptStore(engine)
+    await store.consume_input("ses_render_evidence", consumed, _user("go"))
+    written = await store.append_response("ses_render_evidence", _assistant("stored"), final=True)
+    with engine.begin() as conn:
+        conn.execute(messages.update().where(messages.c.id == written.row_id).values(
+            metadata_json=json.dumps({"hosted_render_epoch": 2, "hosted_render_rule": 3, "hosted_render_omitted": value}),
+        ))
+    loaded = list(await store.load("ses_render_evidence"))
+    assert loaded[1].message.hosted_render_omitted == expected
+    assert loaded[1].message.hosted_render_rule == 3
+    assert loaded[1].payload == written.payload
 
 
 async def test_a_stored_unknown_native_hosted_row_loads_through_the_transcript_owner(engine):

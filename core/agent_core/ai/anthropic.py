@@ -262,7 +262,8 @@ class AnthropicAdapter(ProviderAdapter):
             if terminal is not None:
                 yield terminal
             return
-        transformed_messages, loaded_images = prepared
+        transformed_messages, loaded_images = prepared.messages, prepared.loaded_images
+        assembler.hosted_render_omitted = prepared.hosted_render_omitted
         if cancel.cancelled:
             terminal = assembler.terminal(assembler.aborted(cancel.reason))
             if terminal is not None:
@@ -979,7 +980,7 @@ class AnthropicAdapter(ProviderAdapter):
                     if terminal is not None:
                         yield terminal
                     return
-                transformed_messages, loaded_images = prepared
+                transformed_messages, loaded_images = prepared.messages, prepared.loaded_images
                 if first_sent is not None and _binding_prefix(
                     sending, transformed_messages, loaded_images
                 ) != _binding_prefix(request, (*first_sent[0], so_far), first_sent[1]):

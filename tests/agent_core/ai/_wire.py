@@ -38,5 +38,4 @@ async def build_wire_request(
     )
     if isinstance(prepared, ProviderError):
         raise ValueError(prepared.message)
-    messages, loaded_images = prepared
-    return _WIRE_REQUESTS[protocol](request, messages, gateway=gateway, loaded_images=loaded_images)
+    return _WIRE_REQUESTS[protocol](request, prepared.messages, gateway=gateway, loaded_images=prepared.loaded_images)
