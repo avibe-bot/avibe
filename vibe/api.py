@@ -2449,7 +2449,10 @@ def set_default_vibe_agent(name: str, *, user_context: Any = None) -> dict:
         agent = store.require_manageable(name, user_context=context)
         if not agent.enabled:
             raise ValueError(f"agent '{agent.name}' is disabled")
-        store.set_default_agent_name(name, user_context=context)
+        try:
+            store.set_default_agent_name(name, user_context=context)
+        except AgentBotLockedError as exc:
+            return _agent_lifecycle_error(exc)
         return {"ok": True, "default_agent_name": agent.name, "agent": _vibe_agent_payload(agent, brief=True)}
     finally:
         store.close()

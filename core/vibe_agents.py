@@ -1994,6 +1994,9 @@ class VibeAgentStore:
                     agent_name=agent.name,
                     reason="disabled",
                 )
+            if is_bot_agent(agent):
+                # A Bot is a standing colleague with one conversation; new chats never start on its Agent.
+                raise AgentBotLockedError(agent_name=agent.name)
             # No audience validation here: the default is advisory and the ACL
             # is enforced per-principal at use time. Agent managers may point
             # instance-wide routing without widening the target Agent's ACL.

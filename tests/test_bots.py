@@ -387,3 +387,27 @@ def test_bot_change_events_reach_only_the_owner():
     for role in ("member", "editor", "viewer"):
         member = AuthorizationContext(instance_role=role, is_remote=True, subject="m1")
         assert not can_receive_workbench_event(member, "bots.changed")
+
+
+def test_vibey_and_the_default_agent_stay_workers(service):
+    """The built-in Vibey Agent is never a Bot, and the default Agent and a Bot's Agent never trade places."""
+    from core.bots import BotError
+    from core.vibe_agents import AgentBotLockedError
+
+    store = service.store
+    vibey = store.get_builtin_default_agent_for_backend("vibey")
+    with pytest.raises(BotError) as builtin:
+        service.set_bot(vibey.name, display_name="Vibey")
+    assert builtin.value.code == "bot_agent_builtin"
+
+    store.create(name="writer", backend="vibey")
+    store.set_default_agent_name("writer")
+    with pytest.raises(BotError) as default:
+        service.set_bot("writer", display_name="Writer")
+    assert default.value.code == "bot_agent_default"
+
+    bot = service.create_bot(display_name="Researcher")
+    for name in (bot.agent.name, service.ensure_main_bot().agent.name):
+        with pytest.raises(AgentBotLockedError):
+            store.set_default_agent_name(name)
+    assert store.get_default_agent_name() == "writer"

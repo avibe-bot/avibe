@@ -34,6 +34,7 @@ from core.vibe_agents import (
     VibeAgent,
     VibeAgentStore,
     agent_bot_record,
+    is_builtin_default_agent,
     is_main_bot_agent,
     normalize_agent_name,
 )
@@ -556,6 +557,14 @@ class BotService:
                 raise BotError(
                     "bot_agent_backend", f"Only Vibey Agents can be Bots; '{agent.name}' runs on {agent.backend}"
                 )
+            if is_builtin_default_agent(agent):
+                # Vibey stays an ordinary worker: listed among Agents, mentionable, and the default (bots.md D9).
+                raise BotError("bot_agent_builtin", f"The built-in Agent '{agent.name}' cannot be a Bot", status=409)
+            if _is_default_agent(conn, agent):
+                raise BotError(
+                    "bot_agent_default", f"Agent '{agent.name}' is the default Agent; choose another default first",
+                    status=409,
+                )
             if not agent.enabled:
                 raise BotError("bot_agent_disabled", f"Agent '{agent.name}' is disabled", status=409)
             if agent_bot_record(agent) is not None:
@@ -708,6 +717,15 @@ class BotService:
                 updated_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             )
         )
+
+
+def _is_default_agent(conn: Connection, agent: VibeAgent) -> bool:
+    """Whether the instance's recorded default Agent is ``agent``: new chats start on it, so it cannot be a Bot."""
+    name = VibeAgentStore._default_agent_name(conn)
+    try:
+        return bool(name) and normalize_agent_name(name) == agent.normalized_name
+    except ValueError:
+        return False
 
 
 class _HandleMoved(Exception):

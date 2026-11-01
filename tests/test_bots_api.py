@@ -108,3 +108,11 @@ def test_bot_sessions_refuse_archive_and_title_edits(client):
     ).status_code == 200
     searched = client.get("/api/sessions?q=Research").get_json()["sessions"]
     assert all(row["id"] != "ses_researcher" for row in searched)
+
+
+def test_a_bots_agent_is_refused_as_the_default_over_http(client):
+    client.post("/api/bots", json={"display_name": "Researcher"}, headers=csrf_headers(client))
+    refused = client.post("/api/agents/default", json={"name": "researcher"}, headers=csrf_headers(client))
+    assert (refused.status_code, refused.get_json()["code"]) == (409, "agent_is_bot")
+    vibey = client.post("/api/bots/set", json={"agent_name": "vibey", "display_name": "V"}, headers=csrf_headers(client))
+    assert (vibey.status_code, vibey.get_json()["error"]["code"]) == (409, "bot_agent_builtin")

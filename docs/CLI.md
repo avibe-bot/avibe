@@ -780,7 +780,8 @@ vibe bot remove cso
   follows the main Bot's model and effort.
 - `set` makes an existing enabled Vibey Agent a Bot. Its handle is its Agent
   name; an Agent that was a Bot before gets its old handle, Session, and
-  directory back.
+  directory back. The built-in `vibey` Agent and the default Agent cannot be
+  set; a Bot's Agent cannot become the default Agent either.
 - `update` changes the display name, the emoji avatar (`--emoji` with `--hue`,
   or `--clear-avatar`), or the position among the other Bots. Change the role,
   model, or instructions with `vibe agent update`.
