@@ -93,8 +93,9 @@ def test_the_main_bot_is_always_enabled_and_cannot_leave(service):
         service.remove_bot("main")
     assert removed.value.code == "bot_main_not_removable"
     renamed = service.update_bot("main", display_name="歪比")
-    assert renamed.display_name == "歪比"
+    assert (renamed.display_name, _session("ses_main")["title"]) == ("歪比", "歪比")
     assert service.update_bot("main", display_name="").display_name == ""
+    assert _session("ses_main")["title"] is None
 
 
 # --- Bot fields are the catalog's ---------------------------------------------------------------------------------

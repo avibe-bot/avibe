@@ -696,13 +696,14 @@ class BotService:
 
     @staticmethod
     def _sync_session_title(conn: Connection, session_id: str, display_name: str) -> None:
-        """A Bot's Session is titled by its display name; the main Bot's empty name leaves the title alone."""
-        if not display_name:
-            return
+        """A Bot's Session is titled by its display name; the main Bot's empty name clears it (the UI's default)."""
         conn.execute(
             update(agent_sessions)
             .where(agent_sessions.c.id == session_id)
-            .values(title=display_name, updated_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+            .values(
+                title=display_name or None,
+                updated_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            )
         )
 
 
