@@ -65,10 +65,11 @@ const BotProfileForm: React.FC<{ request: BotProfileRequest; onClose: () => void
   const api = useApi();
   const navigate = useNavigate();
   const { showToast } = useToast();
-  const { mainBot, botForHandle, displayName, refresh } = useBots();
+  const { mainBot, botForHandle, displayName, afterWrite } = useBots();
   const editing = request.kind === 'edit' ? botForHandle(request.handle) ?? null : null;
   const [tab, setTab] = useState<'new' | 'agent'>(request.kind === 'create' ? request.tab ?? 'new' : 'new');
   const [agents, setAgents] = useState<VibeAgentBrief[] | null>(null);
+  const [defaultAgentName, setDefaultAgentName] = useState<string | null>(null);
   const [agentName, setAgentName] = useState<string | null>(request.kind === 'create' ? request.agentName ?? null : null);
   const [name, setName] = useState(editing?.display_name ?? '');
   const [role, setRole] = useState(editing?.role ?? '');
@@ -89,14 +90,18 @@ const BotProfileForm: React.FC<{ request: BotProfileRequest; onClose: () => void
     [agents, mainBot],
   );
   const eligibleAgents = useMemo(() => (agents ?? []).filter(eligibleForBot), [agents]);
-  const pickedAgent = eligibleAgents.find((agent) => agent.name === agentName) ?? null;
+  // The default Agent is listed but cannot be picked: the server refuses it until
+  // another Agent is the default, so the row says so instead of failing on submit.
+  const pickedAgent = eligibleAgents.find((agent) => agent.name === agentName && agent.name !== defaultAgentName) ?? null;
 
   useEffect(() => {
     let live = true;
     api
       .listVibeAgents({ cache: false })
       .then((result) => {
-        if (live) setAgents(result.agents ?? []);
+        if (!live) return;
+        setAgents(result.agents ?? []);
+        setDefaultAgentName(result.default_agent_name ?? null);
       })
       .catch(() => {
         if (live) setAgents([]);
@@ -213,7 +218,7 @@ const BotProfileForm: React.FC<{ request: BotProfileRequest; onClose: () => void
         if (!editing.builtin && role.trim() !== editing.role.trim()) {
           await api.updateVibeAgent(editing.agent_name, { description: role.trim() || null });
         }
-        await refresh();
+        await afterWrite();
         onClose();
         return;
       }
@@ -224,7 +229,7 @@ const BotProfileForm: React.FC<{ request: BotProfileRequest; onClose: () => void
         }
         let bot = await api.setBot({ agent_name: pickedAgent.name, display_name: trimmedName, avatar: emojiInput });
         bot = await uploadAvatar(bot);
-        await refresh();
+        await afterWrite();
         onClose();
         navigate(botSessionPath(bot));
         return;
@@ -262,7 +267,7 @@ const BotProfileForm: React.FC<{ request: BotProfileRequest; onClose: () => void
         ...(route ? { model: route.model, reasoning_effort: route.reasoning_effort } : {}),
       });
       bot = await uploadAvatar(bot);
-      await refresh();
+      await afterWrite();
       onClose();
       navigate(botSessionPath(bot));
     } catch (err) {
@@ -411,17 +416,22 @@ const BotProfileForm: React.FC<{ request: BotProfileRequest; onClose: () => void
           ) : (
             <div className="flex max-h-[180px] flex-col gap-1.5 overflow-y-auto" role="radiogroup" aria-label={t('bots.dialog.tabFromAgent')}>
               {eligibleAgents.map((agent) => {
-                const picked = agent.name === agentName;
+                const unavailable = agent.name === defaultAgentName;
+                const picked = !unavailable && agent.name === agentName;
+                const note = unavailable ? t('bots.notForDefaultAgent') : agent.description;
                 return (
                   <button
                     key={agent.id}
                     type="button"
                     role="radio"
                     aria-checked={picked}
+                    disabled={unavailable}
                     onClick={() => setAgentName(agent.name)}
                     className={clsx(
                       'flex items-center gap-2.5 rounded-lg border px-3 py-2 text-left transition',
-                      picked ? 'border-mint bg-mint-soft' : 'border-border hover:bg-foreground/[0.03]',
+                      unavailable
+                        ? 'cursor-not-allowed border-border opacity-60'
+                        : picked ? 'border-mint bg-mint-soft' : 'border-border hover:bg-foreground/[0.03]',
                     )}
                   >
                     <span className={clsx('grid size-4 shrink-0 place-items-center rounded-full border', picked ? 'border-mint' : 'border-border-strong')}>
@@ -430,7 +440,7 @@ const BotProfileForm: React.FC<{ request: BotProfileRequest; onClose: () => void
                     <BotIcon className="size-4 shrink-0 text-muted" />
                     <span className="min-w-0 flex-1 leading-tight">
                       <span className="block truncate font-mono text-[12px] font-semibold text-foreground">{agent.name}</span>
-                      {agent.description && <span className="block truncate text-[11px] text-muted">{agent.description}</span>}
+                      {note && <span className={clsx('block text-[11px] text-muted', !unavailable && 'truncate')}>{note}</span>}
                     </span>
                   </button>
                 );

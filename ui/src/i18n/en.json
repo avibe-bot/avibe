@@ -4682,6 +4682,7 @@
     "reorderPosition": "{{name}}, position {{position}} of {{count}}.",
     "reorderDropped": "Dropped {{name}}.",
     "reorderCancelled": "Reordering cancelled.",
+    "notForDefaultAgent": "It is the default Agent. Make another Agent the default first, then set it as a Bot.",
     "menu": {
       "label": "{{name}} actions",
       "editProfile": "Edit profile",

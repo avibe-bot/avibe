@@ -10,7 +10,9 @@ import { botDisplayName, orderBots, type Bot } from '../lib/bots';
 /** Owns the Owner's Bot list (`GET /api/bots`) and each Bot Session's running state.
  *
  *  The list is refetched on `bots.changed` and on every stream (re)connect, since
- *  the broker replays nothing. Unread counts are not here: they come from the
+ *  the broker replays nothing. That event is also how this page's own writes
+ *  arrive: `afterWrite` reads the list itself only while the stream is not live,
+ *  so a write is never read twice. Unread counts are not here: they come from the
  *  Inbox's per-session map by Session id, as the plan's Web API says. Running state
  *  is read once per Bot Session and then kept by `session.status` frames. */
 export const BotsProvider = ({ children }: { children: ReactNode }) => {
@@ -24,6 +26,7 @@ export const BotsProvider = ({ children }: { children: ReactNode }) => {
   const [profileRequest, setProfileRequest] = useState<BotProfileRequest | null>(null);
   const readRef = useRef(0);
   const sessionIdsRef = useRef<Set<string>>(new Set());
+  const streamLiveRef = useRef(false);
 
   const readStatuses = useCallback(
     async (sessionIds: string[]) => {
@@ -62,6 +65,10 @@ export const BotsProvider = ({ children }: { children: ReactNode }) => {
     }
   }, [api, enabled, readStatuses]);
 
+  const afterWrite = useCallback(async () => {
+    if (!streamLiveRef.current) await refresh();
+  }, [refresh]);
+
   useEffect(() => {
     if (!enabled) {
       // A reader who is not the Owner gets nothing (the value below withholds
@@ -73,7 +80,10 @@ export const BotsProvider = ({ children }: { children: ReactNode }) => {
     // The first read does not wait for the stream: a stream that never connects
     // must not leave the Owner without Bots.
     queueMicrotask(() => void refresh());
-    return api.connectWorkbenchEvents({
+    const disconnect = api.connectWorkbenchEvents({
+      onConnectionState: (state) => {
+        streamLiveRef.current = state === 'connected';
+      },
       onConnected: () => {
         // Nothing replays the gap: re-read the list and every Bot's status.
         void refresh().then(() => readStatuses([...sessionIdsRef.current]));
@@ -90,6 +100,10 @@ export const BotsProvider = ({ children }: { children: ReactNode }) => {
         setStatusBySession((prev) => (prev[sessionId] === 'running' ? prev : { ...prev, [sessionId]: 'running' }));
       },
     });
+    return () => {
+      streamLiveRef.current = false;
+      disconnect();
+    };
   }, [api, enabled, refresh, readStatuses]);
 
   const moveBot = useCallback(
@@ -111,10 +125,10 @@ export const BotsProvider = ({ children }: { children: ReactNode }) => {
         setBots(previous);
         return false;
       } finally {
-        void refresh();
+        void afterWrite();
       }
     },
-    [api, ownerBots, refresh],
+    [api, ownerBots, afterWrite],
   );
 
   const mainDefault = t('bots.mainDefaultName');
@@ -134,7 +148,7 @@ export const BotsProvider = ({ children }: { children: ReactNode }) => {
       botForAgent: (agentName) => (agentName ? byAgent.get(agentName) : undefined),
       botForHandle: (handle) => (handle ? byHandle.get(handle) : undefined),
       displayName: (bot) => botDisplayName(bot, mainDefault),
-      refresh,
+      afterWrite,
       moveBot,
       openProfile: (request) => {
         if (enabled) setProfileRequest(request);
@@ -142,7 +156,7 @@ export const BotsProvider = ({ children }: { children: ReactNode }) => {
       profileRequest: enabled ? profileRequest : null,
       closeProfile: () => setProfileRequest(null),
     };
-  }, [enabled, ownerBots, loaded, ownerStatuses, mainDefault, refresh, moveBot, profileRequest]);
+  }, [enabled, ownerBots, loaded, ownerStatuses, mainDefault, afterWrite, moveBot, profileRequest]);
 
   return <BotsContext.Provider value={value}>{children}</BotsContext.Provider>;
 };
