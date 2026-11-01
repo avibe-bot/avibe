@@ -8094,13 +8094,13 @@ def test_flush_suppressed_segment_claims_each_delivery_id_in_one_turn(tmp_path, 
     ("trigger", "spec", "expected"),
     [
         pytest.param(
-            "agent_run", {"source_kind": "agent", "source_actor": "ses_caller"},
-            "[Harness: agent run run-1 from #ses_caller; agent run run-2 from #ses_caller]",
+            "agent_run", {"source_kind": "agent", "source_actor": "sescaller01"},
+            "[Harness: agent run run-1 from #sescaller01; agent run run-2 from #sescaller01]",
             id="agent-runs-from-one-caller",
         ),
         pytest.param(
-            "agent_run", {"source_kind": "callback", "source_session_id": "ses_child"},
-            "[Harness: callback of run run-1 from #ses_child; callback of run run-2 from #ses_child]",
+            "agent_run", {"source_kind": "callback", "source_session_id": "seschild01"},
+            "[Harness: callback of run run-1 from #seschild01; callback of run run-2 from #seschild01]",
             id="callbacks-from-one-session",
         ),
         pytest.param(

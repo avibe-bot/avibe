@@ -62,6 +62,8 @@ def _token(value: Any) -> str:
 
 #: How an input no person typed begins (``AgentInputMetadata.render``).
 HARNESS_MARKER = "[Harness:"
+#: A Bot's permanent Session id, ``ses_<handle>`` (``core.bots.BOT_HANDLE_PATTERN``).
+_BOT_SESSION = re.compile(r"ses_([a-z][a-z0-9-]{1,23})")
 
 #: The dispatch provenance a ``[Harness: ...]`` label is built from: all a merged batch's
 #: Message keeps of each later Delivery's provenance (``merged_harness_sources``).
@@ -92,9 +94,12 @@ def harness_source(spec: Mapping[str, Any]) -> str:
     source_kind = _token(spec.get("source_kind"))
     actor = str(spec.get("source_actor") or "").strip()
     # The Agent Session that authored the input: a callback names the delegated run's
-    # Session, an agent-authored run its caller (``source_actor``).
+    # Session, an agent-authored run its caller (``source_actor``). A Bot's Session is
+    # ``ses_<handle>``, a namespace generated ids never enter (``docs/plans/bots.md`` D2),
+    # so it is named as the Bot.
     session = _token(spec.get("source_session_id")) or (_token(actor) if source_kind == "agent" else "")
-    origin = f"from #{session}" if session else ""
+    bot = _BOT_SESSION.fullmatch(session)
+    origin = f"from @<bot:{bot.group(1)}>" if bot else f"from #{session}" if session else ""
     if trigger == "watch":
         parts = ["Watch", definition, name]
     elif trigger == "scheduled":

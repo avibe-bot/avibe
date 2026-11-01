@@ -378,7 +378,7 @@
     },
     "agentLifecycle": {
       "agent_is_bot": {
-        "message": "Agent `{agent}` 是伙伴，因此保持启用并保留名称。",
+        "message": "Agent `{agent}` 是伙伴：保持启用、保留名称，也不能设为默认 Agent。",
         "hint": "请先将它移出伙伴；仍可调整它的模型、Effort、描述与系统提示词。"
       },
       "agent_always_enabled": {
@@ -397,9 +397,9 @@
     "bots": {
       "sessionProtected": "伙伴的对话由 Avibe 管理：不能归档，标题跟随伙伴的名字。",
       "bot_not_found": "找不到伙伴 `@{handle}`。",
-      "bot_handle_invalid": "`{handle}` 不是有效的标识。请使用 2 到 24 个小写字母、数字或连字符，以字母开头，且不以连字符结尾。",
-      "bot_handle_reserved": "标识 `{handle}` 已保留给内置伙伴。",
-      "bot_handle_taken": "标识 `{handle}` 已被占用。",
+      "bot_handle_invalid": "`{handle}` 不是有效的代号。请使用 2 到 24 个小写字母、数字或连字符，以字母开头，且不以连字符结尾。",
+      "bot_handle_reserved": "代号 `{handle}` 已保留给内置伙伴。",
+      "bot_handle_taken": "代号 `{handle}` 已被占用。",
       "bot_display_name_required": "请给伙伴起个名字。",
       "bot_display_name_too_long": "伙伴的名字最多 64 个字符。",
       "bot_avatar_invalid": "头像无效。请选择一个 emoji 和颜色，或上传一张图片。",
@@ -409,6 +409,8 @@
       "bot_agent_backend": "只有 Vibey Agent 可以设为伙伴。",
       "bot_agent_disabled": "请先启用这个 Agent，再设为伙伴。",
       "bot_agent_is_bot": "这个 Agent 已经是伙伴。",
+      "bot_agent_builtin": "内置的 Vibey Agent 保持为 Agent，不能设为伙伴。",
+      "bot_agent_default": "这个 Agent 是默认 Agent。请先选择其他默认 Agent，再把它设为伙伴。",
       "bot_main_not_removable": "主伙伴不能移出。",
       "bot_main_position": "主伙伴始终排在第一位。",
       "bot_position_invalid": "伙伴的位置是从 1 开始的整数。",

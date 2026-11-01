@@ -50,6 +50,10 @@ COMPONENT_TIERS = {
     "mcp-pagination-prompt": 1,
     "session-title-prompt": 1,
     "agent-instructions": 1,
+    # A Bot's sections are who it is (docs/plans/bots.md "Prompt drafts"); the roster is someone else's change.
+    "bot-identity-prompt": 1,
+    "bot-memory-prompt": 1,
+    "bot-main-prompt": 1,
     "harness-agents-prompt": 2,
     "skills-catalog": 2,
     "skills-more-notice": 2,
@@ -160,10 +164,21 @@ class Decision:
     applied: tuple[Pending, ...] = ()
 
 
+def _file_tier(path: str, *, global_file: bool) -> int:
+    """The user's global file is 1; a Bot's own memory file, ``~/.avibe/bots/<handle>/AGENTS.md``, is the Bot's own
+    writing, 3 (bots.md D11); every other file, the shared ``~/.avibe/bots/AGENTS.md`` included, is 2."""
+    if global_file:
+        return 1
+    from config import paths
+
+    bots = os.path.realpath(paths.get_bots_dir())
+    return 3 if os.path.dirname(os.path.dirname(os.path.realpath(path))) == bots else 2
+
+
 def component_tier(before: Component | None, after: Component | None) -> int:
     component = after or before
     if component.path:
-        return COMPONENT_TIERS.get(component.id, 1 if component.global_file else 2)
+        return COMPONENT_TIERS.get(component.id, _file_tier(component.path, global_file=component.global_file))
     if (before is not None and after is not None and component.id in COMPONENT_TIERS
             and before.contract_revision != after.contract_revision):
         return 1

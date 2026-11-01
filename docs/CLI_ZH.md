@@ -572,7 +572,7 @@ Session 空闲时立即启动；只有明确拒绝后才回退到 P3。它不会
 `vibe session send-now` 是无内容 P1 操作，只提升现有的精确 FIFO 队头，不新增消息。
 过期队头会被拒绝，而不会改为提升下一条；两个命令都不会调用 Stop。
 
-`--bot <handle>` 给伙伴（Bot）的永久 Session 发消息（见 `vibe bot`）。这次运行会像
+`--bot <handle>` 按代号给伙伴（Bot）的永久 Session 发消息（见 `vibe bot`）。这次运行会像
 `--queue` 一样排在伙伴之前的消息之后，所以伙伴一次只处理一条消息。伙伴只有一个对话，
 用自己的模型：`--agent`、`--session-id`、fork 参数、`--model`、`--reasoning-effort`、
 位置参数、`--cwd` 和 `--close-after` 都不能与 `--bot` 一起使用。对同时是伙伴的
@@ -624,18 +624,19 @@ vibe bot update cso --position 1
 vibe bot remove cso
 ```
 
-- `list` 列出所有伙伴，主伙伴在最前；`show` 按 handle 显示一个伙伴。
-- `create` 新建一个以 handle 命名的 Vibey Agent，并把它设为伙伴。`--handle` 是小写
+- `list` 列出所有伙伴，主伙伴在最前；`show` 按代号显示一个伙伴。
+- `create` 新建一个以代号（handle）命名的 Vibey Agent，并把它设为伙伴。`--handle` 是小写
   ASCII，2 到 24 个字母、数字或连字符，以字母开头、不以连字符结尾；`main`、`memory`、`ops` 已保留。
-  不传 `--handle` 时，handle 由名字生成：ASCII 名字会被规范化，其他名字会被转写，
+  不传 `--handle` 时，代号由名字生成：ASCII 名字会被规范化，其他名字会被转写，
   被占用时加 `-2`。不传 `--model` 时，伙伴沿用主伙伴的模型和推理强度。
-- `set` 把一个已启用的现有 Vibey Agent 设为伙伴。它的 handle 就是 Agent 名称；
-  以前当过伙伴的 Agent 会拿回原来的 handle、Session 和目录。
+- `set` 把一个已启用的现有 Vibey Agent 设为伙伴。它的代号就是 Agent 名称；
+  以前当过伙伴的 Agent 会拿回原来的代号、Session 和目录。内置的 `vibey` Agent
+  和默认 Agent 不能设为伙伴；伙伴的 Agent 也不能设为默认 Agent。
 - `update` 修改显示名称、emoji 头像（`--emoji` 配合 `--hue`，或 `--clear-avatar`），
   或在其他伙伴中的位置。角色、模型或指令用 `vibe agent update` 修改。
 - `remove` 移出伙伴，保留 Agent、Session 和目录。主伙伴不能移出。
 
-伙伴创建后 handle 不再改变：它的 Session 是 `ses_<handle>`，目录是
+伙伴创建后代号不再改变：它的 Session 是 `ses_<handle>`，目录是
 `~/.avibe/bots/<handle>/`。主伙伴的 Session 是 `ses_main`。Agent 作为伙伴期间保持
 启用，不能改名或删除。目录一开始是一个空的 Git 仓库；Avibe 在伙伴 Session 的每个
 Turn 之前（他人的修改）和之后（伙伴自己的修改）自动提交，从不压缩历史。

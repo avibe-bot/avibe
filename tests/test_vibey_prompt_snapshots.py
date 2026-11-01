@@ -37,6 +37,9 @@ def choose(previous, candidate, **overrides):
     (Component("hosted-tools", "new"), 2),
     (Component("unknown-future-module", "new"), 2),
     (Component("tool-environment", "new"), 3),
+    (Component("bot-identity-prompt", "new"), 1),
+    (Component("bot-memory-prompt", "new"), 1),
+    (Component("bot-main-prompt", "new"), 1),
 ])
 def test_each_component_class_replaces_only_at_its_tier(component, expected):
     old = replace(component, content="old")
@@ -218,3 +221,14 @@ def test_a_failed_optional_write_does_not_fail_the_turn(tmp_path, monkeypatch):
     monkeypatch.setattr(SnapshotStore, "_write_bytes", denied)
     assert not store.save("session", state, snapshot=True)
     assert store.load("session") is None
+
+
+def test_a_bots_own_memory_file_is_tier_three_and_the_shared_layer_tier_two(monkeypatch, tmp_path):
+    """bots.md D11: a Bot's own AGENTS.md is its own writing; the memory Bot's shared layer is bounded."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    own = str(tmp_path / "bots" / "cso" / "AGENTS.md")
+    shared = str(tmp_path / "bots" / "AGENTS.md")
+    nested = str(tmp_path / "bots" / "cso" / "notes" / "AGENTS.md")
+    for path, expected in ((own, 3), (shared, 2), (nested, 2)):
+        component = Component("file:" + path, "new", path)
+        assert component_tier(replace(component, content="old"), component) == expected, path

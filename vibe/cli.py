@@ -5459,6 +5459,9 @@ def cmd_agent_default(args):
         agent = store.require(args.name)
         _print_cli_payload("default_agent", default_agent_name=agent.name, agent=_agent_payload(agent, brief=True))
         return 0
+    except AgentBotLockedError as exc:
+        _print_task_error(_agent_lifecycle_cli_error(exc))
+        return 1
     except Exception as exc:
         _print_task_error(exc)
         return 1
@@ -17891,8 +17894,9 @@ def build_parser():
         "set",
         help="Make an existing Vibey Agent a Bot",
         description=(
-            "Make an enabled Vibey Agent a Bot. Its handle is its Agent name; an Agent that was a Bot before "
-            "gets its old handle back, with its Session and directory."
+            "Make an enabled Vibey Agent a Bot, other than the built-in vibey Agent and the default Agent. Its "
+            "handle is its Agent name; an Agent that was a Bot before gets its old handle back, with its Session "
+            "and directory."
         ),
         error_help_command="vibe bot set --help",
     )

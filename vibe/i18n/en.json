@@ -378,7 +378,7 @@
     },
     "agentLifecycle": {
       "agent_is_bot": {
-        "message": "Agent `{agent}` is a Bot, so it stays enabled and keeps its name.",
+        "message": "Agent `{agent}` is a Bot: it stays enabled, keeps its name, and is never the default Agent.",
         "hint": "Remove it from Bots first; you can still change its model, effort, description, and system prompt."
       },
       "agent_always_enabled": {
@@ -409,6 +409,8 @@
       "bot_agent_backend": "Only Vibey Agents can be set as Bots.",
       "bot_agent_disabled": "Enable the Agent before setting it as a Bot.",
       "bot_agent_is_bot": "This Agent is already a Bot.",
+      "bot_agent_builtin": "The built-in Vibey Agent stays an Agent and cannot be set as a Bot.",
+      "bot_agent_default": "This Agent is the default Agent. Choose another default before setting it as a Bot.",
       "bot_main_not_removable": "The main Bot cannot be removed.",
       "bot_main_position": "The main Bot always comes first.",
       "bot_position_invalid": "A Bot's position is a whole number from 1.",

@@ -5520,7 +5520,7 @@ def _vibe_agent_result_response(result: dict):
     status = 200
     if not result.get("ok", True):
         code = result.get("code")
-        if code in {"agent_in_use", "agent_archived_read_only"}:
+        if code in {"agent_in_use", "agent_archived_read_only", "agent_is_bot"}:
             status = 409
         elif code in {"agent_not_found", "agent_import_source_not_found"}:
             status = 404
@@ -5727,7 +5727,7 @@ def vibe_agents_default_post():
 
     payload = request.json or {}
     try:
-        return jsonify(
+        return _vibe_agent_result_response(
             api.set_default_vibe_agent(
                 payload.get("name") or "",
                 user_context=getattr(g, "authorization_context", None),

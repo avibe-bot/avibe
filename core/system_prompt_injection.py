@@ -36,11 +36,36 @@ logger = logging.getLogger(__name__)
 #   guidance and catalogs; backends must not prepend or append their own copy.
 
 
+#: The main Bot's name in prompts while the user has not named it (``docs/plans/bots.md`` D5).
+MAIN_BOT_DEFAULT_DISPLAY_NAME = "Vibey"
+
+
 @dataclass(frozen=True)
 class AgentPromptInfo:
     name: str
     description: str
     backend: str = "unknown"
+    #: Set when the Agent is a Bot: the Bots table lists it, and the Agents table leaves it out.
+    bot_handle: str = ""
+    bot_display_name: str = ""
+    bot_position: int = 0
+    bot_builtin: bool = False
+
+
+@dataclass(frozen=True)
+class BotPromptInfo:
+    """The Bot a Vibey Turn runs as, for its own sections (``docs/plans/bots.md`` "Prompt drafts").
+
+    Every field is a fact of the Bot, never of the Session or Turn, so a Bot's sections are byte-stable across its
+    Turns and identical in its forks, which keep its directory (D7).
+    """
+
+    handle: str
+    display_name: str
+    role: str
+    session_id: str
+    workdir: str
+    builtin: bool = False
 
 
 def _codex_generated_images_block() -> RenderedPromptBlock:
@@ -94,6 +119,40 @@ def _is_web_platform(platform: str) -> bool:
     return platform.strip().lower() in {"avibe", "web"}
 
 
+def _agent_bot_fields(agent: Any) -> dict[str, Any]:
+    """The Bot an Agent is, from an Agent record, its list payload (``bot``), or an already coerced row."""
+    if isinstance(agent, AgentPromptInfo):
+        return {
+            "bot_handle": agent.bot_handle,
+            "bot_display_name": agent.bot_display_name,
+            "bot_position": agent.bot_position,
+            "bot_builtin": agent.bot_builtin,
+        }
+    if isinstance(agent, dict):
+        bot = agent.get("bot")
+        builtin = bool(bot.get("builtin")) if isinstance(bot, dict) else False
+    else:
+        from core.vibe_agents import agent_bot_record, is_main_bot_agent
+
+        try:
+            bot = agent_bot_record(agent) if getattr(agent, "archived_at", None) is None else None
+            builtin = bool(bot) and is_main_bot_agent(agent)
+        except (AttributeError, TypeError):
+            bot, builtin = None, False
+    if not isinstance(bot, dict) or not str(bot.get("handle") or "").strip():
+        return {}
+    try:
+        position = int(bot.get("position") or 0)
+    except (TypeError, ValueError):
+        position = 0
+    return {
+        "bot_handle": str(bot["handle"]).strip(),
+        "bot_display_name": str(bot.get("display_name") or "").strip(),
+        "bot_position": position,
+        "bot_builtin": builtin,
+    }
+
+
 def _coerce_agent_prompt_info(agent: Any) -> AgentPromptInfo:
     if isinstance(agent, dict):
         raw_name = str(agent.get("name") or "").strip()
@@ -112,6 +171,7 @@ def _coerce_agent_prompt_info(agent: Any) -> AgentPromptInfo:
         name=name,
         description=description or "(no description)",
         backend=backend or "unknown",
+        **_agent_bot_fields(agent),
     )
 
 
@@ -123,17 +183,37 @@ def _escape_markdown_table_cell(value: str) -> str:
     return str(value).replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ").strip()
 
 
-def _format_enabled_agents_rows(enabled_agents: Optional[Iterable[Any]]) -> str:
-    if enabled_agents is None:
-        return ""
-
+def _coerce_enabled_agents(enabled_agents: Optional[Iterable[Any]]) -> list[AgentPromptInfo]:
     rows: list[AgentPromptInfo] = []
-    for agent in enabled_agents:
+    for agent in enabled_agents or ():
         try:
             rows.append(_coerce_agent_prompt_info(agent))
         except ValueError:
             logger.debug("Skipping enabled Agent prompt row with no name: %r", agent)
+    return rows
 
+
+def _bot_display_name(name: str, *, builtin: bool) -> str:
+    return name or (MAIN_BOT_DEFAULT_DISPLAY_NAME if builtin else "")
+
+
+def _format_bots_rows(rows: list[AgentPromptInfo]) -> str:
+    """The Bots table: the main Bot first, then by position, as the Web strip orders them."""
+    bots = sorted(
+        (row for row in rows if row.bot_handle),
+        key=lambda row: (0 if row.bot_builtin else 1, row.bot_position, row.bot_handle),
+    )
+    return "\n".join(
+        f"| {_escape_markdown_table_cell(bot.bot_handle)} | "
+        f"{_escape_markdown_table_cell(_bot_display_name(bot.bot_display_name, builtin=bot.bot_builtin))} | "
+        f"{_escape_markdown_table_cell(bot.description)} |"
+        for bot in bots
+    )
+
+
+def _format_enabled_agents_rows(rows: list[AgentPromptInfo]) -> str:
+    """The Agents table. An Agent that is a Bot is listed once, as the Bot (``bots.md`` D4)."""
+    rows = [row for row in rows if not row.bot_handle]
     if not rows:
         return ""
 
@@ -154,6 +234,55 @@ def _format_enabled_agents_rows(enabled_agents: Optional[Iterable[Any]]) -> str:
             f"{_escape_markdown_table_cell(agent.description)} |"
         )
     return "\n".join(lines)
+
+
+def _role_sentence(role: str) -> str:
+    text = " ".join(str(role or "").split())
+    if not text:
+        return ""
+    return f" Your role: {text}" + ("" if text[-1] in ".!?。！？" else ".")
+
+
+def _bot_blocks(bot: BotPromptInfo) -> list[RenderedPromptBlock]:
+    blocks = [
+        render_prompt_block(
+            "bot-identity-prompt",
+            display_name=_bot_display_name(" ".join(bot.display_name.split()), builtin=bot.builtin) or bot.handle,
+            handle=bot.handle,
+            role_sentence=_role_sentence(bot.role),
+            session_id=bot.session_id,
+        ),
+        render_prompt_block("bot-memory-prompt", workdir=bot.workdir, session_id=bot.session_id),
+    ]
+    if bot.builtin:
+        blocks.append(render_prompt_block("bot-main-prompt"))
+    return blocks
+
+
+def bot_for_turn(store: Any, *, agent_id: Optional[str], cwd: str) -> Optional[BotPromptInfo]:
+    """The Bot a Turn runs as: its Agent is the Bot's, and it runs in the Bot's directory.
+
+    This is the one rule for the Bot sections, and it needs no Session id: the Bot's own Session runs there, and so
+    does every fork of it, since forks keep the source's directory (``bots.md`` D7). A fork therefore shares its
+    source's sections and its cached prefix; a fresh ``--agent`` Session of the same Agent runs elsewhere and is an
+    ordinary worker. Reads the catalog: call it off the event loop.
+    """
+    if store is None or not agent_id or not cwd:
+        return None
+    from core.bots import bot_from_agent
+
+    agent = store.get_by_id(agent_id)
+    bot = bot_from_agent(agent) if agent is not None else None
+    if bot is None or os.path.realpath(cwd) != os.path.realpath(bot.directory):
+        return None
+    return BotPromptInfo(
+        handle=bot.handle,
+        display_name=bot.display_name,
+        role=bot.role,
+        session_id=bot.session_id,
+        workdir=str(bot.directory),
+        builtin=bot.builtin,
+    )
 
 
 def get_enabled_agents_for_prompt(controller: Any) -> Optional[list[AgentPromptInfo]]:
@@ -187,8 +316,12 @@ def build_system_prompt_blocks(
     skills_cwd: str | Path | None = None,
     skills_project_base: str | Path | None = None,
     skill_catalog_sink: list[dict[str, Any]] | None = None,
+    bot: BotPromptInfo | None = None,
 ) -> list[RenderedPromptBlock]:
-    """The production composition, also exported by the debug command."""
+    """The production composition, also exported by the debug command.
+
+    ``bot`` is the Bot a Vibey Turn runs as (``bot_for_turn``); only then are the Bot sections rendered.
+    """
 
     skills = None
     if skills_cwd is not None:
@@ -208,6 +341,10 @@ def build_system_prompt_blocks(
         render_prompt_block("base-capabilities-intro"),
         render_prompt_block("agent-working-principles"),
     ]
+    if isinstance(bot, dict):
+        bot = BotPromptInfo(**bot)
+    if bot is not None:
+        blocks.extend(_bot_blocks(bot))
     if context is not None and backend != "vibey":
         blocks.append(render_prompt_block("session-start-prompt", default_session_id=_extract_default_session_id(context)))
         correction = build_forked_session_correction_prompt(context)
@@ -225,9 +362,13 @@ def build_system_prompt_blocks(
         blocks.append(render_prompt_block("vault-routing-prompt"))
     if context is not None:
         blocks.append(render_prompt_block("harness-routing-prompt"))
-        agent_rows = _format_enabled_agents_rows(enabled_agents)
-        if agent_rows:
-            blocks.append(render_prompt_block("harness-agents-prompt", enabled_agents_rows=agent_rows))
+        roster = _coerce_enabled_agents(enabled_agents)
+        agent_rows = _format_enabled_agents_rows(roster)
+        bots_rows = _format_bots_rows(roster)
+        if agent_rows or bots_rows:
+            blocks.append(
+                render_prompt_block("harness-agents-prompt", bots_rows=bots_rows, enabled_agents_rows=agent_rows)
+            )
     if include_context_guidance:
         blocks.append(render_prompt_block("project-context-prompt"))
     from core.mcp_hub.prompt import build_mcp_prompt_blocks
@@ -244,7 +385,8 @@ def build_system_prompt_blocks(
                 skill_catalog_sink.append(catalog_result(skills, entry_point="runtime_prompt"))
             except Exception:
                 logger.info("Skill catalog observation unavailable during prompt preparation")
-    if context is not None:
+    if context is not None and bot is None:
+        # A Bot's Session is titled by the Bot's display name, so it gets no title section (bots.md D5).
         platform = resolve_context_platform(context, fallback_platform=fallback_platform, default="<platform>")
         if _is_web_platform(platform):
             blocks.append(render_prompt_block("session-title-prompt"))
