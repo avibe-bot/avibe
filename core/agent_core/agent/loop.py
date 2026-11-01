@@ -85,6 +85,7 @@ from core.agent_core.ai.provider import (
     ThinkingDelta,
 )
 from core.agent_core.cancel import CancelToken
+from core.agent_core.harness.cache_metrics import CacheTracker
 from core.agent_core.harness.context import (
     CLEAR_SOFT_RATIO,
     DEFAULT_MAX_OUTPUT_TOKENS,
@@ -336,6 +337,7 @@ class _Attempt:
     error: Optional[ProviderError] = None
     committed: bool = False
     audited: bool = False
+    cache: Optional[dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -432,6 +434,11 @@ class Agent:
         # The C-9 cache clock deliberately keys the served provider/model boundary;
         # canonical rows also retain Source identity, but it is not a separate clock.
         self._last_model_at: dict[tuple[str, str], float] = {}
+        self.cache_causes: tuple[Mapping[str, Any], ...] = ()
+        self.prompt_pending = False
+        self.prompt_notice = False
+        self._cache_tracker = CacheTracker()
+        self._cache_fork = False
         self._seq = 0
 
     @property
@@ -750,7 +757,7 @@ class Agent:
         await self._save_state()
         # The attempt this response answered: the ledger's latest conversation attempt (the C-9 anchor).
         attempt = next((item for item in reversed(self._attempts) if item.purpose == "conversation"), None)
-        facts = {"request": request_facts(attempt.request)} if self.context is not None and attempt else {}
+        facts = {"request": request_facts(attempt.request), "cache": attempt.cache} if self.context is not None and attempt else {}
         row = await self._scope.call(
             lambda: self.store.append_response(
                 self.session_id,
@@ -785,6 +792,11 @@ class Agent:
                 selected = await self._scope.call(self.models.resolve)
                 self._check_model_route(selected)
                 self._rows = list(await self._scope.call(lambda: self.store.load(self.session_id)))
+                if self.context is not None:
+                    attempts = await self._scope.call(lambda: self.store.load_cache_attempts(self.session_id))
+                    self._cache_tracker = CacheTracker()
+                    self._cache_tracker.restore(self._rows, attempts)
+                    self._cache_fork = bool(self._rows) and not any(row.session_id == self.session_id for row in self._rows)
                 projection = project(self._rows)
                 self._ctx.state = deepcopy(dict(projection.state))
                 self._committed_state_json = state_representation(self._ctx.state)
@@ -1045,6 +1057,13 @@ class Agent:
                     yield retry_error, tools
                     return
                 self._scope.check()
+                cache = None
+                if self.context is not None:
+                    cache = await self._scope.call(lambda: asyncio.to_thread(
+                        self._cache_tracker.begin, request, self._rows, now=self.context.clock(),
+                        causes=self.cache_causes, fork=self._cache_fork,
+                    ))
+                    cache.update(prompt_pending=self.prompt_pending, prompt_notice=self.prompt_notice)
                 stream = self.models.provider_for(request.endpoint.protocol).stream(request, self._ctx.cancel)
                 streamed = False
                 terminal = None
@@ -1069,12 +1088,16 @@ class Agent:
                         served = terminal.message if isinstance(terminal, Done) else terminal.partial
                         upstream = served.origin if served is not None else endpoint_origin(request.endpoint)
                         self._last_model_at[_cache_of(upstream)] = self.context.clock()
+                        self._cache_tracker.finish(cache, served, rows=self._rows)
+                        if served is not None and served.usage is not None:
+                            self.cache_causes, self._cache_fork = (), False
                     self._attempts.append(
                         _Attempt(
                             purpose,
                             request,
                             terminal.message if isinstance(terminal, Done) else terminal.partial,
                             None if isinstance(terminal, Done) else terminal,
+                            cache=cache,
                         )
                     )
                     relieve = (
@@ -1179,23 +1202,26 @@ class Agent:
                         raise
 
     async def _settle_attempts(self, first: int, *, error: Optional[BaseException] = None) -> None:
-        """Every conversation attempt since ``first`` that reported usage and did not become a response row:
-        exactly one non-context ``ModelAttempt`` audit row, in every mode, with or without ``ContextConfig``.
+        """Every uncommitted conversation attempt since ``first`` with usage or optional cache facts:
+        exactly one non-context ``ModelAttempt`` audit row. Missing usage is unknown, never zero.
 
-        It is the one place that usage is kept. ``error`` is why the model call ended, for an attempt that
+        It is the one place that uncommitted usage is kept. ``error`` is why the model call ended, for an attempt that
         carries no provider error of its own (a response refused at admission, a failed commit).
         """
         for attempt in self._attempts[first:]:
             message = attempt.message
             if attempt.purpose != "conversation" or attempt.committed or attempt.audited:
                 continue
-            if message is None or message.usage is None:
+            usage = message.usage if message is not None else None
+            if usage is None and attempt.cache is None:
                 continue
             attempt.audited = True
             cause = attempt.error
             payload: dict[str, Any] = {
                 "version": 1,
-                "usage": usage_to_dict(message.usage),
+                **({"usage": usage_to_dict(usage)} if usage is not None else {}),
+                **({"cache": attempt.cache, "cache_state": list(self._cache_tracker.latest.values())}
+                   if attempt.cache is not None else {}),
                 "error": f"{cause.kind}: {cause.message}" if cause is not None else str(error) if error else None,
             }
             await self._audit("attempt", payload)
@@ -2570,6 +2596,13 @@ class Agent:
         usage = self._turn_usage(start)
         if usage is not None:
             record["usage"] = usage_to_dict(usage)
+        cache_attempts = [
+            {"cache": item.cache, **({"usage": usage_to_dict(item.message.usage)} if item.message and item.message.usage else {})}
+            for item in self._attempts[start:] if item.cache is not None
+        ]
+        if cache_attempts:
+            record["cache_attempts"] = cache_attempts
+            record["cache_state"] = list(self._cache_tracker.latest.values())
         return {**record, **finished}
 
     async def _side_tool(

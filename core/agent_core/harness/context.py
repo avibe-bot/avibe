@@ -473,6 +473,12 @@ def add_usage(total: Optional[Usage], usage: Optional[Usage]) -> Optional[Usage]
         cache_read_tokens=total.cache_read_tokens + usage.cache_read_tokens,
         cache_write_tokens=total.cache_write_tokens + usage.cache_write_tokens,
         reasoning_tokens=reasoning,
+        cache_writes_by_ttl=(
+            None if total.cache_writes_by_ttl is None and usage.cache_writes_by_ttl is None else
+            {ttl: (total.cache_writes_by_ttl or {}).get(ttl, 0) + (usage.cache_writes_by_ttl or {}).get(ttl, 0)
+             for ttl in (total.cache_writes_by_ttl or {}).keys() | (usage.cache_writes_by_ttl or {}).keys()}
+        ),
+        cache_write_total_reported=total.cache_write_total_reported and usage.cache_write_total_reported,
     )
 
 

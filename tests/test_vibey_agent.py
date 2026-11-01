@@ -2749,6 +2749,18 @@ async def test_the_instruction_files_enter_between_the_head_and_avibes_sections_
     rows = await harness.context_rows()
     last_input = [row.message for row in rows if row.kind == "input"][-1]
     assert f"instructions: pending {tmp_path / 'AGENTS.md'}@" in last_input.content[0].text
+    # Diagnostics belong to actual snapshot transitions, not every warm no-op Turn.
+    with engine.connect() as conn:
+        events = conn.execute(select(agent_events.c.event_type, agent_events.c.content_json).where(
+            agent_events.c.session_id == session,
+            agent_events.c.event_type.in_(("prompt.pending", "prompt.applied")),
+        )).all()
+    applied = [json.loads(body) for kind, body in events if kind == "prompt.applied"]
+    pending = [json.loads(body) for kind, body in events if kind == "prompt.pending"]
+    assert len(pending) == 2
+    assert {event["reason"] for event in applied} == {"session_start", "tier1"}
+    assert len(applied) == 2
+    assert {item["tier"] for event in applied for item in event["components"]} == {1, 2}
 
 
 @pytest.mark.parametrize("own_content", ["My own revision.", "", "  \n", "\ufeff"])

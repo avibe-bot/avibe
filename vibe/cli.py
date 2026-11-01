@@ -7857,8 +7857,49 @@ def cmd_data_query(args):
         return 1
 
 
-# ``vibe session`` — Agent-facing session management. ``list`` / ``get`` are
-# read-only; ``update`` edits title, visibility, or scope placement. All three go through the shared
+def cmd_data_cache(args):
+    """Summarize Vibey cache behavior from read-only diagnostic views."""
+    help_command = "vibe data cache --help"
+    try:
+        now = datetime.now(timezone.utc)
+        since_text = _parse_cli_time_filter(
+            getattr(args, "since", None) or "7d", field_name="--since", help_command=help_command
+        )
+        until_text = _parse_cli_time_filter(
+            getattr(args, "until", None), field_name="--until", help_command=help_command
+        )
+        since = datetime.fromisoformat(since_text.replace("Z", "+00:00")) if since_text else now - timedelta(days=7)
+        until = datetime.fromisoformat(until_text.replace("Z", "+00:00")) if until_text else now
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=timezone.utc)
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
+        since = since.astimezone(timezone.utc)
+        until = until.astimezone(timezone.utc)
+        if until <= since:
+            raise TaskCliError("--until must be later than --since", code="invalid_time_range", help_command=help_command)
+        from core.handlers.cache_metrics import report
+
+        payload = report(
+            since=since,
+            until=until,
+            session_id=getattr(args, "session_id", None),
+            model=getattr(args, "model", None),
+            user_context=caller_resource_user_context(caller_context_from_env()),
+            db_path=paths.get_sqlite_state_path(),
+        )
+        _print_cli_payload("data_cache", **payload)
+        return 0
+    except ReadOnlyQueryError as exc:
+        _print_task_error(TaskCliError(str(exc), code=exc.code, hint=exc.hint, help_command=help_command))
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command=help_command)
+        return 1
+
+
+# Session commands: list/get are read-only; update changes title, visibility or scope placement.
+# All three use the shared
 # ``core.services.sessions`` business API (same entry the UI server uses) and
 # never surface archived (soft-deleted) sessions.
 # Lean list row: enough to locate a session and tell whether it is busy.
@@ -18639,7 +18680,7 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe data --help",
     )
-    data_subparsers = data_parser.add_subparsers(dest="data_command", metavar="{query,retention,skill-usage}")
+    data_subparsers = data_parser.add_subparsers(dest="data_command", metavar="{query,cache,retention,skill-usage}")
     data_subparsers.required = True
     skill_usage_parser = data_subparsers.add_parser(
         "skill-usage", help="Inspect or clear local Skill statistics (Instance Member or Owner)",
@@ -18649,18 +18690,33 @@ def build_parser():
     skill_usage_parser.add_argument("--clear", action="store_true", help="Clear Skill events and daily statistics.")
     skill_usage_parser.add_argument("--yes", action="store_true", help="Confirm clearing Skill statistics.")
     _add_json_noop(skill_usage_parser)
+    data_cache_parser = data_subparsers.add_parser(
+        "cache",
+        help="Summarize Vibey cache behavior and current-list cost estimates",
+        description=(
+            "Read Vibey cache request facts without changing local state. Cost figures use the cached current "
+            "standard price list, not historical bills; unknown or inferred facts are labeled in the result."
+        ),
+        error_help_command="vibe data cache --help",
+    )
+    data_cache_parser.add_argument("--since", help="Start time (ISO 8601 or relative value such as 6h or 7d; default 7d).")
+    data_cache_parser.add_argument("--until", help="Exclusive end time (ISO 8601 or relative value; default now).")
+    data_cache_parser.add_argument("--session-id", help="Limit the report to one Session.")
+    data_cache_parser.add_argument("--model", help="Limit the report to one served model id.")
+    _add_json_noop(data_cache_parser)
     data_query_parser = data_subparsers.add_parser(
         "query",
         help="Run one read-only SQL query",
         description="Run one guarded read-only SQL query against the local SQLite state database.",
         epilog=(
-            "Recall earlier work through four views (the raw tables stay queryable):\n"
+            "Recall earlier work through four history views (the raw tables stay queryable):\n"
             "  digests(session_id, title, agent_name, last_active_at, parent_session_id, digest_at, mind, memo, now, text)\n"
             "    what each Session is about and where it stands: a Vibey Session's latest checkpoint memory\n"
             "    (mind, memo, now; text holds all three), else its first input and latest reply\n"
             "  sessions(session_id, title, agent_name, backend, model, status, workdir, created_at, last_active_at, parent_session_id)\n"
             "  transcript(session_id, at, role, kind, text, turn_id, message_id)   role: user, agent, harness\n"
             "  turns(session_id, turn_id, started_at, ended_at, outcome, input, reply)\n"
+            "  cache_requests: Vibey cache classification, TTL writes and current-list valuation (Member access).\n"
             "excerpt(text, 'term'[, width]) shows the text around a match; REGEXP takes a Python pattern.\n"
             "  vibe data query --sql \"select session_id, title, excerpt(text, 'tax') from digests where text like '%tax%' order by last_active_at desc\" --format text\n"
             "  vibe data query --sql \"select session_id, at, excerpt(text, 'watch list') from transcript where text like '%watch list%' order by at desc\" --format text\n"
@@ -19603,6 +19659,7 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("skill", "list"): "editor",
     ("skill", "load"): "editor",
     ("data", "query"): "editor",
+    ("data", "cache"): "member",
     ("data", "skill-usage"): "editor",
     # Kept model requests hold whole prompts, tool definitions and output of every Session, as raw bytes: Owner
     # only, listing included.
@@ -19937,6 +19994,8 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
     if args.command == "data":
         if args.data_command == "query":
             sys.exit(cmd_data_query(args))
+        if args.data_command == "cache":
+            sys.exit(cmd_data_cache(args))
         if args.data_command == "skill-usage":
             sys.exit(cmd_data_skill_usage(args))
         if args.data_command == "retention":

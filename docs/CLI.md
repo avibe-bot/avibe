@@ -367,9 +367,10 @@ vibe data query --sql "select id, status, created_at from agent_runs order by cr
 vibe data query --sql-file query.sql --limit 50
 ```
 
-Four views give every query a stable way into conversation history; the raw
+Four history views give every query a stable way into conversation history; the raw
 tables stay queryable. Start from `digests` to recognize a Session, then read
-its details in `transcript` or `turns`:
+its details in `transcript` or `turns`. Cache diagnostics add two connection-local
+views described below; they do not create database tables:
 
 | View | Columns | Meaning |
 | --- | --- | --- |
@@ -377,6 +378,8 @@ its details in `transcript` or `turns`:
 | `sessions` | `session_id`, `title`, `agent_name`, `backend`, `model`, `status`, `workdir`, `created_at`, `last_active_at`, `parent_session_id` | One row per Session. `parent_session_id` is the Session whose Agent started it with `vibe agent run`. |
 | `transcript` | `session_id`, `at`, `role`, `kind`, `text`, `turn_id`, `message_id` | Every message with text, in delivery time `at`. `role` is `user`, `agent`, or `harness` (input Avibe delivered: another Agent's brief, a callback, a Watch or Task); `kind` is the message type, such as `result` for an Agent's reply. |
 | `turns` | `session_id`, `turn_id`, `started_at`, `ended_at`, `outcome`, `input`, `reply` | One row per recorded Agent Turn: the text it was given and its final reply. Older history without Turn records is in `transcript`. |
+| `_cache_rows` | Internal source view for cache diagnostics | Response, attempt, and fork-turn rows normalized before `cache_requests`; use `cache_requests` for a stable public shape. |
+| `cache_requests` | `request_id`, `session_id`, `turn_id`, `at`, `started_at`, `provider`, `protocol`, `model`, `purpose`, classification/facts, valuation | Per-request Vibey cache facts and a current-list cost valuation. Rows with no `cache` object are explicitly `timestamp_inferred`; `valuation` is JSON and may be a lower bound or have no USD value. |
 
 Two functions help with long text. `excerpt(text, 'term')` returns about 300
 characters of `text` around the first case-insensitive match of `term` (pass a
@@ -401,6 +404,33 @@ are refused. The schema PRAGMAs `table_list`, `table_info`, `table_xinfo`,
 `no such table` or `no such column` error carries a `hint` with the closest
 names and the table list, or the referenced tables' columns. Tasks and Watches
 are rows of `run_definitions` (`definition_type` is `scheduled` or `watch`).
+
+### `vibe data cache`
+
+Summarize Vibey cache behavior for the last seven days, or an explicit UTC time
+range. This command is read-only and requires the Member-level diagnostic access
+needed to inspect `agent_events`.
+
+```bash
+vibe data cache
+vibe data cache --since 30d --until 2026-10-31T00:00:00Z
+vibe data cache --session-id sesk8m4q2p7x --model claude-opus-5-5
+```
+
+The report groups request facts by served route and includes idle bands,
+active/passive/provider-miss/estimated-miss classes, causes, TTL write buckets, prompt freshness
+by tier, and lifetime what-if estimates where the route supports an override.
+Cost values use the cached local standard price list, including any local alias or
+default rate; they are not historical provider bills or subscription charges.
+Missing usage, unknown TTLs, inferred legacy timestamps, aliases, default rates,
+and unavailable fast-mode information remain labeled in the JSON result. Valuation
+also reports the concrete price key, per-token rate multipliers, and whether cache
+rates are listed or defaulted, with an explicit flag when the read discount is
+unknown. What-if
+figures keep active breaks and provider misses as misses, recover only passive
+expiry, and reprice all known writes at the candidate lifetime's rate (Claude's
+static tools/system prefix stays at one hour). Requests with unknown TTL writes or
+an unreported aggregate write count are excluded from what-ifs, not reassigned.
 
 ### `vibe data skill-usage`
 

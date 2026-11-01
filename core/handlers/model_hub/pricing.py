@@ -26,7 +26,7 @@ import json
 import logging
 import math
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Final, Mapping, Optional
@@ -128,6 +128,8 @@ class ModelPrice:
     # `experimental.modes.fast.cost`: a call its response says ran fast is billed
     # at these rates, read by the same rules. None when the table lists none.
     fast: Optional["ModelPrice"] = None
+    # Diagnostic provenance only; does not change accounting or price equality.
+    listed_cache_rates: frozenset[str] = field(default_factory=frozenset, compare=False, repr=False)
 
 
 def _bounded(value: object, ceiling: float) -> Optional[float]:
@@ -251,6 +253,9 @@ def _flat_price(cost: object) -> Optional[ModelPrice]:
         ),
         cache_write_30m=input_price * 1.25 if cache_write_30m is None else cache_write_30m,
         cache_write_12h=input_price * 2.5 if cache_write_12h is None else cache_write_12h,
+        listed_cache_rates=frozenset(key for key in (
+            "cache_read", "cache_write", "cache_write_1h", "cache_write_30m", "cache_write_12h",
+        ) if _price(cost.get(key)) is not None),
         charges_cache_writes=any(
             price is not None and price > input_price for price in (cache_write, cache_write_1h)
         ),
@@ -409,6 +414,25 @@ class PriceTable:
         if key not in self._memo:
             self._memo[key] = self._resolve(key, hops=0)
         return self._memo[key]
+
+    def price_key(self, model_id: str) -> Optional[str]:
+        """The concrete table/override key used by ``price(model_id)``."""
+        return self._resolve_key(normalize_model_id(model_id), hops=0)
+
+    def _resolve_key(self, key: str, *, hops: int) -> Optional[str]:
+        if hops > _MAX_ALIAS_HOPS or not key:
+            return None
+        override = self._model_overrides.get(key)
+        if override is not None:
+            alias, price = override
+            if alias is not None:
+                return self._resolve_key(alias, hops=hops + 1)
+            if price is not None:
+                return key
+        if self._catalog_price(key) is not None:
+            return key
+        alias = MODEL_ALIASES.get(key)
+        return self._resolve_key(alias, hops=hops + 1) if alias is not None else None
 
     def _resolve(self, key: str, *, hops: int) -> Optional[ModelPrice]:
         if hops > _MAX_ALIAS_HOPS or not key:

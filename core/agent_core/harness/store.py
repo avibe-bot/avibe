@@ -44,6 +44,10 @@ class TranscriptStore(Protocol):
         """Context entries of the Session and its fork ancestry, ordered by ``context_seq``."""
         ...
 
+    async def load_cache_attempts(self, session_id: str) -> Sequence[Mapping[str, Any]]:
+        """Latest optional request-cache record per route from this Session's non-context attempts."""
+        ...
+
     async def consume_input(self, session_id: str, message_id: str, message: UserMessage) -> ContextEntry:
         """Admit an already stored input row into the context as rendered for the model."""
         ...
@@ -55,6 +59,7 @@ class TranscriptStore(Protocol):
         *,
         final: bool,
         request: Optional[Mapping[str, Any]] = None,
+        cache: Optional[Mapping[str, Any]] = None,
         replied: Optional[bool] = None,
         images: Sequence[HostedImage] = (),
         superseded: bool = False,

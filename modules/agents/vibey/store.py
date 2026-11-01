@@ -128,6 +128,9 @@ class AdapterTranscriptStore:
         """Small response facts; only legacy rows need their canonical body decoded."""
         return await self._store.load_turn_response_metadata(session_id, turn_id)
 
+    async def load_cache_attempts(self, session_id: str) -> Sequence[Mapping[str, Any]]:
+        return await self._store.load_cache_attempts(session_id)
+
     async def consume_input(self, session_id: str, message_id: str, message: UserMessage) -> ContextEntry:
         await self._await_input_row(session_id, message_id)
         previous = self._env_state.get(session_id)
@@ -153,6 +156,7 @@ class AdapterTranscriptStore:
         *,
         final: bool,
         request: Optional[Mapping[str, Any]] = None,
+        cache: Optional[Mapping[str, Any]] = None,
         replied: Optional[bool] = None,
         images: Sequence[HostedImage] = (),
         superseded: bool = False,
@@ -162,6 +166,7 @@ class AdapterTranscriptStore:
             message,
             final=final,
             request=request,
+            cache=cache,
             replied=replied,
             images=images,
             superseded=superseded,

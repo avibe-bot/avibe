@@ -288,9 +288,9 @@ There is one normalizer per adapter, not separate initial/delta/choice mappers.
 Mapped counters are shape-validated before normalization. Ignored fields are
 not revalidated or retained: they do not influence canonical usage. The
 canonical schema deliberately has no per-modality, TTL, request-count, tier,
-geography, cost or redundant-total field. This inventory does not add any.
-Reasoning is already included in output, never added to it; a missing optional
-reasoning count remains `None`, unlike Pi's default zero.
+geography, cost or redundant-total field. This inventory does not add any. Reasoning is already included in output, never added to it; a missing optional reasoning count remains `None`, unlike Pi's default zero.
+
+This optional decomposition is deliberately outside canonical `Usage`: it is a transient adapter diagnostic and, when a response is committed, is carried once by `ModelResponse.cache.writes_by_ttl`. Bad or contradictory optional TTL data is dropped to `unknown`; it never makes an otherwise valid provider response terminal. The aggregate write total remains the source of token accounting, and a missing OpenAI aggregate is marked incomplete even when both TTL details are present.
 
 #### Anthropic: `_anthropic_usage`
 
@@ -307,8 +307,8 @@ Pi's separate `cacheWrite1h` (`:840-847`) has no canonical counterpart.
 | `cache_read_input_tokens` | `cache_read_tokens` |
 | `cache_creation_input_tokens` | `cache_write_tokens`; non-null aggregate wins over every TTL value, including when aggregate is zero |
 | `cache_creation` | Nullable TTL breakdown container. If aggregate is missing/null, sum its non-null counters as the reported snapshot; missing/null/empty/all-null breakdown preserves current aggregate. Do not add a TTL snapshot to previous usage. |
-| `cache_creation.ephemeral_5m_input_tokens` | Part of fallback `cache_write_tokens` sum only; absent/null contributes nothing. Explicit zero is a reported value. No separate TTL field. |
-| `cache_creation.ephemeral_1h_input_tokens` | Same fallback policy as 5m; never added on top of an aggregate. No separate 1h billing field; Model Hub's usage ledger meters the one-hour part (`cache_write_1h_input_tokens`, `model-hub-contracts/api.md`). |
+| `cache_creation.ephemeral_5m_input_tokens` | Part of the transient `Usage.cache_writes_by_ttl["5m"]` diagnostic when the aggregate is compatible; absent/null contributes nothing. Explicit zero is a reported value. It is never added to canonical totals or persisted in canonical `Usage`. |
+| `cache_creation.ephemeral_1h_input_tokens` | Same transient diagnostic policy for `"1h"`; never added on top of an aggregate. Model Hub's separate usage ledger meters the one-hour part (`cache_write_1h_input_tokens`, `model-hub-contracts/api.md`). |
 | `output_tokens_details` | Nullable decomposition container; not itself a count |
 | `output_tokens_details.thinking_tokens` | `reasoning_tokens`; non-null merge at both message start and delta. This observability subset does not increase `output_tokens`. |
 | `server_tool_use` | Ignored: server-side request-count metadata, not tokens or canonical tool calls |
@@ -373,8 +373,8 @@ reasoning follows the canonical optional-field rule.
 | `input_tokens_details` | Input breakdown container; not itself a count |
 | `input_tokens_details.cached_tokens` | `cache_read_tokens`, default zero |
 | `input_tokens_details.cache_write_tokens` | `cache_write_tokens`, default zero; distinct from cache reads |
-| `input_tokens_details.cache_write_tokens_details.ttl_30m_tokens` | `cache_write_30m_input_tokens`; disjoint from the 12h count |
-| `input_tokens_details.cache_write_tokens_details.ttl_12h_tokens` | `cache_write_12h_input_tokens`; disjoint from the 30m count |
+| `input_tokens_details.cache_write_tokens_details.ttl_30m_tokens` | Transient `Usage.cache_writes_by_ttl["30m"]`; the decomposition is persisted only in the optional response `cache.writes_by_ttl` object, not in canonical Usage. |
+| `input_tokens_details.cache_write_tokens_details.ttl_12h_tokens` | Transient `Usage.cache_writes_by_ttl["12h"]`; disjoint from the 30m count. If the aggregate write total is absent, the response is marked incomplete rather than treating the detail sum as a complete total. |
 | `output_tokens` | `output_tokens`, inclusive of reasoning |
 | `output_tokens_details` | Output decomposition container; not itself a count |
 | `output_tokens_details.reasoning_tokens` | `reasoning_tokens`; absent field is `None`. Accepted compatible null counter normalizes to zero, matching Pi. |

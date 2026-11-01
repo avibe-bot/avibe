@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import difflib
 import functools
+import json
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -10,6 +11,7 @@ from typing import Any
 from urllib.parse import quote
 
 from config import paths
+from storage.cache_metrics import CACHE_VIEWS, cache_observation
 from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
 from storage.models import MESSAGE_TURN_ID_SQL
 from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
@@ -105,6 +107,7 @@ RECALL_VIEWS = {
         "WHERE text IS NOT NULL"
     ),
 }
+RECALL_VIEWS.update(CACHE_VIEWS)
 
 EXCERPT_DEFAULT_WIDTH = 300
 
@@ -157,6 +160,8 @@ def _regexp(pattern: Any, value: Any) -> int | None:
 _FUNCTION_HINTS = {
     "excerpt": "Call excerpt(text, 'term') or excerpt(text, 'term', width).",
     "regexp": "REGEXP takes a Python regular expression; add (?i) to ignore case.",
+    "cache_observation": "The cache diagnostic views own this function; query cache_requests rather than calling it directly.",
+    "cache_valuation": "The cache diagnostic views own this function; query cache_requests rather than calling it directly.",
 }
 
 
@@ -216,6 +221,18 @@ def run_read_only_query(
     try:
         conn.create_function("excerpt", -1, reporting("excerpt", _excerpt), deterministic=True)
         conn.create_function("regexp", 2, reporting("regexp", _regexp), deterministic=True)
+        conn.create_function("cache_observation", 8, reporting("cache_observation", cache_observation), deterministic=True)
+        price_table = None
+
+        def cache_valuation(model, usage, writes, write_basis):
+            nonlocal price_table
+            from core.handlers.cache_metrics import cached_prices, valuation
+
+            if price_table is None:
+                price_table = cached_prices(resolved_db_path.parent)
+            return json.dumps(valuation(model, usage, writes, price_table, str(write_basis or "unknown")), separators=(",", ":"))
+
+        conn.create_function("cache_valuation", 4, reporting("cache_valuation", cache_valuation))
         # TEMP objects live in this connection only, so a read-only database still
         # takes them; they must exist before query_only and the authorizer forbid it.
         for name, select in RECALL_VIEWS.items():
@@ -351,6 +368,8 @@ def _unknown_column_hint(schema: dict[str, list[str]], statement: str, reference
         referenced = [aliases[qualifier]]
     referenced = list(dict.fromkeys(referenced))
     owners = [table for table, columns in schema.items() if column in columns]
+    preferred = {name: index for index, name in enumerate(("transcript", "turns", "agent_events"))}
+    owners.sort(key=lambda name: (preferred.get(name, len(preferred)), name))
     parts = []
     if referenced:
         parts.append(f"No column '{column}' on {', '.join(referenced)}.")
