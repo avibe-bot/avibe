@@ -57,15 +57,19 @@ from core.agent_core.agent.events import (
 )
 from core.agent_core.agent.hooks import AgentInput
 from core.agent_core.agent.loop import Agent
+from core.agent_core.agent.preview import RequestPreview
 from core.agent_core.agent.models import ModelSelection, RetryPolicy
 from core.agent_core.agent.recovery import settle_open_calls
 from core.agent_core.harness.context import ContextConfig
 from core.agent_core.harness.projection import open_tool_calls
 from core.agent_core.hosted_continuations import pending_hosted
+from core.agent_core.ai.request_artifacts import RequestArtifactStore, capture_model_requests
 from core.agent_core.ai.transform import in_flight_position
 from core.agent_core.tools.base import CallInstance
 from core.agent_core.tools.jobs import call_instance
 from core.agent_core.messages import (
+    HOSTED_RENDER_EPOCH,
+    HOSTED_RENDER_RULE,
     HOSTED_RESULT_TOOLS,
     HostedImage,
     IMAGE_MIME_TYPES,
@@ -267,6 +271,11 @@ class VibeyAgent(BaseAgent):
         state = Path(state_dir) if state_dir is not None else paths.get_state_dir() / "agent_core"
         self._state_dir = state
         self.media = MediaSnapshots(self._engine, state / "media")
+        # The exact bytes of every model request a Turn sends, kept when it does not succeed (``request_artifacts``).
+        self.request_artifacts = RequestArtifactStore(state / "model-requests")
+        from vibe import __version__
+
+        self._version = __version__
         self.store = AdapterTranscriptStore(
             SQLiteTranscriptStore(self._engine, render=self._display_source),
             self._engine,
@@ -318,7 +327,10 @@ class VibeyAgent(BaseAgent):
         turn = _Run(request, session_id, turn_id, self._instance)
         async with self._held(session_id, run=turn) as runtime:
             try:
-                await self._run_turn(runtime, turn, input_id)
+                with capture_model_requests(
+                    self.request_artifacts, session_id=session_id, turn_id=turn_id, version=self._version
+                ):
+                    await self._run_turn(runtime, turn, input_id)
             except Exception as error:
                 if turn.settled:
                     # Raised during or after settlement (its emits, or a failure notice): the
@@ -942,17 +954,32 @@ class VibeyAgent(BaseAgent):
         builtin_agent: bool,
         instructions: str = "",
     ) -> None:
-        """The Turn's loop, over its router, tools, system prompt, and the environment its commands run in.
+        turn.agent = self._build_agent(
+            turn.request, turn.session_id, turn.router, cwd, sections, environment,
+            builtin_agent=builtin_agent, instructions=instructions,
+        )
+        turn.cwd = cwd
 
-        The bash rule names ``rg`` only when that environment's PATH finds it. That PATH is the service's
-        PATH plus the installed managed tools, which change only on an install or upgrade, so a Session's
-        Turns keep one system prompt, which changes only when ripgrep's availability or an instruction file does.
+    def _build_agent(
+        self,
+        request: AgentRequest,
+        session_id: str,
+        router: HubModelRouter,
+        cwd: str,
+        sections: str,
+        environment: Mapping[str, str],
+        *,
+        builtin_agent: bool,
+        instructions: str = "",
+    ) -> Agent:
+        """Production construction shared with detached previews; this does not register or start a Turn.
+
+        The bash rule names ``rg`` only when the command environment's PATH finds it.
         """
-        request, session_id = turn.request, turn.session_id
         suite = self._tools()
         agent = Agent(
             session_id=session_id,
-            models=turn.router,
+            models=router,
             tools=(),
             hooks=(),
             store=self.store,
@@ -971,7 +998,7 @@ class VibeyAgent(BaseAgent):
         # Job-backed tools receive the loop's tracking wrapper, so Stop kills foreground commands.
         tools = mark_skill_loads(
             (
-                *hosted_tools(turn.router, self._gateway_client, self.media, language=self._language),
+                *hosted_tools(router, self._gateway_client, self.media, language=self._language),
                 *suite.create_tools(agent.jobs, self.media.image_sink(session_id)),
             )
         )
@@ -984,7 +1011,34 @@ class VibeyAgent(BaseAgent):
             rg=finds_rg,
             project_context=instructions,
         )
-        turn.agent, turn.cwd = agent, cwd
+        return agent
+
+    async def preview_request(
+        self, session_id: str, request: AgentRequest, *, context_seq: int | None = None,
+    ) -> RequestPreview:
+        """Reconstruct from current configuration without binding a runtime, consuming input, or activating supply."""
+        model = request.subagent_model or request.vibe_agent_model
+        if not model:
+            raise ValueError("request_preview_model_unset")
+        launch = await self.controller.model_hub_runtime.describe_vibey_request(model)
+        selected = budgeted(selection_from_hop(launch.to_hop_resolution()))
+
+        async def no_resolve() -> ModelSelection:
+            raise RuntimeError("A preview must not resolve a model route")
+
+        router = HubModelRouter(no_resolve, self._providers, first=selected)
+        cwd = request.working_path
+        sections, _ = await self._avibe_sections(request, cwd)
+        builtin_agent = await asyncio.to_thread(self._is_builtin_agent, request)
+        environment = await asyncio.to_thread(self._turn_environment, request, cwd)
+        instructions = await asyncio.to_thread(_project_instructions, cwd)
+        agent = self._build_agent(
+            request, session_id, router, cwd, sections, environment,
+            builtin_agent=builtin_agent, instructions=instructions,
+        )
+        return await agent.dry_tick(
+            selected=selected, context_seq=context_seq, gateway=True, media_loader=self.media,
+        )
 
     async def _on_event(self, run: _Run, event: AgentEvent) -> None:
         if isinstance(event, MessageCommitted):
@@ -1920,10 +1974,17 @@ class VibeyAgent(BaseAgent):
         run = self._run_for(session_id, None)
         current = getattr(getattr(run, "router", None), "current", None)
         routes = getattr(getattr(current, "endpoint", None), "hosted_tools", {})
-        return response_recovery_metadata(message, (
-            tool for tool, route in routes.items()
-            if route.mode == "proxy" and route.route_switch == "native_interrupted"
-        ))
+        return {
+            **response_recovery_metadata(message, (
+                tool for tool, route in routes.items()
+                if route.mode == "proxy" and route.route_switch == "native_interrupted"
+            )),
+            "hosted_render_epoch": HOSTED_RENDER_EPOCH,
+            **({
+                "hosted_render_rule": HOSTED_RENDER_RULE,
+                "hosted_render_omitted": list(message.hosted_render_omitted),
+            } if message.hosted_render_rule == HOSTED_RENDER_RULE and message.hosted_render_omitted else {}),
+        }
 
     def _on_response(
         self,

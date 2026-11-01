@@ -457,6 +457,7 @@ scenarios:
     related_tests:
       - tests/agent_core/ai/test_hosted_pause_turn.py::test_a_response_paused_past_the_bound_ends_interrupted_and_keeps_everything_it_assembled
       - tests/agent_core/ai/test_hosted_pause_turn.py::test_a_paused_response_its_source_cannot_continue_ends_interrupted_and_keeps_what_it_has
+      - tests/agent_core/ai/test_hosted_pause_turn.py::test_a_paused_response_the_session_cannot_send_back_as_served_ends_interrupted_without_a_continuation
       - tests/agent_core/ai/test_hosted_pause_turn.py::test_a_continued_response_is_verified_only_when_every_response_in_it_was_from_one_origin
       - tests/agent_core/ai/test_hosted_pause_turn.py::test_a_counter_past_the_bound_in_any_pause_stays_absent_and_the_response_completes
       - tests/agent_core/ai/test_anthropic_deferred.py::test_mixed_pause_preserves_exact_assistant_and_result_only_user_group

@@ -373,6 +373,13 @@ failover, and is refused unpinned (C-6 item 7). What changes is what happens aft
   model of the same Source may run the tool), when the refusal is first learned, and again only
   after the record is cleared (by the user or a stamp change) and the tool is tried natively once more. The upstream is not called twice
   for nothing: a refusal before output costs no output tokens.
+- **Hosted-refusal rendering is versioned.** When an Anthropic hop has explicit `opaque_refused(hosted)` evidence, B omits unexecuted pending hosted calls instead of inventing Avibe `no result` text. Completed, failed, incomplete, other protocols and ordinary portable fallbacks keep their existing rendering. `hosted_render_epoch=2`, `hosted_render_rule=3`, and `hosted_render_omitted` live only in response-row metadata, never in the canonical message payload; old or malformed optional metadata cannot prevent loading history.
+  - A response already marked epoch 2 keeps the exact released rc8 rule: B only when every later signed-thinking response also has epoch 2. This includes rc8's existing treatment of error/aborted responses; the legacy-tail rules below must not change an already-marked response's wire.
+  - An unmarked legacy response can migrate only when all its pending hosted calls follow a client call (already rendered as trailing in-place text), with no signed or redacted thinking after the first omitted block inside the response. Unknown metadata versions do not authorize migration. The store supplies its stable `transcript_row_id` on load and append; without that identity it stays X*. This identity is transient, not canonical content, and does not rely on provider call ids being unique.
+  - Its first later signed-thinking response that is actually replayed (excluding error/aborted responses) fixes the rendering. No such successor means the tail is unbound and uses B. A successor carrying epoch 2, rule 3, and this predecessor's row id in `hosted_render_omitted` proves its request actually omitted that tail. Version alone, another row's evidence, or a refusal learned later cannot authorize a change. Older or unevidenced bindings keep X*. Signature refusals do not erase canonical binding evidence.
+  - The compiler collects only legacy rows it actually omits. `PreparedMessages` carries that evidence into the Anthropic stream assembler, whose final, partial, and paused messages retain the first send's set; the existing continuation prefix guard rejects any altered continuation. Fresh attempts get fresh assemblers, never a union of failed attempts. The response writer retains epoch 2 for released readers and writes rule 3 only with nonempty compiler evidence. No historical row is rewritten, including shared fork ancestry. Preview and retry use the same pure compiler; failed attempts need no migration write. Prefix-only compaction cannot remove the first binding successor while retaining its predecessor.
+  - **Downgrade limit:** rolling back to rc8 renders a migrated, unmarked legacy tail as X* again, invalidating any later signature generated against B. Continuing after that downgrade can create conflicting old/new signature prefixes that a later upgrade cannot preserve simultaneously. Avoid downgrading such Sessions; this is not a promise of transparent signature recovery. New epoch-2 responses retain rc8 behavior.
+  - **Acceptance:** an unbound legacy mixed tail must change in the production wire compiler, not just new-response fixtures. Repeated previews are deterministic; unsigned/new-rule successors preserve the prior request prefix; rc8/older bindings remain byte-identical. Existing thinking prefixes and client tool/result objects must not change, and no tool executes during reconstruction. These are structural guarantees, not proof that an upstream prefill rejection has only this cause.
 - **The gateway never rewrites hosted content.** Vibey renders every request from its canonical records; the gateway
   never swaps declarations or converts history. C-6 item 6's opaque thinking strip still applies to unpinned
   requests only.
@@ -526,8 +533,13 @@ never dropped.
 **`pause_turn`.** Unchanged from v1 as implemented (orchestrator decision, 2026-10-14):
 - The Anthropic adapter continues a paused response internally, at most 5 continuations, each pinned to the Source
   that served the paused response. It never re-renders a continuation in portable form.
-- A continuation that Source answers `pin_unavailable`, a pause of a send that carried no pin, or a 6th pause ends
-  the response with one terminal `ProviderError(kind="interrupted")` whose partial keeps all assembled content.
+- A continuation goes out only as the first send plus the paused response exactly as served: same `system`, `tools`,
+  and earlier messages, cache markers aside. A render that changes any of it (a hosted call or thinking the Session can
+  no longer send back after a replay refusal, or an earlier message rendered differently) is not sent, since it would
+  be a different request whose assistant tail the provider takes as a prefill.
+- A continuation that Source answers `pin_unavailable`, a pause of a send that carried no pin, a continuation that
+  cannot go out as served, or a 6th pause ends the response with one terminal `ProviderError(kind="interrupted")`
+  whose partial keeps all assembled content.
 - The merged message carries the final continuation's usage; `hosted_summary` sums counts and cost and deduplicates
   `cited_sources` by URL. Pending calls carry over by tool-call id, so each call stays one block.
 - The merged message is verified only when every response in it was verified and reported the same origin.

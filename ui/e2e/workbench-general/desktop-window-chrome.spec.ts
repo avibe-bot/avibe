@@ -1,6 +1,144 @@
 import { expect, test, type Page } from '@playwright/test';
 import { open, serveProduct } from './support';
 
+// The neutral overlay and the aside's resizer used to paint two lines at
+// different stacking levels. Unit gesture tests cannot detect chrome covering
+// the top hit area or hiding the active border.
+for (const theme of ['light', 'dark'] as const) {
+test(`native sidebar divider owns full-height hit testing and all visual states (${theme})`, async ({ page }) => {
+  const denied = await serveChat(page);
+  await page.addInitScript(() => {
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_DRAG__', { value: true });
+    document.addEventListener('DOMContentLoaded', () => document.documentElement.style.setProperty('--shell-titlebar-inset', '28px'));
+  });
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await open(page, '/agents', { theme });
+  const agents = page.getByRole('link', { name: 'Agents', exact: true });
+  await expect(agents).toBeVisible();
+  const agentsBorder = await agents.evaluate((element) => getComputedStyle(element).borderRightColor);
+  await open(page, '/chat/chrome-fixture', { theme });
+  const edge = page.getByRole('separator', { name: 'Resize sidebar' });
+  const contentEdge = page.locator('[data-sidebar-resizer-content]');
+  await expect(edge).toBeVisible();
+  const sidebar = page.locator('aside').filter({ has: page.locator('#workbench-capability-nav') });
+  const verifyEdge = async () => {
+    const side = (await sidebar.boundingBox())!;
+    const bounds = (await edge.boundingBox())!;
+    expect(bounds.y).toBe(0);
+    expect(bounds.height).toBe(28);
+    expect(bounds.width).toBe(8);
+    expect(await edge.evaluate((element) => {
+      const r = element.getBoundingClientRect();
+      return [1, 27].map(y => document.elementFromPoint(r.right - 0.5, y) === element);
+    })).toEqual([true, true]);
+    const lower = (await contentEdge.boundingBox())!;
+    expect(lower.y).toBe(28);
+    expect(lower.height).toBe(772);
+    expect(lower.width).toBe(8);
+    expect(await contentEdge.evaluate((element) => {
+      const r = element.getBoundingClientRect();
+      return [28, 29, innerHeight - 1].map(y => document.elementFromPoint(r.right - 0.5, y) === element);
+    })).toEqual([true, true, true]);
+    expect(lower.x + lower.width).toBe(side.x + side.width);
+    expect(bounds.x + bounds.width).toBe(side.x + side.width);
+    return bounds;
+  };
+  let bounds = await verifyEdge();
+  await expect(sidebar).toHaveCSS('border-right-width', '0px');
+  await expect(page.locator('[data-sidebar-divider]')).toHaveCount(0);
+  await expect(edge).toHaveCSS('border-right-width', '1px');
+  await expect(contentEdge).toHaveCSS('border-right-width', '1px');
+  const neutral = await edge.evaluate(el => getComputedStyle(el).borderRightColor);
+  expect(neutral).not.toBe(agentsBorder);
+  await page.mouse.move(bounds.x + 4, 400);
+  await expect(edge).toHaveCSS('border-right-color', agentsBorder);
+  await expect(contentEdge).toHaveCSS('border-right-color', agentsBorder);
+  await verifyEdge();
+  await page.screenshot({ path: 'e2e/.artifacts/workbench-general/shots/divider-hover.png' });
+  await page.mouse.move(bounds.x + 4, 1);
+  await expect(edge).toHaveCSS('border-right-color', agentsBorder);
+  await expect(contentEdge).toHaveCSS('border-right-color', agentsBorder);
+  await page.mouse.move(1000, 400);
+  await expect(edge).toHaveCSS('border-right-color', neutral);
+  await expect(contentEdge).toHaveCSS('border-right-color', neutral);
+
+  // Keyboard focus colors the same border; blur restores it.
+  await page.keyboard.press('Tab');
+  await edge.focus();
+  expect(await edge.evaluate(el => el.matches(':focus-visible'))).toBe(true);
+  await expect(edge).toHaveCSS('border-right-color', agentsBorder);
+  await expect(contentEdge).toHaveCSS('border-right-color', agentsBorder);
+  await page.keyboard.press('ArrowRight');
+  bounds = await verifyEdge();
+  await page.getByRole('button', { name: 'Back', exact: true }).focus();
+  await expect(edge).toHaveCSS('border-right-color', neutral);
+  await expect(contentEdge).toHaveCSS('border-right-color', neutral);
+
+  // Start at the top chrome, then move beyond the width clamp: captured input
+  // keeps the entire edge active even while the pointer is far outside it.
+  await page.mouse.move(bounds.x + 4, 1);
+  await page.mouse.down();
+  await expect(edge).toHaveAttribute('data-dragging', 'true');
+  await page.mouse.move(1000, 400);
+  await expect(edge).toHaveCSS('border-right-color', agentsBorder);
+  await expect(contentEdge).toHaveCSS('border-right-color', agentsBorder);
+  bounds = await verifyEdge();
+  expect(bounds.x + bounds.width).toBe(496);
+  await page.mouse.up();
+  await expect(edge).not.toHaveAttribute('data-dragging');
+  await expect(edge).toHaveCSS('border-right-color', neutral);
+  await expect(contentEdge).toHaveCSS('border-right-color', neutral);
+
+  // Cancellation uses existing gesture cleanup, not another hover-state writer.
+  await page.mouse.move(bounds.x + 4, 400);
+  await page.mouse.down();
+  await page.mouse.move(1000, 400);
+  await edge.dispatchEvent('pointercancel', { pointerId: 1 });
+  await expect(edge).not.toHaveAttribute('data-dragging');
+  await page.mouse.up();
+  await page.mouse.move(1001, 400);
+  await expect(edge).toHaveCSS('border-right-color', neutral);
+  await expect(contentEdge).toHaveCSS('border-right-color', neutral);
+  await page.screenshot({ path: 'e2e/.artifacts/workbench-general/shots/divider-neutral.png' });
+
+  // Only the narrow resize strip sits above chrome, not controls or empty drag.
+  expect(await page.evaluate(() => document.elementFromPoint(140, 1)?.hasAttribute('data-tauri-drag-region'))).toBe(true);
+  for (const name of ['Back', 'Visualize']) {
+    const button = page.getByRole('button', { name, exact: true });
+    expect(await button.evaluate(el => {
+      const r = el.getBoundingClientRect();
+      return el.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2));
+    })).toBe(true);
+  }
+  await page.evaluate(() => {
+    localStorage.setItem('avibe.settings.menu-placement.v1', 'inline');
+    window.dispatchEvent(new Event('avibe:settings-menu-placement-changed'));
+  });
+  await page.locator('[data-settings-toggle]').click();
+  await expect(page.locator('nav[aria-label="Settings sections"]')).toBeVisible();
+  await page.mouse.move(bounds.x + 4, 1);
+  await page.mouse.down();
+  await page.mouse.move(bounds.x - 12, 100);
+  await page.mouse.up();
+  await expect(page.locator('nav[aria-label="Settings sections"]')).toBeVisible();
+  await verifyEdge();
+  await page.keyboard.press('Escape');
+  await sidebar.locator('a[href="/"]').click();
+  await expect(page.locator('[data-chat-header]')).toHaveCount(0);
+  bounds = await verifyEdge();
+  await page.mouse.move(bounds.x + 4, 1);
+  await expect(edge).toHaveCSS('border-right-color', agentsBorder);
+  await page.setViewportSize({ width: 700, height: 800 });
+  await expect(edge).toHaveCount(0);
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await page.evaluate(() => localStorage.setItem('avibe.settings.menu-placement.v1', 'standalone'));
+  await open(page, '/settings/general', { theme: 'light' });
+  await expect(page.locator('[data-sidebar-resizer]')).toBeHidden();
+  expect(denied).toEqual([]);
+});
+}
+
 async function serveChat(page: Page) {
   const denied = await serveProduct(page);
   const session = {
@@ -67,17 +205,70 @@ for (const desktop of [false, true]) {
       await expect(page.locator('[data-desktop-window-chrome] [data-chat-header]')).toHaveCount(1);
       await expect(page.locator('main [data-chat-header]')).toHaveCount(0);
       const bounds = await page.locator('[data-desktop-window-chrome]').boundingBox();
-      expect(bounds).toEqual({ x: 0, y: 0, width: 1200, height: 28 });
-      // Every rendered drag surface is confined to the same top row, including
-      // the sidebar clearance. The transcript and composer never join it.
+      expect(bounds).toEqual({ x: 0, y: 0, width: 1200, height: 48 });
+      // Native clearance remains 28px; toolbar empty surfaces use its independent
+      // 48px height. The transcript and composer never join either drag region.
       for (const region of await page.locator('[data-tauri-drag-region]').all()) {
         const rect = await region.boundingBox();
         if (rect) {
           expect(rect.y).toBeGreaterThanOrEqual(0);
-          expect(rect.y + rect.height).toBeLessThanOrEqual(28);
+          expect(rect.y + rect.height).toBeLessThanOrEqual(48);
         }
         await expect(region).toHaveAttribute('data-tauri-drag-region', '');
       }
+
+      // Keep the chat toolbar mounted while a real floating app is opened. Hn
+      // is the only overlap boundary: the safe strip may receive y=Hn-1,
+      // while an AppWindow owns every covered point at and below Hn, including
+      // the titlebar controls. Ht remains a 48px layout surface.
+      const launcher = page.locator('[data-show-page-dock-drop-target] > button');
+      await launcher.hover();
+      const library = page.getByRole('menu').getByRole('button', { name: 'App Library', exact: true });
+      await expect(library).toBeVisible();
+      await library.click();
+      const appWindow = page.locator('[data-window-id][aria-label="App Library"]');
+      await expect(appWindow).toBeVisible();
+
+      const centerHitBelongsToWindow = async (buttonName: string) => {
+        const button = appWindow.getByRole('button', { name: buttonName, exact: true });
+        const box = (await button.boundingBox())!;
+        return page.evaluate(({ x, y }) => (
+          document.elementFromPoint(x, y)?.closest('[data-window-id]') !== null
+        ), { x: box.x + box.width / 2, y: box.y + box.height / 2 });
+      };
+      for (const buttonName of ['Close', 'Minimize', 'Maximize']) {
+        expect(await centerHitBelongsToWindow(buttonName)).toBe(true);
+      }
+
+      const maximize = appWindow.getByRole('button', { name: 'Maximize', exact: true });
+      const maximizeBox = (await maximize.boundingBox())!;
+      await page.mouse.click(maximizeBox.x + maximizeBox.width / 2, maximizeBox.y + maximizeBox.height / 2);
+      await expect(appWindow).toHaveCSS('border-radius', '0px');
+      await expect.poll(async () => {
+        const box = (await appWindow.boundingBox())!;
+        return {
+          x: Math.round(box.x),
+          y: Math.round(box.y),
+          width: Math.round(box.width),
+          height: Math.round(box.height),
+        };
+      }).toEqual({ x: 0, y: 28, width: 1200, height: 772 });
+      const edgeX = (await page.getByRole('separator', { name: 'Resize sidebar' }).boundingBox())!.x + 7.5;
+      expect(await page.evaluate((x) => [27, 28, 40, 47, 49].map(y => ({
+        y,
+        resizer: document.elementFromPoint(x, y)?.closest('[data-sidebar-resizer]') !== null,
+        window: document.elementFromPoint(x, y)?.closest('[data-window-id]') !== null,
+      })), edgeX)).toEqual([
+        { y: 27, resizer: true, window: false },
+        { y: 28, resizer: false, window: true },
+        { y: 40, resizer: false, window: true },
+        { y: 47, resizer: false, window: true },
+        { y: 49, resizer: false, window: true },
+      ]);
+      const close = appWindow.getByRole('button', { name: 'Close', exact: true });
+      const closeBox = (await close.boundingBox())!;
+      await page.mouse.click(closeBox.x + closeBox.width / 2, closeBox.y + closeBox.height / 2);
+      await expect(appWindow).toHaveCount(0);
     } else {
       await expect(page.locator('[data-desktop-window-chrome]')).toHaveCount(0);
       await expect(page.locator('main [data-chat-header]')).toHaveCount(1);
@@ -145,13 +336,44 @@ for (const desktop of [false, true]) {
       expect(topBounds?.height).toBe(28);
       expect(topBounds?.width).toBe((await sidebar.boundingBox())?.width);
       await expect(topRow).toHaveCSS('border-bottom-width', '0px');
-      await expect(sidebar).toHaveCSS('border-right-width', '1px');
+      await expect(sidebar).toHaveCSS('border-right-width', '0px');
+      await expect(page.getByRole('separator', { name: 'Resize sidebar' })).toHaveCSS('border-right-width', '1px');
       const brandMark = brand.locator('img');
       const brandMarkBounds = await brandMark.boundingBox();
       expect(brandMarkBounds?.x).toBeCloseTo((await sidebar.boundingBox())!.x + 16, 0);
       expect(brandMarkBounds?.y).toBeCloseTo(topBounds!.y + topBounds!.height + 16, 0);
       // There is no whole-window empty chrome added to the home page.
       await expect(page.locator('[data-desktop-window-chrome]')).toHaveCount(0);
+
+      // A maximized floating app starts below the native clearance. The edge
+      // remains above the native safe strip, but the WindowLayer owns the same
+      // x-coordinate from Hn downward and receives the hit there.
+      const launcher = page.locator('[data-show-page-dock-drop-target] > button');
+      await launcher.hover();
+      const library = page.getByRole('menu').getByRole('button', { name: 'App Library', exact: true });
+      await expect(library).toBeVisible();
+      await library.click();
+      const appWindow = page.locator('[data-window-id][aria-label="App Library"]');
+      await expect(appWindow).toBeVisible();
+      await appWindow.getByRole('button', { name: 'Maximize', exact: true }).click();
+      await expect(appWindow).toHaveCSS('border-radius', '0px');
+      await expect.poll(async () => {
+        const box = (await appWindow.boundingBox())!;
+        return {
+          x: Math.round(box.x),
+          y: Math.round(box.y),
+          width: Math.round(box.width),
+          height: Math.round(box.height),
+        };
+      }).toEqual({ x: 0, y: 28, width: 1200, height: 772 });
+      const edgeX = (await page.getByRole('separator', { name: 'Resize sidebar' }).boundingBox())!.x + 7.5;
+      expect(await page.evaluate((x) => ({
+        nativeChrome: document.elementFromPoint(x, 20)?.closest('[data-sidebar-resizer]') !== null,
+        workbench: document.elementFromPoint(x, 40)?.closest('[data-window-id]') !== null,
+        appWindow: document.elementFromPoint(x, 60)?.closest('[data-window-id]') !== null,
+      }), edgeX)).toEqual({ nativeChrome: true, workbench: true, appWindow: true });
+      await appWindow.getByRole('button', { name: 'Close', exact: true }).click();
+      await expect(appWindow).toHaveCount(0);
     } else {
       await expect(sidebar.locator('[data-tauri-drag-region]')).toHaveCount(0);
       expect(chatSidebar.brand!.y).toBe(10);

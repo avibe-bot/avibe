@@ -2911,7 +2911,7 @@ export const ChatPage: React.FC = () => {
           there). */}
       <div
         ref={chatSurfaceRef}
-        style={windowChrome ? { paddingTop: 'var(--shell-titlebar-inset)' } : undefined}
+        style={windowChrome ? { paddingTop: 'var(--desktop-chat-toolbar-h)' } : undefined}
         className="fixed inset-x-0 bottom-0 top-[var(--macos-stale-login-session-notice-h,0px)] z-40 flex flex-col bg-background pt-[env(safe-area-inset-top)] md:relative md:inset-auto md:z-auto md:-mx-10 md:-my-8 md:h-[var(--app-vvh)] md:bg-transparent md:pt-0"
         onKeyDown={annotation.handleShortcutKeyDown}
         onPointerDownCapture={focusCanvas}
@@ -3808,7 +3808,8 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
     // flagged (regression feedback #1/#3).
     <div data-chat-header="" data-tauri-drag-region={desktopDragRegion()} className={clsx(
       'shrink-0 px-4 md:px-8',
-      windowChrome ? 'h-full' : 'border-b border-border bg-surface/70 py-2.5 backdrop-blur',
+      'border-b border-border bg-surface/70 py-2.5 backdrop-blur',
+      windowChrome && 'h-full',
     )}>
       <div data-tauri-drag-region={desktopDragRegion()} className={clsx(
         'mx-auto flex w-full max-w-[1080px] items-center gap-3',

@@ -53,8 +53,15 @@ async def run(handler, *args) -> tuple[dict[str, Any], int]:
         return _error(McpHubError("internal", str(exc) or "Unexpected MCP Hub error."))
 
 
-async def list_servers() -> dict[str, Any]:
-    return {"ok": True, "servers": await asyncio.to_thread(repository.list_packages)}
+async def list_servers(origin: str | None = None, port: int | None = None) -> dict[str, Any]:
+    from core.mcp_hub.oauth import redirect_mode
+
+    body: dict[str, Any] = {"ok": True, "servers": await asyncio.to_thread(repository.list_packages)}
+    try:
+        body["oauthMode"] = redirect_mode(origin, port=port)[0]
+    except McpHubError:
+        body["oauthMode"] = "paste"
+    return body
 
 
 async def add(body: dict[str, Any]) -> dict[str, Any]:
@@ -99,6 +106,8 @@ async def refresh(name: str) -> dict[str, Any]:
 
 async def remove(name: str) -> dict[str, Any]:
     return await _owner("remove", {"name": name})
+
+
 async def oauth_start(name: str, body: dict[str, Any], origin: str | None = None) -> dict[str, Any]:
     payload: dict[str, Any] = {"name": name, "origin": origin}
     if body.get("port") is not None:

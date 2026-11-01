@@ -44,6 +44,9 @@
    viewport pads its own top by this, so nothing interactive sits in the strip. */
 :root {
   --shell-titlebar-inset: 0px;
+  /* macOS chat keeps the established 48px toolbar while the native shell
+     clearance stays independently controlled by --shell-titlebar-inset. */
+  --desktop-chat-toolbar-h: 48px;
 }
 
 /* Width of the desktop shell sidebar. The sidebar itself, every md+ content

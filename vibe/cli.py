@@ -1039,6 +1039,31 @@ _PROMPT_RENDER_INPUT_ERRORS = {
 }
 
 
+def cmd_debug_request_preview(args) -> int:
+    """Print only structural metadata and private artifact paths, never the prepared request."""
+    from vibe.authorization import require_instance_role
+    from vibe.internal_client import request_preview
+
+    try:
+        require_instance_role(None, "owner")
+        response = asyncio.run(request_preview(args.session_id, context_seq=args.context_seq))
+        if response["status_code"] != 200:
+            print("Request preview failed; check Owner access, the Vibey Session and current model configuration.", file=sys.stderr)
+            return 1
+        payload = response["body"]
+        # An allowlist makes future IPC payload growth unable to leak diagnostic contents to stdout.
+        keys = (
+            "kind", "status", "reason", "mode", "auth", "session_id", "context_seq", "requested_context_seq",
+            "transition_required", "transition", "missing_tool_results", "wire_prepared", "body_bytes", "body_sha256",
+            "artifact_dir", "manifest_path", "request_body_path",
+        )
+        print(json.dumps({key: payload[key] for key in keys if key in payload}, ensure_ascii=False, indent=2))
+        return 0
+    except Exception:
+        print("Request preview unavailable; no model request was sent.", file=sys.stderr)
+        return 1
+
+
 def cmd_debug_prompt(args) -> int:
     """Export all authored sources, optionally with the production rendering."""
 
@@ -6886,6 +6911,114 @@ def _wait_for_run_result(store: TaskExecutionStore, run_id: str, *, wait_timeout
             run["wait_elapsed_seconds"] = round(elapsed, 3)
             return _run_payload(run)
         time.sleep(0.25)
+
+
+def _model_request_store():
+    from core.agent_core.ai.request_artifacts import RequestArtifactStore
+
+    return RequestArtifactStore(paths.get_model_request_artifacts_dir())
+
+
+def _model_request_summary(meta: dict) -> dict:
+    """One kept model request, by its typed facts: never a body, header value it did not allow, or error message."""
+
+    request = meta.get("request") if isinstance(meta.get("request"), dict) else {}
+    outcome = meta.get("outcome") if isinstance(meta.get("outcome"), dict) else {}
+    return {
+        "id": meta.get("id"),
+        "state": meta.get("state"),
+        "created_at": meta.get("created_at"),
+        "finished_at": meta.get("finished_at"),
+        "session_id": meta.get("session_id"),
+        "turn_id": meta.get("turn_id"),
+        "protocol": request.get("protocol"),
+        "provider": request.get("provider"),
+        "model": request.get("model"),
+        "source_id": request.get("source_id"),
+        "outcome": outcome.get("kind"),
+        "error_kind": outcome.get("error_kind"),
+        "http_status": outcome.get("http_status"),
+        "request_bytes": request.get("body_bytes"),
+        "size_bytes": meta.get("size_bytes"),
+    }
+
+
+def _model_request_error(exc: Exception, *, help_command: str) -> int:
+    from core.agent_core.ai.request_artifacts import ArtifactStoreError
+
+    if isinstance(exc, ArtifactStoreError):
+        exc = TaskCliError(str(exc), code="model_request_unavailable", help_command=help_command)
+    _print_task_error(exc, help_command=help_command)
+    return 1
+
+
+def cmd_model_requests_list(args):
+    help_command = "vibe model-requests list --help"
+    try:
+        page_request = _page_request_from_args(args, help_command=help_command)
+        store = _model_request_store()
+        entries = store.entries()
+        if getattr(args, "session_id", None):
+            entries = [meta for meta in entries if meta.get("session_id") == args.session_id]
+        if getattr(args, "state", None):
+            entries = [meta for meta in entries if meta.get("state") == args.state]
+        result = page_sequence(entries, page_request)
+        command = ["vibe", "model-requests", "list"]
+        _add_optional_arg(command, "--session-id", getattr(args, "session_id", None))
+        _add_optional_arg(command, "--state", getattr(args, "state", None))
+        _print_cli_payload(
+            "model_requests",
+            directory=str(store.root),
+            model_requests=[_model_request_summary(meta) for meta in result.items],
+            **_paginated_fields(result, command=command),
+        )
+        return 0
+    except Exception as exc:
+        return _model_request_error(exc, help_command=help_command)
+
+
+def cmd_model_requests_show(args):
+    help_command = "vibe model-requests show --help"
+    try:
+        from core.agent_core.ai.request_artifacts import META_FILE, REQUEST_FILE, RESPONSE_FILE
+
+        store = _model_request_store()
+        meta = store.meta(args.request_id)
+        meta["state"] = store.state(meta)
+        directory = store.path(args.request_id)
+        files = {
+            name: (directory / name).stat().st_size
+            for name in (REQUEST_FILE, RESPONSE_FILE, META_FILE)
+            if (directory / name).is_file()
+        }
+        _print_cli_payload("model_request", model_request=meta, directory=str(directory), files=files)
+        return 0
+    except Exception as exc:
+        return _model_request_error(exc, help_command=help_command)
+
+
+def cmd_model_requests_export(args):
+    help_command = "vibe model-requests export --help"
+    try:
+        store = _model_request_store()
+        target = store.export(args.request_id, Path(args.to))
+        _print_cli_payload(
+            "model_request_export",
+            id=args.request_id,
+            path=str(target),
+            files=sorted(path.name for path in target.iterdir()),
+        )
+        return 0
+    except FileExistsError:
+        error = TaskCliError(
+            f"{Path(args.to).expanduser() / args.request_id} already exists",
+            code="model_request_export_exists",
+            hint="Export into another directory, or remove the earlier export first.",
+            help_command=help_command,
+        )
+        return _model_request_error(error, help_command=help_command)
+    except Exception as exc:
+        return _model_request_error(exc, help_command=help_command)
 
 
 def cmd_runs_list(args):
@@ -17216,7 +17349,7 @@ def build_parser():
         "debug",
         help="Inspect internal Avibe state",
     )
-    debug_subparsers = debug_parser.add_subparsers(dest="debug_command", metavar="{prompt}")
+    debug_subparsers = debug_parser.add_subparsers(dest="debug_command", metavar="{prompt,request}")
     debug_subparsers.required = True
     debug_prompt_parser = debug_subparsers.add_parser(
         "prompt",
@@ -17242,6 +17375,20 @@ def build_parser():
         help="Export format",
     )
     _add_json_noop(debug_prompt_export_parser)
+    debug_request_parser = debug_subparsers.add_parser("request", help="Inspect a model request without sending it")
+    debug_request_subparsers = debug_request_parser.add_subparsers(dest="request_debug_command", required=True)
+    debug_request_preview = debug_request_subparsers.add_parser(
+        "preview", help="Reconstruct a Vibey Session's committed context with current configuration (Owner only)",
+        description=(
+            "Create owner-private request artifacts without calling a provider or changing the Session. "
+            "Uses current Agent/system/tools/route configuration, not historical sent bytes. "
+            "Queued inputs are excluded; context transitions and missing tool results are reported, not executed. "
+            "Authentication is unbound. Requires the local controller; no Web forwarding route exists."
+        ),
+    )
+    debug_request_preview.add_argument("--session-id", required=True, help="Existing active Vibey Session ID")
+    debug_request_preview.add_argument("--context-seq", type=_non_negative_int, help="Inclusive committed context cutoff")
+    _add_json_noop(debug_request_preview)
     runtime_parser = subparsers.add_parser(
         "runtime",
         help="Inspect and prepare managed runtimes",
@@ -17576,6 +17723,51 @@ def build_parser():
     )
     runs_cancel_parser.add_argument("run_id")
     _add_json_noop(runs_cancel_parser)
+
+    model_requests_parser = subparsers.add_parser(
+        "model-requests",
+        help="Inspect model requests Vibey kept because they did not succeed",
+        description=(
+            "List, inspect, and export the exact bytes of Vibey model requests that failed, were cancelled, or "
+            "ended without a known outcome. Output never includes a request or response body; export copies one "
+            "into a private directory you choose."
+        ),
+        error_help_command="vibe model-requests --help",
+    )
+    model_requests_subparsers = model_requests_parser.add_subparsers(
+        dest="model_requests_command", metavar="{list,show,export}"
+    )
+    model_requests_subparsers.required = True
+    model_requests_list_parser = model_requests_subparsers.add_parser(
+        "list",
+        help="List kept model requests, newest first",
+        error_help_command="vibe model-requests list --help",
+    )
+    model_requests_list_parser.add_argument("--session-id", help="Only requests of this Session")
+    model_requests_list_parser.add_argument(
+        "--state", choices=["failed", "cancelled", "unknown", "pending"], help="Only requests in this state"
+    )
+    _add_pagination_args(model_requests_list_parser, help_command="vibe model-requests list --help")
+    _add_json_noop(model_requests_list_parser)
+    model_requests_show_parser = model_requests_subparsers.add_parser(
+        "show",
+        help="Show one kept model request's metadata",
+        error_help_command="vibe model-requests show --help",
+    )
+    model_requests_show_parser.add_argument("request_id")
+    _add_json_noop(model_requests_show_parser)
+    model_requests_export_parser = model_requests_subparsers.add_parser(
+        "export",
+        help="Copy one kept model request's files into DIR/<id>/",
+        description=(
+            "Copy request.bin, response.bin, and meta.json of one kept model request into a new private "
+            "directory DIR/<id>/. The files may hold prompts and tool output; keep them private."
+        ),
+        error_help_command="vibe model-requests export --help",
+    )
+    model_requests_export_parser.add_argument("request_id")
+    model_requests_export_parser.add_argument("--to", required=True, metavar="DIR", help="Directory to export into")
+    _add_json_noop(model_requests_export_parser)
 
     harness_parser = subparsers.add_parser(
         "harness",
@@ -18973,6 +19165,7 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     # authored files, and have no role contract to repair here.
     ("screenshot",): None,
     ("debug", "prompt", "export"): None,
+    ("debug", "request", "preview"): "owner",
     # Runtime, configuration and retention are operational management.
     (): "member",
     ("start",): "member",
@@ -19073,6 +19266,11 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("skill", "load"): "editor",
     ("data", "query"): "editor",
     ("data", "skill-usage"): "editor",
+    # Kept model requests hold whole prompts, tool definitions and output of every Session, as raw bytes: Owner
+    # only, listing included.
+    ("model-requests", "list"): "owner",
+    ("model-requests", "show"): "owner",
+    ("model-requests", "export"): "owner",
     ("data", "retention"): "member",
     # ``vibe mcp`` admits itself from raw argv (vibe/mcp_cli.py): discovery and
     # calls at Editor like Skills, management Owner-only. This floor is reached
@@ -19250,6 +19448,8 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
             _print_task_error(exc, help_command="vibe computer --help")
             sys.exit(1)
     if args.command == "debug":
+        if args.debug_command == "request":
+            sys.exit(cmd_debug_request_preview(args))
         sys.exit(cmd_debug_prompt(args))
     if args.command == "doctor":
         sys.exit(cmd_doctor(args))
@@ -19317,6 +19517,14 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
         if args.runs_command == "cancel":
             sys.exit(cmd_runs_cancel(args))
         parser.error("runs command is required")
+    if args.command == "model-requests":
+        if args.model_requests_command == "list":
+            sys.exit(cmd_model_requests_list(args))
+        if args.model_requests_command == "show":
+            sys.exit(cmd_model_requests_show(args))
+        if args.model_requests_command == "export":
+            sys.exit(cmd_model_requests_export(args))
+        parser.error("model-requests command is required")
     if args.command == "harness":
         if args.harness_command == "status":
             sys.exit(cmd_harness_status(args))

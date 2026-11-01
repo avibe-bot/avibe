@@ -13,7 +13,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from sqlalchemy import Engine, select, update
 
@@ -719,7 +719,7 @@ def _target_from_session_row(
         session_anchor=str(row.get("session_anchor") or fallback_anchor),
         workdir=workdir,
         source=source,
-        project_base=_session_project_base(row, workdir),
+        project_base=session_project_base_from_row(row, workdir),
         scope_id=_optional_str(row.get("scope_id")),
         scope_type=_optional_str(row.get("_scope_type")),
         agent_session_id=_optional_str(row.get("id")),
@@ -788,7 +788,8 @@ def _project_base_for_workdir(workdir: str, candidate: Any) -> Optional[str]:
     return normalize_session_project_base(workdir, candidate)
 
 
-def _session_project_base(row: dict[str, Any], workdir: str) -> Optional[str]:
+def session_project_base_from_row(row: Mapping[str, Any], workdir: str) -> Optional[str]:
+    """Read a Session's durable project boundary without resolving or creating its workdir."""
     try:
         metadata = json.loads(str(row.get("metadata_json") or "{}"))
     except (TypeError, ValueError):

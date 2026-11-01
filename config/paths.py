@@ -130,6 +130,12 @@ def get_state_dir() -> Path:
     return get_vibe_remote_dir() / "state"
 
 
+def get_model_request_artifacts_dir() -> Path:
+    """Where Vibey keeps the exact bytes of model requests that did not succeed (``request_artifacts``)."""
+
+    return get_state_dir() / "agent_core" / "model-requests"
+
+
 def get_logs_dir() -> Path:
     return get_vibe_remote_dir() / "logs"
 

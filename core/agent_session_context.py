@@ -2,7 +2,26 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
+
+
+def session_model_settings(
+    target: Mapping[str, Any] | None,
+    *,
+    fallback_model: str | None = None,
+    fallback_reasoning_effort: str | None = None,
+) -> tuple[str | None, str | None, set[str]]:
+    """Resolve a Session's settings without materializing them; explicit null is a pin, not inheritance."""
+    from storage.session_reclaim import explicit_override_names
+
+    target = target or {}
+    explicit = explicit_override_names(target.get("metadata"))
+    model = target.get("model") if "model" in explicit else target.get("model") or fallback_model
+    effort = (
+        target.get("reasoning_effort") if "reasoning_effort" in explicit
+        else target.get("reasoning_effort") or fallback_reasoning_effort
+    )
+    return model, effort, explicit
 
 
 def resolve_context_agent_session_target(context: Any) -> Optional[dict[str, Any]]:

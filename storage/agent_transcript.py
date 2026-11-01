@@ -66,7 +66,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Callable, Literal, Mapping, Optional, Sequence, TypeVar
 
@@ -322,20 +322,22 @@ class SQLiteTranscriptStore:
     ) -> ContextEntry:
         if not isinstance(message, AssistantMessage):
             raise TypeError("append_response takes an AssistantMessage")
-        response: dict[str, Any] = {"version": PAYLOAD_VERSION, "message": message_to_dict(message)}
+        row_metadata = dict(metadata or {})
+        stored_message = _with_render_metadata(message, row_metadata)
+        response: dict[str, Any] = {"version": PAYLOAD_VERSION, "message": message_to_dict(stored_message)}
         if request is not None:
             response["request"] = dict(request)  # C-9 ``ModelResponse.request``: the anchor's request facts
         model = _canonical(response, "response")
         if replied is None:
-            replied = has_reply(message)
-        display_text = self._render(message, final=final, replied=replied, images=tuple(images))
+            replied = has_reply(stored_message)
+        display_text = self._render(stored_message, final=final, replied=replied, images=tuple(images))
 
         def work(conn: Connection) -> ContextEntry:
             origin = _turn_origin(conn, session_id, agent_name, turn_id)
             seq = _next_context_seq(conn, session_id)
-            row_metadata = dict(metadata or {})
+            row_metadata_for_write = dict(row_metadata)
             if origin.turn_id:
-                row_metadata["turn_id"] = origin.turn_id
+                row_metadata_for_write["turn_id"] = origin.turn_id
             row = messages_service.append(
                 conn,
                 scope_id=origin.scope_id,
@@ -349,12 +351,13 @@ class SQLiteTranscriptStore:
                 ),
                 text=display_text,
                 content={"model": model},
-                metadata=row_metadata or None,
+                metadata=row_metadata_for_write or None,
             )
             conn.execute(messages.update().where(messages.c.id == row["id"]).values(context_seq=seq))
-            _register_images(conn, origin.scope_id, session_id, message)
+            _register_images(conn, origin.scope_id, session_id, stored_message)
             return ContextEntry(
-                session_id, seq, "response", row["id"], message=message, payload=model, created_at=_epoch(row["created_at"])
+                session_id, seq, "response", row["id"], message=replace(stored_message, transcript_row_id=row["id"]),
+                payload=model, created_at=_epoch(row["created_at"]),
             )
 
         return await self._write(session_id, work)
@@ -982,7 +985,7 @@ def _context_entries(conn: Connection, session_id: str) -> list[ContextEntry]:
 def _context_rows(conn: Connection, session_id: str, bound: Optional[int]) -> list[ContextEntry]:
     entries: list[ContextEntry] = []
     for table, columns, to_entry in (
-        (messages, (messages.c.type,), _message_entry),
+        (messages, (messages.c.type, messages.c.metadata_json), _message_entry),
         (agent_events, (agent_events.c.event_type, agent_events.c.visibility), _event_entry),
     ):
         conditions = [table.c.session_id == session_id, table.c.context_seq.is_not(None)]
@@ -1001,7 +1004,7 @@ def _turn_context_entries(conn: Connection, session_id: str, turn_id: str) -> li
     """Read one Turn through its owner indexes, without loading Session history or forks."""
     entries: list[ContextEntry] = []
     for table, index, owner, columns, to_entry in (
-        ("messages", "ix_messages_turn_id", MESSAGE_TURN_ID_SQL, "type", _message_entry),
+        ("messages", "ix_messages_turn_id", MESSAGE_TURN_ID_SQL, "type, metadata_json", _message_entry),
         ("agent_events", "ix_agent_events_turn_sequence_id", "turn_id", "event_type, visibility", _event_entry),
     ):
         query = text(
@@ -1027,6 +1030,19 @@ def _turn_context_entries(conn: Connection, session_id: str, turn_id: str) -> li
     return sorted(entries, key=lambda row: row.context_seq)
 
 
+def _with_render_metadata(message: AssistantMessage, metadata: Mapping[str, Any]) -> AssistantMessage:
+    """Optional renderer facts never make an otherwise valid historical row unreadable."""
+    changes: dict[str, Any] = {}
+    for key in ("hosted_render_epoch", "hosted_render_rule"):
+        value = metadata.get(key)
+        if type(value) is int:
+            changes[key] = value
+    omitted = metadata.get("hosted_render_omitted")
+    if isinstance(omitted, list) and all(isinstance(row, str) and row for row in omitted):
+        changes["hosted_render_omitted"] = tuple(omitted)
+    return replace(message, **changes)
+
+
 def _message_entry(session_id: str, row: Mapping[str, Any]) -> ContextEntry:
     row_id = row["id"]
     if row["type"] in INPUT_TYPES:
@@ -1038,6 +1054,12 @@ def _message_entry(session_id: str, row: Mapping[str, Any]) -> ContextEntry:
         raise TranscriptError(f"context row {row_id} has message type {row['type']!r}")
     payload = _versioned(_json_object(row["content_json"], row_id).get("model"), row_id)
     message = _message(payload.get("message"), expected, row_id)
+    if isinstance(message, AssistantMessage):
+        try:
+            metadata = _json_object(row.get("metadata_json"), row_id)
+        except TranscriptError:
+            metadata = {}
+        message = replace(_with_render_metadata(message, metadata), transcript_row_id=row_id)
     return ContextEntry(
         session_id, row["context_seq"], kind, row_id, message=message, payload=payload, created_at=_epoch(row["created_at"])
     )

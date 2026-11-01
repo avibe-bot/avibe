@@ -19,7 +19,7 @@ import secrets
 import time
 from collections import deque
 from contextlib import asynccontextmanager, suppress
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, AsyncIterator, Awaitable, Callable, Iterable, Literal, Mapping, Optional, Sequence, TypeVar
 
@@ -70,10 +70,13 @@ from core.agent_core.agent.jobs import TrackingJobHost
 from core.agent_core.agent.lifecycle import RunAborted as _Aborted, RunScope
 from core.agent_core.agent.models import ModelRouter, ModelSelection, RetryPolicy
 from core.agent_core.agent.outcome import OutcomeOwner
+from core.agent_core.agent.preview import ContextTransition, RequestPreview
 from core.agent_core.agent.state import HookStateError, state_representation
 from core.agent_core.ai._common import endpoint_origin, native_hosted_tools, portable_endpoint, search_history_endpoint
+from core.agent_core.ai.preview import preview_wire_request
 from core.agent_core.ai.provider import (
     Done,
+    MediaLoader,
     ModelEndpoint,
     ModelRequest,
     ProviderError,
@@ -144,6 +147,7 @@ from core.agent_core.harness.projection import (
     ContextView,
     ProjectionError,
     context_view,
+    open_tool_calls,
     project,
     validate_message_append,
 )
@@ -335,6 +339,14 @@ class _Attempt:
 
 
 @dataclass(frozen=True)
+class _PreparedConversation:
+    request: ModelRequest
+    tools: dict[str, Tool]
+    view: ContextView
+    budget: Budget | None
+
+
+@dataclass(frozen=True)
 class _Outcome:
     ok: bool
     overflow: bool = False
@@ -480,6 +492,75 @@ class Agent:
         """A committed cut, including only state that can be restored there."""
         seq = self._rows[-1].context_seq if self._rows else 0
         return Snapshot(self.session_id, seq, deepcopy(self._committed_state))
+
+    async def dry_tick(
+        self,
+        *,
+        selected: ModelSelection,
+        entries: Sequence[ContextEntry] | None = None,
+        context_seq: int | None = None,
+        turn_inputs: Iterable[int] = (),
+        gateway: bool = False,
+        media_loader: MediaLoader | None = None,
+    ) -> RequestPreview:
+        """Reconstruct the next request at a committed cut, without running it.
+
+        ``selected`` is explicit: resolving a router can activate a gateway or
+        mutate its retry state. The host supplies a read-only route description.
+        The current Agent configuration is used, not an invented historical
+        system/tools/route snapshot. Hooks and pending client tools block a dry
+        tick because their effects cannot safely be predicted. No hook, context
+        transition, transcript write, model send or tool execution occurs here.
+        """
+        if context_seq is not None and (type(context_seq) is not int or context_seq < 0):
+            raise ValueError("context_seq must be a nonnegative integer")
+        async with self._lock:
+            if self._running:
+                raise RuntimeError("cannot preview an Agent with an active run")
+            rows = deepcopy(list(entries if entries is not None else await self.store.load(self.session_id)))
+            head = max((row.context_seq for row in rows), default=0)
+            if context_seq is not None and context_seq > head:
+                raise ValueError("context_seq is beyond the committed context")
+            if context_seq is not None:
+                rows = [row for row in rows if row.context_seq <= context_seq]
+            projection = project(rows)
+            snapshot = Snapshot(
+                self.session_id, max((row.context_seq for row in rows), default=0), deepcopy(dict(projection.state))
+            )
+            if self.hooks or self.rehydrate is not None:
+                return RequestPreview(snapshot, "unsupported_hooks")
+            if open_tool_calls(rows):
+                return RequestPreview(snapshot, "pending_tools")
+            # Only detached preparation state changes. Dependencies are shared
+            # read-only; none of the run, commit or execution methods is entered.
+            preparing = copy(self)
+            preparing._rows = rows
+            preparing._ctx = RunContext(self.session_id, "", CancelToken(), deepcopy(dict(projection.state)))
+            preparing._scope = RunScope(preparing._ctx.cancel)
+            preparing._run_tools = None
+            preparing._turn_inputs = {seq for seq in turn_inputs if 0 < seq <= snapshot.context_seq}
+            preparing._unproductive = 0
+            preparing._last_model_at = {}
+            preparing._refusals = _Refusals(opaque=set(projection.opaque_refused))
+            if preparing.context is not None:
+                now = preparing.context.clock()
+                preparing.context = replace(preparing.context, clock=lambda: now)
+            route = preparing._refusals.render(deepcopy(selected), portable=False)
+            prepared = await preparing._prepare_conversation(preparing.system, route)
+            transition = (
+                preparing._context_transition(prepared.request, prepared.view, prepared.budget, _Ladder())
+                if prepared.budget is not None else None
+            )
+            facts = dict(
+                request=prepared.request, capabilities=route.capabilities, budget=prepared.budget,
+                turn_inputs=tuple(sorted(preparing._turn_inputs)),
+            )
+            if transition is not None:
+                return RequestPreview(snapshot, "needs_context_transition", transition=transition, **facts)
+        wire = await preview_wire_request(prepared.request, gateway=gateway, media_loader=media_loader)
+        if isinstance(wire, ProviderError):
+            return RequestPreview(snapshot, "preparation_error", error=wire, **facts)
+        return RequestPreview(snapshot, "ready", wire=wire, **facts)
 
     def run(self, input: AgentInput, *, turn_id: str) -> AsyncIterator[AgentEvent]:
         input = deepcopy(input)
@@ -1630,18 +1711,44 @@ class Agent:
         last = used.get(_cache_of(endpoint_origin(endpoint)), max(used.values(), default=None))
         return last is not None and self.context.clock() - last > cache_ttl_s(endpoint)
 
+    async def _prepare_conversation(self, system: str, selected: ModelSelection) -> _PreparedConversation:
+        """Compose and budget before any context transition; also used by dry_tick."""
+        view = context_view(self._rows)
+        request, tools = await self._request(system, selected, messages=self._carried(view))
+        plan = (
+            budget(request, selected.capabilities, transcript=view.messages, anchor=last_anchor(self._rows, view))
+            if self.context is not None else None
+        )
+        return _PreparedConversation(request, tools, view, plan)
+
+    def _context_transition(
+        self, request: ModelRequest, view: ContextView, plan: Budget, ladder: _Ladder,
+        *, minimal_checked: bool = False,
+    ) -> ContextTransition | None:
+        """Select the next effect without applying it, for both live and dry preparation."""
+        if (not plan.can_fit and not minimal_checked) or ladder.refused:
+            return "context_relief"
+        if self.context.clear_tool_results and (
+            plan.est >= CLEAR_SOFT_RATIO * plan.threshold or self._cache_cold(request.endpoint)
+        ) and clearable_results(view):
+            return "clear_tool_results"
+        if plan.est >= plan.threshold and not ladder.compacted and not self._stopped:
+            if normal_cut(view.units, plan.keep, turn_inputs=self._turn_inputs, pinned=view.pinned) is not None:
+                return "checkpoint"
+        if plan.fits or ((ladder.summary_failed or self._stopped) and plan.can_fit):
+            return None
+        return "context_relief"
+
     async def _compose(
         self, system: str, selected: ModelSelection, emit: Callable[..., Awaitable[None]], ladder: _Ladder
     ) -> tuple[ModelRequest, dict[str, Tool]]:
-        """The conversation request pipeline (invariant 1)."""
+        """Prepare, apply any required context transition, and prepare again."""
         while True:
-            view = context_view(self._rows)
-            request, tools = await self._request(system, selected, messages=self._carried(view))
-            if self.context is None:
-                return request, tools
-            plan = budget(request, selected.capabilities, transcript=view.messages, anchor=last_anchor(self._rows, view))
-            if not await self._stage(system, selected, request, view, plan, emit, ladder):
-                return request, tools
+            prepared = await self._prepare_conversation(system, selected)
+            if prepared.budget is None or not await self._stage(
+                system, selected, prepared.request, prepared.view, prepared.budget, emit, ladder,
+            ):
+                return prepared.request, prepared.tools
 
     async def _stage(
         self,
@@ -1658,13 +1765,12 @@ class Agent:
         Whether the run still takes checkpoints is read from its live bound at every decision, never kept: a
         checkpoint attempt in this pass can use it up.
         """
-        # Once the run takes no more checkpoints, only a drop can follow, and only for a request that cannot fit or
-        # that the provider refused; for one that will be sent as it is, nothing is built for a compaction.
-        compacting = not plan.can_fit or ladder.refused
-        if not self._stopped:
-            compacting = compacting or plan.est >= plan.threshold or not plan.fits
-        if compacting:
-            # A compaction may follow: what a person typed, for its memo, read off the event loop first.
+        transition = self._context_transition(request, view, plan, ladder)
+        if transition is None:
+            return False
+        # A compaction may follow: read memo input off the event loop only on
+        # the live effect path. Dry preparation stops at the decision above.
+        if transition != "clear_tool_results":
             await self._prefetch_typed(view)
         if not plan.can_fit:
             _, minimal = await self._minimal(system, selected, request, view, plan, carry=False)
@@ -1677,17 +1783,16 @@ class Agent:
                 if await self._fit_batch(view, (room - minimal.margin, room)):
                     return True
                 raise self._exhausted(request, view, plan, kind=self._cause(view, minimal))
+            # The minimal check is admission, not a replacement for the normal
+            # clear/checkpoint ladder. Keep that order even on oversized input.
+            transition = self._context_transition(request, view, plan, ladder, minimal_checked=True)
         refused, ladder.refused = ladder.refused, False
+        if transition == "clear_tool_results":
+            await self._commit_context([("context_edit", clear_edit(target)) for target in clearable_results(view)])
+            return True
         shrink = refused
         if not shrink:
-            if self.context.clear_tool_results and (
-                plan.est >= CLEAR_SOFT_RATIO * plan.threshold or self._cache_cold(request.endpoint)
-            ):
-                targets = clearable_results(view)
-                if targets:
-                    await self._commit_context([("context_edit", clear_edit(target)) for target in targets])
-                    return True
-            if plan.est >= plan.threshold and not ladder.compacted and not self._stopped:
+            if transition == "checkpoint":
                 cut = normal_cut(view.units, plan.keep, turn_inputs=self._turn_inputs, pinned=view.pinned)
                 if cut is not None:
                     ladder.compacted = True

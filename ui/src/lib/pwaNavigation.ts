@@ -82,28 +82,3 @@ export function openLinkInNewContext(href: string, features?: string): Window | 
   if (window.__AVIBE_PWA_NAVIGATE_SAME_ORIGIN__?.(href)) return null;
   return window.open(href, '_blank', features);
 }
-
-/**
- * Open a blank tab inside the click gesture so a later awaited request can
- * still navigate it. Popup blockers reject `window.open` after `await`.
- */
-export function openPreparedTab(): Window | null {
-  if (typeof window === 'undefined') return null;
-  const tab = window.open('about:blank', '_blank');
-  if (!tab) return null;
-  try {
-    tab.opener = null;
-  } catch {
-    // Some WindowProxy implementations expose a read-only opener.
-  }
-  return tab;
-}
-
-export function navigatePreparedTab(tab: Window | null, href: string | null | undefined): void {
-  if (!tab || tab.closed) return;
-  if (!href) {
-    tab.close();
-    return;
-  }
-  tab.location.replace(href);
-}

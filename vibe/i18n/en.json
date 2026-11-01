@@ -1798,5 +1798,7 @@
     }
   },
   "mcp_oauth_callback_success": "MCP OAuth login completed. You can close this tab.",
-  "mcp_oauth_callback_failure": "MCP OAuth login could not be completed. Return to Avibe and try again."
+  "mcp_oauth_callback_failure": "MCP OAuth login could not be completed. Return to Avibe and try again.",
+  "mcp_oauth_start_failure": "MCP OAuth login could not be started. Return to Avibe and try again.",
+  "mcp_oauth_start_rejected": "This MCP OAuth link must be opened from Avibe."
 }

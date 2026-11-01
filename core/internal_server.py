@@ -1263,6 +1263,37 @@ def create_app(
         (FSM, Phase 1b). A reconnected Chat page asks this to restore working/Stop."""
         return manager.turn_state(session_id)
 
+    @app.post("/internal/debug/request/preview")
+    async def _request_preview(request: Request) -> Any:
+        from core.handlers.request_preview import preview_session_request, require_preview_owner
+        from vibe.authorization import InstanceAuthorizationError, invocation_authority
+
+        try:
+            payload = await _bounded_json_object(request, limit=32 * 1024)
+        except _RequestBodyTooLarge:
+            return JSONResponse({"error": "request_preview_payload_too_large"}, status_code=413)
+        # Provenance is mandatory. An omitted caller must never inherit the controller's Owner identity.
+        try:
+            authority = await asyncio.to_thread(require_preview_owner, payload.get("caller"))
+        except (InstanceAuthorizationError, ValueError, TypeError):
+            return JSONResponse({"error": "instance_access_forbidden"}, status_code=403)
+        session_id, cut = payload.get("session_id"), payload.get("context_seq")
+        if (
+            set(payload) != {"caller", "session_id", "context_seq"}
+            or not isinstance(session_id, str) or not session_id.strip() or len(session_id) > 200
+            or (cut is not None and (type(cut) is not int or cut < 0))
+        ):
+            return JSONResponse({"error": "request_preview_invalid_parameters"}, status_code=400)
+        try:
+            with invocation_authority(authority):
+                context = await asyncio.to_thread(_build_session_context, session_id.strip())
+                return await preview_session_request(controller, context, context_seq=cut)
+        except InstanceAuthorizationError:
+            return JSONResponse({"error": "instance_access_forbidden"}, status_code=403)
+        except Exception:
+            # Preparation failures may contain paths, prompts or signed provider content. Do not log or echo them.
+            return JSONResponse({"error": "request_preview_failed"}, status_code=409)
+
     @app.get("/internal/running-agents")
     async def _running_agents() -> Any:
         """Read-only snapshot of currently-running agent instances across all

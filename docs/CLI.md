@@ -600,6 +600,24 @@ message sent mid-turn, is `other_outputs`; delivery bookkeeping, turn and
 process ids, and copies of other fields are not printed. `--brief` prints the
 same compact row as `vibe runs list`, for status checks.
 
+### `vibe model-requests`
+
+Inspect the model requests Vibey kept because they did not succeed: the exact
+bytes sent, with the outcome and the raw response read.
+
+```bash
+vibe model-requests list                       # newest first; --session-id and --state narrow it, --page and --limit page it
+vibe model-requests show mr_20261031T140102Z_0a1b2c3d4e5f
+vibe model-requests export mr_20261031T140102Z_0a1b2c3d4e5f --to ~/private/requests
+```
+
+`list` and `show` print metadata only, never a request or response body.
+`export` copies one request's files into a new private directory `<dir>/<id>/`.
+The files can hold prompts and tool output. See
+[Model request artifacts](model-request-artifacts.md) for what is kept, for how
+long, and why these are the bytes sent to the local Model Hub rather than the
+provider's.
+
 ### `vibe task`
 
 Create, inspect, update, run, pause, resume, or remove scheduled tasks.
@@ -982,6 +1000,7 @@ The web UI (`http://127.0.0.1:5123`) provides the same controls:
 | `~/.vibe_remote/state/task_requests/` | Legacy queued task/hook requests imported into SQLite on startup |
 | `~/.vibe_remote/state/user_preferences.md` | Shared long-term user preference notes |
 | `~/.vibe_remote/state/backups/` | Automatic state backups taken before migrations |
+| `~/.vibe_remote/state/agent_core/model-requests/` | Private copies of Vibey model requests that did not succeed (`vibe model-requests`); kept 7 days, 256 MiB at most |
 | `~/.vibe_remote/runtime/remote-access-cloudflared.pid` | cloudflared tunnel PID for Avibe Cloud remote access |
 | `~/.vibe_remote/screenshots/` | Default output directory for `vibe screenshot` |
 | `~/.vibe_remote/logs/vibe_remote.log` | Application logs |

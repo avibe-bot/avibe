@@ -23,6 +23,14 @@ PROTOCOLS: tuple[str, ...] = ("anthropic", "openai_chat", "openai_responses", "g
 StopReason = Literal["stop", "length", "tool_use", "refusal", "safety", "aborted", "error"]
 STOP_REASONS: tuple[str, ...] = ("stop", "length", "tool_use", "refusal", "safety", "aborted", "error")
 
+#: The persisted response metadata epoch for the hosted-refusal wire renderer. It is deliberately not part of
+#: the canonical message payload: older releases ignore the row metadata, while this build uses it to keep a
+#: response's historical rendering stable across later requests.
+HOSTED_RENDER_EPOCH = 2
+#: The successor-binding rule used when this response was generated. Keep epoch 2 for released readers; rule 3
+#: plus explicit predecessor row ids proves which legacy tails the actual request omitted.
+HOSTED_RENDER_RULE = 3
+
 IMAGE_MIME_TYPES: tuple[str, ...] = ("image/png", "image/jpeg", "image/gif", "image/webp")
 
 _LARGE_REF_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -848,6 +856,16 @@ class AssistantMessage:
     #: Provider classification carried to the store as response-row metadata, not a canonical message field.
     #: A later hop can distinguish transient cut-offs without interpreting provider wording as capability evidence.
     error_kind: Optional[str] = field(default=None, compare=False, repr=False)
+    #: The response-row metadata epoch used by the hosted-refusal renderer. This transient fact is loaded from the
+    #: response metadata and is intentionally omitted from ``message_to_dict`` / the canonical transcript payload.
+    hosted_render_epoch: Optional[int] = field(default=None, compare=False, repr=False)
+    #: Like the epoch, this is response-row metadata, not canonical content. A signed successor commits the rule
+    #: that compiled its predecessors without modifying any historical row (including shared fork ancestry).
+    hosted_render_rule: Optional[int] = field(default=None, compare=False, repr=False)
+    #: The old response rows actually migrated by the request producing this response, not provider call ids.
+    hosted_render_omitted: tuple[str, ...] = field(default=(), compare=False, repr=False)
+    #: Store-owned identity, stable across reload and shared fork ancestry; never serialized as canonical content.
+    transcript_row_id: Optional[str] = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         _require_blocks(self.content, (TextBlock, ThinkingBlock, ToolCallBlock, HostedToolBlock), "assistant message")

@@ -11,6 +11,7 @@ on:
       - "desktop/**"
       - "ui/src/i18n/en.json"
       - "ui/src/i18n/zh.json"
+      - "scripts/desktop_release.py"
       - ".github/workflows/desktop-shell.yml"
       - ".github/workflows/desktop-package.yml"
   push:
@@ -20,6 +21,7 @@ on:
       - "desktop/**"
       - "ui/src/i18n/en.json"
       - "ui/src/i18n/zh.json"
+      - "scripts/desktop_release.py"
       - ".github/workflows/desktop-shell.yml"
       - ".github/workflows/desktop-package.yml"
 
@@ -38,15 +40,39 @@ jobs:
   shell:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    env:
+      DEVELOPER_DIR: ${{ matrix.developer_dir }}
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, windows-latest]
+        include:
+          - os: macos-26
+            developer_dir: /Applications/Xcode_26.6.app/Contents/Developer
+            cache_scope: xcode-26.6-default-target-
+          - os: windows-latest
+            developer_dir: ""
+            cache_scope: ""
     defaults:
       run:
         working-directory: desktop
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Report pinned Apple toolchain
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          [ -d "$DEVELOPER_DIR" ] || {
+            echo "Pinned Xcode is missing: $DEVELOPER_DIR" >&2
+            exit 1
+          }
+          xcodebuild -version
+          [ "$(xcodebuild -version | sed -n '1p')" = "Xcode 26.6" ] || {
+            echo "Expected Xcode 26.6 from $DEVELOPER_DIR" >&2
+            exit 1
+          }
+          xcrun --sdk macosx --show-sdk-version
+          echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
@@ -63,8 +89,8 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             desktop/target
-          key: ${{ runner.os }}-desktop-cargo-${{ hashFiles('desktop/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-desktop-cargo-
+          key: ${{ runner.os }}-${{ matrix.cache_scope }}desktop-cargo-${{ hashFiles('desktop/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.cache_scope }}desktop-cargo-
 
       - name: Report toolchain
         run: |
@@ -114,3 +140,10 @@ jobs:
 
       - name: Build the shell
         run: cargo build --workspace
+
+      - name: Verify macOS SDK and deployment target ceiling
+        if: runner.os == 'macOS'
+        run: >
+          python ../scripts/desktop_release.py verify-macos-build-version
+          --binary target/debug/avibe-desktop=11.0
+          --minimum-sdk 26.0

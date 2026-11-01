@@ -206,7 +206,7 @@ class OpenAIChatAdapter(ProviderAdapter):
             if terminal is not None:
                 yield terminal
             return
-        transformed_messages, loaded_images = prepared
+        transformed_messages, loaded_images = prepared.messages, prepared.loaded_images
         if cancel.cancelled:
             terminal = assembler.terminal(assembler.aborted(cancel.reason))
             if terminal is not None:

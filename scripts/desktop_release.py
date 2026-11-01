@@ -76,6 +76,117 @@ def resolve(tag: str, source_sha: str | None = None) -> dict[str, str]:
             "package_version": package_version_from_release_tag(tag)}
 
 
+def _numeric_version(value: str) -> tuple[int, ...]:
+    if re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", value) is None:
+        raise ValueError(f"Invalid Mach-O build version: {value}")
+    parts = tuple(int(part) for part in value.split("."))
+    while len(parts) > 1 and parts[-1] == 0:
+        parts = parts[:-1]
+    return parts
+
+
+def parse_macos_build_versions(output: str) -> list[tuple[str, str, str]]:
+    records: list[tuple[str, str, str]] = []
+    command: str | None = None
+    deployment_target: str | None = None
+    sdk: str | None = None
+
+    def finish_command() -> None:
+        nonlocal command, deployment_target, sdk
+        if command in {"LC_BUILD_VERSION", "LC_VERSION_MIN_MACOSX"}:
+            if deployment_target is None or sdk is None:
+                raise ValueError(f"Incomplete {command} command")
+            _numeric_version(deployment_target)
+            _numeric_version(sdk)
+            records.append((command, deployment_target, sdk))
+        command = None
+        deployment_target = None
+        sdk = None
+
+    for line in output.splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and fields[:2] == ["Load", "command"]:
+            finish_command()
+        elif len(fields) == 2 and fields[0] == "cmd":
+            command = fields[1]
+        elif command == "LC_BUILD_VERSION" and len(fields) == 2:
+            if fields[0] == "minos":
+                deployment_target = fields[1]
+            elif fields[0] == "sdk":
+                sdk = fields[1]
+        elif command == "LC_VERSION_MIN_MACOSX" and len(fields) == 2:
+            if fields[0] == "version":
+                deployment_target = fields[1]
+            elif fields[0] == "sdk":
+                sdk = fields[1]
+    finish_command()
+    if not records:
+        raise ValueError(
+            "Mach-O binary has no LC_BUILD_VERSION or LC_VERSION_MIN_MACOSX command"
+        )
+    return records
+
+
+def parse_macos_binary_spec(spec: str) -> tuple[Path, str]:
+    try:
+        binary, maximum_deployment_target = spec.rsplit("=", 1)
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid macOS binary spec {spec!r}; expected PATH=MAX_DEPLOYMENT_TARGET"
+        ) from exc
+    if not binary:
+        raise ValueError(f"Invalid macOS binary spec {spec!r}: path is empty")
+    _numeric_version(maximum_deployment_target)
+    return Path(binary), maximum_deployment_target
+
+
+def verify_macos_build_versions(
+    binaries: list[tuple[Path, str]],
+    *,
+    minimum_sdk: str,
+) -> None:
+    minimum_sdk_value = _numeric_version(minimum_sdk)
+    for binary, maximum_deployment_target in binaries:
+        maximum_deployment_target_value = _numeric_version(maximum_deployment_target)
+        if binary.is_symlink() or not binary.is_file():
+            raise ValueError(f"Missing or invalid Mach-O binary: {binary}")
+        architectures = subprocess.check_output(
+            ["lipo", "-archs", str(binary)],
+            text=True,
+            stderr=subprocess.STDOUT,
+        ).split()
+        if not architectures:
+            raise ValueError(f"Mach-O binary has no architecture: {binary}")
+        for architecture in architectures:
+            output = subprocess.check_output(
+                ["otool", "-arch", architecture, "-l", str(binary)],
+                text=True,
+                stderr=subprocess.STDOUT,
+            )
+            records = parse_macos_build_versions(output)
+            if len(records) != 1:
+                raise ValueError(
+                    f"{binary} [{architecture}]: expected exactly one "
+                    "LC_BUILD_VERSION or LC_VERSION_MIN_MACOSX command, "
+                    f"got {len(records)}"
+                )
+            command, deployment_target, sdk = records[0]
+            print(
+                f"{binary} [{architecture}]: "
+                f"{command} deployment target {deployment_target}, sdk {sdk}"
+            )
+            if _numeric_version(sdk) < minimum_sdk_value:
+                raise ValueError(
+                    f"{binary} [{architecture}]: expected {command} sdk >= "
+                    f"{minimum_sdk}, got {sdk}"
+                )
+            if _numeric_version(deployment_target) > maximum_deployment_target_value:
+                raise ValueError(
+                    f"{binary} [{architecture}]: expected {command} deployment "
+                    f"target <= {maximum_deployment_target}, got {deployment_target}"
+                )
+
+
 def prepare(
     version: str,
     tag: str,
@@ -459,6 +570,14 @@ def main() -> None:
     resolver = sub.add_parser("resolve")
     resolver.add_argument("--tag", required=True)
     resolver.add_argument("--output", type=Path, required=True)
+    build_version = sub.add_parser("verify-macos-build-version")
+    build_version.add_argument(
+        "--binary",
+        action="append",
+        required=True,
+        metavar="PATH=MAX_DEPLOYMENT_TARGET",
+    )
+    build_version.add_argument("--minimum-sdk", default="26.0")
     prep = sub.add_parser("prepare")
     prep.add_argument("--version", required=True)
     prep.add_argument("--tag", default="")
@@ -499,6 +618,11 @@ def main() -> None:
         # outputs the step already wrote (enabled/updater_enabled).
         with args["output"].open("a", encoding="utf-8") as stream:
             stream.write("".join(f"{key}={value}\n" for key, value in resolve(args["tag"]).items()))
+    elif command == "verify-macos-build-version":
+        verify_macos_build_versions(
+            [parse_macos_binary_spec(spec) for spec in args["binary"]],
+            minimum_sdk=args["minimum_sdk"],
+        )
     elif command == "prepare":
         prepare(**args)
     elif command == "record":
