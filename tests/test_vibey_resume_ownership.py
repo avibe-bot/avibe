@@ -195,12 +195,18 @@ async def test_retry_events_and_recovered_job_belong_to_retry_turn_not_last_inpu
     harness = _Harness(engine, tmp_path, "avibe", [[ProviderError("invalid_request", "failed", False)]], suite=suite)
     original = harness.request("运行检查")
     await harness.agent.handle_message(original)
+    with engine.connect() as conn:
+        before = {row["id"]: dict(row) for row in conn.execute(
+            select(agent_events).where(agent_events.c.session_id == SESSION)
+        ).mappings()}
+    # The failed Turn now has non-context prompt/attempt diagnostics of its own.
+    assert {row["turn_id"] for row in before.values()} == {_turn(original.context)}
     retry = _retry_request(harness, original)
     retry_turn = _turn(retry.context)
     harness.controller._native_start(retry.context)
     # Simulate the retry process dying after the tool call was committed, before its result.
     harness.agent.store.bind_agent(SESSION, "vibey", turn_id=retry_turn)
-    response = await harness.agent.store.append_response(
+    await harness.agent.store.append_response(
         SESSION, assistant("", calls=[ToolCallBlock("retry_bash", "bash", {"command": "pytest"})]), final=False
     )
     await harness.agent.store.append_audit(SESSION, "attempt", {"version": 1, "test": "retry"})
@@ -211,7 +217,8 @@ async def test_retry_events_and_recovered_job_belong_to_retry_turn_not_last_inpu
 
     with engine.connect() as conn:
         events = conn.execute(select(agent_events).where(agent_events.c.session_id == SESSION)).mappings().all()
-    retry_events = [row for row in events if row["context_seq"] is None or row["context_seq"] > response.context_seq]
+    assert {row["id"]: dict(row) for row in events if row["id"] in before} == before
+    retry_events = [row for row in events if row["id"] not in before]
     assert {row["turn_id"] for row in retry_events} == {retry_turn}
     assert jobs.watches == {"job_retry": "watch_job_retry"}
     [result] = [entry for entry in await harness.context_rows() if entry.kind == "tool_result"]
