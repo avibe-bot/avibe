@@ -28,6 +28,8 @@ impl Fixture {
             std::process::id()
         ));
         std::fs::create_dir_all(&scratch).unwrap();
+        let stderr_path = scratch.join("stderr.log");
+        let stderr = std::fs::File::create(&stderr_path).unwrap();
         let python =
             std::env::var_os("AVIBE_TEST_PYTHON").expect("set absolute AVIBE_TEST_PYTHON to project test Python");
         let mut command = Command::new(python);
@@ -70,20 +72,19 @@ impl Fixture {
             .arg(case)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::from(stderr))
             .spawn()
             .expect("fixture Python starts");
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
         let endpoint = scratch.join("endpoint");
         while !endpoint.exists() {
             if let Some(status) = child.try_wait().unwrap() {
-                let output = child.wait_with_output().unwrap();
-                panic!("fixture exited {status}: {}", String::from_utf8_lossy(&output.stderr));
+                panic!("fixture exited {status}: {}", diagnostic_tail(&stderr_path));
             }
             if std::time::Instant::now() >= deadline {
                 child.kill().ok();
                 child.wait().ok();
-                panic!("fixture initialization timed out");
+                panic!("fixture initialization timed out: {}", diagnostic_tail(&stderr_path));
             }
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -136,6 +137,16 @@ impl Drop for Fixture {
         }
         std::fs::remove_dir_all(&self.scratch).ok();
     }
+}
+
+fn diagnostic_tail(path: &Path) -> String {
+    use std::io::{Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).unwrap();
+    let size = file.metadata().unwrap().len();
+    file.seek(SeekFrom::Start(size.saturating_sub(8192))).unwrap();
+    let mut tail = Vec::new();
+    file.take(8192).read_to_end(&mut tail).unwrap();
+    String::from_utf8_lossy(&tail).into_owned()
 }
 
 #[test]

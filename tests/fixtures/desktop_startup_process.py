@@ -7,6 +7,7 @@ The Rust parent supplies an empty environment with private homes before imports.
 """
 from __future__ import annotations
 
+import faulthandler
 import json
 import os
 from pathlib import Path
@@ -16,6 +17,9 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 
+# A slow import or listener initialization must identify its blocking call in
+# CI before the Rust parent's 15-second fixture initialization deadline.
+faulthandler.dump_traceback_later(10, file=sys.stderr)
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from vibe import cli, runtime  # noqa: E402
 from vibe import install_generations  # noqa: E402
@@ -140,6 +144,7 @@ runtime.wait_for_service_ready = wait_service
 install_generations.collect_install_generations = housekeeping_work
 (scratch / "endpoint.tmp").write_text(f"http://127.0.0.1:{port}", encoding="utf-8")
 (scratch / "endpoint.tmp").replace(scratch / "endpoint")
+faulthandler.cancel_dump_traceback_later()
 try:
     assert sys.stdin.readline().strip() == "start"
     started = time.monotonic()
