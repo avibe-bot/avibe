@@ -50,8 +50,7 @@ async def preview_wire_request(
     )
     if isinstance(prepared, ProviderError):
         return prepared
-    messages, images = prepared
-    wire = builder(request, messages, gateway=gateway, loaded_images=images)
+    wire = builder(request, prepared.messages, gateway=gateway, loaded_images=prepared.loaded_images)
     # AsyncClient.build_request delegates JSON serialization to Request, too.
     # No client construction (or environment/proxy/credential lookup) is needed.
     body = httpx.Request("POST", wire.url, headers=wire.headers, json=wire.body).content

@@ -39,6 +39,8 @@ from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import (
     AssistantContent,
     AssistantMessage,
+    HOSTED_RENDER_EPOCH,
+    HOSTED_RENDER_RULE,
     Citation,
     HostedCost,
     HostedSource,
@@ -226,6 +228,8 @@ class StreamAssembler:
         #: The Source that served the response (the served-hop report): the ``native.source_id`` of its hosted calls.
         self.source_id: str | None = None
         self.source_identity: str | None = None
+        # Evidence from this stream's first prepared request; pause continuations must preserve its wire prefix.
+        self.hosted_render_omitted: tuple[str, ...] = ()
         self._citations: dict[int, list[Citation]] = {}
         self._hosted_inputs: dict[Hashable, io.StringIO] = {}
         self._hosted_counts: dict[str, int] = {}
@@ -1148,11 +1152,11 @@ class StreamAssembler:
                 kind="invalid_request",
                 message=message,
                 retryable=False,
-                partial=partial,
+                partial=self._rendered_response(partial),
                 continuable=True,
                 malformed_tool_calls=tuple(malformed),
             )
-        return assistant_message(
+        return self._rendered_response(assistant_message(
             final,
             origin=self.origin,
             stop_reason=stop_reason,
@@ -1161,6 +1165,14 @@ class StreamAssembler:
             verified_origin=self.verified_origin,
             hosted_summary=self._hosted_summary(final),
             source_identity=self.source_identity,
+        ))
+
+    def _rendered_response(self, message: AssistantMessage) -> AssistantMessage:
+        if not self.hosted_render_omitted:
+            return message
+        return replace(
+            message, hosted_render_epoch=HOSTED_RENDER_EPOCH, hosted_render_rule=HOSTED_RENDER_RULE,
+            hosted_render_omitted=self.hosted_render_omitted,
         )
 
     def pause(self) -> AssistantMessage | ProviderError:
@@ -1177,7 +1189,7 @@ class StreamAssembler:
         content = list(self.content)
         if not self._emitted_output:
             content = []
-        return partial_message(
+        return self._rendered_response(partial_message(
             content,
             origin=self.origin,
             usage=self.usage,
@@ -1185,7 +1197,7 @@ class StreamAssembler:
             stop_reason=stop_reason,
             hosted_summary=self._hosted_summary(content),
             source_identity=self.source_identity,
-        )
+        ))
 
     def error(
         self,
@@ -2260,6 +2272,15 @@ async def read_response_body(
     return b"".join(chunks).decode("utf-8", errors="replace")
 
 
+@dataclass(frozen=True)
+class PreparedMessages:
+    """The compiled history, its immutable media snapshots, and the legacy rows this exact render omitted."""
+
+    messages: tuple[Any, ...]
+    loaded_images: dict[str, LoadedImage]
+    hosted_render_omitted: tuple[str, ...]
+
+
 async def prepare_messages(
     messages: tuple[Any, ...],
     *,
@@ -2269,7 +2290,7 @@ async def prepare_messages(
     media_loader: MediaLoader | None,
     cancel: CancelToken,
     endpoint: ModelEndpoint | None = None,
-) -> tuple[tuple[Any, ...], dict[str, LoadedImage]] | ProviderError:
+) -> PreparedMessages | ProviderError:
     """Transform history and resolve immutable media snapshots as one safe boundary."""
 
     try:
@@ -2296,7 +2317,7 @@ async def prepare_messages(
             retryable=False,
             continuable=False,
         )
-    return transformed.messages, loaded_images
+    return PreparedMessages(transformed.messages, loaded_images, transformed.hosted_render_omitted)
 
 
 class _suppress_cancelled:

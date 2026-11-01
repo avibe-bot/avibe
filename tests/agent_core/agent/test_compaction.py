@@ -362,7 +362,7 @@ async def _wire(request):
         media_loader=None,
         cancel=CancelToken(),
     )
-    messages, images = prepared
+    messages, images = prepared.messages, prepared.loaded_images
     build = {
         "anthropic": build_messages_payload,
         "openai_chat": build_chat_payload,

@@ -1980,7 +1980,10 @@ class VibeyAgent(BaseAgent):
                 if route.mode == "proxy" and route.route_switch == "native_interrupted"
             )),
             "hosted_render_epoch": HOSTED_RENDER_EPOCH,
-            "hosted_render_rule": HOSTED_RENDER_RULE,
+            **({
+                "hosted_render_rule": HOSTED_RENDER_RULE,
+                "hosted_render_omitted": list(message.hosted_render_omitted),
+            } if message.hosted_render_rule == HOSTED_RENDER_RULE and message.hosted_render_omitted else {}),
         }
 
     def _on_response(
