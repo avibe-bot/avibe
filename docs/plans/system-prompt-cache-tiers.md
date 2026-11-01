@@ -102,8 +102,8 @@ holds:
 
 Otherwise keep the snapshot and tell the model what is pending (below).
 
-`N` is 30 minutes. With Claude's conversation cache at one hour (proposed
-below), a Session in constant use never goes cold; `N` bounds how long a
+`N` is 30 minutes (owner decision, 2026-11-01). With Claude's conversation
+cache at one hour (Decisions, below), a Session in constant use never goes cold; `N` bounds how long a
 tier-2 change can wait there. At most one forced refresh happens per Session
 per `N` minutes, and only while a tier-2 change is pending; changes that
 arrive together are applied together.
@@ -117,7 +117,7 @@ free instead of cheap.
 
 | Tier | Meaning | Reserved for |
 | --- | --- | --- |
-| 1 Immediate | Replace at the next Turn start | Changes that reading on demand cannot cover: who the Agent is, and Avibe's own contract after an upgrade; an explicit refresh |
+| 1 Immediate | Replace at the next Turn start | Who the Agent is; the user's global rules, saved deliberately and rarely; Avibe's own contract after an upgrade |
 | 2 Bounded | Replace at the next free moment, or after `N` minutes | Instructions and capabilities someone else changed for this Session |
 | 3 Natural | Replace at the next free moment only | The Session's own writing, and environment details |
 
@@ -131,8 +131,7 @@ tier decides only when the system prompt itself is replaced.
 | --- | --- | --- | --- |
 | Agent identity and definition: preamble, the Agent's system prompt, a Bot's display name and role | Agent record | the user | 1 |
 | Avibe prompt modules (capabilities, working principles, Show Pages, Harness, Vault routing, quick replies, session title) and tool definitions | Avibe code | an Avibe upgrade | 1, only when the rendered bytes changed |
-| Explicit refresh | the user (a refresh action, or a CLI command) | the user | 1 |
-| Global instructions `~/.avibe/AGENTS.md` | file | the user | 2 |
+| Global instructions `~/.avibe/AGENTS.md` | file, edited in Agents → Global prompts (Vibey tab) | the user | 1 |
 | Project `AGENTS.md` chain in a project Session | files | the user, the team, `git pull` or a branch switch | 2 |
 | Shared Bot memory `~/.avibe/bots/AGENTS.md` | file | the memory Bot | 2 |
 | Agents and Bots roster | database | the user (create, enable, rename, set as Bot) | 2 |
@@ -214,20 +213,33 @@ cannot observe it.
 
 No route sends `prompt_cache_key` or a conversation header.
 
-## Recommended changes
+## Decisions and follow-ups
 
-1. **Claude conversation breakpoints: 5 minutes to 1 hour.** The system prompt
-   is already cached for an hour; the conversation, which is almost all of
-   the prefix, is not. Measured above, 55% of all Claude writes were
-   re-writes after 5 to 60 minute gaps. At Opus 5.5 rates (read 0.05x),
-   moving the conversation to 1 hour turns those 306 M re-written tokens into
-   reads and makes the remaining 251 M writes cost 2x instead of 1.25x: the
-   input-side cost falls by about 17%. Update `CACHE_TTLS["anthropic"]` to
-   3,600 s and the route-override validation that limits official Anthropic
-   conversation breakpoints to `5m`.
+1. **Claude: tools and system prompt stay at 1 hour; the conversation moves
+   from 5 minutes to 1 hour** (owner decision, 2026-11-01).
+   - The conversation is almost all of the prefix. Measured above, 55% of all
+     Claude writes were re-writes after 5 to 60 minute gaps.
+   - At Opus 5.5 rates (read 0.05x), one hour turns those 306 M re-written
+     tokens into reads and makes the remaining 251 M writes cost 2x instead
+     of 1.25x: the input-side cost falls by about 17%.
+   - A mix (older history at 1 hour, the newest messages at 5 minutes) does
+     not work on Anthropic: an entry's lifetime is fixed when it is written,
+     and a later 1-hour breakpoint over content already cached at 5 minutes
+     bills a 1-hour write only beyond what was read, so it never extends that
+     content. History has one-hour coverage only if it was written at one
+     hour.
+   - Update `CACHE_TTLS["anthropic"]` to 3,600 s and the route-override
+     validation that limits official Anthropic conversation breakpoints to
+     `5m`. Review with the metrics below after two weeks; split by Session
+     kind (for example unattended Task runs) only if the data asks for it.
 2. **OpenAI: keep 30 minutes.** Gaps of 30 minutes to 12 hours missed 48 M
    tokens; a 12-hour lifetime would save about 55 M token-equivalents but make
-   every other write cost 2.5x instead of 1.25x, roughly 400 M more.
+   every other write cost 2.5x instead of 1.25x, roughly 400 M more. OpenAI
+   also allows the split Anthropic does not: 12 hours on the system prompt and
+   30 minutes on the conversation, with the instructions moved from the
+   top-level `instructions` field into a developer message carrying an
+   explicit breakpoint. The gain is small while the system prompt is a small
+   part of the prefix; revisit when Bot forks share one system prompt.
 3. **Send a Session-scoped `prompt_cache_key` where it routes:** xAI (and its
    `x-grok-conv-id` header on Chat Completions), OpenAI models before GPT-5.6,
    and OpenRouter's session header. Follow-up, verified per route.
@@ -236,11 +248,77 @@ No route sends `prompt_cache_key` or a conversation header.
    errs toward warm, which only delays tier-3 refreshes, and tier 2 bounds
    them.
 
+## Metrics
+
+Caching saves cost and latency by keeping the prefix unchanged; managing the
+context (fresh instructions, cleared tool output, checkpoints) changes it.
+Every parameter here (cache lifetimes, `N`, the tier of each component, the
+clearing and checkpoint thresholds) picks a point between the two, and each
+will be retuned. A change needs evidence on both sides: what the cache cost,
+and how current the context was.
+
+### Per request: what the cache did and why
+
+The loop records a `cache` object beside `usage` on each Vibey response row:
+
+| Field | Meaning |
+| --- | --- |
+| `idle_s` | Seconds since the start of the previous request on the same provider and model (providers count lifetimes from the request start) |
+| `lifetime_s` | The lifetime Avibe assumed for the route at that moment |
+| `expected_read` | Tokens Avibe expected the provider to read: the prefix it left unchanged since that previous request, or 0 when the route is cold by the clock |
+| `writes_by_ttl` | Write tokens by lifetime as the provider reports them (Anthropic 5 m and 1 h, OpenAI 30 m and 12 h) |
+| `causes` | What Avibe changed in the prefix before this request: `prompt_applied` with its reason (`tier1`, `deadline`, `cold`, `route_change`, `checkpoint`, `session_start`), `tools_changed`, `tool_results_cleared`, `checkpoint`, `route_changed`, `fork_start` |
+
+A query view classifies each request from these facts:
+
+- **Active break**: Avibe changed the prefix (`causes` is not empty); the
+  missed tokens are charged to the cause.
+- **Passive expiry**: nothing changed and `idle_s` exceeded the provider's
+  lifetime.
+- **Provider miss**: nothing changed, the route was warm by the clock, and
+  the provider read less than `expected_read` (eviction, routing, overflow).
+
+Each class carries its tokens and their cost at the route's rates. The
+measurements in Background had to infer these classes from timestamps; with
+the facts recorded, the inference becomes exact.
+
+### Per snapshot change: how current the context was
+
+Two `agent_events` rows per Session:
+
+- `prompt.pending`: a change first seen at a Turn start, with its components
+  and tiers.
+- `prompt.applied`: the snapshot replaced, with its reason and how long each
+  component had waited.
+
+From them: time from detection to application by tier (median, 90th
+percentile, maximum), forced refreshes per Session per day, and the share of
+Turns that ran with a pending notice.
+
+### Reports
+
+- A read-only `vibe data query` view of the per-request facts and their
+  classification, so any Agent can answer a new question directly, as the
+  measurements in this document were made.
+- A summary by route and period: hit rate; writes by class, cause, and
+  lifetime; the idle-gap distribution (under 5 m, 5 to 30 m, 30 to 60 m, 1 to
+  12 h, over 12 h) with the tokens at stake in each band; what each lifetime
+  option would have cost on that distribution at the route's prices; and
+  freshness by tier. It starts as a CLI report and later joins the Models
+  usage page.
+
+The Model Hub meter's daily totals (`core/handlers/model_hub/usage.py`)
+already separate writes by lifetime; the per-request facts explain them.
+Claude Code and Codex Sessions are out of scope: their requests do not pass
+through this loop.
+
 ## Persisted shape
 
 The snapshot is a new per-Session file in the agent-core state directory. A
 missing or unreadable snapshot is treated as absent: the Turn renders fresh
-and writes a new one. No database migration.
+and writes a new one. The `cache` object and the two event types are optional
+additions; rows written before them are classified from timestamps as in
+Background. No database migration.
 
 ## Open items
 
@@ -252,3 +330,6 @@ and writes a new one. No database migration.
 - OpenAI responses on `gpt-6-astra` report no cache-write tokens; verify
   whether the Source reports them or the meter misses them.
 - Whether to make `N` configurable.
+- An explicit refresh action is left out of the first version (owner
+  decision, 2026-11-01): what the user saves in the UI is tier 1 already, and
+  the pending notice covers the rest. Add a Session menu item later if needed.
