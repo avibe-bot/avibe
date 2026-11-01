@@ -6499,7 +6499,7 @@
     "remove": "删除",
     "removeConfirm": "删除 MCP 服务器 {{name}}？",
     "removeAvibeHint": "将从 Avibe 中移除该服务器。",
-    "removeNativeHint": "仅在 Avibe 中隐藏；不会改动原生配置文件。",
+    "removeNativeHint": "将从 {{agent}} 的配置文件 {{path}} 中删除 {{name}}，{{agent}} 也将不再拥有这个服务器。",
     "empty": "还没有已注册的 MCP 服务器。添加一个，或等待自动发现。",
     "noSearchMatch": "没有匹配的 MCP 服务器。",
     "failed": "MCP 操作失败。",

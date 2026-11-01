@@ -7,9 +7,9 @@ Reachable servers are registered automatically. Two sources share one list:
 | Source | Where it lives |
 |---|---|
 | Avibe | `<avibe-home>/mcp/<name>/definition.json` (page or `vibe mcp-add`) |
-| Claude | `~/.claude.json` `mcpServers` (read-only) |
-| Codex | `~/.codex/config.toml` `[mcp_servers.<name>]` (read-only) |
-| OpenCode | `~/.config/opencode/opencode.json` `mcp` (read-only) |
+| Claude | `~/.claude.json` `mcpServers` |
+| Codex | `~/.codex/config.toml` `[mcp_servers.<name>]` |
+| OpenCode | `~/.config/opencode/opencode.json` `mcp` |
 
 Avibe sessions do not load native MCP: Claude, Codex and OpenCode started by Avibe call tools only through `vibe mcp`. Native files are not rewritten for this.
 
@@ -49,7 +49,7 @@ vibe mcp-add --json-stdin < servers.json
 ## Delete
 
 - Avibe source: remove the definition and artifacts.
-- Native source: hide in Avibe (`<avibe-home>/mcp/.hidden.json`); the native file is unchanged.
+- Native source: delete that one entry from the Claude/Codex/OpenCode file listed above (Codex: the `[mcp_servers.<name>]` table and its sub-tables). Everything else in the file — other servers, keys, comments, layout, file mode — is kept. That agent no longer has the server either. If the entry is already gone, only Avibe's snapshot is dropped; if the file cannot be parsed, or the entry is not a standalone block (for example an inline table), nothing is written and the error says to remove it by hand. Names hidden by older versions (`<avibe-home>/mcp/.hidden.json`) stay hidden; new deletes do not write it.
 
 ```bash
 vibe mcp docs --remove

@@ -194,26 +194,26 @@ def write_definition(definition: dict[str, Any]) -> str:
 
 
 def remove_package(name: str) -> str:
-    """Avibe source: delete artifacts. Native source: hide in Avibe only."""
+    """Avibe source: delete artifacts. Native source: delete the entry from its file.
+
+    A native entry already gone from its file only drops Avibe's snapshot.
+    """
 
     validate_name(name)
     mcp_oauth.delete_oauth(name)
-    if read_avibe_definition(name) is not None:
-        directory = package_dir(name)
-        if directory.exists():
-            shutil.rmtree(directory)
-        return AVIBE
-    if name in native.read_all() or name in native.disabled_names():
-        hide_name(name)
-        directory = package_dir(name)
-        if directory.exists():
-            shutil.rmtree(directory)
-        return "native"
     directory = package_dir(name)
+    kind = AVIBE if read_avibe_definition(name) is not None else None
+    if kind is None:
+        server = native.read_all().get(name)
+        source = server.source if server is not None else native.disabled_source(name)
+        if source is not None:
+            native.remove_entry(source, name)
+            kind = "native"
+    if kind is None and not directory.exists():
+        raise _not_found(name)
     if directory.exists():
         shutil.rmtree(directory)
-        return AVIBE
-    raise _not_found(name)
+    return kind or AVIBE
 
 
 def delete_artifacts(name: str) -> None:

@@ -9,7 +9,7 @@
 
 Add MCP Hub to the Skills & MCP page. Reachable servers are registered automatically; unreachable ones are simply not listed. Every backend calls tools through `vibe mcp <server> <tool>`; no Skill loader.
 
-**Native MCP is off.** Claude, Codex and OpenCode must not load their own MCP servers in Avibe sessions. Hub **reads** native files as one source and stores Avibe-added servers only under `<avibe-home>/mcp/<name>/definition.json` (add never writes native files):
+**Native MCP is off.** Claude, Codex and OpenCode must not load their own MCP servers in Avibe sessions. Hub **reads** native files as one source and stores Avibe-added servers only under `<avibe-home>/mcp/<name>/definition.json` (add never writes native files; delete of a native server removes its entry, §Delete):
 
 - Claude: `~/.claude.json` `mcpServers`
 - Codex: `~/.codex/config.toml` `[mcp_servers.<name>]`
@@ -30,7 +30,7 @@ Out of scope: OAuth (now `docs/plans/mcp-hub-oauth.md`), SSE (explicit `unsuppor
 
 ```text
 <avibe-home>/mcp/
-  .hidden.json             # names hidden from Avibe lists (native files unchanged)
+  .hidden.json             # legacy: names hidden by released versions; still honored, no longer written
   <name>/
     definition.json        # Avibe-owned connection (absent for native-only servers)
     current.json           # pointer to the one published snapshot
@@ -41,7 +41,7 @@ Out of scope: OAuth (now `docs/plans/mcp-hub-oauth.md`), SSE (explicit `unsuppor
       commands.json
 ```
 
-- Native files are a read-only source. Avibe-added servers store `definition.json` here. Hub never writes Claude/Codex/OpenCode files. Every file is written with `config/atomic_io.py` `write_atomic`.
+- Native files are a source. Avibe-added servers store `definition.json` here. Hub writes Claude/Codex/OpenCode files only to delete one named entry (see Delete). Every file is written with `config/atomic_io.py` `write_atomic`.
 - `commands.json` is declarative data interpreted by the shared `vibe mcp` runner, not code.
 - One published snapshot per server. An unreadable or unknown-`formatVersion` snapshot omits only that package; leftover MVP `state.json` is ignored.
 
@@ -140,7 +140,7 @@ Skills & MCP page, MCP tab. No status badges, enable toggle, or edit dialog.
 - Row: transport icon, name, command/URL, tool count · transport, source chip (Avibe/Claude/Codex/OpenCode).
 - Detail: connection, tools, `vibe mcp <name> <tool>`, last refreshed. Footer: 刷新 / 删除.
 - Add dialog: JSON textarea, 取消 / 添加. Invalid JSON or failed refresh keeps the dialog open.
-- Delete: Avibe source removes artifacts. Native source **hides in Avibe only** (`.hidden.json`); the native file is never touched. Owner-confirmed.
+- Delete: Avibe source removes artifacts. Native source **removes the entry from its owning native file** (Claude `mcpServers`, Codex `[mcp_servers.<name>]` + sub-tables, OpenCode `mcp`) by a text edit that keeps every other byte, then drops Avibe's snapshot. Owner-confirmed; the dialog names the file and says the other agent loses the server. The result must parse to the original minus that entry, else nothing is written (`invalid_native_config`). An entry already gone only drops the snapshot. Only the canonical (first) source is edited. No backups or undo. *Decision reversed 2026-11-01 (owner): earlier MVP hid native deletes in `.hidden.json`; released `.hidden.json` names stay honored, new deletes no longer write it.*
 
 ## 6. Discovery and versions
 
@@ -183,7 +183,7 @@ GET    /api/mcp/{name}
 POST   /api/mcp                  # add JSON block → Avibe store + refresh
 POST   /api/mcp/discover
 POST   /api/mcp/{name}/refresh
-DELETE /api/mcp/{name}           # Avibe: remove; native: hide
+DELETE /api/mcp/{name}           # Avibe: remove; native: delete entry from its file
 ```
 
 Read routes Editor; management Owner. Native async FastAPI → owner IPC.
@@ -204,7 +204,7 @@ Acceptance:
 1. Fresh start with reachable native servers lists and calls them without user action; unreachable ones are absent and `vibe mcp-discover` shows why.
 2. `vibe mcp-discover` and `vibe mcp <name> --refresh` work from CLI and UI; concurrent passes join. Startup discovery never blocks the controller loop or readiness.
 3. Add through page/`vibe mcp-add` writes only the Avibe store and the server appears after the call returns.
-4. Delete of an Avibe server removes it. Delete of a native server hides it in Avibe only (owner-confirmed); the native file is never touched.
+4. Delete of an Avibe server removes it. Delete of a native server removes that entry from its native file (owner-confirmed), preserving the rest of the file.
 5. Help/list work with the owner down; schema-to-flag contracts hold; injected prompt examples are parser-tested.
 6. UI matches the Pencil frames; leftover MVP `state.json` enabled flags and drafts load safely (ignored).
 7. Avibe-spawned sessions do not load native MCP (C3 unchanged).

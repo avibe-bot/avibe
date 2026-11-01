@@ -6499,7 +6499,7 @@
     "remove": "Delete",
     "removeConfirm": "Delete MCP server {{name}}?",
     "removeAvibeHint": "This removes the server from Avibe.",
-    "removeNativeHint": "This hides the server in Avibe. The native config file is not changed.",
+    "removeNativeHint": "This removes {{name}} from {{path}}, the {{agent}} config file. {{agent}} will no longer have this server either.",
     "empty": "No MCP server registered. Add one or wait for discovery.",
     "noSearchMatch": "No matching MCP servers.",
     "failed": "MCP operation failed.",
