@@ -1474,10 +1474,9 @@ def test_session_handler_reuses_cached_claude_client_when_system_prompt_is_uncha
     assert first_client.disconnects == 0
     assert len(captured["clients"]) == 1
     assert controller.claude_sessions[composite_key] is first_client
-    assert "Use the current platform `slack`" in first_client.options.system_prompt["append"]
-    assert "`slack/<user_id>`" in first_client.options.system_prompt["append"]
-    assert "slack/U123" not in first_client.options.system_prompt["append"]
-    assert "slack/U456" not in first_client.options.system_prompt["append"]
+    prompt = first_client.options.system_prompt["append"]
+    assert "## Project Context and History" in prompt
+    assert "U123" not in prompt and "U456" not in prompt
 
 
 def test_session_handler_recreates_cached_claude_client_when_skill_bindings_change(

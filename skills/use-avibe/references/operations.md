@@ -7,7 +7,6 @@ Avibe stores runtime data under `~/.avibe/` by default, or under `AVIBE_HOME` wh
 - `~/.avibe/config/config.json` — global config; mutate through `POST /api/config`, not by editing the file
 - `~/.avibe/logs/vibe_remote.log` — main application log; read via `POST /api/logs`
 - `~/.avibe/screenshots/` — default output directory for `vibe screenshot`
-- `~/.avibe/state/user_preferences.md` — shared long-term preference file (safe to read and update)
 
 Agent harness state is managed through `vibe agent run`, `vibe task`, `vibe watch`, and `vibe runs` (or their API endpoints), not by editing persistence files. Everything else under `state/` and `runtime/` is internal — treat it as opaque.
 

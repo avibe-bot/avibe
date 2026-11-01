@@ -4,9 +4,10 @@ The system prompt is stable so providers can cache it: who the Agent is, Pi's
 tool snippets and rules, the user's instruction files (``instructions``, C-7
 tools.md section 9), then Avibe's injected sections. Who the Agent is comes
 from its record, so it is the same on every Turn the Session runs as that Agent.
-Facts that change (cwd, date, live Watches) travel in an ``<environment>`` block
+Facts that change (cwd, shell, live Watches) travel in an ``<environment>`` block
 rendered into each consumed input instead (C-7 tools.md section 8), so the
-stored transcript is what the model saw.
+stored transcript is what the model saw. The date and time are not among them:
+every input's ``[Now: ...]`` line (``core/agent_input.py``) carries them.
 
 Tool snippets and rules ported from Pi (MIT, Copyright (c) 2025 Mario Zechner),
 ``packages/coding-agent/src/core/system-prompt.ts`` and
@@ -23,11 +24,8 @@ threshold (``core.presentation.interim_worthy``).
 from __future__ import annotations
 
 import functools
-import os
 import platform
 import re
-import time
-from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Mapping, Optional, Sequence, Union
 
@@ -122,7 +120,7 @@ def system_prompt(
 
 # --- environment block ---------------------------------------------------------
 
-ENVIRONMENT_FIELDS = ("cwd", "os", "shell", "date", "timezone", "watches")
+ENVIRONMENT_FIELDS = ("cwd", "os", "shell", "watches")
 _BLOCK = re.compile(r"\A<environment>\n(?P<body>(?:[a-z]+: [^\n]*\n)*)</environment>\Z")
 
 
@@ -135,19 +133,6 @@ def operating_system() -> str:
     return f"{platform.system() or 'unknown'} {platform.release()} ({machine})".strip()
 
 
-def local_timezone() -> str:
-    zone = os.environ.get("TZ", "").lstrip(":")
-    if zone:
-        return zone
-    try:
-        target = os.path.realpath("/etc/localtime")
-        if "zoneinfo/" in target:
-            return target.split("zoneinfo/", 1)[1]
-    except OSError:
-        pass
-    return time.tzname[0] if time.tzname else "UTC"
-
-
 #: The environment block names at most this many Watches (tools.md section 8).
 _WATCHES_LISTED = 20
 
@@ -155,24 +140,19 @@ _WATCHES_LISTED = 20
 EnvironmentValue = Union[str, tuple[str, ...]]
 
 
-def current_environment(
-    cwd: str, watches: Sequence[str], *, shell: str, include_time: bool = True, now: Optional[datetime] = None
-) -> dict[str, EnvironmentValue]:
-    """The environment fields, raw; the clock ones follow ``include_time_info``, as every input prefix does.
+def current_environment(cwd: str, watches: Sequence[str], *, shell: str) -> dict[str, EnvironmentValue]:
+    """The environment fields, raw.
 
     Identity is the raw value: only the block the model reads displays them (``render_environment``), and only the
     exact display of one can prove it unchanged (``environment_delta``).
     """
-    fields: dict[str, EnvironmentValue] = {
+    return {
         "cwd": str(Path(cwd).resolve()) if cwd else "",
         "os": operating_system(),
         # The shell the commands run in (``Shell.describe``), not the user's login shell.
         "shell": shell,
+        "watches": tuple(watches),
     }
-    if include_time:
-        fields.update(date=(now or datetime.now()).date().isoformat(), timezone=local_timezone())
-    fields["watches"] = tuple(watches)
-    return fields
 
 
 def render_environment(fields: Mapping[str, EnvironmentValue]) -> str:
@@ -206,6 +186,8 @@ def _whole(name: str, value: EnvironmentValue) -> bool:
 
 
 def parse_environment(text: str) -> Optional[dict[str, str]]:
+    """A block's fields; a name no longer sent, such as ``date`` or ``timezone`` in rows stored before they left the
+    block, is dropped."""
     match = _BLOCK.match(text or "")
     if match is None:
         return None

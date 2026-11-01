@@ -532,8 +532,6 @@ async def test_a_turn_commits_its_context_once_and_shows_the_reply_once(
     assert environment.text.startswith("<environment>\ncwd: ") and typed == TextBlock(text="看一下目录")
     # The shell is the one the commands run in, the job host's, not the user's login shell.
     assert f"\nshell: {harness.suite.shell}\n" in environment.text
-    # The clock fields follow include_time_info (off here), as every input prefix does.
-    assert "date:" not in environment.text and "timezone:" not in environment.text
     # The steer identity existed when the Turn owner bound the native start.
     [native] = harness.controller.started
     assert native.startswith("vibey:") and native.endswith(f":{_turn(request.context)}")

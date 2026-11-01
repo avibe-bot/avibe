@@ -419,18 +419,16 @@ async def test_the_state_is_the_environment_core_fields_each_bounded_in_bytes(en
     fields = {
         "cwd": "/工作/" + "目录/" * 1_000,
         "os": "macOS " + "x" * 5_000,
-        "shell": "/bin/" + "s" * 5_000,
-        "date": "2026-10-05",
-        "timezone": "Zone/" + "時" * 2_000,
+        "shell": "/bin/" + "時" * 2_000,
         "watches": 'wd_1 "CI" command running',
     }
     host = VibeyContextHost(engine, environment=lambda _: fields)
     (environment,) = await host.render_state(StateRequest(SESSION))
     lines = environment.splitlines()[1:-1]
-    assert [line.split(": ", 1)[0] for line in lines] == ["cwd", "os", "shell", "date", "timezone"]
+    assert [line.split(": ", 1)[0] for line in lines] == ["cwd", "os", "shell"]
     assert lines[0] == f"cwd: {fields['cwd']}"
     assert all(len(line.split(": ", 1)[1].encode()) <= 160 for line in lines[1:])
-    assert text_tokens(environment) <= (len(fields["cwd"].encode()) + 4 * 160 + 80) // 4
+    assert text_tokens(environment) <= (len(fields["cwd"].encode()) + 2 * 160 + 80) // 4
 
 
 async def test_a_3000_byte_cwd_is_kept_whole_on_every_input_and_in_the_state(engine, session):
@@ -462,6 +460,20 @@ async def test_two_values_that_look_alike_once_cut_are_still_two_environments(en
     shell = [line for line in first.split("\n") if line.startswith("shell: ")]
     assert shell and shell[0] in second.split("\n")  # the same display ...
     assert second.startswith("<environment>\nshell: ")  # ... yet the second input says the shell changed
+
+
+def test_a_block_stored_with_the_retired_clock_fields_still_replays(tmp_path):
+    from core.agent_core.harness.store import ContextEntry
+    from modules.agents.vibey.prompt import current_environment, environment_delta, environment_state, operating_system
+
+    # Blocks stored while the block still had date and timezone (every input's [Now: ...] line carries them now)
+    # replay as what the model was told: those lines are ignored, and the next input repeats nothing unchanged.
+    stored = (
+        f"<environment>\ncwd: {tmp_path.resolve()}\nos: {operating_system()}\nshell: /bin/bash\n"
+        "date: 2026-10-05\ntimezone: Asia/Shanghai\nwatches: none\n</environment>"
+    )
+    entry = ContextEntry(SESSION, 1, "input", "msg_1", UserMessage(content=(text(stored), text("hello"))))
+    assert environment_delta(environment_state([entry]), current_environment(str(tmp_path), [], shell="/bin/bash")) == {}
 
 
 async def test_every_skill_a_successful_bash_result_loaded_is_recorded():
@@ -660,7 +672,7 @@ async def test_the_mind_is_revised_in_the_session_s_scratch_and_a_cut_one_points
         ]
     )
     await _turn(harness, tokens(23_700))
-    await _turn(harness, tokens(26_000))
+    await _turn(harness, tokens(26_500))
     (compaction,) = [row for row in await harness.context_rows() if row.kind == "compaction"]
     assert compaction.payload["mind_truncated"] and agreements in compaction.payload["mind"]
     (copy,) = (state / "checkpoints" / SESSION).iterdir()
