@@ -160,6 +160,16 @@ def get_show_git_dir(session_id: str) -> Path:
     return get_vibe_remote_dir() / "show-git" / f"{session_id}.git"
 
 
+def get_bots_dir() -> Path:
+    """The parent of every Bot's working directory (``docs/plans/bots.md`` D7)."""
+
+    return get_vibe_remote_dir() / "bots"
+
+
+def get_bot_dir(handle: str) -> Path:
+    return get_bots_dir() / handle
+
+
 def get_show_git_runtime_status_path() -> Path:
     return get_runtime_dir() / "show-git-checkpoints.json"
 

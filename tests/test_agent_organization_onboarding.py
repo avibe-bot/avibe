@@ -79,30 +79,30 @@ def test_upgrade_onboarding_inventories_custom_and_system_agents_as_private(monk
             backend="codex",
             system_prompt="legacy prompt",
         )
-        # Every install also has the built-in Avibe Agent.
+        # Every install also has the built-in Avibe Agent and the main Bot's Agent.
         builtins = store.ensure_builtin_default_agents(["codex", "claude"])
 
         before = store.organization_onboarding_inventory(user_context=_organization_context())
         assert before["counts"] == {
-            "total": 4,
-            "system": 3,
+            "total": 5,
+            "system": 4,
             "custom": 1,
-            "not_onboarded": 4,
+            "not_onboarded": 5,
             "private": 0,
             "published": 0,
             "conflicts": 0,
         }
 
         result = store.onboard_organization_agents(user_context=_organization_context())
-        assert result["created"] == 4
-        assert result["counts"]["private"] == 4
+        assert result["created"] == 5
+        assert result["counts"]["private"] == 5
         with store.engine.connect() as connection:
             policies = resource_access_service.list_resource_policies(
                 resource_kind="agent",
                 organization_id="org-1",
                 connection=connection,
             )
-        assert len(policies) == 4
+        assert len(policies) == 5
         assert all(policy["access_level"] == "private" for policy in policies)
         assert all(policy["group_ids"] == [] for policy in policies)
 

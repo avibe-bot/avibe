@@ -717,8 +717,22 @@ class ShowGitRepository:
 _UNSET = object()
 
 
+def _bot_directory_for_session(session_id: str) -> Path | None:
+    """A Bot Session's directory (``ses_<handle>`` and ``~/.avibe/bots/<handle>/``), when it exists."""
+    from core.bots import bot_directory, bot_handle_for_session_id
+
+    handle = bot_handle_for_session_id(session_id)
+    if handle is None:
+        return None
+    directory = bot_directory(handle)
+    return directory if directory.is_dir() else None
+
+
 class ShowGitCheckpointService:
     """Turn-boundary subscriber owned by the Controller process.
+
+    The same boundaries give a Bot's directory its automatic history (``core.bot_git``): a Bot Session's Turn is
+    committed before it starts and after it ends, in the same ordered worker.
 
     The bus delivers turn events on the controller loop. The subscriber records
     them there and runs the checkpoint work, storage reads and ``git``, on one
@@ -902,7 +916,7 @@ class ShowGitCheckpointService:
             self._open_bus_turns.add(session_id)
         else:
             self._open_bus_turns.discard(session_id)
-        if not paths.get_show_page_dir(session_id).is_dir():
+        if not paths.get_show_page_dir(session_id).is_dir() and _bot_directory_for_session(session_id) is None:
             if event_type == "turn.end":
                 self._worker.submit(self._active_turns.pop, session_id, None)
             return
@@ -927,7 +941,9 @@ class ShowGitCheckpointService:
                 started_at=started_at,
                 turn_id=turn_id or context.turn_id,
             )
-            self._repository(session_id).checkpoint(PRE_TURN, run_id=context.run_id)
+            self._checkpoint_bot_directory(session_id, PRE_TURN, run_id=context.run_id)
+            if paths.get_show_page_dir(session_id).is_dir():
+                self._repository(session_id).checkpoint(PRE_TURN, run_id=context.run_id)
         except Exception:
             logger.exception("Show Page checkpoint failed at turn.start for session=%s", session_id)
 
@@ -957,13 +973,30 @@ class ShowGitCheckpointService:
                     )
                 )
             run_id = start_context.run_id or context.run_id
-            self._repository(session_id).checkpoint(
-                POST_TURN,
-                message=start_context.message if start_context.message_id is not None else context.message,
-                run_id=run_id,
-            )
+            message = start_context.message if start_context.message_id is not None else context.message
+            self._checkpoint_bot_directory(session_id, POST_TURN, message=message, run_id=run_id)
+            if paths.get_show_page_dir(session_id).is_dir():
+                self._repository(session_id).checkpoint(POST_TURN, message=message, run_id=run_id)
         except Exception:
             logger.exception("Show Page checkpoint failed at turn.end for session=%s", session_id)
+
+    def _checkpoint_bot_directory(
+        self, session_id: str, checkpoint: str, *, message: str = "", run_id: str | None = None
+    ) -> None:
+        """Commit a Bot Session's directory; a failure here never blocks the Show Page checkpoint."""
+        from core.bot_git import BotGitRepository
+        from core.bots import bot_handle_for_session_id
+
+        directory = _bot_directory_for_session(session_id)
+        handle = bot_handle_for_session_id(session_id)
+        if directory is None or handle is None or not isinstance(self.git, ResolvedGit):
+            return
+        try:
+            BotGitRepository(handle, directory, self.git).checkpoint(
+                checkpoint, session_id=session_id, message=message, run_id=run_id
+            )
+        except Exception:
+            logger.exception("Bot directory checkpoint failed at %s for session=%s", checkpoint, session_id)
 
     def _repository(self, session_id: str) -> ShowGitRepository:
         if not isinstance(self.git, ResolvedGit):

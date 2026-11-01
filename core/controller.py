@@ -417,11 +417,23 @@ class Controller:
             return
         store = self.vibe_agent_store
         vibey = store.get_builtin_default_agent_for_backend("vibey", enabled_only=False)
-        if vibey is None or str(vibey.model or "").strip():
+        if vibey is not None and not str(vibey.model or "").strip():
+            vibey = store.update(
+                vibey.name,
+                model=models[0].id,
+                only_if_model_unset=True,
+                user_context=instance_owner_context(),
+            )
+        # The main Bot's Agent follows Vibey's model (docs/plans/bots.md D9). On a new install it is created
+        # before any model exists, so it takes Vibey's here, under the same never-replace-a-choice rule.
+        main = store.get_main_bot_agent()
+        if main is None or str(main.model or "").strip():
             return
+        follows = vibey is not None and str(vibey.model or "").strip()
         store.update(
-            vibey.name,
-            model=models[0].id,
+            main.name,
+            model=vibey.model if follows else models[0].id,
+            reasoning_effort=vibey.reasoning_effort if follows else None,
             only_if_model_unset=True,
             user_context=instance_owner_context(),
         )
@@ -1709,9 +1721,8 @@ class Controller:
         """Archive one Workbench session through its serialized lifecycle."""
 
         from core.services import sessions as workbench_sessions_service
-        from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
+        from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID, is_bot_session, is_bot_session_id
         from storage.db import create_sqlite_engine
-        from storage.workbench_sessions_service import MAIN_SESSION_ID
 
         if (
             not isinstance(raw_session_id, str)
@@ -1719,11 +1730,20 @@ class Controller:
             or raw_session_id != raw_session_id.strip()
         ):
             raise ValueError("invalid Workbench session ID")
-        if raw_session_id in {
-            WORKSPACE_NOTICE_SESSION_ID,
-            MAIN_SESSION_ID,
-        }:
+        if raw_session_id == WORKSPACE_NOTICE_SESSION_ID:
             raise workbench_sessions_service.ReservedSessionError(raw_session_id)
+        if is_bot_session_id(raw_session_id):
+
+            def owned_by_bot() -> bool:
+                engine = create_sqlite_engine()
+                try:
+                    with engine.connect() as conn:
+                        return is_bot_session(conn, raw_session_id)
+                finally:
+                    engine.dispose()
+
+            if await asyncio.to_thread(owned_by_bot):
+                raise workbench_sessions_service.ReservedSessionError(raw_session_id)
 
         async def retire_computer_use_session() -> None:
             js_kernels = getattr(self, "computer_js_kernels", None)

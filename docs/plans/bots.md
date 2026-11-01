@@ -58,8 +58,9 @@ own. A Session has none of these; a Bot has all three.
   1. an ASCII name is normalized (`Researcher` to `researcher`);
   2. otherwise the main Bot's model, at its lowest reasoning effort, proposes
      an English codename from the display name and role, accepted only if it
-     matches `^[a-z][a-z0-9-]{1,23}$` (首席安全官 to `cso`); the request waits
-     at most 5 seconds;
+     matches `^[a-z][a-z0-9-]{1,23}$` and does not end with a hyphen (an
+     Agent name never does) (首席安全官 to `cso`); the request waits at most
+     5 seconds;
   3. if no model answers in time or the output is invalid, transliterate with
      `anyascii` (ISC license; 小爱 to `xiaoai`);
   4. on a collision add `-2`, and skip reserved names.
@@ -152,9 +153,9 @@ Owner decisions 2026-11-01, from the mockups in this Session's Show Page
   - *New*: name (any language), avatar, and role. The handle is generated in
     the background after the name is entered (D2) and shown as a muted
     `@handle` with an edit pencil; until an avatar is chosen, the avatar is the
-    name's first character on a color derived from the name. The role seeds the
-    Agent's system prompt and stays editable on the Agents page. The model
-    follows the main Bot by default, under "Advanced".
+    name's first character on a color derived from the name. The role is
+    written to the Agent's description (D1) and stays editable on the Agents
+    page. The model follows the main Bot by default, under "Advanced".
   - *From an existing Agent*: lists Vibey-backend Agents that are not Bots; the
     handle is the Agent name, locked.
   - Avatars come from an emoji with a background color, or an uploaded image

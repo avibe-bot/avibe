@@ -540,10 +540,14 @@ class SettingsHandler(BaseHandler):
             current_routing=current_routing,
             agent_option_limit=getattr(im_client, "route_option_limit", None),
         )
-        if data.agent(data.current_agent) is None and agents:
+        from core.vibe_agents import is_bot_agent
+
+        bot_ids = {row.id for row in listed if is_bot_agent(row)}
+        workers = [agent for agent in agents if agent.id not in bot_ids]
+        if data.agent(data.current_agent) is None and workers:
             # The scope's Agent cannot run here. As for a default Agent, the built-in backend's is the
-            # replacement only when no other Agent is listed.
-            data.current_agent = min(agents, key=lambda agent: implicit_default_rank(agent.backend)).id
+            # replacement only when no other Agent is listed, and a Bot is never the replacement.
+            data.current_agent = min(workers, key=lambda agent: implicit_default_rank(agent.backend)).id
         current_agent = data.agent(data.current_agent)
         shown = data.agent(data.shown_agent(selected_agent))
         # A form refreshed per change loads only the shown Agent's backend; the others load every listed one.

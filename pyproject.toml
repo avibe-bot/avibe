@@ -91,6 +91,8 @@ dependencies = [
     # Vibey fits context images to the providers' per-image size limit
     # (core/agent_core/ai/image_limits.py).
     "Pillow>=11.0",
+    # Bot handles from display names in any script (docs/plans/bots.md D2); ISC license.
+    "anyascii>=0.3.2",
     "pywebpush>=2.0.3",
     # The Intel Mac Runtime is binary-only, and 48.0.1 is the newest release with
     # an x86_64 macOS wheel (universal2); 49+ ships none. Elsewhere, 50.0.2

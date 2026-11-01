@@ -4811,7 +4811,8 @@ def test_a_new_install_starts_on_vibey_and_setup_completes_without_choosing_a_de
     headers = csrf_headers(client)
     try:
         listed = client.get("/api/agents").get_json()
-        vibey = next(row for row in listed["agents"] if row["backend"] == "vibey")
+        # The built-in Vibey Agent, not the main Bot's Agent beside it (docs/plans/bots.md D9).
+        vibey = next(row for row in listed["agents"] if row["backend"] == "vibey" and row["bot"] is None)
         assert listed["default_agent_name"] == vibey["name"]
 
         candidate = next(
@@ -4887,7 +4888,8 @@ def test_builtin_vibey_model_pick_completes_setup_without_a_cli(monkeypatch, tmp
     headers = csrf_headers(client)
     try:
         listed = client.get("/api/agents").get_json()
-        vibey = next(row for row in listed["agents"] if row["backend"] == "vibey")
+        # The built-in Vibey Agent, not the main Bot's Agent beside it (docs/plans/bots.md D9).
+        vibey = next(row for row in listed["agents"] if row["backend"] == "vibey" and row["bot"] is None)
         assert vibey["model"] is None
 
         candidates = client.get("/api/models/agents/vibey/models/candidates").get_json()["candidates"]
@@ -4988,7 +4990,9 @@ def test_vibey_starts_on_a_sources_tool_capable_model_and_setup_completes_withou
     client = app.test_client()
     headers = csrf_headers(client)
     try:
-        vibey = next(row for row in client.get("/api/agents").get_json()["agents"] if row["backend"] == "vibey")
+        vibey = next(
+            row for row in client.get("/api/agents").get_json()["agents"] if row["backend"] == "vibey" and row["bot"] is None
+        )
         assert vibey["model"] is None
         # A new install records the built-in Agent as its default.
         recorded = client.post("/api/agents/default", json={"name": vibey["name"]}, headers=headers)
