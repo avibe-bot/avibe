@@ -1,7 +1,7 @@
 # Bots
 
-Status: in design. Records the owner's decisions through 2026-11-01; open
-topics are listed at the end.
+Status: approved for implementation (2026-11-01). Records the owner's
+decisions; deferred topics are listed at the end.
 
 ## Why
 
@@ -30,13 +30,17 @@ own. A Session has none of these; a Bot has all three.
 ### D1. A Bot is Agent metadata plus a reserved Session
 
 - No new table. Bot fields (handle, display name, avatar, position) live in
-  the Agent record's metadata; persona and duties stay in the Agent's system
-  prompt.
+  the Agent record's metadata. The Bot's role is the Agent's description (the
+  Bots roster shows it); a richer persona goes in the Agent's system prompt.
 - One Agent is at most one Bot.
 - Only Vibey-backend Agents can be set as a Bot, and a Bot's Agent cannot
   change backend.
-- Removing the Bot role keeps its Session and directory; setting it again
-  reconnects them.
+- Removing the Bot role keeps its Session and directory, hidden everywhere;
+  setting it again reconnects them.
+- While an Agent is a Bot it cannot be archived, deleted, renamed, or moved to
+  another backend.
+- Phase 1 Bots are owner-only, as `ses_main` is: other members see no Bot area
+  and cannot reach Bot Sessions or Bot APIs. Per-member Bots come later.
 
 ### D2. Identity: display name, handle, Session id
 
@@ -47,20 +51,27 @@ own. A Session has none of these; a Bot has all three.
 | Session id | `ses_<handle>`, always | Storage and URLs |
 
 - The main Bot's handle is `main`, so its Session stays the released
-  `ses_main`; renaming it changes nothing underneath.
+  `ses_main`; renaming it changes nothing underneath. Its Agent is a dedicated
+  built-in Agent named `main` (D9), not the default `vibey` Agent.
 - `memory` and `ops` are reserved for built-in Bots.
 - Handle generation, with no user input:
   1. an ASCII name is normalized (`Researcher` to `researcher`);
-  2. otherwise Vibey's current model proposes an English codename from the
-     display name and role, accepted only if it matches
-     `^[a-z][a-z0-9-]{1,23}$` (首席安全官 to `cso`);
-  3. if no model answers in time or the output is invalid, transliterate
-     (小爱 to `xiaoai`);
+  2. otherwise the main Bot's model, at its lowest reasoning effort, proposes
+     an English codename from the display name and role, accepted only if it
+     matches `^[a-z][a-z0-9-]{1,23}$` (首席安全官 to `cso`); the request waits
+     at most 5 seconds;
+  3. if no model answers in time or the output is invalid, transliterate with
+     `anyascii` (ISC license; 小爱 to `xiaoai`);
   4. on a collision add `-2`, and skip reserved names.
 - The form shows the handle as a muted `@cso` under the name; it can be edited
-  but never needs to be.
-- An Agent set as a Bot from the Agents page uses its Agent name as the
-  handle. While it is a Bot, its handle and its Agent name are locked.
+  before the Bot is created but never needs to be. A Bot created through the
+  CLI (for example by the main Bot in conversation) gets the handle its caller
+  passes, so no extra model call is made.
+- The handle is frozen once the Bot exists: it is the Session id, the
+  directory name, and the target of every stored `@<bot:...>` marker and
+  `--bot` invocation. A new Bot's Agent is named after its handle; an Agent
+  set as a Bot keeps its Agent name as the handle. Either way the Agent name
+  is locked while it is a Bot.
 - Session ids generated today are `ses` plus 10 characters from an alphabet
   without `_`, so `ses_` ids cannot collide with them.
 - Known bug this fixes: `normalize_agent_name` drops non-ASCII characters
@@ -86,6 +97,10 @@ own. A Session has none of these; a Bot has all three.
 
 - `vibe agent run --bot <handle> --message ...` sends to `ses_<handle>`, with
   validation. Async by default; the reply returns to the caller as a callback.
+- `vibe bot list | show | create | set | update | remove` manages Bots, so the
+  main Bot can add a colleague when asked in conversation. `create` makes a
+  Vibey Agent and its Bot; `set` makes an existing Vibey Agent a Bot; `remove`
+  drops the Bot role and keeps the Agent, Session, and directory.
 - `--agent` keeps its meaning: saved Tasks, Watches, and scripts that name an
   Agent which later becomes a Bot keep starting new Sessions, and never flood
   the Bot's conversation. Choosing a colleague and starting a fresh worker of
@@ -95,7 +110,10 @@ own. A Session has none of these; a Bot has all three.
 - An input from a Bot is labelled `[Harness: agent run <run> from @<bot:main>]`.
 - A Bot's conversation handles one message at a time; messages from Agents and
   Bots queue behind the user's.
-- A message chain between Bots has a hop limit.
+- No hop limit between Bots (owner decision, 2026-11-01): Bots are meant to
+  message each other, and run lineage is not reliable enough to enforce one.
+  The prompt's rule to answer in the reply rather than send back with `--bot`
+  is the guard against ping-pong.
 - CLI examples in the prompts get parser-backed contract tests.
 
 ### D5. Web surfaces
@@ -142,8 +160,18 @@ Owner decisions 2026-11-01, from the mockups in this Session's Show Page
   - Avatars come from an emoji with a background color, or an uploaded image
     cropped to a circle. AI-generated avatars are left out of the first version.
   - The footer reminds the user they can also ask the main Bot to add one.
-- Proposed, not yet confirmed: `/new` in a Bot conversation condenses its
-  context instead of starting a new Session.
+- **Avatar storage.** An emoji avatar (emoji and hue) lives in the Agent
+  metadata. An uploaded avatar is scaled to 256px and saved as `avatar.png` in
+  the Bot's own directory, so the Bot can see and replace it and Git keeps
+  every version; the UI serves that file. No prompt text describes the avatar.
+- **Bot conversation page.** The header shows the avatar and display name with
+  "Edit profile"; there is no archive or rename. The composer's model picker
+  changes that Bot Session's model, as `ses_main` already allows. Bot Sessions
+  do not get the session-title prompt section; their title is the display
+  name. A new Bot gets its Session at once but no automatic self-introduction;
+  the empty conversation shows its role.
+- **Desktop pet.** It keeps the Vibey mascot art; its bubble uses the main
+  Bot's display name.
 
 ### D6. IM direct messages (phase 2)
 
@@ -152,8 +180,8 @@ Owner decisions 2026-11-01, from the mockups in this Session's Show Page
   Only the owner's own IM accounts may bind a Bot, or binding must warn about
   this.
 - Design notes for phase 2: a reply goes back to the platform its message came
-  from; `/new` condenses instead of starting over; a bound DM is not split by
-  thread; each input names its platform.
+  from; a bound DM is not split by thread; each input names its platform; what
+  the IM `/new` command does in a bound DM is decided then.
 
 ### D7. Memory is the Bot's working directory
 
@@ -182,6 +210,9 @@ the way an engineer maintains a project.
   prefix match the source; a Project's instructions go into the fork's first
   input instead.
 - Secrets never go into memory; they belong in Vault.
+- The checkpoint scratch files (`mind.md`, `memo.md`) stay where Vibey keeps
+  them today; they are working memory owned by the checkpoint process, not part
+  of this directory.
 - Removing a Bot keeps its directory, as it keeps its Session.
 
 Layout:
@@ -219,10 +250,19 @@ Each file has one author: the user, the memory Bot, or the Bot itself.
 - Its memory holds what the user entrusts to it: what they ask it to
   remember, the matters it follows, and the Sessions handling them. Live state
   is queried, not copied.
+- It runs as a dedicated built-in Agent named `main` (Vibey backend, model
+  following Vibey's), created at startup like the other built-in Agents and
+  marked by the store. The default `vibey` Agent stays an ordinary worker Agent:
+  listed in the Agents roster, available to `@<agent:vibey>`, and the default
+  for new project chats. Keeping them apart avoids two problems: setting
+  `vibey` as a Bot would hide it from the roster and mentions, and a renamed
+  main Bot would contradict Vibey's built-in preamble. The `main` Agent gets
+  the neutral preamble plus the Bot sections.
 - Its directory becomes `~/.avibe/bots/main/`, replacing
   `~/.avibe/main/owner/`. Owner decision (2026-10-31): `ses_main` has no real
-  users yet, so there is no migration; the row's workdir and its validation
-  (`_validate_main_session_row`) change directly, and the old directory is
+  users yet, so there is no data migration. An existing `ses_main` row of the
+  earlier shape (the `vibey` Agent, the old workdir) is rewritten in place to
+  the new Agent and workdir instead of being refused; the old directory is
   abandoned.
 - It stays owner-only, as `ses_main` is today.
 
@@ -345,29 +385,52 @@ You are `@<bot:memory>`, the background memory of the user's Bots, above all of 
 - Keep every Bot's memory true, short, and findable. Edit a Bot's directory only while it has no Turn running; when a fix needs that Bot's own judgment, message it with `--bot` instead. Never change a Bot's definition.
 ```
 
-## Phasing
+## Web API (owner-only)
 
-- **P0, the main Bot on the Web:** the Bot area showing `ses_main`; the Inbox
-  icon and brand subtitle; rename and avatar; the Bot directory with automatic
-  Git; the Bot prompts.
-- **P1, custom Bots:** setting an Agent as a Bot, typed mentions, `--bot`, the
-  Bots roster, messages between Bots.
-- **P2, background Bots:** the memory Bot; the operations Bot.
-- **P3:** forks into Projects, IM binding (D6), group conversations among Bots,
-  per-member Bots.
-- **Independent tracks** that help every Vibey Session: system prompt
-  snapshots and tiers, Claude's one-hour conversation cache, the environment
-  block changes (`system-prompt-cache-tiers.md`).
+The contract the Web UI builds on. Every route requires the instance owner.
 
-Context rotation (`2026-10-01-session-context-rotation.md`) is no longer a P0
+| Route | Purpose |
+| --- | --- |
+| `GET /api/bots` | Bots in display order: handle, display name (empty means the localized default for the main Bot), avatar (`emoji` with hue, `image` with URL, or the main Bot's mascot), role, Agent name, Session id, position, built-in flag |
+| `POST /api/bots` | Create: display name, handle (optional), role, avatar (optional), model (optional). Makes the Vibey Agent, the Bot, its directory, and its Session |
+| `POST /api/bots/set` | Make an existing Vibey Agent a Bot: Agent name, display name, avatar |
+| `PATCH /api/bots/{handle}` | Display name, emoji avatar, position |
+| `DELETE /api/bots/{handle}` | Remove the Bot role (the main Bot refuses) |
+| `PUT /api/bots/{handle}/avatar` | Upload an image; stored as `avatar.png` in the Bot's directory |
+| `GET /api/bots/{handle}/avatar` | Serve that image |
+| `POST /api/bots/handle-suggestion` | Display name and role in; a free handle and its source (`model` or `transliteration`) out |
+
+Unread counts and running state come from the existing Session and Inbox
+reads by Session id; the Bot list does not duplicate them. The Inbox feed
+includes Bot Sessions, which have no scope.
+
+## Delivery plan
+
+Two tracks, each change on its own branch and PR under `pr-delivery-loop`.
+
+| PR | Track | Content | Depends on |
+| --- | --- | --- | --- |
+| 1 | Docs | This plan and `system-prompt-cache-tiers.md` | none |
+| 2 | Cache | Claude conversation breakpoints at one hour; the environment block drops `date` and `timezone`; the `user_preferences.md` prompt section and template are retired (D8) | none |
+| 3 | Cache | System prompt snapshots and tiers, the `instructions` field, the Session id moved out of the system prompt, forks inheriting the snapshot; then cache metrics | 2 |
+| 4 | Bots | Backend: Bot metadata, the `main` Agent and `ses_main` rewrite, `ses_<handle>` Sessions, Bot directories with automatic Git, the Bot prompt sections and roster, typed mention guidance, `--bot`, `vibe bot`, the Web API | none |
+| 5 | Bots | Web UI: avatar strip, hover card, context menu, Inbox Bot rows, add dialog, Agents page "Set as Bot", Bot conversation header, typed mention markers, i18n | 4 |
+
+The UI follows the Show Page mockups of this design Session; `design.pen` is
+brought up to date through Pencil afterward (owner decision, 2026-11-01).
+Public documentation (avibe-docs, English and Chinese) ships with the feature.
+
+Later: the memory Bot and the operations Bot; IM binding (D6); forks into
+Projects; group conversations among Bots; per-member Bots.
+
+Context rotation (`2026-10-01-session-context-rotation.md`) is no longer a
 prerequisite: Bots run on Vibey, whose checkpoints already condense context.
 What remains to verify is how checkpoints behave over months and how open
 work is handed across them.
 
-## Open topics
+## Deferred topics
 
 - The operations Bot: what it watches, and how far it may act on its own.
 - The memory Bot's cadence, cost ceiling, and what each pass does.
-- Whether Bots should prefer forking themselves when they hand off work
-  (deferred by the owner).
-- Bots on multi-member instances: per instance or per member.
+- Whether Bots should prefer forking themselves when they hand off work.
+- Per-member Bots on multi-member instances.
