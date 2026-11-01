@@ -3489,7 +3489,7 @@
       "inbox": "收件箱",
       "newChat": "新建会话",
       "agents": "Agents",
-      "skills": "技能 & MCP",
+      "skills": "Skills",
       "harness": "Harness",
       "vaults": "Vaults"
     },
@@ -3567,8 +3567,8 @@
         "description": "全局 Avibe Agent 注册表 —— Claude / OpenCode / Codex 各自的变体,开会话时可选。"
       },
       "skills": {
-        "eyebrow": "技能 & MCP",
-        "title": "技能 & MCP",
+        "eyebrow": "Skills",
+        "title": "Skills",
         "description": "在 askill CLI 之上管理 Agent Skills(全局 + 项目级)。"
       },
       "harness": {
@@ -4791,7 +4791,7 @@
       "done": "完成",
       "empty": "没有匹配你搜索的技能。"
     },
-    "pageTitle": "技能 & MCP",
+    "pageTitle": "Skills",
     "tabSkills": "技能",
     "tabMcp": "MCP"
   },

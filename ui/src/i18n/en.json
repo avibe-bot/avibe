@@ -3489,7 +3489,7 @@
       "inbox": "Inbox",
       "newChat": "New chat",
       "agents": "Agents",
-      "skills": "Skills & MCP",
+      "skills": "Skills",
       "harness": "Harness",
       "vaults": "Vaults"
     },
@@ -3567,8 +3567,8 @@
         "description": "Global registry of every Avibe Agent — Claude / OpenCode / Codex variants you can pick when starting a session."
       },
       "skills": {
-        "eyebrow": "Skills & MCP",
-        "title": "Skills & MCP",
+        "eyebrow": "Skills",
+        "title": "Skills",
         "description": "Manage Agent Skills (global + project-scoped) on top of the askill CLI."
       },
       "harness": {
@@ -4791,7 +4791,7 @@
       "done": "Done",
       "empty": "No skills match your search."
     },
-    "pageTitle": "Skills & MCP",
+    "pageTitle": "Skills",
     "tabSkills": "Skills",
     "tabMcp": "MCP"
   },

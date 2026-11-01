@@ -33,7 +33,7 @@ A Codex/OpenCode server with `enabled = false` is omitted. Native extras Hub doe
 
 ## Add a server
 
-On the Skills & MCP page, MCP tab, paste an `mcpServers` block and choose **Add MCP**. That writes only Avibe's store, then refreshes the name.
+On the Skills page, MCP tab, paste an `mcpServers` block and choose **Add MCP**. That writes only Avibe's store, then refreshes the name.
 
 ```bash
 vibe mcp-add --transport http docs https://example.invalid/mcp --header 'Authorization: Bearer <token>'
@@ -41,7 +41,7 @@ vibe mcp-add local-tools --env MODE=readonly -- python server.py
 vibe mcp-add --json-stdin < servers.json
 ```
 
-- Supported transports are stdio and Streamable HTTP. SSE is not supported. HTTP servers that advertise OAuth can be logged in from the Skills & MCP page or with `vibe mcp <name> --login`.
+- Supported transports are stdio and Streamable HTTP. SSE is not supported. HTTP servers that advertise OAuth can be logged in from the Skills page or with `vibe mcp <name> --login`.
 - Add never writes Claude/Codex/OpenCode files.
 - A Hub-entered `cwd` must be absolute.
 - `${VAR}` placeholders are not expanded.
@@ -59,7 +59,7 @@ vibe mcp docs --remove
 
 HTTP definitions may include Claude-format OAuth options such as `"oauth": {"scopes": "offline_access"}`. When a server requires OAuth it remains visible as **needs login**, but its tools are not added to the Agent prompt until login succeeds.
 
-Use **Log in** in the Skills & MCP page, or:
+Use **Log in** in the Skills page, or:
 
 ```bash
 vibe mcp suno --login
