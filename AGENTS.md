@@ -304,7 +304,7 @@ there rather than expanding this index.
 
 - source lives in `ui/`; build with `cd ui && npm run build`; `ui/dist/` is served by `vibe/ui_server.py`
 - follow the reuse ladder for UI and shared backend logic: inventory existing patterns -> reuse (`ui/src/components/ui/` primitives such as `Button`, `Badge`, `Card`, `Input`, `Popover`, `Dialog` first) -> extend via variants/sizes/props -> promote near-duplicates -> create a reusable unit only when needed; extract on the third repeat
-- `../avibe-docs/design.pen` is the visual source of truth; map spacing, type, radius, color, and shadow to exact tokens/classes, add missing tokens instead of hardcoding, and verify against the exported frame when visual fidelity matters
+- design new and changed surfaces as frames in `ui/design/` (rules in `ui/design/AGENTS.md`): they render the product's own components and tokens, and `npm run design:export` presents them in a Show Page; `../avibe-docs/design.pen` stays the read-only reference for surfaces not yet drawn there. Map spacing, type, radius, color, and shadow to exact tokens/classes and add missing tokens instead of hardcoding
 - installed `vibe` uses packaged UI assets, not raw repo `ui/dist/`; for packaged CLI/UI preview, build UI and reinstall from a normal wheel — never `uv tool install --force --editable .`, and never an editable install against system Python
 
 ## 7. Testing and Validation

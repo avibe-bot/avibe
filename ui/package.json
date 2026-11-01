@@ -8,6 +8,11 @@
   },
   "scripts": {
     "dev": "vite",
+    "design": "vite --open /design.html",
+    "design:shot": "node scripts/design-shot.mjs",
+    "design:build": "node scripts/design-build.mjs",
+    "design:export": "node scripts/design-export.mjs",
+    "typecheck:design": "tsc -p design/tsconfig.json --noEmit",
     "validate:imports": "node scripts/validate-out-of-tree-imports.mjs",
     "build": "npm run validate:imports && tsc -b && vite build",
     "lint": "node scripts/lint-baseline.mjs",

@@ -30,3 +30,5 @@ playwright-report
 test-results
 blob-report
 .playwright
+design/.shots/
+design/.dist/

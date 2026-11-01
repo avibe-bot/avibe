@@ -193,6 +193,8 @@ jobs:
               npm run lint
               # Production tsc excludes test files, and vitest only strips types.
               npm run typecheck:tests
+              # Design frames (ui/design) are not part of the production build.
+              npm run typecheck:design
           - part: tests
             commands: |
               npm test
@@ -241,6 +243,8 @@ jobs:
               npm run test:workbench-general -- sidebar-floating.spec.ts desktop-window-chrome.spec.ts composer-route-trigger.spec.ts skills-dialog.spec.ts bots.spec.ts
               npm run test:chat-interactions
               npm run test:pdf-preview
+              # Renders every design frame in both themes; fails on any console error.
+              npm run design:shot
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
