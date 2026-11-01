@@ -65,12 +65,14 @@ def load_manifest(path: Path = SOURCES) -> dict:
         or driver["source"].get("root")
         != "cua-5272e492d61b96caf08e3bf434d91126c1f3dccc"
         or not isinstance(driver.get("patch"), dict)
-        or driver["patch"].get("variant") != "avibe-raw-single-click-v1"
+        or driver["patch"].get("variant") != "avibe-raw-single-click-reopen-v2"
         or driver["patch"].get("file")
         != "patches/0001-macos-raw-single-click.patch"
         or SHA256.fullmatch(str(driver["patch"].get("sha256"))) is None
         or driver["patch"].get("contract")
-        != "click.click_mode=raw; embedded parent-liveness cleanup"
+        != ("click.click_mode=raw; embedded parent-liveness cleanup; "
+            "running launch_app uses kAEReopenApplication ('rapp') without activation; "
+            "cold and new-instance launch use 'oapp'")
         or not isinstance(driver["patch"].get("upstream_refs"), list)
         or not driver["patch"]["upstream_refs"]
         or not isinstance(driver["patch"].get("upgrade_plan"), str)
@@ -286,6 +288,7 @@ def provenance_record(
         "patch_variant": driver["patch"]["variant"],
         "patch_file": driver["patch"]["file"],
         "patch_sha256": patch_sha256,
+        "patch_contract": driver["patch"]["contract"],
         "tool_snapshot_sha256": digest(TOOL_SNAPSHOT),
         "prepared_binary_sha256": binary_sha256,
         "build_origin": "repository_patch_built",

@@ -61,6 +61,7 @@ def driver_provenance_payload(target, prepared_binary_sha256):
         "patch_variant": pinned_driver["patch_variant"],
         "patch_file": pinned_driver["patch_file"],
         "patch_sha256": pinned_driver["patch_sha256"],
+        "patch_contract": pinned_driver["patch_contract"],
         "tool_snapshot_sha256": pinned_driver["tool_snapshot_sha256"],
         "prepared_binary_sha256": prepared_binary_sha256,
         "build_origin": "repository_patch_built",

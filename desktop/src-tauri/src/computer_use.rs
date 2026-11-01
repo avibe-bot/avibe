@@ -15,8 +15,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use avibe_runtime_host::computer_use::{
     CapabilityCache, CapabilityProbe, CapabilityVerdict, ComputerUseLifecycle, ComputerUsePhase, ComputerUseRecord,
     ComputerUseShellLock, ComputerUseStateStore, Grants, HealthResult, LifecycleDirective, RuntimeSupport,
-    StoredComputerUseState, ToolSnapshot, COMPUTER_USE_DRIVER_VERSION, COMPUTER_USE_LOCK_FILE,
-    COMPUTER_USE_SCHEMA_VERSION, COMPUTER_USE_SOCKET_FILE, COMPUTER_USE_STATE_FILE, COMPUTER_USE_TOOL_SNAPSHOT_SHA256,
+    StoredComputerUseState, ToolSnapshot, COMPUTER_USE_APPROVED_TOOL_SNAPSHOT_SHA256, COMPUTER_USE_DRIVER_VERSION,
+    COMPUTER_USE_LOCK_FILE, COMPUTER_USE_SCHEMA_VERSION, COMPUTER_USE_SOCKET_FILE, COMPUTER_USE_STATE_FILE,
+    COMPUTER_USE_TOOL_SNAPSHOT_SHA256,
 };
 use avibe_runtime_host::hashing::{lower_hex, update_from_reader};
 use avibe_runtime_host::{BootstrapLog, LoopbackOrigin, BOOTSTRAP_LOG_NAME};
@@ -306,7 +307,9 @@ impl Paths {
     fn assets_valid(&self) -> bool {
         self.driver.is_file()
             && self.policy.is_file()
-            && sha256_file(&self.snapshot).as_deref() == Some(COMPUTER_USE_TOOL_SNAPSHOT_SHA256)
+            && sha256_file(&self.snapshot)
+                .as_deref()
+                .is_some_and(|digest| COMPUTER_USE_APPROVED_TOOL_SNAPSHOT_SHA256.contains(&digest))
     }
 }
 
