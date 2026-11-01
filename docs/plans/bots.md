@@ -100,16 +100,46 @@ own. A Session has none of these; a Bot has all three.
 
 ### D5. Web surfaces
 
-- The Bot area takes the Inbox's place in the sidebar and shows the main Bot
-  by default; Bots set by the user are pinned there.
-- The Inbox becomes an icon-only button at the right end of the brand row.
-- The brand subtitle drops "工作台" / "Workbench" and reads "Agent OS".
-- Where Bots are created is undecided; the owner will choose from mockups
-  (options: a `+` in the Bot section header, as Projects has; the Agents page
-  only; others).
-- Proposed, not yet confirmed: Bot unread state shows in the Bot area rather
-  than in the Inbox; `/new` in a Bot conversation condenses its context
-  instead of starting a new Session.
+Owner decisions 2026-11-01, from the mockups in this Session's Show Page
+(variant C).
+
+- **Placement.** The Bot area takes the Inbox's place. The Inbox becomes an
+  icon-only button at the right end of the brand row; the brand subtitle
+  drops "工作台" / "Workbench" and reads "Agent OS".
+- **Label.** The section is titled 「伙伴」 in Chinese. The English UI label
+  is still open (see Open topics); code, CLI, and prompts keep "Bot".
+- **Avatar strip.** Bots appear as a row of 40px avatars with their names
+  below, the main Bot first. The current Bot has a mint ring; unread shows as
+  a cyan count; a running Turn shows as a pulsing mint dot. With few Bots an
+  "Add" slot (dashed circle) follows the avatars; with more, the avatars
+  scroll horizontally with a fading right edge and "Add" stays pinned at the
+  right.
+- **Theme.** The main Bot's avatar well follows the theme: white with a hairline
+  ring in light, dark in dark. Emoji avatars keep one hue with a light and a
+  dark well.
+- **Hover card.** Hovering an avatar shows its full name, handle, role, and
+  latest message or running step; clicking opens the conversation. This makes
+  up for the strip having no message preview.
+- **Context menu.** Edit profile, drag to reorder, and remove from Bots (its
+  conversation and memory are kept). The main Bot cannot be removed.
+- **Inbox.** The Inbox stays the one total of everything unread, Bot
+  conversations included; the icon's count is that total. A Bot row shows the
+  Bot's avatar and name with a small Bot tag; other Sessions keep their
+  "project · title" rows.
+- **Adding a Bot.** "Add" opens a dialog with two tabs:
+  - *New*: name (any language), avatar, and role. The handle is generated in
+    the background after the name is entered (D2) and shown as a muted
+    `@handle` with an edit pencil; until an avatar is chosen, the avatar is the
+    name's first character on a color derived from the name. The role seeds the
+    Agent's system prompt and stays editable on the Agents page. The model
+    follows the main Bot by default, under "Advanced".
+  - *From an existing Agent*: lists Vibey-backend Agents that are not Bots; the
+    handle is the Agent name, locked.
+  - Avatars come from an emoji with a background color, or an uploaded image
+    cropped to a circle. AI-generated avatars are left out of the first version.
+  - The footer reminds the user they can also ask the main Bot to add one.
+- Proposed, not yet confirmed: `/new` in a Bot conversation condenses its
+  context instead of starting a new Session.
 
 ### D6. IM direct messages (phase 2)
 
@@ -334,7 +364,7 @@ work is handed across them.
 
 - The operations Bot: what it watches, and how far it may act on its own.
 - The memory Bot's cadence, cost ceiling, and what each pass does.
-- Sidebar mockups: the Bot area, the Inbox icon, where Bots are created.
+- The English UI label for the Bot section (「伙伴」 in Chinese).
 - Whether Bots should prefer forking themselves when they hand off work
   (deferred by the owner).
 - Bots on multi-member instances: per instance or per member.
