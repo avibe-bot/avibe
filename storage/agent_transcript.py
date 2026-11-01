@@ -123,6 +123,14 @@ _AUDIT_EVENT_TYPE: dict[str, str] = {"attempt": "model_attempt", "fork_turn": "f
 CONTEXT_WRITER = "vibey"
 PAYLOAD_VERSION = 1
 
+# Two bounded index seeks recover all route clocks; no per-Turn audit-history scan.
+CACHE_ATTEMPTS_SQL = """
+SELECT CASE WHEN json_valid(content_json) THEN json_extract(content_json, '$.cache_state') END
+FROM agent_events
+WHERE session_id = :session_id AND event_type = :event_type
+ORDER BY created_at DESC, id DESC LIMIT 1
+"""
+
 PayloadKind = Literal["compaction", "context_edit", "agent_state", "replay_refusal"]
 _EVENT_TYPE_BY_KIND: dict[str, str] = {
     "tool_result": "tool_result",
@@ -306,6 +314,25 @@ class SQLiteTranscriptStore:
 
         return await self._write(session_id, work)
 
+    async def load_cache_attempts(self, session_id: str) -> Sequence[Mapping[str, Any]]:
+        """Read only optional diagnostics, by the existing Session index and on a worker."""
+        from core.agent_core.harness.cache_metrics import CacheTracker
+
+        def read():
+            tracker = CacheTracker()
+            with self._engine.connect() as conn:
+                for event_type in ("model_attempt", "fork_turn"):
+                    raw = conn.execute(text(CACHE_ATTEMPTS_SQL), {"session_id": session_id, "event_type": event_type}).scalar()
+                    try:
+                        records = json.loads(raw) if raw else []
+                        if isinstance(records, list):
+                            tracker.restore((), records)
+                    except (ValueError, TypeError):
+                        continue
+            return list(tracker.latest.values())
+
+        return await asyncio.to_thread(read)
+
     async def append_response(
         self,
         session_id: str,
@@ -313,6 +340,7 @@ class SQLiteTranscriptStore:
         *,
         final: bool,
         request: Optional[Mapping[str, Any]] = None,
+        cache: Optional[Mapping[str, Any]] = None,
         replied: Optional[bool] = None,
         images: Sequence[HostedImage] = (),
         superseded: bool = False,
@@ -327,6 +355,8 @@ class SQLiteTranscriptStore:
         response: dict[str, Any] = {"version": PAYLOAD_VERSION, "message": message_to_dict(stored_message)}
         if request is not None:
             response["request"] = dict(request)  # C-9 ``ModelResponse.request``: the anchor's request facts
+        if cache is not None:
+            response["cache"] = dict(cache)
         model = _canonical(response, "response")
         if replied is None:
             replied = has_reply(stored_message)

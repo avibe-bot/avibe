@@ -137,6 +137,15 @@ class InMemoryTranscriptStore:
             prefix = [row for row in await self.load(anchor.session_id) if row.context_seq <= anchor.context_seq]
         return deepcopy(prefix + self.rows.get(session_id, []))
 
+    async def load_cache_attempts(self, session_id: str) -> Sequence[Mapping]:
+        from core.agent_core.harness.cache_metrics import CacheTracker
+
+        tracker = CacheTracker()
+        for records in (self.attempts, self.audits):
+            payload = next((payload for owner, _, payload in reversed(records) if owner == session_id), {})
+            tracker.restore((), payload.get("cache_state", []))
+        return deepcopy(list(tracker.latest.values()))
+
     def _entries(self, session_id, items) -> list[ContextEntry]:
         """Rows for ``(kind, message, payload, row_id)`` items, numbered after the Session's context."""
         entries = self.rows.get(session_id, [])
@@ -166,9 +175,11 @@ class InMemoryTranscriptStore:
         return (await self._append(session_id, [("input", message, {}, message_id)]))[0]
 
     async def append_response(
-        self, session_id, message: AssistantMessage, *, final: bool, request=None, replied=None, images=(), superseded=False
+        self, session_id, message: AssistantMessage, *, final: bool, request=None, cache=None, replied=None, images=(), superseded=False
     ) -> ContextEntry:
         payload = {"request": dict(request)} if request is not None else {}
+        if cache is not None:
+            payload["cache"] = dict(cache)
         row = (await self._append(session_id, [("response", message, payload, None)]))[0]
         self.final[row.row_id] = final
         return row

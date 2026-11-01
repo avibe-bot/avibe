@@ -4,6 +4,17 @@
   "title": "TranscriptRowPayloads",
   "description": "C-5 payloads of context rows (transcript.md). Written by the adapter's TranscriptStore for the `harness`; read by projection, fork, resume, and the Workbench model view. All shapes are persisted and versioned.",
   "definitions": {
+    "CacheObservation": {
+      "description": "Optional request-start diagnostics (system-prompt-cache-tiers.md). Never canonical usage or a C-9 control clock. Damaged diagnostics are ignored by readers; unknown fields permit additions without a migration.",
+      "type": "object",
+      "required": ["version"],
+      "properties": {"version": {"const": 1}}
+    },
+    "CacheState": {
+      "description": "Latest usage-bearing request per served provider/model; bounded sampled prefix hashes, never message content.",
+      "type": "array",
+      "items": {"$ref": "#/definitions/CacheObservation"}
+    },
     "ModelInput": {
       "description": "`messages.content_json.model` on user, harness, agent_initiated, and annotation rows, set when the loop consumes the input.",
       "type": "object",
@@ -38,6 +49,7 @@
           "$ref": "message.schema.json#/definitions/AssistantMessage",
           "description": "Verbatim, including quick-reply blocks and file:// links that the display copy rewrites."
         },
+        "cache": {"$ref": "#/definitions/CacheObservation"},
         "request": {
           "type": "object",
           "description": "C-9 (context.md section 2): the request this response answered, as sent, for the estimate anchor. Written only when context management is on.",
@@ -524,24 +536,39 @@
             "$ref": "message.schema.json"
           }
         },
+        "cache_state": {"$ref": "#/definitions/CacheState"},
+        "cache_attempts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["cache"],
+            "additionalProperties": false,
+            "properties": {
+              "cache": {"$ref": "#/definitions/CacheObservation"},
+              "usage": {"$ref": "message.schema.json#/definitions/Usage"}
+            }
+          }
+        },
         "usage": {
           "$ref": "message.schema.json#/definitions/Usage"
         }
       }
     },
     "ModelAttempt": {
-      "description": "`agent_events.content_json` of a `model_attempt` audit row (`TranscriptStore.append_audit(kind='attempt')`, `visibility = 'audit'`, no `context_seq`): a conversation attempt that reported usage and did not become a response row (retried, relieved, a usage-only terminal, refused at admission, or a failed commit), written by the attempt ledger in every mode, with or without context management (context.md section 10, invariant 4). Never context.",
+      "description": "`agent_events.content_json` of a `model_attempt` audit row (`TranscriptStore.append_audit(kind='attempt')`, `visibility = 'audit'`, no `context_seq`): a conversation attempt with usage or cache diagnostics that did not become a response row (retried, relieved, a usage-only terminal, refused at admission, or a failed commit), written by the attempt ledger in every mode, with or without context management (context.md section 10, invariant 4). Never context.",
       "type": "object",
       "required": [
         "version",
-        "usage",
         "error"
       ],
+      "anyOf": [{"required": ["usage"]}, {"required": ["cache"]}],
       "additionalProperties": false,
       "properties": {
         "version": {
           "const": 1
         },
+        "cache": {"$ref": "#/definitions/CacheObservation"},
+        "cache_state": {"$ref": "#/definitions/CacheState"},
         "usage": {
           "$ref": "message.schema.json#/definitions/Usage"
         },

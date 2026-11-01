@@ -816,14 +816,27 @@ class Usage:
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     reasoning_tokens: Optional[int] = None
+    # Transient provider diagnostics: only ModelResponse.cache persists these.
+    # Keeping the canonical Usage shape unchanged permits older releases to read the transcript.
+    cache_writes_by_ttl: Optional[Mapping[str, int]] = field(default=None, compare=False, repr=False)
+    # False when a provider exposed TTL detail but omitted the aggregate write total; the
+    # detail may be retained for diagnostics but must not be treated as complete billing input.
+    cache_write_total_reported: bool = field(default=True, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         for name in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"):
             _require(getattr(self, name), int, name)
         _require(self.reasoning_tokens, int, "reasoning_tokens", optional=True)
+        _require(self.cache_write_total_reported, bool, "cache_write_total_reported")
         counts = (self.input_tokens, self.output_tokens, self.cache_read_tokens, self.cache_write_tokens)
         if any(c < 0 for c in counts) or (self.reasoning_tokens is not None and self.reasoning_tokens < 0):
             raise ValueError("token counts must not be negative")
+        if self.cache_writes_by_ttl is not None:
+            if (not isinstance(self.cache_writes_by_ttl, Mapping)
+                    or any(key not in {"5m", "1h", "30m", "12h"} or type(value) is not int or value < 0
+                           for key, value in self.cache_writes_by_ttl.items())
+                    or (self.cache_write_total_reported and sum(self.cache_writes_by_ttl.values()) > self.cache_write_tokens)):
+                raise ValueError("invalid cache write TTL decomposition")
 
 
 @dataclass(frozen=True)

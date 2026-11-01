@@ -283,28 +283,41 @@ The loop records a `cache` object beside `usage` on each Vibey response row:
 
 | Field | Meaning |
 | --- | --- |
-| `idle_s` | Seconds since the start of the previous request on the same provider and model (providers count lifetimes from the request start) |
+| `idle_s` | Seconds since the start of the previous usage-bearing request on the same provider and model; a failed attempt with no usage cannot establish a populated cache |
 | `lifetime_s` | The lifetime Avibe assumed for the route at that moment |
 | `expected_read` | Tokens Avibe expected the provider to read: the prefix it left unchanged since that previous request, or 0 when the route is cold by the clock |
-| `writes_by_ttl` | Write tokens by lifetime as the provider reports them (Anthropic 5 m and 1 h, OpenAI 30 m and 12 h) |
-| `causes` | What Avibe changed in the prefix before this request: `prompt_applied` with its reason (`tier1`, `deadline`, `cold`, `route_change`, `checkpoint`, `session_start`), `tools_changed`, `tool_results_cleared`, `checkpoint`, `route_changed`, `fork_start` |
+| `writes_by_ttl` | Write tokens by lifetime as the provider reports them (Anthropic 5 m and 1 h, OpenAI 30 m and 12 h); unreported or contradictory portions stay in `unknown` and remain a lower-bound signal in valuation |
+| `cache_write_basis` | `reported`, `unknown`, `incomplete_total`, `none`, or `timestamp_inferred`; this prevents a missing aggregate or legacy row from looking like a complete TTL bill |
+| `causes` | What Avibe changed in the prefix before this request: `prompt_applied` with its reason (`tier1`, `deadline`, `cold`, `route_change`, `checkpoint`, `session_start`, `persistence_failure`), `tools_changed`, `tool_results_cleared`, `checkpoint`, `route_changed`, `fork_start` |
 
-A query view classifies each request from these facts:
+A query view classifies each request from these facts. The `cache` object is
+optional and sits beside the canonical response `message`/`request`; TTL
+breakdowns are not added to canonical `Usage`, so older releases can still read
+these rows. A malformed optional cache object is treated as unknown rather than
+making a response or report fail.
 
-- **Active break**: Avibe changed the prefix (`causes` is not empty); the
-  missed tokens are charged to the cause.
+- **Unknown**: no usage was reported; a failed attempt is not a measured cache miss.
+- **Active break**: Avibe changed the prefix and input tokens were missed; the
+  missed tokens are charged to the cause. `fork_start` and `prompt_applied:session_start`
+  are informational, not evidence of a broken prefix. A full hit remains a hit.
 - **Passive expiry**: nothing changed and `idle_s` exceeded the provider's
   lifetime.
 - **Provider miss**: nothing changed, the route was warm by the clock, and
-  the provider read less than `expected_read` (eviction, routing, overflow).
+  the provider read less than `expected_read` when the basis is
+  `reported_input`, beyond a tolerance of max(128 tokens, 1% of expected input)
+  (eviction, routing, overflow). Partial-prefix expectations
+  are classified separately as `estimated_miss` rather than blamed on the
+  provider.
 
-Each class carries its tokens and their cost at the route's rates. The
-measurements in Background had to infer these classes from timestamps; with
-the facts recorded, the inference becomes exact.
+Each class carries its tokens and current-list valuation. Recorded request-start
+timing supersedes legacy timestamp inference; estimated token boundaries and provider
+retention assumptions remain estimates, not exact proof of a provider fault. Each
+persisted prefix has at most 32 sampled 128-bit hash boundaries, retaining the exact
+final boundary for whole-request reuse. Sampling can undercount partial-prefix reuse.
 
 ### Per snapshot change: how current the context was
 
-Two `agent_events` rows per Session:
+Two `agent_events` types at snapshot transitions:
 
 - `prompt.pending`: a change first seen at a Turn start, with its components
   and tiers.
@@ -318,8 +331,12 @@ Turns that ran with a pending notice.
 ### Reports
 
 - A read-only `vibe data query` view of the per-request facts and their
-  classification, so any Agent can answer a new question directly, as the
-  measurements in this document were made.
+  classification, so any Agent can answer a new question directly.
+- `vibe data cache` is the supported summary entry point. It is read-only and
+  requires the Member-level diagnostic access needed to read `agent_events`.
+  It uses the cached local price table only; its USD figures are current
+  standard-list valuations, not historical provider bills. Legacy rows are
+  labeled timestamp-inferred, and what-if lifetimes are estimates.
 - A summary by route and period: hit rate; writes by class, cause, and
   lifetime; the idle-gap distribution (under 5 m, 5 to 30 m, 30 to 60 m, 1 to
   12 h, over 12 h) with the tokens at stake in each band; what each lifetime

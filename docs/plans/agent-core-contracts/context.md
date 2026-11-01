@@ -663,7 +663,12 @@ every-exit audit: `test_loop.py`) that fails when its order or owner is broken.
    conversation attempt that did not become a response row (retried, relieved, a usage-only terminal, refused at
    admission, or a failed commit): one non-context `ModelAttempt` audit row, never a response row, written in every
    mode, with or without `ContextConfig`, on every exit of the model call but an abort; a failed audit write is a
-   diagnostic and is not retried. The cancelled run scope admits no further store write, so an aborted call's
+   diagnostic and is not retried. When cache metrics are enabled, an attempt without usage also keeps optional
+   request-start diagnostics in this audit; absent usage is unknown, never a zero-token report. Only a
+   usage-bearing attempt advances the diagnostic cache clock or consumes pending change causes. Responses keep
+   optional `ModelResponse.cache`; attempt/side-turn audits keep `cache`/`cache_attempts` and the latest per-route
+   `cache_state`. These diagnostics do not alter the C-9 response-end clock or canonical Usage.
+   The cancelled run scope admits no further store write, so an aborted call's
    unaudited attempts are not kept. It is the one place that usage is kept. A checkpoint attempt's partials and
    usage are kept in its side turn's `fork_turn` audit row (§6, C-10 F7), written by the same rule: once, on every
    exit but an abort, whichever step ends it (compose, provider, admission, the host's state or hint, building the

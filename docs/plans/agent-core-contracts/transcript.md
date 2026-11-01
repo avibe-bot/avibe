@@ -34,10 +34,17 @@ an `output` that is not a committed response, queued or removed inputs, and the 
 either: `agent_events` with `visibility = 'audit'` and no `context_seq`, written by `append_audit`, as
 `fork_turn` (`ForkTurn`, C-10 `fork.md` §7: one side turn, such as a C-9 checkpoint, with its own attempts' partials
 and usage) or
-`model_attempt` (`ModelAttempt`: the usage of a conversation attempt that did not become a response row, C-9
+`model_attempt` (`ModelAttempt`: the usage and/or optional cache diagnostics of a conversation attempt that did not become a response row, C-9
 `context.md` §10, invariant 4). The activity panel does not read them.
 
 ## 2. Writing
+
+Cache diagnostics are optional version-1 objects, outside canonical `Usage`:
+`ModelResponse.cache`, `ModelAttempt.cache/cache_state`, and `ForkTurn.cache_attempts/cache_state`.
+Old readers ignore them. Only usage-bearing records restore the request-start clock; two indexed latest-audit
+lookups recover the per-route state without scanning history. Each persisted prefix holds at most 32 sampled
+128-bit hash boundaries (including tools, system, and the exact final boundary), not copied prompt content.
+Partial-prefix counts are estimates/lower bounds; a fully retained request uses its reported input count.
 
 - Every store implements the whole `TranscriptStore` protocol (`harness/store.py`) with the same behavior: an append
   returns exactly the entry `load` reads back, `created_at` (epoch seconds) included; a response keeps C-9's request

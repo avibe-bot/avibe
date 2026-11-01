@@ -1047,15 +1047,50 @@ class VibeyAgent(BaseAgent):
                 if not self.prompt_snapshots.save(agent.session_id, decision.state, snapshot=decision.reason is not None):
                     # Without a durable first-seen time, retaining a warm prefix could
                     # reset a tier-2 deadline forever. Lose the optimization, not freshness.
-                    return decide(None, candidate, now=now, route=decision.state.snapshot.route,
-                                  checkpoint_seq=decision.state.observed_checkpoint_seq, cold=False).state
-            return decision.state
+                    failed = decision
+                    decision = decide(None, candidate, now=now, route=failed.state.snapshot.route,
+                                      checkpoint_seq=failed.state.observed_checkpoint_seq, cold=False)
+                    decision = replace(decision, reason="persistence_failure", detected=failed.detected,
+                                       applied=failed.applied or failed.state.pending)
+            if persist and (decision.detected or decision.reason):
+                self._record_prompt_events(request, agent.session_id, decision, now)
+            return decision
 
-        state = await to_thread_joined(prepare)
+        decision = await to_thread_joined(prepare)
+        state = decision.state
+        agent.cache_causes = (({"kind": "prompt_applied", "reason": decision.reason},) if decision.reason else ())
+        agent.prompt_pending = bool(state.pending)
+        agent.prompt_notice = state.notice != "current"
         agent.system = state.snapshot.prefix.system
         agent.set_tools(frozen_tools(state.snapshot.prefix.tools, agent.tools))
         router.prefix_declarations = (route_identity(endpoint), state.snapshot.prefix.hosted)
         return state
+
+    def _record_prompt_events(self, request: AgentRequest, session_id: str, decision, now: float) -> None:
+        """Worker-only diagnostics: a failed metrics write cannot fail a Turn."""
+        from dataclasses import asdict
+        from storage import agent_events_service
+
+        events = []
+        if decision.detected:
+            events.append(("prompt.pending", {"components": [asdict(item) for item in decision.detected]}))
+        if decision.reason:
+            events.append(("prompt.applied", {
+                "reason": decision.reason,
+                "components": [{**asdict(item), "wait_s": max(0, now - item.pending_since)} for item in decision.applied],
+            }))
+        try:
+            with self._engine.begin() as conn:
+                scope_id = conn.execute(select(agent_sessions.c.scope_id).where(agent_sessions.c.id == session_id)).scalar()
+                for event_type, data in events:
+                    agent_events_service.append(
+                        conn, scope_id=scope_id, session_id=session_id, platform=request.context.platform or "avibe",
+                        event_type=event_type, content={"version": 1, "at": now, **data}, visibility="trace",
+                        backend=BACKEND, agent_name=request.vibe_agent_name,
+                        turn_id=(request.context.platform_specific or {}).get("turn_token"),
+                    )
+        except Exception:
+            logger.warning("Could not record optional prompt metrics for Session %s", session_id)
 
     async def preview_request(
         self, session_id: str, request: AgentRequest, *, context_seq: int | None = None,

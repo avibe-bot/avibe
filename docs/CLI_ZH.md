@@ -270,8 +270,9 @@ vibe data query --sql "select id, status, created_at from agent_runs order by cr
 vibe data query --sql-file query.sql --limit 50
 ```
 
-四个视图为每次查询提供读取对话历史的稳定入口；原始表照样可以直接查询。先用 `digests`
-认出 Session，再到 `transcript` 或 `turns` 里读细节：
+四个历史视图为每次查询提供读取对话历史的稳定入口；原始表照样可以直接查询。先用 `digests`
+认出 Session，再到 `transcript` 或 `turns` 里读细节。缓存诊断另外提供两个仅连接内
+存在的临时视图，不会创建数据库表：
 
 | 视图 | 列 | 含义 |
 | --- | --- | --- |
@@ -279,6 +280,8 @@ vibe data query --sql-file query.sql --limit 50
 | `sessions` | `session_id`、`title`、`agent_name`、`backend`、`model`、`status`、`workdir`、`created_at`、`last_active_at`、`parent_session_id` | 每个 Session 一行。`parent_session_id` 是用 `vibe agent run` 启动它的那个 Session。 |
 | `transcript` | `session_id`、`at`、`role`、`kind`、`text`、`turn_id`、`message_id` | 所有有正文的消息，`at` 是送达时间。`role` 为 `user`、`agent` 或 `harness`（Avibe 投递的输入：其他 Agent 的任务说明、回调、Watch 或 Task）；`kind` 是消息类型，例如 Agent 的回复是 `result`。 |
 | `turns` | `session_id`、`turn_id`、`started_at`、`ended_at`、`outcome`、`input`、`reply` | 每个有记录的 Agent 回合一行：它收到的原文和最终回复。没有回合记录的更早历史在 `transcript` 里。 |
+| `_cache_rows` | 内部来源视图 | 把响应、attempt 和 fork-turn 行规范化；稳定的对外查询应使用 `cache_requests`。 |
+| `cache_requests` | `request_id`、`session_id`、`turn_id`、`at`、`started_at`、`provider`、`protocol`、`model`、`purpose`、分类/事实、估值 | 每个 Vibey 请求的缓存事实和当前价目表估值。缺少 `cache` 对象的旧行会明确标为 `timestamp_inferred`；`valuation` 是 JSON，可能是下限或没有 USD 值。 |
 
 两个函数用来处理长文本。`excerpt(text, 'term')` 返回 `text` 中第一个匹配 `term`
 （不区分大小写）的位置前后约 300 个字符，第三个参数可以调整宽度；没有匹配时返回开头。
@@ -298,6 +301,26 @@ vibe data query --sql-file query.sql --limit 50
 PRAGMA 一律拒绝。`no such table` 或 `no such column` 错误会带上 `hint`，给出最接近的
 名称以及表清单，或所引用表的列。Task 和 Watch 都是 `run_definitions` 的行
 （`definition_type` 为 `scheduled` 或 `watch`）。
+
+### `vibe data cache`
+
+汇总 Vibey 最近七天的缓存行为，也可以指定 UTC 时间范围。命令只读，要求具备读取
+`agent_events` 所需的 Member 级诊断权限。
+
+```bash
+vibe data cache
+vibe data cache --since 30d --until 2026-10-31T00:00:00Z
+vibe data cache --session-id sesk8m4q2p7x --model claude-opus-5-5
+```
+
+报告按服务路由汇总请求事实，包含空闲区间、active/passive/provider-miss/estimated-miss 分类、原因、
+TTL 写入桶、按 tier 的提示词新鲜度，以及支持指定 lifetime 的 what-if 估算。费用使用
+本地缓存的当前标准价目表（含本地别名或缺省倍率），不是历史供应商账单或订阅费用。
+缺失 usage、未知 TTL、旧行时间推断、别名、缺省价格和无法观测的 fast 模式都会在 JSON
+结果中明确标注；估值还会返回实际使用的 price key、各 token 费率倍率、明确列出或缺省的
+费率来源，以及读折扣是否已知。what-if 保持主动变更和 provider miss 不恢复，只恢复 passive expiry，
+并让所有已知写入按候选 lifetime 重新计费（Claude 的 tools/system 静态前缀保持 1 小时）。
+TTL 未知或供应商未报告 aggregate 写入总量的请求从 what-if 排除，不会被重新分配 lifetime。
 
 ### `vibe data skill-usage`
 

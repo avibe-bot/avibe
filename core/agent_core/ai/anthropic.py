@@ -1340,12 +1340,18 @@ def _anthropic_usage(value: Any, *, current: Any = None) -> Any:
         return current
     if current is None:
         current = _usage()
+    from core.agent_core.ai.cache_usage import write_ttls
+
+    total = _anthropic_cache_write_tokens(value, current.cache_write_tokens)
     return _usage(
         _pick(value, "input_tokens", current.input_tokens),
         _pick(value, "output_tokens", current.output_tokens),
         _pick(value, "cache_read_input_tokens", current.cache_read_tokens),
-        _anthropic_cache_write_tokens(value, current.cache_write_tokens),
+        total,
         _pick_nested(value, "output_tokens_details", "thinking_tokens", current.reasoning_tokens),
+        write_ttls(value.get("cache_creation"),
+                   {"ephemeral_5m_input_tokens": "5m", "ephemeral_1h_input_tokens": "1h"}, total,
+                   current=current.cache_writes_by_ttl),
     )
 
 
@@ -1367,7 +1373,10 @@ def _anthropic_cache_write_tokens(value: Mapping[str, Any], fallback: int = 0) -
     return fallback
 
 
-def _usage(input_tokens: int = 0, output_tokens: int = 0, cache_read: int = 0, cache_write: int = 0, reasoning: int | None = None) -> Any:
+def _usage(
+    input_tokens: int = 0, output_tokens: int = 0, cache_read: int = 0, cache_write: int = 0,
+    reasoning: int | None = None, writes_by_ttl: Mapping[str, int] | None = None,
+) -> Any:
     from core.agent_core.messages import Usage
 
     return Usage(
@@ -1376,6 +1385,7 @@ def _usage(input_tokens: int = 0, output_tokens: int = 0, cache_read: int = 0, c
         cache_read_tokens=cache_read,
         cache_write_tokens=cache_write,
         reasoning_tokens=reasoning,
+        cache_writes_by_ttl=writes_by_ttl,
     )
 
 

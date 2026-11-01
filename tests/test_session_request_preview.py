@@ -79,7 +79,7 @@ async def commit_input(host):
 
 
 def deny_effects(host, monkeypatch):
-    for name in ("_preflight", "_resume", "_accept_native_start", "handle_message", "recover_runtime_state"):
+    for name in ("_preflight", "_resume", "_accept_native_start", "handle_message", "recover_runtime_state", "_record_prompt_events"):
         monkeypatch.setattr(host.harness.agent, name, forbidden)
     monkeypatch.setattr(host.harness.agent, "_providers", forbidden)
     monkeypatch.setattr(host.router, "resolve", forbidden)

@@ -223,6 +223,42 @@ async def test_each_append_returns_the_entry_load_reads_back_in_commit_order(bac
     assert times == sorted(times)
 
 
+async def test_cache_facts_round_trip_and_latest_audits_restore_without_entering_context(backend):
+    from dataclasses import replace
+    from core.agent_core.ai.provider import ModelRequest
+    from core.agent_core.harness.cache_metrics import CacheTracker
+    from tests.agent_core.fakes import ENDPOINT
+
+    store = backend.store
+    await _started(backend)
+    tracker = CacheTracker()
+    request = ModelRequest(endpoint=ENDPOINT, system="fixed", tools=(), messages=(user("hello"),), max_tokens=10)
+    message = replace(assistant(), usage=Usage(input_tokens=100))
+    cache = tracker.begin(request, (), now=100)
+    tracker.finish(cache, message)
+    response = await store.append_response(SESSION, message, final=True, cache=cache)
+    loaded = await store.load(SESSION)
+    assert loaded[-1].payload["cache"] == cache
+    backend.fork("child", SESSION, response)
+    inherited = await store.load("child")
+    assert inherited[-1].payload["cache"] == cache
+    later = tracker.begin(request, loaded, now=200)
+    tracker.finish(later, message)
+    await store.append_audit(SESSION, "attempt", {
+        "version": 1, "error": "commit failed", "usage": usage_to_dict(message.usage),
+        "cache": later, "cache_state": list(tracker.latest.values()),
+    })
+    assert list(await store.load_cache_attempts(SESSION)) == [later]
+    assert list(await store.load(SESSION)) == list(loaded)
+    # A failure with no usage retains the last usage-bearing state, rather than a new clock.
+    failed = tracker.begin(request, loaded, now=300)
+    tracker.finish(failed, None)
+    await store.append_audit(SESSION, "attempt", {
+        "version": 1, "error": "rate limited", "cache": failed, "cache_state": list(tracker.latest.values()),
+    })
+    assert list(await store.load_cache_attempts(SESSION)) == [later]
+
+
 async def test_a_payload_row_needs_a_payload_kind_and_the_current_version(backend):
     store = backend.store
     before = [await _started(backend)]

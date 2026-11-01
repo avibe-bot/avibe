@@ -1675,6 +1675,7 @@ def _responses_usage(value: Any) -> Any:
     if not isinstance(value, Mapping):
         return None
     from core.agent_core.messages import Usage
+    from core.agent_core.ai.cache_usage import write_ttls
 
     input_details = value.get("input_tokens_details")
     output_details = value.get("output_tokens_details")
@@ -1683,16 +1684,21 @@ def _responses_usage(value: Any) -> Any:
         if isinstance(input_details, Mapping)
         else 0
     )
-    cache_write_tokens = (
-        _nonnegative(input_details.get("cache_write_tokens"))
-        if isinstance(input_details, Mapping)
-        else 0
-    )
+    write_details = input_details.get("cache_write_tokens_details") if isinstance(input_details, Mapping) else None
+    aggregate_write = input_details.get("cache_write_tokens") if isinstance(input_details, Mapping) else None
+    aggregate_reported = type(aggregate_write) is int and aggregate_write >= 0
+    cache_write_tokens = _nonnegative(aggregate_write)
+    # TTL detail is optional telemetry: it must not invent a canonical aggregate.
     return Usage(
         input_tokens=max(0, _nonnegative(value.get("input_tokens")) - cache_read_tokens - cache_write_tokens),
         output_tokens=_nonnegative(value.get("output_tokens")),
         cache_read_tokens=cache_read_tokens,
         cache_write_tokens=cache_write_tokens,
+        cache_writes_by_ttl=write_ttls(
+            write_details, {"ttl_30m_tokens": "30m", "ttl_12h_tokens": "12h"},
+            cache_write_tokens if aggregate_reported else None,
+        ),
+        cache_write_total_reported=aggregate_reported,
         reasoning_tokens=_nonnegative(output_details.get("reasoning_tokens")) if isinstance(output_details, Mapping) and "reasoning_tokens" in output_details else None,
     )
 

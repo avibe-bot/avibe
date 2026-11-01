@@ -598,6 +598,30 @@ def test_data_query_cli_runs_read_only_sql(monkeypatch, tmp_path, capsys) -> Non
     assert payload["rows"] == [{"id": "run-1", "status": "succeeded"}]
 
 
+def test_data_cache_cli_passes_filters_to_read_only_report(monkeypatch, capsys) -> None:
+    from core.handlers import cache_metrics
+
+    seen = {}
+
+    def fake_report(**kwargs):
+        seen.update(kwargs)
+        return {"since": "x", "until": "y", "routes": []}
+
+    monkeypatch.setattr(cache_metrics, "report", fake_report)
+    args = cli.build_parser().parse_args([
+        "data", "cache", "--since", "2026-10-01T00:00:00Z", "--until", "2026-10-02T00:00:00Z",
+        "--session-id", "ses-cache", "--model", "claude-test",
+    ])
+    assert cli.cmd_data_cache(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["kind"] == "data_cache"
+    assert payload["routes"] == []
+    assert seen["session_id"] == "ses-cache"
+    assert seen["model"] == "claude-test"
+    assert seen["since"].isoformat() == "2026-10-01T00:00:00+00:00"
+    assert seen["until"].isoformat() == "2026-10-02T00:00:00+00:00"
+
+
 def test_data_query_cli_omits_next_command_for_stdin_sql(monkeypatch, tmp_path, capsys) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
