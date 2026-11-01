@@ -27,6 +27,9 @@ STOP_REASONS: tuple[str, ...] = ("stop", "length", "tool_use", "refusal", "safet
 #: the canonical message payload: older releases ignore the row metadata, while this build uses it to keep a
 #: response's historical rendering stable across later requests.
 HOSTED_RENDER_EPOCH = 2
+#: The successor-binding rule used when this response was generated. Keep epoch 2 for released readers; rule 3
+#: additionally proves that an unmarked, unbound predecessor used the legacy-tail migration before this response.
+HOSTED_RENDER_RULE = 3
 
 IMAGE_MIME_TYPES: tuple[str, ...] = ("image/png", "image/jpeg", "image/gif", "image/webp")
 
@@ -856,6 +859,9 @@ class AssistantMessage:
     #: The response-row metadata epoch used by the hosted-refusal renderer. This transient fact is loaded from the
     #: response metadata and is intentionally omitted from ``message_to_dict`` / the canonical transcript payload.
     hosted_render_epoch: Optional[int] = field(default=None, compare=False, repr=False)
+    #: Like the epoch, this is response-row metadata, not canonical content. A signed successor commits the rule
+    #: that compiled its predecessors without modifying any historical row (including shared fork ancestry).
+    hosted_render_rule: Optional[int] = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         _require_blocks(self.content, (TextBlock, ThinkingBlock, ToolCallBlock, HostedToolBlock), "assistant message")

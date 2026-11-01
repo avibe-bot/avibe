@@ -9,6 +9,7 @@ are never sent.
 from __future__ import annotations
 
 import itertools
+from dataclasses import replace
 
 import pytest
 
@@ -50,6 +51,17 @@ def _hosted(call_id: str, tool: str, action: HostedAction, record: HostedRecord)
         record=record,
         native=HostedNative(source_id=SOURCE, payload=({"type": "web_search_call", "id": call_id},)),
     )
+
+
+def _deferred_hosted(call_id: str, *, completed: bool) -> HostedToolBlock:
+    action = HostedAction("search", queries=(f"q-{call_id}",))
+    if completed:
+        record = HostedRecord(status="completed")
+        native = HostedNative(source_id=SOURCE, payload=({"type": "web_search_tool_result", "tool_use_id": call_id},))
+    else:
+        record = HostedRecord(status="pending")
+        native = HostedNative(source_id=SOURCE, payload=({"type": "server_tool_use", "id": call_id},))
+    return HostedToolBlock(id=call_id, tool="web_search", action=action, record=record, native=native)
 
 
 SEARCH = _hosted(
@@ -254,6 +266,170 @@ def test_legacy_refused_pending_response_stays_legacy_after_new_epoch_history():
     sent = result.messages[1]
     assert isinstance(sent, AssistantMessage)
     assert any(isinstance(block, ToolCallBlock) for block in sent.content)
+
+
+async def test_legacy_refused_tail_recovers_in_the_real_wire_without_changing_client_results():
+    """MH-HOSTED-VIBEY-003: an already-failed, unmarked mixed tail must benefit from the upgrade."""
+    target = Origin("anthropic", "anthropic", "claude-opus-5-5")
+    thinking = ThinkingBlock(text="kept", signature="signed-prefix")
+    calls = (ToolCallBlock("client_1", "x_search", {}), ToolCallBlock("client_2", "web_fetch", {}))
+    pending = tuple(
+        _hosted(f"pending_{i}", "web_search", HostedAction("search", queries=("q",)), HostedRecord(status="pending"))
+        for i in range(2)
+    )
+    first = AssistantMessage(
+        (thinking, calls[0], pending[0]), target, "tool_use", hosted_summary=HostedSummary(), source_identity="identity"
+    )
+    second = AssistantMessage(
+        (calls[1], pending[1]), target, "tool_use", hosted_summary=HostedSummary(), source_identity="identity"
+    )
+    results = tuple(ToolResultMessage(call.id, call.name, (TextBlock("settled"),)) for call in calls)
+    endpoint = ModelEndpoint(
+        "anthropic", "http://hub.invalid/vibey/v1", target.model, "hub-token", provider="anthropic",
+        source_id=SOURCE, source_identity="identity", opaque_refused=frozenset({("identity", "hosted")}),
+    )
+    request = ModelRequest(
+        endpoint=endpoint, system="unchanged", tools=(), max_tokens=256, cache="none",
+        messages=(UserMessage((TextBlock("go"),)), first, results[0], second, results[1]),
+    )
+
+    wire = await build_wire_request(request, gateway=True)
+    again = await build_wire_request(request, gateway=True)
+
+    assert wire.body == again.body
+    sent = wire.body["messages"]
+    assert len(sent) == 5
+    assert [block["type"] for block in sent[1]["content"]] == ["thinking", "tool_use"]
+    assert sent[1]["content"][0] == {"type": "thinking", "thinking": "kept", "signature": "signed-prefix"}
+    assert [block["type"] for block in sent[3]["content"]] == ["tool_use"]
+    assert [sent[i]["content"][0]["tool_use_id"] for i in (2, 4)] == [call.id for call in calls]
+    assert all(sent[i]["content"][0]["content"] == [{"type": "text", "text": "settled"}] for i in (2, 4))
+    assert first.content == (thinking, calls[0], pending[0]) and second.content == (calls[1], pending[1])
+
+
+async def test_parallel_deferred_group_keeps_unfinished_pending_call_as_synthetic_wire_pair():
+    """A paired deferred call makes the whole mixed response parallel; legacy migration must not drop its sibling."""
+    target = Origin("anthropic", "anthropic", "claude-opus-5-5")
+    client = ToolCallBlock("client", "read", {})
+    pending_a = _deferred_hosted("pending_a", completed=False)
+    completed = _deferred_hosted("pending_a", completed=True)
+    unfinished = _deferred_hosted("pending_b", completed=False)
+    first = AssistantMessage(
+        (client, pending_a, unfinished),
+        target,
+        "tool_use",
+        hosted_summary=HostedSummary(),
+        source_identity="identity",
+    )
+    continuation = AssistantMessage(
+        (completed,), target, "stop", hosted_summary=HostedSummary(), source_identity="identity"
+    )
+    endpoint = ModelEndpoint(
+        "anthropic", "http://hub.invalid/vibey/v1", target.model, "hub-token", provider="anthropic",
+        source_id=SOURCE, source_identity="identity", opaque_refused=frozenset({("identity", "hosted")}),
+    )
+    request = ModelRequest(
+        endpoint=endpoint, system="same", tools=(), max_tokens=256, cache="none",
+        messages=(UserMessage((TextBlock("go"),)), first, ToolResultMessage("client", "read", (TextBlock("done"),)), continuation),
+    )
+
+    wire = await build_wire_request(request, gateway=True)
+
+    assistant = wire.body["messages"][1]
+    assert [block["type"] for block in assistant["content"]] == ["tool_use", "tool_use", "tool_use"]
+    assert {block["id"] for block in assistant["content"]} == {"client", "pending_a", "pending_b"}
+    result_ids = [block["tool_use_id"] for block in wire.body["messages"][2]["content"]]
+    assert result_ids == ["pending_a", "pending_b", "client"]
+    unfinished_result = next(
+        block for block in wire.body["messages"][2]["content"] if block["tool_use_id"] == "pending_b"
+    )
+    assert unfinished_result["content"] == [{"type": "text", "text": SYNTHETIC_TOOL_RESULT}]
+
+
+@pytest.mark.parametrize(
+    ("epoch", "inline_binding", "successors", "omitted"),
+    [
+        (None, False, (), True),
+        (None, False, ((2, 3, "stop", False),), True),
+        (None, False, ((None, None, "stop", False),), False),
+        (None, False, ((2, None, "stop", False),), False),
+        (None, False, ((2, 4, "stop", False),), False),
+        (None, False, ((None, 3, "stop", False),), False),
+        (None, False, ((None, None, "stop", False), (2, 3, "stop", False)), False),
+        (None, False, ((2, 3, "stop", True),), True),
+        (None, False, ((None, None, "stop", True),), False),
+        (None, False, ((None, None, "error", False),), True),
+        (None, False, ((None, None, "aborted", True),), True),
+        (None, True, (), False),
+        (2, True, (), True),  # The released rc8 branch is not retroactively guarded.
+        (2, False, ((2, None, "stop", False), (None, None, "stop", False)), False),
+        (2, False, ((None, None, "error", False),), False),  # rc8 counted this partial.
+        (2, False, ((2, 3, "stop", False),), True),
+        (42, False, (), False),
+    ],
+)
+async def test_refused_legacy_tail_uses_first_binding_successor_but_preserves_rc8(
+    epoch, inline_binding, successors, omitted,
+):
+    target = Origin("anthropic", "anthropic", "claude-opus-5-5")
+    client = ToolCallBlock("client", "read", {})
+    pending = _hosted("pending", "web_search", HostedAction("search", queries=("q",)), HostedRecord(status="pending"))
+    thinking = ThinkingBlock(text="", signature="opaque", redacted=True)
+    content = (client, pending, thinking) if inline_binding else (thinking, client, pending)
+    response = AssistantMessage(
+        content, target, "tool_use", hosted_summary=HostedSummary(), source_identity="identity", hosted_render_epoch=epoch,
+    )
+    later = tuple(
+        AssistantMessage(
+            (ThinkingBlock(text="", signature=f"signed-{i}", redacted=redacted), TextBlock("next")),
+            target, stop, source_identity="identity", hosted_render_epoch=marker, hosted_render_rule=rule,
+        )
+        for i, (marker, rule, stop, redacted) in enumerate(successors)
+    )
+    endpoint = ModelEndpoint(
+        "anthropic", "http://hub.invalid/vibey/v1", target.model, "hub-token", provider="anthropic",
+        source_id=SOURCE, source_identity="identity", opaque_refused=frozenset({("identity", "hosted")}),
+    )
+    request = ModelRequest(
+        endpoint=endpoint, system="same", tools=(), max_tokens=256, cache="none",
+        messages=(UserMessage((TextBlock("go"),)), response, ToolResultMessage("client", "read", (TextBlock("done"),)), *later),
+    )
+    wire = await build_wire_request(request, gateway=True)
+    blocks = wire.body["messages"][1]["content"]
+    assert any(block.get("text") == '[web_search: "q"] (no result)' for block in blocks) is not omitted
+    assert [block for block in blocks if block["type"] == "redacted_thinking"] == [
+        {"type": "redacted_thinking", "data": "opaque"}
+    ]
+    assert len([block for block in blocks if block["type"] == "tool_use"]) == 1
+
+
+async def test_legacy_tail_render_stays_an_exact_prefix_after_unsigned_and_rule3_responses():
+    target = Origin("anthropic", "anthropic", "claude-opus-5-5")
+    pending = _hosted("pending", "web_search", HostedAction("search", queries=("q",)), HostedRecord(status="pending"))
+    response = AssistantMessage(
+        (ThinkingBlock(text="kept", signature="original"), ToolCallBlock("client", "read", {}), pending),
+        target, "tool_use", hosted_summary=HostedSummary(), source_identity="identity",
+    )
+    endpoint = ModelEndpoint(
+        "anthropic", "http://hub.invalid/vibey/v1", target.model, "hub-token", provider="anthropic",
+        source_id=SOURCE, source_identity="identity", opaque_refused=frozenset({("identity", "hosted")}),
+    )
+    request = ModelRequest(
+        endpoint=endpoint, system="same", tools=(), max_tokens=256, cache="none",
+        messages=(UserMessage((TextBlock("go"),)), response, ToolResultMessage("client", "read", (TextBlock("done"),))),
+    )
+    initial = await build_wire_request(request, gateway=True)
+    assert initial.body["messages"][1]["content"][-1]["type"] == "tool_use"
+    for signed in (False, True, True):
+        successor = AssistantMessage(
+            ((ThinkingBlock(text="later", signature="next-signature"),) if signed else ()) + (TextBlock("next"),),
+            target, "stop", source_identity="identity", hosted_render_epoch=2, hosted_render_rule=3,
+        )
+        request = replace(request, messages=(*request.messages, successor))
+        continued = await build_wire_request(request, gateway=True)
+        assert continued.body["messages"][:len(initial.body["messages"])] == initial.body["messages"]
+        initial = continued
+    assert response.hosted_render_epoch is None and response.hosted_render_rule is None
 
 
 def test_refused_pending_hosted_b_does_not_change_non_anthropic_targets():

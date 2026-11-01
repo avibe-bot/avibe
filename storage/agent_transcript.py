@@ -324,9 +324,10 @@ class SQLiteTranscriptStore:
             raise TypeError("append_response takes an AssistantMessage")
         row_metadata = dict(metadata or {})
         stored_message = message
-        epoch = row_metadata.get("hosted_render_epoch")
-        if isinstance(epoch, int) and not isinstance(epoch, bool):
-            stored_message = replace(message, hosted_render_epoch=epoch)
+        for key in ("hosted_render_epoch", "hosted_render_rule"):
+            value = row_metadata.get(key)
+            if type(value) is int:
+                stored_message = replace(stored_message, **{key: value})
         response: dict[str, Any] = {"version": PAYLOAD_VERSION, "message": message_to_dict(stored_message)}
         if request is not None:
             response["request"] = dict(request)  # C-9 ``ModelResponse.request``: the anchor's request facts
@@ -1048,9 +1049,10 @@ def _message_entry(session_id: str, row: Mapping[str, Any]) -> ContextEntry:
             metadata = _json_object(row.get("metadata_json"), row_id)
         except TranscriptError:
             metadata = {}
-        epoch = metadata.get("hosted_render_epoch")
-        if isinstance(epoch, int) and not isinstance(epoch, bool):
-            message = replace(message, hosted_render_epoch=epoch)
+        for key in ("hosted_render_epoch", "hosted_render_rule"):
+            value = metadata.get(key)
+            if type(value) is int:
+                message = replace(message, **{key: value})
     return ContextEntry(
         session_id, row["context_seq"], kind, row_id, message=message, payload=payload, created_at=_epoch(row["created_at"])
     )

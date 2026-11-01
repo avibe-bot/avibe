@@ -20,6 +20,7 @@ from sqlalchemy import select
 from core.agent_core.messages import (
     AssistantMessage,
     HOSTED_RENDER_EPOCH,
+    HOSTED_RENDER_RULE,
     HostedAction,
     HostedNative,
     HostedRecord,
@@ -315,15 +316,16 @@ async def test_hosted_render_epoch_is_response_metadata_not_canonical_message_co
         home = _scope(conn, "C-hosted-render-epoch")
         _session(conn, "ses_hosted_render_epoch", home)
         consumed = _row(conn, "ses_hosted_render_epoch", home, "go")
+    from modules.agents.vibey.agent import VibeyAgent
+
+    agent = object.__new__(VibeyAgent)
+    agent._run_for = lambda *_: None
     store = AdapterTranscriptStore(
         SQLiteTranscriptStore(engine),
         engine,
         environment=lambda _: {},
         on_response=lambda *_: None,
-        response_metadata=lambda *_: {
-            "hosted_render_epoch": HOSTED_RENDER_EPOCH,
-            "future_metadata": "ignored by the model payload",
-        },
+        response_metadata=agent._response_metadata,
     )
     await store.consume_input("ses_hosted_render_epoch", consumed, _user("go"))
     written = await store.append_response("ses_hosted_render_epoch", _assistant("stored"), final=True)
@@ -332,11 +334,32 @@ async def test_hosted_render_epoch_is_response_metadata_not_canonical_message_co
     restored = loaded[1].message
     assert isinstance(restored, AssistantMessage)
     assert restored.hosted_render_epoch == HOSTED_RENDER_EPOCH
+    assert restored.hosted_render_rule == HOSTED_RENDER_RULE
+    assert written.message.hosted_render_rule == HOSTED_RENDER_RULE
     with engine.connect() as conn:
         row = conn.execute(select(messages).where(messages.c.id == written.row_id)).mappings().one()
     model = json.loads(row["content_json"])["model"]["message"]
     assert "hosted_render_epoch" not in model
-    assert "future_metadata" not in model
+    assert "hosted_render_rule" not in model
+
+
+@pytest.mark.parametrize(("value", "expected"), [(None, None), (True, None), ("3", None), ({}, None), (3, 3), (4, 4)])
+async def test_optional_hosted_render_rule_metadata_does_not_break_historical_load(engine, value, expected):
+    with engine.begin() as conn:
+        home = _scope(conn, "C-render-rule")
+        _session(conn, "ses_render_rule", home)
+        consumed = _row(conn, "ses_render_rule", home, "go")
+    store = SQLiteTranscriptStore(engine)
+    await store.consume_input("ses_render_rule", consumed, _user("go"))
+    written = await store.append_response("ses_render_rule", _assistant("stored"), final=True)
+    with engine.begin() as conn:
+        conn.execute(messages.update().where(messages.c.id == written.row_id).values(
+            metadata_json=json.dumps({"hosted_render_epoch": 2, "hosted_render_rule": value}),
+        ))
+    loaded = list(await store.load("ses_render_rule"))
+    assert loaded[1].message.hosted_render_epoch == 2
+    assert loaded[1].message.hosted_render_rule == expected
+    assert loaded[1].payload == written.payload
 
 
 async def test_a_stored_unknown_native_hosted_row_loads_through_the_transcript_owner(engine):
