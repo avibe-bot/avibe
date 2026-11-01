@@ -106,8 +106,12 @@ Owner decisions 2026-11-01, from the mockups in this Session's Show Page
 - **Placement.** The Bot area takes the Inbox's place. The Inbox becomes an
   icon-only button at the right end of the brand row; the brand subtitle
   drops "工作台" / "Workbench" and reads "Agent OS".
-- **Label.** The section is titled 「伙伴」 in Chinese. The English UI label
-  is still open (see Open topics); code, CLI, and prompts keep "Bot".
+- **Naming (owner decision, 2026-11-01).** English UI says "Bots"; Chinese UI
+  says 「伙伴」, as localization rather than literal translation (机器人 reads as
+  a cold tool). Code, CLI, markers, and prompts always say "Bot". Chinese docs
+  write 「伙伴（Bot）」 at first mention, and the Chinese UI uses one verb set:
+  添加伙伴, 设为伙伴, 移出伙伴. Technical concepts (Agents, Harness, Vaults)
+  stay in English, so the wording itself separates a role from a colleague.
 - **Avatar strip.** Bots appear as a row of 40px avatars with their names
   below, the main Bot first. The current Bot has a mint ring; unread shows as
   a cyan count; a running Turn shows as a pulsing mint dot. With few Bots an
@@ -262,7 +266,7 @@ You can address two kinds of workers. Both tables are generated from live defini
 - A **Bot** is a standing member with one permanent Session and its own memory. A message to a Bot joins that conversation, and the Bot handles its messages in order.
 - An **Agent** is a reusable role: backend, model, and instructions. Each run starts a fresh Session with no memory of earlier runs, so several runs can work in parallel.
 
-Ask a Bot when the work needs its memory, ongoing responsibility, or judgment. Run an Agent for a self-contained task or for parallel work.
+Ask a Bot when the work needs its memory, ongoing responsibility, or judgment. Run an Agent for a self-contained task or for parallel work. In Chinese, the product calls Bots 伙伴; use that word when you write to the user in Chinese.
 
 | Bot | Display Name | Role |
 | --- | --- | --- |
@@ -364,7 +368,6 @@ work is handed across them.
 
 - The operations Bot: what it watches, and how far it may act on its own.
 - The memory Bot's cadence, cost ceiling, and what each pass does.
-- The English UI label for the Bot section (「伙伴」 in Chinese).
 - Whether Bots should prefer forking themselves when they hand off work
   (deferred by the owner).
 - Bots on multi-member instances: per instance or per member.
