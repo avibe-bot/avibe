@@ -60,12 +60,14 @@ from core.agent_core.agent.loop import Agent
 from core.agent_core.agent.preview import RequestPreview
 from core.agent_core.agent.models import ModelSelection, RetryPolicy
 from core.agent_core.agent.recovery import settle_open_calls
-from core.agent_core.harness.context import ContextConfig
+from core.agent_core.harness.context import ContextConfig, cache_cold
+from core.agent_core.ai.provider import ModelRequest
 from core.agent_core.harness.projection import open_tool_calls
 from core.agent_core.hosted_continuations import pending_hosted
 from core.agent_core.ai.request_artifacts import RequestArtifactStore, capture_model_requests
 from core.agent_core.ai.transform import in_flight_position
 from core.agent_core.tools.base import CallInstance
+from core.agent_core.tools.paths import to_thread_joined
 from core.agent_core.tools.jobs import call_instance
 from core.agent_core.messages import (
     HOSTED_RENDER_EPOCH,
@@ -107,7 +109,9 @@ from modules.agents.vibey.context import (
     mark_skill_loads,
 )
 from modules.agents.vibey.errors import error_text
+from core.prompt_registry import RenderedPromptBlock, join_prompt_blocks
 from modules.agents.vibey.instructions import load_instruction_files, project_context
+from modules.agents.vibey.prompt_snapshot import State as PromptState, SnapshotStore, candidate_prefix, decide, frozen_tools, route_identity
 from modules.agents.vibey.media import MediaSnapshots
 from modules.agents.vibey.models import HubModelRouter, ProviderFactory, registry_providers, selection_from_hop
 from modules.agents.vibey.native_search_recovery import (
@@ -164,12 +168,6 @@ def _relative_to(cwd: str) -> Callable[[str], str]:
     return relative
 
 
-def _project_instructions(cwd: str) -> str:
-    """The ``<project_context>`` section for a Turn in ``cwd``: the user's global file, then the instruction files from
-    the filesystem root down to ``cwd`` (C-7 tools.md section 9)."""
-    return project_context(load_instruction_files(cwd, paths.get_global_instructions_path()))
-
-
 #: ``Agent.max_tokens`` for every Turn: the resolved hop's budgeted maximum decides the output (``budgeted``).
 _NO_OUTPUT_CAP = 1 << 30
 #: A failure's diagnostic in the service log: one redacted line, bounded, never a payload.
@@ -202,6 +200,7 @@ class _Run:
     agent: Optional[Agent] = None
     router: Optional[HubModelRouter] = None
     cwd: str = ""
+    instructions_notice: Optional[str] = None
     settled: bool = False
     reason: Optional[str] = None
     # The error that decided ``reason`` (``RunEnded.cause``): the failure's kind, text, and Model Hub attribution.
@@ -270,6 +269,7 @@ class VibeyAgent(BaseAgent):
         self._engine = engine or get_cached_sqlite_engine()
         state = Path(state_dir) if state_dir is not None else paths.get_state_dir() / "agent_core"
         self._state_dir = state
+        self.prompt_snapshots = SnapshotStore(state)
         self.media = MediaSnapshots(self._engine, state / "media")
         # The exact bytes of every model request a Turn sends, kept when it does not succeed (``request_artifacts``).
         self.request_artifacts = RequestArtifactStore(state / "model-requests")
@@ -282,6 +282,7 @@ class VibeyAgent(BaseAgent):
             environment=self._environment,
             on_response=self._on_response,
             response_metadata=self._response_metadata,
+            file_write=self._record_instruction_write,
         )
         self._providers = providers or registry_providers(media_loader=self.media)
         # The client of the Turn's other gateway calls (the hosted-tool executor); None opens one per call.
@@ -404,9 +405,13 @@ class VibeyAgent(BaseAgent):
         sections, skill_catalog = await self._avibe_sections(request, cwd)
         builtin_agent = await asyncio.to_thread(self._is_builtin_agent, request)
         environment = await asyncio.to_thread(self._turn_environment, request, cwd)
-        # Read again every Turn, so an edit takes effect on the next one (C-7 tools.md section 9).
-        instructions = await asyncio.to_thread(_project_instructions, cwd)
-        self._start_agent(turn, cwd, sections, environment, builtin_agent=builtin_agent, instructions=instructions)
+        files = await asyncio.to_thread(load_instruction_files, cwd, paths.get_global_instructions_path(), include_empty=True)
+        self._start_agent(turn, cwd, join_prompt_blocks(sections), environment,
+                          builtin_agent=builtin_agent, instructions=project_context(files))
+        prompt_state = await self._prepare_prompt(
+            turn.agent, request, turn.router, sections, files, environment, builtin_agent=builtin_agent, catalog=skill_catalog,
+        )
+        turn.instructions_notice = prompt_state.notice
         runtime.cwd = cwd
         # Prepared before anything is dispatched (``core.native_dispatch_phase``).
         message = await self._render_input(session_id, request.message, request.files, request.input_metadata)
@@ -419,7 +424,7 @@ class VibeyAgent(BaseAgent):
         if indicator is not None:
             # The ack message goes once the native write is accepted, as for the other backends.
             await indicator.delete_ack_message(request)
-        accept_catalog(self.controller, context, skill_catalog, backend=BACKEND)
+        accept_catalog(self.controller, context, prompt_state.snapshot.prefix.catalog, backend=BACKEND)
         agent_input: Optional[AgentInput] = AgentInput(input_id, message)
         platform_specific = context.platform_specific or {}
         transcript_resume = platform_specific.get("vibey_resume") is True
@@ -1013,6 +1018,45 @@ class VibeyAgent(BaseAgent):
         )
         return agent
 
+    async def _prepare_prompt(
+        self, agent: Agent, request: AgentRequest, router: HubModelRouter,
+        blocks: Sequence[RenderedPromptBlock], files: Sequence[Any], environment: Mapping[str, str], *,
+        builtin_agent: bool, persist: bool = True, catalog: Optional[dict] = None,
+    ) -> PromptState:
+        """Read, compare and publish optional prefix state off the loop, once per Turn."""
+        entries = await self.store.load(agent.session_id)
+        endpoint = router.preflight.endpoint
+
+        def prepare():
+            candidate = candidate_prefix(
+                agent.system, agent.tools, endpoint, blocks, files, builtin_agent=builtin_agent,
+                rg=shutil.which("rg", path=environment.get("PATH", "")) is not None, catalog=catalog,
+            )
+            previous = self.prompt_snapshots.load(agent.session_id)
+            prefix = previous.snapshot.prefix if previous is not None else candidate
+            probe = ModelRequest(endpoint=endpoint, system=prefix.system, tools=prefix.tools, messages=(), max_tokens=1)
+            now = agent.context.clock()
+            decision = decide(
+                previous, candidate, now=now,
+                route=route_identity(endpoint, agent=request.vibe_agent_id or "", model=request.subagent_model or request.vibe_agent_model or "",
+                                     effort=request.subagent_reasoning_effort or request.vibe_agent_reasoning_effort or ""),
+                checkpoint_seq=max((entry.context_seq for entry in entries if entry.kind == "compaction"), default=0),
+                cold=cache_cold(probe, entries, now=now),
+            )
+            if persist and decision.state != previous:
+                if not self.prompt_snapshots.save(agent.session_id, decision.state, snapshot=decision.reason is not None):
+                    # Without a durable first-seen time, retaining a warm prefix could
+                    # reset a tier-2 deadline forever. Lose the optimization, not freshness.
+                    return decide(None, candidate, now=now, route=decision.state.snapshot.route,
+                                  checkpoint_seq=decision.state.observed_checkpoint_seq, cold=False).state
+            return decision.state
+
+        state = await to_thread_joined(prepare)
+        agent.system = state.snapshot.prefix.system
+        agent.set_tools(frozen_tools(state.snapshot.prefix.tools, agent.tools))
+        router.prefix_declarations = (route_identity(endpoint), state.snapshot.prefix.hosted)
+        return state
+
     async def preview_request(
         self, session_id: str, request: AgentRequest, *, context_seq: int | None = None,
     ) -> RequestPreview:
@@ -1031,13 +1075,15 @@ class VibeyAgent(BaseAgent):
         sections, _ = await self._avibe_sections(request, cwd)
         builtin_agent = await asyncio.to_thread(self._is_builtin_agent, request)
         environment = await asyncio.to_thread(self._turn_environment, request, cwd)
-        instructions = await asyncio.to_thread(_project_instructions, cwd)
+        files = await asyncio.to_thread(load_instruction_files, cwd, paths.get_global_instructions_path(), include_empty=True)
         agent = self._build_agent(
-            request, session_id, router, cwd, sections, environment,
-            builtin_agent=builtin_agent, instructions=instructions,
+            request, session_id, router, cwd, join_prompt_blocks(sections), environment,
+            builtin_agent=builtin_agent, instructions=project_context(files),
         )
+        await self._prepare_prompt(agent, request, router, sections, files, environment,
+                                   builtin_agent=builtin_agent, persist=False)
         return await agent.dry_tick(
-            selected=selected, context_seq=context_seq, gateway=True, media_loader=self.media,
+            selected=router.prompt_route(selected), context_seq=context_seq, gateway=True, media_loader=self.media,
         )
 
     async def _on_event(self, run: _Run, event: AgentEvent) -> None:
@@ -1609,21 +1655,21 @@ class VibeyAgent(BaseAgent):
         body = strip_silent_blocks(value)
         return self._with_images(body, images) if final else body
 
-    async def _avibe_sections(self, request: AgentRequest, cwd: str) -> tuple[str, Optional[dict]]:
+    async def _avibe_sections(self, request: AgentRequest, cwd: str) -> tuple[list[RenderedPromptBlock], Optional[dict]]:
         """Avibe's injected prompt sections and the skill catalog they offered.
 
         Built off the event loop as the other backends build them: skill resolution
         scans the ordinary static Skill directories.
         """
         from core.managed_skills import managed_skill_project_base
-        from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
+        from core.system_prompt_injection import build_system_prompt_blocks, get_enabled_agents_for_prompt
 
         context = request.context
         skill_catalog_sink: list[dict] = []
 
-        def build() -> str:
+        def build() -> list[RenderedPromptBlock]:
             # Every lookup runs here, off the loop: the enabled-Agent list reads SQLite.
-            return build_system_prompt_injection(
+            return build_system_prompt_blocks(
                 agent_instructions=request.vibe_agent_system_prompt or "",
                 backend=BACKEND,
                 include_quick_replies=getattr(self.config, "reply_enhancements", True)
@@ -1686,10 +1732,24 @@ class VibeyAgent(BaseAgent):
         prepend_managed_tools_to_path(environment, base_env=environment, working_dir=cwd or None)
         return environment
 
+    def _record_instruction_write(self, session_id: str, path: str, revision: str) -> None:
+        """Only the instruction chain can affect this prefix; never accumulate unrelated file history."""
+        runtime = self._runtimes.get(session_id)
+        cwd = runtime.run.cwd if runtime is not None and runtime.run is not None else ""
+        target = Path(path)
+        directory = Path(cwd).absolute() if cwd else None
+        if target == paths.get_global_instructions_path() or (
+            directory is not None and target.parent in (directory, *directory.parents)
+        ):
+            self.prompt_snapshots.record_write(session_id, path, revision)
+
     def _environment(self, session_id: str) -> dict[str, EnvironmentValue]:
         runtime = self._runtimes.get(session_id)
         cwd = ((runtime.run.cwd if runtime.run is not None else "") or runtime.cwd) if runtime is not None else ""
-        return current_environment(cwd, self._watch_lines(session_id), shell=self._tools().shell)
+        fields = {"session": session_id, **current_environment(cwd, self._watch_lines(session_id), shell=self._tools().shell)}
+        if runtime is not None and runtime.run is not None and runtime.run.instructions_notice is not None:
+            fields["instructions"] = runtime.run.instructions_notice
+        return fields
 
     def _watch_lines(self, session_id: str) -> list[str]:
         service = getattr(self.controller, "watch_service", None)

@@ -234,7 +234,7 @@ What the user ultimately wants from this conversation, and why it matters to the
 ## What I own
 What I am responsible for seeing through, and where that ends.
 ## Agreements
-How to report, when to ask, what I may decide on my own, and the scope of what I am authorized to do, written as principles. Do not redefine who I am: my identity and this Session's id come from the system prompt; when mentioning another Session, give its id and how it relates to this one.
+How to report, when to ask, what I may decide on my own, and the scope of what I am authorized to do, written as principles. Keep my identity from the system prompt and Session id from the environment; when mentioning another Session, give its id and how it relates to this one.
 # 2. Goals
 ## Mission
 In your own words, the ultimate purpose of this conversation and its status; its scope is the user's, neither wider nor narrower.
@@ -677,6 +677,25 @@ def cache_ttl_s(endpoint: ModelEndpoint, *, request: ModelRequest | None = None)
     if family in {"anthropic", "anthropic-compatible"} and request is not None:
         return actual
     return CACHE_TTL_UNKNOWN_S if family is None else CACHE_TTLS[family]
+
+
+def cache_cold(
+    request: ModelRequest, entries: Sequence[ContextEntry], *, now: float,
+    last_model_at: Mapping[tuple[str, str], float] | None = None,
+) -> bool:
+    """C-9's route clock, shared with the adapter's Turn-start prompt policy.
+
+    Unknown use leans warm; a route without its own use takes the latest use of any route.
+    """
+    used = dict(last_model_at or {})
+    for row in entries:
+        if row.kind == "response" and row.created_at is not None:
+            origin = row.message.origin
+            key = (origin.provider, origin.model)
+            used[key] = max(used.get(key, row.created_at), row.created_at)
+    key = (request.endpoint.provider, request.endpoint.model_id)
+    last = used.get(key, max(used.values(), default=None))
+    return last is not None and now - last > cache_ttl_s(request.endpoint, request=request)
 
 
 def _cache_family(endpoint: ModelEndpoint) -> Optional[str]:

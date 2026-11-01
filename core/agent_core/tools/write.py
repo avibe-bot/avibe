@@ -7,6 +7,7 @@ Ported from Pi ``packages/coding-agent/src/core/tools/write.ts`` (MIT, Copyright
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import errno
 import os
 import secrets
@@ -81,7 +82,13 @@ class WriteTool:
                 return error_result(f"Cannot write {path}: {KIND_REASON[exc.kind]}.")
             except OSError as exc:
                 return error_result(f"Cannot write {path}: {os_reason(exc)}.")
-        return text_result(f"Successfully wrote to {path}")
+        receipt = await to_thread_joined(write_receipt, absolute, content)
+        return text_result(f"Successfully wrote to {path}", details={"file_write": receipt})
+
+
+def write_receipt(path: str, data: bytes | str) -> dict[str, str]:
+    """Evidence for this exact successful write, not a later reread somebody else may have changed."""
+    return {"path": path, "revision": hashlib.sha256(data.encode("utf-8") if isinstance(data, str) else data).hexdigest()}
 
 
 def _prepare_target(absolute: str) -> Optional[str]:

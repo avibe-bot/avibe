@@ -39,7 +39,7 @@ from core.agent_core.tools.paths import (
 )
 from core.agent_core.tools.text import decode_file, encode_file, model_text
 from core.agent_core.tools.truncate import format_size
-from core.agent_core.tools.write import FileChanged, FileIdentity, NotReplaceable, may_write, write_bytes
+from core.agent_core.tools.write import FileChanged, FileIdentity, NotReplaceable, may_write, write_bytes, write_receipt
 
 #: Avibe: larger files are refused rather than loaded whole; the display diff stops at a smaller size.
 MAX_EDIT_BYTES = 10 * 1024 * 1024
@@ -284,11 +284,12 @@ class EditTool:
                 return error_result(f"Could not edit file: {path}. Error code: {errno_name(exc)}.")
 
         result = edit_summary(path, edits, counts, changed)
+        details = {"file_write": await to_thread_joined(write_receipt, absolute, data)}
         if max(size, len(data)) > MAX_DIFF_BYTES:
             # The diff is for display only, and difflib is superlinear on large inputs.
-            return text_result(result, details={"diff_skipped": True})
+            return text_result(result, details={**details, "diff_skipped": True})
         shown_diff = await asyncio.to_thread(display_diff, path, base, new_content)
         if shown_diff is None:
-            return text_result(result, details={"diff_skipped": True})
+            return text_result(result, details={**details, "diff_skipped": True})
         diff, first_changed_line, patch = shown_diff
-        return text_result(result, details={"diff": diff, "patch": patch, "first_changed_line": first_changed_line})
+        return text_result(result, details={**details, "diff": diff, "patch": patch, "first_changed_line": first_changed_line})

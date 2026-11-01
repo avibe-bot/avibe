@@ -529,7 +529,7 @@ async def test_a_turn_commits_its_context_once_and_shows_the_reply_once(
     rows = await harness.context_rows()
     assert [entry.kind for entry in rows] == ["input", "response", "tool_result", "response"]
     environment, typed = rows[0].message.content
-    assert environment.text.startswith("<environment>\ncwd: ") and typed == TextBlock(text="看一下目录")
+    assert environment.text.startswith(f"<environment>\nsession: {session}\ncwd: ") and typed == TextBlock(text="看一下目录")
     # The shell is the one the commands run in, the job host's, not the user's login shell.
     assert f"\nshell: {harness.suite.shell}\n" in environment.text
     # The steer identity existed when the Turn owner bound the native start.
@@ -599,7 +599,7 @@ async def test_a_setup_failure_after_the_route_resolved_fails_the_turn_and_not_t
     def broken(**_kwargs):
         raise RuntimeError("the skills directory could not be read")
 
-    monkeypatch.setattr(injection, "build_system_prompt_injection", broken)
+    monkeypatch.setattr(injection, "build_system_prompt_blocks", broken)
     harness = _Harness(engine, tmp_path, "telegram", [[Done(assistant("unreachable"))]])
     harness.controller.model_hub_runtime.record_native_failure = record_native_failure
 
@@ -2703,8 +2703,8 @@ async def test_another_agent_on_the_backend_is_not_told_it_is_vibey(engine, sess
 async def test_the_instruction_files_enter_between_the_head_and_avibes_sections_and_are_read_every_turn(
     engine, session, tmp_path, published, monkeypatch
 ) -> None:
-    # C-7 tools.md section 9: the global file in the Avibe home, then the files from the root down to the Session's
-    # cwd. They are read every Turn, and the system prompt changes only when one of them does, so the cache holds.
+    # C-7: global edits refresh immediately; project edits are read every Turn but
+    # stay pending while the conversation cache is warm.
     from config import paths
     from modules.agents.vibey.prompt import FINAL_REPLY_RULE
 
@@ -2745,7 +2745,194 @@ async def test_the_instruction_files_enter_between_the_head_and_avibes_sections_
     assert without[head_end:].startswith(empty)
     assert first == f"{without[:head_end]}\n\n{section}{without[head_end + len(empty):]}"
     assert again == first
-    assert edited != first and "Never push to master." in edited
+    assert edited == first and "Never push to master." not in edited
+    rows = await harness.context_rows()
+    last_input = [row.message for row in rows if row.kind == "input"][-1]
+    assert f"instructions: pending {tmp_path / 'AGENTS.md'}@" in last_input.content[0].text
+
+
+@pytest.mark.parametrize("own_content", ["My own revision.", "", "  \n", "\ufeff"])
+async def test_snapshot_notice_tracks_exact_own_and_external_revisions_across_restart(
+    engine, session, tmp_path, published, own_content,
+) -> None:
+    # The tool receipt proves the exact own revision; rereading after a write would
+    # misattribute an intervening outside edit. Prior environment tests had no pending field.
+    from config import paths
+    from core.agent_core.tools.write import WriteTool
+    from modules.agents.vibey.prompt import parse_environment
+
+    file = tmp_path / "AGENTS.md"
+    file.write_text("Original instructions.")
+    write = ToolCallBlock(id="self_write", name="write", arguments={"path": "AGENTS.md", "content": own_content})
+    harness = _Harness(engine, tmp_path, "avibe", [
+        [Done(assistant("updating", calls=(write,)))], [Done(assistant("done"))],
+        *[[Done(assistant("next"))] for _ in range(6)],
+    ], tools=[WriteTool()])
+    await harness.agent.handle_message(harness.request("write it"))
+    first = harness.provider.requests[0].system
+    harness.new_agent()
+    await harness.agent.handle_message(harness.request("own change"))
+    file.write_text("Someone else's revision.")
+    await harness.agent.handle_message(harness.request("outside change"))
+    await harness.agent.handle_message(harness.request("still pending"))
+    file.write_text("Someone else's second revision.")
+    harness.new_agent()
+    await harness.agent.handle_message(harness.request("outside changed again"))
+    global_file = paths.get_global_instructions_path()
+    global_file.parent.mkdir(parents=True, exist_ok=True)
+    global_file.write_text("A deliberate global rule.")
+    await harness.agent.handle_message(harness.request("apply global rule"))
+    await harness.agent.handle_message(harness.request("already current"))
+
+    inputs = [row.message for row in await harness.context_rows() if row.kind == "input"]
+    deltas = [parse_environment(message.content[0].text) or {} for message in inputs]
+    assert deltas[0]["session"] == session and deltas[0]["instructions"] == "current"
+    assert "instructions" not in deltas[1]  # exact own edit is already in the conversation
+    assert deltas[2]["instructions"].startswith(f"pending {file}@")
+    assert "instructions" not in deltas[3]
+    assert deltas[4]["instructions"] != deltas[2]["instructions"]
+    assert deltas[5]["instructions"] == "current" and "instructions" not in deltas[6]
+    assert all(item.system == first for item in harness.provider.requests[:6])
+    assert "A deliberate global rule." in harness.provider.requests[6].system
+    assert "Someone else's second revision." in harness.provider.requests[6].system
+
+
+async def test_skill_observation_describes_the_applied_catalog_not_a_deferred_candidate(
+    engine, session, tmp_path, published,
+) -> None:
+    # The existing acceptance hook used the just-rendered candidate, which would
+    # report discovery of skills the frozen prompt had not actually offered.
+    def add_skill(name):
+        path = tmp_path / ".agents" / "skills" / name / "SKILL.md"
+        path.parent.mkdir(parents=True)
+        path.write_text(f"---\nname: {name}\ndescription: {name} description\n---\nbody\n")
+
+    add_skill("first-skill")
+    harness = _Harness(engine, tmp_path, "avibe", [[Done(assistant("ok"))] for _ in range(2)])
+    observed = []
+    harness.controller.skill_observability = SimpleNamespace(enqueue=lambda event, **kwargs: observed.append(event))
+    await harness.agent.handle_message(harness.request("first"))
+    add_skill("deferred-skill")
+    harness.new_agent()
+    await harness.agent.handle_message(harness.request("second"))
+    assert len(observed) == 2
+    assert observed[1]["content"] == observed[0]["content"]
+    assert "deferred-skill" not in harness.provider.requests[1].system
+    assert any(entry["skill_name"] == "first-skill" for entry in observed[1]["content"]["entries"])
+
+
+async def test_pending_write_failure_uses_fresh_candidate_instead_of_resetting_its_deadline(
+    engine, session, tmp_path, published, monkeypatch,
+) -> None:
+    # A read-only pending file used to reset first-seen on every Turn, keeping
+    # a tier-2 change stale indefinitely. The adapter must lose only caching.
+    file = tmp_path / "AGENTS.md"
+    file.write_text("old")
+    harness = _Harness(engine, tmp_path, "avibe", [[Done(assistant("ok"))] for _ in range(3)])
+    await harness.agent.handle_message(harness.request("initial"))
+    file.write_text("new instructions")
+
+    def denied(*args):
+        raise PermissionError("read only")
+
+    monkeypatch.setattr(type(harness.agent.prompt_snapshots), "_write_bytes", denied)
+    await harness.agent.handle_message(harness.request("changed"))
+    harness.new_agent()
+    await harness.agent.handle_message(harness.request("restart"))
+    assert "new instructions" not in harness.provider.requests[0].system
+    assert all("new instructions" in request.system for request in harness.provider.requests[1:])
+
+
+@pytest.mark.parametrize("replacement", [{}, {"web_search": {"native": "unsupported", "replay": "unsupported"}}])
+async def test_revoking_a_native_hosted_route_refreshes_before_the_next_model_request(
+    engine, session, tmp_path, published, replacement,
+) -> None:
+    # Native calls execute upstream, before FrozenTool could deny one. A cached
+    # native declaration must never re-enable what the fresh hop removed/downgraded.
+    harness = _Harness(engine, tmp_path, "avibe", [[Done(assistant("ok"))] for _ in range(2)])
+    harness.controller.hub_hosted_tools = {"web_search": {
+        "native": "assumed", "replay": "assumed",
+        "declaration": {"type": "web_search_20250305", "name": "web_search"}, "include": [],
+    }}
+    await harness.agent.handle_message(harness.request("enabled"))
+    (tmp_path / "AGENTS.md").write_text("Apply this pending project change too.")
+    harness.controller.hub_hosted_tools = replacement
+    harness.new_agent()
+    await harness.agent.handle_message(harness.request("revoked"))
+    before, after = harness.provider.requests
+    assert before.endpoint.hosted_tools["web_search"].mode == "native"
+    assert "Apply this pending project change too." in after.system
+    if replacement:
+        assert after.endpoint.hosted_tools["web_search"].mode == "proxy"
+    else:
+        assert "web_search" not in after.endpoint.hosted_tools
+        assert "web_search" not in {tool.name for tool in after.tools}
+
+
+async def test_removed_function_tool_keeps_its_declaration_but_cannot_execute(
+    engine, session, tmp_path, published,
+) -> None:
+    import httpx
+
+    def forbidden(request):
+        pytest.fail("A removed function tool reached the gateway")
+
+    call = ToolCallBlock(id="stale_call", name="web_search", arguments={"query": "test"})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(forbidden)) as client:
+        harness = _Harness(engine, tmp_path, "avibe", [
+            [Done(assistant("first"))], [Done(assistant("using stale declaration", calls=(call,)))],
+            [Done(assistant("not available"))],
+        ], gateway_client=client)
+        harness.controller.hub_hosted_tools = {"web_search": {"native": "unsupported", "replay": "unsupported"}}
+        await harness.agent.handle_message(harness.request("enabled"))
+        harness.controller.hub_hosted_tools = {}
+        await harness.agent.handle_message(harness.request("disabled"))
+        before, after = harness.provider.requests[:2]
+        assert after.tools == before.tools and after.system == before.system
+        [result] = [row.message for row in await harness.context_rows() if row.kind == "tool_result"]
+        assert result.is_error and "no longer available" in result.content[0].text
+
+
+async def test_real_fork_reservation_copies_a_byte_identical_prefix_before_the_child_runs(
+    engine, session, tmp_path, published, monkeypatch,
+) -> None:
+    # F2 now extends to Session forks: real reservation owns snapshot copying;
+    # the adapter must not rerender a Session-specific system prefix on first use.
+    from config import paths
+    from core.services.session_fork import reserve_forked_session
+
+    monkeypatch.setattr(paths, "get_state_dir", lambda: tmp_path)
+    monkeypatch.setattr(paths, "get_sqlite_state_path", lambda: Path(engine.url.database))
+    store = _agent_store(engine)
+    vibey = store.get_builtin_default_agent_for_backend("vibey", enabled_only=False)
+    with engine.begin() as conn:
+        conn.execute(update(agent_sessions).where(agent_sessions.c.id == session).values(
+            agent_id=vibey.id, workdir=str(tmp_path), model="test-model",
+        ))
+    source = _Harness(engine, tmp_path, "avibe", [[Done(assistant("source reply"))]])
+    source.controller.vibe_agent_store = store
+    await source.agent.handle_message(_as_agent(source.request("source input"), vibey))
+    with engine.begin() as conn:
+        conn.execute(update(session_turns).where(session_turns.c.session_id == session).values(
+            state="terminal", terminal_outcome="completed", terminal_at=NOW,
+        ))
+    result = await asyncio.to_thread(reserve_forked_session, source_session_id=session, db_path=Path(engine.url.database))
+    snapshots = source.agent.prompt_snapshots
+    raw = (snapshots.directory(session) / "snapshot.json").read_bytes()
+    assert (snapshots.directory(result.session_id) / "snapshot.json").read_bytes() == raw
+    # This external project edit is tier 2 and cannot make the warm child cold.
+    (tmp_path / "AGENTS.md").write_text("A new project convention.")
+    child = _Harness(engine, tmp_path, "avibe", [[Done(assistant("child reply"))]], session_id=result.session_id)
+    child.controller.vibe_agent_store = store
+    await child.agent.handle_message(_as_agent(child.request("child input"), vibey))
+    parent_request, child_request = source.provider.requests[0], child.provider.requests[0]
+    assert child_request.system.encode() == parent_request.system.encode()
+    assert child_request.tools == parent_request.tools
+    assert session not in parent_request.system and result.session_id not in child_request.system
+    own_input = [row.message for row in await child.context_rows() if row.kind == "input" and row.session_id == result.session_id][0]
+    assert f"session: {result.session_id}\n" in own_input.content[0].text
+    assert any(block.text.startswith("<fork>") for block in own_input.content)
+    store.close()
 
 
 async def test_an_idle_session_holds_no_adapter_state(engine, session, tmp_path, published) -> None:
@@ -4208,7 +4395,7 @@ async def test_web_fetch_survives_the_real_agent_commit_delivery_and_next_turn_r
         assert executed[0].headers["x-avibe-turn-id"] == _turn(first.context)
         assert executed[0].headers["authorization"] == "Bearer hub-token"
 
-        # Reconstruct from durable rows, with no web_fetch declaration on the new turn.
+        # Reconstruct from durable rows, with web_fetch disabled for live execution.
         harness.new_agent()
         harness.controller.hub_hosted_tools = {}
         await harness.agent.handle_message(harness.request("recall the stored read"))
@@ -4219,7 +4406,9 @@ async def test_web_fetch_survives_the_real_agent_commit_delivery_and_next_turn_r
 
     assert len(executed) == 1 and len(models) == 3 and replies == []
     assert models[0]["tools"][0]["name"] == "web_fetch"
-    assert all(tool.get("name") != "web_fetch" for tool in models[2].get("tools", []))
+    # The warm prefix still advertises the old declaration until a free moment/deadline;
+    # execution remains live and no second fetch ran.
+    assert models[2]["tools"] == models[0]["tools"]
     for request in models[1:]:
         [answer] = [block for message in request["messages"] for block in message["content"]
                     if block.get("type") == "tool_result" and block.get("tool_use_id") == "toolu_fetch"]

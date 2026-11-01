@@ -61,6 +61,11 @@ TOOL_GUIDELINES: dict[str, tuple[str, ...]] = {
     "write": ("Use write only for new files or complete rewrites.",),
 }
 TOOL_ORDER = ("read", "bash", "powershell", "edit", "write")
+INSTRUCTIONS_RULE = (
+    "The environment's session field is this Session's authoritative id; its instructions field lists parts that "
+    "changed since the cached instructions were loaded: read the current file, `vibe skill list`, `vibe mcp --list`, "
+    "or `vibe agent list` before relying on a listed part."
+)
 FINAL_REPLY_RULE = "Only your final reply is reliably shown to the user; put anything the user must see in it"
 #: Avibe's: the loop runs a response's neighbouring read and bash calls at the same time (C-3 loop-control.md section 2).
 CONCURRENT_CALLS_RULE = (
@@ -101,7 +106,7 @@ def coding_prompt(tool_names: Iterable[str], *, builtin_agent: bool, rg: bool) -
         rules.extend(TOOL_GUIDELINES.get(name, ()))
     if names:
         rules.append(CONCURRENT_CALLS_RULE)
-    rules += ["Be concise in your responses", "Show file paths clearly when working with files", FINAL_REPLY_RULE]
+    rules += ["Be concise in your responses", "Show file paths clearly when working with files", INSTRUCTIONS_RULE, FINAL_REPLY_RULE]
     return "\n\n".join(
         (
             preamble(builtin_agent),
@@ -120,7 +125,7 @@ def system_prompt(
 
 # --- environment block ---------------------------------------------------------
 
-ENVIRONMENT_FIELDS = ("cwd", "os", "shell", "watches")
+ENVIRONMENT_FIELDS = ("session", "cwd", "os", "shell", "watches", "instructions")
 _BLOCK = re.compile(r"\A<environment>\n(?P<body>(?:[a-z]+: [^\n]*\n)*)</environment>\Z")
 
 
@@ -170,7 +175,7 @@ def displayed_environment(fields: Mapping[str, EnvironmentValue]) -> dict[str, s
 
 def _shown(name: str, value: EnvironmentValue) -> str:
     if name != "watches":
-        return escape(str(value)) if name == "cwd" else display(str(value))
+        return escape(str(value)) if name in ("cwd", "instructions") else display(str(value))
     # Bounded on every input, and so in every checkpoint: the first ones, then how many more (tools.md section 8).
     listed = [display(line) for line in value[:_WATCHES_LISTED]]
     if len(value) > _WATCHES_LISTED:

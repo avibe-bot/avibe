@@ -419,8 +419,8 @@ is written, so projection stays a pure function of the rows:
   of two real first consolidations, a seven-part edit dropped a heading, and the structure repair it took doubled
   the checkpoint's requests. The model revises what is under the headings, never the lines themselves, and may add headings of its own beneath them. Text before the first heading counts toward the
   first section's limit and is cut with it. A mind still the template keeps no mind
-  (`mind` is empty), and the next checkpoint starts from the template again. My identity and the Session's id are the
-  system prompt's; the mind never restates them.
+  (`mind` is empty), and the next checkpoint starts from the template again. My identity is the system prompt's and the Session's id is the current environment's; the
+  mind never restates them.
 - **The memo** (`memo`: `{seq, text, truncated}`, in `context_seq` order): the messages a person typed that the next
   context carries verbatim, whitespace included, each cut to 300 tokens (head kept), at most 3,000 tokens together, counted as the
   checkpoint shows them, each entry's `(#<seq>)` line and cut note included. Its list, `memo.md`,
@@ -467,10 +467,10 @@ is written, so projection stays a pure function of the rows:
   (`kept_inputs`, §5): a mid-turn checkpoint may misstate the Turn (as finished, or as more than was asked), and the
   verbatim inputs placed before it must win.
 - `state`: texts the adapter rendered from their own stores when the checkpoint was written: the environment's core
-  fields (C-7 §8: cwd, os, shell; no Watches; each field displayed as every input's block displays it,
-  the cwd escaped and never cut, every other field cut to 160 UTF-8 bytes (`display`), so the block is the cwd, which
-  the OS bounds, plus at most about 2 x 40 tokens; a checkpoint always happens inside
-  a run, and a Turn's own input carries only the fields that changed). Pending work is the now's own "Waiting on",
+  fields (C-7 §8: session, cwd, os, shell, instructions; no Watches; each field displayed as every input's block
+  displays it). The Session id and pending revisions remain available after a checkpoint. The cwd and pending
+  notice are escaped and never cut; other fields use the 160-byte display bound. A checkpoint always happens inside
+  a run, and a Turn's own input carries only the fields that changed. Pending work is the now's own "Waiting on",
   and the in-flight Turn's inputs stay as they were (§5).
 - Projection (C-5 §3): the system prompt, hook-rehydrated messages, the kept inputs (§5), one user message
   holding `summary` and then each `state` text as its own text block, then the rows from `first_kept_seq` on, with
@@ -767,7 +767,7 @@ What the user ultimately wants from this conversation, and why it matters to the
 ## What I own
 What I am responsible for seeing through, and where that ends.
 ## Agreements
-How to report, when to ask, what I may decide on my own, and the scope of what I am authorized to do, written as principles. Do not redefine who I am: my identity and this Session's id come from the system prompt; when mentioning another Session, give its id and how it relates to this one.
+How to report, when to ask, what I may decide on my own, and the scope of what I am authorized to do, written as principles. Keep my identity from the system prompt and Session id from the environment; when mentioning another Session, give its id and how it relates to this one.
 # 2. Goals
 ## Mission
 In your own words, the ultimate purpose of this conversation and its status; its scope is the user's, neither wider nor narrower.

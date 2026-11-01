@@ -477,6 +477,13 @@ def reserve_forked_session(
                 require_workdir=False,
             )
 
+        if source_backend == "vibey":
+            from modules.agents.vibey.prompt_snapshot import SnapshotStore
+
+            # This service already runs on its callers' worker paths. Copy now: a
+            # source may refresh again before the child's first Turn begins.
+            SnapshotStore(paths.get_state_dir() / "agent_core").inherit(str(source_session_id), session_id)
+
         fork = SessionForkSpec(
             source_session_id=str(source_session_id),
             source_native_session_id=source_native,
