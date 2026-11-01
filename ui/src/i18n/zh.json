@@ -436,6 +436,7 @@
     },
     "sections": {
       "general": "常规",
+      "notifications": "通知",
       "backends": "后端",
       "models": "模型",
       "replies": "回复",
@@ -2762,6 +2763,17 @@
           "explain": "此供应商拒绝过这个推理强度，之后的请求会跳过它。"
         }
       }
+    },
+    "notifications": {
+      "subtitle": "决定哪些消息会推送到你的设备、计入应用图标角标。所有消息都会照常进入收件箱。这些开关跟随账号，在每台设备上生效。",
+      "masterHint": "总开关。关闭后不推送任何消息，角标也不再显示数字。",
+      "botsHint": "伙伴的回复。",
+      "sessionsHint": "项目里普通会话的回复和失败提醒。只关心伙伴时把它关掉：会话照常工作、照常进收件箱，只是安静。",
+      "deviceTitle": "本设备",
+      "pushTitle": "推送（浏览器 / 主屏幕 App）",
+      "pushHint": "这台设备是否接收推送。",
+      "desktopTitle": "桌面 App 系统通知",
+      "desktopHint": "Vault 审批和后台任务完成。本机的开关在菜单栏图标 › 通知。"
     }
   },
   "remoteAccess": {
@@ -3552,7 +3564,14 @@
         "testFailed": "测试通知发送失败",
         "normalBlocked": "但普通通知当前会跳过你（{{policy}} 策略：{{disposition}}）"
       },
-      "navUnread": "收件箱，{{count}} 条未读"
+      "navUnread": "收件箱，{{count}} 条未读",
+      "sections": {
+        "bots": "伙伴",
+        "sessions": "会话",
+        "muted": "免打扰",
+        "markRead": "本组全部已读"
+      },
+      "navQuiet": "收件箱：有未读，通知已关闭"
     },
     "modules": {
       "comingSoonEyebrow": "即将就位",
@@ -3581,6 +3600,26 @@
         "eyebrow": "Vaults",
         "title": "Vaults",
         "description": "secrets 和 API key,Agent 可以直接写进 ENV / .env,不用你复制粘贴。"
+      }
+    },
+    "notifications": {
+      "title": "通知",
+      "description": "推送到开启了通知的设备，并计入应用角标。",
+      "bots": "伙伴消息",
+      "botsHint": "伙伴的回复",
+      "sessions": "会话消息",
+      "sessionsHint": "项目里普通会话的回复和失败提醒",
+      "sessionsOff": "会话消息照常进收件箱，只是不推送、不计入角标。",
+      "device": "本设备",
+      "moreSettings": "更多通知设置",
+      "back": "回到收件箱",
+      "open": "通知设置",
+      "button": "通知：{{mode}}",
+      "mode": {
+        "all": "全部",
+        "bots": "仅伙伴",
+        "sessions": "仅会话",
+        "off": "已关闭"
       }
     }
   },

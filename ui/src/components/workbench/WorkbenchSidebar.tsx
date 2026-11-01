@@ -5,7 +5,6 @@ import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom';
 import {
   Activity,
   Archive,
-  ArrowRight,
   Bot,
   ChevronDown,
   ChevronRight,
@@ -27,7 +26,6 @@ import {
 import clsx from 'clsx';
 import type { LucideIcon } from 'lucide-react';
 
-import { writeInboxFilter } from '../../lib/inboxFilterMemory';
 import { useSidebarSectionOpen } from '../../lib/sidebarSectionsMemory';
 import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { useLatestRef } from '../../lib/useLatestRef';
@@ -46,20 +44,16 @@ import {
 } from './sessionRowLayout';
 import { SessionActionMenuContent, SessionActionsTrigger } from './sessionActions';
 import { useSessionActions } from './useSessionActions';
-import { formatRelativeTime } from '../../lib/relativeTime';
 import { canCreateLocalProject } from '../../lib/sessionInfo';
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
-import { Markdown } from '../ui/markdown';
 import { NewProjectDialog } from './NewProjectDialog';
 import { ProjectAgentsMdDialog } from './ProjectAgentsMdDialog';
 import { ProjectSettingsDialog } from './ProjectSettingsDialog';
 import { SortableProjectList, type ProjectDragHandle } from './SortableProjectList';
 import { BotStrip } from './bots/BotStrip';
-import { BotAvatar } from '../ui/bot-avatar';
-import { BotTag } from './bots/BotTag';
-import { useBots } from '../../context/BotsContext';
+import { InboxHoverPopover } from './InboxHoverPopover';
 import logoImg from '../../assets/logo.png';
 
 interface CapabilityNavItem {
@@ -110,219 +104,6 @@ const SidebarNavRow: React.FC<{
     )}
   </NavLink>
 );
-
-// How many session rows the peek holds. Named because two things depend on it:
-// which rows are picked, and whether the peek had room it could not fill.
-const PEEK_ROWS = 5;
-
-// 360px floating popover that opens when the user hovers the Inbox entry.
-// Mirrors design.pen KmQ1L — header + a few session cards + footer "open full
-// inbox" link. Pure presentational; data comes from <WorkbenchInboxProvider>.
-const InboxHoverPopover: React.FC<{
-  sessions: InboxSession[];
-  unreadBySession: Record<string, number>;
-  unreadSessions: number;
-  totalUnread: number;
-  canMarkRead: boolean;
-  onItemClick: (session: InboxSession) => void;
-  onMarkAllRead: () => void;
-  onMouseEnter: () => void;
-  onMouseLeave: () => void;
-}> = ({
-  sessions,
-  unreadBySession,
-  unreadSessions,
-  totalUnread,
-  canMarkRead,
-  onItemClick,
-  onMarkAllRead,
-  onMouseEnter,
-  onMouseLeave,
-}) => {
-  const { t } = useTranslation();
-  const navigate = useNavigate();
-  const { botForSession, displayName: botName } = useBots();
-  // The unread map is authoritative; a session absent from it has 0 unread
-  // (don't fall back to the card's stale unread_count — see InboxPage).
-  const unreadOf = (s: InboxSession) => unreadBySession[s.session_id] ?? 0;
-  // Unread first, then the rest. `sort` is stable, so within each group the feed
-  // keeps the backend's activity order untouched.
-  //
-  // This decides *which* five appear, not only how they are stacked — and that is
-  // the point. The popover is a five-row peek at a feed that is usually longer, so
-  // a strictly chronological slice hides the unread session the user opened it to
-  // act on behind ones they have already read. The full Inbox page keeps the
-  // chronological order on purpose: it has unread/all tabs and keyset pagination,
-  // which a client-side reorder would fight.
-  const shown = useMemo(
-    () =>
-      [...sessions]
-        .sort(
-          (a, b) =>
-            Number((unreadBySession[b.session_id] ?? 0) > 0) -
-            Number((unreadBySession[a.session_id] ?? 0) > 0),
-        )
-        .slice(0, PEEK_ROWS),
-    [sessions, unreadBySession],
-  );
-  // `unreadSessions` counts the whole feed; `sessions` holds only the pages the
-  // provider has loaded, so an unread session older than the loaded window is in
-  // the count but not in the rows, and no ordering of those rows can surface it.
-  // Say so rather than letting a header that reads "3 unread" sit above five read
-  // rows. The condition is deliberately "the peek had room and could not fill it":
-  // a peek already full of unread is hiding nothing the header does not state.
-  const unreadShown = shown.filter((s) => unreadOf(s) > 0).length;
-  const unreadBeyondPeek = unreadShown < PEEK_ROWS && unreadSessions > unreadShown;
-  const openFullInbox = (filter?: 'unread') => {
-    // The Inbox page resolves its tab from this store on entry, so writing it
-    // first is how a caller asks for a tab without a new route or prop.
-    if (filter) writeInboxFilter(filter, 0);
-    navigate('/inbox');
-  };
-  return (
-    // Portaled (PopoverContent) so it escapes the sidebar's stacking context and
-    // floats above the chat panel — a plain `absolute z-50` div was painted under
-    // the chat's own stacking context, so the two visually overlapped.
-    <PopoverContent
-      side="right"
-      align="start"
-      sideOffset={12}
-      data-settings-interaction-owner="true"
-      onOpenAutoFocus={(e) => e.preventDefault()}
-      role="dialog"
-      aria-label={t('workbench.inbox.title')}
-      onMouseEnter={onMouseEnter}
-      onMouseLeave={onMouseLeave}
-      className="flex w-[360px] flex-col gap-2.5 rounded-2xl border-border-strong bg-surface-2 p-3.5 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.6)]"
-    >
-      <div className="flex items-start gap-2">
-        <div className="flex flex-1 flex-col">
-          <div className="text-[13px] font-bold text-foreground">{t('workbench.inbox.title')}</div>
-          <div className="text-[10px] text-muted">
-            {t('workbench.inbox.headerCount', { unread: unreadSessions, total: sessions.length })}
-          </div>
-        </div>
-        {canMarkRead && <button
-          type="button"
-          onClick={onMarkAllRead}
-          disabled={totalUnread === 0}
-          className={clsx(
-            'rounded-md border px-2 py-1 text-[10px] font-medium transition',
-            totalUnread === 0
-              ? 'cursor-not-allowed border-border bg-foreground/[0.02] text-muted'
-              : 'border-border-strong text-foreground hover:bg-foreground/[0.04]',
-          )}
-        >
-          {t('workbench.inbox.markAllRead')}
-        </button>}
-      </div>
-
-      {shown.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-border px-3 py-6 text-center text-[12px] text-muted">
-          {t('workbench.inbox.empty')}
-        </div>
-      ) : (
-        <div className="flex flex-col gap-1">
-          {shown.map((s) => {
-            const unread = unreadOf(s);
-            const projectLabel = s.project_name || s.project_id || 'avibe';
-            const bot = botForSession(s.session_id);
-            const replied = s.replied ? (
-              <span className="shrink-0 font-semibold text-cyan-ink" title={t('workbench.inbox.replied')}>
-                ↩
-              </span>
-            ) : null;
-            const preview = s.preview_text ? (
-              <div
-                className={clsx(
-                  'line-clamp-2 text-[11.5px] leading-relaxed',
-                  unread > 0 ? 'text-foreground' : 'text-muted',
-                )}
-              >
-                <Markdown content={s.preview_text} interactive={false} className="vr-markdown--preview" />
-              </div>
-            ) : (
-              <div className="text-[11.5px] leading-relaxed text-muted">—</div>
-            );
-            if (bot) {
-              // A Bot's conversation reads as the Bot: its avatar and name with a
-              // small Bot tag, instead of "project · title" (docs/plans/bots.md D5).
-              const name = botName(bot);
-              return (
-                <button
-                  key={s.session_id}
-                  type="button"
-                  onClick={() => onItemClick(s)}
-                  className={clsx(
-                    'flex gap-2.5 rounded-lg px-3 py-2.5 text-left transition',
-                    unread > 0
-                      ? 'border-l-2 border-mint bg-mint/[0.06] hover:bg-mint/[0.10]'
-                      : 'hover:bg-foreground/[0.04]',
-                  )}
-                >
-                  <BotAvatar avatar={bot.avatar} name={name} size={28} className="mt-0.5" />
-                  <div className="flex min-w-0 flex-1 flex-col gap-1">
-                    <div className="flex items-center gap-1.5 text-[11px]">
-                      <span className="truncate font-bold text-foreground">{name}</span>
-                      <BotTag />
-                      <span className="flex-1" />
-                      {replied}
-                      <span className="shrink-0 font-mono text-[10px] text-muted">{formatRelativeTime(s.last_activity_at, t)}</span>
-                    </div>
-                    {preview}
-                  </div>
-                </button>
-              );
-            }
-            return (
-              <button
-                key={s.session_id}
-                type="button"
-                onClick={() => onItemClick(s)}
-                className={clsx(
-                  'flex flex-col gap-1.5 rounded-lg px-3 py-2.5 text-left transition',
-                  unread > 0
-                    ? 'border-l-2 border-mint bg-mint/[0.06] hover:bg-mint/[0.10]'
-                    : 'hover:bg-foreground/[0.04]',
-                )}
-              >
-                <div className="flex items-center gap-1.5 text-[10px]">
-                  <span className="truncate font-semibold text-cyan-ink">{projectLabel}</span>
-                  <span className="text-muted">·</span>
-                  <span className="flex-1 truncate font-semibold text-foreground">
-                    {s.title?.trim() || s.session_id}
-                  </span>
-                  {replied}
-                  <span className="font-mono text-muted">{formatRelativeTime(s.last_activity_at, t)}</span>
-                </div>
-                {preview}
-              </button>
-            );
-          })}
-        </div>
-      )}
-
-      {unreadBeyondPeek && (
-        <button
-          type="button"
-          onClick={() => openFullInbox('unread')}
-          className="rounded-lg border border-dashed border-border px-3 py-2 text-left text-[11px] leading-relaxed text-muted transition hover:bg-foreground/[0.04] hover:text-foreground"
-        >
-          {t('workbench.inbox.moreUnreadInFull')}
-        </button>
-      )}
-
-      <button
-        type="button"
-        onClick={() => openFullInbox()}
-        className="flex items-center justify-center gap-1.5 rounded-md pt-1 text-[11px] font-medium text-cyan-ink hover:underline"
-      >
-        {t('workbench.inbox.viewAll')}
-        <ArrowRight className="size-3" />
-      </button>
-    </PopoverContent>
-  );
-};
 
 // Session status dot colours. Maps the agent-runtime status to the user's
 // gray / green / red: idle → muted (gray), running → mint (green) + glow,
@@ -831,7 +612,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
     if (to === '/vaults') return capabilities.can_use_vault_secrets;
     return false;
   });
-  const { totalUnread, unreadSessions, inboxSessions, markRead, unreadBySession } = useWorkbenchInbox({
+  const { totalUnread, badgeTotal, unreadSessions, inboxSessions, markRead, unreadBySession } = useWorkbenchInbox({
     feed: surfaceActive,
   });
   // Projects/sessions tree — shared with the mobile ProjectsPage via the provider
@@ -897,10 +678,14 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
     await Promise.all(ids.map((id) => markRead(id)));
   };
 
+  // The number counts only categories whose notifications are on; unread that
+  // is all in muted categories shows as a grey dot instead, so it is there to
+  // find but asks for nothing (docs/plans/workbench-refinements.md §1).
   const badge = useMemo(() => {
-    if (totalUnread <= 0) return null;
-    return totalUnread > 99 ? '99+' : String(totalUnread);
-  }, [totalUnread]);
+    if (badgeTotal <= 0) return null;
+    return badgeTotal > 99 ? '99+' : String(badgeTotal);
+  }, [badgeTotal]);
+  const quietUnread = !badge && totalUnread > 0;
 
   // Fill the sidebar column and cap its height so the project list (and only the
   // project list) scrolls; the brand row, Inbox and Capabilities stay pinned. The
@@ -938,7 +723,13 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
             <div className="ml-auto shrink-0" onMouseEnter={openPopover} onMouseLeave={queueClose}>
               <NavLink
                 to="/inbox"
-                aria-label={badge ? t('workbench.inbox.navUnread', { count: totalUnread }) : t('workbench.nav.inbox')}
+                aria-label={
+                  badge
+                    ? t('workbench.inbox.navUnread', { count: badgeTotal })
+                    : quietUnread
+                      ? t('workbench.inbox.navQuiet')
+                      : t('workbench.nav.inbox')
+                }
                 title={t('workbench.nav.inbox')}
                 className={({ isActive }) =>
                   clsx(
@@ -956,11 +747,16 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
                     {/* Cyan is what unread means here, so the counter colours the
                         icon on any route — not only while Inbox is the open one. */}
                     <Inbox className={clsx('size-[18px]', badge || isActive ? 'text-cyan-ink' : 'text-foreground')} />
-                    {badge && (
+                    {badge ? (
                       <span className="absolute -right-1 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-cyan px-1 font-mono text-[9px] font-bold text-accent-foreground shadow-glow-xs-cyan">
                         {badge}
                       </span>
-                    )}
+                    ) : quietUnread ? (
+                      <span
+                        aria-hidden="true"
+                        className="absolute right-0.5 top-0.5 size-[7px] rounded-full bg-muted ring-2 ring-[var(--sidebar-background)]"
+                      />
+                    ) : null}
                   </>
                 )}
               </NavLink>
@@ -976,6 +772,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
             onMarkAllRead={onMarkAllRead}
             onMouseEnter={openPopover}
             onMouseLeave={queueClose}
+            onClose={() => setPopoverOpen(false)}
           />
         </Popover>
       </div>

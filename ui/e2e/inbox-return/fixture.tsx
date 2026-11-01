@@ -63,7 +63,9 @@ export function Fixture() {
   };
   return <WorkbenchInboxContext.Provider value={{
     inboxSessions: sessions, unreadBySession: unread, totalUnread: Object.keys(unread).length,
-    unreadSessions: Object.keys(unread).length, nextCursor: sessions.length < 90 ? 'next' : null,
+    unreadSessions: Object.keys(unread).length,
+    unreadByCategory: { bot: 0, session: Object.keys(unread).length }, badgeTotal: Object.keys(unread).length,
+    nextCursor: sessions.length < 90 ? 'next' : null,
     loading: false, loadingMore: false, refresh: async () => {},
     loadMore: async () => { setSessions(history); }, markRead, activateFeed,
   }}>

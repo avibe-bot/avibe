@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect } from 'react';
 
 import type { InboxSession } from './ApiContext';
+import type { UnreadByCategory } from '../lib/notificationPreferences';
 
 // The Inbox state contract and the context handle every consumer reads.
 // `WorkbenchInboxProvider.tsx` owns the feed, the SSE subscription and the
@@ -20,6 +21,12 @@ export interface InboxState {
   totalUnread: number;
   /** Number of sessions with ≥1 unread reply — the header "N unread" count. */
   unreadSessions: number;
+  /** ``totalUnread`` split into Bot conversations and ordinary Sessions. */
+  unreadByCategory: UnreadByCategory;
+  /** The aggregate badge: unread in categories whose notifications are on
+   *  (docs/plans/workbench-refinements.md §1). The sidebar icon, the app icon and
+   *  the tab favicon all show this; with every switch on it is ``totalUnread``. */
+  badgeTotal: number;
   /** Keyset cursor for "load more"; null when the feed is fully loaded. */
   nextCursor: string | null;
   loading: boolean;

@@ -267,7 +267,7 @@ test.describe('workbench home geometry', () => {
       const inheritedReads = new Set([
         '/api/session', '/api/config', '/api/csrf-token', '/api/projects',
         '/api/workbench/projects-bootstrap', '/api/sessions', '/api/agents',
-        '/api/inbox', '/api/version', '/api/events',
+        '/api/inbox', '/api/notifications/preferences', '/api/version', '/api/events',
         // The home's Computer Use status line reads this on every mount.
         '/api/desktop/computer-use/status',
       ]);

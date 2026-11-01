@@ -130,13 +130,33 @@ it is still delivered, listed, and unread.
   popover header (left of "Mark all read") and from a "Notifications: All /
   Bots only / Sessions only / Off" button on the Inbox page toolbar. The bell is
   `Bell` when everything is on, `BellMinus` with a short label when partial, and
-  `BellOff` when off. The hover popover stays open while the portaled menu is
-  open.
+  `BellOff` when off. In the hover popover the bell swaps the popover's body for
+  the menu in place, with a way back, so the hover surface never hosts a second
+  floating layer; on the Inbox page the menu is an ordinary popover.
 - Settings › Notifications, a new page right after General in
   `ui/src/components/settings/SettingsLayout.tsx`: the same switches with
   one-line explanations, "This device" with the full `WebPushControl` (moved out
-  of the Inbox toolbar), and a note that desktop OS notifications are switched
-  from the tray menu.
+  of the Inbox toolbar), and, in the desktop app, a note that its OS
+  notifications are switched from the tray menu.
+- The client holds the switches in one provider above the router
+  (`NotificationPreferencesProvider`), read on mount and re-read on the stream's
+  preference nudge, a reconnect, or an authorization change. A change applies
+  at once and writes only the switch it changes, which the server merges, so
+  two devices changing different switches keep both. Overlapping writes'
+  responses cannot say which the server applied last, so each confirms only
+  the switches it wrote; a refused save puts its switches back to their last
+  confirmed value unless a later change has set them since, and the record is
+  read back once the last write of a burst settles.
+- A Session is a Bot conversation while it is a current Bot's permanent
+  Session, the server's definition. The client reads it from the Owner's live
+  Bot list (`BotsProvider`, refetched on `bots.changed`), which a small bridge
+  (`BotRosterContext`) carries up to the Inbox provider above the router; a
+  removed Bot's `ses_` Session is an ordinary Session, and a reader without Bots
+  has one category. The client computes the badge from its live unread map and
+  the switches, and the aggregate badges wait until the map, the switches, and
+  the Bot list are all known. A shared fixture
+  (`ui/src/lib/notificationBadge.fixture.json`) runs against both this
+  computation and the server's `badge_total`.
 - Sidebar Inbox icon: a cyan number for `badge_total`; a grey dot with no number
   when `badge_total` is 0 and anything is unread.
 

@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 
 import { useApi } from './ApiContext';
 import { BotsContext, type BotProfileRequest, type BotRuntimeStatus, type BotsState } from './BotsContext';
+import { UNKNOWN_BOT_ROSTER, useBotRoster } from './BotRosterContext';
 import { useInstanceAuthorization } from './InstanceAuthorizationContext';
 import { botDisplayName, orderBots, type Bot } from '../lib/bots';
 
@@ -22,6 +23,8 @@ export const BotsProvider = ({ children }: { children: ReactNode }) => {
   const enabled = capabilities.is_instance_owner === true;
   const [ownerBots, setBots] = useState<Bot[]>([]);
   const [loaded, setLoaded] = useState(false);
+  // A list the server returned, as opposed to a first read that merely ended.
+  const [listed, setListed] = useState(false);
   const [ownerStatuses, setStatusBySession] = useState<Record<string, BotRuntimeStatus>>({});
   const [profileRequest, setProfileRequest] = useState<BotProfileRequest | null>(null);
   const readRef = useRef(0);
@@ -54,6 +57,7 @@ export const BotsProvider = ({ children }: { children: ReactNode }) => {
       const next = await api.listBots({ cache: false });
       if (read !== readRef.current) return;
       setBots(orderBots(next));
+      setListed(true);
       const known = sessionIdsRef.current;
       const fresh = next.map((bot) => bot.session_id).filter((id) => !known.has(id));
       sessionIdsRef.current = new Set(next.map((bot) => bot.session_id));
@@ -157,6 +161,17 @@ export const BotsProvider = ({ children }: { children: ReactNode }) => {
       closeProfile: () => setProfileRequest(null),
     };
   }, [enabled, ownerBots, loaded, ownerStatuses, mainDefault, afterWrite, moveBot, profileRequest]);
+
+  // The Inbox above the router splits its counts by this list (BotRosterContext).
+  // A reader who is not the Owner has none to wait for; the Owner's is known once
+  // the server has returned it, since a failed read is not "no Bots".
+  const { publish } = useBotRoster();
+  const rosterKnown = !enabled || listed;
+  useEffect(() => {
+    publish({ known: rosterKnown, sessionIds: new Set(value.bots.map((bot) => bot.session_id)) });
+  }, [publish, rosterKnown, value.bots]);
+  // Signing out unmounts this provider; the next reader's list is not known yet.
+  useEffect(() => () => publish(UNKNOWN_BOT_ROSTER), [publish]);
 
   return <BotsContext.Provider value={value}>{children}</BotsContext.Provider>;
 };

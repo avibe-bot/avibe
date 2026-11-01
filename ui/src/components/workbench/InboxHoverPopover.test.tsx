@@ -1,12 +1,16 @@
 /* @vitest-environment jsdom */
 
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { Popover } from '../ui/popover';
 import type { InboxSession } from '../../context/ApiContext';
 import { readInboxFilter } from '../../lib/inboxFilterMemory';
 import { InboxHoverPopover } from './WorkbenchSidebar';
+import { BotsContext, type BotsState } from '../../context/BotsContext';
+import { BotRosterContext } from '../../context/BotRosterContext';
+import { NotificationPreferencesContext } from '../../context/NotificationPreferencesContext';
+import type { Bot } from '../../lib/bots';
 
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 vi.mock('../ui/markdown', () => ({ Markdown: ({ content }: { content: string }) => <p>{content}</p> }));
@@ -131,4 +135,102 @@ it('stays quiet when the peek is already full of unread sessions', () => {
   const unread = Object.fromEntries(sessions.map((s) => [s.session_id, 1]));
   expect(mount(sessions, unread)).toHaveLength(5);
   expect(screen.queryByText('workbench.inbox.moreUnreadInFull')).toBeNull();
+});
+
+describe('with Bots', () => {
+  const bots: Bot[] = [
+    { handle: 'main', display_name: 'Vibey', avatar: { kind: 'mascot' }, role: '', agent_name: 'main', session_id: 'ses_main', position: 0, builtin: true },
+    { handle: 'cso', display_name: 'CSO', avatar: null, role: '', agent_name: 'cso', session_id: 'ses_cso', position: 1, builtin: false },
+  ];
+  const botsState = {
+    enabled: true,
+    bots,
+    botForSession: (id: string | null | undefined) => bots.find((bot) => bot.session_id === id),
+    displayName: (bot: Bot) => bot.display_name,
+  } as unknown as BotsState;
+  const botRow = (sessionId: string, minutesAgo: number): InboxSession => ({ ...row(0, minutesAgo), session_id: sessionId, title: null });
+
+  function mountWithBots(
+    sessions: InboxSession[],
+    unreadBySession: Record<string, number>,
+    preferences = { enabled: true, bots: true, sessions: true },
+  ) {
+    const roster = { sessionIds: new Set(bots.map((bot) => bot.session_id)), known: true };
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <BotRosterContext.Provider value={{ roster, publish: () => {} }}>
+          <BotsContext.Provider value={botsState}>
+            <NotificationPreferencesContext.Provider value={{ preferences, loaded: true, update: async () => true }}>
+              <Popover open>
+                <InboxHoverPopover
+                  sessions={sessions}
+                  unreadBySession={unreadBySession}
+                  unreadSessions={Object.values(unreadBySession).filter((n) => n > 0).length}
+                  totalUnread={Object.values(unreadBySession).reduce((sum, n) => sum + n, 0)}
+                  canMarkRead
+                  onItemClick={() => {}}
+                  onMarkAllRead={() => {}}
+                  onMouseEnter={() => {}}
+                  onMouseLeave={() => {}}
+                />
+              </Popover>
+            </NotificationPreferencesContext.Provider>
+          </BotsContext.Provider>
+        </BotRosterContext.Provider>
+      </MemoryRouter>,
+    );
+  }
+  const rowNames = () => screen
+    .getAllByRole('button')
+    .map((node) => node.textContent ?? '')
+    .map((text) => text.match(/Session \d+|Vibey|CSO/)?.[0])
+    .filter(Boolean);
+
+  it('puts Bots above Sessions, three rows each and unread first', () => {
+    const sessions = [botRow('ses_main', 1), row(1, 2), row(2, 3), botRow('ses_cso', 4), row(3, 5), row(4, 6)];
+    mountWithBots(sessions, { ses_cso: 2, 'session-4': 1 });
+
+    const headers = screen.getAllByText(/workbench\.inbox\.sections\.(bots|sessions)/).map((node) => node.textContent);
+    expect(headers).toEqual(['workbench.inbox.sections.bots', 'workbench.inbox.sections.sessions']);
+    expect(rowNames()).toEqual(['CSO', 'Vibey', 'Session 4', 'Session 1', 'Session 2']);
+    // The section says Bot already; its rows carry no Bot tag.
+    expect(screen.queryByText('bots.tag')).toBeNull();
+  });
+
+  it("files a removed Bot's Session with the Sessions, as the server counts it", () => {
+    // `ses_retired` keeps its id after its Bot is removed, but it is not in the live list.
+    mountWithBots([botRow('ses_cso', 1), { ...row(7, 2), session_id: 'ses_retired' }], { ses_cso: 1, ses_retired: 4 });
+    const sessionsSection = screen.getByText('workbench.inbox.sections.sessions').closest('section')!;
+    expect(sessionsSection.textContent).toContain('Session 7');
+    const botsSection = screen.getByText('workbench.inbox.sections.bots').closest('section')!;
+    expect(botsSection.textContent).not.toContain('Session 7');
+  });
+
+  it('leaves the Bots section out until a Bot has spoken', () => {
+    mountWithBots([row(1, 1), row(2, 2)], {});
+    expect(screen.queryByText('workbench.inbox.sections.bots')).toBeNull();
+    expect(screen.getByText('workbench.inbox.sections.sessions')).toBeTruthy();
+  });
+
+  it('marks the muted category and pictures the mode on the bell', () => {
+    mountWithBots([botRow('ses_cso', 1), row(1, 2)], { ses_cso: 1, 'session-1': 3 }, { enabled: true, bots: true, sessions: false });
+
+    expect(screen.getAllByText('workbench.inbox.sections.muted')).toHaveLength(1);
+    expect(screen.getByRole('button', { name: 'workbench.notifications.open' }).textContent).toContain('workbench.notifications.mode.bots');
+  });
+
+  it('swaps in the notification switches from the bell and back', () => {
+    mountWithBots([botRow('ses_cso', 1), row(1, 2)], {});
+
+    fireEvent.click(screen.getByRole('button', { name: 'workbench.notifications.open' }));
+    expect(screen.getAllByRole('switch').map((node) => node.getAttribute('aria-label'))).toEqual([
+      'workbench.notifications.title',
+      'workbench.notifications.bots',
+      'workbench.notifications.sessions',
+    ]);
+    expect(rowNames()).toEqual([]);
+
+    fireEvent.click(screen.getByRole('button', { name: 'workbench.notifications.back' }));
+    expect(rowNames()).toEqual(['CSO', 'Session 1']);
+  });
 });

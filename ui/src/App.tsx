@@ -37,6 +37,7 @@ import { SettingsPlatformsPage } from './components/settings/SettingsPlatformsPa
 import { SettingsServicePage } from './components/settings/SettingsServicePage';
 import { SettingsGeneralPage } from './components/settings/SettingsGeneralPage';
 import { SettingsShortcutsPage } from './components/settings/SettingsShortcutsPage';
+import { SettingsNotificationsPage } from './components/settings/SettingsNotificationsPage';
 import { SettingsComputerUsePage } from './components/settings/SettingsComputerUsePage';
 import { SettingsLayout } from './components/settings/SettingsLayout';
 import { SettingsOverlayRouteSurface } from './components/settings/SettingsOverlayRouteSurface';
@@ -50,6 +51,8 @@ import { ToastProvider } from './context/ToastProvider';
 import { ThemeProvider } from './context/ThemeProvider';
 import { VaultSandboxAppearanceBridge } from './components/VaultSandboxAppearanceBridge';
 import { WorkbenchInboxProvider } from './context/WorkbenchInboxProvider';
+import { NotificationPreferencesProvider } from './context/NotificationPreferencesProvider';
+import { BotRosterProvider } from './context/BotRosterProvider';
 import { WorkbenchProjectsProvider } from './context/WorkbenchProjectsProvider';
 import { ComposerBridgeProvider } from './context/ComposerBridgeProvider';
 import { UnsavedChangesProvider } from './context/UnsavedChangesProvider';
@@ -729,6 +732,7 @@ const settingsRoute = () => (
         alias follows them. Account keeps pointing at Replies, which still owns it. */}
     <Route path="appearance" element={<Navigate to="/settings/general" replace />} />
     <Route path="account" element={<Navigate to="/settings/replies" replace />} />
+    <Route path="notifications" element={<SettingsNotificationsPage />} />
     <Route path="shortcuts" element={<SettingsShortcutsPage />} />
     <Route path="computer-use" element={<SettingsComputerUsePage />} />
     <Route path="service" element={<SettingsServicePage />} />
@@ -874,6 +878,8 @@ function App() {
       <StatusProvider>
         <ToastProvider>
           <ApiProvider>
+            <NotificationPreferencesProvider>
+            <BotRosterProvider>
             <WorkbenchInboxProvider>
               <WorkbenchProjectsProvider>
                 <ComposerBridgeProvider>
@@ -882,6 +888,8 @@ function App() {
                 </ComposerBridgeProvider>
               </WorkbenchProjectsProvider>
             </WorkbenchInboxProvider>
+            </BotRosterProvider>
+            </NotificationPreferencesProvider>
           </ApiProvider>
         </ToastProvider>
       </StatusProvider>

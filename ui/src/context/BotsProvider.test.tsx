@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { WorkbenchEventHandlers } from './ApiContext';
 import { BotsProvider } from './BotsProvider';
+import { BotRosterContext, type BotRoster } from './BotRosterContext';
 import { useBots } from './BotsContext';
 import { InstanceAuthorizationContext } from './InstanceAuthorizationContext';
 import { ToastContext } from './ToastContext';
@@ -117,5 +118,72 @@ describe('saving a Bot from the dialog reads the Bots once', () => {
     }
 
     expect(api.listBots.mock.calls.length - readsBefore).toBe(expectedReads);
+  });
+});
+
+// The Inbox above the router splits its counts by this list (BotRosterContext),
+// the server's definition of a Bot conversation: a current Bot's Session.
+describe('publishing the Bot list to the Inbox', () => {
+  function mountRoster(owner: boolean) {
+    const { api, stream } = fakeApi();
+    apiRef.current = api;
+    const published: BotRoster[] = [];
+    const ids = () => [...(published.at(-1)?.sessionIds ?? [])].sort();
+    const view = render(
+      <BotRosterContext.Provider value={{ roster: published.at(-1) ?? { sessionIds: new Set(), known: false }, publish: (roster) => published.push(roster) }}>
+        <InstanceAuthorizationContext.Provider
+          value={{
+            remote: false,
+            instanceKind: null,
+            instanceRole: null,
+            capabilities: { ...DENIED_INSTANCE_CAPABILITIES, is_instance_owner: owner },
+          }}
+        >
+          <BotsProvider>{null}</BotsProvider>
+        </InstanceAuthorizationContext.Provider>
+      </BotRosterContext.Provider>,
+    );
+    return { api, stream, published, ids, view };
+  }
+
+  it("publishes the Owner's Bot Sessions once the list answers, and drops a removed Bot's", async () => {
+    const { api, stream, published, ids, view } = mountRoster(true);
+    // Before the list answers, nothing is known: no Session is a Bot's yet, nor a Session's.
+    expect(published[0]).toMatchObject({ known: false });
+    await flush();
+    expect(published.at(-1)?.known).toBe(true);
+    expect(ids()).toEqual(['ses_cso', 'ses_main']);
+
+    api.listBots.mockResolvedValueOnce([MAIN]);
+    act(() => stream.handlers?.onBotsChanged?.({ handle: 'cso' }));
+    await flush();
+    expect(ids()).toEqual(['ses_main']);
+
+    // Signing out unmounts the provider: the next reader's list is not known.
+    view.unmount();
+    expect(published.at(-1)).toMatchObject({ known: false });
+    expect(published.at(-1)?.sessionIds.size).toBe(0);
+  });
+
+  it("keeps the Owner's list unknown while it cannot be read", async () => {
+    const { api, stream, published, ids } = mountRoster(true);
+    api.listBots.mockReset();
+    api.listBots.mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce([MAIN, CSO]);
+    await flush();
+    // A failed read is not "no Bots": counting every Bot reply as a Session's would be wrong.
+    expect(published.at(-1)).toMatchObject({ known: false });
+
+    act(() => stream.handlers?.onConnected?.());
+    await flush();
+    expect(published.at(-1)?.known).toBe(true);
+    expect(ids()).toEqual(['ses_cso', 'ses_main']);
+  });
+
+  it('publishes a known, empty list for a reader who is not the Owner', async () => {
+    const { api, published } = mountRoster(false);
+    await flush();
+    expect(published.at(-1)).toMatchObject({ known: true });
+    expect(published.at(-1)?.sessionIds.size).toBe(0);
+    expect(api.listBots).not.toHaveBeenCalled();
   });
 });

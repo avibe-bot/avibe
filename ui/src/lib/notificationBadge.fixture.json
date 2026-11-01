@@ -1,0 +1,47 @@
+{
+  "description": "One set of Inbox unread data and switches, with the category split and badge both sides must compute. Read by ui/src/lib/notificationPreferences.test.ts (the page's live badge) and tests/test_notification_badge_parity.py (the server's badge_total).",
+  "unread_by_session": {
+    "ses_main": 1,
+    "ses_cso": 2,
+    "ses_retired": 3,
+    "sesa1b2c3d4e5": 4,
+    "sesz9y8x7w6v5": 5
+  },
+  "cases": [
+    {
+      "name": "Owner, every switch on; a removed Bot's ses_ Session is an ordinary Session",
+      "bot_session_ids": ["ses_main", "ses_cso"],
+      "preferences": { "enabled": true, "bots": true, "sessions": true },
+      "unread_by_category": { "bot": 3, "session": 12 },
+      "badge_total": 15
+    },
+    {
+      "name": "Owner, Session messages muted",
+      "bot_session_ids": ["ses_main", "ses_cso"],
+      "preferences": { "enabled": true, "bots": true, "sessions": false },
+      "unread_by_category": { "bot": 3, "session": 12 },
+      "badge_total": 3
+    },
+    {
+      "name": "Owner, Bot messages muted",
+      "bot_session_ids": ["ses_main", "ses_cso"],
+      "preferences": { "enabled": true, "bots": false, "sessions": true },
+      "unread_by_category": { "bot": 3, "session": 12 },
+      "badge_total": 12
+    },
+    {
+      "name": "Owner, master switch off",
+      "bot_session_ids": ["ses_main", "ses_cso"],
+      "preferences": { "enabled": false, "bots": true, "sessions": true },
+      "unread_by_category": { "bot": 3, "session": 12 },
+      "badge_total": 0
+    },
+    {
+      "name": "A reader without Bots: everything is a Session",
+      "bot_session_ids": [],
+      "preferences": { "enabled": true, "bots": true, "sessions": false },
+      "unread_by_category": { "bot": 0, "session": 15 },
+      "badge_total": 0
+    }
+  ]
+}
