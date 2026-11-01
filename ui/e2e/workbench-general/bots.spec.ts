@@ -238,6 +238,34 @@ for (const theme of ['light', 'dark'] as const) {
   });
 }
 
+test('adding a Bot sends the generated handle, its role, and the emoji avatar, then opens its conversation', async ({ page }) => {
+  const { denied } = await serveBots(page, 'en', [MAIN, CSO, PM]);
+  const created: unknown[] = [];
+  await page.route('**/api/bots', (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    const body = route.request().postDataJSON() as { display_name: string; handle: string };
+    created.push(body);
+    return route.fulfill({ status: 201, json: { ok: true, bot: payload({ handle: body.handle, display_name: body.display_name, avatar: null, role: '' }, 3) } });
+  });
+  await page.setViewportSize(DESKTOP);
+  await open(page, '/', { lang: 'en' });
+  await sidebarOf(page).getByRole('button', { name: 'Add a Bot' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Add a Bot' });
+  await dialog.getByRole('textbox').first().fill('首席安全官');
+  await dialog.getByPlaceholder('e.g. Audits dependencies and permissions, and reports every Monday').fill('Audits dependencies weekly.');
+  await dialog.getByRole('button', { name: 'Choose an avatar' }).click();
+  await page.getByRole('radio', { name: '🛡️' }).click();
+  await page.keyboard.press('Escape');
+  await expect(dialog.getByText('@cso-2')).toBeVisible();
+  await dialog.getByRole('button', { name: 'Add Bot' }).click();
+  await expect(page).toHaveURL(/\/chat\/ses_cso-2$/);
+  // The model follows the main Bot unless Advanced chose one, so none is sent.
+  expect(created).toEqual([{
+    display_name: '首席安全官', handle: 'cso-2', role: 'Audits dependencies weekly.', avatar: { emoji: '🛡️', hue: 200 },
+  }]);
+  expect(denied).toEqual([]);
+});
+
 test('with more Bots than fit, the strip scrolls and Add stays pinned at the right', async ({ page }) => {
   const { denied } = await serveBots(page, 'en', [MAIN, CSO, PM, ...EXTRA]);
   await page.setViewportSize(DESKTOP);

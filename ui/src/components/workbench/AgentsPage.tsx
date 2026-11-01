@@ -2735,9 +2735,8 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
         )}
         <div className="flex-1" />
         {canEdit ? (
-          isBot ? (
-            <span className="text-[10px] text-muted">{t('bots.agents.badge')}</span>
-          ) : !system ? (
+          // A Bot's Agent cannot be deleted; the card at the top says why.
+          isBot ? null : !system ? (
             <Button
               type="button"
               variant="destructive-soft"

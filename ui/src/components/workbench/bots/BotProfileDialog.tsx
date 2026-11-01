@@ -23,7 +23,8 @@ import { BotAvatarPicker, type BotAvatarChoice } from './BotAvatarPicker';
 type HandleState =
   | { status: 'idle' }
   | { status: 'generating' }
-  | { status: 'ready'; handle: string };
+  /** `forName` is the display name the handle was generated from. */
+  | { status: 'ready'; handle: string; forName: string };
 
 /** The server's `normalize_handle`, to show the handle an existing Agent will keep. */
 function agentNameHandle(name: string): string {
@@ -128,7 +129,7 @@ const BotProfileForm: React.FC<{ request: BotProfileRequest; onClose: () => void
         .suggestBotHandle({ display_name: trimmed, role: roleValue.trim() }, { signal: controller.signal })
         .then((result) => {
           if (controller.signal.aborted) return null;
-          setHandle(result.handle ? { status: 'ready', handle: result.handle } : { status: 'idle' });
+          setHandle(result.handle ? { status: 'ready', handle: result.handle, forName: trimmed } : { status: 'idle' });
           return result.handle || null;
         })
         .catch(() => {
@@ -208,15 +209,14 @@ const BotProfileForm: React.FC<{ request: BotProfileRequest; onClose: () => void
         navigate(botSessionPath(bot));
         return;
       }
-      // A suggestion still in flight is worth its few seconds: without it the
-      // server falls back to transliteration, which reads worse for a CJK name.
+      // The handle shown for this exact name, else a fresh one: a suggestion is
+      // worth its few seconds, since without it the server falls back to
+      // transliteration, which reads worse for a CJK name.
       let chosenHandle: string | null = handleEdited ? handleDraft?.trim() || null : null;
       if (!handleEdited) {
-        chosenHandle = handle.status === 'ready'
+        chosenHandle = handle.status === 'ready' && handle.forName === trimmedName
           ? handle.handle
-          : handle.status === 'generating'
-            ? await (suggestionRef.current?.promise ?? Promise.resolve(null))
-            : null;
+          : await suggest(trimmedName, role);
       }
       let bot = await api.createBot({
         display_name: trimmedName,
@@ -301,7 +301,14 @@ const BotProfileForm: React.FC<{ request: BotProfileRequest; onClose: () => void
         maxLength={64}
         onChange={(event) => {
           nameTouchedRef.current = true;
-          setName(event.target.value);
+          const next = event.target.value;
+          setName(next);
+          // A handle made for another name is stale at once; a new one follows (D2).
+          if (creatingNew && !handleEdited) {
+            setHandle((current) => (current.status === 'ready' && current.forName === next.trim()
+              ? current
+              : next.trim() ? { status: 'generating' } : { status: 'idle' }));
+          }
         }}
         placeholder={editing?.builtin ? t('bots.mainDefaultName') : t('bots.dialog.namePlaceholder')}
         className="text-[13px]"
