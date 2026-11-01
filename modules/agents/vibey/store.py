@@ -140,7 +140,7 @@ class AdapterTranscriptStore:
             if not any(entry.session_id == session_id for entry in entries):
                 # No row of its own yet: a fork's first own input carries the notice, an empty prefix included.
                 message = await asyncio.to_thread(self._with_fork_notice, session_id, message)
-        current = {"session": session_id, **self._environment(session_id)}
+        current = self._environment(session_id)
         rendered = with_environment(message, environment_delta(previous, current))
         entry = await self._store.consume_input(session_id, message_id, rendered)
         self._env_state[session_id] = {**previous, **displayed_environment(current)}

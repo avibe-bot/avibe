@@ -1048,7 +1048,7 @@ class VibeyAgent(BaseAgent):
                     # Without a durable first-seen time, retaining a warm prefix could
                     # reset a tier-2 deadline forever. Lose the optimization, not freshness.
                     return decide(None, candidate, now=now, route=decision.state.snapshot.route,
-                                  checkpoint_seq=decision.state.snapshot.checkpoint_seq, cold=False).state
+                                  checkpoint_seq=decision.state.observed_checkpoint_seq, cold=False).state
             return decision.state
 
         state = await to_thread_joined(prepare)
@@ -1746,8 +1746,7 @@ class VibeyAgent(BaseAgent):
     def _environment(self, session_id: str) -> dict[str, EnvironmentValue]:
         runtime = self._runtimes.get(session_id)
         cwd = ((runtime.run.cwd if runtime.run is not None else "") or runtime.cwd) if runtime is not None else ""
-        fields = current_environment(cwd, self._watch_lines(session_id), shell=self._tools().shell)
-        fields["session"] = session_id
+        fields = {"session": session_id, **current_environment(cwd, self._watch_lines(session_id), shell=self._tools().shell)}
         if runtime is not None and runtime.run is not None and runtime.run.instructions_notice is not None:
             fields["instructions"] = runtime.run.instructions_notice
         return fields

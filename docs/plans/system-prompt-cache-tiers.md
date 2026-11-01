@@ -81,7 +81,9 @@ module id, each instruction file by path) and the tool definitions.
   it changed to and when it was first seen (`pending_since`). The pending
   record is written whenever it changes, independently of the applied
   snapshot, so a restart keeps the original `pending_since` and cannot extend
-  a tier-2 deadline.
+  a tier-2 deadline. It also keeps the checkpoint sequence last observed at a
+  Turn-start decision, even when the prefix stayed unchanged, so that a
+  checkpoint's refresh opportunity cannot be reused by a later warm Turn.
 - A fork copies its source's snapshot byte for byte, so its first request
   hits the source's cache. This and moving the Session id out of the system
   prompt (`agent-core-contracts/fork.md` §3) are both needed for warm forks.
@@ -100,8 +102,9 @@ holds:
    - the route's conversation cache has expired (the existing
      `_cache_cold` clock, by the route's lifetime);
    - the model or route changed;
-   - a checkpoint ran since the snapshot was applied (the context was just
-     condensed, so the re-read is small);
+   - a checkpoint ran since the previous Turn-start decision (the context
+     was just condensed, so the re-read is small); this opportunity is
+     consumed even if the prefix is unchanged, and remains consumed after a restart;
 3. a tier-2 change has been pending for at least `N` minutes.
 
 Otherwise keep the snapshot and tell the model what is pending (below).

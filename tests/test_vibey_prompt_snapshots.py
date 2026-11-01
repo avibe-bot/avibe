@@ -81,6 +81,38 @@ def test_every_free_moment_and_deadline_applies_all_changes_together(moment, kwa
     assert {item.tier for item in decision.applied} == {2, 3}
 
 
+@pytest.mark.parametrize("component_id", ["skills-catalog", "tool-environment"])
+@pytest.mark.parametrize("resume", ["restart", "fork"])
+def test_an_observed_checkpoint_cannot_refresh_changes_from_a_later_warm_turn(tmp_path, component_id, resume):
+    # A checkpoint with identical prefix bytes used to remain available forever,
+    # refreshing a later catalog/environment change after the cache had warmed.
+    store = SnapshotStore(tmp_path)
+    original = prefix(Component(component_id, "old"))
+    candidate = prefix(Component(component_id, "new"))
+    initial = choose(None, original).state
+    assert store.save("source", initial, snapshot=True)
+    snapshot_bytes = (store.directory("source") / "snapshot.json").read_bytes()
+    observed = choose(store.load("source"), original, now=101, checkpoint_seq=10)
+    assert observed.reason is None
+    assert store.save("source", observed.state, snapshot=False)
+    # An unrelated own-write receipt must not reset the observed checkpoint.
+    store.record_write("source", "/project/AGENTS.md", "written-revision")
+    assert (store.directory("source") / "snapshot.json").read_bytes() == snapshot_bytes
+    session_id = "source"
+    if resume == "fork":
+        store.inherit("source", "child")
+        session_id = "child"
+        assert (store.directory("child") / "snapshot.json").read_bytes() == snapshot_bytes
+    resumed = SnapshotStore(tmp_path).load(session_id)
+    deferred = choose(resumed, candidate, now=102, checkpoint_seq=10)
+    assert deferred.reason is None
+    assert deferred.state.snapshot == initial.snapshot
+    assert deferred.state.pending[0].pending_since == 102
+    fresh_checkpoint = choose(deferred.state, candidate, now=103, checkpoint_seq=20)
+    assert fresh_checkpoint.reason == "checkpoint"
+    assert fresh_checkpoint.state.snapshot.prefix == candidate
+
+
 def test_repeated_revisions_and_restart_cannot_extend_the_tier_two_deadline(tmp_path):
     store = SnapshotStore(tmp_path)
     initial = choose(None, prefix(Component("skills-catalog", "one"))).state
@@ -156,16 +188,22 @@ def test_missing_or_unreadable_optional_file_renders_fresh(tmp_path, filename, b
     assert store.load("session") == refreshed.state
 
 
-@pytest.mark.parametrize("field,value", [
-    ("applied_at", "bad"), ("applied_at", 10**400), ("checkpoint_seq", -1), ("route", {}), ("prefix", []),
+@pytest.mark.parametrize("filename,field,value", [
+    ("snapshot.json", "applied_at", "bad"), ("snapshot.json", "applied_at", 10**400),
+    ("snapshot.json", "checkpoint_seq", -1), ("snapshot.json", "route", {}), ("snapshot.json", "prefix", []),
+    ("pending.json", "observed_checkpoint_seq", -1), ("pending.json", "observed_checkpoint_seq", "10"),
+    ("pending.json", "observed_checkpoint_seq", None),
 ])
-def test_malformed_snapshot_fields_are_absent_not_a_turn_failure(tmp_path, field, value):
+def test_malformed_snapshot_fields_are_absent_not_a_turn_failure(tmp_path, filename, field, value):
     store = SnapshotStore(tmp_path)
     state = choose(None, prefix(Component("skills-catalog", "old"))).state
     store.save("session", state, snapshot=True)
-    path = store.directory("session") / "snapshot.json"
+    path = store.directory("session") / filename
     raw = json.loads(path.read_text())
-    raw[field] = value
+    if value is None:
+        raw.pop(field)
+    else:
+        raw[field] = value
     path.write_text(json.dumps(raw))
     assert store.load("session") is None
 

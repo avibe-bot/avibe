@@ -13,7 +13,7 @@ import logging
 import math
 import os
 import tempfile
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -134,6 +134,8 @@ class State:
     snapshot: Snapshot
     pending: tuple[Pending, ...] = ()
     written: Mapping[str, str] = field(default_factory=dict)
+    # A checkpoint is a one-Turn opportunity, even when the prefix stayed identical.
+    observed_checkpoint_seq: int = 0
 
     @property
     def notice(self) -> str:
@@ -176,9 +178,9 @@ def decide(
 ) -> Decision:
     """Replace the whole prefix, never individual components; continuous edits keep their deadline."""
     if previous is None:
-        return Decision(State(Snapshot(candidate, now, route, checkpoint_seq)), "session_start")
+        return Decision(State(Snapshot(candidate, now, route, checkpoint_seq), observed_checkpoint_seq=checkpoint_seq), "session_start")
     if previous.snapshot.route == route and previous.snapshot.prefix.revision == candidate.revision:
-        return Decision(State(previous.snapshot, written=previous.written), None)
+        return Decision(replace(previous, pending=(), observed_checkpoint_seq=checkpoint_seq), None)
     old = {item.id: item for item in previous.snapshot.prefix.components}
     fresh = {item.id: item for item in candidate.components}
     prior = {item.component: item for item in previous.pending}
@@ -208,13 +210,13 @@ def decide(
         reason = "tier1"
     elif pending and cold:
         reason = "cold"
-    elif pending and checkpoint_seq > previous.snapshot.checkpoint_seq:
+    elif pending and checkpoint_seq > previous.observed_checkpoint_seq:
         reason = "checkpoint"
     elif any(item.tier == 2 and now - item.pending_since >= DEADLINE_S for item in pending):
         reason = "deadline"
     if reason is not None:
-        return Decision(State(Snapshot(candidate, now, route, checkpoint_seq)), reason, detected, pending)
-    return Decision(State(previous.snapshot, pending, previous.written), None, detected)
+        return Decision(State(Snapshot(candidate, now, route, checkpoint_seq), observed_checkpoint_seq=checkpoint_seq), reason, detected, pending)
+    return Decision(replace(previous, pending=pending, observed_checkpoint_seq=checkpoint_seq), None, detected)
 
 
 def route_identity(endpoint: ModelEndpoint, *, agent: str = "", model: str = "", effort: str = "") -> tuple[str, ...]:
@@ -380,7 +382,8 @@ class SnapshotStore:
                 raise ValueError("invalid prompt route")
             route = tuple(_text(item) for item in raw["route"])
             seq = raw["checkpoint_seq"]
-            if type(seq) is not int or seq < 0:
+            observed_seq = waiting["observed_checkpoint_seq"]
+            if any(type(value) is not int or value < 0 for value in (seq, observed_seq)):
                 raise ValueError("invalid checkpoint seq")
             pending = []
             for item in waiting["components"]:
@@ -392,7 +395,7 @@ class SnapshotStore:
                 _number(change.pending_since)
                 pending.append(change)
             return State(Snapshot(prefix, _number(raw["applied_at"]), route, seq), tuple(pending),
-                         _strings(waiting["written"]))
+                         _strings(waiting["written"]), observed_seq)
         except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError, OverflowError):
             return None
 
@@ -406,6 +409,7 @@ class SnapshotStore:
             self._write(directory / "pending.json", {
                 "version": VERSION, "snapshot_revision": state.snapshot.prefix.revision,
                 "components": [asdict(item) for item in state.pending], "written": dict(state.written),
+                "observed_checkpoint_seq": state.observed_checkpoint_seq,
             })
             return True
         except (OSError, ValueError, TypeError, RecursionError, OverflowError):
@@ -420,7 +424,7 @@ class SnapshotStore:
         state = self.load(session_id)
         if state is not None:
             written = {**state.written, path: revision}
-            self.save(session_id, State(state.snapshot, state.pending, written), snapshot=False)
+            self.save(session_id, replace(state, written=written), snapshot=False)
 
     def inherit(self, source: str, target: str) -> None:
         """Copy at reservation, not first use (the source may advance before then)."""
@@ -432,7 +436,7 @@ class SnapshotStore:
             # plus the revision link makes a concurrent source update degrade to fresh.
             data = (self.directory(source) / "snapshot.json").read_bytes()
             self._write_bytes(self.directory(target) / "snapshot.json", data)
-            self.save(target, State(state.snapshot, state.pending), snapshot=False)
+            self.save(target, replace(state, written={}), snapshot=False)
         except (OSError, ValueError):
             logger.warning("Could not inherit optional prompt snapshot for Session %s", target)
 
