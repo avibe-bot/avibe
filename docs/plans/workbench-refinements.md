@@ -285,14 +285,17 @@ it is still delivered, listed, and unread.
   running Activity card stays at the transcript tail, outside the group. If
   that Turn ends without a reply its chip joins the group; if it replies, the
   reply closes the group.
-- A single row that becomes a run of two forms a collapsed group, unless that
-  row was expanded, in which case the group starts expanded.
+- A single row that becomes a run of two forms a collapsed group. A row the
+  reader had opened folds with it; its own expansion is not carried over.
 - Unread: Harness inputs are never unread (only `result` is), so groups carry no
   unread mark and change no counts. Opening a Session still lands at the tail.
 - Scroll: toggling keeps the group header in place (the existing anchor logic);
   a reader following the tail stays pinned; a jump or search target inside a
   group expands that group before scrolling and highlights the row; older pages
-  prepended above can grow a group at its top.
+  prepended above can grow a group at its top. A group keeps its element as it
+  grows at either end, so a scroll anchor held on it survives, and the anchor
+  search accepts a row that stands for several messages
+  (`data-transcript-row`).
 - State: the set of expanded member ids, in memory for the open Session. A
   group is expanded when any member is in the set, so growth at either end
   keeps its state. Nothing is persisted.
@@ -301,8 +304,12 @@ it is still delivered, listed, and unread.
 
 ### Code that changes
 
-- `ChatPage.tsx` `Transcript`: render items instead of raw messages, route the
-  members' after-chips into their group, and expand on jump.
-- A new `HarnessGroup` component reusing the Harness row and `ActivityChip`; a
-  new `ui/src/lib/harnessGroups.ts` with unit tests for the break rules, the
-  first-message rule, live growth, and anchor routing; `en`/`zh` strings.
+- `ChatPage.tsx` `Transcript`: render items instead of raw messages; an open
+  group draws its members, with their Activity chips, through the same row
+  rendering as any other row; expand on jump.
+- `ui/src/lib/harnessGroups.ts`: `groupHarnessRuns` and
+  `stableHarnessGroupKeys`, with unit tests for the break rules, the
+  first-message rule, and key stability.
+- A new `HarnessGroup` component for the group head and the collapsed stack;
+  `ui/src/lib/transcriptScrollAnchor.ts` accepts `data-transcript-row`;
+  `en`/`zh` strings.
