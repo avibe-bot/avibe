@@ -281,7 +281,7 @@ export const AgentsPage: React.FC = () => {
   tRef.current = t;
   const api = useApi();
   const { showToast } = useToast();
-  const { refresh: refreshBots } = useBots();
+  const { afterWrite: afterBotWrite } = useBots();
   const {
     capabilities,
   } = useInstanceAuthorization();
@@ -1353,10 +1353,9 @@ export const AgentsPage: React.FC = () => {
     let mutationSettled = false;
     try {
       const result = await api.updateVibeAgent(name, patch);
-      // A Bot's role is its Agent's description (docs/plans/bots.md D1), and an
-      // Agent write publishes no Bot event: read the Bots again so the strip, its
-      // card, and Edit profile show what was saved.
-      if (result.ok && isBot && 'description' in patch) void refreshBots();
+      // A Bot's role is its Agent's description (docs/plans/bots.md D1): the strip,
+      // its card, and Edit profile show what was saved once the Bots are read again.
+      if (result.ok && isBot && 'description' in patch) void afterBotWrite();
       const settled = await settleSelectedMutation(operation, result.ok ? undefined : result);
       mutationSettled = true;
       if (!settled.ok) throw settled.error;

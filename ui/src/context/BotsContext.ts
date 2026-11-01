@@ -27,7 +27,10 @@ export interface BotsState {
   botForHandle: (handle: string | null | undefined) => Bot | undefined;
   /** The name a Bot goes by, with the main Bot's localized default. */
   displayName: (bot: Bot) => string;
-  refresh: () => Promise<void>;
+  /** Call after this page writes a Bot or a Bot's Agent. Every such write
+   *  publishes `bots.changed` once it commits, and that event is the one refetch;
+   *  only while the event stream is not live does this read the list itself. */
+  afterWrite: () => Promise<void>;
   /** Move a Bot (not the main one) to `position` (1-based among the others),
    *  optimistically; resolves false when the server refused it. */
   moveBot: (handle: string, position: number) => Promise<boolean>;
@@ -50,7 +53,7 @@ const EMPTY: BotsState = {
   botForAgent: () => undefined,
   botForHandle: () => undefined,
   displayName: (bot) => bot.display_name || bot.handle,
-  refresh: async () => undefined,
+  afterWrite: async () => undefined,
   moveBot: async () => false,
   openProfile: () => undefined,
   profileRequest: null,

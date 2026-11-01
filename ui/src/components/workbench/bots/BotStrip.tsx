@@ -209,7 +209,7 @@ const BotSlot: React.FC<BotSlotProps & { drag?: SlotDrag }> = ({ bot, name, unre
   const navigate = useNavigate();
   const location = useLocation();
   const { showToast } = useToast();
-  const { openProfile, refresh } = useBots();
+  const { openProfile, afterWrite } = useBots();
   const authorizeRouteAction = useUnsavedChangesActionGuard();
   const path = botSessionPath(bot);
   const selected = location.pathname === path;
@@ -298,7 +298,7 @@ const BotSlot: React.FC<BotSlotProps & { drag?: SlotDrag }> = ({ bot, name, unre
     } catch (err) {
       showToast(errorMessage(err) || t('bots.removeFailed'), 'error');
     } finally {
-      void refresh();
+      void afterWrite();
     }
   };
 

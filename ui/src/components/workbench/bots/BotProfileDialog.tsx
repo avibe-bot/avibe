@@ -65,7 +65,7 @@ const BotProfileForm: React.FC<{ request: BotProfileRequest; onClose: () => void
   const api = useApi();
   const navigate = useNavigate();
   const { showToast } = useToast();
-  const { mainBot, botForHandle, displayName, refresh } = useBots();
+  const { mainBot, botForHandle, displayName, afterWrite } = useBots();
   const editing = request.kind === 'edit' ? botForHandle(request.handle) ?? null : null;
   const [tab, setTab] = useState<'new' | 'agent'>(request.kind === 'create' ? request.tab ?? 'new' : 'new');
   const [agents, setAgents] = useState<VibeAgentBrief[] | null>(null);
@@ -218,7 +218,7 @@ const BotProfileForm: React.FC<{ request: BotProfileRequest; onClose: () => void
         if (!editing.builtin && role.trim() !== editing.role.trim()) {
           await api.updateVibeAgent(editing.agent_name, { description: role.trim() || null });
         }
-        await refresh();
+        await afterWrite();
         onClose();
         return;
       }
@@ -229,7 +229,7 @@ const BotProfileForm: React.FC<{ request: BotProfileRequest; onClose: () => void
         }
         let bot = await api.setBot({ agent_name: pickedAgent.name, display_name: trimmedName, avatar: emojiInput });
         bot = await uploadAvatar(bot);
-        await refresh();
+        await afterWrite();
         onClose();
         navigate(botSessionPath(bot));
         return;
@@ -267,7 +267,7 @@ const BotProfileForm: React.FC<{ request: BotProfileRequest; onClose: () => void
         ...(route ? { model: route.model, reasoning_effort: route.reasoning_effort } : {}),
       });
       bot = await uploadAvatar(bot);
-      await refresh();
+      await afterWrite();
       onClose();
       navigate(botSessionPath(bot));
     } catch (err) {
