@@ -69,6 +69,8 @@ import { FailureRetry, type FailureRetryOptions } from './FailureRetry';
 import { FailureNextStep } from './FailureNextStep';
 import { AGENT_BUBBLE, SYSTEM_BUBBLE, USER_BUBBLE } from './chatBubble';
 import { RoleAvatar } from './RoleAvatar';
+import { HARNESS_GROUP_RAIL, HarnessGroup, HarnessGroupCollapse } from './HarnessGroup';
+import { groupHarnessRuns, stableHarnessGroupKeys } from '../../lib/harnessGroups';
 import { SenderHead } from './SenderHead';
 import { useFileDrop } from '../../lib/useFileDrop';
 import { quoteText } from '../../lib/quoteText';
@@ -4289,6 +4291,75 @@ export const Transcript: React.FC<TranscriptProps> = ({
         onToggleTools={activity.onToggleTools}
       />
     ) : null;
+  // Runs of Harness input fold into one group (docs/plans/workbench-refinements.md
+  // §3). Which groups are open is this page's memory for the open Session only:
+  // a group is open while any of its members is in the set, so it stays open as
+  // it grows at either end, and a Session switch starts every group collapsed.
+  const transcriptItems = useMemo(() => groupHarnessRuns(messages, { hasOlder }), [messages, hasOlder]);
+  // Group keys carried from the previous grouping, so a group keeps its element
+  // as it grows (see ``stableHarnessGroupKeys``). Updated during render, the
+  // React pattern for state derived from the previous render's state.
+  const [harnessKeys, setHarnessKeys] = useState(() => ({
+    items: transcriptItems,
+    keys: stableHarnessGroupKeys(transcriptItems, new Map()),
+  }));
+  let harnessGroupKeys = harnessKeys.keys;
+  if (harnessKeys.items !== transcriptItems) {
+    harnessGroupKeys = stableHarnessGroupKeys(transcriptItems, harnessKeys.keys);
+    setHarnessKeys({ items: transcriptItems, keys: harnessGroupKeys });
+  }
+  const [openHarness, setOpenHarness] = useState<{ sessionId: string; ids: ReadonlySet<string> }>(
+    () => ({ sessionId: session.id, ids: new Set() }),
+  );
+  const openHarnessIds = openHarness.sessionId === session.id ? openHarness.ids : null;
+  const setHarnessGroupOpen = useCallback(
+    (memberIds: readonly string[], open: boolean) => {
+      setOpenHarness((prev) => {
+        const ids = new Set(prev.sessionId === session.id ? prev.ids : []);
+        for (const id of memberIds) {
+          if (open) ids.add(id);
+          else ids.delete(id);
+        }
+        return { sessionId: session.id, ids };
+      });
+    },
+    [session.id],
+  );
+  // A deep link or search hit opens the group it lands in, in the render that
+  // carries it (so the jump below finds the row) and for good: the target joins
+  // the open set, and a group is open while any member is in it.
+  if (jumpTarget && !openHarnessIds?.has(jumpTarget)) setHarnessGroupOpen([jumpTarget], true);
+  // One transcript row with the Activity chips positioned relative to it: 'before'
+  // it (done/failed, hugging the reply from above) and 'after' it (interrupted, or
+  // a Turn that did not reply, just below its trigger). A Harness group draws its
+  // members through this too, so an opened member looks exactly as it would alone.
+  const renderTranscriptRow = (message: WorkbenchMessage, index: number) => {
+    const before = activity?.enabled ? activity.beforeAnchor.get(message.id) : undefined;
+    const after = activity?.enabled ? activity.afterAnchor.get(message.id) : undefined;
+    // A reply keeps the Agent that wrote it, which a switch may have replaced.
+    const author = message.author === 'agent' ? messageAuthorAgent(message, agents) : null;
+    return (
+      <>
+        {before?.map((group) => renderActivityChip(group))}
+        <MessageRow
+          message={message}
+          session={session}
+          agentDisplayName={author ? author.displayName : agentDisplayName}
+          agentBackend={author?.backend ?? agentBackend}
+          messageFontSize={messageFontSize}
+          onQuickReply={onQuickReply}
+          onFailureRetry={onFailureRetry}
+          retryDisabled={working || index < latestRetryBoundary}
+          vaultRequests={provisionRequestsByMessage.get(message.id)}
+          onVaultRequestResolved={onVaultRequestResolved}
+          onOpenLocalFile={openLocalFile}
+          readOnly={readOnly}
+          highlighted={message.id === highlightedId}
+        />
+        {after?.map((group) => renderActivityChip(group))}
+      </>
+    );
+  };
   const empty = messages.length === 0 && !working;
   // The end-of-history line answers "why did paging stop?" — a question only a
   // reader who actually scrolled can have asked. A chat that fits the viewport
@@ -4632,35 +4703,29 @@ export const Transcript: React.FC<TranscriptProps> = ({
           ) : null}
           {/* Degenerate null-anchor groups render at the TOP (never the tail). */}
           {activity?.enabled && activity.topGroups.map((group) => renderActivityChip(group))}
-          {messages.map((message, index) => {
-            // Agent Activity chips positioned relative to THIS row: 'before' it
-            // (done/failed, hugging the reply from above) and 'after' it (interrupted,
-            // just below the turn's trigger).
-            const before = activity?.enabled ? activity.beforeAnchor.get(message.id) : undefined;
-            const after = activity?.enabled ? activity.afterAnchor.get(message.id) : undefined;
-            // A reply keeps the Agent that wrote it, which a switch may have replaced.
-            const author = message.author === 'agent' ? messageAuthorAgent(message, agents) : null;
-            return (
-              <Fragment key={message.id}>
-                {before?.map((group) => renderActivityChip(group))}
-                <MessageRow
-                  message={message}
-                  session={session}
-                  agentDisplayName={author ? author.displayName : agentDisplayName}
-                  agentBackend={author?.backend ?? agentBackend}
-                  messageFontSize={messageFontSize}
-                  onQuickReply={onQuickReply}
-                  onFailureRetry={onFailureRetry}
-                  retryDisabled={working || index < latestRetryBoundary}
-                  vaultRequests={provisionRequestsByMessage.get(message.id)}
-                  onVaultRequestResolved={onVaultRequestResolved}
-                  onOpenLocalFile={openLocalFile}
-                  readOnly={readOnly}
-                  highlighted={message.id === highlightedId}
-                />
-                {after?.map((group) => renderActivityChip(group))}
-              </Fragment>
-            );
+          {transcriptItems.map((item) => {
+            if (item.kind === 'harnessGroup') {
+              const memberIds = item.members.map(({ message }) => message.id);
+              const open = memberIds.some((id) => openHarnessIds?.has(id) || id === jumpTarget);
+              const key = harnessGroupKeys.get(memberIds[0]) ?? memberIds[0];
+              const toggle = () => setHarnessGroupOpen(memberIds, !open);
+              return (
+                <Fragment key={key}>
+                  <HarnessGroup
+                    members={item.members.map(({ message }) => message)}
+                    expanded={open}
+                    onToggle={toggle}
+                  />
+                  {open && item.members.map(({ message, index }) => (
+                    <div key={message.id} className={clsx(HARNESS_GROUP_RAIL, 'flex flex-col gap-3')}>
+                      {renderTranscriptRow(message, index)}
+                    </div>
+                  ))}
+                  {open && <HarnessGroupCollapse count={memberIds.length} onCollapse={toggle} />}
+                </Fragment>
+              );
+            }
+            return <Fragment key={item.message.id}>{renderTranscriptRow(item.message, item.index)}</Fragment>;
           })}
           {/* The transcript TAIL is reserved exclusively for the live running card
               (or the ThinkingBubble fallback) — never a settled/interrupted chip. */}

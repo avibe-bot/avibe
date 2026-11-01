@@ -92,6 +92,20 @@ describe('pickScrollAnchor', () => {
     });
   });
 
+  // A collapsed Harness group stands for several messages in one element. At the
+  // head of the window it is the row a prepend pushes down, so skipping it as
+  // chrome would anchor the reader to whatever sits below it instead.
+  it('counts a row that stands for several messages as the first row', () => {
+    const group = chrome({ top: -8, height: 70 });
+    group.dataset.transcriptRow = '';
+    const nextRow = row({ top: 74, height: 60, id: 'm9' });
+
+    expect(pickScrollAnchor([chrome({ top: -40, height: 32 }), group, nextRow], CONTAINER_TOP)).toEqual({
+      el: group,
+      top: -8,
+    });
+  });
+
   it('measures against the container top rather than the viewport', () => {
     const offscreenAboveContainer = row({ top: 100, height: 40, id: 'm1' });
     const firstVisible = row({ top: 152, height: 60, id: 'm2' });

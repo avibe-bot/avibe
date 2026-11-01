@@ -23,7 +23,14 @@
 // search starts at the first message row and never looks above it. Chrome added
 // above the transcript later is excluded by construction instead of by someone
 // remembering to mark it.
+//
+// A row is a message row (``data-message-id``) or a row standing for several of
+// them (``data-transcript-row``): a collapsed Harness group is one element for
+// many messages, and it moves with a prepend exactly as the rows it holds would.
 export type ScrollAnchor = { el: HTMLElement; top: number };
+
+const isTranscriptRow = (el: HTMLElement): boolean =>
+  el.dataset.messageId !== undefined || el.dataset.transcriptRow !== undefined;
 
 export const pickScrollAnchor = (
   children: readonly HTMLElement[],
@@ -31,7 +38,7 @@ export const pickScrollAnchor = (
 ): ScrollAnchor | null => {
   // Everything before the first row holds still while the content grows above it,
   // so it can never restore anything.
-  const firstRow = children.findIndex((child) => child.dataset.messageId !== undefined);
+  const firstRow = children.findIndex(isTranscriptRow);
   if (firstRow < 0) return null;
   for (let i = firstRow; i < children.length; i += 1) {
     const child = children[i];

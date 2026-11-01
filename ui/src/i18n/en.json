@@ -5139,6 +5139,13 @@
     },
     "retryFailed": "Could not request retry. You can try again safely.",
     "collapse": "Collapse",
+    "harnessGroup": {
+      "count": "{{count}} Harness messages",
+      "latest": "Latest",
+      "sourceCount": "· {{label}} {{n}}",
+      "expand": "Expand",
+      "collapseCount": "Collapse these {{count}}"
+    },
     "turnInProgress": "A turn is already running — wait for the reply.",
     "stopFailed": "Couldn't reach the agent to stop it — it may still be running.",
     "source": {

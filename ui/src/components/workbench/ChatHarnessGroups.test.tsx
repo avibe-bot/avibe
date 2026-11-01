@@ -1,0 +1,187 @@
+/** @vitest-environment jsdom */
+
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { MemoryRouter } from 'react-router-dom';
+import { createRef, type ComponentProps } from 'react';
+
+vi.mock('react-i18next', () => ({
+  useTranslation: () => ({
+    t: (key: string, options?: { count?: number }) => (options?.count === undefined ? key : `${key}:${options.count}`),
+  }),
+}));
+vi.mock('../../context/ApiContext', () => ({ useApi: () => ({}) }));
+vi.mock('../../context/ToastContext', () => ({ useToast: () => ({ showToast: vi.fn() }) }));
+vi.mock('../../context/InstanceAuthorizationContext', () => ({
+  useInstanceAuthorization: () => ({
+    capabilities: { can_chat: true, can_manage_instance: false, can_use_show_pages: false, can_use_vault_secrets: false },
+  }),
+}));
+vi.mock('../../context/WindowManagerContext', () => ({
+  useWindowManager: () => ({ focusedId: null, focusCanvas: vi.fn() }),
+}));
+vi.mock('../../lib/useIsDesktop', () => ({ isDesktopViewport: () => false, useIsDesktop: () => false }));
+vi.mock('./Composer', () => ({ Composer: () => null }));
+
+import { Transcript } from './ChatPage';
+import type { WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
+import type { ActivityGroup } from '../../lib/agentActivity';
+
+type Props = ComponentProps<typeof Transcript>;
+
+let clock = 0;
+const message = (id: string, over: Partial<WorkbenchMessage>): WorkbenchMessage =>
+  ({
+    id,
+    session_id: 'session-1',
+    platform: 'avibe',
+    content: {},
+    metadata: {},
+    created_at: new Date(Date.UTC(2026, 9, 30, 4, 0, clock++)).toISOString(),
+    ...over,
+  }) as WorkbenchMessage;
+const watch = (id: string) =>
+  message(id, { author: 'harness', source: 'harness', type: 'harness', author_name: 'watch', text: `Watch ${id} finished` });
+const userMessage = (id: string) => message(id, { author: 'user', source: 'user', type: 'user', text: `User ${id}` });
+const reply = (id: string) => message(id, { author: 'agent', source: 'agent', type: 'result', text: `Reply ${id}` });
+
+const chip = (id: string, anchorMessageId: string, anchorPosition: 'before' | 'after'): ActivityGroup => ({
+  id,
+  anchorMessageId,
+  anchorPosition,
+  open: false,
+  status: 'done',
+  steps: 3,
+  durationMs: 1000,
+});
+
+const activity = (groups: ActivityGroup[]): NonNullable<Props['activity']> => {
+  const before = new Map<string, ActivityGroup[]>();
+  const after = new Map<string, ActivityGroup[]>();
+  for (const group of groups) (group.anchorPosition === 'before' ? before : after).set(group.anchorMessageId!, [group]);
+  return {
+    enabled: true,
+    beforeAnchor: before,
+    afterAnchor: after,
+    topGroups: [],
+    liveRows: [],
+    liveStartedAt: null,
+    cardExpanded: false,
+    onToggleCard: vi.fn(),
+    expanded: {},
+    loading: {},
+    error: {},
+    onToggleGroup: vi.fn(),
+    onRetryGroup: vi.fn(),
+    showToolCalls: false,
+    onToggleTools: vi.fn(),
+  };
+};
+
+const renderTranscript = (over: Partial<Props>) => {
+  const props: Props = {
+    messages: [],
+    session: { id: 'session-1', title: 'Session', agent_name: null, archived_at: null } as WorkbenchSession,
+    agentDisplayName: null,
+    working: false,
+    hasOlder: false,
+    loadingOlder: false,
+    onLoadOlder: vi.fn().mockResolvedValue(true),
+    needsLatestReload: false,
+    onReloadLatest: vi.fn().mockResolvedValue(true),
+    jumpTarget: null,
+    onJumpHandled: vi.fn(),
+    highlightedId: null,
+    messageFontSize: 14,
+    onQuickReply: vi.fn(),
+    provisionRequestsByMessage: new Map(),
+    onVaultRequestResolved: vi.fn(),
+    onQuoteSelection: vi.fn(),
+    onAskInNewSession: vi.fn(),
+    readOnly: false,
+    followingTailRef: createRef<boolean>() as React.MutableRefObject<boolean>,
+    ...over,
+  };
+  const view = render(<MemoryRouter><Transcript {...props} /></MemoryRouter>);
+  const rerender = (next: Partial<Props>) => {
+    Object.assign(props, next);
+    view.rerender(<MemoryRouter><Transcript {...props} /></MemoryRouter>);
+  };
+  return { ...view, rerender };
+};
+
+const groupToggle = (count: number) => screen.getByRole('button', { name: `chat.harnessGroup.count:${count}` });
+const rendered = (id: string) => document.querySelector(`[data-message-id="${id}"]`);
+
+describe('transcript Harness groups', () => {
+  beforeEach(() => {
+    clock = 0;
+    vi.stubGlobal('CSS', { escape: (value: string) => value });
+    vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
+    vi.stubGlobal('IntersectionObserver', class { observe() {} disconnect() {} unobserve() {} });
+    vi.stubGlobal('requestAnimationFrame', () => 0);
+    vi.stubGlobal('cancelAnimationFrame', () => {});
+  });
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it('folds a run with its silent Turns and opens it in place', () => {
+    const brief = watch('brief');
+    const members = [watch('h1'), watch('h2'), watch('h3')];
+    const answer = reply('r1');
+    renderTranscript({
+      messages: [brief, ...members, answer],
+      activity: activity([chip('silent-1', 'h1', 'after'), chip('answering', 'r1', 'before')]),
+    });
+
+    // The Session's opening brief stays its own row; the three after it fold.
+    expect(rendered('brief')).toBeTruthy();
+    const toggle = groupToggle(3);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(toggle.textContent).toContain('Watch h3 finished');
+    for (const { id } of members) expect(rendered(id)).toBeNull();
+    // A silent Turn's chip folds with its trigger; the reply's own chip does not.
+    expect(screen.getAllByText(/chat\.agentActivity\.label/)).toHaveLength(1);
+
+    fireEvent.click(toggle);
+    expect(groupToggle(3).getAttribute('aria-expanded')).toBe('true');
+    for (const { id } of members) expect(rendered(id)).toBeTruthy();
+    expect(screen.getAllByText(/chat\.agentActivity\.label/)).toHaveLength(2);
+
+    fireEvent.click(screen.getByRole('button', { name: /chat\.harnessGroup\.collapseCount:3/ }));
+    for (const { id } of members) expect(rendered(id)).toBeNull();
+  });
+
+  it('grows in place as Harness messages arrive and as older ones load', () => {
+    const view = renderTranscript({ messages: [userMessage('u1'), watch('h3'), watch('h4')], hasOlder: true });
+    const row = groupToggle(2).closest('[data-transcript-row]');
+
+    view.rerender({ messages: [userMessage('u1'), watch('h3'), watch('h4'), watch('h5')] });
+    expect(groupToggle(3).getAttribute('aria-expanded')).toBe('false');
+    expect(groupToggle(3).textContent).toContain('Watch h5 finished');
+    // The same element, so a scroll anchor held on it survives the growth.
+    expect(groupToggle(3).closest('[data-transcript-row]')).toBe(row);
+
+    fireEvent.click(groupToggle(3));
+    view.rerender({ messages: [watch('h1'), watch('h2'), watch('h3'), watch('h4'), watch('h5'), watch('h6')] });
+    expect(groupToggle(6).getAttribute('aria-expanded')).toBe('true');
+    expect(groupToggle(6).closest('[data-transcript-row]')).toBe(row);
+    expect(rendered('h1')).toBeTruthy();
+    expect(rendered('h6')).toBeTruthy();
+  });
+
+  it('opens the group a jump lands in and keeps it open afterwards', () => {
+    const messages = [userMessage('u1'), watch('h1'), watch('h2'), watch('h3'), reply('r1')];
+    const view = renderTranscript({ messages });
+    expect(rendered('h2')).toBeNull();
+
+    act(() => view.rerender({ jumpTarget: 'h2', highlightedId: 'h2' }));
+    expect(rendered('h2')).toBeTruthy();
+
+    act(() => view.rerender({ jumpTarget: null, highlightedId: null }));
+    expect(rendered('h2')).toBeTruthy();
+    expect(groupToggle(3).getAttribute('aria-expanded')).toBe('true');
+  });
+});
