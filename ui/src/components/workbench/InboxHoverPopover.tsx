@@ -7,6 +7,7 @@ import clsx from 'clsx';
 import type { InboxSession } from '../../context/ApiContext';
 import { useBots } from '../../context/BotsContext';
 import { useNotificationPreferences } from '../../context/NotificationPreferencesContext';
+import { useBotRoster } from '../../context/BotRosterContext';
 import { writeInboxFilter } from '../../lib/inboxFilterMemory';
 import { inboxCategory, isCategoryLoud, type InboxCategory } from '../../lib/notificationPreferences';
 import { formatRelativeTime } from '../../lib/relativeTime';
@@ -85,6 +86,7 @@ export const InboxHoverPopover: React.FC<{
   const navigate = useNavigate();
   const { enabled: hasBots, botForSession, displayName: botName } = useBots();
   const { preferences } = useNotificationPreferences();
+  const { roster } = useBotRoster();
   const { mode, icon: BellIcon } = useNotificationMode();
   const [view, setView] = useState<'inbox' | 'notifications'>('inbox');
   // The unread map is authoritative; a session absent from it has 0 unread
@@ -96,14 +98,15 @@ export const InboxHoverPopover: React.FC<{
       return [{ rows: peek(sessions, unreadBySession, PEEK_ROWS), limit: PEEK_ROWS, unreadSessions, unread: totalUnread }];
     }
     return (['bot', 'session'] as const).flatMap((category) => {
-      const rows = sessions.filter((s) => inboxCategory(s.session_id) === category);
-      const unreadIds = Object.entries(unreadBySession).filter(([id, n]) => n > 0 && inboxCategory(id) === category);
+      const rows = sessions.filter((s) => inboxCategory(s.session_id, roster.sessionIds) === category);
+      const unreadIds = Object.entries(unreadBySession)
+        .filter(([id, n]) => n > 0 && inboxCategory(id, roster.sessionIds) === category);
       const unread = unreadIds.reduce((sum, [, n]) => sum + n, 0);
       // A section with nothing in it says nothing; Bots appear once one has spoken.
       if (category === 'bot' && rows.length === 0 && unread === 0) return [];
       return [{ category, rows: peek(rows, unreadBySession, SECTION_ROWS), limit: SECTION_ROWS, unreadSessions: unreadIds.length, unread }];
     });
-  }, [hasBots, sessions, unreadBySession, unreadSessions, totalUnread]);
+  }, [hasBots, roster.sessionIds, sessions, unreadBySession, unreadSessions, totalUnread]);
 
   const openFullInbox = (filter?: 'unread') => {
     // The Inbox page resolves its tab from this store on entry, so writing it
@@ -253,7 +256,7 @@ export const InboxHoverPopover: React.FC<{
               const unreadShown = section.rows.filter((s) => unreadOf(s) > 0).length;
               const unreadBeyondPeek = unreadShown < section.limit && section.unreadSessions > unreadShown;
               return (
-                <div key={section.category ?? 'all'} className="flex flex-col gap-1">
+                <section key={section.category ?? 'all'} className="flex flex-col gap-1">
                   {index > 0 && <div className="mx-1 mb-1 h-px bg-border" />}
                   {section.category && (
                     <InboxSectionHeader category={section.category} unread={section.unread} quiet={quiet} className="px-1" />
@@ -268,7 +271,7 @@ export const InboxHoverPopover: React.FC<{
                       {t('workbench.inbox.moreUnreadInFull')}
                     </button>
                   )}
-                </div>
+                </section>
               );
             })
           )}

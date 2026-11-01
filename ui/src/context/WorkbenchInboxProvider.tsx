@@ -5,6 +5,7 @@ import { useApi } from './ApiContext';
 import type { InboxSession } from './ApiContext';
 import { WorkbenchInboxContext, type InboxState } from './WorkbenchInboxContext';
 import { useNotificationPreferences } from './NotificationPreferencesContext';
+import { useBotRoster } from './BotRosterContext';
 import { badgeTotal as loudUnread, unreadByCategory as splitUnread } from '../lib/notificationPreferences';
 import { sessionActivityInboxAction } from '../lib/inboxActivity';
 import { syncFaviconBadge } from '../lib/faviconBadge';
@@ -942,12 +943,17 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     [unreadBySession],
   );
   // The badges outside the app count only categories whose notifications are on.
-  // They wait for the switches as they wait for the map: before either is known,
-  // a badge the push worker set while the app was closed is the better number.
+  // They wait for the switches and the Bot list as they wait for the map: before
+  // all three are known, a badge the push worker set while the app was closed is
+  // the better number.
   const { preferences, loaded: preferencesLoaded } = useNotificationPreferences();
-  const unreadByCategory = useMemo(() => splitUnread(unreadBySession), [unreadBySession]);
+  const { roster } = useBotRoster();
+  const unreadByCategory = useMemo(
+    () => splitUnread(unreadBySession, roster.sessionIds),
+    [unreadBySession, roster.sessionIds],
+  );
   const badgeTotal = useMemo(() => loudUnread(unreadByCategory, preferences), [unreadByCategory, preferences]);
-  const badgeKnown = unreadLoaded && preferencesLoaded;
+  const badgeKnown = unreadLoaded && preferencesLoaded && roster.known;
 
   // Mirror the badge total onto the installed PWA's home-screen icon badge so
   // the icon matches the in-app Inbox badge. The push service worker (push-sw.js)

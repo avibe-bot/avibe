@@ -52,6 +52,7 @@ import { ThemeProvider } from './context/ThemeProvider';
 import { VaultSandboxAppearanceBridge } from './components/VaultSandboxAppearanceBridge';
 import { WorkbenchInboxProvider } from './context/WorkbenchInboxProvider';
 import { NotificationPreferencesProvider } from './context/NotificationPreferencesProvider';
+import { BotRosterProvider } from './context/BotRosterProvider';
 import { WorkbenchProjectsProvider } from './context/WorkbenchProjectsProvider';
 import { ComposerBridgeProvider } from './context/ComposerBridgeProvider';
 import { UnsavedChangesProvider } from './context/UnsavedChangesProvider';
@@ -878,6 +879,7 @@ function App() {
         <ToastProvider>
           <ApiProvider>
             <NotificationPreferencesProvider>
+            <BotRosterProvider>
             <WorkbenchInboxProvider>
               <WorkbenchProjectsProvider>
                 <ComposerBridgeProvider>
@@ -886,6 +888,7 @@ function App() {
                 </ComposerBridgeProvider>
               </WorkbenchProjectsProvider>
             </WorkbenchInboxProvider>
+            </BotRosterProvider>
             </NotificationPreferencesProvider>
           </ApiProvider>
         </ToastProvider>

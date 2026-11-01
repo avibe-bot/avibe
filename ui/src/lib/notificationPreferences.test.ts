@@ -7,6 +7,7 @@ import {
   parseNotificationPreferences,
   unreadByCategory,
 } from './notificationPreferences';
+import badgeFixture from './notificationBadge.fixture.json';
 
 const ALL_ON = DEFAULT_NOTIFICATION_PREFERENCES;
 const BOTS_ONLY = { enabled: true, bots: true, sessions: false };
@@ -15,12 +16,21 @@ const MASTER_OFF = { enabled: false, bots: true, sessions: true };
 
 describe('notification preferences', () => {
   // Two Bot replies in the main Bot's and a colleague's conversation, nine in
-  // ordinary Sessions (generated ids never carry `_`).
-  const unread = { ses_main: 1, ses_cso: 1, sesa1b2c3d4e5: 4, sesz9y8x7w6v5: 5, sesq1w2e3r4t5: 0 };
-  const counts = unreadByCategory(unread);
+  // ordinary Sessions, one of them a removed Bot's.
+  const unread = { ses_main: 1, ses_cso: 1, ses_retired: 4, sesz9y8x7w6v5: 5, sesq1w2e3r4t5: 0 };
+  const counts = unreadByCategory(unread, new Set(['ses_main', 'ses_cso']));
 
-  it('splits unread into Bot conversations and ordinary Sessions by Session id', () => {
+  it("splits unread by the live Bot list, not by the id's prefix", () => {
     expect(counts).toEqual({ bot: 2, session: 9 });
+  });
+
+  // The same fixture runs against the server's split_unread_counts and badge_total
+  // (tests/test_notification_badge_parity.py), so the sidebar number and the app
+  // icon or Dock badge the server computes cannot follow different rules.
+  it.each(badgeFixture.cases)('computes the server\'s badge_total from the same data ($name)', (fixture) => {
+    const split = unreadByCategory(badgeFixture.unread_by_session, new Set(fixture.bot_session_ids));
+    expect(split).toEqual(fixture.unread_by_category);
+    expect(badgeTotal(split, fixture.preferences)).toBe(fixture.badge_total);
   });
 
   it.each([

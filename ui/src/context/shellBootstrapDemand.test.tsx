@@ -23,6 +23,7 @@ import {
 } from './WorkbenchProjectsContext';
 import type { WorkbenchEventHandlers } from './ApiContext';
 import { NotificationPreferencesContext, type NotificationPreferencesState } from './NotificationPreferencesContext';
+import { BotRosterContext, UNKNOWN_BOT_ROSTER, type BotRoster } from './BotRosterContext';
 
 const project = {
   id: 'proj_a',
@@ -819,7 +820,7 @@ describe('Demand-driven shell bootstrap', () => {
       }
     });
 
-    it('badges only categories whose notifications are on, once the switches are known', async () => {
+    it('badges only categories whose notifications are on, once the switches and the Bot list are known', async () => {
       const originalSetBadge = Object.getOwnPropertyDescriptor(navigator, 'setAppBadge');
       const originalClearBadge = Object.getOwnPropertyDescriptor(navigator, 'clearAppBadge');
       const setAppBadge = vi.fn(async () => {});
@@ -828,19 +829,23 @@ describe('Demand-driven shell bootstrap', () => {
       Object.defineProperty(navigator, 'clearAppBadge', { configurable: true, value: clearAppBadge });
 
       try {
-        // Two unread replies from a Bot, five from an ordinary Session.
+        // Two unread replies from a Bot; five from an ordinary Session and three
+        // from a removed Bot's, which the server counts as a Session too.
         const listInbox = vi.fn(async (_args: ListInboxArgs) => ({
           sessions: [],
           next_cursor: null,
-          unread_by_session: { ses_cso: 2, sesa1b2c3d4e5: 5 },
+          unread_by_session: { ses_cso: 2, sesa1b2c3d4e5: 5, ses_retired: 3 },
         }));
         apiRef.current = { listInbox, connectWorkbenchEvents: vi.fn(() => vi.fn()) };
-        const tree = (preferences: NotificationPreferencesState) => (
-          <NotificationPreferencesContext.Provider value={preferences}>
-            <WorkbenchInboxProvider>
-              <InboxProbe feed={false} onState={(state) => { latest = state; }} />
-            </WorkbenchInboxProvider>
-          </NotificationPreferencesContext.Provider>
+        const roster: BotRoster = { sessionIds: new Set(['ses_main', 'ses_cso']), known: true };
+        const tree = (preferences: NotificationPreferencesState, bots: BotRoster = roster) => (
+          <BotRosterContext.Provider value={{ roster: bots, publish: () => {} }}>
+            <NotificationPreferencesContext.Provider value={preferences}>
+              <WorkbenchInboxProvider>
+                <InboxProbe feed={false} onState={(state) => { latest = state; }} />
+              </WorkbenchInboxProvider>
+            </NotificationPreferencesContext.Provider>
+          </BotRosterContext.Provider>
         );
         let latest: InboxState | null = null;
         const sessionsMuted = { enabled: true, bots: true, sessions: false };
@@ -851,10 +856,16 @@ describe('Demand-driven shell bootstrap', () => {
         expect(setAppBadge).not.toHaveBeenCalled();
         expect(clearAppBadge).not.toHaveBeenCalled();
 
+        // The switches are in, the Bot list is not: which unread is a Bot's is unknown.
+        view.rerender(tree({ preferences: sessionsMuted, loaded: true, update: async () => true }, UNKNOWN_BOT_ROSTER));
+        await settle();
+        expect(setAppBadge).not.toHaveBeenCalled();
+        expect(clearAppBadge).not.toHaveBeenCalled();
+
         view.rerender(tree({ preferences: sessionsMuted, loaded: true, update: async () => true }));
         await settle();
         expect(setAppBadge).toHaveBeenLastCalledWith(2);
-        expect(latest).toMatchObject({ totalUnread: 7, badgeTotal: 2, unreadByCategory: { bot: 2, session: 5 } });
+        expect(latest).toMatchObject({ totalUnread: 10, badgeTotal: 2, unreadByCategory: { bot: 2, session: 8 } });
 
         view.rerender(tree({ preferences: { ...sessionsMuted, enabled: false }, loaded: true, update: async () => true }));
         await settle();

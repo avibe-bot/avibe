@@ -8,6 +8,7 @@ import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import { useBots } from '../../context/BotsContext';
 import { useNotificationPreferences } from '../../context/NotificationPreferencesContext';
+import { useBotRoster } from '../../context/BotRosterContext';
 import { inboxCategory, isCategoryLoud, type InboxCategory } from '../../lib/notificationPreferences';
 import type { InboxSession } from '../../context/ApiContext';
 import { formatRelativeTime } from '../../lib/relativeTime';
@@ -35,6 +36,7 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
   const listRef = useRef<HTMLDivElement>(null);
   const { enabled: hasBots, botForSession, displayName: botName } = useBots();
   const { preferences } = useNotificationPreferences();
+  const { roster } = useBotRoster();
   const { mode: notification, icon: NotificationIcon } = useNotificationMode();
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const {
@@ -251,9 +253,12 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
   const sections = useMemo<{ category?: InboxCategory; rows: InboxSession[] }[]>(() => {
     if (!hasBots) return [{ rows: visible }];
     return (['bot', 'session'] as const)
-      .map((category) => ({ category, rows: visible.filter((row) => inboxCategory(row.session_id) === category) }))
+      .map((category) => ({
+        category,
+        rows: visible.filter((row) => inboxCategory(row.session_id, roster.sessionIds) === category),
+      }))
       .filter((section) => section.rows.length > 0);
-  }, [hasBots, visible]);
+  }, [hasBots, roster.sessionIds, visible]);
 
   const hasMore = !!nextCursor;
   // Only declare "all clear" when nothing is visible AND nothing left to load
@@ -396,7 +401,7 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
             const quiet = section.category ? !isCategoryLoud(preferences, section.category) : false;
             const sectionUnreadIds = section.category
               ? Object.entries(unreadBySession)
-                .filter(([id, n]) => n > 0 && inboxCategory(id) === section.category)
+                .filter(([id, n]) => n > 0 && inboxCategory(id, roster.sessionIds) === section.category)
                 .map(([id]) => id)
               : [];
             return (

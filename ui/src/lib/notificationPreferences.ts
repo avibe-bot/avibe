@@ -3,8 +3,6 @@
 // conversation is in, and the badge those two decide. Every surface that counts
 // or switches notifications reads these, so the badge on the sidebar, the app
 // icon and the tab favicon cannot disagree.
-import { isBotSessionId } from './bots';
-
 /** The account's switches. A category is loud while the master switch and its own are on. */
 export type NotificationPreferences = {
   enabled: boolean;
@@ -24,32 +22,35 @@ export type InboxCategory = 'bot' | 'session';
 export const NOTIFICATIONS_SETTINGS_PATH = '/settings/notifications';
 
 /**
- * A Bot's permanent Session (`ses_<handle>`) is a Bot conversation; everything
- * else is an ordinary Session. The server decides from the current Bot registry
- * (a row's `category`), and the id agrees with it for every Session an Inbox
- * read can return: the `ses_` namespace belongs to Bots alone
- * (docs/plans/bots.md D2), a removed Bot's Session is hidden, an Agent stays
- * enabled while it is a Bot, and readers other than the Owner see no Bot
- * Session at all. The page classifies by the id because the live unread map
- * names Sessions by id alone, and one classifier keeps a row's section and the
- * count it adds to from ever disagreeing.
+ * A Session is a Bot conversation while it is a current Bot's permanent Session,
+ * the server's own definition (`core/notification_categories.py`). The caller
+ * passes the Bot Sessions it knows, the live Bot list (`BotRosterContext`); a
+ * removed Bot's `ses_` Session is therefore an ordinary Session, as it is on the
+ * server. One classifier serves the feed rows and the unread map, so a row's
+ * section and the count it adds to cannot disagree.
  */
-export const inboxCategory = (sessionId: string): InboxCategory => (isBotSessionId(sessionId) ? 'bot' : 'session');
+export const inboxCategory = (sessionId: string, botSessionIds: ReadonlySet<string>): InboxCategory =>
+  (botSessionIds.has(sessionId) ? 'bot' : 'session');
 
 export const isCategoryLoud = (preferences: NotificationPreferences, category: InboxCategory): boolean =>
   preferences.enabled && (category === 'bot' ? preferences.bots : preferences.sessions);
 
 export type UnreadByCategory = Record<InboxCategory, number>;
 
-export function unreadByCategory(unreadBySession: Record<string, number>): UnreadByCategory {
+/** The unread map split by category: the server's `split_unread_counts`. */
+export function unreadByCategory(
+  unreadBySession: Record<string, number>,
+  botSessionIds: ReadonlySet<string>,
+): UnreadByCategory {
   const counts: UnreadByCategory = { bot: 0, session: 0 };
   for (const [sessionId, count] of Object.entries(unreadBySession)) {
-    if (count > 0) counts[inboxCategory(sessionId)] += count;
+    if (count > 0) counts[inboxCategory(sessionId, botSessionIds)] += count;
   }
   return counts;
 }
 
-/** The aggregate badge: unread in loud categories only. With every switch on it is the whole unread total. */
+/** The aggregate badge: unread in loud categories only, the server's `badge_total`.
+ *  With every switch on it is the whole unread total. */
 export const badgeTotal = (counts: UnreadByCategory, preferences: NotificationPreferences): number =>
   (isCategoryLoud(preferences, 'bot') ? counts.bot : 0) + (isCategoryLoud(preferences, 'session') ? counts.session : 0);
 

@@ -143,9 +143,17 @@ it is still delivered, listed, and unread.
   preference nudge, a reconnect, or an authorization change. A change applies
   at once and writes only the switch it changes, which the server merges, so
   two devices changing different switches keep both; a refused save restores
-  the last saved record. Categories come from the Session id (`ses_<handle>` is
-  a Bot's), which agrees with the server's registry for every Session an Inbox
-  read can return.
+  the last saved record.
+- A Session is a Bot conversation while it is a current Bot's permanent
+  Session, the server's definition. The client reads it from the Owner's live
+  Bot list (`BotsProvider`, refetched on `bots.changed`), which a small bridge
+  (`BotRosterContext`) carries up to the Inbox provider above the router; a
+  removed Bot's `ses_` Session is an ordinary Session, and a reader without Bots
+  has one category. The client computes the badge from its live unread map and
+  the switches, and the aggregate badges wait until the map, the switches, and
+  the Bot list are all known. A shared fixture
+  (`ui/src/lib/notificationBadge.fixture.json`) runs against both this
+  computation and the server's `badge_total`.
 - Sidebar Inbox icon: a cyan number for `badge_total`; a grey dot with no number
   when `badge_total` is 0 and anything is unread.
 

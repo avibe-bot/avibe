@@ -8,6 +8,7 @@ import type { InboxSession } from '../../context/ApiContext';
 import { readInboxFilter } from '../../lib/inboxFilterMemory';
 import { InboxHoverPopover } from './WorkbenchSidebar';
 import { BotsContext, type BotsState } from '../../context/BotsContext';
+import { BotRosterContext } from '../../context/BotRosterContext';
 import { NotificationPreferencesContext } from '../../context/NotificationPreferencesContext';
 import type { Bot } from '../../lib/bots';
 
@@ -154,25 +155,28 @@ describe('with Bots', () => {
     unreadBySession: Record<string, number>,
     preferences = { enabled: true, bots: true, sessions: true },
   ) {
+    const roster = { sessionIds: new Set(bots.map((bot) => bot.session_id)), known: true };
     render(
       <MemoryRouter initialEntries={['/']}>
-        <BotsContext.Provider value={botsState}>
-          <NotificationPreferencesContext.Provider value={{ preferences, loaded: true, update: async () => true }}>
-            <Popover open>
-              <InboxHoverPopover
-                sessions={sessions}
-                unreadBySession={unreadBySession}
-                unreadSessions={Object.values(unreadBySession).filter((n) => n > 0).length}
-                totalUnread={Object.values(unreadBySession).reduce((sum, n) => sum + n, 0)}
-                canMarkRead
-                onItemClick={() => {}}
-                onMarkAllRead={() => {}}
-                onMouseEnter={() => {}}
-                onMouseLeave={() => {}}
-              />
-            </Popover>
-          </NotificationPreferencesContext.Provider>
-        </BotsContext.Provider>
+        <BotRosterContext.Provider value={{ roster, publish: () => {} }}>
+          <BotsContext.Provider value={botsState}>
+            <NotificationPreferencesContext.Provider value={{ preferences, loaded: true, update: async () => true }}>
+              <Popover open>
+                <InboxHoverPopover
+                  sessions={sessions}
+                  unreadBySession={unreadBySession}
+                  unreadSessions={Object.values(unreadBySession).filter((n) => n > 0).length}
+                  totalUnread={Object.values(unreadBySession).reduce((sum, n) => sum + n, 0)}
+                  canMarkRead
+                  onItemClick={() => {}}
+                  onMarkAllRead={() => {}}
+                  onMouseEnter={() => {}}
+                  onMouseLeave={() => {}}
+                />
+              </Popover>
+            </NotificationPreferencesContext.Provider>
+          </BotsContext.Provider>
+        </BotRosterContext.Provider>
       </MemoryRouter>,
     );
   }
@@ -191,6 +195,15 @@ describe('with Bots', () => {
     expect(rowNames()).toEqual(['CSO', 'Vibey', 'Session 4', 'Session 1', 'Session 2']);
     // The section says Bot already; its rows carry no Bot tag.
     expect(screen.queryByText('bots.tag')).toBeNull();
+  });
+
+  it("files a removed Bot's Session with the Sessions, as the server counts it", () => {
+    // `ses_retired` keeps its id after its Bot is removed, but it is not in the live list.
+    mountWithBots([botRow('ses_cso', 1), { ...row(7, 2), session_id: 'ses_retired' }], { ses_cso: 1, ses_retired: 4 });
+    const sessionsSection = screen.getByText('workbench.inbox.sections.sessions').closest('section')!;
+    expect(sessionsSection.textContent).toContain('Session 7');
+    const botsSection = screen.getByText('workbench.inbox.sections.bots').closest('section')!;
+    expect(botsSection.textContent).not.toContain('Session 7');
   });
 
   it('leaves the Bots section out until a Bot has spoken', () => {

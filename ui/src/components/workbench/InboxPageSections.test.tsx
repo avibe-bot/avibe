@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import type { InboxSession } from '../../context/ApiContext';
 import { BotsContext, type BotsState } from '../../context/BotsContext';
+import { BotRosterContext } from '../../context/BotRosterContext';
 import { NotificationPreferencesContext } from '../../context/NotificationPreferencesContext';
 import type { Bot } from '../../lib/bots';
 import { writeInboxFilter } from '../../lib/inboxFilterMemory';
@@ -21,7 +22,7 @@ vi.mock('../../context/WorkbenchInboxContext', () => ({
     ...feed,
     totalUnread: Object.values(feed.unreadBySession).reduce((sum, n) => sum + n, 0),
     unreadSessions: Object.keys(feed.unreadBySession).length,
-    unreadByCategory: unreadByCategory(feed.unreadBySession),
+    unreadByCategory: unreadByCategory(feed.unreadBySession, new Set(['ses_cso'])),
     nextCursor: null,
     loading: false,
     loadingMore: false,
@@ -58,11 +59,13 @@ const row = (sessionId: string, title: string | null): InboxSession => ({
 function mount(preferences: NotificationPreferences = { enabled: true, bots: true, sessions: true }) {
   render(
     <MemoryRouter initialEntries={['/inbox']}>
-      <BotsContext.Provider value={botsState}>
-        <NotificationPreferencesContext.Provider value={{ preferences, loaded: true, update: async () => true }}>
-          <InboxPage onOpenSearch={() => {}} />
-        </NotificationPreferencesContext.Provider>
-      </BotsContext.Provider>
+      <BotRosterContext.Provider value={{ roster: { sessionIds: new Set(['ses_cso']), known: true }, publish: () => {} }}>
+        <BotsContext.Provider value={botsState}>
+          <NotificationPreferencesContext.Provider value={{ preferences, loaded: true, update: async () => true }}>
+            <InboxPage onOpenSearch={() => {}} />
+          </NotificationPreferencesContext.Provider>
+        </BotsContext.Provider>
+      </BotRosterContext.Provider>
     </MemoryRouter>,
   );
 }

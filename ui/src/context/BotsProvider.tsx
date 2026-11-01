@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 
 import { useApi } from './ApiContext';
 import { BotsContext, type BotProfileRequest, type BotRuntimeStatus, type BotsState } from './BotsContext';
+import { UNKNOWN_BOT_ROSTER, useBotRoster } from './BotRosterContext';
 import { useInstanceAuthorization } from './InstanceAuthorizationContext';
 import { botDisplayName, orderBots, type Bot } from '../lib/bots';
 
@@ -157,6 +158,16 @@ export const BotsProvider = ({ children }: { children: ReactNode }) => {
       closeProfile: () => setProfileRequest(null),
     };
   }, [enabled, ownerBots, loaded, ownerStatuses, mainDefault, afterWrite, moveBot, profileRequest]);
+
+  // The Inbox above the router splits its counts by this list (BotRosterContext).
+  // A reader who is not the Owner has none to wait for.
+  const { publish } = useBotRoster();
+  const rosterKnown = !enabled || loaded;
+  useEffect(() => {
+    publish({ known: rosterKnown, sessionIds: new Set(value.bots.map((bot) => bot.session_id)) });
+  }, [publish, rosterKnown, value.bots]);
+  // Signing out unmounts this provider; the next reader's list is not known yet.
+  useEffect(() => () => publish(UNKNOWN_BOT_ROSTER), [publish]);
 
   return <BotsContext.Provider value={value}>{children}</BotsContext.Provider>;
 };
