@@ -1,0 +1,64 @@
+// Bots in the sidebar (docs/plans/bots.md D5): the shipped strip, hover card, and Inbox icon,
+// drawn by the shipped sidebar from fixtures.
+import { WorkbenchSidebar } from '@/components/workbench/WorkbenchSidebar';
+
+import { frames } from '../../frame';
+import { demoBots, demoProjects, inboxRow, mainBot, type WorkbenchFixtures } from '../../shell/fixtures';
+import { SidebarColumn } from '../../shell/SidebarColumn';
+
+const sidebar = () => (
+  <SidebarColumn>
+    <WorkbenchSidebar />
+  </SidebarColumn>
+);
+
+const team: WorkbenchFixtures = {
+  projects: demoProjects,
+  bots: demoBots,
+  botStatus: { ses_pm: 'running' },
+  unreadBySession: { ses_cso: 2, ses_demo_cache: 3 },
+  inboxSessions: [inboxRow('ses_cso', null, '首席安全官', 'avault 依赖里发现 2 个高危漏洞', 20, 2)],
+  // The hover card reads the Bot's latest message when it opens.
+  api: {
+    '/api/inbox?limit=1&session=ses_pm': {
+      sessions: [inboxRow('ses_pm', null, '产品经理', '需求池按优先级排好了，前三项需要你拍板。', 2)],
+    },
+  },
+};
+
+const designFrames = frames([
+  {
+    name: 'new-user',
+    title: '伙伴 · 只有歪比',
+    width: 248,
+    height: 360,
+    status: 'shipped',
+    fixtures: { projects: demoProjects, bots: [mainBot] },
+    render: sidebar,
+  },
+  {
+    name: 'three',
+    title: '伙伴 · 3 个伙伴：未读、运行中',
+    width: 248,
+    height: 360,
+    status: 'shipped',
+    fixtures: team,
+    render: sidebar,
+  },
+  {
+    name: 'hover-card',
+    title: '伙伴 · 悬停卡片',
+    width: 520,
+    height: 360,
+    status: 'shipped',
+    fixtures: team,
+    hover: '[data-bot-handle="pm"]',
+    render: () => (
+      <div className="h-full w-[248px]">
+        {sidebar()}
+      </div>
+    ),
+  },
+]);
+
+export default designFrames;
