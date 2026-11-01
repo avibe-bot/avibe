@@ -711,10 +711,11 @@ fn choice(result: &MessageDialogResult, c: &Catalog) -> Choice {
         _ => Choice::Later,
     }
 }
-/// Only the automatic startup check honours a skipped version; an explicit menu
-/// check always offers it, and any newer release prompts again.
-fn should_prompt(interactive: bool, skipped: Option<&str>, version: &str) -> bool {
-    interactive || skipped != Some(version)
+/// Only the automatic startup check honours a skipped version or a silent
+/// release; an explicit menu check always offers it, and any newer announced
+/// release prompts again. A silent release still shows as available.
+fn should_prompt(interactive: bool, silent: bool, skipped: Option<&str>, version: &str) -> bool {
+    interactive || (!silent && skipped != Some(version))
 }
 fn skipped_version(updater: &Updater) -> Option<String> {
     std::fs::read(&updater.skipped_path)
@@ -742,6 +743,8 @@ struct GithubRelease {
     draft: bool,
     prerelease: bool,
     assets: Vec<GithubAsset>,
+    #[serde(default)]
+    body: Option<String>,
 }
 #[derive(Deserialize)]
 struct GithubAsset {
@@ -885,6 +888,7 @@ async fn releases(client: &reqwest::Client) -> Result<Vec<Release>, String> {
                 prerelease: release.prerelease,
                 commit: None,
                 assets,
+                silent: release.body.as_deref().is_some_and(update::silent_release_notes),
             });
         }
         if done {
@@ -893,7 +897,8 @@ async fn releases(client: &reqwest::Client) -> Result<Vec<Release>, String> {
     }
     Err("release history exceeds discovery bound".into())
 }
-async fn find_update(app: &AppHandle, channel: Channel) -> Result<Option<Manifest>, String> {
+/// The newer release in `channel`, verified, and whether it asked not to be announced.
+async fn find_update(app: &AppHandle, channel: Channel) -> Result<Option<(Manifest, bool)>, String> {
     let client = client()?;
     let Some((version, release)) = channel.latest(releases(&client).await?) else {
         return Err("no release in this channel".into());
@@ -945,7 +950,7 @@ async fn find_update(app: &AppHandle, channel: Channel) -> Result<Option<Manifes
     {
         return Err("updater artifact missing".into());
     }
-    Ok(Some(manifest))
+    Ok(Some((manifest, release.silent)))
 }
 
 pub fn check(app: AppHandle, interactive: bool) {
@@ -985,11 +990,11 @@ pub fn check(app: AppHandle, interactive: bool) {
     set_state(&app, Phase::Checking, None);
     tauri::async_runtime::spawn(async move {
         match find_update(&app, channel).await {
-            Ok(Some(manifest)) => {
+            Ok(Some((manifest, silent))) => {
                 set_available(&app, manifest.clone());
                 publish_check(&app);
                 let skipped = skipped_version(&app.state::<Updater>());
-                if !should_prompt(interactive, skipped.as_deref(), &manifest.version) {
+                if !should_prompt(interactive, silent, skipped.as_deref(), &manifest.version) {
                     settle_update(&app, None, Settlement::Completed);
                     return;
                 }
@@ -1319,8 +1324,9 @@ async fn process_remote_update_request(app: AppHandle, request: DesktopUpdateReq
         None,
     );
     let channel = app.state::<Updater>().state.lock().expect("updater state").channel;
+    // A remote request asked for this update, so a silent release is offered too.
     match find_update(&app, channel).await {
-        Ok(Some(manifest)) => {
+        Ok(Some((manifest, _silent))) => {
             app.state::<Updater>()
                 .state
                 .lock()
@@ -1605,10 +1611,18 @@ mod tests {
 
     #[test]
     fn only_the_startup_check_honours_a_skipped_version() {
-        assert!(!should_prompt(false, Some("1.2.3"), "1.2.3"));
-        assert!(should_prompt(false, Some("1.2.3"), "1.2.4"));
-        assert!(should_prompt(false, None, "1.2.3"));
-        assert!(should_prompt(true, Some("1.2.3"), "1.2.3"));
+        assert!(!should_prompt(false, false, Some("1.2.3"), "1.2.3"));
+        assert!(should_prompt(false, false, Some("1.2.3"), "1.2.4"));
+        assert!(should_prompt(false, false, None, "1.2.3"));
+        assert!(should_prompt(true, false, Some("1.2.3"), "1.2.3"));
+    }
+
+    #[test]
+    fn a_silent_release_never_prompts_at_startup_but_an_explicit_check_offers_it() {
+        assert!(!should_prompt(false, true, None, "1.2.4"));
+        assert!(!should_prompt(false, true, Some("1.2.3"), "1.2.4"));
+        assert!(should_prompt(true, true, None, "1.2.4"));
+        assert!(should_prompt(true, true, Some("1.2.4"), "1.2.4"));
     }
 
     #[test]
@@ -1734,7 +1748,7 @@ mod tests {
         let path = dir.path().join("update-skipped.json");
         persist_skipped_version(&path, "3.2.3").unwrap();
 
-        assert!(should_prompt(true, Some("3.2.3"), "3.2.3"));
+        assert!(should_prompt(true, false, Some("3.2.3"), "3.2.3"));
         assert_eq!(
             serde_json::from_slice::<String>(&std::fs::read(path).unwrap()).unwrap(),
             "3.2.3",

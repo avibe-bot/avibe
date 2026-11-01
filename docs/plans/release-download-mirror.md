@@ -82,7 +82,8 @@ only the releases that `vibe/ripgrep_runtime_manifest.json` and
       "prerelease": true,
       "published_at": "2026-09-29T07:35:48Z",
       "commit": "<40-hex commit the tag points to>",
-      "assets": [{ "name": "<asset>", "size": 123, "sha256": "<64-hex>" }]
+      "assets": [{ "name": "<asset>", "size": 123, "sha256": "<64-hex>" }],
+      "update_notification": "none"
     }
   ]
 }
@@ -93,12 +94,18 @@ only the releases that `vibe/ripgrep_runtime_manifest.json` and
   every listed asset already exists in the bucket with those bytes.
 - `sha256` is GitHub's asset digest, re-verified against the downloaded bytes
   before upload. `commit` is the peeled tag target.
+- `update_notification` is present, as `"none"`, only when the release notes
+  carry the silent-update marker (`docs/release.md`), read as
+  `core/update_checker.py` reads it. Consumers treat a missing field as an
+  announced release. The desktop updater does not prompt at startup for a
+  silent release.
 - Producer: the release mirror workflow. Consumers: the desktop updater reads
   Avibe's index; the other repositories' have none yet.
   Planned: the CLI update checker, replacing its `api.github.com` discovery
   call. Runtime downloads use pinned release URLs and need no index.
 - The index is unauthenticated metadata. A hostile index can at most withhold
-  releases or name copies that then fail the consumer's existing verification.
+  releases, mark them silent, or name copies that then fail the consumer's
+  existing verification.
 
 ### Retention
 
