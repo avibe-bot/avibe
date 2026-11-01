@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { pickScrollAnchor } from './transcriptScrollAnchor';
+import { pickScrollAnchor, resolveScrollAnchor } from './transcriptScrollAnchor';
 
 // jsdom does no layout, so each child declares the rect it would have had. The
 // numbers below mirror the real transcript column: the scroll container carries
@@ -34,7 +34,7 @@ describe('pickScrollAnchor', () => {
     const firstVisible = row({ top: -8, height: 60, id: 'm2' });
     const below = row({ top: 64, height: 60, id: 'm3' });
 
-    expect(pickScrollAnchor([scrolledPast, firstVisible, below], CONTAINER_TOP)).toEqual({
+    expect(pickScrollAnchor([scrolledPast, firstVisible, below], CONTAINER_TOP)).toMatchObject({
       el: firstVisible,
       top: -8,
     });
@@ -66,14 +66,14 @@ describe('pickScrollAnchor', () => {
     const readersRow = row({ top: 20, height: 60, id: 'm2' });
 
     for (const [name, above] of Object.entries(preMessageChrome)) {
-      expect(pickScrollAnchor([above, readersRow], CONTAINER_TOP), name).toEqual({
+      expect(pickScrollAnchor([above, readersRow], CONTAINER_TOP), name).toMatchObject({
         el: readersRow,
         top: 20,
       });
     }
 
     // ...and all of it at once, in render order, is still skipped.
-    expect(pickScrollAnchor([...Object.values(preMessageChrome), readersRow], CONTAINER_TOP)).toEqual(
+    expect(pickScrollAnchor([...Object.values(preMessageChrome), readersRow], CONTAINER_TOP)).toMatchObject(
       { el: readersRow, top: 20 },
     );
   });
@@ -86,7 +86,7 @@ describe('pickScrollAnchor', () => {
     const chipBetweenRows = chrome({ top: -8, height: 24 });
     const nextRow = row({ top: 28, height: 60, id: 'm2' });
 
-    expect(pickScrollAnchor([firstRow, chipBetweenRows, nextRow], CONTAINER_TOP)).toEqual({
+    expect(pickScrollAnchor([firstRow, chipBetweenRows, nextRow], CONTAINER_TOP)).toMatchObject({
       el: chipBetweenRows,
       top: -8,
     });
@@ -100,7 +100,7 @@ describe('pickScrollAnchor', () => {
     group.dataset.transcriptRow = '';
     const nextRow = row({ top: 74, height: 60, id: 'm9' });
 
-    expect(pickScrollAnchor([chrome({ top: -40, height: 32 }), group, nextRow], CONTAINER_TOP)).toEqual({
+    expect(pickScrollAnchor([chrome({ top: -40, height: 32 }), group, nextRow], CONTAINER_TOP)).toMatchObject({
       el: group,
       top: -8,
     });
@@ -110,9 +110,46 @@ describe('pickScrollAnchor', () => {
     const offscreenAboveContainer = row({ top: 100, height: 40, id: 'm1' });
     const firstVisible = row({ top: 152, height: 60, id: 'm2' });
 
-    expect(pickScrollAnchor([offscreenAboveContainer, firstVisible], 150)).toEqual({
+    expect(pickScrollAnchor([offscreenAboveContainer, firstVisible], 150)).toMatchObject({
       el: firstVisible,
       top: 2,
     });
   });
 });
+
+describe('resolveScrollAnchor', () => {
+  const content = (...children: HTMLElement[]) => {
+    const column = document.createElement('div');
+    column.append(...children);
+    document.body.append(column);
+    return column;
+  };
+
+  it('follows a message whose row re-mounted inside a group, or folded into its head', () => {
+    const anchor = pickScrollAnchor([row({ top: 12, height: 60, id: 'h5' })], CONTAINER_TOP)!;
+    expect(anchor).toMatchObject({ rowId: 'h5', rowTop: 12 });
+
+    // An older page made h5 a group member: a new element, nested in a wrapper.
+    const wrapper = document.createElement('div');
+    const remounted = row({ top: 412, height: 60, id: 'h5' });
+    wrapper.append(remounted);
+    expect(resolveScrollAnchor(anchor, content(wrapper))).toEqual({ el: remounted, top: 12 });
+
+    // ...or folded it into a collapsed group, which takes the row's place.
+    const head = chrome({ top: 100, height: 70 });
+    head.dataset.harnessMembers = 'h3 h4 h5';
+    expect(resolveScrollAnchor(anchor, content(head))).toEqual({ el: head, top: 12 });
+
+    // A message that left the transcript leaves nothing to hold.
+    expect(resolveScrollAnchor(anchor, content(chrome({ top: 0, height: 10 })))).toBeNull();
+  });
+
+  it('keeps the anchored element while it is still mounted', () => {
+    const anchored = row({ top: 30, height: 60, id: 'm1' });
+    const anchor = pickScrollAnchor([anchored], CONTAINER_TOP)!;
+    content(anchored);
+
+    expect(resolveScrollAnchor(anchor, document.body)).toEqual({ el: anchored, top: 30 });
+  });
+});
+

@@ -80,7 +80,7 @@ import {
   insertMessageOrdered,
   reconcileWorkbenchClaimedDeliveries,
 } from '../../lib/transcriptOrder';
-import { pickScrollAnchor } from '../../lib/transcriptScrollAnchor';
+import { pickScrollAnchor, resolveScrollAnchor, type ScrollAnchor } from '../../lib/transcriptScrollAnchor';
 import { AgentRoutePicker } from './AgentRoutePicker';
 import {
   archiveSessionShortcutLabel,
@@ -4233,7 +4233,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
   // any later content resize can put that exact row back where it was. This is a
   // manual scroll-anchor: iOS Safari still ships no CSS ``overflow-anchor``, so a
   // late-loading image would otherwise shift the page out from under the reader.
-  const anchorRef = useRef<{ el: HTMLElement; top: number } | null>(null);
+  const anchorRef = useRef<ScrollAnchor | null>(null);
   const lastSessionRef = useRef<string | null>(null);
   const [showJump, setShowJump] = useState(false);
   // Whether the transcript is actually scrollable. Measured by the same
@@ -4586,9 +4586,13 @@ export const Transcript: React.FC<TranscriptProps> = ({
       el.scrollTop = el.scrollHeight;
     } else {
       const anchor = anchorRef.current;
-      if (!anchor || !anchor.el.isConnected) return;
-      const currentTop = anchor.el.getBoundingClientRect().top - el.getBoundingClientRect().top;
-      const delta = currentTop - anchor.top;
+      const content = contentRef.current;
+      // The anchored row may have re-mounted elsewhere (a Harness row an older
+      // page made a group member); follow the message, not the element.
+      const target = anchor && content ? resolveScrollAnchor(anchor, content) : null;
+      if (!target) return;
+      const currentTop = target.el.getBoundingClientRect().top - el.getBoundingClientRect().top;
+      const delta = currentTop - target.top;
       if (Math.abs(delta) >= 0.5) el.scrollTop += delta;
     }
     // A programmatic adjustment must not look like upward input when its
@@ -4596,9 +4600,6 @@ export const Transcript: React.FC<TranscriptProps> = ({
     lastScrollTopRef.current = Math.max(0, el.scrollTop);
   }, [jumpTarget, pinnedRef]);
 
-  // Prepending and trimming can leave the total height unchanged. Restore after
-  // every DOM commit, before paint or a queued scroll can capture a different
-  // row. This also covers the loading slot being inserted or removed.
   // A group closed from its trailing control (or anywhere below its head) took
   // the anchored row with it, so the restore below has nothing to hold. Bring
   // the head back to the top of the viewport and anchor to it instead. Runs
@@ -4617,6 +4618,10 @@ export const Transcript: React.FC<TranscriptProps> = ({
     }
     captureAnchor();
   });
+
+  // Prepending and trimming can leave the total height unchanged. Restore after
+  // every DOM commit, before paint or a queued scroll can capture a different
+  // row. This also covers the loading slot being inserted or removed.
   useLayoutEffect(restoreScrollPosition);
 
   // Images and viewport changes can resize outside a React commit.

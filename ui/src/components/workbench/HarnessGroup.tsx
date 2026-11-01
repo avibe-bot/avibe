@@ -114,7 +114,14 @@ export function HarnessGroup({
   }
 
   return (
-    <div data-transcript-row data-harness-group={groupKey} className="flex w-full justify-start">
+    <div
+      data-transcript-row
+      data-harness-group={groupKey}
+      // The folded messages, so a scroll anchor held on one of them can find
+      // the head it collapsed into.
+      data-harness-members={members.map((message) => message.id).join(' ')}
+      className="flex w-full justify-start"
+    >
       <button
         type="button"
         onClick={onToggle}

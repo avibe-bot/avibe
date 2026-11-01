@@ -241,5 +241,48 @@ describe('transcript Harness groups', () => {
     // The collapsed group now sits at the top of the viewport, not off-screen above it.
     expect(scrollTop).toBe(100);
   });
+
+  // jsdom has no layout: every direct child of the transcript column is 100px
+  // tall, stacked in DOM order, and a nested element sits at its top-level
+  // ancestor's place. The viewport is 800px tall.
+  const layOut = (scroller: HTMLElement) => {
+    const column = scroller.firstElementChild!;
+    let scrollTop = 0;
+    Object.defineProperties(scroller, {
+      clientHeight: { configurable: true, get: () => 800 },
+      scrollHeight: { configurable: true, get: () => column.children.length * 100 },
+      scrollTop: { configurable: true, get: () => scrollTop, set: (value: number) => { scrollTop = Math.max(0, value); } },
+    });
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      if (this === scroller) return { top: 0, bottom: 800, height: 800 } as DOMRect;
+      const ancestor = [...column.children].find((child) => child === this || child.contains(this));
+      const index = ancestor ? Array.prototype.indexOf.call(column.children, ancestor) : -1;
+      const top = index < 0 ? 0 : index * 100 - scrollTop;
+      return { top, bottom: top + 90, height: 90 } as DOMRect;
+    });
+    return { top: () => scrollTop };
+  };
+  const tail = Array.from({ length: 10 }, (_, index) => reply(`r${index}`));
+
+  it.each([
+    ['opened, so it re-mounts inside the opened group', true, 400],
+    ['closed, so it folds into the collapsed head', false, 100],
+  ])('holds the reading position when an older page makes the anchored row a group member (%s)', (_label, opened, expected) => {
+    const view = renderTranscript({ messages: [watch('h5'), ...tail], hasOlder: true });
+    const scroller = view.getByTestId('chat-transcript');
+    const layout = layOut(scroller);
+    if (opened) fireEvent.click(rendered('h5')!.querySelector('button[aria-expanded]')!);
+    // Read at the top of the window: h5 is the anchored row, at the top of the view.
+    fireEvent.pointerDown(scroller);
+    scroller.scrollTop = 0;
+    fireEvent.scroll(scroller);
+
+    view.rerender({ messages: [userMessage('u1'), watch('h3'), watch('h4'), watch('h5'), ...tail] });
+
+    // u1 is row 0 and the group head row 1. Opened, h5 renders as row 4; closed,
+    // the head stands in for it. Either way it is back at the top of the view.
+    expect(groupToggle(3).getAttribute('aria-expanded')).toBe(opened ? 'true' : 'false');
+    expect(layout.top()).toBe(expected);
+  });
 });
 

@@ -27,7 +27,12 @@
 // A row is a message row (``data-message-id``) or a row standing for several of
 // them (``data-transcript-row``): a collapsed Harness group is one element for
 // many messages, and it moves with a prepend exactly as the rows it holds would.
-export type ScrollAnchor = { el: HTMLElement; top: number };
+//
+// The anchor also names the message row it holds (``rowId``, ``rowTop``), because
+// a message can change element without leaving the transcript: a Harness row
+// that an older page turns into a group member is re-mounted inside the group,
+// or folded into its collapsed head. ``resolveScrollAnchor`` follows it there.
+export type ScrollAnchor = { el: HTMLElement; top: number; rowId?: string; rowTop?: number };
 
 const isTranscriptRow = (el: HTMLElement): boolean =>
   el.dataset.messageId !== undefined || el.dataset.transcriptRow !== undefined;
@@ -45,7 +50,36 @@ export const pickScrollAnchor = (
     const rect = child.getBoundingClientRect();
     // Entirely above the viewport top — scrolled past, not what the reader sees.
     if (rect.bottom <= containerTop) continue;
-    return { el: child, top: rect.top - containerTop };
+    const anchor: ScrollAnchor = { el: child, top: rect.top - containerTop };
+    const row = child.dataset.messageId !== undefined ? child : child.querySelector<HTMLElement>('[data-message-id]');
+    if (row?.dataset.messageId) {
+      anchor.rowId = row.dataset.messageId;
+      anchor.rowTop = row.getBoundingClientRect().top - containerTop;
+    }
+    return anchor;
   }
   return null;
+};
+
+const byAttribute = (content: ParentNode, selector: string) => content.querySelector<HTMLElement>(selector);
+
+/**
+ * The element to restore against, and where its top belongs. The anchored
+ * element while it is still mounted; otherwise the same message's row wherever
+ * it now renders; otherwise the collapsed group that folded it in
+ * (``data-harness-members`` lists a group's message ids), placed where the row
+ * was. ``null`` when the message left the transcript.
+ */
+export const resolveScrollAnchor = (
+  anchor: ScrollAnchor,
+  content: ParentNode,
+): { el: HTMLElement; top: number } | null => {
+  if (anchor.el.isConnected) return { el: anchor.el, top: anchor.top };
+  if (anchor.rowId === undefined || anchor.rowTop === undefined) return null;
+  // Quoted attribute values need only quotes and backslashes escaped.
+  const id = anchor.rowId.replace(/["\\]/g, '\\$&');
+  const row =
+    byAttribute(content, `[data-message-id="${id}"]`) ??
+    byAttribute(content, `[data-harness-members~="${id}"]`);
+  return row ? { el: row, top: anchor.rowTop } : null;
 };
