@@ -28,6 +28,7 @@ import clsx from 'clsx';
 import type { LucideIcon } from 'lucide-react';
 
 import { writeInboxFilter } from '../../lib/inboxFilterMemory';
+import { useSidebarSectionOpen } from '../../lib/sidebarSectionsMemory';
 import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { useLatestRef } from '../../lib/useLatestRef';
 
@@ -815,7 +816,9 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
   const [popoverOpen, setPopoverOpen] = useState(false);
   const closeTimer = useRef<number | null>(null);
   const [showNewProject, setShowNewProject] = useState(false);
-  const [capabilitiesOpen, setCapabilitiesOpen] = useState(true);
+  // Both groups remember, per browser, whether the user left them open.
+  const [capabilitiesOpen, setCapabilitiesOpen] = useSidebarSectionOpen('capabilities');
+  const [projectsOpen, setProjectsOpen] = useSidebarSectionOpen('projects');
 
   // Small open/close delays so the popover doesn't flicker as the cursor
   // brushes through the inbox row on its way somewhere else, and survives
@@ -955,7 +958,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
             className="group flex items-center gap-1 px-1 font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted transition-colors hover:text-foreground"
             aria-expanded={capabilitiesOpen}
             aria-controls="workbench-capability-nav"
-            onClick={() => setCapabilitiesOpen((open) => !open)}
+            onClick={() => setCapabilitiesOpen(!capabilitiesOpen)}
           >
             <span className="flex-1 text-left">{t('nav.capabilities')}</span>
             <ChevronDown className={clsx('size-3.5 shrink-0 transition-transform', !capabilitiesOpen && '-rotate-90')} />
@@ -970,17 +973,25 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
         </div>
       )}
 
-      {/* Projects section t7o96 — the label on the left (matching the
-          Capabilities label style) and the borderless search + add icons grouped
-          on the right. Search sits immediately before add and stays reachable
-          for everyone who could reach it before, including the people this
-          instance does not let create a project; ⌘K still opens the same
-          palette from anywhere. */}
+      {/* Projects section t7o96 — collapses like Capabilities: the label and the
+          chevron closing the row both toggle it, and the chevron sits in the same
+          right-edge column as the Capabilities one. The borderless search + add
+          icons stay between them, so they remain reachable while the list is
+          hidden. Search sits immediately before add and stays reachable for
+          everyone who could reach it before, including the people this instance
+          does not let create a project; ⌘K still opens the same palette from
+          anywhere. */}
       <div className="flex min-h-0 flex-1 flex-col gap-1.5">
-        <div className="flex items-center justify-between px-1">
-          <span className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted">
-            {t('workbench.projectsLabel')}
-          </span>
+        <div className="flex items-center px-1">
+          <button
+            type="button"
+            className="flex h-7 min-w-0 flex-1 items-center text-left font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted transition-colors hover:text-foreground"
+            aria-expanded={projectsOpen}
+            aria-controls="workbench-project-list"
+            onClick={() => setProjectsOpen(!projectsOpen)}
+          >
+            <span className="truncate">{t('workbench.projectsLabel')}</span>
+          </button>
           <div className="flex items-center gap-0.5">
             <Button
               type="button"
@@ -1003,9 +1014,20 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
               <FolderPlus className="size-4" />
             </Button>}
           </div>
+          {/* A second pointer target for the label's toggle, so it is hidden from
+              assistive tech and the tab order: the label button is the control. */}
+          <button
+            type="button"
+            tabIndex={-1}
+            aria-hidden="true"
+            className="ml-0.5 flex h-7 w-3.5 shrink-0 items-center justify-center text-muted transition-colors hover:text-foreground"
+            onClick={() => setProjectsOpen(!projectsOpen)}
+          >
+            <ChevronDown className={clsx('size-3.5 shrink-0 transition-transform', !projectsOpen && '-rotate-90')} />
+          </button>
         </div>
 
-        <div className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto pr-0.5">
+        {projectsOpen && <div id="workbench-project-list" className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto pr-0.5">
           {projects === null && !projectsError && (
             <div className="flex items-center gap-2 rounded-md border border-dashed border-border px-3 py-3 text-[11px] text-muted">
               <Loader2 className="size-3 animate-spin" />
@@ -1067,13 +1089,17 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
               );
             }}
           </SortableProjectList>}
-        </div>
+        </div>}
       </div>
 
       {showNewProject && canCreateProject && (
         <NewProjectDialog
           onClose={() => setShowNewProject(false)}
-          onCreated={() => setShowNewProject(false)}
+          onCreated={() => {
+            setShowNewProject(false);
+            // A project just created must be visible, even if the list was collapsed.
+            setProjectsOpen(true);
+          }}
         />
       )}
     </div>
