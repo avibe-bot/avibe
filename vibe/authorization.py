@@ -67,6 +67,7 @@ _VIEWER_WORKBENCH_EVENTS = frozenset(
         "connected",
         "inbox.session.updated",
         "inbox.unread.changed",
+        "notifications.preferences.updated",
         "message.new",
         "message.updated",
         "projects.changed",
@@ -459,6 +460,7 @@ _VIEWER_HTTP_RULES = tuple(
         r"^/api/search/messages$",
         r"^/api/events$",
         r"^/api/inbox$",
+        r"^/api/notifications/preferences$",
         r"^/api/media/[^/]+(?:/meta)?$",
         r"^/api/permissions$",
         r"^/api/permissions/resources/[^/]+/[^/]+/access$",
@@ -485,6 +487,7 @@ _VIEWER_HTTP_NAMESPACES = (
     "/api/web-push",
 )
 _VIEWER_HTTP_MUTATION_RULES = (
+    ("PUT", re.compile(r"^/api/notifications/preferences$")),
     ("POST", re.compile(r"^/api/sessions/[^/]+/mark-read$")),
     ("DELETE", re.compile(r"^/api/terminal/[^/]+$")),
 )

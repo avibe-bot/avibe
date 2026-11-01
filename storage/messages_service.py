@@ -20,6 +20,15 @@ from sqlalchemy import and_, case, delete, func, or_, select, update
 from sqlalchemy.engine import Connection
 
 from storage.agent_session_rows import INBOX_SESSION_VISIBILITIES
+from core.notification_categories import (
+    CATEGORY_BOT,
+    CATEGORY_SESSION,
+    category_expression,
+    current_bot_session_ids,
+    current_bot_session_predicate,
+    normalize_category,
+    split_unread_counts,
+)
 from storage.db import escape_sql_like
 from storage.models import (
     agent_runs,
@@ -1278,6 +1287,27 @@ def unread_counts_by_session(
     return {session_id: int(count) for session_id, count in conn.execute(query).all()}
 
 
+def unread_counts_by_category(
+    conn: Connection,
+    *,
+    platform: Optional[str] = None,
+    scope_ids: Optional[Iterable[str]] = None,
+    hidden_session_ids: Optional[Iterable[str]] = None,
+) -> dict[str, int]:
+    """Return unread result counts split by the current Bot registry."""
+
+    per_session = unread_counts_by_session(
+        conn,
+        platform=platform,
+        scope_ids=scope_ids,
+        hidden_session_ids=hidden_session_ids,
+    )
+    return split_unread_counts(
+        per_session,
+        bot_session_ids=current_bot_session_ids(conn),
+    )
+
+
 def total_unread(
     conn: Connection,
     *,
@@ -1314,6 +1344,7 @@ def list_inbox_sessions(
     only_session: Optional[str] = None,
     scope_ids: Optional[Iterable[str]] = None,
     hidden_session_ids: Optional[Iterable[str]] = None,
+    category: Optional[str] = None,
 ) -> dict[str, Any]:
     """Per-session ("Slack-like") inbox feed.
 
@@ -1335,6 +1366,9 @@ def list_inbox_sessions(
     allowed_scope_ids = list(dict.fromkeys(scope_ids)) if scope_ids is not None else None
     if allowed_scope_ids == []:
         return {"sessions": [], "next_cursor": None}
+
+    normalized_category = normalize_category(category)
+    bot_session_predicate = current_bot_session_predicate(agent_sessions.c.id)
 
     def _latest_message_value(
         column_name: Optional[str],
@@ -1481,6 +1515,7 @@ def list_inbox_sessions(
             agent_sessions.c.scope_id,
             scopes.c.native_id.label("project_id"),
             scopes.c.display_name.label("project_name"),
+            category_expression(agent_sessions.c.id).label("category"),
             unread_count_col,
             preview_id.label("preview_id"),
             preview_at.label("preview_at"),
@@ -1513,6 +1548,11 @@ def list_inbox_sessions(
         session_rows = session_rows.where(agent_sessions.c.id == only_session)
     if allowed_scope_ids is not None:
         session_rows = session_rows.where(agent_sessions.c.scope_id.in_(allowed_scope_ids))
+    if normalized_category == CATEGORY_BOT:
+        session_rows = session_rows.where(bot_session_predicate)
+    elif normalized_category == CATEGORY_SESSION:
+        session_rows = session_rows.where(~bot_session_predicate)
+
     hidden = _hidden_ids(hidden_session_ids)
     if hidden:
         session_rows = session_rows.where(agent_sessions.c.id.not_in(hidden))
@@ -1603,6 +1643,7 @@ def list_inbox_sessions(
                 "preview_at": row["preview_at"],
                 "unread_count": unread,
                 "unread": unread > 0,
+                "category": row["category"],
             }
         )
 

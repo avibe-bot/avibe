@@ -81,7 +81,7 @@ async function refreshAppBadge() {
       requestForegroundBadgeRefresh(clients);
       return;
     }
-    await queueAppBadge(payload?.unread_total, refreshId, pageRevisionAtStart);
+    await queueAppBadge(payload?.badge_total ?? payload?.unread_total, refreshId, pageRevisionAtStart);
     requestForegroundBadgeRefresh(await appWindowClients());
   } catch {
     // An unavailable or unauthenticated read is not evidence that the badge is zero.

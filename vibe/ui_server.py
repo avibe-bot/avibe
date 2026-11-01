@@ -6899,6 +6899,46 @@ def _web_push_user_key() -> str:
     return "local"
 
 
+@app.route("/api/notifications/preferences", methods=["GET", "PUT"])
+def notification_preferences_route():
+    from core.notification_preferences import (
+        get_notification_preferences,
+        public_notification_preferences,
+        set_notification_preferences,
+    )
+
+    user_key = _web_push_user_key()
+    if request.method == "GET":
+        preferences = get_notification_preferences(user_key)
+        return jsonify({"ok": True, "preferences": public_notification_preferences(preferences)})
+
+    payload = request.json
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "invalid_payload"}), 400
+    updates = {field: payload[field] for field in ("enabled", "bots", "sessions") if field in payload}
+    if not updates:
+        return jsonify({"ok": False, "error": "no_preferences"}), 400
+    try:
+        preferences = set_notification_preferences(user_key, updates)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": "invalid_preferences", "message": str(exc)}), 400
+
+    public = public_notification_preferences(preferences)
+    from vibe.sse_broker import broker
+
+    broker.publish(
+        "notifications.preferences.updated",
+        {"user_key": user_key, "preferences": public},
+    )
+    return jsonify({"ok": True, "preferences": public})
+
+
+def _notification_user_key_for_context(context: Any) -> str:
+    if context is not None and getattr(context, "is_remote", False) and getattr(context, "subject", None):
+        return f"remote:{context.subject}"
+    return "local"
+
+
 def _workbench_author_id() -> str | None:
     """Return an author only when the browser passes strict admission."""
 
@@ -13194,6 +13234,11 @@ async def sessions_cancel(session_id: str):
 
 @app.route("/api/sessions/<session_id>/mark-read", methods=["POST"])
 def sessions_mark_read(session_id: str):
+    from core.notification_categories import current_bot_session_ids, split_unread_counts
+    from core.notification_preferences import (
+        badge_total as notification_badge_total,
+        get_notification_preferences,
+    )
     from core.services import sessions as workbench_sessions_service
     from storage import messages_service
     from vibe.sse_broker import broker
@@ -13227,6 +13272,14 @@ def sessions_mark_read(session_id: str):
                 scope_ids=accessible_scope_ids,
                 hidden_session_ids=hidden_session_ids,
             )
+            unread_by_category = split_unread_counts(
+                unread_by_session,
+                bot_session_ids=current_bot_session_ids(conn),
+            )
+            current_badge_total = notification_badge_total(
+                unread_by_category,
+                get_notification_preferences(_web_push_user_key()),
+            )
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
     if updated:
@@ -13238,6 +13291,8 @@ def sessions_mark_read(session_id: str):
                 "delta": -updated,
                 "unread_counts": unread_counts,
                 "unread_by_session": unread_by_session,
+                "unread_by_category": unread_by_category,
+                "badge_total": current_badge_total,
             },
         )
     return jsonify(
@@ -13245,6 +13300,8 @@ def sessions_mark_read(session_id: str):
             "updated": updated,
             "unread_counts": unread_counts,
             "unread_by_session": unread_by_session,
+            "unread_by_category": unread_by_category,
+            "badge_total": current_badge_total,
         }
     )
 
@@ -13451,6 +13508,12 @@ def _workbench_event_heartbeat_frame() -> str:
 
 
 def _workbench_event_visible_to_context(context, event_type: str, payload: str) -> bool:
+    if event_type == "notifications.preferences.updated":
+        data = _workbench_event_data(payload)
+        return bool(
+            data is not None
+            and data.get("user_key") == _notification_user_key_for_context(context)
+        )
     if context is None:
         return True
     if event_type == "show.event":
@@ -13588,6 +13651,11 @@ def _workbench_event_payload_for_context(context, event_type: str, payload: str)
     if not isinstance(data, dict):
         return payload
 
+    from core.notification_categories import current_bot_session_ids, split_unread_counts
+    from core.notification_preferences import (
+        badge_total as notification_badge_total,
+        get_notification_preferences,
+    )
     from storage import messages_service
 
     engine = _projects_engine()
@@ -13606,6 +13674,14 @@ def _workbench_event_payload_for_context(context, event_type: str, payload: str)
             scope_ids=scope_ids,
             hidden_session_ids=hidden_session_ids,
         )
+        unread_by_category = split_unread_counts(
+            unread_by_session,
+            bot_session_ids=current_bot_session_ids(conn),
+        )
+        current_badge_total = notification_badge_total(
+            unread_by_category,
+            get_notification_preferences(_notification_user_key_for_context(context)),
+        )
     return json.dumps(
         {
             **envelope,
@@ -13613,6 +13689,8 @@ def _workbench_event_payload_for_context(context, event_type: str, payload: str)
                 **data,
                 "unread_counts": unread_counts,
                 "unread_by_session": unread_by_session,
+                "unread_by_category": unread_by_category,
+                "badge_total": current_badge_total,
             },
         },
         ensure_ascii=False,
@@ -13803,6 +13881,12 @@ def inbox_list():
     activity first. Defaults to avibe-only per workbench scope."""
 
     from storage import messages_service
+    from core.notification_categories import (
+        current_bot_session_ids,
+        normalize_category,
+        split_unread_counts,
+    )
+    from core.notification_preferences import badge_total, get_notification_preferences
 
     platform = request.args.get("platform") or "avibe"
     scope_filter = platform if platform != "all" else None
@@ -13816,6 +13900,10 @@ def inbox_list():
     # reconcile) guarantee one specific session's row is (re)loaded even when its
     # activity sorts past the paged window.
     only_session = request.args.get("session") or None
+    try:
+        category = normalize_category(request.args.get("category"))
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": "invalid_category", "message": str(exc)}), 400
 
     engine = _projects_engine()
     with engine.connect() as conn:
@@ -13831,6 +13919,7 @@ def inbox_list():
             only_session=only_session,
             scope_ids=accessible_scope_ids,
             hidden_session_ids=hidden_session_ids,
+            category=category,
         )
         # Pagination-independent unread map for the sidebar badges (a session
         # with unread may sit past the first inbox page) + header totals.
@@ -13843,6 +13932,15 @@ def inbox_list():
         result["unread_by_session"] = per_session
         result["unread_total"] = sum(per_session.values())
         result["unread_sessions"] = len(per_session)
+        category_counts = split_unread_counts(
+            per_session,
+            bot_session_ids=current_bot_session_ids(conn),
+        )
+        result["unread_by_category"] = category_counts
+        result["badge_total"] = badge_total(
+            category_counts,
+            get_notification_preferences(_web_push_user_key()),
+        )
     return jsonify(result)
 
 

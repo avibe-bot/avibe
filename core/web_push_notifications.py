@@ -42,6 +42,7 @@ WEB_PUSH_DISPOSITION_REVOKED = "revoked"
 WEB_PUSH_DISPOSITION_NO_SUBSCRIPTION = "no_subscription"
 WEB_PUSH_DISPOSITION_PROVIDER_FAILURE = "provider_failure"
 WEB_PUSH_DISPOSITION_SUPPRESSED_READ = "suppressed_read"
+WEB_PUSH_DISPOSITION_MUTED = "muted"
 
 WEB_PUSH_DISPOSITION_CONFIG_UNAVAILABLE = "config_unavailable"
 
@@ -950,37 +951,45 @@ def _badge_count_for_user_key(
     user_key: str,
     contexts: dict[str, AuthorizationContext],
 ) -> int:
-    """Return the unread count visible to one Push subscription owner."""
+    """Return the loud unread count visible to one Push subscription owner."""
 
+    from core.notification_categories import current_bot_session_ids, split_unread_counts
+    from core.notification_preferences import badge_total, get_notification_preferences
+    from core.bots import hidden_bot_session_ids
+
+    hidden_session_ids = hidden_bot_session_ids(
+        conn,
+        None if user_key == "local" else contexts.get(user_key),
+    )
     if user_key == "local":
-        from core.bots import hidden_bot_session_ids
+        scope_ids = None
+    else:
+        context = contexts.get(user_key)
+        if context is None:
+            # Legacy remote messages predate persisted authorization claims. Keep
+            # delivering eligible content, but never attach a machine-global count.
+            return 0
+        if context.can_manage_instance:
+            scope_ids = None
+        else:
+            from storage import project_access_service
 
-        return messages_service.total_unread(
-            conn, platform="avibe", hidden_session_ids=hidden_bot_session_ids(conn, None)
-        )
-    context = contexts.get(user_key)
-    if context is None:
-        # Legacy remote messages predate persisted authorization claims. Keep
-        # delivering eligible content, but never attach a machine-global count.
-        return 0
-    if context.can_manage_instance:
-        from core.bots import hidden_bot_session_ids
+            scope_ids = [
+                project_access_service.project_scope_id(project_id)
+                for project_id in project_access_service.accessible_project_ids(conn, context)
+            ]
 
-        return messages_service.total_unread(
-            conn, platform="avibe", hidden_session_ids=hidden_bot_session_ids(conn, context)
-        )
-
-    from storage import project_access_service
-
-    scope_ids = [
-        project_access_service.project_scope_id(project_id)
-        for project_id in project_access_service.accessible_project_ids(conn, context)
-    ]
-    return messages_service.total_unread(
+    per_session = messages_service.unread_counts_by_session(
         conn,
         platform="avibe",
         scope_ids=scope_ids,
+        hidden_session_ids=hidden_session_ids,
     )
+    category_counts = split_unread_counts(
+        per_session,
+        bot_session_ids=current_bot_session_ids(conn),
+    )
+    return badge_total(category_counts, get_notification_preferences(user_key))
 
 
 def _remote_access_enabled() -> bool:
@@ -1099,6 +1108,34 @@ def _send_to_enabled_subscriptions(payload: dict[str, Any]) -> None:
                     "disposition": None,
                     "reason": "local fallback with remote access disabled",
                 }
+
+            from core.notification_categories import category_for_session_id, current_bot_session_ids
+            from core.notification_preferences import category_is_loud, get_notification_preferences
+
+            notification_category = category_for_session_id(
+                session_id,
+                bot_session_ids=current_bot_session_ids(conn),
+            )
+            payload.setdefault("category", notification_category)
+            loud_authorized_keys: list[str] = []
+            for user_key in authorized_keys:
+                preferences = get_notification_preferences(user_key)
+                if category_is_loud(preferences, notification_category):
+                    loud_authorized_keys.append(user_key)
+                    continue
+                attempt["owners"][user_key] = {
+                    "policy": attempt["owners"].get(user_key, {}).get("policy") or (
+                        "local" if user_key == "local" else "unknown"
+                    ),
+                    "disposition": WEB_PUSH_DISPOSITION_MUTED,
+                    "reason": f"{notification_category} notifications are muted for this account",
+                }
+                logger.info(
+                    "web push: skipping owner %s: %s notifications are muted",
+                    user_key,
+                    notification_category,
+                )
+            authorized_keys = loud_authorized_keys
             if not authorized_keys:
                 disposition = next(
                     (

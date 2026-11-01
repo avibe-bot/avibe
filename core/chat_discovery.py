@@ -9,7 +9,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from sqlalchemy import Connection, and_, func, select
 
@@ -242,6 +242,38 @@ def set_state_meta(key: str, value: Any, *, db_path: Path | None = None, now: st
     try:
         with engine.begin() as conn:
             _set_state_meta(conn, key, value, now=now or _utc_now_iso())
+    finally:
+        engine.dispose()
+
+
+def update_state_meta(
+    key: str,
+    updater: Callable[[Any], Any],
+    *,
+    db_path: Path | None = None,
+    now: str | None = None,
+) -> Any:
+    """Atomically read, update, and replace one state metadata document."""
+
+    engine = _engine(db_path)
+    try:
+        with engine.connect() as conn:
+            # A deferred SQLite transaction allows two readers to observe the
+            # same JSON document before either writer commits.  Acquire the
+            # database write reservation before reading so the merge cannot
+            # lose a concurrent partial update.
+            conn.exec_driver_sql("BEGIN IMMEDIATE")
+            try:
+                raw = conn.execute(
+                    select(state_meta.c.value_json).where(state_meta.c.key == key)
+                ).scalar_one_or_none()
+                value = updater(_json_load_any(raw))
+                _set_state_meta(conn, key, value, now=now or _utc_now_iso())
+                conn.commit()
+                return value
+            except Exception:
+                conn.rollback()
+                raise
     finally:
         engine.dispose()
 
