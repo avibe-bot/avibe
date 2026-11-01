@@ -15,13 +15,14 @@ REPOSITORY = "avibe-bot/avibe"
 
 
 def github_release(
-    tag, *, published_at, prerelease=False, draft=False, assets=("a.tgz",), repository=REPOSITORY
+    tag, *, published_at, prerelease=False, draft=False, assets=("a.tgz",), repository=REPOSITORY, body=None
 ):
     return {
         "tag_name": tag,
         "draft": draft,
         "prerelease": prerelease,
         "published_at": published_at,
+        "body": body,
         "assets": [
             {
                 "name": name,
@@ -54,6 +55,55 @@ def test_selection_keeps_every_full_release_and_only_the_newest_prereleases():
     assert [release.tag for release in mirror.select(parsed, keep_prereleases=2)] == [
         "gh-v1.0.1rc3", "gh-v1.0.1rc2", "model-hub-engine-v1-1", "v1.0.0",
     ]
+
+
+def test_the_index_marks_only_releases_whose_notes_ask_for_silence():
+    parsed = releases(
+        github_release(
+            "v3.2.4", published_at="2026-11-01T00:00:00Z",
+            body="<!-- avibe:update-notification=none -->\n<!-- vibe-remote:update-notification=none -->\n\nNotes",
+        ),
+        github_release(
+            "v3.2.3", published_at="2026-10-27T00:00:00Z",
+            body="<!-- avibe:update-notification=default -->\n\nNotes",
+        ),
+        github_release("v3.2.2", published_at="2026-10-21T00:00:00Z", body="Notes"),
+        github_release("v3.2.1", published_at="2026-10-16T00:00:00Z"),
+    )
+
+    assert [release.silent for release in parsed] == [True, False, False, False]
+    document = json.loads(mirror.render_index(REPOSITORY, parsed))
+    assert [item.get("update_notification") for item in document["releases"]] == ["none", None, None, None]
+    # Announced releases keep the bytes an index had before the field existed.
+    assert "update_notification" not in mirror.render_index(REPOSITORY, parsed[1:]).decode()
+
+
+def test_the_index_reads_silence_the_way_the_cli_update_checker_does():
+    from core import update_checker
+
+    assert mirror._UPDATE_NOTIFICATION_RE.pattern == update_checker.UPDATE_NOTIFICATION_POLICY_MARKER_RE.pattern
+    assert mirror._UPDATE_NOTIFICATION_RE.flags == update_checker.UPDATE_NOTIFICATION_POLICY_MARKER_RE.flags
+    for body in (
+        None,
+        "",
+        "<!-- AVIBE:Update-Notification = NONE -->",
+        "<!-- avibe:update-notification=default --><!-- avibe:update-notification=none -->",
+        "`avibe:update-notification=none`",
+    ):
+        assert mirror.silent_release_notes(body) is (
+            update_checker._parse_update_notification_policy(body) == update_checker.UPDATE_NOTIFICATION_POLICY_NONE
+        ), body
+
+
+def test_an_earlier_pinned_release_keeps_its_silence_from_the_previous_index():
+    (silent,) = releases(
+        github_release("v3.2.4", published_at="2026-11-01T00:00:00Z", body="<!-- avibe:update-notification=none -->")
+    )
+    (announced,) = releases(github_release("v3.2.5", published_at="2026-11-02T00:00:00Z"))
+
+    kept = mirror.with_earlier_pins(REPOSITORY, [announced], mirror.render_index(REPOSITORY, [silent]))
+
+    assert [(release.tag, release.silent) for release in kept] == [("v3.2.5", False), ("v3.2.4", True)]
 
 
 def test_reconcile_plan_trusts_only_objects_the_prior_index_verified():

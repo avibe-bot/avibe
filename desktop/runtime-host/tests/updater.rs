@@ -182,6 +182,7 @@ fn channel_selection_uses_semver_and_the_prerelease_flag_together() {
         prerelease,
         commit: None,
         assets: Vec::new(),
+        silent: false,
     };
     let listed = vec![
         release("gh-v3.1.2rc9", true),
@@ -213,6 +214,10 @@ fn only_the_supported_index_schema_for_this_repository_is_read() {
     });
     let releases = index_releases(&serde_json::to_vec(&index).unwrap()).unwrap();
     assert_eq!(releases[0].assets, ["测试.tgz"]);
+    assert!(
+        !releases[0].silent,
+        "an index written before the field announces every release"
+    );
     for (field, value) in [
         ("schema_version", serde_json::json!(2)),
         ("repository", serde_json::json!("someone/avibe")),
@@ -226,4 +231,34 @@ fn only_the_supported_index_schema_for_this_repository_is_read() {
         );
     }
     assert!(index_releases(b"<html>captive portal</html>").is_err());
+}
+
+#[test]
+fn only_an_index_none_policy_marks_a_release_silent() {
+    use avibe_runtime_host::update::index_releases;
+    let index = |policy: serde_json::Value| {
+        let mut release = serde_json::json!({
+            "tag": "v3.2.4",
+            "prerelease": false,
+            "published_at": "2026-11-01T00:00:00Z",
+            "commit": "b".repeat(40),
+            "assets": []
+        });
+        if !policy.is_null() {
+            release["update_notification"] = policy;
+        }
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "repository": "avibe-bot/avibe",
+            "releases": [release]
+        }))
+        .unwrap()
+    };
+    assert!(index_releases(&index(serde_json::json!("none"))).unwrap()[0].silent);
+    for announced in [serde_json::Value::Null, serde_json::json!("default")] {
+        assert!(
+            !index_releases(&index(announced.clone())).unwrap()[0].silent,
+            "{announced}"
+        );
+    }
 }

@@ -10,6 +10,12 @@ for `AGENTS.md`. The workflows are the source of truth for the final commands.
   input. Put `<!-- avibe:update-notification=none -->` in the tag annotation
   when the release should suppress update and post-update notifications while
   automatic updates remain enabled.
+- The marker also silences the desktop app: its automatic startup check does
+  not prompt for a silent release, which still shows as available and is
+  offered by an explicit check or a remote install request. The shell reads
+  the marker from the mirror index's `update_notification` field, or from the
+  release notes when it falls back to the GitHub API. Desktop apps built
+  before this rule still prompt.
 - Push the tag and let the official workflows create the release. Do not
   pre-create or manually edit a GitHub Release.
 - The workflow emits both current and legacy `vibe-remote` update markers for

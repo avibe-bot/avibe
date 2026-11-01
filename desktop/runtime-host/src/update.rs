@@ -106,6 +106,9 @@ pub struct Release {
     pub commit: Option<String>,
     /// Asset names published under the canonical download URL.
     pub assets: Vec<String>,
+    /// The release asked not to be announced: its notes carry
+    /// `<!-- avibe:update-notification=none -->` (docs/release.md).
+    pub silent: bool,
 }
 #[derive(Deserialize)]
 struct Index {
@@ -119,6 +122,9 @@ struct IndexRelease {
     prerelease: bool,
     commit: String,
     assets: Vec<IndexAsset>,
+    /// Present only as `"none"`, for a silent release.
+    #[serde(default)]
+    update_notification: Option<String>,
 }
 #[derive(Deserialize)]
 struct IndexAsset {
@@ -139,8 +145,44 @@ pub fn index_releases(bytes: &[u8]) -> Result<Vec<Release>, String> {
             prerelease: release.prerelease,
             commit: Some(release.commit),
             assets: release.assets.into_iter().map(|asset| asset.name).collect(),
+            silent: release.update_notification.as_deref() == Some("none"),
         })
         .collect())
+}
+
+/// Whether release notes ask clients not to announce the release. Reads the
+/// marker the way `UPDATE_NOTIFICATION_POLICY_MARKER_RE` in
+/// `core/update_checker.py` does: case-insensitively, and the first
+/// well-formed marker decides.
+pub fn silent_release_notes(body: &str) -> bool {
+    let mut rest = body;
+    while let Some(start) = rest.find("<!--") {
+        rest = &rest[start + 4..];
+        let Some(end) = rest.find("-->") else {
+            return false;
+        };
+        if let Some(silent) = notification_marker(&rest[..end]) {
+            return silent;
+        }
+    }
+    false
+}
+/// `Some(silent)` for a well-formed marker comment, `None` for any other comment.
+fn notification_marker(comment: &str) -> Option<bool> {
+    let comment = comment.trim().to_ascii_lowercase();
+    let marker = comment
+        .strip_prefix("avibe:")
+        .or_else(|| comment.strip_prefix("vibe-remote:"))?;
+    match marker
+        .strip_prefix("update-notification")?
+        .trim_start()
+        .strip_prefix('=')?
+        .trim()
+    {
+        "none" => Some(true),
+        "default" => Some(false),
+        _ => None,
+    }
 }
 pub fn artifact_name(version: &str, target: &str) -> Result<String, String> {
     Ok(format!("Avibe_{version}_{target}{}", target_spec(target)?.1))
@@ -255,6 +297,30 @@ mod tests {
         }
         for tag in ["gh-v3.1.2rc1", "v3.1.2rc1", "v3.1.2-rc.1", "v3.1.2+foo"] {
             assert!(Channel::Stable.version(tag).is_err(), "{tag}");
+        }
+    }
+    #[test]
+    fn the_first_well_formed_notification_marker_decides_silence() {
+        for silent in [
+            "<!-- avibe:update-notification=none -->",
+            "notes\n<!--avibe:update-notification = none-->",
+            "<!-- vibe-remote:update-notification=none -->",
+            "<!-- draft <!-- avibe:update-notification=none -->",
+            "<!-- other -->\n<!--\n avibe:update-notification=none\n-->",
+            "<!-- AVIBE:Update-Notification=NONE -->",
+        ] {
+            assert!(silent_release_notes(silent), "{silent:?}");
+        }
+        for announced in [
+            "",
+            "Release notes",
+            "`avibe:update-notification=none` documents the marker",
+            "<!-- avibe:update-notification=default -->\n<!-- avibe:update-notification=none -->",
+            "<!-- avibe:update-notification=nones -->",
+            "<!-- avibe : update-notification=none -->",
+            "<!-- avibe:update-notification=none",
+        ] {
+            assert!(!silent_release_notes(announced), "{announced:?}");
         }
     }
     #[test]

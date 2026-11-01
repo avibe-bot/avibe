@@ -68,6 +68,12 @@ _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 # The desktop updater's stable channel: canonical ``vX.Y.Z`` full releases.
 _STABLE_TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
+# The release-notes marker asking clients not to announce a release, read as
+# ``core/update_checker.py`` reads it: the first well-formed marker decides.
+_UPDATE_NOTIFICATION_RE = re.compile(
+    r"<!--\s*(?:avibe|vibe-remote):update-notification\s*=\s*(?P<policy>none|default)\s*-->",
+    re.IGNORECASE,
+)
 
 
 class MirrorError(RuntimeError):
@@ -99,6 +105,8 @@ class Release:
     published_at: str
     commit: str
     assets: tuple[Asset, ...]
+    # The release notes ask clients not to announce it (docs/release.md).
+    silent: bool = False
 
     def key(self, asset: Asset) -> str:
         return f"{release_prefix(self.repository)}{self.tag}/{asset.name}"
@@ -159,9 +167,15 @@ def parse_releases(
                 published_at=item["published_at"],
                 commit=commit,
                 assets=tuple(sorted(assets, key=lambda asset: asset.name)),
+                silent=silent_release_notes(item.get("body")),
             )
         )
     return releases
+
+
+def silent_release_notes(body: object) -> bool:
+    match = _UPDATE_NOTIFICATION_RE.search(body) if isinstance(body, str) else None
+    return match is not None and match.group("policy").lower() == "none"
 
 
 def pinned_releases(
@@ -224,6 +238,8 @@ def render_index(repository: str, releases: Sequence[Release]) -> bytes:
                     {"name": asset.name, "size": asset.size, "sha256": asset.sha256}
                     for asset in release.assets
                 ],
+                # Written only for a silent release, so other indexes keep their bytes.
+                **({"update_notification": "none"} if release.silent else {}),
             }
             for release in releases
         ],
@@ -269,6 +285,7 @@ def with_earlier_pins(repository: str, releases: Sequence[Release], index: bytes
                     )
                     for asset in item["assets"]
                 ),
+                silent=item.get("update_notification") == "none",
             )
             for item in document["releases"]
             if item["tag"] not in selected
