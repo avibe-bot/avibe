@@ -3342,7 +3342,7 @@
   },
   "appShell": {
     "title": "Avibe",
-    "subtitle": "Agent OS · Workbench",
+    "subtitle": "Agent OS",
     "workspaceLabel": "Settings",
     "moreSettings": "More Settings",
     "openControlPanel": "Settings",
@@ -3551,7 +3551,8 @@
         "testSent": "Test notification sent",
         "testFailed": "Test notification failed",
         "normalBlocked": "normal notifications are currently skipped for you ({{policy}} policy: {{disposition}})"
-      }
+      },
+      "navUnread": "Inbox, {{count}} unread"
     },
     "modules": {
       "comingSoonEyebrow": "Coming soon",
@@ -4658,6 +4659,96 @@
       "systemPromptHint": "Optional",
       "systemPromptPlaceholder": "Optional. Prepended to every conversation that uses this agent.",
       "submit": "Create agent"
+    }
+  },
+  "bots": {
+    "sectionLabel": "Bots",
+    "mainDefaultName": "Vibey",
+    "tag": "Bot",
+    "handle": "@{{handle}}",
+    "handlePrefix": "@",
+    "mentionName": "@{{name}}",
+    "add": "Add",
+    "addLabel": "Add a Bot",
+    "slotLabelUnread": "{{name}}, {{count}} unread",
+    "running": "Running",
+    "latest": "Latest",
+    "statusAt": "{{status}} · {{time}}",
+    "openConversation": "Open conversation",
+    "removed": "{{name}} was removed from Bots",
+    "removeFailed": "Could not remove this Bot",
+    "reorderInstructions": "Press Space to pick up a Bot, use arrow keys to move it, Space to drop, or Escape to cancel.",
+    "reorderPickedUp": "Picked up {{name}}.",
+    "reorderPosition": "{{name}}, position {{position}} of {{count}}.",
+    "reorderDropped": "Dropped {{name}}.",
+    "reorderCancelled": "Reordering cancelled.",
+    "menu": {
+      "label": "{{name}} actions",
+      "editProfile": "Edit profile",
+      "dragToReorder": "Drag to reorder",
+      "remove": "Remove from Bots",
+      "removeNote": "Its conversation and memory are kept; set it as a Bot again to reconnect them."
+    },
+    "dialog": {
+      "addTitle": "Add a Bot",
+      "editTitle": "Edit profile",
+      "description": "A Bot has a name and its own memory, and your conversation with it carries on.",
+      "tabNew": "New",
+      "tabFromAgent": "From an existing Agent",
+      "name": "Name",
+      "displayName": "Display name",
+      "namePlaceholder": "e.g. Chief Security Officer",
+      "nameRequired": "Give the Bot a name.",
+      "avatar": "Choose an avatar",
+      "role": "What it handles",
+      "rolePlaceholder": "e.g. Audits dependencies and permissions, and reports every Monday",
+      "roleHint": "Goes into its instructions; you can change it later on the Agents page.",
+      "handleGenerating": "Generating a handle…",
+      "handleHint": "Generated for @ mentions and the CLI",
+      "handleLocked": "The Agent name, locked while it is a Bot",
+      "handleFrozen": "Fixed once the Bot exists",
+      "handleEdit": "Edit handle",
+      "handleInvalid": "Use 2 to 24 lowercase letters, digits, or hyphens, starting with a letter and not ending with a hyphen.",
+      "advancedFollows": "Advanced: model follows {{name}} ({{model}})",
+      "advancedModel": "Advanced: model {{model}}",
+      "followMain": "Follow {{name}}'s model",
+      "chatHint": "You can also ask {{name}} to add one, e.g. “Add a Bot that handles security.”",
+      "fromAgentHint": "Only Vibey Agents that are not Bots yet are listed.",
+      "noEligibleAgents": "No Vibey Agent can be set as a Bot. Create one on the Agents page first.",
+      "pickAgent": "Choose an Agent.",
+      "create": "Add Bot",
+      "set": "Set as Bot",
+      "save": "Save",
+      "saveFailed": "Could not save the Bot.",
+      "avatarUploadFailed": "The Bot was saved, but its avatar did not upload."
+    },
+    "avatarPicker": {
+      "emoji": "Emoji",
+      "upload": "Upload image",
+      "background": "Background",
+      "hue": "Hue {{hue}}",
+      "defaultHint": "Optional: by default it shows the name's first character on a color the name decides.",
+      "dropHint": "Drop an image here, or click to choose",
+      "formats": "PNG, JPG, or WebP, cropped to a circle",
+      "unsupported": "Choose a PNG, JPG, or WebP image.",
+      "tooLarge": "The image is larger than 10 MB.",
+      "useDefault": "Use the default"
+    },
+    "conversation": {
+      "editProfile": "Edit profile",
+      "emptyTitle": "This is the start of your conversation with {{name}}",
+      "emptyBody": "It carries on from here: {{name}} keeps what matters in its memory and handles messages in order."
+    },
+    "agents": {
+      "badge": "Bot",
+      "setAsBot": "Set as Bot",
+      "setAsBotHint": "Give it a name, an avatar, and one permanent conversation with memory.",
+      "setAsBotNeedsEnabled": "Enable the Agent first, then set it as a Bot.",
+      "isBotTitle": "This Agent is the Bot {{name}}",
+      "isBotHint": "While it is a Bot it stays enabled and keeps its name; it cannot be archived or deleted. Remove it from Bots first.",
+      "isMainBotHint": "The main Bot's Agent is built in: it stays enabled and cannot be removed.",
+      "openConversation": "Open conversation",
+      "editProfile": "Edit profile"
     }
   },
   "editor": {

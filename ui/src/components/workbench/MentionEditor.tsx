@@ -40,16 +40,25 @@ import {
   BeautifulMentionsPlugin,
   BeautifulMentionNode,
   $isBeautifulMentionNode,
+  createBeautifulMentionNode,
   useBeautifulMentions,
+  type BeautifulMentionComponentProps,
   type BeautifulMentionsItem,
   type BeautifulMentionsMenuProps,
   type BeautifulMentionsMenuItemProps,
 } from 'lexical-beautiful-mentions';
 
+import { useTranslation } from 'react-i18next';
+
 import { filesFromClipboard } from '../../lib/clipboardFiles';
 import { isSoftKeyboardOpen, isTouchCapableDevice } from '../../lib/softKeyboard';
 import { cn } from '../../lib/utils';
 import { dedupeReferences, type MentionReference } from '../../lib/mentions';
+import type { BotAvatar as BotAvatarSpec } from '../../lib/bots';
+import { useBots } from '../../context/BotsContext';
+import { BotAvatar } from '../ui/bot-avatar';
+import { BackendAvatar } from '../visual';
+import type { BackendId } from '../../lib/agentBackends';
 import {
   applyVoiceInsertionWithSnapshot,
   voiceInsertionSnapshot,
@@ -59,11 +68,20 @@ import { isComposingKey } from '@/lib/imeComposition';
 import { useLatestRef } from '@/lib/useLatestRef';
 
 export type AgentSearchResult = {
+  kind?: 'agent';
   name: string;
   agent_id?: string | null;
   backend?: string | null;
   description?: string | null;
 };
+/** A Bot in the `@` list (docs/plans/bots.md D3): it leads the list, with its avatar. */
+export type BotSearchResult = {
+  kind: 'bot';
+  handle: string;
+  display_name: string;
+  avatar: BotAvatarSpec | null;
+};
+export type MentionSearchResult = AgentSearchResult | BotSearchResult;
 export type SessionSearchResult = { session_id: string; title?: string | null };
 
 export interface MentionEditorHandle {
@@ -119,7 +137,8 @@ export interface MentionEditorProps {
     isVoicePreview?: boolean,
   ) => void;
   onSubmit: () => void;
-  onSearchAgents: (query: string) => Promise<AgentSearchResult[]>;
+  /** The `@` list: Bots first, then Agents. */
+  onSearchAgents: (query: string) => Promise<MentionSearchResult[]>;
   onSearchSessions: (query: string) => Promise<SessionSearchResult[]>;
   /** Pasting a file into the editor (clipboard screenshot or OS-copied file)
    *  hands it here instead of pasting as text. Unset → paste behaves as plain
@@ -145,6 +164,12 @@ function nodeToMarkerText(node: LexicalNode, refs: MentionReference[]): string {
     const value = node.getValue();
     const data = (node.getData() ?? {}) as Record<string, string | number | boolean | null>;
     if (trigger === '@') {
+      // The kind decides the meaning (D3): a Bot's chip shows its display name
+      // but its marker carries the frozen handle, so a rename never alters it.
+      if (data.kind === 'bot' && typeof data.handle === 'string' && data.handle) {
+        refs.push({ kind: 'bot', handle: data.handle, display_name: value });
+        return `@<bot:${data.handle}>`;
+      }
       // The marker terminates at the first `>`; a name containing `>` (or a
       // newline) would serialize to an ambiguous `@<a>b>`. Such names can't be
       // round-tripped, so fall back to plain text rather than a broken marker.
@@ -156,7 +181,7 @@ function nodeToMarkerText(node: LexicalNode, refs: MentionReference[]): string {
         agent_id: data.agentId != null ? String(data.agentId) : undefined,
         backend: data.backend != null ? String(data.backend) : undefined,
       });
-      return `@<${value}>`;
+      return `@<agent:${value}>`;
     }
     if (trigger === '#') {
       const sessionId = data.sessionId != null ? String(data.sessionId) : value;
@@ -782,26 +807,71 @@ MentionMenu.displayName = 'MentionMenu';
 
 const MentionMenuItem = forwardRef<HTMLLIElement, BeautifulMentionsMenuItemProps>(
   ({ selected, item, itemValue: _itemValue, label: _label, ...props }, ref) => {
+    const { t } = useTranslation();
     const data = (item.data ?? {}) as Record<string, string | number | boolean | null>;
+    const isBot = item.trigger === '@' && data.kind === 'bot';
     // Agents show their backend as a secondary hint; sessions show only the title.
-    const secondary = item.trigger === '@' && data.backend != null ? String(data.backend) : '';
+    const secondary = item.trigger === '@' && !isBot && data.backend != null ? String(data.backend) : '';
     return (
       <li
         ref={ref}
         className={cn(
           'flex cursor-pointer select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none',
           selected ? 'bg-accent/10 text-accent-ink' : 'text-text',
+          // Bots lead the list; a hairline separates them from the Agents (D3).
+          data.groupStart === true && 'relative mt-1.5 before:absolute before:inset-x-1 before:-top-1 before:h-px before:bg-border',
         )}
         {...props}
       >
-        <span className="shrink-0 text-muted">{item.trigger}</span>
+        {isBot ? (
+          <MentionBotAvatar handle={String(data.handle ?? '')} name={item.value} />
+        ) : item.trigger === '@' && data.backend != null ? (
+          <BackendAvatar backend={String(data.backend) as BackendId} size={16} className="size-4 shrink-0 text-muted" />
+        ) : (
+          <span className="shrink-0 text-muted">{item.trigger}</span>
+        )}
         <span className="truncate">{item.value}</span>
-        {secondary ? <span className="ml-auto shrink-0 text-xs text-muted">{secondary}</span> : null}
+        {isBot ? (
+          <span className="ml-auto shrink-0 font-mono text-xs text-muted">{t('bots.handle', { handle: String(data.handle ?? '') })}</span>
+        ) : secondary ? (
+          <span className="ml-auto shrink-0 text-xs text-muted">{secondary}</span>
+        ) : null}
       </li>
     );
   },
 );
 MentionMenuItem.displayName = 'MentionMenuItem';
+
+/** A Bot's avatar in the `@` list or a chip, read live so it follows edits. */
+const MentionBotAvatar: React.FC<{ handle: string; name: string; size?: number }> = ({ handle, name, size = 18 }) => {
+  const { botForHandle } = useBots();
+  return <BotAvatar avatar={botForHandle(handle)?.avatar ?? null} name={name} size={size} />;
+};
+
+// The chip a picked mention becomes. A Bot's chip carries its avatar beside the
+// display name (D3); every other chip renders exactly as the default node did.
+const MentionChip = forwardRef<HTMLSpanElement, BeautifulMentionComponentProps<Record<string, string | number | boolean | null>>>(
+  ({ trigger, value, data, children, className, ...rest }, ref) => {
+    if (trigger === '@' && data?.kind === 'bot' && typeof data.handle === 'string') {
+      return (
+        <span ref={ref} className={cn(className, 'inline-flex items-center gap-1 pl-0.5 align-bottom')} {...rest}>
+          <MentionBotAvatar handle={data.handle} name={value} size={14} />
+          <span>{children}</span>
+        </span>
+      );
+    }
+    return (
+      <span ref={ref} className={className} {...rest}>
+        {children}
+      </span>
+    );
+  },
+);
+MentionChip.displayName = 'MentionChip';
+
+// One custom node class per app (the library keeps it as a singleton), so the
+// replacement is built once at module load rather than per editor.
+const MENTION_NODES = createBeautifulMentionNode(MentionChip);
 
 // A Lexical-backed text input with `@` (agent) / `#` (session) inline-chip
 // mentions. Owns only the editor; the surrounding composer shell (send button,
@@ -840,12 +910,23 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
     async (trigger: string, queryString?: string | null): Promise<BeautifulMentionsItem[]> => {
       const query = (queryString ?? '').trim();
       if (trigger === '@') {
-        const agents = await onSearchAgents(query);
-        return agents.map((a) => ({
-          value: a.name,
-          agentId: a.agent_id ?? null,
-          backend: a.backend ?? null,
-        }));
+        const results = await onSearchAgents(query);
+        const hasBots = results.some((result) => result.kind === 'bot');
+        let firstAgent = true;
+        return results.map((result): BeautifulMentionsItem => {
+          if (result.kind === 'bot') {
+            return { value: result.display_name, kind: 'bot', handle: result.handle };
+          }
+          const groupStart = hasBots && firstAgent;
+          firstAgent = false;
+          return {
+            value: result.name,
+            kind: 'agent',
+            agentId: result.agent_id ?? null,
+            backend: result.backend ?? null,
+            groupStart,
+          };
+        });
       }
       if (trigger === '#') {
         const sessions = await onSearchSessions(query);
@@ -867,7 +948,7 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
   const [initialConfig] = useState(() => ({
     namespace: 'avibe-mention-composer',
     theme: { beautifulMentions: MENTION_THEME },
-    nodes: [BeautifulMentionNode],
+    nodes: [...MENTION_NODES],
     editable: !disabled,
     onError: (error: Error) => {
       // Surface in dev; never throw out of the editor and wipe the box.
@@ -899,7 +980,7 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
           triggers={['@', '#']}
           onSearch={onSearch}
           searchDelay={150}
-          menuItemLimit={8}
+          menuItemLimit={12}
           // Allow `@`/`#` after a word boundary without a leading space (including
           // CJK, which has no inter-word spaces) but NOT inside a Latin word / number
           // / `_` token, so ordinary text like `name@host` or `C#` doesn't open the

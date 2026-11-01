@@ -6,12 +6,15 @@ import clsx from 'clsx';
 
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
+import { useBots } from '../../context/BotsContext';
 import type { InboxSession } from '../../context/ApiContext';
 import { formatRelativeTime } from '../../lib/relativeTime';
 import { Markdown } from '../ui/markdown';
 import { Button } from '../ui/button';
 import { WebPushControl } from './WebPushControl';
 import { useInboxScrollRestoration } from './useInboxScrollRestoration';
+import { BotAvatar } from '../ui/bot-avatar';
+import { BotTag } from './bots/BotTag';
 import {
   readInboxFilter,
   writeInboxFilter,
@@ -25,6 +28,7 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
   const navigate = useNavigate();
   const location = useLocation();
   const listRef = useRef<HTMLDivElement>(null);
+  const { botForSession, displayName: botName } = useBots();
   const {
     capabilities,
   } = useInstanceAuthorization();
@@ -256,6 +260,9 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
             const unread = unreadOf(s);
             const projectLabel = s.project_name || s.project_id || 'avibe';
             const sessionLabel = s.title?.trim() || s.session_id;
+            // A Bot's conversation reads as the Bot: avatar, name, and a small Bot
+            // tag in place of "project · title" (docs/plans/bots.md D5).
+            const bot = botForSession(s.session_id);
             return (
               <article
                 key={s.session_id}
@@ -268,13 +275,24 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
                 )}
               >
                 <div className="flex items-center gap-2 text-[11px]">
-                  <span className="inline-flex max-w-[40%] items-center gap-1 truncate rounded-md border border-border-strong bg-surface-2 px-2 py-0.5 font-semibold text-cyan-ink">
-                    {projectLabel}
-                  </span>
-                  <span className="text-muted">·</span>
-                  <span className="flex-1 truncate text-[13px] font-semibold text-foreground">
-                    {sessionLabel}
-                  </span>
+                  {bot ? (
+                    <>
+                      <BotAvatar avatar={bot.avatar} name={botName(bot)} size={24} />
+                      <span className="min-w-0 truncate text-[13px] font-semibold text-foreground">{botName(bot)}</span>
+                      <BotTag />
+                      <span className="flex-1" />
+                    </>
+                  ) : (
+                    <>
+                      <span className="inline-flex max-w-[40%] items-center gap-1 truncate rounded-md border border-border-strong bg-surface-2 px-2 py-0.5 font-semibold text-cyan-ink">
+                        {projectLabel}
+                      </span>
+                      <span className="text-muted">·</span>
+                      <span className="flex-1 truncate text-[13px] font-semibold text-foreground">
+                        {sessionLabel}
+                      </span>
+                    </>
+                  )}
                   {s.replied && (
                     <span className="inline-flex items-center gap-1 rounded-md border border-cyan/30 bg-cyan/[0.08] px-1.5 py-0.5 text-[10px] font-semibold text-cyan-ink">
                       <MessageSquareReply className="size-2.5" />

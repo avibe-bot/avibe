@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { linkifyMentions, type MentionReference } from './mentions';
+import { linkifyMentions, parseMentionHref, referenceToMarker, type MentionReference } from './mentions';
 
 const REFERENCES: MentionReference[] = [
   { kind: 'agent', name: 'claude' },
@@ -91,5 +91,39 @@ describe('linkifyMentions', () => {
 
     const replaced = verifyEdits(input, text, edits);
     expect(replaced[0][1]).toBe('[#ses6jr7c5h2q6](avibe-mention:session:ses6jr7c5h2q6)');
+  });
+
+  // Typed markers (docs/plans/bots.md D3): the marker carries the kind and the
+  // frozen handle; the chip label is the Bot's display name from the sidecar,
+  // so a rename never has to rewrite a stored message.
+  it('reads typed Bot and Agent markers, and an untyped legacy one as an Agent', () => {
+    const input = 'Ask @<bot:cso>, @<agent:reviewer>, and @<claude>.';
+    const { text, edits } = linkifyMentions(input, [
+      ...REFERENCES,
+      { kind: 'bot', handle: 'cso', display_name: '首席安全官' },
+    ]);
+
+    const replaced = verifyEdits(input, text, edits);
+    expect(replaced.map(([, to]) => to)).toEqual([
+      '[@首席安全官](avibe-mention:bot:cso)',
+      '[@reviewer](avibe-mention:agent:reviewer)',
+      '[@claude](avibe-mention:agent:claude)',
+    ]);
+    expect(parseMentionHref('avibe-mention:bot:cso')).toEqual({ kind: '@', target: 'bot', value: 'cso' });
+    expect(parseMentionHref('avibe-mention:agent:reviewer')).toEqual({ kind: '@', target: 'agent', value: 'reviewer' });
+  });
+
+  it('labels a Bot by its handle when the message carried no display name', () => {
+    const { text } = linkifyMentions('Ask @<bot:cso>.', [{ kind: 'bot', handle: 'cso' }]);
+
+    expect(text).toBe('Ask [@cso](avibe-mention:bot:cso).');
+  });
+});
+
+describe('referenceToMarker', () => {
+  it('writes the kind into every @ marker', () => {
+    expect(referenceToMarker({ kind: 'bot', handle: 'cso', display_name: '首席安全官' })).toBe('@<bot:cso>');
+    expect(referenceToMarker({ kind: 'agent', name: 'reviewer' })).toBe('@<agent:reviewer>');
+    expect(referenceToMarker({ kind: 'session', session_id: 'ses6jr7c5h2q6' })).toBe('#<ses6jr7c5h2q6>');
   });
 });

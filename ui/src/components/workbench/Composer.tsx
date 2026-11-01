@@ -67,7 +67,7 @@ import { inForegroundSurface } from './chatShortcuts';
 import { useRouteSurfaceWindowEvent } from '../../lib/routeSurfaceActivity';
 import {
   MentionEditor,
-  type AgentSearchResult,
+  type MentionSearchResult,
   type MentionEditorHandle,
   type SessionSearchResult,
 } from './MentionEditor';
@@ -421,7 +421,7 @@ export interface ComposerProps {
   /** When BOTH are provided, the input upgrades to the rich mention editor:
    *  `@` autocompletes enabled Agents, `#` autocompletes Sessions. Leaving them
    *  unset keeps the plain textarea (e.g. the Workbench home). */
-  onSearchAgents?: (query: string) => Promise<AgentSearchResult[]>;
+  onSearchAgents?: (query: string) => Promise<MentionSearchResult[]>;
   onSearchSessions?: (query: string) => Promise<SessionSearchResult[]>;
   /** The chat's latest Agent reply, read once when dictation starts and sent to
    *  realtime recognition as context. Surfaces without one leave it unset. */

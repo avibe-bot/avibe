@@ -1,0 +1,139 @@
+// Bots (docs/plans/bots.md): an enabled Vibey Agent plus one permanent Session.
+// The Web contract is `GET /api/bots`; this module holds the pure parts every
+// surface shares — the payload shapes, the Session-id namespace, and the
+// default avatar a Bot shows before one is chosen.
+
+/** What `GET /api/bots` says a Bot looks like. `null` means no avatar chosen. */
+export type BotAvatar =
+  | { kind: 'mascot' }
+  | { kind: 'emoji'; emoji: string; hue: number }
+  | { kind: 'image'; url: string };
+
+export type Bot = {
+  /** Lowercase ASCII, frozen once the Bot exists (D2). */
+  handle: string;
+  /** Any language. Empty means the main Bot's localized default name. */
+  display_name: string;
+  avatar: BotAvatar | null;
+  /** The Agent's description (D1). */
+  role: string;
+  agent_name: string;
+  /** Always `ses_<handle>`. */
+  session_id: string;
+  position: number;
+  /** The main Bot: always first, never removed. */
+  builtin: boolean;
+};
+
+/** The Bot an Agent is, as Agent lists carry it. */
+export type AgentBotSummary = {
+  handle: string;
+  display_name: string;
+  builtin: boolean;
+};
+
+/** An emoji avatar as the API accepts it (`PATCH`/`POST` `avatar`). */
+export type BotEmojiAvatarInput = { emoji: string; hue: number };
+
+/** Generated Session ids are `ses` plus characters without `_`, so `ses_` is the
+ *  Bots' namespace alone (D2). Whether a Bot still owns the id is the list's call. */
+export const BOT_SESSION_ID_PREFIX = 'ses_';
+export const MAIN_BOT_SESSION_ID = 'ses_main';
+
+export function isBotSessionId(sessionId: string | null | undefined): boolean {
+  return typeof sessionId === 'string' && sessionId.startsWith(BOT_SESSION_ID_PREFIX);
+}
+
+/** Whether an Agent can be set as a Bot from the Web (D1, D5): an enabled Vibey
+ *  Agent that is not archived and not a Bot already. Built-in Agents are left
+ *  out: the default `vibey` Agent stays an ordinary worker (D9), and the main
+ *  Bot's Agent is one already. */
+export function eligibleForBot(agent: {
+  backend: string;
+  enabled: boolean;
+  archived?: boolean;
+  source?: string;
+  bot?: AgentBotSummary | null;
+}): boolean {
+  return agent.backend === 'vibey' && agent.enabled && !agent.archived && !agent.bot && agent.source !== 'builtin';
+}
+
+/** The name a Bot goes by: its display name, the localized default for the main
+ *  Bot, else its handle. */
+export function botDisplayName(bot: Pick<Bot, 'display_name' | 'builtin' | 'handle'>, mainDefault: string): string {
+  return bot.display_name.trim() || (bot.builtin ? mainDefault : bot.handle);
+}
+
+export function botSessionPath(bot: Pick<Bot, 'session_id'>): string {
+  return `/chat/${encodeURIComponent(bot.session_id)}`;
+}
+
+/** D2's handle grammar, for the pre-creation edit: 2 to 24 characters, a letter
+ *  first, and no trailing hyphen (an Agent name never ends in one). */
+export const BOT_HANDLE_RE = /^[a-z][a-z0-9-]{0,22}[a-z0-9]$/;
+
+/** The hues the avatar picker offers; a name-derived default draws from them too. */
+export const BOT_AVATAR_HUES = [200, 42, 150, 330, 265, 12, 180, 90] as const;
+
+export const BOT_AVATAR_EMOJIS = [
+  '🛡️', '🧭', '📊', '🎨', '🔭', '🧪', '📚', '💼',
+  '🛠️', '📝', '🌐', '🎯', '🤖', '🦉', '🐳', '🚀',
+] as const;
+
+/** A stable hue from the name, so the default avatar keeps its color as the
+ *  Bot is renamed only when the name itself changes. */
+export function nameHue(name: string): number {
+  let hash = 0;
+  for (const char of name.trim()) {
+    hash = (hash * 31 + (char.codePointAt(0) ?? 0)) >>> 0;
+  }
+  return BOT_AVATAR_HUES[hash % BOT_AVATAR_HUES.length];
+}
+
+/** The first character of the name (a whole grapheme for CJK and emoji). */
+export function nameInitial(name: string): string {
+  const trimmed = name.trim();
+  if (!trimmed) return '?';
+  const Segmenter = (Intl as { Segmenter?: typeof Intl.Segmenter }).Segmenter;
+  const first = Segmenter
+    ? new Segmenter(undefined, { granularity: 'grapheme' }).segment(trimmed)[Symbol.iterator]().next().value?.segment
+    : Array.from(trimmed)[0];
+  return (first ?? '?').toLocaleUpperCase();
+}
+
+/** Display order: the main Bot first, then by position (the server's order, restated
+ *  so a local reorder renders without waiting for the refetch). */
+export function orderBots(bots: Bot[]): Bot[] {
+  return [...bots].sort((a, b) => {
+    if (a.builtin !== b.builtin) return a.builtin ? -1 : 1;
+    if (a.position !== b.position) return a.position - b.position;
+    return a.handle.localeCompare(b.handle);
+  });
+}
+
+export function parseBot(value: unknown): Bot | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Record<string, unknown>;
+  if (typeof raw.handle !== 'string' || !raw.handle) return null;
+  return {
+    handle: raw.handle,
+    display_name: typeof raw.display_name === 'string' ? raw.display_name : '',
+    avatar: parseBotAvatar(raw.avatar),
+    role: typeof raw.role === 'string' ? raw.role : '',
+    agent_name: typeof raw.agent_name === 'string' ? raw.agent_name : raw.handle,
+    session_id: typeof raw.session_id === 'string' ? raw.session_id : `${BOT_SESSION_ID_PREFIX}${raw.handle}`,
+    position: typeof raw.position === 'number' ? raw.position : 0,
+    builtin: raw.builtin === true,
+  };
+}
+
+function parseBotAvatar(value: unknown): BotAvatar | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Record<string, unknown>;
+  if (raw.kind === 'mascot') return { kind: 'mascot' };
+  if (raw.kind === 'emoji' && typeof raw.emoji === 'string' && typeof raw.hue === 'number') {
+    return { kind: 'emoji', emoji: raw.emoji, hue: raw.hue };
+  }
+  if (raw.kind === 'image' && typeof raw.url === 'string') return { kind: 'image', url: raw.url };
+  return null;
+}

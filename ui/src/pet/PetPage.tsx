@@ -18,6 +18,7 @@ import { readMessageAttachments } from '@/lib/messageAttachments';
 import { usePendingVaultRequests } from '@/lib/usePendingVaultRequests';
 import { useVaultRequestRefresh } from '@/lib/useVaultRequestRefresh';
 import { vaultRequestType } from '@/lib/vaultRequestPlacement';
+import { useBots } from '@/context/BotsContext';
 import { referenceToMarker, type MentionReference, type SessionReference } from '@/lib/mentions';
 import { ShowPageVoiceDictation } from '@/lib/showPageVoiceDictation';
 import { VoiceTranscriptionError } from '@/lib/voiceTranscription';
@@ -1613,6 +1614,11 @@ function useWidthMorph(key: unknown, reducedMotion: boolean) {
 
 const MainReplyBubble: React.FC<Omit<MainDetailProps, 'visible'> & { open: boolean; onToggle: () => void; pinnedReply?: WorkbenchMessage | null; reducedMotion: boolean }> = ({ open, onToggle, pinnedReply, reducedMotion, ...props }) => {
   const { t } = useTranslation();
+  // The bubble speaks as the main Bot, by the name the user gave it (docs/plans/
+  // bots.md D5); the mascot art stays Vibey's. Until the Bot list answers, and
+  // for anyone but the Owner, it is the localized default name.
+  const { mainBot, displayName } = useBots();
+  const speaker = mainBot ? displayName(mainBot) : t('pet.mainAgent');
   // A lingering reply keeps its summary even if a later result (a background
   // completion) arrives while it lingers.
   const last = pinnedReply ?? props.exchange.results.at(-1);
@@ -1633,7 +1639,7 @@ const MainReplyBubble: React.FC<Omit<MainDetailProps, 'visible'> & { open: boole
   return (
     <div ref={bubbleRef} className={clsx('pet-mini-reply-bubble is-main', compact && 'is-compact')} data-pet-hit>
       <button type="button" className="pet-mini-reply-toggle" onClick={onToggle} aria-expanded={open} aria-controls={detailId}>
-        <span className="pet-mini-bubble-speaker">{t('pet.mainAgent')}<span>{t(open ? 'pet.collapseHistory' : 'pet.recentTurns')}<ChevronUp size={11} /></span></span>
+        <span className="pet-mini-bubble-speaker">{speaker}<span>{t(open ? 'pet.collapseHistory' : 'pet.recentTurns')}<ChevronUp size={11} /></span></span>
         <p title={summary}>{props.running && <span className="pet-mini-running-dot" aria-hidden />}<span className="pet-mini-reply-summary">{summary}</span></p>
       </button>
       <div id={detailId} className={clsx('pet-mini-detail', open && 'is-open')}>

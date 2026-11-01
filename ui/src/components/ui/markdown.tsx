@@ -35,6 +35,7 @@ import {
   parseMentionHref,
   type MentionReference,
 } from '@/lib/mentions';
+import { BotMentionChip } from './bot-mention-chip';
 import { cn, copyTextToClipboard } from '@/lib/utils';
 
 // Shared markdown renderer. react-markdown + remark-gfm (tables, strikethrough,
@@ -595,6 +596,9 @@ export const Markdown: React.FC<{
         // interactive and non-interactive contexts — a chip is a span, safe inside
         // a clickable row, and never triggers a fetch or navigation.
         const mention = parseMentionHref(url);
+        if (mention?.target === 'bot') {
+          return <BotMentionChip handle={mention.value} fallback={children} className="max-w-[18rem]" />;
+        }
         if (mention) {
           return (
             <Badge
