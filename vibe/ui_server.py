@@ -10155,13 +10155,6 @@ def _bot_owner_context():
     return require_instance_role(getattr(g, "authorization_context", None), "owner")
 
 
-def _publish_bots_changed(handle: str | None = None) -> None:
-    """Tell the Owner's open Workbench to refetch ``GET /api/bots``; an unlisted event stays Owner-only."""
-    from vibe.sse_broker import broker
-
-    broker.publish("bots.changed", {"handle": handle} if handle else {})
-
-
 @app.route("/api/bots", methods=["GET"])
 def bots_list():
     from core.bots import BotService
@@ -10195,7 +10188,6 @@ def bots_create():
             )
     except Exception as exc:
         return _bot_error_response(exc)
-    _publish_bots_changed(bot.handle)
     return jsonify({"ok": True, "bot": bot.to_payload()}), 201
 
 
@@ -10215,7 +10207,6 @@ def bots_set():
             )
     except Exception as exc:
         return _bot_error_response(exc)
-    _publish_bots_changed(bot.handle)
     return jsonify({"ok": True, "bot": bot.to_payload()})
 
 
@@ -10272,7 +10263,6 @@ def bots_update(handle):
             bot = service.update_bot(handle, authorization_context=context, **fields)
     except Exception as exc:
         return _bot_error_response(exc)
-    _publish_bots_changed(bot.handle)
     return jsonify({"ok": True, "bot": bot.to_payload()})
 
 
@@ -10286,7 +10276,6 @@ def bots_remove(handle):
             bot = service.remove_bot(handle, authorization_context=context)
     except Exception as exc:
         return _bot_error_response(exc)
-    _publish_bots_changed(bot.handle)
     return jsonify({"ok": True, "removed": bot.handle, "agent_name": bot.agent.name, "session_id": bot.session_id})
 
 
@@ -10315,7 +10304,6 @@ async def bots_avatar_upload(handle: str, starlette_request: FastAPIRequest):
             bot = await asyncio.to_thread(store)
         except Exception as exc:
             return _bot_error_response(exc)
-        _publish_bots_changed(bot.handle)
         return jsonify({"ok": True, "bot": bot.to_payload()})
 
     return await _dispatch_native_ui_request(starlette_request, handler)

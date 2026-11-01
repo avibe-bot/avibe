@@ -390,6 +390,19 @@ You are `@<bot:memory>`, the background memory of the user's Bots, above all of 
 
 The contract the Web UI builds on. Every route requires the instance owner.
 
+All Bot mutations publish one owner-only `bots.changed` invalidation after commit,
+from the shared service rather than the Web routes. CLI writers use the existing
+internal event socket and controller-to-UI inbox bridge; controller writers use
+the controller bus. UI writers also deliver locally (including when the controller
+is offline), suppressing their own bridge echo. Editing a Bot Agent's description
+publishes the same event because it changes the Bot's role; unchanged descriptions
+and list reads do not. An active Bot's Agent cannot be renamed.
+
+Replacing `avatar.png` directly is not a Bot API mutation and has no filesystem
+watcher. The image URL already includes its file mtime, so the next Bot-list fetch
+(including stream reconnection) picks up a replacement. Uploading through the Bot
+API invalidates immediately.
+
 | Route | Purpose |
 | --- | --- |
 | `GET /api/bots` | Bots in display order: handle, display name (empty means the localized default for the main Bot), avatar (`emoji` with hue, `image` with URL, or the main Bot's mascot), role, Agent name, Session id, position, built-in flag |

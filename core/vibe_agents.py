@@ -1196,7 +1196,14 @@ class VibeAgentStore:
             updated = conn.execute(
                 select(agents).where(agents.c.id == existing.id).limit(1)
             ).mappings().one()
-            return self._from_row(updated)
+            agent = self._from_row(updated)
+        # The Bot role is its Agent description, including edits through Agent APIs/CLI.
+        record = agent_bot_record(agent)
+        if record is not None and agent.description != existing.description:
+            from core.inbox_events import publish_bots_changed
+
+            publish_bots_changed(str(record["handle"]))
+        return agent
 
     def set_enabled(self, name: str, enabled: bool, *, user_context: Any = None) -> VibeAgent:
         return self.update(name, enabled=enabled, user_context=user_context)
@@ -1903,9 +1910,14 @@ class VibeAgentStore:
             record = current.metadata.get(BOT_METADATA_KEY)
             record = dict(record) if isinstance(record, dict) else {}
             restored = {**_main_bot_record(), **{key: record[key] for key in ("display_name", "avatar") if key in record}}
-            return self._write_builtin_state(
+            updated = self._write_builtin_state(
                 current, metadata={**current.metadata, BOT_METADATA_KEY: restored}, enabled=True
             )
+            if current.metadata.get(BOT_METADATA_KEY) != restored:
+                from core.inbox_events import publish_bots_changed
+
+                publish_bots_changed(MAIN_BOT_HANDLE)
+            return updated
         vibey = self.get_builtin_default_agent_for_backend("vibey", enabled_only=False)
 
         def only_one(conn: Connection, _agent: VibeAgent) -> None:
@@ -1921,7 +1933,7 @@ class VibeAgentStore:
                 raise _MainBotExists()
 
         try:
-            return self._create(
+            created = self._create(
                 name=self._free_agent_name(MAIN_BOT_AGENT_NAME),
                 backend="vibey",
                 description=MAIN_BOT_DESCRIPTION,
@@ -1938,6 +1950,10 @@ class VibeAgentStore:
             if current is None:
                 raise
             return current
+        from core.inbox_events import publish_bots_changed
+
+        publish_bots_changed(MAIN_BOT_HANDLE)
+        return created
 
     def get_builtin_default_agent_for_backend(self, backend: str, *, enabled_only: bool = True) -> Optional[VibeAgent]:
         """The backend's built-in Agent: the one owner of built-in identity.
