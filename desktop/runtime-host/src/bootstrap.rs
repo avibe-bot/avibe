@@ -719,7 +719,7 @@ impl RuntimeHost {
                 );
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
-            let _ = tokio::time::timeout(remaining, watch.receipt_changed()).await;
+            let _ = tokio::time::timeout(remaining, watch.receipt_changed(remaining)).await;
         }
     }
 

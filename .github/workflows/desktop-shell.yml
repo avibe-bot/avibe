@@ -133,6 +133,21 @@ jobs:
       - name: Test Rust
         run: cargo test --workspace --all-features
 
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install startup fixture dependencies
+        working-directory: .
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.12.10
+          uv sync --frozen --no-install-project --no-dev
+
+      - name: Verify launcher stdout closes while Runtime children stay alive
+        env:
+          AVIBE_TEST_PYTHON: ${{ github.workspace }}/.venv/${{ runner.os == 'Windows' && 'Scripts/python.exe' || 'bin/python' }}
+        run: cargo test -p avibe-runtime-host cmd_start_stdout_reaches_eof -- --ignored --nocapture
+
       - name: Verify Windows installer transaction with isolated native fixtures
         if: runner.os == 'Windows'
         shell: powershell

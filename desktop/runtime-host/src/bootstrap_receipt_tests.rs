@@ -7,7 +7,7 @@ use crate::health::HttpHealthProbe;
 use crate::launcher::LaunchWatch;
 use crate::receipt::StartupReceiptStream;
 use crate::status::BootstrapPhase;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -18,6 +18,7 @@ struct Fixture {
     scratch: PathBuf,
     receipt: bool,
     launches: AtomicUsize,
+    descendants: bool,
 }
 
 impl Fixture {
@@ -66,6 +67,7 @@ impl Fixture {
             .arg(if receipt { "receipt" } else { "legacy" })
             .arg(delay.to_string())
             .arg(housekeeping.to_string())
+            .arg(case)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -91,6 +93,7 @@ impl Fixture {
             scratch,
             receipt,
             launches: AtomicUsize::new(0),
+            descendants: case == "eof",
         })
     }
 
@@ -114,6 +117,17 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
+        if self.descendants {
+            std::fs::write(self.scratch.join("children-stop"), "").ok();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while ["service-done", "ui-done"]
+                .iter()
+                .any(|name| !self.scratch.join(name).exists())
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
         if let Ok(child) = self.child.get_mut() {
             if child.try_wait().ok().flatten().is_none() {
                 child.kill().ok();
@@ -121,6 +135,52 @@ impl Drop for Fixture {
             child.wait().ok();
         }
         std::fs::remove_dir_all(&self.scratch).ok();
+    }
+}
+
+#[test]
+#[ignore = "requires repository Python dependencies; run on both desktop CI platforms"]
+fn cmd_start_stdout_reaches_eof_while_runtime_children_remain_alive() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_owned();
+    let fixture = Fixture::start(&root, "eof", true, 0.0, 0.0, 0);
+    let mut stdout = {
+        let mut child = fixture.child.lock().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        writeln!(child.stdin.as_mut().unwrap(), "start").unwrap();
+        stdout
+    };
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        // This is the real launcher pipe, with no transport/spawn mocks.
+        let result = stdout.read_to_end(&mut bytes).map(|_| bytes);
+        let _ = sender.send(result);
+    });
+    fixture.finish(); // waits for actual cmd_start and the launcher process exit
+    let bytes = receiver
+        .recv_timeout(Duration::from_secs(1))
+        .expect("reader sees EOF after helper exit")
+        .unwrap();
+    reader.join().unwrap();
+    assert!(String::from_utf8(bytes).unwrap().contains("\"outcome\":\"ready\""));
+    // These acknowledgements are written after the helper exited: the actual
+    // service/UI spawn primitives and their log sinks did not inherit stdout.
+    std::fs::write(fixture.scratch.join("prove-alive"), "").unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while ["service-alive", "ui-alive"]
+        .iter()
+        .any(|name| !fixture.scratch.join(name).exists())
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "both Runtime fixture children outlive the helper"
+        );
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 impl RuntimeLauncher for Arc<Fixture> {

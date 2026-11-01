@@ -64,12 +64,18 @@ product logic.
    Runtime identity and usable Controller/UI state. A valid frame is an
    irreversible startup observation: later helper exit or ordinary stdout
    cleanup cannot revoke it, while a final probe contradiction still refuses
-   navigation. The reader stops at that temporal acceptance boundary so a
-   descendant that inherited stdout cannot hold startup open forever; malformed,
+   navigation. Admission stops at that temporal acceptance boundary and does
+   not wait for stdout EOF; malformed,
    oversized, duplicate, or contradictory protocol data in the read batch
    containing the first frame fails closed. Later bytes are outside that
-   acceptance boundary. Exited helpers and cancelled observation cannot leave
-   a reader waiting indefinitely on a descendant's inherited stdout.
+   acceptance boundary. The dedicated reader uses ordinary blocking reads and
+   sends a verdict over a bounded channel. Admission spends the remaining
+   deadline and allows a short drain after helper exit. Current service/UI
+   spawns redirect output to separate log sinks and close unrelated handles.
+   A future descendant that incorrectly inherits receipt stdout could leave
+   one idle reader thread blocked until it exits; admission, rollback and
+   navigation remain unaffected. Both desktop CI platforms verify real stdout
+   EOF after helper exit while the fixture Runtime children stay alive.
 
    Python's desktop readiness requests also bypass configured proxies and refuse
    redirects. Only the exact loopback `/ready` is required; LAN `/health` is

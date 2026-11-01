@@ -22,9 +22,26 @@ from vibe import install_generations  # noqa: E402
 
 scratch = Path(sys.argv[1])
 mode, delay, housekeeping = sys.argv[2], float(sys.argv[3]), float(sys.argv[4])
+case = sys.argv[5]
 controller_ready = threading.Event()
 trace = {"python_ready_probes": 0, "health_probes": 0, "service_starts": 0, "ui_starts": 0}
 started = 0.0
+service_pid = os.getpid()
+
+# In the EOF case these children and their real log sinks outlive cmd_start.
+# Their bounded lifetime and explicit stop file also cover assertion failures.
+child_script = """
+import os,sys,time
+from pathlib import Path
+root, role = Path(sys.argv[1]), sys.argv[2]
+deadline = time.monotonic() + 30
+while not (root / 'children-stop').exists() and time.monotonic() < deadline:
+    if (root / 'prove-alive').exists():
+        (root / (role + '-alive')).write_text(str(os.getpid()))
+        print(role, flush=True)
+    time.sleep(0.02)
+(root / (role + '-done')).touch()
+"""
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -64,13 +81,22 @@ config = SimpleNamespace(
 cli._ensure_config = lambda: config
 cli._guard_cli_default_state_migration = lambda: None
 cli.cache_running_vibe_path = lambda: None
-runtime.resolve_service_owner_pid = lambda **kwargs: os.getpid() if controller_ready.is_set() else None
+runtime.resolve_service_owner_pid = lambda **kwargs: service_pid if controller_ready.is_set() else None
 runtime.service_instance_started = lambda _pid: controller_ready.is_set()
 
 
 def start_service(*, start_info, **kwargs):
+    global service_pid
     trace["service_starts"] += 1
-    start_info.capture(os.getpid(), reused=True)
+    if case == "eof":
+        child = runtime.spawn_service_background_process(
+            [sys.executable, "-c", child_script, str(scratch), "service"],
+            "service-stdout.log", "service-stderr.log",
+        )
+        service_pid = child.pid
+        start_info.capture(child.pid, reused=False)
+    else:
+        start_info.capture(service_pid, reused=True)
 
     def become_ready():
         time.sleep(delay)
@@ -78,15 +104,23 @@ def start_service(*, start_info, **kwargs):
         controller_ready.set()
 
     threading.Thread(target=become_ready, daemon=True).start()
-    return os.getpid()
+    return service_pid
 
 
 def start_ui(host, port, *, start_info, wait_for_ready=True):
     trace["ui_starts"] += 1
-    start_info.capture(os.getpid(), reused=True)
+    if case == "eof":
+        pid = runtime.spawn_background(
+            [sys.executable, "-c", child_script, str(scratch), "ui"],
+            scratch / "ui.pid", "ui-stdout.log", "ui-stderr.log",
+            start_info=start_info,
+        )
+    else:
+        pid = os.getpid()
+        start_info.capture(pid, reused=True)
     if wait_for_ready:
         runtime.wait_for_ui_server(host, port)
-    return os.getpid()
+    return pid
 
 
 def wait_service(pid, timeout):

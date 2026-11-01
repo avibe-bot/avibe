@@ -43,9 +43,9 @@ path retain their existing contracts.
   the first complete frame. A second protocol prefix in that batch rejects it.
   Rust accepts that one terminal result only after checking origin and any
   already observed helper failure. A malformed frame or oversized prefixed
-  line is terminal immediately, even without a newline. The reader stops after
-  this batch so an inherited descendant pipe
-  cannot hold a successful bootstrap thread on EOF. Acceptance is a temporal
+  line is terminal immediately, even without a newline. The verdict is sent
+  after this batch; admission does not wait for the reader's subsequent drain
+  to EOF. Acceptance is a temporal
   boundary: a helper exit or additional output racing after it cannot
   retroactively defeat startup. The final exact-origin presence/identity check
   remains authoritative and may still reject navigation; later Runtime loss
@@ -67,13 +67,22 @@ path retain their existing contracts.
   identity/presence check. If Rust's observation budget expires while the
   helper is still in-flight, the helper remains retained by the existing launch
   state so Retry cannot launch a duplicate.
-- **Transport lifetime:** safe nonblocking pipe wrappers (`rustix` on Unix,
-  `interprocess` 2.2.3 on Windows) preserve `forbid(unsafe_code)`. The reader
-  keeps one terminal event and at most 4096 line bytes. The helper reaper marks
-  exit; only immediately available bytes are drained after exit (at most
-  100 ms for a continuously writing descendant). A shell observation timeout
-  cancels the reader, not the helper or Runtime. A 600 s transport backstop
-  bounds abandoned observers. None of these events confers kill authority.
+- **Transport lifetime (2026-11-01 source decision):** use ordinary blocking
+  `std::io::Read` on the existing dedicated thread, with a bounded channel to
+  the admission state machine. No platform pipe adapter or added dependency.
+  Channel waits spend only the shared remaining deadline. The helper reaper
+  signals exit; a successful exit allows at most 100 ms to receive an already
+  written frame. Accept/fail/timeout is final for that observer; later results
+  cannot change it. After its first frame the reader discards remaining stdout
+  through EOF without affecting admission. Current service/UI spawn primitives
+  redirect stdout/stderr to log sinks and close unrelated handles; the sinks
+  also redirect their output and close unrelated handles. A real cmd_start
+  fixture must prove EOF after helper exit while its child is still alive, on
+  both macOS and Windows CI. Residual: a future descendant incorrectly inheriting
+  receipt stdout can leave one idle reader thread blocked until it exits.
+  Admission, rollback, navigation and Retry deduplication remain bounded and
+  unaffected. This is an explicit accepted limitation, not a claim that EOF is
+  guaranteed for arbitrary descendants.
 - **Rust consumer:** bundled launch reads the actual child stdout while it is
   running, drains it without waiting for pipe EOF, rejects malformed,
   oversized, stale, or wrong-origin receipts, plus duplicate/contradictory
@@ -161,9 +170,9 @@ production 500 ms legacy polling interval, all reached successful admission:
 
 | Scenario | Legacy admission (ms) | Receipt admission (ms) | Rust probes, legacy → receipt |
 | --- | --- | --- | --- |
-| Early ready | 505.9, 504.2, 503.1 | 246.4, 103.4, 99.2 | 2 → 2 |
-| Controller delayed 1.1 s | 1508.0, 1516.6, 1509.6 | 1146.1, 1152.0, 1144.9 | 4 → 2 |
-| Housekeeping delayed 1.2 s | 505.0, 505.2, 505.3 | 109.7, 106.3, 106.0 | 2 → 2 |
+| Early ready | 509.2, 504.6, 505.0 | 107.3, 92.9, 92.9 | 2 → 2 |
+| Controller delayed 1.1 s | 1518.1, 1518.3, 1516.6 | 1152.2, 1161.9, 1181.1 | 4 → 2 |
+| Housekeeping delayed 1.2 s | 504.8, 505.7, 507.0 | 94.2, 92.7, 92.6 | 2 → 2 |
 
 Admission means `RuntimeHost` permits navigation, not rendered WebView latency.
 The initial adoption probe is included. Python used one `/ready` for early and
@@ -172,7 +181,7 @@ probes. Baseline additionally called `/health` on each Python poll; candidate
 made zero `/health` requests. All cases started one fixture service and one
 fixture UI, then reused the live endpoint on Retry without another launch.
 Candidate admission preceded housekeeping completion in every delayed sample
-(the helper completed around 1298–1315 ms). The former 30 ms comparison is a
+(the helper completed around 1292.9–1294.3 ms). The former 30 ms comparison is a
 **timeout/probe-count test only**, not time-to-ready performance evidence.
 
 Run the integration gate explicitly (ignored in ordinary Cargo tests because it
@@ -183,6 +192,15 @@ AVIBE_TEST_PYTHON="$PWD/.venv/bin/python" cargo test \
   --manifest-path desktop/Cargo.toml -p avibe-runtime-host \
   cmd_start_receipt_admission -- --ignored --nocapture
 ```
+
+Both desktop CI platforms install the existing locked Python dependencies
+without an editable project build and explicitly run
+`cmd_start_stdout_reaches_eof_while_runtime_children_remain_alive`. This uses
+actual `cmd_start` and the service/UI spawn primitives plus their real log
+sinks, then proves receipt-pipe EOF after launcher exit while both spawned
+children acknowledge a later liveness request. The fixture owns all child
+state and stops them with bounded test controls. It does not mock pipe reads,
+Popen, log-sink setup, descriptor inheritance, or process isolation.
 
 Windows CI covers the native pipe reader and shell build. Packaged cold/warm
 NSIS launch, release-matched identity/handover, UI/controller failures, and

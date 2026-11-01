@@ -338,10 +338,10 @@ impl LaunchWatch {
             .and_then(StartupReceiptStream::try_next)
     }
 
-    pub async fn receipt_changed(&self) {
+    pub async fn receipt_changed(&self, remaining: Duration) {
         let receipt = self.0.receipt.lock().ok().and_then(|receipt| receipt.clone());
         if let Some(receipt) = receipt {
-            receipt.changed().await;
+            receipt.changed(remaining).await;
         }
     }
 

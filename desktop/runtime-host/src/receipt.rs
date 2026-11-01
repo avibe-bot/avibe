@@ -1,13 +1,10 @@
 //! The bounded stdout protocol for the bundled desktop startup command.
 
-use std::collections::VecDeque;
 use std::io::{self, Read};
 use std::process::ChildStdout;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
-use tokio::sync::Notify;
 
 use serde::Deserialize;
 
@@ -51,105 +48,139 @@ pub enum ReceiptEvent {
     TransportError,
 }
 
-#[derive(Clone, Default)]
+const EXIT_DRAIN: Duration = Duration::from_millis(100);
+
+// At most three messages: one verdict, EOF after a verdict, and helper exit.
+enum TransportEvent {
+    Verdict(ReceiptEvent),
+    Exited(Instant),
+}
+
+#[derive(Clone)]
 pub struct StartupReceiptStream {
-    events: Arc<Mutex<VecDeque<ReceiptEvent>>>,
-    finished: Arc<AtomicBool>,
-    cancelled: Arc<AtomicBool>,
-    changed: Arc<Notify>,
+    sender: mpsc::SyncSender<TransportEvent>,
+    receiver: Arc<Mutex<mpsc::Receiver<TransportEvent>>>,
+    terminal: Arc<OnceLock<ReceiptEvent>>,
+    exited: Arc<OnceLock<Instant>>,
+}
+
+impl Default for StartupReceiptStream {
+    fn default() -> Self {
+        let (sender, receiver) = mpsc::sync_channel(3);
+        Self {
+            sender,
+            receiver: Arc::new(Mutex::new(receiver)),
+            terminal: Arc::new(OnceLock::new()),
+            exited: Arc::new(OnceLock::new()),
+        }
+    }
 }
 
 impl StartupReceiptStream {
     #[cfg(test)]
     pub(crate) fn from_events(events: impl IntoIterator<Item = ReceiptEvent>) -> Self {
-        Self {
-            events: Arc::new(Mutex::new(events.into_iter().collect())),
-            ..Self::default()
+        let stream = Self::default();
+        for event in events {
+            stream.sender.try_send(TransportEvent::Verdict(event)).unwrap();
         }
+        stream
     }
 
-    pub fn spawn(stdout: ChildStdout, log: BootstrapLog) -> Self {
+    pub fn spawn(mut stdout: ChildStdout, log: BootstrapLog) -> Self {
         let stream = Self::default();
-        let worker = stream.clone();
+        let sender = stream.sender.clone();
         thread::spawn(move || {
-            let event = match nonblocking_stdout(stdout) {
-                Ok(reader) => read_receipts(reader, &worker.finished, &worker.cancelled),
-                Err(_) => ReceiptEvent::TransportError,
-            };
+            let event = read_receipts(&mut stdout);
+            let drain = matches!(event, ReceiptEvent::Receipt(_));
             if let ReceiptEvent::Receipt(receipt) = &event {
                 log.record(
                     "runtime.start.receipt",
                     &[("outcome", format!("{:?}", receipt.outcome))],
                 );
             }
-            push_event(&worker.events, event);
-            worker.changed.notify_one();
+            let _ = sender.try_send(TransportEvent::Verdict(event));
+            // Keep ordinary post-commit output from breaking the helper's pipe.
+            // The consumer has one terminal verdict and ignores later messages.
+            // A future descendant inheriting stdout can keep only this detached
+            // reader blocked; it cannot extend the admission deadline.
+            if drain {
+                let event = match io::copy(&mut stdout, &mut io::sink()) {
+                    Ok(_) => ReceiptEvent::Eof,
+                    Err(_) => ReceiptEvent::TransportError,
+                };
+                let _ = sender.try_send(TransportEvent::Verdict(event));
+            }
         });
         stream
     }
 
+    fn record(&self, event: TransportEvent) {
+        match event {
+            TransportEvent::Verdict(verdict) => {
+                let _ = self.terminal.set(verdict);
+            }
+            TransportEvent::Exited(at) => {
+                let _ = self.exited.set(at);
+            }
+        }
+    }
+
     pub fn try_next(&self) -> Option<ReceiptEvent> {
-        self.events.lock().ok()?.front().cloned()
+        if self.terminal.get().is_none() {
+            // Another observer may be waiting on this retained attempt. Never
+            // block the async admission thread on its channel lock.
+            if let Ok(receiver) = self.receiver.try_lock() {
+                while let Ok(event) = receiver.try_recv() {
+                    self.record(event);
+                }
+            }
+            if self.exited.get().is_some_and(|at| at.elapsed() >= EXIT_DRAIN) {
+                let _ = self.terminal.set(ReceiptEvent::Eof);
+            }
+        }
+        self.terminal.get().cloned()
     }
 
     pub fn finish(&self) {
-        self.finished.store(true, Ordering::Release);
+        let _ = self.sender.try_send(TransportEvent::Exited(Instant::now()));
     }
 
     pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
+        let _ = self.terminal.set(ReceiptEvent::TransportError);
     }
 
-    pub async fn changed(&self) {
-        self.changed.notified().await;
+    pub async fn changed(&self, remaining: Duration) {
+        let stream = self.clone();
+        // Include time queued for the blocking pool/channel mutex in the same
+        // budget. The GUI thread never performs a blocking pipe or channel read.
+        let deadline = Instant::now() + remaining;
+        let _ = tokio::task::spawn_blocking(move || {
+            if stream.terminal.get().is_some() {
+                return;
+            }
+            if let Ok(receiver) = stream.receiver.lock() {
+                let deadline = stream
+                    .exited
+                    .get()
+                    .map_or(deadline, |at| deadline.min(*at + EXIT_DRAIN));
+                if let Ok(event) = receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                    stream.record(event);
+                }
+            }
+        })
+        .await;
     }
-}
-
-// Use safe OS wrappers: an asynchronous facade over a blocking anonymous pipe
-// still leaks a read thread on Windows when a descendant inherits the writer.
-#[cfg(unix)]
-fn nonblocking_stdout(stdout: ChildStdout) -> io::Result<impl Read> {
-    use rustix::fs::{fcntl_getfl, fcntl_setfl, OFlags};
-    let flags = fcntl_getfl(&stdout)?;
-    fcntl_setfl(&stdout, flags | OFlags::NONBLOCK)?;
-    Ok(stdout)
-}
-
-#[cfg(windows)]
-fn nonblocking_stdout(stdout: ChildStdout) -> io::Result<impl Read> {
-    use interprocess::os::windows::named_pipe::{pipe_mode, RecvPipeStream};
-    use std::os::windows::io::OwnedHandle;
-    let pipe = RecvPipeStream::<pipe_mode::Bytes>::try_from(OwnedHandle::from(stdout)).map_err(io::Error::from)?;
-    pipe.set_nonblocking(true)?;
-    Ok(pipe)
-}
-
-fn temporarily_empty(error: &io::Error) -> bool {
-    error.kind() == io::ErrorKind::WouldBlock
-        // ReadFile on a PIPE_NOWAIT byte pipe returns ERROR_NO_DATA.
-        || (cfg!(windows) && error.raw_os_error() == Some(232))
 }
 
 /// One terminal result, at most 4096 retained line bytes and one 8 KiB read.
 /// Acceptance is the end of the read batch containing the first valid frame.
 /// A second protocol prefix in that batch rejects it; later bytes are outside
-/// the acceptance boundary. No read waits on an inherited writer or on EOF.
-fn read_receipts(mut reader: impl Read, finished: &AtomicBool, cancelled: &AtomicBool) -> ReceiptEvent {
-    let deadline = Instant::now() + Duration::from_secs(600);
+/// the acceptance boundary. Only the dedicated reader thread may block on I/O.
+fn read_receipts(mut reader: impl Read) -> ReceiptEvent {
     let mut line = Vec::new();
     let mut oversized = false;
     let mut chunk = [0_u8; 8192];
-    let mut exit_deadline = None;
     loop {
-        if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
-            return ReceiptEvent::TransportError;
-        }
-        if finished.load(Ordering::Acquire) {
-            let end = exit_deadline.get_or_insert_with(|| Instant::now() + Duration::from_millis(100));
-            if Instant::now() >= *end {
-                return ReceiptEvent::Eof;
-            }
-        }
         let count = match reader.read(&mut chunk) {
             Ok(0) => {
                 return if line.starts_with(START_RECEIPT_PREFIX.as_bytes()) {
@@ -159,13 +190,6 @@ fn read_receipts(mut reader: impl Read, finished: &AtomicBool, cancelled: &Atomi
                 }
             }
             Ok(count) => count,
-            Err(error) if temporarily_empty(&error) => {
-                if finished.load(Ordering::Acquire) {
-                    return ReceiptEvent::Eof;
-                }
-                thread::sleep(Duration::from_millis(5));
-                continue;
-            }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => return ReceiptEvent::TransportError,
         };
@@ -219,12 +243,6 @@ fn parse_frame(frame: &[u8]) -> Result<StartupReceipt, ()> {
     }
 }
 
-fn push_event(events: &Arc<Mutex<VecDeque<ReceiptEvent>>>, event: ReceiptEvent) {
-    if let Ok(mut events) = events.lock() {
-        events.push_back(event);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,11 +285,7 @@ mod tests {
     #[test]
     fn ordinary_output_is_not_a_protocol_event() {
         assert_eq!(
-            read_receipts(
-                Cursor::new(b"Web UI:\nordinary output\n"),
-                &AtomicBool::new(false),
-                &AtomicBool::new(false),
-            ),
+            read_receipts(Cursor::new(b"Web UI:\nordinary output\n"),),
             ReceiptEvent::Eof,
         );
     }
@@ -288,10 +302,7 @@ mod tests {
             ready.trim_end().to_owned(),
             format!("{START_RECEIPT_PREFIX}{}", "x".repeat(4096)),
         ] {
-            assert_eq!(
-                read_receipts(Cursor::new(bytes), &AtomicBool::new(false), &AtomicBool::new(false)),
-                ReceiptEvent::Invalid,
-            );
+            assert_eq!(read_receipts(Cursor::new(bytes)), ReceiptEvent::Invalid,);
         }
     }
 
