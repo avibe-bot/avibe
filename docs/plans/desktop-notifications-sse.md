@@ -9,6 +9,8 @@ the Runtime is already settled; this contract does not reopen it).
 Owner: Avibe core
 Date: 2026-09-10
 Baseline: `desktop` branch after #1975 / #1977 (tray + start-receipt).
+Account/category extension: 2026-11-02, consuming #3127's merged preferences
+and Inbox badge contract (`workbench-refinements.md`).
 
 ## Product outcome
 
@@ -22,8 +24,9 @@ need them to look:
    longer than ~30 seconds.
 
 Default on. The tray has a checkable "Notifications" item that persists
-the preference. System Focus / Do Not Disturb is left to the OS; Avibe
-does not reimplement it.
+this device's preference. Account-wide `enabled`, `bots`, and `sessions`
+preferences provide a separate gate, described below. System Focus / Do
+Not Disturb is left to the OS; Avibe does not reimplement it.
 
 Notification activation follows the OS-default behavior described in
 **Click** below. Deep-link navigation into a specific session
@@ -106,8 +109,10 @@ v1 filter (exact event type strings, already published):
 
 Every other event (`message.new`, `session.activity`, `queue.updated`,
 `inbox.unread.changed`, `show.event`, keep-alives, unknown types) is
-ignored by the notification path. The filter is an allow-list: a new
-event type never becomes a notification by accident.
+ignored by the notification path. `notifications.preferences.updated`
+is a refetch hint, never an OS notification or an authoritative preference
+snapshot. The filter is an allow-list: a new event type never becomes a
+notification by accident.
 
 ### "Background" for `run.terminal`
 
@@ -158,9 +163,44 @@ notify" flag, no `visibility` field in v1.
 A notification is suppressed (not queued) when:
 
 - the Avibe window is focused and visible; or
-- the tray "Notifications" item is unchecked.
+- the tray "Notifications" item is unchecked; or
+- the account-wide `enabled` preference is false; or
+- for `run.terminal` only, its account category is quiet.
 
 System DND / Focus is the OS's problem.
+
+### Account preferences and run categories
+
+The shell reads `GET /api/notifications/preferences` on every successful
+SSE connection and on `notifications.preferences.updated`. Both use the
+adopted loopback origin, with no redirects or new credentials. Only an
+`ok: true` response containing all three boolean fields under `preferences`
+is accepted; unknown fields are ignored. The event payload is never trusted.
+Failed, malformed, or old-server reads keep the last valid snapshot; before
+any valid snapshot the defaults are all on. Each read is bounded to five
+seconds and 256 KiB. Refresh finishes before the next frame is processed;
+in-flight run deliveries wait for that snapshot too. Badge reads continue
+independently during a preference read.
+
+- `enabled=false` suppresses all OS notification classes, including Vault.
+- `bots=false` suppresses Bot `run.terminal` banners only.
+- `sessions=false` suppresses ordinary Session `run.terminal` banners only.
+- Vault approvals ignore both category switches, while still honoring
+  master, device, and focus/visibility gates.
+
+`GET /api/harness/runs/<id>` provides `notification_category: "bot" | "session"`
+from the same current Bot registry expression as Inbox. Scope, Project
+membership, and run kind never imply a category. A run without a concrete
+Bot permanent Session is `session`. The shell uses this detail field, not
+an event-supplied category. A run must be loud both at receipt and at
+delivery: re-enabling a category does not replay quiet events, and muting
+while a detail read is pending suppresses its eventual delivery.
+
+An unavailable detail, missing/unknown category on an older Runtime, or
+an overloaded lookup backlog is allowed to use generic copy only when
+both categories are loud. Otherwise it is dropped, so failure cannot
+bypass quiet-category intent. Existing background-duration rules still
+apply; preferences never turn a short foreground run into a banner.
 
 ## Frozen presentation
 
@@ -200,15 +240,16 @@ comes from the run detail the shell already reads
 3. `definition_name` — the task or watch, when no session resolved.
 
 A terminal run that qualifies as background work is read back once for
-its label; an unreadable or label-less detail keeps the generic catalog
-title and body rather than withholding the notification. Approval
+its label and category; an unreadable or label-less detail keeps the generic
+catalog title and body if both categories are loud (a known loud category
+also permits a missing label). Approval
 banners keep generic copy. Detail reads run beside the SSE reader, never
 inside it: each is bounded by the request timeout, at most 16 are in
 flight, and at most 64 are pending (later runs queue for a slot, since
 a run without stamps is only qualified by its read). Past that backlog
 the shell is overloaded: runs the event already qualifies notify at once
-with generic copy, and a run only its read could qualify fails closed.
-Stopping the
+with generic copy only when both categories are loud; otherwise they are
+dropped. A run only its read could qualify fails closed. Stopping the
 loop cancels them, so a slow Runtime never delays the next event.
 
 These labels are Runtime strings on their way to a privileged OS
@@ -284,6 +325,13 @@ plugin and reads window-focus / tray-pref state.
 - Dedup bound: both approval and run key sets stay within 512
   entries / 24h; inserting past the bound drops the oldest, and a
   later duplicate of a dropped key may notify again.
+- Account preferences: master gates both classes, category switches gate
+  only their run categories, never Vault; receipt and delivery both honor
+  quiet categories. Preference hints refetch, failed reads preserve the
+  last valid value, reconnect refreshes, and suppression never replays.
+- Old-server/overload fallback: unknown run category can notify only if
+  both categories are loud. Badge reads prefer `badge_total`, including
+  zero, and fall back only when it is absent.
 - Focus gate: window focused + visible → no intent even on a matching
   event.
 - Reconnect: stream drop then restore does not panic, does not
@@ -302,11 +350,16 @@ threshold is exercised in microseconds.
 The app icon badge is the second consumer of the shell-owned connection,
 not a second connection. Each connect and each decoded frame, of any
 type, schedules a read of `GET /api/inbox?platform=avibe&limit=1` and
-paints its `unread_total`. A trailing-edge coalescer allows at most one
+paints its `badge_total` (unread in loud categories). Only when that field
+is absent on an older Runtime does the shell fall back to `unread_total`;
+an explicit zero or malformed field never falls through to the raw count.
+A trailing-edge coalescer allows at most one
 read per second. Triggering on every frame instead of an allowlist means
 the badge never depends on knowing which events change unread state, and
 the 15s heartbeat bounds staleness after a failed read. The badge is
-state, so the Notifications toggle and the focus gate do not apply.
+state, so the device Notifications toggle and the focus gate do not apply.
+Account preferences affect the server's `badge_total`, not whether the
+shell stays connected or refreshes the count.
 `stop` clears it on the main thread, behind any paint the voided
 generation queued. The WebView cannot own the badge: WebKit suspends
 page timers while the window is backgrounded, and WKWebView does not
@@ -316,8 +369,9 @@ overlay icon is follow-up work.
 ## Explicit non-goals (v1)
 
 - A new HTTP route or a Python "please notify" flag. (The run detail
-  gained one additive projected field, `session_project_name`, on the
-  existing route.)
+  gained additive projected fields `session_project_name` and
+  `notification_category` on its existing route; preferences reuse #3127's
+  account endpoint.)
 - Deep-link click targets (G5).
 - Notifying on every chat message, every `session.activity`, or
   foreground turns that finish quickly.

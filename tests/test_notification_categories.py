@@ -190,6 +190,46 @@ def test_inbox_categories_filters_and_badge_total_follow_registry_and_preference
     engine.dispose()
 
 
+def test_run_detail_category_uses_current_bot_registry_not_scope(isolated_state):
+    """Desktop reads the detail category, not the Inbox row or a scope heuristic."""
+    from core.bots import BotService
+    from storage.background import SQLiteBackgroundTaskStore
+    from storage.projects_service import create_project
+
+    with BotService() as service:
+        bot = service.create_bot(display_name="Desktop test", handle="desktop-category")
+    store = SQLiteBackgroundTaskStore()
+    try:
+        with store.engine.begin() as conn:
+            project_dir = isolated_state / "desktop-category-project"
+            project_dir.mkdir()
+            project = create_project(conn, str(project_dir), display_name="Project")
+            _seed_session(conn, "ses_project", scope_id=project["scope_id"], title="Project Session")
+            _seed_session(conn, "ses_scopeless", scope_id=None, title="No scope, not a Bot")
+        client = app.test_client()
+        for run_id, session_id, category in (
+            ("bot", bot.session_id, "bot"),
+            ("project", "ses_project", "session"),
+            ("scopeless", "ses_scopeless", "session"),
+            ("no-session", None, "session"),
+        ):
+            store.enqueue_run({
+                "id": run_id, "run_type": "watch", "status": "succeeded",
+                "session_id": session_id, "created_at": "2026-09-10T12:00:00Z",
+                "updated_at": "2026-09-10T12:01:00Z",
+            })
+            response = client.get(f"/api/harness/runs/{run_id}", base_url="http://127.0.0.1:5123")
+            assert response.status_code == 200
+            assert response.get_json()["run"]["notification_category"] == category
+        with BotService() as service:
+            service.remove_bot(bot.handle)
+        # Removing the role keeps the Session but changes its category, just
+        # like Inbox; no category is frozen onto the historical run row.
+        assert client.get("/api/harness/runs/bot").get_json()["run"]["notification_category"] == "session"
+    finally:
+        store.close()
+
+
 def test_member_cannot_turn_owner_bot_session_into_a_session_category(isolated_state):
     from core.bots import BotService, hidden_bot_session_ids
     from storage import messages_service

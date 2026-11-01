@@ -5,9 +5,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use avibe_runtime_host::notifications::{
-    run_notifications, EventStream, NotificationFilter, NotificationGate, NotificationIntent, NotificationSink,
-    NotificationTransport, ReconnectBackoff, RunDetail, RunTimestamps, SseDecoder, StreamError, RETAINED_KEYS,
-    RETENTION, UNREAD_REFRESH_INTERVAL,
+    run_notifications, EventStream, NotificationFilter, NotificationGate, NotificationIntent, NotificationPreferences,
+    NotificationSink, NotificationTransport, ReconnectBackoff, RunDetail, RunTimestamps, SseDecoder, StreamError,
+    RETAINED_KEYS, RETENTION, UNREAD_REFRESH_INTERVAL,
 };
 use serde_json::{json, Value};
 use tokio::time::Instant;
@@ -42,6 +42,9 @@ struct FakeTransport {
     detail_delay: Duration,
     unread: Mutex<Option<u64>>,
     unread_reads: Mutex<Vec<Instant>>,
+    preferences: Mutex<VecDeque<Option<NotificationPreferences>>>,
+    preference_reads: AtomicUsize,
+    preference_delay: Duration,
 }
 
 #[async_trait]
@@ -60,6 +63,12 @@ impl NotificationTransport for FakeTransport {
         self.refetched.lock().unwrap().push(run_id.to_owned());
         tokio::time::sleep(self.detail_delay).await;
         self.details.lock().unwrap().get(run_id).cloned()
+    }
+
+    async fn preferences(&self) -> Option<NotificationPreferences> {
+        self.preference_reads.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(self.preference_delay).await;
+        self.preferences.lock().unwrap().pop_front().flatten()
     }
 
     async fn unread_total(&self) -> Option<u64> {
@@ -868,6 +877,267 @@ async fn every_connection_and_frame_refreshes_the_runtime_unread_total_at_a_boun
     assert_eq!(reads.len(), 2);
     assert!(reads[1] >= start + gap * 8);
     assert!(sink.delivered.lock().unwrap().is_empty());
+    task.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn account_switches_gate_run_categories_but_only_master_gates_vault() {
+    for enabled in [false, true] {
+        for bots in [false, true] {
+            for sessions in [false, true] {
+                let transport = Arc::new(FakeTransport::default());
+                let sink = Arc::new(FakeSink::default());
+                transport
+                    .preferences
+                    .lock()
+                    .unwrap()
+                    .push_back(Some(NotificationPreferences {
+                        enabled,
+                        bots,
+                        sessions,
+                    }));
+                let mut chunks = vec![approval("request", "pending")];
+                for category in [Some("bot"), Some("session"), Some("future"), None] {
+                    let id = format!("{category:?}");
+                    transport.details.lock().unwrap().insert(
+                        id.clone(),
+                        RunDetail {
+                            notification_category: category.map(Into::into),
+                            ..RunDetail::default()
+                        },
+                    );
+                    chunks.push(run(id, "watch", 1));
+                }
+                // Neither an unreadable detail nor a forged event category may
+                // bypass a quiet category; the HTTP detail is the authority.
+                chunks.push(frame(
+                    "runs.updated",
+                    json!({
+                        "run_id": "unreadable", "status": "succeeded", "run_type": "watch",
+                        "notification_category": "session",
+                    }),
+                ));
+                *transport.unread.lock().unwrap() = Some(9);
+                transport.stream(chunks, false);
+                let task = spawn(transport.clone(), sink.clone());
+                settle().await;
+                let delivered = sink.delivered.lock().unwrap().clone();
+                assert_eq!(
+                    delivered
+                        .iter()
+                        .filter(|&&intent| intent == NotificationIntent::ApprovalRequested)
+                        .count(),
+                    usize::from(enabled)
+                );
+                let runs = if enabled {
+                    usize::from(bots) + usize::from(sessions) + 3 * usize::from(bots && sessions)
+                } else {
+                    0
+                };
+                assert_eq!(
+                    delivered
+                        .iter()
+                        .filter(|&&intent| intent == NotificationIntent::RunSucceeded)
+                        .count(),
+                    runs
+                );
+                assert_eq!(*sink.unread.lock().unwrap(), [9]);
+                assert_eq!(transport.preference_reads.load(Ordering::SeqCst), 1);
+                task.abort();
+            }
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn preference_events_refetch_not_trust_payload_keep_last_valid_and_do_not_replay() {
+    let transport = Arc::new(FakeTransport::default());
+    let sink = Arc::new(FakeSink::default());
+    transport.preferences.lock().unwrap().extend([
+        Some(NotificationPreferences {
+            enabled: false,
+            ..NotificationPreferences::default()
+        }),
+        None, // failed refresh must not restore defaults
+        Some(NotificationPreferences::default()),
+    ]);
+    transport.stream(
+        [
+            approval("quiet", "pending"),
+            run("quiet", "watch", 0),
+            frame(
+                "notifications.preferences.updated",
+                json!({"preferences": {"enabled": true}}),
+            ),
+            approval("still-quiet", "pending"),
+            run("still-quiet", "watch", 0),
+        ],
+        true,
+    );
+    // Reconnect re-reads the preferences even if its update event was missed.
+    transport.stream(
+        [
+            approval("quiet", "pending"),
+            run("quiet", "watch", 0),
+            approval("still-quiet", "pending"),
+            run("still-quiet", "watch", 0),
+            approval("fresh", "pending"),
+            run("fresh", "watch", 0),
+        ],
+        false,
+    );
+    let task = spawn(transport.clone(), sink.clone());
+    settle().await;
+    assert!(sink.delivered.lock().unwrap().is_empty());
+    tokio::time::advance(Duration::from_secs(1)).await;
+    settle().await;
+    assert_eq!(
+        *sink.delivered.lock().unwrap(),
+        [NotificationIntent::ApprovalRequested, NotificationIntent::RunSucceeded]
+    );
+    assert_eq!(transport.preference_reads.load(Ordering::SeqCst), 3);
+    task.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn run_category_must_be_loud_at_receipt_and_after_the_detail_lookup() {
+    for initially_loud in [false, true] {
+        let transport = Arc::new(FakeTransport {
+            detail_delay: Duration::from_secs(2),
+            ..FakeTransport::default()
+        });
+        let sink = Arc::new(FakeSink::default());
+        transport
+            .preferences
+            .lock()
+            .unwrap()
+            .extend([initially_loud, !initially_loud].map(|bots| {
+                Some(NotificationPreferences {
+                    bots,
+                    ..NotificationPreferences::default()
+                })
+            }));
+        transport.details.lock().unwrap().insert(
+            "run".into(),
+            RunDetail {
+                notification_category: Some("bot".into()),
+                ..RunDetail::default()
+            },
+        );
+        transport.paced_stream(
+            [
+                run("run", "watch", 0),
+                frame(
+                    "notifications.preferences.updated",
+                    json!({"preferences": {"bots": initially_loud}}),
+                ),
+                approval("vault", "pending"),
+            ],
+            false,
+            Duration::from_secs(1),
+        );
+        let task = spawn(transport.clone(), sink.clone());
+        settle().await;
+        for _ in 0..4 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            settle().await;
+        }
+        assert_eq!(*transport.refetched.lock().unwrap(), ["run"]);
+        assert_eq!(*sink.delivered.lock().unwrap(), [NotificationIntent::ApprovalRequested]);
+        task.abort();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn in_flight_run_delivery_waits_for_an_account_refresh() {
+    let transport = Arc::new(FakeTransport {
+        preference_delay: Duration::from_secs(2),
+        detail_delay: Duration::from_secs(2),
+        ..FakeTransport::default()
+    });
+    let sink = Arc::new(FakeSink::default());
+    transport.preferences.lock().unwrap().extend([
+        Some(NotificationPreferences::default()),
+        Some(NotificationPreferences {
+            enabled: false,
+            ..NotificationPreferences::default()
+        }),
+    ]);
+    transport.details.lock().unwrap().insert(
+        "run".into(),
+        RunDetail {
+            notification_category: Some("session".into()),
+            ..RunDetail::default()
+        },
+    );
+    transport.paced_stream(
+        [
+            run("run", "watch", 0),
+            frame("notifications.preferences.updated", json!({})),
+            approval("vault", "pending"),
+        ],
+        false,
+        Duration::from_secs(1),
+    );
+    let task = spawn(transport.clone(), sink.clone());
+    settle().await;
+    // Startup read ends at t=2, run arrives at t=3, refresh at t=4.
+    // Detail completes at t=5, before the master-off read finishes at t=6.
+    for _ in 0..8 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        settle().await;
+        assert!(sink.delivered.lock().unwrap().is_empty());
+    }
+    assert_eq!(*transport.refetched.lock().unwrap(), ["run"]);
+    assert_eq!(transport.preference_reads.load(Ordering::SeqCst), 2);
+    task.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn unread_and_stream_survive_a_bounded_preference_timeout() {
+    let transport = Arc::new(FakeTransport {
+        preference_delay: Duration::from_secs(60),
+        ..FakeTransport::default()
+    });
+    let sink = Arc::new(FakeSink::default());
+    *transport.unread.lock().unwrap() = Some(4);
+    transport.stream([approval("request", "pending")], false);
+    let task = spawn(transport.clone(), sink.clone());
+    settle().await;
+    assert_eq!(*sink.unread.lock().unwrap(), [4]);
+    tokio::time::advance(Duration::from_secs(5)).await;
+    settle().await;
+    assert_eq!(*sink.delivered.lock().unwrap(), [NotificationIntent::ApprovalRequested]);
+    assert_eq!(transport.connected_at.lock().unwrap().len(), 1);
+    task.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn overloaded_runs_cannot_bypass_a_quiet_category() {
+    let transport = Arc::new(FakeTransport {
+        detail_delay: Duration::from_secs(60),
+        ..FakeTransport::default()
+    });
+    let sink = Arc::new(FakeSink::default());
+    transport
+        .preferences
+        .lock()
+        .unwrap()
+        .push_back(Some(NotificationPreferences {
+            bots: false,
+            ..NotificationPreferences::default()
+        }));
+    let mut frames = (0..100).map(|index| run(index, "watch", 0)).collect::<Vec<_>>();
+    frames.push(approval("request", "pending"));
+    transport.stream(frames, false);
+    let task = spawn(transport.clone(), sink.clone());
+    settle().await;
+    assert_eq!(transport.refetched.lock().unwrap().len(), 16);
+    for _ in 0..4 {
+        tokio::time::advance(Duration::from_secs(5)).await;
+        settle().await;
+    }
+    assert_eq!(*sink.delivered.lock().unwrap(), [NotificationIntent::ApprovalRequested]);
     task.abort();
 }
 

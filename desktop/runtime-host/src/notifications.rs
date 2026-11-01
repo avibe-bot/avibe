@@ -5,7 +5,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::DateTime;
 use serde::Deserialize;
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::{Notify, RwLock, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 use url::Url;
@@ -132,13 +132,49 @@ impl NotificationGate {
     }
 }
 
+/// Account preferences are independent of the shell's device/focus gate.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+pub struct NotificationPreferences {
+    pub enabled: bool,
+    pub bots: bool,
+    pub sessions: bool,
+}
+
+impl Default for NotificationPreferences {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            bots: true,
+            sessions: true,
+        }
+    }
+}
+
+impl NotificationPreferences {
+    fn allows_run(self, category: Option<&str>) -> bool {
+        self.enabled
+            && match category {
+                Some("bot") => self.bots,
+                Some("session") => self.sessions,
+                // Old servers, failed details, and overload have no trustworthy
+                // category. Generic copy must not bypass a quiet category.
+                _ => self.bots && self.sessions,
+            }
+    }
+}
+
+struct RunPreferences {
+    current: Arc<RwLock<NotificationPreferences>>,
+    at_receipt: NotificationPreferences,
+}
+
 pub trait NotificationSink: Send + Sync {
     fn gate(&self) -> NotificationGate;
     /// `source` names where a run happened ("Project · Session"), already
     /// sanitized by [`RunDetail::source`]; `None` keeps the generic copy.
     fn deliver(&self, intent: NotificationIntent, source: Option<String>);
-    /// The Runtime's unread total, for the app icon badge. It is state rather
-    /// than an interruption, so neither the toggle nor focus gates it.
+    /// The Runtime's badge total (loud-category unread), for the app icon.
+    /// It is state rather than an interruption: no device/focus gate applies.
     fn show_unread(&self, total: u64);
     /// A remote desktop update event is only a nudge. The shell must re-read
     /// and validate its request file; the SSE payload never reaches this API.
@@ -238,6 +274,7 @@ pub struct RunDetail {
     pub session_project_name: Option<String>,
     pub session_label: Option<String>,
     pub definition_name: Option<String>,
+    pub notification_category: Option<String>,
 }
 
 const SOURCE_PART_CHARS: usize = 48;
@@ -382,6 +419,7 @@ pub trait NotificationTransport: Send + Sync {
     async fn connect(&self) -> Result<Box<dyn EventStream>, StreamError>;
     async fn run_detail(&self, run_id: &str) -> Option<RunDetail>;
     async fn unread_total(&self) -> Option<u64>;
+    async fn preferences(&self) -> Option<NotificationPreferences>;
 }
 
 pub struct HttpNotificationTransport {
@@ -480,7 +518,28 @@ impl NotificationTransport for HttpNotificationTransport {
         }
         let bytes = bounded_detail_body(response).await?;
         let inbox: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-        inbox.get("unread_total")?.as_u64()
+        // Fall back only when absent, not when malformed: an explicit zero
+        // must never turn into the raw (possibly quiet-category) unread count.
+        inbox.get("badge_total").or_else(|| inbox.get("unread_total"))?.as_u64()
+    }
+
+    async fn preferences(&self) -> Option<NotificationPreferences> {
+        let response = self
+            .client
+            .get(self.url("/api/notifications/preferences"))
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+            .ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        let bytes = bounded_detail_body(response).await?;
+        let document: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        if !document.get("ok")?.as_bool()? {
+            return None;
+        }
+        serde_json::from_value(document.get("preferences")?.clone()).ok()
     }
 }
 
@@ -524,6 +583,7 @@ pub async fn run_notifications(
     sink: Arc<dyn NotificationSink>,
 ) {
     let mut backoff = ReconnectBackoff::default();
+    let preferences = Arc::new(RwLock::new(NotificationPreferences::default()));
     // Any frame may follow an unread change, and listing the event types that
     // can would miss the next one added, so every connection and every frame
     // (the 15-second heartbeat included) asks for a fresh total. The reader
@@ -540,6 +600,7 @@ pub async fn run_notifications(
         let connected_at = Instant::now();
         if let Ok(mut stream) = transport.connect().await {
             unread_changed.notify_one();
+            refresh_preferences(&transport, &preferences).await;
             let mut decoder = SseDecoder::new();
             while let Ok(Ok(Some(chunk))) = tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next_chunk()).await {
                 if Instant::now().duration_since(connected_at) >= STREAM_IDLE_TIMEOUT {
@@ -548,9 +609,15 @@ pub async fn run_notifications(
                 while lookups.try_join_next().is_some() {}
                 // Suppression is not a queue: frames still reach the filter so
                 // its de-duplication stays current, then are dropped.
-                let allowed_at_receipt = sink.gate().allows();
                 for frame in decoder.push(&chunk) {
                     unread_changed.notify_one();
+                    if frame.event == "notifications.preferences.updated" {
+                        // Only a nudge: never trust preferences from the SSE payload.
+                        refresh_preferences(&transport, &preferences).await;
+                        continue;
+                    }
+                    let at_receipt = *preferences.read().await;
+                    let allowed_at_receipt = sink.gate().allows() && at_receipt.enabled;
                     if frame.event == "desktop.update.requested" {
                         sink.desktop_update_requested();
                         continue;
@@ -579,12 +646,16 @@ pub async fn run_notifications(
                                 // event already qualifies notifies now with
                                 // generic copy; a run only its read could
                                 // qualify fails closed.
-                                if background && sink.gate().allows() {
+                                if background && at_receipt.allows_run(None) && sink.gate().allows() {
                                     sink.deliver(intent, None);
                                 }
                                 continue;
                             }
                             let (transport, sink, slots) = (transport.clone(), sink.clone(), slots.clone());
+                            let preferences = RunPreferences {
+                                current: preferences.clone(),
+                                at_receipt,
+                            };
                             lookups.spawn(async move {
                                 // Queue behind the request limit rather than
                                 // drop: a run without stamps is only decided
@@ -592,7 +663,7 @@ pub async fn run_notifications(
                                 let Ok(_slot) = slots.acquire_owned().await else {
                                     return;
                                 };
-                                notify_run(transport, sink, run_id, stamps, intent, background).await;
+                                notify_run(transport, sink, run_id, stamps, intent, background, preferences).await;
                             });
                         }
                     }
@@ -600,6 +671,19 @@ pub async fn run_notifications(
             }
         }
         tokio::time::sleep(backoff.next_delay()).await;
+    }
+}
+
+/// Refresh before consuming further frames. The bounded write lock also holds
+/// in-flight run deliveries until the new preference snapshot is known. On a
+/// failed/old-server read, keep the last valid value (initially all on).
+async fn refresh_preferences(
+    transport: &Arc<dyn NotificationTransport>,
+    preferences: &RwLock<NotificationPreferences>,
+) {
+    let mut current = preferences.write().await;
+    if let Ok(Some(fresh)) = tokio::time::timeout(REQUEST_TIMEOUT, transport.preferences()).await {
+        *current = fresh;
     }
 }
 
@@ -630,12 +714,20 @@ async fn notify_run(
     mut stamps: RunTimestamps,
     intent: NotificationIntent,
     background: bool,
+    preferences: RunPreferences,
 ) {
     let detail = tokio::time::timeout(REQUEST_TIMEOUT, transport.run_detail(&run_id))
         .await
         .ok()
         .flatten();
     let source = detail.as_ref().and_then(RunDetail::source);
+    let category = detail
+        .as_ref()
+        .and_then(|detail| detail.notification_category.as_deref());
+    let current = preferences.current.read().await;
+    if !preferences.at_receipt.allows_run(category) || !current.allows_run(category) {
+        return;
+    }
     if let Some(detail) = detail {
         stamps.fill_missing(detail.stamps);
     }
