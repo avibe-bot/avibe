@@ -5137,11 +5137,21 @@ class SQLiteBackgroundTaskStore:
         return counts
 
     def get_run(self, run_id: str) -> Optional[dict[str, Any]]:
+        from core.notification_categories import category_expression
+
         with self.engine.connect() as conn:
-            row = conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1)).mappings().first()
+            row = conn.execute(
+                select(agent_runs, category_expression(agent_runs.c.session_id).label("notification_category"))
+                .where(agent_runs.c.id == run_id)
+                .limit(1)
+            ).mappings().first()
             if row is None:
                 return None
-            return self._enrich_runs([self._run_from_row(row)], conn)[0]
+            run = self._run_from_row(row)
+            # The shell consumes the same registry-backed category as Inbox,
+            # never a scope heuristic. No concrete Bot Session means session.
+            run["notification_category"] = row["notification_category"]
+            return self._enrich_runs([run], conn)[0]
 
     def get_unsettled_watch_run(self, definition_id: str) -> Optional[dict[str, Any]]:
         """Return the oldest queued/running Agent follow-up owned by one Watch."""

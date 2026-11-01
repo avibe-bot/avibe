@@ -5,7 +5,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use avibe_runtime_host::notifications::{HttpNotificationTransport, NotificationTransport, SseDecoder};
+use avibe_runtime_host::notifications::{
+    HttpNotificationTransport, NotificationPreferences, NotificationTransport, SseDecoder,
+};
 use avibe_runtime_host::LoopbackOrigin;
 use serde_json::json;
 
@@ -143,12 +145,14 @@ async fn stream_and_detail_redirects_never_delegate_trust_to_another_origin() {
         target.origin.as_str()
     )
     .into_bytes();
-    let server = FakeServer::start([redirect.clone(), redirect]);
+    let server = FakeServer::start([redirect.clone(), redirect.clone(), redirect.clone(), redirect]);
     let transport = server.transport();
     assert!(transport.connect().await.is_err());
     assert!(transport.run_detail("run").await.is_none());
+    assert!(transport.unread_total().await.is_none());
+    assert!(transport.preferences().await.is_none());
     assert!(target.requests.lock().unwrap().is_empty());
-    assert_eq!(server.requests.lock().unwrap().len(), 2);
+    assert_eq!(server.requests.lock().unwrap().len(), 4);
 }
 
 #[tokio::test]
@@ -167,6 +171,7 @@ async fn stream_requires_a_successful_sse_response_not_an_arbitrary_live_http_en
 async fn refetch_requires_the_requested_run_and_bounds_untrusted_detail_bodies() {
     let valid = json!({"ok": true, "run": {
         "id": "run", "started_at": "2026-09-10T12:00:00Z", "updated_at": "2026-09-10T12:00:30Z",
+        "notification_category": "bot",
         "session_project_name": "avibe-app", "session_label": "桌面版检查更新", "definition_name": null,
     }});
     let server = FakeServer::start([
@@ -186,6 +191,7 @@ async fn refetch_requires_the_requested_run_and_bounds_untrusted_detail_bodies()
     let detail = transport.run_detail("run").await.unwrap();
     assert_eq!(detail.stamps.started_at, Some("2026-09-10T12:00:00Z".into()));
     assert_eq!(detail.stamps.updated_at, Some("2026-09-10T12:00:30Z".into()));
+    assert_eq!(detail.notification_category.as_deref(), Some("bot"));
     assert_eq!(detail.source(), Some("avibe-app · 桌面版检查更新".into()));
     for _ in 0..5 {
         assert!(transport.run_detail("run").await.is_none());
@@ -212,14 +218,73 @@ async fn identifiers_are_encoded_as_one_path_segment_not_runtime_selected_routes
 }
 
 #[tokio::test]
-async fn unread_total_reads_the_runtime_inbox_total_and_fails_closed_on_anything_else() {
+async fn preferences_require_a_complete_valid_snapshot_on_the_adopted_origin() {
+    let server = FakeServer::start([
+        response(
+            "200 OK",
+            "application/json",
+            br#"{"ok":true,"preferences":{"enabled":true,"bots":false,"sessions":true,"future":[]}}"#,
+        ),
+        response("404 Not Found", "application/json", b"{}"),
+        response(
+            "200 OK",
+            "application/json",
+            br#"{"ok":false,"preferences":{"enabled":true,"bots":true,"sessions":true}}"#,
+        ),
+        response(
+            "200 OK",
+            "application/json",
+            br#"{"ok":true,"preferences":{"enabled":true}}"#,
+        ),
+        response(
+            "200 OK",
+            "application/json",
+            br#"{"ok":true,"preferences":{"enabled":true,"bots":"false","sessions":true}}"#,
+        ),
+        response("200 OK", "application/json", b"not-json"),
+        response("200 OK", "application/json", &vec![b' '; 256 * 1024 + 1]),
+    ]);
+    let transport = server.transport();
+    assert_eq!(
+        transport.preferences().await,
+        Some(NotificationPreferences {
+            enabled: true,
+            bots: false,
+            sessions: true
+        })
+    );
+    for _ in 0..6 {
+        assert_eq!(transport.preferences().await, None);
+    }
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(requests.len(), 7);
+    for request in requests.iter() {
+        assert!(request.starts_with("GET /api/notifications/preferences HTTP/1.1\r\n"));
+        for forbidden in ["authorization:", "cookie:"] {
+            assert!(!request.to_ascii_lowercase().contains(forbidden));
+        }
+    }
+}
+
+#[tokio::test]
+async fn unread_total_prefers_loud_badge_total_and_only_falls_back_when_absent() {
     let server = FakeServer::start([
         response(
             "200 OK",
             "application/json",
             br#"{"sessions":[],"unread_by_session":{"a":2,"b":1},"unread_total":3}"#,
         ),
+        response("200 OK", "application/json", br#"{"unread_total":9,"badge_total":2}"#),
+        response("200 OK", "application/json", br#"{"unread_total":9,"badge_total":0}"#),
+        response("200 OK", "application/json", br#"{"badge_total":4}"#),
         response("200 OK", "application/json", br#"{"sessions":[],"unread_total":0}"#),
+        response("200 OK", "application/json", br#"{"unread_total":9,"badge_total":-1}"#),
+        response(
+            "200 OK",
+            "application/json",
+            br#"{"unread_total":9,"badge_total":null}"#,
+        ),
+        response("200 OK", "application/json", br#"{"unread_total":9,"badge_total":"2"}"#),
         response("401 Unauthorized", "application/json", br#"{"unread_total":9}"#),
         response("200 OK", "application/json", br#"{"unread_total":-1}"#),
         response("200 OK", "application/json", br#"{"sessions":[]}"#),
@@ -228,12 +293,15 @@ async fn unread_total_reads_the_runtime_inbox_total_and_fails_closed_on_anything
     ]);
     let transport = server.transport();
     assert_eq!(transport.unread_total().await, Some(3));
+    assert_eq!(transport.unread_total().await, Some(2));
     assert_eq!(transport.unread_total().await, Some(0));
-    for _ in 0..5 {
+    assert_eq!(transport.unread_total().await, Some(4));
+    assert_eq!(transport.unread_total().await, Some(0));
+    for _ in 0..8 {
         assert_eq!(transport.unread_total().await, None);
     }
     let requests = server.requests.lock().unwrap();
-    assert_eq!(requests.len(), 7);
+    assert_eq!(requests.len(), 13);
     for request in requests.iter() {
         let normalized = request.to_ascii_lowercase();
         assert!(request.starts_with("GET /api/inbox?platform=avibe&limit=1 HTTP/1.1\r\n"));
