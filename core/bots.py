@@ -38,6 +38,7 @@ from core.vibe_agents import (
     is_main_bot_agent,
     normalize_agent_name,
 )
+from core.inbox_events import publish_bots_changed
 from storage.agent_session_rows import BOT_SESSION_ID_PREFIX, is_bot_session_id, reserve_write_lock
 from storage.agent_session_rows import hidden_bot_session_ids as stored_hidden_bot_session_ids
 from storage.models import agent_sessions, agents
@@ -524,6 +525,7 @@ class BotService:
         bot = bot_from_agent(agent)
         assert bot is not None
         self.ensure_home(bot, authorization_context=context)
+        publish_bots_changed(bot.handle)
         return bot
 
     def set_bot(
@@ -587,6 +589,7 @@ class BotService:
         bot = bot_from_agent(agent)
         assert bot is not None
         self.ensure_home(bot, authorization_context=context)
+        publish_bots_changed(bot.handle)
         return bot
 
     def update_bot(
@@ -618,7 +621,9 @@ class BotService:
                 self._move(conn, bot.agent.id, position)
             if display_name is not ...:
                 self._sync_session_title(conn, bot.session_id, record["display_name"])
-            return self._require_bot(conn, handle)
+            updated = self._require_bot(conn, handle)
+        publish_bots_changed(handle)
+        return updated
 
     def remove_bot(self, handle: str, *, authorization_context: Any = None) -> Bot:
         """Drop the Bot role, keeping the Agent, the Session, and the directory (D4 ``remove``)."""
@@ -633,7 +638,8 @@ class BotService:
             record["removed_at"] = _now()
             self._write_record(conn, bot.agent, record)
             self._compact_positions(conn)
-            return bot
+        publish_bots_changed(handle)
+        return bot
 
     def set_avatar_image(self, handle: str, data: bytes, *, authorization_context: Any = None) -> Bot:
         """Store an uploaded avatar as ``avatar.png`` in the Bot's directory, scaled to 256px (D5)."""
@@ -651,7 +657,9 @@ class BotService:
             record = dict(agent_bot_record(bot.agent) or {})
             record["avatar"] = {"kind": "image"}
             self._write_record(conn, bot.agent, record)
-            return self._require_bot(conn, handle)
+            updated = self._require_bot(conn, handle)
+        publish_bots_changed(handle)
+        return updated
 
     def avatar_path(self, handle: str, *, authorization_context: Any = None) -> Path:
         bot = self.get_bot(handle, authorization_context=authorization_context)

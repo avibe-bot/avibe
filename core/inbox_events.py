@@ -19,6 +19,7 @@ from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
+BOTS_CHANGED_EVENT = "bots.changed"
 RUNS_UPDATED_EVENT = "runs.updated"
 VAULTS_UPDATED_EVENT = "vaults.updated"
 QUEUE_UPDATED_EVENT = "queue.updated"
@@ -207,6 +208,37 @@ def vaults_updated_payload(
 
 def publish_run_updated(**kwargs: Any) -> None:
     bus.publish(RUNS_UPDATED_EVENT, run_updated_payload(**kwargs))
+
+
+def publish_bots_changed(handle: str) -> None:
+    """Refetch the Owner's Bot list after commit, regardless of the writer's process.
+
+    Controller writes use its bus. Other writers reuse the internal events bridge,
+    with immediate local delivery (also when the controller is down) and the same
+    echo suppression as Vault updates. No route or CLI command publishes again.
+    """
+    payload = {"handle": handle}
+    if is_controller_process():
+        bus.publish(BOTS_CHANGED_EVENT, payload)
+        return
+
+    from uuid import uuid4
+
+    from vibe.inbox_bridge import remember_local_event
+    from vibe.sse_broker import broker
+
+    event_id = uuid4().hex
+    remember_local_event(event_id)
+    broker.publish(BOTS_CHANGED_EVENT, payload)
+    try:
+        from vibe import internal_client
+
+        internal_client.publish_event_sync(
+            BOTS_CHANGED_EVENT, {**payload, "_event_id": event_id}, timeout=1.5
+        )
+    except Exception:
+        # The durable mutation succeeded. Reconnection makes clients re-read it.
+        logger.debug("bots.changed bridge publish failed", exc_info=True)
 
 
 def publish_definitions_updated(*, definition_type: str) -> None:
