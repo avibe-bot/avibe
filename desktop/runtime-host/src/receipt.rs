@@ -119,7 +119,7 @@ fn nonblocking_stdout(stdout: ChildStdout) -> io::Result<impl Read> {
 fn nonblocking_stdout(stdout: ChildStdout) -> io::Result<impl Read> {
     use interprocess::os::windows::named_pipe::{pipe_mode, RecvPipeStream};
     use std::os::windows::io::OwnedHandle;
-    let pipe = RecvPipeStream::<pipe_mode::Bytes>::try_from(OwnedHandle::from(stdout)).map_err(io::Error::other)?;
+    let pipe = RecvPipeStream::<pipe_mode::Bytes>::try_from(OwnedHandle::from(stdout)).map_err(io::Error::from)?;
     pipe.set_nonblocking(true)?;
     Ok(pipe)
 }
