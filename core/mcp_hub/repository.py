@@ -200,7 +200,6 @@ def remove_package(name: str) -> str:
     """
 
     validate_name(name)
-    mcp_oauth.delete_oauth(name)
     directory = package_dir(name)
     kind = AVIBE if read_avibe_definition(name) is not None else None
     if kind is None:
@@ -211,6 +210,7 @@ def remove_package(name: str) -> str:
             kind = "native"
     if kind is None and not directory.exists():
         raise _not_found(name)
+    mcp_oauth.delete_oauth(name)  # only after a refused native edit can no longer happen
     if directory.exists():
         shutil.rmtree(directory)
     return kind or AVIBE

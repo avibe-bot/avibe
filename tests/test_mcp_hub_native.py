@@ -334,3 +334,28 @@ def test_spawns_disable_every_native_server(native_files):
     ))
     assert only_in_overlay["mcp"]["extra"]["enabled"] is False
     assert only_in_overlay["mcp"]["oc"]["enabled"] is False
+
+
+def test_remove_last_codex_server_drops_implicit_parent(native_files):
+    _claude, codex, _opencode = native_files
+    codex.write_text('model = "m"\n\n[mcp_servers.only]\ncommand = "srv"\n')
+
+    assert native.remove_entry(native.CODEX, "only")
+
+    assert codex.read_text() == 'model = "m"\n\n'
+
+
+def test_refused_native_remove_keeps_oauth_login(native_files, runtime):
+    from core.mcp_hub import oauth as mcp_oauth
+
+    _claude, codex, _opencode = native_files
+    codex.write_text('[mcp_servers]\ninline = { url = "https://i.invalid/mcp" }\n')
+    oauth_file = mcp_oauth.oauth_path("inline")
+    oauth_file.parent.mkdir(parents=True)
+    oauth_file.write_text("{}")
+
+    result = _run(runtime, "remove", {"name": "inline"})
+
+    assert result["ok"] is False and result["error"]["type"] == "invalid_native_config"
+    assert oauth_file.exists()
+    assert "inline" in codex.read_text()

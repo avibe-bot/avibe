@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -280,6 +281,8 @@ def disabled_names() -> set[str]:
 # ---------------------------------------------------------------------------
 
 _KEY = {CLAUDE: "mcpServers", CODEX: "mcp_servers", OPENCODE: "mcp"}
+# One read-modify-write at a time, so two deletes from one file never lose an edit.
+_EDIT_LOCK = threading.Lock()
 
 
 def _toml_header_path(line: str) -> Optional[tuple[str, ...]]:
@@ -332,6 +335,11 @@ def remove_entry(source: str, name: str) -> bool:
     parse to the original minus that one entry, or nothing is written.
     """
 
+    with _EDIT_LOCK:
+        return _remove_entry_locked(source, name)
+
+
+def _remove_entry_locked(source: str, name: str) -> bool:
     from config.atomic_io import write_atomic
 
     path, _data = _load(source)
@@ -348,7 +356,10 @@ def remove_entry(source: str, name: str) -> bool:
         updated = _remove_text(source, text, name)
         expected = json.loads(json.dumps(data, default=str))
         expected[_KEY[source]].pop(name)
-        if json.loads(json.dumps(_parse(source, updated), default=str)) != expected:
+        actual = json.loads(json.dumps(_parse(source, updated), default=str))
+        if expected[_KEY[source]] == {} and _KEY[source] not in actual:
+            expected.pop(_KEY[source])  # an implicit TOML parent table goes with its last child
+        if actual != expected:
             raise ValueError("entry is not a standalone block")
     except Exception as exc:
         raise McpHubError(
@@ -356,7 +367,12 @@ def remove_entry(source: str, name: str) -> bool:
             f"{source} config {path}: could not remove {name!r} without touching other content ({exc}).",
             hint=f"Remove it from {path} by hand.",
         ) from None
-    write_atomic(path, updated, follow_symlinks=True, mode=path.stat().st_mode & 0o777)
+
+    def unchanged() -> None:
+        if path.read_text(encoding="utf-8") != text:
+            raise McpHubError("native_config_changed", f"{path} changed while removing {name!r}; try again.")
+
+    write_atomic(path, updated, follow_symlinks=True, mode=path.stat().st_mode & 0o777, before_replace=unchanged)
     return True
 
 
