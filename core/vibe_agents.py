@@ -55,6 +55,17 @@ BUILTIN_DEFAULT_AGENT_METADATA = {"builtin": True, "builtin_default": True, "loc
 BUILTIN_BACKEND_ENABLED_META_KEY = "backend_enabled"
 # Catalog-owned: only the store writes them, and only on rows it created (``source == "builtin"``).
 BUILTIN_AGENT_MARKER_KEYS = frozenset((*BUILTIN_DEFAULT_AGENT_METADATA, BUILTIN_BACKEND_ENABLED_META_KEY))
+#: An Agent's Bot fields (``docs/plans/bots.md`` D1): handle, display name, avatar, position, and ``removed_at``
+#: once the Bot role is removed. Written only by the Bot operations (``core/bots.py``), never by ordinary create/update.
+BOT_METADATA_KEY = "bot"
+#: Marks the store-made Agent of a built-in Bot (its handle, ``"main"``); written only by the store.
+BUILTIN_BOT_METADATA_KEY = "builtin_bot"
+MAIN_BOT_HANDLE = "main"
+#: The main Bot's Agent: its name (taking the next free one when a user Agent holds it) and its role.
+MAIN_BOT_AGENT_NAME = "main"
+MAIN_BOT_DESCRIPTION = "The user's main Bot and first point of contact."
+#: Metadata no public create or update can set, change, or clear.
+STORE_OWNED_METADATA_KEYS = frozenset((*BUILTIN_AGENT_MARKER_KEYS, BOT_METADATA_KEY, BUILTIN_BOT_METADATA_KEY))
 # The description a built-in Agent is created with. The built-in backend's Agent is Vibey, as its system prompt
 # says (``modules/agents/vibey/prompt.py``); the prompt's Agents roster (``core/prompts/harness-agents.md``)
 # lists this description beside that identity.
@@ -124,6 +135,16 @@ class AgentAlwaysEnabledError(ValueError):
     """The built-in Agent of a built-in backend is part of the platform and stays enabled."""
 
     code = "agent_always_enabled"
+
+    def __init__(self, *, agent_name: str) -> None:
+        super().__init__(self.code)
+        self.agent_name = str(agent_name)
+
+
+class AgentBotLockedError(ValueError):
+    """While an Agent is a Bot it stays enabled and keeps its name, backend, and row (``bots.md`` D1)."""
+
+    code = "agent_is_bot"
 
     def __init__(self, *, agent_name: str) -> None:
         super().__init__(self.code)
@@ -485,6 +506,7 @@ class VibeAgent:
         payload = asdict(self)
         payload["archived"] = self.archived_at is not None
         payload["display_name"] = archived_agent_original_name(self) or self.name
+        payload["bot"] = agent_bot_summary(self)
         return payload
 
 
@@ -495,6 +517,18 @@ class AgentArchiveResult:
     archived_name: str
     references: dict[str, int]
     default_agent_name: Optional[str] = None
+
+
+def agent_bot_summary(agent: VibeAgent) -> Optional[dict[str, Any]]:
+    """The Bot an Agent is, as Agent lists show it: handle and display name, or None."""
+    record = agent_bot_record(agent) if agent.archived_at is None else None
+    if record is None:
+        return None
+    return {
+        "handle": str(record["handle"]),
+        "display_name": str(record.get("display_name") or ""),
+        "builtin": is_main_bot_agent(agent),
+    }
 
 
 def archived_agent_original_name(agent: VibeAgent) -> Optional[str]:
@@ -616,7 +650,8 @@ def resolve_usable_default_agent(
         .mappings()
         .all()
     )
-    candidates = [VibeAgentStore._from_row(row) for row in rows]
+    # A Bot is a standing colleague, never a substitute default.
+    candidates = [agent for agent in map(VibeAgentStore._from_row, rows) if not is_bot_agent(agent)]
     # Builtins first: they are the shape every install has and the one a caller
     # is most likely to be entitled to. A built-in backend's Agents still come last.
     candidates.sort(key=lambda item: (implicit_default_rank(item.backend), 0 if item.source == "builtin" else 1))
@@ -1007,6 +1042,39 @@ class VibeAgentStore:
         enabled: bool = True,
         user_context: Any = None,
     ) -> VibeAgent:
+        return self._create(
+            name=name,
+            backend=backend,
+            description=description,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            system_prompt=system_prompt,
+            source=source,
+            source_ref=source_ref,
+            metadata=metadata,
+            enabled=enabled,
+            user_context=user_context,
+        )
+
+    def _create(
+        self,
+        *,
+        name: str,
+        backend: str,
+        description: Optional[str] = None,
+        model: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
+        system_prompt: Optional[str] = None,
+        source: str = "user",
+        source_ref: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+        enabled: bool = True,
+        user_context: Any = None,
+        store_metadata: Optional[dict[str, Any]] = None,
+        before_insert: Any = None,
+    ) -> VibeAgent:
+        """``create``, plus the catalog's own writes: ``store_metadata`` (store-owned keys, such as a Bot's fields)
+        and ``before_insert(conn, agent)``, a check run under the write lock in the inserting transaction."""
         from storage import resource_access_service
 
         raw_name, normalized = _validated_public_agent_name(name)
@@ -1027,12 +1095,18 @@ class VibeAgentStore:
             enabled=bool(enabled),
             source=str(source or "user"),
             source_ref=_clean_optional(source_ref),
-            metadata=dict(metadata or {}) if source == "builtin" else _without_builtin_markers(metadata),
+            metadata={
+                **(dict(metadata or {}) if source == "builtin" else _without_builtin_markers(metadata)),
+                **dict(store_metadata or {}),
+            },
             created_at=now,
             updated_at=now,
         )
         try:
             with self.engine.begin() as conn:
+                if before_insert is not None:
+                    reserve_write_lock(conn)
+                    before_insert(conn, agent)
                 conn.execute(agents.insert().values(**self._values(agent)))
                 # Register a private ACL for any creating subject, including a
                 # Personal/email member. Organization *use* still follows the
@@ -1099,15 +1173,17 @@ class VibeAgentStore:
             if system_prompt is not _UNSET:
                 values["system_prompt"] = _clean_optional(system_prompt)
             if metadata is not _UNSET:
-                # The built-in markers belong to the catalog: a caller neither sets nor clears them.
+                # The built-in markers and Bot fields belong to the catalog: a caller neither sets nor clears them.
                 metadata = _without_builtin_markers(metadata)
                 metadata.update(
-                    (key, existing.metadata[key]) for key in BUILTIN_AGENT_MARKER_KEYS if key in existing.metadata
+                    (key, existing.metadata[key]) for key in STORE_OWNED_METADATA_KEYS if key in existing.metadata
                 )
                 values["metadata_json"] = _json_dumps(metadata)
             if enabled is not _UNSET:
-                if not enabled and is_always_enabled_agent(existing):
+                if not enabled and (is_always_enabled_agent(existing) or is_main_bot_agent(existing)):
                     raise AgentAlwaysEnabledError(agent_name=existing.name)
+                if not enabled and is_bot_agent(existing):
+                    raise AgentBotLockedError(agent_name=existing.name)
                 values["enabled"] = 1 if bool(enabled) else 0
             result = conn.execute(
                 agents.update()
@@ -1155,6 +1231,8 @@ class VibeAgentStore:
                     raise AgentArchivedEditError(agent_name=name)
                 if is_builtin_default_agent(agent):
                     raise ValueError(f"agent '{agent.name}' is built in and cannot be renamed")
+                if is_bot_agent(agent):
+                    raise AgentBotLockedError(agent_name=agent.name)
                 if new_normalized == agent.normalized_name:
                     if raw_new_name == agent.name:
                         return agent
@@ -1230,6 +1308,8 @@ class VibeAgentStore:
                     code="agent_builtin",
                     agent_name=agent.name,
                 )
+            if is_bot_agent(agent):
+                raise AgentArchiveError(code=AgentBotLockedError.code, agent_name=agent.name)
             if agent.archived_at is not None:
                 if agent.name.startswith(LEGACY_ARCHIVED_AGENT_NAME_PREFIX):
                     return self._compact_legacy_archive(conn, agent, now=now)
@@ -1410,6 +1490,8 @@ class VibeAgentStore:
             )
             if is_builtin_default_agent(agent):
                 raise ValueError(f"agent '{agent.name}' is built in and cannot be deleted")
+            if is_bot_agent(agent):
+                raise AgentBotLockedError(agent_name=agent.name)
             result = conn.execute(agents.delete().where(agents.c.id == agent.id))
             if result.rowcount:
                 resource_access_service.delete_resource_policy(conn, "agent", agent.id)
@@ -1593,7 +1675,7 @@ class VibeAgentStore:
             .where(agents.c.archived_at.is_(None))
             .order_by(agents.c.name)
         ).mappings()
-        candidates = [VibeAgentStore._from_row(row) for row in rows]
+        candidates = [agent for agent in map(VibeAgentStore._from_row, rows) if not is_bot_agent(agent)]
         for candidate in candidates:
             if candidate.backend == archived.backend and is_builtin_default_agent(candidate):
                 return candidate
@@ -1780,6 +1862,10 @@ class VibeAgentStore:
                 and agent.backend not in enabled_backend_set
             ):
                 self.sync_builtin_default_agent(backend=agent.backend, backend_enabled=False, name=agent.name)
+        try:
+            self.ensure_main_bot_agent()
+        except ValueError as exc:
+            logger.warning("Skipping the main Bot's Agent: %s", exc)
         default_name = self.get_default_agent_name()
         default_agent = self.get(default_name) if default_name else None
         enabled_ensured = [agent for agent in ensured if agent.enabled]
@@ -1794,6 +1880,50 @@ class VibeAgentStore:
         if chosen is not None:
             self.set_default_agent_name(chosen.name, user_context=instance_owner_context())
         return ensured
+
+    def get_main_bot_agent(self) -> Optional[VibeAgent]:
+        """The main Bot's Agent: the oldest row the store created and marked for it, under any name."""
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                select(agents)
+                .where(agents.c.source == "builtin", agents.c.archived_at.is_(None))
+                .order_by(agents.c.created_at, agents.c.id)
+            ).mappings().all()
+        return next((agent for agent in map(self._from_row, rows) if is_main_bot_agent(agent)), None)
+
+    def ensure_main_bot_agent(self) -> VibeAgent:
+        """The dedicated built-in Agent behind the main Bot (``bots.md`` D9).
+
+        Created once on the Vibey backend, named ``main`` (or the next free name when a user Agent holds it), with
+        the built-in Vibey Agent's model and effort at creation. It is always enabled and always the main Bot: a
+        missing or removed Bot record is restored, keeping the display name and avatar the user chose.
+        """
+        current = self.get_main_bot_agent()
+        if current is not None:
+            record = current.metadata.get(BOT_METADATA_KEY)
+            record = dict(record) if isinstance(record, dict) else {}
+            restored = {**_main_bot_record(), **{key: record[key] for key in ("display_name", "avatar") if key in record}}
+            return self._write_builtin_state(
+                current, metadata={**current.metadata, BOT_METADATA_KEY: restored}, enabled=True
+            )
+        vibey = self.get_builtin_default_agent_for_backend("vibey", enabled_only=False)
+        try:
+            return self._create(
+                name=self._free_agent_name(MAIN_BOT_AGENT_NAME),
+                backend="vibey",
+                description=MAIN_BOT_DESCRIPTION,
+                model=vibey.model if vibey is not None else None,
+                reasoning_effort=vibey.reasoning_effort if vibey is not None else None,
+                source="builtin",
+                metadata={BUILTIN_BOT_METADATA_KEY: MAIN_BOT_HANDLE, BOT_METADATA_KEY: _main_bot_record()},
+                enabled=True,
+            )
+        except ValueError:
+            # Another process created it first.
+            current = self.get_main_bot_agent()
+            if current is None:
+                raise
+            return current
 
     def get_builtin_default_agent_for_backend(self, backend: str, *, enabled_only: bool = True) -> Optional[VibeAgent]:
         """The backend's built-in Agent: the one owner of built-in identity.
@@ -1937,7 +2067,28 @@ def _has_builtin_markers(agent: VibeAgent) -> bool:
 
 
 def _without_builtin_markers(metadata: Any) -> dict[str, Any]:
-    return {key: value for key, value in dict(metadata or {}).items() if key not in BUILTIN_AGENT_MARKER_KEYS}
+    return {key: value for key, value in dict(metadata or {}).items() if key not in STORE_OWNED_METADATA_KEYS}
+
+
+def _main_bot_record() -> dict[str, Any]:
+    return {"handle": MAIN_BOT_HANDLE, "display_name": "", "avatar": None, "position": 0}
+
+
+def agent_bot_record(agent: VibeAgent) -> Optional[dict[str, Any]]:
+    """The Agent's Bot fields while it is a Bot: a record with a handle and no ``removed_at``."""
+    record = agent.metadata.get(BOT_METADATA_KEY)
+    if not isinstance(record, dict) or not str(record.get("handle") or "").strip() or record.get("removed_at"):
+        return None
+    return record
+
+
+def is_bot_agent(agent: VibeAgent) -> bool:
+    return agent.archived_at is None and agent_bot_record(agent) is not None
+
+
+def is_main_bot_agent(agent: VibeAgent) -> bool:
+    """The main Bot's Agent: store-made (``source == "builtin"``) and marked by the store."""
+    return agent.source == "builtin" and agent.metadata.get(BUILTIN_BOT_METADATA_KEY) == MAIN_BOT_HANDLE
 
 
 def is_builtin_default_agent(agent: VibeAgent) -> bool:
@@ -1951,8 +2102,15 @@ def is_always_enabled_agent(agent: VibeAgent) -> bool:
 
 
 def _implicit_default(candidates: Iterable[VibeAgent]) -> Optional[VibeAgent]:
-    """The first candidate by ``implicit_default_rank``, keeping the given order among equals."""
-    return min(candidates, key=lambda agent: implicit_default_rank(agent.backend), default=None)
+    """The first candidate by ``implicit_default_rank``, keeping the given order among equals.
+
+    A Bot is a standing colleague, not a worker new chats start on, so it is never chosen implicitly.
+    """
+    return min(
+        (agent for agent in candidates if not is_bot_agent(agent)),
+        key=lambda agent: implicit_default_rank(agent.backend),
+        default=None,
+    )
 
 
 def _first_default(candidates: list[VibeAgent]) -> Optional[VibeAgent]:

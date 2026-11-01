@@ -359,6 +359,10 @@
       "tooLarge": "Attachment '{name}' exceeds the attachment size limit."
     },
     "agentArchive": {
+      "agent_is_bot": {
+        "message": "Agent `{agent}` is a Bot and cannot be deleted.",
+        "hint": "Remove it from Bots first; its conversation and memory are kept."
+      },
       "agent_builtin": {
         "message": "Agent `{agent}` is built in and cannot be deleted.",
         "hint": "Built-in default Agents are created from enabled Backends and cannot be deleted."
@@ -373,6 +377,10 @@
       }
     },
     "agentLifecycle": {
+      "agent_is_bot": {
+        "message": "Agent `{agent}` is a Bot, so it stays enabled and keeps its name.",
+        "hint": "Remove it from Bots first; you can still change its model, effort, description, and system prompt."
+      },
       "agent_always_enabled": {
         "message": "Agent `{agent}` is built in and always enabled.",
         "hint": "You can still change its model, effort, and system prompt."
@@ -385,6 +393,26 @@
         "message": "Avibe cannot update Agent references because a task or watch contains invalid metadata.",
         "hint": "Repair or remove the malformed task or watch metadata, then try again."
       }
+    },
+    "bots": {
+      "sessionProtected": "A Bot's conversation is managed by Avibe: it cannot be archived, and its title follows the Bot's name.",
+      "bot_not_found": "Bot `@{handle}` was not found.",
+      "bot_handle_invalid": "`{handle}` is not a valid handle. Use 2 to 24 lowercase letters, digits, or hyphens, starting with a letter.",
+      "bot_handle_reserved": "The handle `{handle}` is reserved for a built-in Bot.",
+      "bot_handle_taken": "The handle `{handle}` is already taken.",
+      "bot_display_name_required": "Give the Bot a name.",
+      "bot_display_name_too_long": "A Bot's name can have at most 64 characters.",
+      "bot_avatar_invalid": "The avatar is not valid. Choose one emoji with a color, or upload an image.",
+      "bot_avatar_too_large": "The avatar image is larger than 10 MB.",
+      "bot_avatar_missing": "This Bot has no uploaded avatar.",
+      "bot_agent_not_found": "That Agent was not found.",
+      "bot_agent_backend": "Only Vibey Agents can be set as Bots.",
+      "bot_agent_disabled": "Enable the Agent before setting it as a Bot.",
+      "bot_agent_is_bot": "This Agent is already a Bot.",
+      "bot_main_not_removable": "The main Bot cannot be removed.",
+      "bot_main_position": "The main Bot always comes first.",
+      "bot_position_invalid": "A Bot's position is a whole number from 1.",
+      "bot_main_unavailable": "The main Bot is not available right now."
     },
     "agentNameValidation": {
       "agent_name_reserved": {

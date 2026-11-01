@@ -254,6 +254,54 @@ WORKSPACE_NOTICE_SESSION_METADATA_KEY = "workspace_notice_session"
 #: than either of the two that existed.
 WORKSPACE_NOTICE_SESSION_VISIBILITY = "system"
 
+#: A Bot's permanent Session is ``ses_<handle>`` (``docs/plans/bots.md`` D2). Generated ids are ``ses`` plus
+#: characters from ``SESSION_ID_ALPHABET``, which has no ``_``, so this prefix is the Bots' namespace alone.
+BOT_SESSION_ID_PREFIX = "ses_"
+
+
+MAIN_BOT_SESSION_ID = "ses_main"
+
+
+def is_bot_session_id(session_id: Any) -> bool:
+    """Whether ``session_id`` is in the Bots' namespace. Only ``is_bot_session`` says whether a Bot owns it."""
+
+    return str(session_id or "").startswith(BOT_SESSION_ID_PREFIX)
+
+
+def _bot_handle_column():
+    from storage.models import agents
+
+    return func.json_extract(agents.c.metadata_json, "$.bot.handle")
+
+
+def bot_session_ids(conn: Connection) -> set[str]:
+    """Every Bot's Session id, removed Bots' included: ``ses_main`` and ``ses_<handle>`` of each Bot record."""
+
+    from storage.models import agents
+
+    handles = conn.execute(select(_bot_handle_column()).select_from(agents).where(_bot_handle_column().is_not(None)))
+    return {MAIN_BOT_SESSION_ID} | {
+        f"{BOT_SESSION_ID_PREFIX}{handle}" for handle in handles.scalars() if isinstance(handle, str) and handle
+    }
+
+
+def is_bot_session(conn: Connection, session_id: Any) -> bool:
+    """Whether a Bot owns this Session (``docs/plans/bots.md`` D2): ``ses_main``, or ``ses_<handle>`` of a Bot record.
+
+    A removed Bot's Session still counts: it is kept, hidden, for the Bot to reconnect to. Only ids in the Bots'
+    namespace reach the catalog, so every other Session pays nothing for the check.
+    """
+
+    from storage.models import agents
+
+    text = str(session_id or "")
+    if not is_bot_session_id(text):
+        return False
+    if text == MAIN_BOT_SESSION_ID:
+        return True
+    handle = text[len(BOT_SESSION_ID_PREFIX):]
+    return conn.execute(select(agents.c.id).where(_bot_handle_column() == handle).limit(1)).first() is not None
+
 
 def session_is_runtime_owned(*, session_id: Any, visibility: Any = None) -> bool:
     """Whether the RUNTIME owns this session, i.e. it accepts no user turn.

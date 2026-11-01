@@ -359,6 +359,10 @@
       "tooLarge": "附件“{name}”超过附件大小限制。"
     },
     "agentArchive": {
+      "agent_is_bot": {
+        "message": "Agent `{agent}` 是伙伴，无法删除。",
+        "hint": "请先将它移出伙伴；它的对话与记忆会保留。"
+      },
       "agent_builtin": {
         "message": "Agent `{agent}` 是内置 Agent，无法删除。",
         "hint": "内置默认 Agent 由已启用的 Backend 创建，无法删除。"
@@ -373,6 +377,10 @@
       }
     },
     "agentLifecycle": {
+      "agent_is_bot": {
+        "message": "Agent `{agent}` 是伙伴，因此保持启用并保留名称。",
+        "hint": "请先将它移出伙伴；仍可调整它的模型、Effort、描述与系统提示词。"
+      },
       "agent_always_enabled": {
         "message": "Agent `{agent}` 是内置 Agent，始终启用。",
         "hint": "仍可调整它的模型、Effort 与系统提示词。"
@@ -385,6 +393,26 @@
         "message": "任务或监控包含无效元数据，Avibe 无法更新 Agent 引用。",
         "hint": "请修复或删除元数据异常的任务或监控，然后重试。"
       }
+    },
+    "bots": {
+      "sessionProtected": "伙伴的对话由 Avibe 管理：不能归档，标题跟随伙伴的名字。",
+      "bot_not_found": "找不到伙伴 `@{handle}`。",
+      "bot_handle_invalid": "`{handle}` 不是有效的标识。请使用 2 到 24 个小写字母、数字或连字符，并以字母开头。",
+      "bot_handle_reserved": "标识 `{handle}` 已保留给内置伙伴。",
+      "bot_handle_taken": "标识 `{handle}` 已被占用。",
+      "bot_display_name_required": "请给伙伴起个名字。",
+      "bot_display_name_too_long": "伙伴的名字最多 64 个字符。",
+      "bot_avatar_invalid": "头像无效。请选择一个 emoji 和颜色，或上传一张图片。",
+      "bot_avatar_too_large": "头像图片超过 10 MB。",
+      "bot_avatar_missing": "这个伙伴没有上传头像。",
+      "bot_agent_not_found": "找不到这个 Agent。",
+      "bot_agent_backend": "只有 Vibey Agent 可以设为伙伴。",
+      "bot_agent_disabled": "请先启用这个 Agent，再设为伙伴。",
+      "bot_agent_is_bot": "这个 Agent 已经是伙伴。",
+      "bot_main_not_removable": "主伙伴不能移出。",
+      "bot_main_position": "主伙伴始终排在第一位。",
+      "bot_position_invalid": "伙伴的位置是从 1 开始的整数。",
+      "bot_main_unavailable": "主伙伴暂时不可用。"
     },
     "agentNameValidation": {
       "agent_name_reserved": {

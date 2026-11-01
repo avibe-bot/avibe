@@ -11,6 +11,7 @@ from sqlalchemy import delete, insert, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection
 
+from storage.agent_session_rows import is_bot_session
 from storage.models import (
     agent_sessions,
     project_access_bindings,
@@ -373,6 +374,9 @@ def get_effective_session_role(
     if project_id is None:
         if context.is_instance_owner:
             return "owner"
+        if is_bot_session(conn, session_id):
+            # Bots are the Owner's (``docs/plans/bots.md`` D1): no other member reaches a Bot's Session.
+            return None
         if context.can_manage_instance and session_exists(conn, session_id):
             return context.instance_role
         return None

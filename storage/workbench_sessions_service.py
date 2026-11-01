@@ -40,7 +40,9 @@ from storage.agent_session_rows import (
     SESSION_SPEED_FAST,
     SESSION_SPEED_METADATA_KEY,
     WORKSPACE_NOTICE_SESSION_ID,
+    bot_session_ids,
     create_agent_session_row,
+    is_bot_session,
     new_session_id,
     session_speed,
     normalize_workdir,
@@ -173,6 +175,10 @@ def _apply_session_speed(metadata: dict[str, Any], speed: Any) -> None:
         raise ValueError(f"invalid session speed: {speed!r}")
 
 
+def _not_bot_session(conn: Connection):
+    return agent_sessions.c.id.not_in(sorted(bot_session_ids(conn)))
+
+
 def _has_runtime_management_access(context: AuthorizationContext) -> bool:
     return context.can_manage_instance
 
@@ -209,7 +215,11 @@ def list_sessions(
     """
 
     context = require_instance_role(authorization_context, "viewer")
-    query = select(agent_sessions).where(agent_sessions.c.visibility == "foreground")
+    query = select(agent_sessions).where(
+        agent_sessions.c.visibility == "foreground",
+        # A Bot's Session is reached through its Bot, never a session list or the ``#`` search (``bots.md`` D3).
+        _not_bot_session(conn),
+    )
     if not _has_runtime_management_access(context):
         accessible_scope_ids = {
             project_access_service.project_scope_id(project_id)
@@ -303,6 +313,9 @@ def get_session(
         select(agent_sessions).where(agent_sessions.c.id == session_id)
     ).mappings().first()
     if row is None:
+        raise LookupError(f"Session not found: {session_id}")
+    if not context.is_instance_owner and is_bot_session(conn, session_id):
+        # Bots are the Owner's (``bots.md`` D1): no other member reaches a Bot's Session.
         raise LookupError(f"Session not found: {session_id}")
     if not _has_runtime_management_access(context):
         project_id = project_access_service.project_id_from_scope_id(row["scope_id"])
@@ -434,6 +447,8 @@ def list_sessions_page(
         agent_sessions.c.status == "active",
         agent_sessions.c.visibility == "foreground",
     )
+    if not context.is_instance_owner:
+        query = query.where(_not_bot_session(conn))
     if not _has_runtime_management_access(context):
         accessible_scope_ids = {
             project_access_service.project_scope_id(project_id)
@@ -672,13 +687,17 @@ def create_session(
 MAIN_SESSION_ID = "ses_main"
 MAIN_SESSION_METADATA_KEY = "kind"
 MAIN_SESSION_METADATA_VALUE = "main"
-MAIN_SESSION_WORKDIR_DIRNAME = "main"
-MAIN_SESSION_WORKDIR_COMPONENT = "owner"
-MAIN_SESSION_UPDATABLE_FIELDS = frozenset({"model", "reasoning_effort", "speed", "title", "pinned"})
+BOT_SESSION_METADATA_VALUE = "bot"
+#: The released main Session's workdir, before the main Bot moved it to its Bot directory (``bots.md`` D9).
+LEGACY_MAIN_SESSION_WORKDIR_PARTS = ("main", "owner")
+#: What a caller may change on a Bot's Session, ``ses_main`` included. Its title follows the Bot's display name
+#: and is written only by the Bot operations (``core/bots.py``).
+BOT_SESSION_UPDATABLE_FIELDS = frozenset({"model", "reasoning_effort", "speed", "pinned"})
+MAIN_SESSION_UPDATABLE_FIELDS = BOT_SESSION_UPDATABLE_FIELDS
 
 
 class MainSessionArchivedError(PermissionError):
-    """Raised when the fixed main-session row is already archived."""
+    """Raised when a Bot's fixed Session row is already archived."""
 
     code = "main_session_archived"
 
@@ -687,7 +706,7 @@ class MainSessionArchivedError(PermissionError):
 
 
 class MainSessionInvariantError(RuntimeError):
-    """Raised when the fixed main-session row no longer has its built-in shape."""
+    """Raised when a Bot's fixed Session row no longer has its Bot shape."""
 
     code = "main_session_invalid"
 
@@ -697,103 +716,142 @@ class MainSessionInvariantError(RuntimeError):
 
 
 def main_session_workdir() -> str:
-    """Return the fixed singleton main-session workdir."""
+    """The main Bot's working directory, where ``ses_main`` runs."""
 
-    return str(paths.get_vibe_remote_dir() / MAIN_SESSION_WORKDIR_DIRNAME / MAIN_SESSION_WORKDIR_COMPONENT)
-
-
-def _main_builtin_agent(conn: Connection, agent_name: str) -> dict[str, Any]:
-    from core.vibe_agents import VibeAgentStore, is_builtin_default_agent
-
-    row = conn.execute(
-        select(agents)
-        .where(
-            agents.c.name == str(agent_name or "").strip(),
-            agents.c.backend == "vibey",
-            agents.c.enabled == 1,
-            agents.c.archived_at.is_(None),
-            agents.c.source == "builtin",
-        )
-        .limit(1)
-    ).mappings().first()
-    if row is None or not is_builtin_default_agent(VibeAgentStore._from_row(row)):
-        raise MainSessionInvariantError("built-in Vibey Agent is unavailable")
-    return dict(row)
+    return bot_session_workdir("main")
 
 
-def _validate_main_session_row(
+def bot_session_workdir(handle: str) -> str:
+    return str(paths.get_bot_dir(handle))
+
+
+def _legacy_main_session_workdir() -> str:
+    return str(paths.get_vibe_remote_dir().joinpath(*LEGACY_MAIN_SESSION_WORKDIR_PARTS))
+
+
+def _session_kind(session_id: str) -> str:
+    return MAIN_SESSION_METADATA_VALUE if session_id == MAIN_SESSION_ID else BOT_SESSION_METADATA_VALUE
+
+
+def _bot_session_repairs(
+    conn: Connection,
     row: Mapping[str, Any],
     *,
+    session_id: str,
     agent: Mapping[str, Any],
     workdir: str,
-) -> None:
+) -> dict[str, Any]:
+    """The in-place rewrites a Bot's existing Session row needs, or ``MainSessionInvariantError``.
+
+    Two rewrites keep data where it is: the released ``ses_main`` shape (the built-in Vibey Agent in the old
+    ``~/.avibe/main/owner`` workdir) moves to the main Bot's Agent and directory, and a Bot set again after its Agent
+    was renamed follows the Agent's current name. Any other difference is corruption, refused as before.
+    """
     if row.get("status") == "archived":
         raise MainSessionArchivedError()
+    repairs: dict[str, Any] = {}
+    agent_id, agent_name = row.get("agent_id"), row.get("agent_name")
+    row_workdir = row.get("workdir")
+    if session_id == MAIN_SESSION_ID and agent_id != agent["id"] and row_workdir == _legacy_main_session_workdir():
+        legacy_agent = conn.execute(select(agents).where(agents.c.id == agent_id).limit(1)).mappings().first()
+        from core.vibe_agents import VibeAgentStore, is_builtin_default_agent
+
+        if legacy_agent is not None and legacy_agent["backend"] == "vibey" and is_builtin_default_agent(
+            VibeAgentStore._from_row(legacy_agent)
+        ):
+            repairs.update(agent_id=agent["id"], agent_name=agent["name"], workdir=workdir)
+            agent_id, agent_name, row_workdir = agent["id"], agent["name"], workdir
+    if agent_id == agent["id"] and agent_name != agent["name"]:
+        repairs["agent_name"] = agent["name"]
+        agent_name = agent["name"]
     metadata = _load_metadata(row.get("metadata_json"))
+    actual = {**dict(row), "agent_id": agent_id, "agent_name": agent_name, "workdir": row_workdir}
     expected = {
-        "id": MAIN_SESSION_ID,
+        "id": session_id,
         "scope_id": None,
         "agent_id": agent["id"],
         "agent_name": agent["name"],
         "agent_backend": "vibey",
         "agent_variant": "vibey",
-        "session_anchor": MAIN_SESSION_ID,
+        "session_anchor": session_id,
         "workdir": workdir,
         "status": "active",
         "visibility": "foreground",
     }
     for field, value in expected.items():
-        if row.get(field) != value:
-            raise MainSessionInvariantError(f"{field} does not match the built-in main session")
-    if metadata.get(MAIN_SESSION_METADATA_KEY) != MAIN_SESSION_METADATA_VALUE:
-        raise MainSessionInvariantError("metadata.kind does not identify the main session")
+        if actual.get(field) != value:
+            raise MainSessionInvariantError(f"{field} does not match the Bot's session")
+    if metadata.get(MAIN_SESSION_METADATA_KEY) != _session_kind(session_id):
+        raise MainSessionInvariantError("metadata.kind does not identify the Bot's session")
+    return repairs
+
+
+def ensure_bot_session(
+    conn: Connection,
+    *,
+    session_id: str,
+    agent: Mapping[str, Any],
+    workdir: str,
+    title: Optional[str] = None,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Resolve a Bot's permanent Session, creating it on first use (``bots.md`` D1, D2).
+
+    The Session is ``ses_<handle>``: no scope, the Bot's Agent, its directory as the workdir. Only the instance Owner
+    reaches it. The caller prepares ``workdir`` before this reserves the writer lock.
+    """
+
+    context = require_instance_role(authorization_context, "owner")
+    if desktop_mini_owner_key(context) is None:
+        raise ProjectAccessDeniedError
+    for attempt in range(2):
+        row = conn.execute(select(agent_sessions).where(agent_sessions.c.id == session_id)).mappings().first()
+        if row is not None:
+            repairs = _bot_session_repairs(conn, row, session_id=session_id, agent=agent, workdir=workdir)
+            if repairs:
+                reserve_write_lock(conn)
+                conn.execute(
+                    update(agent_sessions)
+                    .where(agent_sessions.c.id == session_id)
+                    .values(**repairs, updated_at=_utc_now_iso())
+                )
+            return get_session(conn, session_id, authorization_context=context)
+        if attempt:
+            break
+        # The fixed primary key makes creation idempotent, and the write lock closes the
+        # read/insert race when two first uses arrive together.
+        reserve_write_lock(conn)
+    return create_session(
+        conn,
+        scope_id=None,
+        session_id=session_id,
+        agent_backend="",
+        agent_name=agent["name"],
+        agent_id=agent["id"],
+        title=title,
+        workdir=workdir,
+        metadata={MAIN_SESSION_METADATA_KEY: _session_kind(session_id)},
+        authorization_context=context,
+        workdir_prepared=True,
+    )
 
 
 def ensure_main_session(
     conn: Connection,
     *,
-    agent_name: str,
+    agent: Mapping[str, Any],
     title: Optional[str] = None,
     authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Resolve the stable built-in main session, creating it on first use."""
+    """Resolve the main Bot's ``ses_main``, creating it on first use."""
 
-    context = require_instance_role(authorization_context, "owner")
-    if desktop_mini_owner_key(context) is None:
-        raise ProjectAccessDeniedError
-    workdir = main_session_workdir()
-    row = conn.execute(
-        select(agent_sessions).where(agent_sessions.c.id == MAIN_SESSION_ID)
-    ).mappings().first()
-    if row is not None and row.get("status") == "archived":
-        raise MainSessionArchivedError()
-    builtin_agent = _main_builtin_agent(conn, agent_name)
-    if row is not None:
-        _validate_main_session_row(row, agent=builtin_agent, workdir=workdir)
-        return get_session(conn, MAIN_SESSION_ID, authorization_context=context)
-
-    Path(workdir).mkdir(parents=True, exist_ok=True)
-    # The fixed primary key makes deletion idempotent, while the write lock closes
-    # the read/insert race when two first turns arrive together.
-    reserve_write_lock(conn)
-    row = conn.execute(
-        select(agent_sessions).where(agent_sessions.c.id == MAIN_SESSION_ID)
-    ).mappings().first()
-    if row is not None:
-        _validate_main_session_row(row, agent=builtin_agent, workdir=workdir)
-        return get_session(conn, MAIN_SESSION_ID, authorization_context=context)
-
-    return create_session(
+    return ensure_bot_session(
         conn,
-        scope_id=None,
         session_id=MAIN_SESSION_ID,
-        agent_backend="",
-        agent_name=agent_name,
+        agent=agent,
+        workdir=main_session_workdir(),
         title=title,
-        workdir=workdir,
-        metadata={MAIN_SESSION_METADATA_KEY: MAIN_SESSION_METADATA_VALUE},
-        authorization_context=context,
-        workdir_prepared=True,
+        authorization_context=authorization_context,
     )
 
 
@@ -1043,10 +1101,10 @@ def update_session(
     ``system`` itself is not assignable in the other direction either: see the
     ``visibility`` branch below.
     """
-    is_main_session = str(session_id) == MAIN_SESSION_ID
+    is_bot_session_row = is_bot_session(conn, session_id)
     authorization = require_instance_role(
         authorization_context,
-        "owner" if is_main_session else "editor",
+        "owner" if is_bot_session_row else "editor",
     )
     requested_fields = {
         name
@@ -1066,7 +1124,7 @@ def update_session(
         if value is not _UNSET
     }
     if str(session_id) == WORKSPACE_NOTICE_SESSION_ID or (
-        is_main_session and not requested_fields.issubset(MAIN_SESSION_UPDATABLE_FIELDS)
+        is_bot_session_row and not requested_fields.issubset(BOT_SESSION_UPDATABLE_FIELDS)
     ):
         raise ReservedSessionError(str(session_id))
     reserve_write_lock(conn)
@@ -1544,7 +1602,8 @@ def backfill_session_title(
     """
 
     cleaned = str(title or "").strip()
-    if not cleaned:
+    if not cleaned or is_bot_session(conn, session_id):
+        # A Bot's Session is titled by the Bot's display name, never from its conversation.
         return None
 
     row = conn.execute(
@@ -2013,7 +2072,7 @@ def archive_session(
     Checked BEFORE the existence lookup so the answer is the same on every install,
     whether or not the lazily-created row exists yet.
     """
-    if str(session_id) in {WORKSPACE_NOTICE_SESSION_ID, MAIN_SESSION_ID}:
+    if str(session_id) == WORKSPACE_NOTICE_SESSION_ID or is_bot_session(conn, session_id):
         raise ReservedSessionError(str(session_id))
     context = require_instance_role(authorization_context, "editor")
     existing = conn.execute(
