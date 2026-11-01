@@ -998,7 +998,6 @@ The web UI (`http://127.0.0.1:5123`) provides the same controls:
 | `~/.vibe_remote/state/scheduled_tasks.json` | Legacy scheduled task definitions imported into SQLite on startup |
 | `~/.vibe_remote/state/watches.json` | Legacy managed watch definitions imported into SQLite on startup |
 | `~/.vibe_remote/state/task_requests/` | Legacy queued task/hook requests imported into SQLite on startup |
-| `~/.vibe_remote/state/user_preferences.md` | Shared long-term user preference notes |
 | `~/.vibe_remote/state/backups/` | Automatic state backups taken before migrations |
 | `~/.vibe_remote/state/agent_core/model-requests/` | Private copies of Vibey model requests that did not succeed (`vibe model-requests`); kept 7 days, 256 MiB at most |
 | `~/.vibe_remote/runtime/remote-access-cloudflared.pid` | cloudflared tunnel PID for Avibe Cloud remote access |

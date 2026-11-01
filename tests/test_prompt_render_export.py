@@ -11,7 +11,6 @@ from pathlib import Path
 import pytest
 from markdown_it import MarkdownIt
 
-from config import paths
 from core.mcp_hub import repository as mcp_repository
 from core import managed_skills, show_git
 from core.managed_skills import ManagedSkill
@@ -80,6 +79,26 @@ _SESSION_TITLE_STEPS = (
     'without waiting for the user:\n`vibe session update --title "<short title>" --if-untitled`\n\n'
     "It keeps a title the user or an Agent already set. Do not mention"
 )
+_PREVIOUS_PREFERENCES_CONTEXT = (
+    "## User Preferences and Project Context\n"
+    "Stable user habits the user asks you to keep go to the shared preferences file; project lessons, conventions, "
+    "architecture, workflows, and pointers go to the nearest relevant `AGENTS.md`, which future Agents load early.\n\n"
+    "`AGENTS.md` is an index, not a log. Keep high-level principles there, point to local detail files when needed, "
+    "and update by consolidating and abstracting instead of merely appending.\n\n"
+    "A shared user context and preferences file is available at ``/fixture/preferences.md``. Read it only when "
+    "stable cross-project user context would improve the decision, and update it only when the user explicitly asks.\n"
+    "Use the current platform `avibe` and the user id from the current message metadata to choose the appropriate "
+    "user section: `avibe/<user_id>`.\n"
+    "Only record durable, factual, reusable information there. Keep entries short, deduplicated, and free of secrets "
+    "unless the user explicitly asks.\n\n"
+)
+_PROJECT_CONTEXT = (
+    "## Project Context and History\n"
+    "Project lessons, conventions, architecture, workflows, and pointers go to the nearest relevant `AGENTS.md`, "
+    "which future Agents load early.\n\n"
+    "`AGENTS.md` is an index, not a log. Keep high-level principles there, point to local detail files when needed, "
+    "and update by consolidating and abstracting instead of merely appending.\n\n"
+)
 _CODEX_SKILL_REUSE_GUIDANCE = (
     "Choose skills by task relevance, but load a skill only if it has not already been read "
     "in this conversation; reuse already-loaded instructions across turns, callbacks, "
@@ -110,7 +129,6 @@ def _inputs(backend="codex", history="managed", skill_mode="pages"):
 
 def _environment(monkeypatch, history="managed", skill_mode="pages"):
     monkeypatch.setenv("CODEX_HOME", "/fixture/codex")
-    monkeypatch.setattr(paths, "get_user_preferences_path", lambda: Path("/fixture/preferences.md"))
     monkeypatch.setattr(show_git, "show_git_checkpointing_active", lambda: history != "off")
     monkeypatch.setattr(show_git, "_workspace_is_self_managed", lambda _: history == "self-managed")
     names = [f"skill-{index:02}" for index in range(26)] + ["use-avibe-vault"]
@@ -573,6 +591,8 @@ def test_approved_guidance_changes_preserve_all_other_injection_bytes(monkeypatc
         assert text.count(_NEW_SESSION_MODEL_GUIDANCE) == 1
         assert text.count(_HARNESS_SOURCE_GUIDANCE) == 1
         assert text.count(_SESSION_TITLE_STEPS) == 1
+        assert text.count(_PROJECT_CONTEXT) == 1
+        text = text.replace(_PROJECT_CONTEXT, _PREVIOUS_PREFERENCES_CONTEXT)
         text = text.replace(_HARNESS_SOURCE_GUIDANCE, "")
         text = text.replace(_SESSION_TITLE_STEPS, _PREVIOUS_SESSION_TITLE_STEPS)
         text = text.replace(_NEW_SESSION_MODEL_GUIDANCE, _PREVIOUS_FORK_OVERRIDE_GUIDANCE)
@@ -587,6 +607,7 @@ def test_approved_guidance_changes_preserve_all_other_injection_bytes(monkeypatc
     # principle, and the Harness rule that a run's --model applies
     # only to forks (now: to any new Session a run creates), and without the
     # Harness line that says what a `[Harness: ...]` input is, and restoring the
-    # two-call Session Title steps that `--if-untitled` replaced.
+    # two-call Session Title steps that `--if-untitled` replaced, and restoring the
+    # retired shared preferences file paragraphs and their section heading.
     # Every other byte/order stays pinned, including all Claude/OpenCode output.
     assert digest == "262c7cbabbbb0bfefa4a69511d805d28f76a3559bd511184006242f831b4836e"

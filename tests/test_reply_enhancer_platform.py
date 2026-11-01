@@ -15,7 +15,6 @@ from core.controller import Controller
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.reply_enhancer import process_reply, strip_silent_blocks
 from core.system_prompt_injection import build_system_prompt_injection
-from config import paths
 from modules.agents.base import AgentRequest, BaseAgent
 from modules.im import MessageContext
 
@@ -145,8 +144,7 @@ def _resolved_core_skills(*, manual_only: bool = False) -> list[SimpleNamespace]
 
 class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
     def test_prompt_can_exclude_quick_replies(self):
-        with patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")):
-            prompt = build_system_prompt_injection(include_quick_replies=False)
+        prompt = build_system_prompt_injection(include_quick_replies=False)
 
         self.assertIn("## Silent replies", prompt)
         self.assertIn("<silent>reason not shown to the user</silent>", prompt)
@@ -171,16 +169,15 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Avibe provides optional capabilities:", prompt)
         self.assertNotIn("If you generate an image with Codex", prompt)
         self.assertNotIn("## Quick-reply buttons", prompt)
-        self.assertIn("## User Preferences and Project Context", prompt)
-        self.assertIn("`/tmp/user_preferences.md`", prompt)
-        self.assertIn("Use the current platform `<platform>`", prompt)
-        self.assertIn("`<platform>/<user_id>`", prompt)
+        self.assertIn("## Project Context and History", prompt)
+        self.assertIn("`AGENTS.md` is an index, not a log.", prompt)
+        self.assertIn("make good use of `vibe data query`", prompt)
+        # The shared preferences file is retired: the prompt neither names it nor routes notes to it.
+        self.assertNotIn("user_preferences.md", prompt)
+        self.assertNotIn("preferences file", prompt)
 
     def test_prompt_can_include_codex_generated_image_instructions(self):
-        with (
-            patch.dict(os.environ, {"CODEX_HOME": "/Users/test/.codex"}),
-            patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
-        ):
+        with patch.dict(os.environ, {"CODEX_HOME": "/Users/test/.codex"}):
             prompt = build_system_prompt_injection(
                 include_quick_replies=False,
                 include_codex_generated_images=True,
@@ -192,10 +189,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Never emit variables, placeholder paths, or sandbox paths like `/mnt/data/...`", prompt)
 
     def test_prompt_routes_vault_work_to_builtin_skill(self):
-        with (
-            patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
-            patch("core.managed_skills.resolve_skills", return_value=_resolved_core_skills()),
-        ):
+        with patch("core.managed_skills.resolve_skills", return_value=_resolved_core_skills()):
             prompt = build_system_prompt_injection(
                 include_quick_replies=False,
                 skills_cwd=Path("/tmp/project"),
@@ -223,10 +217,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             for platform in ("avibe", "slack")
         ]
 
-        with (
-            patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
-            patch("core.managed_skills.resolve_skills", return_value=_resolved_core_skills()),
-        ):
+        with patch("core.managed_skills.resolve_skills", return_value=_resolved_core_skills()):
             prompts = [
                 build_system_prompt_injection(
                     include_quick_replies=False,
@@ -249,10 +240,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             platform="avibe",
             platform_specific={"agent_session_id": "sesk8m4q2p7x"},
         )
-        with (
-            patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
-            patch("core.managed_skills.resolve_skills", return_value=[]),
-        ):
+        with patch("core.managed_skills.resolve_skills", return_value=[]):
             prompt = build_system_prompt_injection(
                 include_quick_replies=False,
                 context=context,
@@ -273,10 +261,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             platform_specific={"agent_session_id": "sesk8m4q2p7x"},
         )
 
-        with (
-            patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
-            patch("core.managed_skills.resolve_skills", return_value=_resolved_core_skills()),
-        ):
+        with patch("core.managed_skills.resolve_skills", return_value=_resolved_core_skills()):
             prompt = build_system_prompt_injection(
                 include_quick_replies=False,
                 context=context,
@@ -297,18 +282,14 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             platform_specific={"agent_session_id": "sesk8m4q2p7x"},
         )
 
-        with patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")):
-            prompt = build_system_prompt_injection(
-                include_quick_replies=False,
-                include_context_guidance=False,
-                context=context,
-            )
+        prompt = build_system_prompt_injection(
+            include_quick_replies=False,
+            include_context_guidance=False,
+            context=context,
+        )
 
         self.assertIn("Current session id: `sesk8m4q2p7x`", prompt)
-        self.assertNotIn("## Memory and Project Context", prompt)
-        self.assertNotIn("## User Preferences and Project Context", prompt)
-        self.assertNotIn("/tmp/user_preferences.md", prompt)
-        self.assertNotIn("slack/U1", prompt)
+        self.assertNotIn("## Project Context and History", prompt)
 
 
     def test_process_reply_strips_silent_blocks_before_enhancements(self):
@@ -1585,10 +1566,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             ),
         ]
 
-        with (
-            patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
-            patch("core.managed_skills.resolve_skills", return_value=_resolved_core_skills()),
-        ):
+        with patch("core.managed_skills.resolve_skills", return_value=_resolved_core_skills()):
             prompt = build_system_prompt_injection(
                 include_quick_replies=True,
                 context=context,
@@ -1612,8 +1590,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("| review-bot | codex | Name needs prompt-safe normalization |", prompt)
         self.assertLess(prompt.index("| codex |"), prompt.index("| release-auditor |"))
         self.assertLess(prompt.index("| release-auditor |"), prompt.index("| review-bot |"))
-        self.assertIn("## User Preferences and Project Context", prompt)
-        self.assertIn("/tmp/user_preferences.md", prompt)
+        self.assertIn("## Project Context and History", prompt)
 
         skill = (Path(__file__).resolve().parents[1] / "skills" / "use-avibe-harness" / "SKILL.md").read_text()
         self.assertIn("Avibe Harness turns user intent into durable Agent work", skill)
@@ -1637,17 +1614,16 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             SimpleNamespace(name="beta", normalized_name="beta", backend="opencode", description="Middle"),
         ]
 
-        with patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")):
-            forward = build_system_prompt_injection(
-                include_quick_replies=False,
-                context=context,
-                enabled_agents=enabled_agents,
-            )
-            reverse = build_system_prompt_injection(
-                include_quick_replies=False,
-                context=context,
-                enabled_agents=reversed(enabled_agents),
-            )
+        forward = build_system_prompt_injection(
+            include_quick_replies=False,
+            context=context,
+            enabled_agents=enabled_agents,
+        )
+        reverse = build_system_prompt_injection(
+            include_quick_replies=False,
+            context=context,
+            enabled_agents=reversed(enabled_agents),
+        )
 
         self.assertEqual(forward, reverse)
         self.assertLess(forward.index("| alpha |"), forward.index("| beta |"))
@@ -1662,19 +1638,18 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             platform_specific={"agent_session_id": "sesk8m4q2p7x"},
         )
 
-        with patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")):
-            with patch("core.show_git.show_git_checkpointing_active", return_value=False):
-                unavailable = build_system_prompt_injection(include_quick_replies=True, context=context)
-            with (
-                patch("core.show_git.show_git_checkpointing_active", return_value=True),
-                patch("core.show_git._workspace_is_self_managed", return_value=False),
-            ):
-                managed = build_system_prompt_injection(include_quick_replies=True, context=context)
-            with (
-                patch("core.show_git.show_git_checkpointing_active", return_value=True),
-                patch("core.show_git._workspace_is_self_managed", return_value=True),
-            ):
-                self_managed = build_system_prompt_injection(include_quick_replies=True, context=context)
+        with patch("core.show_git.show_git_checkpointing_active", return_value=False):
+            unavailable = build_system_prompt_injection(include_quick_replies=True, context=context)
+        with (
+            patch("core.show_git.show_git_checkpointing_active", return_value=True),
+            patch("core.show_git._workspace_is_self_managed", return_value=False),
+        ):
+            managed = build_system_prompt_injection(include_quick_replies=True, context=context)
+        with (
+            patch("core.show_git.show_git_checkpointing_active", return_value=True),
+            patch("core.show_git._workspace_is_self_managed", return_value=True),
+        ):
+            self_managed = build_system_prompt_injection(include_quick_replies=True, context=context)
 
         self.assertEqual(managed, self_managed)
         self.assertEqual(managed, unavailable)
@@ -1697,17 +1672,16 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             platform_specific={"agent_session_id": "sesk8m4q2p7x"},
         )
 
-        with patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")):
-            missing_store_prompt = build_system_prompt_injection(
-                include_quick_replies=False,
-                context=context,
-                enabled_agents=None,
-            )
-            empty_store_prompt = build_system_prompt_injection(
-                include_quick_replies=False,
-                context=context,
-                enabled_agents=[],
-            )
+        missing_store_prompt = build_system_prompt_injection(
+            include_quick_replies=False,
+            context=context,
+            enabled_agents=None,
+        )
+        empty_store_prompt = build_system_prompt_injection(
+            include_quick_replies=False,
+            context=context,
+            enabled_agents=[],
+        )
 
         self.assertNotIn("### Agents", missing_store_prompt)
         self.assertNotIn("### Agents", empty_store_prompt)
@@ -1724,10 +1698,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             platform_specific={"agent_session_id": "sesk8m4q2p7x"},
         )
 
-        with (
-            patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
-            patch("core.managed_skills.resolve_skills", return_value=_resolved_core_skills()),
-        ):
+        with patch("core.managed_skills.resolve_skills", return_value=_resolved_core_skills()):
             prompt = build_system_prompt_injection(
                 include_quick_replies=False,
                 context=context,
@@ -1772,10 +1743,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
                 disable_model_invocation=False,
             ),
         ]
-        with (
-            patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
-            patch("core.managed_skills.resolve_skills", return_value=skills),
-        ):
+        with patch("core.managed_skills.resolve_skills", return_value=skills):
             prompt = build_system_prompt_injection(
                 include_quick_replies=False,
                 context=context,
@@ -1794,7 +1762,6 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             platform_specific={"agent_session_id": "sesk8m4q2p7x"},
         )
         with (
-            patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")),
             patch(
                 "core.managed_skills.resolve_skills",
                 return_value=_resolved_core_skills(manual_only=True),
@@ -1821,16 +1788,11 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             platform="avibe",
             platform_specific={"agent_session_id": "sesk8m4q2p7x"},
         )
-        with patch.object(
-            paths,
-            "get_user_preferences_path",
-            return_value=Path("/tmp/user_preferences.md"),
-        ):
-            prompt = build_system_prompt_injection(
-                include_quick_replies=False,
-                context=context,
-                skills_cwd=None,
-            )
+        prompt = build_system_prompt_injection(
+            include_quick_replies=False,
+            context=context,
+            skills_cwd=None,
+        )
 
         self.assertIn("load the `use-show-pages` Skill", prompt)
         self.assertNotIn("load the `use-avibe-vault` Skill", prompt)
@@ -1845,13 +1807,12 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             platform_specific={"is_dm": False},
         )
 
-        with patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")):
-            with self.assertRaisesRegex(ValueError, "agent_session_id is required"):
-                build_system_prompt_injection(
-                    include_quick_replies=True,
-                    context=context,
-                    fallback_platform="slack",
-                )
+        with self.assertRaisesRegex(ValueError, "agent_session_id is required"):
+            build_system_prompt_injection(
+                include_quick_replies=True,
+                context=context,
+                fallback_platform="slack",
+            )
 
     def test_prompt_handles_missing_platform_specific(self):
         context = MessageContext(
@@ -1861,13 +1822,12 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             platform_specific=None,
         )
 
-        with patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")):
-            with self.assertRaisesRegex(ValueError, "agent_session_id is required"):
-                build_system_prompt_injection(
-                    include_quick_replies=True,
-                    context=context,
-                    fallback_platform="slack",
-                )
+        with self.assertRaisesRegex(ValueError, "agent_session_id is required"):
+            build_system_prompt_injection(
+                include_quick_replies=True,
+                context=context,
+                fallback_platform="slack",
+            )
 
     def test_file_links_with_parentheses_are_preserved(self):
         enhanced = process_reply("![video](file:///Users/test/SaveTwitter.Net_GABV3XNWYAARAZz(gif).mp4)")

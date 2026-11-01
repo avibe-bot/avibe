@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from config import paths
 from core.message_context import resolve_context_platform
 from core.prompt_registry import RenderedPromptBlock, join_prompt_blocks, order_prompt_blocks, render_prompt, render_prompt_block
 from modules.im import MessageContext
@@ -175,19 +174,6 @@ def get_enabled_agents_for_prompt(controller: Any) -> Optional[list[AgentPromptI
     return rows
 
 
-def _context_block(
-    context: Optional[MessageContext],
-    *,
-    fallback_platform: Optional[str] = None,
-) -> RenderedPromptBlock:
-    platform = resolve_context_platform(context, fallback_platform=fallback_platform, default="<platform>")
-    return render_prompt_block(
-        "preferences-context-prompt",
-        preferences_path=f"`{paths.get_user_preferences_path()}`",
-        platform=platform,
-    )
-
-
 def build_system_prompt_blocks(
     *,
     agent_instructions: str = "",
@@ -243,10 +229,7 @@ def build_system_prompt_blocks(
         if agent_rows:
             blocks.append(render_prompt_block("harness-agents-prompt", enabled_agents_rows=agent_rows))
     if include_context_guidance:
-        blocks.append(_context_block(
-            context,
-            fallback_platform=fallback_platform,
-        ))
+        blocks.append(render_prompt_block("project-context-prompt"))
     from core.mcp_hub.prompt import build_mcp_prompt_blocks
 
     blocks.extend(build_mcp_prompt_blocks())

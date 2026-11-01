@@ -39,13 +39,13 @@ def test_every_prompt_markdown_file_has_one_stably_ordered_registry_entry() -> N
 
 def test_prompt_rendering_replaces_only_declared_placeholders() -> None:
     rendered = render_prompt(
-        "preferences-context-prompt",
-        preferences_path="`/tmp/preferences.md`",
-        platform="avibe",
+        "forked-session-prompt",
+        source_session_id="sessource",
+        default_session_id="sesfork",
     )
 
-    assert "`/tmp/preferences.md`" in rendered
-    assert "`avibe/<user_id>`" in rendered
+    assert "forked from `sessource`" in rendered
+    assert "this fork is `sesfork`" in rendered
 
 
 def test_prompt_catalog_export_is_deterministic_and_source_addressable() -> None:

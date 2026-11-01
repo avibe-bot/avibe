@@ -11,7 +11,6 @@ def test_paths_are_under_home():
     assert paths.get_settings_path().parent == paths.get_state_dir()
     assert paths.get_sessions_path().parent == paths.get_state_dir()
     assert paths.get_discovered_chats_path().parent == paths.get_state_dir()
-    assert paths.get_user_preferences_path().parent == paths.get_state_dir()
 
 
 def test_ensure_data_dirs(tmp_path, monkeypatch):
@@ -22,14 +21,8 @@ def test_ensure_data_dirs(tmp_path, monkeypatch):
     assert (tmp_path / ".avibe" / "logs").exists()
     assert (tmp_path / ".avibe" / "runtime").exists()
     assert (tmp_path / ".avibe" / "attachments").exists()
-    preferences_path = tmp_path / ".avibe" / "state" / "user_preferences.md"
-    assert preferences_path.exists()
-    text = preferences_path.read_text(encoding="utf-8")
-    assert "# User Context and Preferences" in text
-    assert "Prefer adding notes under `## Users`." in text
-    assert "### platform/user_id" in text
-    assert "communicate, work, and make decisions." in text
-    assert "free of secrets unless the user explicitly asks." in text
+    # The shared preferences file is retired: Avibe no longer creates it.
+    assert not (tmp_path / ".avibe" / "state" / "user_preferences.md").exists()
 
 
 def test_avibe_home_env_sets_custom_home(tmp_path, monkeypatch):

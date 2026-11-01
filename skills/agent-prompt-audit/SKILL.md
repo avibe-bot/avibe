@@ -2,7 +2,7 @@
 name: agent-prompt-audit
 slug: agent-prompt-audit
 description: Audit and improve the prompt surface of Avibe Agents across backends (Claude, Codex/GPT, OpenCode) — global and project rules, Agent system prompts, Skills, delegation briefs, and Task and Watch messages — using real run evidence. Use when an Agent misbehaves (stalls, over-asks, over-reaches, ignores or over-applies a rule), after a model or backend change, or when the user asks to review, clean up, or tighten prompts.
-version: 0.1.0
+version: 0.1.1
 ---
 
 # Agent Prompt Audit
@@ -83,7 +83,6 @@ actually loads rather than assuming default paths.
 | Agent system prompt, model, effort | `vibe agent show <name> --json` | `vibe agent update <name> --system-prompt-file <file>` |
 | Skills | user skill dirs (follow symlinks), Avibe `skills/`, project `.agents/skills/` | The directory's owner |
 | Task and Watch messages (re-sent every fire) | `vibe task list --session-id <id>` / `vibe watch list --session-id <id>` (or `--global`) for ids, then `vibe task show <id>` / `vibe watch show <id>` for the full text | `vibe task update`, `vibe watch update` |
-| User preferences (read on demand) | `~/.avibe/state/user_preferences.md`; inspect only the reported user's part, and only when the transcript shows it was read | The user |
 | Delegation briefs and callbacks | `agent_runs.message` / `result_text` | The prompt or Skill that writes them |
 
 Only Skill descriptions on the first catalog page are loaded every turn;

@@ -348,11 +348,13 @@ the projected context no longer shows, because the inputs that carried the earli
 cwd: /absolute/path
 os: macOS 26.0 (arm64)
 shell: /bin/bash
-date: 2026-10-02
-timezone: Asia/Shanghai
 watches: wch_8f2k "nightly sync" command running; wch_3c1d job running
 </environment>
 ```
+
+The date and time are not fields: every input's `[Now: ...]` line (`core/agent_input.py`) already carries the date,
+time, and UTC offset. Blocks stored while the block still had `date` and `timezone` keep replaying; those two lines
+are ignored when the loop reads back what the model was last told.
 
 `shell` is the shell the commands run in: the job host's on POSIX (`/bin/bash`, else `bash` on `PATH`, else `sh`), and
 on Windows `PowerShell 7 ({path})` or `Windows PowerShell 5.1 ({path})`.

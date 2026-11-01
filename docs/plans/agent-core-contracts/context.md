@@ -466,9 +466,9 @@ is written, so projection stays a pure function of the rows:
   (`kept_inputs`, §5): a mid-turn checkpoint may misstate the Turn (as finished, or as more than was asked), and the
   verbatim inputs placed before it must win.
 - `state`: texts the adapter rendered from their own stores when the checkpoint was written: the environment's core
-  fields (C-7 §8: cwd, os, shell, date, timezone; no Watches; each field displayed as every input's block displays it,
+  fields (C-7 §8: cwd, os, shell; no Watches; each field displayed as every input's block displays it,
   the cwd escaped and never cut, every other field cut to 160 UTF-8 bytes (`display`), so the block is the cwd, which
-  the OS bounds, plus at most about 4 x 40 tokens; a checkpoint always happens inside
+  the OS bounds, plus at most about 2 x 40 tokens; a checkpoint always happens inside
   a run, and a Turn's own input carries only the fields that changed). Pending work is the now's own "Waiting on",
   and the in-flight Turn's inputs stay as they were (§5).
 - Projection (C-5 §3): the system prompt, hook-rehydrated messages, the kept inputs (§5), one user message

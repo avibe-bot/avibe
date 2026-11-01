@@ -247,25 +247,6 @@ def get_global_instructions_path() -> Path:
     return get_vibe_remote_dir() / GLOBAL_INSTRUCTIONS_FILENAME
 
 
-def get_user_preferences_path() -> Path:
-    return get_state_dir() / "user_preferences.md"
-
-
-_USER_PREFERENCES_TEMPLATE = """# User Context and Preferences
-
-Use this file for durable user context, stable preferences, and recurring working patterns.
-Prefer adding notes under `## Users`.
-Keep entries short, factual, reusable, deduplicated, and free of secrets unless the user explicitly asks.
-
-## Users
-### platform/user_id
-- Add stable notes about how this user prefers to communicate, work, and make decisions.
-
-## Shared
-- Add cross-user notes here only when they are genuinely reusable.
-"""
-
-
 def ensure_data_dirs() -> None:
     from storage.migrations import guard_source_checkout_default_state_bootstrap
 
@@ -278,6 +259,3 @@ def ensure_data_dirs() -> None:
     get_attachments_dir().mkdir(parents=True, exist_ok=True)
     get_show_pages_dir().mkdir(parents=True, exist_ok=True)
     get_state_backups_dir().mkdir(parents=True, exist_ok=True)
-    preferences_path = get_user_preferences_path()
-    if not preferences_path.exists():
-        preferences_path.write_text(_USER_PREFERENCES_TEMPLATE, encoding="utf-8")
