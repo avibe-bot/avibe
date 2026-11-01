@@ -180,7 +180,7 @@ for (const theme of ['light', 'dark'] as const) {
     await expect(dialog).toBeVisible();
 
     await dialog.getByRole('textbox').first().fill('首席安全官');
-    await expect(dialog.getByRole('status')).toContainText('正在生成英文代号');
+    await expect(dialog.getByRole('status')).toContainText('正在生成代号');
     await page.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-add-generating-${theme}.png` });
     await expect(dialog.getByText('@cso-2')).toBeVisible();
     await dialog.getByPlaceholder('例如：负责依赖与权限的安全审计，每周一汇报一次').fill('负责依赖与权限的安全审计，每周一早上汇报一次。');

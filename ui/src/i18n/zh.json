@@ -4703,7 +4703,7 @@
       "role": "它负责什么",
       "rolePlaceholder": "例如：负责依赖与权限的安全审计，每周一汇报一次",
       "roleHint": "会写进它的设定，之后可以在 Agents 页修改。",
-      "handleGenerating": "正在生成英文代号…",
+      "handleGenerating": "正在生成代号…",
       "handleHint": "自动生成，用于 @ 和命令行",
       "handleLocked": "沿用 Agent 名，设为伙伴期间锁定",
       "handleFrozen": "创建后固定不变",
