@@ -38,6 +38,7 @@
   "GET /api/mcp": "editor",
   "GET /api/mcp/example": "editor",
   "GET /api/mcp/oauth/callback": "viewer",
+  "GET /api/notifications/preferences": "viewer",
   "GET /api/media/example": "viewer",
   "GET /api/media/example/meta": "viewer",
   "GET /api/models/agents/example/models": "editor",
@@ -145,6 +146,7 @@
   "POST /api/web-push/test": "viewer",
   "PUT /api/dock/order": "editor",
   "PUT /api/files/write": "editor",
+  "PUT /api/notifications/preferences": "viewer",
   "PUT /api/sessions/example/draft": "editor",
   "PUT /api/vault/secrets/example/fields/example": "editor"
 }
