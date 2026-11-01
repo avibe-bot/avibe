@@ -2,7 +2,7 @@
 
 Contract (docs/plans/mcp-hub-mvp.md §1, acceptance 6): Hub lists the union of
 Claude ``.claude.json``, Codex ``config.toml`` and OpenCode ``opencode.json``
-servers as a read-only union, stores Avibe-added servers under the Hub,
+servers, deletes a native entry from its own file only, stores Avibe-added servers under the Hub,
 and every spawn path disables the user's native servers.
 Runs under the hermetic homes ``tests/conftest.py`` provides.
 """
@@ -69,7 +69,7 @@ def test_hub_reads_native_union_without_listing_unpublished(native_files):
     assert repository.list_packages() == []  # unpublished native entries are not listed
 
 
-def test_add_writes_avibe_store_and_remove_hides_native(native_files, runtime):
+def test_add_writes_avibe_store_without_touching_native(native_files, runtime):
     claude, _codex, _opencode = native_files
     before = claude.read_bytes()
     new = {"name": "fresh", "server": {"command": "/nonexistent/mcp-fresh"}}
@@ -79,9 +79,82 @@ def test_add_writes_avibe_store_and_remove_hides_native(native_files, runtime):
     assert claude.read_bytes() == before
     assert "fresh" not in {item["name"] for item in repository.list_packages()}
 
-    assert _run(runtime, "remove", {"name": "shared"})["ok"]
-    assert claude.read_bytes() == before
-    assert "shared" in repository.hidden_names()
+
+CODEX_COMMENTED = """# my codex config
+model = "gpt-test"  # pinned
+
+[mcp_servers.keep]
+command = "keep"   # stays
+
+# the one to delete
+[mcp_servers.gone]
+command = "gone"
+
+[mcp_servers.gone.env]
+TOKEN = "x"
+
+[profiles.fast]
+model = "fast"
+"""
+
+
+def test_remove_deletes_codex_table_and_subtables_preserving_text(native_files, runtime):
+    _claude, codex, _opencode = native_files
+    codex.write_text(CODEX_COMMENTED)
+    codex.chmod(0o640)
+    repository.package_dir("gone").mkdir(parents=True)
+
+    result = _run(runtime, "remove", {"name": "gone"})
+
+    assert result["ok"] and result["kind"] == "native"
+    assert codex.read_text() == CODEX_COMMENTED.replace(
+        '[mcp_servers.gone]\ncommand = "gone"\n\n[mcp_servers.gone.env]\nTOKEN = "x"\n\n', ""
+    )
+    assert codex.stat().st_mode & 0o777 == 0o640
+    assert not repository.package_dir("gone").exists()
+    assert "gone" not in repository.hidden_names()
+
+
+def test_remove_deletes_claude_entry_preserving_other_keys_and_layout(native_files, runtime):
+    claude, _codex, _opencode = native_files
+    claude.write_text(json.dumps(CLAUDE, indent=2) + "\n")
+
+    assert _run(runtime, "remove", {"name": "docs"})["ok"]
+
+    expected = {"numStartups": 7, "mcpServers": {"shared": CLAUDE["mcpServers"]["shared"]}}
+    assert claude.read_text() == json.dumps(expected, indent=2) + "\n"
+
+
+def test_remove_deletes_last_opencode_entry_keeping_comments(native_files, runtime):
+    _claude, _codex, opencode = native_files
+    text = '{\n  // mine\n  "theme": "x",\n  "mcp": {\n    "keep": {"type": "remote", "url": "https://k.invalid"},\n    "oc": {"type": "local", "command": ["node"]}\n  }\n}\n'
+    opencode.write_text(text)
+
+    assert _run(runtime, "remove", {"name": "oc"})["ok"]
+
+    assert opencode.read_text() == text.replace(',\n    "oc": {"type": "local", "command": ["node"]}', "")
+
+
+def test_remove_of_entry_already_gone_drops_snapshot(native_files, runtime):
+    _claude, codex, _opencode = native_files
+    repository.package_dir("vanished").mkdir(parents=True)
+    before = codex.read_bytes()
+
+    assert _run(runtime, "remove", {"name": "vanished"})["ok"]
+
+    assert codex.read_bytes() == before
+    assert not repository.package_dir("vanished").exists()
+
+
+def test_remove_never_writes_a_file_it_cannot_parse(native_files):
+    from core.mcp_hub.errors import McpHubError
+
+    _claude, codex, _opencode = native_files
+    codex.write_text("[mcp_servers.local]\ncommand = 'srv'\nbroken")
+    with pytest.raises(McpHubError) as caught:
+        native.remove_entry(native.CODEX, "local")
+    assert caught.value.type == "invalid_native_config"
+    assert codex.read_text() == "[mcp_servers.local]\ncommand = 'srv'\nbroken"
 
 
 def test_concurrent_hide_keeps_every_name(native_files):
@@ -261,3 +334,28 @@ def test_spawns_disable_every_native_server(native_files):
     ))
     assert only_in_overlay["mcp"]["extra"]["enabled"] is False
     assert only_in_overlay["mcp"]["oc"]["enabled"] is False
+
+
+def test_remove_last_codex_server_drops_implicit_parent(native_files):
+    _claude, codex, _opencode = native_files
+    codex.write_text('model = "m"\n\n[mcp_servers.only]\ncommand = "srv"\n')
+
+    assert native.remove_entry(native.CODEX, "only")
+
+    assert codex.read_text() == 'model = "m"\n\n'
+
+
+def test_refused_native_remove_keeps_oauth_login(native_files, runtime):
+    from core.mcp_hub import oauth as mcp_oauth
+
+    _claude, codex, _opencode = native_files
+    codex.write_text('[mcp_servers]\ninline = { url = "https://i.invalid/mcp" }\n')
+    oauth_file = mcp_oauth.oauth_path("inline")
+    oauth_file.parent.mkdir(parents=True)
+    oauth_file.write_text("{}")
+
+    result = _run(runtime, "remove", {"name": "inline"})
+
+    assert result["ok"] is False and result["error"]["type"] == "invalid_native_config"
+    assert oauth_file.exists()
+    assert "inline" in codex.read_text()

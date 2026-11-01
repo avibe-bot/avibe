@@ -6,7 +6,9 @@ Hub reads the union of:
 - Codex ``$CODEX_HOME/config.toml`` (default ``~/.codex``) ``[mcp_servers.<name>]``
 - OpenCode ``~/.config/opencode/opencode.json`` ``mcp``
 
-as a read-only union. Avibe-added servers live under ``<avibe-home>/mcp``.
+as a union. Avibe-added servers live under ``<avibe-home>/mcp``. The Hub
+never edits these files except :func:`remove_entry`, which deletes one named
+entry and leaves every other byte in place.
 For a name present in several files the first source in that order is canonical.
 Avibe sessions never load these servers natively; see
 :func:`codex_disable_overrides` and :func:`opencode_disabled_mcp`.
@@ -17,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -70,18 +73,7 @@ def _load(source: str) -> tuple[Path, dict[str, Any]]:
     except (OSError, UnicodeDecodeError, ValueError) as exc:
         raise _unreadable(source, path, exc) from None
     try:
-        if source == CODEX:
-            try:
-                import tomllib  # type: ignore[attr-defined]
-            except ImportError:  # pragma: no cover - py<3.11
-                import tomli as tomllib  # type: ignore[no-redef]
-            data = tomllib.loads(text)
-        elif source == OPENCODE:
-            from vibe.opencode_config import parse_jsonc_object
-
-            data = parse_jsonc_object(text)
-        else:
-            data = json.loads(text)
+        data = _parse(source, text)
     except Exception as exc:
         raise _unreadable(source, path, exc) from None
     if not isinstance(data, dict):
@@ -90,9 +82,22 @@ def _load(source: str) -> tuple[Path, dict[str, Any]]:
 
 
 
+def _parse(source: str, text: str) -> Any:
+    if source == CODEX:
+        try:
+            import tomllib  # type: ignore[attr-defined]
+        except ImportError:  # pragma: no cover - py<3.11
+            import tomli as tomllib  # type: ignore[no-redef]
+        return tomllib.loads(text)
+    if source == OPENCODE:
+        from vibe.opencode_config import parse_jsonc_object
+
+        return parse_jsonc_object(text)
+    return json.loads(text)
+
+
 def _servers(source: str, data: dict[str, Any]) -> dict[str, Any]:
-    key = {CLAUDE: "mcpServers", CODEX: "mcp_servers", OPENCODE: "mcp"}[source]
-    value = data.get(key)
+    value = data.get(_KEY[source])
     return value if isinstance(value, dict) else {}
 
 
@@ -240,6 +245,20 @@ def read_all() -> dict[str, NativeServer]:
     return servers
 
 
+def disabled_source(name: str) -> Optional[str]:
+    """The first source holding ``name`` as a native ``enabled=false`` entry."""
+
+    for source in SOURCES:
+        try:
+            _path, data = _load(source)
+        except McpHubError:
+            continue
+        entry = _servers(source, data).get(name)
+        if isinstance(entry, dict) and not _native_enabled(source, entry):
+            return source
+    return None
+
+
 def disabled_names() -> set[str]:
     """Names whose native entry is ``enabled=false``. Hub lists omit these."""
 
@@ -255,6 +274,106 @@ def disabled_names() -> set[str]:
                 names.add(str(name))
     return names
 
+
+
+# ---------------------------------------------------------------------------
+# Delete: remove one entry from its native file
+# ---------------------------------------------------------------------------
+
+_KEY = {CLAUDE: "mcpServers", CODEX: "mcp_servers", OPENCODE: "mcp"}
+# One read-modify-write at a time, so two deletes from one file never lose an edit.
+_EDIT_LOCK = threading.Lock()
+
+
+def _toml_header_path(line: str) -> Optional[tuple[str, ...]]:
+    """Key path of a ``[table]`` / ``[[array]]`` header line, else ``None``."""
+
+    stripped = line.strip()
+    if not stripped.startswith("["):
+        return None
+    inner = stripped[2:] if stripped.startswith("[[") else stripped[1:]
+    close = inner.find("]]" if stripped.startswith("[[") else "]")
+    if close < 0:
+        return None
+    try:
+        node: Any = _parse(CODEX, f"{inner[:close]} = 0")
+    except Exception:
+        return None
+    path: list[str] = []
+    while isinstance(node, dict) and len(node) == 1:
+        key, node = next(iter(node.items()))
+        path.append(key)
+    return tuple(path)
+
+
+def _remove_codex(text: str, name: str) -> str:
+    """Drop ``[mcp_servers.<name>]`` and its sub-tables, line for line."""
+
+    kept: list[str] = []
+    dropping = False
+    for line in text.splitlines(keepends=True):
+        header = _toml_header_path(line)
+        if header is not None:
+            dropping = header[:2] == (_KEY[CODEX], name)
+        if not dropping:
+            kept.append(line)
+    return "".join(kept)
+
+
+def _remove_text(source: str, text: str, name: str) -> str:
+    if source == CODEX:
+        return _remove_codex(text, name)
+    from vibe.opencode_config import remove_jsonc_member
+
+    return remove_jsonc_member(text, _KEY[source], name)
+
+
+def remove_entry(source: str, name: str) -> bool:
+    """Delete ``name`` from ``source``'s native file; ``False`` if it is already gone.
+
+    Re-reads the file, so an edit since discovery is respected. The result must
+    parse to the original minus that one entry, or nothing is written.
+    """
+
+    with _EDIT_LOCK:
+        return _remove_entry_locked(source, name)
+
+
+def _remove_entry_locked(source: str, name: str) -> bool:
+    from config.atomic_io import write_atomic
+
+    path, _data = _load(source)
+    try:
+        text = path.read_text(encoding="utf-8")
+        data = _parse(source, text)
+    except FileNotFoundError:
+        return False
+    except Exception as exc:
+        raise _unreadable(source, path, exc) from None
+    if not isinstance(data, dict) or name not in _servers(source, data):
+        return False
+    try:
+        updated = _remove_text(source, text, name)
+        expected = json.loads(json.dumps(data, default=str))
+        expected[_KEY[source]].pop(name)
+        actual = json.loads(json.dumps(_parse(source, updated), default=str))
+        if expected[_KEY[source]] == {} and _KEY[source] not in actual:
+            expected.pop(_KEY[source])  # an implicit TOML parent table goes with its last child
+        if actual != expected:
+            raise ValueError("entry is not a standalone block")
+    except Exception as exc:
+        raise McpHubError(
+            "invalid_native_config",
+            f"{source} config {path}: could not remove {name!r} without touching other content ({exc}).",
+            hint=f"Remove it from {path} by hand.",
+        ) from None
+
+    def unchanged() -> None:
+        if path.read_text(encoding="utf-8") != text:
+            raise McpHubError("native_config_changed", f"{path} changed while removing {name!r}; try again.")
+
+    write_atomic(path, updated, follow_symlinks=True, mode=path.stat().st_mode & 0o777, before_replace=unchanged)
+    return True
 
 
 # ---------------------------------------------------------------------------

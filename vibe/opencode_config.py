@@ -376,9 +376,16 @@ def _indent_slice(source: str, line_start: int, token_start: int) -> str:
     return source[line_start:token_start].replace("\ufeff", "")
 
 
-def _scan_jsonc_top_level_properties(source: str) -> tuple[int, int, list[_JsoncTopLevelProperty]]:
-    root_start = 1 if source.startswith("\ufeff") else 0
-    root_start = _skip_jsonc_whitespace_and_comments(source, root_start)
+def _scan_jsonc_top_level_properties(
+    source: str, object_start: int | None = None
+) -> tuple[int, int, list[_JsoncTopLevelProperty]]:
+    """Members of the root object, or of the object starting at ``object_start``."""
+
+    if object_start is None:
+        root_start = 1 if source.startswith("\ufeff") else 0
+        root_start = _skip_jsonc_whitespace_and_comments(source, root_start)
+    else:
+        root_start = object_start
     if root_start >= len(source) or source[root_start] != "{":
         raise ValueError("root is not a JSON object")
 
@@ -494,6 +501,35 @@ def set_jsonc_top_level_string_property(source: str, key: str, value: str) -> st
         suffix = "," if trailing_comma else ""
         insertion = f"{newline}{child_indent}{property_text}{suffix}{newline}{root_indent}"
         return updated_source[:insertion_point] + insertion + updated_source[insertion_point:]
+
+
+def remove_jsonc_member(source: str, parent_key: str, key: str) -> str:
+    """Drop ``parent_key.key`` from the text, leaving every other byte in place."""
+
+    _root_start, _root_end, properties = _scan_jsonc_top_level_properties(source)
+    parent = next((prop for prop in reversed(properties) if prop.key == parent_key), None)
+    if parent is None or source[parent.value_start] != "{":
+        raise ValueError(f"{parent_key} is not an object")
+    start, end, members = _scan_jsonc_top_level_properties(source, parent.value_start)
+    index = next((i for i in range(len(members) - 1, -1, -1) if members[i].key == key), None)
+    if index is None:
+        raise KeyError(key)
+    member = members[index]
+    if len(members) == 1:
+        return source[: start + 1] + source[end:]
+    if member.delimiter == ",":
+        line_start = _line_start(source, member.key_start)
+        cut_start = line_start if source[line_start : member.key_start].strip() == "" else member.key_start
+        cut_end = member.delimiter_index + 1
+        if cut_start == line_start:
+            rest = len(source[cut_end:]) - len(source[cut_end:].lstrip(" \t"))
+            if source.startswith("\r\n", cut_end + rest) or source.startswith("\n", cut_end + rest):
+                cut_end = source.index("\n", cut_end + rest) + 1
+        else:
+            cut_end += len(source[cut_end:]) - len(source[cut_end:].lstrip(" \t"))
+        return source[:cut_start] + source[cut_end:]
+    previous = members[index - 1]
+    return source[: previous.delimiter_index] + source[member.value_end :]
 
 
 def load_first_opencode_user_config(

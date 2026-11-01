@@ -527,7 +527,11 @@ export const McpHubSection: React.FC = () => {
         <DialogContent className="max-w-md" closeLabel={t('common.close')}>
           <DialogTitle>{t('mcpHub.removeConfirm', { name: confirmDelete?.name ?? '' })}</DialogTitle>
           <DialogDescription>
-            {confirmDelete?.source === 'avibe' ? t('mcpHub.removeAvibeHint') : t('mcpHub.removeNativeHint')}
+            {confirmDelete?.source === 'avibe' ? t('mcpHub.removeAvibeHint') : t('mcpHub.removeNativeHint', {
+                  name: confirmDelete?.name ?? '',
+                  path: confirmDelete?.sourcePath ?? '',
+                  agent: t(`mcpHub.source.${confirmDelete?.source ?? 'avibe'}`),
+                })}
           </DialogDescription>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setConfirmDelete(null)}>{t('common.cancel')}</Button>

@@ -133,9 +133,7 @@ def test_failed_readd_of_hidden_native_stays_hidden(runtime):
     claude.write_text(json.dumps({"mcpServers": {
         "echo": {"type": "stdio", "command": sys.executable, "args": [FIXTURE]},
     }}))
-    assert _run(runtime, "discover", {})["ok"]
-    assert _run(runtime, "remove", {"name": "echo"})["ok"]
-    assert "echo" in repository.hidden_names()
+    repository.hide_name("echo")  # hidden by a released version's native delete
     result = _run(runtime, "add", {"servers": [{"name": "echo", "server": {"command": "/nonexistent/mcp-echo"}}]})
     assert result["ok"] is False
     assert "echo" in repository.hidden_names()
@@ -172,9 +170,7 @@ def test_readding_hidden_native_identical_definition_registers_again(runtime):
     claude.write_text(json.dumps({"mcpServers": {
         "echo": {"type": "stdio", "command": sys.executable, "args": [FIXTURE]},
     }}))
-    assert _run(runtime, "discover", {})["ok"]
-    assert _run(runtime, "remove", {"name": "echo"})["ok"]
-    assert "echo" in repository.hidden_names()
+    repository.hide_name("echo")  # hidden by a released version's native delete
     assert repository.read_published("echo") is None
     result = _run(runtime, "add", {"servers": [_server()]})
     assert result["ok"] is True
