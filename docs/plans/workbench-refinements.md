@@ -142,8 +142,11 @@ it is still delivered, listed, and unread.
   (`NotificationPreferencesProvider`), read on mount and re-read on the stream's
   preference nudge, a reconnect, or an authorization change. A change applies
   at once and writes only the switch it changes, which the server merges, so
-  two devices changing different switches keep both; a refused save restores
-  the last saved record.
+  two devices changing different switches keep both. Overlapping writes'
+  responses cannot say which the server applied last, so each confirms only
+  the switches it wrote; a refused save puts its switches back to their last
+  confirmed value unless a later change has set them since, and the record is
+  read back once the last write of a burst settles.
 - A Session is a Bot conversation while it is a current Bot's permanent
   Session, the server's definition. The client reads it from the Owner's live
   Bot list (`BotsProvider`, refetched on `bots.changed`), which a small bridge

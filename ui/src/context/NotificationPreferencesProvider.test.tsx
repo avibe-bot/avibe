@@ -120,6 +120,62 @@ describe('NotificationPreferencesProvider', () => {
     expect(state.current?.preferences).toEqual({ enabled: false, bots: true, sessions: false });
   });
 
+  it('keeps switches that overlapping saves confirmed when a later save is refused', async () => {
+    // The server applies Sessions, then Bots; their answers arrive the other way round.
+    const sessionsSave = deferred<NotificationPreferences>();
+    const botsSave = deferred<NotificationPreferences>();
+    const masterSave = deferred<NotificationPreferences>();
+    const saves = [sessionsSave, botsSave, masterSave];
+    const getNotificationPreferences = vi.fn()
+      .mockResolvedValueOnce(ON)
+      // No stream and no reads to fall back on from here: only this page's own record.
+      .mockRejectedValue(new Error('offline'));
+    const { state } = mount({
+      getNotificationPreferences,
+      updateNotificationPreferences: () => saves.shift()!.promise,
+    });
+    await settle();
+
+    await act(async () => {
+      void state.current!.update({ sessions: false });
+      void state.current!.update({ bots: false });
+    });
+    await act(async () => botsSave.resolve({ enabled: true, bots: false, sessions: false }));
+    await act(async () => sessionsSave.resolve({ enabled: true, bots: true, sessions: false }));
+    await settle();
+    expect(state.current?.preferences).toEqual({ enabled: true, bots: false, sessions: false });
+
+    await act(async () => { void state.current!.update({ enabled: false }); });
+    await act(async () => masterSave.reject(new Error('refused')));
+    await settle();
+    // The refused save undoes its own switch and nothing else.
+    expect(state.current?.preferences).toEqual({ enabled: true, bots: false, sessions: false });
+  });
+
+  it('leaves a switch a later change has set since when an earlier change is refused', async () => {
+    const first = deferred<NotificationPreferences>();
+    const second = deferred<NotificationPreferences>();
+    const saves = [first, second];
+    const { state } = mount({
+      getNotificationPreferences: vi.fn().mockResolvedValueOnce(ON).mockRejectedValue(new Error('offline')),
+      updateNotificationPreferences: () => saves.shift()!.promise,
+    });
+    await settle();
+
+    await act(async () => {
+      void state.current!.update({ bots: false });
+      void state.current!.update({ bots: false, sessions: false });
+    });
+    // The second change still wants Bots off: refusing the first must not turn them back on.
+    await act(async () => first.reject(new Error('refused')));
+    await settle();
+    expect(state.current?.preferences).toEqual({ enabled: true, bots: false, sessions: false });
+
+    await act(async () => second.resolve({ enabled: true, bots: false, sessions: false }));
+    await settle();
+    expect(state.current?.preferences).toEqual({ enabled: true, bots: false, sessions: false });
+  });
+
   it('keeps an in-flight read from putting the old switches back over a change', async () => {
     const slowRead = deferred<NotificationPreferences>();
     const getNotificationPreferences = vi.fn()
