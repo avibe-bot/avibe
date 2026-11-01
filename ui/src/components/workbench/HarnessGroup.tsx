@@ -93,9 +93,18 @@ export function HarnessGroup({
     </span>
   );
 
+  // The head's identity for the transcript's scroll anchor: which group it is,
+  // and the messages it stands for, so an anchor held on one of them can find
+  // the head they collapsed into and the head can find them if it dissolves.
+  const rowAttributes = {
+    'data-transcript-row': '',
+    'data-harness-group': groupKey,
+    'data-harness-members': members.map((message) => message.id).join(' '),
+  };
+
   if (expanded) {
     return (
-      <div data-transcript-row data-harness-group={groupKey} className="flex w-full justify-start">
+      <div {...rowAttributes} className="flex w-full justify-start">
         <button
           type="button"
           onClick={onToggle}
@@ -114,14 +123,7 @@ export function HarnessGroup({
   }
 
   return (
-    <div
-      data-transcript-row
-      data-harness-group={groupKey}
-      // The folded messages, so a scroll anchor held on one of them can find
-      // the head it collapsed into.
-      data-harness-members={members.map((message) => message.id).join(' ')}
-      className="flex w-full justify-start"
-    >
+    <div {...rowAttributes} className="flex w-full justify-start">
       <button
         type="button"
         onClick={onToggle}

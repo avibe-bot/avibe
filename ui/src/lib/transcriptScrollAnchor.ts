@@ -55,6 +55,11 @@ export const pickScrollAnchor = (
     if (row?.dataset.messageId) {
       anchor.rowId = row.dataset.messageId;
       anchor.rowTop = row.getBoundingClientRect().top - containerTop;
+    } else if (child.dataset.harnessMembers) {
+      // A group head stands for its members; should the group dissolve, its
+      // first message's row takes the head's place.
+      anchor.rowId = child.dataset.harnessMembers.split(' ')[0];
+      anchor.rowTop = anchor.top;
     }
     return anchor;
   }

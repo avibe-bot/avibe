@@ -144,6 +144,17 @@ describe('resolveScrollAnchor', () => {
     expect(resolveScrollAnchor(anchor, content(chrome({ top: 0, height: 10 })))).toBeNull();
   });
 
+  it('lets a dissolved group hand its place to its first message', () => {
+    const head = chrome({ top: -20, height: 70 });
+    head.dataset.transcriptRow = '';
+    head.dataset.harnessMembers = 'h1 h2';
+    const anchor = pickScrollAnchor([head], CONTAINER_TOP)!;
+    expect(anchor).toMatchObject({ el: head, rowId: 'h1', rowTop: -20 });
+
+    const standalone = row({ top: 80, height: 60, id: 'h1' });
+    expect(resolveScrollAnchor(anchor, content(standalone))).toEqual({ el: standalone, top: -20 });
+  });
+
   it('keeps the anchored element while it is still mounted', () => {
     const anchored = row({ top: 30, height: 60, id: 'm1' });
     const anchor = pickScrollAnchor([anchored], CONTAINER_TOP)!;
