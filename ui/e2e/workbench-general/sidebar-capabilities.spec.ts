@@ -4,9 +4,9 @@ import { DESKTOP, open, serveProduct } from './support';
 
 for (const copy of [
   { lang: 'en', capabilities: 'Capabilities', search: 'Search', inbox: 'Inbox', close: 'Close Settings',
-    brand: 'Agent OS · Workbench', add: 'Open project' },
+    brand: 'Agent OS', add: 'Open project' },
   { lang: 'zh', capabilities: '能力', search: '搜索', inbox: '收件箱', close: '关闭设置',
-    brand: 'Agent OS · 工作台', add: '打开项目' },
+    brand: 'Agent OS', add: '打开项目' },
 ] as const) {
   test(`capability navigation survives retained Settings (${copy.lang})`, async ({ page }, info) => {
     const denied = await serveProduct(page, copy.lang);

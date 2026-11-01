@@ -85,6 +85,10 @@ interface AgentRoutePickerProps {
    *  ``onChange``. */
   speed?: SessionSpeed;
   onSpeedChange?: (speed: SessionSpeed) => void;
+  /** The Agent is fixed (a Bot's conversation, where the Bot is the Agent): the
+   *  menu names it but offers no other Agent, no default, and no New Agent exit;
+   *  only the model, effort, and speed move. */
+  agentLocked?: boolean;
 }
 
 type ReasoningOption = { value: string; label: string };
@@ -115,6 +119,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   onNavigateAway,
   speed = null,
   onSpeedChange,
+  agentLocked = false,
 }) => {
   const { t } = useTranslation();
   const api = useApi();
@@ -618,20 +623,29 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
         </div>
       </div>
     );
+    const agentRowContent = (
+      <>
+        <span className="text-[10px] font-bold uppercase tracking-[0.1em] text-muted">{t('chat.picker.agent')}</span>
+        <span className="ml-auto flex min-w-0 items-center gap-1.5">
+          {backend && <BackendAvatar backend={backend} className="size-3.5 shrink-0" />}
+          <span className="truncate text-[12px] font-semibold text-foreground">{agentRowLabel}</span>
+          {!agentLocked && <ChevronRight className="size-3.5 shrink-0 text-muted" />}
+        </span>
+      </>
+    );
     const routeMenu = (
       <div className="flex flex-col">
-        <button
-          type="button"
-          onClick={() => setAgentPage(true)}
-          className="flex items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-foreground/[0.03]"
-        >
-          <span className="text-[10px] font-bold uppercase tracking-[0.1em] text-muted">{t('chat.picker.agent')}</span>
-          <span className="ml-auto flex min-w-0 items-center gap-1.5">
-            {backend && <BackendAvatar backend={backend} className="size-3.5 shrink-0" />}
-            <span className="truncate text-[12px] font-semibold text-foreground">{agentRowLabel}</span>
-            <ChevronRight className="size-3.5 shrink-0 text-muted" />
-          </span>
-        </button>
+        {agentLocked ? (
+          <div className="flex items-center gap-2 px-3 py-2.5">{agentRowContent}</div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setAgentPage(true)}
+            className="flex items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-foreground/[0.03]"
+          >
+            {agentRowContent}
+          </button>
+        )}
         <RouteColumn title={t('chat.picker.model')} className="max-h-[40vh] border-t border-border">
           {modelListBody((model) => {
             const label = modelOptionLabel(model, modelLabels);
@@ -738,7 +752,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
         align={align}
         modal={modal}
       >
-        {agentPage ? agentList : routeMenu}
+        {agentPage && !agentLocked ? agentList : routeMenu}
       </ResponsiveMenu>
     );
   }
@@ -762,6 +776,13 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
         >
           {/* Column 1 — Agent */}
           <RouteColumn title={t('chat.picker.agent')}>
+            {agentLocked ? (
+              <div className="flex items-center gap-2 rounded bg-cyan/[0.10] px-2 py-1.5 text-[12px] text-cyan-ink">
+                {backend && <BackendAvatar backend={backend} className="size-3.5 shrink-0" />}
+                <span className="flex-1 truncate font-semibold">{agentLabel}</span>
+              </div>
+            ) : (
+            <>
             {/* Default option: clears the route back to inherited defaults after
                 picking an explicit agent, without a page refresh. */}
             {defaultLabel && (
@@ -792,6 +813,8 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
               </div>
             ))}
             <PickerExitButton label={t('chat.picker.newAgent')} onClick={openNewAgent} />
+            </>
+            )}
           </RouteColumn>
 
           {/* Column 2 — Model (lazy-loaded for the active backend). Its own

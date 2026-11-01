@@ -62,6 +62,16 @@ const PROJECTS = {
   sessions: {},
 };
 
+// The Owner always has the main Bot (docs/plans/bots.md D9); the server creates it
+// on first read, so the shell never shows an empty Bots strip.
+const BOTS = {
+  ok: true,
+  bots: [{
+    handle: 'main', display_name: '', avatar: { kind: 'mascot' }, role: "The user's main Bot and first point of contact.",
+    agent_name: 'main', session_id: 'ses_main', position: 0, builtin: true,
+  }],
+};
+
 const AGENTS = {
   ok: true,
   agents: [
@@ -99,6 +109,7 @@ export async function serveProduct(page: Page, lang: Lang = 'en') {
   await page.route('**/api/workbench/projects-bootstrap**', (route) => route.fulfill({ json: PROJECTS }));
   await page.route('**/api/sessions**', (route) => route.fulfill({ json: { sessions: [] } }));
   await page.route('**/api/agents**', (route) => route.fulfill({ json: AGENTS }));
+  await page.route('**/api/bots', (route) => route.fulfill({ json: BOTS }));
   await page.route('**/api/inbox**', (route) => route.fulfill({ json: { sessions: [], unread: {} } }));
   // The service badge polls the bare `/status`, not an `/api` path.
   await page.route('**/status', (route) => route.fulfill({ json: { state: 'running' } }));

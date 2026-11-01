@@ -4,7 +4,7 @@ import { useDesktopWindowChrome } from '../../context/DesktopWindowChromeContext
 import { Fragment, forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, Bell, Bot, ChevronDown, ChevronRight, Clock, Eye, GitFork, Image as ImageIcon, Info, Loader2, MapPin, MessageSquare, MessageSquareQuote, Terminal, Undo2, UploadCloud, X } from 'lucide-react';
+import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, Bell, Bot, ChevronDown, ChevronRight, Clock, Eye, GitFork, Image as ImageIcon, Info, Loader2, MapPin, MessageSquare, MessageSquareQuote, Pencil, Terminal, Undo2, UploadCloud, X } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -13,6 +13,9 @@ import { selectApiErrorFields } from '../../context/apiErrorParse';
 import { useToast } from '../../context/ToastContext';
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
+import { useBots } from '../../context/BotsContext';
+import { isBotSessionId, type BotAvatar as BotAvatarSpec } from '../../lib/bots';
+import { BotAvatar } from '../ui/bot-avatar';
 import { useRegisterComposerTarget, type ComposerInsertTarget } from '../../context/ComposerBridgeContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
 import type { SessionActivityItemKind, SessionActivityState, SessionRuntimeState, VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
@@ -82,6 +85,7 @@ import {
 } from '../../lib/transcriptOrder';
 import { pickScrollAnchor, resolveScrollAnchor, type ScrollAnchor } from '../../lib/transcriptScrollAnchor';
 import { AgentRoutePicker } from './AgentRoutePicker';
+import type { MentionSearchResult } from './MentionEditor';
 import {
   archiveSessionShortcutLabel,
   isArchiveSessionChord,
@@ -260,6 +264,11 @@ export const ChatPage: React.FC = () => {
   const {
     capabilities,
   } = useInstanceAuthorization();
+  // A Bot's permanent conversation (docs/plans/bots.md D5): the header shows the
+  // Bot, and the Session cannot be archived or renamed. The id namespace says so
+  // before the Bot list has answered; the list supplies the face.
+  const { bots, loaded: botsLoaded, displayName: botDisplayName } = useBots();
+  const botConversation = isBotSessionId(sessionId);
   const [sessionCanChat, setSessionCanChat] = useState(false);
   const canChat = capabilities.can_chat && sessionCanChat;
   const canManageShowPageAsInstance = capabilities.can_use_show_pages;
@@ -2091,20 +2100,28 @@ export const ChatPage: React.FC = () => {
     ],
   );
 
-  // @ mention source: all enabled Agents, filtered client-side (the set is small
-  // and already loaded for this session via bootstrap).
+  // @ mention source (docs/plans/bots.md D3): the Owner's Bots first, then every
+  // enabled Agent, filtered client-side (both sets are small and already loaded).
+  // An Agent that is a Bot appears once, as the Bot.
   const searchAgents = useCallback(
-    async (query: string) => {
+    async (query: string): Promise<MentionSearchResult[]> => {
       const q = query.trim().toLowerCase();
-      return agents
-        .filter((a) => a.enabled)
+      // The live Bot list decides which Agents are Bots: this page's Agent rows are
+      // a bootstrap snapshot, and a Bot removed since then is an Agent again.
+      const botAgents = new Set(botsLoaded ? bots.map((bot) => bot.agent_name) : agents.filter((a) => a.bot).map((a) => a.name));
+      const botResults: MentionSearchResult[] = bots
+        .filter((bot) => !q || botDisplayName(bot).toLowerCase().includes(q) || bot.handle.includes(q))
+        .map((bot) => ({ kind: 'bot', handle: bot.handle, display_name: botDisplayName(bot), avatar: bot.avatar }));
+      const agentResults: MentionSearchResult[] = agents
+        .filter((a) => a.enabled && !botAgents.has(a.name))
         // Names with the marker terminator (`>`) or a newline can't round-trip
-        // through @<name>, so they aren't mentionable.
+        // through @<agent:name>, so they aren't mentionable.
         .filter((a) => !/[>\n]/.test(a.name))
         .filter((a) => !q || a.name.toLowerCase().includes(q))
-        .map((a) => ({ name: a.name, agent_id: a.id, backend: a.backend, description: a.description }));
+        .map((a) => ({ kind: 'agent', name: a.name, agent_id: a.id, backend: a.backend, description: a.description }));
+      return [...botResults, ...agentResults];
     },
-    [agents],
+    [agents, bots, botsLoaded, botDisplayName],
   );
 
   // # reference source: recent active sessions machine-wide (excluding the current
@@ -2703,6 +2720,7 @@ export const ChatPage: React.FC = () => {
     session,
     writable: metadataWritable,
     lifecycleWritable: writable,
+    botSession: botConversation,
     // Rename focuses the header's existing click-to-edit title instead of adding
     // a second editor for the same field.
     onRenameStart: () => titleFieldRef.current?.startEditing(),
@@ -3101,6 +3119,7 @@ export const ChatPage: React.FC = () => {
               onPatch={patch}
               patchSaving={patchSaving}
               working={working}
+              lockAgent={botConversation}
             />
           ) : null}
         />}
@@ -3649,6 +3668,20 @@ interface TitleFieldHandle {
   startEditing: () => void;
 }
 
+// A Bot's empty conversation shows who it is: there is no automatic
+// self-introduction, so its role is what the user reads first (D5).
+const BotConversationEmpty: React.FC<{ name: string; avatar: BotAvatarSpec | null; role: string }> = ({ name, avatar, role }) => {
+  const { t } = useTranslation();
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
+      <BotAvatar avatar={avatar} name={name} size={64} />
+      <div className="max-w-[420px] text-[15px] font-semibold text-foreground">{t('bots.conversation.emptyTitle', { name })}</div>
+      {role && <div className="max-w-[440px] text-[13px] leading-relaxed text-foreground/80">{role}</div>}
+      <div className="max-w-[440px] text-[12px] leading-relaxed text-muted">{t('bots.conversation.emptyBody', { name })}</div>
+    </div>
+  );
+};
+
 interface ChatRoutePickerProps {
   session: WorkbenchSession;
   agents: VibeAgentBrief[];
@@ -3658,12 +3691,15 @@ interface ChatRoutePickerProps {
   /** A queued ``onPatch`` write is still in flight. */
   patchSaving?: boolean;
   working: boolean;
+  /** A Bot's conversation: its Agent is the Bot, so only the model, effort, and
+   *  speed move (docs/plans/bots.md D5); the server refuses any other route. */
+  lockAgent?: boolean;
 }
 
 // The live session's agent/model/effort picker, hosted by the composer's action
 // row: the route is "who answers the next message", so it sits beside Send.
 // Read-only sessions never mount it — their header names the frozen route.
-const ChatRoutePicker: React.FC<ChatRoutePickerProps> = ({ session, agents, defaultAgentName, onPatch, patchSaving, working }) => {
+const ChatRoutePicker: React.FC<ChatRoutePickerProps> = ({ session, agents, defaultAgentName, onPatch, patchSaving, working, lockAgent = false }) => {
   const { t } = useTranslation();
   const api = useApi();
   const defaultAgent = defaultAgentName ? agents.find((agent) => agent.name === defaultAgentName) : null;
@@ -3698,8 +3734,11 @@ const ChatRoutePicker: React.FC<ChatRoutePickerProps> = ({ session, agents, defa
       : null;
   const backendLocked =
     (nativeBound && concreteBackend === 'vibey') || working || Boolean(pendingForkBackend);
-  const pinnedBackend = pendingForkBackend ?? (backendLocked ? concreteBackend : null);
-  const canClearToDefault = !backendLocked && !nativeBound;
+  const pinnedBackend = lockAgent
+    ? concreteBackend
+    : pendingForkBackend ?? (backendLocked ? concreteBackend : null);
+  const canClearToDefault = !lockAgent && !backendLocked && !nativeBound;
+  const pickableAgents = lockAgent ? agents.filter((agent) => agent.name === session.agent_name) : agents;
   const pickerDisabled = working && !concreteBackend && !pendingForkBackend;
   const defaultRoute = defaultAgent
     ? {
@@ -3716,7 +3755,8 @@ const ChatRoutePicker: React.FC<ChatRoutePickerProps> = ({ session, agents, defa
     <AgentRoutePicker
       presentation="compact"
       value={session}
-      agents={agents}
+      agents={pickableAgents}
+      agentLocked={lockAgent}
       onChange={onPatch}
       saving={patchSaving}
       disabled={pickerDisabled}
@@ -3783,6 +3823,12 @@ interface ChatHeaderBarProps {
 // which renders the header alone rather than mounting the whole page.
 export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, showPageMode, showPageBusy, onToggleShowPage, onPrepareShowPageLaunch, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnlyReason, writable = readOnlyReason === null, showPageAccess = null, canOpenShowPage = true, canManageShowPage = true, canManageInstance = false, canPinToDock = false, sessionActions, titleFieldRef }) => {
   const { t } = useTranslation();
+  // A Bot's conversation (docs/plans/bots.md D5) shows the Bot — avatar, display
+  // name, and "Edit profile" — in place of the editable title. Its id says it is
+  // a Bot's before the Bot list answers; until then the title stays static.
+  const { botForSession, displayName: botDisplayName, openProfile: openBotProfile } = useBots();
+  const conversationBot = botForSession(session.id);
+  const botConversation = isBotSessionId(session.id);
   const windowChrome = useDesktopWindowChrome();
   const readOnly = !writable;
   const sessionReadOnly = readOnlyReason !== null;
@@ -3827,13 +3873,34 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
         >
           <ArrowLeft className="size-3.5" />
         </Button>
-        <TitleField
-          key={session.id}
-          ref={titleFieldRef}
-          title={session.title}
-          onCommit={(title) => onPatch({ title })}
-          readOnly={readOnly}
-        />
+        {conversationBot ? (
+          <div className="flex min-w-0 items-center gap-2">
+            <BotAvatar avatar={conversationBot.avatar} name={botDisplayName(conversationBot)} size={26} />
+            <span className="min-w-0 truncate text-[16px] font-bold text-foreground">{botDisplayName(conversationBot)}</span>
+            {writable && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                onClick={() => openBotProfile({ kind: 'edit', handle: conversationBot.handle })}
+                aria-label={t('bots.conversation.editProfile')}
+                className="shrink-0 text-muted hover:text-foreground"
+              >
+                <Pencil className="size-3" />
+                {/* A phone's header keeps the pencil alone; the name needs the room. */}
+                <span className="max-md:hidden">{t('bots.conversation.editProfile')}</span>
+              </Button>
+            )}
+          </div>
+        ) : (
+          <TitleField
+            key={session.id}
+            ref={titleFieldRef}
+            title={session.title}
+            onCommit={(title) => onPatch({ title })}
+            readOnly={readOnly || botConversation}
+          />
+        )}
         {/* Desktop: the session menu belongs to the session's name, so it sits
             right after the title rather than among the page-level controls on
             the right. Mobile keeps its own trigger at the far right below. */}
@@ -4150,6 +4217,9 @@ export const Transcript: React.FC<TranscriptProps> = ({
   const { t } = useTranslation();
   const { instanceKind } = useInstanceAuthorization();
   const recovery = useModelHubRecovery(modelRecovery, working);
+  // A Bot's empty conversation shows who it is (docs/plans/bots.md D5).
+  const { botForSession, displayName: botDisplayName } = useBots();
+  const conversationBot = botForSession(session.id);
   const navigate = useNavigate();
   const { openApp } = useWindowManager();
   const fileViewer = useFileViewer();
@@ -4657,6 +4727,12 @@ export const Transcript: React.FC<TranscriptProps> = ({
             <div className="max-w-[440px] text-[12px] leading-relaxed">{t('chat.forkedEmptyBody')}</div>
           </div>
         </>
+      ) : conversationBot ? (
+        <BotConversationEmpty
+          name={botDisplayName(conversationBot)}
+          avatar={conversationBot.avatar}
+          role={conversationBot.role}
+        />
       ) : (
         <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center text-muted">
           <MessageSquare className="size-8 opacity-60" />

@@ -3342,7 +3342,7 @@
   },
   "appShell": {
     "title": "Avibe",
-    "subtitle": "Agent OS · 工作台",
+    "subtitle": "Agent OS",
     "workspaceLabel": "设置",
     "moreSettings": "更多设置",
     "openControlPanel": "设置",
@@ -3551,7 +3551,8 @@
         "testSent": "测试通知已发送",
         "testFailed": "测试通知发送失败",
         "normalBlocked": "但普通通知当前会跳过你（{{policy}} 策略：{{disposition}}）"
-      }
+      },
+      "navUnread": "收件箱，{{count}} 条未读"
     },
     "modules": {
       "comingSoonEyebrow": "即将就位",
@@ -4658,6 +4659,96 @@
       "systemPromptHint": "可选",
       "systemPromptPlaceholder": "可选。会拼接到使用本 Agent 的每一段对话前。",
       "submit": "创建 Agent"
+    }
+  },
+  "bots": {
+    "sectionLabel": "伙伴",
+    "mainDefaultName": "歪比",
+    "tag": "伙伴",
+    "handle": "@{{handle}}",
+    "handlePrefix": "@",
+    "mentionName": "@{{name}}",
+    "add": "添加",
+    "addLabel": "添加伙伴",
+    "slotLabelUnread": "{{name}}，{{count}} 条未读",
+    "running": "运行中",
+    "latest": "最近",
+    "statusAt": "{{status}} · {{time}}",
+    "openConversation": "进入对话",
+    "removed": "已将{{name}}移出伙伴",
+    "removeFailed": "未能移出这个伙伴",
+    "reorderInstructions": "按空格键拿起伙伴，用方向键移动，再按空格键放下，或按 Esc 取消。",
+    "reorderPickedUp": "已拿起{{name}}。",
+    "reorderPosition": "{{name}}，第 {{position}} 位，共 {{count}} 位。",
+    "reorderDropped": "已放下{{name}}。",
+    "reorderCancelled": "已取消调整顺序。",
+    "menu": {
+      "label": "{{name}}的操作",
+      "editProfile": "编辑资料",
+      "dragToReorder": "拖动调整顺序",
+      "remove": "移出伙伴",
+      "removeNote": "对话和记忆都会保留，重新设为伙伴即可接回。"
+    },
+    "dialog": {
+      "addTitle": "添加伙伴",
+      "editTitle": "编辑资料",
+      "description": "伙伴有名字、有自己的记忆，和它的对话会一直延续。",
+      "tabNew": "新建",
+      "tabFromAgent": "从已有 Agent 设为伙伴",
+      "name": "名称",
+      "displayName": "显示名称",
+      "namePlaceholder": "例如：首席安全官",
+      "nameRequired": "请给伙伴起个名字。",
+      "avatar": "选择头像",
+      "role": "它负责什么",
+      "rolePlaceholder": "例如：负责依赖与权限的安全审计，每周一汇报一次",
+      "roleHint": "会写进它的设定，之后可以在 Agents 页修改。",
+      "handleGenerating": "正在生成代号…",
+      "handleHint": "自动生成，用于 @ 和命令行",
+      "handleLocked": "沿用 Agent 名，设为伙伴期间锁定",
+      "handleFrozen": "创建后固定不变",
+      "handleEdit": "修改代号",
+      "handleInvalid": "请使用 2 到 24 个小写字母、数字或连字符，以字母开头，且不以连字符结尾。",
+      "advancedFollows": "高级：模型跟随{{name}}（{{model}}）",
+      "advancedModel": "高级：模型 {{model}}",
+      "followMain": "改回跟随{{name}}的模型",
+      "chatHint": "也可以直接跟{{name}}说「帮我加一个负责安全的伙伴」。",
+      "fromAgentHint": "只列出 vibey 后端、还不是伙伴的 Agent。",
+      "noEligibleAgents": "没有可以设为伙伴的 Vibey Agent，可以先在 Agents 页新建一个。",
+      "pickAgent": "请选择一个 Agent。",
+      "create": "添加伙伴",
+      "set": "设为伙伴",
+      "save": "保存",
+      "saveFailed": "未能保存伙伴。",
+      "avatarUploadFailed": "伙伴已保存，但头像没有上传成功。"
+    },
+    "avatarPicker": {
+      "emoji": "表情",
+      "upload": "上传图片",
+      "background": "底色",
+      "hue": "色相 {{hue}}",
+      "defaultHint": "不选也行：默认用名称的第一个字配一个由名称决定的颜色。",
+      "dropHint": "拖入图片，或点击选择",
+      "formats": "PNG、JPG、WebP，自动裁成圆形",
+      "unsupported": "请选择 PNG、JPG 或 WebP 图片。",
+      "tooLarge": "图片超过 10 MB。",
+      "useDefault": "恢复默认"
+    },
+    "conversation": {
+      "editProfile": "编辑资料",
+      "emptyTitle": "这是你和{{name}}对话的开始",
+      "emptyBody": "这段对话会一直延续：{{name}}会把重要的事记在自己的记忆里，并按顺序处理消息。"
+    },
+    "agents": {
+      "badge": "伙伴",
+      "setAsBot": "设为伙伴",
+      "setAsBotHint": "给它一个名字、一个头像，以及一段带记忆的常驻对话。",
+      "setAsBotNeedsEnabled": "请先启用这个 Agent，再设为伙伴。",
+      "isBotTitle": "这个 Agent 是伙伴「{{name}}」",
+      "isBotHint": "设为伙伴期间，它保持启用、名字不变，也不能归档或删除；如需这样做，请先移出伙伴。",
+      "isMainBotHint": "主伙伴的 Agent 是内置的：始终启用，不能移出。",
+      "openConversation": "进入对话",
+      "editProfile": "编辑资料"
     }
   },
   "editor": {

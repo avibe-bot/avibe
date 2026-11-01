@@ -1,9 +1,13 @@
-// Shared contract for @-agent / #-session mentions in the chat composer.
+// Shared contract for @-mentions (Bots and Agents) and #-session references in
+// the chat composer.
 //
-// Marker convention (the agent-facing, transport-stable form): `@<agent-name>`
-// and `#<session-id>` live inline in the message text. A structured sidecar in
-// `message.content.references` carries the resolved data (ids, session titles)
-// for faithful chip rendering and backend context — see docs/plans.
+// Marker convention (the agent-facing, transport-stable form) lives inline in the
+// message text and carries the kind (docs/plans/bots.md D3): `@<bot:handle>`
+// points at a Bot's permanent conversation, `@<agent:name>` at an Agent (a fresh
+// Session each run), and `#<session-id>` at a Session. An untyped `@<name>` in
+// older messages means an Agent. A structured sidecar in
+// `message.content.references` carries the resolved data (ids, display names,
+// session titles) for faithful chip rendering and backend context — see docs/plans.
 //
 // Humans never read the raw markers (the bubble renders chips), so the format is
 // optimized for LLM legibility + robust parsing. The `<…>` form is excised from
@@ -30,7 +34,26 @@ export type SessionReference = {
   title?: string | null;
 };
 
-export type MentionReference = AgentReference | SessionReference;
+export type BotReference = {
+  kind: 'bot';
+  /** The frozen handle — the marker and `vibe agent run --bot <handle>` target. */
+  handle: string;
+  /** Snapshot of the display name at send time — the chip's fallback label. */
+  display_name?: string | null;
+};
+
+export type MentionReference = AgentReference | BotReference | SessionReference;
+
+/** What a `@` marker points at. */
+export type MentionTarget = 'agent' | 'bot' | 'session';
+
+/** Split the inside of an `@<…>` marker into its kind and name. Untyped markers
+ *  from before typed mentions mean an Agent. */
+export function parseAtMarker(inner: string): { target: 'agent' | 'bot'; name: string } {
+  if (inner.startsWith('bot:')) return { target: 'bot', name: inner.slice(4) };
+  if (inner.startsWith('agent:')) return { target: 'agent', name: inner.slice(6) };
+  return { target: 'agent', name: inner };
+}
 
 export const MENTION_TRIGGERS = ['@', '#'] as const;
 export type MentionTrigger = (typeof MENTION_TRIGGERS)[number];
@@ -44,7 +67,9 @@ export const MENTION_LINK_SCHEME = 'avibe-mention';
 
 /** The inline text marker for a reference. */
 export function referenceToMarker(ref: MentionReference): string {
-  return ref.kind === 'agent' ? `@<${ref.name}>` : `#<${ref.session_id}>`;
+  if (ref.kind === 'bot') return `@<bot:${ref.handle}>`;
+  if (ref.kind === 'agent') return `@<agent:${ref.name}>`;
+  return `#<${ref.session_id}>`;
 }
 
 /** Dedupe references by (kind, id) so a marker repeated in the text yields one entry. */
@@ -52,7 +77,11 @@ export function dedupeReferences(refs: MentionReference[]): MentionReference[] {
   const seen = new Set<string>();
   const out: MentionReference[] = [];
   for (const ref of refs) {
-    const key = ref.kind === 'agent' ? `agent:${ref.name}` : `session:${ref.session_id}`;
+    const key = ref.kind === 'agent'
+      ? `agent:${ref.name}`
+      : ref.kind === 'bot'
+        ? `bot:${ref.handle}`
+        : `session:${ref.session_id}`;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(ref);
@@ -82,17 +111,29 @@ const CODE_SEGMENT_RE = /(```[\s\S]*?```|`[^`]*`)/g;
 
 export function linkifyMentions(text: string, references?: MentionReference[]): EditedText {
   const sessionTitles = new Map<string, string>();
+  const botNames = new Map<string, string>();
   for (const ref of references ?? []) {
     if (ref.kind === 'session' && ref.title) sessionTitles.set(ref.session_id, ref.title);
+    if (ref.kind === 'bot' && ref.display_name) botNames.set(ref.handle, ref.display_name);
   }
   const edits: TextEdit[] = [];
   const rewrite = (segment: string, base: number): string =>
     segment.replace(MENTION_MARKER_RE, (full: string, trigger: string, inner: string, at: number) => {
-      const label = trigger === '@'
-        ? escapeMarkdownLabel(`@${inner}`)
-        : escapeMarkdownLabel(`#${sessionTitles.get(inner) || inner}`);
-      const kind = trigger === '@' ? 'agent' : 'session';
-      const link = `[${label}](${MENTION_LINK_SCHEME}:${kind}:${encodeURIComponent(inner)})`;
+      let kind: MentionTarget = 'session';
+      let value = inner;
+      let label: string;
+      if (trigger === '@') {
+        const marker = parseAtMarker(inner);
+        kind = marker.target;
+        value = marker.name;
+        // A Bot's chip shows its display name (the marker keeps the handle, so a
+        // rename never alters old messages); the renderer refreshes it from the
+        // live Bot when there is one.
+        label = escapeMarkdownLabel(`@${kind === 'bot' ? botNames.get(value) || value : value}`);
+      } else {
+        label = escapeMarkdownLabel(`#${sessionTitles.get(inner) || inner}`);
+      }
+      const link = `[${label}](${MENTION_LINK_SCHEME}:${kind}:${encodeURIComponent(value)})`;
       edits.push({ start: base + at, end: base + at + full.length, inserted: link.length });
       return link;
     });
@@ -113,7 +154,7 @@ export function linkifyMentions(text: string, references?: MentionReference[]): 
 }
 
 /** Parse an `avibe-mention:<kind>:<value>` href back into its parts. */
-export function parseMentionHref(href: string): { kind: MentionTrigger; value: string } | null {
+export function parseMentionHref(href: string): { kind: MentionTrigger; target: MentionTarget; value: string } | null {
   const prefix = `${MENTION_LINK_SCHEME}:`;
   if (!href.startsWith(prefix)) return null;
   const rest = href.slice(prefix.length);
@@ -126,8 +167,9 @@ export function parseMentionHref(href: string): { kind: MentionTrigger; value: s
   } catch {
     value = rest.slice(sep + 1);
   }
-  if (kindStr === 'agent') return { kind: '@', value };
-  if (kindStr === 'session') return { kind: '#', value };
+  if (kindStr === 'agent') return { kind: '@', target: 'agent', value };
+  if (kindStr === 'bot') return { kind: '@', target: 'bot', value };
+  if (kindStr === 'session') return { kind: '#', target: 'session', value };
   return null;
 }
 

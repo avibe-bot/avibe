@@ -5,6 +5,7 @@ import type { PickerAgentCatalog } from '../components/settings/models/types';
 import type { AgentBackendId, NativeCliBackend, WebOAuthBackend } from '../lib/agentBackends';
 import { apiFetch, recoverRemoteAuthFromSessionProbe, withApiDeadline } from '../lib/apiFetch';
 import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
+import { parseBot, type AgentBotSummary, type Bot, type BotEmojiAvatarInput } from '../lib/bots';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
 import type { AgentGraphParams, AgentGraphResult, AgentGraphVisibility } from '../lib/agentGraph';
 import { onPageReactivated, type PageReactivationListener } from '../lib/pageActivity';
@@ -888,6 +889,29 @@ export type ApiContextType = {
   recoverSessionDraftAfterRejectedSend: (sessionId: string) => Promise<void>;
   listInbox: (params?: { platform?: string; unreadOnly?: boolean; limit?: number; before?: string; onlySession?: string; cache?: boolean; handleError?: boolean; backgroundPush?: boolean }) => Promise<InboxFeedResult>;
   connectWorkbenchEvents: (handlers: WorkbenchEventHandlers) => () => void;
+  // Bots (docs/plans/bots.md "Web API"): every route is the instance Owner's. The
+  // writes reject with an ``ApiError`` carrying the server's localized message and
+  // code, and raise no toast: the Bot dialogs show the refusal where it was made.
+  listBots: (params?: { cache?: boolean }) => Promise<Bot[]>;
+  createBot: (payload: {
+    display_name: string;
+    handle?: string | null;
+    role?: string | null;
+    avatar?: BotEmojiAvatarInput | null;
+    model?: string | null;
+    reasoning_effort?: string | null;
+  }) => Promise<Bot>;
+  setBot: (payload: { agent_name: string; display_name: string; avatar?: BotEmojiAvatarInput | null }) => Promise<Bot>;
+  updateBot: (
+    handle: string,
+    payload: { display_name?: string; avatar?: BotEmojiAvatarInput | null; position?: number },
+  ) => Promise<Bot>;
+  removeBot: (handle: string) => Promise<void>;
+  uploadBotAvatar: (handle: string, image: Blob) => Promise<Bot>;
+  suggestBotHandle: (
+    payload: { display_name: string; role?: string },
+    options?: { signal?: AbortSignal },
+  ) => Promise<{ handle: string; source: string }>;
   listVibeAgents: (params?: {
     backend?: string;
     includeDisabled?: boolean;
@@ -1154,6 +1178,8 @@ export type VibeAgentBrief = {
   archived_at: string | null;
   source: string;
   updated_at: string;
+  /** The Bot this Agent is, if any (docs/plans/bots.md D1). Absent on older servers. */
+  bot?: AgentBotSummary | null;
 };
 
 export type VibeAgentFull = VibeAgentBrief & {
@@ -1344,6 +1370,9 @@ export type WorkbenchEventHandlers = {
    */
   onConnected?: () => void;
   onProjectsChanged?: () => void;
+  /** The Owner's Bots changed (created, set, edited, reordered, removed): refetch
+   *  ``GET /api/bots``. ``handle`` is a hint, not a filter. */
+  onBotsChanged?: (data: { handle?: string }) => void;
   onConnectionState?: (state: WorkbenchEventConnectionState) => void;
   onEventBridgeStatus?: (data: { connected: boolean }) => void;
   onAuthorizationChanged?: (data: {
@@ -3090,6 +3119,16 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         handlers.onProjectsChanged?.();
       });
     });
+    source.addEventListener('bots.changed', (e: MessageEvent) => {
+      const envelope = parseWorkbenchEnvelope<{ handle?: string }>(e.data);
+      if (!envelope) return;
+      // A Bot is Agent metadata (D1), so the Agents reads carry it too.
+      clearReadCacheMatching((path) => path.startsWith('/api/bots') || path.startsWith('/api/agents'));
+      dispatchToWorkbenchHandlers((handlers) => {
+        handlers.onAny?.(envelope);
+        handlers.onBotsChanged?.(envelope.data ?? {});
+      });
+    });
     source.addEventListener('remote.authorization', (e: MessageEvent) => {
       try {
         const payload = JSON.parse(e.data) as { state?: RemoteAuthorizationState };
@@ -3535,6 +3574,25 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       opts,
     );
     return payloadJson;
+  };
+
+  // The Bot routes answer a refusal with a coded, already-localized body
+  // (``_bot_error_response``). Read it here and reject with it, without the global
+  // toast: the dialog that asked shows the refusal in place.
+  const botRequest = async (path: string, init: RequestInit): Promise<Record<string, unknown>> => {
+    const { res, payloadJson } = await requestJson(path, init, path, { handleError: false });
+    if (!res.ok || payloadJson?.ok === false) {
+      const parsed = payloadJson && typeof payloadJson === 'object'
+        ? selectApiErrorFields(payloadJson, `Request failed: ${path} (${res.status})`)
+        : null;
+      throw new ApiError(parsed?.fallback ?? `Request failed: ${path} (${res.status})`, res.status, parsed?.code ?? null);
+    }
+    return payloadJson as Record<string, unknown>;
+  };
+  const botFromResponse = (payload: Record<string, unknown>): Bot => {
+    const bot = parseBot(payload.bot);
+    if (!bot) throw new ApiError('The server returned no Bot', 0, null);
+    return bot;
   };
 
   const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
@@ -4248,6 +4306,47 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       const options = { handleError: params?.handleError };
       return params?.cache === false ? getJson(path, options) : getCachedJson(path, 1500, options);
+    },
+    listBots: async (params) => {
+      const payload = params?.cache === false
+        ? await getJson('/api/bots', { handleError: false })
+        : await getCachedJson('/api/bots', 1500, { handleError: false });
+      if (!payload || payload.ok === false || !Array.isArray(payload.bots)) {
+        const parsed = payload ? selectApiErrorFields(payload, 'Request failed: /api/bots') : null;
+        throw new ApiError(parsed?.fallback ?? 'Request failed: /api/bots', 0, parsed?.code ?? null);
+      }
+      return (payload.bots as unknown[]).map(parseBot).filter((bot): bot is Bot => bot !== null);
+    },
+    createBot: async (payload) => botFromResponse(await botRequest('/api/bots', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })),
+    setBot: async (payload) => botFromResponse(await botRequest('/api/bots/set', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })),
+    updateBot: async (handle, payload) => botFromResponse(await botRequest(`/api/bots/${encodeURIComponent(handle)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })),
+    removeBot: async (handle) => {
+      await botRequest(`/api/bots/${encodeURIComponent(handle)}`, { method: 'DELETE' });
+    },
+    uploadBotAvatar: async (handle, image) => botFromResponse(await botRequest(
+      `/api/bots/${encodeURIComponent(handle)}/avatar`,
+      { method: 'PUT', headers: { 'Content-Type': image.type || 'application/octet-stream' }, body: image },
+    )),
+    suggestBotHandle: async (payload, options) => {
+      const body = await botRequest('/api/bots/handle-suggestion', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: options?.signal,
+      });
+      return { handle: String(body.handle ?? ''), source: String(body.source ?? '') };
     },
     listVibeAgents: (params) => {
       const search = new URLSearchParams();

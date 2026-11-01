@@ -846,6 +846,7 @@ const NON_KEY_LITERALS = [
 
   // Event-channel names. `ApiContext.tsx` publishes and subscribes by these.
   'authorization.changed',
+  'bots.changed',
   'definitions.updated',
   'inbox.session.updated',
   'inbox.unread.changed',

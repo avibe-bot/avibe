@@ -303,6 +303,17 @@
      is #10B98114 against --mint-soft's #10B98124. They happen to coincide in Dark,
      which is exactly why collapsing them there would look correct and render wrong
      in the other theme. */
+  /* Bot avatars (docs/plans/bots.md D5). The main Bot's mascot sits on a well
+     that follows the theme: dark here, white with a hairline ring in Light. An
+     emoji avatar keeps one hue and takes its well's saturation and lightness
+     from the theme; the default (the name's first character) is a deeper fill. */
+  --bot-mascot-well: #16172b;
+  --bot-mascot-ring: rgba(255, 255, 255, 0.1);
+  --bot-mascot-shadow: none;
+  --bot-emoji-well-saturation: 35%;
+  --bot-emoji-well-lightness: 20%;
+  --bot-initial-saturation: 45%;
+  --bot-initial-lightness: 38%;
   --sidebar-background: #0e0e18;
   --nav-selected-bg: #5bffa029;
   --nav-selected-border: #5bffa059;
@@ -465,6 +476,14 @@
        from the fill, which is why they carry the fill's hex. */
     /* Mirrors the dark block's note: the sidebar fill and the selected nav wash
        are the two that genuinely differ from --surface and --mint-soft here. */
+    /* Bot avatar wells; see the dark block. */
+    --bot-mascot-well: #ffffff;
+    --bot-mascot-ring: rgba(8, 8, 18, 0.1);
+    --bot-mascot-shadow: drop-shadow(0 1px 1.5px rgba(8, 8, 18, 0.28));
+    --bot-emoji-well-saturation: 85%;
+    --bot-emoji-well-lightness: 92%;
+    --bot-initial-saturation: 70%;
+    --bot-initial-lightness: 45%;
     --sidebar-background: #fcfcfe;
     --nav-selected-bg: #10b98114;
     --nav-selected-border: #10b98160;
@@ -589,6 +608,15 @@
   --input: rgba(8, 8, 18, 0.12);
   /* Mirrors the @media light block above; see the note there. */
   --ring: rgba(16, 185, 129, 0.5);
+
+  /* Bot avatar wells; mirrors the @media light block above. */
+  --bot-mascot-well: #ffffff;
+  --bot-mascot-ring: rgba(8, 8, 18, 0.1);
+  --bot-mascot-shadow: drop-shadow(0 1px 1.5px rgba(8, 8, 18, 0.28));
+  --bot-emoji-well-saturation: 85%;
+  --bot-emoji-well-lightness: 92%;
+  --bot-initial-saturation: 70%;
+  --bot-initial-lightness: 45%;
 
   /* Mirrors the @media light block above; see the note in the dark block. */
   --sidebar-background: #fcfcfe;
@@ -1133,4 +1161,24 @@ pre,
 @media (prefers-reduced-motion: reduce) {
   .project-drag-preview { animation: none; }
   .project-sortable { transition: none !important; }
+}
+
+/* Bot avatars: `--bot-hue` is set per avatar; the theme supplies the rest. */
+.bot-avatar-emoji {
+  background: hsl(var(--bot-hue) var(--bot-emoji-well-saturation) var(--bot-emoji-well-lightness));
+}
+.bot-avatar-initial {
+  background: hsl(var(--bot-hue) var(--bot-initial-saturation) var(--bot-initial-lightness));
+  color: #ffffff;
+}
+.bot-avatar-mascot {
+  background: var(--bot-mascot-well);
+  box-shadow: inset 0 0 0 1px var(--bot-mascot-ring);
+}
+.bot-avatar-mascot > img {
+  filter: var(--bot-mascot-shadow);
+}
+/* The strip scrolls sideways once it overflows; its right edge fades out. */
+.bot-strip-fade {
+  mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
 }

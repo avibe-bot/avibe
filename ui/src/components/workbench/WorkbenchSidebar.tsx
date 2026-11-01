@@ -56,6 +56,10 @@ import { NewProjectDialog } from './NewProjectDialog';
 import { ProjectAgentsMdDialog } from './ProjectAgentsMdDialog';
 import { ProjectSettingsDialog } from './ProjectSettingsDialog';
 import { SortableProjectList, type ProjectDragHandle } from './SortableProjectList';
+import { BotStrip } from './bots/BotStrip';
+import { BotAvatar } from '../ui/bot-avatar';
+import { BotTag } from './bots/BotTag';
+import { useBots } from '../../context/BotsContext';
 import logoImg from '../../assets/logo.png';
 
 interface CapabilityNavItem {
@@ -137,6 +141,7 @@ const InboxHoverPopover: React.FC<{
 }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const { botForSession, displayName: botName } = useBots();
   // The unread map is authoritative; a session absent from it has 0 unread
   // (don't fall back to the card's stale unread_count — see InboxPage).
   const unreadOf = (s: InboxSession) => unreadBySession[s.session_id] ?? 0;
@@ -221,6 +226,54 @@ const InboxHoverPopover: React.FC<{
           {shown.map((s) => {
             const unread = unreadOf(s);
             const projectLabel = s.project_name || s.project_id || 'avibe';
+            const bot = botForSession(s.session_id);
+            const replied = s.replied ? (
+              <span className="shrink-0 font-semibold text-cyan-ink" title={t('workbench.inbox.replied')}>
+                ↩
+              </span>
+            ) : null;
+            const preview = s.preview_text ? (
+              <div
+                className={clsx(
+                  'line-clamp-2 text-[11.5px] leading-relaxed',
+                  unread > 0 ? 'text-foreground' : 'text-muted',
+                )}
+              >
+                <Markdown content={s.preview_text} interactive={false} className="vr-markdown--preview" />
+              </div>
+            ) : (
+              <div className="text-[11.5px] leading-relaxed text-muted">—</div>
+            );
+            if (bot) {
+              // A Bot's conversation reads as the Bot: its avatar and name with a
+              // small Bot tag, instead of "project · title" (docs/plans/bots.md D5).
+              const name = botName(bot);
+              return (
+                <button
+                  key={s.session_id}
+                  type="button"
+                  onClick={() => onItemClick(s)}
+                  className={clsx(
+                    'flex gap-2.5 rounded-lg px-3 py-2.5 text-left transition',
+                    unread > 0
+                      ? 'border-l-2 border-mint bg-mint/[0.06] hover:bg-mint/[0.10]'
+                      : 'hover:bg-foreground/[0.04]',
+                  )}
+                >
+                  <BotAvatar avatar={bot.avatar} name={name} size={28} className="mt-0.5" />
+                  <div className="flex min-w-0 flex-1 flex-col gap-1">
+                    <div className="flex items-center gap-1.5 text-[11px]">
+                      <span className="truncate font-bold text-foreground">{name}</span>
+                      <BotTag />
+                      <span className="flex-1" />
+                      {replied}
+                      <span className="shrink-0 font-mono text-[10px] text-muted">{formatRelativeTime(s.last_activity_at, t)}</span>
+                    </div>
+                    {preview}
+                  </div>
+                </button>
+              );
+            }
             return (
               <button
                 key={s.session_id}
@@ -239,25 +292,10 @@ const InboxHoverPopover: React.FC<{
                   <span className="flex-1 truncate font-semibold text-foreground">
                     {s.title?.trim() || s.session_id}
                   </span>
-                  {s.replied && (
-                    <span className="shrink-0 font-semibold text-cyan-ink" title={t('workbench.inbox.replied')}>
-                      ↩
-                    </span>
-                  )}
+                  {replied}
                   <span className="font-mono text-muted">{formatRelativeTime(s.last_activity_at, t)}</span>
                 </div>
-                {s.preview_text ? (
-                  <div
-                    className={clsx(
-                      'line-clamp-2 text-[11.5px] leading-relaxed',
-                      unread > 0 ? 'text-foreground' : 'text-muted',
-                    )}
-                  >
-                    <Markdown content={s.preview_text} interactive={false} className="vr-markdown--preview" />
-                  </div>
-                ) : (
-                  <div className="text-[11.5px] leading-relaxed text-muted">—</div>
-                )}
+                {preview}
               </button>
             );
           })}
@@ -873,8 +911,11 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
           mark keeps the approved chip treatment (32px, mint hairline over a
           mint well, resting glow that strengthens on hover) inside this
           sidebar's own padding, so the adjustable width still governs the
-          column. Search is a compact icon in the Projects header below. */}
-      <div className="flex shrink-0 items-center pb-3">
+          column. The Inbox is the icon at the row's right end (docs/plans/bots.md
+          D5): hover opens the same floating popover, a click the full Inbox. At
+          zero unread there is no badge node at all and the icon stays
+          uncoloured; both reads come from the same real counter. */}
+      <div className="flex shrink-0 items-center gap-2 pb-3">
         <Link
           to="/"
           className="group flex min-w-0 items-center gap-2.5 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/60"
@@ -892,59 +933,56 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
             <div className="truncate text-[11px] text-muted">{t('appShell.subtitle')}</div>
           </div>
         </Link>
+        <Popover open={popoverOpen} onOpenChange={(open) => { if (!open) setPopoverOpen(false); }}>
+          <PopoverAnchor asChild>
+            <div className="ml-auto shrink-0" onMouseEnter={openPopover} onMouseLeave={queueClose}>
+              <NavLink
+                to="/inbox"
+                aria-label={badge ? t('workbench.inbox.navUnread', { count: totalUnread }) : t('workbench.nav.inbox')}
+                title={t('workbench.nav.inbox')}
+                className={({ isActive }) =>
+                  clsx(
+                    'relative grid size-8 place-items-center rounded-lg border transition-colors',
+                    // Cyan active state per design.pen ze15A — mint is reserved
+                    // for sessions / projects so the two reads stay distinct.
+                    isActive
+                      ? 'border-cyan/40 bg-cyan-soft shadow-glow-sm-cyan'
+                      : 'border-transparent hover:bg-foreground/[0.04]',
+                  )
+                }
+              >
+                {({ isActive }) => (
+                  <>
+                    {/* Cyan is what unread means here, so the counter colours the
+                        icon on any route — not only while Inbox is the open one. */}
+                    <Inbox className={clsx('size-[18px]', badge || isActive ? 'text-cyan-ink' : 'text-foreground')} />
+                    {badge && (
+                      <span className="absolute -right-1 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-cyan px-1 font-mono text-[9px] font-bold text-accent-foreground shadow-glow-xs-cyan">
+                        {badge}
+                      </span>
+                    )}
+                  </>
+                )}
+              </NavLink>
+            </div>
+          </PopoverAnchor>
+          <InboxHoverPopover
+            sessions={inboxSessions}
+            unreadBySession={unreadBySession}
+            unreadSessions={unreadSessions}
+            totalUnread={totalUnread}
+            canMarkRead={canChat}
+            onItemClick={onItemClick}
+            onMarkAllRead={onMarkAllRead}
+            onMouseEnter={openPopover}
+            onMouseLeave={queueClose}
+          />
+        </Popover>
       </div>
 
-      {/* Inbox entry — hover opens the floating popover (portaled above the chat).
-          Search is a compact icon in the Projects header below, so this row keeps
-          the full width the approved design gives it. At zero unread there is no
-          badge node at all and the icon stays uncoloured; both reads come from
-          the same real counter. */}
-      <Popover open={popoverOpen} onOpenChange={(open) => { if (!open) setPopoverOpen(false); }}>
-        <PopoverAnchor asChild>
-          <div className="w-full" onMouseEnter={openPopover} onMouseLeave={queueClose}>
-            <NavLink
-              to="/inbox"
-              aria-label={t('workbench.nav.inbox')}
-              className={({ isActive }) =>
-                clsx(
-                  'group flex w-full items-center gap-2.5 rounded-lg border px-3 py-2.5 text-[13px] font-semibold transition-colors',
-                  // Cyan active state per design.pen ze15A — mint is reserved
-                  // for sessions / projects so the two reads stay distinct.
-                  isActive
-                    ? 'border-cyan/40 bg-cyan-soft text-foreground shadow-glow-sm-cyan'
-                    : 'border-border-strong text-foreground hover:bg-foreground/[0.04]',
-                )
-              }
-            >
-              {({ isActive }) => (
-                <>
-                  {/* Cyan is what unread means here, so the counter colours the
-                      icon on any route — not only while Inbox is the open one. */}
-                  <Inbox className={clsx('size-4', badge || isActive ? 'text-cyan-ink' : 'text-foreground')} />
-                  <span className="flex-1">{t('workbench.nav.inbox')}</span>
-                  {badge && (
-                    <span className="inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-cyan px-1.5 py-0.5 font-mono text-[9px] font-bold text-accent-foreground shadow-glow-xs-cyan">
-                      {badge}
-                    </span>
-                  )}
-                  <ChevronRight className="size-3.5 text-muted opacity-0 transition-opacity group-hover:opacity-100" />
-                </>
-              )}
-            </NavLink>
-          </div>
-        </PopoverAnchor>
-        <InboxHoverPopover
-          sessions={inboxSessions}
-          unreadBySession={unreadBySession}
-          unreadSessions={unreadSessions}
-          totalUnread={totalUnread}
-          canMarkRead={canChat}
-          onItemClick={onItemClick}
-          onMarkAllRead={onMarkAllRead}
-          onMouseEnter={openPopover}
-          onMouseLeave={queueClose}
-        />
-      </Popover>
+      {/* Bots — the Owner's standing members take the Inbox row's old place
+          (docs/plans/bots.md D5). Nobody else sees the strip. */}
+      <BotStrip unreadBySession={unreadBySession} />
 
       {/* Capabilities m8K59 — a collapsible group, so a long project list can
           reclaim the rows. The label leads and the chevron closes the row on the

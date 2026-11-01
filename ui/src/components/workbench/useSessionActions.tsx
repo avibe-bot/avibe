@@ -50,6 +50,10 @@ export interface SessionActionsOptions {
   onSessionPatched?: (changes: Partial<WorkbenchSession>, sessionId: string) => void;
   /** Keyboard hint for the archive row (see chatShortcuts). */
   archiveHint?: string;
+  /** A Bot's permanent conversation (docs/plans/bots.md D5): it is never archived,
+   *  renamed, pinned, or hidden — the server refuses those writes — so only the
+   *  rows that continue from it (reference, fork) remain. */
+  botSession?: boolean;
 }
 
 export interface SessionActionsHandle {
@@ -74,6 +78,7 @@ export const useSessionActions = ({
   onArchived,
   onSessionPatched,
   archiveHint,
+  botSession = false,
 }: SessionActionsOptions): SessionActionsHandle => {
   const { t } = useTranslation();
   const api = useApi();
@@ -195,7 +200,7 @@ export const useSessionActions = ({
     // cannot reference the session you are already typing in, which is also why
     // the chat header never shows this row for its own session.
     const canReference = insertTarget != null && insertTarget.sessionId !== target.id;
-    const rows: SessionActionDescriptor[] = [
+    const rows: SessionActionDescriptor[] = botSession ? [] : [
       {
         id: 'pin',
         group: 'organize',
@@ -206,7 +211,7 @@ export const useSessionActions = ({
         onSelect: () => void togglePinned(),
       },
     ];
-    if (onRenameStart) {
+    if (onRenameStart && !botSession) {
       rows.push({
         id: 'rename',
         group: 'organize',
@@ -239,7 +244,7 @@ export const useSessionActions = ({
         onSelect: () => void fork(),
       });
     }
-    rows.push({
+    if (!botSession) rows.push({
       id: 'visibility',
       group: 'continue',
       icon: inBackground ? Eye : EyeOff,
@@ -248,7 +253,7 @@ export const useSessionActions = ({
       disabled: movingVisibility,
       onSelect: () => void toggleVisibility(),
     });
-    if (lifecycleWritable) {
+    if (lifecycleWritable && !botSession) {
       rows.push({
         id: 'archive',
         group: 'lifecycle',
@@ -275,9 +280,10 @@ export const useSessionActions = ({
     requestArchive,
     archiveHint,
     lifecycleWritable,
+    botSession,
   ]);
 
-  const archiveDialog = lifecycleWritable && target ? (
+  const archiveDialog = lifecycleWritable && target && !botSession ? (
     <ArchiveSessionDialog
       sessionId={archiveOpen ? archiveRequestId : null}
       sessionTitle={target.title}
@@ -290,5 +296,10 @@ export const useSessionActions = ({
     />
   ) : null;
 
-  return { actions, archiveDialog, requestArchive, canArchive: lifecycleWritable && target != null };
+  return {
+    actions,
+    archiveDialog,
+    requestArchive,
+    canArchive: lifecycleWritable && target != null && !botSession,
+  };
 };

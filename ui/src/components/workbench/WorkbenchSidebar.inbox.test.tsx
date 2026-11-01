@@ -94,7 +94,7 @@ const sidebarElement = (active = true, onOpenSearch?: () => void) => (
 );
 const renderSidebar = (active = true, onOpenSearch?: () => void) => render(sidebarElement(active, onOpenSearch));
 
-const inboxIcon = () => screen.getByRole('link', { name: en.workbench.nav.inbox }).querySelector('svg')!;
+const inboxIcon = () => screen.getByRole('link', { name: (name) => name.startsWith(en.workbench.nav.inbox) }).querySelector('svg')!;
 const projectsToggle = () => screen.getByRole('button', { name: en.workbench.projectsLabel });
 
 beforeEach(() => {
@@ -127,7 +127,8 @@ describe('Workbench sidebar inbox counter', () => {
 
     const link = screen.getByRole('link', { name: en.workbench.nav.inbox });
     // A zero badge is still a badge — an empty inbox draws no attention at all.
-    expect(link.textContent).toBe(en.workbench.nav.inbox);
+    // The entry is the brand row's icon (docs/plans/bots.md D5), so it holds no text.
+    expect(link.textContent).toBe('');
     // Cyan is the unread read; the resting row is plain foreground ink.
     expect(inboxIcon().getAttribute('class')).toContain('text-foreground');
     expect(inboxIcon().getAttribute('class')).not.toContain('text-cyan-ink');
@@ -139,7 +140,8 @@ describe('Workbench sidebar inbox counter', () => {
     inbox.unreadBySession = { ses_a: 4, ses_b: 3 };
     renderSidebar();
 
-    expect(screen.getByRole('link', { name: en.workbench.nav.inbox }).textContent).toBe(`${en.workbench.nav.inbox}7`);
+    const link = screen.getByRole('link', { name: en.workbench.inbox.navUnread.replace('{{count}}', '7') });
+    expect(link.textContent).toBe('7');
     expect(inboxIcon().getAttribute('class')).toContain('text-cyan-ink');
   });
 
@@ -147,7 +149,7 @@ describe('Workbench sidebar inbox counter', () => {
     inbox.totalUnread = 150;
     renderSidebar();
 
-    expect(screen.getByRole('link', { name: en.workbench.nav.inbox }).textContent).toBe(`${en.workbench.nav.inbox}99+`);
+    expect(screen.getByRole('link', { name: en.workbench.inbox.navUnread.replace('{{count}}', '150') }).textContent).toBe('99+');
   });
 
   it('keeps Search in the Projects header, before New Project and without needing it', async () => {

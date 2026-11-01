@@ -44,6 +44,7 @@ import { StatusProvider } from './context/StatusProvider';
 import { ApiProvider, useApi, ApiError } from './context/ApiContext';
 import type { SessionInfo } from './context/ApiContext';
 import { InstanceAuthorizationProvider } from './context/InstanceAuthorizationProvider';
+import { BotsProvider } from './context/BotsProvider';
 import { useWindowManager } from './context/WindowManagerContext';
 import { ToastProvider } from './context/ToastProvider';
 import { ThemeProvider } from './context/ThemeProvider';
@@ -845,14 +846,16 @@ const router = createBrowserRouter(
         <ErrorBoundary variant="page">
           <PetWindow>
             <AuthGuard>
-              <Suspense fallback={null}><PetPage /></Suspense>
+              <BotsProvider>
+                <Suspense fallback={null}><PetPage /></Suspense>
+              </BotsProvider>
             </AuthGuard>
           </PetWindow>
         </ErrorBoundary>
       )}
     />
     <Route element={<ErrorBoundary variant="page"><RouterRoot /></ErrorBoundary>}>
-      <Route element={<AuthGuard><AppShell /></AuthGuard>}>
+      <Route element={<AuthGuard><BotsProvider><AppShell /></BotsProvider></AuthGuard>}>
         <Route path="*" element={<WorkbenchRouteSurface />} />
       </Route>
     </Route>

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Bot,
   ChevronDown,
@@ -34,6 +34,9 @@ import type {
   VibeAgentUpdatePayload,
 } from '../../context/ApiContext';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
+import { useBots } from '../../context/BotsContext';
+import { BotAvatar } from '../ui/bot-avatar';
+import { eligibleForBot } from '../../lib/bots';
 import { AgentGraphTab } from './AgentGraphTab';
 import { useToast } from '../../context/ToastContext';
 import { NewAgentDialog } from './NewAgentDialog';
@@ -278,6 +281,7 @@ export const AgentsPage: React.FC = () => {
   tRef.current = t;
   const api = useApi();
   const { showToast } = useToast();
+  const { refresh: refreshBots } = useBots();
   const {
     capabilities,
   } = useInstanceAuthorization();
@@ -1216,6 +1220,11 @@ export const AgentsPage: React.FC = () => {
       onAuthorizationChanged: () => {
         void reconcileGap();
       },
+      // A Bot is Agent metadata (docs/plans/bots.md D1): its badge and locks ride
+      // on the Agent rows, so a Bot change is a definitions change here.
+      onBotsChanged: () => {
+        void reconcileGap();
+      },
     });
   }, [api, capabilities.can_use_agents, fetchRunningActiveCount, reconcileGap, refreshOnboarding]);
 
@@ -1339,10 +1348,15 @@ export const AgentsPage: React.FC = () => {
   const updateField = async (patch: VibeAgentUpdatePayload): Promise<void> => {
     if (!selected) return;
     const name = selected.name;
+    const isBot = Boolean(selected.bot);
     const operation = beginSelectedMutation(name);
     let mutationSettled = false;
     try {
       const result = await api.updateVibeAgent(name, patch);
+      // A Bot's role is its Agent's description (docs/plans/bots.md D1), and an
+      // Agent write publishes no Bot event: read the Bots again so the strip, its
+      // card, and Edit profile show what was saved.
+      if (result.ok && isBot && 'description' in patch) void refreshBots();
       const settled = await settleSelectedMutation(operation, result.ok ? undefined : result);
       mutationSettled = true;
       if (!settled.ok) throw settled.error;
@@ -1839,6 +1853,11 @@ const AgentRow: React.FC<AgentRowProps> = ({ agent, isSelected, isDefault, model
               {t('common.systemSession')}
             </Badge>
           )}
+          {agent.bot && (
+            <Badge variant="success" className="px-1.5 py-0 text-[9px] font-mono uppercase" title={agent.bot.display_name || undefined}>
+              {t('bots.agents.badge')}
+            </Badge>
+          )}
         </div>
         {description && <div className="text-[11px] text-muted">{description}</div>}
       </div>
@@ -1972,6 +1991,10 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
   // System agents are locked everywhere; remote access locks every agent.
   const locked = isSystemAgent(agent) || !canEdit;
   const system = isSystemAgent(agent);
+  // While an Agent is a Bot it stays enabled and keeps its name and row
+  // (docs/plans/bots.md D1); the server refuses those writes, so they are not offered.
+  const isBot = Boolean(agent.bot);
+  const nameLocked = locked || isBot;
   // The built-in Agent of the built-in backend is part of the platform: it stays enabled.
   const alwaysEnabled = agent.source === 'builtin' && isBuiltinAgent(agent) && getBackendUiMeta(agent.backend).builtin;
   const [name, setName] = useState(agent.name);
@@ -2325,7 +2348,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
       cancelFieldEdit('name', serverSnapshotRef.current.name);
       return;
     }
-    if (locked) {
+    if (nameLocked) {
       cancelFieldEdit('name', serverSnapshotRef.current.name);
       return;
     }
@@ -2383,6 +2406,8 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
         </Button>
       </div>
 
+      <AgentBotCard agent={agent} canEdit={canEdit} />
+
       {/* Enable toggle — design.pen EWTY7 */}
       <div
         className={clsx(
@@ -2403,8 +2428,8 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
           onCheckedChange={(next) => {
             consumeBackgroundMutation(onChange({ enabled: next }));
           }}
-          disabled={!canEdit || alwaysEnabled}
-          title={canEdit ? undefined : t('agents.remoteReadOnlyHint')}
+          disabled={!canEdit || alwaysEnabled || isBot}
+          title={canEdit ? (isBot ? t('bots.agents.isBotHint') : undefined) : t('agents.remoteReadOnlyHint')}
           label={t('agents.detail.enabled')}
         />
       </div>
@@ -2428,7 +2453,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
             <Star className="size-3" />
             {t('agents.detail.defaultActive')}
           </Badge>
-        ) : !canEdit ? null : (
+        ) : !canEdit || isBot ? null : (
           <Button
             type="button"
             variant="outline"
@@ -2458,11 +2483,11 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
               if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
               if (e.key === 'Escape') cancelFieldEdit('name', serverSnapshotRef.current.name);
             }}
-            disabled={locked || renaming}
-            title={lockHint}
+            disabled={nameLocked || renaming}
+            title={isBot && !locked ? t('bots.agents.isBotHint') : lockHint}
             className="flex-1 bg-transparent text-[13px] font-medium text-foreground outline-none disabled:cursor-not-allowed disabled:opacity-70"
           />
-          {!locked && <Pencil className="size-3 shrink-0 text-muted" />}
+          {nameLocked ? (isBot && !locked ? <Lock className="size-3 shrink-0 text-muted" /> : null) : <Pencil className="size-3 shrink-0 text-muted" />}
         </div>
       </Field>
 
@@ -2716,7 +2741,8 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
         )}
         <div className="flex-1" />
         {canEdit ? (
-          !system ? (
+          // A Bot's Agent cannot be deleted; the card at the top says why.
+          isBot ? null : !system ? (
             <Button
               type="button"
               variant="destructive-soft"
@@ -2770,6 +2796,68 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
           return;
         }}
       />
+    </div>
+  );
+};
+
+// The Agent's Bot side (docs/plans/bots.md D1, D5): who it is as a Bot, with the
+// way into its conversation, or — for an eligible Vibey Agent — "Set as Bot",
+// which opens the add dialog's existing-Agent tab. Bots are the Owner's, so the
+// card is absent for everyone else.
+const AgentBotCard: React.FC<{ agent: VibeAgentFull; canEdit: boolean }> = ({ agent, canEdit }) => {
+  const { t } = useTranslation();
+  const navigate = useNavigate();
+  const { enabled, botForAgent, displayName, openProfile } = useBots();
+  if (!enabled) return null;
+  const bot = botForAgent(agent.name);
+  if (agent.bot || bot) {
+    const name = bot ? displayName(bot) : agent.bot?.display_name || agent.name;
+    const builtin = bot?.builtin ?? agent.bot?.builtin ?? false;
+    return (
+      <div className="flex flex-col gap-2.5 rounded-[10px] border border-mint/40 bg-mint-soft px-3.5 py-3">
+        <div className="flex items-center gap-2.5">
+          {bot && <BotAvatar avatar={bot.avatar} name={name} size={32} />}
+          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <span className="truncate text-[13px] font-bold text-foreground">{t('bots.agents.isBotTitle', { name })}</span>
+            <span className="text-[11px] leading-relaxed text-muted">
+              {builtin ? t('bots.agents.isMainBotHint') : t('bots.agents.isBotHint')}
+            </span>
+          </div>
+        </div>
+        {bot && (
+          <div className="flex flex-wrap items-center gap-2">
+            <Button type="button" variant="outline" size="xs" onClick={() => navigate(`/chat/${encodeURIComponent(bot.session_id)}`)}>
+              {t('bots.agents.openConversation')}
+            </Button>
+            {canEdit && (
+              <Button type="button" variant="ghost" size="xs" onClick={() => openProfile({ kind: 'edit', handle: bot.handle })}>
+                {t('bots.agents.editProfile')}
+              </Button>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
+  // Disabled Agents still show the way in, with what to do first.
+  if (!canEdit || !eligibleForBot({ ...agent, enabled: true })) return null;
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-[10px] border border-border-strong bg-surface-2 px-3.5 py-3">
+      <div className="flex min-w-0 flex-col gap-0.5">
+        <span className="text-[13px] font-bold text-foreground">{t('bots.agents.setAsBot')}</span>
+        <span className="text-[11px] text-muted">
+          {agent.enabled ? t('bots.agents.setAsBotHint') : t('bots.agents.setAsBotNeedsEnabled')}
+        </span>
+      </div>
+      <Button
+        type="button"
+        variant="outline"
+        size="xs"
+        disabled={!agent.enabled}
+        onClick={() => openProfile({ kind: 'create', tab: 'agent', agentName: agent.name })}
+      >
+        {t('bots.agents.setAsBot')}
+      </Button>
     </div>
   );
 };
