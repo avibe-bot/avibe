@@ -351,7 +351,7 @@ export const McpHubSection: React.FC = () => {
         ) : null}
       </div>
 
-      <div className={clsx('grid gap-5', current ? 'lg:grid-cols-[minmax(0,1fr)_400px]' : 'grid-cols-1')}>
+      <div className={clsx('grid gap-5', 'grid-cols-1', current && 'lg:grid-cols-[minmax(0,1fr)_400px]')}>
         <div className="flex min-w-0 flex-col gap-2">
           {filtered.length === 0 ? (
             <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-border bg-surface px-6 py-12 text-center">
@@ -411,7 +411,7 @@ export const McpHubSection: React.FC = () => {
         </div>
 
         {current ? (
-          <div className="flex flex-col gap-3.5 self-start rounded-2xl border border-border-strong bg-surface p-5">
+          <div className="flex min-w-0 flex-col gap-3.5 self-start rounded-2xl border border-border-strong bg-surface p-5">
             <div className="flex items-start gap-3">
               <span className="flex size-10 shrink-0 items-center justify-center rounded-[10px] border border-border bg-surface-3">
                 {current.transport === 'stdio' ? <Terminal className="size-5" /> : <Globe className="size-5" />}
