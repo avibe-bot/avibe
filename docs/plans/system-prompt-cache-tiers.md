@@ -322,11 +322,31 @@ Background. No database migration.
 
 ## Open items
 
-- Claude prefix breaks while warm inside a Turn (284 events, 118 M tokens,
-  21% of writes in the sample) are not caused by the system prompt. Likely
-  causes are clearing old tool results at 80% of the threshold, checkpoints,
-  and Source fallback; investigate separately, since it is a larger leak than
-  system prompt changes. OpenAI shows the same pattern (1,338 events).
+- **Found (2026-11-01): Claude prefix breaks while warm inside a Turn come from
+  the relay's account stickiness, not from Avibe.** 234 of the 285 such breaks
+  (82%) fall on the second request of a Turn; the rate there is 12.3%, against
+  0.1 to 2% at every later position. Each reads only the 1-hour tools and
+  system entries (about 13 k tokens) and rewrites the rest of the conversation
+  (about 118 M tokens in the sample, 21% of Claude writes). The Anthropic
+  Source is the owner's `sub2api`-based relay, which pools upstream accounts.
+  Without a Claude Code `metadata.user_id`, its sticky key is the text of the
+  first message that carries `cache_control`
+  (`GatewayService.extractCacheableContent`). Vibey marks the last two user
+  messages, so on the second request that message is the Turn's new input, its
+  text changes the key, and the request may land on another account whose
+  cache holds only the shared prefix. A tool-result message has no text block,
+  so the key falls back to the system prompt and returns to the first account,
+  which is why later requests do not break. The same can happen at a Turn
+  start after a Turn with no tool calls, so part of the 52 Turn-start breaks
+  above is this too.
+  - Fix at the relay: derive the Anthropic sticky key from what stays fixed in
+    a conversation (system and tools plus the first message), as its OpenAI
+    path already does, not from a moving breakpoint. Saves about 13% of the
+    Claude input-side cost in the sample, and the re-prefill latency of every
+    affected second request.
+  - OpenAI breaks are spread evenly over positions (3 to 7%), so they are not
+    this mechanism; send a Session-scoped `prompt_cache_key` (follow-up 3),
+    which the relay also honors as an explicit session id, then measure again.
 - OpenAI responses on `gpt-6-astra` report no cache-write tokens; verify
   whether the Source reports them or the meter misses them.
 - Whether to make `N` configurable.
