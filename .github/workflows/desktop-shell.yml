@@ -145,6 +145,5 @@ jobs:
         if: runner.os == 'macOS'
         run: >
           python ../scripts/desktop_release.py verify-macos-build-version
-          --binary target/debug/avibe-desktop
+          --binary target/debug/avibe-desktop=11.0
           --minimum-sdk 26.0
-          --maximum-deployment-target 11.0

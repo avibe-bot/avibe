@@ -85,22 +85,22 @@ def _numeric_version(value: str) -> tuple[int, ...]:
     return parts
 
 
-def parse_macos_build_versions(output: str) -> list[tuple[str, str]]:
-    records: list[tuple[str, str]] = []
+def parse_macos_build_versions(output: str) -> list[tuple[str, str, str]]:
+    records: list[tuple[str, str, str]] = []
     command: str | None = None
-    minos: str | None = None
+    deployment_target: str | None = None
     sdk: str | None = None
 
     def finish_command() -> None:
-        nonlocal command, minos, sdk
-        if command == "LC_BUILD_VERSION":
-            if minos is None or sdk is None:
-                raise ValueError("Incomplete LC_BUILD_VERSION command")
-            _numeric_version(minos)
+        nonlocal command, deployment_target, sdk
+        if command in {"LC_BUILD_VERSION", "LC_VERSION_MIN_MACOSX"}:
+            if deployment_target is None or sdk is None:
+                raise ValueError(f"Incomplete {command} command")
+            _numeric_version(deployment_target)
             _numeric_version(sdk)
-            records.append((minos, sdk))
+            records.append((command, deployment_target, sdk))
         command = None
-        minos = None
+        deployment_target = None
         sdk = None
 
     for line in output.splitlines():
@@ -111,24 +111,43 @@ def parse_macos_build_versions(output: str) -> list[tuple[str, str]]:
             command = fields[1]
         elif command == "LC_BUILD_VERSION" and len(fields) == 2:
             if fields[0] == "minos":
-                minos = fields[1]
+                deployment_target = fields[1]
+            elif fields[0] == "sdk":
+                sdk = fields[1]
+        elif command == "LC_VERSION_MIN_MACOSX" and len(fields) == 2:
+            if fields[0] == "version":
+                deployment_target = fields[1]
             elif fields[0] == "sdk":
                 sdk = fields[1]
     finish_command()
     if not records:
-        raise ValueError("Mach-O binary has no LC_BUILD_VERSION command")
+        raise ValueError(
+            "Mach-O binary has no LC_BUILD_VERSION or LC_VERSION_MIN_MACOSX command"
+        )
     return records
 
 
+def parse_macos_binary_spec(spec: str) -> tuple[Path, str]:
+    try:
+        binary, maximum_deployment_target = spec.rsplit("=", 1)
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid macOS binary spec {spec!r}; expected PATH=MAX_DEPLOYMENT_TARGET"
+        ) from exc
+    if not binary:
+        raise ValueError(f"Invalid macOS binary spec {spec!r}: path is empty")
+    _numeric_version(maximum_deployment_target)
+    return Path(binary), maximum_deployment_target
+
+
 def verify_macos_build_versions(
-    binaries: list[Path],
+    binaries: list[tuple[Path, str]],
     *,
     minimum_sdk: str,
-    maximum_deployment_target: str,
 ) -> None:
     minimum_sdk_value = _numeric_version(minimum_sdk)
-    maximum_deployment_target_value = _numeric_version(maximum_deployment_target)
-    for binary in binaries:
+    for binary, maximum_deployment_target in binaries:
+        maximum_deployment_target_value = _numeric_version(maximum_deployment_target)
         if binary.is_symlink() or not binary.is_file():
             raise ValueError(f"Missing or invalid Mach-O binary: {binary}")
         architectures = subprocess.check_output(
@@ -148,22 +167,23 @@ def verify_macos_build_versions(
             if len(records) != 1:
                 raise ValueError(
                     f"{binary} [{architecture}]: expected exactly one "
-                    f"LC_BUILD_VERSION command, got {len(records)}"
+                    "LC_BUILD_VERSION or LC_VERSION_MIN_MACOSX command, "
+                    f"got {len(records)}"
                 )
-            minos, sdk = records[0]
+            command, deployment_target, sdk = records[0]
             print(
                 f"{binary} [{architecture}]: "
-                f"LC_BUILD_VERSION minos {minos}, sdk {sdk}"
+                f"{command} deployment target {deployment_target}, sdk {sdk}"
             )
             if _numeric_version(sdk) < minimum_sdk_value:
                 raise ValueError(
-                    f"{binary} [{architecture}]: expected LC_BUILD_VERSION sdk >= "
+                    f"{binary} [{architecture}]: expected {command} sdk >= "
                     f"{minimum_sdk}, got {sdk}"
                 )
-            if _numeric_version(minos) > maximum_deployment_target_value:
+            if _numeric_version(deployment_target) > maximum_deployment_target_value:
                 raise ValueError(
-                    f"{binary} [{architecture}]: expected LC_BUILD_VERSION minos <= "
-                    f"{maximum_deployment_target}, got {minos}"
+                    f"{binary} [{architecture}]: expected {command} deployment "
+                    f"target <= {maximum_deployment_target}, got {deployment_target}"
                 )
 
 
@@ -551,9 +571,13 @@ def main() -> None:
     resolver.add_argument("--tag", required=True)
     resolver.add_argument("--output", type=Path, required=True)
     build_version = sub.add_parser("verify-macos-build-version")
-    build_version.add_argument("--binary", action="append", type=Path, required=True)
+    build_version.add_argument(
+        "--binary",
+        action="append",
+        required=True,
+        metavar="PATH=MAX_DEPLOYMENT_TARGET",
+    )
     build_version.add_argument("--minimum-sdk", default="26.0")
-    build_version.add_argument("--maximum-deployment-target", default="11.0")
     prep = sub.add_parser("prepare")
     prep.add_argument("--version", required=True)
     prep.add_argument("--tag", default="")
@@ -596,9 +620,8 @@ def main() -> None:
             stream.write("".join(f"{key}={value}\n" for key, value in resolve(args["tag"]).items()))
     elif command == "verify-macos-build-version":
         verify_macos_build_versions(
-            args["binary"],
+            [parse_macos_binary_spec(spec) for spec in args["binary"]],
             minimum_sdk=args["minimum_sdk"],
-            maximum_deployment_target=args["maximum_deployment_target"],
         )
     elif command == "prepare":
         prepare(**args)

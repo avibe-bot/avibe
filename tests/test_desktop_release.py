@@ -510,7 +510,36 @@ def test_manual_record_names_the_layers_it_produced(tmp_path, profile, layers):
     assert (work / "manual" / "Avibe_3.1.2-dev.1_aarch64-apple-darwin.SIGNATURE").read_text() == layers
 
 
-def test_macos_build_version_parser_requires_the_pinned_sdk_and_caps_deployment_target(
+def test_macos_build_version_parser_supports_both_platform_commands():
+    def build_version(minos="11.0", sdk="26.5"):
+        return f"""
+Load command 9
+      cmd LC_BUILD_VERSION
+  cmdsize 32
+ platform 1
+    minos {minos}
+      sdk {sdk}
+   ntools 1
+"""
+
+    def version_min(version="10.13", sdk="26.5"):
+        return f"""
+Load command 9
+      cmd LC_VERSION_MIN_MACOSX
+  cmdsize 16
+  version {version}
+      sdk {sdk}
+"""
+
+    assert release.parse_macos_build_versions(build_version()) == [
+        ("LC_BUILD_VERSION", "11.0", "26.5")
+    ]
+    assert release.parse_macos_build_versions(version_min()) == [
+        ("LC_VERSION_MIN_MACOSX", "10.13", "26.5")
+    ]
+
+
+def test_macos_build_version_verifier_checks_each_binary_ceiling(
     tmp_path, monkeypatch, capsys
 ):
     binary = tmp_path / "avibe-desktop"
@@ -527,7 +556,16 @@ Load command 9
    ntools 1
 """
 
-    def verify(output, architectures="x86_64"):
+    def version_min(version="10.13", sdk="26.5"):
+        return f"""
+Load command 9
+      cmd LC_VERSION_MIN_MACOSX
+  cmdsize 16
+  version {version}
+      sdk {sdk}
+"""
+
+    def verify(output, maximum_deployment_target, architectures="x86_64"):
         def check_output(command, **kwargs):
             if command[:2] == ["lipo", "-archs"]:
                 return architectures
@@ -536,21 +574,31 @@ Load command 9
 
         monkeypatch.setattr(release.subprocess, "check_output", check_output)
         release.verify_macos_build_versions(
-            [binary],
+            [(binary, maximum_deployment_target)],
             minimum_sdk="26.0",
-            maximum_deployment_target="11.0",
         )
 
-    verify(build_version(minos="10.13"))
-    assert f"{binary} [x86_64]: LC_BUILD_VERSION minos 10.13, sdk 26.5" in capsys.readouterr().out
-    verify(build_version(minos="11.0"), architectures="arm64")
-    assert f"{binary} [arm64]: LC_BUILD_VERSION minos 11.0, sdk 26.5" in capsys.readouterr().out
+    verify(version_min(), "11.0")
+    assert (
+        f"{binary} [x86_64]: LC_VERSION_MIN_MACOSX deployment target 10.13, sdk 26.5"
+        in capsys.readouterr().out
+    )
+    verify(build_version(minos="13.0"), "13.0", architectures="arm64")
+    assert (
+        f"{binary} [arm64]: LC_BUILD_VERSION deployment target 13.0, sdk 26.5"
+        in capsys.readouterr().out
+    )
     for output, message in (
         (build_version(sdk="15.5"), "sdk >= 26.0"),
-        (build_version(minos="13.0"), "minos <= 11.0"),
+        (build_version(minos="14.0"), "deployment target <= 13.0"),
     ):
         with pytest.raises(ValueError, match=message):
-            verify(output)
+            verify(output, "13.0")
+
+    with pytest.raises(ValueError, match="no LC_BUILD_VERSION or LC_VERSION_MIN_MACOSX"):
+        verify("Load command 1\n      cmd LC_SYMTAB\n", "11.0")
+    with pytest.raises(ValueError, match="expected exactly one"):
+        verify(f"{build_version()}\n{version_min()}", "11.0")
 
 
 def test_macos_desktop_builds_pin_xcode_and_check_link_metadata():
@@ -602,13 +650,16 @@ def test_macos_desktop_builds_pin_xcode_and_check_link_metadata():
         )
         assert "verify-macos-build-version" in check["run"]
         assert "--minimum-sdk 26.0" in check["run"]
-        assert "--maximum-deployment-target 11.0" in check["run"]
+        assert "target/debug/avibe-desktop=11.0" in check["run"] or (
+            "Contents/MacOS/$executable=11.0" in check["run"]
+        )
     package_check = next(
         item
         for item in package["steps"]
         if item.get("name") == "Verify macOS SDK and deployment target ceiling"
     )
-    assert "Contents/Helpers/cua-driver" in package_check["run"]
+    assert 'Contents/MacOS/$executable=11.0' in package_check["run"]
+    assert "Contents/Helpers/cua-driver=13.0" in package_check["run"]
 
 
 def test_workflow_signs_every_macos_layer_before_recording():
