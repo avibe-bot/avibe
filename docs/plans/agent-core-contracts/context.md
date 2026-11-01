@@ -154,9 +154,10 @@ route override (`harness/context.py`, `CACHE_TTLS`):
 
 | Route | Lifetime |
 | --- | --- |
-| provider `anthropic` on the Anthropic protocol: the message breakpoints' `cache_control` is ephemeral, with no `ttl` | 300 s, refreshed on use |
+| provider `anthropic` on the Anthropic protocol: official Claude requests carry `ttl: 1h` on the tool, system, and message breakpoints; a rejected route or a request without a static prefix carries the default ephemeral breakpoints | 3,600 s when the one-hour fields are sent; 300 s otherwise, refreshed on use |
+| non-Claude models and other vendors on the Anthropic protocol use the default ephemeral breakpoints | 300 s, refreshed on use |
 | provider `openai`, protocol `openai_responses`, and a model id `gpt-<major>[.<minor>][-<suffix>]` from GPT-5.6: `prompt_cache_options.ttl` defaults to 30 minutes; an explicit route override may request `30m` or the opt-in `12h` mode | 1,800 s by default |
-| any other route, or one not identified unambiguously (older OpenAI models, `openai_chat`, other vendors, relays) | 3,600 s |
+| any other route, or one not identified unambiguously (older OpenAI models, `openai_chat`, relays) | 3,600 s |
 | a nonempty route's validated `cache_ttl` override | the configured 5m, 30m, 1h, or 12h estimate; official OpenAI Responses GPT-5.6+ routes accept explicit `30m` or `12h` wire modes |
 
 Earlier supported OpenAI models may expose a separate policy-dependent `prompt_cache_retention` mode (`in_memory` or `24h`), but Avibe does not infer or send that option; those routes remain on the conservative built-in estimate unless a route capability explicitly supports it. The official 12-hour Responses mode has a 2.5x cache-write rate versus 1.25x for the 30-minute default, while reads use the same cached-input rate; Avibe sends that opt-in only on confirmed official GPT-5.6+ Responses routes and meters the two write lifetimes separately. Clearing a warm cache forces a full-price re-read of the context, while skipping a clear on a cold one only keeps

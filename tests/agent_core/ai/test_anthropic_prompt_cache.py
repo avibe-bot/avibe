@@ -1,7 +1,7 @@
 """Anthropic prompt-cache breakpoints, read on the wire at the adapter's HTTP boundary.
 
-A Claude route caches its static prefix (tools, then system) for an hour and the conversation for the default five
-minutes; every other route keeps the default everywhere. An endpoint that rejects the field never fails a turn
+A Claude route caches its static prefix and conversation breakpoints for one hour; every other route keeps Anthropic's
+five-minute default. An endpoint that rejects the field never fails a turn
 (C-2 ``conversion-tables.md``, Anthropic "Cache" row). Usage parsing of the TTL breakdown is pinned by
 ``test_provider_adapters.py`` (``test_anthropic_usage_*``).
 """
@@ -16,9 +16,10 @@ from typing import Any
 import httpx
 import pytest
 
-from core.agent_core.ai.anthropic import AnthropicAdapter
+from core.agent_core.ai.anthropic import AnthropicAdapter, cache_ttl_s as anthropic_cache_ttl_s
 from core.agent_core.ai.provider import Done, ModelEndpoint, ModelRequest, ProviderError
 from core.agent_core.cancel import CancelToken
+from core.agent_core.harness.context import cache_ttl_s as context_cache_ttl_s
 from core.agent_core.messages import AssistantMessage, Origin, TextBlock, ToolCallBlock, ToolResultMessage, UserMessage
 from core.agent_core.tools.base import ToolSpec
 from core.handlers.model_hub.provenance import produce_turn_outcome, render_turn_outcome_copy
@@ -74,6 +75,7 @@ def _request(
     messages: tuple[Any, ...] = CONVERSATION,
     base_url: str | None = None,
     source_id: str | None = None,
+    cache_ttl: str | None = None,
 ) -> ModelRequest:
     # A fresh endpoint per request unless one is given: a route's TTL memory lasts the process.
     return ModelRequest(
@@ -84,6 +86,7 @@ def _request(
             "token",
             provider=provider,
             source_id=source_id,
+            cache_ttl=cache_ttl,
         ),
         system=system,
         messages=messages,
@@ -164,8 +167,8 @@ async def test_only_a_claude_route_caches_its_static_prefix_for_an_hour(
         assert _breakpoints(body) == [
             ("tools.1", prefix),
             ("system.0", prefix),
-            ("messages.0.content.0", DEFAULT),
-            ("messages.2.content.0", DEFAULT),
+            ("messages.0.content.0", prefix),
+            ("messages.2.content.0", prefix),
         ]
     if prefix is not HOUR:
         # Today's request, unchanged: no route but a Claude one ever sees the field.
@@ -186,16 +189,14 @@ async def test_only_a_claude_route_caches_its_static_prefix_for_an_hour(
 async def test_a_longer_cache_lifetime_never_follows_a_shorter_one(
     system: str, tools: tuple[ToolSpec, ...], messages: tuple[Any, ...],
 ) -> None:
-    # Anthropic rejects a 1h breakpoint evaluated after a 5m one; tools, system, messages is its evaluation order.
+    # A 1h breakpoint must never follow a shorter one. Supported Claude requests use one hour for all breakpoints;
+    # requests without a static prefix use Anthropic's default everywhere.
     _raw, body = await _wire(_request(system=system, tools=tools, messages=messages))
-
+    expected = HOUR if system or tools else DEFAULT
     lifetimes = [LIFETIME_S[cache_control.get("ttl")] for _, cache_control in _breakpoints(body)]
     assert lifetimes == sorted(lifetimes, reverse=True)
     assert len(lifetimes) <= 4
-    assert all(
-        where.startswith(("tools.", "system.")) == (cache_control == HOUR)
-        for where, cache_control in _breakpoints(body)
-    )
+    assert all(cache_control == expected for _, cache_control in _breakpoints(body))
 
 
 @pytest.mark.parametrize("rejection", [ANTHROPIC_REJECTION, GATEWAY_REJECTION], ids=["endpoint", "model-hub"])
@@ -215,7 +216,7 @@ async def test_a_rejected_ttl_is_retried_once_without_it_and_remembered_for_the_
     caplog.set_level(logging.WARNING, logger="core.agent_core.ai.anthropic")
     # Two Sources behind one gateway URL, as every Vibey hop is.
     gateway = f"https://{uuid.uuid4().hex}.test/vibey/v1"
-    request = _request(base_url=gateway, source_id="src_relayaaaa01")
+    request = _request(base_url=gateway, source_id="src_relayaaaa01", cache_ttl="1h")
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         runs = [
             await _run(client, request),
@@ -237,6 +238,7 @@ async def test_a_rejected_ttl_is_retried_once_without_it_and_remembered_for_the_
     assert other_retried == _without_ttl(other_rejected)
     assert _carries_ttl(source_rejected)
     assert source_retried == _without_ttl(source_rejected)
+    assert context_cache_ttl_s(request.endpoint, request=request) == 300
     for events in runs:
         # One terminal per run: a rejected attempt never reaches the consumer.
         terminals = [event for event in events if isinstance(event, (Done, ProviderError))]
@@ -276,3 +278,22 @@ async def test_a_rejection_the_ttl_did_not_cause_is_surfaced_without_a_retry(pro
     assert events[-1].kind == "invalid_request"
     # The route was not downgraded: its next request asks for the hour again.
     assert _carries_ttl(sent[1]) == (provider == "anthropic")
+
+
+@pytest.mark.parametrize(
+    ("provider", "model_id", "cache", "expected"),
+    [
+        ("anthropic", CLAUDE, "default", 3_600),
+        ("anthropic", "gpt-5", "default", 300),
+        ("custom", CLAUDE, "default", 300),
+        ("anthropic", CLAUDE, "none", 300),
+    ],
+)
+async def test_assumed_cache_lifetime_matches_the_breakpoints_on_the_wire(
+    provider: str, model_id: str, cache: str, expected: int,
+) -> None:
+    request = _request(provider, model_id, cache=cache)
+    _raw, body = await _wire(request)
+    assert (3_600 if _carries_ttl(body) else 300) == expected
+    assert anthropic_cache_ttl_s(request) == expected
+    assert context_cache_ttl_s(request.endpoint, request=request) == expected

@@ -95,6 +95,27 @@ def test_prompt_cache_override_rejects_unsupported_official_values():
         validate_cache_ttl_override(config, "vibey", route)
 
 
+def test_prompt_cache_override_rejects_unsupported_official_anthropic_values():
+    source = _source("src_anthropic001", ("claude-opus-4-6",), vendor="anthropic")
+    config = ModelHubConfig(sources=[source])
+    route = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source.id, "claude-opus-4-6"),),
+        cache_ttl="5m",
+    )
+    with pytest.raises(ValueError, match="only 1h"):
+        validate_cache_ttl_override(config, "vibey", route)
+
+
+def test_prompt_cache_override_accepts_the_official_anthropic_one_hour_mode():
+    source = _source("src_anthropic001", ("claude-opus-4-6",), vendor="anthropic")
+    config = ModelHubConfig(sources=[source])
+    route = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source.id, "claude-opus-4-6"),),
+        cache_ttl="1h",
+    )
+    validate_cache_ttl_override(config, "vibey", route)
+
+
 def test_prompt_cache_override_is_rejected_for_non_vibey_routes():
     source = _source("src_openai001", ("gpt-6-astra",), vendor="openai")
     config = ModelHubConfig(sources=[source])

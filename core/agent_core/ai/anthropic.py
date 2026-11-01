@@ -83,9 +83,8 @@ PAUSE_UNSERVED_MESSAGE = "the Source that served the paused turn cannot continue
 #: A continuation goes out only as the first send plus the paused response exactly as served (§4.3).
 PAUSE_ALTERED_MESSAGE = "the paused turn cannot be sent back as it was served"
 _MAX_CACHE_BREAKPOINTS = 4
-# A Claude route caches its static prefix, the tools and then the system prompt, for an hour (``_prefix_ttl``); the
-# conversation's breakpoints keep the default five minutes. Anthropic evaluates breakpoints as tools, system, messages
-# and requires every longer lifetime to come before every shorter one, which this placement satisfies.
+# A Claude route caches its static prefix and the conversation breakpoints for an hour (``_prefix_ttl``); every
+# longer lifetime precedes every shorter one because Anthropic evaluates breakpoints as tools, system, messages.
 _PREFIX_TTL = "1h"
 # Routes whose endpoint rejected the field. They keep the default lifetime for the rest of the process.
 _TTL_REJECTED_ROUTES: set[tuple[str, str | None, str, str]] = set()
@@ -1071,7 +1070,7 @@ def build_messages_payload(
 ) -> dict[str, Any]:
     """Build the Anthropic Messages request body.
 
-    ``prefix_ttl`` is the lifetime of the tool and system breakpoints; message breakpoints keep the default.
+    ``prefix_ttl`` is the lifetime of every cache breakpoint in the request: tools, system, and messages.
     """
 
     payload_messages: list[dict[str, Any]] = []
@@ -1095,7 +1094,7 @@ def build_messages_payload(
     if request.cache == "default" and request.system:
         system = [{"type": "text", "text": request.system, "cache_control": _cache_control(prefix_ttl)}]
     if request.cache == "default":
-        _mark_message_breakpoints(payload_messages)
+        _mark_message_breakpoints(payload_messages, prefix_ttl)
     payload: dict[str, Any] = {
         "model": request.endpoint.model_id,
         "max_tokens": request.max_tokens,
@@ -1232,7 +1231,7 @@ def _anthropic_user_content(
     return result
 
 
-def _mark_message_breakpoints(messages: list[dict[str, Any]]) -> None:
+def _mark_message_breakpoints(messages: list[dict[str, Any]], ttl: str | None = None) -> None:
     candidates = [
         index
         for index, message in enumerate(messages)
@@ -1241,17 +1240,28 @@ def _mark_message_breakpoints(messages: list[dict[str, Any]]) -> None:
     for index in candidates[-2:]:
         content = messages[index]["content"]
         if isinstance(content, str):
-            messages[index]["content"] = [{"type": "text", "text": content, "cache_control": _cache_control()}]
+            messages[index]["content"] = [{"type": "text", "text": content, "cache_control": _cache_control(ttl)}]
         elif content:
             last = content[-1]
             if isinstance(last, dict) and last.get("type") in {"text", "image", "tool_result"}:
-                last["cache_control"] = _cache_control()
+                last["cache_control"] = _cache_control(ttl)
 
 
 def _cache_control(ttl: str | None = None) -> dict[str, str]:
     """One breakpoint; without ``ttl`` it keeps Anthropic's default five-minute lifetime."""
 
     return {"type": "ephemeral", "ttl": ttl} if ttl else {"type": "ephemeral"}
+
+
+def cache_ttl_s(request: ModelRequest) -> float:
+    """The cache lifetime of this request's Anthropic breakpoints, in seconds.
+
+    This is the owner of the route predicate used by both the wire builder and C-9's cold-cache clock: a supported
+    Claude route sends one-hour breakpoints, while a rejected route or any other request keeps Anthropic's five-minute
+    default.
+    """
+
+    return 3_600.0 if _prefix_ttl(request) == _PREFIX_TTL else 300.0
 
 
 def _prefix_ttl(request: ModelRequest) -> str | None:

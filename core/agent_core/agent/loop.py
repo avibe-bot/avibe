@@ -1694,7 +1694,7 @@ class Agent:
     # C-10 section 7), ``_commit_context`` (3), ``self._attempts`` with ``_settle_attempts`` and ``side_turn``'s
     # one audit (4), ``harness.context.budget`` (5), and ``_model`` (6, admission).
 
-    def _cache_cold(self, endpoint: ModelEndpoint) -> bool:
+    def _cache_cold(self, request: ModelRequest) -> bool:
         """The provider cache of the request's route has gone unused longer than it stays warm (section 3).
 
         Its use is the latest model call's end or response row's commit served by the route's upstream cache
@@ -1708,8 +1708,8 @@ class Agent:
             if row.kind == "response" and row.created_at is not None:
                 cache = _cache_of(row.message.origin)
                 used[cache] = max(used.get(cache, row.created_at), row.created_at)
-        last = used.get(_cache_of(endpoint_origin(endpoint)), max(used.values(), default=None))
-        return last is not None and self.context.clock() - last > cache_ttl_s(endpoint)
+        last = used.get(_cache_of(endpoint_origin(request.endpoint)), max(used.values(), default=None))
+        return last is not None and self.context.clock() - last > cache_ttl_s(request.endpoint, request=request)
 
     async def _prepare_conversation(self, system: str, selected: ModelSelection) -> _PreparedConversation:
         """Compose and budget before any context transition; also used by dry_tick."""
@@ -1729,7 +1729,7 @@ class Agent:
         if (not plan.can_fit and not minimal_checked) or ladder.refused:
             return "context_relief"
         if self.context.clear_tool_results and (
-            plan.est >= CLEAR_SOFT_RATIO * plan.threshold or self._cache_cold(request.endpoint)
+            plan.est >= CLEAR_SOFT_RATIO * plan.threshold or self._cache_cold(request)
         ) and clearable_results(view):
             return "clear_tool_results"
         if plan.est >= plan.threshold and not ladder.compacted and not self._stopped:

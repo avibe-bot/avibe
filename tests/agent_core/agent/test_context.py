@@ -496,7 +496,10 @@ def test_a_checkpoint_or_another_route_invalidates_the_anchor():
 @pytest.mark.parametrize(
     "protocol,provider,model,lifetime",
     [
-        ("anthropic", "anthropic", "claude-opus-5-5", 300),  # message breakpoints: ephemeral, no ttl
+        ("anthropic", "anthropic", "claude-opus-5-5", 3_600),  # official Claude breakpoints: ttl 1h
+        ("anthropic", "anthropic", "gpt-5", 300),  # non-Claude Anthropic route: default ephemeral
+        ("anthropic", "custom", "claude-opus-5-5", 300),  # other vendor on Anthropic protocol
+        ("anthropic", "moonshot", "kimi-k2", 300),  # other vendor on Anthropic protocol
         ("openai_responses", "openai", "gpt-6-astra", 1_800),
         ("openai_responses", "openai", "gpt-6.1-sol", 1_800),
         ("openai_chat", "openai", "gpt-5.6-mini", 3_600),  # OpenAI cache retention is official Responses-only
@@ -506,8 +509,8 @@ def test_a_checkpoint_or_another_route_invalidates_the_anchor():
         ("openai_responses", "openai", "my-gpt-6-astra", 3_600),  # parsed whole, never searched for
         ("openai_chat", "openrouter", "openai/gpt-6-astra", 3_600),  # a relay
         ("openai_responses", "xai", "grok/grok-4.6", 3_600),
-        ("anthropic", "moonshot", "kimi-k2", 3_600),  # another vendor on the Anthropic protocol
-        ("anthropic", "test-provider", "test-model", 3_600),
+        ("anthropic", "moonshot", "kimi-k2", 300),  # another vendor on the Anthropic protocol
+        ("anthropic", "test-provider", "test-model", 300),
     ],
 )
 def test_a_route_cache_lives_as_long_as_its_family_documents_else_an_hour(protocol, provider, model, lifetime):
