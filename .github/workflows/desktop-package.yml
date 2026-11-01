@@ -61,7 +61,6 @@ jobs:
       DESKTOP_CACHE_WARMUP: ${{ !inputs.release_tag && (github.event_name == 'push' || github.event_name == 'schedule') }}
       DESKTOP_VERSION: ${{ inputs.version || '0.0.0' }}
       DEVELOPER_DIR: ${{ matrix.developer_dir }}
-      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macosx_deployment_target }}
     strategy:
       fail-fast: false
       matrix:
@@ -69,23 +68,20 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-26
             developer_dir: /Applications/Xcode_26.6.app/Contents/Developer
-            macosx_deployment_target: "11.0"
-            cache_scope: macos11-
+            cache_scope: default-target-
             cache_separator: "-"
             bundle: app
             artifact_glob: desktop/target/release/bundle/dmg/*.dmg
           - target: x86_64-apple-darwin
             os: macos-26-intel
             developer_dir: /Applications/Xcode_26.6.app/Contents/Developer
-            macosx_deployment_target: "11.0"
-            cache_scope: macos11-
+            cache_scope: default-target-
             cache_separator: "-"
             bundle: app
             artifact_glob: desktop/target/release/bundle/dmg/*.dmg
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             developer_dir: ""
-            macosx_deployment_target: ""
             cache_scope: ""
             cache_separator: ""
             bundle: nsis
@@ -240,7 +236,7 @@ jobs:
           path: |
             desktop/src-tauri/binaries/cua-driver-${{ matrix.target }}
             desktop/src-tauri/binaries/cua-driver-${{ matrix.target }}.provenance.json
-          key: cua-driver-${{ matrix.target }}-${{ steps.toolchain.outputs.apple }}-macos${{ matrix.macosx_deployment_target }}-${{ hashFiles('desktop/cua-driver/**', 'desktop/scripts/prepare-cua-driver.py') }}
+          key: cua-driver-${{ matrix.target }}-${{ steps.toolchain.outputs.apple }}-default-target-${{ hashFiles('desktop/cua-driver/**', 'desktop/scripts/prepare-cua-driver.py') }}
 
       - name: Prepare pinned Cua Driver sidecar
         if: runner.os == 'macOS'
@@ -278,7 +274,7 @@ jobs:
           --features bundled-runtime
           --config tauri.release.conf.json
 
-      - name: Verify macOS SDK and deployment target
+      - name: Verify macOS SDK and deployment target ceiling
         if: runner.os == 'macOS'
         working-directory: desktop
         shell: bash
@@ -290,7 +286,7 @@ jobs:
             --binary "$app/Contents/MacOS/$executable" \
             --binary "$app/Contents/Helpers/cua-driver" \
             --minimum-sdk 26.0 \
-            --deployment-target 11.0
+            --maximum-deployment-target 11.0
 
       - name: Save Rust build cache
         if: ${{ !inputs.release_tag && steps.rust-cache.outputs.cache-hit != 'true' }}

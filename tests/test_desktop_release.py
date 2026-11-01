@@ -510,8 +510,8 @@ def test_manual_record_names_the_layers_it_produced(tmp_path, profile, layers):
     assert (work / "manual" / "Avibe_3.1.2-dev.1_aarch64-apple-darwin.SIGNATURE").read_text() == layers
 
 
-def test_macos_build_version_parser_requires_the_pinned_sdk_and_deployment_target(
-    tmp_path, monkeypatch
+def test_macos_build_version_parser_requires_the_pinned_sdk_and_caps_deployment_target(
+    tmp_path, monkeypatch, capsys
 ):
     binary = tmp_path / "avibe-desktop"
     binary.write_bytes(b"Mach-O fixture")
@@ -527,32 +527,30 @@ Load command 9
    ntools 1
 """
 
-    monkeypatch.setattr(
-        release.subprocess,
-        "check_output",
-        lambda command, **kwargs: build_version(),
-    )
-    release.verify_macos_build_versions(
-        [binary],
-        minimum_sdk="26.0",
-        deployment_target="11.0",
-    )
+    def verify(output, architectures="x86_64"):
+        def check_output(command, **kwargs):
+            if command[:2] == ["lipo", "-archs"]:
+                return architectures
+            assert command[:2] == ["otool", "-arch"]
+            return output
 
+        monkeypatch.setattr(release.subprocess, "check_output", check_output)
+        release.verify_macos_build_versions(
+            [binary],
+            minimum_sdk="26.0",
+            maximum_deployment_target="11.0",
+        )
+
+    verify(build_version(minos="10.13"))
+    assert f"{binary} [x86_64]: LC_BUILD_VERSION minos 10.13, sdk 26.5" in capsys.readouterr().out
+    verify(build_version(minos="11.0"), architectures="arm64")
+    assert f"{binary} [arm64]: LC_BUILD_VERSION minos 11.0, sdk 26.5" in capsys.readouterr().out
     for output, message in (
         (build_version(sdk="15.5"), "sdk >= 26.0"),
-        (build_version(minos="13.0"), "minos 11.0"),
+        (build_version(minos="13.0"), "minos <= 11.0"),
     ):
-        monkeypatch.setattr(
-            release.subprocess,
-            "check_output",
-            lambda command, _output=output, **kwargs: _output,
-        )
         with pytest.raises(ValueError, match=message):
-            release.verify_macos_build_versions(
-                [binary],
-                minimum_sdk="26.0",
-                deployment_target="11.0",
-            )
+            verify(output)
 
 
 def test_macos_desktop_builds_pin_xcode_and_check_link_metadata():
@@ -568,10 +566,10 @@ def test_macos_desktop_builds_pin_xcode_and_check_link_metadata():
     }
     for item in package_macos:
         assert item["developer_dir"] == "/Applications/Xcode_26.6.app/Contents/Developer"
-        assert item["macosx_deployment_target"] == "11.0"
-        assert item["cache_scope"] == "macos11-"
+        assert "macosx_deployment_target" not in item
+        assert item["cache_scope"] == "default-target-"
     assert package["env"]["DEVELOPER_DIR"] == "${{ matrix.developer_dir }}"
-    assert package["env"]["MACOSX_DEPLOYMENT_TARGET"] == "${{ matrix.macosx_deployment_target }}"
+    assert "MACOSX_DEPLOYMENT_TARGET" not in package["env"]
     cache = next(
         item for item in package["steps"] if item.get("name") == "Restore Rust build cache"
     )
@@ -585,7 +583,8 @@ def test_macos_desktop_builds_pin_xcode_and_check_link_metadata():
         if item["os"] == "macos-26"
     )
     assert shell_macos["developer_dir"] == "/Applications/Xcode_26.6.app/Contents/Developer"
-    assert shell_macos["macosx_deployment_target"] == "11.0"
+    assert "macosx_deployment_target" not in shell_macos
+    assert "MACOSX_DEPLOYMENT_TARGET" not in shell["env"]
 
     for job in (package, shell):
         report = next(
@@ -599,15 +598,15 @@ def test_macos_desktop_builds_pin_xcode_and_check_link_metadata():
         check = next(
             item
             for item in job["steps"]
-            if item.get("name") == "Verify macOS SDK and deployment target"
+            if item.get("name") == "Verify macOS SDK and deployment target ceiling"
         )
         assert "verify-macos-build-version" in check["run"]
         assert "--minimum-sdk 26.0" in check["run"]
-        assert "--deployment-target 11.0" in check["run"]
+        assert "--maximum-deployment-target 11.0" in check["run"]
     package_check = next(
         item
         for item in package["steps"]
-        if item.get("name") == "Verify macOS SDK and deployment target"
+        if item.get("name") == "Verify macOS SDK and deployment target ceiling"
     )
     assert "Contents/Helpers/cua-driver" in package_check["run"]
 
