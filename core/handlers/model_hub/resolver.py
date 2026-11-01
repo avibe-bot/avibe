@@ -341,9 +341,9 @@ def validate_cache_ttl_override(
             and source.base_url is None
             for hop in route.hops
         )
-        and ttl != "5m"
+        and ttl != "1h"
     ):
-        raise ValueError("official Anthropic conversation breakpoints support only 5m")
+        raise ValueError("official Anthropic Claude routes support only 1h")
 
 
 def effective_model_route(

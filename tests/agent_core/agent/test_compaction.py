@@ -1533,13 +1533,14 @@ async def test_one_compaction_is_in_flight_per_session():
     assert len(model.checkpoint_requests) == 1
 
 
-#: An official OpenAI GPT model (a 30-minute prompt cache, section 3) and Anthropic, whose message breakpoints Vibey
-#: caches for 5 minutes; ``ENDPOINT``'s test provider is a route of unknown lifetime, an hour.
+#: An official OpenAI GPT model (a 30-minute prompt cache, section 3) and Anthropic, whose Claude breakpoints Vibey
+#: caches for 1 hour; ``ENDPOINT``'s Anthropic-compatible test provider uses the default five-minute lifetime.
 GPT = ModelEndpoint("openai_responses", "http://model.invalid", "gpt-6-astra", "", provider="openai")
 CLAUDE = ModelEndpoint("anthropic", "http://model.invalid", "claude-opus-5-5", "", provider="anthropic")
+UNKNOWN = ModelEndpoint("openai_chat", "http://model.invalid", "test-model", "", provider="test-provider")
 
 
-@pytest.mark.parametrize("endpoint,lifetime", [(CLAUDE, 300), (GPT, 1_800), (ENDPOINT, 3_600)])
+@pytest.mark.parametrize("endpoint,lifetime", [(CLAUDE, 3_600), (GPT, 1_800), (ENDPOINT, 300)])
 async def test_clearing_runs_once_the_route_cache_has_gone_cold_and_spares_recent_turns(endpoint, lifetime):
     now = [1_000.0]
     store = InMemoryTranscriptStore(clock=lambda: now[0])
@@ -1609,15 +1610,15 @@ async def routed_turn(store, now, endpoint, scripts, row, served=None):
 
 async def test_a_route_cache_counts_only_its_own_use():
     # Ten minutes after Claude's last reply, GPT answers for the first time: a route with no use yet takes the latest
-    # use of any route, well inside GPT's 30 minutes, so nothing clears. A minute later the Session is back on Claude,
-    # whose own cache went unused for eleven minutes: cold, although another route answered a minute ago.
+    # use of any route, well inside GPT's 30 minutes. After another 50 minutes, the Session is back on Claude,
+    # whose own cache went unused for just over an hour: cold, although GPT answered 50 minutes ago.
     now = [1_000.0]
     store = InMemoryTranscriptStore(clock=lambda: now[0])
     await routed_turn(store, now, CLAUDE, [*_long_context(9), [Done(assistant("one"))]], "turn-1")
     await routed_turn(store, now, CLAUDE, [[Done(assistant("two"))]], "turn-2")
     now[0] += 600
     assert not await routed_turn(store, now, GPT, [[Done(assistant("three"))]], "turn-3")
-    now[0] += 60
+    now[0] += 3_001
     assert len(await routed_turn(store, now, CLAUDE, [[Done(assistant("four"))]], "turn-4")) == 4
 
 
@@ -1632,7 +1633,7 @@ async def test_a_converted_route_cache_is_its_upstream_provider_and_model():
     now[0] += 3_000
     assert not await routed_turn(store, now, GEMINI, [[Done(assistant("three"))]], "turn-3", GEMINI_SERVED)
     now[0] += 3_000
-    assert not await routed_turn(store, now, ENDPOINT, [[Done(assistant("four"))]], "turn-4")
+    assert not await routed_turn(store, now, UNKNOWN, [[Done(assistant("four"))]], "turn-4")
     now[0] += 700
     assert len(await routed_turn(store, now, GEMINI, [[Done(assistant("five"))]], "turn-5", GEMINI_SERVED)) == 4
 

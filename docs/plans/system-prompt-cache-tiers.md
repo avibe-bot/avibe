@@ -213,7 +213,8 @@ cannot observe it.
 
 | Route | Sent | Lifetime Avibe assumes (`CACHE_TTLS`) |
 | --- | --- | --- |
-| Official Anthropic, Claude model | tools and system prompt breakpoints with `ttl: 1h` (since #2484); the last two user-message breakpoints with the default 5 minutes | 300 s |
+| Official Anthropic, Claude model | tools, system, and the last two eligible user-message breakpoints with `ttl: 1h` when a static prefix is present; a route that rejects `ttl`, or a request without a static prefix, uses Anthropic's default ephemeral breakpoints | 3,600 s when the one-hour fields are sent; 300 s otherwise |
+| Other Anthropic-protocol routes (non-Claude models and other vendors) | default ephemeral breakpoints; Avibe does not send the one-hour field | 300 s |
 | Official OpenAI Responses, GPT-5.6 and later | nothing by default (30 minutes); a validated route override may send `prompt_cache_options.ttl` of `30m` or `12h` | 1,800 s |
 | Every other route | no cache fields | 3,600 s (errs toward warm) |
 
@@ -222,7 +223,7 @@ No route sends `prompt_cache_key` or a conversation header.
 ## Decisions and follow-ups
 
 1. **Claude: tools and system prompt stay at 1 hour; the conversation moves
-   from 5 minutes to 1 hour** (owner decision, 2026-11-01).
+   from 5 minutes to 1 hour** (owner decision, 2026-11-01; implemented in this PR).
    - The conversation is almost all of the prefix. Measured above, 55% of all
      Claude writes were re-writes after 5 to 60 minute gaps.
    - At Opus 5.5 rates (read 0.05x), one hour turns those 306 M re-written
@@ -234,10 +235,12 @@ No route sends `prompt_cache_key` or a conversation header.
      bills a 1-hour write only beyond what was read, so it never extends that
      content. History has one-hour coverage only if it was written at one
      hour.
-   - Update `CACHE_TTLS["anthropic"]` to 3,600 s and the route-override
-     validation that limits official Anthropic conversation breakpoints to
-     `5m`. Review with the metrics below after two weeks; split by Session
-     kind (for example unattended Task runs) only if the data asks for it.
+   - Implemented by setting `CACHE_TTLS["anthropic"]` to 3,600 s and the
+     route-override validation to admit only `1h` for official Anthropic
+     Claude routes. C-9 derives its lifetime from the adapter's actual
+     breakpoint predicate. Review with the metrics below after two weeks;
+     split by Session kind (for example unattended Task runs) only if the
+     data asks for it.
 2. **OpenAI: keep 30 minutes.** Gaps of 30 minutes to 12 hours missed 48 M
    tokens; a 12-hour lifetime would save about 55 M token-equivalents but make
    every other write cost 2.5x instead of 1.25x, roughly 400 M more. OpenAI

@@ -88,14 +88,23 @@ COMMAND_TOOLS = frozenset({"bash", "powershell"})
 CLEARABLE_TOOLS = frozenset({"read"}) | COMMAND_TOOLS
 #: How long a route's provider prompt cache stays warm after its last use, in seconds, by cache family (section 3):
 #: the documented lifetime of the cache mode Vibey requests for the conversation, where clearable results live.
-#: ``anthropic``: the message breakpoints' ``cache_control`` is ephemeral with no ``ttl``, 5 minutes, refreshed on use.
-#: ``openai-gpt-5.6``: OpenAI Responses GPT-5.6+ defaults to a 30-minute prefix cache; a validated official route may opt into ``12h`` via ``prompt_cache_options.ttl``. The latter has a 2.5x cache-write rate versus 1.25x for 30m, while reads use the same cached-input rate.
+#: ``anthropic``: official Claude routes send one-hour breakpoints; the adapter's shared route predicate falls back to
+#: the five-minute default for rejected or otherwise non-one-hour requests.
+#: ``anthropic-compatible``: non-Claude models and other vendors on the Anthropic protocol use the five-minute
+#: default, because Avibe does not send the one-hour field there.
+#: ``openai-gpt-5.6``: OpenAI Responses GPT-5.6+ defaults to a 30-minute prefix cache; a validated official route may
+#: opt into ``12h`` via ``prompt_cache_options.ttl``. The latter has a 2.5x cache-write rate versus 1.25x for 30m,
+#: while reads use the same cached-input rate.
 #: Route overrides are intentionally closed: they are persisted as operator-visible
 #: duration labels, not arbitrary provider claims. ``12h`` is admitted only for
 #: official OpenAI Responses GPT-5.6+ routes by Model Hub validation.
 CACHE_TTL_OVERRIDES: Mapping[str, float] = {"5m": 300.0, "30m": 1_800.0, "1h": 3_600.0, "12h": 43_200.0}
 #: Earlier supported OpenAI models may expose the separate Chat Completions ``prompt_cache_retention`` modes ``in_memory`` or ``24h`` depending on model and organization policy; Avibe does not infer or send that policy-dependent option, so those routes stay on the conservative built-in estimate unless explicitly supported later.
-CACHE_TTLS: Mapping[str, float] = {"anthropic": 300.0, "openai-gpt-5.6": 1_800.0}
+CACHE_TTLS: Mapping[str, float] = {
+    "anthropic": 3_600.0,
+    "anthropic-compatible": 300.0,
+    "openai-gpt-5.6": 1_800.0,
+}
 #: Any other route, or one not identified unambiguously: clearing a warm cache costs a full-price re-read of the
 #: context, while leaving a cold one only keeps some old output, so an unknown lifetime counts as an hour.
 CACHE_TTL_UNKNOWN_S = 3_600.0
@@ -646,23 +655,27 @@ def budget(
 _GPT_MODEL = re.compile(r"gpt-(\d+)(?:\.(\d+))?(?:-[a-z0-9]+(?:[.-][a-z0-9]+)*)?", re.ASCII)
 
 
-def cache_ttl_s(endpoint: ModelEndpoint) -> float:
+def cache_ttl_s(endpoint: ModelEndpoint, *, request: ModelRequest | None = None) -> float:
     """How long the provider cache of a request's route stays warm (section 3).
 
-    A validated Model Hub route override wins. Otherwise use the documented
-    family lifetime, with OpenAI GPT-5.6+ recognized only on Responses; unknown
-    routes keep the conservative one-hour estimate.
+    A validated Model Hub route override wins. Otherwise use the documented family lifetime; Anthropic requests use
+    the adapter's wire predicate when the complete request is available, so C-9 clears on the lifetime actually sent.
     """
     if endpoint.cache_ttl is not None:
         return CACHE_TTL_OVERRIDES.get(endpoint.cache_ttl, CACHE_TTL_UNKNOWN_S)
     family = _cache_family(endpoint)
+    if family in {"anthropic", "anthropic-compatible"} and request is not None:
+        # Import lazily: the adapter owns both the wire predicate and its per-route rejection memory.
+        from core.agent_core.ai.anthropic import cache_ttl_s as anthropic_cache_ttl_s
+
+        return anthropic_cache_ttl_s(request)
     return CACHE_TTL_UNKNOWN_S if family is None else CACHE_TTLS[family]
 
 
 def _cache_family(endpoint: ModelEndpoint) -> Optional[str]:
     """The route's cache family from its provider, protocol, and whole model id; None unless unambiguous."""
-    if endpoint.provider == "anthropic" and endpoint.protocol == "anthropic":
-        return "anthropic"
+    if endpoint.protocol == "anthropic":
+        return "anthropic" if endpoint.provider == "anthropic" and endpoint.model_id.startswith("claude-") else "anthropic-compatible"
     gpt = (
         _GPT_MODEL.fullmatch(endpoint.model_id)
         if endpoint.provider == "openai" and endpoint.protocol == "openai_responses"
