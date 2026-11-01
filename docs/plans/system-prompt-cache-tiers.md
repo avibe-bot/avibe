@@ -76,8 +76,12 @@ module id, each instruction file by path) and the tool definitions.
 - It is stored per Session in the agent-core state directory, beside the
   Session's checkpoints, so a service restart keeps using it: the provider's
   cache survives an Avibe restart.
-- It is written only when it is applied, and records when each pending change
-  was first seen (`pending_since`).
+- The applied snapshot is replaced only when it is applied. Beside it the
+  Session keeps a pending record: each changed component with the revision
+  it changed to and when it was first seen (`pending_since`). The pending
+  record is written whenever it changes, independently of the applied
+  snapshot, so a restart keeps the original `pending_since` and cannot extend
+  a tier-2 deadline.
 - A fork copies its source's snapshot byte for byte, so its first request
   hits the source's cache. This and moving the Session id out of the system
   prompt (`agent-core-contracts/fork.md` §3) are both needed for warm forks.
@@ -157,12 +161,14 @@ one more field, sent only when its value changes, like the other fields:
 
 ```text
 <environment>
-instructions: pending ~/.avibe/AGENTS.md; skills
+instructions: pending ~/.avibe/AGENTS.md@3f9a2c; skills@81be07
 </environment>
 ```
 
 - It names changed files by path and catalogs by name (`skills`, `mcp`,
-  `agents`), never their contents.
+  `agents`), never their contents. Each name carries a short revision of the
+  component's current content, so a second edit to an already pending
+  component changes the value and is announced again.
 - It omits changes this Session made itself (its own edits are already in the
   conversation).
 - When a snapshot is applied the value becomes `current`, sent once.
