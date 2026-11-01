@@ -4682,6 +4682,7 @@
     "reorderPosition": "{{name}}，第 {{position}} 位，共 {{count}} 位。",
     "reorderDropped": "已放下{{name}}。",
     "reorderCancelled": "已取消调整顺序。",
+    "notForDefaultAgent": "它是默认 Agent，先把默认换成别的 Agent 才能设为伙伴。",
     "menu": {
       "label": "{{name}}的操作",
       "editProfile": "编辑资料",

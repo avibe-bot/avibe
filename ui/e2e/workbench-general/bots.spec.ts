@@ -477,3 +477,34 @@ for (const theme of ['light', 'dark'] as const) {
     expect(denied).toEqual([]);
   });
 }
+
+test('the default Agent is offered as a Bot nowhere, and both ways in say what to do first', async ({ page }) => {
+  const { denied } = await serveBots(page, 'en', [MAIN, CSO, PM]);
+  // The user made their own Agent the default; the server refuses it as a Bot
+  // (`bot_agent_default`) until another Agent is the default.
+  const auditor = AGENTS[2];
+  await page.route(
+    (url) => url.pathname === '/api/agents',
+    (route) => route.fulfill({ json: { ok: true, agents: AGENTS, default_agent_name: auditor.name } }),
+  );
+  await page.route(`**/api/agents/${auditor.name}`, (route) => route.fulfill({ json: {
+    ok: true,
+    agent: { ...auditor, display_name: auditor.name, archived_at: null, updated_at: ago(60), system_prompt: null, metadata: {}, created_at: ago(600) },
+  } }));
+  await page.setViewportSize(DESKTOP);
+  const reason = 'It is the default Agent. Make another Agent the default first, then set it as a Bot.';
+
+  await open(page, '/agents', { lang: 'en', theme: 'light' });
+  await page.getByRole('button', { name: /^security-auditor/ }).click();
+  await expect(page.getByText(reason)).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Set as Bot' })).toBeDisabled();
+
+  await sidebarOf(page).getByRole('button', { name: 'Add a Bot' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Add a Bot' });
+  await dialog.getByRole('radio', { name: 'From an existing Agent' }).click();
+  const choice = dialog.getByRole('radiogroup', { name: 'From an existing Agent' }).getByRole('radio', { name: /security-auditor/ });
+  await expect(choice).toBeDisabled();
+  await expect(choice).toContainText(reason);
+  await expect(dialog.getByRole('button', { name: 'Set as Bot' })).toBeDisabled();
+  expect(denied).toEqual([]);
+});

@@ -2406,7 +2406,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
         </Button>
       </div>
 
-      <AgentBotCard agent={agent} canEdit={canEdit} />
+      <AgentBotCard agent={agent} canEdit={canEdit} isDefault={isDefault} />
 
       {/* Enable toggle — design.pen EWTY7 */}
       <div
@@ -2803,8 +2803,9 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
 // The Agent's Bot side (docs/plans/bots.md D1, D5): who it is as a Bot, with the
 // way into its conversation, or — for an eligible Vibey Agent — "Set as Bot",
 // which opens the add dialog's existing-Agent tab. Bots are the Owner's, so the
-// card is absent for everyone else.
-const AgentBotCard: React.FC<{ agent: VibeAgentFull; canEdit: boolean }> = ({ agent, canEdit }) => {
+// card is absent for everyone else. The default Agent keeps the card, unavailable,
+// with what to do first: the server refuses it until another Agent is the default.
+const AgentBotCard: React.FC<{ agent: VibeAgentFull; canEdit: boolean; isDefault: boolean }> = ({ agent, canEdit, isDefault }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { enabled, botForAgent, displayName, openProfile } = useBots();
@@ -2841,19 +2842,20 @@ const AgentBotCard: React.FC<{ agent: VibeAgentFull; canEdit: boolean }> = ({ ag
   }
   // Disabled Agents still show the way in, with what to do first.
   if (!canEdit || !eligibleForBot({ ...agent, enabled: true })) return null;
+  const blocker = isDefault
+    ? t('bots.notForDefaultAgent')
+    : agent.enabled ? null : t('bots.agents.setAsBotNeedsEnabled');
   return (
     <div className="flex items-center justify-between gap-3 rounded-[10px] border border-border-strong bg-surface-2 px-3.5 py-3">
       <div className="flex min-w-0 flex-col gap-0.5">
         <span className="text-[13px] font-bold text-foreground">{t('bots.agents.setAsBot')}</span>
-        <span className="text-[11px] text-muted">
-          {agent.enabled ? t('bots.agents.setAsBotHint') : t('bots.agents.setAsBotNeedsEnabled')}
-        </span>
+        <span className="text-[11px] text-muted">{blocker ?? t('bots.agents.setAsBotHint')}</span>
       </div>
       <Button
         type="button"
         variant="outline"
         size="xs"
-        disabled={!agent.enabled}
+        disabled={blocker !== null}
         onClick={() => openProfile({ kind: 'create', tab: 'agent', agentName: agent.name })}
       >
         {t('bots.agents.setAsBot')}
