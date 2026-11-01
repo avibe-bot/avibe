@@ -75,6 +75,7 @@ def _request(
     messages: tuple[Any, ...] = CONVERSATION,
     base_url: str | None = None,
     source_id: str | None = None,
+    cache_ttl: str | None = None,
 ) -> ModelRequest:
     # A fresh endpoint per request unless one is given: a route's TTL memory lasts the process.
     return ModelRequest(
@@ -85,6 +86,7 @@ def _request(
             "token",
             provider=provider,
             source_id=source_id,
+            cache_ttl=cache_ttl,
         ),
         system=system,
         messages=messages,
@@ -214,7 +216,7 @@ async def test_a_rejected_ttl_is_retried_once_without_it_and_remembered_for_the_
     caplog.set_level(logging.WARNING, logger="core.agent_core.ai.anthropic")
     # Two Sources behind one gateway URL, as every Vibey hop is.
     gateway = f"https://{uuid.uuid4().hex}.test/vibey/v1"
-    request = _request(base_url=gateway, source_id="src_relayaaaa01")
+    request = _request(base_url=gateway, source_id="src_relayaaaa01", cache_ttl="1h")
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         runs = [
             await _run(client, request),

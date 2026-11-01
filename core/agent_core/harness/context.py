@@ -658,17 +658,24 @@ _GPT_MODEL = re.compile(r"gpt-(\d+)(?:\.(\d+))?(?:-[a-z0-9]+(?:[.-][a-z0-9]+)*)?
 def cache_ttl_s(endpoint: ModelEndpoint, *, request: ModelRequest | None = None) -> float:
     """How long the provider cache of a request's route stays warm (section 3).
 
-    A validated Model Hub route override wins. Otherwise use the documented family lifetime; Anthropic requests use
-    the adapter's wire predicate when the complete request is available, so C-9 clears on the lifetime actually sent.
+    A validated Model Hub route override wins, except that a remembered Anthropic rejection downgrades an explicit 1h
+    override to the five-minute wire lifetime. Otherwise use the documented family lifetime; Anthropic requests use the
+    adapter's wire predicate when the complete request is available, so C-9 clears on the lifetime actually sent.
     """
-    if endpoint.cache_ttl is not None:
-        return CACHE_TTL_OVERRIDES.get(endpoint.cache_ttl, CACHE_TTL_UNKNOWN_S)
     family = _cache_family(endpoint)
     if family in {"anthropic", "anthropic-compatible"} and request is not None:
         # Import lazily: the adapter owns both the wire predicate and its per-route rejection memory.
         from core.agent_core.ai.anthropic import cache_ttl_s as anthropic_cache_ttl_s
 
-        return anthropic_cache_ttl_s(request)
+        actual = anthropic_cache_ttl_s(request)
+        # An explicit official-Claude 1h override describes the normal wire mode, but a remembered provider
+        # rejection downgrades this request to Anthropic's five-minute default before C-9 decides whether it is cold.
+        if endpoint.cache_ttl == "1h" and actual != CACHE_TTL_OVERRIDES["1h"]:
+            return actual
+    if endpoint.cache_ttl is not None:
+        return CACHE_TTL_OVERRIDES.get(endpoint.cache_ttl, CACHE_TTL_UNKNOWN_S)
+    if family in {"anthropic", "anthropic-compatible"} and request is not None:
+        return actual
     return CACHE_TTL_UNKNOWN_S if family is None else CACHE_TTLS[family]
 
 
