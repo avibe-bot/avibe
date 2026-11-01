@@ -2457,7 +2457,7 @@ pub fn run() {
             };
             #[cfg(not(feature = "bundled-runtime"))]
             let bootstrap_log = BootstrapLog::disabled();
-            app.manage(Shell::new(host, bootstrap_log));
+            app.manage(Shell::new(host, bootstrap_log.clone()));
             #[cfg(target_os = "macos")]
             app.manage(computer_use::Controller::start(app.handle()));
             app.manage(notifications::Notifications::new(

@@ -34,15 +34,17 @@ path retain their existing contracts.
   startup commit. Python completes all failure-prone startup and ownership
   work, including the shared service/UI readiness check, status publication,
   identity claim, and any rollback decision, before writing the ready frame.
-  Optional housekeeping runs before the commit point and is warning-only once
-  readiness has been established. Python marks the startup committed immediately
-  before publishing the ready frame; a broken pipe or other ordinary output
-  failure after that point cannot roll back the Runtime or emit a failed frame.
-  Rust accepts the first complete ready frame as the transport acceptance point,
-  after draining any invalid or duplicate events already queued before that
-  point. A duplicate, contradiction, malformed frame, helper failure, or
-  transport failure observed before that acceptance rejects the attempt. The
-  reader stops after a complete valid frame so an inherited descendant pipe
+  Python marks the startup committed immediately before publishing the ready
+  frame. Optional install-generation housekeeping runs after that publication
+  and is warning-only; it cannot delay Workbench admission or revoke the
+  committed Runtime. A broken pipe or other ordinary output failure after that
+  point cannot roll back the Runtime or emit a failed frame.
+  The reader validates the entire read batch (at most 8192 bytes) containing
+  the first complete frame. A second protocol prefix in that batch rejects it.
+  Rust accepts that one terminal result only after checking origin and any
+  already observed helper failure. A malformed frame or oversized prefixed
+  line is terminal immediately, even without a newline. The reader stops after
+  this batch so an inherited descendant pipe
   cannot hold a successful bootstrap thread on EOF. Acceptance is a temporal
   boundary: a helper exit or additional output racing after it cannot
   retroactively defeat startup. The final exact-origin presence/identity check
@@ -54,22 +56,37 @@ path retain their existing contracts.
   receipt-capable path starts the service and UI through the existing
   `runtime` primitives, launches the UI without waiting for service readiness,
   and checks the UI and Controller together under one shared remaining startup
-  deadline. Rust owns desktop policy, receipt validation, the bounded attempt
-  budget, adoption/handover rules, and the final `/ready` identity/presence
-  check. If Rust's observation budget expires while the helper is still
-  in-flight, the helper remains retained by the existing launch state so Retry
-  cannot launch a duplicate.
+  deadline. The Python desktop readiness probe uses the existing httpx
+  dependency with `trust_env=False` and `follow_redirects=False`, and probes
+  only the exact loopback `/ready`. LAN `/health` is not a desktop gate.
+  Each entire response (including its body, bounded to 1024 bytes) is bounded
+  by the smaller of 500 ms and the remaining deadline; streamed bytes cannot
+  reset that budget. Service provenance still passes through the existing
+  `claim_ready_service`. Rust owns desktop policy, receipt validation, the bounded
+  attempt budget, adoption/handover rules, and the final `/ready`
+  identity/presence check. If Rust's observation budget expires while the
+  helper is still in-flight, the helper remains retained by the existing launch
+  state so Retry cannot launch a duplicate.
+- **Transport lifetime:** safe nonblocking pipe wrappers (`rustix` on Unix,
+  `interprocess` 2.2.3 on Windows) preserve `forbid(unsafe_code)`. The reader
+  keeps one terminal event and at most 4096 line bytes. The helper reaper marks
+  exit; only immediately available bytes are drained after exit (at most
+  100 ms for a continuously writing descendant). A shell observation timeout
+  cancels the reader, not the helper or Runtime. A 600 s transport backstop
+  bounds abandoned observers. None of these events confers kill authority.
 - **Rust consumer:** bundled launch reads the actual child stdout while it is
   running, drains it without waiting for pipe EOF, rejects malformed,
-  oversized, duplicate, contradictory, stale, or wrong-origin receipts before
-  acceptance, and navigates only after a `ready` receipt plus a final
+  oversized, stale, or wrong-origin receipts, plus duplicate/contradictory
+  prefixes within the documented read batch, and navigates only after a
+  `ready` receipt plus a final
   `Presence::Mine` or allowed unmanaged/adopted result. A missing receipt while
   the helper is alive is pending; helper failure, timeout, broken output, or a
   failed receipt is terminal failure. A final probe contradiction never falls
   back to receipt success. The endpoint helper remains for endpoint discovery
   and is not replaced by an unsafe Rust config guess.
 - **Exit mapping:** `ready` requires helper success or an observed still-running
-  helper plus the final readiness check; a nonzero helper exit is failure.
+  helper plus the final readiness check; a nonzero exit observed before
+  acceptance is failure.
   Receipt `failed` is failure and preserves existing retryability. Legacy
   launchers continue using the existing `vibe start` plus Rust readiness path.
 - **Failure reasons:** after origin resolution, Python emits only
@@ -90,14 +107,17 @@ path retain their existing contracts.
 
 The bundled path removes the Rust full startup `/ready` polling loop that
 duplicates Python's service/UI readiness work. The remaining Rust probe is a
-single final check immediately before navigation. This removes probe/process
-duplication and may or may not reduce elapsed cold-start time; it does not
+single final check immediately before navigation. This removes duplicate
+probes, not helper processes, and may or may not reduce elapsed cold-start time; it does not
 promise a Windows speedup from historical Mac measurements. Existing bounded
 bootstrap diagnostics now mark receipt arrival, receipt acceptance, final
 presence verification, and successful navigation alongside the existing
 endpoint/start records. Helper/probe counts and elapsed time can therefore be
 compared on identical hermetic fixtures. Early-ready and slow-controller
 fixtures must show that navigation does not move later than the current path.
+The timing report separates time to Python readiness, receipt acceptance, the
+final probe, and navigation; a timeout comparison alone is not startup-speed
+evidence.
 
 ## Verification
 
@@ -105,15 +125,66 @@ fixtures must show that navigation does not move later than the current path.
    ordinary `vibe start` semantics.
 2. Python tests exercise complete, failed, duplicate, and cleanup outcomes.
 3. Rust tests cover the receipt parser and bootstrap state transitions,
-   including wrong origin/identity, malformed or oversized output, helper
+   including wrong origin/identity, Retry/Stop during final verification, malformed
+   or oversized output, helper
    failure, delayed output, retry, close, handover, and reuse.
 4. A hermetic cross-language fixture sends real Python-produced stdout through
    the Rust parser/state-machine boundary, including spaces and non-ASCII paths.
 5. Temporal tests cover transport failure before successful publication, the
-   ready commit boundary, duplicate/failure output before acceptance, helper
-   observation timeout with retry deduplication, and final probe contradiction.
-6. Baseline/candidate timing and probe-count traces use identical hermetic
-   fixtures for early-ready and slow-controller cases. The report distinguishes
-   actual reductions from remaining Windows packaged/manual acceptance.
+   ready commit boundary, terminal malformed/oversized output, duplicate output
+   already buffered in one real stdout batch, helper observation timeout with
+   retry deduplication, canonical default-port origins, and final probe
+   contradiction.
+6. The hermetic timing fixture has early-ready and delayed-controller outcomes
+   with repeated samples and real Python stdout consumption. Baseline and
+   candidate traces report helper/probe counts and time to each startup
+   milestone separately. The report distinguishes actual reductions from
+   remaining Windows packaged/manual acceptance.
 7. Focused Python tests, Ruff, Rust tests, and desktop shell boundary checks
    run before the PR. Windows packaged/manual acceptance remains a handoff item.
+
+## Local integration evidence (2026-11-01)
+
+The explicit cross-language gate runs actual `cmd_start` and its parser,
+readiness HTTP, private status writes and stdout through the production Rust
+reader and `RuntimeHost` with `HttpHealthProbe`, including the expected identity.
+The bootstrap log records receipt arrival/acceptance and final verification. Process creation and Controller
+scheduling use controlled fixture seams; this is not a full installed Runtime
+or native Windows benchmark. Every subprocess has an empty inherited environment
+and private HOME/XDG/Avibe/credential directories under a path with spaces and
+non-ASCII characters. It never contacts user services. No endpoint helper is
+removed: production still uses one discovery helper and one start helper.
+
+Three fresh helper processes per mode and scenario (after fixture Python imports
+and endpoint initialization), same debug build and
+production 500 ms legacy polling interval, all reached successful admission:
+
+| Scenario | Legacy admission (ms) | Receipt admission (ms) | Rust probes, legacy → receipt |
+| --- | --- | --- | --- |
+| Early ready | 505.9, 504.2, 503.1 | 246.4, 103.4, 99.2 | 2 → 2 |
+| Controller delayed 1.1 s | 1508.0, 1516.6, 1509.6 | 1146.1, 1152.0, 1144.9 | 4 → 2 |
+| Housekeeping delayed 1.2 s | 505.0, 505.2, 505.3 | 109.7, 106.3, 106.0 | 2 → 2 |
+
+Admission means `RuntimeHost` permits navigation, not rendered WebView latency.
+The initial adoption probe is included. Python used one `/ready` for early and
+housekeeping cases; delayed Controller used 11–12 baseline and 11 candidate
+probes. Baseline additionally called `/health` on each Python poll; candidate
+made zero `/health` requests. All cases started one fixture service and one
+fixture UI, then reused the live endpoint on Retry without another launch.
+Candidate admission preceded housekeeping completion in every delayed sample
+(the helper completed around 1298–1315 ms). The former 30 ms comparison is a
+**timeout/probe-count test only**, not time-to-ready performance evidence.
+
+Run the integration gate explicitly (ignored in ordinary Cargo tests because it
+needs the repository Python dependencies):
+
+```sh
+AVIBE_TEST_PYTHON="$PWD/.venv/bin/python" cargo test \
+  --manifest-path desktop/Cargo.toml -p avibe-runtime-host \
+  cmd_start_receipt_admission -- --ignored --nocapture
+```
+
+Windows CI covers the native pipe reader and shell build. Packaged cold/warm
+NSIS launch, release-matched identity/handover, UI/controller failures, and
+close/retry acceptance still require the Windows artifact. These local results
+make no Windows elapsed-time claim.

@@ -4380,6 +4380,28 @@ def test_desktop_receipt_start_shares_readiness_and_does_not_wait_twice(monkeypa
     assert "@avibe-desktop-start:" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("service_reused", [False, True])
+@pytest.mark.parametrize("ui_reused", [False, True])
+def test_desktop_receipt_requires_combined_readiness_even_when_service_is_alive(
+    monkeypatch, capsys, service_reused, ui_reused,
+):
+    """A live timeout must fail; actual rollback stops only created children."""
+    state = _ui_refuses_to_start(
+        monkeypatch, reused=service_reused, ui_outcome=5678, ui_reused=ui_reused,
+    )
+    monkeypatch.setattr(cli.runtime, "pid_alive", lambda pid: True)
+    monkeypatch.setattr(cli.runtime, "wait_for_desktop_startup_ready", lambda *args, **kwargs: None)
+    with pytest.raises(RuntimeError, match="did not become ready"):
+        cli.cmd_start(open_browser=False, desktop_receipt=True)
+    output = capsys.readouterr().out
+    assert '"outcome":"ready"' not in output
+    assert '"reason":"runtime_not_ready"' in output
+    assert ("stop_ui" in state.calls) is (not ui_reused)
+    assert ("stop_service" in state.calls) is (not service_reused)
+    if not ui_reused:
+        assert state.stop_ui_kwargs == [{"stop_remote_access": False}]
+
+
 def test_desktop_receipt_failure_is_emitted_after_rollback(monkeypatch, capsys):
     config = SimpleNamespace(
         has_configured_platform_credentials=lambda: True,
@@ -4415,7 +4437,8 @@ def test_desktop_receipt_failure_is_emitted_after_rollback(monkeypatch, capsys):
     assert len(stopped) == 1
 
 
-def test_desktop_receipt_transport_failure_after_commit_keeps_runtime(monkeypatch):
+@pytest.mark.parametrize("failure", ["transport", "housekeeping"])
+def test_desktop_receipt_failure_after_commit_keeps_runtime(monkeypatch, capsys, failure):
     config = SimpleNamespace(
         has_configured_platform_credentials=lambda: True,
         ui=SimpleNamespace(setup_host="127.0.0.1", setup_port=5123, open_browser=False),
@@ -4437,14 +4460,21 @@ def test_desktop_receipt_transport_failure_after_commit_keeps_runtime(monkeypatc
     monkeypatch.setattr(cli.runtime, "claim_ready_service", lambda *args, **kwargs: None)
     monkeypatch.setattr("vibe.install_generations.collect_install_generations", lambda *_args: None)
     monkeypatch.setattr(cli.runtime, "roll_back_start", lambda *args: rolled_back.append(args))
-    monkeypatch.setattr(
-        "vibe.desktop_startup.emit_desktop_start_receipt",
-        lambda **kwargs: (_ for _ in ()).throw(BrokenPipeError()),
-    )
+    if failure == "transport":
+        monkeypatch.setattr(
+            "vibe.desktop_startup.emit_desktop_start_receipt",
+            lambda **kwargs: (_ for _ in ()).throw(BrokenPipeError()),
+        )
+        with pytest.raises(BrokenPipeError):
+            cli.cmd_start(open_browser=False, desktop_receipt=True)
+    else:
+        def fail_housekeeping(*_args):
+            assert '"outcome":"ready"' in capsys.readouterr().out
+            raise RuntimeError("housekeeping failed after publication")
 
-    with pytest.raises(BrokenPipeError):
-        cli.cmd_start(open_browser=False, desktop_receipt=True)
-
+        monkeypatch.setattr("vibe.install_generations.collect_install_generations", fail_housekeeping)
+        assert cli.cmd_start(open_browser=False, desktop_receipt=True) == 0
+    assert '"outcome":"failed"' not in capsys.readouterr().out
     assert rolled_back == []
 
 

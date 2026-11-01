@@ -2394,6 +2394,10 @@ def _ui_ready_identity_state(response) -> bool | None:
     except (AttributeError, OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
 
+    return _ui_ready_payload_state(response.status, payload)
+
+
+def _ui_ready_payload_state(status: int, payload) -> bool | None:
     if not isinstance(payload, dict):
         return None
     if type(payload.get("schema_version")) is not int or payload["schema_version"] != 1:
@@ -2419,12 +2423,12 @@ def _ui_ready_identity_state(response) -> bool | None:
         ):
             return None
         expected_ready.add(field)
-    if response.status == 200 and set(payload) == expected_ready and payload["ready"] is True:
+    if status == 200 and set(payload) == expected_ready and payload["ready"] is True:
         return True
 
     code = payload.get("code")
     if (
-        response.status == 503
+        status == 503
         and isinstance(code, str)
         and bool(code)
         and payload
@@ -2491,24 +2495,54 @@ def wait_for_desktop_startup_ready(
     for status and rollback; it never becomes a second readiness predicate.
     """
 
+    import asyncio
+
+    import httpx
+
+    from vibe.desktop_runtime import desktop_origin
+
     deadline = time.monotonic() + max(0.0, timeout)
-    current_pid = service_pid
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return None
-        owner_pid = resolve_service_owner_pid(include_starting=False)
-        if owner_pid is not None:
-            current_pid = owner_pid
-        if ui_server_healthy(host, port, timeout=min(0.5, remaining)):
-            if owner_pid is not None or service_instance_started(current_pid):
-                return current_pid
-        if not pid_alive(current_pid) and owner_pid is None:
-            return None
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return None
-        time.sleep(min(0.1, remaining))
+    origin = desktop_origin(host, port)
+
+    async def observe(client):
+        # The combined exact-origin /ready predicate includes the usable UI,
+        # service owner and Controller IPC. LAN /health is not a desktop gate.
+        async with client.stream("GET", f"{origin}/ready") as response:
+            body = bytearray()
+            async for chunk in response.aiter_bytes():
+                body.extend(chunk)
+                if len(body) > 1024:
+                    return False
+            try:
+                return _ui_ready_payload_state(response.status_code, json.loads(body)) is True
+            except (ValueError, UnicodeDecodeError):
+                return False
+
+    async def wait():
+        current_pid = service_pid
+        async with httpx.AsyncClient(trust_env=False, follow_redirects=False) as client:
+            while time.monotonic() < deadline:
+                owner_pid = resolve_service_owner_pid(include_starting=False)
+                if owner_pid is not None:
+                    current_pid = owner_pid
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                try:
+                    # Bound the entire request including headers and streamed
+                    # body, not a fresh socket timeout for each received byte.
+                    ready = await asyncio.wait_for(observe(client), min(0.5, remaining))
+                except (httpx.HTTPError, TimeoutError, OSError):
+                    ready = False
+                if ready and time.monotonic() < deadline:
+                    if owner_pid is not None or service_instance_started(current_pid):
+                        return current_pid
+                if not pid_alive(current_pid) and owner_pid is None:
+                    return None
+                await asyncio.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+        return None
+
+    return asyncio.run(wait())
 
 
 def _is_ui_server_command(command: str) -> bool:

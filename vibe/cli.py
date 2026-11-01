@@ -14217,6 +14217,20 @@ def cmd_start(
             service_pid = resolved_pid
         if service_ready:
             runtime.write_status("running", "pid={}".format(service_pid), service_pid, ui_pid)
+        elif desktop_receipt:
+            alive = runtime.pid_alive(service_pid)
+            detail = (
+                "service process is still starting"
+                if alive
+                else "service process exited before startup completed"
+            )
+            runtime.write_status(
+                "starting" if alive else "error",
+                detail,
+                service_pid,
+                ui_pid,
+            )
+            raise RuntimeError("Vibe service and UI did not become ready before startup deadline")
         elif runtime.pid_alive(service_pid):
             runtime.write_status("starting", "service process is still starting", service_pid, ui_pid)
         else:
@@ -14242,19 +14256,18 @@ def cmd_start(
                 print(f"(Tip) Could not auto-open a browser. Open this URL manually: {ui_url}")
                 print("")
         if desktop_receipt:
-            from vibe.install_generations import collect_install_generations
-
-            try:
-                if service_ready:
-                    collect_install_generations(cache_running_vibe_path())
-            except Exception:
-                logger.warning("Desktop startup housekeeping failed after Runtime became ready", exc_info=True)
             # Readiness and ownership are complete here. From this point on,
             # stdout transport is only an observation channel for the shell;
             # closing that channel must never roll back a Runtime that this
             # invocation has already started or adopted.
             startup_committed = True
             emit_receipt("ready")
+            try:
+                from vibe.install_generations import collect_install_generations
+
+                collect_install_generations(cache_running_vibe_path())
+            except Exception:
+                logger.warning("Desktop startup housekeeping failed after Runtime became ready", exc_info=True)
             return 0
     except BaseException as exc:
         # The invariant is that this invocation leaves running nothing it
@@ -14295,7 +14308,11 @@ def cmd_start(
         if not startup_committed:
             runtime.roll_back_start(service_start, ui_start)
         if desktop_receipt and not startup_committed:
-            reason = "runtime_not_ready" if isinstance(exc, RuntimeError) else "startup_failed"
+            reason = (
+                "runtime_claim_refused" if isinstance(exc, runtime.DesktopRuntimeClaimRefused)
+                else "runtime_not_ready" if isinstance(exc, RuntimeError)
+                else "startup_failed"
+            )
             try:
                 emit_receipt("failed", reason)
             except Exception:

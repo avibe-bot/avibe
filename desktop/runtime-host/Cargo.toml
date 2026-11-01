@@ -21,6 +21,12 @@ tokio = { workspace = true, features = ["sync"] }
 url.workspace = true
 zip.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs"] }
+
+[target.'cfg(windows)'.dependencies]
+interprocess = { version = "=2.2.3", default-features = false }
+
 [dev-dependencies]
 async-trait.workspace = true
 tokio = { version = "1", default-features = false, features = [

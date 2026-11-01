@@ -338,6 +338,19 @@ impl LaunchWatch {
             .and_then(StartupReceiptStream::try_next)
     }
 
+    pub async fn receipt_changed(&self) {
+        let receipt = self.0.receipt.lock().ok().and_then(|receipt| receipt.clone());
+        if let Some(receipt) = receipt {
+            receipt.changed().await;
+        }
+    }
+
+    pub fn cancel_receipt(&self) {
+        if let Some(receipt) = self.0.receipt.lock().ok().and_then(|receipt| receipt.clone()) {
+            receipt.cancel();
+        }
+    }
+
     pub(crate) fn with_receipt(receipt: StartupReceiptStream) -> Self {
         let watch = Self::default();
         *watch.0.receipt.lock().expect("launch receipt lock") = Some(receipt);
@@ -353,6 +366,9 @@ impl LaunchWatch {
 
     fn record(&self, exit: LaunchExit) {
         let _ = self.0.exit.set(exit);
+        if let Some(receipt) = self.0.receipt.lock().ok().and_then(|receipt| receipt.clone()) {
+            receipt.finish();
+        }
     }
 }
 
@@ -574,10 +590,7 @@ impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
             let stdout = child.stdout.take().ok_or_else(|| {
                 let _ = child.kill();
                 let _ = child.wait();
-                LaunchError::Spawn(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "desktop startup receipt pipe was not created",
-                ))
+                LaunchError::Spawn(std::io::Error::other("desktop startup receipt pipe was not created"))
             })?;
             LaunchWatch::with_receipt(StartupReceiptStream::spawn(stdout, self.log.clone()))
         } else {

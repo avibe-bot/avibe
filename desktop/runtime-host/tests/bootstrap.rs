@@ -1470,7 +1470,9 @@ async fn concurrent_bootstraps_start_at_most_one_runtime() {
     let (left, right) = (Recorder::default(), Recorder::default());
     let (first, second) = tokio::join!(host.bootstrap(&left, Launch), host.bootstrap(&right, Launch));
 
-    assert_eq!(first.phase, BootstrapPhase::Ready);
+    // The newer run owns admission. An older in-flight probe must not publish
+    // Ready after that run has replaced its epoch, even for the same endpoint.
+    assert_eq!(first.phase, BootstrapPhase::Failed);
     assert_eq!(second.phase, BootstrapPhase::Ready);
     assert_eq!(launcher.calls(), 1, "two racing runs must not start two Runtimes");
     assert_eq!(

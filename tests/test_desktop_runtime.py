@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import urllib.error
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -524,6 +525,162 @@ def test_ui_server_readiness_reuses_wildcard_listener(monkeypatch):
         ("http://127.0.0.1:5123/health", 0.5),
         ("http://127.0.0.1:5123/ready", 0.5),
     ]
+
+
+def test_desktop_startup_readiness_uses_direct_no_redirect_http(monkeypatch):
+    requests = []
+    proxy_requests = []
+
+    class RuntimeHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            requests.append(self.path)
+            if self.path == "/health":
+                body = b""
+            elif self.path == "/ready":
+                body = b'{"schema_version":1,"product":"avibe","ready":true}'
+            else:
+                self.send_response(404)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            return
+
+    class ProxyTrapHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            proxy_requests.append(self.path)
+            self.send_response(502)
+            self.end_headers()
+
+        def log_message(self, *_args):
+            return
+
+    runtime_server = ThreadingHTTPServer(("127.0.0.1", 0), RuntimeHandler)
+    proxy_server = ThreadingHTTPServer(("127.0.0.1", 0), ProxyTrapHandler)
+    runtime_thread = threading.Thread(target=runtime_server.serve_forever, daemon=True)
+    proxy_thread = threading.Thread(target=proxy_server.serve_forever, daemon=True)
+    runtime_thread.start()
+    proxy_thread.start()
+    try:
+        runtime_port = runtime_server.server_address[1]
+        proxy_port = proxy_server.server_address[1]
+        monkeypatch.setenv("NO_PROXY", "")
+        monkeypatch.setenv("no_proxy", "")
+        monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{proxy_port}")
+        monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{proxy_port}")
+        monkeypatch.setenv("HTTPS_PROXY", f"http://127.0.0.1:{proxy_port}")
+        monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda **kwargs: None)
+        monkeypatch.setattr(runtime, "service_instance_started", lambda _pid: True)
+        monkeypatch.setattr(runtime, "pid_alive", lambda _pid: True)
+
+        assert runtime.wait_for_desktop_startup_ready(
+            1234,
+            "127.0.0.1",
+            runtime_port,
+            timeout=2.0,
+        ) == 1234
+    finally:
+        runtime_server.shutdown()
+        proxy_server.shutdown()
+        runtime_server.server_close()
+        proxy_server.server_close()
+        runtime_thread.join(timeout=2)
+        proxy_thread.join(timeout=2)
+
+    assert requests == ["/ready"]
+    assert proxy_requests == []
+
+
+def test_desktop_startup_readiness_rejects_redirects(monkeypatch):
+    requests = []
+
+    class RedirectHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            requests.append(self.path)
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{self.server.server_address[1]}/ready")
+            self.end_headers()
+
+        def log_message(self, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda **kwargs: None)
+        monkeypatch.setattr(runtime, "service_instance_started", lambda _pid: True)
+        monkeypatch.setattr(runtime, "pid_alive", lambda _pid: True)
+        assert (
+            runtime.wait_for_desktop_startup_ready(
+                1234,
+                "127.0.0.1",
+                server.server_address[1],
+                timeout=0.1,
+            )
+            is None
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert requests == ["/ready"]
+
+
+@pytest.mark.parametrize("response_kind", ["drip", "oversized"])
+def test_desktop_ready_request_body_has_one_deadline_and_size_bound(monkeypatch, response_kind):
+    """A peer sending bytes must not restart the whole observation budget."""
+    import time
+
+    completed = threading.Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = (
+                b'{"schema_version":1,"product":"avibe","ready":true}' + b" " * 1100
+                if response_kind == "oversized"
+                else b'{"schema_version":1,"product":"avibe","ready":true}'
+            )
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                if response_kind == "oversized":
+                    self.wfile.write(body)
+                else:
+                    for byte in body:
+                        self.wfile.write(bytes([byte]))
+                        self.wfile.flush()
+                        time.sleep(0.02)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                completed.set()
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda **kwargs: 1234)
+        monkeypatch.setattr(runtime, "pid_alive", lambda _pid: True)
+        started = time.monotonic()
+        assert runtime.wait_for_desktop_startup_ready(
+            1234, "127.0.0.1", server.server_address[1], timeout=0.2,
+        ) is None
+        assert time.monotonic() - started < 0.5
+        assert completed.wait(2)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 def test_ui_server_health_fails_when_old_specific_bind_lacks_desktop_listener(monkeypatch):

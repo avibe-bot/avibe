@@ -41,11 +41,46 @@ product logic.
    a concurrent Stop is not held for that budget. A successful lookup lets the
    shell finish its logout hooks within the remaining time; only a fallback
    (or a logout that itself hangs) ends the process group.
-5. Polls until the Runtime is ready or the bound expires, then navigates. The
+5. Observes readiness until the bound expires, then navigates. The
    window never leaves the bootstrap page before combined readiness succeeds.
    If the launcher it started exits non-zero, it gives up immediately instead of
    waiting out the timeout: nothing is coming, and the user is asked to update
    Avibe rather than watching a spinner for two minutes.
+
+   Bundled product builds use an opt-in `vibe start --desktop-receipt` mode.
+   Python remains the owner of config, process startup, ownership, rollback, and
+   the combined UI/Controller readiness predicate. It writes one bounded
+   `@avibe-desktop-start:` JSON line after all failure-prone startup work has
+   completed. The frame is version `1`, is at most 4096 UTF-8 bytes including
+   its prefix and newline, and has `outcome: "ready"` or `outcome: "failed"`.
+   A failed start before the endpoint origin is resolved emits no frame and
+   keeps the existing nonzero exit behavior. External launchers,
+   `AVIBE_DESKTOP_VIBE_PATH`, and `AVIBE_DESKTOP_ORIGIN` continue through the
+   legacy startup path.
+
+   The bundled shell accepts a ready frame only after validating its canonical
+   loopback origin and then performs one final direct, redirect-free `/ready`
+   probe against the exact endpoint. The probe still verifies the expected
+   Runtime identity and usable Controller/UI state. A valid frame is an
+   irreversible startup observation: later helper exit or ordinary stdout
+   cleanup cannot revoke it, while a final probe contradiction still refuses
+   navigation. The reader stops at that temporal acceptance boundary so a
+   descendant that inherited stdout cannot hold startup open forever; malformed,
+   oversized, duplicate, or contradictory protocol data in the read batch
+   containing the first frame fails closed. Later bytes are outside that
+   acceptance boundary. Exited helpers and cancelled observation cannot leave
+   a reader waiting indefinitely on a descendant's inherited stdout.
+
+   Python's desktop readiness requests also bypass configured proxies and refuse
+   redirects. Only the exact loopback `/ready` is required; LAN `/health` is
+   not a desktop readiness gate. Each complete HTTP response, including its
+   body, spends the remaining startup deadline. The UI starts without waiting
+   for service readiness so the existing startup
+   parallelism remains. Optional install-generation cleanup runs after the
+   receipt is flushed and cannot delay Workbench admission. This receipt removes
+   duplicate Rust readiness polling; it does not promise a cold-start time
+   reduction on Windows. Packaged Windows acceptance still needs the release
+   artifact and manual launch checks.
 6. After navigation, probes the same exact origin every two seconds. Three
    consecutive failures return the WebView to the bundled bootstrap and rerun
    adoption/startup; a transient miss does not replace the Workbench.
