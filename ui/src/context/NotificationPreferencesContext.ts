@@ -7,12 +7,12 @@ import { DEFAULT_NOTIFICATION_PREFERENCES, type NotificationPreferences } from '
 // write; this module is the component-free handle consumers import.
 export interface NotificationPreferencesState {
   preferences: NotificationPreferences;
-  /** The first read has settled, successfully or not. Until then the switches
-   *  read as all on, so nothing that counts them should overwrite a badge the
-   *  push worker set while the app was closed. */
+  /** A record from the server is on screen. Until then the switches read as
+   *  all on, so nothing that counts them should overwrite a badge the push
+   *  worker set while the app was closed; a failed read keeps it so. */
   loaded: boolean;
-  /** Apply a change at once and save it; a refused save restores the last saved
-   *  record. Resolves whether the server kept it. */
+  /** Apply a change at once and save only that switch; a refused save puts it
+   *  back. Resolves whether the server kept it. */
   update: (patch: Partial<NotificationPreferences>) => Promise<boolean>;
 }
 

@@ -74,6 +74,20 @@ describe('NotificationPreferencesProvider', () => {
     expect(state.current?.preferences).toEqual(SESSIONS_MUTED);
   });
 
+  it('stays unknown while the record cannot be read, so the badges keep their number', async () => {
+    const getNotificationPreferences = vi.fn()
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValueOnce(SESSIONS_MUTED);
+    const { state, handlers } = mount({ getNotificationPreferences });
+    await settle();
+    // All-on defaults are not the account's switches.
+    expect(state.current).toMatchObject({ preferences: ON, loaded: false });
+
+    await act(async () => handlers[0].onConnected?.());
+    await settle();
+    expect(state.current).toMatchObject({ preferences: SESSIONS_MUTED, loaded: true });
+  });
+
   it('applies a change at once and puts the saved record back when the save is refused', async () => {
     const save = deferred<NotificationPreferences>();
     const { state } = mount({

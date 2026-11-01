@@ -165,6 +165,20 @@ describe('publishing the Bot list to the Inbox', () => {
     expect(published.at(-1)?.sessionIds.size).toBe(0);
   });
 
+  it("keeps the Owner's list unknown while it cannot be read", async () => {
+    const { api, stream, published, ids } = mountRoster(true);
+    api.listBots.mockReset();
+    api.listBots.mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce([MAIN, CSO]);
+    await flush();
+    // A failed read is not "no Bots": counting every Bot reply as a Session's would be wrong.
+    expect(published.at(-1)).toMatchObject({ known: false });
+
+    act(() => stream.handlers?.onConnected?.());
+    await flush();
+    expect(published.at(-1)?.known).toBe(true);
+    expect(ids()).toEqual(['ses_cso', 'ses_main']);
+  });
+
   it('publishes a known, empty list for a reader who is not the Owner', async () => {
     const { api, published } = mountRoster(false);
     await flush();

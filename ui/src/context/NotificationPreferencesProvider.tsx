@@ -55,10 +55,10 @@ export const NotificationPreferencesProvider = ({ children }: { children: ReactN
       if (generation !== generationRef.current) return;
       confirm(next, generation);
       show(next);
+      setLoaded(true);
     } catch {
-      // Unreadable is not "all off": keep what we have, defaults included.
-    } finally {
-      if (generation === generationRef.current) setLoaded(true);
+      // Unreadable is not "all off": keep what we have, and stay unknown until a
+      // record arrives, so the badges keep the number the push worker set.
     }
   }, [api, confirm, show]);
 

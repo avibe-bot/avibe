@@ -23,6 +23,8 @@ export const BotsProvider = ({ children }: { children: ReactNode }) => {
   const enabled = capabilities.is_instance_owner === true;
   const [ownerBots, setBots] = useState<Bot[]>([]);
   const [loaded, setLoaded] = useState(false);
+  // A list the server returned, as opposed to a first read that merely ended.
+  const [listed, setListed] = useState(false);
   const [ownerStatuses, setStatusBySession] = useState<Record<string, BotRuntimeStatus>>({});
   const [profileRequest, setProfileRequest] = useState<BotProfileRequest | null>(null);
   const readRef = useRef(0);
@@ -55,6 +57,7 @@ export const BotsProvider = ({ children }: { children: ReactNode }) => {
       const next = await api.listBots({ cache: false });
       if (read !== readRef.current) return;
       setBots(orderBots(next));
+      setListed(true);
       const known = sessionIdsRef.current;
       const fresh = next.map((bot) => bot.session_id).filter((id) => !known.has(id));
       sessionIdsRef.current = new Set(next.map((bot) => bot.session_id));
@@ -160,9 +163,10 @@ export const BotsProvider = ({ children }: { children: ReactNode }) => {
   }, [enabled, ownerBots, loaded, ownerStatuses, mainDefault, afterWrite, moveBot, profileRequest]);
 
   // The Inbox above the router splits its counts by this list (BotRosterContext).
-  // A reader who is not the Owner has none to wait for.
+  // A reader who is not the Owner has none to wait for; the Owner's is known once
+  // the server has returned it, since a failed read is not "no Bots".
   const { publish } = useBotRoster();
-  const rosterKnown = !enabled || loaded;
+  const rosterKnown = !enabled || listed;
   useEffect(() => {
     publish({ known: rosterKnown, sessionIds: new Set(value.bots.map((bot) => bot.session_id)) });
   }, [publish, rosterKnown, value.bots]);
