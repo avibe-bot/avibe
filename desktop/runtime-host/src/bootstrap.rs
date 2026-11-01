@@ -13,6 +13,7 @@ use tokio::time::{sleep, Instant};
 use crate::health::{HealthProbe, Presence};
 use crate::launcher::{CliOutcome, LaunchError, LaunchExit, LaunchedRuntime, ResolvedRuntimeLauncher, RuntimeLauncher};
 use crate::origin::LoopbackOrigin;
+use crate::receipt::{ReceiptEvent, StartupReceiptOutcome, StartupReceiptReason};
 use crate::status::{BootstrapNotice, BootstrapNoticeCode, BootstrapStatus};
 
 /// Overrides the origin the shell probes and navigates to. Still validated as a
@@ -422,7 +423,7 @@ impl RuntimeHost {
                     .adopt(
                         sink,
                         &origin,
-                        attempt,
+                        (run, attempt),
                         presence,
                         resolved_launcher.as_ref(),
                         BootstrapNoticeCode::Adopted,
@@ -434,7 +435,7 @@ impl RuntimeHost {
                     .adopt(
                         sink,
                         &origin,
-                        attempt,
+                        (run, attempt),
                         presence,
                         resolved_launcher.as_ref(),
                         BootstrapNoticeCode::Adopted,
@@ -504,6 +505,18 @@ impl RuntimeHost {
 
         publish(sink, BootstrapStatus::starting(&origin, attempt));
 
+        let receipt_watch = self
+            .launched_runtime()
+            .attempt
+            .as_ref()
+            .map(|attempt| attempt.watch.clone())
+            .filter(|watch| watch.receipt_capable());
+        if let Some(watch) = receipt_watch {
+            return self
+                .wait_for_startup_receipt(sink, run, origin, launcher, attempt, watch)
+                .await;
+        }
+
         let deadline = Instant::now() + self.settings.ready_timeout;
         while Instant::now() < deadline {
             sleep(self.settings.poll_interval).await;
@@ -518,7 +531,7 @@ impl RuntimeHost {
                         .adopt(
                             sink,
                             &origin,
-                            attempt,
+                            (run, attempt),
                             presence,
                             Some(&launcher),
                             BootstrapNoticeCode::Ready,
@@ -530,7 +543,7 @@ impl RuntimeHost {
                         .adopt(
                             sink,
                             &origin,
-                            attempt,
+                            (run, attempt),
                             presence,
                             Some(&launcher),
                             BootstrapNoticeCode::Adopted,
@@ -542,7 +555,7 @@ impl RuntimeHost {
                         .adopt(
                             sink,
                             &origin,
-                            attempt,
+                            (run, attempt),
                             presence,
                             Some(&launcher),
                             BootstrapNoticeCode::Adopted,
@@ -583,6 +596,142 @@ impl RuntimeHost {
         )
     }
 
+    async fn wait_for_startup_receipt(
+        &self,
+        sink: &dyn StatusSink,
+        run: u64,
+        origin: LoopbackOrigin,
+        launcher: Arc<dyn ResolvedRuntimeLauncher>,
+        mut attempt: u32,
+        watch: crate::launcher::LaunchWatch,
+    ) -> BootstrapStatus {
+        let identified = launcher.expected_runtime_id().is_some();
+        let deadline = Instant::now() + self.settings.ready_timeout;
+        loop {
+            if !self.receipt_run_current(run) {
+                return publish(sink, receipt_invalid(&origin, attempt));
+            }
+            if Instant::now() >= deadline {
+                watch.cancel_receipt();
+                self.clear_successful_launch();
+                return publish(
+                    sink,
+                    BootstrapStatus::failed(
+                        &origin,
+                        attempt,
+                        BootstrapNotice::timeout(self.settings.ready_timeout.as_secs()),
+                        true,
+                    ),
+                );
+            }
+            let receipt = match watch.receipt_event() {
+                Some(ReceiptEvent::Receipt(receipt)) => Some(receipt),
+                Some(ReceiptEvent::Invalid | ReceiptEvent::TransportError | ReceiptEvent::Eof) => {
+                    let code = self
+                        .clear_failed_launch()
+                        .unwrap_or(BootstrapNoticeCode::RuntimeDiscoveryFailed);
+                    return publish(
+                        sink,
+                        BootstrapStatus::failed(&origin, attempt, BootstrapNotice::new(code), true),
+                    );
+                }
+                None => None,
+            };
+            if let Some(receipt) = receipt {
+                if !receipt_matches_origin(&receipt, &origin) {
+                    return publish(sink, receipt_invalid(&origin, attempt));
+                }
+                if receipt.outcome == StartupReceiptOutcome::Failed {
+                    let status = publish(
+                        sink,
+                        BootstrapStatus::failed(
+                            &origin,
+                            attempt,
+                            BootstrapNotice::new(receipt_failure_notice(receipt.reason)),
+                            true,
+                        ),
+                    );
+                    // Keep the live helper's retry slot, but do not display the
+                    // same terminal failure again when its exit is reaped.
+                    watch.acknowledge_receipt_failure();
+                    return status;
+                }
+                if let Some(code) = self.clear_failed_launch() {
+                    return publish(
+                        sink,
+                        BootstrapStatus::failed(&origin, attempt, BootstrapNotice::new(code), true),
+                    );
+                }
+                // Receipt acceptance is the startup commit observation. The
+                // final probe below is still authoritative for the exact
+                // endpoint and Runtime identity, but helper output and exit
+                // events observed after this point belong to the monitor.
+                launcher.record_bootstrap_event("runtime.start.receipt.accepted");
+                attempt += 1;
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let presence =
+                    match tokio::time::timeout(remaining, self.observe_presence(run, &origin, Some(&launcher))).await {
+                        Ok(presence) if Instant::now() < deadline => presence,
+                        _ => Presence::Unknown,
+                    };
+                if !self.receipt_run_current(run) {
+                    return publish(sink, receipt_invalid(&origin, attempt));
+                }
+                launcher.record_bootstrap_event("runtime.start.final_presence");
+                return match presence {
+                    Presence::Mine { ready: true } => {
+                        self.adopt(
+                            sink,
+                            &origin,
+                            (run, attempt),
+                            presence,
+                            Some(&launcher),
+                            BootstrapNoticeCode::Ready,
+                        )
+                        .await
+                    }
+                    Presence::Unmanaged => {
+                        self.adopt(
+                            sink,
+                            &origin,
+                            (run, attempt),
+                            presence,
+                            Some(&launcher),
+                            BootstrapNoticeCode::Adopted,
+                        )
+                        .await
+                    }
+                    Presence::Foreign { ready: true, .. } if !identified => {
+                        self.adopt(
+                            sink,
+                            &origin,
+                            (run, attempt),
+                            presence,
+                            Some(&launcher),
+                            BootstrapNoticeCode::Adopted,
+                        )
+                        .await
+                    }
+                    Presence::Foreign { .. } if identified => publish(sink, ownership_lost(&origin, attempt)),
+                    _ => publish(sink, receipt_invalid(&origin, attempt)),
+                };
+            }
+            if let Some(code) = self.clear_failed_launch() {
+                return publish(
+                    sink,
+                    BootstrapStatus::failed(&origin, attempt, BootstrapNotice::new(code), true),
+                );
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let _ = tokio::time::timeout(remaining, watch.receipt_changed(remaining)).await;
+        }
+    }
+
+    fn receipt_run_current(&self, run: u64) -> bool {
+        let state = self.launched_runtime();
+        !state.stopping && state.epoch == run
+    }
+
     async fn resolve_origin(&self) -> Result<(LoopbackOrigin, Option<Arc<dyn ResolvedRuntimeLauncher>>), LaunchError> {
         if let Some(origin) = self.settings.origin_override.as_deref() {
             return LoopbackOrigin::parse(origin)
@@ -617,19 +766,29 @@ impl RuntimeHost {
         &self,
         sink: &dyn StatusSink,
         origin: &LoopbackOrigin,
-        attempt: u32,
+        run_attempt: (u64, u32),
         presence: Presence,
         launcher: Option<&Arc<dyn ResolvedRuntimeLauncher>>,
         notice: BootstrapNoticeCode,
     ) -> BootstrapStatus {
+        let (run, attempt) = run_attempt;
+        if !self.receipt_run_current(run) {
+            return publish(sink, receipt_invalid(origin, attempt));
+        }
         let mine = matches!(presence, Presence::Mine { .. });
-        self.launched_runtime().adoption = Some(Adoption {
-            presence,
-            launcher: launcher.cloned(),
-        });
         // Only this app's own Runtime proves which bundle is current.
         if let Some(launcher) = launcher.filter(|_| mine).cloned() {
             let _ = tokio::task::spawn_blocking(move || launcher.prune_superseded()).await;
+        }
+        {
+            let mut state = self.launched_runtime();
+            if state.stopping || state.epoch != run {
+                return publish(sink, receipt_invalid(origin, attempt));
+            }
+            state.adoption = Some(Adoption {
+                presence,
+                launcher: launcher.cloned(),
+            });
         }
         publish(sink, BootstrapStatus::ready(origin, attempt, notice))
     }
@@ -752,14 +911,14 @@ impl RuntimeHost {
             // Spawning the helper is evidence that a Runtime may exist even
             // when the helper later reports failure. Keep that fact separate
             // from retry deduplication and stop authority.
-            state.attempt = Some(launcher.launch(hand_over)?);
+            state.attempt = Some(launcher.launch_with_ready_timeout(hand_over, self.settings.ready_timeout)?);
             state.runtime_may_be_running = true;
         }
         Ok(())
     }
 
-    /// A failed helper releases its retry slot and nothing else. Returns the
-    /// notice its exit calls for.
+    /// A failed helper releases its retry slot and nothing else. Report its
+    /// exit only when this attempt has not already published a valid FAILED.
     fn clear_failed_launch(&self) -> Option<BootstrapNoticeCode> {
         let mut state = self.launched_runtime();
         let code = match state.attempt.as_ref()?.watch.exit()? {
@@ -768,8 +927,9 @@ impl RuntimeHost {
             LaunchExit::HandoverFailed => BootstrapNoticeCode::RuntimeStopFailed,
             LaunchExit::Failed => BootstrapNoticeCode::LauncherExited,
         };
+        let presented = state.attempt.as_ref()?.watch.receipt_failure_presented();
         state.attempt = None;
-        Some(code)
+        (!presented).then_some(code)
     }
 
     /// Readiness timeout releases only a completed helper, never the liveness
@@ -803,6 +963,30 @@ fn ownership_lost(origin: &LoopbackOrigin, attempt: u32) -> BootstrapStatus {
     )
 }
 
+fn receipt_invalid(origin: &LoopbackOrigin, attempt: u32) -> BootstrapStatus {
+    BootstrapStatus::failed(
+        origin,
+        attempt,
+        BootstrapNotice::new(BootstrapNoticeCode::RuntimeDiscoveryFailed),
+        true,
+    )
+}
+
+fn receipt_matches_origin(receipt: &crate::receipt::StartupReceipt, origin: &LoopbackOrigin) -> bool {
+    LoopbackOrigin::parse(&receipt.origin).is_ok_and(|receipt_origin| receipt_origin.as_str() == origin.as_str())
+}
+
+fn receipt_failure_notice(reason: Option<StartupReceiptReason>) -> BootstrapNoticeCode {
+    match reason {
+        Some(StartupReceiptReason::HandoverRefused | StartupReceiptReason::RuntimeClaimRefused) => {
+            BootstrapNoticeCode::RuntimeOwnershipLost
+        }
+        Some(StartupReceiptReason::HandoverFailed) => BootstrapNoticeCode::RuntimeStopFailed,
+        Some(StartupReceiptReason::RuntimeNotReady) => BootstrapNoticeCode::RuntimeDiscoveryFailed,
+        Some(StartupReceiptReason::StartupFailed) | None => BootstrapNoticeCode::RuntimeSpawnFailed,
+    }
+}
+
 fn publish(sink: &dyn StatusSink, status: BootstrapStatus) -> BootstrapStatus {
     sink.publish(status.clone());
     status
@@ -812,7 +996,9 @@ fn publish(sink: &dyn StatusSink, status: BootstrapStatus) -> BootstrapStatus {
 mod tests {
     use super::*;
     use crate::launcher::LaunchWatch;
+    use crate::receipt::{ReceiptEvent, StartupReceipt, StartupReceiptOutcome, StartupReceiptStream};
     use crate::status::BootstrapPhase;
+    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     const ORIGIN: &str = "http://127.0.0.1:5123";
@@ -920,6 +1106,124 @@ mod tests {
         inner: Arc<CountingLauncher>,
     }
 
+    #[derive(Clone)]
+    struct ReceiptLauncher {
+        state: Arc<ReceiptLauncherState>,
+    }
+
+    struct ReceiptLauncherState {
+        events: Vec<ReceiptEvent>,
+        launches: AtomicUsize,
+        runtime_id: String,
+        exit: Option<LaunchExit>,
+    }
+
+    impl ReceiptLauncher {
+        fn new(events: impl IntoIterator<Item = ReceiptEvent>) -> Self {
+            Self {
+                state: Arc::new(ReceiptLauncherState {
+                    events: events.into_iter().collect(),
+                    launches: AtomicUsize::new(0),
+                    runtime_id: "b".repeat(64),
+                    exit: None,
+                }),
+            }
+        }
+
+        fn ready(events: impl IntoIterator<Item = ReceiptEvent>) -> Self {
+            Self::new(events)
+        }
+
+        fn failed_before_acceptance(events: impl IntoIterator<Item = ReceiptEvent>) -> Self {
+            let mut launcher = Self::new(events);
+            Arc::get_mut(&mut launcher.state)
+                .expect("unique receipt launcher state")
+                .exit = Some(LaunchExit::Failed);
+            launcher
+        }
+
+        fn launches(&self) -> usize {
+            self.state.launches.load(Ordering::SeqCst)
+        }
+    }
+
+    impl RuntimeLauncher for ReceiptLauncher {
+        fn resolve(&self) -> Result<Arc<dyn ResolvedRuntimeLauncher>, LaunchError> {
+            Ok(Arc::new(self.clone()))
+        }
+    }
+
+    impl ResolvedRuntimeLauncher for ReceiptLauncher {
+        fn endpoint(&self) -> Result<LoopbackOrigin, LaunchError> {
+            Ok(LoopbackOrigin::parse(ORIGIN).expect("test origin"))
+        }
+
+        fn launch(&self, _hand_over: bool) -> Result<LaunchedRuntime, LaunchError> {
+            self.state.launches.fetch_add(1, Ordering::SeqCst);
+            let watch = if let Some(exit) = self.state.exit {
+                LaunchWatch::with_receipt_and_exit(StartupReceiptStream::from_events(self.state.events.clone()), exit)
+            } else {
+                LaunchWatch::with_receipt(StartupReceiptStream::from_events(self.state.events.clone()))
+            };
+            Ok(LaunchedRuntime { pid: 4242, watch })
+        }
+
+        fn expected_runtime_id(&self) -> Option<&str> {
+            Some(&self.state.runtime_id)
+        }
+
+        fn stop(&self, runtime_id: &str) -> CliOutcome {
+            assert_eq!(runtime_id, self.state.runtime_id);
+            CliOutcome::Completed
+        }
+    }
+
+    fn ready_receipt(origin: &str) -> ReceiptEvent {
+        ReceiptEvent::Receipt(StartupReceipt {
+            schema_version: 1,
+            outcome: StartupReceiptOutcome::Ready,
+            origin: origin.to_owned(),
+            reason: None,
+        })
+    }
+
+    struct ReceiptProbe {
+        calls: AtomicUsize,
+    }
+
+    impl ReceiptProbe {
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    struct SequenceProbe {
+        responses: Mutex<VecDeque<Presence>>,
+    }
+
+    #[async_trait::async_trait]
+    impl HealthProbe for SequenceProbe {
+        async fn presence(&self, _origin: &LoopbackOrigin, _expected: Option<&str>) -> Presence {
+            self.responses
+                .lock()
+                .expect("sequence probe lock")
+                .pop_front()
+                .unwrap_or(Presence::Unknown)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl HealthProbe for ReceiptProbe {
+        async fn presence(&self, _origin: &LoopbackOrigin, expected: Option<&str>) -> Presence {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Presence::Absent;
+            }
+            Presence::Mine {
+                ready: expected == Some("b".repeat(64).as_str()),
+            }
+        }
+    }
+
     impl RuntimeLauncher for PreparingLauncher {
         fn resolve(&self) -> Result<Arc<dyn ResolvedRuntimeLauncher>, LaunchError> {
             Ok(Arc::new(self.inner.clone()))
@@ -981,6 +1285,346 @@ mod tests {
 
         assert_eq!(counting.prepares.load(Ordering::SeqCst), 0);
         assert_eq!(counting.launches.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_ready_receipt_is_followed_by_one_final_presence_check() {
+        let probe = Arc::new(ReceiptProbe {
+            calls: AtomicUsize::new(0),
+        });
+        let launcher = ReceiptLauncher::ready([ready_receipt(ORIGIN)]);
+        let host = RuntimeHost::new(
+            probe.clone(),
+            Arc::new(launcher.clone()),
+            RuntimeHostSettings {
+                ready_timeout: Duration::from_secs(2),
+                poll_interval: Duration::from_secs(1),
+                ..RuntimeHostSettings::default()
+            },
+        );
+
+        let status = host.bootstrap(&DiscardStatus, BootstrapTrigger::Launch).await;
+
+        assert_eq!(status.phase, BootstrapPhase::Ready);
+        assert_eq!(status.notice.code, BootstrapNoticeCode::Ready);
+        assert_eq!(probe.calls(), 2, "initial adoption plus one final receipt check");
+        assert_eq!(launcher.launches(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_terminal_invalid_receipt_event_refuses_navigation() {
+        let probe = Arc::new(ReceiptProbe {
+            calls: AtomicUsize::new(0),
+        });
+        let launcher = ReceiptLauncher::ready([ReceiptEvent::Invalid]);
+        let host = RuntimeHost::new(
+            probe,
+            Arc::new(launcher),
+            RuntimeHostSettings {
+                ready_timeout: Duration::from_secs(2),
+                poll_interval: Duration::from_secs(1),
+                ..RuntimeHostSettings::default()
+            },
+        );
+
+        let status = host.bootstrap(&DiscardStatus, BootstrapTrigger::Launch).await;
+
+        assert_eq!(status.phase, BootstrapPhase::Failed);
+        assert_eq!(status.notice.code, BootstrapNoticeCode::RuntimeDiscoveryFailed);
+    }
+
+    #[test]
+    fn receipt_origin_comparison_uses_the_loopback_canonical_form() {
+        for host in ["127.0.0.1", "[::1]"] {
+            let expected = LoopbackOrigin::parse(&format!("http://{host}")).expect("default HTTP port");
+            let explicit_default = ready_receipt(&format!("http://{host}:80"));
+            let distinct = ready_receipt(&format!("http://{host}:81"));
+
+            let ReceiptEvent::Receipt(explicit_default) = explicit_default else {
+                unreachable!("test receipt is a receipt event");
+            };
+            let ReceiptEvent::Receipt(distinct) = distinct else {
+                unreachable!("test receipt is a receipt event");
+            };
+
+            assert!(receipt_matches_origin(&explicit_default, &expected));
+            assert!(!receipt_matches_origin(&distinct, &expected));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_receipt_for_another_origin_refuses_navigation() {
+        let probe = Arc::new(ReceiptProbe {
+            calls: AtomicUsize::new(0),
+        });
+        let launcher = ReceiptLauncher::ready([ready_receipt("http://127.0.0.1:5124")]);
+        let host = RuntimeHost::new(
+            probe.clone(),
+            Arc::new(launcher),
+            RuntimeHostSettings {
+                ready_timeout: Duration::from_secs(2),
+                poll_interval: Duration::from_secs(1),
+                ..RuntimeHostSettings::default()
+            },
+        );
+
+        let status = host.bootstrap(&DiscardStatus, BootstrapTrigger::Launch).await;
+
+        assert_eq!(status.phase, BootstrapPhase::Failed);
+        assert_eq!(status.notice.code, BootstrapNoticeCode::RuntimeDiscoveryFailed);
+        assert_eq!(probe.calls(), 1, "wrong origin precedes the final probe");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_receipt_transport_failure_before_publication_refuses_navigation() {
+        let probe = Arc::new(ReceiptProbe {
+            calls: AtomicUsize::new(0),
+        });
+        let launcher = ReceiptLauncher::ready([ReceiptEvent::TransportError]);
+        let host = RuntimeHost::new(
+            probe.clone(),
+            Arc::new(launcher),
+            RuntimeHostSettings {
+                ready_timeout: Duration::from_secs(2),
+                poll_interval: Duration::from_secs(1),
+                ..RuntimeHostSettings::default()
+            },
+        );
+
+        let status = host.bootstrap(&DiscardStatus, BootstrapTrigger::Launch).await;
+
+        assert_eq!(status.phase, BootstrapPhase::Failed);
+        assert_eq!(status.notice.code, BootstrapNoticeCode::RuntimeDiscoveryFailed);
+        assert_eq!(probe.calls(), 1, "transport failure precedes the final probe");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_helper_before_receipt_acceptance_refuses_navigation() {
+        let launcher = ReceiptLauncher::failed_before_acceptance([ready_receipt(ORIGIN)]);
+        let host = RuntimeHost::new(
+            Arc::new(ReceiptProbe {
+                calls: AtomicUsize::new(0),
+            }),
+            Arc::new(launcher),
+            RuntimeHostSettings {
+                ready_timeout: Duration::from_secs(2),
+                poll_interval: Duration::from_secs(1),
+                ..RuntimeHostSettings::default()
+            },
+        );
+
+        let status = host.bootstrap(&DiscardStatus, BootstrapTrigger::Launch).await;
+
+        assert_eq!(status.phase, BootstrapPhase::Failed);
+        assert_eq!(status.notice.code, BootstrapNoticeCode::LauncherExited);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_final_presence_probe_remains_authoritative_after_a_ready_receipt() {
+        for final_presence in [
+            Presence::Absent,
+            Presence::Unknown,
+            Presence::Mine { ready: false },
+            Presence::Foreign {
+                runtime_id: "c".repeat(64),
+                ready: true,
+            },
+        ] {
+            let probe = Arc::new(SequenceProbe {
+                responses: Mutex::new(VecDeque::from([Presence::Absent, final_presence])),
+            });
+            let host = RuntimeHost::new(
+                probe,
+                Arc::new(ReceiptLauncher::ready([ready_receipt(ORIGIN)])),
+                RuntimeHostSettings {
+                    ready_timeout: Duration::from_secs(2),
+                    poll_interval: Duration::from_secs(1),
+                    ..RuntimeHostSettings::default()
+                },
+            );
+
+            let status = host.bootstrap(&DiscardStatus, BootstrapTrigger::Launch).await;
+
+            assert_eq!(status.phase, BootstrapPhase::Failed);
+            assert_ne!(status.notice.code, BootstrapNoticeCode::Ready);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_in_flight_receipt_helper_is_retained_after_observation_timeout() {
+        struct NeverReadyProbe;
+
+        #[async_trait::async_trait]
+        impl HealthProbe for NeverReadyProbe {
+            async fn presence(&self, _origin: &LoopbackOrigin, _expected: Option<&str>) -> Presence {
+                Presence::Absent
+            }
+        }
+
+        let launcher = ReceiptLauncher::ready([]);
+        let host = RuntimeHost::new(
+            Arc::new(NeverReadyProbe),
+            Arc::new(launcher.clone()),
+            RuntimeHostSettings {
+                ready_timeout: Duration::ZERO,
+                poll_interval: Duration::from_secs(1),
+                ..RuntimeHostSettings::default()
+            },
+        );
+
+        let first = host.bootstrap(&DiscardStatus, BootstrapTrigger::Launch).await;
+        let second = host.bootstrap(&DiscardStatus, BootstrapTrigger::Retry).await;
+
+        assert_eq!(first.notice.code, BootstrapNoticeCode::ReadyTimeout);
+        assert_eq!(second.notice.code, BootstrapNoticeCode::ReadyTimeout);
+        assert_eq!(launcher.launches(), 1, "Retry must not start a duplicate helper");
+        assert!(host.has_launched());
+    }
+
+    #[tokio::test]
+    async fn a_newer_attempt_or_stop_fences_a_receipts_in_flight_final_probe() {
+        struct PausedFinalProbe {
+            calls: AtomicUsize,
+            entered: tokio::sync::Notify,
+            release: tokio::sync::Notify,
+            initial: Presence,
+        }
+        #[async_trait::async_trait]
+        impl HealthProbe for PausedFinalProbe {
+            async fn presence(&self, _origin: &LoopbackOrigin, _expected: Option<&str>) -> Presence {
+                match self.calls.fetch_add(1, Ordering::SeqCst) {
+                    0 => self.initial.clone(),
+                    1 => {
+                        self.entered.notify_one();
+                        self.release.notified().await;
+                        Presence::Mine { ready: true }
+                    }
+                    _ => Presence::Mine { ready: true },
+                }
+            }
+        }
+        for stop in [false, true] {
+            let probe = Arc::new(PausedFinalProbe {
+                calls: AtomicUsize::new(0),
+                entered: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+                initial: if stop {
+                    Presence::Mine { ready: false }
+                } else {
+                    Presence::Absent
+                },
+            });
+            let mut launcher = ReceiptLauncher::ready([ready_receipt(ORIGIN)]);
+            // Stop is permitted only once the helper has settled and actual
+            // presence established this Runtime's ownership.
+            if stop {
+                Arc::get_mut(&mut launcher.state).unwrap().exit = Some(LaunchExit::Started);
+            }
+            let host = RuntimeHost::new(
+                probe.clone(),
+                Arc::new(launcher.clone()),
+                RuntimeHostSettings::default(),
+            );
+            let (stale, ()) = tokio::join!(host.bootstrap(&DiscardStatus, BootstrapTrigger::Launch), async {
+                probe.entered.notified().await;
+                if stop {
+                    assert_eq!(host.stop_owned_runtime().await, CliOutcome::Completed);
+                } else {
+                    assert_eq!(
+                        host.bootstrap(&DiscardStatus, BootstrapTrigger::Retry).await.phase,
+                        BootstrapPhase::Ready
+                    );
+                }
+                probe.release.notify_one();
+            });
+            assert_eq!(stale.phase, BootstrapPhase::Failed);
+            assert_eq!(launcher.launches(), 1);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_ready_frame_cannot_extend_the_deadline_for_final_verification() {
+        struct SlowFinalProbe(AtomicUsize);
+        #[async_trait::async_trait]
+        impl HealthProbe for SlowFinalProbe {
+            async fn presence(&self, _origin: &LoopbackOrigin, _expected: Option<&str>) -> Presence {
+                if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Presence::Absent;
+                }
+                sleep(Duration::from_secs(5)).await;
+                Presence::Mine { ready: true }
+            }
+        }
+        for budget in [Duration::ZERO, Duration::from_secs(1)] {
+            let host = RuntimeHost::new(
+                Arc::new(SlowFinalProbe(AtomicUsize::new(0))),
+                Arc::new(ReceiptLauncher::ready([ready_receipt(ORIGIN)])),
+                RuntimeHostSettings {
+                    ready_timeout: budget,
+                    ..RuntimeHostSettings::default()
+                },
+            );
+            let started = Instant::now();
+            assert_eq!(
+                host.bootstrap(&DiscardStatus, BootstrapTrigger::Launch).await.phase,
+                BootstrapPhase::Failed
+            );
+            assert!(started.elapsed() <= budget);
+        }
+    }
+
+    #[tokio::test]
+    async fn receipt_timeout_does_not_run_a_second_http_polling_loop() {
+        struct CountingAbsentProbe {
+            calls: AtomicUsize,
+        }
+
+        #[async_trait::async_trait]
+        impl HealthProbe for CountingAbsentProbe {
+            async fn presence(&self, _origin: &LoopbackOrigin, _expected: Option<&str>) -> Presence {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Presence::Absent
+            }
+        }
+
+        let receipt_probe = Arc::new(CountingAbsentProbe {
+            calls: AtomicUsize::new(0),
+        });
+        let receipt_host = RuntimeHost::new(
+            receipt_probe.clone(),
+            Arc::new(ReceiptLauncher::ready([])),
+            RuntimeHostSettings {
+                ready_timeout: Duration::from_millis(30),
+                poll_interval: Duration::from_millis(5),
+                ..RuntimeHostSettings::default()
+            },
+        );
+        let receipt_status = receipt_host.bootstrap(&DiscardStatus, BootstrapTrigger::Launch).await;
+
+        let legacy_probe = Arc::new(CountingAbsentProbe {
+            calls: AtomicUsize::new(0),
+        });
+        let legacy_launcher = Arc::new(CountingLauncher::default());
+        let legacy_host = RuntimeHost::new(
+            legacy_probe.clone(),
+            Arc::new(PreparingLauncher { inner: legacy_launcher }),
+            RuntimeHostSettings {
+                ready_timeout: Duration::from_millis(30),
+                poll_interval: Duration::from_millis(5),
+                ..RuntimeHostSettings::default()
+            },
+        );
+        let legacy_status = legacy_host.bootstrap(&DiscardStatus, BootstrapTrigger::Launch).await;
+
+        assert_eq!(receipt_status.notice.code, BootstrapNoticeCode::ReadyTimeout);
+        assert_eq!(legacy_status.notice.code, BootstrapNoticeCode::ReadyTimeout);
+        let receipt_calls = receipt_probe.calls.load(Ordering::SeqCst);
+        let legacy_calls = legacy_probe.calls.load(Ordering::SeqCst);
+        assert_eq!(receipt_calls, 1, "receipt waiting does not poll /ready");
+        assert!(
+            legacy_calls > receipt_calls,
+            "legacy Rust polling should exceed the receipt path"
+        );
     }
 
     /// A launcher whose login-shell lookup blocks until the test releases it.
@@ -1094,10 +1738,16 @@ mod tests {
 
     #[test]
     fn a_timeout_override_must_be_a_positive_bounded_number_of_seconds() {
+        assert_eq!(parse_timeout("1"), Some(Duration::from_secs(1)));
         assert_eq!(parse_timeout("30"), Some(Duration::from_secs(30)));
+        assert_eq!(parse_timeout("600"), Some(Duration::from_secs(600)));
         assert_eq!(parse_timeout("  30  "), Some(Duration::from_secs(30)));
         for rejected in ["", "0", "-1", "abc", "30s", "1e3", "601", "18446744073709551616"] {
             assert_eq!(parse_timeout(rejected), None, "override {rejected:?}");
         }
     }
 }
+
+#[cfg(test)]
+#[path = "bootstrap_receipt_tests.rs"]
+mod receipt_integration;

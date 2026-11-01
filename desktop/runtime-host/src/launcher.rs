@@ -12,10 +12,11 @@
 
 use std::env;
 use std::ffi::{OsStr, OsString};
+use std::fmt;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{mpsc, Arc, OnceLock};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -24,6 +25,7 @@ use crate::bootstrap_log::BootstrapLog;
 use crate::login_path::{login_shell_path, LoginPath};
 use crate::origin::LoopbackOrigin;
 use crate::private_runtime::{InstalledPrivateRuntime, PrivateRuntimeBundle, PrivateRuntimeError};
+use crate::receipt::{ReceiptEvent, StartupReceiptStream};
 use crate::status::BootstrapNoticeCode;
 /// Environment variable that points the shell at a specific `vibe` executable.
 ///
@@ -59,6 +61,20 @@ pub const DESKTOP_BACKENDS_ROOT_ENV: &str = "AVIBE_DESKTOP_BACKENDS_ROOT";
 /// same Runtime. The shell owns a WebView for exactly this purpose, so it always
 /// opts out.
 const START_ARGS: [&str; 2] = ["start", "--no-open-browser"];
+const DESKTOP_START_ARGS: [&str; 3] = ["start", "--no-open-browser", "--desktop-receipt"];
+
+/// Only the bundled CLI shares this interface. The shell has already validated
+/// its environment override; Python consumes this attempt's explicit budget.
+pub(crate) fn desktop_start_arguments(ready_timeout: Duration) -> Vec<String> {
+    DESKTOP_START_ARGS
+        .iter()
+        .map(|arg| (*arg).to_owned())
+        .chain([
+            "--desktop-ready-timeout".to_owned(),
+            ready_timeout.as_secs_f64().to_string(),
+        ])
+        .collect()
+}
 /// Lets this start stop another desktop Runtime that serves this home. `vibe
 /// start` refuses that handover without it.
 const HAND_OVER_ARG: &str = "--hand-over";
@@ -219,6 +235,15 @@ pub trait ResolvedRuntimeLauncher: Send + Sync {
     /// `hand_over` lets the start replace another desktop Runtime serving this
     /// home. The start owns that act and reports it in its exit.
     fn launch(&self, hand_over: bool) -> Result<LaunchedRuntime, LaunchError>;
+    /// Legacy/external launchers retain their CLI; bundled launchers pass the
+    /// shell-owned readiness budget to the producer.
+    fn launch_with_ready_timeout(
+        &self,
+        hand_over: bool,
+        _ready_timeout: Duration,
+    ) -> Result<LaunchedRuntime, LaunchError> {
+        self.launch(hand_over)
+    }
 
     /// The provenance id of the Runtime this launcher starts, if it has one.
     /// Only a Runtime serving this id is this launcher's own.
@@ -235,6 +260,9 @@ pub trait ResolvedRuntimeLauncher: Send + Sync {
     fn remove_backends(&self) -> CliOutcome {
         CliOutcome::Unrunnable
     }
+
+    /// Records a bounded bootstrap milestone without affecting the outcome.
+    fn record_bootstrap_event(&self, _event: &str) {}
 
     fn prune_superseded(&self) {}
 }
@@ -273,8 +301,24 @@ impl LaunchExit {
 
 /// Whether the launcher process itself survived long enough to do its job.
 /// Empty means "still running, or not observable".
-#[derive(Debug, Clone, Default)]
-pub struct LaunchWatch(Arc<OnceLock<LaunchExit>>);
+#[derive(Clone)]
+pub struct LaunchWatch(Arc<LaunchWatchState>);
+
+struct LaunchWatchState {
+    exit: OnceLock<LaunchExit>,
+    receipt: Mutex<Option<StartupReceiptStream>>,
+    presented_receipt_failure: OnceLock<()>,
+}
+
+impl Default for LaunchWatch {
+    fn default() -> Self {
+        Self(Arc::new(LaunchWatchState {
+            exit: OnceLock::new(),
+            receipt: Mutex::new(None),
+            presented_receipt_failure: OnceLock::new(),
+        }))
+    }
+}
 
 impl LaunchWatch {
     /// A watch that has already seen the launcher exit. For launchers that learn
@@ -287,7 +331,7 @@ impl LaunchWatch {
 
     /// The exit seen, if the launcher has exited.
     pub fn exit(&self) -> Option<LaunchExit> {
-        self.0.get().copied()
+        self.0.exit.get().copied()
     }
 
     /// True only once the launcher has been *seen* to exit non-zero.
@@ -302,11 +346,71 @@ impl LaunchWatch {
 
     /// Neither outcome has been seen: the launcher may still be starting pieces.
     pub fn pending(&self) -> bool {
-        self.0.get().is_none()
+        self.0.exit.get().is_none()
+    }
+
+    pub fn receipt_capable(&self) -> bool {
+        self.0.receipt.lock().map(|receipt| receipt.is_some()).unwrap_or(false)
+    }
+
+    pub fn receipt_event(&self) -> Option<ReceiptEvent> {
+        self.0
+            .receipt
+            .lock()
+            .ok()?
+            .as_ref()
+            .and_then(StartupReceiptStream::try_next)
+    }
+
+    pub async fn receipt_changed(&self, remaining: Duration) {
+        let receipt = self.0.receipt.lock().ok().and_then(|receipt| receipt.clone());
+        if let Some(receipt) = receipt {
+            receipt.changed(remaining).await;
+        }
+    }
+
+    pub fn cancel_receipt(&self) {
+        if let Some(receipt) = self.0.receipt.lock().ok().and_then(|receipt| receipt.clone()) {
+            receipt.cancel();
+        }
+    }
+
+    pub(crate) fn acknowledge_receipt_failure(&self) {
+        let _ = self.0.presented_receipt_failure.set(());
+    }
+
+    pub(crate) fn receipt_failure_presented(&self) -> bool {
+        self.0.presented_receipt_failure.get().is_some()
+    }
+
+    pub(crate) fn with_receipt(receipt: StartupReceiptStream) -> Self {
+        let watch = Self::default();
+        *watch.0.receipt.lock().expect("launch receipt lock") = Some(receipt);
+        watch
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_receipt_and_exit(receipt: StartupReceiptStream, exit: LaunchExit) -> Self {
+        let watch = Self::with_receipt(receipt);
+        watch.record(exit);
+        watch
     }
 
     fn record(&self, exit: LaunchExit) {
-        let _ = self.0.set(exit);
+        let _ = self.0.exit.set(exit);
+        if let Some(receipt) = self.0.receipt.lock().ok().and_then(|receipt| receipt.clone()) {
+            receipt.finish();
+        }
+    }
+}
+
+impl fmt::Debug for LaunchWatch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LaunchWatch")
+            .field("exit", &self.exit())
+            .field("receipt_capable", &self.receipt_capable())
+            .finish()
     }
 }
 
@@ -501,15 +605,37 @@ impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
     }
 
     fn launch(&self, hand_over: bool) -> Result<LaunchedRuntime, LaunchError> {
+        self.launch_with_ready_timeout(hand_over, crate::bootstrap::DEFAULT_READY_TIMEOUT)
+    }
+
+    fn launch_with_ready_timeout(
+        &self,
+        hand_over: bool,
+        ready_timeout: Duration,
+    ) -> Result<LaunchedRuntime, LaunchError> {
         // Only this shell's own Runtime is started by a CLI of its version,
         // which knows the flag and exits by the handover contract.
         let identified = self.expected_runtime_id.is_some();
         let hand_over = hand_over && identified;
         let login_path = self.login_path();
         let started = Instant::now();
-        let child = spawn_detached(&self.command, hand_over, login_path).map_err(LaunchError::Spawn)?;
+        let mut child = if identified {
+            spawn_detached_with_receipt(&self.command, hand_over, login_path, Some(ready_timeout))
+        } else {
+            spawn_detached(&self.command, hand_over, login_path)
+        }
+        .map_err(LaunchError::Spawn)?;
         let pid = child.id();
-        let watch = LaunchWatch::default();
+        let watch = if identified {
+            let stdout = child.stdout.take().ok_or_else(|| {
+                let _ = child.kill();
+                let _ = child.wait();
+                LaunchError::Spawn(std::io::Error::other("desktop startup receipt pipe was not created"))
+            })?;
+            LaunchWatch::with_receipt(StartupReceiptStream::spawn(stdout, self.log.clone()))
+        } else {
+            LaunchWatch::default()
+        };
 
         // Reap the launcher process so it cannot linger as a zombie. `vibe start`
         // returns once the Runtime daemons are up; those daemons are grandchildren
@@ -555,6 +681,10 @@ impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
             &self.log,
             "runtime.remove_backends",
         )
+    }
+
+    fn record_bootstrap_event(&self, event: &str) {
+        self.log.record(event, &[]);
     }
 
     fn prune_superseded(&self) {
@@ -1082,11 +1212,27 @@ fn spawn_detached(
     hand_over: bool,
     login_path: &LoginPath,
 ) -> std::io::Result<std::process::Child> {
+    spawn_detached_with_receipt(runtime, hand_over, login_path, None)
+}
+
+fn spawn_detached_with_receipt(
+    runtime: &RuntimeCommand,
+    hand_over: bool,
+    login_path: &LoginPath,
+    receipt_timeout: Option<Duration>,
+) -> std::io::Result<std::process::Child> {
     let inherited_path = match login_path {
         LoginPath::Resolved(path) => Some(path.as_os_str()),
         LoginPath::Inherited(_) => None,
     };
-    let mut command = lifecycle_command(runtime, &START_ARGS, inherited_path);
+    let receipt_args = receipt_timeout.map(desktop_start_arguments);
+    let args: Vec<&str> = receipt_args
+        .as_ref()
+        .map_or_else(|| START_ARGS.to_vec(), |args| args.iter().map(String::as_str).collect());
+    let mut command = lifecycle_command(runtime, &args, inherited_path);
+    if receipt_timeout.is_some() {
+        command.stdout(Stdio::piped());
+    }
     if hand_over {
         command.arg(HAND_OVER_ARG);
     }
@@ -1202,6 +1348,177 @@ fn lifecycle_command(runtime: &RuntimeCommand, args: &[&str], inherited_path: Op
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+
+    /// FAILED is already visible before reaping; transport loss/timeouts are
+    /// not a substitute for that verdict. Only the former acknowledges failure.
+    #[tokio::test]
+    async fn retained_receipt_attempt_transitions_preserve_first_retry_and_live_deduplication() {
+        use crate::bootstrap::{BootstrapTrigger, DiscardStatus, RuntimeHost, RuntimeHostSettings};
+        use crate::health::{HealthProbe, Presence};
+        use crate::receipt::{StartupReceipt, StartupReceiptOutcome, StartupReceiptReason};
+        use crate::status::BootstrapPhase;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone)]
+        struct Launcher {
+            first: LaunchWatch,
+            launches: Arc<AtomicUsize>,
+        }
+        impl RuntimeLauncher for Launcher {
+            fn resolve(&self) -> Result<Arc<dyn ResolvedRuntimeLauncher>, LaunchError> {
+                Ok(Arc::new(self.clone()))
+            }
+        }
+        impl ResolvedRuntimeLauncher for Launcher {
+            fn endpoint(&self) -> Result<LoopbackOrigin, LaunchError> {
+                Ok(LoopbackOrigin::parse("http://127.0.0.1:5123").unwrap())
+            }
+            fn launch(&self, _hand_over: bool) -> Result<LaunchedRuntime, LaunchError> {
+                let first = self.launches.fetch_add(1, Ordering::SeqCst) == 0;
+                Ok(LaunchedRuntime {
+                    pid: 42,
+                    watch: if first {
+                        self.first.clone()
+                    } else {
+                        LaunchWatch::exited(LaunchExit::Failed)
+                    },
+                })
+            }
+        }
+        struct Probe {
+            healthy: bool,
+            calls: AtomicUsize,
+        }
+        #[async_trait::async_trait]
+        impl HealthProbe for Probe {
+            async fn presence(&self, _origin: &LoopbackOrigin, _expected: Option<&str>) -> Presence {
+                if self.healthy && self.calls.fetch_add(1, Ordering::SeqCst) > 0 {
+                    Presence::Unmanaged
+                } else {
+                    Presence::Absent
+                }
+            }
+        }
+        for scenario in [
+            "failed",
+            "wrong-origin",
+            "eof",
+            "timeout",
+            "cancel",
+            "healthy",
+            "legacy",
+        ] {
+            for exit in [
+                LaunchExit::Failed,
+                LaunchExit::HandoverRefused,
+                LaunchExit::HandoverFailed,
+            ] {
+                let events = match scenario {
+                    "failed" | "wrong-origin" | "healthy" => vec![ReceiptEvent::Receipt(StartupReceipt {
+                        schema_version: 1,
+                        outcome: if scenario == "healthy" {
+                            StartupReceiptOutcome::Ready
+                        } else {
+                            StartupReceiptOutcome::Failed
+                        },
+                        origin: if scenario == "wrong-origin" {
+                            "http://127.0.0.1:5124"
+                        } else {
+                            "http://127.0.0.1:5123"
+                        }
+                        .to_owned(),
+                        reason: (scenario != "healthy").then_some(match exit {
+                            LaunchExit::HandoverRefused => StartupReceiptReason::HandoverRefused,
+                            LaunchExit::HandoverFailed => StartupReceiptReason::HandoverFailed,
+                            _ => StartupReceiptReason::RuntimeNotReady,
+                        }),
+                    })],
+                    "eof" => vec![ReceiptEvent::Eof],
+                    _ => vec![],
+                };
+                let watch = if scenario == "legacy" {
+                    LaunchWatch::default()
+                } else {
+                    LaunchWatch::with_receipt(StartupReceiptStream::from_events(events))
+                };
+                if scenario == "cancel" {
+                    watch.cancel_receipt();
+                }
+                let launcher = Launcher {
+                    first: watch.clone(),
+                    launches: Arc::new(AtomicUsize::new(0)),
+                };
+                let host = RuntimeHost::new(
+                    Arc::new(Probe {
+                        healthy: scenario == "healthy",
+                        calls: AtomicUsize::new(0),
+                    }),
+                    Arc::new(launcher.clone()),
+                    RuntimeHostSettings {
+                        ready_timeout: Duration::from_millis(20),
+                        poll_interval: Duration::from_millis(1),
+                        ..RuntimeHostSettings::default()
+                    },
+                );
+                let first = host.bootstrap(&DiscardStatus, BootstrapTrigger::Launch).await;
+                assert_eq!(
+                    first.phase,
+                    if scenario == "healthy" {
+                        BootstrapPhase::Ready
+                    } else {
+                        BootstrapPhase::Failed
+                    },
+                    "{scenario}"
+                );
+                if scenario == "failed" {
+                    assert_eq!(
+                        first.notice.code,
+                        match exit {
+                            LaunchExit::HandoverRefused => BootstrapNoticeCode::RuntimeOwnershipLost,
+                            LaunchExit::HandoverFailed => BootstrapNoticeCode::RuntimeStopFailed,
+                            _ => BootstrapNoticeCode::RuntimeDiscoveryFailed,
+                        }
+                    );
+                }
+                host.bootstrap(&DiscardStatus, BootstrapTrigger::Retry).await;
+                assert_eq!(
+                    launcher.launches.load(Ordering::SeqCst),
+                    1,
+                    "{scenario}: live helper is retained"
+                );
+                watch.record(exit); // the same observation the actual reaper records
+                let retry = host.bootstrap(&DiscardStatus, BootstrapTrigger::Retry).await;
+                let expected_launches = if scenario == "failed" { 2 } else { 1 };
+                assert_eq!(
+                    launcher.launches.load(Ordering::SeqCst),
+                    expected_launches,
+                    "{scenario}: {exit:?}"
+                );
+                if scenario == "healthy" {
+                    assert_eq!(retry.phase, BootstrapPhase::Ready, "live Runtime is adopted");
+                } else if scenario == "failed" {
+                    assert_eq!(
+                        retry.notice.code,
+                        BootstrapNoticeCode::LauncherExited,
+                        "a new attempt's failure is not acknowledged by the old attempt"
+                    );
+                } else {
+                    let code = match exit {
+                        LaunchExit::HandoverRefused => BootstrapNoticeCode::RuntimeOwnershipLost,
+                        LaunchExit::HandoverFailed => BootstrapNoticeCode::RuntimeStopFailed,
+                        _ => BootstrapNoticeCode::LauncherExited,
+                    };
+                    assert_eq!(retry.notice.code, code, "{scenario}: unreported exit is shown once");
+                    host.bootstrap(&DiscardStatus, BootstrapTrigger::Retry).await;
+                    assert_eq!(
+                        launcher.launches.load(Ordering::SeqCst),
+                        2,
+                        "{scenario}: next retry launches"
+                    );
+                }
+            }
+        }
+    }
 
     /// The lifecycle verbs read the frozen CLI contract from a real process:
     /// the exit code decides, and the last JSON line on stderr names the reason
@@ -1758,11 +2075,30 @@ mod tests {
         // CLI may predate the flag, and would refuse the start.
         for (identified_launcher, hand_over, expected) in [
             (false, true, &["start", "--no-open-browser", "shell=1"][..]),
-            (true, false, &["start", "--no-open-browser", "shell=1"][..]),
+            (
+                true,
+                false,
+                &[
+                    "start",
+                    "--no-open-browser",
+                    "--desktop-receipt",
+                    "--desktop-ready-timeout",
+                    "37",
+                    "shell=1",
+                ][..],
+            ),
             (
                 true,
                 true,
-                &["start", "--no-open-browser", "--hand-over", "shell=1"][..],
+                &[
+                    "start",
+                    "--no-open-browser",
+                    "--desktop-receipt",
+                    "--desktop-ready-timeout",
+                    "37",
+                    "--hand-over",
+                    "shell=1",
+                ][..],
             ),
         ] {
             let dir = scratch_dir("launch");
@@ -1784,7 +2120,9 @@ mod tests {
                 .resolve()
                 .expect("the fake runtime resolves")
             };
-            let launched = resolved.launch(hand_over).expect("the fake runtime starts");
+            let launched = resolved
+                .launch_with_ready_timeout(hand_over, Duration::from_secs(37))
+                .expect("the fake runtime starts");
             assert!(launched.pid > 0);
 
             let recorded = wait_for_file(&recording);

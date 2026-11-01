@@ -33,6 +33,7 @@ pub mod notifications;
 pub mod origin;
 pub mod pet;
 pub mod private_runtime;
+pub mod receipt;
 pub mod status;
 pub mod window_frame;
 

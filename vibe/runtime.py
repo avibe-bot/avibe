@@ -159,6 +159,8 @@ _PENDING_SQLITE_BACKUP_READINESS: tuple[Path, str, tuple[str, ...], datetime] | 
 _SERVICE_START_PROCESSES: dict[int, subprocess.Popen] = {}
 # /ready can spend up to two seconds in the Controller health probe.
 UI_ADOPTION_PROBE_TIMEOUT_SECONDS = 3.0
+# Preserve the desktop host's DEFAULT_PROBE_TIMEOUT when Python owns the wait.
+DESKTOP_READY_PROBE_TIMEOUT_SECONDS = 5.0
 
 
 def _rounded_seconds(seconds: float) -> float:
@@ -2394,6 +2396,10 @@ def _ui_ready_identity_state(response) -> bool | None:
     except (AttributeError, OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
 
+    return _ui_ready_payload_state(response.status, payload)
+
+
+def _ui_ready_payload_state(status: int, payload) -> bool | None:
     if not isinstance(payload, dict):
         return None
     if type(payload.get("schema_version")) is not int or payload["schema_version"] != 1:
@@ -2419,12 +2425,12 @@ def _ui_ready_identity_state(response) -> bool | None:
         ):
             return None
         expected_ready.add(field)
-    if response.status == 200 and set(payload) == expected_ready and payload["ready"] is True:
+    if status == 200 and set(payload) == expected_ready and payload["ready"] is True:
         return True
 
     code = payload.get("code")
     if (
-        response.status == 503
+        status == 503
         and isinstance(code, str)
         and bool(code)
         and payload
@@ -2475,6 +2481,79 @@ def wait_for_ui_server(host: str, port: int, timeout: float = 5.0) -> bool:
             return True
         time.sleep(0.1)
     return ui_server_healthy(host, port)
+
+
+def wait_for_desktop_startup_ready(
+    service_pid: int,
+    host: str,
+    port: int,
+    *,
+    timeout: float = SERVICE_SLOW_START_TIMEOUT_SECONDS,
+) -> int | None:
+    """Wait for the UI and Controller together under one startup deadline.
+
+    ``/ready`` is the existing combined UI/Controller readiness contract. The
+    service owner lookup is still required to return the authoritative process
+    for status and rollback; it never becomes a second readiness predicate.
+    """
+
+    import asyncio
+
+    import httpx
+
+    from vibe.desktop_runtime import desktop_origin
+
+    deadline = time.monotonic() + max(0.0, timeout)
+    origin = desktop_origin(host, port)
+
+    async def observe(client):
+        # The combined exact-origin /ready predicate includes the usable UI,
+        # service owner and Controller IPC. LAN /health is not a desktop gate.
+        async with client.stream("GET", f"{origin}/ready", headers={"Accept-Encoding": "identity"}) as response:
+            length = response.headers.get("content-length")
+            if length is not None:
+                try:
+                    if int(length) > 1024:
+                        return False
+                except ValueError:
+                    return False
+            body = bytearray()
+            async for chunk in response.aiter_raw():
+                if len(body) + len(chunk) > 1024:
+                    return False
+                body.extend(chunk)
+            try:
+                return _ui_ready_payload_state(response.status_code, json.loads(body.decode("utf-8"))) is True
+            except (ValueError, UnicodeDecodeError):
+                return False
+
+    async def wait():
+        current_pid = service_pid
+        async with httpx.AsyncClient(trust_env=False, follow_redirects=False) as client:
+            while time.monotonic() < deadline:
+                owner_pid = resolve_service_owner_pid(include_starting=False)
+                if owner_pid is not None:
+                    current_pid = owner_pid
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                try:
+                    # Bound the entire request including headers and streamed
+                    # body, not a fresh socket timeout for each received byte.
+                    ready = await asyncio.wait_for(
+                        observe(client), min(DESKTOP_READY_PROBE_TIMEOUT_SECONDS, remaining),
+                    )
+                except (httpx.HTTPError, TimeoutError, OSError):
+                    ready = False
+                if ready and time.monotonic() < deadline:
+                    if owner_pid is not None or service_instance_started(current_pid):
+                        return current_pid
+                if not pid_alive(current_pid) and owner_pid is None:
+                    return None
+                await asyncio.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+        return None
+
+    return asyncio.run(wait())
 
 
 def _is_ui_server_command(command: str) -> bool:

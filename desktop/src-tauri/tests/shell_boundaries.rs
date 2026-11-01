@@ -42,7 +42,8 @@ fn shipping_source(relative: &str) -> String {
 /// every check here must read the same text on every platform.
 fn shipping_text(source: &str) -> String {
     let source = source.replace("\r\n", "\n");
-    match source.find("#[cfg(test)]") {
+    // Individual test-only methods may occur before more shipping code.
+    match source.find("#[cfg(test)]\nmod tests") {
         Some(offset) => source[..offset].to_owned(),
         None => source,
     }
