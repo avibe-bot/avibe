@@ -69,6 +69,8 @@ import { FailureRetry, type FailureRetryOptions } from './FailureRetry';
 import { FailureNextStep } from './FailureNextStep';
 import { AGENT_BUBBLE, SYSTEM_BUBBLE, USER_BUBBLE } from './chatBubble';
 import { RoleAvatar } from './RoleAvatar';
+import { HARNESS_GROUP_RAIL, HarnessGroup, HarnessGroupCollapse } from './HarnessGroup';
+import { groupHarnessRuns, stableHarnessGroupKeys } from '../../lib/harnessGroups';
 import { SenderHead } from './SenderHead';
 import { useFileDrop } from '../../lib/useFileDrop';
 import { quoteText } from '../../lib/quoteText';
@@ -78,7 +80,7 @@ import {
   insertMessageOrdered,
   reconcileWorkbenchClaimedDeliveries,
 } from '../../lib/transcriptOrder';
-import { pickScrollAnchor } from '../../lib/transcriptScrollAnchor';
+import { pickScrollAnchor, resolveScrollAnchor, type ScrollAnchor } from '../../lib/transcriptScrollAnchor';
 import { AgentRoutePicker } from './AgentRoutePicker';
 import {
   archiveSessionShortcutLabel,
@@ -4023,6 +4025,31 @@ function transcriptOwnsUpwardInput(target: EventTarget, root: HTMLElement): bool
 }
 
 const NO_AGENTS: VibeAgentBrief[] = [];
+const NO_IDS: ReadonlySet<string> = new Set();
+
+// A set of message ids the transcript remembers for the open Session only: a
+// Session switch reads as empty without an effect to clear it.
+function useSessionIdSet(sessionId: string) {
+  const [state, setState] = useState<{ sessionId: string; ids: ReadonlySet<string> }>(() => ({
+    sessionId,
+    ids: NO_IDS,
+  }));
+  const ids = state.sessionId === sessionId ? state.ids : NO_IDS;
+  const update = useCallback(
+    (messageIds: readonly string[], include: boolean) => {
+      setState((prev) => {
+        const next = new Set(prev.sessionId === sessionId ? prev.ids : NO_IDS);
+        for (const id of messageIds) {
+          if (include) next.add(id);
+          else next.delete(id);
+        }
+        return { sessionId, ids: next };
+      });
+    },
+    [sessionId],
+  );
+  return [ids, update] as const;
+}
 
 interface TranscriptProps {
   messages: WorkbenchMessage[];
@@ -4206,7 +4233,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
   // any later content resize can put that exact row back where it was. This is a
   // manual scroll-anchor: iOS Safari still ships no CSS ``overflow-anchor``, so a
   // late-loading image would otherwise shift the page out from under the reader.
-  const anchorRef = useRef<{ el: HTMLElement; top: number } | null>(null);
+  const anchorRef = useRef<ScrollAnchor | null>(null);
   const lastSessionRef = useRef<string | null>(null);
   const [showJump, setShowJump] = useState(false);
   // Whether the transcript is actually scrollable. Measured by the same
@@ -4289,6 +4316,82 @@ export const Transcript: React.FC<TranscriptProps> = ({
         onToggleTools={activity.onToggleTools}
       />
     ) : null;
+  // Runs of Harness input fold into one group (docs/plans/workbench-refinements.md
+  // §3). Which groups are open is this page's memory for the open Session only:
+  // a group is open while any of its members is in the set, so it stays open as
+  // it grows at either end, and a Session switch starts every group collapsed.
+  const transcriptItems = useMemo(() => groupHarnessRuns(messages, { hasOlder }), [messages, hasOlder]);
+  // Group keys carried from the previous grouping, so a group keeps its element
+  // as it grows (see ``stableHarnessGroupKeys``). Updated during render, the
+  // React pattern for state derived from the previous render's state.
+  const [harnessKeys, setHarnessKeys] = useState(() => ({
+    items: transcriptItems,
+    keys: stableHarnessGroupKeys(transcriptItems, new Map()),
+  }));
+  let harnessGroupKeys = harnessKeys.keys;
+  if (harnessKeys.items !== transcriptItems) {
+    harnessGroupKeys = stableHarnessGroupKeys(transcriptItems, harnessKeys.keys);
+    setHarnessKeys({ items: transcriptItems, keys: harnessGroupKeys });
+  }
+  // Two memories: which groups are open (a group is open while any member is in
+  // it) and which single Harness rows the reader opened to read their prompt.
+  const [openGroupIds, setGroupIdsOpen] = useSessionIdSet(session.id);
+  const [openRowIds, setRowIdsOpen] = useSessionIdSet(session.id);
+  const setHarnessRowOpen = useCallback(
+    (messageId: string, open: boolean) => setRowIdsOpen([messageId], open),
+    [setRowIdsOpen],
+  );
+  // A deep link or search hit opens the group it lands in, in the render that
+  // carries it (so the jump below finds the row) and for good.
+  if (jumpTarget && !openGroupIds.has(jumpTarget)) setGroupIdsOpen([jumpTarget], true);
+  // What the reader is reading is not folded away under them: a row they opened
+  // that a new message turns into a group opens that group, and keeps it open
+  // after they close the row again.
+  const groupsHoldingOpenRows = transcriptItems.flatMap((item) =>
+    item.kind === 'harnessGroup'
+    && item.members.some(({ message }) => openRowIds.has(message.id))
+    && !item.members.some(({ message }) => openGroupIds.has(message.id))
+      ? item.members.map(({ message }) => message.id)
+      : [],
+  );
+  if (groupsHoldingOpenRows.length > 0) setGroupIdsOpen(groupsHoldingOpenRows, true);
+  // Collapsing from below the fold removes the row the scroll anchor holds, so
+  // the group's head is brought back into view once it commits (see the layout
+  // effect next to the anchor restore).
+  const revealHarnessGroupRef = useRef<string | null>(null);
+  // One transcript row with the Activity chips positioned relative to it: 'before'
+  // it (done/failed, hugging the reply from above) and 'after' it (interrupted, or
+  // a Turn that did not reply, just below its trigger). A Harness group draws its
+  // members through this too, so an opened member looks exactly as it would alone.
+  const renderTranscriptRow = (message: WorkbenchMessage, index: number) => {
+    const before = activity?.enabled ? activity.beforeAnchor.get(message.id) : undefined;
+    const after = activity?.enabled ? activity.afterAnchor.get(message.id) : undefined;
+    // A reply keeps the Agent that wrote it, which a switch may have replaced.
+    const author = message.author === 'agent' ? messageAuthorAgent(message, agents) : null;
+    return (
+      <>
+        {before?.map((group) => renderActivityChip(group))}
+        <MessageRow
+          message={message}
+          session={session}
+          agentDisplayName={author ? author.displayName : agentDisplayName}
+          agentBackend={author?.backend ?? agentBackend}
+          messageFontSize={messageFontSize}
+          onQuickReply={onQuickReply}
+          onFailureRetry={onFailureRetry}
+          retryDisabled={working || index < latestRetryBoundary}
+          vaultRequests={provisionRequestsByMessage.get(message.id)}
+          onVaultRequestResolved={onVaultRequestResolved}
+          onOpenLocalFile={openLocalFile}
+          readOnly={readOnly}
+          highlighted={message.id === highlightedId}
+          harnessOpen={openRowIds.has(message.id)}
+          onHarnessOpenChange={setHarnessRowOpen}
+        />
+        {after?.map((group) => renderActivityChip(group))}
+      </>
+    );
+  };
   const empty = messages.length === 0 && !working;
   // The end-of-history line answers "why did paging stop?" — a question only a
   // reader who actually scrolled can have asked. A chat that fits the viewport
@@ -4483,15 +4586,38 @@ export const Transcript: React.FC<TranscriptProps> = ({
       el.scrollTop = el.scrollHeight;
     } else {
       const anchor = anchorRef.current;
-      if (!anchor || !anchor.el.isConnected) return;
-      const currentTop = anchor.el.getBoundingClientRect().top - el.getBoundingClientRect().top;
-      const delta = currentTop - anchor.top;
+      const content = contentRef.current;
+      // The anchored row may have re-mounted elsewhere (a Harness row an older
+      // page made a group member); follow the message, not the element.
+      const target = anchor && content ? resolveScrollAnchor(anchor, content) : null;
+      if (!target) return;
+      const currentTop = target.el.getBoundingClientRect().top - el.getBoundingClientRect().top;
+      const delta = currentTop - target.top;
       if (Math.abs(delta) >= 0.5) el.scrollTop += delta;
     }
     // A programmatic adjustment must not look like upward input when its
     // queued scroll event is delivered.
     lastScrollTopRef.current = Math.max(0, el.scrollTop);
   }, [jumpTarget, pinnedRef]);
+
+  // A group closed from its trailing control (or anywhere below its head) took
+  // the anchored row with it, so the restore below has nothing to hold. Bring
+  // the head back to the top of the viewport and anchor to it instead. Runs
+  // before the restore, which then finds an anchor that is still connected.
+  useLayoutEffect(() => {
+    const key = revealHarnessGroupRef.current;
+    if (!key) return;
+    revealHarnessGroupRef.current = null;
+    const el = scrollRef.current;
+    const head = contentRef.current?.querySelector<HTMLElement>(`[data-harness-group="${CSS.escape(key)}"]`);
+    if (!el || !head || pinnedRef.current) return;
+    const offset = head.getBoundingClientRect().top - el.getBoundingClientRect().top;
+    if (offset < 0) {
+      el.scrollTop += offset;
+      lastScrollTopRef.current = Math.max(0, el.scrollTop);
+    }
+    captureAnchor();
+  });
 
   // Prepending and trimming can leave the total height unchanged. Restore after
   // every DOM commit, before paint or a queued scroll can capture a different
@@ -4632,35 +4758,39 @@ export const Transcript: React.FC<TranscriptProps> = ({
           ) : null}
           {/* Degenerate null-anchor groups render at the TOP (never the tail). */}
           {activity?.enabled && activity.topGroups.map((group) => renderActivityChip(group))}
-          {messages.map((message, index) => {
-            // Agent Activity chips positioned relative to THIS row: 'before' it
-            // (done/failed, hugging the reply from above) and 'after' it (interrupted,
-            // just below the turn's trigger).
-            const before = activity?.enabled ? activity.beforeAnchor.get(message.id) : undefined;
-            const after = activity?.enabled ? activity.afterAnchor.get(message.id) : undefined;
-            // A reply keeps the Agent that wrote it, which a switch may have replaced.
-            const author = message.author === 'agent' ? messageAuthorAgent(message, agents) : null;
-            return (
-              <Fragment key={message.id}>
-                {before?.map((group) => renderActivityChip(group))}
-                <MessageRow
-                  message={message}
-                  session={session}
-                  agentDisplayName={author ? author.displayName : agentDisplayName}
-                  agentBackend={author?.backend ?? agentBackend}
-                  messageFontSize={messageFontSize}
-                  onQuickReply={onQuickReply}
-                  onFailureRetry={onFailureRetry}
-                  retryDisabled={working || index < latestRetryBoundary}
-                  vaultRequests={provisionRequestsByMessage.get(message.id)}
-                  onVaultRequestResolved={onVaultRequestResolved}
-                  onOpenLocalFile={openLocalFile}
-                  readOnly={readOnly}
-                  highlighted={message.id === highlightedId}
-                />
-                {after?.map((group) => renderActivityChip(group))}
-              </Fragment>
-            );
+          {transcriptItems.map((item) => {
+            if (item.kind === 'harnessGroup') {
+              const memberIds = item.members.map(({ message }) => message.id);
+              const open = memberIds.some((id) => openGroupIds.has(id) || id === jumpTarget);
+              const key = harnessGroupKeys.get(memberIds[0]) ?? memberIds[0];
+              const toggle = () => {
+                if (!open) {
+                  setGroupIdsOpen(memberIds, true);
+                  return;
+                }
+                // Closing the group closes its rows too, so none holds it open.
+                setGroupIdsOpen(memberIds, false);
+                setRowIdsOpen(memberIds, false);
+                revealHarnessGroupRef.current = key;
+              };
+              return (
+                <Fragment key={key}>
+                  <HarnessGroup
+                    groupKey={key}
+                    members={item.members.map(({ message }) => message)}
+                    expanded={open}
+                    onToggle={toggle}
+                  />
+                  {open && item.members.map(({ message, index }) => (
+                    <div key={message.id} className={clsx(HARNESS_GROUP_RAIL, 'flex flex-col gap-3')}>
+                      {renderTranscriptRow(message, index)}
+                    </div>
+                  ))}
+                  {open && <HarnessGroupCollapse count={memberIds.length} onCollapse={toggle} />}
+                </Fragment>
+              );
+            }
+            return <Fragment key={item.message.id}>{renderTranscriptRow(item.message, item.index)}</Fragment>;
           })}
           {/* The transcript TAIL is reserved exclusively for the live running card
               (or the ThinkingBubble fallback) — never a settled/interrupted chip. */}
@@ -4801,6 +4931,10 @@ type MessageRowProps = {
   // message; included in the memo's shallow compare so the highlight on/off
   // re-renders just this row.
   highlighted?: boolean;
+  // A Harness row's prompt is open. Held by the Transcript rather than the row,
+  // because whether the reader is reading it decides whether a group may fold it.
+  harnessOpen?: boolean;
+  onHarnessOpenChange?: (messageId: string, open: boolean) => void;
 };
 
 // Memoized so a transcript re-render that doesn't touch THIS row — the scroll
@@ -4827,6 +4961,8 @@ export const MessageRow = memo(function MessageRow({
   onOpenLocalFile,
   readOnly,
   highlighted,
+  harnessOpen = false,
+  onHarnessOpenChange,
 }: MessageRowProps) {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -4834,8 +4970,8 @@ export const MessageRow = memo(function MessageRow({
   // row's memo, so a personal↔organization change repaints the transcript
   // without the page having to re-create every row's props.
   const { instanceKind } = useInstanceAuthorization();
-  // Harness rows are collapsed by default; this tracks the per-row expand state.
-  const [expanded, setExpanded] = useState(false);
+  // Harness rows are collapsed by default; the Transcript holds which are open.
+  const expanded = harnessOpen;
 
   // Deep-link jump target dressing applied to every row's outer wrapper:
   //  - ``data-message-id`` lets the transcript locate the row to scroll to.
@@ -5131,7 +5267,7 @@ export const MessageRow = memo(function MessageRow({
             type="button"
             variant="ghost"
             size="xs"
-            onClick={() => setExpanded((v) => !v)}
+            onClick={() => onHarnessOpenChange?.(message.id, !expanded)}
             aria-expanded={expanded}
             className="h-auto max-w-[360px] justify-start gap-2 rounded-xl rounded-tl-md border border-dashed border-cyan/40 bg-cyan/[0.05] px-3 py-1.5 hover:bg-cyan/[0.10]"
           >

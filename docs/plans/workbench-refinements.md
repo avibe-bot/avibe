@@ -286,23 +286,38 @@ it is still delivered, listed, and unread.
   that Turn ends without a reply its chip joins the group; if it replies, the
   reply closes the group.
 - A single row that becomes a run of two forms a collapsed group, unless that
-  row was expanded, in which case the group starts expanded.
+  row was expanded, in which case the group starts expanded: what the reader is
+  reading is never folded away, and the content around it does not jump.
+  Closing that row afterwards keeps the group open; closing the group closes its
+  rows.
 - Unread: Harness inputs are never unread (only `result` is), so groups carry no
   unread mark and change no counts. Opening a Session still lands at the tail.
 - Scroll: toggling keeps the group header in place (the existing anchor logic);
   a reader following the tail stays pinned; a jump or search target inside a
   group expands that group before scrolling and highlights the row; older pages
-  prepended above can grow a group at its top.
-- State: the set of expanded member ids, in memory for the open Session. A
-  group is expanded when any member is in the set, so growth at either end
-  keeps its state. Nothing is persisted.
+  prepended above can grow a group at its top. A group keeps its element as it
+  grows at either end, so a scroll anchor held on it survives, and the anchor
+  search accepts a row that stands for several messages
+  (`data-transcript-row`). The anchor also names the message it holds, so a
+  row that an older page turns into a group member keeps its place: it is found
+  again inside the opened group, or the collapsed head takes its place
+  (`data-harness-members`). Closing a group from below its head (its trailing
+  control) brings the head back to the top of the view, since the anchored row
+  went with the members.
+- State: the set of expanded member ids and the set of opened Harness rows, in
+  memory for the open Session. A group is expanded when any member is in the
+  first set, so growth at either end keeps its state. Nothing is persisted.
 - Web transcript only: search, copy, Retry eligibility, the API, and IM are
   unchanged.
 
 ### Code that changes
 
-- `ChatPage.tsx` `Transcript`: render items instead of raw messages, route the
-  members' after-chips into their group, and expand on jump.
-- A new `HarnessGroup` component reusing the Harness row and `ActivityChip`; a
-  new `ui/src/lib/harnessGroups.ts` with unit tests for the break rules, the
-  first-message rule, live growth, and anchor routing; `en`/`zh` strings.
+- `ChatPage.tsx` `Transcript`: render items instead of raw messages; an open
+  group draws its members, with their Activity chips, through the same row
+  rendering as any other row; expand on jump.
+- `ui/src/lib/harnessGroups.ts`: `groupHarnessRuns` and
+  `stableHarnessGroupKeys`, with unit tests for the break rules, the
+  first-message rule, and key stability.
+- A new `HarnessGroup` component for the group head and the collapsed stack;
+  `ui/src/lib/transcriptScrollAnchor.ts` accepts `data-transcript-row`;
+  `en`/`zh` strings.
