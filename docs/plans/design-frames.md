@@ -1,18 +1,17 @@
-# Design frames in the repository
+# Design frames
 
-Status: implemented (2026-11-02). Replaces Pencil (`avibe-docs/design.pen`) for new design work.
+Status: adopted (2026-11-02). Avibe's UI designs live in `ui/design/` as frames; working rules are in
+`ui/design/AGENTS.md`.
 
-## Why
+## Goals
 
-- **Fidelity.** A Pencil frame is a drawing of the product; it drifts as the product changes. Its 53 color
-  variables mirror `ui/src/index.css` by hand. A frame that renders the shipped component cannot drift: on
-  2026-11-01 #3111 renamed a sidebar label, and the frames picked it up while the hand-drawn mockups of the
-  same day did not.
-- **Collaboration.** `design.pen` is one 25 MB file (220 artboards, about 45,000 nodes) marked binary, so Git
-  cannot merge it; concurrent edits need a three-way replay through Pencil (`avibe-docs/docs/design-merge-playbook.md`).
-  Frames are small TSX files that merge like code, and Pencil is now a paid, per-seat tool.
-- **Agents.** Agents write static JSX with the product's Tailwind tokens and check it by screenshot, without
-  touching interaction logic.
+- **Fidelity.** A frame renders the shipped components, tokens, and copy, so a design of a shipped surface
+  cannot drift from the product, and a proposal built from the same tokens and primitives is implemented by
+  assembly rather than translation.
+- **Collaboration.** Frames are small TSX files in the repository. Everyone designs locally with their own
+  Agent, reviews through PRs, and merges like code; there is one design source and no per-seat tool.
+- **Focus.** Frames are static. A designer, person or Agent, works on layout and style from fixtures, checks
+  the result by screenshot, and never writes interaction logic.
 
 ## Design
 
@@ -21,18 +20,23 @@ Status: implemented (2026-11-02). Replaces Pencil (`avibe-docs/design.pen`) for 
   shipped component with fixtures; what is not shipped yet is drawn with `ui/design/kit/` components that use
   only product tokens and assets, and switches to the shipped component when it ships.
 - `DesignShell` serves the providers Workbench surfaces read (router, toast, authorization, unsaved changes,
-  window manager, Inbox, project tree) from fixtures. The real `ApiProvider` runs, with `fetch` and
-  `EventSource` answered in the page, so no frame reaches a server; paths a frame fetched without a fixture are
-  reported. The clock is fixed, so relative times are stable. No product code changes for this.
+  window manager, Inbox, project tree) from fixtures, and runs the real `ApiProvider` and `BotsProvider`.
+  `fetch` and `EventSource` are answered in the page from the frame's API fixtures (by path and query, then by
+  path), so no frame reaches a server; paths a frame fetched without a fixture are reported. Each frame gets
+  fresh in-memory Web Storage (seeded by its `storage` fixture) and a fixed clock, so a viewer's remembered
+  preferences and the date never change a frame. No product code changes for this.
 - The canvas (`ui/design.html`, not part of the production build) shows every frame, each in its own iframe so
   themes, portals, and routing never leak between frames. `?frame=<id>&theme=light|dark&lang=zh|en` renders one
   frame at its size.
-- `npm run design:shot` renders frames with Playwright (2x PNG, animations off, portals included) and fails on
-  any console error; CI runs it with the browser checks, and `typecheck:design` with the static checks.
+- `npm run design:shot` renders frames with Playwright (2x PNG, animations off, portals included, an optional
+  hover) once fonts are loaded and the network is quiet, and fails on any console error. CI runs it with the
+  browser checks, and `typecheck:design` with the static checks, so a product change that breaks a frame fails
+  its PR.
 - `npm run design:export` copies the canvas, the screenshots, and `frames.json` into the current Session's Show
   Page and writes `<DesignFrame>`, which embeds frames live (crisp, interactive) without any Show Page change.
-  While the Show Page's annotation is on, `<DesignFrame>` draws each frame as its screenshot through the
-  overlay's public window API, so annotations reach it and name the frame.
+  Each shot keeps the language it was exported in. While the Show Page's annotation is on, `<DesignFrame>` draws
+  each frame as its screenshot through the overlay's public window API, so annotations reach it and name the
+  frame.
 
 ## Known by design
 
@@ -46,6 +50,4 @@ Status: implemented (2026-11-02). Replaces Pencil (`avibe-docs/design.pen`) for 
 
 ## Follow-ups
 
-- Export every `design.pen` artboard to PNG while Pencil is available, then keep the file read-only.
-- Update `avibe-docs/AGENTS.md` and the workspace index, which still name `design.pen` the design source.
-- Draw `avibe-bot-backend` surfaces (avibe.bot landing page and console) the same way in that repository.
+- Draw `avibe-bot-backend` surfaces (the avibe.bot site and console) the same way in that repository.

@@ -1,3 +1,6 @@
+// First: frames get their own storage before any product module reads it.
+import { designStorage } from './shell/storage';
+
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 
@@ -21,6 +24,7 @@ void i18n.changeLanguage(lang);
 // fixtures are in place before any provider can fetch.
 const shown = ALL_FRAMES.find((f) => f.id === params.get('frame'));
 designNetwork.setResponses(apiResponses(shown?.fixtures));
+designStorage.seed(shown?.fixtures?.storage);
 
 declare global {
   interface Window {

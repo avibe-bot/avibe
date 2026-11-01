@@ -17,6 +17,8 @@ export interface WorkbenchFixtures {
   bots?: Bot[];
   /** Agent status of Bot Sessions, by Session id (the running dot). */
   botStatus?: Record<string, BotRuntimeStatus>;
+  /** Web Storage entries the frame starts with (a remembered preference, such as a collapsed section). */
+  storage?: Record<string, string>;
   /** API responses by path plus query (`/api/inbox?session=ses_pm&limit=1`) or by path, for anything else a frame fetches. */
   api?: Record<string, unknown>;
 }
