@@ -49,10 +49,13 @@ const timeSpan = (first: string, last: string): string => {
  * below it on the rail.
  */
 export function HarnessGroup({
+  groupKey,
   members,
   expanded,
   onToggle,
 }: {
+  /** Stable across growth; the Transcript finds the head by it after a collapse. */
+  groupKey: string;
   members: WorkbenchMessage[];
   expanded: boolean;
   onToggle: () => void;
@@ -92,7 +95,7 @@ export function HarnessGroup({
 
   if (expanded) {
     return (
-      <div data-transcript-row className="flex w-full justify-start">
+      <div data-transcript-row data-harness-group={groupKey} className="flex w-full justify-start">
         <button
           type="button"
           onClick={onToggle}
@@ -111,7 +114,7 @@ export function HarnessGroup({
   }
 
   return (
-    <div data-transcript-row className="flex w-full justify-start">
+    <div data-transcript-row data-harness-group={groupKey} className="flex w-full justify-start">
       <button
         type="button"
         onClick={onToggle}

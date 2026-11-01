@@ -285,8 +285,11 @@ it is still delivered, listed, and unread.
   running Activity card stays at the transcript tail, outside the group. If
   that Turn ends without a reply its chip joins the group; if it replies, the
   reply closes the group.
-- A single row that becomes a run of two forms a collapsed group. A row the
-  reader had opened folds with it; its own expansion is not carried over.
+- A single row that becomes a run of two forms a collapsed group, unless that
+  row was expanded, in which case the group starts expanded: what the reader is
+  reading is never folded away, and the content around it does not jump.
+  Closing that row afterwards keeps the group open; closing the group closes its
+  rows.
 - Unread: Harness inputs are never unread (only `result` is), so groups carry no
   unread mark and change no counts. Opening a Session still lands at the tail.
 - Scroll: toggling keeps the group header in place (the existing anchor logic);
@@ -295,10 +298,12 @@ it is still delivered, listed, and unread.
   prepended above can grow a group at its top. A group keeps its element as it
   grows at either end, so a scroll anchor held on it survives, and the anchor
   search accepts a row that stands for several messages
-  (`data-transcript-row`).
-- State: the set of expanded member ids, in memory for the open Session. A
-  group is expanded when any member is in the set, so growth at either end
-  keeps its state. Nothing is persisted.
+  (`data-transcript-row`). Closing a group from below its head (its trailing
+  control) brings the head back to the top of the view, since the anchored row
+  went with the members.
+- State: the set of expanded member ids and the set of opened Harness rows, in
+  memory for the open Session. A group is expanded when any member is in the
+  first set, so growth at either end keeps its state. Nothing is persisted.
 - Web transcript only: search, copy, Retry eligibility, the API, and IM are
   unchanged.
 

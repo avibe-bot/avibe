@@ -4025,6 +4025,31 @@ function transcriptOwnsUpwardInput(target: EventTarget, root: HTMLElement): bool
 }
 
 const NO_AGENTS: VibeAgentBrief[] = [];
+const NO_IDS: ReadonlySet<string> = new Set();
+
+// A set of message ids the transcript remembers for the open Session only: a
+// Session switch reads as empty without an effect to clear it.
+function useSessionIdSet(sessionId: string) {
+  const [state, setState] = useState<{ sessionId: string; ids: ReadonlySet<string> }>(() => ({
+    sessionId,
+    ids: NO_IDS,
+  }));
+  const ids = state.sessionId === sessionId ? state.ids : NO_IDS;
+  const update = useCallback(
+    (messageIds: readonly string[], include: boolean) => {
+      setState((prev) => {
+        const next = new Set(prev.sessionId === sessionId ? prev.ids : NO_IDS);
+        for (const id of messageIds) {
+          if (include) next.add(id);
+          else next.delete(id);
+        }
+        return { sessionId, ids: next };
+      });
+    },
+    [sessionId],
+  );
+  return [ids, update] as const;
+}
 
 interface TranscriptProps {
   messages: WorkbenchMessage[];
@@ -4308,27 +4333,32 @@ export const Transcript: React.FC<TranscriptProps> = ({
     harnessGroupKeys = stableHarnessGroupKeys(transcriptItems, harnessKeys.keys);
     setHarnessKeys({ items: transcriptItems, keys: harnessGroupKeys });
   }
-  const [openHarness, setOpenHarness] = useState<{ sessionId: string; ids: ReadonlySet<string> }>(
-    () => ({ sessionId: session.id, ids: new Set() }),
-  );
-  const openHarnessIds = openHarness.sessionId === session.id ? openHarness.ids : null;
-  const setHarnessGroupOpen = useCallback(
-    (memberIds: readonly string[], open: boolean) => {
-      setOpenHarness((prev) => {
-        const ids = new Set(prev.sessionId === session.id ? prev.ids : []);
-        for (const id of memberIds) {
-          if (open) ids.add(id);
-          else ids.delete(id);
-        }
-        return { sessionId: session.id, ids };
-      });
-    },
-    [session.id],
+  // Two memories: which groups are open (a group is open while any member is in
+  // it) and which single Harness rows the reader opened to read their prompt.
+  const [openGroupIds, setGroupIdsOpen] = useSessionIdSet(session.id);
+  const [openRowIds, setRowIdsOpen] = useSessionIdSet(session.id);
+  const setHarnessRowOpen = useCallback(
+    (messageId: string, open: boolean) => setRowIdsOpen([messageId], open),
+    [setRowIdsOpen],
   );
   // A deep link or search hit opens the group it lands in, in the render that
-  // carries it (so the jump below finds the row) and for good: the target joins
-  // the open set, and a group is open while any member is in it.
-  if (jumpTarget && !openHarnessIds?.has(jumpTarget)) setHarnessGroupOpen([jumpTarget], true);
+  // carries it (so the jump below finds the row) and for good.
+  if (jumpTarget && !openGroupIds.has(jumpTarget)) setGroupIdsOpen([jumpTarget], true);
+  // What the reader is reading is not folded away under them: a row they opened
+  // that a new message turns into a group opens that group, and keeps it open
+  // after they close the row again.
+  const groupsHoldingOpenRows = transcriptItems.flatMap((item) =>
+    item.kind === 'harnessGroup'
+    && item.members.some(({ message }) => openRowIds.has(message.id))
+    && !item.members.some(({ message }) => openGroupIds.has(message.id))
+      ? item.members.map(({ message }) => message.id)
+      : [],
+  );
+  if (groupsHoldingOpenRows.length > 0) setGroupIdsOpen(groupsHoldingOpenRows, true);
+  // Collapsing from below the fold removes the row the scroll anchor holds, so
+  // the group's head is brought back into view once it commits (see the layout
+  // effect next to the anchor restore).
+  const revealHarnessGroupRef = useRef<string | null>(null);
   // One transcript row with the Activity chips positioned relative to it: 'before'
   // it (done/failed, hugging the reply from above) and 'after' it (interrupted, or
   // a Turn that did not reply, just below its trigger). A Harness group draws its
@@ -4355,6 +4385,8 @@ export const Transcript: React.FC<TranscriptProps> = ({
           onOpenLocalFile={openLocalFile}
           readOnly={readOnly}
           highlighted={message.id === highlightedId}
+          harnessOpen={openRowIds.has(message.id)}
+          onHarnessOpenChange={setHarnessRowOpen}
         />
         {after?.map((group) => renderActivityChip(group))}
       </>
@@ -4567,6 +4599,24 @@ export const Transcript: React.FC<TranscriptProps> = ({
   // Prepending and trimming can leave the total height unchanged. Restore after
   // every DOM commit, before paint or a queued scroll can capture a different
   // row. This also covers the loading slot being inserted or removed.
+  // A group closed from its trailing control (or anywhere below its head) took
+  // the anchored row with it, so the restore below has nothing to hold. Bring
+  // the head back to the top of the viewport and anchor to it instead. Runs
+  // before the restore, which then finds an anchor that is still connected.
+  useLayoutEffect(() => {
+    const key = revealHarnessGroupRef.current;
+    if (!key) return;
+    revealHarnessGroupRef.current = null;
+    const el = scrollRef.current;
+    const head = contentRef.current?.querySelector<HTMLElement>(`[data-harness-group="${CSS.escape(key)}"]`);
+    if (!el || !head || pinnedRef.current) return;
+    const offset = head.getBoundingClientRect().top - el.getBoundingClientRect().top;
+    if (offset < 0) {
+      el.scrollTop += offset;
+      lastScrollTopRef.current = Math.max(0, el.scrollTop);
+    }
+    captureAnchor();
+  });
   useLayoutEffect(restoreScrollPosition);
 
   // Images and viewport changes can resize outside a React commit.
@@ -4706,12 +4756,22 @@ export const Transcript: React.FC<TranscriptProps> = ({
           {transcriptItems.map((item) => {
             if (item.kind === 'harnessGroup') {
               const memberIds = item.members.map(({ message }) => message.id);
-              const open = memberIds.some((id) => openHarnessIds?.has(id) || id === jumpTarget);
+              const open = memberIds.some((id) => openGroupIds.has(id) || id === jumpTarget);
               const key = harnessGroupKeys.get(memberIds[0]) ?? memberIds[0];
-              const toggle = () => setHarnessGroupOpen(memberIds, !open);
+              const toggle = () => {
+                if (!open) {
+                  setGroupIdsOpen(memberIds, true);
+                  return;
+                }
+                // Closing the group closes its rows too, so none holds it open.
+                setGroupIdsOpen(memberIds, false);
+                setRowIdsOpen(memberIds, false);
+                revealHarnessGroupRef.current = key;
+              };
               return (
                 <Fragment key={key}>
                   <HarnessGroup
+                    groupKey={key}
                     members={item.members.map(({ message }) => message)}
                     expanded={open}
                     onToggle={toggle}
@@ -4866,6 +4926,10 @@ type MessageRowProps = {
   // message; included in the memo's shallow compare so the highlight on/off
   // re-renders just this row.
   highlighted?: boolean;
+  // A Harness row's prompt is open. Held by the Transcript rather than the row,
+  // because whether the reader is reading it decides whether a group may fold it.
+  harnessOpen?: boolean;
+  onHarnessOpenChange?: (messageId: string, open: boolean) => void;
 };
 
 // Memoized so a transcript re-render that doesn't touch THIS row — the scroll
@@ -4892,6 +4956,8 @@ export const MessageRow = memo(function MessageRow({
   onOpenLocalFile,
   readOnly,
   highlighted,
+  harnessOpen = false,
+  onHarnessOpenChange,
 }: MessageRowProps) {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -4899,8 +4965,8 @@ export const MessageRow = memo(function MessageRow({
   // row's memo, so a personal↔organization change repaints the transcript
   // without the page having to re-create every row's props.
   const { instanceKind } = useInstanceAuthorization();
-  // Harness rows are collapsed by default; this tracks the per-row expand state.
-  const [expanded, setExpanded] = useState(false);
+  // Harness rows are collapsed by default; the Transcript holds which are open.
+  const expanded = harnessOpen;
 
   // Deep-link jump target dressing applied to every row's outer wrapper:
   //  - ``data-message-id`` lets the transcript locate the row to scroll to.
@@ -5196,7 +5262,7 @@ export const MessageRow = memo(function MessageRow({
             type="button"
             variant="ghost"
             size="xs"
-            onClick={() => setExpanded((v) => !v)}
+            onClick={() => onHarnessOpenChange?.(message.id, !expanded)}
             aria-expanded={expanded}
             className="h-auto max-w-[360px] justify-start gap-2 rounded-xl rounded-tl-md border border-dashed border-cyan/40 bg-cyan/[0.05] px-3 py-1.5 hover:bg-cyan/[0.10]"
           >

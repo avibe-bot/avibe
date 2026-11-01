@@ -184,4 +184,62 @@ describe('transcript Harness groups', () => {
     expect(rendered('h2')).toBeTruthy();
     expect(groupToggle(3).getAttribute('aria-expanded')).toBe('true');
   });
+
+  it('keeps the row a reader opened in view when the next Harness message folds it', () => {
+    const view = renderTranscript({ messages: [userMessage('u1'), watch('h1')], hasOlder: true });
+    const chipOf = (id: string) => rendered(id)!.querySelector<HTMLButtonElement>('button[aria-expanded]')!;
+    fireEvent.click(chipOf('h1'));
+    expect(chipOf('h1').getAttribute('aria-expanded')).toBe('true');
+
+    view.rerender({ messages: [userMessage('u1'), watch('h1'), watch('h2')] });
+    // The group opens in place: the row being read stays where it was, still open.
+    expect(groupToggle(2).getAttribute('aria-expanded')).toBe('true');
+    expect(chipOf('h1').getAttribute('aria-expanded')).toBe('true');
+    expect(rendered('h2')).toBeTruthy();
+
+    // Closing that row does not fold the group out from under the reader.
+    fireEvent.click(chipOf('h1'));
+    expect(groupToggle(2).getAttribute('aria-expanded')).toBe('true');
+
+    // Closing the group closes its rows, so reopening it starts them closed.
+    fireEvent.click(chipOf('h1'));
+    fireEvent.click(groupToggle(2));
+    expect(rendered('h1')).toBeNull();
+    fireEvent.click(groupToggle(2));
+    expect(chipOf('h1').getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('brings a group closed from below its head back to the top of the view', () => {
+    const members = Array.from({ length: 12 }, (_, index) => watch(`h${index + 1}`));
+    const view = renderTranscript({ messages: [userMessage('u1'), ...members, reply('r1')] });
+    fireEvent.click(groupToggle(12));
+
+    // jsdom has no layout: every direct child of the transcript column is 100px
+    // tall, stacked in DOM order, and the viewport is 800px tall at the top.
+    const scroller = view.getByTestId('chat-transcript');
+    const column = scroller.firstElementChild!;
+    let scrollTop = 0;
+    Object.defineProperties(scroller, {
+      clientHeight: { configurable: true, get: () => 800 },
+      scrollHeight: { configurable: true, get: () => column.children.length * 100 },
+      scrollTop: { configurable: true, get: () => scrollTop, set: (value: number) => { scrollTop = Math.max(0, value); } },
+    });
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      if (this === scroller) return { top: 0, bottom: 800, height: 800 } as DOMRect;
+      const index = Array.prototype.indexOf.call(column.children, this);
+      const top = index < 0 ? 0 : index * 100 - scrollTop;
+      return { top, bottom: top + 90, height: 90 } as DOMRect;
+    });
+
+    // Read down into the open group: its head (row 1) is far above the viewport.
+    fireEvent.pointerDown(scroller);
+    scroller.scrollTop = 500;
+    fireEvent.scroll(scroller);
+    fireEvent.click(screen.getByRole('button', { name: /chat\.harnessGroup\.collapseCount:12/ }));
+
+    expect(groupToggle(12).getAttribute('aria-expanded')).toBe('false');
+    // The collapsed group now sits at the top of the viewport, not off-screen above it.
+    expect(scrollTop).toBe(100);
+  });
 });
+
