@@ -345,10 +345,12 @@ the projected context no longer shows, because the inputs that carried the earli
 
 ```text
 <environment>
+session: ses_example
 cwd: /absolute/path
 os: macOS 26.0 (arm64)
 shell: /bin/bash
 watches: wch_8f2k "nightly sync" command running; wch_3c1d job running
+instructions: current
 </environment>
 ```
 
@@ -356,14 +358,28 @@ The date and time are not fields: every input's `[Now: ...]` line (`core/agent_i
 time, and UTC offset. Blocks stored while the block still had `date` and `timezone` keep replaying; those two lines
 are ignored when the loop reads back what the model was last told.
 
+`session` is the authoritative Session id. It is delivered on the first own input (including a fork's),
+then only when the projected context no longer carries it. Vibey's system prompt contains neither the id nor
+its fork correction; native backends keep their existing prompts.
+
+`instructions` is `current`, or `pending <path-or-catalog>@<short-revision>; ...`. It names changed components,
+never their contents, and is sent only when its value changes. A later revision of an already pending component
+changes the notice again; application sends `current` once. Changes proven to be this Session's own successful
+`write`/`edit` are omitted only while the candidate still matches that exact byte revision. Unattributed changes
+(including arbitrary shell commands) are treated as external, never guessed to be self-authored. A fixed sentence
+in the system prompt tells the Agent to read the current file or query the catalog before relying on a listed part.
+The pending field is escaped and not cut, so revisions after a long path remain visible and send-on-change remains
+exact. Its names are bounded by the prompt's component set, not by conversation history.
+
 `shell` is the shell the commands run in: the job host's on POSIX (`/bin/bash`, else `bash` on `PATH`, else `sh`), and
 on Windows `PowerShell 7 ({path})` or `Windows PowerShell 5.1 ({path})`.
 `watches` names the Session's enabled Watches by id, name, and kind, never a command: at most 20, then `and N more`.
 A field's identity is its raw value; only the block displays it, through the one display helper (`display`, C-9
 `context.md` §7): one line of plain text, escaped injectively (a backslash doubled, control characters and `<`, `>`
 as `\uXXXX`), then cut in the middle to 160 UTF-8 bytes, each Watch's line on its own. The cwd is escaped and never
-cut: the model builds absolute paths from it, so a cut one would be false, and the OS bounds its length. So the block
-stays bounded on every input whatever the script, and no value can add a line, forge a field, or close the block.
+cut: the model builds absolute paths from it, so a cut one would be false, and the OS bounds its length. The
+`instructions` field is likewise never cut (above). Every value is escaped, so none can add a line, forge a field,
+or close the block.
 The rows hold only what the model read, so a field counts as unchanged only when its display equals what the model
 last read and is not cut: escaping is injective, but a cut display can look the same after its value changed, so a
 cut field is sent on every input rather than taken for unchanged.
@@ -437,11 +453,21 @@ A directory below the working directory may hold its own instruction file with m
     own facts, so the provider's cache shares the longer prefix across Sessions.
   - The Agent's own definition, in Avibe's sections, is more specific than a repository's guidance, and comes later.
 
-**Read every Turn, cache-stable.** The files are read again at the start of every Turn, from that Turn's cwd, so an
-edit takes effect on the next Turn. The section depends only on the files' paths and contents, never on times or
-modification stamps, so the system prompt changes only when a file does. What uses the Turn's system prompt gets the
-same section: the checkpoint turn and the request after a checkpoint (C-9), and a side turn (C-10). A fork Session reads
-its own at its first Turn.
+**Read every Turn, apply by tier.** Files and prompt catalogs are read again at each Turn start, but the whole
+cached prefix (system prompt components and tool definitions) is retained in the Session's optional
+`<state>/agent_core/prompts/<session_id>/snapshot.json`. `pending.json` independently keeps each changed
+component's latest revision and its first-detected time. Missing, malformed, unreadable, or inconsistent files
+mean fresh rendering; failures to persist never fail the Turn. All these reads and writes run off the controller loop.
+
+The policy is [`../system-prompt-cache-tiers.md`](../system-prompt-cache-tiers.md): global instructions, Agent
+identity/definition and changed Avibe code are tier 1 (next Turn); project instructions and catalogs are tier 2
+(next free moment or after 30 minutes continuously pending); a Bot's own memory file and environment
+details are tier 3 (free moments only). Authorship only suppresses the notice; it never changes a component's tier
+or resets its deadline. Removing or downgrading a native hosted tool is an immediate route change: a cached
+declaration cannot restore execution authority. A changed model/route/Agent, the existing C-9 cold-cache clock, or a checkpoint
+since application is a free moment. One qualifying change applies all pending components together. There is no
+explicit refresh action. The prefix remains fixed for the whole Turn, including checkpoint/side requests; a fork
+inherits its source's saved prefix at reservation (C-10 §3). Native CLIs' prompt behavior is unchanged.
 
 **Bound.** The section carries at most 65,536 bytes (64 KiB), about 16,000 tokens. That count includes the header,
 each file's path and markup, the files' text, and the notices, so the bound holds by construction, whatever the

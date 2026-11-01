@@ -11,6 +11,7 @@ files left out, unreadable files skipped silently, and a precedence line.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,6 +52,8 @@ class InstructionFile:
     is_global: bool = False
     #: The file's size in bytes, without a byte-order mark; None means the size of ``content``.
     size: Optional[int] = None
+    #: Exact bytes when the bounded read got the whole file; used only for proven self-write attribution.
+    source_revision: Optional[str] = None
 
     @property
     def byte_size(self) -> int:
@@ -62,7 +65,7 @@ _BOM = b"\xef\xbb\xbf"
 _GIT_LINE = 8192
 
 
-def _read(path: str) -> Optional[tuple[str, int]]:
+def _read(path: str) -> Optional[tuple[str, int, Optional[str]]]:
     """A candidate's text and size, or None when it is not a readable file. Symlinks are followed.
 
     Reads no more than the section can hold (plus a character's worth, so a cut still falls on a whole one): every
@@ -76,11 +79,12 @@ def _read(path: str) -> Optional[tuple[str, int]]:
             data = handle.read(len(_BOM) + LIMIT + 4)
     except OSError:
         return None
+    source_revision = hashlib.sha256(data).hexdigest() if len(data) == size else None
     if data.startswith(_BOM):
         data, size = data[len(_BOM) :], size - len(_BOM)
     text = data[: LIMIT + 4].decode("utf-8", "replace")
     # Read whole, its size is the text's: each undecodable byte became a three-byte replacement character.
-    return text, (len(text.encode("utf-8")) if len(data) >= size else size)
+    return text, (len(text.encode("utf-8")) if len(data) >= size else size), source_revision
 
 
 def _from_dir(directory: str) -> Optional[InstructionFile]:
@@ -88,7 +92,7 @@ def _from_dir(directory: str) -> Optional[InstructionFile]:
         path = os.path.join(directory, name)
         read = _read(path)
         if read is not None:
-            return InstructionFile(path, read[0], size=read[1])
+            return InstructionFile(path, read[0], size=read[1], source_revision=read[2])
     return None
 
 
@@ -141,7 +145,7 @@ def _shadowed(cwd: str) -> Optional[tuple[str, str]]:
     return (main_root, os.path.basename(own.path)) if own is not None else None
 
 
-def load_instruction_files(cwd: str, global_path: Path) -> list[InstructionFile]:
+def load_instruction_files(cwd: str, global_path: Path, *, include_empty: bool = False) -> list[InstructionFile]:
     """The global file, then each directory's from the filesystem root down to ``cwd``.
 
     A file is loaded once per real path: as the global file, or else at the directory nearest ``cwd`` that reaches it.
@@ -152,8 +156,8 @@ def load_instruction_files(cwd: str, global_path: Path) -> list[InstructionFile]
     read = _read(str(global_path))
     if read is not None:
         seen.add(os.path.realpath(global_path))
-        if read[0].strip():
-            files.append(InstructionFile(str(global_path), read[0], is_global=True, size=read[1]))
+        if read[0].strip() or include_empty:
+            files.append(InstructionFile(str(global_path), read[0], is_global=True, size=read[1], source_revision=read[2]))
     if not cwd:
         return files
     directory = os.path.abspath(cwd)
@@ -165,7 +169,7 @@ def load_instruction_files(cwd: str, global_path: Path) -> list[InstructionFile]
         at_shadow = found is not None and (os.path.realpath(directory), os.path.basename(found.path)) == shadowed
         if found is not None and not at_shadow and real not in seen:
             seen.add(real)
-            if found.content.strip():
+            if found.content.strip() or include_empty:
                 chain.insert(0, found)
         parent = os.path.dirname(directory)
         if parent == directory:
@@ -203,12 +207,13 @@ def _not_loaded(files: Sequence[InstructionFile]) -> str:
     return "\n\n" + NOT_LOADED.format(files="; ".join([*named, MORE.format(count=rest)] if rest else named))
 
 
-def project_context(files: Sequence[InstructionFile]) -> str:
+def project_context(files: Sequence[InstructionFile], *, components: dict[str, str] | None = None) -> str:
     """The ``<project_context>`` section, at most ``LIMIT`` bytes, all of it counted; with no file, only ``SUBTREE``.
 
     The room goes first to the global file, then to the files from the cwd upward, so the most specific one is the last
     cut. A file that gets no room is named in the closing notice. The section keeps the files' order either way.
     """
+    files = [file for file in files if file.content.strip()]
     if not files:
         return f"<project_context>\n{SUBTREE}\n</project_context>"
     opening, closing = f"<project_context>\n{HEADER}\n{PRECEDENCE}\n{SUBTREE}", "\n</project_context>"
@@ -231,5 +236,8 @@ def project_context(files: Sequence[InstructionFile]) -> str:
         blocks[index] = start + text + end
         left -= _bytes(blocks[index])
     omitted = [file for index, file in enumerate(files) if index not in blocks]
+    if components is not None:
+        components.update({file.path: blocks.get(index, f"{escape(file.path)} ({file.byte_size} bytes)")
+                           for index, file in enumerate(files)})
     body = "".join(blocks[index] for index in sorted(blocks))
     return opening + body + (_not_loaded(omitted) if omitted else "") + closing

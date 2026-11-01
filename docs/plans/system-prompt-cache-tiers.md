@@ -122,12 +122,19 @@ free instead of cheap.
 | Tier | Meaning | Reserved for |
 | --- | --- | --- |
 | 1 Immediate | Replace at the next Turn start | Who the Agent is; the user's global rules, saved deliberately and rarely; Avibe's own contract after an upgrade |
-| 2 Bounded | Replace at the next free moment, or after `N` minutes | Instructions and capabilities someone else changed for this Session |
-| 3 Natural | Replace at the next free moment only | The Session's own writing, and environment details |
+| 2 Bounded | Replace at the next free moment, or after `N` minutes | Project instructions, shared memory, and capability catalogs |
+| 3 Natural | Replace at the next free moment only | A Bot's own memory file, and environment details |
 
 The pending notice makes tiers 2 and 3 semantically immediate: the model
 learns of the change on the next input and can read the current version. A
 tier decides only when the system prompt itself is replaced.
+
+The component fixes its tier; authorship only controls the pending notice (orchestrator clarification,
+2026-11-01). A project's `AGENTS.md` stays tier 2 even after a proven self-edit; a Bot's own `AGENTS.md`
+stays tier 3 even when somebody else edits it. Unattributed shell or concurrent edits count as external.
+Capability revocation takes effect immediately: removing or downgrading an enabled native hosted tool is a
+route change and refreshes at the next Turn, since the provider executes its declaration without a local
+function-tool gate. Added or non-revoking declarations remain tier 2; function tools retain live execution checks.
 
 ### Component table
 
@@ -141,7 +148,7 @@ tier decides only when the system prompt itself is replaced.
 | Agents and Bots roster | database | the user (create, enable, rename, set as Bot) | 2 |
 | Skills catalog | Skill directories | the user (install, remove, enable) | 2 |
 | MCP catalog | MCP Hub | the user (connect, remove), or a login expiring | 2 |
-| Hosted tool declarations | Model Hub service configuration | the user (enable a search service) | 2 |
+| Hosted tool declarations | Model Hub service configuration | the user (enable a search service) | 2; removal or downgrade of an enabled native tool is an immediate route change (above) |
 | Platform switches (quick replies, session title section) | configuration | the user | 2 |
 | A Bot's own `AGENTS.md` | file | the Bot itself; others' edits get the notice | 3 |
 | Tool list details (ripgrep found on `PATH`) | environment | the runtime | 3 |
@@ -169,8 +176,9 @@ instructions: pending ~/.avibe/AGENTS.md@3f9a2c; skills@81be07
   `agents`), never their contents. Each name carries a short revision of the
   component's current content, so a second edit to an already pending
   component changes the value and is announced again.
-- It omits changes this Session made itself (its own edits are already in the
-  conversation).
+- It omits changes proven to be this Session's own successful `write`/`edit`, only while the current content
+  matches the exact written revision (its own edits are already in the conversation). This does not change the
+  component's tier or restart its deadline; arbitrary shell edits are not attributed by guessing.
 - When a snapshot is applied the value becomes `current`, sent once.
 - The field name is lowercase letters, as the block's parser requires.
 - A fixed sentence in the system prompt explains the field once: the listed

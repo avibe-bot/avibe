@@ -192,14 +192,19 @@ because they are rendered into the prompt (C-9 §6).
   upstream, so the policy cannot deny it at execution: a side turn may make one, billed like any other. A side turn's
   prompt asks for its reply, and a warm prefix on every checkpoint is worth more than that rare call.
 
-**A fork Session is cache-cold today.**
+**Warm fork Sessions.**
 
-- Vibey's system prompt carries the Session's own id, plus a fork note (`core/system_prompt_injection.py:228-231`,
-  `core/prompts/forked-session.md`). So a child's first request shares only the tool definitions with its source.
-- For a user's fork, correct identity is worth one cold prefix.
-- For N teammates forked from one large context, it is N cold copies of that context.
-- The remedy is a Session-invariant system prompt, with the Session id moved into the environment block of the
-  first input (C-7 §8). That is left to the teams design (§17).
+Vibey's cached prefix is Session-invariant: the Session id travels in the first own input's environment block
+(C-7 §8), and the existing fork notice stays in that input (§8), never in the system prompt. Reservation copies
+its source's optional prompt snapshot byte for byte, before either Session can use a later source snapshot. The
+child's Turn-start policy compares current candidates with this inherited prefix using the same tiers and deadlines
+as any other Turn (`../system-prompt-cache-tiers.md`). A warm same-route fork with no immediately due change can
+therefore reuse the source's cached system, tools, and inherited conversation prefix. A route/Agent override or a
+required tier refresh may deliberately make the fork cold; an absent/corrupt snapshot renders fresh.
+
+The snapshot contains rendered instructions and declarations only, never credentials or execution grants. Live tool
+executors, provider refusals, and route fallback behavior remain authoritative. Native backends keep their existing
+Session/fork prompts.
 
 ## 4. Storage: by reference
 
@@ -545,8 +550,8 @@ already provide, plus work outside fork.
     now or a tool later. They run in the background with one task message each. Each shares the prefix by reference
     and runs concurrently as its own Session, and their replies come back as Harness inputs (§9).
   - Needs from fork: nothing more.
-  - Needs elsewhere, left to the teams design: the descendant lookup (§5) and a Session-invariant system prompt, so
-    that N forks of one large context hit the cache (§3). No depth or descendant bound (O-4).
+  - Needs elsewhere, left to the teams design: the descendant lookup (§5). The Session-invariant cached prefix
+    now supports warm forks (§3). No depth or descendant bound (O-4).
 - **Self context management.**
   - Explore and come back: a background fork Session with full tools, because exploring needs `bash`. Its reply
     returns as a message.

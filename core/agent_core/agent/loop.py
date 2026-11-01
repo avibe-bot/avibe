@@ -107,7 +107,7 @@ from core.agent_core.harness.context import (
     StateRequest,
     add_usage,
     budget,
-    cache_ttl_s,
+    cache_cold,
     checkpoint_block,
     checkpoint_max_tokens,
     checkpoint_repair,
@@ -433,6 +433,11 @@ class Agent:
         # canonical rows also retain Source identity, but it is not a separate clock.
         self._last_model_at: dict[tuple[str, str], float] = {}
         self._seq = 0
+
+    @property
+    def tools(self) -> tuple[Tool, ...]:
+        """The configured tools, before a run takes its own fixed set."""
+        return tuple(self._tools.values())
 
     def set_tools(self, tools: Sequence[Tool]) -> None:
         names = [tool.spec.name for tool in tools]
@@ -1703,13 +1708,7 @@ class Agent:
         row also retains the served Source identity for canonical replay and scrubbing, but this C-9 clock intentionally
         keys by provider/model.
         """
-        used = dict(self._last_model_at)
-        for row in self._rows:
-            if row.kind == "response" and row.created_at is not None:
-                cache = _cache_of(row.message.origin)
-                used[cache] = max(used.get(cache, row.created_at), row.created_at)
-        last = used.get(_cache_of(endpoint_origin(request.endpoint)), max(used.values(), default=None))
-        return last is not None and self.context.clock() - last > cache_ttl_s(request.endpoint, request=request)
+        return cache_cold(request, self._rows, now=self.context.clock(), last_model_at=self._last_model_at)
 
     async def _prepare_conversation(self, system: str, selected: ModelSelection) -> _PreparedConversation:
         """Compose and budget before any context transition; also used by dry_tick."""

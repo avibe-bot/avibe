@@ -32,6 +32,7 @@ from sqlalchemy.engine import Engine
 from core.agent_core.harness.projection import context_view
 from core.agent_core.harness.store import ContextEntry
 from core.agent_core.messages import AssistantMessage, HostedImage, ToolResultMessage, UserMessage
+from core.agent_core.tools.paths import to_thread_joined
 from modules.agents.vibey.prompt import (
     EnvironmentValue,
     displayed_environment,
@@ -64,6 +65,7 @@ class AdapterTranscriptStore:
         environment: EnvironmentSource,
         on_response: ResponseObserver,
         response_metadata: Optional[ResponseMetadata] = None,
+        file_write: Optional[Callable[[str, str, str], None]] = None,
         input_row_timeout_s: float = INPUT_ROW_TIMEOUT_S,
     ) -> None:
         self._store = store
@@ -71,6 +73,7 @@ class AdapterTranscriptStore:
         self._environment = environment
         self._on_response = on_response
         self._response_metadata = response_metadata
+        self._file_write = file_write
         self._input_row_timeout_s = input_row_timeout_s
         # Per Session, the environment the projected context shows; evicted by ``forget`` when
         # the adapter retires the Session's runtime, and when a checkpoint commits.
@@ -137,7 +140,7 @@ class AdapterTranscriptStore:
             if not any(entry.session_id == session_id for entry in entries):
                 # No row of its own yet: a fork's first own input carries the notice, an empty prefix included.
                 message = await asyncio.to_thread(self._with_fork_notice, session_id, message)
-        current = dict(self._environment(session_id))
+        current = {"session": session_id, **self._environment(session_id)}
         rendered = with_environment(message, environment_delta(previous, current))
         entry = await self._store.consume_input(session_id, message_id, rendered)
         self._env_state[session_id] = {**previous, **displayed_environment(current)}
@@ -172,6 +175,10 @@ class AdapterTranscriptStore:
     async def append_tool_result(
         self, session_id: str, message: ToolResultMessage, *, details: Mapping[str, Any]
     ) -> ContextEntry:
+        receipt = details.get("file_write")
+        if (not message.is_error and self._file_write is not None and isinstance(receipt, Mapping)
+                and isinstance(receipt.get("path"), str) and isinstance(receipt.get("revision"), str)):
+            await to_thread_joined(self._file_write, session_id, receipt["path"], receipt["revision"])
         return await self._store.append_tool_result(
             session_id, message, details=details, agent_name=self._agents.get(session_id),
             turn_id=self._turns.get(session_id),

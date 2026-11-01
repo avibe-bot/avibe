@@ -911,7 +911,7 @@ async def test_the_display_diff_and_patch_are_pis(tmp_path, make_ctx, original, 
     result = await _edit(make_ctx, "f.txt", edit)
 
     assert not result.is_error, result_text(result)
-    assert result.details == {
+    assert {key: result.details[key] for key in ("diff", "patch", "first_changed_line")} == {
         "diff": diff,
         "patch": "--- f.txt\n+++ f.txt\n" + patch,
         "first_changed_line": first_changed_line,
@@ -1096,7 +1096,7 @@ async def test_the_display_diff_never_splits_a_result_with_too_many_lines(tmp_pa
     finally:
         tracemalloc.stop()
 
-    assert result.details == {"diff_skipped": True}
+    assert result.details["diff_skipped"] is True
     assert peak < 8 * 1024 * 1024
 
 
@@ -1111,7 +1111,7 @@ async def test_a_large_changed_middle_skips_the_display_diff(tmp_path, make_ctx)
     )
 
     assert not result.is_error, result_text(result)
-    assert result.details == {"diff_skipped": True}
+    assert result.details["diff_skipped"] is True
 
 
 async def test_a_planned_result_over_the_limit_is_refused_and_its_diff_skipped(tmp_path, make_ctx, monkeypatch):
@@ -1122,7 +1122,7 @@ async def test_a_planned_result_over_the_limit_is_refused_and_its_diff_skipped(t
     grown = await _edit(make_ctx, "small.txt", {"oldText": "seed", "newText": "x" * 600})
     too_big = await _edit(make_ctx, "small.txt", {"oldText": "x" * 600, "newText": "y" * 2000})
 
-    assert grown.details == {"diff_skipped": True}
+    assert grown.details["diff_skipped"] is True
     assert too_big.is_error
     assert result_text(too_big) == (
         "File small.txt would be over the 1000B edit limit after this edit. "
@@ -1149,7 +1149,7 @@ async def test_files_over_the_edit_limit_are_refused_and_large_diffs_skipped(tmp
     edited = await _edit(make_ctx, "big.log", {"oldText": "line", "newText": "x", "replaceAll": True})
 
     assert not edited.is_error, result_text(edited)
-    assert edited.details == {"diff_skipped": True}
+    assert edited.details["diff_skipped"] is True
 
 
 @pytest.mark.parametrize("ending", ["\r\n", "\r"])

@@ -19,6 +19,7 @@ is ``native``, and pins that request to the hop's Source
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 import re
 from typing import Any, Awaitable, Callable, Mapping, Optional
 
@@ -232,6 +233,7 @@ class HubModelRouter:
         #: The hop the Turn runs on now, its latest resolution. The gateway answers the Turn's requests only on that
         #: hop's credential (C-6 item 3), so the Turn's hosted calls go out on it too.
         self.current = first
+        self.prefix_declarations: tuple[tuple[str, ...], Mapping[str, Any]] | None = None
         self._adapters: dict[str, ProviderAdapter] = {}
 
     async def resolve(self) -> ModelSelection:
@@ -239,7 +241,18 @@ class HubModelRouter:
             selection, self._first = self._first, None
         else:
             selection = await self._resolve()
+        selection = self.prompt_route(selection)
         self.current = selection
+        return selection
+
+    def prompt_route(self, selection: ModelSelection) -> ModelSelection:
+        """Only the saved route's declarations are cached; fallbacks and live refusals remain authoritative."""
+        from modules.agents.vibey.prompt_snapshot import frozen_hosted, route_identity
+
+        if self.prefix_declarations is not None:
+            route, hosted = self.prefix_declarations
+            if route_identity(selection.endpoint) == route:
+                selection = replace(selection, endpoint=replace(selection.endpoint, hosted_tools=frozen_hosted(selection.endpoint, hosted)))
         return selection
 
     def provider_for(self, protocol: ProtocolName) -> ProviderAdapter:

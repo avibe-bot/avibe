@@ -208,7 +208,7 @@ def build_system_prompt_blocks(
         render_prompt_block("base-capabilities-intro"),
         render_prompt_block("agent-working-principles"),
     ]
-    if context is not None:
+    if context is not None and backend != "vibey":
         blocks.append(render_prompt_block("session-start-prompt", default_session_id=_extract_default_session_id(context)))
         correction = build_forked_session_correction_prompt(context)
         if correction:
