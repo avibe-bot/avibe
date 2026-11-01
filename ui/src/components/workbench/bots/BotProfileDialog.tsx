@@ -487,6 +487,9 @@ const BotProfileForm: React.FC<{ request: BotProfileRequest; onClose: () => void
                     reasoning_effort: route ? route.reasoning_effort : mainAgent.reasoning_effort,
                   }}
                   agents={[mainAgent]}
+                  agentLocked
+                  // Any exit the picker offers leaves the dialog behind it closed.
+                  onNavigateAway={onClose}
                   onChange={(patch: AgentRoutePatch) => {
                     setRoute({
                       model: patch.model ?? (route ? route.model : mainAgent.model),

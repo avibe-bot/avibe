@@ -132,8 +132,9 @@ const OptimisticOwner: React.FC<{
   defaultRoute?: AgentRouteValue;
   defaultLabel?: string;
   presentation?: 'columns' | 'compact';
+  agentLocked?: boolean;
   onWrite: (patch: AgentRoutePatch) => void;
-}> = ({ initial = CLAUDE_ROUTE, isDefaultRoute, defaultRoute, defaultLabel, presentation, onWrite }) => {
+}> = ({ initial = CLAUDE_ROUTE, isDefaultRoute, defaultRoute, defaultLabel, presentation, agentLocked, onWrite }) => {
   const [route, setRoute] = useState<AgentRouteValue>(initial);
   const [saving, setSaving] = useState(false);
   return (
@@ -146,6 +147,7 @@ const OptimisticOwner: React.FC<{
         defaultRoute={defaultRoute}
         defaultLabel={defaultLabel}
         presentation={presentation}
+        agentLocked={agentLocked}
         onChange={(patch) => {
           setRoute((prev) => ({ ...prev, ...patch }));
           setSaving(true);
@@ -758,6 +760,24 @@ describe('AgentRoutePicker compact presentation', () => {
     });
     expect(screen.getByText('chat.picker.model')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'chat.picker.newAgent' })).toBeNull();
+  });
+
+  // A Bot's conversation (docs/plans/bots.md D5): the server refuses any Agent
+  // write on a Bot's Session, so the menu must not offer one, only the model.
+  it('names a locked Agent without offering another, while the model still moves', async () => {
+    const user = userEvent.setup();
+    const onWrite = vi.fn();
+    render(<OptimisticOwner presentation="compact" agentLocked onWrite={onWrite} />);
+    await openMenu(user);
+
+    expect(screen.queryByRole('button', { name: /chat\.picker\.agent/ })).toBeNull();
+    expect(screen.getByText('chat.picker.agent').parentElement?.textContent).toContain('claude');
+    await user.click(screen.getByText('chat.picker.agent'));
+    expect(screen.queryByRole('button', { name: /^codex/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'chat.picker.newAgent' })).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: /^opus/ }));
+    expect(onWrite.mock.calls).toEqual([[{ model: 'opus' }]]);
   });
 
   it('names an inherited route by its Agent on the trigger and says Default only in the menu', async () => {

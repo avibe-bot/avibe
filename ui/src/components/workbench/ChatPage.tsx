@@ -267,7 +267,7 @@ export const ChatPage: React.FC = () => {
   // A Bot's permanent conversation (docs/plans/bots.md D5): the header shows the
   // Bot, and the Session cannot be archived or renamed. The id namespace says so
   // before the Bot list has answered; the list supplies the face.
-  const { bots, displayName: botDisplayName } = useBots();
+  const { bots, loaded: botsLoaded, displayName: botDisplayName } = useBots();
   const botConversation = isBotSessionId(sessionId);
   const [sessionCanChat, setSessionCanChat] = useState(false);
   const canChat = capabilities.can_chat && sessionCanChat;
@@ -2106,12 +2106,14 @@ export const ChatPage: React.FC = () => {
   const searchAgents = useCallback(
     async (query: string): Promise<MentionSearchResult[]> => {
       const q = query.trim().toLowerCase();
-      const botAgents = new Set(bots.map((bot) => bot.agent_name));
+      // The live Bot list decides which Agents are Bots: this page's Agent rows are
+      // a bootstrap snapshot, and a Bot removed since then is an Agent again.
+      const botAgents = new Set(botsLoaded ? bots.map((bot) => bot.agent_name) : agents.filter((a) => a.bot).map((a) => a.name));
       const botResults: MentionSearchResult[] = bots
         .filter((bot) => !q || botDisplayName(bot).toLowerCase().includes(q) || bot.handle.includes(q))
         .map((bot) => ({ kind: 'bot', handle: bot.handle, display_name: botDisplayName(bot), avatar: bot.avatar }));
       const agentResults: MentionSearchResult[] = agents
-        .filter((a) => a.enabled && !botAgents.has(a.name) && !a.bot)
+        .filter((a) => a.enabled && !botAgents.has(a.name))
         // Names with the marker terminator (`>`) or a newline can't round-trip
         // through @<agent:name>, so they aren't mentionable.
         .filter((a) => !/[>\n]/.test(a.name))
@@ -2119,7 +2121,7 @@ export const ChatPage: React.FC = () => {
         .map((a) => ({ kind: 'agent', name: a.name, agent_id: a.id, backend: a.backend, description: a.description }));
       return [...botResults, ...agentResults];
     },
-    [agents, bots, botDisplayName],
+    [agents, bots, botsLoaded, botDisplayName],
   );
 
   // # reference source: recent active sessions machine-wide (excluding the current
@@ -3754,6 +3756,7 @@ const ChatRoutePicker: React.FC<ChatRoutePickerProps> = ({ session, agents, defa
       presentation="compact"
       value={session}
       agents={pickableAgents}
+      agentLocked={lockAgent}
       onChange={onPatch}
       saving={patchSaving}
       disabled={pickerDisabled}

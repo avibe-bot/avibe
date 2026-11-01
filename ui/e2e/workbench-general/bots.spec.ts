@@ -224,7 +224,12 @@ for (const theme of ['light', 'dark'] as const) {
     // The empty conversation shows the Bot's role; the open Bot carries the ring.
     await expect(page.locator('main')).toContainText('依赖与权限的安全审计，每周汇报');
     await expect(page.getByRole('button', { name: '首席安全官, 2 unread', exact: true })).toHaveAttribute('aria-current', 'page');
-    // The composer moves the model only: the Agent is the Bot's.
+    // The composer moves the model only: the Agent is the Bot's, named but not offered.
+    await page.locator('main').getByRole('button', { name: /^cso/ }).click();
+    await expect(page.getByText('Model', { exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: /^Agent/ })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'New agent' })).toHaveCount(0);
+    await page.keyboard.press('Escape');
     await page.mouse.move(900, 300);
     await page.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-conversation-${theme}.png` });
 
