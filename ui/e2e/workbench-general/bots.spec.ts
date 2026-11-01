@@ -271,6 +271,26 @@ test('adding a Bot sends the generated handle, its role, and the emoji avatar, t
   expect(denied).toEqual([]);
 });
 
+test('adding before the handle arrives waits for it and creates with it', async ({ page }) => {
+  const { denied } = await serveBots(page, 'en', [MAIN, CSO, PM]);
+  const created: { handle?: string }[] = [];
+  await page.route('**/api/bots', (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    const body = route.request().postDataJSON() as { display_name: string; handle: string };
+    created.push(body);
+    return route.fulfill({ status: 201, json: { ok: true, bot: payload({ handle: body.handle, display_name: body.display_name, avatar: null, role: '' }, 3) } });
+  });
+  await page.setViewportSize(DESKTOP);
+  await open(page, '/', { lang: 'en' });
+  await sidebarOf(page).getByRole('button', { name: 'Add a Bot' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Add a Bot' });
+  await dialog.getByRole('textbox').first().fill('首席安全官');
+  await dialog.getByRole('button', { name: 'Add Bot' }).click();
+  await expect(page).toHaveURL(/\/chat\/ses_cso-2$/);
+  expect(created.map((body) => body.handle)).toEqual(['cso-2']);
+  expect(denied).toEqual([]);
+});
+
 test('closing the dialog while a create waits for its handle sends nothing', async ({ page }) => {
   const { denied } = await serveBots(page, 'en', [MAIN, CSO, PM]);
   const created: unknown[] = [];
@@ -409,6 +429,21 @@ for (const theme of ['light', 'dark'] as const) {
     await expect(page.getByRole('switch')).toBeDisabled();
     await expect(page.getByRole('button', { name: 'Delete' })).toHaveCount(0);
     await page.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-agents-bot-${theme}.png` });
+
+    // A Bot's role is its Agent's description: saving it reads the Bots again.
+    if (theme === 'light') {
+      let botReads = 0;
+      page.on('request', (request) => {
+        if (request.method() === 'GET' && new URL(request.url()).pathname === '/api/bots') botReads += 1;
+      });
+      await page.route('**/api/agents/cso', (route) => (route.request().method() === 'PATCH'
+        ? route.fulfill({ json: { ok: true, agent: { ...AGENTS[3], description: 'Weekly audits', display_name: 'cso', archived_at: null, updated_at: ago(1), system_prompt: null, metadata: {}, created_at: ago(600) } } })
+        : route.fallback()));
+      const description = page.locator('textarea').first();
+      await description.fill('Weekly audits');
+      await description.blur();
+      await expect.poll(() => botReads).toBeGreaterThan(0);
+    }
 
     await page.getByRole('button', { name: /^security-auditor/ }).click();
     const set = page.getByRole('button', { name: 'Set as Bot' });

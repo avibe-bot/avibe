@@ -163,10 +163,15 @@ const BotProfileForm: React.FC<{ request: BotProfileRequest; onClose: () => void
   // create still waiting for its handle, which then never sends.
   const closedRef = useRef(false);
   const submitControllerRef = useRef<AbortController | null>(null);
-  useEffect(() => () => {
-    closedRef.current = true;
-    suggestionRef.current?.controller.abort();
-    submitControllerRef.current?.abort();
+  useEffect(() => {
+    // Set on every mount: StrictMode replays this effect, and only a real unmount
+    // may leave the form closed.
+    closedRef.current = false;
+    return () => {
+      closedRef.current = true;
+      suggestionRef.current?.controller.abort();
+      submitControllerRef.current?.abort();
+    };
   }, []);
 
   const handleError = handleDraft !== null && handleDraft !== '' && !BOT_HANDLE_RE.test(handleDraft)
