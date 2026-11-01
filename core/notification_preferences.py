@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping
 
-from core.chat_discovery import get_state_meta, set_state_meta
+from core.chat_discovery import get_state_meta, update_state_meta
 from core.notification_categories import CATEGORY_BOT, CATEGORY_SESSION
 
 PREFERENCES_KEY_PREFIX = "notification_preferences:"
@@ -49,16 +49,18 @@ def set_notification_preferences(
 
     if not isinstance(updates, Mapping):
         raise ValueError("preferences must be an object")
-    document = get_notification_preferences(user_key, db_path=db_path)
-    for field in PREFERENCE_FIELDS:
-        if field not in updates:
-            continue
-        value = updates[field]
-        if not isinstance(value, bool):
-            raise ValueError(f"{field} must be a JSON boolean")
-        document[field] = value
-    set_state_meta(preferences_key(user_key), document, db_path=db_path)
-    return document
+    def merge(raw: Any) -> dict[str, Any]:
+        document = _normalized_document(raw)
+        for field in PREFERENCE_FIELDS:
+            if field not in updates:
+                continue
+            value = updates[field]
+            if not isinstance(value, bool):
+                raise ValueError(f"{field} must be a JSON boolean")
+            document[field] = value
+        return document
+
+    return update_state_meta(preferences_key(user_key), merge, db_path=db_path)
 
 
 def public_notification_preferences(preferences: Mapping[str, Any]) -> dict[str, bool]:
