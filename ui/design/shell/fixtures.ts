@@ -1,4 +1,6 @@
 import type { InboxSession, InstanceCapabilities, WorkbenchProject, WorkbenchSession } from '@/context/ApiContext';
+import type { BotRuntimeStatus } from '@/context/BotsContext';
+import type { Bot, BotAvatar } from '@/lib/bots';
 import { OWNER_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
 
 import { DESIGN_NOW } from './clock';
@@ -11,8 +13,24 @@ export interface WorkbenchFixtures {
   expandedProjects?: string[];
   inboxSessions?: InboxSession[];
   unreadBySession?: Record<string, number>;
-  /** API responses by path (`/api/...`), for components that fetch while rendering. */
+  /** The Owner's Bots, served as `GET /api/bots` to the real Bots provider. */
+  bots?: Bot[];
+  /** Agent status of Bot Sessions, by Session id (the running dot). */
+  botStatus?: Record<string, BotRuntimeStatus>;
+  /** API responses by path plus query (`/api/inbox?session=ses_pm&limit=1`) or by path, for anything else a frame fetches. */
   api?: Record<string, unknown>;
+}
+
+/** Everything the frame's providers fetch, as the network stub serves it. */
+export function apiResponses(fixtures: WorkbenchFixtures = {}): Record<string, unknown> {
+  const responses: Record<string, unknown> = {};
+  if (fixtures.bots) responses['/api/bots'] = { ok: true, bots: fixtures.bots };
+  // Every Bot Session is read for its status dot; idle unless the frame says otherwise.
+  for (const { session_id: sessionId } of fixtures.bots ?? []) {
+    const status = fixtures.botStatus?.[sessionId] ?? 'idle';
+    responses[`/api/sessions/${sessionId}`] = session(sessionId, '', '', { scope_id: null, project_id: null, agent_status: status });
+  }
+  return { ...responses, ...fixtures.api };
 }
 
 export const owner = OWNER_INSTANCE_CAPABILITIES;
@@ -94,3 +112,22 @@ export const demoSessions: Record<string, WorkbenchSession[]> = {
     session('ses_demo_pr', 'proj_avibe', 'PR #3073 交付', { agent_status: 'failed' }),
   ],
 };
+
+export const bot = (handle: string, displayName: string, role: string, avatar: BotAvatar | null, position: number): Bot => ({
+  handle,
+  display_name: displayName,
+  avatar,
+  role,
+  agent_name: handle,
+  session_id: `ses_${handle}`,
+  position,
+  builtin: handle === 'main',
+});
+
+/** The main Bot as a new install has it: the mascot, and the localized default name. */
+export const mainBot = bot('main', '', "The user's main Bot and first point of contact.", { kind: 'mascot' }, 0);
+export const demoBots = [
+  mainBot,
+  bot('cso', '首席安全官', '依赖与权限的安全审计，每周汇报', { kind: 'emoji', emoji: '🛡️', hue: 200 }, 1),
+  bot('pm', '产品经理', '需求池整理与优先级', { kind: 'emoji', emoji: '🧭', hue: 42 }, 2),
+];

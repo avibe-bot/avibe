@@ -3,6 +3,7 @@ import { useEffect, type ReactNode } from 'react';
 import type { DesignLang, DesignTheme, Frame } from './frame';
 import { ALL_FRAMES } from './registry';
 import { DesignShell } from './shell/DesignShell';
+import { designNetwork } from './shell/network';
 
 function FrameBox({ frame, theme }: { frame: Frame; theme: DesignTheme }) {
   return (
@@ -24,13 +25,12 @@ function Single({ frame, theme }: { frame: Frame; theme: DesignTheme }) {
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
     let cancelled = false;
-    void document.fonts.ready.then(() =>
-      requestAnimationFrame(() =>
-        requestAnimationFrame(() => {
-          if (!cancelled) document.body.dataset.designReady = 'true';
-        }),
-      ),
-    );
+    // Ready once fonts are in and the providers' fixture reads have settled.
+    void document.fonts.ready
+      .then(() => designNetwork.quiet())
+      .then(() => {
+        if (!cancelled) document.body.dataset.designReady = 'true';
+      });
     return () => {
       cancelled = true;
     };

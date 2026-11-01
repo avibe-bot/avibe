@@ -32,7 +32,7 @@ const index = {
   lang: 'zh',
   shots: [
     { id: 'sidebar/bots/three', title: '伙伴 · 3 个伙伴', status: 'approved', theme: 'light', width: 248, height: 190, hash: 'h1', src: 'shots/sidebar/bots/three.light.png' },
-    { id: 'sidebar/bots/three', title: '伙伴 · 3 个伙伴', status: 'approved', theme: 'dark', width: 248, height: 190, hash: 'h2', src: 'shots/sidebar/bots/three.dark.png' },
+    { id: 'sidebar/bots/three', title: '伙伴 · 3 个伙伴', status: 'approved', theme: 'dark', lang: 'en', width: 248, height: 190, hash: 'h2', src: 'shots/sidebar/bots/three.dark.png' },
   ],
 };
 
@@ -61,7 +61,8 @@ describe('DesignFrame', () => {
     const frames = await screen.findAllByTitle(/伙伴 · 3 个伙伴/);
     expect(frames.map((frame) => frame.getAttribute('src'))).toEqual([
       './design/canvas/design.html?frame=sidebar%2Fbots%2Fthree&theme=light&lang=zh',
-      './design/canvas/design.html?frame=sidebar%2Fbots%2Fthree&theme=dark&lang=zh',
+      // A shot exported in another language keeps it (partial exports merge).
+      './design/canvas/design.html?frame=sidebar%2Fbots%2Fthree&theme=dark&lang=en',
     ]);
 
     setAnnotating(true);

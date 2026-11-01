@@ -11,7 +11,7 @@
 // so it can be annotated like any image; the image's alt names the frame and theme.
 import { useEffect, useRef, useState } from "react"
 
-type Shot = { id: string; title: string; status: string; theme: "light" | "dark"; width: number; height: number; hash: string; src: string }
+type Shot = { id: string; title: string; status: string; theme: "light" | "dark"; lang?: string; width: number; height: number; hash: string; src: string }
 type Index = { lang: string; shots: Shot[] }
 
 let index: Promise<Index> | null = null
@@ -87,7 +87,7 @@ function Live({ shot, lang, still }: { shot: Shot; lang: string; still: boolean 
     observer.observe(parent)
     return () => observer.disconnect()
   }, [shot.width])
-  const src = `./design/canvas/design.html?frame=${encodeURIComponent(shot.id)}&theme=${shot.theme}&lang=${lang}`
+  const src = `./design/canvas/design.html?frame=${encodeURIComponent(shot.id)}&theme=${shot.theme}&lang=${shot.lang ?? lang}`
   const image = `./design/${shot.src}?v=${shot.hash}`
   return (
     <div ref={box} className="flex flex-col gap-1" style={{ width: shot.width * scale }}>

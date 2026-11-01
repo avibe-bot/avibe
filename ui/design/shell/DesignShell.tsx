@@ -2,6 +2,7 @@ import { useMemo, type ReactNode } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 
 import { ApiProvider } from '@/context/ApiContext';
+import { BotsProvider } from '@/context/BotsProvider';
 import { InstanceAuthorizationContext } from '@/context/InstanceAuthorizationContext';
 import { ToastProvider } from '@/context/ToastProvider';
 import { UnsavedChangesContext } from '@/context/unsavedChangesContext';
@@ -61,7 +62,8 @@ function projectsValue(fixtures: WorkbenchFixtures): WorkbenchProjectsTree {
   });
 }
 
-/** The providers the Workbench surfaces read, served from fixtures. The API provider is the real one. */
+/** The providers the Workbench surfaces read, served from fixtures. The API and Bots providers are the
+ *  real ones, reading the frame's API fixtures through the network stub (`apiResponses`). */
 export function DesignShell({ fixtures = {}, route = '/', children }: { fixtures?: WorkbenchFixtures; route?: string; children: ReactNode }) {
   const inbox = useMemo(() => inboxValue(fixtures), [fixtures]);
   const projects = useMemo(() => projectsValue(fixtures), [fixtures]);
@@ -77,7 +79,9 @@ export function DesignShell({ fixtures = {}, route = '/', children }: { fixtures
             <UnsavedChangesContext.Provider value={{ setRegistration: () => {}, authorizeRouteAction: () => null }}>
               <WindowManagerContext.Provider value={inert<WindowManagerValue>({ windows: [], focusedId: null, gestureActive: false })}>
                 <WorkbenchInboxContext.Provider value={inbox}>
-                  <WorkbenchProjectsContext.Provider value={projects}>{children}</WorkbenchProjectsContext.Provider>
+                  <WorkbenchProjectsContext.Provider value={projects}>
+                    <BotsProvider>{children}</BotsProvider>
+                  </WorkbenchProjectsContext.Provider>
                 </WorkbenchInboxContext.Provider>
               </WindowManagerContext.Provider>
             </UnsavedChangesContext.Provider>

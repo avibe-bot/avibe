@@ -2,7 +2,7 @@
 import { WorkbenchSidebar } from '@/components/workbench/WorkbenchSidebar';
 
 import { frames } from '../../frame';
-import { demoProjects, demoSessions, inboxRow } from '../../shell/fixtures';
+import { demoProjects, demoSessions, inboxRow, mainBot } from '../../shell/fixtures';
 import { SidebarColumn } from '../../shell/SidebarColumn';
 
 const sidebar = () => (
@@ -18,7 +18,7 @@ const designFrames = frames([
     width: 248,
     height: 640,
     status: 'shipped',
-    fixtures: { projects: demoProjects },
+    fixtures: { projects: demoProjects, bots: [mainBot] },
     render: sidebar,
   },
   {
@@ -29,6 +29,7 @@ const designFrames = frames([
     status: 'shipped',
     fixtures: {
       projects: demoProjects,
+      bots: [mainBot],
       sessionsByProject: demoSessions,
       expandedProjects: ['proj_avibe'],
       unreadBySession: { ses_demo_cache: 3, ses_demo_pr: 2 },

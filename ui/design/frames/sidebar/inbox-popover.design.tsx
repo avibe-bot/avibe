@@ -3,7 +3,7 @@ import { Popover, PopoverAnchor } from '@/components/ui/popover';
 import { InboxHoverPopover } from '@/components/workbench/WorkbenchSidebar';
 
 import { frames } from '../../frame';
-import { inboxRow } from '../../shell/fixtures';
+import { inboxRow, mainBot } from '../../shell/fixtures';
 
 const rows = [
   inboxRow('ses_demo_cache', 'avibe', '修复中途断缓存', '定位到清理旧工具结果时前缀断开，PR 已开。', 5, 3),
@@ -18,6 +18,7 @@ const designFrames = frames([
     width: 420,
     height: 460,
     status: 'shipped',
+    fixtures: { bots: [mainBot] },
     render: () => (
       <Popover open>
         <PopoverAnchor className="absolute left-0 top-4 size-px" />

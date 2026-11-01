@@ -20,6 +20,8 @@ export interface FrameSpec {
   fixtures?: WorkbenchFixtures;
   /** Initial route for components that read the location. */
   route?: string;
+  /** A CSS selector the screenshot hovers before capturing, for hover states (cards, menus). */
+  hover?: string;
   render: () => ReactNode;
 }
 

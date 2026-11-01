@@ -1,56 +1,61 @@
-// Bots sidebar (docs/plans/bots.md D5): the top of the sidebar, drawn with kit components.
+// Bots in the sidebar (docs/plans/bots.md D5): the shipped strip, hover card, and Inbox icon,
+// drawn by the shipped sidebar from fixtures.
+import { WorkbenchSidebar } from '@/components/workbench/WorkbenchSidebar';
+
 import { frames } from '../../frame';
-import { BotHoverCard, BotStrip, BrandRowWithInbox, type BotItem } from '../../kit/BotStrip';
+import { demoBots, demoProjects, inboxRow, mainBot, type WorkbenchFixtures } from '../../shell/fixtures';
 import { SidebarColumn } from '../../shell/SidebarColumn';
 
-const vibey: BotItem = {
-  handle: 'main',
-  name: '歪比',
-  role: '你的主助理，帮你安排一切',
-  avatar: { kind: 'vibey' },
-  preview: '周报草稿已发到飞书，等你确认',
-  time: '16:02',
-};
-const cso: BotItem = {
-  handle: 'cso',
-  name: '首席安全官',
-  role: '依赖与权限的安全审计，每周汇报',
-  avatar: { kind: 'emoji', emoji: '🛡️', well: 'cyan' },
-  unread: 2,
-  preview: 'avault 依赖里发现 2 个高危漏洞',
-  time: '15:40',
-};
-const pm: BotItem = {
-  handle: 'pm',
-  name: '产品经理',
-  role: '需求池整理与优先级',
-  avatar: { kind: 'emoji', emoji: '🧭', well: 'gold' },
-  running: true,
-  preview: '正在整理本周需求池…',
-  time: '15:58',
-};
-
-const top = (bots: BotItem[], inboxUnread = 0) => () => (
+const sidebar = () => (
   <SidebarColumn>
-    <div className="flex flex-col gap-2.5">
-      <BrandRowWithInbox inboxUnread={inboxUnread} />
-      <BotStrip bots={bots} />
-    </div>
+    <WorkbenchSidebar />
   </SidebarColumn>
 );
 
+const team: WorkbenchFixtures = {
+  projects: demoProjects,
+  bots: demoBots,
+  botStatus: { ses_pm: 'running' },
+  unreadBySession: { ses_cso: 2, ses_demo_cache: 3 },
+  inboxSessions: [inboxRow('ses_cso', null, '首席安全官', 'avault 依赖里发现 2 个高危漏洞', 20, 2)],
+  // The hover card reads the Bot's latest message when it opens.
+  api: {
+    '/api/inbox?limit=1&session=ses_pm': {
+      sessions: [inboxRow('ses_pm', null, '产品经理', '需求池按优先级排好了，前三项需要你拍板。', 2)],
+    },
+  },
+};
+
 const designFrames = frames([
-  { name: 'new-user', title: '伙伴 · 只有歪比', width: 248, height: 190, status: 'approved', render: top([vibey]) },
-  { name: 'three', title: '伙伴 · 3 个伙伴', width: 248, height: 190, status: 'approved', render: top([vibey, cso, pm], 5) },
+  {
+    name: 'new-user',
+    title: '伙伴 · 只有歪比',
+    width: 248,
+    height: 360,
+    status: 'shipped',
+    fixtures: { projects: demoProjects, bots: [mainBot] },
+    render: sidebar,
+  },
+  {
+    name: 'three',
+    title: '伙伴 · 3 个伙伴：未读、运行中',
+    width: 248,
+    height: 360,
+    status: 'shipped',
+    fixtures: team,
+    render: sidebar,
+  },
   {
     name: 'hover-card',
     title: '伙伴 · 悬停卡片',
-    width: 280,
-    height: 300,
-    status: 'approved',
+    width: 520,
+    height: 360,
+    status: 'shipped',
+    fixtures: team,
+    hover: '[data-bot-handle="pm"]',
     render: () => (
-      <div className="p-4">
-        <BotHoverCard bot={pm} />
+      <div className="h-full w-[248px]">
+        {sidebar()}
       </div>
     ),
   },
