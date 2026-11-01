@@ -6,6 +6,7 @@ import type { AgentBackendId, NativeCliBackend, WebOAuthBackend } from '../lib/a
 import { apiFetch, recoverRemoteAuthFromSessionProbe, withApiDeadline } from '../lib/apiFetch';
 import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
 import { parseBot, type AgentBotSummary, type Bot, type BotEmojiAvatarInput } from '../lib/bots';
+import { parseNotificationPreferences, type NotificationPreferences } from '../lib/notificationPreferences';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
 import type { AgentGraphParams, AgentGraphResult, AgentGraphVisibility } from '../lib/agentGraph';
 import { onPageReactivated, type PageReactivationListener } from '../lib/pageActivity';
@@ -629,6 +630,9 @@ export type ApiContextType = {
     sessionId: string,
     payload: ShowAccessApplyRequest,
   ) => Promise<ShowAccessApplyResult>;
+  /** The caller's notification switches (docs/plans/workbench-refinements.md §1). */
+  getNotificationPreferences: () => Promise<NotificationPreferences>;
+  updateNotificationPreferences: (preferences: NotificationPreferences) => Promise<NotificationPreferences>;
   getWebPushStatus: (payload?: WebPushStatusPayload) => Promise<WebPushStatus>;
   getWebPushVapidPublicKey: () => Promise<{ ok: boolean; public_key: string }>;
   subscribeWebPush: (
@@ -1373,6 +1377,9 @@ export type WorkbenchEventHandlers = {
   /** The Owner's Bots changed (created, set, edited, reordered, removed): refetch
    *  ``GET /api/bots``. ``handle`` is a hint, not a filter. */
   onBotsChanged?: (data: { handle?: string }) => void;
+  /** Someone's notification switches changed. The stream reaches every reader,
+   *  so this is a nudge to re-read one's own, never the record itself. */
+  onNotificationPreferencesChanged?: () => void;
   onConnectionState?: (state: WorkbenchEventConnectionState) => void;
   onEventBridgeStatus?: (data: { connected: boolean }) => void;
   onAuthorizationChanged?: (data: {
@@ -3129,6 +3136,15 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         handlers.onBotsChanged?.(envelope.data ?? {});
       });
     });
+    source.addEventListener('notifications.preferences.updated', (e: MessageEvent) => {
+      const envelope = parseWorkbenchEnvelope<unknown>(e.data);
+      if (!envelope) return;
+      clearReadCacheMatching((path) => path.startsWith('/api/notifications') || path.startsWith('/api/inbox'));
+      dispatchToWorkbenchHandlers((handlers) => {
+        handlers.onAny?.(envelope);
+        handlers.onNotificationPreferencesChanged?.();
+      });
+    });
     source.addEventListener('remote.authorization', (e: MessageEvent) => {
       try {
         const payload = JSON.parse(e.data) as { state?: RemoteAuthorizationState };
@@ -3743,6 +3759,22 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       `/api/show-pages/${encodeURIComponent(sessionId)}/access-settings/apply`,
       { page_id: sessionId, ...payload },
     ),
+    getNotificationPreferences: async () => {
+      const path = '/api/notifications/preferences';
+      const preferences = parseNotificationPreferences(await getJson(path, { handleError: false }));
+      if (!preferences) throw new ApiError(`Request failed: ${path}`, 0, null);
+      return preferences;
+    },
+    updateNotificationPreferences: async (preferences) => {
+      const path = '/api/notifications/preferences';
+      const { res, payloadJson } = await requestJson(path, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(preferences),
+      });
+      if (!res.ok) throw new ApiError(`Request failed: ${path} (${res.status})`, res.status, null);
+      return parseNotificationPreferences(payloadJson) ?? preferences;
+    },
     getWebPushStatus: (payload) =>
       payload ? postJson('/api/web-push/status', payload) : getJson('/api/web-push/status'),
     getWebPushVapidPublicKey: () => getJson('/api/web-push/vapid-public-key'),

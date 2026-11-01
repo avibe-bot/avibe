@@ -4,6 +4,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft,
+  Bell,
   ChevronDown,
   ChevronLeft,
   Cpu,
@@ -66,6 +67,7 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
   {
     items: [
       { path: SETTINGS_LANDING_PATH, labelKey: 'settings.sections.general', icon: Settings },
+      { path: '/settings/notifications', labelKey: 'settings.sections.notifications', icon: Bell },
     ],
   },
   {

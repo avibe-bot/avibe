@@ -506,7 +506,7 @@
       "react-hooks/set-state-in-effect": 1
     },
     "src/components/workbench/WorkbenchSidebar.tsx": {
-      "avibe/localized-user-text": 5
+      "avibe/localized-user-text": 1
     },
     "src/components/workbench/harnessLifecycle.test.ts": {
       "@typescript-eslint/no-explicit-any": 1

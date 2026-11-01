@@ -1,17 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { ArrowRight, CheckCheck, Filter, Inbox, Loader2, MessageSquareReply, RefreshCw, Search } from 'lucide-react';
+import { ArrowRight, CheckCheck, ChevronDown, Filter, Inbox, Loader2, MessageSquareReply, RefreshCw, Search } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import { useBots } from '../../context/BotsContext';
+import { useNotificationPreferences } from '../../context/NotificationPreferencesContext';
+import { inboxCategory, isCategoryLoud, type InboxCategory } from '../../lib/notificationPreferences';
 import type { InboxSession } from '../../context/ApiContext';
 import { formatRelativeTime } from '../../lib/relativeTime';
 import { Markdown } from '../ui/markdown';
 import { Button } from '../ui/button';
-import { WebPushControl } from './WebPushControl';
+import { NotificationMenu } from './NotificationMenu';
+import { useNotificationMode } from './useNotificationMode';
+import { InboxSectionHeader } from './InboxSectionHeader';
+import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { useInboxScrollRestoration } from './useInboxScrollRestoration';
 import { BotAvatar } from '../ui/bot-avatar';
 import { BotTag } from './bots/BotTag';
@@ -28,7 +33,10 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
   const navigate = useNavigate();
   const location = useLocation();
   const listRef = useRef<HTMLDivElement>(null);
-  const { botForSession, displayName: botName } = useBots();
+  const { enabled: hasBots, botForSession, displayName: botName } = useBots();
+  const { preferences } = useNotificationPreferences();
+  const { mode: notification, icon: NotificationIcon } = useNotificationMode();
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
   const {
     capabilities,
   } = useInstanceAuthorization();
@@ -37,6 +45,7 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
     unreadBySession,
     totalUnread,
     unreadSessions,
+    unreadByCategory,
     nextCursor,
     loading,
     loadingMore,
@@ -133,6 +142,119 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
     await Promise.all(ids.map((id) => markRead(id)));
   };
 
+  // One conversation card. In a muted category an unread card stays marked but
+  // drops the mint that asks for attention, and its count turns grey. Inside the
+  // Bots section the header already says Bot, so the card carries no Bot tag.
+  const renderCard = (s: InboxSession, quiet: boolean, inBotSection: boolean) => {
+    const unread = unreadOf(s);
+    const projectLabel = s.project_name || s.project_id || 'avibe';
+    const sessionLabel = s.title?.trim() || s.session_id;
+    // A Bot's conversation reads as the Bot: avatar, name, and a small Bot
+    // tag in place of "project · title" (docs/plans/bots.md D5).
+    const bot = botForSession(s.session_id);
+    return (
+      <article
+        key={s.session_id}
+        data-inbox-session-id={s.session_id}
+        className={clsx(
+          'flex flex-col gap-3 rounded-xl border p-4 transition',
+          unread > 0
+            ? quiet
+              ? 'border-border-strong bg-foreground/[0.03]'
+              : 'border-mint/30 bg-mint/[0.05] shadow-glow-md-mint'
+            : 'border-border bg-surface',
+        )}
+      >
+        <div className="flex items-center gap-2 text-[11px]">
+          {bot ? (
+            <>
+              <BotAvatar avatar={bot.avatar} name={botName(bot)} size={24} />
+              <span className="min-w-0 truncate text-[13px] font-semibold text-foreground">{botName(bot)}</span>
+              {!inBotSection && <BotTag />}
+              <span className="flex-1" />
+            </>
+          ) : (
+            <>
+              <span className="inline-flex max-w-[40%] items-center gap-1 truncate rounded-md border border-border-strong bg-surface-2 px-2 py-0.5 font-semibold text-cyan-ink">
+                {projectLabel}
+              </span>
+              <span className="text-muted">·</span>
+              <span className="flex-1 truncate text-[13px] font-semibold text-foreground">
+                {sessionLabel}
+              </span>
+            </>
+          )}
+          {s.replied && (
+            <span className="inline-flex items-center gap-1 rounded-md border border-cyan/30 bg-cyan/[0.08] px-1.5 py-0.5 text-[10px] font-semibold text-cyan-ink">
+              <MessageSquareReply className="size-2.5" />
+              {t('workbench.inbox.replied')}
+            </span>
+          )}
+          <span className="shrink-0 font-mono text-muted">{formatRelativeTime(s.last_activity_at, t)}</span>
+        </div>
+
+        <div className="flex flex-col gap-1">
+          <div className="text-[10px] font-bold uppercase tracking-wider text-mint-ink">
+            {t('workbench.inbox.agent')}
+          </div>
+          {s.preview_text ? (
+            <div
+              className={clsx(
+                'line-clamp-3 text-[13px] leading-relaxed',
+                unread > 0 ? 'text-foreground' : 'text-muted',
+              )}
+            >
+              <Markdown content={s.preview_text} interactive={false} className="vr-markdown--preview" />
+            </div>
+          ) : (
+            <p className="text-[13px] leading-relaxed text-muted">—</p>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => openSession(s)}
+            className="inline-flex items-center gap-1.5 rounded-md border border-mint/30 bg-mint/[0.06] px-3 py-1.5 text-[11px] font-semibold text-mint-ink transition hover:bg-mint/[0.12]"
+          >
+            {unread > 0 && (
+              <span
+                className={clsx(
+                  'inline-flex min-w-[1.1rem] items-center justify-center rounded-full px-1.5 font-mono text-[9px] font-bold',
+                  quiet ? 'bg-foreground/[0.18] text-foreground' : 'bg-mint text-primary-foreground',
+                )}
+              >
+                {unread > 99 ? '99+' : unread}
+              </span>
+            )}
+            {t('workbench.inbox.openSession')}
+            <ArrowRight className="size-3" />
+          </button>
+          {capabilities.can_chat && unread > 0 && (
+            <button
+              type="button"
+              onClick={() => markRead(s.session_id)}
+              className="inline-flex items-center gap-1.5 rounded-md border border-border-strong px-3 py-1.5 text-[11px] font-medium text-foreground transition hover:bg-foreground/[0.04]"
+            >
+              <CheckCheck className="size-3" />
+              {t('workbench.inbox.markRead')}
+            </button>
+          )}
+        </div>
+      </article>
+    );
+  };
+
+  // With Bots the feed splits into two sections, Bots first
+  // (docs/plans/workbench-refinements.md §1); each keeps the feed's activity order.
+  // A section with nothing to show is left out. Without Bots there is one list.
+  const sections = useMemo<{ category?: InboxCategory; rows: InboxSession[] }[]>(() => {
+    if (!hasBots) return [{ rows: visible }];
+    return (['bot', 'session'] as const)
+      .map((category) => ({ category, rows: visible.filter((row) => inboxCategory(row.session_id) === category) }))
+      .filter((section) => section.rows.length > 0);
+  }, [hasBots, visible]);
+
   const hasMore = !!nextCursor;
   // Only declare "all clear" when nothing is visible AND nothing left to load
   // could match. On the Unread tab that means no unread sessions exist anywhere
@@ -216,7 +338,21 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
           ))}
         </div>
         <div className="flex min-w-0 flex-wrap items-center gap-2 sm:ml-auto sm:justify-end">
-          {capabilities.can_read_instance && <WebPushControl />}
+          <Popover open={notificationsOpen} onOpenChange={setNotificationsOpen}>
+            <PopoverTrigger asChild>
+              <button
+                type="button"
+                className="flex shrink-0 items-center gap-1.5 rounded-md border border-border-strong px-3 py-1.5 text-[12px] font-semibold text-foreground transition hover:bg-foreground/[0.04]"
+              >
+                <NotificationIcon className={clsx('size-3.5', notification === 'off' && 'text-muted')} />
+                {t('workbench.notifications.button', { mode: t(`workbench.notifications.mode.${notification}`) })}
+                <ChevronDown className="size-3 text-muted" />
+              </button>
+            </PopoverTrigger>
+            <PopoverContent align="end" className="w-[320px] p-3">
+              <NotificationMenu onNavigate={() => setNotificationsOpen(false)} />
+            </PopoverContent>
+          </Popover>
           {capabilities.can_chat && (
             <button
               type="button"
@@ -256,96 +392,37 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
               {t('workbench.inbox.moreUnreadBeyond')}
             </div>
           )}
-          {visible.map((s) => {
-            const unread = unreadOf(s);
-            const projectLabel = s.project_name || s.project_id || 'avibe';
-            const sessionLabel = s.title?.trim() || s.session_id;
-            // A Bot's conversation reads as the Bot: avatar, name, and a small Bot
-            // tag in place of "project · title" (docs/plans/bots.md D5).
-            const bot = botForSession(s.session_id);
+          {sections.map((section) => {
+            const quiet = section.category ? !isCategoryLoud(preferences, section.category) : false;
+            const sectionUnreadIds = section.category
+              ? Object.entries(unreadBySession)
+                .filter(([id, n]) => n > 0 && inboxCategory(id) === section.category)
+                .map(([id]) => id)
+              : [];
             return (
-              <article
-                key={s.session_id}
-                data-inbox-session-id={s.session_id}
-                className={clsx(
-                  'flex flex-col gap-3 rounded-xl border p-4 transition',
-                  unread > 0
-                    ? 'border-mint/30 bg-mint/[0.05] shadow-glow-md-mint'
-                    : 'border-border bg-surface',
+              <section key={section.category ?? 'all'} className="flex flex-col gap-3">
+                {section.category && (
+                  <InboxSectionHeader
+                    category={section.category}
+                    unread={unreadByCategory[section.category]}
+                    quiet={quiet}
+                    className="px-1 pt-1"
+                    action={
+                      section.category === 'session' && capabilities.can_chat && sectionUnreadIds.length > 0 ? (
+                        <button
+                          type="button"
+                          onClick={() => void Promise.all(sectionUnreadIds.map((id) => markRead(id)))}
+                          className="inline-flex items-center gap-1 rounded-md border border-border-strong px-2 py-0.5 text-[11px] font-medium text-foreground transition hover:bg-foreground/[0.04]"
+                        >
+                          <CheckCheck className="size-3" />
+                          {t('workbench.inbox.sections.markRead')}
+                        </button>
+                      ) : null
+                    }
+                  />
                 )}
-              >
-                <div className="flex items-center gap-2 text-[11px]">
-                  {bot ? (
-                    <>
-                      <BotAvatar avatar={bot.avatar} name={botName(bot)} size={24} />
-                      <span className="min-w-0 truncate text-[13px] font-semibold text-foreground">{botName(bot)}</span>
-                      <BotTag />
-                      <span className="flex-1" />
-                    </>
-                  ) : (
-                    <>
-                      <span className="inline-flex max-w-[40%] items-center gap-1 truncate rounded-md border border-border-strong bg-surface-2 px-2 py-0.5 font-semibold text-cyan-ink">
-                        {projectLabel}
-                      </span>
-                      <span className="text-muted">·</span>
-                      <span className="flex-1 truncate text-[13px] font-semibold text-foreground">
-                        {sessionLabel}
-                      </span>
-                    </>
-                  )}
-                  {s.replied && (
-                    <span className="inline-flex items-center gap-1 rounded-md border border-cyan/30 bg-cyan/[0.08] px-1.5 py-0.5 text-[10px] font-semibold text-cyan-ink">
-                      <MessageSquareReply className="size-2.5" />
-                      {t('workbench.inbox.replied')}
-                    </span>
-                  )}
-                  <span className="shrink-0 font-mono text-muted">{formatRelativeTime(s.last_activity_at, t)}</span>
-                </div>
-
-                <div className="flex flex-col gap-1">
-                  <div className="text-[10px] font-bold uppercase tracking-wider text-mint-ink">
-                    {t('workbench.inbox.agent')}
-                  </div>
-                  {s.preview_text ? (
-                    <div
-                      className={clsx(
-                        'line-clamp-3 text-[13px] leading-relaxed',
-                        unread > 0 ? 'text-foreground' : 'text-muted',
-                      )}
-                    >
-                      <Markdown content={s.preview_text} interactive={false} className="vr-markdown--preview" />
-                    </div>
-                  ) : (
-                    <p className="text-[13px] leading-relaxed text-muted">—</p>
-                  )}
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => openSession(s)}
-                    className="inline-flex items-center gap-1.5 rounded-md border border-mint/30 bg-mint/[0.06] px-3 py-1.5 text-[11px] font-semibold text-mint-ink transition hover:bg-mint/[0.12]"
-                  >
-                    {unread > 0 && (
-                      <span className="inline-flex min-w-[1.1rem] items-center justify-center rounded-full bg-mint px-1.5 font-mono text-[9px] font-bold text-primary-foreground">
-                        {unread > 99 ? '99+' : unread}
-                      </span>
-                    )}
-                    {t('workbench.inbox.openSession')}
-                    <ArrowRight className="size-3" />
-                  </button>
-                  {capabilities.can_chat && unread > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => markRead(s.session_id)}
-                      className="inline-flex items-center gap-1.5 rounded-md border border-border-strong px-3 py-1.5 text-[11px] font-medium text-foreground transition hover:bg-foreground/[0.04]"
-                    >
-                      <CheckCheck className="size-3" />
-                      {t('workbench.inbox.markRead')}
-                    </button>
-                  )}
-                </div>
-              </article>
+                {section.rows.map((s) => renderCard(s, quiet, section.category === 'bot'))}
+              </section>
             );
           })}
 

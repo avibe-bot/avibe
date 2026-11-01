@@ -10,6 +10,7 @@ import { RouteSurfaceActivityBoundary } from '../RouteSurfaceActivityBoundary';
 
 const inbox = vi.hoisted(() => ({
   totalUnread: 0,
+  badgeTotal: 0,
   unreadSessions: 0,
   inboxSessions: [] as unknown[],
   unreadBySession: {} as Record<string, number>,
@@ -101,6 +102,7 @@ beforeEach(() => {
   // Section open state is remembered per browser; every case starts from a fresh one.
   window.localStorage.clear();
   inbox.totalUnread = 0;
+  inbox.badgeTotal = 0;
   inbox.unreadSessions = 0;
   inbox.inboxSessions = [];
   inbox.unreadBySession = {};
@@ -136,6 +138,7 @@ describe('Workbench sidebar inbox counter', () => {
 
   it('shows the real unread count and colours the icon with it', () => {
     inbox.totalUnread = 7;
+    inbox.badgeTotal = 7;
     inbox.unreadSessions = 3;
     inbox.unreadBySession = { ses_a: 4, ses_b: 3 };
     renderSidebar();
@@ -147,9 +150,33 @@ describe('Workbench sidebar inbox counter', () => {
 
   it('caps the badge instead of widening the icon', () => {
     inbox.totalUnread = 150;
+    inbox.badgeTotal = 150;
     renderSidebar();
 
     expect(screen.getByRole('link', { name: en.workbench.inbox.navUnread.replace('{{count}}', '150') }).textContent).toBe('99+');
+  });
+
+  it('counts only categories whose notifications are on', () => {
+    // Bot replies are loud, two Session replies are muted (the provider's badgeTotal).
+    inbox.totalUnread = 4;
+    inbox.badgeTotal = 2;
+    renderSidebar();
+
+    const link = screen.getByRole('link', { name: en.workbench.inbox.navUnread.replace('{{count}}', '2') });
+    expect(link.textContent).toBe('2');
+    expect(inboxIcon().getAttribute('class')).toContain('text-cyan-ink');
+  });
+
+  it('marks muted unread with a grey dot instead of a number', () => {
+    inbox.totalUnread = 5;
+    inbox.badgeTotal = 0;
+    renderSidebar();
+
+    const link = screen.getByRole('link', { name: en.workbench.inbox.navQuiet });
+    // Unread is there to find, but asks for nothing: no number, no cyan.
+    expect(link.textContent).toBe('');
+    expect(link.querySelector('span[aria-hidden="true"].rounded-full')).toBeTruthy();
+    expect(inboxIcon().getAttribute('class')).toContain('text-foreground');
   });
 
   it('keeps Search in the Projects header, before New Project and without needing it', async () => {

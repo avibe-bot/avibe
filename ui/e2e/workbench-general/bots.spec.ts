@@ -168,13 +168,70 @@ for (const theme of ['light', 'dark'] as const) {
     await expect(page.getByRole('menu').getByRole('menuitem', { name: '移出伙伴' })).toHaveCount(0);
     await page.keyboard.press('Escape');
 
-    // The Inbox popover: a Bot row is the Bot, with its tag.
+    // The Inbox popover: Bots above Sessions, and a Bot row is the Bot
+    // (docs/plans/workbench-refinements.md §1).
     await inbox.hover();
     const popover = page.getByRole('dialog', { name: '收件箱' });
     await expect(popover).toBeVisible();
-    await expect(popover.getByRole('button').filter({ hasText: '首席安全官' })).toContainText('伙伴');
+    const botsHeader = popover.getByText('伙伴', { exact: true });
+    const sessionsHeader = popover.getByText('会话', { exact: true });
+    await expect(botsHeader).toBeVisible();
+    await expect(sessionsHeader).toBeVisible();
+    expect((await botsHeader.boundingBox())!.y).toBeLessThan((await sessionsHeader.boundingBox())!.y);
+    await expect(popover.getByRole('button').filter({ hasText: '首席安全官' })).toContainText('avault');
     await expect(popover.getByRole('button').filter({ hasText: '中文项目' })).toContainText('Fix the cache break');
     await page.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-inbox-${theme}.png`, clip: { x: 0, y: 0, width: 680, height: 560 } });
+    expect(denied).toEqual([]);
+  });
+
+  test(`muting Session messages leaves the Inbox counting Bots, and the switches are one click away (${theme})`, async ({ page }) => {
+    const { denied } = await serveBots(page, 'zh', [MAIN, CSO, PM]);
+    let preferences = { enabled: true, bots: true, sessions: false };
+    const saved: unknown[] = [];
+    await page.route('**/api/notifications/preferences', async (route) => {
+      if (route.request().method() === 'PUT') {
+        preferences = route.request().postDataJSON();
+        saved.push(preferences);
+      }
+      return route.fulfill({ json: { ok: true, preferences } });
+    });
+    await page.setViewportSize(DESKTOP);
+    await open(page, '/', { lang: 'zh', theme });
+    const sidebar = sidebarOf(page);
+
+    // The Bot's 2 count; the Session's 3 is quiet (docs/plans/workbench-refinements.md §1).
+    const inbox = sidebar.getByRole('link', { name: '收件箱，2 条未读' });
+    await expect(inbox).toHaveText('2');
+    await inbox.hover();
+    const popover = page.getByRole('dialog', { name: '收件箱' });
+    await expect(popover.getByText('免打扰')).toHaveCount(1);
+    const bell = popover.getByRole('button', { name: '通知设置' });
+    await expect(bell).toContainText('仅伙伴');
+    await page.screenshot({ animations: 'disabled', path: `${SHOTS}/notifications-inbox-${theme}.png`, clip: { x: 0, y: 0, width: 680, height: 560 } });
+
+    await bell.click();
+    const sessions = popover.getByRole('switch', { name: '会话消息' });
+    await expect(sessions).toHaveAttribute('aria-checked', 'false');
+    await expect(popover).toContainText('会话消息照常进收件箱');
+    await page.screenshot({ animations: 'disabled', path: `${SHOTS}/notifications-menu-${theme}.png`, clip: { x: 0, y: 0, width: 680, height: 560 } });
+    await sessions.click();
+    expect(saved).toEqual([{ enabled: true, bots: true, sessions: true }]);
+    await expect(sidebar.getByRole('link', { name: '收件箱，5 条未读' })).toHaveText('5');
+
+    await popover.getByRole('button', { name: '更多通知设置' }).click();
+    await expect(page).toHaveURL(/\/settings\/notifications/);
+    await expect(popover).toBeHidden();
+    await expect(page.getByRole('heading', { name: '通知', level: 1 })).toBeVisible();
+    await expect(page.getByRole('switch', { name: '会话消息' })).toHaveAttribute('aria-checked', 'true');
+    await page.screenshot({ animations: 'disabled', path: `${SHOTS}/notifications-settings-${theme}.png` });
+
+    // The full Inbox: the same two sections, and the switches behind one button.
+    await open(page, '/inbox', { lang: 'zh', theme });
+    const main = page.getByRole('main');
+    await expect(main.getByRole('button', { name: /^通知：全部/ })).toBeVisible();
+    await expect(main.locator('section').first()).toContainText('首席安全官');
+    await expect(main.locator('section').nth(1)).toContainText('Fix the cache break');
+    await page.screenshot({ animations: 'disabled', path: `${SHOTS}/notifications-inbox-page-${theme}.png` });
     expect(denied).toEqual([]);
   });
 

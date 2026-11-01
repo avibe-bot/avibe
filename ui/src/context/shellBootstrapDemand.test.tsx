@@ -22,6 +22,7 @@ import {
   type WorkbenchProjectsTree,
 } from './WorkbenchProjectsContext';
 import type { WorkbenchEventHandlers } from './ApiContext';
+import { NotificationPreferencesContext, type NotificationPreferencesState } from './NotificationPreferencesContext';
 
 const project = {
   id: 'proj_a',
@@ -815,6 +816,55 @@ describe('Demand-driven shell bootstrap', () => {
         else Reflect.deleteProperty(navigator, 'clearAppBadge');
         if (originalWorker) Object.defineProperty(navigator, 'serviceWorker', originalWorker);
         else Reflect.deleteProperty(navigator, 'serviceWorker');
+      }
+    });
+
+    it('badges only categories whose notifications are on, once the switches are known', async () => {
+      const originalSetBadge = Object.getOwnPropertyDescriptor(navigator, 'setAppBadge');
+      const originalClearBadge = Object.getOwnPropertyDescriptor(navigator, 'clearAppBadge');
+      const setAppBadge = vi.fn(async () => {});
+      const clearAppBadge = vi.fn(async () => {});
+      Object.defineProperty(navigator, 'setAppBadge', { configurable: true, value: setAppBadge });
+      Object.defineProperty(navigator, 'clearAppBadge', { configurable: true, value: clearAppBadge });
+
+      try {
+        // Two unread replies from a Bot, five from an ordinary Session.
+        const listInbox = vi.fn(async (_args: ListInboxArgs) => ({
+          sessions: [],
+          next_cursor: null,
+          unread_by_session: { ses_cso: 2, sesa1b2c3d4e5: 5 },
+        }));
+        apiRef.current = { listInbox, connectWorkbenchEvents: vi.fn(() => vi.fn()) };
+        const tree = (preferences: NotificationPreferencesState) => (
+          <NotificationPreferencesContext.Provider value={preferences}>
+            <WorkbenchInboxProvider>
+              <InboxProbe feed={false} onState={(state) => { latest = state; }} />
+            </WorkbenchInboxProvider>
+          </NotificationPreferencesContext.Provider>
+        );
+        let latest: InboxState | null = null;
+        const sessionsMuted = { enabled: true, bots: true, sessions: false };
+        const view = render(tree({ preferences: sessionsMuted, loaded: false, update: async () => true }));
+        await settle();
+        // The map is in, the switches are not: a badge the push worker set while
+        // the app was closed is the better number, so nothing is written yet.
+        expect(setAppBadge).not.toHaveBeenCalled();
+        expect(clearAppBadge).not.toHaveBeenCalled();
+
+        view.rerender(tree({ preferences: sessionsMuted, loaded: true, update: async () => true }));
+        await settle();
+        expect(setAppBadge).toHaveBeenLastCalledWith(2);
+        expect(latest).toMatchObject({ totalUnread: 7, badgeTotal: 2, unreadByCategory: { bot: 2, session: 5 } });
+
+        view.rerender(tree({ preferences: { ...sessionsMuted, enabled: false }, loaded: true, update: async () => true }));
+        await settle();
+        expect(clearAppBadge).toHaveBeenCalledOnce();
+      } finally {
+        cleanup();
+        if (originalSetBadge) Object.defineProperty(navigator, 'setAppBadge', originalSetBadge);
+        else Reflect.deleteProperty(navigator, 'setAppBadge');
+        if (originalClearBadge) Object.defineProperty(navigator, 'clearAppBadge', originalClearBadge);
+        else Reflect.deleteProperty(navigator, 'clearAppBadge');
       }
     });
 

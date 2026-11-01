@@ -130,13 +130,20 @@ it is still delivered, listed, and unread.
   popover header (left of "Mark all read") and from a "Notifications: All /
   Bots only / Sessions only / Off" button on the Inbox page toolbar. The bell is
   `Bell` when everything is on, `BellMinus` with a short label when partial, and
-  `BellOff` when off. The hover popover stays open while the portaled menu is
-  open.
+  `BellOff` when off. In the hover popover the bell swaps the popover's body for
+  the menu in place, with a way back, so the hover surface never hosts a second
+  floating layer; on the Inbox page the menu is an ordinary popover.
 - Settings › Notifications, a new page right after General in
   `ui/src/components/settings/SettingsLayout.tsx`: the same switches with
   one-line explanations, "This device" with the full `WebPushControl` (moved out
-  of the Inbox toolbar), and a note that desktop OS notifications are switched
-  from the tray menu.
+  of the Inbox toolbar), and, in the desktop app, a note that its OS
+  notifications are switched from the tray menu.
+- The client holds the switches in one provider above the router
+  (`NotificationPreferencesProvider`), read on mount and re-read on the stream's
+  preference nudge, a reconnect, or an authorization change. A change applies
+  at once and a refused save restores the last saved record. Categories come
+  from the Session id (`ses_<handle>` is a Bot's), which agrees with the server's
+  registry for every Session an Inbox read can return.
 - Sidebar Inbox icon: a cyan number for `badge_total`; a grey dot with no number
   when `badge_total` is 0 and anything is unread.
 

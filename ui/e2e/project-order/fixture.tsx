@@ -71,7 +71,8 @@ export function Fixture() {
     capabilities: { ...OWNER_INSTANCE_CAPABILITIES, can_read_instance: false },
   }}><ToastContext.Provider value={{ showToast: noop }}><ApiProvider><UnsavedChangesProvider>
     <WorkbenchProjectsProvider><WorkbenchInboxContext.Provider value={{
-      inboxSessions: [], unreadBySession: {}, totalUnread: 0, unreadSessions: 0, nextCursor: null,
+      inboxSessions: [], unreadBySession: {}, totalUnread: 0, unreadSessions: 0,
+      unreadByCategory: { bot: 0, session: 0 }, badgeTotal: 0, nextCursor: null,
       loading: false, loadingMore: false, refresh: async () => {}, loadMore: async () => {},
       markRead: async () => true, activateFeed: () => noop,
     }}><WindowManagerContext.Provider value={{ focusedId: null, focusCanvas: noop, openApp: noop } as unknown as WindowManagerValue}>

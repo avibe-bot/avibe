@@ -436,6 +436,7 @@
     },
     "sections": {
       "general": "General",
+      "notifications": "Notifications",
       "backends": "Backends",
       "models": "Models",
       "replies": "Replies",
@@ -2762,6 +2763,17 @@
           "explain": "This Source refused this reasoning effort, so requests at it skip this Source."
         }
       }
+    },
+    "notifications": {
+      "subtitle": "Choose which messages are pushed to your devices and counted in app badges. Every message still arrives in the Inbox. These switches follow your account on every device.",
+      "masterHint": "Turn off to stop every push; badges stop showing numbers.",
+      "botsHint": "Replies from your Bots.",
+      "sessionsHint": "Replies and failure notices from project Sessions. Turn this off when you only follow your Bots: Sessions keep working and keep arriving in the Inbox, just quietly.",
+      "deviceTitle": "This device",
+      "pushTitle": "Push (browser or Home Screen app)",
+      "pushHint": "Whether this browser receives pushes at all.",
+      "desktopTitle": "Desktop app notifications",
+      "desktopHint": "Vault approvals and finished background runs. Switch them for this computer from the menu bar icon › Notifications."
     }
   },
   "remoteAccess": {
@@ -3552,7 +3564,14 @@
         "testFailed": "Test notification failed",
         "normalBlocked": "normal notifications are currently skipped for you ({{policy}} policy: {{disposition}})"
       },
-      "navUnread": "Inbox, {{count}} unread"
+      "navUnread": "Inbox, {{count}} unread",
+      "sections": {
+        "bots": "Bots",
+        "sessions": "Sessions",
+        "muted": "Muted",
+        "markRead": "Mark section read"
+      },
+      "navQuiet": "Inbox, unread with notifications off"
     },
     "modules": {
       "comingSoonEyebrow": "Coming soon",
@@ -3581,6 +3600,26 @@
         "eyebrow": "Vaults",
         "title": "Vaults",
         "description": "Secrets and API keys that the Agent can pull into ENV / .env without you copy-pasting."
+      }
+    },
+    "notifications": {
+      "title": "Notifications",
+      "description": "Pushed to devices with notifications on, and counted in app badges.",
+      "bots": "Bot messages",
+      "botsHint": "Replies from your Bots",
+      "sessions": "Session messages",
+      "sessionsHint": "Replies and failure notices from project Sessions",
+      "sessionsOff": "Session messages still arrive in the Inbox; they are not pushed or counted in badges.",
+      "device": "This device",
+      "moreSettings": "More notification settings",
+      "back": "Back to Inbox",
+      "open": "Notification settings",
+      "button": "Notifications: {{mode}}",
+      "mode": {
+        "all": "All",
+        "bots": "Bots only",
+        "sessions": "Sessions only",
+        "off": "Off"
       }
     }
   },

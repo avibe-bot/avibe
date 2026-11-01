@@ -852,6 +852,7 @@ const NON_KEY_LITERALS = [
   'inbox.unread.changed',
   'message.new',
   'message.updated',
+  'notifications.preferences.updated',
   'projects.changed',
   'queue.updated',
   'remote.authorization',

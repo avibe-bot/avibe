@@ -4,6 +4,8 @@ import type { ReactNode } from 'react';
 import { useApi } from './ApiContext';
 import type { InboxSession } from './ApiContext';
 import { WorkbenchInboxContext, type InboxState } from './WorkbenchInboxContext';
+import { useNotificationPreferences } from './NotificationPreferencesContext';
+import { badgeTotal as loudUnread, unreadByCategory as splitUnread } from '../lib/notificationPreferences';
 import { sessionActivityInboxAction } from '../lib/inboxActivity';
 import { syncFaviconBadge } from '../lib/faviconBadge';
 import { useConsumerActivation } from '../lib/useConsumerActivation';
@@ -939,16 +941,23 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     () => Object.values(unreadBySession).filter((n) => (n || 0) > 0).length,
     [unreadBySession],
   );
+  // The badges outside the app count only categories whose notifications are on.
+  // They wait for the switches as they wait for the map: before either is known,
+  // a badge the push worker set while the app was closed is the better number.
+  const { preferences, loaded: preferencesLoaded } = useNotificationPreferences();
+  const unreadByCategory = useMemo(() => splitUnread(unreadBySession), [unreadBySession]);
+  const badgeTotal = useMemo(() => loudUnread(unreadByCategory, preferences), [unreadByCategory, preferences]);
+  const badgeKnown = unreadLoaded && preferencesLoaded;
 
-  // Mirror the unread total onto the installed PWA's home-screen icon badge so
+  // Mirror the badge total onto the installed PWA's home-screen icon badge so
   // the icon matches the in-app Inbox badge. The push service worker (push-sw.js)
   // sets this while the app is closed; this keeps it live while the app is open —
   // reading clears it, a new reply bumps it. Best-effort + feature-detected:
   // browsers without the Badging API (and non-installed tabs) simply no-op, and a
   // rejected badge promise is swallowed so it never surfaces as an app error.
   //
-  // Gated on ``unreadLoaded``: until the first authoritative unread map arrives,
-  // ``totalUnread`` is just the default 0, and clearing here would wipe a badge
+  // Gated on ``badgeKnown``: until the first authoritative unread map arrives,
+  // ``badgeTotal`` is just the default 0, and clearing here would wipe a badge
   // the service worker set while the app was closed if that initial load is slow,
   // fails, or redirects on an expired session. Once loaded, a real 0 clears it.
   // A fresh authoritative map reasserts the badge even when its numeric sum
@@ -959,8 +968,8 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       clearAppBadge?: () => Promise<void>;
     };
     if (!('setAppBadge' in nav)) return;
-    if (!unreadLoaded) return;
-    const op = totalUnread > 0 ? nav.setAppBadge?.(totalUnread) : nav.clearAppBadge?.();
+    if (!badgeKnown) return;
+    const op = badgeTotal > 0 ? nav.setAppBadge?.(badgeTotal) : nav.clearAppBadge?.();
     void op?.catch?.(() => {});
     // Fence a background worker read that started before this authoritative
     // map arrived. The worker serializes its own setter after this message, so
@@ -968,12 +977,12 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     try {
       navigator.serviceWorker?.controller?.postMessage({
         type: 'vibe.app-badge-current',
-        count: totalUnread,
+        count: badgeTotal,
       });
     } catch {
       // The direct badge write above still works without a controlling worker.
     }
-  }, [unreadBySession, totalUnread, unreadLoaded]);
+  }, [unreadBySession, badgeTotal, badgeKnown]);
 
   // A worker can finish a background badge write after this page's last
   // unread update. Revalidate on its completion signal and whenever the page
@@ -994,9 +1003,9 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // Browser tabs have no Badging API. Keep their favicon useful while the
   // Inbox map is authoritative, and restore the original icon after reading.
   useEffect(() => {
-    if (!unreadLoaded) return;
-    syncFaviconBadge(totalUnread);
-  }, [totalUnread, unreadLoaded]);
+    if (!badgeKnown) return;
+    syncFaviconBadge(badgeTotal);
+  }, [badgeTotal, badgeKnown]);
 
   const value = useMemo<InboxState>(
     () => ({
@@ -1005,6 +1014,8 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       unreadLoaded,
       totalUnread,
       unreadSessions,
+      unreadByCategory,
+      badgeTotal,
       nextCursor,
       loading,
       loadingMore,
@@ -1020,6 +1031,8 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       unreadLoaded,
       totalUnread,
       unreadSessions,
+      unreadByCategory,
+      badgeTotal,
       nextCursor,
       loading,
       loadingMore,

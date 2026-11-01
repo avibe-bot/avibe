@@ -111,6 +111,9 @@ export async function serveProduct(page: Page, lang: Lang = 'en') {
   await page.route('**/api/agents**', (route) => route.fulfill({ json: AGENTS }));
   await page.route('**/api/bots', (route) => route.fulfill({ json: BOTS }));
   await page.route('**/api/inbox**', (route) => route.fulfill({ json: { sessions: [], unread: {} } }));
+  await page.route('**/api/notifications/preferences', (route) => route.fulfill({
+    json: { ok: true, preferences: { enabled: true, bots: true, sessions: true } },
+  }));
   // The service badge polls the bare `/status`, not an `/api` path.
   await page.route('**/status', (route) => route.fulfill({ json: { state: 'running' } }));
   await page.route('**/api/version**', (route) => route.fulfill({
