@@ -99,6 +99,14 @@ _PROJECT_CONTEXT = (
     "`AGENTS.md` is an index, not a log. Keep high-level principles there, point to local detail files when needed, "
     "and update by consolidating and abstracting instead of merely appending.\n\n"
 )
+# The Bots and Agents roster (docs/plans/bots.md "Prompt drafts") and what it replaced, with no Bots listed.
+_BOTS_ROSTER_INTRO = '### Bots and Agents\nYou can address two kinds of workers. Both tables are generated from live definitions; use the first column exactly as listed in commands, and the display name when talking to the user.\n\n- A **Bot** is a standing member with one permanent Session and its own memory. A message to a Bot joins that conversation, and the Bot handles its messages in order.\n- An **Agent** is a reusable role: backend, model, and instructions. Each run starts a fresh Session with no memory of earlier runs, so several runs can work in parallel.\n\nAsk a Bot when the work needs its memory, ongoing responsibility, or judgment. Run an Agent for a self-contained task or for parallel work. In Chinese, the product calls Bots 伙伴; use that word when you write to the user in Chinese.\n\n| Bot | Display Name | Role |\n| --- | --- | --- |\n\n\n'
+_PREVIOUS_AGENTS_INTRO = '### Agents\nThe table below is generated from currently enabled Agents at prompt-injection time. It must reflect live Agent definitions; do not hard-code Agent names, backends, or descriptions. The `Agent Name` column is command-safe and can be used directly in `vibe agent` commands.\n\n'
+_BOT_RULES = '\nBot rules:\n- Message a Bot with `vibe agent run --bot <bot> --message ...`. Like any async run, its reply returns to this conversation as a callback.\n- Reach a Bot only through `--bot`, never through `--agent` or `--session-id`. `--model` and `--reasoning-effort` do not apply.\n\nAgent rules:\n'
+_PREVIOUS_RULES = '\nRules:\n'
+_TYPED_MENTIONS = '### Mentions in user messages\nThe Web composer inserts typed references into the message text:\n- `@<bot:name>` points at a Bot. Message it with `vibe agent run --bot <name> ...`.\n- `@<agent:name>` points at an Agent. Run it with `vibe agent run --agent <name> ...`.\n- `#<session-id>` points at a Session. Resume it with `vibe agent run --session-id <session-id> ...`, or read it with `vibe data query`.\n- `@<name>` without a type, found in older messages, points at an Agent.\n\nA mention says whom the user pointed at, not what to do; decide the action from the message. A mention of yourself needs no command. Only these bracketed forms are references; a bare `@` or `#` in prose is ordinary text.'
+_PREVIOUS_MENTIONS = '### Mentions in user messages\nOn the Web chat the user composes with `@` / `#` autocomplete, which inserts stable references into their message text:\n- `@<agent-name>` points at that enabled Agent (see the table above). Act on it with `vibe agent run --agent <agent-name> ...`.\n- `#<session-id>` points at that Session. Resume it with `vibe agent run --session-id <session-id> ...`, or read its history with `vibe data query`.\n\nTreat these as the user pointing at that Agent or Session, and decide the action from context. Only the bracketed `@<...>` / `#<...>` forms are references; a bare `@` or `#` in prose is ordinary text.'
+
 _CODEX_SKILL_REUSE_GUIDANCE = (
     "Choose skills by task relevance, but load a skill only if it has not already been read "
     "in this conversation; reuse already-loaded instructions across turns, callbacks, "
@@ -124,6 +132,12 @@ def _inputs(backend="codex", history="managed", skill_mode="pages"):
             {"name": "alpha", "backend": "codex", "description": "First"},
         ],
     }
+    if backend == "vibey":
+        # Only a Vibey Turn runs as a Bot; the main Bot also renders its own section.
+        options["bot"] = {
+            "handle": "main", "display_name": "", "role": "The user's main Bot.", "session_id": "ses_main",
+            "workdir": "/fixture/bots/main", "builtin": True,
+        }
     return {"backend": backend, "agent_instructions": "Custom {unchanged} instructions", "options": options}
 
 
@@ -543,7 +557,8 @@ def test_cli_renders_valid_json_agent_arrays(monkeypatch, tmp_path, capsys, agen
     tables = [block for block in rendered["blocks"] if block["id"] == "harness-agents-prompt"]
     assert bool(tables) == bool(expected_rows)
     if tables:
-        rows = [line for line in tables[0]["text"].splitlines() if line.startswith("| ")][2:]
+        agents_table = tables[0]["text"].split("| Agent Name | Backend | Agent Description |", 1)[1]
+        rows = [line for line in agents_table.splitlines() if line.startswith("| ")][1:]
         assert rows == expected_rows
     omitted = _inputs()
     del omitted["options"]["enabled_agents"]
@@ -593,6 +608,10 @@ def test_approved_guidance_changes_preserve_all_other_injection_bytes(monkeypatc
         assert text.count(_SESSION_TITLE_STEPS) == 1
         assert text.count(_PROJECT_CONTEXT) == 1
         text = text.replace(_PROJECT_CONTEXT, _PREVIOUS_PREFERENCES_CONTEXT)
+        assert text.count(_BOTS_ROSTER_INTRO) == text.count(_BOT_RULES) == text.count(_TYPED_MENTIONS) == 1
+        text = text.replace(_BOTS_ROSTER_INTRO, _PREVIOUS_AGENTS_INTRO)
+        text = text.replace(_BOT_RULES, _PREVIOUS_RULES)
+        text = text.replace(_TYPED_MENTIONS, _PREVIOUS_MENTIONS)
         text = text.replace(_HARNESS_SOURCE_GUIDANCE, "")
         text = text.replace(_SESSION_TITLE_STEPS, _PREVIOUS_SESSION_TITLE_STEPS)
         text = text.replace(_NEW_SESSION_MODEL_GUIDANCE, _PREVIOUS_FORK_OVERRIDE_GUIDANCE)
@@ -608,6 +627,7 @@ def test_approved_guidance_changes_preserve_all_other_injection_bytes(monkeypatc
     # only to forks (now: to any new Session a run creates), and without the
     # Harness line that says what a `[Harness: ...]` input is, and restoring the
     # two-call Session Title steps that `--if-untitled` replaced, and restoring the
-    # retired shared preferences file paragraphs and their section heading.
+    # retired shared preferences file paragraphs and their section heading, and
+    # restoring the Agents roster and untyped mentions the Bots roster replaced.
     # Every other byte/order stays pinned, including all Claude/OpenCode output.
     assert digest == "262c7cbabbbb0bfefa4a69511d805d28f76a3559bd511184006242f831b4836e"
