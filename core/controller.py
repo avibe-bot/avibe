@@ -417,11 +417,23 @@ class Controller:
             return
         store = self.vibe_agent_store
         vibey = store.get_builtin_default_agent_for_backend("vibey", enabled_only=False)
-        if vibey is None or str(vibey.model or "").strip():
+        if vibey is not None and not str(vibey.model or "").strip():
+            vibey = store.update(
+                vibey.name,
+                model=models[0].id,
+                only_if_model_unset=True,
+                user_context=instance_owner_context(),
+            )
+        # The main Bot's Agent follows Vibey's model (docs/plans/bots.md D9). On a new install it is created
+        # before any model exists, so it takes Vibey's here, under the same never-replace-a-choice rule.
+        main = store.get_main_bot_agent()
+        if main is None or str(main.model or "").strip():
             return
+        follows = vibey is not None and str(vibey.model or "").strip()
         store.update(
-            vibey.name,
-            model=models[0].id,
+            main.name,
+            model=vibey.model if follows else models[0].id,
+            reasoning_effort=vibey.reasoning_effort if follows else None,
             only_if_model_unset=True,
             user_context=instance_owner_context(),
         )

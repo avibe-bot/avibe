@@ -37,7 +37,8 @@ from core.vibe_agents import (
     is_main_bot_agent,
     normalize_agent_name,
 )
-from storage.agent_session_rows import BOT_SESSION_ID_PREFIX, bot_session_ids, is_bot_session_id, reserve_write_lock
+from storage.agent_session_rows import BOT_SESSION_ID_PREFIX, is_bot_session_id, reserve_write_lock
+from storage.agent_session_rows import hidden_bot_session_ids as stored_hidden_bot_session_ids
 from storage.models import agent_sessions, agents
 from vibe.authorization import AuthorizationContext, require_instance_role
 
@@ -285,11 +286,8 @@ def list_bots_in(conn: Connection) -> list[Bot]:
 
 def hidden_bot_session_ids(conn: Connection, context: AuthorizationContext | None) -> list[str]:
     """Bots' Sessions a reader may not see: every one for a non-Owner (D1), else those of removed Bots."""
-    session_ids = bot_session_ids(conn)
-    if context is not None and not context.is_instance_owner:
-        return sorted(session_ids)
-    visible = {bot.session_id for bot in list_bots_in(conn)}
-    return sorted(session_ids - visible)
+    owner = context is None or context.is_instance_owner
+    return sorted(stored_hidden_bot_session_ids(conn, owner=owner))
 
 
 # --- directories ------------------------------------------------------------------------------------------------
@@ -473,9 +471,12 @@ class BotService:
         context = require_instance_role(authorization_context, "owner")
         name = _clean_display_name(display_name, required=True)
         avatar_record = clean_emoji_avatar(avatar)
-        main = self.store.get_main_bot_agent()
-        if not str(model or "").strip() and main is not None:
-            model, reasoning_effort = main.model, reasoning_effort or main.reasoning_effort
+        if not str(model or "").strip():
+            # The main Bot's model, or Vibey's while the main Bot has none yet.
+            for follows in (self.store.get_main_bot_agent(), self.store.get_builtin_default_agent_for_backend("vibey")):
+                if follows is not None and str(follows.model or "").strip():
+                    model, reasoning_effort = follows.model, reasoning_effort or follows.reasoning_effort
+                    break
         requested = str(handle or "").strip() or None
         chosen: dict[str, str] = {}
 

@@ -42,6 +42,7 @@ from storage.agent_session_rows import (
     WORKSPACE_NOTICE_SESSION_ID,
     bot_session_ids,
     create_agent_session_row,
+    hidden_bot_session_ids,
     is_bot_session,
     new_session_id,
     session_speed,
@@ -447,8 +448,10 @@ def list_sessions_page(
         agent_sessions.c.status == "active",
         agent_sessions.c.visibility == "foreground",
     )
-    if not context.is_instance_owner:
-        query = query.where(_not_bot_session(conn))
+    # A Bot's Session is the Owner's, and a removed Bot's stays hidden until the Bot is set again (bots.md D1).
+    hidden = hidden_bot_session_ids(conn, owner=context.is_instance_owner)
+    if hidden:
+        query = query.where(agent_sessions.c.id.not_in(sorted(hidden)))
     if not _has_runtime_management_access(context):
         accessible_scope_ids = {
             project_access_service.project_scope_id(project_id)

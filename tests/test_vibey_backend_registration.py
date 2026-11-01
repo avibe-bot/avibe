@@ -232,6 +232,26 @@ def test_vibey_agent_runs_its_catalogs_first_model_until_it_has_one(tmp_path, sq
         store.close()
 
 
+@pytest.mark.parametrize("main_model", [None, "chosen-model"])
+def test_the_main_bot_follows_vibeys_first_model_until_it_has_one(tmp_path, sqlite_db_factory, main_model):
+    """A new install creates the main Bot's Agent before any model exists; it then follows Vibey's (bots.md D9)."""
+    store = VibeAgentStore(sqlite_db_factory(tmp_path / "agents.sqlite"))
+    try:
+        store.ensure_builtin_default_agents(["vibey"])
+        main = store.get_main_bot_agent()
+        assert main.model is None
+        if main_model:
+            store.update(main.name, model=main_model)
+        controller = Controller.__new__(Controller)
+        controller.vibe_agent_store = store
+        controller.model_hub_service = _hub_catalog("gpt-5.5", "claude-opus-5-5")
+        controller._reconcile_vibey_agent_model()
+        assert store.get("vibey").model == "gpt-5.5"
+        assert store.get_main_bot_agent().model == (main_model or "gpt-5.5")
+    finally:
+        store.close()
+
+
 def test_a_lost_vibey_model_hand_off_heals_on_the_next_start(tmp_path, sqlite_db_factory, monkeypatch):
     """MH-VIBEY-007: a failed Agent write after a committed seed heals at the next start."""
     store = VibeAgentStore(sqlite_db_factory(tmp_path / "agents.sqlite"))

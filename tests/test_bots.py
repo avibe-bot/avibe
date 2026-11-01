@@ -331,3 +331,43 @@ def test_an_uploaded_avatar_is_a_256px_png_in_the_bot_directory(service, home):
         assert (image.format, image.size) == ("PNG", (256, 256))
     assert updated.to_payload()["avatar"]["url"].startswith(f"/api/bots/{bot.handle}/avatar?v=")
     assert service.avatar_path(bot.handle) == stored
+
+
+def test_two_starts_racing_create_one_main_bot(home, monkeypatch):
+    """The main Bot is decided under the writer lock, not by an Agent-name collision."""
+    from sqlalchemy import func, select
+
+    from storage.models import agents
+
+    store = _store()
+    try:
+        existing = store.ensure_main_bot_agent()
+        # The other process read "no main Bot" before this one committed it.
+        real, stale = store.get_main_bot_agent, [True]
+        monkeypatch.setattr(store, "get_main_bot_agent", lambda: None if stale and stale.pop() else real())
+        assert store.ensure_main_bot_agent().id == existing.id
+        with store.engine.connect() as conn:
+            marked = conn.execute(
+                select(func.count()).select_from(agents).where(
+                    func.json_extract(agents.c.metadata_json, "$.builtin_bot") == "main"
+                )
+            ).scalar_one()
+        assert marked == 1
+    finally:
+        store.close()
+
+
+def test_the_cli_session_list_hides_removed_bots_and_other_members_bots(service):
+    from storage.db import create_sqlite_engine
+    from storage.workbench_sessions_service import list_sessions_page
+    from vibe.authorization import AuthorizationContext, instance_owner_context
+
+    shown = service.create_bot(display_name="Shown")
+    removed = service.create_bot(display_name="Removed")
+    service.remove_bot(removed.handle)
+    member = AuthorizationContext(instance_role="member", is_remote=True, subject="m1")
+    with create_sqlite_engine().connect() as conn:
+        owner_ids = {row["id"] for row in list_sessions_page(conn, limit=50, authorization_context=instance_owner_context()).items}
+        member_ids = {row["id"] for row in list_sessions_page(conn, limit=50, authorization_context=member).items}
+    assert shown.session_id in owner_ids and removed.session_id not in owner_ids
+    assert not {shown.session_id, removed.session_id} & member_ids

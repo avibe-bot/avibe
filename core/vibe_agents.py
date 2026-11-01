@@ -1907,6 +1907,19 @@ class VibeAgentStore:
                 current, metadata={**current.metadata, BOT_METADATA_KEY: restored}, enabled=True
             )
         vibey = self.get_builtin_default_agent_for_backend("vibey", enabled_only=False)
+
+        def only_one(conn: Connection, _agent: VibeAgent) -> None:
+            # Decided under the writer lock in the inserting transaction: two processes starting together create
+            # one main Bot, whatever names they computed before the lock.
+            rows = conn.execute(
+                select(agents)
+                .where(agents.c.source == "builtin", agents.c.archived_at.is_(None))
+                .where(func.json_extract(agents.c.metadata_json, f"$.{BUILTIN_BOT_METADATA_KEY}") == MAIN_BOT_HANDLE)
+                .limit(1)
+            ).first()
+            if rows is not None:
+                raise _MainBotExists()
+
         try:
             return self._create(
                 name=self._free_agent_name(MAIN_BOT_AGENT_NAME),
@@ -1917,9 +1930,10 @@ class VibeAgentStore:
                 source="builtin",
                 metadata={BUILTIN_BOT_METADATA_KEY: MAIN_BOT_HANDLE, BOT_METADATA_KEY: _main_bot_record()},
                 enabled=True,
+                before_insert=only_one,
             )
-        except ValueError:
-            # Another process created it first.
+        except (_MainBotExists, ValueError):
+            # Another process created it first (or took the name it computed).
             current = self.get_main_bot_agent()
             if current is None:
                 raise
@@ -2068,6 +2082,10 @@ def _has_builtin_markers(agent: VibeAgent) -> bool:
 
 def _without_builtin_markers(metadata: Any) -> dict[str, Any]:
     return {key: value for key, value in dict(metadata or {}).items() if key not in STORE_OWNED_METADATA_KEYS}
+
+
+class _MainBotExists(Exception):
+    """The main Bot's Agent was created by someone else while this one waited for the writer lock."""
 
 
 def _main_bot_record() -> dict[str, Any]:

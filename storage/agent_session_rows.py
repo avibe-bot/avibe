@@ -285,6 +285,30 @@ def bot_session_ids(conn: Connection) -> set[str]:
     }
 
 
+def hidden_bot_session_ids(conn: Connection, *, owner: bool) -> set[str]:
+    """Bots' Sessions a reader may not see: every one for a non-Owner, those of removed Bots for the Owner.
+
+    Bots are the Owner's (``docs/plans/bots.md`` D1), and removing the Bot role keeps its Session, hidden.
+    """
+
+    from storage.models import agents
+
+    every = bot_session_ids(conn)
+    if not owner:
+        return every
+    removed = func.json_extract(agents.c.metadata_json, "$.bot.removed_at")
+    active = {MAIN_BOT_SESSION_ID} | {
+        f"{BOT_SESSION_ID_PREFIX}{handle}"
+        for handle in conn.execute(
+            select(_bot_handle_column())
+            .select_from(agents)
+            .where(_bot_handle_column().is_not(None), removed.is_(None), agents.c.archived_at.is_(None))
+        ).scalars()
+        if isinstance(handle, str) and handle
+    }
+    return every - active
+
+
 def is_bot_session(conn: Connection, session_id: Any) -> bool:
     """Whether a Bot owns this Session (``docs/plans/bots.md`` D2): ``ses_main``, or ``ses_<handle>`` of a Bot record.
 
