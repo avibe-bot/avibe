@@ -238,7 +238,7 @@ jobs:
             suites: |
               npm run test:project-order
               npm run test:inbox-return
-              npm run test:workbench-general -- sidebar-floating.spec.ts desktop-window-chrome.spec.ts composer-route-trigger.spec.ts skills-dialog.spec.ts
+              npm run test:workbench-general -- sidebar-floating.spec.ts desktop-window-chrome.spec.ts composer-route-trigger.spec.ts skills-dialog.spec.ts bots.spec.ts
               npm run test:chat-interactions
               npm run test:pdf-preview
     steps:
