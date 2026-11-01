@@ -3880,10 +3880,12 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
                 variant="ghost"
                 size="xs"
                 onClick={() => openBotProfile({ kind: 'edit', handle: conversationBot.handle })}
+                aria-label={t('bots.conversation.editProfile')}
                 className="shrink-0 text-muted hover:text-foreground"
               >
                 <Pencil className="size-3" />
-                {t('bots.conversation.editProfile')}
+                {/* A phone's header keeps the pencil alone; the name needs the room. */}
+                <span className="max-md:hidden">{t('bots.conversation.editProfile')}</span>
               </Button>
             )}
           </div>

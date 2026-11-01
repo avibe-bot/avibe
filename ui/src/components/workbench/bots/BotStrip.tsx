@@ -216,6 +216,16 @@ const BotSlot: React.FC<BotSlotProps & { drag?: SlotDrag }> = ({ bot, name, unre
   const openTimer = useRef<number | null>(null);
   const closeTimer = useRef<number | null>(null);
   const isDragging = drag?.isDragging ?? false;
+  const slotRef = useRef<HTMLDivElement | null>(null);
+  const setDragNode = drag?.setNodeRef;
+  const setSlotNode = useCallback((node: HTMLDivElement | null) => {
+    slotRef.current = node;
+    setDragNode?.(node);
+  }, [setDragNode]);
+  // The open Bot stays in view on a strip that scrolls sideways.
+  useEffect(() => {
+    if (selected) slotRef.current?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+  }, [selected]);
 
   const clearTimers = () => {
     if (openTimer.current !== null) window.clearTimeout(openTimer.current);
@@ -302,7 +312,7 @@ const BotSlot: React.FC<BotSlotProps & { drag?: SlotDrag }> = ({ bot, name, unre
     >
       <PopoverAnchor asChild>
         <div
-          ref={drag?.setNodeRef}
+          ref={setSlotNode}
           data-bot-handle={bot.handle}
           className={clsx('flex w-[52px] shrink-0 flex-col items-center gap-1', isDragging && 'z-10 opacity-80')}
           style={drag ? { transform: CSS.Translate.toString(drag.transform), transition: drag.transition } : undefined}
