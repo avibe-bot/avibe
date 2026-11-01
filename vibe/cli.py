@@ -2115,11 +2115,8 @@ def _agent_run_examples_text() -> str:
         --model, --reasoning-effort, --visible, --same-scope, --scope-id, and --close-after
           apply only to a new or forked Session.
 
-        --bot messages a Bot's permanent Session; it handles its messages in order.
-
         Examples:
           vibe agent run --agent reviewer --message 'Review the latest deployment result.'
-          vibe agent run --bot cso --message 'Review the new login flow for security risks.'
           vibe agent run --session-id sesk8m4q2p7x --queue --message 'After this turn, also update the docs.'
           vibe agent run --fork-self --message 'Explore the alternate fix from this context.'
         """
@@ -6717,10 +6714,16 @@ def cmd_bot_list(args):
     from core.bots import BotService
 
     try:
+        page_request = _page_request_from_args(args, help_command="vibe bot list --help")
         with BotService() as service:
             service.ensure_main_bot()
             bots = service.list_bots()
-        _print_cli_payload("bots", bots=[_bot_cli_payload(bot) for bot in bots])
+        result = page_sequence(bots, page_request)
+        _print_cli_payload(
+            "bots",
+            bots=[_bot_cli_payload(bot) for bot in result.items],
+            **_paginated_fields(result, command=["vibe", "bot", "list"]),
+        )
         return 0
     except Exception as exc:
         return _bot_cli_error(exc, help_command="vibe bot list --help")
@@ -17792,8 +17795,8 @@ def build_parser():
         "run",
         help="Run an Avibe Agent",
         description=(
-    "Run an Agent turn in a new background Session (--agent), a Bot's permanent Session (--bot), "
-            "an existing Session (--session-id), or a fork. Runs are async: the final result returns to the caller Session."
+    "Run an Agent turn in a new background Session (--agent), an existing Session "
+            "(--session-id), or a fork. Runs are async: the final result returns to the caller Session."
         ),
         epilog=_agent_run_examples_text(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -17801,7 +17804,7 @@ def build_parser():
     )
     agent_run_parser.add_argument("--agent", metavar="NAME", help="Agent for a new Session (a fork: same backend only)")
     agent_run_parser.add_argument(
-        "--bot", metavar="HANDLE", help="Message this Bot's permanent Session, queued behind its earlier messages"
+        "--bot", metavar="BOT", help="Message a Bot's Session"
     )
     agent_run_parser.add_argument(
         "--session-id", metavar="ID", help="Join this Session's running turn, or start one if idle"
@@ -17818,7 +17821,7 @@ def build_parser():
         const="foreground",
         help="Make the new Session user-facing",
     )
-    agent_run_parser.add_argument("--model", help="Model the new Session keeps; see 'vibe agent models <agent>'")
+    agent_run_parser.add_argument("--model", help="Model the new Session keeps ('vibe agent models')")
     agent_run_parser.add_argument("--reasoning-effort", metavar="EFFORT", help="Reasoning effort the new Session keeps")
     agent_run_parser.add_argument("--cwd", metavar="DIR", help="Working directory for a new, unforked Session")
     agent_run_parser.add_argument("--callback-session-id", metavar="ID", help="Send the result to this Session instead")
@@ -17853,6 +17856,7 @@ def build_parser():
     bot_subparsers = bot_parser.add_subparsers(dest="bot_command", metavar="{list,show,create,set,update,remove}")
     bot_subparsers.required = True
     bot_list_parser = bot_subparsers.add_parser("list", help="List Bots, the main Bot first")
+    _add_pagination_args(bot_list_parser, help_command="vibe bot list --help")
     _add_json_noop(bot_list_parser)
     bot_show_parser = bot_subparsers.add_parser("show", help="Show one Bot")
     bot_show_parser.add_argument("handle", help="Bot handle, such as main")

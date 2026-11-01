@@ -809,11 +809,17 @@ def ensure_bot_session(
         if row is not None:
             repairs = _bot_session_repairs(conn, row, session_id=session_id, agent=agent, workdir=workdir)
             if repairs:
+                # Identity and placement only: the Session keeps its model, effort, and route settings.
                 reserve_write_lock(conn)
                 conn.execute(
                     update(agent_sessions)
                     .where(agent_sessions.c.id == session_id)
-                    .values(**repairs, updated_at=_utc_now_iso())
+                    .values(
+                        agent_id=agent["id"],
+                        agent_name=agent["name"],
+                        workdir=workdir,
+                        updated_at=_utc_now_iso(),
+                    )
                 )
             return get_session(conn, session_id, authorization_context=context)
         if attempt:

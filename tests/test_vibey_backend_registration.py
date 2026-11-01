@@ -471,7 +471,10 @@ def test_an_im_picker_routes_to_exactly_the_agent_it_lists(tmp_path, sqlite_db_f
         controller.get_cwd = lambda _context: str(tmp_path)
         context = MessageContext(user_id="U1", channel_id="C-test", platform="slack")
         listed = {agent.name: agent for agent in asyncio.run(handler._gather_routing_modal_data(context)).agents}
-        expected = {built_in.name: "vibey", "claude": "claude", **({"vibey": "claude"} if name_taken else {})}
+        # The main Bot's Agent is an enabled Vibey Agent too, and routes like any other (docs/plans/bots.md D4).
+        expected = {
+            built_in.name: "vibey", "claude": "claude", "main": "vibey", **({"vibey": "claude"} if name_taken else {})
+        }
         assert set(listed) == set(expected)
 
         for name, backend in expected.items():

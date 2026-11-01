@@ -152,9 +152,9 @@ Owner decisions 2026-11-01, from the mockups in this Session's Show Page
   - *New*: name (any language), avatar, and role. The handle is generated in
     the background after the name is entered (D2) and shown as a muted
     `@handle` with an edit pencil; until an avatar is chosen, the avatar is the
-    name's first character on a color derived from the name. The role seeds the
-    Agent's system prompt and stays editable on the Agents page. The model
-    follows the main Bot by default, under "Advanced".
+    name's first character on a color derived from the name. The role is
+    written to the Agent's description (D1) and stays editable on the Agents
+    page. The model follows the main Bot by default, under "Advanced".
   - *From an existing Agent*: lists Vibey-backend Agents that are not Bots; the
     handle is the Agent name, locked.
   - Avatars come from an emoji with a background color, or an uploaded image

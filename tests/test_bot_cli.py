@@ -102,7 +102,7 @@ def test_agent_run_bot_without_a_caller_needs_a_callback_choice(home, capsys):
 def test_help_examples_parse_against_the_real_cli():
     """The examples in ``vibe bot --help`` and ``vibe agent run --help`` are live callers."""
     examples = re.findall(r"^\s+(vibe (?:bot|agent run) .+)$", cli._bot_examples_text() + cli._agent_run_examples_text(), re.M)
-    assert any("--bot" in example for example in examples)
+    assert sum(example.startswith("vibe bot ") for example in examples) >= 5
     parser = cli.build_parser()
     for example in examples:
         parser.parse_args(shlex.split(example)[1:])
