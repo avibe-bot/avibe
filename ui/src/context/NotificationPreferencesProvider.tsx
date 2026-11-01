@@ -7,11 +7,13 @@ import { DEFAULT_NOTIFICATION_PREFERENCES, type NotificationPreferences } from '
 
 /** Owns the caller's notification switches (`/api/notifications/preferences`).
  *
- *  Read on mount and re-read whenever the stream says some account's switches
- *  changed, reconnects, or authorization moves: the broker replays nothing, and
- *  its preference event is a nudge shared by every reader rather than the record.
- *  A write applies optimistically and every read started before it is fenced, so
- *  a slow read cannot put the old switches back. */
+ *  Read on mount and re-read whenever the stream says this account's switches
+ *  changed (on any of its devices), reconnects, or authorization moves: the
+ *  broker replays nothing, and re-reading keeps one path that adopts a record.
+ *  A write applies optimistically and sends only the switch it changes, which
+ *  the server merges, so two devices changing different switches keep both.
+ *  Every read started before a write is fenced, so a slow read cannot put the
+ *  old switches back. */
 export const NotificationPreferencesProvider = ({ children }: { children: ReactNode }) => {
   const api = useApi();
   const [preferences, setPreferences] = useState<NotificationPreferences>(DEFAULT_NOTIFICATION_PREFERENCES);
@@ -55,10 +57,9 @@ export const NotificationPreferencesProvider = ({ children }: { children: ReactN
   const update = useCallback(
     async (patch: Partial<NotificationPreferences>) => {
       const generation = ++generationRef.current;
-      const next = { ...shownRef.current, ...patch };
-      show(next);
+      show({ ...shownRef.current, ...patch });
       try {
-        const saved = await api.updateNotificationPreferences(next);
+        const saved = await api.updateNotificationPreferences(patch);
         savedRef.current = saved;
         if (generation === generationRef.current) {
           show(saved);

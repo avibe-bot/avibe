@@ -190,8 +190,9 @@ for (const theme of ['light', 'dark'] as const) {
     const saved: unknown[] = [];
     await page.route('**/api/notifications/preferences', async (route) => {
       if (route.request().method() === 'PUT') {
-        preferences = route.request().postDataJSON();
-        saved.push(preferences);
+        const changes = route.request().postDataJSON();
+        saved.push(changes);
+        preferences = { ...preferences, ...changes };
       }
       return route.fulfill({ json: { ok: true, preferences } });
     });
@@ -215,7 +216,7 @@ for (const theme of ['light', 'dark'] as const) {
     await expect(popover).toContainText('会话消息照常进收件箱');
     await page.screenshot({ animations: 'disabled', path: `${SHOTS}/notifications-menu-${theme}.png`, clip: { x: 0, y: 0, width: 680, height: 560 } });
     await sessions.click();
-    expect(saved).toEqual([{ enabled: true, bots: true, sessions: true }]);
+    expect(saved).toEqual([{ sessions: true }]);
     await expect(sidebar.getByRole('link', { name: '收件箱，5 条未读' })).toHaveText('5');
 
     await popover.getByRole('button', { name: '更多通知设置' }).click();

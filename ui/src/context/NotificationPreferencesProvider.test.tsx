@@ -32,11 +32,11 @@ const settle = () => act(async () => {
 
 function mount(api: {
   getNotificationPreferences: () => Promise<NotificationPreferences>;
-  updateNotificationPreferences?: (preferences: NotificationPreferences) => Promise<NotificationPreferences>;
+  updateNotificationPreferences?: (changes: Partial<NotificationPreferences>) => Promise<NotificationPreferences>;
 }) {
   const handlers: WorkbenchEventHandlers[] = [];
   apiRef.current = {
-    updateNotificationPreferences: async (preferences: NotificationPreferences) => preferences,
+    updateNotificationPreferences: async (changes: Partial<NotificationPreferences>) => ({ ...ON, ...changes }),
     ...api,
     connectWorkbenchEvents: (next: WorkbenchEventHandlers) => {
       handlers.push(next);
@@ -58,7 +58,7 @@ const SESSIONS_MUTED = { enabled: true, bots: true, sessions: false };
 afterEach(() => cleanup());
 
 describe('NotificationPreferencesProvider', () => {
-  it('reads the account record, and re-reads its own on the shared stream nudge', async () => {
+  it('reads the account record, and re-reads it when the stream says it changed', async () => {
     const getNotificationPreferences = vi.fn()
       .mockResolvedValueOnce(ON)
       .mockResolvedValueOnce(SESSIONS_MUTED);
@@ -67,7 +67,7 @@ describe('NotificationPreferencesProvider', () => {
     await settle();
     expect(state.current).toMatchObject({ preferences: ON, loaded: true });
 
-    // The event reaches every reader, so it carries no record: each re-reads its own.
+    // Another device changed a switch: the read path adopts the record.
     await act(async () => handlers[0].onNotificationPreferencesChanged?.());
     await settle();
     expect(getNotificationPreferences).toHaveBeenCalledTimes(2);
@@ -94,13 +94,16 @@ describe('NotificationPreferencesProvider', () => {
     expect(state.current?.preferences).toEqual(ON);
   });
 
-  it('builds a second quick change on the first, not on the last saved record', async () => {
-    const saves: NotificationPreferences[] = [];
+  it('sends only the switch a change names, and shows a second quick change on top of the first', async () => {
+    // The server merges each write into the stored record, as the real route does.
+    let stored = ON;
+    const saves: Partial<NotificationPreferences>[] = [];
     const { state } = mount({
-      getNotificationPreferences: async () => ON,
-      updateNotificationPreferences: async (preferences) => {
-        saves.push(preferences);
-        return preferences;
+      getNotificationPreferences: async () => stored,
+      updateNotificationPreferences: async (changes) => {
+        saves.push(changes);
+        stored = { ...stored, ...changes };
+        return stored;
       },
     });
     await settle();
@@ -111,7 +114,9 @@ describe('NotificationPreferencesProvider', () => {
     });
     await settle();
 
-    expect(saves.at(-1)).toEqual({ enabled: false, bots: true, sessions: false });
+    // A whole record would carry this device's stale copy of the other switches
+    // over a change another device made to them in the meantime.
+    expect(saves).toEqual([{ sessions: false }, { enabled: false }]);
     expect(state.current?.preferences).toEqual({ enabled: false, bots: true, sessions: false });
   });
 

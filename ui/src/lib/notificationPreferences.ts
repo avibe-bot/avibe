@@ -25,9 +25,14 @@ export const NOTIFICATIONS_SETTINGS_PATH = '/settings/notifications';
 
 /**
  * A Bot's permanent Session (`ses_<handle>`) is a Bot conversation; everything
- * else is an ordinary Session. The `ses_` namespace belongs to Bots alone
- * (docs/plans/bots.md D2), and the Sessions of removed Bots never reach an
- * Inbox read, so the id alone settles it for every Session the Inbox can hold.
+ * else is an ordinary Session. The server decides from the current Bot registry
+ * (a row's `category`), and the id agrees with it for every Session an Inbox
+ * read can return: the `ses_` namespace belongs to Bots alone
+ * (docs/plans/bots.md D2), a removed Bot's Session is hidden, an Agent stays
+ * enabled while it is a Bot, and readers other than the Owner see no Bot
+ * Session at all. The page classifies by the id because the live unread map
+ * names Sessions by id alone, and one classifier keeps a row's section and the
+ * count it adds to from ever disagreeing.
  */
 export const inboxCategory = (sessionId: string): InboxCategory => (isBotSessionId(sessionId) ? 'bot' : 'session');
 
@@ -64,14 +69,12 @@ export function notificationMode(preferences: NotificationPreferences, hasBots: 
   return 'off';
 }
 
-/** A read or write response: the record itself or under `preferences`. A missing switch is on. */
+/** A read or write response, `{ok, preferences}`. A missing switch is on; a response without the record is none. */
 export function parseNotificationPreferences(payload: unknown): NotificationPreferences | null {
   if (!payload || typeof payload !== 'object') return null;
   const outer = payload as Record<string, unknown>;
-  if (outer.ok === false) return null;
-  const record = outer.preferences && typeof outer.preferences === 'object'
-    ? (outer.preferences as Record<string, unknown>)
-    : outer;
+  if (outer.ok === false || !outer.preferences || typeof outer.preferences !== 'object') return null;
+  const record = outer.preferences as Record<string, unknown>;
   const flag = (key: keyof NotificationPreferences) => record[key] !== false;
   return { enabled: flag('enabled'), bots: flag('bots'), sessions: flag('sessions') };
 }

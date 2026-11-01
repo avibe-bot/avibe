@@ -43,10 +43,13 @@ describe('notification preferences', () => {
     expect(notificationMode(MASTER_OFF, false)).toBe('off');
   });
 
-  it('reads the record bare or wrapped, and treats a missing switch as on', () => {
-    expect(parseNotificationPreferences({ enabled: true, bots: true, sessions: false })).toEqual(BOTS_ONLY);
+  it('reads the wrapped record, and treats a missing switch as on', () => {
+    expect(parseNotificationPreferences({ ok: true, preferences: { enabled: true, bots: true, sessions: false } })).toEqual(BOTS_ONLY);
     expect(parseNotificationPreferences({ ok: true, preferences: { sessions: false } })).toEqual(BOTS_ONLY);
-    expect(parseNotificationPreferences({})).toEqual(ALL_ON);
+    expect(parseNotificationPreferences({ ok: true, preferences: {} })).toEqual(ALL_ON);
+    // A body without the record says nothing about the switches, least of all "all on".
+    expect(parseNotificationPreferences({ ok: true })).toBeNull();
+    expect(parseNotificationPreferences({ enabled: false })).toBeNull();
     expect(parseNotificationPreferences({ ok: false, error: 'forbidden' })).toBeNull();
     expect(parseNotificationPreferences(null)).toBeNull();
   });

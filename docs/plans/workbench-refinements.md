@@ -141,9 +141,11 @@ it is still delivered, listed, and unread.
 - The client holds the switches in one provider above the router
   (`NotificationPreferencesProvider`), read on mount and re-read on the stream's
   preference nudge, a reconnect, or an authorization change. A change applies
-  at once and a refused save restores the last saved record. Categories come
-  from the Session id (`ses_<handle>` is a Bot's), which agrees with the server's
-  registry for every Session an Inbox read can return.
+  at once and writes only the switch it changes, which the server merges, so
+  two devices changing different switches keep both; a refused save restores
+  the last saved record. Categories come from the Session id (`ses_<handle>` is
+  a Bot's), which agrees with the server's registry for every Session an Inbox
+  read can return.
 - Sidebar Inbox icon: a cyan number for `badge_total`; a grey dot with no number
   when `badge_total` is 0 and anything is unread.
 
