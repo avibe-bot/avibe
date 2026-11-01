@@ -1679,6 +1679,19 @@ def create_app(
         except Exception as exc:
             logger.exception("internal backend auth test failed")
             return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
+    @app.post("/internal/bots/handle-suggestion")
+    async def _bot_handle_suggestion(request: Request) -> Any:
+        """The main Bot's model's proposal for a new Bot's handle (``docs/plans/bots.md`` D2), or null."""
+        from core.bot_handles import propose_handle_with_model
+
+        body = await _safe_json(request)
+        display_name = body.get("display_name") if isinstance(body, dict) else None
+        role = body.get("role", "") if isinstance(body, dict) else None
+        if not isinstance(display_name, str) or not display_name.strip() or not isinstance(role, str):
+            return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_bot_handle_request"})
+        handle = await propose_handle_with_model(controller, display_name=display_name.strip(), role=role)
+        return {"ok": True, "handle": handle}
+
     @app.post("/internal/sessions/archive")
     async def _archive_session(request: Request) -> Any:
         body = await _safe_json(request)

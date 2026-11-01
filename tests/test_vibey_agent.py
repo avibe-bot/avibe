@@ -1025,7 +1025,7 @@ async def test_resume_renders_a_recovered_steer_as_the_live_path_would(engine, s
                             "task_trigger_kind": "agent_run",
                             "task_execution_id": run_id,
                             "source_kind": "agent",
-                            "source_actor": "ses_source",
+                            "source_actor": "sessource01",
                         },
                     }},
                 ),
@@ -1050,7 +1050,7 @@ async def test_resume_renders_a_recovered_steer_as_the_live_path_would(engine, s
 
     [recovered] = [entry for entry in await harness.context_rows() if entry.row_id == "dlv_agent_steer"]
     assert recovered.message.content[-1].text.startswith(
-        "[Harness: agent run run_1 from #ses_source; agent run run_2 from #ses_source]\n"
+        "[Harness: agent run run_1 from #sessource01; agent run run_2 from #sessource01]\n"
     )
 
 
@@ -1097,7 +1097,7 @@ async def test_a_users_fork_of_a_turn_mid_tool_batch_gets_exactly_the_previous_e
         cut = resolve_fork_point(conn, SESSION)
         _insert_session(
             conn,
-            "ses_child",
+            "seschild01",
             _SCOPES["avibe"],
             {
                 "created_via": "session_fork",
@@ -1116,15 +1116,15 @@ async def test_a_users_fork_of_a_turn_mid_tool_batch_gets_exactly_the_previous_e
     await running
     assert [row["content_text"] for row in source.rows("result")] == ["first answer", "Released."]
 
-    child = _Harness(engine, tmp_path, "avibe", [[Done(assistant("child answer"))]], session_id="ses_child")
+    child = _Harness(engine, tmp_path, "avibe", [[Done(assistant("child answer"))]], session_id="seschild01")
     await child.agent.handle_message(child.request("child question"))
 
     rows = await child.context_rows()
     inherited = [entry for entry in await source.context_rows() if entry.context_seq <= cut]
     assert rows[: len(inherited)] == inherited
     assert [(entry.session_id, entry.context_seq, entry.kind) for entry in rows[len(inherited) :]] == [
-        ("ses_child", cut + 1, "input"),
-        ("ses_child", cut + 2, "response"),
+        ("seschild01", cut + 1, "input"),
+        ("seschild01", cut + 2, "response"),
     ]
     # Nothing of the live Turn reaches the child: not its input, its calls, or its replies.
     live_ids = {entry.row_id for entry in live}
@@ -1147,7 +1147,7 @@ async def test_a_fork_at_the_empty_prefix_still_carries_the_fork_notice(engine, 
     with engine.begin() as conn:
         _insert_session(
             conn,
-            "ses_child",
+            "seschild01",
             _SCOPES["avibe"],
             {
                 "created_via": "session_fork",
@@ -1156,11 +1156,11 @@ async def test_a_fork_at_the_empty_prefix_still_carries_the_fork_notice(engine, 
                 "fork_source_context_seq": 0,
             },
         )
-    child = _Harness(engine, tmp_path, "avibe", [[Done(assistant("child answer"))]], session_id="ses_child")
+    child = _Harness(engine, tmp_path, "avibe", [[Done(assistant("child answer"))]], session_id="seschild01")
     await child.agent.handle_message(child.request("child question"))
 
     first = (await child.context_rows())[0]
-    assert first.context_seq == 1 and first.session_id == "ses_child"
+    assert first.context_seq == 1 and first.session_id == "seschild01"
     blocks = [block.text for block in first.message.content if isinstance(block, TextBlock)]
     [notice] = [text_value for text_value in blocks if text_value.startswith("<fork>")]
     assert "fork of Release work (Session " + SESSION + ")" in notice

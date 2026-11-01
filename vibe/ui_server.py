@@ -5520,7 +5520,7 @@ def _vibe_agent_result_response(result: dict):
     status = 200
     if not result.get("ok", True):
         code = result.get("code")
-        if code in {"agent_in_use", "agent_archived_read_only"}:
+        if code in {"agent_in_use", "agent_archived_read_only", "agent_is_bot"}:
             status = 409
         elif code in {"agent_not_found", "agent_import_source_not_found"}:
             status = 404
@@ -5727,7 +5727,7 @@ def vibe_agents_default_post():
 
     payload = request.json or {}
     try:
-        return jsonify(
+        return _vibe_agent_result_response(
             api.set_default_vibe_agent(
                 payload.get("name") or "",
                 user_context=getattr(g, "authorization_context", None),
@@ -9158,6 +9158,13 @@ def _accessible_project_scope_ids_for_context(conn, context) -> list[str] | None
     )
 
 
+def _hidden_bot_session_ids(conn, context) -> list[str]:
+    """Bot Sessions this reader may not see: all of them for a non-Owner, a removed Bot's for the Owner."""
+    from core.bots import hidden_bot_session_ids
+
+    return hidden_bot_session_ids(conn, context)
+
+
 def _request_accessible_project_scope_ids(conn) -> list[str] | None:
     return _accessible_project_scope_ids_for_context(
         conn,
@@ -10071,40 +10078,34 @@ def desktop_mini_session_ensure():
 
 @app.route("/api/sessions/main", methods=["GET"])
 def sessions_main():
-    """Return the caller's stable built-in main session, creating it on first use."""
+    """Return the main Bot's ``ses_main``, creating it on first use (``docs/plans/bots.md`` D9)."""
 
+    from core.bots import BotError, BotService
     from core.services import sessions as workbench_sessions_service
-    from core.vibe_agents import VibeAgentAccessError, VibeAgentStore
+    from core.vibe_agents import VibeAgentAccessError
     from vibe.authorization import InstanceAuthorizationError
     from storage.workbench_sessions_service import (
+        MAIN_SESSION_ID,
         MainSessionArchivedError,
         MainSessionInvariantError,
-        ensure_main_session,
     )
 
-    store = VibeAgentStore()
-    try:
-        vibey = store.get_builtin_default_agent_for_backend("vibey")
-    finally:
-        store.close()
     lang = _request_ui_language()
-    if vibey is None:
-        return _coded_error_response("builtin_agent_unavailable", t("desktopMini.builtinAgentUnavailable", lang), 409)
-
     authorization_context = getattr(g, "authorization_context", None)
-    engine = _projects_engine()
     try:
-        with engine.begin() as conn:
-            session = ensure_main_session(
-                conn,
-                agent_name=vibey.name,
-                title=t("desktopMini.sessionTitle", lang),
-                authorization_context=authorization_context,
+        with BotService() as service:
+            service.ensure_main_bot(authorization_context=authorization_context)
+        engine = _projects_engine()
+        with engine.connect() as conn:
+            session = workbench_sessions_service.get_session(
+                conn, MAIN_SESSION_ID, authorization_context=authorization_context
             )
     except InstanceAuthorizationError:
         return jsonify(
             {"ok": False, "error": "instance_access_forbidden", "required_role": "owner"}
         ), 403
+    except BotError:
+        return _coded_error_response("builtin_agent_unavailable", t("desktopMini.builtinAgentUnavailable", lang), 409)
     except (VibeAgentAccessError, workbench_sessions_service.ProjectAccessDeniedError):
         return _coded_error_response("project_access_denied", t("error.projectAccessDenied", lang), 403)
     except MainSessionArchivedError:
@@ -10128,6 +10129,211 @@ def sessions_main():
         }
     )
 
+
+# --- Bots (docs/plans/bots.md "Web API"): every route is the instance Owner's. ---
+
+
+def _bot_error_response(exc: Exception):
+    from core.bots import BotError
+    from vibe.authorization import InstanceAuthorizationError
+
+    if isinstance(exc, InstanceAuthorizationError):
+        return jsonify({"ok": False, "error": "instance_access_forbidden", "required_role": "owner"}), 403
+    if isinstance(exc, BotError):
+        lang = _request_ui_language()
+        key = f"error.bots.{exc.code}"
+        message = t(key, lang, handle=exc.details.get("handle", ""))
+        return _coded_error_response(exc.code, str(exc) if message == key else message, exc.status, details=exc.details)
+    if isinstance(exc, PermissionError):
+        return jsonify({"ok": False, "error": "instance_access_forbidden", "required_role": "owner"}), 403
+    raise exc
+
+
+def _bot_owner_context():
+    from vibe.authorization import require_instance_role
+
+    return require_instance_role(getattr(g, "authorization_context", None), "owner")
+
+
+def _publish_bots_changed(handle: str | None = None) -> None:
+    """Tell the Owner's open Workbench to refetch ``GET /api/bots``; an unlisted event stays Owner-only."""
+    from vibe.sse_broker import broker
+
+    broker.publish("bots.changed", {"handle": handle} if handle else {})
+
+
+@app.route("/api/bots", methods=["GET"])
+def bots_list():
+    from core.bots import BotService
+
+    try:
+        context = _bot_owner_context()
+        with BotService() as service:
+            service.ensure_main_bot(authorization_context=context)
+            bots = service.list_bots(authorization_context=context)
+    except Exception as exc:
+        return _bot_error_response(exc)
+    return jsonify({"ok": True, "bots": [bot.to_payload() for bot in bots]})
+
+
+@app.route("/api/bots", methods=["POST"])
+def bots_create():
+    from core.bots import BotService
+
+    payload = request.json or {}
+    try:
+        context = _bot_owner_context()
+        with BotService() as service:
+            bot = service.create_bot(
+                display_name=payload.get("display_name"),
+                handle=payload.get("handle"),
+                role=payload.get("role"),
+                avatar=payload.get("avatar"),
+                model=payload.get("model"),
+                reasoning_effort=payload.get("reasoning_effort"),
+                authorization_context=context,
+            )
+    except Exception as exc:
+        return _bot_error_response(exc)
+    _publish_bots_changed(bot.handle)
+    return jsonify({"ok": True, "bot": bot.to_payload()}), 201
+
+
+@app.route("/api/bots/set", methods=["POST"])
+def bots_set():
+    from core.bots import BotService
+
+    payload = request.json or {}
+    try:
+        context = _bot_owner_context()
+        with BotService() as service:
+            bot = service.set_bot(
+                str(payload.get("agent_name") or ""),
+                display_name=payload.get("display_name"),
+                avatar=payload.get("avatar"),
+                authorization_context=context,
+            )
+    except Exception as exc:
+        return _bot_error_response(exc)
+    _publish_bots_changed(bot.handle)
+    return jsonify({"ok": True, "bot": bot.to_payload()})
+
+
+@app.route("/api/bots/handle-suggestion", methods=["POST"])
+async def bots_handle_suggestion():
+    """A free handle for a new Bot and where it came from: ``model`` or ``transliteration`` (D2)."""
+
+    from core.bot_handles import MODEL_BUDGET_SECONDS, needs_model, suggest_handle
+    from core.bots import BotError
+    from vibe import internal_client
+
+    payload = request.json or {}
+    display_name = " ".join(str(payload.get("display_name") or "").split())
+    role = str(payload.get("role") or "")
+    try:
+        _bot_owner_context()
+        if not display_name:
+            raise BotError("bot_display_name_required", "A Bot needs a display name")
+    except Exception as exc:
+        return _bot_error_response(exc)
+    proposal = None
+    if needs_model(display_name):
+        try:
+            proposal = await asyncio.wait_for(
+                internal_client.propose_bot_handle(display_name, role, timeout=MODEL_BUDGET_SECONDS + 1),
+                timeout=MODEL_BUDGET_SECONDS + 1,
+            )
+        except Exception:
+            # No controller, no route, or no answer in time: the handle comes from transliteration.
+            proposal = None
+
+    def suggest() -> tuple[str, str]:
+        with _projects_engine().connect() as conn:
+            return suggest_handle(conn, display_name=display_name, proposal=proposal)
+
+    handle, source = await asyncio.to_thread(suggest)
+    return jsonify({"ok": True, "handle": handle, "source": source})
+
+
+@app.route("/api/bots/<handle>", methods=["PATCH"])
+def bots_update(handle):
+    from core.bots import BotService
+
+    payload = request.json or {}
+    fields = {key: payload[key] for key in ("display_name", "avatar", "position") if key in payload}
+    unknown = sorted(set(payload) - {"display_name", "avatar", "position"})
+    try:
+        context = _bot_owner_context()
+        if unknown or not fields:
+            from core.bots import BotError
+
+            raise BotError("bot_update_invalid", "Change the display name, the emoji avatar, or the position")
+        with BotService() as service:
+            bot = service.update_bot(handle, authorization_context=context, **fields)
+    except Exception as exc:
+        return _bot_error_response(exc)
+    _publish_bots_changed(bot.handle)
+    return jsonify({"ok": True, "bot": bot.to_payload()})
+
+
+@app.route("/api/bots/<handle>", methods=["DELETE"])
+def bots_remove(handle):
+    from core.bots import BotService
+
+    try:
+        context = _bot_owner_context()
+        with BotService() as service:
+            bot = service.remove_bot(handle, authorization_context=context)
+    except Exception as exc:
+        return _bot_error_response(exc)
+    _publish_bots_changed(bot.handle)
+    return jsonify({"ok": True, "removed": bot.handle, "agent_name": bot.agent.name, "session_id": bot.session_id})
+
+
+@app.put("/api/bots/{handle}/avatar", include_in_schema=False)
+async def bots_avatar_upload(handle: str, starlette_request: FastAPIRequest):
+    """Store an uploaded image as the Bot's ``avatar.png``: the request body is the image itself."""
+
+    async def handler():
+        from core.bots import AVATAR_MAX_UPLOAD_BYTES, BotError, BotService
+
+        try:
+            context = _bot_owner_context()
+            length = starlette_request.headers.get("content-length")
+            if length is not None and length.isdigit() and int(length) > AVATAR_MAX_UPLOAD_BYTES:
+                raise BotError("bot_avatar_too_large", "The avatar upload is larger than 10 MB", status=413)
+            data = bytearray()
+            async for chunk in starlette_request.stream():
+                data.extend(chunk)
+                if len(data) > AVATAR_MAX_UPLOAD_BYTES:
+                    raise BotError("bot_avatar_too_large", "The avatar upload is larger than 10 MB", status=413)
+
+            def store():
+                with BotService() as service:
+                    return service.set_avatar_image(handle, bytes(data), authorization_context=context)
+
+            bot = await asyncio.to_thread(store)
+        except Exception as exc:
+            return _bot_error_response(exc)
+        _publish_bots_changed(bot.handle)
+        return jsonify({"ok": True, "bot": bot.to_payload()})
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.route("/api/bots/<handle>/avatar", methods=["GET"])
+def bots_avatar(handle):
+    from core.bots import BotService
+
+    try:
+        context = _bot_owner_context()
+        with BotService() as service:
+            path = service.avatar_path(handle, authorization_context=context)
+    except Exception as exc:
+        return _bot_error_response(exc)
+    response = send_file(path, mimetype="image/png")
+    response.headers["Cache-Control"] = "private, max-age=31536000, immutable"
+    return response
 
 def _session_fork_error_response(err: Exception):
     """Map a ``SessionForkError`` to its machine code, in the STRUCTURED body.
@@ -10545,7 +10751,18 @@ def _session_archived_response():
 #: The archive/edit refusal's copy: the row exists to receive notices and cannot be
 #: torn down or re-labelled. Used by the DELETE and PATCH guards.
 RESERVED_SESSION_PROTECTED_I18N_KEY = "harness.notice.workspaceSessionProtected"
-MAIN_SESSION_PROTECTED_I18N_KEY = "desktopMini.mainSessionProtected"
+# A Bot's Session, ``ses_main`` included (``docs/plans/bots.md`` D5): no archive, no rename.
+MAIN_SESSION_PROTECTED_I18N_KEY = "error.bots.sessionProtected"
+
+
+def _is_bot_session(session_id: str) -> bool:
+    """Whether a Bot owns ``session_id``; only ids in the Bots' namespace read the catalog."""
+    from storage.agent_session_rows import is_bot_session, is_bot_session_id
+
+    if not is_bot_session_id(session_id):
+        return False
+    with _projects_engine().connect() as conn:
+        return is_bot_session(conn, session_id)
 #: The send refusal's copy. A SEPARATE key on purpose: "cannot be archived or modified"
 #: is not an answer to "why did my message not send", and the composer's own inert-state
 #: notice has to say the same thing this body says.
@@ -10758,7 +10975,7 @@ def _publish_session_update_activity(
 @app.route("/api/sessions/<session_id>", methods=["PATCH"])
 async def sessions_update(session_id: str):
     from core.services import sessions as workbench_sessions_service
-    from storage.workbench_sessions_service import MAIN_SESSION_ID, MAIN_SESSION_UPDATABLE_FIELDS
+    from storage.workbench_sessions_service import BOT_SESSION_UPDATABLE_FIELDS
     from vibe import internal_client
     from vibe.sse_broker import broker
 
@@ -10782,9 +10999,7 @@ async def sessions_update(session_id: str):
     }
     if not updatable:
         return jsonify({"error": "no updatable fields supplied"}), 400
-    if str(session_id) == MAIN_SESSION_ID and not set(updatable).issubset(
-        MAIN_SESSION_UPDATABLE_FIELDS
-    ):
+    if not set(updatable).issubset(BOT_SESSION_UPDATABLE_FIELDS) and _is_bot_session(session_id):
         return _reserved_session_response(
             MAIN_SESSION_PROTECTED_I18N_KEY,
             code="reserved_session",
@@ -10883,7 +11098,7 @@ async def sessions_update(session_id: str):
         # route's 403 + localized copy so the two guards read as one contract.
         return _reserved_session_response(
             MAIN_SESSION_PROTECTED_I18N_KEY
-            if str(session_id) == MAIN_SESSION_ID
+            if _is_bot_session(session_id)
             else RESERVED_SESSION_PROTECTED_I18N_KEY,
             code=getattr(err, "code", "reserved_session"),
         )
@@ -11073,7 +11288,6 @@ async def sessions_archive(session_id: str):
     from core.show_pages import ShowPageError, require_show_page_management
     from sqlalchemy import select
     from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
-    from storage.workbench_sessions_service import MAIN_SESSION_ID
     from storage.models import show_pages
     from vibe.sse_broker import broker
 
@@ -11083,7 +11297,7 @@ async def sessions_archive(session_id: str):
             RESERVED_SESSION_PROTECTED_I18N_KEY,
             code="reserved_session",
         )
-    if str(session_id) == MAIN_SESSION_ID:
+    if _is_bot_session(session_id):
         return _reserved_session_response(
             MAIN_SESSION_PROTECTED_I18N_KEY,
             code="reserved_session",
@@ -11125,7 +11339,7 @@ async def sessions_archive(session_id: str):
             if code == "reserved_session":
                 return _reserved_session_response(
                     MAIN_SESSION_PROTECTED_I18N_KEY
-                    if str(session_id) == MAIN_SESSION_ID
+                    if _is_bot_session(session_id)
                     else RESERVED_SESSION_PROTECTED_I18N_KEY,
                     code=code,
                 )
@@ -11156,7 +11370,7 @@ async def sessions_archive(session_id: str):
         if status_code == 403 and body.get("error") == "reserved_session":
             return _reserved_session_response(
                 MAIN_SESSION_PROTECTED_I18N_KEY
-                if str(session_id) == MAIN_SESSION_ID
+                if _is_bot_session(session_id)
                 else RESERVED_SESSION_PROTECTED_I18N_KEY,
                 code="reserved_session",
             )
@@ -11338,6 +11552,7 @@ def search_messages_list():
             limit=limit,
             include_archived=include_archived,
             scope_ids=_request_accessible_project_scope_ids(conn),
+            hidden_session_ids=_hidden_bot_session_ids(conn, getattr(g, "authorization_context", None)),
         )
     return jsonify(result)
 
@@ -13011,15 +13226,18 @@ def sessions_mark_read(session_id: str):
                 conn, session_id, until_message_id=until_message_id
             )
             accessible_scope_ids = _request_accessible_project_scope_ids(conn)
+            hidden_session_ids = _hidden_bot_session_ids(conn, authorization_context)
             unread_counts = messages_service.unread_counts(
                 conn,
                 platform="avibe",
                 scope_ids=accessible_scope_ids,
+                hidden_session_ids=hidden_session_ids,
             )
             unread_by_session = messages_service.unread_counts_by_session(
                 conn,
                 platform="avibe",
                 scope_ids=accessible_scope_ids,
+                hidden_session_ids=hidden_session_ids,
             )
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
@@ -13262,6 +13480,12 @@ def _workbench_event_visible_to_context(context, event_type: str, payload: str) 
         # ACL. Project ACL gates page creation/editing, while §3.2 instance
         # admission gates Viewer reads and live event delivery.
         return context.has_role("viewer")
+    if not context.is_instance_owner:
+        # Bots are the Owner's (``docs/plans/bots.md`` D1): no other member hears about a Bot's Session.
+        data = _workbench_event_data(payload)
+        session_id = data.get("session_id") if data is not None else None
+        if isinstance(session_id, str) and _is_bot_session(session_id):
+            return False
     if _has_runtime_management_access(context):
         return True
     if event_type in {"authorization.changed", "workbench.events.bridge.status"}:
@@ -13381,15 +13605,18 @@ def _workbench_event_payload_for_context(context, event_type: str, payload: str)
     engine = _projects_engine()
     with engine.connect() as conn:
         scope_ids = _accessible_project_scope_ids_for_context(conn, context)
+        hidden_session_ids = _hidden_bot_session_ids(conn, context)
         unread_counts = messages_service.unread_counts(
             conn,
             platform="avibe",
             scope_ids=scope_ids,
+            hidden_session_ids=hidden_session_ids,
         )
         unread_by_session = messages_service.unread_counts_by_session(
             conn,
             platform="avibe",
             scope_ids=scope_ids,
+            hidden_session_ids=hidden_session_ids,
         )
     return json.dumps(
         {
@@ -13605,6 +13832,8 @@ def inbox_list():
     engine = _projects_engine()
     with engine.connect() as conn:
         accessible_scope_ids = _request_accessible_project_scope_ids(conn)
+        # Bot Sessions belong in the feed (``docs/plans/bots.md`` D5), the Owner's only.
+        hidden_session_ids = _hidden_bot_session_ids(conn, getattr(g, "authorization_context", None))
         result = messages_service.list_inbox_sessions(
             conn,
             platform=scope_filter,
@@ -13613,6 +13842,7 @@ def inbox_list():
             before=before,
             only_session=only_session,
             scope_ids=accessible_scope_ids,
+            hidden_session_ids=hidden_session_ids,
         )
         # Pagination-independent unread map for the sidebar badges (a session
         # with unread may sit past the first inbox page) + header totals.
@@ -13620,6 +13850,7 @@ def inbox_list():
             conn,
             platform=scope_filter,
             scope_ids=accessible_scope_ids,
+            hidden_session_ids=hidden_session_ids,
         )
         result["unread_by_session"] = per_session
         result["unread_total"] = sum(per_session.values())

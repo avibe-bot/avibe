@@ -57,7 +57,7 @@ from core.caller_context import (
 from core.command_runner import command_line_preview
 from core.cron_weekday import ambiguous_weekday_field, weekday_readings
 from core.install_integrity import verify_python_environment, verify_site_packages
-from core.vibe_agents import AgentAlwaysEnabledError, AgentArchivedEditError, AgentArchiveError, AgentNameValidationError, AgentReferenceRewriteError, VibeAgent, VibeAgentAccessError, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
+from core.vibe_agents import AgentAlwaysEnabledError, AgentArchivedEditError, AgentBotLockedError, AgentArchiveError, AgentNameValidationError, AgentReferenceRewriteError, VibeAgent, VibeAgentAccessError, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
 from core.watches import (
     DEFAULT_RETRY_EXIT_CODE,
     NO_EVENT_EXIT_CODE,
@@ -5459,6 +5459,9 @@ def cmd_agent_default(args):
         agent = store.require(args.name)
         _print_cli_payload("default_agent", default_agent_name=agent.name, agent=_agent_payload(agent, brief=True))
         return 0
+    except AgentBotLockedError as exc:
+        _print_task_error(_agent_lifecycle_cli_error(exc))
+        return 1
     except Exception as exc:
         _print_task_error(exc)
         return 1
@@ -5735,7 +5738,7 @@ def cmd_agent_update(args):
         agent = _agent_store().update(args.name, **kwargs)
         _print_cli_payload("agent", agent=_agent_payload(agent), **_agent_value_warning_fields(agent))
         return 0
-    except (AgentArchivedEditError, AgentAlwaysEnabledError) as exc:
+    except (AgentArchivedEditError, AgentAlwaysEnabledError, AgentBotLockedError) as exc:
         _print_task_error(_agent_lifecycle_cli_error(exc))
         return 1
     except Exception as exc:
@@ -5748,7 +5751,7 @@ def cmd_agent_set_enabled(args, *, enabled: bool):
         agent = _agent_store().set_enabled(args.name, enabled)
         _print_cli_payload("agent", agent=_agent_payload(agent))
         return 0
-    except (AgentArchivedEditError, AgentAlwaysEnabledError) as exc:
+    except (AgentArchivedEditError, AgentAlwaysEnabledError, AgentBotLockedError) as exc:
         _print_task_error(_agent_lifecycle_cli_error(exc))
         return 1
     except Exception as exc:
@@ -5756,7 +5759,9 @@ def cmd_agent_set_enabled(args, *, enabled: bool):
         return 1
 
 
-def _agent_lifecycle_cli_error(exc: AgentArchivedEditError | AgentAlwaysEnabledError) -> TaskCliError:
+def _agent_lifecycle_cli_error(
+    exc: AgentArchivedEditError | AgentAlwaysEnabledError | AgentBotLockedError,
+) -> TaskCliError:
     key = f"error.agentLifecycle.{exc.code}"
     return TaskCliError(
         i18n_t(f"{key}.message", agent=exc.agent_name),
@@ -6677,9 +6682,227 @@ def _release_cli_session_reservation(session_id: str, *, reason: str) -> bool:
                 )
 
 
+def _bot_cli_payload(bot) -> dict:
+    return {**bot.to_payload(), "directory": str(bot.directory)}
+
+
+def _bot_cli_error(exc: Exception, *, help_command: str) -> int:
+    from core.bots import BotError
+
+    if isinstance(exc, BotError):
+        exc = TaskCliError(str(exc), code=exc.code, help_command=help_command, details=exc.details or None)
+    _print_task_error(exc, help_command=help_command)
+    return 1
+
+
+def _bot_avatar_arg(args, *, help_command: str):
+    """``--emoji`` with ``--hue``, ``--clear-avatar``, or nothing (``...``)."""
+    emoji = (getattr(args, "emoji", None) or "").strip()
+    hue = getattr(args, "hue", None)
+    if getattr(args, "clear_avatar", False):
+        return None
+    if not emoji and hue is None:
+        return ...
+    if not emoji or hue is None:
+        raise TaskCliError(
+            "--emoji and --hue go together",
+            code="bot_avatar_invalid",
+            hint="Pass one emoji and a hue from 0 to 359, for example --emoji '🛡️' --hue 210.",
+            help_command=help_command,
+        )
+    return {"emoji": emoji, "hue": hue}
+
+
+def cmd_bot_list(args):
+    from core.bots import BotService
+
+    try:
+        page_request = _page_request_from_args(args, help_command="vibe bot list --help")
+        with BotService() as service:
+            service.ensure_main_bot()
+            bots = service.list_bots()
+        result = page_sequence(bots, page_request)
+        _print_cli_payload(
+            "bots",
+            bots=[_bot_cli_payload(bot) for bot in result.items],
+            **_paginated_fields(result, command=["vibe", "bot", "list"]),
+        )
+        return 0
+    except Exception as exc:
+        return _bot_cli_error(exc, help_command="vibe bot list --help")
+
+
+def cmd_bot_show(args):
+    from core.bots import MAIN_BOT_HANDLE, BotService
+
+    try:
+        with BotService() as service:
+            bot = service.ensure_main_bot() if args.handle == MAIN_BOT_HANDLE else service.get_bot(args.handle)
+        _print_cli_payload("bot", bot=_bot_cli_payload(bot))
+        return 0
+    except Exception as exc:
+        return _bot_cli_error(exc, help_command="vibe bot show --help")
+
+
+def cmd_bot_create(args):
+    from core.bots import BotService
+
+    help_command = "vibe bot create --help"
+    try:
+        avatar = _bot_avatar_arg(args, help_command=help_command)
+        with BotService() as service:
+            bot = service.create_bot(
+                display_name=args.name,
+                handle=args.handle,
+                role=args.role,
+                avatar=None if avatar is ... else avatar,
+                model=args.model,
+                reasoning_effort=args.reasoning_effort,
+            )
+        _print_cli_payload("bot", bot=_bot_cli_payload(bot))
+        return 0
+    except Exception as exc:
+        return _bot_cli_error(exc, help_command=help_command)
+
+
+def cmd_bot_set(args):
+    from core.bots import BotService
+
+    help_command = "vibe bot set --help"
+    try:
+        avatar = _bot_avatar_arg(args, help_command=help_command)
+        with BotService() as service:
+            bot = service.set_bot(args.agent, display_name=args.name, avatar=None if avatar is ... else avatar)
+        _print_cli_payload("bot", bot=_bot_cli_payload(bot))
+        return 0
+    except Exception as exc:
+        return _bot_cli_error(exc, help_command=help_command)
+
+
+def cmd_bot_update(args):
+    from core.bots import BotService
+
+    help_command = "vibe bot update --help"
+    try:
+        fields: dict = {}
+        if args.name is not None:
+            fields["display_name"] = args.name
+        avatar = _bot_avatar_arg(args, help_command=help_command)
+        if avatar is not ...:
+            fields["avatar"] = avatar
+        if args.position is not None:
+            fields["position"] = args.position
+        if not fields:
+            raise TaskCliError(
+                "no Bot fields were changed",
+                code="no_bot_changes",
+                hint="Pass --name, --emoji with --hue, --clear-avatar, or --position. The handle never changes.",
+                help_command=help_command,
+            )
+        with BotService() as service:
+            bot = service.update_bot(args.handle, **fields)
+        _print_cli_payload("bot", bot=_bot_cli_payload(bot))
+        return 0
+    except Exception as exc:
+        return _bot_cli_error(exc, help_command=help_command)
+
+
+def cmd_bot_remove(args):
+    from core.bots import BotService
+
+    try:
+        with BotService() as service:
+            bot = service.remove_bot(args.handle)
+        _print_cli_payload(
+            "bot_removed",
+            handle=bot.handle,
+            agent_name=bot.agent.name,
+            session_id=bot.session_id,
+            directory=str(bot.directory),
+        )
+        return 0
+    except Exception as exc:
+        return _bot_cli_error(exc, help_command="vibe bot remove --help")
+
+
+def _bot_examples_text() -> str:
+    return dedent(
+        """\
+        A Bot is an enabled Vibey Agent with one permanent Session and its own directory,
+          ~/.avibe/bots/<handle>/, which is its memory. Its role is the Agent's description.
+        Message a Bot with `vibe agent run --bot <handle> --message ...`.
+
+        Examples:
+          vibe bot list
+          vibe bot create --name 'Chief Security Officer' --handle cso --role 'Reviews security risks.'
+          vibe bot set reviewer --name 'Reviewer'
+          vibe bot update cso --emoji '🛡️' --hue 210
+          vibe bot remove cso
+        """
+    )
+
+
+_BOT_RUN_CONFLICTS = (
+    ("agent", "--agent"),
+    ("session_id", "--session-id"),
+    ("fork_session", "--fork-session"),
+    ("fork_self", "--fork-self"),
+    ("model", "--model"),
+    ("reasoning_effort", "--reasoning-effort"),
+    ("same_scope", "--same-scope"),
+    ("scope_id", "--scope-id"),
+    ("visibility", "--visible"),
+    ("cwd", "--cwd"),
+    ("close_after", "--close-after"),
+)
+
+
+def _resolve_bot_run_target(args) -> None:
+    """``--bot <handle>``: the Bot's permanent Session, queued (``docs/plans/bots.md`` D4).
+
+    A Bot keeps one conversation on its own model, so the flags that pick or shape a Session do not apply. The
+    Session and directory are prepared here when missing, then the run continues as a queued ``--session-id`` run.
+    """
+    from core.bots import MAIN_BOT_HANDLE, BotError, BotService
+
+    handle = (getattr(args, "bot", None) or "").strip()
+    conflicts = [flag for attr, flag in _BOT_RUN_CONFLICTS if getattr(args, attr, None)]
+    if conflicts:
+        raise TaskCliError(
+            f"--bot cannot be combined with {', '.join(conflicts)}",
+            code="bot_run_conflict",
+            hint=(
+                "A Bot has one permanent Session on its own model. Message it with --bot alone; "
+                "start a fresh worker of an Agent with --agent instead."
+            ),
+            help_command="vibe agent run --help",
+        )
+    try:
+        with BotService() as service:
+            bot = (
+                service.ensure_main_bot()
+                if handle == MAIN_BOT_HANDLE
+                else service.get_bot(handle)
+            )
+            if bot.handle != MAIN_BOT_HANDLE:
+                service.ensure_home(bot)
+    except BotError as exc:
+        raise TaskCliError(
+            str(exc),
+            code=exc.code,
+            hint="List the Bots with `vibe bot list`.",
+            help_command="vibe agent run --help",
+            details={"bot": handle},
+        ) from exc
+    args.session_id = bot.session_id
+    args.queue = True
+
+
 def cmd_agent_run(args):
     reserved_session_id: Optional[str] = None
     try:
+        if (getattr(args, "bot", None) or "").strip():
+            _resolve_bot_run_target(args)
         caller_context = caller_context_from_env()
         visibility = (getattr(args, "visibility", None) or "background").strip()
         run_async = _agent_run_is_async(args)
@@ -17616,7 +17839,7 @@ def build_parser():
         "run",
         help="Run an Avibe Agent",
         description=(
-            "Run an Agent turn in a new background Session (--agent), an existing Session "
+    "Run an Agent turn in a new background Session (--agent), an existing Session "
             "(--session-id), or a fork. Runs are async: the final result returns to the caller Session."
         ),
         epilog=_agent_run_examples_text(),
@@ -17624,6 +17847,9 @@ def build_parser():
         error_help_command="vibe agent run --help",
     )
     agent_run_parser.add_argument("--agent", metavar="NAME", help="Agent for a new Session (a fork: same backend only)")
+    agent_run_parser.add_argument(
+        "--bot", metavar="BOT", help="Message a Bot's Session"
+    )
     agent_run_parser.add_argument(
         "--session-id", metavar="ID", help="Join this Session's running turn, or start one if idle"
     )
@@ -17639,7 +17865,7 @@ def build_parser():
         const="foreground",
         help="Make the new Session user-facing",
     )
-    agent_run_parser.add_argument("--model", help="Model the new Session keeps; see 'vibe agent models <agent>'")
+    agent_run_parser.add_argument("--model", help="Model the new Session keeps ('vibe agent models')")
     agent_run_parser.add_argument("--reasoning-effort", metavar="EFFORT", help="Reasoning effort the new Session keeps")
     agent_run_parser.add_argument("--cwd", metavar="DIR", help="Working directory for a new, unforked Session")
     agent_run_parser.add_argument("--callback-session-id", metavar="ID", help="Send the result to this Session instead")
@@ -17659,6 +17885,89 @@ def build_parser():
     agent_message_group.add_argument("--message", metavar="TEXT", help="Message for the Agent")
     agent_message_group.add_argument("--message-file", metavar="PATH", help="Read the message from a UTF-8 file")
     _add_json_noop(agent_run_parser)
+
+    bot_parser = subparsers.add_parser(
+        "bot",
+        help="Manage Bots",
+        description=(
+            "List, create, and manage Bots: standing members with one permanent Session and a directory of "
+            "their own memory. Bots belong to the instance Owner."
+        ),
+        epilog=_bot_examples_text(),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe bot --help",
+    )
+    bot_subparsers = bot_parser.add_subparsers(dest="bot_command", metavar="{list,show,create,set,update,remove}")
+    bot_subparsers.required = True
+    bot_list_parser = bot_subparsers.add_parser("list", help="List Bots, the main Bot first")
+    _add_pagination_args(bot_list_parser, help_command="vibe bot list --help")
+    _add_json_noop(bot_list_parser)
+    bot_show_parser = bot_subparsers.add_parser("show", help="Show one Bot")
+    bot_show_parser.add_argument("handle", help="Bot handle, such as main")
+    _add_json_noop(bot_show_parser)
+
+    def add_avatar_args(parser, *, clear: bool) -> None:
+        parser.add_argument("--emoji", help="Avatar emoji, with --hue")
+        parser.add_argument("--hue", type=int, metavar="0-359", help="Avatar background hue, with --emoji")
+        if clear:
+            parser.add_argument("--clear-avatar", action="store_true", help="Go back to the default avatar")
+
+    bot_create_parser = bot_subparsers.add_parser(
+        "create",
+        help="Create a Vibey Agent and its Bot",
+        description=(
+            "Create a Vibey Agent, named after the handle, and make it a Bot with its Session and directory. "
+            "Without --handle the handle comes from the name. Without --model the Bot follows the main Bot's model."
+        ),
+        error_help_command="vibe bot create --help",
+    )
+    bot_create_parser.add_argument("--name", required=True, help="Display name, in any language")
+    bot_create_parser.add_argument(
+        "--handle", help="Lowercase handle, 2 to 24 letters, digits, or hyphens; frozen once created"
+    )
+    bot_create_parser.add_argument("--role", help="The Bot's role, stored as its Agent's description")
+    bot_create_parser.add_argument("--model", help="Model for the Bot's Agent")
+    bot_create_parser.add_argument("--reasoning-effort", metavar="EFFORT", help="Reasoning effort for the Bot's Agent")
+    add_avatar_args(bot_create_parser, clear=False)
+    _add_json_noop(bot_create_parser)
+
+    bot_set_parser = bot_subparsers.add_parser(
+        "set",
+        help="Make an existing Vibey Agent a Bot",
+        description=(
+            "Make an enabled Vibey Agent a Bot, other than the built-in vibey Agent and the default Agent. Its "
+            "handle is its Agent name; an Agent that was a Bot before gets its old handle back, with its Session "
+            "and directory."
+        ),
+        error_help_command="vibe bot set --help",
+    )
+    bot_set_parser.add_argument("agent", help="Agent name")
+    bot_set_parser.add_argument("--name", required=True, help="Display name, in any language")
+    add_avatar_args(bot_set_parser, clear=False)
+    _add_json_noop(bot_set_parser)
+
+    bot_update_parser = bot_subparsers.add_parser(
+        "update",
+        help="Change a Bot's display name, avatar, or position",
+        description=(
+            "Change a Bot's display name, emoji avatar, or position among the other Bots. Change its role, model, "
+            "or instructions with `vibe agent update`."
+        ),
+        error_help_command="vibe bot update --help",
+    )
+    bot_update_parser.add_argument("handle", help="Bot handle")
+    bot_update_parser.add_argument("--name", help="New display name")
+    add_avatar_args(bot_update_parser, clear=True)
+    bot_update_parser.add_argument("--position", type=int, metavar="N", help="Position among the other Bots, from 1")
+    _add_json_noop(bot_update_parser)
+
+    bot_remove_parser = bot_subparsers.add_parser(
+        "remove",
+        help="Remove the Bot role, keeping the Agent, Session, and directory",
+        error_help_command="vibe bot remove --help",
+    )
+    bot_remove_parser.add_argument("handle", help="Bot handle")
+    _add_json_noop(bot_remove_parser)
 
     runs_parser = subparsers.add_parser(
         "runs",
@@ -19188,6 +19497,13 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("agent", "remove"): "member",
     ("agent", "import"): "member",
     ("agent", "default"): "member",
+    # Bots are the instance Owner's (docs/plans/bots.md D1); ``agent run --bot`` asks the same in the Bot service.
+    ("bot", "list"): "owner",
+    ("bot", "show"): "owner",
+    ("bot", "create"): "owner",
+    ("bot", "set"): "owner",
+    ("bot", "update"): "owner",
+    ("bot", "remove"): "owner",
     # Harness: one instance-wide Editor floor for reads and ordinary control.
     ("runs", "list"): "editor",
     ("runs", "show"): "editor",
@@ -19498,6 +19814,19 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
         if args.agent_command == "run":
             sys.exit(cmd_agent_run(args))
         parser.error("agent command is required")
+    if args.command == "bot":
+        commands = {
+            "list": cmd_bot_list,
+            "show": cmd_bot_show,
+            "create": cmd_bot_create,
+            "set": cmd_bot_set,
+            "update": cmd_bot_update,
+            "remove": cmd_bot_remove,
+        }
+        command = commands.get(args.bot_command)
+        if command is None:
+            parser.error("bot command is required")
+        sys.exit(command(args))
     if args.command == "runs":
         if args.runs_command == "list":
             sys.exit(cmd_runs_list(args))

@@ -115,6 +115,15 @@ _RETAINED_OWNER_ROUTES = {
     ("POST", "/api/bind-codes"),
     ("DELETE", "/api/bind-codes/{code}"),
     ("GET", "/api/setup/first-bind-code"),
+    # Bots are the instance Owner's (docs/plans/bots.md D1, "Web API (owner-only)").
+    ("GET", "/api/bots"),
+    ("POST", "/api/bots"),
+    ("POST", "/api/bots/set"),
+    ("POST", "/api/bots/handle-suggestion"),
+    ("PATCH", "/api/bots/{handle}"),
+    ("DELETE", "/api/bots/{handle}"),
+    ("PUT", "/api/bots/{handle}/avatar"),
+    ("GET", "/api/bots/{handle}/avatar"),
 }
 
 
@@ -126,7 +135,8 @@ def test_complete_registered_api_management_inventory():
         for method in (getattr(route, "methods", None) or ())
         if method not in {"HEAD", "OPTIONS"}
     }
-    assert len(endpoints) == 307  # master 297 + 10 MCP Hub routes, classified in tests/test_mcp_hub_api.py
+    # master 297 + 10 MCP Hub routes, classified in tests/test_mcp_hub_api.py, + 8 Bots routes (Owner, above)
+    assert len(endpoints) == 315
     # Editors who use Vault read avault's authorization state; the handler admits only
     # instance managers to raise the Keychain dialog on the host.
     for method in ("GET", "POST"):

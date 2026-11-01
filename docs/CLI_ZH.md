@@ -579,6 +579,7 @@ vibe agent run --no-callback --agent release-reviewer --message 'Review the late
 vibe agent run --sync --agent release-reviewer --message 'Review the latest deployment result and print it here.'
 vibe agent run --no-callback --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
 vibe agent run --session-id sesk8m4q2p7x --queue --message 'Do this after the current turn.'
+vibe agent run --no-callback --bot cso --message 'Review the new login flow for security risks.'
 vibe agent run --no-callback --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
 vibe agent run --session-id sesworker123 --callback-session-id sescaller456 --message 'Run the delegated investigation.'
 vibe agent run --no-callback --scope-id slack::channel::C999 --visible --agent release-reviewer --message 'Post the deployment summary.'
@@ -593,6 +594,12 @@ Session 空闲时立即启动；只有明确拒绝后才回退到 P3。它不会
 提升更早的排队消息。`--queue` 则把新 Run 放进活动 Turn 之后的 P3 队列。
 `vibe session send-now` 是无内容 P1 操作，只提升现有的精确 FIFO 队头，不新增消息。
 过期队头会被拒绝，而不会改为提升下一条；两个命令都不会调用 Stop。
+
+`--bot <handle>` 按代号给伙伴（Bot）的永久 Session 发消息（见 `vibe bot`）。这次运行会像
+`--queue` 一样排在伙伴之前的消息之后，所以伙伴一次只处理一条消息。伙伴只有一个对话，
+用自己的模型：`--agent`、`--session-id`、fork 参数、`--model`、`--reasoning-effort`、
+位置参数、`--cwd` 和 `--close-after` 都不能与 `--bot` 一起使用。对同时是伙伴的
+Agent，`--agent` 的含义不变：它新建该 Agent 的一个 Session，而不是给伙伴发消息。
 
 当一个新 Agent Session 需要从现有 Session 的 native backend 上下文分叉，而不是空白开始时，
 使用 `--fork-session <session-id>`。新 Session 会保持源 Session 的 backend。
@@ -624,6 +631,42 @@ Session 或 fork）设置模型，该 Session 之后的轮次会沿用它。
 对于新建或 fork 的 Session，如果希望 Run 结束后释放 Agent runtime，同时保留
 Session、transcript 和 Run 记录，可以使用 `--close-after`。它不能和
 `--session-id` 一起使用，因为现有 Session 自己管理 runtime 生命周期。
+
+### `vibe bot`
+
+管理伙伴（Bot）：有一个永久 Session 和自己目录的固定成员。伙伴是一个已启用的 Vibey
+Agent，它的角色就是这个 Agent 的描述。伙伴属于实例 Owner。
+
+```bash
+vibe bot list
+vibe bot show main
+vibe bot create --name 'Chief Security Officer' --handle cso --role 'Reviews security risks.'
+vibe bot set reviewer --name 'Reviewer'
+vibe bot update cso --name 'Security' --emoji '🛡️' --hue 210
+vibe bot update cso --position 1
+vibe bot remove cso
+```
+
+- `list` 列出所有伙伴，主伙伴在最前；`show` 按代号显示一个伙伴。
+- `create` 新建一个以代号（handle）命名的 Vibey Agent，并把它设为伙伴。`--handle` 是小写
+  ASCII，2 到 24 个字母、数字或连字符，以字母开头、不以连字符结尾；`main`、`memory`、`ops` 已保留。
+  不传 `--handle` 时，代号由名字生成：ASCII 名字会被规范化，其他名字会被转写，
+  被占用时加 `-2`。不传 `--model` 时，伙伴沿用主伙伴的模型和推理强度。
+- `set` 把一个已启用的现有 Vibey Agent 设为伙伴。它的代号就是 Agent 名称；
+  以前当过伙伴的 Agent 会拿回原来的代号、Session 和目录。内置的 `vibey` Agent
+  和默认 Agent 不能设为伙伴；伙伴的 Agent 也不能设为默认 Agent。
+- `update` 修改显示名称、emoji 头像（`--emoji` 配合 `--hue`，或 `--clear-avatar`），
+  或在其他伙伴中的位置。角色、模型或指令用 `vibe agent update` 修改。
+- `remove` 移出伙伴，保留 Agent、Session 和目录。主伙伴不能移出。
+
+伙伴创建后代号不再改变：它的 Session 是 `ses_<handle>`，目录是
+`~/.avibe/bots/<handle>/`。主伙伴的 Session 是 `ses_main`。Agent 作为伙伴期间保持
+启用，不能改名或删除。目录一开始是一个空的 Git 仓库；Avibe 在伙伴 Session 的每个
+Turn 之前（他人的修改）和之后（伙伴自己的修改）自动提交，从不压缩历史。
+
+每个命令输出一个 `bot` 对象，包含 `handle`、`display_name`、`avatar`、`role`、
+`agent_name`、`session_id`、`position`、`builtin` 和 `directory`（`list` 输出
+`bots`，`remove` 输出 `bot_removed`）。
 
 ### `vibe watch`
 

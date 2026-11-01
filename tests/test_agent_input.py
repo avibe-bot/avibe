@@ -82,20 +82,29 @@ _HARNESS_SOURCES = [
     pytest.param("hook", None, None, "hook send run-1", id="released-hook-send"),
     pytest.param("webhook", "hook-9", None, "webhook hook-9", id="webhook"),
     pytest.param(
-        "agent_run", None, {"source_kind": "agent", "source_actor": "ses_caller"},
-        "agent run run-1 from #ses_caller", id="agent-run",
+        "agent_run", None, {"source_kind": "agent", "source_actor": "sescaller01"},
+        "agent run run-1 from #sescaller01", id="agent-run",
+    ),
+    pytest.param(
+        "agent_run", None, {"source_kind": "agent", "source_actor": "ses_main"},
+        "agent run run-1 from @<bot:main>", id="agent-run-from-a-bot",
+    ),
+    pytest.param(
+        "agent_run", None,
+        {"source_kind": "callback", "source_actor": "run-0", "parent_run_id": "run-0", "source_session_id": "ses_cso"},
+        "callback of run run-0 from @<bot:cso>", id="callback-from-a-bot",
     ),
     pytest.param("agent_run", None, {"source_kind": "cli"}, "agent run run-1 from the CLI", id="cli-run"),
     pytest.param(
         "agent_run", None,
-        {"source_kind": "callback", "source_actor": "run-0", "parent_run_id": "run-0", "source_session_id": "ses_child"},
-        "callback of run run-0 from #ses_child", id="callback",
+        {"source_kind": "callback", "source_actor": "run-0", "parent_run_id": "run-0", "source_session_id": "seschild01"},
+        "callback of run run-0 from #seschild01", id="callback",
     ),
     pytest.param(
         "agent_run", None,
         {"source_kind": "callback", "source_actor": "run-0:terminal:failed", "parent_run_id": "run-0",
-         "source_session_id": "ses_child"},
-        "callback of run run-0 from #ses_child", id="terminal-callback",
+         "source_session_id": "seschild01"},
+        "callback of run run-0 from #seschild01", id="terminal-callback",
     ),
     pytest.param(
         "agent_run", None, {"source_kind": "callback", "source_actor": "vault:vrq_1"},
@@ -143,7 +152,7 @@ def test_a_persons_message_is_never_tagged(tmp_path, include_time):
 
     # Even a context that carries Harness provenance: what decides is who typed the input.
     context = _scheduler_context(
-        tmp_path, trigger_kind="agent_run", metadata={"source_kind": "agent", "source_actor": "ses_caller"}
+        tmp_path, trigger_kind="agent_run", metadata={"source_kind": "agent", "source_actor": "sescaller01"}
     )
     context.user_id = "U1"
     handler = SimpleNamespace(_input_user_name=AsyncMock(return_value="Alex"))

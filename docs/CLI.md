@@ -717,6 +717,7 @@ vibe agent run --no-callback --agent release-reviewer --message 'Review the late
 vibe agent run --sync --agent release-reviewer --message 'Review the latest deployment result and print it here.'
 vibe agent run --no-callback --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
 vibe agent run --session-id sesk8m4q2p7x --queue --message 'Do this after the current turn.'
+vibe agent run --no-callback --bot cso --message 'Review the new login flow for security risks.'
 vibe agent run --no-callback --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
 vibe agent run --session-id sesworker123 --callback-session-id sescaller456 --message 'Run the delegated investigation.'
 vibe agent run --no-callback --scope-id slack::channel::C999 --visible --agent release-reviewer --message 'Post the deployment summary.'
@@ -736,6 +737,14 @@ Turn instead. `vibe session send-now` is the content-free P1 operation: it
 promotes the exact existing FIFO head without adding a message. A stale head is
 refused rather than replaced by the next queued item, and neither command calls
 Stop.
+
+`--bot <handle>` messages a Bot's permanent Session (see `vibe bot`). The run is
+queued behind the Bot's earlier messages, as with `--queue`, so a Bot handles
+one message at a time. A Bot keeps one conversation on its own model:
+`--agent`, `--session-id`, the fork flags, `--model`, `--reasoning-effort`,
+the placement flags, `--cwd`, and `--close-after` are refused with `--bot`.
+`--agent` keeps its meaning for an Agent that is also a Bot: it starts a new
+Session of that Agent, never a message to the Bot.
 
 Use `--fork-session <session-id>` when a new Agent Session should branch from
 an existing Session's native backend context instead of starting blank. The new
@@ -774,6 +783,51 @@ Use `--close-after` for a new or forked Session when the Agent runtime should be
 released after the Run settles while the Session, transcript, and Run record stay
 available. It is rejected for `--session-id`, which targets an existing Session
 with its own runtime lifecycle.
+
+### `vibe bot`
+
+Manage Bots: standing members with one permanent Session and a directory of
+their own. A Bot is an enabled Vibey Agent; its role is the Agent's
+description. Bots belong to the instance Owner.
+
+```bash
+vibe bot list
+vibe bot show main
+vibe bot create --name 'Chief Security Officer' --handle cso --role 'Reviews security risks.'
+vibe bot set reviewer --name 'Reviewer'
+vibe bot update cso --name 'Security' --emoji '🛡️' --hue 210
+vibe bot update cso --position 1
+vibe bot remove cso
+```
+
+- `list` prints every Bot, the main Bot first. `show` prints one by handle.
+- `create` makes a Vibey Agent named after the handle and makes it a Bot.
+  `--handle` is lowercase ASCII, 2 to 24 letters, digits, or hyphens, starting
+  with a letter and not ending with a hyphen; `main`, `memory`, and `ops` are
+  reserved. Without `--handle`
+  the handle comes from the name: an ASCII name is normalized, any other name
+  is transliterated, and a taken handle gets `-2`. Without `--model` the Bot
+  follows the main Bot's model and effort.
+- `set` makes an existing enabled Vibey Agent a Bot. Its handle is its Agent
+  name; an Agent that was a Bot before gets its old handle, Session, and
+  directory back. The built-in `vibey` Agent and the default Agent cannot be
+  set; a Bot's Agent cannot become the default Agent either.
+- `update` changes the display name, the emoji avatar (`--emoji` with `--hue`,
+  or `--clear-avatar`), or the position among the other Bots. Change the role,
+  model, or instructions with `vibe agent update`.
+- `remove` drops the Bot role and keeps the Agent, the Session, and the
+  directory. The main Bot cannot be removed.
+
+The handle never changes once the Bot exists: the Bot's Session is
+`ses_<handle>` and its directory is `~/.avibe/bots/<handle>/`. The main Bot's
+Session is `ses_main`. While an Agent is a Bot it stays enabled and cannot be
+renamed or deleted. The directory starts as an empty Git repository; Avibe
+commits it before each Turn of the Bot's Session (changes by others) and after
+it (the Bot's own changes), and never squashes its history.
+
+Each command prints a `bot` object with `handle`, `display_name`, `avatar`,
+`role`, `agent_name`, `session_id`, `position`, `builtin`, and `directory`
+(`list` prints `bots`; `remove` prints `bot_removed`).
 
 ### `vibe watch`
 

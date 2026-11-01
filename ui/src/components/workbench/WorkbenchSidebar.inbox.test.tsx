@@ -63,6 +63,14 @@ vi.mock('../../context/WindowManagerContext', () => ({ useWindowManager: () => (
 vi.mock('../../context/useUnsavedChangesActionGuard', () => ({
   useUnsavedChangesActionGuard: () => (run: () => void) => run,
 }));
+// The dialog's own flow is covered elsewhere; here only its completion matters.
+vi.mock('./NewProjectDialog', () => ({
+  NewProjectDialog: ({ onCreated }: { onCreated: (project: { id: string }) => void }) => (
+    <button type="button" onClick={() => onCreated({ id: 'proj_new' })}>
+      finish new project
+    </button>
+  ),
+}));
 
 import en from '../../i18n/en.json';
 import { WorkbenchSidebar } from './WorkbenchSidebar';
@@ -87,8 +95,11 @@ const sidebarElement = (active = true, onOpenSearch?: () => void) => (
 const renderSidebar = (active = true, onOpenSearch?: () => void) => render(sidebarElement(active, onOpenSearch));
 
 const inboxIcon = () => screen.getByRole('link', { name: en.workbench.nav.inbox }).querySelector('svg')!;
+const projectsToggle = () => screen.getByRole('button', { name: en.workbench.projectsLabel });
 
 beforeEach(() => {
+  // Section open state is remembered per browser; every case starts from a fresh one.
+  window.localStorage.clear();
   inbox.totalUnread = 0;
   inbox.unreadSessions = 0;
   inbox.inboxSessions = [];
@@ -144,9 +155,9 @@ describe('Workbench sidebar inbox counter', () => {
     const onOpenSearch = vi.fn();
     const { rerender } = renderSidebar(true, onOpenSearch);
 
-    const header = screen.getByText(en.workbench.projectsLabel).parentElement!;
-    expect(within(header).getAllByRole('button').map((button) => button.getAttribute('aria-label')))
-      .toEqual([en.workbench.search.entry, en.workbench.addProject]);
+    const header = projectsToggle().parentElement!;
+    expect(within(header).getAllByRole('button').map((button) => button.getAttribute('aria-label') ?? button.textContent))
+      .toEqual([en.workbench.projectsLabel, en.workbench.search.entry, en.workbench.addProject]);
 
     // Search is not a project-creation affordance: withholding creation must
     // take the add control away and leave the palette entry exactly where it is.
@@ -239,5 +250,56 @@ describe('Workbench sidebar capability navigation', () => {
 
     expect(screen.queryByRole('button', { name: en.nav.capabilities })).toBeNull();
     expect(screen.queryByRole('navigation')).toBeNull();
+  });
+});
+
+describe('Workbench sidebar projects section', () => {
+  it('collapses the project list and keeps Search and New project in its header', async () => {
+    const user = userEvent.setup();
+    const onOpenSearch = vi.fn();
+    const { container } = renderSidebar(true, onOpenSearch);
+
+    expect(projectsToggle().getAttribute('aria-expanded')).toBe('true');
+    expect(container.querySelector(`#${projectsToggle().getAttribute('aria-controls')}`)).toBeTruthy();
+    expect(screen.getByText(en.workbench.projectsEmpty)).toBeTruthy();
+
+    await user.click(projectsToggle());
+    expect(projectsToggle().getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByText(en.workbench.projectsEmpty)).toBeNull();
+    expect(screen.getByRole('button', { name: en.workbench.addProject })).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: en.workbench.search.entry }));
+    expect(onOpenSearch).toHaveBeenCalledOnce();
+
+    // The chevron closing the row is a second pointer target for the same toggle.
+    const chevron = projectsToggle().parentElement!.lastElementChild as HTMLElement;
+    await user.click(chevron);
+    expect(projectsToggle().getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByText(en.workbench.projectsEmpty)).toBeTruthy();
+  });
+
+  it('remembers both collapsed groups across a reload', async () => {
+    const user = userEvent.setup();
+    const first = renderSidebar();
+    await user.click(screen.getByRole('button', { name: en.nav.capabilities }));
+    await user.click(projectsToggle());
+    first.unmount();
+
+    renderSidebar();
+    expect(screen.getByRole('button', { name: en.nav.capabilities }).getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByRole('link', { name: en.workbench.nav.agents })).toBeNull();
+    expect(projectsToggle().getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByText(en.workbench.projectsEmpty)).toBeNull();
+  });
+
+  it('opens the list when a project is created while it is collapsed', async () => {
+    const user = userEvent.setup();
+    renderSidebar();
+    await user.click(projectsToggle());
+
+    await user.click(screen.getByRole('button', { name: en.workbench.addProject }));
+    await user.click(screen.getByRole('button', { name: 'finish new project' }));
+
+    expect(projectsToggle().getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByText(en.workbench.projectsEmpty)).toBeTruthy();
   });
 });

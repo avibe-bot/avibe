@@ -129,6 +129,7 @@ from modules.agents.catalog import (
 from modules.agents.subagent_router import list_codex_subagents
 from core.vibe_agents import (
     AgentAlwaysEnabledError,
+    AgentBotLockedError,
     AgentArchivedEditError,
     AgentArchiveError,
     AgentNameValidationError,
@@ -2100,6 +2101,8 @@ def _vibe_agent_payload(agent, *, brief: bool = False, remote_safe: bool = False
             "archived_at": payload["archived_at"],
             "source": payload["source"],
             "updated_at": payload["updated_at"],
+            # The Bot this Agent is, if any (``docs/plans/bots.md`` D1): handle and display name.
+            "bot": payload["bot"],
         }
         if remote_safe:
             projected.update(
@@ -2352,7 +2355,7 @@ def update_vibe_agent(name: str, payload: dict, *, user_context: Any = None) -> 
             )
         except AgentNameValidationError as exc:
             return _agent_name_validation_error(exc)
-        except (AgentArchivedEditError, AgentAlwaysEnabledError) as exc:
+        except (AgentArchivedEditError, AgentAlwaysEnabledError, AgentBotLockedError) as exc:
             return _agent_lifecycle_error(exc)
         except AgentReferenceRewriteError as exc:
             return _agent_reference_rewrite_error(exc)
@@ -2375,7 +2378,7 @@ def _agent_name_validation_error(exc: AgentNameValidationError) -> dict:
     }
 
 
-def _agent_lifecycle_error(exc: AgentArchivedEditError | AgentAlwaysEnabledError) -> dict:
+def _agent_lifecycle_error(exc: AgentArchivedEditError | AgentAlwaysEnabledError | AgentBotLockedError) -> dict:
     try:
         lang = V2Config.load().language
     except Exception:
@@ -2446,7 +2449,10 @@ def set_default_vibe_agent(name: str, *, user_context: Any = None) -> dict:
         agent = store.require_manageable(name, user_context=context)
         if not agent.enabled:
             raise ValueError(f"agent '{agent.name}' is disabled")
-        store.set_default_agent_name(name, user_context=context)
+        try:
+            store.set_default_agent_name(name, user_context=context)
+        except AgentBotLockedError as exc:
+            return _agent_lifecycle_error(exc)
         return {"ok": True, "default_agent_name": agent.name, "agent": _vibe_agent_payload(agent, brief=True)}
     finally:
         store.close()

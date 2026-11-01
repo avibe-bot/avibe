@@ -5139,6 +5139,13 @@
     },
     "retryFailed": "未能提交重试，可以再次点击。",
     "collapse": "收起",
+    "harnessGroup": {
+      "count": "{{count}} 条 Harness 消息",
+      "latest": "最新",
+      "sourceCount": "· {{label}} {{n}}",
+      "expand": "展开",
+      "collapseCount": "收起这 {{count}} 条"
+    },
     "turnInProgress": "当前回合还在进行中，请等待回复后再发送。",
     "stopFailed": "没能联系到 Agent 来停止，它可能还在运行。",
     "source": {

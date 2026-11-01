@@ -953,14 +953,22 @@ def _badge_count_for_user_key(
     """Return the unread count visible to one Push subscription owner."""
 
     if user_key == "local":
-        return messages_service.total_unread(conn, platform="avibe")
+        from core.bots import hidden_bot_session_ids
+
+        return messages_service.total_unread(
+            conn, platform="avibe", hidden_session_ids=hidden_bot_session_ids(conn, None)
+        )
     context = contexts.get(user_key)
     if context is None:
         # Legacy remote messages predate persisted authorization claims. Keep
         # delivering eligible content, but never attach a machine-global count.
         return 0
     if context.can_manage_instance:
-        return messages_service.total_unread(conn, platform="avibe")
+        from core.bots import hidden_bot_session_ids
+
+        return messages_service.total_unread(
+            conn, platform="avibe", hidden_session_ids=hidden_bot_session_ids(conn, context)
+        )
 
     from storage import project_access_service
 

@@ -433,6 +433,7 @@ def search_messages(
     limit: int = 50,
     include_archived: bool = False,
     scope_ids: Optional[Iterable[str]] = None,
+    hidden_session_ids: Optional[Iterable[str]] = None,
 ) -> dict[str, Any]:
     """Global message-content search, grouped by session.
 
@@ -525,6 +526,9 @@ def search_messages(
     )
     if allowed_scope_ids is not None:
         stmt = stmt.where(agent_sessions.c.scope_id.in_(allowed_scope_ids))
+    hidden = _hidden_ids(hidden_session_ids)
+    if hidden:
+        stmt = stmt.where(messages.c.session_id.not_in(hidden))
 
     rows = conn.execute(stmt).mappings().all()
 
@@ -1149,11 +1153,16 @@ _DETACHED_COMPLETION_TYPES = types_with("detachedCompletion")
 _UNREAD_TYPES = types_with("unread")
 
 
+def _hidden_ids(session_ids: Optional[Iterable[str]]) -> list[str]:
+    return sorted({str(session_id) for session_id in session_ids or () if session_id})
+
+
 def unread_counts(
     conn: Connection,
     *,
     platform: Optional[str] = None,
     scope_ids: Optional[Iterable[str]] = None,
+    hidden_session_ids: Optional[Iterable[str]] = None,
 ) -> dict[str, int]:
     """Return ``{scope_id: count}`` for unread agent ``result`` messages.
 
@@ -1202,6 +1211,9 @@ def unread_counts(
         query = query.where(messages.c.platform == platform)
     if allowed_scope_ids is not None:
         query = query.where(messages.c.scope_id.in_(allowed_scope_ids))
+    hidden = _hidden_ids(hidden_session_ids)
+    if hidden:
+        query = query.where(or_(messages.c.session_id.is_(None), messages.c.session_id.not_in(hidden)))
     return {scope: int(count) for scope, count in conn.execute(query).all()}
 
 
@@ -1210,8 +1222,11 @@ def unread_counts_by_session(
     *,
     platform: Optional[str] = None,
     scope_ids: Optional[Iterable[str]] = None,
+    hidden_session_ids: Optional[Iterable[str]] = None,
 ) -> dict[str, int]:
     """Return ``{session_id: count}`` for unread agent ``result`` messages.
+
+    ``hidden_session_ids`` are Sessions this reader may not see (another member's Bots, a removed Bot's Session).
 
     Per-session granularity for the sidebar: a project can hold several
     sessions, so a scope-level count (see ``unread_counts``) would stamp the
@@ -1257,6 +1272,9 @@ def unread_counts_by_session(
                 )
             )
         )
+    hidden = _hidden_ids(hidden_session_ids)
+    if hidden:
+        query = query.where(messages.c.session_id.not_in(hidden))
     return {session_id: int(count) for session_id, count in conn.execute(query).all()}
 
 
@@ -1265,6 +1283,7 @@ def total_unread(
     *,
     platform: Optional[str] = None,
     scope_ids: Optional[Iterable[str]] = None,
+    hidden_session_ids: Optional[Iterable[str]] = None,
 ) -> int:
     """Global unread agent-``result`` count across all non-archived sessions.
 
@@ -1280,6 +1299,7 @@ def total_unread(
             conn,
             platform=platform,
             scope_ids=scope_ids,
+            hidden_session_ids=hidden_session_ids,
         ).values()
     )
 
@@ -1293,8 +1313,12 @@ def list_inbox_sessions(
     before: Optional[str] = None,
     only_session: Optional[str] = None,
     scope_ids: Optional[Iterable[str]] = None,
+    hidden_session_ids: Optional[Iterable[str]] = None,
 ) -> dict[str, Any]:
     """Per-session ("Slack-like") inbox feed.
+
+    Bot Sessions have no scope and belong in the feed like any other conversation; ``hidden_session_ids`` names
+    the ones this reader may not see (``core.bots.hidden_bot_session_ids``).
 
     One row per session that has at least one agent reply. Sorted by the
     session's most recent message of *any* author (the activity clock),
@@ -1489,6 +1513,9 @@ def list_inbox_sessions(
         session_rows = session_rows.where(agent_sessions.c.id == only_session)
     if allowed_scope_ids is not None:
         session_rows = session_rows.where(agent_sessions.c.scope_id.in_(allowed_scope_ids))
+    hidden = _hidden_ids(hidden_session_ids)
+    if hidden:
+        session_rows = session_rows.where(agent_sessions.c.id.not_in(hidden))
 
     session_rows_sub = session_rows.subquery()
     query = select(session_rows_sub).where(session_rows_sub.c.preview_id.is_not(None))

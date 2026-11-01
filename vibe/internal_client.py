@@ -857,6 +857,37 @@ async def test_backend_auth(
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
 
 
+async def propose_bot_handle(
+    display_name: str,
+    role: str = "",
+    *,
+    socket_path: Optional[Path] = None,
+    timeout: float = 6.0,
+) -> Optional[str]:
+    """Ask the controller for the main Bot's model's handle proposal (``core.bot_handles``); None without one."""
+
+    endpoint = await _resolve_endpoint_async(socket_path)
+    transport = _async_transport(endpoint)
+    try:
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url=endpoint.base_url,
+            headers=endpoint.headers,
+            timeout=httpx.Timeout(timeout, connect=2.0),
+        ) as client:
+            resp = await client.post(
+                "/internal/bots/handle-suggestion", json={"display_name": display_name, "role": role}
+            )
+            _validate_response(resp, endpoint)
+    except _SOCKET_CONNECT_ERRORS as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
+    except httpx.TimeoutException as exc:
+        raise InternalServerTimeout(str(exc)) from exc
+    body = resp.json() if resp.content else {}
+    handle = body.get("handle") if isinstance(body, dict) and resp.status_code == 200 else None
+    return handle if isinstance(handle, str) and handle else None
+
+
 async def notify_vault_request_created(
     request_payload: dict[str, Any],
     *,

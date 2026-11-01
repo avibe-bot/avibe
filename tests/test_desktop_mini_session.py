@@ -58,17 +58,28 @@ def _ensure(principal: str, agent_name: str):
         )
 
 
-def _ensure_main(principal: str, agent_name: str):
+def _ensure_main(principal: str):
+    """The main Bot's ``ses_main``, through the one path every surface uses (``core.bots``)."""
+    from core.bots import BotService
     from storage.db import create_sqlite_engine
-    from storage.workbench_sessions_service import ensure_main_session
+    from storage.workbench_sessions_service import MAIN_SESSION_ID, get_session
 
-    with create_sqlite_engine().begin() as conn:
-        return ensure_main_session(
-            conn,
-            agent_name=agent_name,
-            title="Vibey",
-            authorization_context=_context(principal),
-        )
+    with BotService() as service:
+        service.ensure_main_bot(authorization_context=_context(principal))
+    with create_sqlite_engine().connect() as conn:
+        return get_session(conn, MAIN_SESSION_ID, authorization_context=_context(principal))
+
+
+def _main_agent():
+    from core.vibe_agents import VibeAgentStore
+
+    store = VibeAgentStore()
+    try:
+        agent = store.get_main_bot_agent()
+    finally:
+        store.close()
+    assert agent is not None
+    return agent
 
 
 def _touch(project_id: str, when: str) -> None:
@@ -158,24 +169,25 @@ def test_main_session_is_created_reused_and_recreated_without_a_project(state):
     from storage.models import agent_sessions
     from storage.workbench_sessions_service import MAIN_SESSION_ID
 
-    tmp_path, vibey = state
-    first = _ensure_main("local", vibey.name)
+    tmp_path, _vibey = state
+    first = _ensure_main("local")
+    main = _main_agent()
     assert first["id"] == MAIN_SESSION_ID
     assert first["scope_id"] is None
-    assert first["agent_name"] == vibey.name
+    assert (first["agent_id"], first["agent_name"]) == (main.id, main.name)
     assert first["agent_backend"] == "vibey"
     assert first["metadata"]["kind"] == "main"
-    expected_workdir = str(paths.get_vibe_remote_dir() / "main" / "owner")
+    expected_workdir = str(paths.get_vibe_remote_dir() / "bots" / "main")
     assert first["workdir"] == expected_workdir
-    assert (tmp_path / "main" / "owner").is_dir()
-    assert _ensure_main("local", vibey.name)["id"] == first["id"]
-    remote = _ensure_main("remote:3c6111ab", vibey.name)
+    assert (tmp_path / "bots" / "main" / ".git").is_dir()
+    assert _ensure_main("local")["id"] == first["id"]
+    remote = _ensure_main("remote:3c6111ab")
     assert remote["id"] == first["id"]
     assert remote["workdir"] == expected_workdir
 
     with create_sqlite_engine().begin() as conn:
         conn.execute(delete(agent_sessions).where(agent_sessions.c.id == MAIN_SESSION_ID))
-    rebuilt = _ensure_main("local", vibey.name)
+    rebuilt = _ensure_main("local")
     assert rebuilt["id"] == MAIN_SESSION_ID
     assert rebuilt["workdir"] == first["workdir"]
 
@@ -185,7 +197,6 @@ def test_main_session_is_created_reused_and_recreated_without_a_project(state):
     [
         ("scope_id", "avibe::project::proj_invalid"),
         ("agent_id", "agent_invalid"),
-        ("agent_name", "agent_invalid"),
         ("agent_backend", "claude"),
         ("agent_variant", "claude"),
         ("session_anchor", "ses_other"),
@@ -201,8 +212,8 @@ def test_existing_main_session_must_keep_all_built_in_invariants(state, field, v
     from storage.models import agent_sessions
     from storage.workbench_sessions_service import MainSessionInvariantError
 
-    tmp_path, vibey = state
-    first = _ensure_main("local", vibey.name)
+    tmp_path, _vibey = state
+    first = _ensure_main("local")
     if field == "scope_id":
         value = _project(tmp_path, "invariant-scope")["scope_id"]
     with create_sqlite_engine().begin() as conn:
@@ -213,8 +224,66 @@ def test_existing_main_session_must_keep_all_built_in_invariants(state, field, v
         )
 
     with pytest.raises(MainSessionInvariantError) as exc:
-        _ensure_main("local", vibey.name)
+        _ensure_main("local")
     assert exc.value.code == "main_session_invalid"
+
+
+def test_the_released_main_session_shape_is_rewritten_in_place(state):
+    """``bots.md`` D9: ``ses_main`` on the built-in Vibey Agent in ``~/.avibe/main/owner`` moves to the main Bot.
+
+    The row keeps its id, history, and settings; only its Agent and workdir change. No data moves with it.
+    """
+    from sqlalchemy import select
+
+    from config import paths
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions, messages
+    from storage import messages_service
+    from storage.workbench_sessions_service import MAIN_SESSION_ID, create_session
+
+    tmp_path, vibey = state
+    legacy_workdir = paths.get_vibe_remote_dir() / "main" / "owner"
+    legacy_workdir.mkdir(parents=True)
+    (legacy_workdir / "notes.md").write_text("kept where it is\n")
+    with create_sqlite_engine().begin() as conn:
+        create_session(
+            conn,
+            scope_id=None,
+            session_id=MAIN_SESSION_ID,
+            agent_backend="",
+            agent_name=vibey.name,
+            title="Vibey · Desktop mini",
+            model="legacy-model",
+            workdir=str(legacy_workdir),
+            metadata={"kind": "main"},
+            workdir_prepared=True,
+        )
+        messages_service.append(
+            conn, scope_id=None, session_id=MAIN_SESSION_ID, platform="avibe", author="user", text="hello"
+        )
+
+    session = _ensure_main("local")
+    main = _main_agent()
+    assert (session["agent_id"], session["agent_name"]) == (main.id, main.name)
+    assert session["workdir"] == str(tmp_path / "bots" / "main")
+    assert (session["title"], session["model"]) == ("Vibey · Desktop mini", "legacy-model")
+    with create_sqlite_engine().connect() as conn:
+        assert conn.execute(select(messages.c.content_text).where(messages.c.session_id == MAIN_SESSION_ID)).scalars().all() == ["hello"]
+        assert conn.execute(select(agent_sessions.c.id).where(agent_sessions.c.id == MAIN_SESSION_ID)).scalar_one()
+    assert (legacy_workdir / "notes.md").read_text() == "kept where it is\n"
+    assert not (tmp_path / "bots" / "main" / "notes.md").exists()
+
+
+def test_a_renamed_agent_name_on_the_main_session_follows_the_agent(state):
+    from sqlalchemy import update
+
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions
+
+    first = _ensure_main("local")
+    with create_sqlite_engine().begin() as conn:
+        conn.execute(update(agent_sessions).where(agent_sessions.c.id == first["id"]).values(agent_name="stale"))
+    assert _ensure_main("local")["agent_name"] == _main_agent().name
 
 
 def test_archived_main_session_is_terminal_and_cannot_be_reopened(state):
@@ -225,8 +294,7 @@ def test_archived_main_session_is_terminal_and_cannot_be_reopened(state):
     from storage.models import agent_sessions
     from storage.workbench_sessions_service import MainSessionArchivedError
 
-    _tmp_path, vibey = state
-    first = _ensure_main("local", vibey.name)
+    first = _ensure_main("local")
     with create_sqlite_engine().begin() as conn:
         with pytest.raises(workbench_sessions_service.ReservedSessionError):
             workbench_sessions_service.update_session(
@@ -243,7 +311,7 @@ def test_archived_main_session_is_terminal_and_cannot_be_reopened(state):
         )
 
     with pytest.raises(MainSessionArchivedError):
-        _ensure_main("local", vibey.name)
+        _ensure_main("local")
     with create_sqlite_engine().connect() as conn:
         assert conn.execute(
             select(agent_sessions.c.status).where(agent_sessions.c.id == first["id"])
@@ -258,23 +326,24 @@ def test_archived_main_session_is_terminal_and_cannot_be_reopened(state):
             workbench_sessions_service.archive_session(conn, first["id"])
 
 
-def test_main_session_is_owner_only(state):
+@pytest.mark.parametrize("role", ["member", "editor"])
+def test_main_session_is_owner_only(state, role):
     from vibe.authorization import AuthorizationContext, InstanceAuthorizationError
     from storage.db import create_sqlite_engine
-    from storage.workbench_sessions_service import ensure_main_session
+    from storage.workbench_sessions_service import MAIN_SESSION_ID, ensure_main_session, get_session
 
-    _tmp_path, vibey = state
+    first = _ensure_main("local")
+    other = AuthorizationContext(instance_role=role, is_remote=True, subject="member")
     with create_sqlite_engine().begin() as conn:
         with pytest.raises(InstanceAuthorizationError):
             ensure_main_session(
                 conn,
-                agent_name=vibey.name,
-                authorization_context=AuthorizationContext(
-                    instance_role="editor",
-                    is_remote=True,
-                    subject="member",
-                ),
+                agent={"id": first["agent_id"], "name": first["agent_name"]},
+                authorization_context=other,
             )
+        # Bots are the Owner's (bots.md D1): no other member reads the Session either.
+        with pytest.raises(LookupError):
+            get_session(conn, MAIN_SESSION_ID, authorization_context=other)
 
 
 @pytest.mark.parametrize(
@@ -282,15 +351,13 @@ def test_main_session_is_owner_only(state):
     [
         ("model", "vibey-model"),
         ("reasoning_effort", "high"),
-        ("title", "Renamed main"),
         ("pinned", True),
     ],
 )
 def test_main_session_allows_user_settings_updates(state, field, value):
     from storage.workbench_sessions_service import MAIN_SESSION_ID
 
-    _tmp_path, vibey = state
-    _ensure_main("local", vibey.name)
+    _ensure_main("local")
     client = app.test_client()
     response = client.patch(
         f"/api/sessions/{MAIN_SESSION_ID}",
@@ -301,15 +368,16 @@ def test_main_session_allows_user_settings_updates(state, field, value):
     assert response.get_json()[field] == value
 
 
-def test_main_session_rejects_protected_patch_fields_with_403(state):
+@pytest.mark.parametrize("payload", [{"visibility": "background"}, {"title": "Renamed main"}])
+def test_main_session_rejects_protected_patch_fields_with_403(state, payload):
+    """Its title follows the main Bot's display name, so it is not a Session edit either."""
     from storage.workbench_sessions_service import MAIN_SESSION_ID
 
-    _tmp_path, vibey = state
-    _ensure_main("local", vibey.name)
+    _ensure_main("local")
     client = app.test_client()
     response = client.patch(
         f"/api/sessions/{MAIN_SESSION_ID}",
-        json={"visibility": "background"},
+        json=payload,
         headers=csrf_headers(client),
     )
     assert response.status_code == 403
@@ -319,7 +387,6 @@ def test_main_session_rejects_protected_patch_fields_with_403(state):
 def test_main_workdir_is_prepared_before_writer_lock(state, monkeypatch):
     from storage import workbench_sessions_service
 
-    _tmp_path, vibey = state
     lock_acquired = False
     original_reserve = workbench_sessions_service.reserve_write_lock
     original_mkdir = Path.mkdir
@@ -333,9 +400,13 @@ def test_main_workdir_is_prepared_before_writer_lock(state, monkeypatch):
         assert not lock_acquired
         return original_mkdir(path, *args, **kwargs)
 
-    monkeypatch.setattr(workbench_sessions_service, "reserve_write_lock", reserve)
-    monkeypatch.setattr(Path, "mkdir", mkdir)
-    _ensure_main("local", vibey.name)
+    from core.bots import BotService
+
+    with BotService() as service:
+        monkeypatch.setattr(workbench_sessions_service, "reserve_write_lock", reserve)
+        monkeypatch.setattr(Path, "mkdir", mkdir)
+        service.ensure_main_bot(authorization_context=_context("local"))
+    assert lock_acquired
 
 
 def test_main_route_returns_the_stable_session_and_can_chat_without_a_project(state):

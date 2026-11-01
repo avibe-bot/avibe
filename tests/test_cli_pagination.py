@@ -71,6 +71,7 @@ def test_all_collection_commands_share_bounded_pagination_contract() -> None:
     collection_commands = {
         ("agent", "list"),
         ("agent", "models"),
+        ("bot", "list"),
         ("runs", "list"),
         ("session", "list"),
         ("session", "queue", "list"),
