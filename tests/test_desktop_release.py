@@ -510,6 +510,108 @@ def test_manual_record_names_the_layers_it_produced(tmp_path, profile, layers):
     assert (work / "manual" / "Avibe_3.1.2-dev.1_aarch64-apple-darwin.SIGNATURE").read_text() == layers
 
 
+def test_macos_build_version_parser_requires_the_pinned_sdk_and_deployment_target(
+    tmp_path, monkeypatch
+):
+    binary = tmp_path / "avibe-desktop"
+    binary.write_bytes(b"Mach-O fixture")
+
+    def build_version(minos="11.0", sdk="26.5"):
+        return f"""
+Load command 9
+      cmd LC_BUILD_VERSION
+  cmdsize 32
+ platform 1
+    minos {minos}
+      sdk {sdk}
+   ntools 1
+"""
+
+    monkeypatch.setattr(
+        release.subprocess,
+        "check_output",
+        lambda command, **kwargs: build_version(),
+    )
+    release.verify_macos_build_versions(
+        [binary],
+        minimum_sdk="26.0",
+        deployment_target="11.0",
+    )
+
+    for output, message in (
+        (build_version(sdk="15.5"), "sdk >= 26.0"),
+        (build_version(minos="13.0"), "minos 11.0"),
+    ):
+        monkeypatch.setattr(
+            release.subprocess,
+            "check_output",
+            lambda command, _output=output, **kwargs: _output,
+        )
+        with pytest.raises(ValueError, match=message):
+            release.verify_macos_build_versions(
+                [binary],
+                minimum_sdk="26.0",
+                deployment_target="11.0",
+            )
+
+
+def test_macos_desktop_builds_pin_xcode_and_check_link_metadata():
+    package = workflow("desktop-package.yml")["jobs"]["package"]
+    package_macos = [
+        item
+        for item in package["strategy"]["matrix"]["include"]
+        if item["target"].endswith("apple-darwin")
+    ]
+    assert {(item["target"], item["os"]) for item in package_macos} == {
+        ("aarch64-apple-darwin", "macos-26"),
+        ("x86_64-apple-darwin", "macos-26-intel"),
+    }
+    for item in package_macos:
+        assert item["developer_dir"] == "/Applications/Xcode_26.6.app/Contents/Developer"
+        assert item["macosx_deployment_target"] == "11.0"
+        assert item["cache_scope"] == "macos11-"
+    assert package["env"]["DEVELOPER_DIR"] == "${{ matrix.developer_dir }}"
+    assert package["env"]["MACOSX_DEPLOYMENT_TARGET"] == "${{ matrix.macosx_deployment_target }}"
+    cache = next(
+        item for item in package["steps"] if item.get("name") == "Restore Rust build cache"
+    )
+    assert "steps.toolchain.outputs.apple" in cache["with"]["key"]
+    assert "matrix.cache_scope" in cache["with"]["key"]
+
+    shell = workflow("desktop-shell.yml")["jobs"]["shell"]
+    shell_macos = next(
+        item
+        for item in shell["strategy"]["matrix"]["include"]
+        if item["os"] == "macos-26"
+    )
+    assert shell_macos["developer_dir"] == "/Applications/Xcode_26.6.app/Contents/Developer"
+    assert shell_macos["macosx_deployment_target"] == "11.0"
+
+    for job in (package, shell):
+        report = next(
+            item
+            for item in job["steps"]
+            if item.get("name") == "Report pinned Apple toolchain"
+        )
+        assert "xcodebuild -version" in report["run"]
+        assert "xcrun --sdk macosx --show-sdk-version" in report["run"]
+        assert "SDKROOT=" in report["run"]
+        check = next(
+            item
+            for item in job["steps"]
+            if item.get("name") == "Verify macOS SDK and deployment target"
+        )
+        assert "verify-macos-build-version" in check["run"]
+        assert "--minimum-sdk 26.0" in check["run"]
+        assert "--deployment-target 11.0" in check["run"]
+    package_check = next(
+        item
+        for item in package["steps"]
+        if item.get("name") == "Verify macOS SDK and deployment target"
+    )
+    assert "Contents/Helpers/cua-driver" in package_check["run"]
+
+
 def test_workflow_signs_every_macos_layer_before_recording():
     package = workflow("desktop-package.yml")
     triggers = package.get("on", package.get(True))

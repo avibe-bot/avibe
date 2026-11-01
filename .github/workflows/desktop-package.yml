@@ -60,20 +60,34 @@ jobs:
       # Never a release: a release build always carries its tag.
       DESKTOP_CACHE_WARMUP: ${{ !inputs.release_tag && (github.event_name == 'push' || github.event_name == 'schedule') }}
       DESKTOP_VERSION: ${{ inputs.version || '0.0.0' }}
+      DEVELOPER_DIR: ${{ matrix.developer_dir }}
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macosx_deployment_target }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: aarch64-apple-darwin
-            os: macos-15
+            os: macos-26
+            developer_dir: /Applications/Xcode_26.6.app/Contents/Developer
+            macosx_deployment_target: "11.0"
+            cache_scope: macos11-
+            cache_separator: "-"
             bundle: app
             artifact_glob: desktop/target/release/bundle/dmg/*.dmg
           - target: x86_64-apple-darwin
-            os: macos-15-intel
+            os: macos-26-intel
+            developer_dir: /Applications/Xcode_26.6.app/Contents/Developer
+            macosx_deployment_target: "11.0"
+            cache_scope: macos11-
+            cache_separator: "-"
             bundle: app
             artifact_glob: desktop/target/release/bundle/dmg/*.dmg
           - target: x86_64-pc-windows-msvc
             os: windows-latest
+            developer_dir: ""
+            macosx_deployment_target: ""
+            cache_scope: ""
+            cache_separator: ""
             bundle: nsis
             artifact_glob: desktop/target/release/bundle/nsis/*setup.exe
     steps:
@@ -81,6 +95,23 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ inputs.source_sha || github.sha }}
+
+      - name: Report pinned Apple toolchain
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -d "$DEVELOPER_DIR" ] || {
+            echo "Pinned Xcode is missing: $DEVELOPER_DIR" >&2
+            exit 1
+          }
+          xcodebuild -version
+          [ "$(xcodebuild -version | sed -n '1p')" = "Xcode 26.6" ] || {
+            echo "Expected Xcode 26.6 from $DEVELOPER_DIR" >&2
+            exit 1
+          }
+          xcrun --sdk macosx --show-sdk-version
+          echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
@@ -125,8 +156,8 @@ jobs:
             desktop/target/release/build
             desktop/target/release/deps
             desktop/target/cua-driver-patched
-          key: ${{ runner.os }}-${{ matrix.target }}-desktop-package-${{ steps.toolchain.outputs.rustc }}-${{ hashFiles('desktop/Cargo.lock', 'desktop/cua-driver/sources.json') }}
-          restore-keys: ${{ env.DESKTOP_CACHE_WARMUP != 'true' && format('{0}-{1}-desktop-package-{2}-', runner.os, matrix.target, steps.toolchain.outputs.rustc) || '' }}
+          key: ${{ runner.os }}-${{ matrix.target }}-desktop-package-${{ steps.toolchain.outputs.rustc }}-${{ matrix.cache_scope }}${{ steps.toolchain.outputs.apple }}${{ matrix.cache_separator }}${{ hashFiles('desktop/Cargo.lock', 'desktop/cua-driver/sources.json') }}
+          restore-keys: ${{ env.DESKTOP_CACHE_WARMUP != 'true' && format('{0}-{1}-desktop-package-{2}-{3}{4}{5}', runner.os, matrix.target, steps.toolchain.outputs.rustc, matrix.cache_scope, steps.toolchain.outputs.apple, matrix.cache_separator) || '' }}
 
       - name: Build Workbench
         working-directory: ui
@@ -209,7 +240,7 @@ jobs:
           path: |
             desktop/src-tauri/binaries/cua-driver-${{ matrix.target }}
             desktop/src-tauri/binaries/cua-driver-${{ matrix.target }}.provenance.json
-          key: cua-driver-${{ matrix.target }}-${{ steps.toolchain.outputs.apple }}-${{ hashFiles('desktop/cua-driver/**', 'desktop/scripts/prepare-cua-driver.py') }}
+          key: cua-driver-${{ matrix.target }}-${{ steps.toolchain.outputs.apple }}-macos${{ matrix.macosx_deployment_target }}-${{ hashFiles('desktop/cua-driver/**', 'desktop/scripts/prepare-cua-driver.py') }}
 
       - name: Prepare pinned Cua Driver sidecar
         if: runner.os == 'macOS'
@@ -246,6 +277,20 @@ jobs:
           --bundles "${{ matrix.bundle }}"
           --features bundled-runtime
           --config tauri.release.conf.json
+
+      - name: Verify macOS SDK and deployment target
+        if: runner.os == 'macOS'
+        working-directory: desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="target/release/bundle/macos/Avibe.app"
+          executable="$(plutil -extract CFBundleExecutable raw -o - "$app/Contents/Info.plist")"
+          python ../scripts/desktop_release.py verify-macos-build-version \
+            --binary "$app/Contents/MacOS/$executable" \
+            --binary "$app/Contents/Helpers/cua-driver" \
+            --minimum-sdk 26.0 \
+            --deployment-target 11.0
 
       - name: Save Rust build cache
         if: ${{ !inputs.release_tag && steps.rust-cache.outputs.cache-hit != 'true' }}

@@ -76,6 +76,78 @@ def resolve(tag: str, source_sha: str | None = None) -> dict[str, str]:
             "package_version": package_version_from_release_tag(tag)}
 
 
+def _numeric_version(value: str) -> tuple[int, ...]:
+    if re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", value) is None:
+        raise ValueError(f"Invalid Mach-O build version: {value}")
+    return tuple(int(part) for part in value.split("."))
+
+
+def parse_macos_build_versions(output: str) -> list[tuple[str, str]]:
+    records: list[tuple[str, str]] = []
+    command: str | None = None
+    minos: str | None = None
+    sdk: str | None = None
+
+    def finish_command() -> None:
+        nonlocal command, minos, sdk
+        if command == "LC_BUILD_VERSION":
+            if minos is None or sdk is None:
+                raise ValueError("Incomplete LC_BUILD_VERSION command")
+            _numeric_version(minos)
+            _numeric_version(sdk)
+            records.append((minos, sdk))
+        command = None
+        minos = None
+        sdk = None
+
+    for line in output.splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and fields[:2] == ["Load", "command"]:
+            finish_command()
+        elif len(fields) == 2 and fields[0] == "cmd":
+            command = fields[1]
+        elif command == "LC_BUILD_VERSION" and len(fields) == 2:
+            if fields[0] == "minos":
+                minos = fields[1]
+            elif fields[0] == "sdk":
+                sdk = fields[1]
+    finish_command()
+    if not records:
+        raise ValueError("Mach-O binary has no LC_BUILD_VERSION command")
+    return records
+
+
+def verify_macos_build_versions(
+    binaries: list[Path],
+    *,
+    minimum_sdk: str,
+    deployment_target: str,
+) -> None:
+    minimum_sdk_value = _numeric_version(minimum_sdk)
+    deployment_target_value = _numeric_version(deployment_target)
+    for binary in binaries:
+        if binary.is_symlink() or not binary.is_file():
+            raise ValueError(f"Missing or invalid Mach-O binary: {binary}")
+        output = subprocess.check_output(
+            ["otool", "-l", str(binary)],
+            text=True,
+            stderr=subprocess.STDOUT,
+        )
+        records = parse_macos_build_versions(output)
+        for minos, sdk in records:
+            if _numeric_version(minos) != deployment_target_value:
+                raise ValueError(
+                    f"{binary}: expected LC_BUILD_VERSION minos "
+                    f"{deployment_target}, got {minos}"
+                )
+            if _numeric_version(sdk) < minimum_sdk_value:
+                raise ValueError(
+                    f"{binary}: expected LC_BUILD_VERSION sdk >= "
+                    f"{minimum_sdk}, got {sdk}"
+                )
+            print(f"{binary}: LC_BUILD_VERSION minos {minos}, sdk {sdk}")
+
+
 def prepare(
     version: str,
     tag: str,
@@ -459,6 +531,10 @@ def main() -> None:
     resolver = sub.add_parser("resolve")
     resolver.add_argument("--tag", required=True)
     resolver.add_argument("--output", type=Path, required=True)
+    build_version = sub.add_parser("verify-macos-build-version")
+    build_version.add_argument("--binary", action="append", type=Path, required=True)
+    build_version.add_argument("--minimum-sdk", default="26.0")
+    build_version.add_argument("--deployment-target", default="11.0")
     prep = sub.add_parser("prepare")
     prep.add_argument("--version", required=True)
     prep.add_argument("--tag", default="")
@@ -499,6 +575,12 @@ def main() -> None:
         # outputs the step already wrote (enabled/updater_enabled).
         with args["output"].open("a", encoding="utf-8") as stream:
             stream.write("".join(f"{key}={value}\n" for key, value in resolve(args["tag"]).items()))
+    elif command == "verify-macos-build-version":
+        verify_macos_build_versions(
+            args["binary"],
+            minimum_sdk=args["minimum_sdk"],
+            deployment_target=args["deployment_target"],
+        )
     elif command == "prepare":
         prepare(**args)
     elif command == "record":
