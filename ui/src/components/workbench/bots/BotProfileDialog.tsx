@@ -373,7 +373,8 @@ const BotProfileForm: React.FC<{ request: BotProfileRequest; onClose: () => void
 
   return (
     <DialogContent
-      className="max-w-[460px] gap-0 p-0 max-md:p-0"
+      // A name or role without a break opportunity still wraps rather than running past its box.
+      className="max-w-[460px] gap-0 p-0 [overflow-wrap:anywhere] max-md:p-0"
       closeLabel={t('common.close')}
       onOpenAutoFocus={(event) => {
         // The name field asks for focus itself; on the Agent tab the list leads.
@@ -509,7 +510,7 @@ const BotProfileForm: React.FC<{ request: BotProfileRequest; onClose: () => void
               type="button"
               aria-expanded={advancedOpen}
               onClick={() => setAdvancedOpen((open) => !open)}
-              className="flex items-center gap-1.5 self-start text-[12px] text-muted transition hover:text-foreground"
+              className="flex min-w-0 max-w-full items-center gap-1.5 self-start text-left text-[12px] text-muted transition hover:text-foreground"
             >
               <ChevronRight className={clsx('size-3.5 transition-transform', advancedOpen && 'rotate-90')} />
               {route
