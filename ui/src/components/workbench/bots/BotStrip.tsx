@@ -19,7 +19,7 @@ import clsx from 'clsx';
 import { useApi, type InboxSession } from '../../../context/ApiContext';
 import { useBots, type BotRuntimeStatus } from '../../../context/BotsContext';
 import { useUnsavedChangesActionGuard } from '../../../context/useUnsavedChangesActionGuard';
-import { botRole, botSessionPath, type Bot } from '@/lib/bots';
+import { botSessionPath, type Bot } from '@/lib/bots';
 import { formatRelativeTime } from '@/lib/relativeTime';
 import { Markdown } from '../../ui/markdown';
 import { Popover, PopoverAnchor, PopoverContent } from '../../ui/popover';
@@ -56,6 +56,10 @@ export const BotStrip: React.FC<{
 }> = ({ unreadBySession }) => {
   const { t } = useTranslation();
   const { enabled, bots, statusBySession, displayName, openProfile, moveBot } = useBots();
+  const navigate = useNavigate();
+  const location = useLocation();
+  // The Bot whose removal waits on the confirmation; the strip has one dialog for all its slots.
+  const [removing, setRemoving] = useState<Bot | null>(null);
   const [rowWidth, setRowWidth] = useState<number | null>(null);
   const [fade, setFade] = useState(false);
   const rowRef = useRef<HTMLDivElement | null>(null);
@@ -140,6 +144,7 @@ export const BotStrip: React.FC<{
     suppressHover: draggingHandle !== null,
     scrollEpoch,
     admitsHover,
+    onRemove: setRemoving,
   });
 
   const addSlot = (
@@ -218,6 +223,18 @@ export const BotStrip: React.FC<{
         </div>
         {!inline && <div className="shrink-0 pt-1.5">{addSlot}</div>}
       </div>
+      {removing && (
+        <RemoveBotDialog
+          bot={removing}
+          open
+          onOpenChange={(open) => {
+            if (!open) setRemoving(null);
+          }}
+          onRemoved={() => {
+            if (location.pathname === botSessionPath(removing)) navigate('/');
+          }}
+        />
+      )}
     </section>
   );
 };
@@ -241,6 +258,8 @@ type BotSlotProps = {
   scrollEpoch: number;
   /** False for an enter that only a scroll caused, with the pointer still where it was. */
   admitsHover: (event: React.MouseEvent) => boolean;
+  /** Asks to remove this Bot: the strip confirms first (ui/design: agents/bots-redesign/remove-bot). */
+  onRemove: (bot: Bot) => void;
 };
 
 type SlotDrag = Pick<ReturnType<typeof useSortable>, 'attributes' | 'listeners' | 'setNodeRef' | 'transform' | 'transition' | 'isDragging'>;
@@ -251,7 +270,7 @@ const SortableBotSlot: React.FC<BotSlotProps & { sortable: boolean }> = ({ sorta
   return <BotSlot {...props} drag={sortable ? drag : undefined} />;
 };
 
-const BotSlot: React.FC<BotSlotProps & { drag?: SlotDrag }> = ({ bot, name, unread, status, suppressHover, scrollEpoch, admitsHover, drag }) => {
+const BotSlot: React.FC<BotSlotProps & { drag?: SlotDrag }> = ({ bot, name, unread, status, suppressHover, scrollEpoch, admitsHover, onRemove, drag }) => {
   const { t } = useTranslation();
   const api = useApi();
   const navigate = useNavigate();
@@ -259,7 +278,6 @@ const BotSlot: React.FC<BotSlotProps & { drag?: SlotDrag }> = ({ bot, name, unre
   const { openProfile } = useBots();
   const authorizeRouteAction = useUnsavedChangesActionGuard();
   const path = botSessionPath(bot);
-  const role = botRole(bot, t('bots.mainRole'));
   const selected = location.pathname === path;
   const running = status === 'running';
   // A card belongs to the scroll epoch it opened in, so a scroll of the strip
@@ -342,172 +360,159 @@ const BotSlot: React.FC<BotSlotProps & { drag?: SlotDrag }> = ({ bot, name, unre
     authorization.runNavigation(() => navigate(path));
   };
 
-  // Removing asks first, as on the Agents page (ui/design: agents/bots-redesign/remove-bot).
-  const [removing, setRemoving] = useState(false);
-
   const label = unread > 0 ? t('bots.slotLabelUnread', { name, count: unread }) : name;
   const showCard = hoverOpen && !menuOpen && !isDragging && !suppressHover;
   return (
-    <>
-      <Popover
-        open={showCard || menuOpen}
-        onOpenChange={(next) => {
-          if (!next) {
-            setHoverOpen(false);
-            setMenuOpen(false);
-          }
-        }}
-      >
-        <PopoverAnchor asChild>
-          <div
-            ref={setSlotNode}
-            data-bot-handle={bot.handle}
-            className={clsx('flex w-[50px] shrink-0 flex-col items-center gap-1', isDragging && 'z-10 opacity-80')}
-            style={drag ? { transform: CSS.Translate.toString(drag.transform), transition: drag.transition } : undefined}
-            onMouseEnter={queueOpen}
-            onMouseLeave={queueClose}
-          >
-            <button
-              type="button"
-              {...(drag?.attributes ?? {})}
-              {...(drag?.listeners ?? {})}
-              onClick={open}
-              onContextMenu={(event) => {
-                event.preventDefault();
-                clearTimers();
-                setHoverOpen(false);
-                setMenuOpen(true);
-              }}
-              aria-label={label}
-              aria-current={selected ? 'page' : undefined}
-              className={clsx(
-                'relative rounded-full p-[2px] transition-shadow focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/60',
-                selected ? 'shadow-[0_0_0_2px_var(--mint)]' : 'hover:shadow-[0_0_0_2px_var(--border-strong)]',
-                drag && 'touch-none',
-              )}
-            >
-              <BotAvatar avatar={bot.avatar} name={name} size={40} />
-              {unread > 0 && (
-                <span className="absolute -right-1.5 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-cyan px-1 font-mono text-[9px] font-bold text-accent-foreground shadow-glow-xs-cyan">
-                  {unreadLabel(unread)}
-                </span>
-              )}
-              {running && RUNNING_DOT}
-            </button>
-            <span
-              className={clsx(
-                'w-full truncate text-center text-[11px] leading-tight',
-                selected ? 'font-semibold text-foreground' : 'text-muted',
-              )}
-              title={name}
-            >
-              {name}
-            </span>
-          </div>
-        </PopoverAnchor>
-        {menuOpen ? (
-          <PopoverContent
-            side="bottom"
-            align="start"
-            sideOffset={6}
-            role="menu"
-            aria-label={t('bots.menu.label', { name })}
-            data-settings-interaction-owner="true"
-            onOpenAutoFocus={(event) => event.preventDefault()}
-            className="flex w-[208px] flex-col gap-0.5 rounded-2xl border-border-strong bg-surface-2 p-1.5 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.6)]"
-          >
-            <button
-              type="button"
-              role="menuitem"
-              onClick={() => {
-                setMenuOpen(false);
-                openProfile({ kind: 'edit', handle: bot.handle });
-              }}
-              className="flex items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[13px] text-foreground transition hover:bg-foreground/[0.05]"
-            >
-              <Pencil className="size-4 text-muted" />
-              {t('bots.menu.editProfile')}
-            </button>
-            {!bot.builtin && (
-              <>
-                {/* Reordering is the drag itself; this row says how. */}
-                <div className="flex items-center gap-2.5 px-2.5 py-2 text-[13px] text-muted">
-                  <GripVertical className="size-4" />
-                  {t('bots.menu.dragToReorder')}
-                </div>
-                <div className="my-1 h-px bg-border" />
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    setMenuOpen(false);
-                    setRemoving(true);
-                  }}
-                  className="flex items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[13px] text-destructive-ink transition hover:bg-destructive/[0.08]"
-                >
-                  <UserMinus className="size-4" />
-                  {t('bots.menu.remove')}
-                </button>
-              </>
+    <Popover
+      open={showCard || menuOpen}
+      onOpenChange={(next) => {
+        if (!next) {
+          setHoverOpen(false);
+          setMenuOpen(false);
+        }
+      }}
+    >
+      <PopoverAnchor asChild>
+        <div
+          ref={setSlotNode}
+          data-bot-handle={bot.handle}
+          className={clsx('flex w-[50px] shrink-0 flex-col items-center gap-1', isDragging && 'z-10 opacity-80')}
+          style={drag ? { transform: CSS.Translate.toString(drag.transform), transition: drag.transition } : undefined}
+          onMouseEnter={queueOpen}
+          onMouseLeave={queueClose}
+        >
+          <button
+            type="button"
+            {...(drag?.attributes ?? {})}
+            {...(drag?.listeners ?? {})}
+            onClick={open}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              clearTimers();
+              setHoverOpen(false);
+              setMenuOpen(true);
+            }}
+            aria-label={label}
+            aria-current={selected ? 'page' : undefined}
+            className={clsx(
+              'relative rounded-full p-[2px] transition-shadow focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/60',
+              selected ? 'shadow-[0_0_0_2px_var(--mint)]' : 'hover:shadow-[0_0_0_2px_var(--border-strong)]',
+              drag && 'touch-none',
             )}
-          </PopoverContent>
-        ) : (
-          <PopoverContent
-            side="right"
-            align="start"
-            sideOffset={10}
-            data-settings-interaction-owner="true"
-            onOpenAutoFocus={(event) => event.preventDefault()}
-            onMouseEnter={queueOpen}
-            onMouseLeave={queueClose}
-            className="w-[248px] rounded-2xl border-border-strong bg-surface-2 p-0 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.6)]"
           >
-            <button
-              type="button"
-              onClick={open}
-              className="flex w-full flex-col gap-3 rounded-2xl p-3.5 text-left"
-            >
-              <span className="flex items-center gap-3">
-                <BotAvatar avatar={bot.avatar} name={name} size={44} />
-                <span className="min-w-0 flex-1 leading-tight">
-                  <span className="block truncate text-[14px] font-bold text-foreground">{name}</span>
-                  <span className="mt-0.5 block font-mono text-[11px] text-muted">{t('bots.handle', { handle: bot.handle })}</span>
-                </span>
+            <BotAvatar avatar={bot.avatar} name={name} size={40} />
+            {unread > 0 && (
+              <span className="absolute -right-1.5 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-cyan px-1 font-mono text-[9px] font-bold text-accent-foreground shadow-glow-xs-cyan">
+                {unreadLabel(unread)}
               </span>
-              {role && <span className="line-clamp-3 text-[12px] leading-relaxed text-muted">{role}</span>}
-              {(running || latest) && (
-                <span className="block rounded-lg bg-foreground/[0.04] px-2.5 py-2 text-[12px] leading-relaxed text-foreground">
-                  <span className={clsx('mb-0.5 block text-[10px] font-semibold', running ? 'text-mint-ink' : 'text-muted')}>
-                    {latest
-                      ? t('bots.statusAt', {
-                        status: running ? t('bots.running') : t('bots.latest'),
-                        time: formatRelativeTime(latest.last_activity_at, t),
-                      })
-                      : running ? t('bots.running') : t('bots.latest')}
+            )}
+            {running && RUNNING_DOT}
+          </button>
+          <span
+            className={clsx(
+              'w-full truncate text-center text-[11px] leading-tight',
+              selected ? 'font-semibold text-foreground' : 'text-muted',
+            )}
+            title={name}
+          >
+            {name}
+          </span>
+        </div>
+      </PopoverAnchor>
+      {menuOpen ? (
+        <PopoverContent
+          side="bottom"
+          align="start"
+          sideOffset={6}
+          role="menu"
+          aria-label={t('bots.menu.label', { name })}
+          data-settings-interaction-owner="true"
+          onOpenAutoFocus={(event) => event.preventDefault()}
+          className="flex w-[208px] flex-col gap-0.5 rounded-2xl border-border-strong bg-surface-2 p-1.5 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.6)]"
+        >
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              setMenuOpen(false);
+              openProfile({ kind: 'edit', handle: bot.handle });
+            }}
+            className="flex items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[13px] text-foreground transition hover:bg-foreground/[0.05]"
+          >
+            <Pencil className="size-4 text-muted" />
+            {t('bots.menu.editProfile')}
+          </button>
+          {!bot.builtin && (
+            <>
+              {/* Reordering is the drag itself; this row says how. */}
+              <div className="flex items-center gap-2.5 px-2.5 py-2 text-[13px] text-muted">
+                <GripVertical className="size-4" />
+                {t('bots.menu.dragToReorder')}
+              </div>
+              <div className="my-1 h-px bg-border" />
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onRemove(bot);
+                }}
+                className="flex items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[13px] text-destructive-ink transition hover:bg-destructive/[0.08]"
+              >
+                <UserMinus className="size-4" />
+                {t('bots.menu.remove')}
+              </button>
+            </>
+          )}
+        </PopoverContent>
+      ) : (
+        <PopoverContent
+          side="right"
+          align="start"
+          sideOffset={10}
+          data-settings-interaction-owner="true"
+          onOpenAutoFocus={(event) => event.preventDefault()}
+          onMouseEnter={queueOpen}
+          onMouseLeave={queueClose}
+          className="w-[248px] rounded-2xl border-border-strong bg-surface-2 p-0 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.6)]"
+        >
+          <button
+            type="button"
+            onClick={open}
+            className="flex w-full flex-col gap-3 rounded-2xl p-3.5 text-left"
+          >
+            <span className="flex items-center gap-3">
+              <BotAvatar avatar={bot.avatar} name={name} size={44} />
+              <span className="min-w-0 flex-1 leading-tight">
+                <span className="block truncate text-[14px] font-bold text-foreground">{name}</span>
+                <span className="mt-0.5 block font-mono text-[11px] text-muted">{t('bots.handle', { handle: bot.handle })}</span>
+              </span>
+            </span>
+            {bot.role && <span className="line-clamp-3 text-[12px] leading-relaxed text-muted">{bot.role}</span>}
+            {(running || latest) && (
+              <span className="block rounded-lg bg-foreground/[0.04] px-2.5 py-2 text-[12px] leading-relaxed text-foreground">
+                <span className={clsx('mb-0.5 block text-[10px] font-semibold', running ? 'text-mint-ink' : 'text-muted')}>
+                  {latest
+                    ? t('bots.statusAt', {
+                      status: running ? t('bots.running') : t('bots.latest'),
+                      time: formatRelativeTime(latest.last_activity_at, t),
+                    })
+                    : running ? t('bots.running') : t('bots.latest')}
+                </span>
+                {latest?.preview_text && (
+                  <span className="line-clamp-2 block">
+                    <Markdown content={latest.preview_text} interactive={false} className="vr-markdown--preview" />
                   </span>
-                  {latest?.preview_text && (
-                    <span className="line-clamp-2 block">
-                      <Markdown content={latest.preview_text} interactive={false} className="vr-markdown--preview" />
-                    </span>
-                  )}
-                </span>
-              )}
-              <span className="flex items-center gap-1.5 text-[12px] font-semibold text-cyan-ink">
-                <MessageCircle className="size-3.5" />
-                {t('bots.openConversation')}
+                )}
               </span>
-            </button>
-          </PopoverContent>
-        )}
-      </Popover>
-      <RemoveBotDialog
-        bot={bot}
-        open={removing}
-        onOpenChange={setRemoving}
-        onRemoved={() => {
-          if (selected) navigate('/');
-        }}
-      />
-    </>
+            )}
+            <span className="flex items-center gap-1.5 text-[12px] font-semibold text-cyan-ink">
+              <MessageCircle className="size-3.5" />
+              {t('bots.openConversation')}
+            </span>
+          </button>
+        </PopoverContent>
+      )}
+    </Popover>
   );
 };
