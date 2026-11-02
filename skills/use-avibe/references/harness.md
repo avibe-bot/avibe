@@ -12,6 +12,7 @@ Agents should prefer these managed harness commands over ad-hoc detached shells 
 Preferred CLI shape:
 
 - delegate to another Agent in a private/background Session from an Avibe Agent shell: `vibe agent run --agent '<agent-name>' --message '...'`
+- delegate and have the final result return to this conversation: `vibe agent run --callback --agent '<agent-name>' --message '...'`
 - delegate to a visible sibling Session in the same scope from an Avibe Agent shell: `vibe agent run --agent '<agent-name>' --same-scope --message '...'`
 - wait for an Agent result in the terminal: `vibe agent run --sync --agent '<agent-name>' --message '...'`
 - continue a specific existing Session: `vibe agent run --session-id '<session-id>' --message '...'`
@@ -45,7 +46,7 @@ Targeting and callbacks:
 - Use `vibe session queue list --session-id <session-id>` before changing another Workbench Session's queue. If an instruction is obsolete, contradictory, or duplicated, remove that exact stable row with `vibe session queue remove <message-id> --session-id <session-id>`. Never guess a message ID or delete another row to simulate reordering.
 - When `vibe agent run` creates a new Session, the default placement is private/background. Add `--same-scope` for a visible sibling Session in the same Workbench project or IM scope, or `--scope-id <scopes.id>` for a specific existing scope.
 - When a task, watch, or new Agent run creates a Session and `--cwd` is omitted, Avibe uses the command's current working directory. Forks keep the source Session cwd by default.
-- Async Agent runs return the final result to this conversation by default. Pass `--no-callback` only when you will inspect the run later with `vibe runs`. Pass `--callback-session-id <id>` only when the final result should return to a different Session.
+- An Agent run returns its final result to this conversation only with `--callback`, or to a different Session with `--callback-session-id <id>`. Without one, the receiver's input names this Session and the command to report back with, and `vibe runs show <run-id>` reads the result. A run that does not complete always reports to the Session that sent it. `--no-callback` is accepted and changes nothing.
 - `--message` and `--message-file` are the user-message flags for task, watch, and agent-run commands.
 - `vibe task add` stores a message template — or, with `--shell` / a trailing `-- <argv>`, a command — and creates Runs when the time trigger fires. A command task runs with no Agent turn: silent on success, a failure notice on failure, `--on-failure agent` to escalate failures to an Agent.
 - `vibe watch add` uses `--message` as the instruction template for the Agent Run created after the waiter reaches a reportable state.

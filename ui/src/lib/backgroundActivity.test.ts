@@ -4,6 +4,7 @@ import type { SessionActivityState } from '../context/ApiContext';
 import {
   activityItemKind,
   activityKindI18nKey,
+  activityReturnI18nKey,
   harnessItemNativeId,
   harnessNavPath,
   isHarnessActivity,
@@ -84,6 +85,19 @@ describe('activityKindI18nKey', () => {
     expect(activityKindI18nKey(item({ item_kind: 'watch', status: 'queued' }))).toBe('watch');
     expect(activityKindI18nKey(item({ item_kind: 'task', status: 'queued' }))).toBe('task');
     expect(activityKindI18nKey(item({ status: 'queued' }))).toBe('backendActivity');
+  });
+});
+
+describe('activityReturnI18nKey', () => {
+  it('says whether a delegated run returns here or is reported back', () => {
+    expect(activityReturnI18nKey(item({ item_kind: 'agent_run', returns_here: true }))).toBe('returnsHere');
+    expect(activityReturnI18nKey(item({ item_kind: 'agent_run', returns_here: false }))).toBe('reportsBack');
+  });
+
+  it('says nothing for other rows, or when the server does not say', () => {
+    expect(activityReturnI18nKey(item({ item_kind: 'watch', returns_here: null }))).toBeNull();
+    expect(activityReturnI18nKey(item({ item_kind: 'task' }))).toBeNull();
+    expect(activityReturnI18nKey(item({ item_kind: 'agent_run' }))).toBeNull();
   });
 });
 

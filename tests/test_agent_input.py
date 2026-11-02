@@ -155,7 +155,7 @@ def test_every_harness_input_names_its_source_on_its_first_line(tmp_path, trigge
             {"source_kind": "agent", "source_actor": "sescaller01", "callback_session_id": "sescaller01",
              "callback_mode": "failure"},
             "No callback. When the work is done, you can report to #sescaller01 with "
-            "`vibe agent run --session-id sescaller01 --no-callback --message ...`.",
+            "`vibe agent run --session-id sescaller01 --message ...`.",
             id="session-sender",
         ),
         pytest.param(

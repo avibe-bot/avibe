@@ -2,7 +2,7 @@
 name: use-avibe-harness
 slug: use-avibe-harness
 description: Use Avibe Harness for durable Agent delegation, Sessions, scheduled Tasks, Watches, Runs, queues, and work that must continue beyond the current turn.
-version: 0.1.0
+version: 0.1.1
 ---
 
 # Use Avibe Harness
@@ -63,7 +63,7 @@ Useful Harness queries include schema discovery, current session lookup, existin
 
 Watch waiter contract: exit `0` only for one NEW reportable event. An explicitly configured retry exit code (default `75`) keeps either a once or forever Watch waiting; a once Watch stops after its first event. Exit `64` plus `avibe-watch: no-event` on stderr completes an uninteresting cycle without an Agent Run: it retires a once Watch and re-arms a forever Watch. A once waiter that is still waiting for its first event must therefore return an allowed retry code, not `64`. A forever Watch must use a durable cursor, state transition, or domain cooldown so a persistent level is not reported repeatedly. Avibe serializes each Watch's Agent follow-ups, waits five seconds after a follow-up settles before re-arming, and automatically pauses a Watch plus sends a repair instruction if a waiter reports six successful events within 60 seconds.
 
-Use `vibe agent run --agent <agent-name> --message ...` when one Agent delegates work to another Agent. By default this creates a background Session in the caller's scope and returns immediately; when the run completes, the final result is sent back to this conversation. Background Sessions stay out of the session list and never deliver outward, but remain visible in the Agents run graph, where the user can open their full chat history or promote them at any time. Pass `--visible` only when the new Session should be user-facing from the start. Pass `--sync` only when the current process must wait for the result. Pass `--no-callback` only when you intentionally want no automatic follow-up and will inspect the run later; pass `--callback-session-id <id>` only to route the final result elsewhere. Add `--scope-id <scopes.id>` only when placing the new Session in a specific existing scope.
+Use `vibe agent run --agent <agent-name> --message ...` when one Agent delegates work to another Agent. By default this creates a background Session in the caller's scope and returns immediately. The final result comes back to this conversation only with `--callback`; without it, the receiving Agent's input names this Session and the command to report back with. A run that does not complete always reports here. Background Sessions stay out of the session list and never deliver outward, but remain visible in the Agents run graph, where the user can open their full chat history or promote them at any time. Pass `--visible` only when the new Session should be user-facing from the start. Pass `--sync` only when the current process must wait for the result. Pass `--callback` when this conversation needs the final result back; pass `--callback-session-id <id>` to route it to another Session instead. `--no-callback` is accepted and changes nothing. Add `--scope-id <scopes.id>` only when placing the new Session in a specific existing scope.
 
 Use `vibe agent run --fork-self --message ...` when work should branch from this current Session's native backend context without mutating it. Use `--fork-session <source-session-id>` only when branching from a different explicit Session. Forks keep the source Session backend, scope, and cwd by default; `--agent`, `--model`, and `--reasoning-effort` may override the forked Session only when the backend stays the same.
 
@@ -94,9 +94,10 @@ Rules:
 - `--fork-self` creates a new Agent Session from this current Session's native backend context; use it for alternate paths that need the current context but should not mutate this Session.
 - `--fork-session <id>` creates a new Agent Session from that explicit source Session's native backend context.
 - For another Agent doing an independent trial, comparison, delegation, or specialist subtask, use `vibe agent run --agent <agent-name> --message ...`.
-- Use `vibe agent run --agent <agent-name> --session-id ... --message ...` only when the work should continue that same existing Session. Async callbacks return to this conversation by default.
+- Use `vibe agent run --agent <agent-name> --session-id ... --message ...` only when the work should continue that same existing Session.
 - `--model` and `--reasoning-effort` apply to the new Session a run creates and are refused with `--session-id`. With `--fork-self` or `--fork-session`, `--agent`, `--model`, and `--reasoning-effort` override the forked Session only when the requested Agent backend matches the source Session backend.
-- `--sync` changes waiting behavior, not session identity: default async runs in the background and return through callbacks; synchronous runs wait for the result and are still recorded in `vibe runs`.
+- A run's final reply returns here only with `--callback` (`--callback-session-id <id>` sends it to that Session); a run that does not complete always reports here.
+- `--sync` changes waiting behavior, not session identity: runs are async by default; synchronous runs wait for the result and are still recorded in `vibe runs`.
 - Create or update Agents only when it captures a reusable role, reduces repeated prompting, or makes a long-running Harness more reliable.
 
 ### Mentions in user messages

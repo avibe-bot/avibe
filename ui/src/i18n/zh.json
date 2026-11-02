@@ -5415,6 +5415,10 @@
       "status": {
         "running": "运行中"
       },
+      "return": {
+        "returnsHere": "结果会回到这里",
+        "reportsBack": "完成后由对方汇报"
+      },
       "kind": {
         "backendActivity": "后台任务",
         "watch": "监听",

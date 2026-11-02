@@ -48,6 +48,16 @@ export function activityKindI18nKey(
   return kind;
 }
 
+// Where a delegated run's result goes: back here by callback, or reported by its
+// target when the work is done. Null for every other row, and for a server that
+// does not say.
+export function activityReturnI18nKey(
+  item: Pick<SessionActivityState, 'item_kind' | 'returns_here'>,
+): 'returnsHere' | 'reportsBack' | null {
+  if (activityItemKind(item) !== 'agent_run' || typeof item.returns_here !== 'boolean') return null;
+  return item.returns_here ? 'returnsHere' : 'reportsBack';
+}
+
 // Harness rows (watch / task / delegated run) navigate to the Harness surface;
 // backend activities keep their current non-navigating behavior.
 export function isHarnessActivity(item: Pick<SessionActivityState, 'item_kind'>): boolean {

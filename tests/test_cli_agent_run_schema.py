@@ -300,11 +300,9 @@ def test_agent_run_async_accepts_callback_session_id(tmp_path: Path, capsys) -> 
     assert stored["callback_status"] == "pending"
 
 
-def test_agent_run_async_requires_callback_or_no_callback_without_caller(tmp_path: Path, capsys) -> None:
-    from sqlalchemy import func, select
-    from storage.db import create_sqlite_engine
+def test_agent_run_outside_an_agent_shell_needs_no_callback_policy(tmp_path: Path, capsys) -> None:
+    """bots.md D4 (2026-11-03): no run gets a callback unless it asks, so a terminal needs no callback flag."""
     from storage.importer import ensure_sqlite_state
-    from storage.models import agent_sessions
 
     db_path = tmp_path / "state" / "vibe.sqlite"
     with patch.dict("os.environ", {"AVIBE_HOME": str(tmp_path)}):
@@ -322,20 +320,14 @@ def test_agent_run_async_requires_callback_or_no_callback_without_caller(tmp_pat
         ):
             result = cli.cmd_agent_run(args)
 
-        engine = create_sqlite_engine(db_path)
-        with engine.connect() as conn:
-            session_count = conn.execute(select(func.count()).select_from(agent_sessions)).scalar_one()
-
-    assert result == 1
-    captured = capsys.readouterr()
-    payload = json.loads(captured.out or captured.err)
-    assert payload["code"] == "missing_async_callback"
-    assert "--callback-session-id" in payload["hint"]
-    assert "--no-callback" in payload["hint"]
-    assert session_count == 0
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert "callback_session_id" not in payload["run"]
+    stored = request_store.get_run(payload["run"]["id"])
+    assert (stored["callback_session_id"], stored["callback_status"]) == (None, None)
 
 
-def test_agent_run_async_defaults_callback_from_caller_env(tmp_path: Path, capsys) -> None:
+def test_agent_run_callback_returns_to_the_caller_from_env(tmp_path: Path, capsys) -> None:
     from core.services import sessions as sessions_service
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state
@@ -382,7 +374,7 @@ def test_agent_run_async_defaults_callback_from_caller_env(tmp_path: Path, capsy
         agent_store = cli.VibeAgentStore(db_path)
         agent_store.create(name="worker", backend="codex")
         request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
-        args = _parse_agent_run(["--agent", "worker", "--message", "hi"])
+        args = _parse_agent_run(["--agent", "worker", "--callback", "--message", "hi"])
 
         with (
             patch.dict(
@@ -643,7 +635,7 @@ def test_agent_run_steers_an_im_backed_session_by_default(
     assert stored["metadata"]["delivery_intent"] == "steer"
 
 
-def test_agent_run_async_self_target_defaults_to_no_callback(
+def test_agent_run_async_self_target_callback_is_not_duplicated(
     tmp_path: Path, capsys
 ) -> None:
     from core.services import sessions as sessions_service
@@ -692,7 +684,7 @@ def test_agent_run_async_self_target_defaults_to_no_callback(
         agent_store = cli.VibeAgentStore(db_path)
         agent_store.create(name="caller", backend="codex")
         request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
-        args = _parse_agent_run(["--session-id", caller_session["id"], "--message", "hi"])
+        args = _parse_agent_run(["--session-id", caller_session["id"], "--callback", "--message", "hi"])
 
         with (
             patch.dict(
@@ -720,7 +712,7 @@ def test_agent_run_async_self_target_defaults_to_no_callback(
     assert stored["callback_status"] is None
 
 
-def test_agent_run_sync_self_target_detach_defaults_to_no_callback(
+def test_agent_run_sync_self_target_detach_callback_is_not_duplicated(
     tmp_path: Path, capsys
 ) -> None:
     from core.services import sessions as sessions_service
@@ -769,7 +761,7 @@ def test_agent_run_sync_self_target_detach_defaults_to_no_callback(
         agent_store = cli.VibeAgentStore(db_path)
         agent_store.create(name="caller", backend="codex")
         request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
-        args = _parse_agent_run(["--session-id", caller_session["id"], "--sync", "--message", "hi"])
+        args = _parse_agent_run(["--session-id", caller_session["id"], "--callback", "--sync", "--message", "hi"])
 
         with (
             patch.dict(

@@ -896,6 +896,8 @@ vibe agent run (--session-id <session_id> | --fork-session <session_id> | --fork
 - `--model`
 - `--reasoning-effort`
 - `--close-after`
+- `--callback`
+- `--callback-session-id`
 - `--sync`
 - `--message`
 - `--message-file`
@@ -905,7 +907,8 @@ vibe agent run (--session-id <session_id> | --fork-session <session_id> | --fork
 `--scope-id` 决定它的位置。
 
 Run 默认异步：命令会队列化 run，立即输出一个带 `id` 和 `session_id` 的 `run`
-对象，并按 callback 策略稍后投递最终结果。只有终端需要等待完成时才使用
+对象。只有加 `--callback`（回到调用方）或 `--callback-session-id` 时，最终结果才会回到
+某个 Session；没有完成的 run 总会告诉调用方 Session。只有终端需要等待完成时才使用
 `--sync`。
 
 `--close-after` 适用于新建或 fork 的 Session。Run 结束后它会释放该 Agent
@@ -978,5 +981,5 @@ vibe
 vibe status
 vibe doctor
 vibe task list --global
-vibe agent run --no-callback --session-id sesk8m4q2p7x --message 'Share the latest build summary.'
+vibe agent run --session-id sesk8m4q2p7x --message 'Share the latest build summary.'
 ```

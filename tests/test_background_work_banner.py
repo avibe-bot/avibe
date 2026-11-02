@@ -218,6 +218,8 @@ def test_each_harness_source_contributes_one_row(tmp_path: Path):
     assert by_kind["agent_run"]["label"] == "worker: audit the contract"
     assert by_kind["agent_run"]["status"] == "running"
     assert by_kind["agent_run"]["schedule_type"] is None
+    assert by_kind["agent_run"]["returns_here"] is True
+    assert by_kind["watch"]["returns_here"] is None and by_kind["task"]["returns_here"] is None
     # ``since`` and a stable id are present on every unified item.
     assert all(item["since"] == _NOW for item in items)
     assert all(item["id"] for item in items)
@@ -252,19 +254,61 @@ def test_queued_delivery_projects_delegated_run_as_queued(tmp_path: Path):
     assert items[0]["since"] == queued_at
 
 
-def test_a_run_without_a_callback_is_not_work_returning_to_its_sender(tmp_path: Path):
-    """bots.md D4 (2026-11-03): a run that asked for no callback names its sender only for a failure notice."""
+def test_a_session_sees_the_runs_it_started_and_whether_each_returns_here(tmp_path: Path):
+    """bots.md D4 (2026-11-03): the banner lists the runs a Session started, callback or not, and says on each
+    whether its final reply returns there; a run whose callback returns there is listed too."""
     engine, _ = _make_engine(tmp_path)
-    for run_id, metadata in (("run-callback", "{}"), ("run-message", '{"callback_mode":"failure"}')):
-        _insert_run(
-            engine, id=run_id, agent_name="worker", message="audit", session_id="ses-delegate",
-            callback_session_id="ses-caller", metadata_json=metadata,
-        )
+    failure_only = '{"callback_mode":"failure"}'
+    started_here = {"source_kind": "agent", "source_actor": "ses-caller"}
+    for run_id, overrides in (
+        # Started here: with a callback, without one (failure-only route), and with its callback elsewhere.
+        ("run-callback", {**started_here, "callback_session_id": "ses-caller"}),
+        ("run-message", {**started_here, "callback_session_id": "ses-caller", "metadata_json": failure_only}),
+        ("run-elsewhere", {**started_here, "callback_session_id": "ses-other"}),
+        # Started from a terminal with its callback here.
+        ("run-cli", {"source_kind": "cli", "callback_session_id": "ses-caller"}),
+        # Not this Session's work: a failure-only route it did not start, a run on itself, a --sync run.
+        ("run-foreign", {"source_kind": "agent", "source_actor": "ses-third", "callback_session_id": "ses-caller",
+                         "metadata_json": failure_only}),
+        ("run-self", {**started_here, "callback_session_id": None, "callback_status": None,
+                      "session_id": "ses-caller"}),
+        ("run-sync", {**started_here, "callback_session_id": "ses-caller", "callback_status": None,
+                      "metadata_json": failure_only}),
+    ):
+        _insert_run(engine, **{"id": run_id, "agent_name": "worker", "message": "audit",
+                               "session_id": "ses-delegate", **overrides})
 
     with engine.connect() as conn:
-        items = derive_session_harness_activities(conn, "ses-caller")
+        caller = derive_session_harness_activities(conn, "ses-caller")
+        other = derive_session_harness_activities(conn, "ses-other")
 
-    assert [item["id"] for item in items] == ["agent_run:run-callback"]
+    assert [(item["id"], item["returns_here"]) for item in caller] == [
+        ("agent_run:run-callback", True),
+        ("agent_run:run-cli", True),
+        ("agent_run:run-elsewhere", False),
+        ("agent_run:run-message", False),
+    ]
+    assert [(item["id"], item["returns_here"]) for item in other] == [("agent_run:run-elsewhere", True)]
+
+
+def test_a_watch_left_by_a_run_without_a_callback_stays_with_its_sender(tmp_path: Path):
+    engine, _ = _make_engine(tmp_path)
+    _insert_run(
+        engine, id="run-worker", agent_name="claude", status="succeeded", callback_status="skipped",
+        session_id="ses-worker", callback_session_id="ses-pm", source_kind="agent", source_actor="ses-pm",
+        metadata_json='{"callback_mode":"failure"}',
+    )
+    _insert_definition(
+        engine, id="w-review", definition_type="watch", name="pr review", session_id="ses-worker",
+        metadata_json=json.dumps({"created_by": {"caller": {"session_id": "ses-worker", "run_id": "run-worker"}}}),
+    )
+
+    with engine.connect() as conn:
+        items = derive_session_harness_activities(conn, "ses-pm")
+
+    assert [(item["id"], item["session_id"], item["returns_here"]) for item in items] == [
+        ("watch:w-review", "ses-worker", None),
+    ]
 
 
 def test_agent_run_banner_collapses_accepted_turn_and_keeps_queued_deliveries(
