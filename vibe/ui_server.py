@@ -6301,9 +6301,28 @@ def _settings_conflict_response(exc):
     )
 
 
+def _agent_is_bot_response(agent_name: str):
+    """A new Session, Project, or IM-scope route named a Bot's Agent (``core.vibe_agents.is_selectable_agent``)."""
+    from core.services import settings as settings_service
+    from core.vibe_agents import AgentIsBotError
+
+    lang = settings_service.load_config_or_default().language
+    key = "error.agentIsBot"
+    return _coded_error_response(
+        AgentIsBotError.code,
+        t(f"{key}.message", lang, agent=agent_name),
+        409,
+        hint=t(f"{key}.hint", lang),
+        details={"agent_name": agent_name},
+    )
+
+
 def _scope_agent_unavailable_response(exc):
     from core.services import settings as settings_service
+    from core.vibe_agents import AgentIsBotError
 
+    if exc.code == AgentIsBotError.code:
+        return _agent_is_bot_response(exc.agent_name)
     lang = settings_service.load_config_or_default().language
     key = "error.scopeAgentUnavailable"
     return _coded_error_response(
@@ -6331,7 +6350,10 @@ def _project_agent_conflict_response(exc):
 
 def _project_agent_unavailable_response(exc):
     from core.services import settings as settings_service
+    from core.vibe_agents import AgentIsBotError
 
+    if exc.code == AgentIsBotError.code:
+        return _agent_is_bot_response(exc.agent_name)
     lang = settings_service.load_config_or_default().language
     key = "error.projectAgentUnavailable"
     return _coded_error_response(
@@ -11003,6 +11025,7 @@ def _publish_session_update_activity(
 @app.route("/api/sessions/<session_id>", methods=["PATCH"])
 async def sessions_update(session_id: str):
     from core.services import sessions as workbench_sessions_service
+    from core.vibe_agents import AgentIsBotError
     from storage.workbench_sessions_service import BOT_SESSION_UPDATABLE_FIELDS
     from vibe import internal_client
     from vibe.sse_broker import broker
@@ -11130,6 +11153,8 @@ async def sessions_update(session_id: str):
             else RESERVED_SESSION_PROTECTED_I18N_KEY,
             code=getattr(err, "code", "reserved_session"),
         )
+    except AgentIsBotError as err:
+        return _agent_is_bot_response(err.agent_name)
     except ValueError as err:
         return jsonify({"error": str(err)}), 400
     except PermissionError as err:

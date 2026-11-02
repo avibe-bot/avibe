@@ -324,6 +324,10 @@
       "message": "Agent `{agent}` is unavailable for this project.",
       "hint": "Choose an enabled Agent and apply the project setting again."
     },
+    "agentIsBot": {
+      "message": "Agent `{agent}` belongs to a Bot and can't be chosen as an Agent.",
+      "hint": "Choose another Agent. To work with the Bot, talk to it in its own conversation."
+    },
     "taskOwnerUnavailable": {
       "message": "This Task's managing Session is no longer available.",
       "hint": "Create a replacement Task from an available Agent Session, then remove this orphaned definition with `vibe task remove {id}`."

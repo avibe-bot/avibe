@@ -63,12 +63,10 @@ class BaseHandler:
         code = getattr(error, "code", None)
         if code == "settings_conflict":
             return f"{self._t('error.settingsConflict.message')} {self._t('error.settingsConflict.hint')}"
-        if code == "agent_unavailable":
+        if code in {"agent_unavailable", "agent_is_bot"}:
             agent = getattr(error, "agent_name", "")
-            return (
-                f"{self._t('error.scopeAgentUnavailable.message', agent=agent)} "
-                f"{self._t('error.scopeAgentUnavailable.hint')}"
-            )
+            key = "error.agentIsBot" if code == "agent_is_bot" else "error.scopeAgentUnavailable"
+            return f"{self._t(f'{key}.message', agent=agent)} {self._t(f'{key}.hint')}"
         return str(error)
 
     def _context_can_start_fresh_session_without_reset(self, context: MessageContext) -> bool:

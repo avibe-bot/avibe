@@ -5385,8 +5385,8 @@ def test_native_bind_by_id_idempotent_rebind_cannot_resurrect_an_archived_sessio
 #: The fast-path read at the top of ``update_session``. Keyed on so the archive lands
 #: in the window between it and the UPDATE that acts on its answer.
 _UPDATE_SESSION_FAST_PATH_SELECT = (
-    "SELECT agent_sessions.id, agent_sessions.scope_id, agent_sessions.agent_backend, "
-    "agent_sessions.native_session_id, agent_sessions.agent_status, "
+    "SELECT agent_sessions.id, agent_sessions.scope_id, agent_sessions.agent_id, agent_sessions.agent_name, "
+    "agent_sessions.agent_backend, agent_sessions.native_session_id, agent_sessions.agent_status, "
     "agent_sessions.workdir, agent_sessions.metadata_json, agent_sessions.status FROM agent_sessions "
     "WHERE agent_sessions.id = ?"
 )

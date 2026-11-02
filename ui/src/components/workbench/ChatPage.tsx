@@ -14,7 +14,7 @@ import { useToast } from '../../context/ToastContext';
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import { useBots } from '../../context/BotsContext';
-import { isBotSessionId, type BotAvatar as BotAvatarSpec } from '../../lib/bots';
+import { isBotSessionId, isSelectableAgent, liveBotAgentNames, type BotAvatar as BotAvatarSpec } from '../../lib/bots';
 import { BotAvatar } from '../ui/bot-avatar';
 import { useRegisterComposerTarget, type ComposerInsertTarget } from '../../context/ComposerBridgeContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
@@ -2108,12 +2108,12 @@ export const ChatPage: React.FC = () => {
       const q = query.trim().toLowerCase();
       // The live Bot list decides which Agents are Bots: this page's Agent rows are
       // a bootstrap snapshot, and a Bot removed since then is an Agent again.
-      const botAgents = new Set(botsLoaded ? bots.map((bot) => bot.agent_name) : agents.filter((a) => a.bot).map((a) => a.name));
+      const botAgents = liveBotAgentNames({ bots, loaded: botsLoaded });
       const botResults: MentionSearchResult[] = bots
         .filter((bot) => !q || botDisplayName(bot).toLowerCase().includes(q) || bot.handle.includes(q))
         .map((bot) => ({ kind: 'bot', handle: bot.handle, display_name: botDisplayName(bot), avatar: bot.avatar }));
       const agentResults: MentionSearchResult[] = agents
-        .filter((a) => a.enabled && !botAgents.has(a.name))
+        .filter((a) => isSelectableAgent(a, botAgents))
         // Names with the marker terminator (`>`) or a newline can't round-trip
         // through @<agent:name>, so they aren't mentionable.
         .filter((a) => !/[>\n]/.test(a.name))

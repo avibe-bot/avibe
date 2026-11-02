@@ -248,6 +248,21 @@ describe('D3 a built-in assistant completes setup on its own', () => {
     expect(chooseEntryDefault(entryCandidates(custom), custom)?.agent.name).toBe('claude-agent');
   });
 
+  // Setup makes its pick the default, which a Bot's Agent never is (docs/plans/bots.md D1);
+  // by name, the main Bot's `main` would otherwise come before `vibey`.
+  it('never enters on a Bot\'s Agent, the main Bot\'s included', () => {
+    const MAIN: VibeAgentBrief = {
+      ...VIBEY, id: 'mn-1', name: 'main', display_name: 'main', bot: { handle: 'main', display_name: '', builtin: true },
+    };
+    const routed = vibeySupply({
+      named_agents: ['main', 'vibey'].map((name) => ({ name, effective_model_id: 'gpt-5.6-sol', supply_status: 'ok' as const })),
+    });
+    const both = vibeyOnly({ agents: [CLAUDE, MAIN, VIBEY], supplies: [routed] });
+    expect(entryCandidates(both).map((candidate) => candidate.agent.name)).toEqual(['vibey']);
+    expect(chooseEntryDefault(entryCandidates(both), both)?.agent.name).toBe('vibey');
+    expect(admitEntry(vibeyOnly({ agents: [CLAUDE, MAIN], supplies: [routed] }))).toMatchObject({ kind: 'refused' });
+  });
+
   it('keeps a saved built-in default that can run', () => {
     const saved = evidence({
       agents: [CLAUDE, VIBEY],

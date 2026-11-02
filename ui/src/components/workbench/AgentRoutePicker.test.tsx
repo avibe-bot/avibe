@@ -7,6 +7,8 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 
 import type { VibeAgentBrief } from '../../context/ApiContext';
+import { BotsContext, type BotsState } from '../../context/BotsContext';
+import type { AgentBotSummary, Bot } from '../../lib/bots';
 import { InstanceAuthorizationContext } from '../../context/InstanceAuthorizationContext';
 import { RouteSurfaceActiveContext } from '../../lib/routeSurfaceActivity';
 import { capabilitiesFor } from '../../lib/testing/instanceRoleCapabilities';
@@ -599,6 +601,40 @@ describe('AgentRoutePicker', () => {
       model: 'opus',
       reasoning_effort: 'low',
     });
+  });
+
+  // A Bot's Agent is internal to its Bot (docs/plans/bots.md D1). The rows are a
+  // snapshot from before `writer` became a Bot and `cso` stopped being one, so the
+  // live Bot list decides; the main Bot's `main` is never offered either.
+  it('offers no Bot\'s Agent, by the live Bot list, while a route on one still names it', async () => {
+    const user = userEvent.setup();
+    const vibey = (name: string, bot: AgentBotSummary | null = null) =>
+      agent({ id: `agt-${name}`, name, display_name: name, backend: 'vibey', model: 'm', bot });
+    const agents = [
+      ...AGENTS,
+      vibey('main', { handle: 'main', display_name: '', builtin: true }),
+      vibey('writer'),
+      vibey('cso', { handle: 'cso', display_name: 'CSO', builtin: false }),
+    ];
+    const bots = ['main', 'writer'].map((name) => ({ agent_name: name, handle: name }) as Bot);
+    render(
+      <BotsContext.Provider value={{ loaded: true, bots } as unknown as BotsState}>
+        <MemoryRouter>
+          <AgentRoutePicker
+            value={{ agent_name: 'main', agent_id: 'agt-main', agent_backend: 'vibey', model: 'm' }}
+            agents={agents}
+            onChange={vi.fn()}
+          />
+        </MemoryRouter>
+      </BotsContext.Provider>,
+    );
+
+    await user.click(screen.getByRole('button', { name: /main/ }));
+    await screen.findByText('chat.picker.model');
+    const offered = within(screen.getByText('chat.picker.agent').parentElement as HTMLElement)
+      .getAllByRole('button')
+      .map((option) => option.textContent);
+    expect(offered).toEqual(['claudesonnet', 'codexgpt', 'csom', 'chat.picker.newAgent']);
   });
 });
 

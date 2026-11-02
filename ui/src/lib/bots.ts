@@ -58,6 +58,27 @@ export function eligibleForBot(agent: {
   return agent.backend === 'vibey' && agent.enabled && !agent.archived && !agent.bot && agent.source !== 'builtin';
 }
 
+/** The Agents of the Bots as the live list knows them, or `null` before it has been
+ *  read (and for anyone but the Owner, who has no list): Agent rows are a snapshot,
+ *  and a Bot added or removed since they were read moves its Agent at once. */
+export function liveBotAgentNames(live: { bots: readonly Pick<Bot, 'agent_name'>[]; loaded: boolean }): Set<string> | null {
+  return live.loaded ? new Set(live.bots.map((bot) => bot.agent_name)) : null;
+}
+
+/** Whether a picker offers an Agent (docs/plans/bots.md D1): enabled, not archived,
+ *  and not a Bot's Agent, the main Bot's included. A Bot's Agent is internal to its
+ *  Bot, so users pick the Bot, never its Agent; a removed Bot's Agent is an ordinary
+ *  Agent again. `botAgents` is the live list's answer (`liveBotAgentNames`), else
+ *  the row's own `bot` field decides. Mirrors `core.vibe_agents.is_selectable_agent`,
+ *  whose server guards refuse moving a Session, Project, or IM scope onto a Bot's Agent. */
+export function isSelectableAgent(
+  agent: { name: string; enabled: boolean; archived?: boolean; bot?: AgentBotSummary | null },
+  botAgents?: ReadonlySet<string> | null,
+): boolean {
+  if (!agent.enabled || agent.archived) return false;
+  return botAgents ? !botAgents.has(agent.name) : !agent.bot;
+}
+
 /** The name a Bot goes by: its display name, the localized default for the main
  *  Bot, else its handle. */
 export function botDisplayName(bot: Pick<Bot, 'display_name' | 'builtin' | 'handle'>, mainDefault: string): string {

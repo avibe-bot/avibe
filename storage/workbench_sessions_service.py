@@ -1141,6 +1141,8 @@ def update_session(
         select(
             agent_sessions.c.id,
             agent_sessions.c.scope_id,
+            agent_sessions.c.agent_id,
+            agent_sessions.c.agent_name,
             agent_sessions.c.agent_backend,
             agent_sessions.c.native_session_id,
             agent_sessions.c.agent_status,
@@ -1175,9 +1177,11 @@ def update_session(
 
     derived_backend = False
     from core.vibe_agents import (
+        AgentIsBotError,
         VibeAgentAccessError,
         ensure_agent_selection_access,
         ensure_default_agent_access,
+        is_bot_agent,
         resolve_resource_access_context,
     )
 
@@ -1200,6 +1204,15 @@ def update_session(
                     user_context=resource_context,
                     missing_is_error=True,
                 )
+        if (
+            selected_agent is not None
+            and is_bot_agent(selected_agent)
+            and selected_agent.id != existing.agent_id
+            and selected_agent.name != existing.agent_name
+        ):
+            # A Bot's Agent is internal to its Bot (``is_selectable_agent``): a Session already on it keeps it,
+            # but no Session moves onto it.
+            raise AgentIsBotError(agent_name=selected_agent.name)
         if selected_agent is not None:
             requested_backend = str(agent_backend or "").strip() if agent_backend is not _UNSET else ""
             if requested_backend and requested_backend != selected_agent.backend:

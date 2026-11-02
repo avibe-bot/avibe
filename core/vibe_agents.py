@@ -151,6 +151,16 @@ class AgentBotLockedError(ValueError):
         self.agent_name = str(agent_name)
 
 
+class AgentIsBotError(ValueError):
+    """A new route names a Bot's Agent, which only its Bot uses (``is_selectable_agent``)."""
+
+    code = AgentBotLockedError.code
+
+    def __init__(self, *, agent_name: str) -> None:
+        super().__init__(self.code)
+        self.agent_name = str(agent_name)
+
+
 class AgentReferenceRewriteError(ValueError):
     """A durable Agent reference cannot be rewritten without losing data."""
 
@@ -2126,6 +2136,20 @@ def agent_bot_record(agent: VibeAgent) -> Optional[dict[str, Any]]:
 
 def is_bot_agent(agent: VibeAgent) -> bool:
     return getattr(agent, "archived_at", None) is None and agent_bot_record(agent) is not None
+
+
+def is_selectable_agent(agent: VibeAgent) -> bool:
+    """Whether pickers offer ``agent`` and a new route may name it (``bots.md`` D1).
+
+    Enabled Agents minus the Agents of current Bots, the main Bot's included: a Bot's Agent is internal to its Bot,
+    so users pick the Bot and never its Agent. A removed Bot's Agent is an ordinary Agent again. A Session, Project,
+    IM scope, or default that already names a Bot's Agent keeps it until changed, and ``vibe agent run --agent``
+    still accepts any enabled Agent (D4). The Web pickers read the same rule from the Agent rows' ``bot`` field
+    (``isSelectableAgent`` in ``ui/src/lib/bots.ts``).
+    """
+    return bool(getattr(agent, "enabled", False)) and getattr(agent, "archived_at", None) is None and (
+        not is_bot_agent(agent)
+    )
 
 
 def is_main_bot_agent(agent: VibeAgent) -> bool:
