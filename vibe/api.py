@@ -5683,6 +5683,9 @@ def vault_sign(payload: dict) -> dict:
                     code="unsupported_signer_kind",
                     status=409,
                 )
+            vault_service.validate_bitcoin_signing_context(
+                signing_context, digest=digest, scheme=scheme, signing_key=signing_public_key,
+            )
             if scheme == "schnorr-secp256k1-bip341-keypath":
                 vault_service.require_compressed_signing_public_key(signing_public_key)
             if meta.get("protection") == "protected":

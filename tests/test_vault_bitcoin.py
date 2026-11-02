@@ -36,13 +36,13 @@ def _context(case: dict, *, network: str = "signet") -> dict:
     }
 
 
-def _create_protected_key(public_key: str) -> None:
+def _create_protected_key(public_key: str, *, protection: str = "protected") -> None:
     with api._vault_engine().begin() as conn:
         vault_service.create_secret(
             conn,
             name="BTC_KEY",
             kind="keypair",
-            protection="protected",
+            protection=protection,
             signer_kind="local",
             sealed=Sealed(ciphertext="test-envelope", nonce="test-nonce", wrap_meta="test-meta"),
             public_meta={"signing_public_key": {"curve": "secp256k1", "public_key": public_key}},
@@ -211,6 +211,59 @@ def test_bitcoin_preflight_rejects_before_request_notification_or_signing(monkey
         assert conn.execute(select(vault_requests.c.id)).all() == []
     notify.assert_not_called()
     sign.assert_not_called()
+
+
+@pytest.mark.parametrize("path", ["headless", "approved-payload", "approved-persisted"])
+@pytest.mark.parametrize("case", ["valid", "false-amount", "wrong-q", "unrelated-transaction", "wrong-scheme"])
+def test_standard_typed_bitcoin_preflight_precedes_signer_and_claim(monkeypatch, path, case):
+    """Typed contexts must be validated even when approval creation is bypassed.
+
+    Existing protected preflight tests cannot reach the standard headless/claim
+    paths. A valid digest signature must not hide false transaction metadata.
+    """
+    vector = CORE["cases"][0]
+    key = KEYS[vector["signing_key_id"]]
+    _create_protected_key(key["internal_pubkey_compressed_hex"], protection="standard")
+    context = _context(vector)
+    request_id = None
+    if path != "headless":
+        with api._vault_engine().begin() as conn:
+            request_id = vault_service.create_sign_request(
+                conn, "BTC_KEY", digest=context["digest"], scheme=SCHEME, signing_context=context,
+            )["id"]
+    scheme = SCHEME
+    if case == "false-amount":
+        context["prevout"]["amountSats"] += 1
+    elif case == "wrong-q":
+        context["prevout"]["scriptPubKey"] = CORE["keys"][1]["script_pubkey_hex"]
+    elif case == "unrelated-transaction":
+        context["unsignedTransaction"] = context["unsignedTransaction"][:10] + "ff" * 32 + context["unsignedTransaction"][74:]
+    elif case == "wrong-scheme":
+        scheme = "schnorr-secp256k1-bip340"
+    payload = {"name": "BTC_KEY", "digest": context["digest"], "scheme": scheme, "request_id": request_id}
+    if path == "approved-persisted":
+        with api._vault_engine().begin() as conn:
+            delivery = json.loads(conn.execute(select(vault_requests.c.delivery).where(vault_requests.c.id == request_id)).scalar_one())
+            delivery.update(signing_context=context, scheme=scheme)
+            conn.execute(vault_requests.update().where(vault_requests.c.id == request_id).values(delivery=json.dumps(delivery)))
+    else:
+        payload["signing_context"] = context
+    sign = Mock(return_value={"signature": vector["expected"]["bip340_signature_hex"]})
+    monkeypatch.setattr(api, "avault_sign", sign)
+    if case == "valid":
+        assert api.vault_sign(payload)["ok"] is True
+        sign.assert_called_once()
+    else:
+        with pytest.raises(api.VaultApiError) as error:
+            api.vault_sign(payload)
+        assert error.value.code == "invalid_request"
+        sign.assert_not_called()
+        with api._vault_engine().connect() as conn:
+            assert vault_service.get_secret_meta(conn, "BTC_KEY")["last_used_at"] is None
+            if request_id:
+                assert vault_service.get_request(conn, request_id)["status"] == "pending"
+            else:
+                assert conn.execute(select(vault_requests.c.id)).all() == []
 
 
 def test_api_shape_accepts_only_exact_bitcoin_fields() -> None:
