@@ -288,8 +288,10 @@ describe('NewAgentDialog', () => {
 
     await waitFor(() => expect(screen.getByText('agents.create.effortRefused:{"effort":"high"}')).toBeTruthy());
     expect(createVibeAgent).not.toHaveBeenCalled();
-    // The menu now follows that answer, so the effort moved to one it offers.
+    // The menu now follows that answer, and the effort moved with it to one it
+    // offers, so the Create that takes clicks again sends that one.
     expect(screen.queryByRole('button', { name: 'high', exact: true })).toBeNull();
+    expect(screen.getByRole('button', { name: 'medium', exact: true }).className).toContain('bg-mint-soft');
     // The refused Create has settled when its button takes clicks again.
     const create = screen.getByRole('button', { name: /agents\.create\.submit/ }) as HTMLButtonElement;
     await waitFor(() => expect(create.disabled).toBe(false));
