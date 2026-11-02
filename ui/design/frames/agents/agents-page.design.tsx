@@ -1,4 +1,5 @@
-// The Agents page, Definitions tab: every Vibe Agent by backend, with the selected Agent's settings beside it.
+// The Agents page, Definitions tab, rendered whole: the Bots, then the Agents, with the selected one's panel beside
+// them (the states of the approved design are in bots-redesign.design.tsx).
 import { AgentsPage } from '@/components/workbench/AgentsPage';
 
 import { frames } from '../../frame';
@@ -20,7 +21,7 @@ const designFrames = frames([
   },
   {
     name: 'main-bot',
-    title: 'Agents · 选中主伙伴的 Agent',
+    title: 'Agents · 选中主伙伴',
     width: 1192,
     height: 1320,
     status: 'shipped',
