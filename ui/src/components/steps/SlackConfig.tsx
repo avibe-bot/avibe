@@ -23,7 +23,7 @@ interface SlackConfigProps {
   onCancel?: () => void;
 }
 
-// Mirrors design.pen XCWAT (Slack creds wizard step): WizardCard 920 wide,
+// ui/design: settings/platforms/slack-form. In the wizard: WizardCard 920 wide,
 // sStep accordion rows with mint-bordered active row + faint border collapsed
 // rows, navigation row with chevron-left back and mint pill next.
 export const SlackConfig: React.FC<SlackConfigProps> = ({ data, onNext, onBack, embedded = false, onApply, onCancel }) => {

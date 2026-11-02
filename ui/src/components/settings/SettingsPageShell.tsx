@@ -13,7 +13,7 @@ export type SettingsPageShellProps = {
   /**
    * `section` (default) is the 28/700 heading every Settings section has
    * shipped with. `landing` is the quieter block the source draws for the
-   * Settings landing (design.pen `Ozmrf`: 27/600 over a 13 `$--muted` line).
+   * Settings landing (ui/design: settings/general/default: 27/600 over a 13 `$--muted` line).
    * Opt-in, so adding it restyles no sibling section.
    */
   titleScale?: 'section' | 'landing';

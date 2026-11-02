@@ -34,7 +34,7 @@ interface WeChatConfigProps {
 
 const QR_POLL_INTERVAL_MS = 5000;
 
-// Mirrors design.pen XCWAT visual treatment for the QR-driven WeChat onboarding.
+// ui/design: settings/platforms/wechat-form. The QR-driven WeChat onboarding.
 // Three-stop horizontal stepper, mint-bordered QR card, mint primary actions.
 export const WeChatConfig: React.FC<WeChatConfigProps> = ({
   data,

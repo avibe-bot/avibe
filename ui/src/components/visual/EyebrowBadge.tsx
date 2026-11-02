@@ -7,7 +7,7 @@ interface EyebrowBadgeProps extends React.HTMLAttributes<HTMLSpanElement> {
   tone?: Tone;
 }
 
-// Mirrors design.pen Badge/Eyebrow (mtcmf): JetBrains Mono, 11px, weight 700,
+// Eyebrow badge: JetBrains Mono, 11px, weight 700,
 // letterSpacing 1.4, cyan glow shadow. Used for `01 — STEP` style labels.
 const TONE_CLASSES: Record<Tone, string> = {
   cyan: 'border-cyan/50 bg-cyan/[0.16] text-cyan-ink shadow-glow-md-cyan',
