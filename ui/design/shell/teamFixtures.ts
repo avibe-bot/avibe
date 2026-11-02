@@ -98,6 +98,8 @@ export const spoken = {
   text: '帮我看一下周一发布前还差哪些安全审查，',
   stash: '有问题直接约首席安全官',
   final: '帮我看一下周一发布前还差哪些安全审查，有问题直接约首席安全官。',
+  /** A take that runs on: more than the card shows, so it scrolls. */
+  long: '帮我看一下周一发布前还差哪些安全审查，有问题直接约首席安全官。另外把发布清单里还没勾的几项列给我，按负责人分一下，今天下班前要看到。欢迎流程的文案我觉得还可以再短一点，你让产品经理出两个版本，明天上午我们一起挑。还有试用登录的令牌刷新，安全那边说要先升级依赖，这个排在发布前面，',
 };
 
 /** The main Bot's conversation right after the voice message went in: it is already working on it. */

@@ -194,7 +194,7 @@ function useTips(): Tip[] {
     { icon: KeyRound, title: draft('保险库', 'Vault'), why: draft('密钥存在保险库里，Agent 用得到，但永远看不到原文。', 'Keys live in the Vault: Agents use them without ever seeing them.'), link: draft('打开保险库', 'Open the Vault') },
     { icon: Puzzle, title: draft('技能和 MCP', 'Skills & MCP'), why: draft('装一个技能或 MCP 服务器，所有 Agent 就多一项本事。', 'Install a Skill or an MCP server and every Agent can use it.'), link: draft('看看技能', 'Browse Skills') },
     { icon: MessagesSquare, title: draft('聊天应用', 'Chat apps'), why: draft('在 Slack、飞书、微信里直接和歪比说话，回复也在那里。', 'Talk to Vibey from Slack, Lark, or WeChat, and get replies there.'), link: draft('连接聊天应用', 'Connect one') },
-    { icon: MonitorSmartphone, title: draft('桌面小窗', 'The desktop pet'), why: draft('桌面应用里歪比常驻在屏幕角落，按住就能说话。', 'In the desktop app Vibey sits in a corner of your screen; hold it to talk.'), link: draft('下载桌面应用', 'Get the desktop app') },
+    { icon: MonitorSmartphone, title: draft('桌面小窗', 'The desktop pet'), why: draft('桌面应用里歪比常驻在屏幕角落；按住它，或者在任何应用里按住 ⌥⇧Space，说完松开就发给它。', 'In the desktop app Vibey sits in a corner of your screen; hold it, or hold ⌥⇧Space in any app, and release to send.'), link: draft('下载桌面应用', 'Get the desktop app') },
     { icon: Mic, title: draft('语音', 'Voice'), why: draft('手机上按住底栏中间的歪比说话，松开就发给它。', 'On a phone, hold Vibey in the middle of the tab bar to talk; release to send.'), link: draft('了解语音', 'About voice') },
   ];
 }
