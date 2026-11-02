@@ -54,6 +54,17 @@ const designFrames = frames([
     render: () => page(6, true),
   },
   {
+    name: 'new-session-menu',
+    title: '工作台 · 新会话：项目行 ⋯ → 新建会话（已上线）',
+    width: 390,
+    height: 844,
+    status: 'proposed',
+    fixtures: teamFixtures,
+    route: '/projects',
+    click: ['role=button[name="{t:workbench.projectActions}"] >> nth=0'],
+    render: () => page(6),
+  },
+  {
     name: 'team-small',
     title: '工作台 · 小屏 375×667',
     width: 375,
