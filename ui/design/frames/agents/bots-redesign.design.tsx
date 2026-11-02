@@ -1,4 +1,4 @@
-// Proposal (owner ask, 2026-11-02): the Agents page is where every Bot and Agent is configured.
+// Approved (owner, 2026-11-02): the Agents page is where every Bot and Agent is configured.
 // Bots get their own section by face and name, with Add and Remove on the page; the Agents follow in
 // one list; the panels drop every control that cannot apply. A Bot's Agent is never shown as an Agent
 // (owner rule): it is not in the Agents list, and comes back to it only when the Bot is removed.
@@ -96,7 +96,7 @@ const designFrames = frames([
     title: '伙伴与 Agents · 选中一位伙伴',
     width: 1440,
     height: 900,
-    status: 'proposed',
+    status: 'approved',
     route: '/agents',
     fixtures: team,
     render: desktop(roster({ selected: { kind: 'bot', handle: 'cso' }, detail: csoPanel })),
@@ -106,7 +106,7 @@ const designFrames = frames([
     title: '伙伴与 Agents · 选中一个可设为伙伴的 Agent',
     width: 1440,
     height: 900,
-    status: 'proposed',
+    status: 'approved',
     route: '/agents',
     fixtures: team,
     render: desktop(
@@ -121,7 +121,7 @@ const designFrames = frames([
     title: '伙伴与 Agents · 默认 Agent（内置，只剩能改的）',
     width: 1440,
     height: 900,
-    status: 'proposed',
+    status: 'approved',
     route: '/agents',
     fixtures: team,
     render: desktop(
@@ -136,7 +136,7 @@ const designFrames = frames([
     title: '伙伴与 Agents · 移出伙伴前确认',
     width: 1440,
     height: 900,
-    status: 'proposed',
+    status: 'approved',
     route: '/agents',
     fixtures: team,
     render: desktop(
@@ -151,7 +151,7 @@ const designFrames = frames([
     title: '伙伴与 Agents · 移出之后：它的 Agent 回到 Agents',
     width: 1440,
     height: 900,
-    status: 'proposed',
+    status: 'approved',
     route: '/agents',
     fixtures: { projects: demoProjects, bots: demoBots.filter((bot) => bot.handle !== 'cso') },
     render: desktop(
@@ -168,7 +168,7 @@ const designFrames = frames([
     title: '伙伴与 Agents · 新安装：只有歪比，选中主伙伴',
     width: 1440,
     height: 900,
-    status: 'proposed',
+    status: 'approved',
     route: '/agents',
     fixtures: fresh,
     render: desktop(
@@ -185,7 +185,7 @@ const designFrames = frames([
     title: '伙伴与 Agents · 成员：没有伙伴区',
     width: 1440,
     height: 900,
-    status: 'proposed',
+    status: 'approved',
     route: '/agents',
     fixtures: member,
     render: desktop(
@@ -200,7 +200,7 @@ const designFrames = frames([
     title: '伙伴与 Agents · 手机：列表',
     width: 390,
     height: 844,
-    status: 'proposed',
+    status: 'approved',
     route: '/agents',
     fixtures: team,
     render: phone(roster({})),
@@ -210,7 +210,7 @@ const designFrames = frames([
     title: '伙伴与 Agents · 手机：伙伴详情',
     width: 390,
     height: 844,
-    status: 'proposed',
+    status: 'approved',
     route: '/agents',
     fixtures: team,
     render: phone(roster({ selected: { kind: 'bot', handle: 'cso' }, detail: csoPanel, detailOpen: true })),
