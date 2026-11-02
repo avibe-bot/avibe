@@ -264,7 +264,7 @@ export function AddSkillDialogView({
           </div>
         </div>
 
-        <div className="flex flex-col gap-4 p-5">
+        <div className="flex min-w-0 flex-col gap-4 p-5">
           <SegmentedRadio<SkillSourceTab>
             value={source}
             onChange={onSourceChange}
@@ -356,7 +356,7 @@ export function AddSkillDialogView({
           ) : null}
         </div>
 
-        <div className="flex items-center justify-between gap-3 border-t border-border bg-surface-3 px-5 py-3.5">
+        <div className="flex min-w-0 items-center justify-between gap-3 border-t border-border bg-surface-3 px-5 py-3.5">
           <div className="flex min-w-0 flex-1 items-center gap-1.5">
             <Terminal className="size-3 shrink-0 text-muted" />
             <span className="truncate font-mono text-[10.5px] text-muted">{cliPreview || 'askill add …'}</span>
