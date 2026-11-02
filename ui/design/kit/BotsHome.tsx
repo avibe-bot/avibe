@@ -56,22 +56,22 @@ function MainBotCard({ bot }: { bot: Bot }) {
       type="button"
       className={clsx(
         'flex flex-col gap-3 rounded-2xl border p-4 text-left transition',
-        unread > 0 || running ? 'border-mint/35 bg-mint/[0.05] shadow-glow-md-mint' : 'border-border bg-surface',
+        unread > 0 || running ? 'border-mint/35 bg-mint/5 shadow-glow-md-mint' : 'border-border bg-surface',
       )}
     >
       <span className="flex items-center gap-3">
         <BotFace bot={bot} name={name} size={52} unread={unread} running={running} />
         <span className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="flex items-center gap-1.5">
-            <span className="truncate text-[17px] font-bold text-foreground">{name}</span>
-            <span className="shrink-0 rounded bg-mint-soft px-1 text-[9px] font-semibold leading-[14px] text-mint-ink">{draft('主伙伴', 'Main')}</span>
+            <span className="truncate text-lg font-bold text-foreground">{name}</span>
+            <span className="shrink-0 rounded bg-mint-soft px-1 text-3xs font-semibold leading-3.5 text-mint-ink">{draft('主伙伴', 'Main')}</span>
           </span>
-          <span className="truncate text-[12px] text-muted">{draft('你的第一联系人', 'Your first point of contact')}</span>
+          <span className="truncate text-xs text-muted">{draft('你的第一联系人', 'Your first point of contact')}</span>
         </span>
-        {row && <span className="shrink-0 self-start font-mono text-[10.5px] text-muted">{formatRelativeTime(row.last_activity_at, t)}</span>}
+        {row && <span className="shrink-0 self-start font-mono text-2xs text-muted">{formatRelativeTime(row.last_activity_at, t)}</span>}
       </span>
       {running ? (
-        <span className="flex items-center gap-2 rounded-xl bg-surface px-3 py-2 text-[12.5px]">
+        <span className="flex items-center gap-2 rounded-xl bg-surface px-3 py-2 text-xs">
           <span className="relative size-2 shrink-0">
             <span className="absolute inset-0 animate-ping rounded-full bg-mint opacity-70 motion-reduce:animate-none" />
             <span className="relative block size-2 rounded-full bg-mint shadow-glow-dot-mint" />
@@ -80,7 +80,7 @@ function MainBotCard({ bot }: { bot: Bot }) {
           <span className="min-w-0 truncate text-muted">{row?.preview_text}</span>
         </span>
       ) : (
-        row && <span className="line-clamp-2 text-[14px] leading-relaxed text-foreground">{row.preview_text}</span>
+        row && <span className="line-clamp-2 text-sm leading-relaxed text-foreground">{row.preview_text}</span>
       )}
     </button>
   );
@@ -105,7 +105,7 @@ export function BotsHome() {
           variant="outline"
           size="icon"
           aria-label={draft('添加伙伴', 'Add a Bot')}
-          className="border-mint/35 bg-mint/[0.08] text-mint-ink hover:bg-mint/[0.14]"
+          className="border-mint/35 bg-mint/8 text-mint-ink hover:bg-mint/14"
         >
           <UserPlus className="size-4" />
         </Button>
@@ -113,10 +113,10 @@ export function BotsHome() {
       {mainBot && <MainBotCard bot={mainBot} />}
       {others.length > 0 ? (
         <section className="flex flex-col gap-2">
-          <h2 className="flex items-center gap-2 px-1 text-[12px] font-semibold text-muted">
+          <h2 className="flex items-center gap-2 px-1 text-xs font-semibold text-muted">
             {draft('其他伙伴', 'Other Bots')}
             {othersUnread > 0 && (
-              <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-cyan px-1 font-mono text-[9px] font-bold text-accent-foreground">
+              <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-cyan px-1 font-mono text-3xs font-bold text-accent-foreground">
                 {othersUnread}
               </span>
             )}
@@ -132,18 +132,18 @@ export function BotsHome() {
                 type="button"
                 className={clsx(
                   'flex items-center gap-3 rounded-xl border px-3 py-3 text-left',
-                  unread > 0 ? 'border-cyan/30 bg-cyan/[0.04]' : 'border-border bg-surface',
+                  unread > 0 ? 'border-cyan/30 bg-cyan/4' : 'border-border bg-surface',
                 )}
               >
                 <BotFace bot={bot} name={name} size={44} unread={unread} running={running} />
                 <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                  <span className="truncate text-[15px] font-semibold text-foreground">{name}</span>
-                  <span className={clsx('truncate text-[12px]', unread > 0 ? 'text-foreground' : 'text-muted')}>
+                  <span className="truncate text-base font-semibold text-foreground">{name}</span>
+                  <span className={clsx('truncate text-xs', unread > 0 ? 'text-foreground' : 'text-muted')}>
                     {running && <span className="font-semibold text-mint-ink">{t('bots.running')} · </span>}
                     {row?.preview_text || bot.role}
                   </span>
                 </span>
-                {row && <span className="shrink-0 self-start font-mono text-[10.5px] text-muted">{formatRelativeTime(row.last_activity_at, t)}</span>}
+                {row && <span className="shrink-0 self-start font-mono text-2xs text-muted">{formatRelativeTime(row.last_activity_at, t)}</span>}
               </button>
             );
           })}
@@ -153,16 +153,16 @@ export function BotsHome() {
           <span className="grid size-10 place-items-center rounded-full bg-mint-soft text-mint-ink">
             <UsersRound className="size-5" />
           </span>
-          <span className="text-[15px] font-semibold text-foreground">{draft('添加一位伙伴', 'Add a Bot')}</span>
-          <span className="text-[12.5px] leading-relaxed text-muted">
+          <span className="text-base font-semibold text-foreground">{draft('添加一位伙伴', 'Add a Bot')}</span>
+          <span className="text-xs leading-relaxed text-muted">
             {draft('伙伴有名字、职责和自己的记忆，和它的对话会一直延续。', 'A Bot has a name, a role, and its own memory, and your conversation with it carries on.')}
           </span>
-          <Button type="button" variant="outline" size="sm" className="mt-1 gap-1.5 rounded-full border-mint/35 bg-mint/[0.08] text-mint-ink">
+          <Button type="button" variant="outline" size="sm" className="mt-1 gap-1.5 rounded-full border-mint/35 bg-mint/8 text-mint-ink">
             <UserPlus className="size-3.5" />
             {draft('添加伙伴', 'Add a Bot')}
           </Button>
           {mainBot && (
-            <span className="mt-1 text-[11.5px] text-muted">
+            <span className="mt-1 text-xs text-muted">
               {draft(`也可以直接跟${displayName(mainBot)}说「帮我加一个负责安全的伙伴」`, `Or tell ${displayName(mainBot)}: “Add a Bot that handles security.”`)}
             </span>
           )}

@@ -29,7 +29,7 @@ export function PhoneScreen({
       {header ?? <MobileBrandHeader />}
       <main
         className={clsx(
-          'min-h-0 flex-1 overflow-y-auto pb-[var(--mobile-nav-clearance)]',
+          'min-h-0 flex-1 overflow-y-auto pb-(--mobile-nav-clearance)',
           flat ? 'bg-background' : 'page-glow-console',
         )}
       >

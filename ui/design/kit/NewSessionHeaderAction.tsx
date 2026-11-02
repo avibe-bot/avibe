@@ -18,8 +18,8 @@ export function NewSessionHeaderAction({ pressed = false }: { pressed?: boolean 
         size="sm"
         aria-label={draft('新会话', 'New session')}
         className={clsx(
-          'h-8 gap-1 rounded-full border-mint/35 bg-mint/[0.08] px-3 text-[12px] font-semibold text-mint-ink hover:bg-mint/[0.14]',
-          pressed && 'bg-mint/[0.18] ring-2 ring-mint/40',
+          'h-8 gap-1 rounded-full border-mint/35 bg-mint/8 px-3 text-xs font-semibold text-mint-ink hover:bg-mint/14',
+          pressed && 'bg-mint/18 ring-2 ring-mint/40',
         )}
       >
         <Plus className="size-3.5" />

@@ -26,7 +26,7 @@ export function BotConversationHeader({ current, open = false }: { current: stri
     .filter((each) => each.handle !== current)
     .reduce((sum, each) => sum + (unreadBySession[each.session_id] ?? 0), 0);
   return (
-    <div className="fixed inset-x-0 top-0 z-[45] border-b border-border bg-surface px-4 py-2.5 md:hidden">
+    <div className="fixed inset-x-0 top-0 z-50 border-b border-border bg-surface px-4 py-2.5 md:hidden">
       <div className="flex items-center gap-3">
         <Button type="button" variant="outline" size="icon" aria-label={t('chat.back')} className="size-7 shrink-0">
           <ArrowLeft className="size-3.5" />
@@ -38,15 +38,15 @@ export function BotConversationHeader({ current, open = false }: { current: stri
           aria-label={draft(`${name}，切换伙伴`, `${name}, switch Bot`)}
           className={clsx(
             '-ml-1.5 flex min-w-0 items-center gap-2 rounded-full py-0.5 pl-1.5 pr-2 transition',
-            open ? 'bg-mint-soft ring-1 ring-mint/40' : 'hover:bg-foreground/[0.04]',
+            open ? 'bg-mint-soft ring-1 ring-mint/40' : 'hover:bg-foreground/4',
           )}
         >
           <BotFace bot={bot} name={name} size={26} running={statusBySession[bot.session_id] === 'running'} />
-          <span className="min-w-0 truncate text-[16px] font-bold text-foreground">{name}</span>
+          <span className="min-w-0 truncate text-base font-bold text-foreground">{name}</span>
           <span className="relative shrink-0">
             <ChevronDown className={clsx('size-4 text-muted transition', open && 'rotate-180 text-mint-ink')} />
             {othersUnread > 0 && (
-              <span className="absolute -right-2.5 -top-2 inline-flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-cyan px-0.5 font-mono text-[8.5px] font-bold text-accent-foreground shadow-glow-xs-cyan">
+              <span className="absolute -right-2.5 -top-2 inline-flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-cyan px-0.5 font-mono text-3xs font-bold text-accent-foreground shadow-glow-xs-cyan">
                 {othersUnread}
               </span>
             )}

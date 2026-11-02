@@ -19,14 +19,15 @@ export function BotSwitchSheet({ current, aboveTabBar = false }: { current?: str
   const draft = useDraft();
   const { bots, displayName, statusBySession } = useBots();
   const { inboxSessions, unreadBySession } = useWorkbenchInbox();
-  const bottom = aboveTabBar ? 'bottom-[calc(4.75rem+env(safe-area-inset-bottom))]' : 'bottom-0 pb-[calc(1rem+env(safe-area-inset-bottom))]';
+  // Above the tab bar it stays under a pressed center (variant A); over a conversation it is the top layer.
+  const bottom = aboveTabBar ? 'bottom-(--mobile-nav-height) z-40 pb-3' : 'bottom-0 z-50 pb-4';
   return (
     <div className="md:hidden" role="dialog" aria-modal="true" aria-label={draft('伙伴', 'Bots')}>
-      <div className={clsx('fixed inset-x-0 top-0 z-40 bg-background/70 backdrop-blur-sm', aboveTabBar ? bottom : 'bottom-0')} />
-      <div className={clsx('fixed inset-x-0 z-50 max-h-[72dvh] overflow-y-auto rounded-t-3xl border border-border bg-surface px-3 pt-2 shadow-xl', bottom, aboveTabBar && 'pb-3')}>
+      <div className={clsx('fixed inset-x-0 top-0 z-40 bg-background/70 backdrop-blur-sm', aboveTabBar ? 'bottom-(--mobile-nav-height)' : 'bottom-0')} />
+      <div className={clsx('fixed inset-x-0 max-h-3/4 overflow-y-auto rounded-t-3xl border border-border bg-surface px-3 pt-2 shadow-xl', bottom)}>
         <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-border" />
         <div className="mb-2 flex items-center justify-between gap-3 px-1">
-          <h2 className="text-[17px] font-bold text-foreground">{draft('伙伴', 'Bots')}</h2>
+          <h2 className="text-lg font-bold text-foreground">{draft('伙伴', 'Bots')}</h2>
           <Button type="button" variant="outline" size="xs" className="gap-1 rounded-full">
             <UserPlus className="size-3.5" />
             {draft('添加', 'Add')}
@@ -46,26 +47,26 @@ export function BotSwitchSheet({ current, aboveTabBar = false }: { current?: str
                   aria-current={selected ? 'page' : undefined}
                   className={clsx(
                     'flex w-full items-center gap-3 rounded-2xl px-2.5 py-2.5 text-left transition',
-                    selected ? 'bg-mint-soft ring-1 ring-mint/40' : 'hover:bg-foreground/[0.03]',
+                    selected ? 'bg-mint-soft ring-1 ring-mint/40' : 'hover:bg-foreground/3',
                   )}
                 >
                   <BotFace bot={bot} name={name} size={44} unread={unread} running={running} dotWell={selected ? 'bg-mint-soft' : 'bg-surface'} />
                   <span className="flex min-w-0 flex-1 flex-col gap-0.5">
                     <span className="flex items-center gap-1.5">
-                      <span className="truncate text-[15px] font-semibold text-foreground">{name}</span>
+                      <span className="truncate text-base font-semibold text-foreground">{name}</span>
                       {bot.builtin && (
-                        <span className="shrink-0 rounded bg-mint-soft px-1 text-[9px] font-semibold leading-[14px] text-mint-ink">
+                        <span className="shrink-0 rounded bg-mint-soft px-1 text-3xs font-semibold leading-3.5 text-mint-ink">
                           {draft('主伙伴', 'Main')}
                         </span>
                       )}
                     </span>
-                    <span className={clsx('truncate text-[12px]', unread > 0 ? 'text-foreground' : 'text-muted')}>
+                    <span className={clsx('truncate text-xs', unread > 0 ? 'text-foreground' : 'text-muted')}>
                       {running && <span className="font-semibold text-mint-ink">{t('bots.running')} · </span>}
                       {row?.preview_text || bot.role}
                     </span>
                   </span>
                   <span className="flex shrink-0 flex-col items-end gap-1">
-                    {row && <span className="font-mono text-[10.5px] text-muted">{formatRelativeTime(row.last_activity_at, t)}</span>}
+                    {row && <span className="font-mono text-2xs text-muted">{formatRelativeTime(row.last_activity_at, t)}</span>}
                     {selected && <Check className="size-4 text-mint-ink" />}
                   </span>
                 </button>
@@ -73,6 +74,7 @@ export function BotSwitchSheet({ current, aboveTabBar = false }: { current?: str
             );
           })}
         </ul>
+        {!aboveTabBar && <div className="h-(--safe-area-bottom)" />}
       </div>
     </div>
   );

@@ -18,7 +18,7 @@ export function MainBotQuickComposer({ docked = false, handle }: { docked?: bool
   const field = (
     <div className="flex items-center gap-2 rounded-full border border-border-strong bg-surface py-1.5 pl-1.5 pr-1.5 shadow-mint-card-sm">
       <BotAvatar avatar={bot.avatar} name={name} size={30} />
-      <span className="min-w-0 flex-1 truncate text-[14px] text-muted">{draft(`和${name}说…`, `Message ${name}…`)}</span>
+      <span className="min-w-0 flex-1 truncate text-sm text-muted">{draft(`和${name}说…`, `Message ${name}…`)}</span>
       <span className="grid size-8 place-items-center rounded-full text-muted" aria-hidden="true">
         <Mic className="size-4" />
       </span>
@@ -29,7 +29,7 @@ export function MainBotQuickComposer({ docked = false, handle }: { docked?: bool
   );
   if (!docked) return field;
   return (
-    <div className={clsx('fixed inset-x-0 bottom-[calc(4.75rem+env(safe-area-inset-bottom))] z-30 px-4 pb-2 pt-6 md:hidden', 'bg-gradient-to-t from-background via-background/90 to-transparent')}>
+    <div className={clsx('fixed inset-x-0 bottom-(--mobile-nav-height) z-30 px-4 pb-2 pt-6 md:hidden', 'bg-gradient-to-t from-background via-background/90 to-transparent')}>
       {field}
     </div>
   );
