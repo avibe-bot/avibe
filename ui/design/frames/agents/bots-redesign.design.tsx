@@ -1,7 +1,9 @@
 // Proposal (owner ask, 2026-11-02): the Agents page is where every Bot and Agent is configured.
-// Bots get their own section by face and name, with Add and Remove on the page; the Agents that are
-// not Bots follow in one list; the panels drop every control that cannot apply. Drawn beside the
-// shipped sidebar at 1440×900, and on a phone. Kit: `kit/AgentsRoster.tsx`, `kit/AgentsRosterDetail.tsx`.
+// Bots get their own section by face and name, with Add and Remove on the page; the Agents follow in
+// one list; the panels drop every control that cannot apply. A Bot's Agent is never shown as an Agent
+// (owner rule): it is not in the Agents list, and comes back to it only when the Bot is removed.
+// Drawn beside the shipped sidebar at 1440×900, and on a phone. Kit: `kit/AgentsRoster.tsx`,
+// `kit/AgentsRosterDetail.tsx`.
 import type { ReactNode } from 'react';
 
 import { WorkbenchSidebar } from '@/components/workbench/WorkbenchSidebar';
@@ -47,6 +49,11 @@ const detail = (name: string, promptTokens = 0): DetailAgent => {
   if (!agent) throw new Error(`no demo Agent ${name}`);
   return { ...agent, promptTokens, efforts: EFFORTS[agent.backend] ?? [] };
 };
+
+/** After the security lead is removed from Bots: its Agent is an ordinary Agent again (D1 keeps its
+ *  conversation and memory, hidden until it is a Bot again). */
+const afterRemoval = agents.map((agent) => (agent.name === 'cso' ? { ...agent, bot: null } : agent));
+const csoAgent = (): DetailAgent => ({ ...detail('cso', 640), bot: null });
 
 const team: WorkbenchFixtures = { projects: demoProjects, bots: demoBots };
 const fresh: WorkbenchFixtures = { projects: demoProjects, bots: [mainBot] };
@@ -137,6 +144,23 @@ const designFrames = frames([
         {roster({ selected: { kind: 'bot', handle: 'cso' }, detail: csoPanel })}
         <RemoveBotConfirm handle="cso" />
       </>,
+    ),
+  },
+  {
+    name: 'after-remove',
+    title: '伙伴与 Agents · 移出之后：它的 Agent 回到 Agents',
+    width: 1440,
+    height: 900,
+    status: 'proposed',
+    route: '/agents',
+    fixtures: { projects: demoProjects, bots: demoBots.filter((bot) => bot.handle !== 'cso') },
+    render: desktop(
+      <AgentsRoster
+        agents={afterRemoval}
+        defaultAgentName="vibey"
+        selected={{ kind: 'agent', name: 'cso' }}
+        detail={<AgentDetail agent={csoAgent()} isDefault={false} />}
+      />,
     ),
   },
   {

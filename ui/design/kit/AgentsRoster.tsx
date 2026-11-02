@@ -1,6 +1,9 @@
 // The Agents page as the place where every Bot and Agent is configured (proposal, 2026-11-02):
-// a Bots section first, by face and name, with its own Add; then the Agents that are not Bots, one
-// flat list with backend icons, the order the composer's @ menu uses (docs/plans/bots.md D3).
+// a Bots section first, by face and name, with its own Add; then the Agents, one flat list with
+// backend icons, the order the composer's @ menu uses (docs/plans/bots.md D3).
+// Bots and Agents are two concepts (owner rule, 2026-11-02): the Agent behind a Bot, the main Bot's
+// `main` included, is an implementation detail and is never shown or offered as an Agent. A removed
+// Bot's Agent is an ordinary Agent again and returns to the Agents list.
 // The selected Bot or Agent opens beside the list (below lg, in place of it).
 import type { ReactNode } from 'react';
 import { Bot as BotIcon, FileText, Plus, RefreshCw, Search } from 'lucide-react';
@@ -25,7 +28,7 @@ import { useDraft } from './draft';
 export type RosterSelection = { kind: 'bot'; handle: string } | { kind: 'agent'; name: string } | null;
 
 export interface AgentsRosterProps {
-  /** Every Agent `/api/agents` lists; the ones that are Bots are drawn as Bots. */
+  /** Every Agent `/api/agents` lists; a Bot's Agent is left out (the Bot stands for it). */
   agents: VibeAgentBrief[];
   defaultAgentName: string | null;
   selected?: RosterSelection;
@@ -46,7 +49,7 @@ const backendRank = (backend: string) => {
 
 const isSystem = (agent: VibeAgentBrief) => agent.source === 'builtin' || agent.source === 'system';
 
-/** Agents in one list: by backend, the built-in Agent of each backend first, then by name. */
+/** The Agents list: no Bot's Agent; by backend, the built-in Agent of each backend first, then by name. */
 function rosterAgents(agents: VibeAgentBrief[]): VibeAgentBrief[] {
   return agents
     .filter((agent) => !agent.bot && !agent.archived)
