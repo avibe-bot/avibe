@@ -12,8 +12,7 @@ import {
   statusMeta,
 } from '../../lib/agentGraph';
 
-// Border/tint by status tone. Selected wins (mint ring + glow, per spec frame
-// anu5U 选中态). Failed nodes carry a destructive tint; live-active a mint
+// Border/tint by status tone. Selected wins (mint ring + glow). Failed nodes carry a destructive tint; live-active a mint
 // hint; everything else the neutral surface. Non-live nodes are dimmed by the
 // caller via ``faded``.
 function shellClass(node: AgentGraphNode, selected: boolean): string {

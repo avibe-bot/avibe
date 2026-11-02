@@ -50,6 +50,17 @@ const designFrames = frames([
     render: consolePage(page),
   },
   {
+    name: 'task-detail',
+    title: 'Harness · 选中一个后台任务',
+    width: 1192,
+    height: 900,
+    status: 'shipped',
+    route: '/harness?tab=tasks',
+    fixtures: workbenchFixtures(harnessApi('tasks')),
+    click: ['text=Slack #ops 每天 09:30 战报'],
+    render: consolePage(page),
+  },
+  {
     name: 'phone',
     title: 'Harness · 手机',
     width: 390,

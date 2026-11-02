@@ -14,7 +14,7 @@ import { WorkbenchInboxContext, type InboxState } from '@/context/WorkbenchInbox
 import { WorkbenchProjectsContext, type WorkbenchProjectsTree } from '@/context/WorkbenchProjectsContext';
 import { unreadByCategory } from '@/lib/notificationPreferences';
 
-import type { DesignTheme } from '../frame';
+import type { DesignTheme, FrameRoute } from '../frame';
 
 import { owner, type WorkbenchFixtures } from './fixtures';
 
@@ -88,7 +88,7 @@ export function DesignShell({
   children,
 }: {
   fixtures?: WorkbenchFixtures;
-  route?: string;
+  route?: FrameRoute;
   /** The frame's theme, for components that read it rather than the CSS (a canvas that paints its own colors). */
   theme?: DesignTheme;
   children: ReactNode;

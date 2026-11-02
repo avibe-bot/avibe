@@ -209,7 +209,7 @@ export const Workbench: React.FC = () => {
           </div>
         )}
 
-        {/* Continuation row (design CRERw) — where this conversation can carry on
+        {/* Continuation row (ui/design: workbench/home/desktop) — where this conversation can carry on
             when the user leaves the desk. Both destinations are OWNER_ONLY_ROUTES,
             so anyone without `can_manage_instance` who followed either would be
             bounced straight back here; the whole row goes rather than the links

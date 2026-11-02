@@ -403,7 +403,7 @@ const MobileSessionRow: React.FC<{
 // (WorkbenchSidebar) flattened into a full-page accordion — tap a project to
 // expand its sessions, tap a session to open the chat, ⋯ for the rename/archive/
 // edit-AGENTS.md actions the desktop exposes via right-click + hover. Shares the
-// same data provider (useWorkbenchProjectsTree) as the sidebar. Design: `FW7cI`.
+// same data provider (useWorkbenchProjectsTree) as the sidebar (ui/design: mobile/projects/expanded).
 export const ProjectsPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();

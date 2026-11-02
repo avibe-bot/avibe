@@ -1,5 +1,6 @@
 // Settings · Platform connections: the enabled-platform grid and one card per connected platform,
-// plus each platform's credential form as its card opens it (the shipped embed, drawn on its own).
+// a card opened in place, the confirmation that disabling a platform asks for, and each platform's
+// credential form as its card opens it (the shipped embed, drawn on its own).
 import { PlatformConfigEmbed } from '@/components/settings/PlatformConfigEmbed';
 import { SettingsPlatformsPage } from '@/components/settings/SettingsPlatformsPage';
 
@@ -61,6 +62,28 @@ const designFrames = frames([
         <PlatformConfigEmbed platform="slack" config={settingsConfig} onApply={async () => {}} onCancel={() => {}} />
       </div>
     ),
+  },
+  {
+    name: 'slack-open',
+    title: '设置 · 平台接入 · 展开 Slack 卡片',
+    width: 1440,
+    height: 1200,
+    status: 'shipped',
+    route,
+    fixtures: slackFormFixtures,
+    click: ['role=button[name="{t:common.configure}"] >> nth=0'],
+    render: page,
+  },
+  {
+    name: 'disable-confirm',
+    title: '设置 · 平台接入 · 停用确认',
+    width: 1440,
+    height: 900,
+    status: 'shipped',
+    route,
+    fixtures: settingsFixtures(),
+    click: ['button[aria-pressed="true"] >> nth=0'],
+    render: page,
   },
   ...(['discord', 'telegram', 'lark', 'wechat'] as const).map((platform) => ({
     name: `${platform}-form`,

@@ -2,6 +2,7 @@
 import { UserList } from '@/components/steps/UserList';
 
 import { frames } from '../../frame';
+import { modelMenusApi } from '../agents/fixtures';
 import { bindCodesApi, scopeSettingsApi, settingsFixtures, settingsPage, usersApi } from './fixtures';
 
 const page = settingsPage('platforms/users', <UserList />);
@@ -41,6 +42,18 @@ const designFrames = frames([
       '/api/users': { ok: true, users: {} },
       '/api/bind-codes': { ok: true, bind_codes: [] },
     }),
+    render: page,
+  },
+  {
+    name: 'route-picker',
+    title: '设置 · 私聊 · Agent 路由选择器（三栏级联）',
+    width: 1440,
+    height: 1100,
+    status: 'shipped',
+    // Marc's route runs the reviewer Agent on Claude Code, so all three columns have choices.
+    route: '/settings/platforms/users?platform=telegram&user=58181121',
+    fixtures: { ...fixtures, api: { ...fixtures.api, ...modelMenusApi } },
+    click: ['button[aria-haspopup="dialog"]:has-text("reviewer")'],
     render: page,
   },
   {

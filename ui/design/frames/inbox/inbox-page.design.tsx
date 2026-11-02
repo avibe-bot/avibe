@@ -51,6 +51,17 @@ const designFrames = frames([
     render: consolePage(page),
   },
   {
+    name: 'notifications',
+    title: '收件箱 · 通知开关菜单',
+    width: 1192,
+    height: 700,
+    status: 'shipped',
+    route: '/inbox',
+    fixtures: populated,
+    click: ['button[aria-haspopup="dialog"] >> nth=0'],
+    render: consolePage(page),
+  },
+  {
     name: 'phone',
     title: '收件箱 · 手机',
     width: 390,

@@ -692,7 +692,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
   // Inbox hover popover stays OUT of any overflow box below, so it is never clipped.
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2.5">
-      {/* Brand row tLDP1 — the whole brand opens the new-conversation home. The
+      {/* Brand row — the whole brand opens the new-conversation home. The
           mark keeps the approved chip treatment (32px, mint hairline over a
           mint well, resting glow that strengthens on hover) inside this
           sidebar's own padding, so the adjustable width still governs the
@@ -781,7 +781,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
           (docs/plans/bots.md D5). Nobody else sees the strip. */}
       <BotStrip unreadBySession={unreadBySession} />
 
-      {/* Capabilities m8K59 — a collapsible group, so a long project list can
+      {/* Capabilities — a collapsible group, so a long project list can
           reclaim the rows. The label leads and the chevron closes the row on the
           right, matching the Projects header below. Only the destinations the
           current authorization admits are rendered, and the header disappears
@@ -808,7 +808,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
         </div>
       )}
 
-      {/* Projects section t7o96 — collapses like Capabilities: the label and the
+      {/* Projects section — collapses like Capabilities: the label and the
           chevron closing the row both toggle it, and the chevron sits in the same
           right-edge column as the Capabilities one. The borderless search + add
           icons stay between them, so they remain reachable while the list is
@@ -874,7 +874,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
               {t('workbench.projectsLoadError')}
             </div>
           )}
-          {/* True empty state e5Kplg — a real row, not a centered illustration. */}
+          {/* True empty state — a real row, not a centered illustration. */}
           {projects !== null && projects.length === 0 && (
             <div className="flex items-center gap-[7px] rounded-md px-1.5 py-[7px]">
               <FolderPlus className="size-[14px] shrink-0 text-muted" />

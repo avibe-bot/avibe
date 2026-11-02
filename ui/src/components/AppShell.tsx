@@ -486,7 +486,7 @@ export const AppShell: React.FC = () => {
   const isBuiltinApp = isStandaloneAppRoutePath(surfaceLocation.pathname);
   const isFullHeightApp = chromeless || isBuiltinApp || isShowPageApp;
   const isFullScreenMobile = isChat || isSearch || isSettings || isShowPageApp || isBuiltinApp;
-  // `/` is the Workbench canvas root and the only route board 04 draws. It reads
+  // `/` is the Workbench canvas root (ui/design: workbench/home/desktop). It reads
   // the surface location, so Settings opened over the home keeps the home's own
   // background behind the overlay.
   const isWorkbenchHome = surfaceLocation.pathname === '/';
@@ -522,7 +522,7 @@ export const AppShell: React.FC = () => {
       <ConfigRecoveryNotice config={config} />
       {/* Windows cover the sidebar (z-10 < z-20). AppsLauncher portals its button and Dock
           above the window layer so app switching remains reachable even when maximized. */}
-      {/* Sidebar Y1TiVV — 248 wide by default, 16px horizontal/bottom padding,
+      {/* Sidebar (ui/design: workbench/home/desktop) — 248 wide by default, 16px horizontal/bottom padding,
           a 16px native brand inset and the original 10px web inset. The top group and bottom
           cluster pushed apart. The brand row, navigation and projects are one unit
           inside WorkbenchSidebar; this frame owns only the column and the bottom.
@@ -600,7 +600,7 @@ export const AppShell: React.FC = () => {
             )}
           </div>
 
-          {/* Version row AYIIj — version on the LEFT, run state on the RIGHT. */}
+          {/* Version row — version on the LEFT, run state on the RIGHT. */}
           <div className="flex items-center justify-between gap-2 px-1 py-0.5">
             {capabilities.can_read_instance ? <VersionBadge openUpward /> : <span />}
             <span className="flex items-center gap-1.5 text-[10px] text-muted">
@@ -674,7 +674,7 @@ export const AppShell: React.FC = () => {
               ? 'min-h-0 flex-1 overflow-hidden md:ml-[var(--app-sidebar-w)] md:min-h-screen md:flex-none md:overflow-visible md:pb-0'
             : 'flex-1 min-h-0 overflow-y-auto md:ml-[var(--app-sidebar-w)] md:min-h-screen md:flex-none md:overflow-visible md:pb-0',
           !chromeless && (showBottomNav ? 'pb-[var(--mobile-nav-clearance)]' : 'pb-0'),
-          // Board 04 draws the Workbench home on flat $--background. The console
+          // The Workbench home draws on flat $--background. The console
           // aurora stays with the rest of its page family (Agents, Skills,
           // Harness, Vaults, Inbox, chat), so this is scoped to `/` alone and
           // repaints nothing else. `bg-background` rather than no class at all:
