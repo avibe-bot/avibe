@@ -215,8 +215,9 @@ for (const theme of ['light', 'dark'] as const) {
     await expect(sessions).toHaveAttribute('aria-checked', 'false');
     await expect(popover).toContainText('会话消息照常进收件箱');
     await page.screenshot({ animations: 'disabled', path: `${SHOTS}/notifications-menu-${theme}.png`, clip: { x: 0, y: 0, width: 680, height: 560 } });
+    // The click resolves once it is dispatched; the save reaches the route afterwards.
     await sessions.click();
-    expect(saved).toEqual([{ sessions: true }]);
+    await expect.poll(() => saved).toEqual([{ sessions: true }]);
     await expect(sidebar.getByRole('link', { name: '收件箱，5 条未读' })).toHaveText('5');
 
     await popover.getByRole('button', { name: '更多通知设置' }).click();
@@ -233,6 +234,8 @@ for (const theme of ['light', 'dark'] as const) {
     await expect(main.locator('section').first()).toContainText('首席安全官');
     await expect(main.locator('section').nth(1)).toContainText('Fix the cache break');
     await page.screenshot({ animations: 'disabled', path: `${SHOTS}/notifications-inbox-page-${theme}.png` });
+    // That one switch was the only write.
+    expect(saved).toEqual([{ sessions: true }]);
     expect(denied).toEqual([]);
   });
 

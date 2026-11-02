@@ -35,7 +35,9 @@ def test_patched_source_manifest_hash_locks_the_divergence() -> None:
 
     assert (
         driver["patch"]["contract"]
-        == "click.click_mode=raw; embedded parent-liveness cleanup"
+        == ("click.click_mode=raw; embedded parent-liveness cleanup; "
+        "running launch_app uses kAEReopenApplication ('rapp') without activation; "
+        "cold and new-instance launch use 'oapp'")
     )
     assert driver["patch"]["upstream_refs"]
     assert driver["patch"]["upgrade_plan"]

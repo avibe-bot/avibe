@@ -5,8 +5,8 @@
  * Settings can change while this flow is open. `api.getConfig()` answers from a 30s
  * cache, so calling it again is not a freshness test — it can hand back the world as
  * it was before the change. Everything that must not be wrong about the prerequisite
- * — the initial read, an explicit Retry and the completion boundary — comes through
- * the uncached GET here instead.
+ * — the initial read, arrival at assistants after provider writes, an explicit Retry
+ * and the completion boundary — comes through the uncached GET here instead.
  *
  * Validation is deliberately narrow and shared: absent or malformed fields are UNREAD
  * state, not an opt-out, and that distinction is the whole reason a caller can tell
