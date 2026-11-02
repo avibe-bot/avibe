@@ -35,6 +35,15 @@ A Codex/OpenCode server with `enabled = false` is omitted. Native extras Hub doe
 
 On the Skills page, MCP tab, paste an `mcpServers` block and choose **Add MCP**. That writes only Avibe's store, then refreshes the name.
 
+The Add MCP dialog has two tabs. **Paste JSON** (the default) accepts any `mcpServers` block. **Form** covers the common cases:
+
+- **Name** — validated like any other add; a rejected name shows the server's error.
+- **URL or command** — input starting with `http://` or `https://` becomes a Streamable HTTP server (a `/sse` URL is kept as typed). Anything else is a stdio command, split shell-style: quotes and backslash escapes are honored, but nothing runs through a shell and `$VARS` are not expanded. Shell operators (`|`, `&&`, `||`, `;`, `>`, `<`, backticks, `$(`), unclosed quotes and Windows paths are rejected; use the JSON tab for those. `docker run -e KEY=VAL ...` keeps `-e` in the arguments.
+- **Headers** (HTTP) or **Environment variables** (stdio) — key/value rows, stored in plaintext like JSON values.
+- **Advanced** (stdio) — working directory.
+
+OAuth settings, timeouts, `enabled`, tool filters, `${VAR}` references, `envFile`, `inputs`, and `headersHelper` are JSON-only. Each tab keeps its input while you switch.
+
 ```bash
 vibe mcp-add --transport http docs https://example.invalid/mcp --header 'Authorization: Bearer <token>'
 vibe mcp-add local-tools --env MODE=readonly -- python server.py

@@ -10,10 +10,13 @@ import { useToast } from '../../../context/ToastContext';
 import { useInstanceAuthorization } from '../../../context/InstanceAuthorizationContext';
 import { isDesktopShell } from '../../../lib/desktopShell';
 import { mcpAddOauthAction } from '../../../lib/mcpAddOauth';
+import { EMPTY_MCP_ADD_FORM, mcpAddPayload, type McpAddFormState, type McpAddTab } from '../../../lib/mcpAddForm';
 import { Badge } from '../../ui/badge';
 import { Button } from '../../ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from '../../ui/dialog';
+import { SegmentedRadio } from '../../ui/segmented';
 import { Textarea } from '../../ui/textarea';
+import { McpAddForm } from './McpAddForm';
 import { buttonVariants } from '../../ui/button-variants';
 
 function oauthStartHref(name: string): string {
@@ -234,14 +237,19 @@ export interface McpAddDialogProps {
   busy: boolean;
   adding: boolean;
   onTextChange: (text: string) => void;
+  /** Paste JSON (default) or the form; each keeps its input across switches. */
+  tab: McpAddTab;
+  onTabChange: (tab: McpAddTab) => void;
+  form: McpAddFormState;
+  onFormChange: (form: McpAddFormState) => void;
   onAdd: () => void;
   onClose: () => void;
   onDone: () => void;
   onActivateLogin: (name: string) => void;
 }
 
-/** Paste `mcpServers` JSON to add servers (ui/design: skills/mcp/add). */
-export function McpAddDialog({ open, text, error, result, busy, adding, onTextChange, onAdd, onClose, onDone, onActivateLogin }: McpAddDialogProps) {
+/** Paste `mcpServers` JSON or fill a form to add servers (ui/design: skills/mcp/add, skills/mcp/add-form*). */
+export function McpAddDialog({ open, text, error, result, busy, adding, onTextChange, tab, onTabChange, form, onFormChange, onAdd, onClose, onDone, onActivateLogin }: McpAddDialogProps) {
   const { t } = useTranslation();
   return (
     <Dialog open={open} onOpenChange={(next) => (!next ? onClose() : undefined)}>
@@ -264,8 +272,23 @@ export function McpAddDialog({ open, text, error, result, busy, adding, onTextCh
           </div>
         ) : (
           <>
-            <Textarea value={text} onChange={(event) => onTextChange(event.target.value)} className="min-h-40 font-mono text-[12px]" placeholder={t('mcpHub.pastePlaceholder')} />
-            <p className="text-[11px] text-muted">{t('mcpHub.pasteHint')}</p>
+            <SegmentedRadio
+              value={tab}
+              onChange={onTabChange}
+              ariaLabel={t('mcpHub.addMode')}
+              options={[
+                { id: 'json', label: t('mcpHub.addModeJson') },
+                { id: 'form', label: t('mcpHub.addModeForm') },
+              ]}
+            />
+            {tab === 'json' ? (
+              <>
+                <Textarea value={text} onChange={(event) => onTextChange(event.target.value)} className="min-h-40 font-mono text-[12px]" placeholder={t('mcpHub.pastePlaceholder')} />
+                <p className="text-[11px] text-muted">{t('mcpHub.pasteHint')}</p>
+              </>
+            ) : (
+              <McpAddForm value={form} onChange={onFormChange} />
+            )}
             {error ? <div className="whitespace-pre-wrap text-[12px] text-destructive-ink">{error}</div> : null}
           </>
         )}
@@ -275,7 +298,7 @@ export function McpAddDialog({ open, text, error, result, busy, adding, onTextCh
           ) : (
             <>
               <Button type="button" variant="outline" onClick={onClose}>{t('common.cancel')}</Button>
-              <Button type="button" disabled={busy || !text.trim()} onClick={onAdd}>
+              <Button type="button" disabled={busy || mcpAddPayload(tab, text, form) === null} onClick={onAdd}>
                 {adding ? <Loader2 className="size-3.5 animate-spin" /> : null}
                 {t('mcpHub.add')}
               </Button>
@@ -345,6 +368,8 @@ export const McpHubSection: React.FC = () => {
   const [showAdd, setShowAdd] = useState(false);
   const [addText, setAddText] = useState('');
   const [addError, setAddError] = useState<string | null>(null);
+  const [addTab, setAddTab] = useState<McpAddTab>('json');
+  const [addForm, setAddForm] = useState<McpAddFormState>(EMPTY_MCP_ADD_FORM);
   const [loginFor, setLoginFor] = useState<{ name: string } | null>(null);
   const [callbackText, setCallbackText] = useState('');
   const [confirmDelete, setConfirmDelete] = useState<McpServerSummary | null>(null);
@@ -468,16 +493,21 @@ export const McpHubSection: React.FC = () => {
   const closeAdd = () => {
     setShowAdd(false);
     setAddText('');
+    setAddTab('json');
+    setAddForm(EMPTY_MCP_ADD_FORM);
     setAddError(null);
     setAddResult(null);
   };
 
+  const addPayload = mcpAddPayload(addTab, addText, addForm);
+
   const onAdd = async () => {
+    if (addPayload === null) return;
     setBusy('add');
     setAddError(null);
     setAddResult(null);
     try {
-      const res = await api.addMcp(addText);
+      const res = await api.addMcp(addPayload);
       const added = res.added ?? [];
       const unchanged = res.unchanged ?? [];
       const failed = res.failed ?? [];
@@ -671,6 +701,10 @@ export const McpHubSection: React.FC = () => {
         busy={busy !== null}
         adding={busy === 'add'}
         onTextChange={setAddText}
+        tab={addTab}
+        onTabChange={setAddTab}
+        form={addForm}
+        onFormChange={setAddForm}
         onAdd={() => void onAdd()}
         onClose={closeAdd}
         onDone={() => { closeAdd(); void load(); }}

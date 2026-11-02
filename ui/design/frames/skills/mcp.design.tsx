@@ -3,6 +3,8 @@
 // `/skills?mcp=<name>&oauth=success`. Dialogs are the shipped views, open over the page.
 import { McpAddDialog, McpLoginDialog, McpRemoveDialog } from '@/components/workbench/skills/McpHubSection';
 
+import { EMPTY_MCP_ADD_FORM, type McpAddFormState, type McpAddTab } from '@/lib/mcpAddForm';
+
 import { frames } from '../../frame';
 import { globalChecks, globalSkills, mcpApi, mcpServers, skillsApi, skillsFixtures } from './fixtures';
 import { skillsPage } from './page.design';
@@ -17,6 +19,40 @@ const pasted = `{
     }
   }
 }`;
+
+const addDialog = (tab: McpAddTab, form: McpAddFormState = EMPTY_MCP_ADD_FORM) => () => (
+  <>
+    {skillsPage()}
+    <McpAddDialog
+      open
+      text={tab === 'json' ? pasted : ''}
+      error={null}
+      result={null}
+      busy={false}
+      adding={false}
+      onTextChange={() => {}}
+      tab={tab}
+      onTabChange={() => {}}
+      form={form}
+      onFormChange={() => {}}
+      onAdd={() => {}}
+      onClose={() => {}}
+      onDone={() => {}}
+      onActivateLogin={() => {}}
+    />
+  </>
+);
+
+const addFormFrame = (name: string, title: string, form: McpAddFormState) => ({
+  name,
+  title,
+  width: 1192,
+  height: 900,
+  status: 'shipped' as const,
+  route: '/skills?tab=mcp',
+  fixtures: hubFixtures(),
+  render: addDialog('form', form),
+});
 
 const designFrames = frames([
   {
@@ -73,25 +109,27 @@ const designFrames = frames([
     status: 'shipped',
     route: '/skills?tab=mcp',
     fixtures: hubFixtures(),
-    render: () => (
-      <>
-        {skillsPage()}
-        <McpAddDialog
-          open
-          text={pasted}
-          error={null}
-          result={null}
-          busy={false}
-          adding={false}
-          onTextChange={() => {}}
-          onAdd={() => {}}
-          onClose={() => {}}
-          onDone={() => {}}
-          onActivateLogin={() => {}}
-        />
-      </>
-    ),
+    render: addDialog('json'),
   },
+  addFormFrame('add-form', 'MCP · 添加 · 表单', EMPTY_MCP_ADD_FORM),
+  addFormFrame('add-form-stdio', 'MCP · 表单 · stdio 命令 + 环境变量 + 高级', {
+    ...EMPTY_MCP_ADD_FORM,
+    name: 'filesystem',
+    target: 'npx -y @modelcontextprotocol/server-filesystem "/Users/me/My Notes"',
+    envRows: [{ key: 'LOG_LEVEL', value: 'info' }],
+    cwd: '/Users/me',
+  }),
+  addFormFrame('add-form-http', 'MCP · 表单 · HTTP + Headers', {
+    ...EMPTY_MCP_ADD_FORM,
+    name: 'docs',
+    target: 'https://docs.example.com/mcp',
+    headerRows: [{ key: 'Authorization', value: 'Bearer <token>' }],
+  }),
+  addFormFrame('add-form-error', 'MCP · 表单 · 不支持的 shell 操作符', {
+    ...EMPTY_MCP_ADD_FORM,
+    name: 'tools',
+    target: 'cat config.json | my-server',
+  }),
   {
     name: 'remove',
     title: 'MCP · 删除确认',

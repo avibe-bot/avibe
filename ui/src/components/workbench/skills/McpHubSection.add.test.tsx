@@ -189,3 +189,58 @@ describe('McpHubSection add OAuth', () => {
     expect(suno.className).not.toContain('border-mint');
   });
 });
+
+describe('McpHubSection add form tab', () => {
+  it('defaults to JSON, then submits the form as mcpServers JSON', async () => {
+    addMcp.mockResolvedValue({ ok: true, added: [{ name: 'fs', auth: 'ok' }], unchanged: [], failed: [] });
+    renderHub();
+    await screen.findByText('echo');
+    fireEvent.click(screen.getByRole('button', { name: en.mcpHub.add }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByRole('radio', { name: en.mcpHub.addModeJson }).getAttribute('aria-checked')).toBe('true');
+    expect(within(dialog).getByPlaceholderText((value) => value.includes('mcpServers'))).toBeTruthy();
+
+    fireEvent.click(within(dialog).getByRole('radio', { name: en.mcpHub.addModeForm }));
+    fireEvent.change(within(dialog).getByLabelText(en.mcpHub.form.name), { target: { value: 'fs' } });
+    const target = within(dialog).getByLabelText(new RegExp(en.mcpHub.form.target));
+    fireEvent.change(target, { target: { value: 'https://example.com/mcp' } });
+    expect(within(dialog).getByRole('button', { name: /Headers \(0\)/ })).toBeTruthy();
+    fireEvent.change(target, { target: { value: 'npx -y "@scope/server fs" ""' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: /Environment variables \(0\)/ }));
+    fireEvent.click(within(dialog).getByRole('button', { name: en.mcpHub.form.addRow }));
+    fireEvent.change(within(dialog).getByLabelText(`${en.mcpHub.form.env} key`), { target: { value: 'TOKEN' } });
+    fireEvent.change(within(dialog).getByLabelText(`${en.mcpHub.form.env} value`), { target: { value: 'abc' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: en.mcpHub.add }));
+
+    await waitFor(() => expect(addMcp).toHaveBeenCalledTimes(1));
+    expect(JSON.parse(addMcp.mock.calls[0][0])).toEqual({
+      mcpServers: { fs: { command: 'npx', args: ['-y', '@scope/server fs', ''], env: { TOKEN: 'abc' } } },
+    });
+  });
+
+  it('never sends stdio env rows as HTTP headers and keeps them across flips', async () => {
+    addMcp.mockResolvedValue({ ok: false, failed: [{ name: 'fs', error: 'boom' }] });
+    renderHub();
+    await screen.findByText('echo');
+    fireEvent.click(screen.getByRole('button', { name: en.mcpHub.add }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('radio', { name: en.mcpHub.addModeForm }));
+    fireEvent.change(within(dialog).getByLabelText(en.mcpHub.form.name), { target: { value: 'fs' } });
+    const target = within(dialog).getByLabelText(new RegExp(en.mcpHub.form.target));
+    fireEvent.change(target, { target: { value: 'npx server' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: /Environment variables \(0\)/ }));
+    fireEvent.click(within(dialog).getByRole('button', { name: en.mcpHub.form.addRow }));
+    fireEvent.change(within(dialog).getByLabelText(`${en.mcpHub.form.env} key`), { target: { value: 'SECRET' } });
+    fireEvent.change(within(dialog).getByLabelText(`${en.mcpHub.form.env} value`), { target: { value: 's3cret' } });
+
+    fireEvent.change(target, { target: { value: 'https://example.com/mcp' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: en.mcpHub.add }));
+    await waitFor(() => expect(addMcp).toHaveBeenCalledTimes(1));
+    expect(JSON.parse(addMcp.mock.calls[0][0])).toEqual({
+      mcpServers: { fs: { type: 'http', url: 'https://example.com/mcp' } },
+    });
+
+    fireEvent.change(target, { target: { value: 'npx server' } });
+    expect((within(dialog).getByLabelText(`${en.mcpHub.form.env} value`) as HTMLInputElement).value).toBe('s3cret');
+  });
+});

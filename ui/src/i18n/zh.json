@@ -6692,6 +6692,35 @@
     "needsLoginAfterAdd": "{{name}} 需要登录",
     "goAuthorize": "前往授权",
     "addResultHint": "这些服务器需要登录后才能提供工具。",
-    "loginComplete": "MCP 登录完成"
+    "loginComplete": "MCP 登录完成",
+    "addMode": "添加方式",
+    "addModeJson": "粘贴 JSON",
+    "addModeForm": "表单",
+    "form": {
+      "name": "名称",
+      "target": "URL 或命令",
+      "targetPlaceholder": "https://example.com/mcp 或 npx -y some-mcp-server",
+      "headers": "Headers",
+      "env": "环境变量",
+      "addRow": "添加一行",
+      "key": "{{label}} 键",
+      "value": "{{label}} 值",
+      "removeRow": "移除",
+      "advanced": "高级",
+      "cwd": "工作目录",
+      "hint": "这些值会以明文保存在本机。OAuth、超时、工具过滤或 ${VAR} 引用请使用 JSON 页签。",
+      "issues": {
+        "invalidUrl": "URL 无效。",
+        "unclosedQuote": "有未闭合的引号。",
+        "shellOperator": "不支持 | && ; > 等 shell 操作符，请使用 JSON 页签。",
+        "windowsPath": "这里无法可靠解析 Windows 路径，请使用 JSON 页签。"
+      },
+      "namePlaceholder": "docs",
+      "kindHttp": "HTTP",
+      "kindStdio": "stdio",
+      "headerKeyPlaceholder": "Authorization",
+      "envKeyPlaceholder": "API_KEY",
+      "rowsToggle": "{{label}}（{{count}}）"
+    }
   }
 }
