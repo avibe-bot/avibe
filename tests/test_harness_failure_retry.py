@@ -391,3 +391,102 @@ def test_a_vibey_agent_run_cut_by_a_restart_settles_from_the_continued_work(
     assert callbacks() == [("succeeded", stored["result_text"])]
     assert request_store.sqlite_backend.owed_failure_notice(run.id) is None
     assert "interrupt_reason" not in (stored.get("metadata") or {})
+
+
+@pytest.mark.parametrize("mode", [None, "failure"], ids=["callback", "no-callback"])
+@pytest.mark.parametrize("cut", ["shutdown", "crash"])
+@pytest.mark.parametrize("backend", ["claude", "codex"])
+def test_a_run_a_restart_cuts_tells_its_sender_it_did_not_complete(
+    isolated_state, tmp_path, monkeypatch, backend, cut, mode
+):
+    """docs/plans/bots.md D4: a failure always reaches the sender, with or without a callback.
+
+    A delegated Claude or Codex run whose Turn a restart cuts cannot rerun: its runtime died with the service.
+    ``shutdown``: the service stops under the live Turn. ``crash``: the next start finds the Turn
+    still active. Either way the Run ends failed with its interruption recorded, and the sender's
+    Session receives one notice that it did not complete. A Vibey Turn reruns instead
+    (MESSAGE-DELIVERY-328), so its Run completes and owes no notice.
+    """
+    from core.scheduled_tasks import AGENT_RUN_CALLBACK_MODE_METADATA_KEY
+    from core.services import sessions
+    from core.session_turns import Turn
+    from tests.test_scheduled_tasks import _callback_service
+
+    scope_id, session_id = _make_session(tmp_path, agent_backend=backend)
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        caller = sessions.create_session(conn, scope_id=scope_id, agent_backend=backend, agent_name="worker")["id"]
+    controller = MessageDeliveryController(platform="avibe")
+    request_store = TaskExecutionStore()
+    service = _drain_service(tmp_path, controller, request_store.sqlite_backend, request_store)
+    service._t = ScheduledTaskService._t.__get__(service, ScheduledTaskService)
+    controller.scheduled_task_service = service
+    controller.emit_agent_message = ConsolidatedMessageDispatcher(controller).emit_agent_message
+
+    def context(sid):
+        value = _context(sid)
+        value.platform_specific["agent_session_target"]["agent_backend"] = backend
+        return value
+
+    manager = SessionTurnManager(controller, build_context=context)
+    manager._engine = engine
+    controller.session_turns = manager
+    run = request_store.enqueue_agent_run(
+        message="整理日志并汇报", session_id=session_id, agent_name="worker", agent_backend=backend,
+        callback_session_id=caller, source_kind="agent", source_actor=caller,
+        metadata={AGENT_RUN_CALLBACK_MODE_METADATA_KEY: mode} if mode else None,
+    )
+    assert request_store.claim(run.id) is not None
+    started = []
+
+    async def accept(_sid, ctx, _text, **_kwargs):
+        started.append(ctx)
+        _bind_test_native_start(engine, ctx)
+
+    manager._run = accept
+
+    async def scenario():
+        original = await manager.deliver(
+            DeliveryRequest(
+                session_id=session_id, priority="p3", content=run.prompt,
+                source="harness", author="harness", message_type="harness",
+            ),
+            context=context(session_id),
+        )
+        with engine.begin() as conn:
+            assert attach_agent_run_delivery_in_connection(
+                conn, run.id, session_id=session_id, delivery_id=original.delivery_id,
+            )
+        if cut == "shutdown":
+            running = asyncio.create_task(asyncio.Event().wait())
+            manager.in_flight[session_id] = Turn(task=running, context=started[-1], logical_turn_id=original.turn_id)
+            assert await manager.release_for_service_shutdown() == 1
+            await asyncio.gather(running, return_exceptions=True)
+            manager.in_flight.clear()
+        else:
+            manager._active_identity = lambda *_args: None
+            await manager.recover_durable_delivery_state(session_id, service_restart=True)
+        return original
+
+    original = asyncio.run(scenario())
+
+    stored = request_store.get_run(run.id)
+    with engine.connect() as conn:
+        assert message_deliveries.get_turn(conn, original.turn_id)["terminal_outcome"] == "failed"
+    assert len(started) == 1  # no rerun
+    reason = {"shutdown": "restarted", "crash": "no_terminal_result"}[cut]
+    assert (stored["status"], stored["metadata"]["interrupt_reason"]) == ("failed", reason)
+    assert stored["error"]
+
+    service = _callback_service(tmp_path=tmp_path, request_store=request_store)
+    asyncio.run(service._drain_callbacks())
+    asyncio.run(service._drain_callbacks())
+
+    told = [
+        row for row in request_store.list_runs()
+        if row.get("source_kind") == "callback" and row.get("parent_run_id") == run.id
+    ]
+    assert [(row["session_id"], row["message"]) for row in told] == [(caller, f"Error: {stored['error']}")]
+    marker = "notice" if mode else "terminal"
+    assert told[0]["source_actor"] == f"{run.id}:{marker}:failed"
+    assert request_store.get_run(run.id)["callback_status"] == "sent"
