@@ -155,6 +155,13 @@ AGENT_RUN_DELIVERY_INTENTS = frozenset(
 AGENT_RUN_DELIVERY_INTENT_METADATA_KEY = "delivery_intent"
 AGENT_RUN_DELIVERY_OUTCOME_METADATA_KEY = "delivery_outcome"
 AGENT_RUN_CLOSE_AFTER_METADATA_KEY = "close_after"
+#: What a run's ``callback_session_id`` is told (``docs/plans/bots.md`` D4). Absent, as on every row written
+#: before it, the run's result: a callback. ``failure``: only a run that did not complete, so a failure always
+#: reaches the Session that sent the request even when it asked for no callback.
+AGENT_RUN_CALLBACK_MODE_METADATA_KEY = "callback_mode"
+AGENT_RUN_CALLBACK_FAILURE_ONLY = "failure"
+#: ``source_actor`` of the notice a failure-only route sends: ``<run>:notice:<status>``.
+AGENT_RUN_FAILURE_NOTICE_ACTOR_MARKER = ":notice:"
 FAILURE_CODE_SESSION_TURN_GATE_UNAVAILABLE = "session_turn_gate_unavailable"
 SESSION_TURN_GATE_UNAVAILABLE_I18N_KEY = "harness.run.sessionTurnGateUnavailable"
 
@@ -7991,8 +7998,26 @@ class ScheduledTaskService:
         )
         if isinstance(parent_resource_context, Mapping):
             callback_metadata[RESOURCE_USER_CONTEXT_METADATA_KEY] = dict(parent_resource_context)
+        failure_only = (
+            isinstance(run_metadata, Mapping)
+            and run_metadata.get(AGENT_RUN_CALLBACK_MODE_METADATA_KEY) == AGENT_RUN_CALLBACK_FAILURE_ONLY
+        )
+        if failure_only:
+            # No callback was asked for: a completed run sends nothing, and one that did not complete
+            # (failed, interrupted, or cancelled) tells its sender why (``docs/plans/bots.md`` D4).
+            if status not in {"failed", "canceled"}:
+                return None
+            return enqueue_session_callback(
+                self.request_store,
+                session_id=callback_session_id,
+                message=self._did_not_complete_text(run, status=status),
+                source_actor=f"{run_id}{AGENT_RUN_FAILURE_NOTICE_ACTOR_MARKER}{status}",
+                source_session_id=str(run.get("session_id") or "").strip() or None,
+                parent_run_id=run_id or None,
+                metadata=callback_metadata,
+            )
         if status in {"failed", "canceled"}:
-            terminal_message = self._fallback_callback_result(run, status=status)
+            terminal_message = self._did_not_complete_text(run, status=status)
             terminal_callback = enqueue_session_callback(
                 self.request_store,
                 session_id=callback_session_id,
@@ -8020,6 +8045,20 @@ class ScheduledTaskService:
         if not result_text:
             result_text = self._fallback_callback_result(run, status=status)
         return result_text.strip()
+
+    def _did_not_complete_text(self, run: dict[str, Any], *, status: str) -> str:
+        """What the sender is told about a run that did not complete, with the reason when one is known.
+
+        A run interrupted from outside (a restart, an upstream outage that settled it) often records no error
+        text of its own, so its interruption reason is named instead.
+        """
+        text = self._fallback_callback_result(run, status=status)
+        metadata = run.get("metadata") if isinstance(run.get("metadata"), Mapping) else {}
+        reason = str(metadata.get("interrupt_reason") or "").strip()
+        if reason and not str(run.get("error") or "").strip():
+            label = self._t(failure_notices.notice_reason_i18n_key(reason))
+            text = "\n\n".join(part for part in (text, self._t("harness.run.fallbackResult.reason", reason=label)) if part)
+        return text
 
     def _fallback_callback_result(self, run: dict[str, Any], *, status: str) -> str:
         parts: list[str] = []
@@ -11371,6 +11410,7 @@ class ScheduledTaskService:
                 "vault_request_status": (metadata or {}).get("vault_request_status"),
                 "parent_run_id": (metadata or {}).get("parent_run_id"),
                 "callback_session_id": (metadata or {}).get("callback_session_id"),
+                "callback_mode": (metadata or {}).get(AGENT_RUN_CALLBACK_MODE_METADATA_KEY),
                 "suppress_delivery": bool(target_info.suppress_delivery) if target_info else False,
                 "agent_session_target": (
                     {

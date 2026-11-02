@@ -107,19 +107,36 @@ own. A Session has none of these; a Bot has all three.
 ### D4. CLI, roster, and provenance
 
 - `vibe agent run --bot <handle> --message ...` sends to `ses_<handle>`, with
-  validation, and returns at once. It creates no callback, and refuses
-  `--callback-session-id` and `--sync` (owner decision, 2026-11-02).
-- **Bots talk to each other by messaging, not by callbacks** (owner decision,
-  2026-11-02). A Bot's reply in its own conversation is what the user reads
-  there. With a callback, a Bot's answer to another Bot appeared in its own
-  conversation as if said to the user, and travelled back without the Bot
-  choosing to send it. Instead, a Bot that has something for the sender (a
-  result, a question, a decision) messages it explicitly: `--bot <handle>` for
-  a Bot, `--session-id <id> --no-callback` for a Session. When nothing in the
-  Turn is for the user, the Bot ends it with a silent reply. Whoever asked a
-  Bot hears back as a message in its own conversation. `--agent` and
-  `--session-id` keep their callbacks for now; dropping callbacks altogether
-  is a later decision.
+  validation, and returns at once.
+- **Callbacks are opt-in; failures always return** (owner decision,
+  2026-11-03, superseding the Bot-only rule of 2026-11-02). One rule for
+  every `vibe agent run`, whatever the target: it creates no callback unless
+  `--callback` (or `--callback-session-id <id>`) asks for one; `--no-callback`
+  stays accepted as a no-op, and `--sync` still waits and prints. Two
+  guarantees hold with or without a callback:
+  - *A failure always reaches the sender.* When the target run ends failed,
+    cancelled, or interrupted, the sending Session gets a notice
+    (`[Harness: agent run <run> did not complete in @<bot:x>]`) with the
+    reason. A completed run sends nothing unless a callback was asked for.
+  - *Requests are traceable.* The receiver's input names the sender and the
+    run (`[Harness: agent run <run> from @<bot:main>]`), so a later report can
+    refer to it.
+- **Progressive disclosure, not system prompt guidance.** The line after a
+  run's `[Harness: ...]` label says where its result goes: without a callback,
+  that the receiver can report to the sender when the work is done, with the
+  exact command (`vibe agent run --bot <handle> ...` for a Bot,
+  `vibe agent run --session-id <id> ...` otherwise); with one, that its final
+  reply returns to the sender automatically. Why: a Bot's reply in its own
+  conversation is what the user reads there, so a callback put a Bot's answer
+  to another Bot in front of the user as if said to them, and system prompt
+  rules about who reads which reply could not hold in a Turn the user, other
+  Agents, and Harness inputs interleave. Replies are not attributed: Bot
+  conversations show them as they are, and 「隐藏细节」 hides only Harness
+  inputs, activity, and background-task banners.
+- Delivery: PR 1 adds the failure notice, the hint, and `--callback`, and
+  gives `--bot` no callback by default. PR 2 flips the default for
+  `--agent`, `--session-id`, and the forks once every caller that relies on a
+  callback is updated.
 - `vibe bot list | show | create | set | update | remove` manages Bots, so the
   main Bot can add a colleague when asked in conversation. `create` makes a
   Vibey Agent and its Bot; `set` makes an existing Vibey Agent a Bot; `remove`
@@ -145,9 +162,8 @@ own. A Session has none of these; a Bot has all three.
   input) keep their priority and wait behind the user's.
 - No hop limit between Bots (owner decision, 2026-11-01): Bots are meant to
   message each other, and run lineage is not reliable enough to enforce one.
-  The guard against ping-pong is the prompt: message another Bot only when it
-  needs something (a result, a question, a decision), and never answer an
-  acknowledgement or a thank-you.
+  Without automatic callbacks, a message between Bots is always one a Bot chose
+  to send.
 - CLI examples in the prompts get parser-backed contract tests.
 
 ### D5. Web surfaces
@@ -364,8 +380,8 @@ Ask a Bot when the work needs its memory, ongoing responsibility, or judgment. R
 {enabled_agents_rows}
 
 Bot rules:
-- Message a Bot with `vibe agent run --bot <bot> --message ...`. The message joins its conversation and the command returns at once, with no callback: the Bot's reply there is read by the user. When it has something for you, the Bot messages you back, and its answer arrives later as a message in this conversation.
-- Reach a Bot only through `--bot`, never through `--agent` or `--session-id`. `--model`, `--reasoning-effort`, `--sync`, and `--callback-session-id` do not apply.
+- Message a Bot with `vibe agent run --bot <bot> --message ...`. The message joins its conversation, behind its earlier messages, and the command returns at once.
+- Reach a Bot only through `--bot`, never through `--agent` or `--session-id`. `--model` and `--reasoning-effort` do not apply.
 
 Agent rules:
 (the existing --agent, --session-id, --fork-*, and --sync rules, unchanged)
@@ -392,10 +408,7 @@ Worded to stay true in a fork, which shares this system prompt. `{role_sentence}
 ## You are a Bot
 You are {display_name}, the Bot `@<bot:{handle}>`.{role_sentence} Your one permanent conversation is Session `{session_id}`: it never ends, older context is condensed as it grows, and its full record stays readable with `vibe data query` on `session_id = '{session_id}'`.
 
-Other Bots and Sessions also message you there. Their inputs begin with a `[Harness: ...]` line naming the sender, such as `from @<bot:main>` for a Bot or `from #<session-id>` for a Session; they are not the user's words. Whatever you reply in this conversation is read by the user, not by the sender:
-- To answer or report to a Bot, message it with `vibe agent run --bot <bot> --message ...`; to answer a Session, use `vibe agent run --session-id <session-id> --no-callback --message ...`. When nothing in the Turn is for the user, end it with a silent reply.
-- Message another Bot only when it needs something from you: a result, a question, or a decision. Never answer an acknowledgement or a thank-you, so two Bots never trade them back and forth.
-- When you ask another Bot for something, its answer arrives later as a message in this conversation, not as a callback.
+Other Bots and Agents also message you there. Their inputs begin with a `[Harness: ...]` line naming the sender; they are not the user's words.
 ```
 
 ### Your memory (every Bot)

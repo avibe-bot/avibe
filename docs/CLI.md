@@ -743,11 +743,8 @@ queued behind the Bot's earlier messages, as with `--queue`, so a Bot handles
 one message at a time. A Bot keeps one conversation on its own model:
 `--agent`, `--session-id`, the fork flags, `--model`, `--reasoning-effort`,
 the placement flags, `--cwd`, and `--close-after` are refused with `--bot`.
-A message to a Bot creates no callback and the command returns at once:
-the Bot's reply in its conversation is read by the user, and a Bot that has
-something for the sender messages it back. `--callback-session-id`, `--sync`,
-and `--wait-timeout` are refused with `--bot`, and no callback policy is needed
-outside an Agent shell.
+A message to a Bot creates no callback unless `--callback` asks for one, and
+needs no callback policy outside an Agent shell.
 `--agent` keeps its meaning for an Agent that is also a Bot: it starts a new
 Session of that Agent, never a message to the Bot.
 
@@ -775,11 +772,16 @@ finished run record. `callback_notice` appears only when a run on the caller's
 own Session gets no callback because the result already lands there.
 
 Async runs need an explicit callback policy unless the command is running inside
-an Avibe-injected Agent environment. Use `--callback-session-id` when the final
-result text should return to a caller Session as a follow-up Agent message; use
-`--no-callback` when you intentionally want to inspect the run later with
-`vibe runs show` or by listing/polling runs. Agent-initiated Harness calls
-default the callback to the current caller Session. The callback is independent
+an Avibe-injected Agent environment. Use `--callback` (from an Agent shell) or
+`--callback-session-id` when the final result text should return to a Session as
+a follow-up Agent message; use `--no-callback` when you intentionally want to
+inspect the run later with `vibe runs show` or by listing/polling runs.
+Agent-initiated `--agent`, `--session-id`, and fork runs default the callback to
+the current caller Session; `--bot` does not. Whatever the callback, a run that
+ends failed, cancelled, or interrupted tells the caller Session that it did not
+complete, with the reason, and a run without a callback tells its target where
+to report back: the target's input carries a line naming the sender and the
+exact `vibe agent run` command. The callback is independent
 from ordinary delivery: if the target run also posts to its IM scope, the caller
 Session still receives the result. Process messages such as system notes, tool
 calls, and intermediate assistant updates are not included.

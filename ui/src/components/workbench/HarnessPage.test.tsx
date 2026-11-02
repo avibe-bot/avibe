@@ -276,6 +276,29 @@ describe('RunDetail title', () => {
   });
 });
 
+describe('RunDetail report route', () => {
+  const route = { callback_session_id: 'ses_main', callback_session: NO_SESSION };
+
+  it('shows a callback with its delivery state', () => {
+    const html = render(<RunDetail run={run({ ...route, callback_status: 'skipped', metadata: {} })} />);
+    expect(html).toContain('>Callback<');
+    expect(html).toContain('>skipped<');
+  });
+
+  it('shows a run without a callback as notifying on failure, without a skipped callback', () => {
+    const quiet = render(
+      <RunDetail run={run({ ...route, callback_status: 'skipped', metadata: { callback_mode: 'failure' } })} />,
+    );
+    expect(quiet).toContain('>Notify on failure<');
+    expect(quiet).not.toContain('>Callback<');
+    expect(quiet).not.toContain('>skipped<');
+    const notified = render(
+      <RunDetail run={run({ ...route, status: 'failed', callback_status: 'sent', metadata: { callback_mode: 'failure' } })} />,
+    );
+    expect(notified).toContain('>sent<');
+  });
+});
+
 describe('runTypeLabel / runStatusLabel', () => {
   it('maps known internal values to translation keys', () => {
     expect(runTypeLabel('hook_send', key)).toBe('harness.runType.hook_send');

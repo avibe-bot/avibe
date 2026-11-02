@@ -1804,6 +1804,15 @@ def _harness_banner_item(
     }
 
 
+def _returns_its_result():
+    """A run whose ``callback_session_id`` gets its result, not only a failure notice (``docs/plans/bots.md`` D4).
+
+    A run that asked for no callback still names its sender there, to tell it when the run did not complete; the
+    sender is not waiting on it, so it is no delegated work returning here.
+    """
+    return func.coalesce(func.json_extract(agent_runs.c.metadata_json, "$.callback_mode"), "") != "failure"
+
+
 def derive_session_harness_activities(conn: Connection, session_id: str) -> list[dict[str, Any]]:
     """Live-derive the harness items the background-work banner unions in.
 
@@ -1929,6 +1938,7 @@ def derive_session_harness_activities(conn: Connection, session_id: str) -> list
             .where(run_definitions.c.session_id != session_id)
             .where(agent_runs.c.run_type == "agent_run")
             .where(agent_runs.c.callback_session_id == session_id)
+            .where(_returns_its_result())
             .order_by(run_definitions.c.created_at, run_definitions.c.id)
         )
         .mappings()
@@ -1988,6 +1998,7 @@ def derive_session_harness_activities(conn: Connection, session_id: str) -> list
             .where(agent_runs.c.callback_session_id == session_id)
             .where(agent_runs.c.run_type == "agent_run")
             .where(agent_runs.c.callback_status == "pending")
+            .where(_returns_its_result())
             .where(agent_runs.c.status.in_(_ACTIVE_RUN_STATUSES))
             .where(
                 or_(

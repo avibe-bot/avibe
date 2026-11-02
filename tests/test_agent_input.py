@@ -110,6 +110,12 @@ _HARNESS_SOURCES = [
         "agent_run", None, {"source_kind": "callback", "source_actor": "vault:vrq_1"},
         "Vault request vrq_1", id="vault-callback",
     ),
+    pytest.param(
+        "agent_run", None,
+        {"source_kind": "callback", "source_actor": "run-0:notice:failed", "parent_run_id": "run-0",
+         "source_session_id": "ses_cso"},
+        "agent run run-0 did not complete in @<bot:cso>", id="failure-notice",
+    ),
 ]
 
 
@@ -128,9 +134,66 @@ def test_every_harness_input_names_its_source_on_its_first_line(tmp_path, trigge
             )
             lines = rendered.splitlines()
             assert lines[0] == f"[Harness: {label}]"
-            assert lines[1:] == (["[Now: 2026-09-06 00:00:00 UTC+00:00]"] if include_time else []) + [
+            # An Agent run's input then says where its result goes (test_an_agent_run_input_says_where_...).
+            hints = [f"[{hint}]" for hint in prepared.harness_hints]
+            assert lines[1:] == hints + (["[Now: 2026-09-06 00:00:00 UTC+00:00]"] if include_time else []) + [
                 "User requested a merge."
             ]
+
+
+@pytest.mark.parametrize(
+    ("metadata", "hint"),
+    [
+        pytest.param(
+            {"source_kind": "agent", "source_actor": "ses_main", "callback_session_id": "ses_main",
+             "callback_mode": "failure"},
+            "No callback. When the work is done, you can report to @<bot:main> with "
+            "`vibe agent run --bot main --message ...`.",
+            id="bot-sender",
+        ),
+        pytest.param(
+            {"source_kind": "agent", "source_actor": "sescaller01", "callback_session_id": "sescaller01",
+             "callback_mode": "failure"},
+            "No callback. When the work is done, you can report to #sescaller01 with "
+            "`vibe agent run --session-id sescaller01 --no-callback --message ...`.",
+            id="session-sender",
+        ),
+        pytest.param(
+            {"source_kind": "agent", "source_actor": "ses_main", "callback_session_id": "ses_main"},
+            "Callback: your final reply returns to @<bot:main> automatically.",
+            id="callback",
+        ),
+        pytest.param(
+            {"source_kind": "cli", "callback_session_id": "sescaller01"},
+            "Callback: your final reply returns to #sescaller01 automatically.",
+            id="cli-with-callback",
+        ),
+        pytest.param({"source_kind": "cli"}, None, id="cli-without-callback"),
+        pytest.param(
+            {"source_kind": "callback", "source_actor": "run-0", "parent_run_id": "run-0",
+             "source_session_id": "seschild01", "callback_session_id": "sescaller01"},
+            None,
+            id="a-callback-itself",
+        ),
+    ],
+)
+def test_an_agent_run_input_says_where_its_result_goes(tmp_path, metadata, hint):
+    """docs/plans/bots.md D4 (2026-11-03): progressive disclosure on the input, not system prompt guidance."""
+    from core.handlers.message_handler import MessageHandler
+
+    context = _scheduler_context(tmp_path, trigger_kind="agent_run", metadata=metadata)
+    prepared = asyncio.run(MessageHandler.prepare_input_metadata(object(), context, human=False))
+    rendered = prepared.render("Review the login flow.", SimpleNamespace(include_time_info=False))
+    lines = rendered.splitlines()
+    assert lines[0].startswith("[Harness: ")
+    assert lines[1:] == ([f"[{hint}]"] if hint else []) + ["Review the login flow."]
+
+
+def test_a_merged_batch_names_each_distinct_report_target_once():
+    from core.agent_input import harness_hints
+
+    bot = "No callback. When the work is done, you can report to @<bot:main> with `vibe agent run --bot main --message ...`."
+    assert harness_hints({"harness_hints": [bot, "", bot]}) == (bot,)
 
 
 @pytest.mark.parametrize("include_time", [False, True])

@@ -252,6 +252,21 @@ def test_queued_delivery_projects_delegated_run_as_queued(tmp_path: Path):
     assert items[0]["since"] == queued_at
 
 
+def test_a_run_without_a_callback_is_not_work_returning_to_its_sender(tmp_path: Path):
+    """bots.md D4 (2026-11-03): a run that asked for no callback names its sender only for a failure notice."""
+    engine, _ = _make_engine(tmp_path)
+    for run_id, metadata in (("run-callback", "{}"), ("run-message", '{"callback_mode":"failure"}')):
+        _insert_run(
+            engine, id=run_id, agent_name="worker", message="audit", session_id="ses-delegate",
+            callback_session_id="ses-caller", metadata_json=metadata,
+        )
+
+    with engine.connect() as conn:
+        items = derive_session_harness_activities(conn, "ses-caller")
+
+    assert [item["id"] for item in items] == ["agent_run:run-callback"]
+
+
 def test_agent_run_banner_collapses_accepted_turn_and_keeps_queued_deliveries(
     tmp_path: Path,
 ):
@@ -819,7 +834,7 @@ def test_delegated_watches_are_read_through_live_definitions_only(tmp_path: Path
     captured: list[tuple[str, object]] = []
 
     def capture(conn, cursor, statement, parameters, context, executemany):
-        if "json_extract" in statement and "agent_runs" in statement:
+        if "json_extract" in statement and "agent_runs" in statement and "run_definitions" in statement:
             captured.append((statement, parameters))
 
     event.listen(engine, "before_cursor_execute", capture)

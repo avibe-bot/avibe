@@ -11,6 +11,7 @@ visibility emission + background filtering.
 
 from __future__ import annotations
 
+import json
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -99,7 +100,7 @@ def _insert_session(conn, session_id, *, scope_id, backend="claude", title=None,
 def _insert_run(conn, run_id, *, session_id, status="succeeded", run_type="agent",
                 created=None, source_kind=None, source_actor=None, definition_id=None,
                 callback_session_id=None, callback_status=None, started=None, completed=None,
-                parent_run_id=None, callback_run_id=None) -> None:
+                parent_run_id=None, callback_run_id=None, metadata=None) -> None:
     created = created or (NOW - timedelta(hours=1))
     conn.execute(
         agent_runs.insert().values(
@@ -144,7 +145,7 @@ def _insert_run(conn, run_id, *, session_id, status="succeeded", run_type="agent
             # Mirror production: updated_at is bumped to the latest transition
             # time (start, then completion), never left at creation time.
             updated_at=_run_iso(completed or started or created),
-            metadata_json="{}",
+            metadata_json=json.dumps(metadata or {}),
         )
     )
 
@@ -416,6 +417,26 @@ def test_callback_delivery_is_not_spawn_but_directed_child_is(isolated_state):
         assert directed["last_run_id"] == "run_directed"
         assert callback is not None
         assert callback["last_run_id"] == "run_callback"
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(("callback_status", "edge"), [("skipped", False), ("pending", False), ("sent", True)])
+def test_a_run_without_a_callback_draws_a_callback_edge_only_for_a_sent_failure_notice(
+    isolated_state, callback_status, edge
+):
+    """bots.md D4 (2026-11-03): a run that asked for no callback only tells its sender that it did not complete."""
+    engine = create_sqlite_engine()
+    try:
+        with engine.begin() as conn:
+            _insert_session(conn, "ses_caller", scope_id=None, backend="claude", title="Caller")
+            _insert_session(conn, "ses_callee", scope_id=None, backend="codex", title="Callee")
+            _insert_run(conn, "run_msg", session_id="ses_callee", source_kind="agent", source_actor="ses_caller",
+                        callback_session_id="ses_caller", callback_status=callback_status,
+                        metadata={"callback_mode": "failure"}, created=NOW - timedelta(minutes=30))
+        payload = agent_graph.build_graph(live_agents=[], now=NOW, engine=engine)
+        assert (_edge(payload, "callback", "ses_callee", "ses_caller") is not None) is edge
+        assert _edge(payload, "spawn", "ses_caller", "ses_callee") is not None
     finally:
         engine.dispose()
 

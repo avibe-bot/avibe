@@ -101,8 +101,8 @@ def test_prompt_cli_examples_parse_against_the_real_cli():
     blocks = _blocks(enabled_agents=_ROSTER, bot=_MAIN)
     text = blocks["harness-agents-prompt"] + blocks["bot-identity-prompt"]
     examples = re.findall(r"`(vibe agent run [^`]+)`", text)
-    assert sum("--bot" in example for example in examples) >= 3
-    refused = {attr for attr, _flag in (*cli._BOT_RUN_CONFLICTS, *cli._BOT_RUN_REPLY_FLAGS)}
+    assert any("--bot" in example for example in examples)
+    refused = {attr for attr, _flag in cli._BOT_RUN_CONFLICTS}
     parser = cli.build_parser()
     for example in examples:
         # A placeholder is a value; `...` after a flag is its value, and a trailing one stands for the rest.
@@ -119,18 +119,14 @@ def test_prompt_cli_examples_parse_against_the_real_cli():
             assert not [attr for attr in refused if getattr(args, attr, None) not in (None, False, "")], example
 
 
-def test_bots_answer_each_other_by_message_not_by_reply():
-    """bots.md D4 (2026-11-02): a Bot's reply is the user's to read; answers to a Bot or Session are messages."""
+def test_bots_get_no_messaging_guidance_in_their_system_prompt():
+    """bots.md D4 (2026-11-03): where a result goes is said on each input, not in the system prompt."""
     identity = _blocks(enabled_agents=_ROSTER, bot=_CSO)["bot-identity-prompt"]
-    assert "`from @<bot:main>`" in identity
-    assert "read by the user, not by the sender" in identity
-    assert "`vibe agent run --bot <bot> --message ...`" in identity
-    assert "silent reply" in identity
-    assert "Never answer an acknowledgement" in identity
-    assert "returns to the sender" not in identity
+    assert "begin with a `[Harness: ...]` line naming the sender" in identity
     roster = _blocks(enabled_agents=_ROSTER)["harness-agents-prompt"]
     bot_rules = roster[roster.index("Bot rules:"): roster.index("Agent rules:")]
-    assert "with no callback" in bot_rules and "as a callback" not in bot_rules
+    for text in (identity, bot_rules):
+        assert "callback" not in text and "report" not in text and "silent" not in text
 
 
 @pytest.fixture()
