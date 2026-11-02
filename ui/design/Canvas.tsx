@@ -29,7 +29,11 @@ function Single({ frame, theme }: { frame: Frame; theme: DesignTheme }) {
     void document.fonts.ready
       .then(() => designNetwork.quiet())
       .then(() => {
-        if (!cancelled) document.body.dataset.designReady = 'true';
+        if (cancelled) return;
+        // A dialog moves focus into itself as it opens. A person who opened it with the
+        // pointer sees no focus ring there, but a document nobody has touched draws one.
+        if (document.activeElement instanceof HTMLElement && document.activeElement !== document.body) document.activeElement.blur();
+        document.body.dataset.designReady = 'true';
       });
     return () => {
       cancelled = true;

@@ -1468,7 +1468,7 @@ export type SourceRepaired = {
 };
 
 /** POST /api/models/sources/<source_id>/models — appends a user-authored model
- *  entry to a Source inventory (frame 08). */
+ *  entry to a Source inventory. */
 export type CustomModelCreate = {
   model_id: string;
   display_name?: string | null;

@@ -204,12 +204,11 @@ describe('Model Hub visual token policy', () => {
     expect(literals).toEqual([]);
   });
 
-  // Every modal in `design.pen` whose frame carries an explicit height sits at
-  // exactly (viewport - dialog) / 2. This one is the file's single hug-height
-  // frame, so its 300px `y` is a round stand-in for the 332.5px its own
-  // head/body/foot measure to — and read as a literal `top` it held at the
-  // 1100px artboard and nowhere else, which is how the dialog came to sit near
-  // the bottom of an ordinary laptop viewport.
+  // A modal with an explicit height sits at exactly (viewport - dialog) / 2.
+  // The route dialog hugs its content, so a fixed 300px `y` was a round
+  // stand-in for the 332.5px its own head/body/foot measure to — and read as a
+  // literal `top` it held at an 1100px viewport and nowhere else, which is how
+  // the dialog came to sit near the bottom of an ordinary laptop viewport.
   it('centres the route dialog and leaves it the room a centred box has', () => {
     const dialog = surfaceCssBody.match(/\.model-hub-route-dialog\s*\{([^}]*)\}/)?.[1] ?? '';
     const body = surfaceCssBody.match(/\.model-hub-route-body\s*\{([^}]*)\}/)?.[1] ?? '';

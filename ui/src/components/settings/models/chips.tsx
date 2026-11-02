@@ -1,7 +1,7 @@
 // Small shared chips for the Model Hub rows — all built on the ui/Badge
 // primitive (reuse ladder) with size/width overrides. Kept in one place so the
 // 来源 and Agent bands stay visually consistent and the fixed-width chip
-// columns (frame 01r) align across rows.
+// columns (ui/design: models/page/overview) align across rows.
 import * as React from 'react';
 import { Hourglass, TriangleAlert, Unplug, Zap } from 'lucide-react';
 
@@ -19,7 +19,7 @@ export const Dot: React.FC<{ accent: Accent; className?: string }> = ({ accent, 
 
 /**
  * Source-row chip metrics. On phones the row's second tier has to fit billing +
- * state + usage on ONE line (design.pen M01 m01SrcL2), so the chips shrink to
+ * state + usage on ONE line (ui/design: models/page/overview-phone), so the chips shrink to
  * content-width pills — the desktop frame's fixed-width columns are what made
  * that line overflow. From sm+ the fixed widths come back so the chip columns
  * still align down the list, which is the whole point of them on a wide screen.
@@ -53,8 +53,8 @@ export const BillingChip: React.FC<{
  * 暂不可用 / 需要处理 / 不可用 — nothing at all while the source is healthy.
  *
  * A source that is serving normally (active / standby) draws NO chip in V6:
- * health surfaces as an exception, not as a per-row label (design.pen 「产品改造
- * V6 01」 — only the cooling relay carries one). Callers that reserve an aligned
+ * health surfaces as an exception, not as a per-row label (ui/design:
+ * models/page/takeover — only the cooling source carries one). Callers that reserve an aligned
  * column ask `isUnhealthy(state)` (supply.ts) to tell an empty cell from a
  * missing one.
  */
@@ -91,7 +91,7 @@ export const StateChip: React.FC<{ state: SourceState }> = ({ state }) => {
 
 /**
  * Managed / Direct — a fixed 104px column on desktop so the pills line up
- * down the Agent list (V6 01), content-width beside the name on a phone (M01).
+ * down the Agent list (ui/design: models/page/overview), content-width beside the name on a phone (models/page/overview-phone).
  *
  * Direct carries the `unplug` glyph on mobile only: the desktop frame drops it
  * because the pill sits in a labelled column, while the mobile row has it inline

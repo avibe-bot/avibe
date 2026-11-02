@@ -1,11 +1,11 @@
-// Shared sheet shell for the 模型菜单 drawers (frames 04 / 05r).
+// Shared sheet shell for the 模型菜单 drawers.
 // Built directly on the Radix dialog primitive (already a dependency) rather
 // than the centered `ui/dialog` Dialog, because these surfaces need a custom
 // header (tinted icon tile + title + subtitle + close), a scrollable body, and a
 // sticky footer action bar.
 //
 // Desktop: slides in from the right edge, full height. Phones: a bottom sheet at
-// ~91dvh (design.pen M03 m03Sheet, 730 of an 800 tall frame) — a right-edge
+// ~91dvh (730 of an 800 tall phone) — a right-edge
 // drawer on a phone is a full-screen takeover that hides where you came from,
 // and the sheet keeps the page visible behind it.
 //
