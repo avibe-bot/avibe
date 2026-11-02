@@ -253,7 +253,7 @@ export function nodeDisplayTitle(
   return agentLabel ? `${agentLabel} · ${suffix}` : suffix;
 }
 
-// Desktop run-graph fill height (design.pen KfgtJ — canvas fills its container):
+// Desktop run-graph fill height (ui/design: agents/run-graph/graph — canvas fills its container):
 // the canvas (and the detail panel beside it) grow to consume the viewport below
 // the graph area's top, minus a small bottom gap, floored at a usable minimum so
 // a short window can't crush them — below the floor the page scrolls instead.

@@ -14,7 +14,7 @@ function FrameBox({ frame, theme }: { frame: Frame; theme: DesignTheme }) {
       className="relative overflow-hidden bg-background text-foreground"
       style={{ width: frame.width, height: frame.height }}
     >
-      <DesignShell fixtures={frame.fixtures} route={frame.route}>
+      <DesignShell fixtures={frame.fixtures} route={frame.route} theme={theme}>
         {frame.render()}
       </DesignShell>
     </div>

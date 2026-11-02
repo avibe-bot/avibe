@@ -2,15 +2,19 @@ import { useMemo, type ReactNode } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 
 import { ApiProvider } from '@/context/ApiContext';
+import { BotRosterProvider } from '@/context/BotRosterProvider';
 import { BotsProvider } from '@/context/BotsProvider';
 import { InstanceAuthorizationContext } from '@/context/InstanceAuthorizationContext';
 import { StatusContext, type RuntimeStatus } from '@/context/StatusContext';
+import { ThemeContext } from '@/context/ThemeContext';
 import { ToastProvider } from '@/context/ToastProvider';
 import { UnsavedChangesContext } from '@/context/unsavedChangesContext';
 import { WindowManagerContext, type WindowManagerValue } from '@/context/WindowManagerContext';
 import { WorkbenchInboxContext, type InboxState } from '@/context/WorkbenchInboxContext';
 import { WorkbenchProjectsContext, type WorkbenchProjectsTree } from '@/context/WorkbenchProjectsContext';
 import { unreadByCategory } from '@/lib/notificationPreferences';
+
+import type { DesignTheme } from '../frame';
 
 import { owner, type WorkbenchFixtures } from './fixtures';
 
@@ -75,11 +79,24 @@ function projectsValue(fixtures: WorkbenchFixtures): WorkbenchProjectsTree {
 }
 
 /** The providers the Workbench surfaces read, served from fixtures. The API and Bots providers are the
- *  real ones, reading the frame's API fixtures through the network stub (`apiResponses`). */
-export function DesignShell({ fixtures = {}, route = '/', children }: { fixtures?: WorkbenchFixtures; route?: string; children: ReactNode }) {
+ *  real ones, reading the frame's API fixtures through the network stub (`apiResponses`); the Bots
+ *  provider publishes its roster to the real roster bridge the Inbox sorts by. */
+export function DesignShell({
+  fixtures = {},
+  route = '/',
+  theme = 'light',
+  children,
+}: {
+  fixtures?: WorkbenchFixtures;
+  route?: string;
+  /** The frame's theme, for components that read it rather than the CSS (a canvas that paints its own colors). */
+  theme?: DesignTheme;
+  children: ReactNode;
+}) {
   const inbox = useMemo(() => inboxValue(fixtures), [fixtures]);
   const projects = useMemo(() => projectsValue(fixtures), [fixtures]);
   const status = useMemo(() => statusValue(fixtures), [fixtures]);
+  const themeValue = useMemo(() => ({ mode: theme, resolvedTheme: theme, setMode: () => {}, cycleMode: () => {} }), [theme]);
   const authorization = useMemo(
     () => ({ remote: false, instanceKind: null, instanceRole: 'owner' as const, capabilities: fixtures.capabilities ?? owner }),
     [fixtures],
@@ -93,9 +110,13 @@ export function DesignShell({ fixtures = {}, route = '/', children }: { fixtures
               <WindowManagerContext.Provider value={inert<WindowManagerValue>({ windows: [], focusedId: null, gestureActive: false })}>
                 <WorkbenchInboxContext.Provider value={inbox}>
                   <WorkbenchProjectsContext.Provider value={projects}>
-                    <BotsProvider>
-                      <StatusContext.Provider value={status}>{children}</StatusContext.Provider>
-                    </BotsProvider>
+                    <BotRosterProvider>
+                      <BotsProvider>
+                        <StatusContext.Provider value={status}>
+                          <ThemeContext.Provider value={themeValue}>{children}</ThemeContext.Provider>
+                        </StatusContext.Provider>
+                      </BotsProvider>
+                    </BotRosterProvider>
                   </WorkbenchProjectsContext.Provider>
                 </WorkbenchInboxContext.Provider>
               </WindowManagerContext.Provider>

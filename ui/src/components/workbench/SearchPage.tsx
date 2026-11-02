@@ -12,8 +12,8 @@ import { AppSearchResultSection } from './search/AppSearchResults';
 import { SearchResultGroup } from './search/SearchResultGroup';
 import { useAppSearchResults, useOpenSearchApp } from './search/useAppSearch';
 
-// Mobile full-screen app + message-content search (design.pen K7Bytg "M · Search
-// results"). A focused surface with its OWN header (back chevron + an active
+// Mobile full-screen app + message-content search (ui/design:
+// search/search-page/results). A focused surface with its OWN header (back chevron + an active
 // search field with mint glyph + clear ✕) over the grouped results — reached
 // from the Inbox search field (InboxPage) / the bottom-nav is hidden on
 // /search (AppShell). Results are SERVER-driven via useMessageSearch, the same
@@ -102,7 +102,7 @@ export const SearchPage: React.FC = () => {
     // header is the top of the screen, and it scrolls internally. Desktop never
     // routes here (sidebar field + ⌘K own search), but keep it sane if hit.
     <div className="fixed inset-x-0 bottom-0 top-[var(--macos-stale-login-session-notice-h,0px)] z-40 flex flex-col bg-background pt-[env(safe-area-inset-top)] md:absolute">
-      {/* Header — back chevron + active search field (design.pen P6Nsz/KmsNV). */}
+      {/* Header — back chevron + active search field. */}
       <header data-tauri-drag-region={desktopDragRegion()} className="flex shrink-0 items-center gap-2.5 border-b border-border bg-background/92 px-4 py-3 backdrop-blur">
         <Button
           type="button"

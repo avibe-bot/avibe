@@ -15,7 +15,7 @@ const TABS = [
 // Mobile-only capability sub-tab strip. On desktop these capabilities live in
 // the WorkbenchSidebar; on mobile the 能力 (Capabilities) bottom tab lands on
 // a capability page and this strip switches between Agents / Skills / Harness /
-// Vaults. Design: design.pen `wdtCs` sub-tabs.
+// Vaults (ui/design: agents/agents-page/phone).
 export const CapabilityTabs: React.FC = () => {
   const { t } = useTranslation();
   const { pathname } = useLocation();

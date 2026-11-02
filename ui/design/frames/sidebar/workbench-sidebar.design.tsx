@@ -40,6 +40,17 @@ const designFrames = frames([
     },
     render: sidebar,
   },
+  {
+    name: 'skills-selected',
+    title: '侧边栏 · Skills 选中、Agents 鼠标移上',
+    width: 248,
+    height: 640,
+    status: 'shipped',
+    route: '/skills',
+    fixtures: { projects: demoProjects, bots: [mainBot] },
+    hover: '#workbench-capability-nav a[href="/agents"]',
+    render: sidebar,
+  },
 ]);
 
 export default designFrames;

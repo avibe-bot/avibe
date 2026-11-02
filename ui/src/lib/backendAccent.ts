@@ -1,5 +1,5 @@
 // Per-backend brand accent (mint / cyan / violet) + labels, shared by the
-// Agents and Skills surfaces. Matches design.pen. This is the *accent* of a
+// Agents and Skills surfaces (ui/design: agents/agents-page/definitions). This is the *accent* of a
 // backend; it is intentionally distinct from `lib/agentBackends.ts`, which
 // carries Settings-page backend-tile chrome (icons, tile classes, CLI
 // defaults) for a different visual context.

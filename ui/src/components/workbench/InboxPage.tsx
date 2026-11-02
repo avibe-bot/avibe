@@ -303,7 +303,7 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
       </div>
 
       {/* Mobile search entry — a full-width field-style button that opens the
-          full-screen search page (design.pen S5H9R "M · Inbox · Search entry";
+          full-screen search page (ui/design: inbox/inbox-page/phone;
           SearchField). Mobile-only: desktop searches via the sidebar field + ⌘K
           (md:hidden). */}
       <Button
