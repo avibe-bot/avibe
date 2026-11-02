@@ -30,8 +30,15 @@ function Single({ frame, theme }: { frame: Frame; theme: DesignTheme }) {
     let cancelled = false;
     // Ready once fonts are in and the providers' fixture reads have settled, including a read that
     // starts on a timer when the frame says to wait for it.
+    // `designStage` names the step a frame that never gets ready is stuck in (main.tsx sets `render`).
+    const stage = (name: string) => () => {
+      document.body.dataset.designStage = name;
+    };
+    stage('fonts')();
     void document.fonts.ready
+      .then(stage('network'))
       .then(() => designNetwork.quiet())
+      .then(stage('wait'))
       .then(() => (frame.wait ? new Promise((resolve) => setTimeout(resolve, frame.wait)).then(() => designNetwork.quiet()) : undefined))
       .then(() => {
         if (cancelled) return;
@@ -100,6 +107,8 @@ function Canvas({ lang }: { lang: DesignLang }) {
 /** The canvas, or one frame when the URL names it (`?frame=<id>&theme=light|dark`). */
 export function DesignRoot({ params }: { params: URLSearchParams }): ReactNode {
   const lang: DesignLang = params.get('lang') === 'en' ? 'en' : 'zh';
+  // `?list` renders nothing: the screenshot tool reads `window.__DESIGN__.frames` from it.
+  if (params.has('list')) return null;
   const id = params.get('frame');
   if (!id) return <Canvas lang={lang} />;
   const frame = ALL_FRAMES.find((f) => f.id === id);

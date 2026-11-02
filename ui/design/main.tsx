@@ -43,6 +43,7 @@ window.__DESIGN__ = {
   quiet: () => designNetwork.quiet(),
 };
 
+document.body.dataset.designStage = 'render';
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <DesignRoot params={params} />
