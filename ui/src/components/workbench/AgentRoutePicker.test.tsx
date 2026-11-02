@@ -802,22 +802,26 @@ describe('AgentRoutePicker compact presentation', () => {
     expect(screen.queryByRole('button', { name: 'chat.picker.newAgent' })).toBeNull();
   });
 
-  // A Bot's conversation (docs/plans/bots.md D5): the server refuses any Agent
-  // write on a Bot's Session, so the menu must not offer one, only the model.
-  it('names a locked Agent without offering another, while the model still moves', async () => {
+  // A Bot's conversation (docs/plans/bots.md D5): its Agent is internal to the Bot,
+  // and the server refuses any Agent write on a Bot's Session, so the picker shows
+  // and offers only the model and effort: no Agent name, no Agent level.
+  it('shows a locked route by its model and effort alone, and offers no Agent level', async () => {
     const user = userEvent.setup();
     const onWrite = vi.fn();
     render(<OptimisticOwner presentation="compact" agentLocked onWrite={onWrite} />);
-    await openMenu(user);
 
-    expect(screen.queryByRole('button', { name: /chat\.picker\.agent/ })).toBeNull();
-    expect(screen.getByText('chat.picker.agent').parentElement?.textContent).toContain('claude');
-    await user.click(screen.getByText('chat.picker.agent'));
+    const trigger = screen.getByRole('button', { name: /sonnet/ });
+    expect(trigger.textContent).not.toContain('claude');
+    await user.click(trigger);
+    await screen.findByText('chat.picker.model');
+
+    expect(screen.queryByText('chat.picker.agent')).toBeNull();
     expect(screen.queryByRole('button', { name: /^codex/ })).toBeNull();
     expect(screen.queryByRole('button', { name: 'chat.picker.newAgent' })).toBeNull();
 
     await user.click(screen.getByRole('button', { name: /^opus/ }));
     expect(onWrite.mock.calls).toEqual([[{ model: 'opus' }]]);
+    expect(screen.queryByText('chat.picker.agent')).toBeNull();
   });
 
   it('names an inherited route by its Agent on the trigger and says Default only in the menu', async () => {

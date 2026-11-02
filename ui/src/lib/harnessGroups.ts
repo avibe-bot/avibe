@@ -25,10 +25,14 @@ export type TranscriptItem<M extends Message = WorkbenchMessage> =
  * The Session's first message never joins a group: in a delegated Session it is
  * the task brief, the one Harness row that says what the Session is for. It is
  * only known to be first while no older page is left (``hasOlder`` false).
+ *
+ * ``hideHarness`` drops every Harness row instead, the first included: a Bot's
+ * conversation with "Hide details" on (docs/plans/bots.md D5) shows the Bot's
+ * replies to that input, never the input itself.
  */
 export function groupHarnessRuns<M extends Message>(
   messages: readonly M[],
-  { hasOlder }: { hasOlder: boolean },
+  { hasOlder, hideHarness = false }: { hasOlder: boolean; hideHarness?: boolean },
 ): TranscriptItem<M>[] {
   const items: TranscriptItem<M>[] = [];
   let run: { message: M; index: number }[] = [];
@@ -38,8 +42,10 @@ export function groupHarnessRuns<M extends Message>(
     run = [];
   };
   messages.forEach((message, index) => {
+    const harness = chatRowKind(message).kind === 'harness';
+    if (harness && hideHarness) return;
     const opening = index === 0 && !hasOlder;
-    if (!opening && chatRowKind(message).kind === 'harness') {
+    if (!opening && harness) {
       run.push({ message, index });
       return;
     }

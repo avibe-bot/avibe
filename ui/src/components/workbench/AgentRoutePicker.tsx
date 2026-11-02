@@ -87,9 +87,10 @@ interface AgentRoutePickerProps {
    *  ``onChange``. */
   speed?: SessionSpeed;
   onSpeedChange?: (speed: SessionSpeed) => void;
-  /** The Agent is fixed (a Bot's conversation, where the Bot is the Agent): the
-   *  menu names it but offers no other Agent, no default, and no New Agent exit;
-   *  only the model, effort, and speed move. */
+  /** The Agent is fixed and not the user's to see (a Bot's conversation, where the
+   *  Agent is internal to the Bot, docs/plans/bots.md D1): the trigger shows the
+   *  model and effort alone, and the menu has no Agent level at all, so only the
+   *  model, effort, and speed move. */
   agentLocked?: boolean;
 }
 
@@ -213,6 +214,10 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   const fastOffered = fastState === 'offered';
   const fastActive = fastControls && fastOn && fastOffered;
   const fastUnconfirmed = fastControls && fastOn && fastState === 'unconfirmed';
+  // A locked Agent's trigger leads with the model a turn runs on: the route's own,
+  // else its Agent's default.
+  const lockedModel = agentLocked ? effectiveModel : null;
+  const lockedModelLabel = useRememberedModelLabel(backend, lockedModel) ?? lockedModel;
   const currentAgentLabel = displayedAgent?.display_name || currentAgent;
   const triggerLabel = (routeIsDefault && defaultLabel) || currentAgentLabel || defaultLabel || t('chat.pickAgent');
   const agentLabel = currentAgentLabel || defaultLabel || t('chat.pickAgent');
@@ -504,9 +509,19 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
               className="flex h-5 min-w-0 flex-wrap content-start items-center justify-end gap-x-1.5 overflow-hidden"
             >
               {/* The name keeps its line: detail wraps away first, and only a name
-                  wider than the whole row, or than 10rem, ends in an ellipsis. */}
-              <span className="h-5 min-w-0 max-w-40 truncate font-semibold leading-5 text-foreground">{agentLabel}</span>
-              {currentModel && (
+                  wider than the whole row, or than 10rem, ends in an ellipsis. A
+                  locked Agent is not named: the model leads in its place. */}
+              {agentLocked ? (
+                <span
+                  className="h-5 min-w-0 max-w-40 truncate font-semibold leading-5 text-foreground"
+                  title={lockedModel && lockedModelLabel !== lockedModel ? lockedModel : undefined}
+                >
+                  {lockedModelLabel || t('chat.picker.model')}
+                </span>
+              ) : (
+                <span className="h-5 min-w-0 max-w-40 truncate font-semibold leading-5 text-foreground">{agentLabel}</span>
+              )}
+              {currentModel && !agentLocked && (
                 <span
                   data-route-detail="model"
                   className="h-5 shrink-0 whitespace-nowrap font-mono text-[10px] leading-5 text-muted before:mr-1.5 before:font-sans before:content-['·']"
@@ -636,15 +651,13 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
         <span className="ml-auto flex min-w-0 items-center gap-1.5">
           {backend && <BackendAvatar backend={backend} className="size-3.5 shrink-0" />}
           <span className="truncate text-[12px] font-semibold text-foreground">{agentRowLabel}</span>
-          {!agentLocked && <ChevronRight className="size-3.5 shrink-0 text-muted" />}
+          <ChevronRight className="size-3.5 shrink-0 text-muted" />
         </span>
       </>
     );
     const routeMenu = (
       <div className="flex flex-col">
-        {agentLocked ? (
-          <div className="flex items-center gap-2 px-3 py-2.5">{agentRowContent}</div>
-        ) : (
+        {!agentLocked && (
           <button
             type="button"
             onClick={() => setAgentPage(true)}
@@ -653,7 +666,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
             {agentRowContent}
           </button>
         )}
-        <RouteColumn title={t('chat.picker.model')} className="max-h-[40vh] border-t border-border">
+        <RouteColumn title={t('chat.picker.model')} className={clsx('max-h-[40vh]', !agentLocked && 'border-t border-border')}>
           {modelListBody((model) => {
             const label = modelOptionLabel(model, modelLabels);
             const active = model === currentModel;

@@ -4775,6 +4775,8 @@
       "useDefault": "恢复默认"
     },
     "conversation": {
+      "hideDetails": "隐藏细节",
+      "hideDetailsFailed": "「隐藏细节」没能保存，请再试一次。",
       "editProfile": "编辑资料",
       "emptyTitle": "这是你和{{name}}对话的开始",
       "emptyBody": "这段对话会一直延续：{{name}}会把重要的事记在自己的记忆里，并按顺序处理消息。"

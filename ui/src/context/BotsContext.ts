@@ -36,6 +36,9 @@ export interface BotsState {
   /** Move a Bot (not the main one) to `position` (1-based among the others),
    *  optimistically; resolves false when the server refused it. */
   moveBot: (handle: string, position: number) => Promise<boolean>;
+  /** Turn a Bot's "Hide details" on or off, optimistically; resolves false when
+   *  the server refused it. Every device follows through `bots.changed`. */
+  setHideDetails: (handle: string, hideDetails: boolean) => Promise<boolean>;
   /** Open the one add/edit dialog: the strip's Add slot, a Bot's Edit profile, and
    *  the Agents page's "Set as Bot" all land here. */
   openProfile: (request: BotProfileRequest) => void;
@@ -58,6 +61,7 @@ const EMPTY: BotsState = {
   displayName: (bot) => bot.display_name || bot.handle,
   afterWrite: async () => undefined,
   moveBot: async () => false,
+  setHideDetails: async () => false,
   openProfile: () => undefined,
   profileRequest: null,
   closeProfile: () => undefined,

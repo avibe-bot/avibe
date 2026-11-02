@@ -51,8 +51,8 @@ export interface SessionActionsOptions {
   /** Keyboard hint for the archive row (see chatShortcuts). */
   archiveHint?: string;
   /** A Bot's permanent conversation (docs/plans/bots.md D5): it is never archived,
-   *  renamed, pinned, or hidden — the server refuses those writes — so only the
-   *  rows that continue from it (reference, fork) remain. */
+   *  renamed, pinned, or hidden — the server refuses those writes — and the Web
+   *  does not fork it (owner decision 2026-11-02), so only Reference remains. */
   botSession?: boolean;
 }
 
@@ -229,7 +229,7 @@ export const useSessionActions = ({
         onSelect: () => insertTarget?.insertSessionReference(target.id, target.title),
       });
     }
-    if (lifecycleWritable) {
+    if (lifecycleWritable && !botSession) {
       rows.push({
         id: 'fork',
         group: 'continue',

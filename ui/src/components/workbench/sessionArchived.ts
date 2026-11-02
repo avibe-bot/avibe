@@ -21,6 +21,7 @@
 // so the decisions are unit-tested without mounting a 3000-line component — the
 // page just reads the answers.
 import type { WorkbenchSession } from '../../context/ApiContext';
+import { isBotSessionId } from '../../lib/bots';
 
 /** The reserved workspace-notifications session's id — the server's
  *  ``WORKSPACE_NOTICE_SESSION_ID`` (``storage/agent_session_rows.py``), whose primary
@@ -119,7 +120,9 @@ export const transcriptSelectionActions = (
   readOnly: boolean,
 ): { quote: boolean; askInNew: boolean } => ({
   quote: !readOnly,
-  askInNew: !readOnly && Boolean(session.native_session_id),
+  // "Ask in a new session" forks, and a Bot's conversation is not forked from the
+  // Web (docs/plans/bots.md D5, owner decision 2026-11-02).
+  askInNew: !readOnly && Boolean(session.native_session_id) && !isBotSessionId(session.id),
 });
 
 /** Whether the chat surface is replaced by the session's framed Show Page.

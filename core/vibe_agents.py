@@ -1913,13 +1913,13 @@ class VibeAgentStore:
 
         Created once on the Vibey backend, named ``main`` (or the next free name when a user Agent holds it), with
         the built-in Vibey Agent's model and effort at creation. It is always enabled and always the main Bot: a
-        missing or removed Bot record is restored, keeping the display name and avatar the user chose.
+        missing or removed Bot record is restored, keeping what the user chose (``MAIN_BOT_USER_FIELDS``).
         """
         current = self.get_main_bot_agent()
         if current is not None:
             record = current.metadata.get(BOT_METADATA_KEY)
             record = dict(record) if isinstance(record, dict) else {}
-            restored = {**_main_bot_record(), **{key: record[key] for key in ("display_name", "avatar") if key in record}}
+            restored = {**_main_bot_record(), **{key: record[key] for key in MAIN_BOT_USER_FIELDS if key in record}}
             updated = self._write_builtin_state(
                 current, metadata={**current.metadata, BOT_METADATA_KEY: restored}, enabled=True
             )
@@ -2115,6 +2115,10 @@ def _without_builtin_markers(metadata: Any) -> dict[str, Any]:
 
 class _MainBotExists(Exception):
     """The main Bot's Agent was created by someone else while this one waited for the writer lock."""
+
+
+#: The main Bot's record fields the user sets, which restoring the record keeps: its name, avatar, and Hide details.
+MAIN_BOT_USER_FIELDS = ("display_name", "avatar", "hide_details")
 
 
 def _main_bot_record() -> dict[str, Any]:

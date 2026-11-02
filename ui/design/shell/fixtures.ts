@@ -128,6 +128,7 @@ export const bot = (handle: string, displayName: string, role: string, avatar: B
   session_id: `ses_${handle}`,
   position,
   builtin: handle === 'main',
+  hide_details: true,
 });
 
 /** The main Bot as a new install has it: the mascot, and the localized default name. */

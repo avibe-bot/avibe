@@ -10,6 +10,8 @@ update can neither set nor clear (``core.vibe_agents.STORE_OWNED_METADATA_KEYS``
 - **The main Bot** (D9) is the store-made ``main`` Agent (``VibeAgentStore.ensure_main_bot_agent``); it is always a
   Bot, and its Session is the released ``ses_main``.
 - Bots are the instance Owner's (D1): every operation here requires the Owner.
+- **Hide details** (D5): whether the Bot's conversation hides its execution process, Harness messages, and
+  background tasks, so it reads like talking to a person. Kept on the Bot so every device agrees; on when absent.
 """
 
 from __future__ import annotations
@@ -204,6 +206,7 @@ class Bot:
     avatar: Optional[dict[str, Any]]
     position: int
     agent: VibeAgent
+    hide_details: bool = True
 
     @property
     def builtin(self) -> bool:
@@ -246,6 +249,7 @@ class Bot:
             "session_id": self.session_id,
             "position": self.position,
             "builtin": self.builtin,
+            "hide_details": self.hide_details,
         }
 
 
@@ -267,6 +271,8 @@ def bot_from_agent(agent: VibeAgent) -> Optional[Bot]:
         avatar=dict(avatar) if isinstance(avatar, dict) else None,
         position=0 if is_main_bot_agent(agent) else position,
         agent=agent,
+        # Records written before the switch existed have no value: details stay hidden.
+        hide_details=record.get("hide_details") is not False,
     )
 
 
@@ -583,6 +589,9 @@ class BotService:
                 "avatar": avatar_record if avatar is not None else previous.get("avatar"),
                 "position": self._next_position(conn),
             }
+            # Setting a removed Bot again reconnects its conversation as the user left it.
+            if isinstance(previous.get("hide_details"), bool):
+                record["hide_details"] = previous["hide_details"]
             self._write_record(conn, agent, record)
             agent = self._reload(conn, agent.id)
             self._sync_session_title(conn, bot_session_id(handle), name)
@@ -599,9 +608,10 @@ class BotService:
         display_name: Any = ...,
         avatar: Any = ...,
         position: Any = ...,
+        hide_details: Any = ...,
         authorization_context: Any = None,
     ) -> Bot:
-        """Change a Bot's display name, emoji avatar, or position among the other Bots (D5 ``PATCH``)."""
+        """Change a Bot's display name, emoji avatar, position among the other Bots, or Hide details (D5 ``PATCH``)."""
         context = require_instance_role(authorization_context, "owner")
         with self.engine.begin() as conn:
             reserve_write_lock(conn)
@@ -612,6 +622,10 @@ class BotService:
                 record["display_name"] = _clean_display_name(display_name, required=not bot.builtin)
             if avatar is not ...:
                 record["avatar"] = clean_emoji_avatar(avatar)
+            if hide_details is not ...:
+                if not isinstance(hide_details, bool):
+                    raise BotError("bot_hide_details_invalid", "Hide details is on or off")
+                record["hide_details"] = hide_details
             self._write_record(conn, bot.agent, record)
             if position is not ...:
                 if bot.builtin:

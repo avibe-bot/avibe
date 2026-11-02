@@ -23,6 +23,8 @@ export type Bot = {
   position: number;
   /** The main Bot: always first, never removed. */
   builtin: boolean;
+  /** "Hide details" in the Bot's conversation (`conversationDetails`); on unless turned off. */
+  hide_details: boolean;
 };
 
 /** The Bot an Agent is, as Agent lists carry it. */
@@ -86,6 +88,25 @@ export function botDisplayName(bot: Pick<Bot, 'display_name' | 'builtin' | 'hand
   return bot.display_name.trim() || (bot.builtin ? mainDefault : bot.handle);
 }
 
+/** What a Bot's conversation shows besides the conversation itself (owner decision
+ *  2026-11-02). With "Hide details" on, the default, it reads like talking to a
+ *  person: no execution process (Activity chips and cards, the running card
+ *  included), no Harness messages, and no background-task banner; the Bot's own
+ *  messages, and the thinking bubble while it works, always show. With it off,
+ *  Harness messages and the banner show, and the execution process follows the
+ *  Settings switch "Show Agent Activity" as in any Session. */
+export function conversationDetails(hideDetails: boolean, showAgentActivity: boolean): {
+  executionProcess: boolean;
+  harnessMessages: boolean;
+  backgroundTasks: boolean;
+} {
+  return {
+    executionProcess: !hideDetails && showAgentActivity,
+    harnessMessages: !hideDetails,
+    backgroundTasks: !hideDetails,
+  };
+}
+
 export function botSessionPath(bot: Pick<Bot, 'session_id'>): string {
   return `/chat/${encodeURIComponent(bot.session_id)}`;
 }
@@ -146,6 +167,8 @@ export function parseBot(value: unknown): Bot | null {
     session_id: typeof raw.session_id === 'string' ? raw.session_id : `${BOT_SESSION_ID_PREFIX}${raw.handle}`,
     position: typeof raw.position === 'number' ? raw.position : 0,
     builtin: raw.builtin === true,
+    // A server from before the switch sends none: details stay hidden, as there.
+    hide_details: raw.hide_details !== false,
   };
 }
 

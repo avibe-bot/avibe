@@ -4775,6 +4775,8 @@
       "useDefault": "Use the default"
     },
     "conversation": {
+      "hideDetails": "Hide details",
+      "hideDetailsFailed": "Couldn't save Hide details. Try again.",
       "editProfile": "Edit profile",
       "emptyTitle": "This is the start of your conversation with {{name}}",
       "emptyBody": "It carries on from here: {{name}} keeps what matters in its memory and handles messages in order."

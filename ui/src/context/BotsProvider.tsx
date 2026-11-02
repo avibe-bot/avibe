@@ -135,6 +135,25 @@ export const BotsProvider = ({ children }: { children: ReactNode }) => {
     [api, ownerBots, afterWrite],
   );
 
+  const setHideDetails = useCallback(
+    async (handle: string, hideDetails: boolean) => {
+      const flip = (value: boolean) => (bots: Bot[]) =>
+        bots.map((bot) => (bot.handle === handle ? { ...bot, hide_details: value } : bot));
+      if (!ownerBots.some((bot) => bot.handle === handle)) return false;
+      setBots(flip(hideDetails));
+      try {
+        await api.updateBot(handle, { hide_details: hideDetails });
+        return true;
+      } catch {
+        setBots(flip(!hideDetails));
+        return false;
+      } finally {
+        void afterWrite();
+      }
+    },
+    [api, ownerBots, afterWrite],
+  );
+
   const mainDefault = t('bots.mainDefaultName');
   const value = useMemo<BotsState>(() => {
     const bots = enabled ? ownerBots : [];
@@ -155,13 +174,14 @@ export const BotsProvider = ({ children }: { children: ReactNode }) => {
       displayName: (bot) => botDisplayName(bot, mainDefault),
       afterWrite,
       moveBot,
+      setHideDetails,
       openProfile: (request) => {
         if (enabled) setProfileRequest(request);
       },
       profileRequest: enabled ? profileRequest : null,
       closeProfile: () => setProfileRequest(null),
     };
-  }, [enabled, ownerBots, loaded, listed, ownerStatuses, mainDefault, afterWrite, moveBot, profileRequest]);
+  }, [enabled, ownerBots, loaded, listed, ownerStatuses, mainDefault, afterWrite, moveBot, setHideDetails, profileRequest]);
 
   // The Inbox above the router splits its counts by this list (BotRosterContext).
   // A reader who is not the Owner has none to wait for; the Owner's is known once
