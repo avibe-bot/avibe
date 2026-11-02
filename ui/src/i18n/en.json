@@ -5025,6 +5025,7 @@
       "source": "Source",
       "parentRun": "Parent run",
       "callback": "Callback",
+      "notifyOnFailure": "Notify on failure",
       "effort": "effort {{value}}",
       "waitingSince": "Waiting since",
       "onFailure": "On failure",

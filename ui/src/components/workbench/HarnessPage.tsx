@@ -1834,6 +1834,11 @@ export const RunDetail: React.FC<RunDetailProps> = ({ run, agent }) => {
   const typeLabel = runTypeLabel(run.run_type || run.request_type, t);
   const title = runRowTitle(run, typeLabel);
   const runCommandLine = runCommandSnapshotLine(run);
+  // A run that asked for no callback still tells its sender when it did not complete: its route only
+  // notifies on failure, so it shows whether that notice went out, not a skipped callback.
+  const notifyOnFailure = run.metadata?.callback_mode === 'failure';
+  const shownCallbackStatus =
+    notifyOnFailure && run.callback_status !== 'sent' && run.callback_status !== 'failed' ? null : run.callback_status;
   return (
     <div className="flex flex-col gap-4">
       <div className="flex items-start gap-2">
@@ -1917,7 +1922,7 @@ export const RunDetail: React.FC<RunDetailProps> = ({ run, agent }) => {
         </DetailField>
       )}
       {run.callback_session_id && (
-        <DetailField label={t('harness.detail.callback')}>
+        <DetailField label={t(notifyOnFailure ? 'harness.detail.notifyOnFailure' : 'harness.detail.callback')}>
           <div className="flex min-w-0 flex-col gap-1">
             {/* Where the result reports back to — the same four session states,
                 so "who gets told" is as openable as "who ran it". */}
@@ -1925,9 +1930,9 @@ export const RunDetail: React.FC<RunDetailProps> = ({ run, agent }) => {
               summary={run.callback_session ?? BLANK_SESSION_SUMMARY}
               sessionId={run.callback_session_id}
             />
-            {run.callback_status && (
+            {shownCallbackStatus && (
               <span className="w-fit rounded border border-border-strong bg-foreground/[0.04] px-1.5 py-0 font-mono text-[10px] uppercase text-muted">
-                {run.callback_status}
+                {shownCallbackStatus}
               </span>
             )}
           </div>
