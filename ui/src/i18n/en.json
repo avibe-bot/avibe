@@ -4772,6 +4772,9 @@
       "useDefault": "Use the default"
     },
     "conversation": {
+      "sendStatusUnknown": "We couldn't confirm whether this reached {{name}}. Check the conversation before sending it again.",
+      "attachmentsUnavailable": "An attachment is no longer available, so this message hasn't been delivered. Upload the attachment again to send it.",
+      "waitingMessage": "Waiting message",
       "working": "{{name}} is working…",
       "delivering": "Delivering · {{count}}",
       "notDelivered": "Not delivered yet · {{count}}",

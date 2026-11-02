@@ -6,6 +6,7 @@ import { useTranslation } from 'react-i18next';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, Bell, Bot, ChevronDown, ChevronRight, Clock, Eye, EyeOff, GitFork, Image as ImageIcon, Info, Loader2, MapPin, MessageSquare, MessageSquareQuote, Pencil, Terminal, Undo2, UploadCloud, X } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
+import type { TFunction } from 'i18next';
 import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
@@ -2426,7 +2427,12 @@ export const ChatPage: React.FC = () => {
       const retryable = refreshedQueue?.some(
         (item) => item.id === messageId && !isQueueDeliveryFenced(item),
       ) ?? false;
-      setError(t(retryable ? 'chat.queue.sendFailed' : 'chat.queue.sendStatusUnknown'));
+      const unknownBot = retryable ? undefined : botForSession(sid);
+      setError(retryable
+        ? t('chat.queue.sendFailed')
+        : unknownBot
+          ? t('bots.conversation.sendStatusUnknown', { name: botDisplayName(unknownBot) })
+          : t('chat.queue.sendStatusUnknown'));
     };
     try {
       const res = await api.sendQueuedNow(sid, messageId);
@@ -2444,7 +2450,7 @@ export const ChatPage: React.FC = () => {
       } else if (res?.status === 'queued') {
         const deferredBot = botForSession(sid);
         setError(res.reason === 'attachments_unavailable'
-          ? t('chat.queue.attachmentsUnavailable')
+          ? t(deferredBot ? 'bots.conversation.attachmentsUnavailable' : 'chat.queue.attachmentsUnavailable')
           : deferredBot
             ? t('bots.conversation.sendDeferred', { name: botDisplayName(deferredBot) })
             : t('chat.queue.sendDeferred'));
@@ -2906,7 +2912,7 @@ export const ChatPage: React.FC = () => {
   const conversationBot = botConversation ? botForSession(sessionId) : undefined;
   const conversationBotName = conversationBot
     ? botDisplayName(conversationBot)
-    : botConversation ? session.title?.trim() || null : null;
+    : botConversation ? session.title?.trim() || t('bots.mainDefaultName') : null;
   // A Bot's conversation reads like talking to a person while its "Hide details"
   // is on (docs/plans/bots.md D5): on unless the Bot turned it off, including
   // before the Bot list has answered. Anything else shows what it always has.
@@ -3096,6 +3102,7 @@ export const ChatPage: React.FC = () => {
           state={runtimeState}
           sessionId={sessionId ?? ''}
           enabled={bannerEnabled === true && details.backgroundTasks}
+          inBotConversation={botConversation}
         />
         {/* Archive reclaims all unsent input (queued rows, pending rows, draft),
             so an archived chat loads with an empty queue. A stale tab can still be
@@ -3362,14 +3369,28 @@ const ACTIVITY_ITEM_TINT: Record<SessionActivityItemKind, string> = {
 // One expanded popover row: colored kind icon box + two-line label / subtitle.
 // Backend activities are display-only with a colored status word (no landing
 // page); harness rows navigate to their Harness surface on click.
+// A Bot's conversation never calls anything queued (docs/plans/bots.md D4): a
+// delegated message that has not started yet is one waiting there.
+const activityKindLabel = (
+  t: TFunction,
+  item: SessionActivityState,
+  inBotConversation: boolean,
+): string => {
+  const key = activityKindI18nKey(item);
+  return inBotConversation && key === 'agentRunQueued'
+    ? t('bots.conversation.waitingMessage')
+    : t(`chat.activities.kind.${key}`);
+};
+
 const ActivityRow: React.FC<{
   item: SessionActivityState;
   onNavigate: (item: SessionActivityState) => void;
-}> = ({ item, onNavigate }) => {
+  inBotConversation: boolean;
+}> = ({ item, onNavigate, inBotConversation }) => {
   const { t } = useTranslation();
   const kind = activityItemKind(item);
   const Icon = ACTIVITY_ITEM_ICON[kind];
-  const kindLabel = t(`chat.activities.kind.${activityKindI18nKey(item)}`);
+  const kindLabel = activityKindLabel(t, item, inBotConversation);
   const label = resolveActivityLabel(item, kindLabel);
   const relative = formatRelativeTime(item.since ?? item.started_at, t);
   const isHarness = kind !== 'backend_activity';
@@ -3433,7 +3454,8 @@ const ActivityStrip: React.FC<{
   state: SessionRuntimeState;
   sessionId: string;
   enabled: boolean;
-}> = ({ state, sessionId, enabled }) => {
+  inBotConversation: boolean;
+}> = ({ state, sessionId, enabled, inBotConversation }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
@@ -3447,7 +3469,7 @@ const ActivityStrip: React.FC<{
 
   const first = active[0];
   const firstLabel = first
-    ? resolveActivityLabel(first, t(`chat.activities.kind.${activityKindI18nKey(first)}`))
+    ? resolveActivityLabel(first, activityKindLabel(t, first, inBotConversation))
     : '';
   // Mute the pill only when the banner consists SOLELY of queued delegated
   // runs — a waiting message must not glow like live work. Any running item,
@@ -3530,6 +3552,7 @@ const ActivityStrip: React.FC<{
                     key={item.id}
                     item={item}
                     onNavigate={(it) => navigateTo(harnessNavPath(it, sessionId))}
+                    inBotConversation={inBotConversation}
                   />
                 ))}
               </div>
@@ -3707,6 +3730,7 @@ const Compose: React.FC<ComposeProps> = ({ composerRef, actions, readLatestAgent
         // A Bot takes the user's message into the Turn it is on (docs/plans/bots.md
         // D4), so its conversation names who is working and promises no queue.
         busyPlaceholder={botName ? t('bots.conversation.working', { name: botName }) : undefined}
+        busySendsNow={botName != null}
         autoFocus={!readOnly}
       />
     </div>
