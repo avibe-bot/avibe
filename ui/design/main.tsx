@@ -42,6 +42,7 @@ async function boot() {
   // One document draws one frame (the canvas puts each in its own iframe), so its API
   // fixtures are in place before any provider can fetch.
   designNetwork.setResponses(apiResponses(shown?.fixtures));
+  for (const [key, text] of Object.entries(shown?.fixtures?.copy ?? {})) i18n.addResource(lang, 'translation', key, text[lang]);
   designStorage.seed(shown?.fixtures?.storage);
   window.__DESIGN__ = {
     frames: frames.map((f) => ({ id: f.id, file: f.file, title: f.title, status: f.status, width: f.width, height: f.height, themes: f.themes ?? ['light', 'dark'], hover: f.hover, click: f.click, wait: f.wait })),

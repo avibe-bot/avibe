@@ -63,6 +63,13 @@
   --app-sidebar-w: 248px;
 }
 
+/* The chat column's width: the composer and the transcript it sits under are
+   centered at most this wide (ChatPage and Composer still spell it
+   max-w-[1080px]; a design anchored to the composer reads it from here). */
+:root {
+  --chat-column-w: 1080px;
+}
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
