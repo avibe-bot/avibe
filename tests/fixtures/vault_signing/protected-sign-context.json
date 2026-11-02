@@ -1,0 +1,40 @@
+{
+  "daemonSeedHex": "1111111111111111111111111111111111111111111111111111111111111111",
+  "daemonPublicKey": "0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc=",
+  "daemonKeyId": "fixture-daemon-key",
+  "publicKey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+  "signedContext": {
+    "v": 2,
+    "purpose": "sign",
+    "requestId": "vrq_fixture_sign_binding",
+    "display": {
+      "secrets": [
+        {
+          "name": "PRIVATE_TEST_KEY",
+          "kind": "keypair"
+        }
+      ],
+      "command": "sign fixture digest",
+      "egress": "signature"
+    },
+    "release": {
+      "name": "PRIVATE_TEST_KEY",
+      "scheme": "schnorr-secp256k1-bip340",
+      "digest": "abbd2dc75c4350327bdce8a2ae98d635d606368912984aad934a8f63b0b45b5b",
+      "publicKey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "signingContext": {
+        "kind": "avault-agent-operation",
+        "canonicalPreimage": "avault-agent-operation:v1\nfixture operation: sign a synthetic digest",
+        "digestAlgorithm": "avault-operation-hash-v1",
+        "digest": "abbd2dc75c4350327bdce8a2ae98d635d606368912984aad934a8f63b0b45b5b"
+      }
+    },
+    "expiresAt": "2030-01-01T00:00:00Z",
+    "signature": {
+      "alg": "ed25519",
+      "keyId": "fixture-daemon-key",
+      "value": "l7mtq7TSxiyvUiw6jePS6VvL42cYNoQLobqF6XDK7/6OBmlb2IG/3LnZLlQ7z3I1pdZqjB8xWreb0SAqj0UBDQ=="
+    }
+  },
+  "canonicalUnsignedContext": "{\"display\":{\"command\":\"sign fixture digest\",\"egress\":\"signature\",\"secrets\":[{\"kind\":\"keypair\",\"name\":\"PRIVATE_TEST_KEY\"}]},\"expiresAt\":\"2030-01-01T00:00:00Z\",\"purpose\":\"sign\",\"release\":{\"digest\":\"abbd2dc75c4350327bdce8a2ae98d635d606368912984aad934a8f63b0b45b5b\",\"name\":\"PRIVATE_TEST_KEY\",\"publicKey\":\"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"scheme\":\"schnorr-secp256k1-bip340\",\"signingContext\":{\"canonicalPreimage\":\"avault-agent-operation:v1\\nfixture operation: sign a synthetic digest\",\"digest\":\"abbd2dc75c4350327bdce8a2ae98d635d606368912984aad934a8f63b0b45b5b\",\"digestAlgorithm\":\"avault-operation-hash-v1\",\"kind\":\"avault-agent-operation\"}},\"requestId\":\"vrq_fixture_sign_binding\",\"v\":2}"
+}

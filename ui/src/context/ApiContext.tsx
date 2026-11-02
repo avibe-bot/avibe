@@ -266,6 +266,14 @@ export type VaultSignedOperationContext = {
     source?: { env?: string[]; tags?: string[]; skills?: string[] };
     grantTtlSeconds?: number;
   };
+  release?: {
+    name?: string;
+    scheme?: string;
+    digest?: string;
+    publicKey?: string;
+    signingContext?: Record<string, unknown>;
+    [key: string]: unknown;
+  };
   agent?: { publicKey: { public_key: string; fingerprint?: string }; fingerprint: string };
   expiresAt: string;
   signature: { alg: 'ed25519'; keyId: string; value: string };

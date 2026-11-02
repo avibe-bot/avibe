@@ -1,0 +1,2 @@
+# Preserve the upstream CSV bytes (and its documented SHA256), including CRLF.
+bip340.csv -text whitespace=cr-at-eol

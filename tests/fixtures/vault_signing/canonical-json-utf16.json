@@ -1,0 +1,12 @@
+{
+  "source": "Avibe vibe/api.py _vault_sandbox_canonical_json; exact pure helpers extracted via Python AST, 2026-11-02",
+  "payload": {
+    "message": {
+      "": 9007199254740991,
+      "😀": -9007199254740991
+    },
+    "text": "用户 🚀"
+  },
+  "canonical": "{\"message\":{\"😀\":-9007199254740991,\"\":9007199254740991},\"text\":\"用户 🚀\"}",
+  "sha256": "a412c7d7d314f80a9320659810f9db5a5fd6e9da07536850670537f3b001f587"
+}

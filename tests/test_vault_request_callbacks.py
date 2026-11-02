@@ -49,7 +49,8 @@ def _signing_public_meta() -> dict:
 
 
 def _valid_recoverable_signature() -> dict:
-    return {"signature": "ab" * 64, "recovery_id": 0}
+    # A shape-valid low-S payload; callback routing does not perform key verification.
+    return {"signature": "01" * 64, "recovery_id": 0}
 
 
 def _create_protected_keypair(conn, name: str = "ETH_KEY") -> None:

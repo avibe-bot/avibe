@@ -95,10 +95,21 @@ type ApprovalCard = {
 
 export type ApprovalOutcome = { kind: 'approved' | 'denied'; requestType: 'access' | 'sign' | 'delete' };
 
-/** The receive address(es) a signature scheme produces, for the sign card's "Signing as" row. */
-function addressesForScheme(scheme: string | undefined, addresses: SigningAddresses | null): SigningAddresses {
+/** The receive address(es) a signature scheme produces, for the sign card's "Signing as" row.
+ * ui/design: vault/signing/keypath, vault/signing/raw
+ */
+function addressesForScheme(
+  scheme: string | undefined,
+  addresses: SigningAddresses | null,
+  protectedKey: boolean,
+): SigningAddresses {
   if (!addresses) return {};
-  if (scheme === 'schnorr-secp256k1-bip340') return { btc_taproot: addresses.btc_taproot };
+  // Protected Bitcoin transaction approval is intentionally unsupported until a
+  // verifiable Bitcoin context exists; keep addresses in Vault metadata for
+  // identification, but never present them as a spendable approval target.
+  if (protectedKey) return scheme === 'ecdsa-secp256k1-recoverable' ? { eth: addresses.eth } : {};
+  if (scheme === 'schnorr-secp256k1-bip341-keypath') return { btc_taproot: addresses.btc_taproot };
+  if (scheme === 'schnorr-secp256k1-bip340') return {};
   if (scheme === 'ecdsa-secp256k1-der') return { btc_segwit: addresses.btc_segwit, btc_legacy: addresses.btc_legacy };
   // ecdsa-secp256k1-recoverable (Ethereum) and the default.
   return { eth: addresses.eth };
@@ -249,7 +260,10 @@ export const VaultApprovalCard: React.FC<{
     };
   }, [api, signName]);
   // Only the address(es) the requested signature scheme actually produces.
-  const schemeAddresses = useMemo(() => addressesForScheme(delivery.scheme, signAddresses), [delivery.scheme, signAddresses]);
+  const schemeAddresses = useMemo(
+    () => addressesForScheme(delivery.scheme, signAddresses, isProtected && isKeypair),
+    [delivery.scheme, isProtected, isKeypair, signAddresses],
+  );
   const hasSchemeAddress = Object.values(schemeAddresses).some(Boolean);
 
   const needsProtectedApproval = useMemo(() => vaultApprovalNeedsPasskey(request), [request]);
@@ -539,6 +553,11 @@ export const VaultApprovalCard: React.FC<{
             </DetailRow>
           );
         })}
+        {isSign && isProtected && isKeypair ? (
+          <div role="alert" className="rounded-lg border border-gold/40 bg-gold/10 px-3 py-2 text-xs text-gold-ink">
+            {t('vaults.approval.protectedBitcoinWarning')}
+          </div>
+        ) : null}
         {isSign && hasSchemeAddress ? (
           <DetailRow label={t('vaults.approval.signingAs')}>
             <SigningAddressList addresses={schemeAddresses} />

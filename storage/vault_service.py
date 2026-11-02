@@ -69,6 +69,7 @@ SUPPORTED_SIGNATURE_SCHEMES = {
     "ecdsa-secp256k1-recoverable",
     "ecdsa-secp256k1-der",
     "schnorr-secp256k1-bip340",
+    "schnorr-secp256k1-bip341-keypath",
 }
 REQUEST_AUDIENCE_AGENT = "agent"
 REQUEST_AUDIENCE_UI = "ui"
@@ -4405,6 +4406,10 @@ def create_sign_request(
     if row.get("signer_kind") not in (None, "local"):
         raise InvalidRequestError(f"{name} is not locally signable")
     _reject_unsignable_keypair(row, name)
+    if row.get("protection") == "protected" and scheme == "schnorr-secp256k1-bip341-keypath":
+        raise InvalidRequestError(
+            "protected Bitcoin Taproot key-path signing is not supported yet; wait for a supported Bitcoin approval workflow without changing the key or its protection"
+        )
     payload_audience = _request_audience_from_requester(requester)
     request_id = _id("vrq")
     delivery_payload = dict(delivery or {})
@@ -4581,18 +4586,38 @@ def _validate_signature_payload(scheme: str, signature: dict[str, Any]) -> None:
             raise InvalidRequestError("recoverable secp256k1 signatures must be 64 bytes")
         if type(recovery_id) is not int or recovery_id not in {0, 1, 2, 3}:
             raise InvalidRequestError("recoverable secp256k1 signatures require recovery_id 0..3")
+        r = int.from_bytes(sig_bytes[:32], "big")
+        s = int.from_bytes(sig_bytes[32:], "big")
+        if not (1 <= r < 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141):
+            raise InvalidRequestError("recoverable secp256k1 signatures have invalid r")
+        if not (1 <= s <= 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0):
+            raise InvalidRequestError("recoverable secp256k1 signatures must use low-S")
         return
     if scheme == "ecdsa-secp256k1-der":
-        if len(sig_bytes) < 8 or sig_bytes[0] != 0x30:
-            raise InvalidRequestError("DER secp256k1 signatures must be DER-encoded")
         if recovery_id is not None:
             raise InvalidRequestError("DER secp256k1 signatures must not include recovery_id")
+        try:
+            from cryptography.hazmat.primitives.asymmetric import utils
+
+            r, s = utils.decode_dss_signature(sig_bytes)
+        except (ValueError, TypeError) as exc:
+            raise InvalidRequestError("DER secp256k1 signatures must be valid DER") from exc
+        if not (1 <= r < 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141):
+            raise InvalidRequestError("DER secp256k1 signatures have invalid r")
+        if not (1 <= s <= 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0):
+            raise InvalidRequestError("DER secp256k1 signatures must use low-S")
         return
-    if scheme == "schnorr-secp256k1-bip340":
+    if scheme in {"schnorr-secp256k1-bip340", "schnorr-secp256k1-bip341-keypath"}:
         if len(sig_bytes) != 64:
             raise InvalidRequestError("BIP340 Schnorr signatures must be 64 bytes")
         if recovery_id is not None:
             raise InvalidRequestError("BIP340 Schnorr signatures must not include recovery_id")
+        r = int.from_bytes(sig_bytes[:32], "big")
+        s = int.from_bytes(sig_bytes[32:], "big")
+        if r >= 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F:
+            raise InvalidRequestError("BIP340 Schnorr signatures have invalid r")
+        if s >= 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141:
+            raise InvalidRequestError("BIP340 Schnorr signatures have invalid s")
         return
 
 def complete_sign_request(

@@ -297,6 +297,30 @@ Unifying principle:
 > **Value → browser releases the DEK; `avault` decrypts & delivers (value materializes in `avault`).**
 > **Signature → sign at the unlock point (browser); return only the signature (the private key never moves).**
 
+### 8.5 Signing contract hardening (2026-11)
+
+The current sign API distinguishes raw `schnorr-secp256k1-bip340` (internal P)
+from `schnorr-secp256k1-bip341-keypath` (BIP86 output Q, empty script tree).
+Existing keys and addresses do not change. Standard results are verified against
+pinned public metadata, using Q for key-path signing; the new scheme requires a
+valid compressed pinned P. Legacy records without a pin retain only the old
+schemes with strict encoding, range and low-S checks. Never fall back to raw
+BIP340 when an older avault does not support key-path signing.
+
+Protected signing occurs in the separately deployed `vault-sandbox` runtime,
+not the parent application's crypto helper. The signed operation context's
+`release` binds persisted name, scheme, digest, pinned publicKey and complete
+signingContext. The sandbox must verify that binding before authorization and
+again before key use. `avault-agent-operation:v1` plus a real LF is the required
+domain for agent-operation preimages; arbitrary text is not a transaction
+context. Protected Bitcoin transaction signing remains unsupported and must
+not be approximated with blind digest signing.
+
+See [Taproot signing change contract and acceptance](vault-taproot-signing.md)
+for cross-repository dependencies, canonical JSON, rollout order and the
+isolated Bitcoin Core acceptance runner. Neither the managed avault release pin
+nor the sandbox integrity pin is changed by this integration.
+
 ---
 
 ## 9. Authorization & grants

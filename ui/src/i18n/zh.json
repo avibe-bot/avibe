@@ -5752,7 +5752,9 @@
       "btcSegwit": "BTC SegWit",
       "btcTaproot": "BTC Taproot",
       "btcLegacy": "BTC Legacy",
-      "copy": "复制 {{label}} 地址"
+      "copy": "复制 {{label}} 地址",
+      "protectedBitcoinWarning": "暂不支持保护档 Bitcoin 交易签名。请保留这些地址用于识别已有资金和恢复，但不要把资金转入后期待当前授权流程能够花费它们。",
+      "standardBitcoinTaprootWarning": "BTC Taproot 使用 schnorr-secp256k1-bip341-keypath。较旧的 avault 会安全失败；Avibe 绝不会回退到原始 BIP340。"
     },
     "chat": {
       "floatApprovals": "等你授权 · {{count}}"
@@ -5955,8 +5957,8 @@
       "kindKeypairHelp": "在你浏览器里生成的签名私钥。",
       "nameHint": "首字符必须是字母或下划线；后续可用字母、数字、下划线 · 保留大小写",
       "signingKeyHelp": "会在你的浏览器里新生成一把 secp256k1 签名密钥。私钥在浏览器中封存——标准密钥由本机 avault 签名,保护层密钥在浏览器中签名——只有公钥明文保存。",
-      "signingKeyProtectedHelp": "在沙箱内新生成一把 secp256k1 签名密钥并就地封存。只有密文和公开地址会到达 Avibe——私钥绝不离开沙箱。",
-      "signingKeyProtectedBornHint": "私钥在沙箱内生成,从未进入本应用。",
+      "signingKeyProtectedHelp": "在沙箱内新生成一把 secp256k1 签名密钥并就地封存。只有密文和公开地址会到达 Avibe——私钥绝不离开沙箱。保护档 Bitcoin 交易签名目前尚不支持；BTC 地址仅用于识别和恢复。",
+      "signingKeyProtectedBornHint": "私钥在沙箱内生成,从未进入本应用。保护档 Bitcoin 交易签名目前尚不支持；BTC 地址仅用于识别和恢复。",
       "signingGenerate": "生成",
       "signingImport": "导入",
       "signingGenerateCta": "生成签名密钥",
@@ -5965,7 +5967,8 @@
       "signingAddresses": "地址",
       "signingAddressesLoading": "正在生成地址…",
       "signingAddressesUnavailable": "无法为该密钥推导地址。",
-      "signingAddressesHint": "由密钥推导得到。收款时把地址发给对方即可;私钥始终留在你的保险库里,用哪条链、哪种签名方案在签名时再定。",
+      "signingAddressesHint": "由密钥推导得到。标准档 Bitcoin Taproot 使用 schnorr-secp256k1-bip341-keypath，需要另行安装支持该方案的 avault；较旧的 avault 会安全失败，绝不会回退到原始 BIP340。保护档 Bitcoin 交易签名目前尚不支持。请把地址用于识别和恢复，不要把它理解为每个保护层都能花费。",
+      "protectedBitcoinWarning": "暂不支持保护档 Bitcoin 交易签名。请保留这些地址用于识别已有资金和恢复，但不要把资金转入后期待当前流程能够花费它们。",
       "signingNeedsAvault": "签名密钥需要安装 avault {{version}} 或更新版本。",
       "checkingAvault": "正在检查 avault…",
       "p2Unavailable": "浏览器侧保险库创建需要 avault {{version}} 或更新版本。当前安装：{{installed}}。请先安装兼容的 avault 发布版，再保存标准密钥。",
@@ -6073,6 +6076,7 @@
       "ttlHours": "{{count}} 小时",
       "accessNote": "在你的浏览器里解锁——密钥的值绝不会展示给 AI 或聊天。",
       "signNote": "私钥绝不会离开你的浏览器——只返回签名。",
+      "protectedBitcoinWarning": "暂不支持保护档 Bitcoin 交易签名。请保留显示的 BTC 地址用于识别已有资金，但不要把资金转入后期待当前授权流程能够花费它们。",
       "browserNote": "这一步需要 passkey，而桌面端无法使用 passkey。请在浏览器中审阅并批准。",
       "continueInBrowser": "在浏览器中继续",
       "errors": {

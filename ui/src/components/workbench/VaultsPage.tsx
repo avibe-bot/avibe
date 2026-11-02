@@ -76,6 +76,7 @@ function SearchHighlight({ text, terms }: { text: string; terms: string[] }) {
   )}</>;
 }
 
+// ui/design: vault/signing/capabilities
 const SecretRow: React.FC<{
   secret: VaultSecret;
   terms: string[];
@@ -140,6 +141,12 @@ const SecretRow: React.FC<{
           <span role="alert" className="text-xs text-destructive-ink">{t('errors.fields_corrupt')}</span>
         ) : null}
         {isKeypair && s.signing_addresses ? <SigningAddressList addresses={s.signing_addresses} className="mt-1" /> : null}
+        {isKeypair && isProtected && s.signing_addresses?.btc_legacy ? (
+          <span role="note" className="mt-1 text-xs text-gold-ink">{t('vaults.addresses.protectedBitcoinWarning')}</span>
+        ) : null}
+        {isKeypair && !isProtected && s.signing_addresses?.btc_taproot ? (
+          <span role="note" className="mt-1 text-xs text-muted">{t('vaults.addresses.standardBitcoinTaprootWarning')}</span>
+        ) : null}
         {!isKeypair && vaultHasNamedFieldShape(s) ? (
           <div className="flex flex-wrap gap-1">
             {fields.map((field) => <Badge key={field} variant="outline" className="font-mono">

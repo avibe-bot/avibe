@@ -2,7 +2,7 @@
 name: use-avibe-vault
 slug: use-avibe-vault
 description: Use Avibe Vault for API keys, tokens, passwords, protected credentials, authenticated HTTP requests, or digest signing without exposing secret values to the agent.
-version: 0.5.1
+version: 0.6.0
 ---
 
 # Use Avibe Vault
@@ -27,6 +27,10 @@ Rules:
 - When protected `run` / `fetch` needs approval, Avibe automatically asks the user to decrypt and authorize access, and the command waits for that approval (540 seconds by default; `--approval-wait SECONDS` or `--no-approval-wait` to change it). If the command then succeeds, it ran once: do not run it again. If it returns `approval_required`, `approval_wait_timeout`, or `approval_handed_off`, or your call to it is stopped before it gets the approval, the command did not run; Avibe resumes this session once the request is decided, and after an approval you run the same `run` / `fetch` command once.
 - If a Vault command fails with `avault_authorization_required`, avault needs a one-time macOS Keychain authorization on the Mac running Avibe. Do not retry, and do not run `avault` or `vibe vault key authorize` yourself: ask the user to choose Authorize avault on the Vault page (or to run `vibe vault key authorize` on that Mac), then run the command once after they confirm.
 - When protected `sign` needs approval, Avibe creates a browser signing request and returns immediately. Do not rerun `sign`; when Avibe resumes this session, follow the callback instruction to read the completed request result and continue with the returned signature.
+- For the listed standard-tier BTC Taproot addresses, use `schnorr-secp256k1-bip341-keypath` (BIP86, empty script tree). It requires an avault build supporting that scheme. Older builds fail closed: never retry with raw BIP340, rotate the key, or change the receiving address as a workaround. No Merkle-root/script-tree option is supported.
+- `schnorr-secp256k1-bip340` is raw signing under the internal public key, NOT signing for the listed tweaked Taproot address. `ecdsa-secp256k1-der` produces low-S DER for Bitcoin ECDSA; the caller constructs and validates the transaction sighash and appends any transaction-required sighash byte.
+- Protected Bitcoin transaction signing is not supported yet. BTC addresses remain visible to identify existing funds; do not recommend deposits expecting this workflow to spend them. Never disguise a Bitcoin sighash as an agent operation or downgrade a protected key.
+- Protected signing needs `--signing-context-json` with a supported verifiable context. An `avault-agent-operation` preimage must begin with `avault-agent-operation:v1` followed by a real LF newline and nonempty operation text; its digest is SHA256 of those UTF-8 bytes. JSON encodes that newline as `\n`, not `\\n`. This domain is for agent operations only, not transaction authorization. A legacy unbound request must be recreated after both producer and sandbox are upgraded.
 
 Common commands:
 
@@ -70,8 +74,11 @@ Request approval before a protected `run` with an existing static secret:
 
 For protected `fetch`, run `vibe vault fetch`; it creates the correct fetch approval request when needed.
 
-Sign a 32-byte digest with a keypair secret. Standard keys may return the signature directly; protected keys create a browser approval request:
+Sign a 32-byte digest with a standard keypair secret. Protected keys additionally require a verifiable signing context and browser approval:
 `vibe vault sign WALLET_KEY --digest 0000000000000000000000000000000000000000000000000000000000000001 --scheme ecdsa-secp256k1-recoverable --command "sign deployment transaction"`
+
+Standard-tier BIP86 Taproot scheme example (replace the example digest with the independently verified BIP341 transaction sighash):
+`vibe vault sign BTC_KEY --digest 0000000000000000000000000000000000000000000000000000000000000001 --scheme schnorr-secp256k1-bip341-keypath --command "sign verified Bitcoin key-path spend"`
 
 Ask the user to delete a Vault secret. Every agent-initiated delete needs one-click user approval, including standard, protected, static, and keypair secrets:
 `vibe vault remove OLD_TOKEN --reason "Rotated credential"`
