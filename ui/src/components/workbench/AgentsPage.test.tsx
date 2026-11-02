@@ -288,6 +288,38 @@ describe('AgentsPage contextual selection', () => {
     expect(within(row('codex')).queryByText('settings.models.gateway.agentIssues.modelMissing')).toBeNull();
   });
 
+  // A Bot is not an Agent row, but its next turn fails just the same: its card says so.
+  it('marks a Bot whose Agent the gateway reports without a model', async () => {
+    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([
+      {
+        backend: 'vibey', cli_present: false, mode: 'hub', menu_kind: 'fixed',
+        named_agents: [
+          { name: 'cso', effective_model_id: null, supply_status: null },
+          { name: 'vibey', effective_model_id: 'gpt-6', supply_status: 'ok' },
+        ],
+      },
+    ] as AgentSupply[]);
+    const cso: Bot = { handle: 'cso', display_name: 'Security lead', avatar: null, role: 'audits', agent_name: 'cso', session_id: 'ses_cso', position: 1, builtin: false };
+    const api = makeApi(vi.fn().mockResolvedValue(listResult([
+      { ...brief('vibey', 'Default Agent'), backend: 'vibey' },
+      { ...brief('cso', 'audits'), backend: 'vibey', bot: { handle: 'cso', display_name: 'Security lead', builtin: false } },
+    ])));
+    renderPage(api, {
+      bots: {
+        enabled: true, bots: [cso], loaded: true, listed: true, mainBot: null, statusBySession: {},
+        botForSession: () => undefined, botForAgent: (name) => (name === 'cso' ? cso : undefined), botForHandle: () => cso,
+        displayName: (bot) => bot.display_name, afterWrite: vi.fn(), moveBot: vi.fn(), openProfile: vi.fn(),
+        profileRequest: null, closeProfile: vi.fn(),
+      },
+    });
+    const card = (name: string) => screen.getAllByText(name).find((node) => node.closest('button') && !node.closest('aside'))!.closest('button')!;
+
+    await waitFor(() => expect(
+      within(card('Security lead')).getByText('settings.models.gateway.agentIssues.modelMissing'),
+    ).toBeTruthy());
+    expect(within(card('vibey')).queryByText('settings.models.gateway.agentIssues.modelMissing')).toBeNull();
+  });
+
   it('lists, selects and edits a Vibey Agent without a native import option or CLI detail', async () => {
     const agent = { ...brief('local-helper', 'before'), backend: 'vibey' };
     const changed = { ...agent, description: 'updated in place' };

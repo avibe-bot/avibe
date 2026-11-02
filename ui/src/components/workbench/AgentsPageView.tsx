@@ -146,9 +146,10 @@ export const AgentsPageView: React.FC<AgentsPageViewProps> = ({
         actions={
           <>
             {canEdit && (
-              <Button type="button" variant="outline" size="xs" className="max-sm:hidden" onClick={onGlobalPrompts}>
+              // On a phone it keeps its place as an icon: it is the only way to the global prompts.
+              <Button type="button" variant="outline" size="xs" onClick={onGlobalPrompts} aria-label={t('globalPrompts.button')}>
                 <FileText className="size-3.5" />
-                {t('globalPrompts.button')}
+                <span className="max-sm:hidden">{t('globalPrompts.button')}</span>
               </Button>
             )}
             <Button type="button" variant="outline" size="xs" onClick={onRefresh}>
@@ -192,6 +193,7 @@ export const AgentsPageView: React.FC<AgentsPageViewProps> = ({
             {showBots && (
               <BotsSection
                 bots={bots ?? []}
+                withoutModel={withoutModel}
                 selectedName={selectedName}
                 onSelect={onSelect}
                 onAdd={canEdit ? onAddBot : undefined}
@@ -275,11 +277,14 @@ function SectionHeading({ title, count, actions }: { title: string; count: numbe
 /** The main Bot first, then the user's Bots in their strip order, then Add. */
 function BotsSection({
   bots,
+  withoutModel,
   selectedName,
   onSelect,
   onAdd,
 }: {
   bots: Bot[];
+  /** Agents the gateway cannot run for want of a model: a Bot whose Agent is one says so. */
+  withoutModel: ReadonlySet<string>;
   selectedName: string | null;
   onSelect: (agentName: string) => void;
   /** Absent without the right to add one. */
@@ -291,7 +296,13 @@ function BotsSection({
       <SectionHeading title={t('bots.sectionLabel')} count={bots.length} />
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
         {bots.map((bot) => (
-          <BotCard key={bot.handle} bot={bot} selected={selectedName === bot.agent_name} onSelect={() => onSelect(bot.agent_name)} />
+          <BotCard
+            key={bot.handle}
+            bot={bot}
+            modelMissing={withoutModel.has(bot.agent_name)}
+            selected={selectedName === bot.agent_name}
+            onSelect={() => onSelect(bot.agent_name)}
+          />
         ))}
         {onAdd && (
           <button
@@ -318,7 +329,18 @@ const rowClass = (selected: boolean) =>
       : 'border-border bg-surface hover:border-border-strong hover:bg-surface-2',
   );
 
-function BotCard({ bot, selected, onSelect }: { bot: Bot; selected: boolean; onSelect: () => void }) {
+function BotCard({
+  bot,
+  modelMissing,
+  selected,
+  onSelect,
+}: {
+  bot: Bot;
+  /** Its next turn fails: the gateway has no model selected for its Agent. */
+  modelMissing: boolean;
+  selected: boolean;
+  onSelect: () => void;
+}) {
   const { t } = useTranslation();
   const name = botDisplayName(bot, t('bots.mainDefaultName'));
   const role = botRole(bot, t('bots.mainRole'));
@@ -336,6 +358,11 @@ function BotCard({ bot, selected, onSelect }: { bot: Bot; selected: boolean; onS
         </span>
         {role && <span className="truncate text-xs text-muted">{role}</span>}
       </span>
+      {modelMissing && (
+        <Badge variant="warning" className="shrink-0">
+          {t('settings.models.gateway.agentIssues.modelMissing')}
+        </Badge>
+      )}
     </button>
   );
 }
