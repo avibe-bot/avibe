@@ -17,6 +17,7 @@ import { useInstanceAuthorization } from '../../context/InstanceAuthorizationCon
 import { useBots } from '../../context/BotsContext';
 import { conversationDetails, isBotSessionId, isSelectableAgent, liveBotAgentNames, type BotAvatar as BotAvatarSpec } from '../../lib/bots';
 import { BotAvatar } from '../ui/bot-avatar';
+import { BotConversationTitle } from './bots/BotSwitch';
 import { useRegisterComposerTarget, type ComposerInsertTarget } from '../../context/ComposerBridgeContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
 import type { SessionActivityItemKind, SessionActivityState, SessionRuntimeState, VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
@@ -3900,10 +3901,10 @@ interface ChatHeaderBarProps {
 export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, showPageMode, showPageBusy, onToggleShowPage, onPrepareShowPageLaunch, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnlyReason, writable = readOnlyReason === null, showPageAccess = null, canOpenShowPage = true, canManageShowPage = true, canManageInstance = false, canPinToDock = false, sessionActions, titleFieldRef }) => {
   const { t } = useTranslation();
   // A Bot's conversation (docs/plans/bots.md D5) shows the Bot — avatar and display
-  // name — in place of the editable title, with its profile and "Hide details" in
-  // the ⋯ menu. Its id says it is a Bot's before the Bot list answers; until then
-  // the title stays static.
-  const { botForSession, displayName: botDisplayName, openProfile: openBotProfile, setHideDetails } = useBots();
+  // name, on a phone also the switch to the other Bots (BotConversationTitle) — in
+  // place of the editable title, with its profile and "Hide details" in the ⋯ menu.
+  // Its id says it is a Bot's before the Bot list answers; until then the title stays static.
+  const { botForSession, openProfile: openBotProfile, setHideDetails } = useBots();
   const { showToast } = useToast();
   const conversationBot = botForSession(session.id);
   const botConversation = isBotSessionId(session.id);
@@ -3975,10 +3976,7 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
           <ArrowLeft className="size-3.5" />
         </Button>
         {conversationBot ? (
-          <div className="flex min-w-0 items-center gap-2">
-            <BotAvatar avatar={conversationBot.avatar} name={botDisplayName(conversationBot)} size={26} />
-            <span className="min-w-0 truncate text-[16px] font-bold text-foreground">{botDisplayName(conversationBot)}</span>
-          </div>
+          <BotConversationTitle bot={conversationBot} />
         ) : (
           <TitleField
             key={session.id}

@@ -4,19 +4,21 @@
 // No time limit; a long transcript scrolls; a take cut off keeps what was heard.
 // After sending the user stays put (the toast's 查看 opens the conversation), and the
 // message is marked as voice. One frame per state, in press order, then the outcomes.
+import type { ReactNode } from 'react';
+
+import { ProjectsPage } from '@/components/workbench/ProjectsPage';
+
 import { frames } from '../../frame';
-import { BotConversationHeader } from '../../kit/BotConversationHeader';
+import { BotCenterTabBar, type CenterPhase } from '../../kit/BotCenterTabBar';
 import { VoiceHoldOverlay, VoiceMarkLayer, VoiceToast } from '../../kit/MainBotVoice';
-import { WorkbenchTabBar, WorkbenchTabPage } from '../../kit/WorkbenchTab';
 import { botConversationApi } from '../../shell/fixtures';
 import { PhoneConversation, PhoneScreen } from '../../shell/PhoneScreen';
 import { afterVoiceTranscript, agentsApi, mainRunningFixtures, spoken, team, teamFixtures } from '../../shell/teamFixtures';
-import type { CenterPhase } from '../../kit/BotCenterTabBar';
-import type { ReactNode } from 'react';
 
+// The Workbench tab and the conversation are shipped; the press, the overlay, and the mark are kit.
 const screen = (phase: CenterPhase, overlay?: ReactNode, inboxBadge = 6) => (
-  <PhoneScreen tabBar={<WorkbenchTabBar inboxBadge={inboxBadge} phase={phase} />} overlay={overlay}>
-    <WorkbenchTabPage />
+  <PhoneScreen tabBar={<BotCenterTabBar inboxBadge={inboxBadge} phase={phase} />} overlay={overlay}>
+    <ProjectsPage />
   </PhoneScreen>
 );
 
@@ -51,7 +53,7 @@ const designFrames = frames([
   frame('f-long', '5b · 说得很长：不限时长，转写在卡片里滚动，停在最新一行', () => screen('recording', <VoiceHoldOverlay phase="recording" long text={spoken.long} stash="顺便提醒产品经理更新一下对外的发布说明" seconds={95} />)),
   frame('g-settling', '6 · 松开：最终文字整理中（最长 20 秒）', () => screen('settling', <VoiceHoldOverlay phase="settling" text={spoken.final} seconds={8} />)),
   frame('h-sent', '7 · 已发给歪比：留在原页面，歪比开始工作', () => screen('idle', <VoiceToast outcome="sent" text={spoken.final} />, 5), sentFixtures),
-  frame('i-conversation', '8 · 点「查看」或点歪比：消息在对话里，标着「语音」，歪比在回', () => <PhoneConversation overlay={<><BotConversationHeader current="main" /><VoiceMarkLayer className="right-5 top-124" /></>} />, conversationFixtures, [390, 844], '/chat/ses_main'),
+  frame('i-conversation', '8 · 点「查看」或点歪比：消息在对话里，标着「语音」，歪比在回', () => <PhoneConversation overlay={<VoiceMarkLayer className="right-5 top-124" />} />, conversationFixtures, [390, 844], '/chat/ses_main'),
   frame('j-cancelled', '× · 在取消区松开：没有发送', () => screen('idle', <VoiceToast outcome="cancelled" />)),
   frame('k-too-short', '× · 太短或没听到说话', () => screen('idle', <VoiceToast outcome="too-short" />)),
   frame('l-denied', '× · 没有麦克风权限', () => screen('idle', <VoiceToast outcome="denied" />)),

@@ -5,6 +5,8 @@ import clsx from 'clsx';
 
 import { Button } from './ui/button';
 import { InstallHint } from './InstallHint';
+import { BotFace } from './workbench/bots/BotFace';
+import type { BotAvatar as BotAvatarSpec } from '../lib/bots';
 import logoImg from '../assets/logo.png';
 
 // The mobile shell's chrome as views (props only), so AppShell keeps the data and
@@ -55,10 +57,38 @@ export const MobileNavLink: React.FC<{ item: ShellNavItem }> = ({ item }) => {
 
 export type CenterButton = { label: string; icon: React.ComponentType<{ className?: string }>; to?: string; onClick?: () => void };
 
-// Workbench mobile tabs flank a raised new-session action.
-export const MobileTabBar: React.FC<{ items: ShellNavItem[]; center?: CenterButton }> = ({ items, center }) => {
+/** The main Bot in the middle of the bar (ui/design: mobile/workbench-tab/team): its
+ *  avatar lifted above the bar's edge, its unread count, its running dot, its name. */
+export type BotCenter = {
+  avatar: BotAvatarSpec | null;
+  name: string;
+  /** The accessible name: what a tap does. */
+  label: string;
+  unread: number;
+  running: boolean;
+  onClick: () => void;
+};
+
+export const MobileBotCenter: React.FC<BotCenter> = ({ avatar, name, label, unread, running, onClick }) => (
+  <button
+    type="button"
+    onClick={onClick}
+    aria-label={label}
+    className="flex min-w-0 flex-1 flex-col items-center justify-end gap-1 px-1 pb-2 text-2xs"
+  >
+    {/* Lifted out of the row, so the bar keeps its height and the avatar rises above its edge. */}
+    <span className={clsx('relative -mt-5 rounded-full bg-surface p-0.5 ring-2 transition', running ? 'shadow-glow-lg-mint ring-mint' : 'shadow-glow-md-mint ring-mint/45')}>
+      <BotFace avatar={avatar} name={name} size={50} unread={unread} running={running} />
+    </span>
+    <span className={clsx('max-w-full truncate font-semibold', running ? 'text-mint-ink' : 'text-foreground')}>{name}</span>
+  </button>
+);
+
+// Workbench mobile tabs flank a raised center: the main Bot for the Owner, a
+// new-session action for everyone else.
+export const MobileTabBar: React.FC<{ items: ShellNavItem[]; center?: CenterButton; bot?: BotCenter }> = ({ items, center, bot }) => {
   // No center action means a plain even row of tabs.
-  if (!center) {
+  if (!center && !bot) {
     return (
       <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-surface/96 px-2 pt-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))] backdrop-blur md:hidden">
         <div className="flex items-end justify-between gap-1">
@@ -70,37 +100,43 @@ export const MobileTabBar: React.FC<{ items: ShellNavItem[]; center?: CenterButt
   const half = Math.ceil(items.length / 2);
   const left = items.slice(0, half);
   const right = items.slice(half);
-  const CenterIcon = center.icon;
   return (
     <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-surface/96 px-2 pt-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))] backdrop-blur md:hidden">
       <div className="flex items-end justify-between gap-1">
         {left.map((item) => <MobileNavLink key={item.to ?? item.label} item={item} />)}
-        <div className="flex flex-1 justify-center">
-          {center.onClick ? (
-            <Button
-              type="button"
-              variant="brand"
-              onClick={center.onClick}
-              aria-label={center.label}
-              className="size-12 -translate-y-1 rounded-full p-0 shadow-[0_8px_20px_-4px_rgba(91,255,160,0.6)]"
-            >
-              <CenterIcon className="size-6" />
-            </Button>
-          ) : (
-            <Button
-              asChild
-              variant="brand"
-              className="size-12 -translate-y-1 rounded-full p-0 shadow-[0_8px_20px_-4px_rgba(91,255,160,0.6)]"
-            >
-              <Link to={center.to ?? '/'} aria-label={center.label}>
-                <CenterIcon className="size-6" />
-              </Link>
-            </Button>
-          )}
-        </div>
+        {bot ? <MobileBotCenter {...bot} /> : center && <NewSessionCenter center={center} />}
         {right.map((item) => <MobileNavLink key={item.to ?? item.label} item={item} />)}
       </div>
     </nav>
+  );
+};
+
+const NewSessionCenter: React.FC<{ center: CenterButton }> = ({ center }) => {
+  const CenterIcon = center.icon;
+  return (
+    <div className="flex flex-1 justify-center">
+      {center.onClick ? (
+        <Button
+          type="button"
+          variant="brand"
+          onClick={center.onClick}
+          aria-label={center.label}
+          className="size-12 -translate-y-1 rounded-full p-0 shadow-[0_8px_20px_-4px_rgba(91,255,160,0.6)]"
+        >
+          <CenterIcon className="size-6" />
+        </Button>
+      ) : (
+        <Button
+          asChild
+          variant="brand"
+          className="size-12 -translate-y-1 rounded-full p-0 shadow-[0_8px_20px_-4px_rgba(91,255,160,0.6)]"
+        >
+          <Link to={center.to ?? '/'} aria-label={center.label}>
+            <CenterIcon className="size-6" />
+          </Link>
+        </Button>
+      )}
+    </div>
   );
 };
 

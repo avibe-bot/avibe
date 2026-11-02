@@ -45,6 +45,7 @@ import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
+import { BotStrip } from './bots/BotStrip';
 import { NewProjectDialog } from './NewProjectDialog';
 import { ProjectAgentsMdDialog } from './ProjectAgentsMdDialog';
 import { ProjectSettingsDialog } from './ProjectSettingsDialog';
@@ -119,6 +120,20 @@ const MobileProjectRow: React.FC<{
   // Escape cancels and must not let that trailing blur commit the stale draft.
   const handledRef = useRef(false);
   const canChat = capabilities.can_chat && project.capabilities.can_chat;
+  // The row's ＋ and the ⋯ menu's New session both start one here.
+  const startSession = async () => {
+    if (creatingSessionRef.current) return;
+    creatingSessionRef.current = true;
+    try {
+      const session = await createSessionForProject(project.id);
+      if (session) {
+        onLeaveToChat();
+        navigate(`/chat/${encodeURIComponent(session.id)}`);
+      }
+    } finally {
+      creatingSessionRef.current = false;
+    }
+  };
 
   useEffect(() => {
     if (renaming) inputRef.current?.focus();
@@ -197,24 +212,14 @@ const MobileProjectRow: React.FC<{
             </Button>
           </PopoverTrigger>
           <PopoverContent align="end" className="w-[200px] p-1">
-            {/* New session — first item, mobile only. Desktop surfaces this as
-                the per-project "+" button in the sidebar, so it stays out of the
-                desktop project menu; here the "+" doesn't fit, so it lives here. */}
+            {/* New session — first item, as well as the row's ＋ beside this
+                menu (ui/design: mobile/workbench-tab/team). Desktop surfaces it as
+                the sidebar row's "+", so it stays out of the desktop project menu. */}
             {canChat && <MenuItem
               icon={Plus}
-              onClick={async () => {
+              onClick={() => {
                 setMenuOpen(false);
-                if (creatingSessionRef.current) return;
-                creatingSessionRef.current = true;
-                try {
-                  const session = await createSessionForProject(project.id);
-                  if (session) {
-                    onLeaveToChat();
-                    navigate(`/chat/${encodeURIComponent(session.id)}`);
-                  }
-                } finally {
-                  creatingSessionRef.current = false;
-                }
+                void startSession();
               }}
             >
               {t('newSession.title')}
@@ -266,6 +271,18 @@ const MobileProjectRow: React.FC<{
             </>}
           </PopoverContent>
         </Popover>}
+        {canChat && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            onClick={() => void startSession()}
+            aria-label={t('projects.newSessionIn', { name: project.display_name })}
+            className="size-8 shrink-0 text-mint-ink"
+          >
+            <Plus className="size-4" />
+          </Button>
+        )}
       </div>
       {canManageProjects && (
         <>
@@ -399,9 +416,10 @@ const MobileSessionRow: React.FC<{
   );
 };
 
-// Mobile-only "Projects" tab (workbench): the desktop projects tree
-// (WorkbenchSidebar) flattened into a full-page accordion — tap a project to
-// expand its sessions, tap a session to open the chat, ⋯ for the rename/archive/
+// Mobile-only Workbench tab: the desktop sidebar on a page — the Owner's Bots strip
+// first, then the projects tree flattened into a full-page accordion (ui/design:
+// mobile/workbench-tab/team). Tap a project to expand its sessions, tap a session
+// to open the chat, ＋ to start a Session there, ⋯ for the rename/archive/
 // edit-AGENTS.md actions the desktop exposes via right-click + hover. Shares the
 // same data provider (useWorkbenchProjectsTree) as the sidebar (ui/design: mobile/projects/expanded).
 export const ProjectsPage: React.FC = () => {
@@ -485,7 +503,10 @@ export const ProjectsPage: React.FC = () => {
   const list = projects ?? [];
 
   return (
-    <div className="mx-auto flex max-w-xl flex-col gap-3">
+    <div className="mx-auto flex max-w-xl flex-col gap-5">
+    {/* The strip draws nothing for a reader without Bots. */}
+    <BotStrip unreadBySession={unreadBySession} />
+    <div className="flex flex-col gap-3">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold">{t('projects.title')}</h1>
         {canCreateProject && <Button
@@ -604,6 +625,7 @@ export const ProjectsPage: React.FC = () => {
           onCreated={() => setShowNewProject(false)}
         />
       )}
+    </div>
     </div>
   );
 };
