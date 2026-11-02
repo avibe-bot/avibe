@@ -42,7 +42,7 @@ const getDiscordGuildAllowlist = (source: any): string[] => {
   return Array.isArray(allowlist) ? allowlist : [];
 };
 
-// Mirrors design.pen XCWAT (Slack creds wizard step) adapted for Discord.
+// ui/design: settings/platforms/discord-form. The Slack form's layout, adapted for Discord.
 // 920-wide WizardCard, mint eyebrow, accordion rows with mint-bordered active row.
 export const DiscordConfig: React.FC<DiscordConfigProps> = ({ data, onNext, onBack, embedded = false, onApply, onCancel }) => {
   const { capabilities } = useInstanceAuthorization();

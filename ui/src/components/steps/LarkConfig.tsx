@@ -74,7 +74,7 @@ interface LarkConfigProps {
   onCancel?: () => void;
 }
 
-// Mirrors design.pen XCWAT (Slack creds wizard step) adapted for Lark/Feishu.
+// ui/design: settings/platforms/lark-form. The Slack form's layout, adapted for Lark/Feishu.
 // Adds a domain selector ahead of the 5-step accordion. WizardCard 920, mint eyebrow.
 export const LarkConfig: React.FC<LarkConfigProps> = ({ data, onNext, onBack, embedded = false, onApply, onCancel }) => {
   const { t } = useTranslation();

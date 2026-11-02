@@ -36,7 +36,7 @@ interface TelegramConfigProps {
   onCancel?: () => void;
 }
 
-// Mirrors design.pen XCWAT (Slack creds wizard step) adapted for Telegram.
+// ui/design: settings/platforms/telegram-form. The Slack form's layout, adapted for Telegram.
 // 920-wide WizardCard, mint eyebrow, 4-step accordion with mint accent on active row.
 export const TelegramConfig: React.FC<TelegramConfigProps> = ({ data, onNext, onBack, embedded = false, onApply, onCancel }) => {
   const { t } = useTranslation();
