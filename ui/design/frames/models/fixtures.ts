@@ -163,6 +163,13 @@ export type AgentSpec = {
 
 const runnable = (health: ChainHealth) => health === 'healthy';
 
+/** Which Sources may serve a backend, as the server decides (`ModelHubConfig.source_eligible_for_backend`):
+ *  never a search service; any gateway-held Source; a native login only for its own CLI. */
+const NATIVE_CLIENT: Record<string, AgentBackend> = { anthropic: 'claude', openai: 'codex' };
+export const eligible = (src: Source, backend: AgentBackend): boolean =>
+  src.protocol !== 'search'
+  && (src.supply_channel === 'hub' || (src.kind === 'subscription' && NATIVE_CLIENT[src.vendor] === backend));
+
 const modelSupply = (modelId: string, route: RouteSpec | undefined): ModelSupply => ({
   model_id: modelId,
   route_origin: route?.origin ?? (route ? 'automatic' : null),
@@ -178,7 +185,12 @@ export const agent = ({ backend, mode = 'hub', cliPresent = true, menuKind, orde
     mode,
     menu_kind: menuKind ?? (backend === 'opencode' ? 'open' : 'fixed'),
     sources: mode === 'hub'
-      ? { order: order.map((s) => s.id), eligibility: demoSources.map((s) => ({ source_id: s.id, eligible: true })) }
+      ? {
+          order: order.map((s) => s.id),
+          eligibility: demoSources.map((s) => eligible(s, backend)
+            ? { source_id: s.id, eligible: true, reason_key: null }
+            : { source_id: s.id, eligible: false, reason_key: 'models.eligibility.subscription_wrong_client' }),
+        }
       : null,
     model_supply: mode === 'hub' ? catalogModels.filter((m) => m.routeable).map((m) => modelSupply(m.id, routes[m.id])) : null,
     named_agents: namedAgents,
