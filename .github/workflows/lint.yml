@@ -236,6 +236,8 @@ jobs:
               npm run test:voice-shortcut
               npm run test:chat-selection
               npm run test:badge-triggers
+              # Against the built app: StrictMode's dev double-mount drops the picker's first open.
+              npm run test:workbench-general-build -- composer-mention-picker.spec.ts
           - lane: 2
             suites: |
               npm run test:project-order

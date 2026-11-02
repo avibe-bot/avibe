@@ -19,13 +19,19 @@ import { defineConfig, devices } from '@playwright/test';
  * so the spec runs against the bundle users actually get rather than working
  * around it here or changing that component.
  *
+ * `composer-mention-picker.spec.ts` is here for the same StrictMode reason: on the
+ * dev server the `#`/`@` typeahead's first open in a freshly mounted editor
+ * often never renders its list, so a spec about where that list lands would
+ * grade the development double-mount rather than the picker. The built app
+ * opens it every time.
+ *
  * The build runs as part of the server command so the spec can never grade a
  * stale `dist/`. Port and origin match the dev config because the spec's request
  * guard is written against that one origin.
  */
 export default defineConfig({
   testDir: './e2e/workbench-general',
-  testMatch: ['**/mobile-continuation.spec.ts', '**/setup-handoff.spec.ts'],
+  testMatch: ['**/mobile-continuation.spec.ts', '**/setup-handoff.spec.ts', '**/composer-mention-picker.spec.ts'],
   outputDir: './e2e/.artifacts/workbench-general/run',
   workers: 1,
   retries: 0,
