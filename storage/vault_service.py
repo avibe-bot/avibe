@@ -4704,11 +4704,10 @@ def complete_sign_request(
     if scheme == vault_bitcoin.BITCOIN_SCHEME:
         signing_context = delivery_payload.get("signing_context")
         secret_row = _require_row(conn, name)
-        if signing_context is None and secret_row.get("protection") != "protected":
-            signing_context = None
-        elif not isinstance(signing_context, dict):
-            raise InvalidSigningContextError("Bitcoin signing request is missing a persisted signing_context")
-        if isinstance(signing_context, dict):
+        if not isinstance(signing_context, dict):
+            if secret_row.get("protection") == "protected":
+                raise InvalidSigningContextError("Bitcoin signing request is missing a persisted signing_context")
+        elif signing_context.get("kind") == vault_bitcoin.BITCOIN_CONTEXT_KIND:
             signing_public_key = require_compressed_signing_public_key(
                 _public_meta(secret_row.get("public_meta")).get("signing_public_key")
             )

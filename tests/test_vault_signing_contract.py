@@ -124,6 +124,29 @@ def test_old_avault_failure_never_falls_back_to_raw_signing(monkeypatch):
     assert sign.call_args.args[2] == KEYPATH
 
 
+def test_standard_keypath_agent_context_still_settles_after_bitcoin_revalidation(monkeypatch):
+    create_key()
+    context = copy.deepcopy(SANDBOX["signedContext"]["release"]["signingContext"])
+    context["digest"] = DIGEST
+    with api._vault_engine().begin() as conn:
+        request = vault_service.create_sign_request(
+            conn,
+            "KEY",
+            digest=DIGEST,
+            scheme=KEYPATH,
+            signing_context=context,
+        )
+    monkeypatch.setattr(api, "avault_sign", Mock(return_value=SIGNATURE))
+    result = api.vault_sign({
+        "name": "KEY",
+        "digest": DIGEST,
+        "scheme": KEYPATH,
+        "request_id": request["id"],
+    })
+    assert result["signature"] == SIGNATURE
+    assert result["request"]["status"] == "approved"
+
+
 def _bip340_vectors():
     with (FIXTURES / "bip340.csv").open() as stream:
         # The public API signs only 32-byte digests, not arbitrary-length messages.
