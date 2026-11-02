@@ -222,6 +222,10 @@ class InvalidRequestError(VaultServiceError):
     pass
 
 
+class InvalidSigningKeyError(InvalidRequestError):
+    pass
+
+
 class UnsupportedProtectionError(VaultServiceError):
     """A caller attempted the wrong delivery path for a protection tier."""
 
@@ -2308,6 +2312,24 @@ def sign_headless_allowed(row: dict[str, Any]) -> bool:
 def sign_needs_approval(conn: Connection, name: str, *, user_context: Any = None) -> bool:
     """True when `vibe vault sign` must create a pending approval request for `name`."""
     return not sign_headless_allowed(require_secret_access(conn, name, user_context=user_context))
+
+
+def require_compressed_signing_public_key(signing_key: Any) -> str:
+    """Check the pinned public point before an approval is persisted or a key is used."""
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    message = "signing requires a pinned compressed secp256k1 public key"
+    public_key = signing_key.get("public_key") if isinstance(signing_key, dict) else None
+    if not isinstance(public_key, str) or signing_key.get("curve") != "secp256k1":
+        raise InvalidSigningKeyError(message)
+    try:
+        encoded = bytes.fromhex(public_key)
+        if len(public_key) != 66 or len(encoded) != 33 or encoded[0] not in {2, 3}:
+            raise ValueError("not a compressed public key")
+        ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256K1(), encoded)
+    except ValueError as exc:
+        raise InvalidSigningKeyError(message) from exc
+    return public_key.lower()
 
 
 def _reject_unsignable_keypair(row: dict[str, Any], name: str) -> None:
@@ -4410,6 +4432,15 @@ def create_sign_request(
         raise InvalidRequestError(
             "protected Bitcoin Taproot key-path signing is not supported yet; wait for a supported Bitcoin approval workflow without changing the key or its protection"
         )
+    if row.get("protection") == "protected" or scheme == "schnorr-secp256k1-bip341-keypath":
+        require_compressed_signing_public_key(_public_meta(row.get("public_meta")).get("signing_public_key"))
+    if (
+        row.get("protection") == "protected"
+        and isinstance(signing_context, dict)
+        and signing_context.get("kind") != "avault-agent-operation"
+        and scheme not in {"ecdsa-secp256k1-recoverable", "ecdsa-secp256k1-der"}
+    ):
+        raise InvalidRequestError("EVM signing contexts require an ECDSA scheme")
     payload_audience = _request_audience_from_requester(requester)
     request_id = _id("vrq")
     delivery_payload = dict(delivery or {})

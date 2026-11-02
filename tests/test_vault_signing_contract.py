@@ -20,7 +20,7 @@ from cryptography.hazmat.primitives.asymmetric import ed25519, utils
 from sqlalchemy import select
 
 from storage import vault_service
-from storage.models import vault_audit
+from storage.models import vault_audit, vault_requests
 from storage.vault_crypto import Sealed
 from vibe import api
 
@@ -143,17 +143,48 @@ def test_raw_bip340_official_positive_and_negative_vectors(vector):
             api._verify_standard_signature(**kwargs)
 
 
-@pytest.mark.parametrize("public_key", [None, "", "02" + "00" * 32, INTERNAL[2:], "04" + "00" * 64])
-def test_keypath_never_returns_unpinned_or_invalid_key_result(monkeypatch, public_key):
-    create_key(public_key=public_key)
-    monkeypatch.setattr(api, "avault_sign", Mock(return_value=SIGNATURE))
-    with pytest.raises(api.VaultApiError) as exc:
-        api.vault_sign({"name": "KEY", "digest": DIGEST, "scheme": KEYPATH})
-    assert exc.value.code == "invalid_signing_key"
+@pytest.mark.parametrize("public_key", [
+    None, "", "02" + "00" * 32, INTERNAL[2:], "04" + "00" * 64,
+    "04" + G[2:] + "483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8",
+])
+@pytest.mark.parametrize("entrypoint", [api.vault_sign, api.request_vault_sign, "service", "cli"])
+@pytest.mark.parametrize("protection", ["standard", "protected"])
+def test_key_preflight_leaves_no_request_and_never_uses_the_key(monkeypatch, capfd, public_key, entrypoint, protection):
+    """Previously the protected path persisted a stuck request, and keypath signed before refusing."""
+    from vibe import cli
+
+    scheme = RECOVERABLE if protection == "protected" else KEYPATH
+    context = SANDBOX["signedContext"]["release"]["signingContext"]
+    create_key(public_key=public_key, protection=protection)
+    sign, notify = Mock(return_value=SIGNATURE), Mock()
+    monkeypatch.setattr(api, "avault_sign", sign)
+    monkeypatch.setattr(api, "_notify_vault_request_created", notify)
+    monkeypatch.setattr(cli, "_publish_cli_vaults_updated", notify)
+    payload = {"name": "KEY", "digest": context["digest"], "scheme": scheme, "signing_context": context}
+    if entrypoint == "service":
+        # Catch inside the transaction: rollback must not conceal an inserted request.
+        with api._vault_engine().begin() as conn:
+            with pytest.raises(vault_service.InvalidRequestError):
+                vault_service.create_sign_request(conn, "KEY", digest=context["digest"], scheme=scheme, signing_context=context)
+    elif entrypoint == "cli":
+        args = cli.build_parser().parse_args([
+            "vault", "sign", "KEY", "--digest", context["digest"], "--scheme", scheme,
+            "--signing-context-json", json.dumps(context),
+        ])
+        assert cli.cmd_vault_sign(args) == 1
+        assert json.loads(capfd.readouterr().err)["code"] in {"invalid_signing_key", "invalid_request"}
+    else:
+        with pytest.raises(api.VaultApiError) as exc:
+            entrypoint(payload)
+        assert exc.value.code in {"invalid_signing_key", "invalid_request"}
+    with api._vault_engine().connect() as conn:
+        assert conn.execute(select(vault_requests.c.id)).all() == []
+    sign.assert_not_called()
+    notify.assert_not_called()
 
 
 @pytest.mark.parametrize("entrypoint", [api.request_vault_sign, api.vault_sign])
-@pytest.mark.parametrize("parameter", ["merkle_root", "merkleRoot", "script_tree", "scriptTree"])
+@pytest.mark.parametrize("parameter", ["merkle_root", "merkleRoot", "script_tree", "scriptTree", "taproot_tree", "tapscript_root"])
 @pytest.mark.parametrize("location", ["payload", "delivery", "context"])
 def test_tree_parameters_are_rejected_before_request_or_sign(monkeypatch, entrypoint, parameter, location):
     create_key()
@@ -190,6 +221,50 @@ def test_protected_keypath_is_rejected_before_request_or_notification(monkeypatc
     notify.assert_not_called()
 
 
+@pytest.mark.parametrize("entrypoint", [api.request_vault_sign, api.vault_sign, "service", "cli"])
+@pytest.mark.parametrize("kind", ["evm-transaction", "eip-712-typed-data", "avault-agent-operation"])
+def test_protected_context_scheme_pair_is_checked_before_approval(monkeypatch, capfd, entrypoint, kind):
+    """The consumer only accepts ECDSA for EVM; raw Schnorr remains valid for agent operations."""
+    from vibe import cli
+
+    create_key(protection="protected")
+    context = {
+        "evm-transaction": {"kind": kind, "digestAlgorithm": "keccak256", "chainId": "1", "unsignedTransaction": "0x01", "digest": DIGEST},
+        "eip-712-typed-data": {"kind": kind, "digestAlgorithm": "eip712", "typedData": {}, "digest": DIGEST},
+        "avault-agent-operation": SANDBOX["signedContext"]["release"]["signingContext"],
+    }[kind]
+    sign, notify = Mock(), Mock()
+    monkeypatch.setattr(api, "avault_sign", sign)
+    monkeypatch.setattr(api, "_notify_vault_request_created", notify)
+    monkeypatch.setattr(cli, "_publish_cli_vaults_updated", notify)
+    valid = kind == "avault-agent-operation"
+    if entrypoint == "service":
+        with api._vault_engine().begin() as conn:
+            if valid:
+                vault_service.create_sign_request(conn, "KEY", digest=context["digest"], scheme=RAW, signing_context=context)
+            else:
+                with pytest.raises(vault_service.InvalidRequestError, match="ECDSA"):
+                    vault_service.create_sign_request(conn, "KEY", digest=context["digest"], scheme=RAW, signing_context=context)
+    elif entrypoint == "cli":
+        args = cli.build_parser().parse_args([
+            "vault", "sign", "KEY", "--digest", context["digest"], "--scheme", RAW,
+            "--signing-context-json", json.dumps(context),
+        ])
+        assert cli.cmd_vault_sign(args) == (0 if valid else 1)
+        if not valid:
+            assert json.loads(capfd.readouterr().err)["code"] == "invalid_request"
+    elif valid:
+        entrypoint({"name": "KEY", "digest": context["digest"], "scheme": RAW, "signing_context": context})
+    else:
+        with pytest.raises(api.VaultApiError, match="ECDSA"):
+            entrypoint({"name": "KEY", "digest": context["digest"], "scheme": RAW, "signing_context": context})
+    with api._vault_engine().connect() as conn:
+        assert len(conn.execute(select(vault_requests.c.id)).all()) == int(valid)
+    sign.assert_not_called()
+    if not valid:
+        notify.assert_not_called()
+
+
 def test_real_sandbox_fixture_traverses_input_validator_persistence_and_signed_release(monkeypatch):
     """A helper-only fixture previously hid a literal-backslash-n input validator bug."""
     release = SANDBOX["signedContext"]["release"]
@@ -198,8 +273,12 @@ def test_real_sandbox_fixture_traverses_input_validator_persistence_and_signed_r
     context = copy.deepcopy(release["signingContext"])
     result = api.request_vault_sign({
         "name": "KEY", "digest": release["digest"], "scheme": release["scheme"],
-        "signing_context": context, "delivery": {"publicKey": G, "name": "untrusted"},
+        "signing_context": context, "delivery": {"command": "untrusted display", "egress": "signature"},
     })
+    assert result["request"]["card"]["secret_unlock_material"] == {
+        "name": "KEY", "kind": "keypair",
+        "envelope": {"ciphertext": "test-envelope", "nonce": "test-nonce", "wrap_meta": "test-meta"},
+    }
     signed = result["request"]["delivery"]["operation_context"]
     assert signed["release"] == {**release, "name": "KEY"}
     assert hashlib.sha256(context["canonicalPreimage"].encode()).hexdigest() == release["digest"]
@@ -221,6 +300,42 @@ def test_real_sandbox_fixture_traverses_input_validator_persistence_and_signed_r
     canonical_fixture = copy.deepcopy(SANDBOX["signedContext"])
     canonical_fixture.pop("signature")
     assert api._vault_sandbox_canonical_json(canonical_fixture) == SANDBOX["canonicalUnsignedContext"]
+
+
+@pytest.mark.parametrize("language", ["en", "zh"])
+@pytest.mark.parametrize("case, english, chinese", [
+    ("key", "Signing requires", "签名需要"),
+    ("protected", "Protected Bitcoin", "暂不支持保护档"),
+    ("parameters", "The signing request contains", "签名请求包含"),
+    ("context", "The signing context is invalid", "签名上下文无效"),
+    ("signature", "The returned signature", "返回的签名"),
+])
+def test_web_signing_errors_are_localized_but_cli_stays_english(monkeypatch, capfd, language, case, english, chinese):
+    from core.services import settings as settings_service
+    from tests.ui_server_test_helpers import csrf_headers
+    from vibe import cli, ui_server
+
+    config = settings_service.load_config_or_default()
+    config.language = language
+    monkeypatch.setattr(settings_service, "load_config_or_default", lambda: config)
+    create_key(public_key=None if case == "key" else INTERNAL, protection="protected" if case == "protected" else "standard")
+    payload = {"name": "KEY", "digest": DIGEST, "scheme": KEYPATH}
+    if case == "parameters":
+        payload["delivery"] = {"taproot_tree": []}
+    if case == "context":
+        payload["signing_context"] = {"kind": []}
+    monkeypatch.setattr(api, "avault_sign", Mock(return_value={"signature": "01" * 64}))
+    client = ui_server.app.test_client()
+    response = client.post("/api/vault/sign", json=payload, headers=csrf_headers(client))
+    assert response.status_code == 409
+    body = response.get_json()
+    assert body["message"].startswith(english if language == "en" else chinese)
+    if case == "key":
+        args = cli.build_parser().parse_args(["vault", "sign", "KEY", "--digest", DIGEST, "--scheme", KEYPATH])
+        assert cli.cmd_vault_sign(args) == 1
+        error = json.loads(capfd.readouterr().err)
+        assert error["code"] == "invalid_signing_key"
+        assert "pinned compressed secp256k1 public key" in error["error"]
 
 
 @pytest.mark.parametrize("kind", [None, [], {}, 1, True, "bitcoin-transaction"])

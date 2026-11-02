@@ -5968,7 +5968,6 @@
       "signingAddressesLoading": "Generating addresses…",
       "signingAddressesUnavailable": "Couldn't derive addresses for this key.",
       "signingAddressesHint": "Derived from the key. Standard Bitcoin Taproot key-path signing uses schnorr-secp256k1-bip341-keypath and requires a separately installed supporting avault build; older avault builds fail closed and never fall back to raw BIP340. Protected Bitcoin transaction signing is not supported yet. Keep addresses for identification and recovery, not as a promise that every tier can spend them.",
-      "protectedBitcoinWarning": "Protected Bitcoin transaction signing is not supported yet. Keep these addresses for identifying existing funds, but do not deposit funds expecting this workflow to spend them.",
       "signingNeedsAvault": "Signing keys need avault {{version}} or newer installed.",
       "checkingAvault": "Checking avault…",
       "p2Unavailable": "Browser-side vault create requires avault {{version}} or newer. Installed: {{installed}}. Install a compatible avault release before saving standard secrets.",
@@ -6076,7 +6075,7 @@
       "ttlHours": "{{count}} h",
       "accessNote": "Unlocked in your browser — the secret's value is never shown to the AI or the chat.",
       "signNote": "The private key never leaves your browser — only the signature is returned.",
-      "protectedBitcoinWarning": "Protected Bitcoin transaction signing is not supported yet. Keep displayed BTC addresses for identifying existing funds, but do not deposit funds expecting this approval flow to spend them.",
+      "protectedBitcoinWarning": "Protected Bitcoin transaction signing is not supported yet. Do not deposit BTC expecting this approval flow to spend it. Keep any existing key and its protection unchanged.",
       "browserNote": "This needs your passkey, which the desktop app can't use. Review and approve it in your browser.",
       "continueInBrowser": "Continue in browser",
       "errors": {

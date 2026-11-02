@@ -10645,6 +10645,9 @@ def cmd_vault_sign(args):
     except api.VaultApiError as exc:
         _print_task_error(TaskCliError(str(exc), code=exc.code, help_command=help_command))
         return 1
+    except vault_service.InvalidSigningKeyError as exc:
+        _print_task_error(TaskCliError(str(exc), code="invalid_signing_key", help_command=help_command))
+        return 1
     except vault_service.InvalidRequestError as exc:
         _print_task_error(TaskCliError(str(exc), code="invalid_request", help_command=help_command))
         return 1

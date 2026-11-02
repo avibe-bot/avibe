@@ -18,16 +18,24 @@ these tests.
 - **Standard signing:** both headless and approved delivery verify the returned
   signature against the persisted public key (Q for key-path, P for raw BIP340).
   A bad result is not delivered or audited as success; claimed requests fail.
-  Key-path signing requires a valid compressed pinned secp256k1 P. Legacy
+  Key-path signing requires a valid compressed pinned secp256k1 P **before**
+  creating an approval or using the key. The same preflight applies to protected
+  signing, so invalid metadata leaves no stuck pending request. Legacy
   unpinned records keep only old schemes, with strict encoding/range/low-S checks.
-  Unsupported signing parameters, including explicit empty/null tree inputs,
-  must not be silently dropped before the Rust RPC.
+  Top-level and delivery parameters use allowlists: unsupported signing options,
+  including explicit empty/null tree inputs, must not be silently dropped before
+  the Rust RPC.
 - **Protected signing:** the actual signer is `vault-sandbox`, not an Avibe UI
   crypto helper. `avibe-bot/vault-sandbox#25` binds the signed `release` to name,
   scheme, digest, compressed publicKey and the complete signingContext, checks
   it before approval and immediately before key use, and retains fresh UV,
   expiry and replay checks. The daemon builds it from persisted request/key
-  metadata, never from a caller-supplied release object.
+  metadata, never from a caller-supplied release object. Approval-card metadata
+  is projected to the exact sandbox sign wire shape (`material: {name, envelope}`)
+  at the shared UI hook; display-only `kind`/`field` never enter that RPC. The
+  service owner rejects protected EVM/EIP-712 contexts with non-ECDSA schemes
+  before creating an approval. Raw Schnorr with an agent-operation context stays
+  available as a separate primitive.
 - **Domain separation:** agent-operation preimages start with the literal ASCII
   `avault-agent-operation:v1` followed by one LF and non-whitespace operation
   text. UTF-8 bytes are SHA256-hashed by the sandbox before signing. The API
@@ -40,7 +48,10 @@ these tests.
   UTF-16 code units to match JavaScript, including astral/BMP ordering.
 - **Address UX:** raw BIP340 is never labeled as signing the listed Taproot
   address. Protected BTC addresses remain visible for existing-fund
-  identification, with a warning in creation, list and approval surfaces.
+  identification, with a warning in creation, list and approval surfaces. The
+  approval warning does not imply that BTC addresses are displayed on that card.
+- **Errors:** new signing validation failures carry backend catalog keys. The
+  Web response renders the configured language; CLI diagnostics remain English.
 
 ## Known by design and rollout
 
@@ -64,7 +75,9 @@ real wallet operation, data migration or credential change is part of this PR.
 | Boundary | Observable protection | Why old coverage missed it |
 | --- | --- | --- |
 | `tests/test_vault_signing_contract.py` | Official positive/negative BIP340 and empty-tree BIP341 signatures; pinned standard success/failure and request settlement; range/DER rejection; unsupported parameters; protected owner refusal | Length-only mocks did not verify P vs Q or exercise refusal before request creation |
-| Same suite, sandbox fixtures | Real input validator → persisted request → signed release; UTF-16 interoperability; domain/type/number validation | Helper-only fixtures bypassed input validation and copied a wrong literal `\\n` |
+| Same suite, sandbox fixtures | Real input validator → persisted request → signed release; full hydrated material shape; UTF-16 interoperability; domain/type/number validation | Helper-only fixtures bypassed input validation and copied a wrong literal `\\n` |
+| Same suite, preflight and Web routes | Invalid compressed pins and incompatible scheme/context pairs leave no request or signing side effect across service/API/CLI; localized REST errors and English CLI errors | Post-signature checks failed closed too late; helper tests never exercised Web rendering |
+| `ui/src/lib/useProtectedVault.signing.test.tsx` | Real hook → client → captured full `postMessage` payload, with optional actual sandbox parser acceptance | Card tests mocked the hook, so they missed UI `material.kind` being rejected by the hardened consumer |
 | `tests/test_vault_addresses.py` | BIP341 plus three BIP86 receive/change vectors, both SEC1 parities, zero/order/infinity tweak boundaries | One even-Y vector cannot detect all parity/edge failures |
 | CLI and approval-card tests | Parser-backed skill example, warning visibility, scheme-specific address labels | Primitive tests cannot verify what users/agents are told |
 | Optional Core runner below | Actual `python -m vibe vault sign` → API → avault → Core acceptance for even/odd P, rawtr compatibility, DER SegWit, tamper rejection | Independent node acceptance detects unusable but well-formed signatures |
@@ -72,6 +85,28 @@ real wallet operation, data migration or credential change is part of this PR.
 The Rust and sandbox PRs own their private-key primitive and real sandbox RPC
 regressions respectively. No test claims a JS primitive is a deployed protected
 Bitcoin workflow.
+
+## Optional actual sandbox wire acceptance
+
+The hook/client test always asserts the full wire contract. To additionally pass
+that **captured production payload** to the companion sandbox's actual strict
+`parseSignRequest`, bundle that checkout's source and select it explicitly:
+
+```bash
+# In the companion sandbox worktree, with its own dependencies installed:
+./node_modules/.bin/esbuild src/signRequest.ts --bundle --platform=node \
+  --format=esm --outfile=/absolute/path/to/scratch/sandbox-sign-parser.mjs
+
+# In this worktree's ui/ directory:
+AVIBE_TEST_SANDBOX_SIGN_PARSER=/absolute/path/to/scratch/sandbox-sign-parser.mjs \
+  npx vitest run src/lib/useProtectedVault.signing.test.tsx
+```
+
+The test uses the real UI hook and client, simulates only transport setup and
+responses, and checks that the actual consumer accepts the emitted payload and
+rejects the previous `material.kind` shape. This is parser/serialization
+acceptance, **not** hardware passkey or private-key signing acceptance. No
+sandbox pins, live services, wallets or credentials are changed.
 
 ## Optional offline Bitcoin Core acceptance
 

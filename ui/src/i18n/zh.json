@@ -5968,7 +5968,6 @@
       "signingAddressesLoading": "正在生成地址…",
       "signingAddressesUnavailable": "无法为该密钥推导地址。",
       "signingAddressesHint": "由密钥推导得到。标准档 Bitcoin Taproot 使用 schnorr-secp256k1-bip341-keypath，需要另行安装支持该方案的 avault；较旧的 avault 会安全失败，绝不会回退到原始 BIP340。保护档 Bitcoin 交易签名目前尚不支持。请把地址用于识别和恢复，不要把它理解为每个保护层都能花费。",
-      "protectedBitcoinWarning": "暂不支持保护档 Bitcoin 交易签名。请保留这些地址用于识别已有资金和恢复，但不要把资金转入后期待当前流程能够花费它们。",
       "signingNeedsAvault": "签名密钥需要安装 avault {{version}} 或更新版本。",
       "checkingAvault": "正在检查 avault…",
       "p2Unavailable": "浏览器侧保险库创建需要 avault {{version}} 或更新版本。当前安装：{{installed}}。请先安装兼容的 avault 发布版，再保存标准密钥。",
@@ -6076,7 +6075,7 @@
       "ttlHours": "{{count}} 小时",
       "accessNote": "在你的浏览器里解锁——密钥的值绝不会展示给 AI 或聊天。",
       "signNote": "私钥绝不会离开你的浏览器——只返回签名。",
-      "protectedBitcoinWarning": "暂不支持保护档 Bitcoin 交易签名。请保留显示的 BTC 地址用于识别已有资金，但不要把资金转入后期待当前授权流程能够花费它们。",
+      "protectedBitcoinWarning": "暂不支持保护档 Bitcoin 交易签名。不要转入 BTC 后期待当前审批流程能够花费它们。请保留现有密钥及其保护档位。",
       "browserNote": "这一步需要 passkey，而桌面端无法使用 passkey。请在浏览器中审阅并批准。",
       "continueInBrowser": "在浏览器中继续",
       "errors": {

@@ -2466,10 +2466,17 @@ def set_default_vibe_agent(name: str, *, user_context: Any = None) -> dict:
 class VaultApiError(ValueError):
     """A vault REST error carrying a stable code + HTTP status for the route layer."""
 
-    def __init__(self, message: str, *, code: str = "vault_error", status: int = 400):
+    def __init__(self, message: str, *, code: str = "vault_error", status: int = 400, message_key: str | None = None):
+        # str(exc) stays English for CLI callers; only the Web boundary localizes it.
         super().__init__(message)
         self.code = code
         self.status = status
+        self.message_key = message_key or {
+            "invalid_signing_key": "vault.signing.invalidKey",
+            "protected_signing_unsupported": "vault.signing.protectedUnsupported",
+            "missing_signing_context": "vault.signing.missingContext",
+            "invalid_digest": "vault.signing.invalidDigest",
+        }.get(code)
 
 
 def _vault_secret_access_forbidden(exc: Exception) -> VaultApiError:
@@ -3561,23 +3568,7 @@ def _attach_signed_sign_operation_context(
                 release["signingContext"] = signing_context
             if meta.get("protection") == "protected":
                 signing_key = vault_service.get_signing_public_key(conn, persisted_name)
-                public_key = signing_key.get("public_key") if isinstance(signing_key, dict) else None
-                try:
-                    public_key_bytes = bytes.fromhex(public_key) if isinstance(public_key, str) else b""
-                except ValueError:
-                    public_key_bytes = b""
-                if not isinstance(signing_key, dict) or signing_key.get("curve") != "secp256k1" or len(public_key_bytes) != 33 or public_key_bytes[0] not in {2, 3}:
-                    raise VaultApiError(
-                        "protected signing request is missing a compressed pinned public key",
-                        code="invalid_signing_key",
-                        status=409,
-                    )
-                if _secp256k1_decompress_public_key(public_key_bytes) is None:
-                    raise VaultApiError(
-                        "protected signing request has an invalid pinned public key",
-                        code="invalid_signing_key",
-                        status=409,
-                    )
+                public_key = vault_service.require_compressed_signing_public_key(signing_key)
                 if not isinstance(signing_context, dict):
                     raise VaultApiError(
                         "protected signing request is missing a verifiable signing_context",
@@ -3605,8 +3596,10 @@ def _attach_signed_sign_operation_context(
         raise VaultApiError(f"secret '{exc}' not found", code="secret_not_found", status=404) from exc
     except vault_service.RequestNotFoundError as exc:
         raise VaultApiError(f"request '{request_id}' not found", code="request_not_found", status=404) from exc
+    except vault_service.InvalidSigningKeyError as exc:
+        raise VaultApiError(str(exc), code="invalid_signing_key", status=409) from exc
     except vault_service.InvalidRequestError as exc:
-        raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
+        raise VaultApiError(str(exc), code="invalid_request", status=409, message_key="vault.signing.invalidRequest") from exc
 
 
 def _sign_request_response_audience(request: dict[str, Any]) -> str:
@@ -4436,15 +4429,16 @@ def _validate_sign_parameters(payload: dict) -> None:
     }
     extra = set(payload) - allowed
     delivery = payload.get("delivery")
-    if isinstance(delivery, dict):
-        extra |= set(delivery) & {
-            "merkle_root", "merkleRoot", "script_tree", "scriptTree",
-            "taproot_merkle_root", "taprootMerkleRoot",
+    if delivery is not None:
+        if not isinstance(delivery, dict):
+            raise VaultApiError("signing delivery must be an object", code="invalid_request", status=409, message_key="vault.signing.invalidParameters")
+        extra |= set(delivery) - {
+            "mode", "session_id", "skill", "command", "egress", "signing_context", "signingContext",
         }
     if extra:
         raise VaultApiError(
             f"unsupported signing parameters: {', '.join(sorted(str(key) for key in extra))}; only empty-tree BIP86 key-path signing is supported",
-            code="invalid_request", status=409,
+            code="invalid_request", status=409, message_key="vault.signing.invalidParameters",
         )
 
 
@@ -4458,7 +4452,7 @@ def request_vault_sign(payload: dict, *, user_context: Any = None) -> dict:
     digest = _sign_digest_from_payload(payload.get("digest"))
     scheme = str(payload.get("scheme") or "ecdsa-secp256k1-recoverable").strip()
     if scheme not in vault_service.SUPPORTED_SIGNATURE_SCHEMES:
-        raise VaultApiError(f"unsupported signature scheme: {scheme}", code="invalid_request", status=409)
+        raise VaultApiError(f"unsupported signature scheme: {scheme}", code="invalid_request", status=409, message_key="vault.signing.invalidParameters")
     if not vault_crypto.is_valid_secret_name(name):
         raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
     engine = _vault_engine()
@@ -4498,8 +4492,10 @@ def request_vault_sign(payload: dict, *, user_context: Any = None) -> dict:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
     except vault_service.VaultSecretAccessError as exc:
         raise _vault_secret_access_forbidden(exc) from exc
+    except vault_service.InvalidSigningKeyError as exc:
+        raise VaultApiError(str(exc), code="invalid_signing_key", status=409) from exc
     except vault_service.InvalidRequestError as exc:
-        raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
+        raise VaultApiError(str(exc), code="invalid_request", status=409, message_key="vault.signing.invalidRequest") from exc
     except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="vault_error") from exc
     request = _attach_signed_sign_operation_context(
@@ -5202,21 +5198,25 @@ def _sign_digest_from_payload(value: object) -> str:
     return digest.lower()
 
 
+def _signing_context_invalid(message: str) -> VaultApiError:
+    return VaultApiError(message, code="invalid_request", status=409, message_key="vault.signing.invalidContext")
+
+
 def _validate_signing_context_json(value: Any, *, path: str = "signing_context") -> None:
     """Reject values Python and JavaScript cannot canonicalize identically."""
     if value is None or isinstance(value, bool):
         return
     if isinstance(value, int):
         if abs(value) > (2**53 - 1):
-            raise VaultApiError(f"{path} contains an unsafe integer", code="invalid_request", status=409)
+            raise _signing_context_invalid(f"{path} contains an unsafe integer")
         return
     if isinstance(value, float):
-        raise VaultApiError(f"{path} does not allow floating-point values", code="invalid_request", status=409)
+        raise _signing_context_invalid(f"{path} does not allow floating-point values")
     if isinstance(value, str):
         try:
             value.encode("utf-8")
         except UnicodeEncodeError as exc:
-            raise VaultApiError(f"{path} contains an invalid Unicode string", code="invalid_request", status=409) from exc
+            raise _signing_context_invalid(f"{path} contains an invalid Unicode string") from exc
         return
     if isinstance(value, list):
         for index, item in enumerate(value):
@@ -5225,14 +5225,14 @@ def _validate_signing_context_json(value: Any, *, path: str = "signing_context")
     if isinstance(value, dict):
         for key, item in value.items():
             if not isinstance(key, str):
-                raise VaultApiError(f"{path} contains a non-string key", code="invalid_request", status=409)
+                raise _signing_context_invalid(f"{path} contains a non-string key")
             try:
                 key.encode("utf-8")
             except UnicodeEncodeError as exc:
-                raise VaultApiError(f"{path} contains an invalid Unicode key", code="invalid_request", status=409) from exc
+                raise _signing_context_invalid(f"{path} contains an invalid Unicode key") from exc
             _validate_signing_context_json(item, path=f"{path}.{key}")
         return
-    raise VaultApiError(f"{path} contains an unsupported JSON value", code="invalid_request", status=409)
+    raise _signing_context_invalid(f"{path} contains an unsupported JSON value")
 
 
 def _verifiable_signing_context_from_payload(payload: dict, *, digest: str, required: bool = False) -> dict[str, Any] | None:
@@ -5248,11 +5248,11 @@ def _verifiable_signing_context_from_payload(payload: dict, *, digest: str, requ
             raise VaultApiError("protected signing requires a verifiable signing_context", code="missing_signing_context", status=409)
         return None
     if not isinstance(context, dict):
-        raise VaultApiError("signing_context must be an object", code="invalid_request", status=409)
+        raise _signing_context_invalid("signing_context must be an object")
     _validate_signing_context_json(context)
     kind = context.get("kind")
     if not isinstance(kind, str):
-        raise VaultApiError("signing_context kind must be a string", code="invalid_request", status=409)
+        raise _signing_context_invalid("signing_context kind must be a string")
     allowed_fields = {
         "evm-transaction": {"kind", "digestAlgorithm", "chainId", "unsignedTransaction", "digest"},
         "eip-712-typed-data": {"kind", "digestAlgorithm", "typedData", "digest"},
@@ -5260,41 +5260,35 @@ def _verifiable_signing_context_from_payload(payload: dict, *, digest: str, requ
     }
     allowed = allowed_fields.get(kind)
     if allowed is None:
-        raise VaultApiError("unsupported signing_context kind", code="invalid_request", status=409)
+        raise _signing_context_invalid("unsupported signing_context kind")
     extra = set(context) - allowed
     if extra:
-        raise VaultApiError(
-            f"signing_context contains unsupported fields: {', '.join(sorted(extra))}",
-            code="invalid_request",
-            status=409,
-        )
+        raise _signing_context_invalid(f"signing_context contains unsupported fields: {', '.join(sorted(extra))}")
     context_digest = context.get("digest")
     if not isinstance(context_digest, str) or context_digest.lower() != digest:
-        raise VaultApiError("signing_context digest must match the sign request digest", code="invalid_request", status=409)
+        raise _signing_context_invalid("signing_context digest must match the sign request digest")
     if kind == "evm-transaction":
         if context.get("digestAlgorithm") != "keccak256" or not isinstance(context.get("chainId"), str):
-            raise VaultApiError("invalid evm signing_context", code="invalid_request", status=409)
+            raise _signing_context_invalid("invalid evm signing_context")
         if "unsignedTransaction" not in context:
-            raise VaultApiError("invalid evm signing_context", code="invalid_request", status=409)
+            raise _signing_context_invalid("invalid evm signing_context")
     elif kind == "eip-712-typed-data":
         if context.get("digestAlgorithm") != "eip712" or "typedData" not in context:
-            raise VaultApiError("invalid EIP-712 signing_context", code="invalid_request", status=409)
+            raise _signing_context_invalid("invalid EIP-712 signing_context")
     else:
         prefix = "avault-agent-operation:v1\n"
         preimage = context.get("canonicalPreimage")
         if context.get("digestAlgorithm") != "avault-operation-hash-v1" or not isinstance(preimage, str):
-            raise VaultApiError("invalid avault operation signing_context", code="invalid_request", status=409)
+            raise _signing_context_invalid("invalid avault operation signing_context")
         if not preimage.startswith(prefix) or not preimage[len(prefix):].strip():
-            raise VaultApiError(
-                "avault operation signing_context must start with avault-agent-operation:v1\\n and include operation text",
-                code="invalid_request",
-                status=409,
+            raise _signing_context_invalid(
+                "avault operation signing_context must start with avault-agent-operation:v1\\n and include operation text"
             )
     return dict(context)
 
 
 def _protected_sign_invalid(message: str) -> VaultApiError:
-    return VaultApiError(message, code="invalid_request", status=409)
+    return VaultApiError(message, code="invalid_request", status=409, message_key="vault.signing.invalidSignature")
 
 
 def _protected_signing_public_key_bytes(meta: dict) -> bytes:
@@ -5602,27 +5596,14 @@ def _verify_standard_signature(
     try:
         vault_service._validate_signature_payload(scheme, signature)
     except vault_service.InvalidRequestError as exc:
-        raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
-    if signing_public_key is None:
-        if scheme == "schnorr-secp256k1-bip341-keypath":
-            raise VaultApiError(
-                "Taproot key-path signing requires a pinned compressed secp256k1 public key",
-                code="invalid_signing_key",
-                status=409,
-            )
-        return
+        raise VaultApiError(str(exc), code="invalid_request", status=409, message_key="vault.signing.invalidSignature") from exc
     if scheme == "schnorr-secp256k1-bip341-keypath":
-        raw = signing_public_key.get("public_key") if isinstance(signing_public_key, dict) else None
         try:
-            raw_bytes = bytes.fromhex(raw) if isinstance(raw, str) else b""
-        except ValueError:
-            raw_bytes = b""
-        if len(raw_bytes) != 33 or raw_bytes[0] not in {2, 3} or _secp256k1_decompress_public_key(raw_bytes) is None:
-            raise VaultApiError(
-                "Taproot key-path signing requires a pinned compressed secp256k1 public key",
-                code="invalid_signing_key",
-                status=409,
-            )
+            vault_service.require_compressed_signing_public_key(signing_public_key)
+        except vault_service.InvalidSigningKeyError as exc:
+            raise VaultApiError(str(exc), code="invalid_signing_key", status=409) from exc
+    if signing_public_key is None:
+        return
     _verify_protected_browser_signature(
         {"signing_public_key": signing_public_key},
         digest=digest,
@@ -5676,7 +5657,7 @@ def vault_sign(payload: dict) -> dict:
     digest = _sign_digest_from_payload(payload.get("digest"))
     scheme = str(payload.get("scheme") or "ecdsa-secp256k1-recoverable").strip()
     if scheme not in vault_service.SUPPORTED_SIGNATURE_SCHEMES:
-        raise VaultApiError(f"unsupported signature scheme: {scheme}", code="invalid_request", status=409)
+        raise VaultApiError(f"unsupported signature scheme: {scheme}", code="invalid_request", status=409, message_key="vault.signing.invalidParameters")
     if not vault_crypto.is_valid_secret_name(name):
         raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
     signing_context = _verifiable_signing_context_from_payload(payload, digest=digest)
@@ -5703,6 +5684,8 @@ def vault_sign(payload: dict) -> dict:
                     code="protected_signing_unsupported",
                     status=409,
                 )
+            if scheme == "schnorr-secp256k1-bip341-keypath":
+                vault_service.require_compressed_signing_public_key(signing_public_key)
             if meta.get("protection") == "protected":
                 signature = payload.get("signature")
                 if not isinstance(signature, dict):
@@ -5789,8 +5772,10 @@ def vault_sign(payload: dict) -> dict:
         raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.RequestNotFoundError as exc:
         raise VaultApiError(f"request '{exc}' not found", code="request_not_found", status=404) from exc
+    except vault_service.InvalidSigningKeyError as exc:
+        raise VaultApiError(str(exc), code="invalid_signing_key", status=409) from exc
     except vault_service.InvalidRequestError as exc:
-        raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
+        raise VaultApiError(str(exc), code="invalid_request", status=409, message_key="vault.signing.invalidRequest") from exc
     except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="vault_error") from exc
 

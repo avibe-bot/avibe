@@ -386,7 +386,12 @@ export function useProtectedVault() {
     ): Promise<SignatureResult> => {
       const sandbox = await getVaultSandboxClient();
       try {
-        return await sandbox.sign({ material, scheme, signingContext, context }, authorizationWindow);
+        // Approval cards include display metadata (kind/field); the sign RPC accepts
+        // only the record identity and ciphertext envelope, not that UI metadata.
+        return await sandbox.sign({
+          material: { name: material.name, envelope: material.envelope },
+          scheme, signingContext, context,
+        }, authorizationWindow);
       } finally {
         void syncProtectedOperationStatus(material.envelope.wrap_meta).catch(() => undefined);
       }
