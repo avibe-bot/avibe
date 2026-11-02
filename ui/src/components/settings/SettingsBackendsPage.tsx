@@ -17,7 +17,7 @@ import { AGENT_BACKENDS, DEFAULT_AGENT_STATE, getBackendUiMeta } from '@/lib/age
 import { configChanges } from '@/lib/configMutations';
 import { errorMessage } from '@/lib/errorMessage';
 
-// Mirrors design.pen qVHh4 (VR/CM/Backends): one horizontal card per backend,
+// ui/design: models/backends/list — one horizontal card per backend,
 // in shared display order: built-in first, then native setup order. Each card
 // surfaces icon + name/description + status chip + enable toggle (a
 // "Built-in" badge instead for the always-enabled backend) + a

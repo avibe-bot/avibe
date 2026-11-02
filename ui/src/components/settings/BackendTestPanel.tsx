@@ -20,8 +20,8 @@ export type BackendTestPanelProps = {
 };
 
 /**
- * Settings → Backends connectivity probe. Mirrors the ``cdTest2`` /
- * ``cxTest`` panels in ``design.pen``: sends a single ``Hi`` prompt
+ * Settings → Backends connectivity probe (ui/design: models/backend-detail/claude,
+ * the 测试连通性 panel): sends a single ``Hi`` prompt
  * through the backend's production Agent transport so the user can
  * confirm both the credentials and the endpoint (Base URL) round-trip
  * end-to-end. Works in both OAuth and API-Key modes.

@@ -1,4 +1,4 @@
-// 供给方式 card for a backend detail page (frame 02). Two radio options — 中枢模式
+// 供给方式 card for a backend detail page (ui/design: models/backend-detail/codex). Two radio options — 中枢模式
 // Hub (推荐·默认; supply managed on the Models page, native config untouched) and
 // 直连模式 Direct (legacy behavior preserved). When a native config is detected in
 // Direct mode, a strip offers a one-click 导入中枢 into the migration dialog.
