@@ -11,18 +11,18 @@
 //
 // Drawn over the shipped chat page: this layer covers the page above the composer and lays
 // its own surface exactly over the shipped composer (an invisible shipped Composer sizes it).
-import { CloudOff, Loader2, MessageSquare, Mic, MicOff, MousePointer2, Paperclip, PenLine, RotateCcw, Send, TextCursor, Trash2, X } from 'lucide-react';
+import { CloudOff, Loader2, Mic, MicOff, MousePointer2, Paperclip, PenLine, RotateCcw, Send, TextCursor, Trash2, X } from 'lucide-react';
 import clsx from 'clsx';
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
-import { BotAvatar } from '@/components/ui/bot-avatar';
 import { Composer } from '@/components/workbench/Composer';
 import { useBots } from '@/context/BotsContext';
 
 import { useDraft } from './draft';
-import { VoiceCancelTarget, VoiceCard } from './MainBotVoice';
+import { VoiceCancelTarget, VoiceCard, type VoiceTarget } from './MainBotVoice';
+
 
 export type HoldDevice = 'desktop' | 'phone';
 
@@ -37,23 +37,13 @@ export type HoldNote = 'asking' | 'cancelled' | 'too-short' | 'denied' | 'unavai
 /** Who the composer talks to: a Bot by handle, or a Session by its title. */
 export type HoldTarget = { bot: string } | { session: string };
 
-function useTarget(to: HoldTarget): { name: string; avatar?: ReactNode; title?: string } {
+function useTarget(to: HoldTarget): VoiceTarget {
   const draft = useDraft();
   const { bots, displayName } = useBots();
-  if ('session' in to) {
-    return {
-      name: to.session,
-      title: draft(`发到「${to.session}」`, `To “${to.session}”`),
-      avatar: (
-        <span className="grid size-5.5 shrink-0 place-items-center rounded-full bg-surface-2 text-muted">
-          <MessageSquare className="size-3" />
-        </span>
-      ),
-    };
-  }
+  // A Session has no avatar: the card draws its neutral conversation icon.
+  if ('session' in to) return { name: to.session, title: draft(`发到「${to.session}」`, `To “${to.session}”`) };
   const bot = bots.find((each) => each.handle === to.bot);
-  const name = bot ? displayName(bot) : to.bot;
-  return { name, avatar: bot ? <BotAvatar avatar={bot.avatar} name={name} size={22} /> : undefined };
+  return bot ? { name: displayName(bot), avatar: bot.avatar } : { name: to.bot };
 }
 
 export function ComposerHoldLayer({
@@ -239,34 +229,28 @@ function DesktopHint({ armed }: { armed: boolean }) {
   );
 }
 
-/** An interrupted take keeps what was heard: send it, transcribe the kept recording again, or put it
- *  in the composer to edit. The bin discards it. */
+/** An interrupted take keeps what was heard. Beside the card's own retry and send, the composer
+ *  can put the text in the draft to edit first; the bin discards it. */
 function InterruptedActions() {
   const draft = useDraft();
   return (
-    <div className="flex flex-col gap-3">
-      <span className="text-xs leading-relaxed text-muted">
-        {draft('网络断开了。说过的话都在，录音也留着。', 'The connection dropped. What you said is kept, and so is the recording.')}
-      </span>
-      <div className="flex items-center gap-2">
-        <Button type="button" size="sm">
-          <Send className="size-3.5" />
-          {draft('发送', 'Send')}
-        </Button>
-        <Button type="button" size="sm" variant="secondary">
-          <RotateCcw className="size-3.5" />
-          {draft('重试', 'Retry')}
-        </Button>
-        <Button type="button" size="sm" variant="ghost">
-          <PenLine className="size-3.5" />
-          {draft('放进输入框', 'Edit first')}
-        </Button>
-        <span className="flex-1" />
-        <Button type="button" size="icon" variant="ghost" aria-label={draft('丢弃', 'Discard')} className="size-8 text-muted">
-          <Trash2 className="size-4" />
-        </Button>
-      </div>
-    </div>
+    <>
+      <Button type="button" size="icon" variant="ghost" aria-label={draft('丢弃', 'Discard')} className="mr-auto size-8 text-muted">
+        <Trash2 className="size-4" />
+      </Button>
+      <Button type="button" variant="ghost" size="sm" className="gap-1.5">
+        <PenLine className="size-3.5" />
+        {draft('放进输入框', 'Edit first')}
+      </Button>
+      <Button type="button" variant="outline" size="sm" className="gap-1.5">
+        <RotateCcw className="size-3.5" />
+        {draft('重试', 'Retry')}
+      </Button>
+      <Button type="button" variant="brand" size="sm" className="gap-1.5">
+        <Send className="size-3.5" />
+        {draft('发送', 'Send')}
+      </Button>
+    </>
   );
 }
 

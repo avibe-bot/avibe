@@ -4,6 +4,7 @@
 // composer is empty and the keyboard is down; a tap raises the keyboard, and once it is up, or
 // there is text, a long press is the system's (caret, selection, Paste).
 import { frames } from '../../frame';
+import { VoiceMarkLayer } from '../../kit/MainBotVoice';
 import { ComposerHoldLayer, SoftKeyboard, SystemEditMenu, type HoldNote, type HoldPhase } from '../../kit/ComposerHold';
 import { PhoneConversation } from '../../shell/PhoneScreen';
 import type { WorkbenchFixtures } from '../../shell/fixtures';
@@ -56,7 +57,7 @@ const designFrames = frames([
   frame('e-armed', '5 · 上滑超过 80px：松开取消（滑回 60px 以下恢复）', hold('armed', { text: said.text, stash: said.stash, seconds: 7 })),
   frame('f-settling', '6 · 松开：整理最终文字（最长 20 秒）', hold('settling', { text: said.final, seconds: 8 })),
   frame('d-recording-attachment', '4c · 只放了附件、没有文字：照样按住录音，附件和语音一起发', hold('recording', { text: said.text, stash: said.stash, seconds: 6, attachment: staged })),
-  frame('g-sent', '7 · 已发送：消息直接进了对话（伙伴对话不排队），首席安全官开始工作；占位写「首席安全官正在处理…」，照样可以按住说话', () => <PhoneConversation />, csoFixtures({ messages: csoSentMessages, running: true })),
+  frame('g-sent', '7 · 已发送：消息直接进了对话，带「语音」标记（伙伴对话不排队），首席安全官开始工作；占位写「首席安全官正在处理…」，照样可以按住说话', () => <PhoneConversation overlay={<VoiceMarkLayer className="right-5 top-92.5" />} />, csoFixtures({ messages: csoSentMessages, running: true })),
   frame('h-cancelled', '× · 在取消区松开：没有发送', note('cancelled')),
   frame('i-too-short', '× · 太短（不到 0.5 秒）或没听到说话：没有发送', note('too-short')),
   frame('j-asking', '× · 系统询问麦克风权限（主屏 App 会反复问）：这一次不录音', note('asking')),

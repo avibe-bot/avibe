@@ -6,7 +6,7 @@ Avibe's UI designs live here. A frame is a static React render of one surface in
 
 - `frames/<area>/<name>.design.tsx`: one file per surface; it default-exports `frames([...])`, one frame per state. A frame id is `<area>/<name>/<state>`.
 - `kit/`: components a design proposes that are not shipped yet. They use only product tokens (Tailwind classes from `src/index.css`), assets, and `src/components/ui` primitives.
-- `shell/`: the providers frames render in (`DesignShell`), fixture builders (`fixtures.ts`), the screens as AppShell lays them out (`SidebarColumn`, `PhoneScreen`), the fixed clock, frame-local Web Storage, and the network stub.
+- `shell/`: the providers frames render in (`DesignShell`), fixture builders (`fixtures.ts`), the screens as AppShell lays them out (`SidebarColumn`, `DesktopScreen`, `PhoneScreen`), the fixed clock, frame-local Web Storage, and the network stub.
 
 ## Rules
 
