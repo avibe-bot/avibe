@@ -3,7 +3,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ToastProvider } from '../../../context/ToastProvider';
@@ -44,13 +44,19 @@ void i18n.use(initReactI18next).init({
   interpolation: { escapeValue: false },
 });
 
-function renderHub() {
+function LocationProbe() {
+  const location = useLocation();
+  return <output data-testid="location">{location.pathname + location.search}</output>;
+}
+
+function renderHub(entry = '/skills') {
   return render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[entry]}>
       <RouteSurfaceActiveContext.Provider value={true}>
         <I18nextProvider i18n={i18n}>
           <ToastProvider>
             <McpHubSection />
+            <LocationProbe />
           </ToastProvider>
         </I18nextProvider>
       </RouteSurfaceActiveContext.Provider>
@@ -168,22 +174,16 @@ describe('McpHubSection add OAuth', () => {
         { name: 'echo', auth: 'ok', source: 'avibe', transport: 'stdio', toolCount: 1 },
       ],
     });
-    Object.defineProperty(window, 'location', {
-      configurable: true,
-      value: {
-        origin: 'http://127.0.0.1:5123',
-        pathname: '/skills',
-        search: '?mcp=suno&oauth=success',
-        href: 'http://127.0.0.1:5123/skills?mcp=suno&oauth=success',
-        assign,
-      },
-    });
-    renderHub();
+    renderHub('/skills?mcp=suno&oauth=success');
     const suno = await screen.findByRole('button', { name: /suno/ });
     await waitFor(() => {
       expect(suno.className).toContain('border-mint');
-      expect(replaceState).toHaveBeenCalledWith({}, '', '/skills');
+      // The login is announced once; a reload keeps the server but not the announcement.
+      expect(screen.getByTestId('location').textContent).toBe('/skills?mcp=suno');
     });
+    expect(screen.getAllByText(en.mcpHub.loginComplete)).toHaveLength(1);
+    // The router owns the URL; writing window.history behind it would leave the two disagreeing.
+    expect(replaceState).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: /echo/ }));
     expect(screen.getByRole('button', { name: /echo/ }).className).toContain('border-mint');
     expect(suno.className).not.toContain('border-mint');

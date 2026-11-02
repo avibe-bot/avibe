@@ -21,7 +21,7 @@ export interface AddSkillDialogProps {
   onInstalled: () => void;
 }
 
-type SourceTab = 'github' | 'zip';
+export type SkillSourceTab = 'github' | 'zip';
 
 /** "Add a skill" modal — import from a GitHub URL/slug or an uploaded .zip. */
 export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, onInstalled }: AddSkillDialogProps) {
@@ -29,7 +29,7 @@ export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, 
   const api = useApi();
   const { showToast } = useToast();
 
-  const [source, setSource] = useState<SourceTab>('github');
+  const [source, setSource] = useState<SkillSourceTab>('github');
   const [url, setUrl] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [uploadDir, setUploadDir] = useState<string | null>(null);
@@ -105,26 +105,6 @@ export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, 
     });
   };
 
-  const cliPreview = useMemo(() => {
-    if (!baseSource) return '';
-    const allSelected = discovered && selected.size === discovered.length;
-    const selector = allSelected
-      ? '--all'
-      : selected.size === 1
-        ? `--skill ${[...selected][0]}`
-        : `--skill … (×${selected.size})`;
-    return [
-      'askill add',
-      baseSource,
-      `-a ${Object.keys(AGENT_ID_TO_BACKEND).join(' ')}`,
-      selector,
-      scope === 'global' ? '-g' : '',
-      '-y',
-    ]
-      .filter(Boolean)
-      .join(' ');
-  }, [baseSource, discovered, selected, scope]);
-
   const install = async () => {
     if (!baseSource || selected.size === 0) return;
     setBusy('install');
@@ -163,6 +143,106 @@ export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, 
     }
   };
 
+  return (
+    <AddSkillDialogView
+      source={source}
+      url={url}
+      file={file}
+      uploadDir={uploadDir}
+      discovered={discovered}
+      selected={selected}
+      scope={scope}
+      projectAvailable={Boolean(projectId)}
+      projectName={projectName}
+      busy={busy}
+      error={error}
+      onSourceChange={(next) => {
+        setSource(next);
+        reset();
+      }}
+      onUrlChange={(next) => {
+        setUrl(next);
+        reset();
+      }}
+      onFetch={fetchGithub}
+      onPickFile={onPickFile}
+      onToggleSkill={toggleSkill}
+      onScopeChange={setScope}
+      onInstall={install}
+      onClose={onClose}
+    />
+  );
+}
+
+export interface AddSkillDialogViewProps {
+  source: SkillSourceTab;
+  url: string;
+  file: File | null;
+  /** Where the server unpacked the uploaded .zip; the zip tab installs from it. */
+  uploadDir: string | null;
+  /** The skills the source holds, once fetched or unpacked. */
+  discovered: SkillDiscovered[] | null;
+  selected: ReadonlySet<string>;
+  scope: SkillScope;
+  /** A project with a folder is open, so the Project scope can be chosen. */
+  projectAvailable: boolean;
+  projectName?: string;
+  busy: 'fetch' | 'install' | null;
+  error: string | null;
+  onSourceChange: (source: SkillSourceTab) => void;
+  onUrlChange: (url: string) => void;
+  onFetch: () => void;
+  onPickFile: (file: File | null) => void;
+  onToggleSkill: (name: string) => void;
+  onScopeChange: (scope: SkillScope) => void;
+  onInstall: () => void;
+  onClose: () => void;
+}
+
+/** The Add a skill dialog's markup (ui/design: skills/add-skill/github-fetched, skills/add-skill/zip). */
+export function AddSkillDialogView({
+  source,
+  url,
+  file,
+  uploadDir,
+  discovered,
+  selected,
+  scope,
+  projectAvailable,
+  projectName,
+  busy,
+  error,
+  onSourceChange,
+  onUrlChange,
+  onFetch,
+  onPickFile,
+  onToggleSkill,
+  onScopeChange,
+  onInstall,
+  onClose,
+}: AddSkillDialogViewProps) {
+  const { t } = useTranslation();
+  const baseSource = source === 'github' ? url.trim() : uploadDir;
+  const cliPreview = useMemo(() => {
+    if (!baseSource) return '';
+    const allSelected = discovered && selected.size === discovered.length;
+    const selector = allSelected
+      ? '--all'
+      : selected.size === 1
+        ? `--skill ${[...selected][0]}`
+        : `--skill … (×${selected.size})`;
+    return [
+      'askill add',
+      baseSource,
+      `-a ${Object.keys(AGENT_ID_TO_BACKEND).join(' ')}`,
+      selector,
+      scope === 'global' ? '-g' : '',
+      '-y',
+    ]
+      .filter(Boolean)
+      .join(' ');
+  }, [baseSource, discovered, selected, scope]);
+
   const scopeOptions = [
     { id: 'global' as const, label: t('skills.scopeGlobal') },
     { id: 'project' as const, label: projectName ? `${t('skills.scopeProject')}: ${projectName}` : t('skills.scopeProject') },
@@ -185,12 +265,9 @@ export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, 
         </div>
 
         <div className="flex flex-col gap-4 p-5">
-          <SegmentedRadio<SourceTab>
+          <SegmentedRadio<SkillSourceTab>
             value={source}
-            onChange={(next) => {
-              setSource(next);
-              reset();
-            }}
+            onChange={onSourceChange}
             ariaLabel={t('skills.addDialog.title')}
             options={[
               { id: 'github', label: t('skills.addDialog.githubTab') },
@@ -205,17 +282,14 @@ export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, 
                 <Github className="size-3.5 shrink-0 text-muted" />
                 <input
                   value={url}
-                  onChange={(e) => {
-                    setUrl(e.target.value);
-                    reset();
-                  }}
-                  onKeyDown={(e) => e.key === 'Enter' && fetchGithub()}
+                  onChange={(e) => onUrlChange(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && onFetch()}
                   placeholder={t('skills.addDialog.urlPlaceholder')}
                   className="min-w-0 flex-1 bg-transparent font-mono text-[12px] text-foreground outline-none placeholder:text-muted"
                 />
                 <button
                   type="button"
-                  onClick={fetchGithub}
+                  onClick={onFetch}
                   disabled={!url.trim() || busy === 'fetch'}
                   className="flex shrink-0 items-center gap-1.5 rounded-md border border-cyan/40 bg-cyan-soft px-2.5 py-1.5 text-[11.5px] font-semibold text-cyan-ink transition hover:brightness-110 disabled:opacity-50"
                 >
@@ -255,7 +329,7 @@ export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, 
                     role="checkbox"
                     aria-checked={on}
                     aria-label={skill.name}
-                    onClick={() => toggleSkill(skill.name)}
+                    onClick={() => onToggleSkill(skill.name)}
                     className={clsx(
                       'flex items-center gap-3 rounded-lg border px-3 py-2.5 text-left transition',
                       on ? 'border-mint/40 bg-mint-soft' : 'border-border bg-surface hover:border-border-strong',
@@ -274,7 +348,7 @@ export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, 
 
           <div className="flex flex-col gap-1.5">
             <span className="font-mono text-[10px] font-bold uppercase tracking-[0.1em] text-muted">{t('skills.addDialog.installTo')}</span>
-            <SegmentedRadio<SkillScope> value={scope} onChange={setScope} ariaLabel={t('skills.addDialog.installTo')} options={scopeOptions} disabled={!projectId} />
+            <SegmentedRadio<SkillScope> value={scope} onChange={onScopeChange} ariaLabel={t('skills.addDialog.installTo')} options={scopeOptions} disabled={!projectAvailable} />
           </div>
 
           {error ? (
@@ -295,7 +369,7 @@ export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, 
               type="button"
               variant="brand"
               size={null}
-              onClick={install}
+              onClick={onInstall}
               disabled={!discovered || selected.size === 0 || busy === 'install'}
               className="gap-1.5 px-4 py-2 text-[12px] font-semibold"
             >

@@ -13,9 +13,19 @@ export interface ProjectPickerProps {
 
 /** Dropdown that switches which project's skills are being managed; the project
  *  list is the workbench sidebar's. */
-export function ProjectPicker({ projects, value, onChange }: ProjectPickerProps) {
-  const { t } = useTranslation();
+export function ProjectPicker(props: ProjectPickerProps) {
   const [open, setOpen] = useState(false);
+  return <ProjectPickerView {...props} open={open} onOpenChange={setOpen} />;
+}
+
+export interface ProjectPickerViewProps extends ProjectPickerProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}
+
+/** The picker with its menu open or closed (ui/design: skills/project-picker/open). */
+export function ProjectPickerView({ projects, value, onChange, open, onOpenChange: setOpen }: ProjectPickerViewProps) {
+  const { t } = useTranslation();
   const active = projects.find((p) => p.id === value) ?? null;
   return (
     <Popover open={open} onOpenChange={setOpen}>
