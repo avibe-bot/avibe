@@ -22,15 +22,22 @@ const fixtures = workbenchFixtures({
   '/api/vault/secrets': { ok: true, secrets: [standard, { ...standard, name: 'PROTECTED_BTC_KEY', protection: 'protected' }] },
   '/api/vault/grants': { ok: true, grants: [] },
   '/api/vault/requests': { ok: true, requests: [] },
-  '/api/vault/avault-authorization': { ok: true, required: false, detected_at: null, attempt: null },
+  '/api/vault/vmk': { ok: true, exists: false },
   '/api/dependencies': { deps: [] },
   '/api/skills': { ok: true, skills: [] },
 });
 const request = {
-  id: 'vrq_design_sign', request_type: 'sign', secret_name: standard.name, requester: {},
+  id: 'vrq_design_sign', request_type: 'sign', secret_name: 'PROTECTED_BTC_KEY', requester: {},
   status: 'pending', message_id: null, created_at: standard.created_at, decided_at: null, expires_at: null,
-  delivery: { digest: '00'.repeat(32), scheme: 'schnorr-secp256k1-bip341-keypath' },
-  card: { request_type: 'sign', secret_name: standard.name, kind: 'keypair', protection: 'standard' },
+  delivery: {
+    digest: '00'.repeat(32), scheme: 'schnorr-secp256k1-bip341-keypath',
+    signing_context: {
+      kind: 'bitcoin-taproot-keypath-v1', network: 'signet', unsignedTransaction: '0200000001' + '11'.repeat(32) + '0000000000fdffffff01' + '8096980000000000225120' + '22'.repeat(32) + '00000000',
+      prevout: { amountSats: 10000000, scriptPubKey: '5120' + '33'.repeat(32) },
+      digestAlgorithm: 'bip341-sighash-default-keypath', digest: '00'.repeat(32),
+    },
+  },
+  card: { request_type: 'sign', secret_name: 'PROTECTED_BTC_KEY', kind: 'keypair', protection: 'protected' },
 } satisfies VaultRequest;
 const noop = () => {};
 

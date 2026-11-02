@@ -1,0 +1,1264 @@
+{
+  "warning": "PUBLIC TEST KEYS. NEVER FUND. Invented parent outpoints. Codec/crypto expectations only, not node or protected-RPC acceptance.",
+  "provenance": {
+    "sourceFixtureSha256": "edfca8bc9e60666b40ebbaf70b71d74b59a48cfef45befa5add29996c1e74d73",
+    "sourceGeneratorSha256": "64abf3997753f2dfa37e549a3e6a65394a2a99e87845c76dde6a5c785dadbd73",
+    "coreCommit": "9be056a8a72b624dae9623b2f7bded92c2a21c91",
+    "coreBinary": "v31.1",
+    "addressAuthority": "Native bitcoin-tx -chain=<network> -json",
+    "hashAndSignatureAuthority": "Unchanged pinned upstream Core test framework",
+    "check": "python3 -B generate-codec-fixtures.py --check"
+  },
+  "cases": [
+    {
+      "id": "bitcoin-recipient-p2pkh",
+      "publicKey": "03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "context": {
+        "kind": "bitcoin-taproot-keypath-v1",
+        "network": "bitcoin",
+        "unsignedTransaction": "02000000010c341de8719c87bacebf29922d6daf26e36b6488126ca36fe91f54189d744b200100000000fdffffff0260ea0000000000001976a9147dd65592d0ab2fe0d0257d571abf032cd9db93dc88aca2a8030000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a00000000",
+        "prevout": {
+          "amountSats": 300000,
+          "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a"
+        },
+        "digestAlgorithm": "bip341-sighash-default-keypath",
+        "digest": "40cce6a2801e08b491a794c26301cbaef2261db04deda1a6b670f13b54f44339"
+      },
+      "expected": {
+        "txid": "b1fdf182728cb80f7ea75440cb9748836734dbb53e512e7c03fdb0c65d557892",
+        "outputs": [
+          {
+            "amountSats": 60000,
+            "scriptPubKey": "76a9147dd65592d0ab2fe0d0257d571abf032cd9db93dc88ac",
+            "address": "1CUNEBjYrCn2y1SdiUMohaKUi4wpP326Lb",
+            "type": "pubkeyhash"
+          },
+          {
+            "amountSats": 239778,
+            "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+            "address": "bc1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdqcuvtzv",
+            "type": "witness_v1_taproot"
+          }
+        ],
+        "inputAddress": "bc1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdqcuvtzv",
+        "feeSats": 222,
+        "vsize": 145,
+        "weight": 580,
+        "netLeavingKeySats": 60222,
+        "signalsRbf": true,
+        "bip340Signature": "7b63d95059cf9570a9fea7297da8b70b62cedcdb959d423a7171abcdcea922d7054f05d9e716a7f31ef4602c62bf02b7c940ceccbb8a6efa39c67ea0cb49a23e"
+      }
+    },
+    {
+      "id": "bitcoin-recipient-p2sh",
+      "publicKey": "03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "context": {
+        "kind": "bitcoin-taproot-keypath-v1",
+        "network": "bitcoin",
+        "unsignedTransaction": "02000000010c341de8719c87bacebf29922d6daf26e36b6488126ca36fe91f54189d744b200100000000fdffffff0260ea00000000000017a91469ea5ff598a286f418ae77503ce85d83da4ae88e87a2a8030000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a00000000",
+        "prevout": {
+          "amountSats": 300000,
+          "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a"
+        },
+        "digestAlgorithm": "bip341-sighash-default-keypath",
+        "digest": "c67d649c0d041887b8cb205eabea8bc17a662e0607ec3ddb5e791d07de37e6cb"
+      },
+      "expected": {
+        "txid": "f54bd644eade075029297eb58c08692c2f466aa97fea090f0cf047a25e8289bc",
+        "outputs": [
+          {
+            "amountSats": 60000,
+            "scriptPubKey": "a91469ea5ff598a286f418ae77503ce85d83da4ae88e87",
+            "address": "3BM3eLQZbwubG3XwwxJmd9qxwMJn7yUTSn",
+            "type": "scripthash"
+          },
+          {
+            "amountSats": 239778,
+            "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+            "address": "bc1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdqcuvtzv",
+            "type": "witness_v1_taproot"
+          }
+        ],
+        "inputAddress": "bc1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdqcuvtzv",
+        "feeSats": 222,
+        "vsize": 143,
+        "weight": 572,
+        "netLeavingKeySats": 60222,
+        "signalsRbf": true,
+        "bip340Signature": "ae915206aa294ebd097d4c5e700ef9a8650ee5c9390bbbce1c7ecaa1bf660eb1d8d7ec88b6533b4371765f2193aeb0a84da116271397be6b88d111945a5cab70"
+      }
+    },
+    {
+      "id": "bitcoin-recipient-p2wpkh",
+      "publicKey": "03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "context": {
+        "kind": "bitcoin-taproot-keypath-v1",
+        "network": "bitcoin",
+        "unsignedTransaction": "02000000010c341de8719c87bacebf29922d6daf26e36b6488126ca36fe91f54189d744b200100000000fdffffff0260ea0000000000001600147dd65592d0ab2fe0d0257d571abf032cd9db93dca2a8030000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a00000000",
+        "prevout": {
+          "amountSats": 300000,
+          "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a"
+        },
+        "digestAlgorithm": "bip341-sighash-default-keypath",
+        "digest": "c05da5f0f17428e4033e2b5dd5de962a5b4dcfef76c58a72d49ab14751631200"
+      },
+      "expected": {
+        "txid": "b2779c1fa9189df930a90124de0a1b1c9446748e673a60cfb3fc17b901c70a83",
+        "outputs": [
+          {
+            "amountSats": 60000,
+            "scriptPubKey": "00147dd65592d0ab2fe0d0257d571abf032cd9db93dc",
+            "address": "bc1q0ht9tyks4vh7p5p904t340cr9nvahy7u3re7zg",
+            "type": "witness_v0_keyhash"
+          },
+          {
+            "amountSats": 239778,
+            "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+            "address": "bc1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdqcuvtzv",
+            "type": "witness_v1_taproot"
+          }
+        ],
+        "inputAddress": "bc1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdqcuvtzv",
+        "feeSats": 222,
+        "vsize": 142,
+        "weight": 568,
+        "netLeavingKeySats": 60222,
+        "signalsRbf": true,
+        "bip340Signature": "8e69f59b3383a20ed826a5d0fbfc4b7cb206b8968b59f442a1971fd9f8f814a0c19d26f376058d0062976854bd67d1e164b7c606859267fc53ee9aef05aa2147"
+      }
+    },
+    {
+      "id": "bitcoin-recipient-p2wsh",
+      "publicKey": "03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "context": {
+        "kind": "bitcoin-taproot-keypath-v1",
+        "network": "bitcoin",
+        "unsignedTransaction": "02000000010c341de8719c87bacebf29922d6daf26e36b6488126ca36fe91f54189d744b200100000000fdffffff0260ea000000000000220020e19dcba1a5f40b4fe87866d5c275544c26d624e3e54af613b7cb74857ca93564a2a8030000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a00000000",
+        "prevout": {
+          "amountSats": 300000,
+          "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a"
+        },
+        "digestAlgorithm": "bip341-sighash-default-keypath",
+        "digest": "b2b368be3ab0142eb0375c2dde68957819527272a4e5ea5174bf90c808ff2795"
+      },
+      "expected": {
+        "txid": "6834d773672b279629bf0e8f1710c37fc59a3d244a5ff277535c8a4fc544f73a",
+        "outputs": [
+          {
+            "amountSats": 60000,
+            "scriptPubKey": "0020e19dcba1a5f40b4fe87866d5c275544c26d624e3e54af613b7cb74857ca93564",
+            "address": "bc1quxwuhgd97s95l6rcvm2uya25fsndvf8ru490vyahed6g2l9fx4jqt0xtq6",
+            "type": "witness_v0_scripthash"
+          },
+          {
+            "amountSats": 239778,
+            "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+            "address": "bc1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdqcuvtzv",
+            "type": "witness_v1_taproot"
+          }
+        ],
+        "inputAddress": "bc1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdqcuvtzv",
+        "feeSats": 222,
+        "vsize": 154,
+        "weight": 616,
+        "netLeavingKeySats": 60222,
+        "signalsRbf": true,
+        "bip340Signature": "aa7e7e5843a8db40d42e533b82b12a5090188dc4f76020cf88a3c06ba588fd0e785d986bb1413aa1ac7f4f87a8a5b689422203ca22aa921abe3148d3fed43f40"
+      }
+    },
+    {
+      "id": "bitcoin-recipient-p2tr",
+      "publicKey": "03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "context": {
+        "kind": "bitcoin-taproot-keypath-v1",
+        "network": "bitcoin",
+        "unsignedTransaction": "02000000010c341de8719c87bacebf29922d6daf26e36b6488126ca36fe91f54189d744b200100000000fdffffff0260ea000000000000225120418c46636d9e1a683f58e35b42336e776fdcc3b2d4e39e7a0bf1ab0716e3c5faa2a8030000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a00000000",
+        "prevout": {
+          "amountSats": 300000,
+          "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a"
+        },
+        "digestAlgorithm": "bip341-sighash-default-keypath",
+        "digest": "6d5d6036e04e0b6c029405fef41e25f3886ef5591ed9d8c9532936e39e069017"
+      },
+      "expected": {
+        "txid": "452500f482967863e7ef2fd268ef5b196d4b5166b30fe988653766f34cd04f7e",
+        "outputs": [
+          {
+            "amountSats": 60000,
+            "scriptPubKey": "5120418c46636d9e1a683f58e35b42336e776fdcc3b2d4e39e7a0bf1ab0716e3c5fa",
+            "address": "bc1pgxxyvcmdncdxs06cudd5yvmwwahaesaj6n3eu7st7x4sw9hrchaqjy33gs",
+            "type": "witness_v1_taproot"
+          },
+          {
+            "amountSats": 239778,
+            "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+            "address": "bc1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdqcuvtzv",
+            "type": "witness_v1_taproot"
+          }
+        ],
+        "inputAddress": "bc1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdqcuvtzv",
+        "feeSats": 222,
+        "vsize": 154,
+        "weight": 616,
+        "netLeavingKeySats": 60222,
+        "signalsRbf": true,
+        "bip340Signature": "a9b53acc8feaf253c412745bf51cef7019a0b8ec4cf7b41d59c8d8afe4cd105623804b7a84e443f0b082b81d89b1383a162a6c0c62cb1c6ae8101fd474de0f13"
+      }
+    },
+    {
+      "id": "testnet-recipient-p2pkh",
+      "publicKey": "03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "context": {
+        "kind": "bitcoin-taproot-keypath-v1",
+        "network": "testnet",
+        "unsignedTransaction": "02000000010c341de8719c87bacebf29922d6daf26e36b6488126ca36fe91f54189d744b200100000000fdffffff0260ea0000000000001976a9147dd65592d0ab2fe0d0257d571abf032cd9db93dc88aca2a8030000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a00000000",
+        "prevout": {
+          "amountSats": 300000,
+          "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a"
+        },
+        "digestAlgorithm": "bip341-sighash-default-keypath",
+        "digest": "40cce6a2801e08b491a794c26301cbaef2261db04deda1a6b670f13b54f44339"
+      },
+      "expected": {
+        "txid": "b1fdf182728cb80f7ea75440cb9748836734dbb53e512e7c03fdb0c65d557892",
+        "outputs": [
+          {
+            "amountSats": 60000,
+            "scriptPubKey": "76a9147dd65592d0ab2fe0d0257d571abf032cd9db93dc88ac",
+            "address": "mrzKXEpXfEDHk7vFS3LBXVXoa4YXFcCkje",
+            "type": "pubkeyhash"
+          },
+          {
+            "amountSats": 239778,
+            "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+            "address": "tb1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdq056ycr",
+            "type": "witness_v1_taproot"
+          }
+        ],
+        "inputAddress": "tb1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdq056ycr",
+        "feeSats": 222,
+        "vsize": 145,
+        "weight": 580,
+        "netLeavingKeySats": 60222,
+        "signalsRbf": true,
+        "bip340Signature": "7b63d95059cf9570a9fea7297da8b70b62cedcdb959d423a7171abcdcea922d7054f05d9e716a7f31ef4602c62bf02b7c940ceccbb8a6efa39c67ea0cb49a23e"
+      }
+    },
+    {
+      "id": "testnet-recipient-p2sh",
+      "publicKey": "03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "context": {
+        "kind": "bitcoin-taproot-keypath-v1",
+        "network": "testnet",
+        "unsignedTransaction": "02000000010c341de8719c87bacebf29922d6daf26e36b6488126ca36fe91f54189d744b200100000000fdffffff0260ea00000000000017a91469ea5ff598a286f418ae77503ce85d83da4ae88e87a2a8030000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a00000000",
+        "prevout": {
+          "amountSats": 300000,
+          "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a"
+        },
+        "digestAlgorithm": "bip341-sighash-default-keypath",
+        "digest": "c67d649c0d041887b8cb205eabea8bc17a662e0607ec3ddb5e791d07de37e6cb"
+      },
+      "expected": {
+        "txid": "f54bd644eade075029297eb58c08692c2f466aa97fea090f0cf047a25e8289bc",
+        "outputs": [
+          {
+            "amountSats": 60000,
+            "scriptPubKey": "a91469ea5ff598a286f418ae77503ce85d83da4ae88e87",
+            "address": "2N2uFi5LbDQQwTqAVd5veF6qE9hWww2DVzF",
+            "type": "scripthash"
+          },
+          {
+            "amountSats": 239778,
+            "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+            "address": "tb1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdq056ycr",
+            "type": "witness_v1_taproot"
+          }
+        ],
+        "inputAddress": "tb1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdq056ycr",
+        "feeSats": 222,
+        "vsize": 143,
+        "weight": 572,
+        "netLeavingKeySats": 60222,
+        "signalsRbf": true,
+        "bip340Signature": "ae915206aa294ebd097d4c5e700ef9a8650ee5c9390bbbce1c7ecaa1bf660eb1d8d7ec88b6533b4371765f2193aeb0a84da116271397be6b88d111945a5cab70"
+      }
+    },
+    {
+      "id": "testnet-recipient-p2wpkh",
+      "publicKey": "03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "context": {
+        "kind": "bitcoin-taproot-keypath-v1",
+        "network": "testnet",
+        "unsignedTransaction": "02000000010c341de8719c87bacebf29922d6daf26e36b6488126ca36fe91f54189d744b200100000000fdffffff0260ea0000000000001600147dd65592d0ab2fe0d0257d571abf032cd9db93dca2a8030000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a00000000",
+        "prevout": {
+          "amountSats": 300000,
+          "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a"
+        },
+        "digestAlgorithm": "bip341-sighash-default-keypath",
+        "digest": "c05da5f0f17428e4033e2b5dd5de962a5b4dcfef76c58a72d49ab14751631200"
+      },
+      "expected": {
+        "txid": "b2779c1fa9189df930a90124de0a1b1c9446748e673a60cfb3fc17b901c70a83",
+        "outputs": [
+          {
+            "amountSats": 60000,
+            "scriptPubKey": "00147dd65592d0ab2fe0d0257d571abf032cd9db93dc",
+            "address": "tb1q0ht9tyks4vh7p5p904t340cr9nvahy7um9zdem",
+            "type": "witness_v0_keyhash"
+          },
+          {
+            "amountSats": 239778,
+            "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+            "address": "tb1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdq056ycr",
+            "type": "witness_v1_taproot"
+          }
+        ],
+        "inputAddress": "tb1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdq056ycr",
+        "feeSats": 222,
+        "vsize": 142,
+        "weight": 568,
+        "netLeavingKeySats": 60222,
+        "signalsRbf": true,
+        "bip340Signature": "8e69f59b3383a20ed826a5d0fbfc4b7cb206b8968b59f442a1971fd9f8f814a0c19d26f376058d0062976854bd67d1e164b7c606859267fc53ee9aef05aa2147"
+      }
+    },
+    {
+      "id": "testnet-recipient-p2wsh",
+      "publicKey": "03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "context": {
+        "kind": "bitcoin-taproot-keypath-v1",
+        "network": "testnet",
+        "unsignedTransaction": "02000000010c341de8719c87bacebf29922d6daf26e36b6488126ca36fe91f54189d744b200100000000fdffffff0260ea000000000000220020e19dcba1a5f40b4fe87866d5c275544c26d624e3e54af613b7cb74857ca93564a2a8030000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a00000000",
+        "prevout": {
+          "amountSats": 300000,
+          "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a"
+        },
+        "digestAlgorithm": "bip341-sighash-default-keypath",
+        "digest": "b2b368be3ab0142eb0375c2dde68957819527272a4e5ea5174bf90c808ff2795"
+      },
+      "expected": {
+        "txid": "6834d773672b279629bf0e8f1710c37fc59a3d244a5ff277535c8a4fc544f73a",
+        "outputs": [
+          {
+            "amountSats": 60000,
+            "scriptPubKey": "0020e19dcba1a5f40b4fe87866d5c275544c26d624e3e54af613b7cb74857ca93564",
+            "address": "tb1quxwuhgd97s95l6rcvm2uya25fsndvf8ru490vyahed6g2l9fx4jqu8sy64",
+            "type": "witness_v0_scripthash"
+          },
+          {
+            "amountSats": 239778,
+            "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+            "address": "tb1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdq056ycr",
+            "type": "witness_v1_taproot"
+          }
+        ],
+        "inputAddress": "tb1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdq056ycr",
+        "feeSats": 222,
+        "vsize": 154,
+        "weight": 616,
+        "netLeavingKeySats": 60222,
+        "signalsRbf": true,
+        "bip340Signature": "aa7e7e5843a8db40d42e533b82b12a5090188dc4f76020cf88a3c06ba588fd0e785d986bb1413aa1ac7f4f87a8a5b689422203ca22aa921abe3148d3fed43f40"
+      }
+    },
+    {
+      "id": "testnet-recipient-p2tr",
+      "publicKey": "03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "context": {
+        "kind": "bitcoin-taproot-keypath-v1",
+        "network": "testnet",
+        "unsignedTransaction": "02000000010c341de8719c87bacebf29922d6daf26e36b6488126ca36fe91f54189d744b200100000000fdffffff0260ea000000000000225120418c46636d9e1a683f58e35b42336e776fdcc3b2d4e39e7a0bf1ab0716e3c5faa2a8030000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a00000000",
+        "prevout": {
+          "amountSats": 300000,
+          "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a"
+        },
+        "digestAlgorithm": "bip341-sighash-default-keypath",
+        "digest": "6d5d6036e04e0b6c029405fef41e25f3886ef5591ed9d8c9532936e39e069017"
+      },
+      "expected": {
+        "txid": "452500f482967863e7ef2fd268ef5b196d4b5166b30fe988653766f34cd04f7e",
+        "outputs": [
+          {
+            "amountSats": 60000,
+            "scriptPubKey": "5120418c46636d9e1a683f58e35b42336e776fdcc3b2d4e39e7a0bf1ab0716e3c5fa",
+            "address": "tb1pgxxyvcmdncdxs06cudd5yvmwwahaesaj6n3eu7st7x4sw9hrchaq9v87jl",
+            "type": "witness_v1_taproot"
+          },
+          {
+            "amountSats": 239778,
+            "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+            "address": "tb1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdq056ycr",
+            "type": "witness_v1_taproot"
+          }
+        ],
+        "inputAddress": "tb1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdq056ycr",
+        "feeSats": 222,
+        "vsize": 154,
+        "weight": 616,
+        "netLeavingKeySats": 60222,
+        "signalsRbf": true,
+        "bip340Signature": "a9b53acc8feaf253c412745bf51cef7019a0b8ec4cf7b41d59c8d8afe4cd105623804b7a84e443f0b082b81d89b1383a162a6c0c62cb1c6ae8101fd474de0f13"
+      }
+    },
+    {
+      "id": "signet-recipient-p2pkh",
+      "publicKey": "03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "context": {
+        "kind": "bitcoin-taproot-keypath-v1",
+        "network": "signet",
+        "unsignedTransaction": "02000000010c341de8719c87bacebf29922d6daf26e36b6488126ca36fe91f54189d744b200100000000fdffffff0260ea0000000000001976a9147dd65592d0ab2fe0d0257d571abf032cd9db93dc88aca2a8030000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a00000000",
+        "prevout": {
+          "amountSats": 300000,
+          "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a"
+        },
+        "digestAlgorithm": "bip341-sighash-default-keypath",
+        "digest": "40cce6a2801e08b491a794c26301cbaef2261db04deda1a6b670f13b54f44339"
+      },
+      "expected": {
+        "txid": "b1fdf182728cb80f7ea75440cb9748836734dbb53e512e7c03fdb0c65d557892",
+        "outputs": [
+          {
+            "amountSats": 60000,
+            "scriptPubKey": "76a9147dd65592d0ab2fe0d0257d571abf032cd9db93dc88ac",
+            "address": "mrzKXEpXfEDHk7vFS3LBXVXoa4YXFcCkje",
+            "type": "pubkeyhash"
+          },
+          {
+            "amountSats": 239778,
+            "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+            "address": "tb1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdq056ycr",
+            "type": "witness_v1_taproot"
+          }
+        ],
+        "inputAddress": "tb1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdq056ycr",
+        "feeSats": 222,
+        "vsize": 145,
+        "weight": 580,
+        "netLeavingKeySats": 60222,
+        "signalsRbf": true,
+        "bip340Signature": "7b63d95059cf9570a9fea7297da8b70b62cedcdb959d423a7171abcdcea922d7054f05d9e716a7f31ef4602c62bf02b7c940ceccbb8a6efa39c67ea0cb49a23e"
+      }
+    },
+    {
+      "id": "signet-recipient-p2sh",
+      "publicKey": "03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "context": {
+        "kind": "bitcoin-taproot-keypath-v1",
+        "network": "signet",
+        "unsignedTransaction": "02000000010c341de8719c87bacebf29922d6daf26e36b6488126ca36fe91f54189d744b200100000000fdffffff0260ea00000000000017a91469ea5ff598a286f418ae77503ce85d83da4ae88e87a2a8030000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a00000000",
+        "prevout": {
+          "amountSats": 300000,
+          "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a"
+        },
+        "digestAlgorithm": "bip341-sighash-default-keypath",
+        "digest": "c67d649c0d041887b8cb205eabea8bc17a662e0607ec3ddb5e791d07de37e6cb"
+      },
+      "expected": {
+        "txid": "f54bd644eade075029297eb58c08692c2f466aa97fea090f0cf047a25e8289bc",
+        "outputs": [
+          {
+            "amountSats": 60000,
+            "scriptPubKey": "a91469ea5ff598a286f418ae77503ce85d83da4ae88e87",
+            "address": "2N2uFi5LbDQQwTqAVd5veF6qE9hWww2DVzF",
+            "type": "scripthash"
+          },
+          {
+            "amountSats": 239778,
+            "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+            "address": "tb1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdq056ycr",
+            "type": "witness_v1_taproot"
+          }
+        ],
+        "inputAddress": "tb1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdq056ycr",
+        "feeSats": 222,
+        "vsize": 143,
+        "weight": 572,
+        "netLeavingKeySats": 60222,
+        "signalsRbf": true,
+        "bip340Signature": "ae915206aa294ebd097d4c5e700ef9a8650ee5c9390bbbce1c7ecaa1bf660eb1d8d7ec88b6533b4371765f2193aeb0a84da116271397be6b88d111945a5cab70"
+      }
+    },
+    {
+      "id": "signet-recipient-p2wpkh",
+      "publicKey": "03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "context": {
+        "kind": "bitcoin-taproot-keypath-v1",
+        "network": "signet",
+        "unsignedTransaction": "02000000010c341de8719c87bacebf29922d6daf26e36b6488126ca36fe91f54189d744b200100000000fdffffff0260ea0000000000001600147dd65592d0ab2fe0d0257d571abf032cd9db93dca2a8030000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a00000000",
+        "prevout": {
+          "amountSats": 300000,
+          "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a"
+        },
+        "digestAlgorithm": "bip341-sighash-default-keypath",
+        "digest": "c05da5f0f17428e4033e2b5dd5de962a5b4dcfef76c58a72d49ab14751631200"
+      },
+      "expected": {
+        "txid": "b2779c1fa9189df930a90124de0a1b1c9446748e673a60cfb3fc17b901c70a83",
+        "outputs": [
+          {
+            "amountSats": 60000,
+            "scriptPubKey": "00147dd65592d0ab2fe0d0257d571abf032cd9db93dc",
+            "address": "tb1q0ht9tyks4vh7p5p904t340cr9nvahy7um9zdem",
+            "type": "witness_v0_keyhash"
+          },
+          {
+            "amountSats": 239778,
+            "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+            "address": "tb1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdq056ycr",
+            "type": "witness_v1_taproot"
+          }
+        ],
+        "inputAddress": "tb1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdq056ycr",
+        "feeSats": 222,
+        "vsize": 142,
+        "weight": 568,
+        "netLeavingKeySats": 60222,
+        "signalsRbf": true,
+        "bip340Signature": "8e69f59b3383a20ed826a5d0fbfc4b7cb206b8968b59f442a1971fd9f8f814a0c19d26f376058d0062976854bd67d1e164b7c606859267fc53ee9aef05aa2147"
+      }
+    },
+    {
+      "id": "signet-recipient-p2wsh",
+      "publicKey": "03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "context": {
+        "kind": "bitcoin-taproot-keypath-v1",
+        "network": "signet",
+        "unsignedTransaction": "02000000010c341de8719c87bacebf29922d6daf26e36b6488126ca36fe91f54189d744b200100000000fdffffff0260ea000000000000220020e19dcba1a5f40b4fe87866d5c275544c26d624e3e54af613b7cb74857ca93564a2a8030000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a00000000",
+        "prevout": {
+          "amountSats": 300000,
+          "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a"
+        },
+        "digestAlgorithm": "bip341-sighash-default-keypath",
+        "digest": "b2b368be3ab0142eb0375c2dde68957819527272a4e5ea5174bf90c808ff2795"
+      },
+      "expected": {
+        "txid": "6834d773672b279629bf0e8f1710c37fc59a3d244a5ff277535c8a4fc544f73a",
+        "outputs": [
+          {
+            "amountSats": 60000,
+            "scriptPubKey": "0020e19dcba1a5f40b4fe87866d5c275544c26d624e3e54af613b7cb74857ca93564",
+            "address": "tb1quxwuhgd97s95l6rcvm2uya25fsndvf8ru490vyahed6g2l9fx4jqu8sy64",
+            "type": "witness_v0_scripthash"
+          },
+          {
+            "amountSats": 239778,
+            "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+            "address": "tb1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdq056ycr",
+            "type": "witness_v1_taproot"
+          }
+        ],
+        "inputAddress": "tb1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdq056ycr",
+        "feeSats": 222,
+        "vsize": 154,
+        "weight": 616,
+        "netLeavingKeySats": 60222,
+        "signalsRbf": true,
+        "bip340Signature": "aa7e7e5843a8db40d42e533b82b12a5090188dc4f76020cf88a3c06ba588fd0e785d986bb1413aa1ac7f4f87a8a5b689422203ca22aa921abe3148d3fed43f40"
+      }
+    },
+    {
+      "id": "signet-recipient-p2tr",
+      "publicKey": "03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "context": {
+        "kind": "bitcoin-taproot-keypath-v1",
+        "network": "signet",
+        "unsignedTransaction": "02000000010c341de8719c87bacebf29922d6daf26e36b6488126ca36fe91f54189d744b200100000000fdffffff0260ea000000000000225120418c46636d9e1a683f58e35b42336e776fdcc3b2d4e39e7a0bf1ab0716e3c5faa2a8030000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a00000000",
+        "prevout": {
+          "amountSats": 300000,
+          "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a"
+        },
+        "digestAlgorithm": "bip341-sighash-default-keypath",
+        "digest": "6d5d6036e04e0b6c029405fef41e25f3886ef5591ed9d8c9532936e39e069017"
+      },
+      "expected": {
+        "txid": "452500f482967863e7ef2fd268ef5b196d4b5166b30fe988653766f34cd04f7e",
+        "outputs": [
+          {
+            "amountSats": 60000,
+            "scriptPubKey": "5120418c46636d9e1a683f58e35b42336e776fdcc3b2d4e39e7a0bf1ab0716e3c5fa",
+            "address": "tb1pgxxyvcmdncdxs06cudd5yvmwwahaesaj6n3eu7st7x4sw9hrchaq9v87jl",
+            "type": "witness_v1_taproot"
+          },
+          {
+            "amountSats": 239778,
+            "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+            "address": "tb1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdq056ycr",
+            "type": "witness_v1_taproot"
+          }
+        ],
+        "inputAddress": "tb1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdq056ycr",
+        "feeSats": 222,
+        "vsize": 154,
+        "weight": 616,
+        "netLeavingKeySats": 60222,
+        "signalsRbf": true,
+        "bip340Signature": "a9b53acc8feaf253c412745bf51cef7019a0b8ec4cf7b41d59c8d8afe4cd105623804b7a84e443f0b082b81d89b1383a162a6c0c62cb1c6ae8101fd474de0f13"
+      }
+    },
+    {
+      "id": "regtest-recipient-p2pkh",
+      "publicKey": "03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "context": {
+        "kind": "bitcoin-taproot-keypath-v1",
+        "network": "regtest",
+        "unsignedTransaction": "02000000010c341de8719c87bacebf29922d6daf26e36b6488126ca36fe91f54189d744b200100000000fdffffff0260ea0000000000001976a9147dd65592d0ab2fe0d0257d571abf032cd9db93dc88aca2a8030000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a00000000",
+        "prevout": {
+          "amountSats": 300000,
+          "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a"
+        },
+        "digestAlgorithm": "bip341-sighash-default-keypath",
+        "digest": "40cce6a2801e08b491a794c26301cbaef2261db04deda1a6b670f13b54f44339"
+      },
+      "expected": {
+        "txid": "b1fdf182728cb80f7ea75440cb9748836734dbb53e512e7c03fdb0c65d557892",
+        "outputs": [
+          {
+            "amountSats": 60000,
+            "scriptPubKey": "76a9147dd65592d0ab2fe0d0257d571abf032cd9db93dc88ac",
+            "address": "mrzKXEpXfEDHk7vFS3LBXVXoa4YXFcCkje",
+            "type": "pubkeyhash"
+          },
+          {
+            "amountSats": 239778,
+            "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+            "address": "bcrt1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdqzdszde",
+            "type": "witness_v1_taproot"
+          }
+        ],
+        "inputAddress": "bcrt1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdqzdszde",
+        "feeSats": 222,
+        "vsize": 145,
+        "weight": 580,
+        "netLeavingKeySats": 60222,
+        "signalsRbf": true,
+        "bip340Signature": "7b63d95059cf9570a9fea7297da8b70b62cedcdb959d423a7171abcdcea922d7054f05d9e716a7f31ef4602c62bf02b7c940ceccbb8a6efa39c67ea0cb49a23e"
+      }
+    },
+    {
+      "id": "regtest-recipient-p2sh",
+      "publicKey": "03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "context": {
+        "kind": "bitcoin-taproot-keypath-v1",
+        "network": "regtest",
+        "unsignedTransaction": "02000000010c341de8719c87bacebf29922d6daf26e36b6488126ca36fe91f54189d744b200100000000fdffffff0260ea00000000000017a91469ea5ff598a286f418ae77503ce85d83da4ae88e87a2a8030000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a00000000",
+        "prevout": {
+          "amountSats": 300000,
+          "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a"
+        },
+        "digestAlgorithm": "bip341-sighash-default-keypath",
+        "digest": "c67d649c0d041887b8cb205eabea8bc17a662e0607ec3ddb5e791d07de37e6cb"
+      },
+      "expected": {
+        "txid": "f54bd644eade075029297eb58c08692c2f466aa97fea090f0cf047a25e8289bc",
+        "outputs": [
+          {
+            "amountSats": 60000,
+            "scriptPubKey": "a91469ea5ff598a286f418ae77503ce85d83da4ae88e87",
+            "address": "2N2uFi5LbDQQwTqAVd5veF6qE9hWww2DVzF",
+            "type": "scripthash"
+          },
+          {
+            "amountSats": 239778,
+            "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+            "address": "bcrt1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdqzdszde",
+            "type": "witness_v1_taproot"
+          }
+        ],
+        "inputAddress": "bcrt1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdqzdszde",
+        "feeSats": 222,
+        "vsize": 143,
+        "weight": 572,
+        "netLeavingKeySats": 60222,
+        "signalsRbf": true,
+        "bip340Signature": "ae915206aa294ebd097d4c5e700ef9a8650ee5c9390bbbce1c7ecaa1bf660eb1d8d7ec88b6533b4371765f2193aeb0a84da116271397be6b88d111945a5cab70"
+      }
+    },
+    {
+      "id": "regtest-recipient-p2wpkh",
+      "publicKey": "03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "context": {
+        "kind": "bitcoin-taproot-keypath-v1",
+        "network": "regtest",
+        "unsignedTransaction": "02000000010c341de8719c87bacebf29922d6daf26e36b6488126ca36fe91f54189d744b200100000000fdffffff0260ea0000000000001600147dd65592d0ab2fe0d0257d571abf032cd9db93dca2a8030000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a00000000",
+        "prevout": {
+          "amountSats": 300000,
+          "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a"
+        },
+        "digestAlgorithm": "bip341-sighash-default-keypath",
+        "digest": "c05da5f0f17428e4033e2b5dd5de962a5b4dcfef76c58a72d49ab14751631200"
+      },
+      "expected": {
+        "txid": "b2779c1fa9189df930a90124de0a1b1c9446748e673a60cfb3fc17b901c70a83",
+        "outputs": [
+          {
+            "amountSats": 60000,
+            "scriptPubKey": "00147dd65592d0ab2fe0d0257d571abf032cd9db93dc",
+            "address": "bcrt1q0ht9tyks4vh7p5p904t340cr9nvahy7uevmqwj",
+            "type": "witness_v0_keyhash"
+          },
+          {
+            "amountSats": 239778,
+            "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+            "address": "bcrt1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdqzdszde",
+            "type": "witness_v1_taproot"
+          }
+        ],
+        "inputAddress": "bcrt1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdqzdszde",
+        "feeSats": 222,
+        "vsize": 142,
+        "weight": 568,
+        "netLeavingKeySats": 60222,
+        "signalsRbf": true,
+        "bip340Signature": "8e69f59b3383a20ed826a5d0fbfc4b7cb206b8968b59f442a1971fd9f8f814a0c19d26f376058d0062976854bd67d1e164b7c606859267fc53ee9aef05aa2147"
+      }
+    },
+    {
+      "id": "regtest-recipient-p2wsh",
+      "publicKey": "03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "context": {
+        "kind": "bitcoin-taproot-keypath-v1",
+        "network": "regtest",
+        "unsignedTransaction": "02000000010c341de8719c87bacebf29922d6daf26e36b6488126ca36fe91f54189d744b200100000000fdffffff0260ea000000000000220020e19dcba1a5f40b4fe87866d5c275544c26d624e3e54af613b7cb74857ca93564a2a8030000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a00000000",
+        "prevout": {
+          "amountSats": 300000,
+          "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a"
+        },
+        "digestAlgorithm": "bip341-sighash-default-keypath",
+        "digest": "b2b368be3ab0142eb0375c2dde68957819527272a4e5ea5174bf90c808ff2795"
+      },
+      "expected": {
+        "txid": "6834d773672b279629bf0e8f1710c37fc59a3d244a5ff277535c8a4fc544f73a",
+        "outputs": [
+          {
+            "amountSats": 60000,
+            "scriptPubKey": "0020e19dcba1a5f40b4fe87866d5c275544c26d624e3e54af613b7cb74857ca93564",
+            "address": "bcrt1quxwuhgd97s95l6rcvm2uya25fsndvf8ru490vyahed6g2l9fx4jq376z00",
+            "type": "witness_v0_scripthash"
+          },
+          {
+            "amountSats": 239778,
+            "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+            "address": "bcrt1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdqzdszde",
+            "type": "witness_v1_taproot"
+          }
+        ],
+        "inputAddress": "bcrt1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdqzdszde",
+        "feeSats": 222,
+        "vsize": 154,
+        "weight": 616,
+        "netLeavingKeySats": 60222,
+        "signalsRbf": true,
+        "bip340Signature": "aa7e7e5843a8db40d42e533b82b12a5090188dc4f76020cf88a3c06ba588fd0e785d986bb1413aa1ac7f4f87a8a5b689422203ca22aa921abe3148d3fed43f40"
+      }
+    },
+    {
+      "id": "regtest-recipient-p2tr",
+      "publicKey": "03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "context": {
+        "kind": "bitcoin-taproot-keypath-v1",
+        "network": "regtest",
+        "unsignedTransaction": "02000000010c341de8719c87bacebf29922d6daf26e36b6488126ca36fe91f54189d744b200100000000fdffffff0260ea000000000000225120418c46636d9e1a683f58e35b42336e776fdcc3b2d4e39e7a0bf1ab0716e3c5faa2a8030000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a00000000",
+        "prevout": {
+          "amountSats": 300000,
+          "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a"
+        },
+        "digestAlgorithm": "bip341-sighash-default-keypath",
+        "digest": "6d5d6036e04e0b6c029405fef41e25f3886ef5591ed9d8c9532936e39e069017"
+      },
+      "expected": {
+        "txid": "452500f482967863e7ef2fd268ef5b196d4b5166b30fe988653766f34cd04f7e",
+        "outputs": [
+          {
+            "amountSats": 60000,
+            "scriptPubKey": "5120418c46636d9e1a683f58e35b42336e776fdcc3b2d4e39e7a0bf1ab0716e3c5fa",
+            "address": "bcrt1pgxxyvcmdncdxs06cudd5yvmwwahaesaj6n3eu7st7x4sw9hrchaqg4dc89",
+            "type": "witness_v1_taproot"
+          },
+          {
+            "amountSats": 239778,
+            "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+            "address": "bcrt1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdqzdszde",
+            "type": "witness_v1_taproot"
+          }
+        ],
+        "inputAddress": "bcrt1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdqzdszde",
+        "feeSats": 222,
+        "vsize": 154,
+        "weight": 616,
+        "netLeavingKeySats": 60222,
+        "signalsRbf": true,
+        "bip340Signature": "a9b53acc8feaf253c412745bf51cef7019a0b8ec4cf7b41d59c8d8afe4cd105623804b7a84e443f0b082b81d89b1383a162a6c0c62cb1c6ae8101fd474de0f13"
+      }
+    }
+  ],
+  "sameKeyPolicyRefusals": [
+    {
+      "id": "bitcoin-same-key-unsupported-p2pkh",
+      "publicKey": "03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "context": {
+        "kind": "bitcoin-taproot-keypath-v1",
+        "network": "bitcoin",
+        "unsignedTransaction": "02000000010c341de8719c87bacebf29922d6daf26e36b6488126ca36fe91f54189d744b200100000000fdffffff0260ea0000000000001976a9147fda9cf020c16cacf529c87d8de89bfc70b8c9cb88aca2a8030000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a00000000",
+        "prevout": {
+          "amountSats": 300000,
+          "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a"
+        },
+        "digestAlgorithm": "bip341-sighash-default-keypath",
+        "digest": "3d37e04961e532cf4e5d2c30c52e2d079faf133dc2bd09aebb2237cbec0a5c48"
+      },
+      "expected": {
+        "txid": "618b044bf0ca6bb333cdb246477b560c2b8209d36c16b8ddc4dec8287c380eca",
+        "outputs": [
+          {
+            "amountSats": 60000,
+            "scriptPubKey": "76a9147fda9cf020c16cacf529c87d8de89bfc70b8c9cb88ac",
+            "address": "1Cf2hs39Woi61YNkYGUAcohL2K2q4pawBq",
+            "type": "pubkeyhash"
+          },
+          {
+            "amountSats": 239778,
+            "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+            "address": "bc1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdqcuvtzv",
+            "type": "witness_v1_taproot"
+          }
+        ],
+        "inputAddress": "bc1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdqcuvtzv",
+        "feeSats": 222,
+        "vsize": 145,
+        "weight": 580,
+        "netLeavingKeySats": 60222,
+        "signalsRbf": true,
+        "bip340Signature": "21d0f10ebf552aa0a6ca300dba55948d0603c6ded216daba39fa41cde86a5a3205045f118fcd8d569a5fff246bfde10b0ea561f19750c994a51cec3fb309d029"
+      }
+    },
+    {
+      "id": "bitcoin-same-key-unsupported-p2sh",
+      "publicKey": "03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "context": {
+        "kind": "bitcoin-taproot-keypath-v1",
+        "network": "bitcoin",
+        "unsignedTransaction": "02000000010c341de8719c87bacebf29922d6daf26e36b6488126ca36fe91f54189d744b200100000000fdffffff0260ea00000000000017a914cc6ffbc0bf31af759451068f90ba7a0272b6b33287a2a8030000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a00000000",
+        "prevout": {
+          "amountSats": 300000,
+          "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a"
+        },
+        "digestAlgorithm": "bip341-sighash-default-keypath",
+        "digest": "f6737d9c1eacaf2b06a77cf6279bdcbb945589b0bfa50d031775a73db5a470b0"
+      },
+      "expected": {
+        "txid": "61aa62c937aad800490be2f45157334dccbd7e3bb7bab2e7ad23ac2df8c2b1a7",
+        "outputs": [
+          {
+            "amountSats": 60000,
+            "scriptPubKey": "a914cc6ffbc0bf31af759451068f90ba7a0272b6b33287",
+            "address": "3LKyvRN6SmYXGBNn8fcQvYxW9MGKtwcinN",
+            "type": "scripthash"
+          },
+          {
+            "amountSats": 239778,
+            "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+            "address": "bc1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdqcuvtzv",
+            "type": "witness_v1_taproot"
+          }
+        ],
+        "inputAddress": "bc1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdqcuvtzv",
+        "feeSats": 222,
+        "vsize": 143,
+        "weight": 572,
+        "netLeavingKeySats": 60222,
+        "signalsRbf": true,
+        "bip340Signature": "fad8294b627a86d4ca1d13c2bb0d86fd35e9075c626b232c90340da13696b307aa93d1026651046690e52f3ef3487dfa6220521a5c600617cf5b91ef90efec67"
+      }
+    },
+    {
+      "id": "bitcoin-same-key-unsupported-p2wpkh",
+      "publicKey": "03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "context": {
+        "kind": "bitcoin-taproot-keypath-v1",
+        "network": "bitcoin",
+        "unsignedTransaction": "02000000010c341de8719c87bacebf29922d6daf26e36b6488126ca36fe91f54189d744b200100000000fdffffff0260ea0000000000001600147fda9cf020c16cacf529c87d8de89bfc70b8c9cba2a8030000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a00000000",
+        "prevout": {
+          "amountSats": 300000,
+          "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a"
+        },
+        "digestAlgorithm": "bip341-sighash-default-keypath",
+        "digest": "4bf738efdb20928de9ceab57aadec50be88be0eb1cbc8e97b9d1f48689d56470"
+      },
+      "expected": {
+        "txid": "3c22bc264457363fe8750e3b3c9c3f8e7d18500d7a2cd7b52a53e554f423d9b6",
+        "outputs": [
+          {
+            "amountSats": 60000,
+            "scriptPubKey": "00147fda9cf020c16cacf529c87d8de89bfc70b8c9cb",
+            "address": "bc1q0ldfeupqc9k2eaffep7cm6yml3ct3jwtwzqt7k",
+            "type": "witness_v0_keyhash"
+          },
+          {
+            "amountSats": 239778,
+            "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+            "address": "bc1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdqcuvtzv",
+            "type": "witness_v1_taproot"
+          }
+        ],
+        "inputAddress": "bc1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdqcuvtzv",
+        "feeSats": 222,
+        "vsize": 142,
+        "weight": 568,
+        "netLeavingKeySats": 60222,
+        "signalsRbf": true,
+        "bip340Signature": "ab2c5e8199d9131ca546e351a2bbdddbba4ae0f3231d378190293ae3e49cc64b1b21c09e016a49a77b6d79c69882c4bd640e5b3e8699bd50c7e5443f83b6de86"
+      }
+    },
+    {
+      "id": "testnet-same-key-unsupported-p2pkh",
+      "publicKey": "03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "context": {
+        "kind": "bitcoin-taproot-keypath-v1",
+        "network": "testnet",
+        "unsignedTransaction": "02000000010c341de8719c87bacebf29922d6daf26e36b6488126ca36fe91f54189d744b200100000000fdffffff0260ea0000000000001976a9147fda9cf020c16cacf529c87d8de89bfc70b8c9cb88aca2a8030000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a00000000",
+        "prevout": {
+          "amountSats": 300000,
+          "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a"
+        },
+        "digestAlgorithm": "bip341-sighash-default-keypath",
+        "digest": "3d37e04961e532cf4e5d2c30c52e2d079faf133dc2bd09aebb2237cbec0a5c48"
+      },
+      "expected": {
+        "txid": "618b044bf0ca6bb333cdb246477b560c2b8209d36c16b8ddc4dec8287c380eca",
+        "outputs": [
+          {
+            "amountSats": 60000,
+            "scriptPubKey": "76a9147fda9cf020c16cacf529c87d8de89bfc70b8c9cb88ac",
+            "address": "msAyzv88Kq9LnerNFqSYSiuetJdXxnzZ8w",
+            "type": "pubkeyhash"
+          },
+          {
+            "amountSats": 239778,
+            "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+            "address": "tb1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdq056ycr",
+            "type": "witness_v1_taproot"
+          }
+        ],
+        "inputAddress": "tb1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdq056ycr",
+        "feeSats": 222,
+        "vsize": 145,
+        "weight": 580,
+        "netLeavingKeySats": 60222,
+        "signalsRbf": true,
+        "bip340Signature": "21d0f10ebf552aa0a6ca300dba55948d0603c6ded216daba39fa41cde86a5a3205045f118fcd8d569a5fff246bfde10b0ea561f19750c994a51cec3fb309d029"
+      }
+    },
+    {
+      "id": "testnet-same-key-unsupported-p2sh",
+      "publicKey": "03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "context": {
+        "kind": "bitcoin-taproot-keypath-v1",
+        "network": "testnet",
+        "unsignedTransaction": "02000000010c341de8719c87bacebf29922d6daf26e36b6488126ca36fe91f54189d744b200100000000fdffffff0260ea00000000000017a914cc6ffbc0bf31af759451068f90ba7a0272b6b33287a2a8030000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a00000000",
+        "prevout": {
+          "amountSats": 300000,
+          "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a"
+        },
+        "digestAlgorithm": "bip341-sighash-default-keypath",
+        "digest": "f6737d9c1eacaf2b06a77cf6279bdcbb945589b0bfa50d031775a73db5a470b0"
+      },
+      "expected": {
+        "txid": "61aa62c937aad800490be2f45157334dccbd7e3bb7bab2e7ad23ac2df8c2b1a7",
+        "outputs": [
+          {
+            "amountSats": 60000,
+            "scriptPubKey": "a914cc6ffbc0bf31af759451068f90ba7a0272b6b33287",
+            "address": "2NBtBzAJ84E3sTy1KooEHYVwmMhUVdJAyEa",
+            "type": "scripthash"
+          },
+          {
+            "amountSats": 239778,
+            "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+            "address": "tb1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdq056ycr",
+            "type": "witness_v1_taproot"
+          }
+        ],
+        "inputAddress": "tb1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdq056ycr",
+        "feeSats": 222,
+        "vsize": 143,
+        "weight": 572,
+        "netLeavingKeySats": 60222,
+        "signalsRbf": true,
+        "bip340Signature": "fad8294b627a86d4ca1d13c2bb0d86fd35e9075c626b232c90340da13696b307aa93d1026651046690e52f3ef3487dfa6220521a5c600617cf5b91ef90efec67"
+      }
+    },
+    {
+      "id": "testnet-same-key-unsupported-p2wpkh",
+      "publicKey": "03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "context": {
+        "kind": "bitcoin-taproot-keypath-v1",
+        "network": "testnet",
+        "unsignedTransaction": "02000000010c341de8719c87bacebf29922d6daf26e36b6488126ca36fe91f54189d744b200100000000fdffffff0260ea0000000000001600147fda9cf020c16cacf529c87d8de89bfc70b8c9cba2a8030000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a00000000",
+        "prevout": {
+          "amountSats": 300000,
+          "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a"
+        },
+        "digestAlgorithm": "bip341-sighash-default-keypath",
+        "digest": "4bf738efdb20928de9ceab57aadec50be88be0eb1cbc8e97b9d1f48689d56470"
+      },
+      "expected": {
+        "txid": "3c22bc264457363fe8750e3b3c9c3f8e7d18500d7a2cd7b52a53e554f423d9b6",
+        "outputs": [
+          {
+            "amountSats": 60000,
+            "scriptPubKey": "00147fda9cf020c16cacf529c87d8de89bfc70b8c9cb",
+            "address": "tb1q0ldfeupqc9k2eaffep7cm6yml3ct3jwtyymc99",
+            "type": "witness_v0_keyhash"
+          },
+          {
+            "amountSats": 239778,
+            "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+            "address": "tb1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdq056ycr",
+            "type": "witness_v1_taproot"
+          }
+        ],
+        "inputAddress": "tb1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdq056ycr",
+        "feeSats": 222,
+        "vsize": 142,
+        "weight": 568,
+        "netLeavingKeySats": 60222,
+        "signalsRbf": true,
+        "bip340Signature": "ab2c5e8199d9131ca546e351a2bbdddbba4ae0f3231d378190293ae3e49cc64b1b21c09e016a49a77b6d79c69882c4bd640e5b3e8699bd50c7e5443f83b6de86"
+      }
+    },
+    {
+      "id": "signet-same-key-unsupported-p2pkh",
+      "publicKey": "03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "context": {
+        "kind": "bitcoin-taproot-keypath-v1",
+        "network": "signet",
+        "unsignedTransaction": "02000000010c341de8719c87bacebf29922d6daf26e36b6488126ca36fe91f54189d744b200100000000fdffffff0260ea0000000000001976a9147fda9cf020c16cacf529c87d8de89bfc70b8c9cb88aca2a8030000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a00000000",
+        "prevout": {
+          "amountSats": 300000,
+          "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a"
+        },
+        "digestAlgorithm": "bip341-sighash-default-keypath",
+        "digest": "3d37e04961e532cf4e5d2c30c52e2d079faf133dc2bd09aebb2237cbec0a5c48"
+      },
+      "expected": {
+        "txid": "618b044bf0ca6bb333cdb246477b560c2b8209d36c16b8ddc4dec8287c380eca",
+        "outputs": [
+          {
+            "amountSats": 60000,
+            "scriptPubKey": "76a9147fda9cf020c16cacf529c87d8de89bfc70b8c9cb88ac",
+            "address": "msAyzv88Kq9LnerNFqSYSiuetJdXxnzZ8w",
+            "type": "pubkeyhash"
+          },
+          {
+            "amountSats": 239778,
+            "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+            "address": "tb1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdq056ycr",
+            "type": "witness_v1_taproot"
+          }
+        ],
+        "inputAddress": "tb1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdq056ycr",
+        "feeSats": 222,
+        "vsize": 145,
+        "weight": 580,
+        "netLeavingKeySats": 60222,
+        "signalsRbf": true,
+        "bip340Signature": "21d0f10ebf552aa0a6ca300dba55948d0603c6ded216daba39fa41cde86a5a3205045f118fcd8d569a5fff246bfde10b0ea561f19750c994a51cec3fb309d029"
+      }
+    },
+    {
+      "id": "signet-same-key-unsupported-p2sh",
+      "publicKey": "03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "context": {
+        "kind": "bitcoin-taproot-keypath-v1",
+        "network": "signet",
+        "unsignedTransaction": "02000000010c341de8719c87bacebf29922d6daf26e36b6488126ca36fe91f54189d744b200100000000fdffffff0260ea00000000000017a914cc6ffbc0bf31af759451068f90ba7a0272b6b33287a2a8030000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a00000000",
+        "prevout": {
+          "amountSats": 300000,
+          "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a"
+        },
+        "digestAlgorithm": "bip341-sighash-default-keypath",
+        "digest": "f6737d9c1eacaf2b06a77cf6279bdcbb945589b0bfa50d031775a73db5a470b0"
+      },
+      "expected": {
+        "txid": "61aa62c937aad800490be2f45157334dccbd7e3bb7bab2e7ad23ac2df8c2b1a7",
+        "outputs": [
+          {
+            "amountSats": 60000,
+            "scriptPubKey": "a914cc6ffbc0bf31af759451068f90ba7a0272b6b33287",
+            "address": "2NBtBzAJ84E3sTy1KooEHYVwmMhUVdJAyEa",
+            "type": "scripthash"
+          },
+          {
+            "amountSats": 239778,
+            "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+            "address": "tb1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdq056ycr",
+            "type": "witness_v1_taproot"
+          }
+        ],
+        "inputAddress": "tb1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdq056ycr",
+        "feeSats": 222,
+        "vsize": 143,
+        "weight": 572,
+        "netLeavingKeySats": 60222,
+        "signalsRbf": true,
+        "bip340Signature": "fad8294b627a86d4ca1d13c2bb0d86fd35e9075c626b232c90340da13696b307aa93d1026651046690e52f3ef3487dfa6220521a5c600617cf5b91ef90efec67"
+      }
+    },
+    {
+      "id": "signet-same-key-unsupported-p2wpkh",
+      "publicKey": "03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "context": {
+        "kind": "bitcoin-taproot-keypath-v1",
+        "network": "signet",
+        "unsignedTransaction": "02000000010c341de8719c87bacebf29922d6daf26e36b6488126ca36fe91f54189d744b200100000000fdffffff0260ea0000000000001600147fda9cf020c16cacf529c87d8de89bfc70b8c9cba2a8030000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a00000000",
+        "prevout": {
+          "amountSats": 300000,
+          "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a"
+        },
+        "digestAlgorithm": "bip341-sighash-default-keypath",
+        "digest": "4bf738efdb20928de9ceab57aadec50be88be0eb1cbc8e97b9d1f48689d56470"
+      },
+      "expected": {
+        "txid": "3c22bc264457363fe8750e3b3c9c3f8e7d18500d7a2cd7b52a53e554f423d9b6",
+        "outputs": [
+          {
+            "amountSats": 60000,
+            "scriptPubKey": "00147fda9cf020c16cacf529c87d8de89bfc70b8c9cb",
+            "address": "tb1q0ldfeupqc9k2eaffep7cm6yml3ct3jwtyymc99",
+            "type": "witness_v0_keyhash"
+          },
+          {
+            "amountSats": 239778,
+            "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+            "address": "tb1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdq056ycr",
+            "type": "witness_v1_taproot"
+          }
+        ],
+        "inputAddress": "tb1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdq056ycr",
+        "feeSats": 222,
+        "vsize": 142,
+        "weight": 568,
+        "netLeavingKeySats": 60222,
+        "signalsRbf": true,
+        "bip340Signature": "ab2c5e8199d9131ca546e351a2bbdddbba4ae0f3231d378190293ae3e49cc64b1b21c09e016a49a77b6d79c69882c4bd640e5b3e8699bd50c7e5443f83b6de86"
+      }
+    },
+    {
+      "id": "regtest-same-key-unsupported-p2pkh",
+      "publicKey": "03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "context": {
+        "kind": "bitcoin-taproot-keypath-v1",
+        "network": "regtest",
+        "unsignedTransaction": "02000000010c341de8719c87bacebf29922d6daf26e36b6488126ca36fe91f54189d744b200100000000fdffffff0260ea0000000000001976a9147fda9cf020c16cacf529c87d8de89bfc70b8c9cb88aca2a8030000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a00000000",
+        "prevout": {
+          "amountSats": 300000,
+          "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a"
+        },
+        "digestAlgorithm": "bip341-sighash-default-keypath",
+        "digest": "3d37e04961e532cf4e5d2c30c52e2d079faf133dc2bd09aebb2237cbec0a5c48"
+      },
+      "expected": {
+        "txid": "618b044bf0ca6bb333cdb246477b560c2b8209d36c16b8ddc4dec8287c380eca",
+        "outputs": [
+          {
+            "amountSats": 60000,
+            "scriptPubKey": "76a9147fda9cf020c16cacf529c87d8de89bfc70b8c9cb88ac",
+            "address": "msAyzv88Kq9LnerNFqSYSiuetJdXxnzZ8w",
+            "type": "pubkeyhash"
+          },
+          {
+            "amountSats": 239778,
+            "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+            "address": "bcrt1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdqzdszde",
+            "type": "witness_v1_taproot"
+          }
+        ],
+        "inputAddress": "bcrt1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdqzdszde",
+        "feeSats": 222,
+        "vsize": 145,
+        "weight": 580,
+        "netLeavingKeySats": 60222,
+        "signalsRbf": true,
+        "bip340Signature": "21d0f10ebf552aa0a6ca300dba55948d0603c6ded216daba39fa41cde86a5a3205045f118fcd8d569a5fff246bfde10b0ea561f19750c994a51cec3fb309d029"
+      }
+    },
+    {
+      "id": "regtest-same-key-unsupported-p2sh",
+      "publicKey": "03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "context": {
+        "kind": "bitcoin-taproot-keypath-v1",
+        "network": "regtest",
+        "unsignedTransaction": "02000000010c341de8719c87bacebf29922d6daf26e36b6488126ca36fe91f54189d744b200100000000fdffffff0260ea00000000000017a914cc6ffbc0bf31af759451068f90ba7a0272b6b33287a2a8030000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a00000000",
+        "prevout": {
+          "amountSats": 300000,
+          "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a"
+        },
+        "digestAlgorithm": "bip341-sighash-default-keypath",
+        "digest": "f6737d9c1eacaf2b06a77cf6279bdcbb945589b0bfa50d031775a73db5a470b0"
+      },
+      "expected": {
+        "txid": "61aa62c937aad800490be2f45157334dccbd7e3bb7bab2e7ad23ac2df8c2b1a7",
+        "outputs": [
+          {
+            "amountSats": 60000,
+            "scriptPubKey": "a914cc6ffbc0bf31af759451068f90ba7a0272b6b33287",
+            "address": "2NBtBzAJ84E3sTy1KooEHYVwmMhUVdJAyEa",
+            "type": "scripthash"
+          },
+          {
+            "amountSats": 239778,
+            "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+            "address": "bcrt1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdqzdszde",
+            "type": "witness_v1_taproot"
+          }
+        ],
+        "inputAddress": "bcrt1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdqzdszde",
+        "feeSats": 222,
+        "vsize": 143,
+        "weight": 572,
+        "netLeavingKeySats": 60222,
+        "signalsRbf": true,
+        "bip340Signature": "fad8294b627a86d4ca1d13c2bb0d86fd35e9075c626b232c90340da13696b307aa93d1026651046690e52f3ef3487dfa6220521a5c600617cf5b91ef90efec67"
+      }
+    },
+    {
+      "id": "regtest-same-key-unsupported-p2wpkh",
+      "publicKey": "03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "context": {
+        "kind": "bitcoin-taproot-keypath-v1",
+        "network": "regtest",
+        "unsignedTransaction": "02000000010c341de8719c87bacebf29922d6daf26e36b6488126ca36fe91f54189d744b200100000000fdffffff0260ea0000000000001600147fda9cf020c16cacf529c87d8de89bfc70b8c9cba2a8030000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a00000000",
+        "prevout": {
+          "amountSats": 300000,
+          "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a"
+        },
+        "digestAlgorithm": "bip341-sighash-default-keypath",
+        "digest": "4bf738efdb20928de9ceab57aadec50be88be0eb1cbc8e97b9d1f48689d56470"
+      },
+      "expected": {
+        "txid": "3c22bc264457363fe8750e3b3c9c3f8e7d18500d7a2cd7b52a53e554f423d9b6",
+        "outputs": [
+          {
+            "amountSats": 60000,
+            "scriptPubKey": "00147fda9cf020c16cacf529c87d8de89bfc70b8c9cb",
+            "address": "bcrt1q0ldfeupqc9k2eaffep7cm6yml3ct3jwtxdz4jv",
+            "type": "witness_v0_keyhash"
+          },
+          {
+            "amountSats": 239778,
+            "scriptPubKey": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+            "address": "bcrt1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdqzdszde",
+            "type": "witness_v1_taproot"
+          }
+        ],
+        "inputAddress": "bcrt1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdqzdszde",
+        "feeSats": 222,
+        "vsize": 142,
+        "weight": 568,
+        "netLeavingKeySats": 60222,
+        "signalsRbf": true,
+        "bip340Signature": "ab2c5e8199d9131ca546e351a2bbdddbba4ae0f3231d378190293ae3e49cc64b1b21c09e016a49a77b6d79c69882c4bd640e5b3e8699bd50c7e5443f83b6de86"
+      }
+    }
+  ]
+}

@@ -1,0 +1,244 @@
+{
+  "fixture_format": "public-bip86-core-v1",
+  "warning": "PUBLIC TEST CONSTANTS ONLY. All keys are disclosed. Parents spend invented outpoints; no chain UTXOs or usable funds are represented. NEVER FUND THESE ADDRESSES.",
+  "provenance": {
+    "core_release": "v31.1",
+    "core_commit": "9be056a8a72b624dae9623b2f7bded92c2a21c91",
+    "source_manifest": "source-manifest.json",
+    "source_manifest_sha256": "7cb05137394950325edb38daa7dbb3be51866ca321d717f1b926ddd83ec320dc"
+  },
+  "address_context": {
+    "core_chain_flag": "-signet",
+    "bech32_hrp": "tb",
+    "note": "Address encoding only; tb is shared with testnet. No chain state was queried."
+  },
+  "signing_parameters": {
+    "sighash_type": 0,
+    "sighash_name": "SIGHASH_DEFAULT",
+    "script_tree": "absent",
+    "annex": null,
+    "bip340_aux_rand_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "keys": [
+    {
+      "id": "public-scalar-1",
+      "public_secret_scalar_hex": "0000000000000000000000000000000000000000000000000000000000000001",
+      "internal_pubkey_compressed_hex": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "internal_xonly_hex": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "internal_point_y_parity": 0,
+      "tap_tweak_hex": "3cf5216d476a5e637bf0da674e50ddf55c403270dd36494dfcca438132fa30e7",
+      "output_xonly_hex": "da4710964f7852695de2da025290e24af6d8c281de5a0b902b7135fd9fd74d21",
+      "output_point_y_parity": 1,
+      "script_pubkey_hex": "5120da4710964f7852695de2da025290e24af6d8c281de5a0b902b7135fd9fd74d21",
+      "address": "tb1pmfr3p9j00pfxjh0zmgp99y8zftmd3s5pmedqhyptwy6lm87hf5ssk79hv2"
+    },
+    {
+      "id": "public-scalar-2",
+      "public_secret_scalar_hex": "0000000000000000000000000000000000000000000000000000000000000002",
+      "internal_pubkey_compressed_hex": "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+      "internal_xonly_hex": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+      "internal_point_y_parity": 0,
+      "tap_tweak_hex": "04b26deba66b94db399bbf0c31029d168c5feb5664cd7a212248322171345ade",
+      "output_xonly_hex": "cafd90c7026f0b6ab98df89490d02732881f2f4b5900856358dddff4679c2ffb",
+      "output_point_y_parity": 0,
+      "script_pubkey_hex": "5120cafd90c7026f0b6ab98df89490d02732881f2f4b5900856358dddff4679c2ffb",
+      "address": "tb1pet7ep3czdu9k4wvdlz2fp5p8x2yp7t6ttyqg2c6cmh0lgeuu9lasvfnc28"
+    },
+    {
+      "id": "public-scalar-3",
+      "public_secret_scalar_hex": "0000000000000000000000000000000000000000000000000000000000000003",
+      "internal_pubkey_compressed_hex": "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
+      "internal_xonly_hex": "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
+      "internal_point_y_parity": 0,
+      "tap_tweak_hex": "965a70e32ca36371d64d9942813b6e96e42498e4483c319cd4316cbc53485c82",
+      "output_xonly_hex": "418c46636d9e1a683f58e35b42336e776fdcc3b2d4e39e7a0bf1ab0716e3c5fa",
+      "output_point_y_parity": 0,
+      "script_pubkey_hex": "5120418c46636d9e1a683f58e35b42336e776fdcc3b2d4e39e7a0bf1ab0716e3c5fa",
+      "address": "tb1pgxxyvcmdncdxs06cudd5yvmwwahaesaj6n3eu7st7x4sw9hrchaq9v87jl"
+    },
+    {
+      "id": "public-scalar-6",
+      "public_secret_scalar_hex": "0000000000000000000000000000000000000000000000000000000000000006",
+      "internal_pubkey_compressed_hex": "03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "internal_xonly_hex": "fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "internal_point_y_parity": 1,
+      "tap_tweak_hex": "25fee0b2ff9076ea93b70323592f582d29a4139ce98af1843c67265ce1ba5843",
+      "output_xonly_hex": "a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+      "output_point_y_parity": 1,
+      "script_pubkey_hex": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+      "address": "tb1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdq056ycr"
+    },
+    {
+      "id": "public-scalar-11",
+      "public_secret_scalar_hex": "000000000000000000000000000000000000000000000000000000000000000b",
+      "internal_pubkey_compressed_hex": "03774ae7f858a9411e5ef4246b70c65aac5649980be5c17891bbec17895da008cb",
+      "internal_xonly_hex": "774ae7f858a9411e5ef4246b70c65aac5649980be5c17891bbec17895da008cb",
+      "internal_point_y_parity": 1,
+      "tap_tweak_hex": "4abc8fbf2243df3a8b8eb76e428803afad0017a11a88bb6dcdcab312ab25f037",
+      "output_xonly_hex": "3114ee06015c28efc70b867b6aa3d2aaafadf37d07c1a10873d03301f41f00bc",
+      "output_point_y_parity": 0,
+      "script_pubkey_hex": "51203114ee06015c28efc70b867b6aa3d2aaafadf37d07c1a10873d03301f41f00bc",
+      "address": "tb1pxy2wupspts5wl3ctseak4g7j42h6mumaqlq6zzrn6qesraqlqz7qpk8qm2"
+    }
+  ],
+  "cases": [
+    {
+      "id": "p-even-q-odd-self-legacy-parent",
+      "signing_key_id": "public-scalar-1",
+      "input_index": 0,
+      "funding": {
+        "raw_tx_hex": "02000000018e6afb0fb3becc29339cfc64d1bac314181d029530529ce4aa1484cd916388ba0100000000ffffffff01a086010000000000225120da4710964f7852695de2da025290e24af6d8c281de5a0b902b7135fd9fd74d2101000000",
+        "raw_tx_without_witness_hex": "02000000018e6afb0fb3becc29339cfc64d1bac314181d029530529ce4aa1484cd916388ba0100000000ffffffff01a086010000000000225120da4710964f7852695de2da025290e24af6d8c281de5a0b902b7135fd9fd74d2101000000",
+        "txid": "60a0b8e1f1502a0411a98556baed1a2110880f2216322aa11c3fb50ad2a2ef82",
+        "wtxid": "60a0b8e1f1502a0411a98556baed1a2110880f2216322aa11c3fb50ad2a2ef82",
+        "has_witness": false,
+        "spent_output_index": 0,
+        "spent_output_value_sats": 100000,
+        "spent_output_script_hex": "5120da4710964f7852695de2da025290e24af6d8c281de5a0b902b7135fd9fd74d21"
+      },
+      "unsigned_tx_hex": "020000000182efa2d20ab53f1ca12a3216220f8810211aedba5685a911042a50f1e1b8a0600000000000fdffffff01c285010000000000225120da4710964f7852695de2da025290e24af6d8c281de5a0b902b7135fd9fd74d2100000000",
+      "outputs": [
+        {
+          "role": "self",
+          "key_id": "public-scalar-1",
+          "value_sats": 99778,
+          "script_pubkey_hex": "5120da4710964f7852695de2da025290e24af6d8c281de5a0b902b7135fd9fd74d21",
+          "address": "tb1pmfr3p9j00pfxjh0zmgp99y8zftmd3s5pmedqhyptwy6lm87hf5ssk79hv2"
+        }
+      ],
+      "expected": {
+        "taproot_digest_hex": "fceeb621fab67d6abc6bb385abc959b3c6bfeb917dbf5ee5a0bde6d004928a89",
+        "bip340_signature_hex": "b9a699954df00cfeda91ab3d3522833321681811457f408ae3944d7845b0436e5717655a13551fa64565233bbd88626b834b4ea4e161d7d2c3e7703736a673c7",
+        "signed_tx_hex": "0200000000010182efa2d20ab53f1ca12a3216220f8810211aedba5685a911042a50f1e1b8a0600000000000fdffffff01c285010000000000225120da4710964f7852695de2da025290e24af6d8c281de5a0b902b7135fd9fd74d210140b9a699954df00cfeda91ab3d3522833321681811457f408ae3944d7845b0436e5717655a13551fa64565233bbd88626b834b4ea4e161d7d2c3e7703736a673c700000000",
+        "txid": "d2707e994581e6ad76b7db355bd9f769d9fb08833e71cca599142e4de4a4952e",
+        "wtxid": "62675b82757878c56486c4096105467e34f37cafddad6244572b484919434c51",
+        "fee_sats": 222,
+        "signed_vsize": 111,
+        "signed_weight": 444,
+        "unsigned_vsize": 94
+      }
+    },
+    {
+      "id": "p-even-q-even-recipient-change-segwit-parent",
+      "signing_key_id": "public-scalar-2",
+      "input_index": 0,
+      "funding": {
+        "raw_tx_hex": "02000000000101e4eb262cc6b55648e4755cf4488bbcde3cf60c4df69b20e24a405439569231b20200000000ffffffff01400d030000000000225120cafd90c7026f0b6ab98df89490d02732881f2f4b5900856358dddff4679c2ffb02135055424c49432046495854555245204f4e4c59400202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202000000",
+        "raw_tx_without_witness_hex": "0200000001e4eb262cc6b55648e4755cf4488bbcde3cf60c4df69b20e24a405439569231b20200000000ffffffff01400d030000000000225120cafd90c7026f0b6ab98df89490d02732881f2f4b5900856358dddff4679c2ffb02000000",
+        "txid": "a005f78dba766c5a67bd4a2a0d67dcdd5df675a8c07af96fd155f7df3cdffa9b",
+        "wtxid": "eb56efb5a672a8080145da3770fdfd1dbd7eae5d55e8ab2ffdbc45485f069a32",
+        "has_witness": true,
+        "spent_output_index": 0,
+        "spent_output_value_sats": 200000,
+        "spent_output_script_hex": "5120cafd90c7026f0b6ab98df89490d02732881f2f4b5900856358dddff4679c2ffb"
+      },
+      "unsigned_tx_hex": "02000000019bfadf3cdff755d16ff97ac0a875f65ddddc670d2a4abd675a6c76ba8df705a00000000000fdffffff02c0d4010000000000225120418c46636d9e1a683f58e35b42336e776fdcc3b2d4e39e7a0bf1ab0716e3c5fa4c37010000000000225120cafd90c7026f0b6ab98df89490d02732881f2f4b5900856358dddff4679c2ffb00000000",
+      "outputs": [
+        {
+          "role": "recipient",
+          "key_id": "public-scalar-3",
+          "value_sats": 120000,
+          "script_pubkey_hex": "5120418c46636d9e1a683f58e35b42336e776fdcc3b2d4e39e7a0bf1ab0716e3c5fa",
+          "address": "tb1pgxxyvcmdncdxs06cudd5yvmwwahaesaj6n3eu7st7x4sw9hrchaq9v87jl"
+        },
+        {
+          "role": "change",
+          "key_id": "public-scalar-2",
+          "value_sats": 79692,
+          "script_pubkey_hex": "5120cafd90c7026f0b6ab98df89490d02732881f2f4b5900856358dddff4679c2ffb",
+          "address": "tb1pet7ep3czdu9k4wvdlz2fp5p8x2yp7t6ttyqg2c6cmh0lgeuu9lasvfnc28"
+        }
+      ],
+      "expected": {
+        "taproot_digest_hex": "1f53f492911b36c3bca82db636db8d7a7c26cf8b7bb74cba058f39e33564c518",
+        "bip340_signature_hex": "31b7af3159f02885f0e34279818711d0b0af4aafe1a5613a282056ff01b80dff266386db2bcecf8d46535430bde7446c25bbf4767ebe63f76a27b1bff6d262c4",
+        "signed_tx_hex": "020000000001019bfadf3cdff755d16ff97ac0a875f65ddddc670d2a4abd675a6c76ba8df705a00000000000fdffffff02c0d4010000000000225120418c46636d9e1a683f58e35b42336e776fdcc3b2d4e39e7a0bf1ab0716e3c5fa4c37010000000000225120cafd90c7026f0b6ab98df89490d02732881f2f4b5900856358dddff4679c2ffb014031b7af3159f02885f0e34279818711d0b0af4aafe1a5613a282056ff01b80dff266386db2bcecf8d46535430bde7446c25bbf4767ebe63f76a27b1bff6d262c400000000",
+        "txid": "ca2cd202f621a276d83dc9ab5082bcfe7a2529d512810c97a57a9dfa447d44b6",
+        "wtxid": "99b07aeb2ee7675dbbde1184ee67af5710aea8e9a2bacd88bef5fc608f326d48",
+        "fee_sats": 308,
+        "signed_vsize": 154,
+        "signed_weight": 616,
+        "unsigned_vsize": 137
+      }
+    },
+    {
+      "id": "p-odd-q-odd-self-segwit-parent-vout1",
+      "signing_key_id": "public-scalar-6",
+      "input_index": 0,
+      "funding": {
+        "raw_tx_hex": "0200000000010144ecd974dda240370dfeea520110062a28924656aeb3348ce5f17b3252fcaf780300000000ffffffff02d12f010000000000225120418c46636d9e1a683f58e35b42336e776fdcc3b2d4e39e7a0bf1ab0716e3c5fae093040000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a02135055424c49432046495854555245204f4e4c59400303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303000000",
+        "raw_tx_without_witness_hex": "020000000144ecd974dda240370dfeea520110062a28924656aeb3348ce5f17b3252fcaf780300000000ffffffff02d12f010000000000225120418c46636d9e1a683f58e35b42336e776fdcc3b2d4e39e7a0bf1ab0716e3c5fae093040000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a03000000",
+        "txid": "204b749d18541fe96fa36c1288646be326af6d2d9229bfceba879c71e81d340c",
+        "wtxid": "a0d6a23fee7525044fe47b5e5249a7474dcac8c0d0222c5642a3596da59fd633",
+        "has_witness": true,
+        "spent_output_index": 1,
+        "spent_output_value_sats": 300000,
+        "spent_output_script_hex": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a"
+      },
+      "unsigned_tx_hex": "02000000010c341de8719c87bacebf29922d6daf26e36b6488126ca36fe91f54189d744b200100000000fdffffff019392040000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a00000000",
+      "outputs": [
+        {
+          "role": "self",
+          "key_id": "public-scalar-6",
+          "value_sats": 299667,
+          "script_pubkey_hex": "5120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a",
+          "address": "tb1p4rsld9ryjhte00drc0r23r8ngd63xrzh5s4fvmy6q5yt70xzlsdq056ycr"
+        }
+      ],
+      "expected": {
+        "taproot_digest_hex": "999657565adfa429aab3ebde6934cedd35dcdff2e8f0a152ee2fc72a319660c8",
+        "bip340_signature_hex": "f9decf6fe0c1744d3008f8569452392ebc5745948e31b6dd47394b4072c875f02ca1081ae20d935d976832d006c8a8bd6a4d2bb8554dd89c9118aa750e4582bb",
+        "signed_tx_hex": "020000000001010c341de8719c87bacebf29922d6daf26e36b6488126ca36fe91f54189d744b200100000000fdffffff019392040000000000225120a8e1f6946495d797bda3c3c6a88cf34375130c57a42a966c9a0508bf3cc2fc1a0140f9decf6fe0c1744d3008f8569452392ebc5745948e31b6dd47394b4072c875f02ca1081ae20d935d976832d006c8a8bd6a4d2bb8554dd89c9118aa750e4582bb00000000",
+        "txid": "f20a81b981d7f40a5f49e06d16d5a158d91427c78b46256332fb3d9fa6ec0791",
+        "wtxid": "1f9412807bece2120704ae9d614c9b751b8d341e6bba87c221494a4e4e623886",
+        "fee_sats": 333,
+        "signed_vsize": 111,
+        "signed_weight": 444,
+        "unsigned_vsize": 94
+      }
+    },
+    {
+      "id": "p-odd-q-even-recipient-change-segwit-parent-vout1",
+      "signing_key_id": "public-scalar-11",
+      "input_index": 0,
+      "funding": {
+        "raw_tx_hex": "020000000001015a7ab5ed1cef70d3e797a146c540eb301232fe176291b6737c69e4aeee85066e0400000000ffffffff02d12f010000000000225120418c46636d9e1a683f58e35b42336e776fdcc3b2d4e39e7a0bf1ab0716e3c5fa801a0600000000002251203114ee06015c28efc70b867b6aa3d2aaafadf37d07c1a10873d03301f41f00bc02135055424c49432046495854555245204f4e4c59400404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404040404000000",
+        "raw_tx_without_witness_hex": "02000000015a7ab5ed1cef70d3e797a146c540eb301232fe176291b6737c69e4aeee85066e0400000000ffffffff02d12f010000000000225120418c46636d9e1a683f58e35b42336e776fdcc3b2d4e39e7a0bf1ab0716e3c5fa801a0600000000002251203114ee06015c28efc70b867b6aa3d2aaafadf37d07c1a10873d03301f41f00bc04000000",
+        "txid": "de9d33413038acfca4561b0a8ea4f5fbdeefa9a129b3e1a64123e6736d3cbbe9",
+        "wtxid": "163efac5c0bc674ba49975168986c94a767d9b0f59c57982da9d043bf3c1ff51",
+        "has_witness": true,
+        "spent_output_index": 1,
+        "spent_output_value_sats": 400000,
+        "spent_output_script_hex": "51203114ee06015c28efc70b867b6aa3d2aaafadf37d07c1a10873d03301f41f00bc"
+      },
+      "unsigned_tx_hex": "0200000001e9bb3c6d73e62341a6e1b329a1a9efdefbf5a48e0a1b56a4fcac383041339dde0100000000fdffffff0290d0030000000000225120418c46636d9e1a683f58e35b42336e776fdcc3b2d4e39e7a0bf1ab0716e3c5fa22480200000000002251203114ee06015c28efc70b867b6aa3d2aaafadf37d07c1a10873d03301f41f00bc00000000",
+      "outputs": [
+        {
+          "role": "recipient",
+          "key_id": "public-scalar-3",
+          "value_sats": 250000,
+          "script_pubkey_hex": "5120418c46636d9e1a683f58e35b42336e776fdcc3b2d4e39e7a0bf1ab0716e3c5fa",
+          "address": "tb1pgxxyvcmdncdxs06cudd5yvmwwahaesaj6n3eu7st7x4sw9hrchaq9v87jl"
+        },
+        {
+          "role": "change",
+          "key_id": "public-scalar-11",
+          "value_sats": 149538,
+          "script_pubkey_hex": "51203114ee06015c28efc70b867b6aa3d2aaafadf37d07c1a10873d03301f41f00bc",
+          "address": "tb1pxy2wupspts5wl3ctseak4g7j42h6mumaqlq6zzrn6qesraqlqz7qpk8qm2"
+        }
+      ],
+      "expected": {
+        "taproot_digest_hex": "d761d5fbafbd0fd7695d38edb5f7b14d4405e5cda1a5f14e6d32abe6e45eaec2",
+        "bip340_signature_hex": "377be1cdcb2e7c1101b6554839c556b57664e613587ab2cad39f63c275fcad97d5e4f5aad24ad6b61d21ec2c3e168447fc3bbb0081f44c081e05759c508b153e",
+        "signed_tx_hex": "02000000000101e9bb3c6d73e62341a6e1b329a1a9efdefbf5a48e0a1b56a4fcac383041339dde0100000000fdffffff0290d0030000000000225120418c46636d9e1a683f58e35b42336e776fdcc3b2d4e39e7a0bf1ab0716e3c5fa22480200000000002251203114ee06015c28efc70b867b6aa3d2aaafadf37d07c1a10873d03301f41f00bc0140377be1cdcb2e7c1101b6554839c556b57664e613587ab2cad39f63c275fcad97d5e4f5aad24ad6b61d21ec2c3e168447fc3bbb0081f44c081e05759c508b153e00000000",
+        "txid": "582929bd2e5a81d6ec9e40a04cfb21c004bc4269547aeca82a0ed9d410dad448",
+        "wtxid": "10f6ee8daad0952c09876013653a40565606933820c58d40bf1dc77412937c81",
+        "fee_sats": 462,
+        "signed_vsize": 154,
+        "signed_weight": 616,
+        "unsigned_vsize": 137
+      }
+    }
+  ]
+}

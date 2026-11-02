@@ -4467,11 +4467,6 @@ def request_vault_sign(payload: dict, *, user_context: Any = None) -> dict:
                     code="unsupported_signer_kind",
                     status=409,
                 )
-            if meta.get("protection") == "protected" and scheme == "schnorr-secp256k1-bip341-keypath":
-                raise VaultApiError(
-                    "protected Bitcoin Taproot key-path signing is not supported yet",
-                    code="protected_signing_unsupported", status=409,
-                )
             signing_context = _verifiable_signing_context_from_payload(
                 payload,
                 digest=digest,
@@ -5259,6 +5254,7 @@ def _verifiable_signing_context_from_payload(payload: dict, *, digest: str, requ
         "evm-transaction": {"kind", "digestAlgorithm", "chainId", "unsignedTransaction", "digest"},
         "eip-712-typed-data": {"kind", "digestAlgorithm", "typedData", "digest"},
         "avault-agent-operation": {"kind", "digestAlgorithm", "canonicalPreimage", "digest"},
+        "bitcoin-taproot-keypath-v1": {"kind", "network", "unsignedTransaction", "prevout", "digestAlgorithm", "digest"},
     }
     allowed = allowed_fields.get(kind)
     if allowed is None:
@@ -5269,6 +5265,13 @@ def _verifiable_signing_context_from_payload(payload: dict, *, digest: str, requ
     context_digest = context.get("digest")
     if not isinstance(context_digest, str) or context_digest.lower() != digest:
         raise _signing_context_invalid("signing_context digest must match the sign request digest")
+    if kind == "bitcoin-taproot-keypath-v1":
+        from storage import vault_bitcoin
+
+        try:
+            return vault_bitcoin.validate_context_shape(context, expected_digest=digest)
+        except vault_bitcoin.BitcoinContextError as exc:
+            raise _signing_context_invalid(str(exc)) from exc
     if kind == "evm-transaction":
         if context.get("digestAlgorithm") != "keccak256" or not isinstance(context.get("chainId"), str):
             raise _signing_context_invalid("invalid evm signing_context")
@@ -5678,12 +5681,6 @@ def vault_sign(payload: dict) -> dict:
                 raise VaultApiError(
                     f"secret '{name}' uses signer_kind '{signer_kind}', which is not locally signable",
                     code="unsupported_signer_kind",
-                    status=409,
-                )
-            if meta.get("protection") == "protected" and scheme == "schnorr-secp256k1-bip341-keypath":
-                raise VaultApiError(
-                    "protected Bitcoin Taproot key-path signing is not supported yet; wait for a supported Bitcoin approval workflow without changing the key or its protection",
-                    code="protected_signing_unsupported",
                     status=409,
                 )
             if scheme == "schnorr-secp256k1-bip341-keypath":

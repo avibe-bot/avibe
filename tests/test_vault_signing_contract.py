@@ -204,18 +204,18 @@ def test_tree_parameters_are_rejected_before_request_or_sign(monkeypatch, entryp
 
 
 @pytest.mark.parametrize("entrypoint", [api.request_vault_sign, api.vault_sign, "service"])
-def test_protected_keypath_is_rejected_before_request_or_notification(monkeypatch, entrypoint):
+def test_protected_keypath_requires_typed_context_before_request_or_notification(monkeypatch, entrypoint):
     create_key(protection="protected")
     sign, notify = Mock(), Mock()
     monkeypatch.setattr(api, "avault_sign", sign)
     monkeypatch.setattr(api, "_notify_vault_request_created", notify)
     if entrypoint == "service":
-        with api._vault_engine().begin() as conn, pytest.raises(vault_service.InvalidRequestError, match="not supported"):
+        with api._vault_engine().begin() as conn, pytest.raises(vault_service.InvalidSigningContextError, match="verifiable signing_context"):
             vault_service.create_sign_request(conn, "KEY", digest=DIGEST, scheme=KEYPATH)
     else:
         with pytest.raises(api.VaultApiError) as exc:
             entrypoint({"name": "KEY", "digest": DIGEST, "scheme": KEYPATH})
-        assert exc.value.code == "protected_signing_unsupported"
+        assert exc.value.code == "missing_signing_context"
     assert api.get_vault_requests()["requests"] == []
     sign.assert_not_called()
     notify.assert_not_called()
@@ -332,10 +332,10 @@ def test_web_sign_lifecycle_errors_preserve_the_actual_reason(monkeypatch, state
 @pytest.mark.parametrize("language", ["en", "zh"])
 @pytest.mark.parametrize("case, english, chinese", [
     ("key", "Signing requires", "签名需要"),
-    ("protected", "Protected Bitcoin", "暂不支持保护档"),
+    ("protected", "Protected signing requires", "保护档签名需要"),
     ("parameters", "The signing request contains", "签名请求包含"),
     ("context", "The signing context is invalid", "签名上下文无效"),
-    ("scheme-pair", "EVM and EIP-712 signing contexts", "EVM 和 EIP-712 签名上下文"),
+    ("scheme-pair", "Bitcoin Taproot contexts", "Bitcoin Taproot 上下文"),
     ("signature", "The returned signature", "返回的签名"),
 ])
 def test_web_signing_errors_are_localized_but_cli_stays_english(monkeypatch, capfd, language, case, english, chinese):
