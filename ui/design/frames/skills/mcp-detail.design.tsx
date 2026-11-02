@@ -16,7 +16,7 @@ const designFrames = frames([
     fixtures: skillsFixtures({}),
     render: () => (
       <div className={consolePageClass}>
-        <div className="flex w-[440px] flex-col p-5">
+        <div className="flex w-full flex-col p-5">
           <McpServerDetail
             server={context7}
             canManage
