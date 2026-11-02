@@ -1510,43 +1510,12 @@ export const AgentsPage: React.FC = () => {
       />
 
       {/* Local runtime diagnostics are intentionally unavailable remotely. */}
-      <div className="flex items-center gap-0 overflow-x-auto border-b border-border">
-        {visibleTabs.map((key) => {
-          const active = activeTab === key;
-          return (
-            <button
-              key={key}
-              type="button"
-              onClick={() => selectAgentsTab(key)}
-              className={clsx(
-                'flex shrink-0 items-center gap-2 whitespace-nowrap px-4 py-3 text-[13px] transition',
-                active
-                  ? 'border-b-2 border-violet font-bold text-violet-ink'
-                  : 'font-medium text-muted hover:text-foreground',
-              )}
-            >
-              {key === 'definitions' ? (
-                <Layers className={clsx('size-3.5', active ? 'text-violet-ink' : 'text-muted')} />
-              ) : (
-                <Activity className={clsx('size-3.5', active ? 'text-violet-ink' : 'text-muted')} />
-              )}
-              {t(`agents.tabs.${key}`)}
-              {key === 'running' && (
-                <span
-                  className={clsx(
-                    'rounded-full border px-1.5 py-0 font-mono text-[9px] font-bold',
-                    active
-                      ? 'border-violet/30 bg-violet/[0.10] text-violet-ink'
-                      : 'border-border-strong bg-foreground/[0.04] text-muted',
-                  )}
-                >
-                  {runningActiveCount === null ? '—' : runningActiveCount}
-                </span>
-              )}
-            </button>
-          );
-        })}
-      </div>
+      <AgentsTabStrip
+        tabs={visibleTabs}
+        active={activeTab}
+        runningCount={runningActiveCount}
+        onSelect={selectAgentsTab}
+      />
 
       {/* The run graph follows the Agent capability. */}
       {capabilities.can_use_agents && activeTab === 'running' && <AgentGraphTab />}
@@ -1691,6 +1660,58 @@ export const AgentsPage: React.FC = () => {
           <GlobalPromptsDialog open={showGlobalPrompts} onClose={() => setShowGlobalPrompts(false)} />
         </>
       )}
+    </div>
+  );
+};
+
+interface AgentsTabStripProps {
+  tabs: readonly AgentsTabKey[];
+  active: AgentsTabKey;
+  /** Active running Agents; `null` until the first count arrives. */
+  runningCount: number | null;
+  onSelect: (key: AgentsTabKey) => void;
+}
+
+// The Definitions / Running tabs. A view (props only), so a design frame can draw it.
+export const AgentsTabStrip: React.FC<AgentsTabStripProps> = ({ tabs, active: activeTab, runningCount, onSelect }) => {
+  const { t } = useTranslation();
+  return (
+    <div className="flex items-center gap-0 overflow-x-auto border-b border-border">
+      {tabs.map((key) => {
+        const active = activeTab === key;
+        return (
+          <button
+            key={key}
+            type="button"
+            onClick={() => onSelect(key)}
+            className={clsx(
+              'flex shrink-0 items-center gap-2 whitespace-nowrap px-4 py-3 text-[13px] transition',
+              active
+                ? 'border-b-2 border-violet font-bold text-violet-ink'
+                : 'font-medium text-muted hover:text-foreground',
+            )}
+          >
+            {key === 'definitions' ? (
+              <Layers className={clsx('size-3.5', active ? 'text-violet-ink' : 'text-muted')} />
+            ) : (
+              <Activity className={clsx('size-3.5', active ? 'text-violet-ink' : 'text-muted')} />
+            )}
+            {t(`agents.tabs.${key}`)}
+            {key === 'running' && (
+              <span
+                className={clsx(
+                  'rounded-full border px-1.5 py-0 font-mono text-[9px] font-bold',
+                  active
+                    ? 'border-violet/30 bg-violet/[0.10] text-violet-ink'
+                    : 'border-border-strong bg-foreground/[0.04] text-muted',
+                )}
+              >
+                {runningCount === null ? '—' : runningCount}
+              </span>
+            )}
+          </button>
+        );
+      })}
     </div>
   );
 };
@@ -1880,7 +1901,7 @@ interface BackendFilterProps {
 
 // Compact Popover trigger that mirrors design.pen dMFRl — funnel icon +
 // "Backend: All" label + chevron. Replaces the old hand-rolled checkbox.
-const BackendFilter: React.FC<BackendFilterProps> = ({ value, onChange }) => {
+export const BackendFilter: React.FC<BackendFilterProps> = ({ value, onChange }) => {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const label = value === 'all' ? t('agents.backendAll') : BACKEND_LABEL[value];
@@ -1929,7 +1950,7 @@ interface ImportMenuProps {
 // backend supports bulk import via `from=<backend>&all=true`, which
 // surfaces every installed agent definition the user already has on
 // disk for that backend.
-const ImportMenu: React.FC<ImportMenuProps> = ({ onImport, importing }) => {
+export const ImportMenu: React.FC<ImportMenuProps> = ({ onImport, importing }) => {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   return (
