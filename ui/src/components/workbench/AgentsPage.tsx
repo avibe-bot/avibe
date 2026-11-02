@@ -2,27 +2,21 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
-  Bot,
-  ChevronDown,
   ChevronRight,
   ExternalLink,
-  FileText,
-  Funnel,
   Lock,
   LockKeyhole,
   Loader2,
   Maximize2,
+  MessageSquare,
   Pencil,
   Play,
-  Plus,
-  RefreshCw,
-  Search,
   ShieldCheck,
   Star,
   Trash2,
-  Upload,
-  Activity,
-  Layers,
+  UserMinus,
+  UserPlus,
+  X,
 } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -36,7 +30,9 @@ import type {
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import { useBots } from '../../context/BotsContext';
 import { BotAvatar } from '../ui/bot-avatar';
-import { eligibleForBot } from '../../lib/bots';
+import { botRole, botSessionPath, eligibleForBot, liveBotAgentNames } from '../../lib/bots';
+import { RemoveBotDialog } from './bots/RemoveBotDialog';
+import { AgentGlyph, AgentsPageView } from './AgentsPageView';
 import { AgentGraphTab } from './AgentGraphTab';
 import { useToast } from '../../context/ToastContext';
 import { NewAgentDialog } from './NewAgentDialog';
@@ -49,25 +45,15 @@ import { Combobox } from '../ui/combobox';
 import type { ComboboxOption } from '../ui/combobox';
 import { Textarea } from '../ui/textarea';
 import { EditorDialog } from '../ui/editor-dialog';
-import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { onPageReactivated } from '../../lib/pageActivity';
 import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { estimateTokens } from '../../lib/tokenEstimate';
 import { loadBackendModelsWithRefresh, modelOptionLabel, supersedesHubAnswer, useAddModelExit, type BackendModels } from '../../lib/backendModels';
 import { compatibleEffort, refusedSavedEffort, resolveEffortOptions } from '../../lib/effortOptions';
-import { WorkbenchPageHeader } from './WorkbenchPageHeader';
-import { CapabilityTabs } from './CapabilityTabs';
 // Backend order / labels / accent classes live in lib/backendAccent, shared
 // with the Skills surface (BACKEND_TEXT is this page's old BACKEND_ICON_CLASS).
-import {
-  BACKEND_ORDER,
-  NATIVE_BACKEND_ORDER,
-  BACKEND_LABEL,
-  BACKEND_TEXT as BACKEND_ICON_CLASS,
-  type Backend,
-} from '../../lib/backendAccent';
+import { BACKEND_LABEL, type Backend } from '../../lib/backendAccent';
 import { getBackendUiMeta, type NativeCliBackend } from '@/lib/agentBackends';
-import { BackendAvatar } from '../visual';
 import { isBuiltinAgent } from '../onboarding/setupTargets';
 import { modelsApi } from '../settings/models/modelsApi';
 import { agentsWithoutModel } from '../settings/models/supply';
@@ -281,7 +267,14 @@ export const AgentsPage: React.FC = () => {
   tRef.current = t;
   const api = useApi();
   const { showToast } = useToast();
-  const { afterWrite: afterBotWrite } = useBots();
+  const {
+    afterWrite: afterBotWrite,
+    enabled: botsEnabled,
+    bots: liveBots,
+    listed: botsListed,
+    displayName: botDisplayName,
+    openProfile: openBotProfile,
+  } = useBots();
   const {
     capabilities,
   } = useInstanceAuthorization();
@@ -1313,29 +1306,38 @@ export const AgentsPage: React.FC = () => {
     setDetailOpen(false);
   }, [beginSelectedIntent, commitSelected]);
 
-  // Apply text search + backend filter; backend grouping is a layout
-  // concern that operates on the filtered set.
-  const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return agents.filter((agent) => {
-      if (backendFilter !== 'all' && agent.backend !== backendFilter) return false;
-      if (!q) return true;
-      return (
-        agent.name.toLowerCase().includes(q) ||
-        (agent.description ?? '').toLowerCase().includes(q) ||
-        (agent.model ?? '').toLowerCase().includes(q)
-      );
-    });
-  }, [agents, search, backendFilter]);
+  // Bots and Agents are two concepts (docs/plans/bots.md D1): a Bot's Agent is
+  // never listed as an Agent. The live Bot list decides once it has answered, so a
+  // Bot added or removed since the Agent rows were read moves its Agent at once.
+  const botAgents = liveBotAgentNames({ bots: liveBots, listed: botsListed });
+  const listedAgents = useMemo(
+    () => agents.filter((agent) => (botAgents ? !botAgents.has(agent.name) : !agent.bot)),
+    [agents, botAgents],
+  );
 
-  const grouped = useMemo(() => {
-    const groups = Object.fromEntries(BACKEND_ORDER.map((backend) => [backend, [] as VibeAgentBrief[]])) as Record<Backend, VibeAgentBrief[]>;
-    for (const agent of filtered) {
-      const key = (agent.backend as Backend) in groups ? (agent.backend as Backend) : null;
-      if (key) groups[key].push(agent);
-    }
-    return groups;
-  }, [filtered]);
+  // Text search and the backend filter apply to both sections. Bots all run on
+  // Vibey, so a filter for another backend leaves none.
+  const query = search.trim().toLowerCase();
+  const filteredAgents = useMemo(
+    () =>
+      listedAgents.filter((agent) => {
+        if (backendFilter !== 'all' && agent.backend !== backendFilter) return false;
+        if (!query) return true;
+        return (
+          agent.name.toLowerCase().includes(query) ||
+          (agent.description ?? '').toLowerCase().includes(query) ||
+          (agent.model ?? '').toLowerCase().includes(query)
+        );
+      }),
+    [listedAgents, query, backendFilter],
+  );
+  const filteredBots = useMemo(() => {
+    if (backendFilter !== 'all' && backendFilter !== 'vibey') return [];
+    if (!query) return liveBots;
+    return liveBots.filter((bot) =>
+      [botDisplayName(bot), bot.role, bot.handle].some((text) => text.toLowerCase().includes(query)),
+    );
+  }, [liveBots, botDisplayName, query, backendFilter]);
 
   const onCreated = (agent: VibeAgentFull) => {
     beginSelectedIntent(agent.name);
@@ -1482,162 +1484,52 @@ export const AgentsPage: React.FC = () => {
     }
   };
 
-  const totalShown = filtered.length;
-  const noMatches = totalShown === 0 && agents.length > 0;
-
   return (
-    <div className="mx-auto flex w-full max-w-[1200px] flex-col gap-5 py-2">
-      <CapabilityTabs />
-      {/* Header — shared WorkbenchPageHeader (40px mint icon + title + subtitle). */}
-      <WorkbenchPageHeader
-        icon={<Bot className="size-5" />}
-        title={t('agents.title')}
-        subtitle={t('agents.subtitle', { count: agents.length })}
-        actions={
-          <Button
-            type="button"
-            variant="outline"
-            size="xs"
-            onClick={() => {
-              void refresh();
-              void refreshOnboarding();
-            }}
-          >
-            <RefreshCw className={clsx('size-3.5', loading && 'animate-spin')} />
-            {t('common.refresh')}
-          </Button>
-        }
-      />
-
-      {/* Local runtime diagnostics are intentionally unavailable remotely. */}
-      <AgentsTabStrip
+    <>
+      <AgentsPageView
         tabs={visibleTabs}
-        active={activeTab}
+        activeTab={activeTab}
         runningCount={runningActiveCount}
-        onSelect={selectAgentsTab}
-      />
-
-      {/* The run graph follows the Agent capability. */}
-      {capabilities.can_use_agents && activeTab === 'running' && <AgentGraphTab />}
-
-      {activeTab === 'definitions' && canOnboardAgents && onboardingInventory && (
-        <OrganizationAgentOnboarding
-          inventory={onboardingInventory}
-          expanded={onboardingExpanded}
-          submitting={onboardingSubmitting}
-          className={detailOpen ? 'max-lg:hidden' : undefined}
-          onExpandedChange={setOnboardingExpanded}
-          onOnboard={onOnboardAgents}
-        />
-      )}
-
-      {/* Toolbar: search + backend filter + spacer + Import + 新建 Agent */}
-      <div className={clsx('flex flex-wrap items-center gap-2.5', activeTab === 'running' ? 'hidden' : detailOpen && 'max-lg:hidden')}>
-        <div className="flex h-9 w-full items-center gap-2 rounded-md border border-input bg-background px-3 transition-colors focus-within:border-ring focus-within:ring-2 focus-within:ring-ring sm:w-[320px]">
-          <Search className="size-3.5 shrink-0 text-muted" />
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder={t('agents.searchPlaceholder')}
-            className="flex-1 bg-transparent text-[12px] text-foreground outline-none placeholder:text-muted"
-          />
-        </div>
-        <BackendFilter value={backendFilter} onChange={setBackendFilter} />
-        <div className="flex-1" />
-        {canEditAgents ? (
-          <>
-            <Button type="button" variant="outline" size="xs" onClick={() => setShowGlobalPrompts(true)}>
-              <FileText className="size-3.5" />
-              {t('globalPrompts.button')}
-            </Button>
-            <ImportMenu onImport={onImport} importing={importing} />
-            <Button type="button" variant="brand" size="xs" onClick={() => setShowNew(true)}>
-              <Plus />
-              {t('agents.newAgent')}
-            </Button>
-          </>
-        ) : (
-          <Badge variant="secondary" title={t('agents.remoteReadOnlyHint')}>
-            <Lock className="size-3" />
-            {t('agents.remoteReadOnly')}
-          </Badge>
-        )}
-      </div>
-
-      {activeTab === 'definitions' && error && (
-        <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive-ink">
-          {error}
-        </div>
-      )}
-
-      {/* Body — list + detail. The detail column only renders when a row
-          is selected; the empty "select an agent" placeholder used to
-          dominate the right side of a fresh page. With auto-select on
-          mount it's rarely needed; when it is empty we just collapse
-          back to a single column.
-          Hidden when Running tab is active; all hooks stay mounted. */}
-      <div
-        className={clsx(
-          'grid gap-5',
-          activeTab === 'running' && 'hidden',
-          // `minmax(0,1fr)` + `min-w-0` keep the list column shrinkable; bare
-          // `1fr` would let a long agent row push the fixed detail card off-screen.
-          selected ? 'grid-cols-1 lg:grid-cols-[minmax(0,1fr)_420px]' : 'grid-cols-1',
-        )}
-      >
-        <div className={clsx('flex min-w-0 flex-col gap-4', detailOpen && 'max-lg:hidden')}>
-          {BACKEND_ORDER.map((backend) => {
-            const items = grouped[backend];
-            if (!items || items.length === 0) return null;
-            return (
-              <div key={backend} className="flex flex-col gap-2">
-                <div className="flex items-center gap-2 px-1">
-                  <BackendAvatar backend={backend} className={clsx('size-3.5', BACKEND_ICON_CLASS[backend])} />
-                  <span className={clsx('text-[13px] font-bold', BACKEND_ICON_CLASS[backend])}>
-                    {BACKEND_LABEL[backend]}
-                  </span>
-                  <span className="font-mono text-[10px] text-muted">
-                    {items.length} agents
-                  </span>
-                </div>
-                <div className="flex flex-col gap-2">
-                  {items.map((agent) => (
-                    <AgentRow
-                      key={agent.id}
-                      agent={agent}
-                      isSelected={selected?.name === agent.name}
-                      isDefault={defaultName === agent.name}
-                      modelMissing={agent.enabled && withoutModel.has(agent.name)}
-                      onSelect={() => selectAgent(agent.name, true)}
-                    />
-                  ))}
-                </div>
-              </div>
-            );
-          })}
-
-          {agents.length === 0 && !loading && (
-            <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-border bg-surface px-6 py-16 text-center">
-              <Bot className="size-8 text-muted" />
-              <div className="text-[14px] font-semibold text-foreground">{t('agents.empty')}</div>
-              {canEditAgents && (
-                <Button type="button" variant="brand" size="sm" onClick={() => setShowNew(true)}>
-                  <Plus />
-                  {t('agents.newAgent')}
-                </Button>
-              )}
-            </div>
-          )}
-
-          {noMatches && (
-            <div className="rounded-xl border border-dashed border-border bg-surface px-6 py-10 text-center text-[12px] text-muted">
-              {t('agents.noSearchMatch')}
-            </div>
-          )}
-        </div>
-
-        {selected && (
-          <div className={clsx('self-start rounded-2xl border border-border-strong bg-surface p-5', !detailOpen && 'max-lg:hidden')}>
+        onSelectTab={selectAgentsTab}
+        running={capabilities.can_use_agents && activeTab === 'running' ? <AgentGraphTab /> : null}
+        onboarding={
+          canOnboardAgents && onboardingInventory ? (
+            <OrganizationAgentOnboarding
+              inventory={onboardingInventory}
+              expanded={onboardingExpanded}
+              submitting={onboardingSubmitting}
+              onExpandedChange={setOnboardingExpanded}
+              onOnboard={onOnboardAgents}
+            />
+          ) : null
+        }
+        loading={loading}
+        onRefresh={() => {
+          void refresh();
+          void refreshOnboarding();
+        }}
+        canEdit={canEditAgents}
+        onGlobalPrompts={() => setShowGlobalPrompts(true)}
+        search={search}
+        onSearchChange={setSearch}
+        backendFilter={backendFilter}
+        onBackendFilterChange={setBackendFilter}
+        bots={botsEnabled ? filteredBots : null}
+        botCount={liveBots.length}
+        agentCount={listedAgents.length}
+        onAddBot={() => openBotProfile({ kind: 'create' })}
+        agents={filteredAgents}
+        defaultAgentName={defaultName}
+        withoutModel={withoutModel}
+        selectedName={selected?.name ?? null}
+        onSelect={(name) => void selectAgent(name, true)}
+        importing={importing}
+        onImport={onImport}
+        onNewAgent={() => setShowNew(true)}
+        error={error}
+        detailOpen={detailOpen}
+        detail={
+          selected ? (
             <AgentDetailPanel
               key={selected.id}
               agent={selected}
@@ -1650,69 +1542,16 @@ export const AgentsPage: React.FC = () => {
               onDelete={onDelete}
               onClose={dismissSelected}
             />
-          </div>
-        )}
-      </div>
-
+          ) : null
+        }
+      />
       {canEditAgents && (
         <>
           <NewAgentDialog open={showNew} onClose={() => setShowNew(false)} onCreated={onCreated} />
           <GlobalPromptsDialog open={showGlobalPrompts} onClose={() => setShowGlobalPrompts(false)} />
         </>
       )}
-    </div>
-  );
-};
-
-interface AgentsTabStripProps {
-  tabs: readonly AgentsTabKey[];
-  active: AgentsTabKey;
-  /** Active running Agents; `null` until the first count arrives. */
-  runningCount: number | null;
-  onSelect: (key: AgentsTabKey) => void;
-}
-
-// The Definitions / Running tabs. A view (props only), so a design frame can draw it.
-export const AgentsTabStrip: React.FC<AgentsTabStripProps> = ({ tabs, active: activeTab, runningCount, onSelect }) => {
-  const { t } = useTranslation();
-  return (
-    <div className="flex items-center gap-0 overflow-x-auto border-b border-border">
-      {tabs.map((key) => {
-        const active = activeTab === key;
-        return (
-          <button
-            key={key}
-            type="button"
-            onClick={() => onSelect(key)}
-            className={clsx(
-              'flex shrink-0 items-center gap-2 whitespace-nowrap px-4 py-3 text-[13px] transition',
-              active
-                ? 'border-b-2 border-violet font-bold text-violet-ink'
-                : 'font-medium text-muted hover:text-foreground',
-            )}
-          >
-            {key === 'definitions' ? (
-              <Layers className={clsx('size-3.5', active ? 'text-violet-ink' : 'text-muted')} />
-            ) : (
-              <Activity className={clsx('size-3.5', active ? 'text-violet-ink' : 'text-muted')} />
-            )}
-            {t(`agents.tabs.${key}`)}
-            {key === 'running' && (
-              <span
-                className={clsx(
-                  'rounded-full border px-1.5 py-0 font-mono text-[9px] font-bold',
-                  active
-                    ? 'border-violet/30 bg-violet/[0.10] text-violet-ink'
-                    : 'border-border-strong bg-foreground/[0.04] text-muted',
-                )}
-              >
-                {runningCount === null ? '—' : runningCount}
-              </span>
-            )}
-          </button>
-        );
-      })}
-    </div>
+    </>
   );
 };
 
@@ -1836,152 +1675,6 @@ const OrganizationAgentOnboarding: React.FC<OrganizationAgentOnboardingProps> = 
   );
 };
 
-// One row in the backend-grouped list. Hover state + click selects.
-interface AgentRowProps {
-  agent: VibeAgentBrief;
-  isSelected: boolean;
-  isDefault: boolean;
-  /** Enabled, but its next turn fails: the gateway has no model selected for it. */
-  modelMissing: boolean;
-  onSelect: () => void;
-}
-
-const AgentRow: React.FC<AgentRowProps> = ({ agent, isSelected, isDefault, modelMissing, onSelect }) => {
-  const { t } = useTranslation();
-  const description = [agent.model, agent.reasoning_effort, agent.description].filter(Boolean).join(' · ');
-  return (
-    <button
-      type="button"
-      onClick={onSelect}
-      className={clsx(
-        'flex items-center gap-3 rounded-xl border px-4 py-3 text-left transition',
-        isSelected
-          ? 'border-mint/40 bg-mint-soft shadow-glow-sm-mint'
-          : 'border-border bg-surface hover:border-border-strong hover:bg-surface-2',
-      )}
-    >
-      <div className="flex flex-1 flex-col gap-1">
-        <div className="flex items-center gap-2">
-          <span className="text-[14px] font-semibold text-foreground">{agent.name}</span>
-          {isDefault && (
-            <Badge variant="success" className="px-1.5 py-0 text-[9px] font-mono uppercase">
-              {t('common.default')}
-            </Badge>
-          )}
-          {isSystemAgent(agent) && (
-            <Badge variant="secondary" className="px-1.5 py-0 text-[9px] font-mono uppercase">
-              {t('common.systemSession')}
-            </Badge>
-          )}
-          {agent.bot && (
-            <Badge variant="success" className="px-1.5 py-0 text-[9px] font-mono uppercase" title={agent.bot.display_name || undefined}>
-              {t('bots.agents.badge')}
-            </Badge>
-          )}
-        </div>
-        {description && <div className="text-[11px] text-muted">{description}</div>}
-      </div>
-      {modelMissing && (
-        <Badge variant="warning" className="shrink-0">
-          {t('settings.models.gateway.agentIssues.modelMissing')}
-        </Badge>
-      )}
-      <Badge variant={agent.enabled ? 'success' : 'secondary'} className="font-mono uppercase">
-        <span className={clsx('size-1.5 rounded-full', agent.enabled ? 'bg-mint' : 'bg-muted')} />
-        {agent.enabled ? t('agents.statusEnabled') : t('agents.statusDisabled')}
-      </Badge>
-    </button>
-  );
-};
-
-interface BackendFilterProps {
-  value: Backend | 'all';
-  onChange: (next: Backend | 'all') => void;
-}
-
-// Compact Popover trigger — funnel icon +
-// "Backend: All" label + chevron. Replaces the old hand-rolled checkbox.
-export const BackendFilter: React.FC<BackendFilterProps> = ({ value, onChange }) => {
-  const { t } = useTranslation();
-  const [open, setOpen] = useState(false);
-  const label = value === 'all' ? t('agents.backendAll') : BACKEND_LABEL[value];
-  return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          className="flex items-center gap-1.5 rounded-md border border-border-strong bg-surface px-3 py-2 text-[12px] font-medium text-foreground transition hover:bg-foreground/[0.04]"
-        >
-          <Funnel className="size-3 text-muted" />
-          <span className="text-muted">{t('agents.backendFilter')}:</span>
-          <span>{label}</span>
-          <ChevronDown className="size-3 text-muted" />
-        </button>
-      </PopoverTrigger>
-      <PopoverContent align="start" className="w-[180px] p-1">
-        {(['all', ...BACKEND_ORDER] as const).map((key) => (
-          <button
-            key={key}
-            type="button"
-            onClick={() => {
-              onChange(key);
-              setOpen(false);
-            }}
-            className={clsx(
-              'flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] transition',
-              value === key ? 'bg-cyan-soft text-cyan-ink' : 'text-foreground hover:bg-foreground/[0.04]',
-            )}
-          >
-            {key !== 'all' && <BackendAvatar backend={key} className={clsx('size-3.5', BACKEND_ICON_CLASS[key])} />}
-            <span>{key === 'all' ? t('agents.backendAll') : BACKEND_LABEL[key]}</span>
-          </button>
-        ))}
-      </PopoverContent>
-    </Popover>
-  );
-};
-
-interface ImportMenuProps {
-  onImport: (from: NativeCliBackend) => void;
-  importing: NativeCliBackend | null;
-}
-
-// Outline Button that opens a popover with one entry per backend. The
-// backend supports bulk import via `from=<backend>&all=true`, which
-// surfaces every installed agent definition the user already has on
-// disk for that backend.
-export const ImportMenu: React.FC<ImportMenuProps> = ({ onImport, importing }) => {
-  const { t } = useTranslation();
-  const [open, setOpen] = useState(false);
-  return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <Button type="button" variant="outline" size="xs" disabled={importing !== null}>
-          {importing ? <Loader2 className="size-3.5 animate-spin" /> : <Upload className="size-3.5" />}
-          {t('agents.import')}
-        </Button>
-      </PopoverTrigger>
-      <PopoverContent align="end" className="w-[200px] p-1">
-        {NATIVE_BACKEND_ORDER.map((backend) => (
-          <button
-            key={backend}
-            type="button"
-            disabled={importing !== null}
-            onClick={() => {
-              onImport(backend);
-              setOpen(false);
-            }}
-            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-foreground transition hover:bg-foreground/[0.04] disabled:opacity-50"
-          >
-            <BackendAvatar backend={backend} className={clsx('size-3.5', BACKEND_ICON_CLASS[backend])} />
-            <span>{t('agents.importFrom', { backend: BACKEND_LABEL[backend] })}</span>
-          </button>
-        ))}
-      </PopoverContent>
-    </Popover>
-  );
-};
-
 interface DetailProps {
   agent: VibeAgentFull;
   isDefault: boolean;
@@ -2011,12 +1704,24 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
   // System agents are locked everywhere; remote access locks every agent.
   const locked = isSystemAgent(agent) || !canEdit;
   const system = isSystemAgent(agent);
-  // While an Agent is a Bot it stays enabled and keeps its name and row
-  // (docs/plans/bots.md D1); the server refuses those writes, so they are not offered.
-  const isBot = Boolean(agent.bot);
+  const navigate = useNavigate();
+  const bots = useBots();
+  // A Bot's Agent is drawn as the Bot (docs/plans/bots.md D1): the live Bot list
+  // decides once it has answered, so a Bot removed here turns back into an Agent.
+  const liveBotAgents = liveBotAgentNames(bots);
+  const isBot = liveBotAgents ? liveBotAgents.has(agent.name) : Boolean(agent.bot);
+  const bot = isBot ? bots.botForAgent(agent.name) : undefined;
+  const [removingBot, setRemovingBot] = useState(false);
+  // While an Agent is a Bot it stays enabled and keeps its name and row; the
+  // server refuses those writes, so they are not offered.
   const nameLocked = locked || isBot;
   // The built-in Agent of the built-in backend is part of the platform: it stays enabled.
   const alwaysEnabled = agent.source === 'builtin' && isBuiltinAgent(agent) && getBackendUiMeta(agent.backend).builtin;
+  // Only what applies is drawn (ui/design: agents/bots-redesign/agent): no switch
+  // that cannot turn, no default for a Bot or a disabled Agent, no Bot for the default.
+  const canToggle = canEdit && !alwaysEnabled && !isBot;
+  const canSetDefault = canEdit && !isBot && !isDefault && agent.enabled;
+  const canSetBot = canEdit && bots.enabled && !isDefault && eligibleForBot(agent);
   const [name, setName] = useState(agent.name);
   const [renaming, setRenaming] = useState(false);
   const [settingDefault, setSettingDefault] = useState(false);
@@ -2247,11 +1952,6 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
     hubKnownRef.current = false;
   }, [agent.backend, api, surfaceActive]);
 
-  const lockHint = system
-    ? t('agents.detail.systemLocked')
-    : canEdit
-      ? undefined
-      : t('agents.remoteReadOnlyHint');
   const systemPromptTokens = estimateTokens(systemPrompt);
   // Effort options follow the backend + selected model when the catalog provides them.
   const effortOptions = resolveEffortOptions(agent.backend, model, reasoningOptions);
@@ -2389,6 +2089,10 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
     }
   };
 
+  const botBuiltin = bot?.builtin ?? agent.bot?.builtin ?? false;
+  const botName = bot ? bots.displayName(bot) : agent.bot?.display_name || (botBuiltin ? t('bots.mainDefaultName') : agent.name);
+  const botRoleText = botRole({ builtin: botBuiltin, role: agent.description ?? '' }, t('bots.mainRole'));
+
   const handleSetDefault = async () => {
     if (settingDefault) return;
     setSettingDefault(true);
@@ -2403,160 +2107,129 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
   };
 
   return (
-    <div className="flex flex-col gap-3.5">
-      {/* Header row, without a DEFAULT badge (now read-
-          only via the list-row pill; the panel always shows the agent's
-          current identity, not its "is-default" status). */}
-      <div className="flex items-start gap-2.5">
-        <div className="flex min-w-0 flex-1 flex-col">
-          <div className="truncate text-[16px] font-bold text-foreground">{agent.name}</div>
-          <div className="truncate text-[10px] text-muted">
-            Vibe Agent · {getBackendUiMeta(agent.backend).label} backend
+    <div className="flex flex-col gap-4">
+      {isBot ? (
+        // ui/design: agents/bots-redesign/bot. The Bot itself: face, name, and role,
+        // and the way into its conversation. Its Agent's name is not shown.
+        <>
+          <div className="flex items-start gap-3">
+            <BotAvatar avatar={bot?.avatar ?? null} name={botName} size={56} />
+            <div className="flex min-w-0 flex-1 flex-col gap-1 pt-1">
+              <div className="flex items-center gap-1.5">
+                <span className="truncate text-lg font-bold text-foreground">{botName}</span>
+                {botBuiltin && (
+                  <Badge variant="success" className="shrink-0 px-1.5 py-0">
+                    {t('bots.mainBadge')}
+                  </Badge>
+                )}
+              </div>
+              {botRoleText && <p className="text-xs leading-relaxed text-muted">{botRoleText}</p>}
+            </div>
+            <PanelClose label={t('common.close')} onClose={onClose} />
           </div>
-        </div>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          onClick={onClose}
-          aria-label={t('common.close')}
-          className="size-6"
-        >
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-        </Button>
-      </div>
+          {bot && (
+            <div className="flex flex-wrap items-center gap-2">
+              <Button type="button" variant="outline" size="xs" className={MINT_ACTION} onClick={() => navigate(botSessionPath(bot))}>
+                <MessageSquare className="size-3" />
+                {t('bots.agents.openConversation')}
+              </Button>
+              {canEdit && (
+                <Button type="button" variant="outline" size="xs" onClick={() => bots.openProfile({ kind: 'edit', handle: bot.handle })}>
+                  <Pencil className="size-3" />
+                  {t('bots.agents.editProfile')}
+                </Button>
+              )}
+            </div>
+          )}
+          <div className="h-px bg-border" />
+        </>
+      ) : (
+        // ui/design: agents/bots-redesign/agent. The name is the title, renamed in
+        // place unless it is locked; the backend is its subtitle; "On" is a switch
+        // only where the Agent can be turned off.
+        <>
+          <div className="flex items-start gap-3">
+            <AgentGlyph backend={agent.backend} size="lg" />
+            <div className="flex min-w-0 flex-1 flex-col gap-0.5 pt-0.5">
+              <div className="flex min-w-0 items-center gap-1.5">
+                {nameLocked ? (
+                  <span className="truncate text-lg font-bold text-foreground">{agent.name}</span>
+                ) : (
+                  <>
+                    <input
+                      value={name}
+                      size={Math.max(name.length, 1)}
+                      aria-label={t('agents.detail.name')}
+                      onChange={(e) => {
+                        markFieldEdit('name');
+                        setName(e.target.value);
+                      }}
+                      onBlur={commitRename}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                        if (e.key === 'Escape') cancelFieldEdit('name', serverSnapshotRef.current.name);
+                      }}
+                      disabled={renaming}
+                      className="min-w-0 max-w-full rounded-md bg-transparent text-lg font-bold text-foreground outline-none transition hover:bg-surface-2 focus:bg-surface-2 focus:ring-2 focus:ring-ring"
+                    />
+                    <Pencil className="size-3 shrink-0 text-muted" aria-hidden="true" />
+                  </>
+                )}
+                {isDefault && (
+                  <Badge variant="success" className="shrink-0 px-1.5 py-0">
+                    {t('common.default')}
+                  </Badge>
+                )}
+              </div>
+              <span className="text-xs text-muted">{getBackendUiMeta(agent.backend).label}</span>
+            </div>
+            {canToggle && (
+              <span className="flex shrink-0 items-center gap-2 pt-1.5 text-xs text-muted">
+                {t('agents.detail.on')}
+                <Switch
+                  size="sm"
+                  checked={agent.enabled}
+                  onCheckedChange={(next) => {
+                    consumeBackgroundMutation(onChange({ enabled: next }));
+                  }}
+                  label={t('agents.detail.enabled')}
+                />
+              </span>
+            )}
+            <PanelClose label={t('common.close')} onClose={onClose} />
+          </div>
 
-      <AgentBotCard agent={agent} canEdit={canEdit} isDefault={isDefault} />
-
-      {/* Enable toggle */}
-      <div
-        className={clsx(
-          'flex items-center justify-between gap-3 rounded-[10px] border px-3.5 py-3',
-          agent.enabled ? 'border-mint/40 bg-mint-soft' : 'border-border-strong bg-surface-2',
-        )}
-      >
-        <div className="flex min-w-0 flex-col gap-0.5">
-          <span className="text-[13px] font-bold text-foreground">{t('agents.detail.enabled')}</span>
-          <span className="text-[11px] text-muted">
-            {alwaysEnabled
-              ? t('agents.detail.alwaysEnabledHint', { name: getBackendUiMeta(agent.backend).label })
-              : t('agents.detail.enabledHint')}
-          </span>
-        </div>
-        <Switch
-          checked={agent.enabled}
-          onCheckedChange={(next) => {
-            consumeBackgroundMutation(onChange({ enabled: next }));
-          }}
-          disabled={!canEdit || alwaysEnabled || isBot}
-          title={canEdit ? (isBot ? t('bots.agents.isBotHint') : undefined) : t('agents.remoteReadOnlyHint')}
-          label={t('agents.detail.enabled')}
-        />
-      </div>
-
-      {/* Default routing — promotes this agent to the global default so a
-          plain "new chat" (and IM routing without an explicit agent)
-          lands here. Restores the set-default control dropped in the
-          workbench rebuild; a disabled agent can't be the default. */}
-      <div
-        className={clsx(
-          'flex items-center justify-between gap-3 rounded-[10px] border px-3.5 py-3',
-          isDefault ? 'border-mint/40 bg-mint-soft' : 'border-border-strong bg-surface-2',
-        )}
-      >
-        <div className="flex min-w-0 flex-col gap-0.5">
-          <span className="text-[13px] font-bold text-foreground">{t('agents.detail.defaultTitle')}</span>
-          <span className="text-[11px] text-muted">{t('agents.detail.defaultHint')}</span>
-        </div>
-        {isDefault ? (
-          <Badge variant="success" className="font-mono uppercase">
-            <Star className="size-3" />
-            {t('agents.detail.defaultActive')}
-          </Badge>
-        ) : !canEdit || isBot ? null : (
-          <Button
-            type="button"
-            variant="outline"
-            size="xs"
-            onClick={handleSetDefault}
-            disabled={settingDefault || !agent.enabled}
-            title={!agent.enabled ? t('agents.detail.defaultNeedsEnabled') : undefined}
-          >
-            {settingDefault ? <Loader2 className="size-3 animate-spin" /> : <Star className="size-3" />}
-            {t('agents.detail.setDefault')}
-          </Button>
-        )}
-      </div>
-
-      {/* Name — system agents are locked; user agents are editable via
-          create-then-delete (no DB-level rename support). */}
-      <Field label={t('agents.detail.name')}>
-        <div className="flex items-center gap-2 rounded-lg border border-border-strong bg-surface-2 px-3 py-2">
-          <input
-            value={name}
-            onChange={(e) => {
-              markFieldEdit('name');
-              setName(e.target.value);
-            }}
-            onBlur={commitRename}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-              if (e.key === 'Escape') cancelFieldEdit('name', serverSnapshotRef.current.name);
-            }}
-            disabled={nameLocked || renaming}
-            title={isBot && !locked ? t('bots.agents.isBotHint') : lockHint}
-            className="flex-1 bg-transparent text-[13px] font-medium text-foreground outline-none disabled:cursor-not-allowed disabled:opacity-70"
-          />
-          {nameLocked ? (isBot && !locked ? <Lock className="size-3 shrink-0 text-muted" /> : null) : <Pencil className="size-3 shrink-0 text-muted" />}
-        </div>
-      </Field>
-
-      {/* Description — free-text summary of what the agent is for. Feeds the
-          list-row subtitle (model · effort · description). Locked for system
-          agents (same as the name); editable for user agents. */}
-      <Field label={t('agents.detail.description')}>
-        <Textarea
-          value={description}
-          onChange={(e) => {
-            markFieldEdit('description');
-            setDescription(e.target.value);
-          }}
-          onBlur={() => {
-            if (locked) return;
-            const canonical = description.trim();
-            setDescription(canonical);
-            if (canonical === serverSnapshotRef.current.description && pendingRevisionRef.current.description === null) {
-              cancelFieldEdit('description', canonical);
-              return;
-            }
-            markFieldSubmitted('description');
-              consumeBackgroundMutation(submitFields({ description: canonical || null }, ['description']));
-          }}
-          disabled={locked}
-          title={lockHint}
-          rows={2}
-          placeholder={t('agents.detail.descriptionPlaceholder')}
-          className="text-[13px] disabled:cursor-not-allowed disabled:opacity-70"
-        />
-      </Field>
-
-      {/* Backend (read-only). "creation-time only ·
-          locked" hint sits inside the value chip on the right so users
-          don't mistake it for a note about the field above (the name). */}
-      <Field label={t('agents.detail.backend')}>
-        <div className="flex items-center gap-2 rounded-lg border border-border bg-surface-3 px-3 py-2">
-          <BackendAvatar backend={agent.backend} className={clsx('size-3 shrink-0', BACKEND_ICON_CLASS[agent.backend as Backend] || 'text-muted')} />
-          <span className={clsx('font-mono text-[12px] font-bold', BACKEND_ICON_CLASS[agent.backend as Backend] || 'text-foreground')}>
-            {agent.backend}
-          </span>
-          <span className="text-[11px] text-muted">·</span>
-          <span className="text-[11px] text-muted">{t(
-            getBackendUiMeta(agent.backend).capabilities.supports_cli ? 'agents.detail.nativeBackend' : 'agents.detail.backendName',
-            { backend: BACKEND_LABEL[agent.backend as Backend] || agent.backend },
-          )}</span>
-          <span className="ml-auto font-mono text-[9px] text-muted">{t('agents.detail.backendLocked')}</span>
-        </div>
-      </Field>
+          {/* What the Agent is for; it feeds the list row. A built-in Agent's reads as text. */}
+          {(!locked || agent.description) && (
+          <Field label={t('agents.detail.description')}>
+            {locked ? (
+              <p className="text-sm leading-relaxed text-foreground">{agent.description}</p>
+            ) : (
+              <Textarea
+                value={description}
+                onChange={(e) => {
+                  markFieldEdit('description');
+                  setDescription(e.target.value);
+                }}
+                onBlur={() => {
+                  const canonical = description.trim();
+                  setDescription(canonical);
+                  if (canonical === serverSnapshotRef.current.description && pendingRevisionRef.current.description === null) {
+                    cancelFieldEdit('description', canonical);
+                    return;
+                  }
+                  markFieldSubmitted('description');
+                  consumeBackgroundMutation(submitFields({ description: canonical || null }, ['description']));
+                }}
+                rows={2}
+                placeholder={t('agents.detail.descriptionPlaceholder')}
+                className="text-sm"
+              />
+            )}
+          </Field>
+          )}
+        </>
+      )}
 
       {/* Model — Combobox with chevron + searchable + custom values. Callers
           outside the current runtime policy get the Backend field's locked
@@ -2743,42 +2416,60 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
         )}
       </div>
 
-      {/* Footer — Run on the left, Delete on the right. The Disable
-          button was redundant with the top Enable toggle and was
-          removed. */}
-      <div className="flex items-center gap-2 pt-2">
-        {canRun && (
-          <Button
-            type="button"
-            variant="outline"
-            size="xs"
-            onClick={() => setRunning(true)}
-            className="border-mint/40 bg-mint-soft text-mint-ink hover:brightness-110"
-          >
-            <Play className="size-3" />
-            {t('agents.detail.run')}
-          </Button>
-        )}
-        <div className="flex-1" />
-        {canEdit ? (
-          // A Bot's Agent cannot be deleted; the card at the top says why.
-          isBot ? null : !system ? (
-            <Button
-              type="button"
-              variant="destructive-soft"
-              size="xs"
-              onClick={onDelete}
-            >
-              <Trash2 className="size-3" />
-              {t('common.delete')}
-            </Button>
-          ) : (
-            <span className="text-[10px] text-muted">{t('agents.detail.systemLocked')}</span>
-          )
-        ) : (
-          <span className="text-[10px] text-muted">{t('agents.remoteReadOnlyHint')}</span>
-        )}
-      </div>
+      {isBot ? (
+        // The main Bot is never removed, and its handle is never typed: it has no footer.
+        !botBuiltin && (
+          <div className="flex items-center gap-2 border-t border-border pt-4">
+            <span className="font-mono text-xs text-muted" title={t('bots.handleHint')}>
+              {t('bots.handle', { handle: bot?.handle ?? agent.bot?.handle ?? agent.name })}
+            </span>
+            <div className="flex-1" />
+            {canEdit && bot && (
+              <Button type="button" variant="destructive-soft" size="xs" onClick={() => setRemovingBot(true)}>
+                <UserMinus className="size-3" />
+                {t('bots.menu.remove')}
+              </Button>
+            )}
+          </div>
+        )
+      ) : (
+        (canRun || canSetDefault || canSetBot || (canEdit && !system)) && (
+          <div className="flex flex-wrap items-center gap-2 border-t border-border pt-4">
+            {canRun && (
+              <Button type="button" variant="outline" size="xs" onClick={() => setRunning(true)} className={MINT_ACTION}>
+                <Play className="size-3" />
+                {t('agents.detail.run')}
+              </Button>
+            )}
+            {canSetDefault && (
+              <Button type="button" variant="ghost" size="xs" onClick={handleSetDefault} disabled={settingDefault}>
+                {settingDefault ? <Loader2 className="size-3 animate-spin" /> : <Star className="size-3" />}
+                {t('agents.detail.setDefault')}
+              </Button>
+            )}
+            {canSetBot && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                onClick={() => bots.openProfile({ kind: 'create', tab: 'agent', agentName: agent.name })}
+              >
+                <UserPlus className="size-3" />
+                {t('bots.agents.setAsBot')}
+              </Button>
+            )}
+            <div className="flex-1" />
+            {canEdit && !system && (
+              <Button type="button" variant="destructive-soft" size="xs" onClick={onDelete}>
+                <Trash2 className="size-3" />
+                {t('common.delete')}
+              </Button>
+            )}
+          </div>
+        )
+      )}
+
+      {bot && <RemoveBotDialog bot={bot} open={removingBot} onOpenChange={setRemovingBot} />}
 
       {/* Derived, not latched: losing `canRun` mid-dialog unmounts it in the same
           render, so a revoked capability cannot leave an open launcher behind. */}
@@ -2820,69 +2511,13 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
   );
 };
 
-// The Agent's Bot side (docs/plans/bots.md D1, D5): who it is as a Bot, with the
-// way into its conversation, or — for an eligible Vibey Agent — "Set as Bot",
-// which opens the add dialog's existing-Agent tab. Bots are the Owner's, so the
-// card is absent for everyone else. The default Agent keeps the card, unavailable,
-// with what to do first: the server refuses it until another Agent is the default.
-const AgentBotCard: React.FC<{ agent: VibeAgentFull; canEdit: boolean; isDefault: boolean }> = ({ agent, canEdit, isDefault }) => {
-  const { t } = useTranslation();
-  const navigate = useNavigate();
-  const { enabled, botForAgent, displayName, openProfile } = useBots();
-  if (!enabled) return null;
-  const bot = botForAgent(agent.name);
-  if (agent.bot || bot) {
-    const name = bot ? displayName(bot) : agent.bot?.display_name || agent.name;
-    const builtin = bot?.builtin ?? agent.bot?.builtin ?? false;
-    return (
-      <div className="flex flex-col gap-2.5 rounded-[10px] border border-mint/40 bg-mint-soft px-3.5 py-3">
-        <div className="flex items-center gap-2.5">
-          {bot && <BotAvatar avatar={bot.avatar} name={name} size={32} />}
-          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-            <span className="truncate text-[13px] font-bold text-foreground">{t('bots.agents.isBotTitle', { name })}</span>
-            <span className="text-[11px] leading-relaxed text-muted">
-              {builtin ? t('bots.agents.isMainBotHint') : t('bots.agents.isBotHint')}
-            </span>
-          </div>
-        </div>
-        {bot && (
-          <div className="flex flex-wrap items-center gap-2">
-            <Button type="button" variant="outline" size="xs" onClick={() => navigate(`/chat/${encodeURIComponent(bot.session_id)}`)}>
-              {t('bots.agents.openConversation')}
-            </Button>
-            {canEdit && (
-              <Button type="button" variant="ghost" size="xs" onClick={() => openProfile({ kind: 'edit', handle: bot.handle })}>
-                {t('bots.agents.editProfile')}
-              </Button>
-            )}
-          </div>
-        )}
-      </div>
-    );
-  }
-  // Disabled Agents still show the way in, with what to do first.
-  if (!canEdit || !eligibleForBot({ ...agent, enabled: true })) return null;
-  const blocker = isDefault
-    ? t('bots.notForDefaultAgent')
-    : agent.enabled ? null : t('bots.agents.setAsBotNeedsEnabled');
-  return (
-    <div className="flex items-center justify-between gap-3 rounded-[10px] border border-border-strong bg-surface-2 px-3.5 py-3">
-      <div className="flex min-w-0 flex-col gap-0.5">
-        <span className="text-[13px] font-bold text-foreground">{t('bots.agents.setAsBot')}</span>
-        <span className="text-[11px] text-muted">{blocker ?? t('bots.agents.setAsBotHint')}</span>
-      </div>
-      <Button
-        type="button"
-        variant="outline"
-        size="xs"
-        disabled={blocker !== null}
-        onClick={() => openProfile({ kind: 'create', tab: 'agent', agentName: agent.name })}
-      >
-        {t('bots.agents.setAsBot')}
-      </Button>
-    </div>
-  );
-};
+const MINT_ACTION = 'border-mint/40 bg-mint-soft text-mint-ink hover:brightness-110';
+
+const PanelClose: React.FC<{ label: string; onClose: () => void }> = ({ label, onClose }) => (
+  <Button type="button" variant="ghost" size="icon" onClick={onClose} aria-label={label} className="size-7 shrink-0">
+    <X className="size-3.5" />
+  </Button>
+);
 
 const Field: React.FC<{ label: string; labelRight?: React.ReactNode; children: React.ReactNode }> = ({
   label,

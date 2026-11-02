@@ -4465,7 +4465,8 @@
   },
   "agents": {
     "title": "Agents",
-    "subtitle": "{{count}} agents registered across all backends.",
+    "subtitle": "{{count}} Agents",
+    "subtitleWithBots": "{{bots}} Bots · {{agents}} Agents",
     "remoteReadOnly": "Read-only",
     "remoteReadOnlyHint": "This resource is read-only in remote mode.",
     "tabs": {
@@ -4624,7 +4625,6 @@
       }
     },
     "showDisabled": "Show disabled",
-    "statusEnabled": "enabled",
     "statusDisabled": "disabled",
     "newAgent": "New agent",
     "import": "Import",
@@ -4634,9 +4634,11 @@
     "importNoneFound": "No {{backend}} agents found on disk to import.",
     "renameSuccess": "Agent renamed",
     "searchPlaceholder": "Search agents…",
-    "backendFilter": "Backend",
+    "searchPlaceholderWithBots": "Search Bots and Agents…",
+    "backendFilterLabel": "Backend:",
     "backendAll": "All",
     "noSearchMatch": "No matching agents.",
+    "noSearchMatchWithBots": "No Bots or Agents match.",
     "noConfig": "No model or system prompt configured",
     "empty": "No agents yet. Create one to start a conversation.",
     "selectPrompt": "Select an agent to view its configuration.",
@@ -4644,21 +4646,12 @@
     "deleteConfirm": "Archive agent \"{{name}}\"? It will disappear from Agents, while existing sessions and automations keep their saved configuration.",
     "detail": {
       "enabled": "Enabled",
-      "enabledHint": "Disabling keeps the agent in the registry but excludes it from new sessions; running sessions are unaffected.",
-      "alwaysEnabledHint": "{{name}} is built in and always enabled. You can still adjust its model, effort, and system prompt.",
-      "defaultTitle": "Default agent",
-      "defaultHint": "New chats and IM messages without an explicit agent route to this one.",
-      "defaultActive": "Default",
+      "on": "On",
       "setDefault": "Set as default",
-      "defaultNeedsEnabled": "Enable the agent before making it the default.",
       "defaultSet": "{{name}} is now the default agent.",
       "name": "Name",
       "description": "Description",
       "descriptionPlaceholder": "What this agent is for…",
-      "backend": "Backend",
-      "backendLocked": "creation-time only · locked",
-      "nativeBackend": "{{backend}} CLI",
-      "backendName": "{{backend}}",
       "model": "Model",
       "modelPlaceholder": "Pick or type a model",
       "modelEmpty": "No matches — you can type a custom value.",
@@ -4668,9 +4661,7 @@
       "systemPromptCount": "~{{count}} tokens",
       "systemPromptExpand": "Expand editor",
       "systemPromptEditorHint": "Write the full system prompt with live Markdown preview.",
-      "systemLocked": "System agents cannot be deleted. You can still adjust model, effort, and system prompt.",
-      "run": "Run",
-      "nameLocked": "Used as the reference id · locked after create"
+      "run": "Run"
     },
     "runDialog": {
       "title": "Open a chat with this agent",
@@ -4703,9 +4694,12 @@
   "bots": {
     "sectionLabel": "Bots",
     "mainDefaultName": "Vibey",
+    "mainBadge": "Main",
+    "mainRole": "Your first point of contact: talks things through with you, hands work on, and follows it up",
     "tag": "Bot",
     "handle": "@{{handle}}",
     "handlePrefix": "@",
+    "handleHint": "Handle: how the CLI names this Bot; fixed once created",
     "mentionName": "@{{name}}",
     "add": "Add",
     "addLabel": "Add a Bot",
@@ -4716,6 +4710,10 @@
     "openConversation": "Open conversation",
     "removed": "{{name}} was removed from Bots",
     "removeFailed": "Could not remove this Bot",
+    "removeConfirm": {
+      "title": "Remove {{name}} from Bots?",
+      "body": "Its conversation and memory are kept, and it returns to the Agents list. Make it a Bot again to pick up where you left off."
+    },
     "reorderInstructions": "Press Space to pick up a Bot, use arrow keys to move it, Space to drop, or Escape to cancel.",
     "reorderPickedUp": "Picked up {{name}}.",
     "reorderPosition": "{{name}}, position {{position}} of {{count}}.",
@@ -4726,8 +4724,7 @@
       "label": "{{name}} actions",
       "editProfile": "Edit profile",
       "dragToReorder": "Drag to reorder",
-      "remove": "Remove from Bots",
-      "removeNote": "Its conversation and memory are kept; set it as a Bot again to reconnect them."
+      "remove": "Remove from Bots"
     },
     "dialog": {
       "addTitle": "Add a Bot",
@@ -4788,13 +4785,7 @@
       "emptyBody": "It carries on from here: {{name}} keeps what matters in its memory and handles messages in order."
     },
     "agents": {
-      "badge": "Bot",
       "setAsBot": "Set as Bot",
-      "setAsBotHint": "Give it a name, an avatar, and one permanent conversation with memory.",
-      "setAsBotNeedsEnabled": "Enable the Agent first, then set it as a Bot.",
-      "isBotTitle": "This Agent is the Bot {{name}}",
-      "isBotHint": "While it is a Bot it stays enabled and keeps its name; it cannot be archived or deleted. Remove it from Bots first.",
-      "isMainBotHint": "The main Bot's Agent is built in: it stays enabled and cannot be removed.",
       "openConversation": "Open conversation",
       "editProfile": "Edit profile"
     }
