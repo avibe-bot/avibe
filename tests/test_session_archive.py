@@ -149,7 +149,8 @@ def test_archive_reclaims_bound_resources(tmp_path: Path) -> None:
             public_meta={
                 "signing_public_key": {
                     "curve": "secp256k1",
-                    "public_key": "02" + "cd" * 32,
+                    # Public generator point: signing preflight rejects shape-only fake keys.
+                    "public_key": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
                 }
             },
         )
