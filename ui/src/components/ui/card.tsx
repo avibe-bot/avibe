@@ -2,7 +2,7 @@ import * as React from 'react';
 
 import { cn } from '@/lib/utils';
 
-// Card defaults match design.pen's stat / panel cards: rounded-12 / border-1 / surface-2.
+// Card defaults (ui/design: system/cards/all): rounded-xl, a 1px border, bg-card.
 export const Card = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
   ({ className, ...props }, ref) => (
     <div

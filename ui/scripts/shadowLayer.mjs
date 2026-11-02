@@ -6,11 +6,12 @@ import { isLength, isZeroLength } from './cssLength.mjs';
 // zero, a blur, and an accent colour. Written as a literal it is invisible to
 // every assertion in `validate-theme.mjs` -- which is how 72 of them accumulated
 // 52 distinct spellings of the same four shapes, and how the eight card washes
-// came to retype `--shadow-mint-card`'s value and so keep the dark frame's neon
-// on a white page. A token cannot drift that way: it is one value, it is read
-// against design.pen, and light re-anchors it in one place. So a glow names a
-// token, and this asserts the property rather than listing the spellings,
-// because the next literal will be a spelling nobody listed.
+// came to retype `--shadow-mint-card`'s value and so keep the dark theme's neon
+// on a white page. A token cannot drift that way: it is one value, declared in
+// index.css (ui/design: system/shape/glows), and light re-anchors it in one
+// place. So a glow names a token, and this asserts the property rather than
+// listing the spellings, because the next literal will be a spelling nobody
+// listed.
 //
 // Only the glow layer is held to it. An offset shadow is directional light, not
 // a glow, and `0 0 0 2px` is a ring -- no blur, nothing to colour-manage.
@@ -178,8 +179,8 @@ function glowOffencesInLayer(layer, tokens, seen, depth) {
     if (!declared) return [`${shown} -- ${name} is declared in no scanned stylesheet, so its value cannot be checked`];
     const next = new Set(seen).add(name);
     // The sanctioned home for a shadow literal, and the only stop condition
-    // here: a managed glow token is read against design.pen and re-anchored for
-    // light in one place, which is exactly what a call site cannot do. It stops
+    // here: a managed glow token is declared once in index.css and re-anchored
+    // for light in one place, which is exactly what a call site cannot do. It stops
     // the recursion, not the check -- the name still has to exist, and a
     // fallback beside it is a second value that renders whenever it does not,
     // so the fallback is classified even when the token it guards is managed.
@@ -190,7 +191,7 @@ function glowOffencesInLayer(layer, tokens, seen, depth) {
     // declared in any component stylesheet was resolved, found, and then
     // deliberately discarded unread. Requiring the declaration to live in an
     // `@theme` block asks the question the prefix was standing in for, because
-    // that block is what design.pen is read against -- and a name that only
+    // that block is the token scale the frames draw -- and a name that only
     // looks managed now falls through to the ordinary classification, where its
     // geometry is judged like any other literal.
     //
@@ -276,7 +277,7 @@ function glowOffencesInLayer(layer, tokens, seen, depth) {
 //
 // It is a separate walk rather than a mode of the one above because the two
 // stop in OPPOSITE places. The glow walk stops at a managed token: its geometry
-// is read against design.pen in one place, so a call site naming it is answered.
+// is declared once in index.css, so a call site naming it is answered.
 // That is exactly the wrong stop here, because the constraint belongs to the
 // CALL SITE -- the token cannot know which function it will be spliced into --
 // so this walk has to open the token the other one is finished with. Threading

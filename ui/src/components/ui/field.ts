@@ -1,8 +1,8 @@
 // Shared base styling for every form-control surface — Input, Select,
-// Textarea, and the Combobox trigger. Mirrors design.pen's single
-// "inset field" treatment so all controls read identically when idle:
+// Textarea, and the Combobox trigger (ui/design: system/fields/all). One
+// "inset field" treatment, so all controls read identically when idle:
 //   fill   = --background (bg-background)    border = --input (border-input)
-//   radius = 6px (rounded-md)                focus  = mint ring (ring-ring)
+//   radius = 8px (rounded-md)                focus  = mint ring (ring-ring)
 // Callers add only size/layout differences (height, padding, chevron) on top
 // via cn(fieldBaseClass, ...). Do not re-roll these tokens per component.
 export const fieldBaseClass =

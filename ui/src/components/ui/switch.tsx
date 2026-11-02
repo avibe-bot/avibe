@@ -38,11 +38,10 @@ const Thumb: React.FC<{ checked: boolean; size: SwitchSize }> = ({ checked, size
   />
 );
 
-// Mirrors design.pen c8fiq/fcMl6 (Switch/Checked + Switch/Unchecked):
-// 44x24 rail, padding 2, 20x20 thumb. Rail flips `$--primary` (mint) ↔
-// `$--border-strong`; thumb stays `$--background` in both states so it
-// reads white in light mode and dark surface in dark mode without a
-// hardcoded fill color per side.
+// ui/design: system/choices/all. 44x24 rail, padding 2, 20x20 thumb.
+// Rail flips `--primary` (mint) ↔ `--border-strong`; thumb stays
+// `--background` in both states so it reads white in light mode and dark
+// surface in dark mode without a hardcoded fill color per side.
 export const Switch = React.forwardRef<HTMLButtonElement, SwitchProps>(
   ({ className, checked, onCheckedChange, label, disabled, size = 'default', ...props }, ref) => (
     <button

@@ -24,8 +24,8 @@ import { eachStylesheet } from './stylesheets.mjs';
 
 const html = fs.readFileSync('index.html', 'utf8');
 const css = fs.readFileSync('src/index.css', 'utf8');
-// The Model Hub carries its own theme-token layer (design.pen's dark frame plus
-// light overrides), so it has to satisfy the same cascade contract as index.css.
+// The Model Hub carries its own theme-token layer (a dark palette plus light
+// overrides), so it has to satisfy the same cascade contract as index.css.
 const modelHubCss = fs.readFileSync('src/components/settings/models/modelHubSurface.css', 'utf8');
 
 function extractThemeBootstrap() {
@@ -269,10 +269,11 @@ function contrastRatio(foreground, background) {
 
 // Measurements the owner has accepted below the WCAG floor. Avibe's accents carry
 // the product's personality — an AI-colleague product should read as alive, not
-// muted — so every accent keeps design.pen's value, and a brand value is never
-// moved to buy contrast. What that costs is recorded here rather than hidden:
-// the white label the design drew on a vivid light fill, and the mint focus ring
-// at 50% over the light surfaces. Owner decision 2026-08-14.
+// muted — so every accent keeps its brand value in index.css (ui/design:
+// system/colors/accents), and a brand value is never moved to buy contrast. What
+// that costs is recorded here rather than hidden: the white label on a vivid
+// light fill, and the mint focus ring at 50% over the light surfaces. Owner
+// decision 2026-08-14.
 //
 // These are pinned, not skipped. Each entry records the ratio it was accepted at and
 // the guard fails when the measured ratio moves off it, so an exemption still catches
@@ -287,7 +288,7 @@ const ACCEPTED_BRAND_RATIOS = new Map([
   // it and this guard could not see it. Naming --violet-foreground brings it under
   // the same pin as the rest instead of leaving it undeclared.
   ['dark fill: --violet-foreground on --violet', 4.38],
-  // The light ring is design.pen's mint at 50%, which composites to ~1.5:1 — a hint
+  // The light ring is the light brand mint at 50%, which composites to ~1.5:1 — a hint
   // drawn beside a focused control, not the only cue for it. Dark needs no entry: the
   // same token over the dark surfaces clears the non-text floor on its own.
   ['light ring: --ring over --card', 1.61],
@@ -372,16 +373,16 @@ for (const [theme, tokens] of [['light', systemLight], ['dark', systemDark]]) {
     assertEqual(`${theme} ${fill} is defined`, tokens.has(fill), true);
     assertEqual(`${theme} ${fill} declares an ink`, tokens.has(`${fill}-ink`), true);
     // --X-ink names the role an accent plays (a mark or small text rather than a
-    // fill); it is not a second, deepened palette. Both roles carry design.pen's
-    // value, so the ink equals the fill, and a light accent therefore reads
+    // fill); it is not a second, deepened palette. Both roles carry the accent's
+    // brand value, so the ink equals the fill, and a light accent therefore reads
     // 2.1-4.2:1 as text — under the AA floor by the owner decision above. This
     // identity is what keeps that decision honest: re-deepening an ink to buy
     // contrast fails here instead of shipping a palette nobody drew.
     if (tokens.get(`${fill}-ink`) !== tokens.get(fill)) {
       throw new Error(
         `${theme} ${fill}-ink is ${tokens.get(`${fill}-ink`)} but ${fill} is ${tokens.get(fill)}. `
-          + 'An accent keeps its design value in both roles; move the design value if it should '
-          + 'change, and move both.',
+          + 'An accent keeps its brand value in both roles; if that value should change, change it '
+          + 'in index.css for both.',
       );
     }
   }
@@ -1113,7 +1114,7 @@ function assertGlowsReadThroughTokens(root) {
   if (offenders.length > 0) {
     throw new Error(
       `${offenders.length} shadow layer(s) either draw a glow themselves or cannot be shown not to. `
-      + `Spelled-out geometry drifts from design.pen exactly the way a spelled-out colour does: `
+      + `Spelled-out geometry drifts from the token scale exactly the way a spelled-out colour does: `
       + `neither can be re-anchored for light, and blur, spread and alpha have no scale left to be `
       + `checked against -- so a managed colour does not redeem hand-picked offsets, and neither `
       + `does a tidy name wrapped around them. Pick the token whose blur this is nearest -- dot, `

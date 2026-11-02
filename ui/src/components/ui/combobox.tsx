@@ -50,12 +50,12 @@ interface ComboboxProps {
   commitOnClose?: boolean
   createLabel?: (value: string) => string
   createHeading?: string
-  /** The design.pen group-picker skin: one folder mark for every row plus its own
+  /** The group-picker skin (ui/design: system/fields/combobox-folder-open): one folder mark for every row plus its own
    *  active fill and trailing check. A row layout, not the per-option `icon`
    *  above — that one says which mark a row carries, this one which list it is. */
   withFolderIcon?: boolean
   /** When set, the create affordance renders as a bordered input + this-labelled button
-   *  (design.pen `e3rPI`) instead of an inline command item. */
+   *  instead of an inline command item. */
   createButtonLabel?: string
   /** A "+ label" row pinned under the options, visible however far the list
    *  scrolls, that leads somewhere else rather than choosing a value; the menu
@@ -113,7 +113,7 @@ export function Combobox({
     setInputValue("")
   }
 
-  // Bordered "+ <typed value>  Create" row (design.pen `e3rPI`). Used when the consumer
+  // Bordered "+ <typed value>  Create" row. Used when the consumer
   // opts in via `createButtonLabel`; otherwise the legacy inline command item is used.
   const renderCreateButtonRow = (typed: string) => (
     <div className="flex items-center gap-2 p-2">

@@ -11,8 +11,8 @@ export type SelectProps = React.SelectHTMLAttributes<HTMLSelectElement> & {
 
 // The non-search dropdown. A styled native <select> so it stays fully
 // accessible, with the unified field surface + a custom chevron. When closed
-// it is intentionally identical to Combobox's trigger (design.pen Select
-// Group/Default === Combobox/Default minus the chevron icon).
+// it is intentionally identical to Combobox's trigger, but for the chevron
+// icon (ui/design: system/fields/all).
 export const Select = React.forwardRef<HTMLSelectElement, SelectProps>(
   ({ className, wrapperClassName, children, disabled, ...props }, ref) => (
     <div className={cn('relative w-full', wrapperClassName)}>
