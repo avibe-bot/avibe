@@ -11,8 +11,8 @@ export interface ProjectPickerProps {
   onChange: (projectId: string) => void;
 }
 
-/** Dropdown that switches which project's skills are being managed. Mirrors the
- *  open-state in design.pen — the project list is the workbench sidebar's. */
+/** Dropdown that switches which project's skills are being managed; the project
+ *  list is the workbench sidebar's. */
 export function ProjectPicker({ projects, value, onChange }: ProjectPickerProps) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);

@@ -23,15 +23,16 @@ Status: adopted (2026-11-02). Avibe's UI designs live in `ui/design/` as frames;
   window manager, Inbox, project tree) from fixtures, and runs the real `ApiProvider` and `BotsProvider`.
   `fetch` and `EventSource` are answered in the page from the frame's API fixtures (by path and query, then by
   path), so no frame reaches a server; paths a frame fetched without a fixture are reported. Each frame gets
-  fresh in-memory Web Storage (seeded by its `storage` fixture) and a fixed clock, so a viewer's remembered
-  preferences and the date never change a frame. No product code changes for this.
+  fresh in-memory Web Storage (seeded by its `storage` fixture), a document URL carrying its `search` fixture
+  (a deep link a component reads), and a fixed clock, so a viewer's remembered preferences and the date never
+  change a frame. No product code changes for this.
 - The canvas (`ui/design.html`, not part of the production build) shows every frame, each in its own iframe so
   themes, portals, and routing never leak between frames. `?frame=<id>&theme=light|dark&lang=zh|en` renders one
   frame at its size.
 - `npm run design:shot` renders frames with Playwright (2x PNG, animations off, portals included, an optional
-  hover) once fonts are loaded and the network is quiet, and fails on any console error. CI runs it with the
-  browser checks, and `typecheck:design` with the static checks, so a product change that breaks a frame fails
-  its PR.
+  hover) once fonts are loaded and the network is quiet (after the frame's `wait`, for a read that starts on a
+  timer), and fails on any console error. CI runs it with the browser checks, and `typecheck:design` with the
+  static checks, so a product change that breaks a frame fails its PR.
 - `npm run design:export` copies the canvas, the screenshots, and `frames.json` into the current Session's Show
   Page and writes `<DesignFrame>`, which embeds frames live (crisp, interactive) without any Show Page change.
   Each shot keeps the language it was exported in. While the Show Page's annotation is on, `<DesignFrame>` draws

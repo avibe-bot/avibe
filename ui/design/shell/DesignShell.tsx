@@ -9,6 +9,7 @@ import { UnsavedChangesContext } from '@/context/unsavedChangesContext';
 import { WindowManagerContext, type WindowManagerValue } from '@/context/WindowManagerContext';
 import { WorkbenchInboxContext, type InboxState } from '@/context/WorkbenchInboxContext';
 import { WorkbenchProjectsContext, type WorkbenchProjectsTree } from '@/context/WorkbenchProjectsContext';
+import { unreadByCategory } from '@/lib/notificationPreferences';
 
 import { owner, type WorkbenchFixtures } from './fixtures';
 
@@ -25,11 +26,16 @@ function inert<T extends object>(known: Partial<T>): T {
 function inboxValue(fixtures: WorkbenchFixtures): InboxState {
   const unreadBySession = fixtures.unreadBySession ?? {};
   const counts = Object.values(unreadBySession);
+  const totalUnread = counts.reduce((sum, n) => sum + n, 0);
+  const botSessions = new Set((fixtures.bots ?? []).map((b) => b.session_id));
   return inert<InboxState>({
     inboxSessions: fixtures.inboxSessions ?? [],
     unreadBySession,
     unreadLoaded: true,
-    totalUnread: counts.reduce((sum, n) => sum + n, 0),
+    totalUnread,
+    unreadByCategory: unreadByCategory(unreadBySession, botSessions),
+    // Every notification switch on, as a new install has them.
+    badgeTotal: totalUnread,
     unreadSessions: counts.filter((n) => n > 0).length,
     nextCursor: null,
     loading: false,

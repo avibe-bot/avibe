@@ -22,6 +22,9 @@ export interface FrameSpec {
   route?: string;
   /** A CSS selector the screenshot hovers before capturing, for hover states (cards, menus). */
   hover?: string;
+  /** Milliseconds the frame waits, once its reads have settled, before it is ready: for a read that starts
+   *  on a timer (a debounced search), so the screenshot shows its result rather than its spinner. */
+  wait?: number;
   render: () => ReactNode;
 }
 
