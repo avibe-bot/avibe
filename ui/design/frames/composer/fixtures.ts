@@ -7,15 +7,10 @@ import { agentsApi, csoTranscript, team, teamFixtures } from '../../shell/teamFi
 
 const cso = team.find((each) => each.handle === 'cso')!;
 
-/** The placeholder that teaches the gesture, wherever a hold would record. While a Bot works, its
- *  conversation names it and says nothing about a queue: a message to a Bot always goes straight in
- *  (owner, 2026-11-02), typed or spoken, and a hold still records. */
+/** The placeholder that teaches the gesture, wherever a hold would record. (While a Bot works, its
+ *  conversation already reads "{name} 正在处理…", and a hold still records.) */
 const holdCopy = {
   'chat.compose.placeholder': { zh: '输入消息，或按住说话', en: 'Message, or hold to talk' },
-};
-const botCopy = {
-  ...holdCopy,
-  'chat.compose.placeholderBusy': { zh: '首席安全官正在处理…', en: 'Chief Security Officer is working…' },
 };
 
 /** A file staged in the composer with no text: a hold still records, and it goes with the message. */
@@ -69,7 +64,7 @@ export function csoFixtures({
       [`/api/sessions/${cso.session_id}/bootstrap`]: { ...bootstrap, draft: { text: draft, updated_at: null } },
       ...speech,
     },
-    copy: copy ? botCopy : undefined,
+    copy: copy ? holdCopy : undefined,
   };
 }
 
