@@ -133,13 +133,28 @@ that a bridge change and its Web UI consumer land in one PR (owner decision).
   New avibe.bot pieces are control-plane functions: an APNs relay for encrypted
   payloads, Sign in with Apple, account deletion, and optionally an instance
   list.
-- The native bridge and the microphone grant apply only to the configured
-  instance origins, never to other sites opened from the app. Other origins
-  open in `SFSafariViewController`.
-- The silent grant covers the Workbench, not Agent-authored content. Show Pages
-  are served from the instance origin under `/show/`, so the delegate checks
-  the requesting frame (`WKFrameInfo`) and answers `.prompt` for Show Page
-  frames and paths.
+- Navigation has three classes:
+  1. **Instance origins** (configured by the user) load in the WebView and get
+     the native bridge and the microphone grant.
+  2. **Authentication origins** load in the WebView without bridge or
+     microphone access: avibe.bot, the Supabase Auth host avibe.bot uses, and
+     GitHub's OAuth pages. Phase 0 sign-in depends on this class (see Signing
+     in). Google's authorization endpoint is intercepted instead, because
+     Google rejects embedded webviews.
+  3. **Everything else** opens in `SFSafariViewController`.
+
+  The bridge checks the sender's `WKScriptMessage.frameInfo.securityOrigin`
+  and the media-capture delegate checks the requesting origin against class 1
+  on every call, so a page in class 2 or 3 never reaches either.
+- The microphone grant follows the instance origin, the trust boundary the Web
+  UI already uses. Show Pages are same-origin-trusted by product decision: the
+  Workbench frames them with `allow-same-origin` and they can reach the parent
+  document (`ui/src/components/workbench/ChatPage.tsx`,
+  `ui/src/apps/ShowPageApp.tsx`). A frame or path check could not exclude them,
+  so the shell does not pretend to. An Agent-authored Show Page can therefore
+  start capture without a WebKit prompt; the iOS recording indicator still
+  shows, and an Agent already has full access to the machine. If this needs a
+  real boundary later, Show Pages must move to a separate origin.
 - Phase 0 adds no credential: the WebView holds the same
   `__Host-vibe_remote_session` cookie a browser holds (`vibe/remote_access.py`,
   24-hour personal session, renewed after half its life).
@@ -161,7 +176,10 @@ browser.
 
 Phase 0, inside the WebView: the instance redirects to avibe.bot's OIDC
 authorize page as it does for a browser, and the user signs in there with the
-email code, password, or GitHub. Google blocks OAuth in embedded webviews with
+email code, password, or GitHub. The whole round trip (instance, avibe.bot,
+Supabase Auth, GitHub, back to the instance's `/auth/callback`) stays in the
+WebView through the authentication-origin class above, so the session cookie
+lands in the WebView's own store. Google blocks OAuth in embedded webviews with
 `disallowed_useragent` ([Google](https://developers.googleblog.com/upcoming-security-changes-to-googles-oauth-20-authorization-endpoint-in-embedded-webviews/)).
 The shell intercepts navigation to Google's authorization endpoint and explains
 that the email code works for the same account. Supabase links identities with
@@ -416,7 +434,7 @@ Effort assumes one Agent lane per track and owner review between phases.
 
 | Track | Work | Effort |
 | --- | --- | --- |
-| Native | SwiftUI app, one `WKWebView`, persistent data store, instance entry by URL or QR, media-capture grant for configured origins, external links in `SFSafariViewController`, safe areas and status bar, offline and error page, user script flags, UA suffix, haptics bridge, Google sign-in interception | 1.5 weeks |
+| Native | SwiftUI app, one `WKWebView`, persistent data store, instance entry by URL or QR, media-capture grant for configured origins, three-class navigation policy (instance, authentication, external in `SFSafariViewController`), safe areas and status bar, offline and error page, user script flags, UA suffix, haptics bridge, Google sign-in interception | 1.5 weeks |
 | Build | Xcode project, signing, `xcodebuild` or fastlane upload to TestFlight | 0.5 week, parallel |
 | Web UI | `isIosShell()`, hide Web Push toggle and install hint, haptics calls, "Open on iPhone" QR | 3 days, parallel |
 
@@ -446,6 +464,8 @@ notifications keep the Home Screen web app as well.
 - iOS behavior is cited and reasoned from shared WebKit code, not yet observed
   on an iPhone (Phase 0 gate).
 - Protected Vault passkeys inside the shell (section 5).
+- Agent-authored Show Pages share the silent microphone grant (section 5); a
+  separate Show Page origin would be the fix if that becomes unacceptable.
 - Payload budget for CJK titles under the 4 KB APNs limit (section 6).
 - The keyboard accessory bar that `WKWebView` shows above the keyboard; removing
   it relies on private behavior, so v1 keeps it.
