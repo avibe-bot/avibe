@@ -20,6 +20,7 @@ export function PhoneScreen({
   tabBar,
   overlay,
   flat = false,
+  bare = false,
 }: {
   children: ReactNode;
   header?: ReactNode;
@@ -27,17 +28,20 @@ export function PhoneScreen({
   overlay?: ReactNode;
   /** The Workbench home draws on flat background; every other page on the console glow. */
   flat?: boolean;
+  /** The page lays itself out as a column filling the main, clear of the tab bar (the home pins its composer there). */
+  bare?: boolean;
 }) {
   return (
     <div className="flex h-full flex-col overflow-hidden bg-background text-foreground">
       {header ?? <MobileBrandHeader />}
       <main
         className={clsx(
-          'min-h-0 flex-1 overflow-y-auto pb-(--mobile-nav-clearance)',
+          'min-h-0 flex-1 pb-(--mobile-nav-clearance)',
+          bare ? 'flex flex-col' : 'overflow-y-auto',
           flat ? 'bg-background' : 'page-glow-console',
         )}
       >
-        <div className="mx-auto w-full px-4 py-5">{children}</div>
+        {bare ? children : <div className="mx-auto w-full px-4 py-5">{children}</div>}
       </main>
       {tabBar ?? <ShippedTabBar />}
       {overlay}

@@ -37,6 +37,8 @@
   --mobile-nav-height: calc(4.75rem + env(safe-area-inset-bottom));
   /* The home-indicator inset alone, for padding a bottom edge clear of it. */
   --safe-area-bottom: env(safe-area-inset-bottom);
+  /* The conversation column: the composer's widest, and every block the home lines up with it. */
+  --chat-column: 1080px;
 }
 
 /* Height of the desktop shell's overlay title bar. On macOS the shell draws the
