@@ -1,6 +1,7 @@
-// avibe-design-frame: shows one avibe/ui design frame live in a Show Page.
-// Written by `npm run design:export`; it imports nothing from the product, only the files the
-// export put in public/design/ (the live canvas, screenshots, and frames.json).
+// avibe-design-frame: shows one design frame live in a Show Page.
+// Written by `npm run design:export` in avibe/ui and in avibe-bot-backend (the same file in both); it
+// imports nothing from the product, only the files the exports put in public/design/: each
+// repository's live canvas, screenshots, and one shared frames.json, whose entries name their canvas.
 //
 //   import { DesignFrame } from "../design/DesignFrame"
 //   <DesignFrame id="sidebar/bots/three" />                 light, then dark
@@ -13,7 +14,8 @@
 // state; "单独打开" still opens it live.
 import { useEffect, useRef, useState } from "react"
 
-type Shot = { id: string; title: string; status: string; theme: "light" | "dark"; lang?: string; width: number; height: number; interaction?: boolean; hash: string; src: string }
+// `canvas`: the folder under public/design/ that holds the frame's live canvas; "canvas" (avibe/ui's) when absent.
+type Shot = { id: string; title: string; status: string; theme: "light" | "dark"; lang?: string; width: number; height: number; interaction?: boolean; hash: string; src: string; canvas?: string }
 type Index = { lang: string; shots: Shot[] }
 
 let index: Promise<Index> | null = null
@@ -90,7 +92,7 @@ function Live({ shot, lang, annotating }: { shot: Shot; lang: string; annotating
     observer.observe(parent)
     return () => observer.disconnect()
   }, [shot.width])
-  const src = `./design/canvas/design.html?frame=${encodeURIComponent(shot.id)}&theme=${shot.theme}&lang=${shot.lang ?? lang}`
+  const src = `./design/${shot.canvas ?? "canvas"}/design.html?frame=${encodeURIComponent(shot.id)}&theme=${shot.theme}&lang=${shot.lang ?? lang}`
   const image = `./design/${shot.src}?v=${shot.hash}`
   return (
     <div ref={box} className="flex flex-col gap-1" style={{ width: shot.width * scale }}>

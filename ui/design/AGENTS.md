@@ -31,7 +31,7 @@ Avibe's UI designs live here. A frame is a static React render of one surface in
 
 Show designs in your own Session's Show Page, next to your explanation:
 
-1. `npm run design:export -- <id prefix>` copies the live canvas, a screenshot of each frame, and `frames.json` into `public/design/` of this Session's Show Page, and writes `src/design/DesignFrame.tsx` there.
+1. `npm run design:export -- <id prefix>` copies the live canvas, a screenshot of each frame, and `frames.json` into `public/design/` of this Session's Show Page, and writes `src/design/DesignFrame.tsx` there. avibe-bot-backend's `design:export` writes into the same places (its canvas under `public/design/avibe-bot/`), and `frames.json` indexes both, so one page can embed frames of either repository.
 2. In a page: `import { DesignFrame } from "../design/DesignFrame"`, then `<DesignFrame id="sidebar/bots/three" />`. Each frame runs the real components in an iframe (crisp, scalable, hover and popovers work) and links to its screenshot; a frame with `hover` or `click` is shown as its screenshot, which holds that state.
 3. While the Show Page's annotation is on, each frame is drawn as its screenshot so the overlay can reach it; an annotation names the frame (`设计帧 <id>`) and theme. Read it back to the frame file before you change anything.
 
