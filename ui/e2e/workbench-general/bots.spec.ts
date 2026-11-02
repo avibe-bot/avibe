@@ -329,6 +329,81 @@ for (const theme of ['light', 'dark'] as const) {
     expect(denied).toEqual([]);
   });
 
+  // The user's message to a Bot is P1 (docs/plans/bots.md D4, MESSAGE-DELIVERY-339):
+  // the server takes it into the Turn the Bot is on, so the conversation names who
+  // is working and promises no queue. Steered, it is simply the user's message;
+  // refused by that Turn, it says it has not reached the Bot yet, never "queued".
+  test(`a working Bot takes the user's message, and a refused one says it has not arrived (${theme})`, async ({ page }) => {
+    const { denied } = await serveBots(page, 'zh', [MAIN, { ...CSO, running: true }, PM]);
+    const sessionId = 'ses_cso';
+    const turnState = {
+      in_flight: true, foreground: 'running', native_turn_started: true, pending_input_count: 0,
+      background_activities: [], pending_activity_output_count: 0, connection: 'connected',
+    };
+    const session = {
+      id: sessionId, scope_id: null, project_id: null, title: CSO.display_name, agent_id: 'agt-cso', agent_name: 'cso',
+      agent_backend: 'vibey', agent_variant: 'vibey', model: 'gpt-6-astra', reasoning_effort: 'high', speed: null, status: 'active',
+      agent_status: 'running', pinned: false, visibility: 'foreground', workdir: '/fixture/.avibe/bots/cso',
+      native_session_id: 'native-cso', metadata: { kind: 'bot' }, created_at: ago(600), updated_at: ago(1),
+    };
+    const ask = {
+      id: 'msg-ask', scope_id: null, session_id: sessionId, platform: 'avibe', author: 'user', type: 'user', source: 'user',
+      author_id: null, author_name: null, native_message_id: null, parent_native_message_id: null,
+      text: '帮我审一下 avault 这周的依赖升级。', content: {}, metadata: {}, created_at: ago(3), updated_at: ago(3),
+    };
+    await page.route(`**/api/sessions/${sessionId}/bootstrap`, (route) => route.fulfill({ json: {
+      session, capabilities: { can_chat: true }, agents: AGENTS, default_agent_name: 'vibey', config: { ui: {} },
+      messages: [ask], queued: [], next_after_id: null, next_before_id: null, draft: { text: '', updated_at: null }, turn_state: turnState,
+    } }));
+    await page.route(`**/api/sessions/${sessionId}`, (route) => route.fulfill({ json: session }));
+    await page.route(`**/api/sessions/${sessionId}/turn-state`, (route) => route.fulfill({ json: turnState }));
+    let queued: unknown[] = [];
+    await page.route(`**/api/sessions/${sessionId}/queue`, (route) => route.fulfill({ json: { queued } }));
+    const sent: string[] = [];
+    await page.route(`**/api/sessions/${sessionId}/messages`, (route) => {
+      if (route.request().method() !== 'POST') return route.fallback();
+      const { text } = route.request().postDataJSON() as { text: string };
+      sent.push(text);
+      const row = { ...ask, id: `msg-${sent.length}`, text, created_at: ago(0), updated_at: ago(0) };
+      // The first message steers into the Turn; the Turn refuses the second, which waits.
+      if (sent.length === 1) return route.fulfill({ status: 201, json: { ...row, state: 'accepted', delivery_state: 'accepted' } });
+      queued = [{ ...row, type: 'queued', state: 'queued', priority: 'p3' }];
+      return route.fulfill({ status: 202, json: { ...row, type: 'queued', state: 'queued', queued: true, delivery_state: 'queued' } });
+    });
+    await page.setViewportSize(DESKTOP);
+    await open(page, `/chat/${sessionId}`, { lang: 'zh', theme });
+    const main = page.locator('main');
+    const composer = main.getByRole('textbox').last();
+
+    // Working: the composer names the Bot and promises no queue.
+    await expect(main.getByText('首席安全官 正在处理…')).toBeVisible();
+    await expect(main).not.toContainText('排队');
+
+    await composer.click();
+    await page.keyboard.type('先看 avault-core，别的放一放。');
+    await page.keyboard.press('Enter');
+    await expect(main.getByText('先看 avault-core，别的放一放。')).toBeVisible();
+    await expect(page.locator('[data-queue-row]')).toHaveCount(0);
+    await page.mouse.move(900, 300);
+    await page.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-steer-accepted-${theme}.png` });
+
+    await composer.click();
+    await page.keyboard.type('顺便把结论发我邮箱。');
+    await page.keyboard.press('Enter');
+    const strip = page.locator('[data-queue-batch]').locator('..');
+    await expect(strip).toContainText('还没送达 · 1');
+    await expect(strip).toContainText('没能插进首席安全官正在处理的这一轮，这一轮结束后就会收到。');
+    await expect(page.locator('[data-queue-row]')).toContainText('顺便把结论发我邮箱。');
+    await expect(page.locator('[data-queue-row]').getByRole('button', { name: '不发了' })).toBeVisible();
+    // It is not in the conversation: it has not reached the Bot.
+    await expect(page.locator('[data-message-id="msg-2"]')).toHaveCount(0);
+    await expect(main).not.toContainText('排队');
+    await page.mouse.move(900, 300);
+    await page.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-steer-refused-${theme}.png` });
+    expect(sent).toEqual(['先看 avault-core，别的放一放。', '顺便把结论发我邮箱。']);
+    expect(denied).toEqual([]);
+  });
+
   // "Hide details" (docs/plans/bots.md D5): on by default, a Bot's conversation
   // reads like talking to a person. The Watch that woke the Bot, the execution
   // process, and the background-task banner stay out; the Bot's report on the

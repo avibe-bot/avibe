@@ -107,6 +107,7 @@ instead of claiming equivalent durability.
 | Source | Default | Behavior |
 | --- | --- | --- |
 | Web composer | P3 | Starts when idle; otherwise joins the FIFO backlog. |
+| Web composer in a Bot's conversation | P1 | The user's own message to a Bot (`docs/plans/bots.md` D4): steers the active Turn or starts when idle; a definitive refusal falls back to P3. |
 | Ordinary IM message | P1 | Steers the active Turn or starts when idle; a definitive refusal falls back to P3. |
 | Existing-Session Agent Run | P1 | Same as ordinary IM. `--queue` selects P3. The new message never promotes older queued work. |
 | Watch, Hook, Webhook | P1 | Continues the target Session without interrupting it. |

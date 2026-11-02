@@ -445,6 +445,37 @@ describe('PetPage Vibey conversation', () => {
     expect(await screen.findByText('No model source yet.')).toBeTruthy();
     expect(screen.getByText('pet.fixInAvibe')).toBeTruthy();
   });
+
+  // The user's message to a Bot is P1 (docs/plans/bots.md D4): one waits only
+  // when the Bot's Turn refused it, and the pet says it has not reached the Bot.
+  it.each([
+    ['the main Bot', 'ses_main', 'pet.queuedForBot'],
+    ['a Session that is no Bot', 'S', 'pet.queued'],
+  ])('names a waiting message to %s (%s) with %s', async (_label, binding, copy) => {
+    const { BotsContext } = await import('@/context/BotsContext');
+    const mainBot = {
+      handle: 'main', display_name: 'Vibey', avatar: { kind: 'mascot' as const }, role: '', agent_name: 'main',
+      session_id: 'ses_main', position: 0, builtin: true, hide_details: true,
+    };
+    const bots = {
+      enabled: true, bots: [mainBot], loaded: true, listed: true, mainBot, statusBySession: {},
+      botForSession: (id: string | null | undefined) => (id === 'ses_main' ? mainBot : undefined),
+      botForAgent: () => undefined, botForHandle: () => undefined, displayName: () => 'Vibey',
+      afterWrite: async () => undefined, moveBot: async () => false, setHideDetails: async () => false,
+      openProfile: () => undefined, profileRequest: null, closeProfile: () => undefined,
+    };
+    tails[binding] = [message('u', binding, { author: 'user', type: 'user', text: 'hello' })];
+    api.getTurnState.mockResolvedValue({ ...idleTurn, in_flight: true, foreground: 'running', pending_input_count: 1 } as never);
+    try {
+      mainSession(binding);
+      render(<BotsContext.Provider value={bots}><PetPage /></BotsContext.Provider>);
+      await showDetail();
+      expect(await screen.findByText(copy)).toBeTruthy();
+      expect(screen.queryByText(copy === 'pet.queued' ? 'pet.queuedForBot' : 'pet.queued')).toBeNull();
+    } finally {
+      api.getTurnState.mockResolvedValue(idleTurn);
+    }
+  });
 });
 
 describe('PetPage state', () => {

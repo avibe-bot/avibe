@@ -109,6 +109,17 @@ CASES = [
     ("show annotation", _envelope("show_annotation"), "p1", "source:show_annotation"),
     ("failure retry", _envelope("failure_retry"), "p3", "source:failure_retry"),
     ("agent initiated", _envelope("agent_initiated"), "p3", "source:agent_initiated"),
+    # MESSAGE-DELIVERY-339: the user's own message to a Bot reaches it at once;
+    # other senders to a Bot keep their priority, a --bot message behind the user's.
+    ("web composer to a Bot", _envelope("web_composer", to_bot=True), "p1", "bot_conversation"),
+    (
+        "another Bot or Agent to a Bot (--bot)",
+        _envelope("harness", trigger="agent_run", requested_intent="queue", to_bot=True),
+        "p3",
+        "requested:queue",
+    ),
+    ("a Watch to a Bot", _envelope("harness", trigger="watch", to_bot=True), "p1", "trigger:watch"),
+    ("failure retry in a Bot", _envelope("failure_retry", to_bot=True), "p3", "source:failure_retry"),
 ]
 
 
@@ -156,7 +167,7 @@ def _admit(engine, envelope, **kwargs):
 def test_each_source_is_admitted_with_its_released_priority_and_records_the_decision(
     engine, envelope, priority, reason
 ) -> None:
-    """MESSAGE-DELIVERY-338: one policy holds every source's released priority."""
+    """MESSAGE-DELIVERY-338, MESSAGE-DELIVERY-339: one policy holds every source's released priority."""
 
     admitted, row = _admit(engine, envelope)
 

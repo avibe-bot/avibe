@@ -135,8 +135,14 @@ own. A Session has none of these; a Bot has all three.
   created through the Web API with an explicit Bot's Agent is accepted the same
   way, though no picker offers one.
 - An input from a Bot is labelled `[Harness: agent run <run> from @<bot:main>]`.
-- A Bot's conversation handles one message at a time; messages from Agents and
-  Bots queue behind the user's.
+- A Bot's conversation handles one Turn at a time. The user's own messages are
+  always P1 (owner decision, 2026-11-02): the Web composer, on the Web, the
+  phone, and the desktop pet alike, delivers them on the released P1 path, so an
+  idle Bot starts at once and a working Bot takes the message into the Turn it
+  is on (steer). Only a definitive steer refusal leaves the message waiting for
+  that Turn to end; the conversation then says it has not reached the Bot yet,
+  without calling it a queue. Messages from Agents and Bots (`--bot`, Harness
+  input) keep their priority and wait behind the user's.
 - No hop limit between Bots (owner decision, 2026-11-01): Bots are meant to
   message each other, and run lineage is not reliable enough to enforce one.
   The guard against ping-pong is the prompt: message another Bot only when it

@@ -97,6 +97,8 @@ class InputEnvelope:
     #: named with an explicit prefix.
     backend: str | None = None
     subagent: str | None = None
+    #: The Session is a Bot's permanent conversation (``docs/plans/bots.md`` D4).
+    to_bot: bool = False
 
     @property
     def attachments(self) -> list[dict[str, Any]]:
@@ -164,6 +166,10 @@ class DefaultAdmissionPolicy:
                 delivery_intent_for_trigger("show_annotation"),
                 "source:show_annotation",
             )
+        if source == "web_composer" and envelope.to_bot and envelope.sender.kind == "user":
+            # The user talks to a Bot as to a person: their message reaches it at
+            # once, steering the Turn it is working on (docs/plans/bots.md D4).
+            return self._decision("steer", "bot_conversation")
         if source in {"web_composer", "failure_retry", "agent_initiated"}:
             return self._decision("queue", f"source:{source}")
         raise ValueError(f"unsupported input source: {source}")
