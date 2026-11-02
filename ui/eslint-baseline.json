@@ -30,7 +30,6 @@
     },
     "src/components/AppShell.tsx": {
       "@typescript-eslint/no-explicit-any": 2,
-      "avibe/localized-user-text": 2,
       "react-hooks/set-state-in-effect": 1
     },
     "src/components/InstallHint.tsx": {

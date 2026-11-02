@@ -4,6 +4,8 @@ import { MemoryRouter } from 'react-router-dom';
 import { ApiProvider } from '@/context/ApiContext';
 import { BotRosterProvider } from '@/context/BotRosterProvider';
 import { BotsProvider } from '@/context/BotsProvider';
+import { DockContext, type DockValue } from '@/context/DockContext';
+import { ShowPageDragContext, type ShowPageDragValue } from '@/context/showPageDrag';
 import { InstanceAuthorizationContext } from '@/context/InstanceAuthorizationContext';
 import { StatusContext, type RuntimeStatus } from '@/context/StatusContext';
 import { ThemeContext } from '@/context/ThemeContext';
@@ -28,17 +30,19 @@ function inert<T extends object>(known: Partial<T>): T {
   }) as T;
 }
 
+/** The Bots' Sessions, which the Inbox files under Bots rather than Sessions. */
+const botSessionIds = (fixtures: WorkbenchFixtures) => new Set((fixtures.bots ?? []).map((bot) => bot.session_id));
+
 function inboxValue(fixtures: WorkbenchFixtures): InboxState {
   const unreadBySession = fixtures.unreadBySession ?? {};
   const counts = Object.values(unreadBySession);
   const totalUnread = counts.reduce((sum, n) => sum + n, 0);
-  const botSessions = new Set((fixtures.bots ?? []).map((b) => b.session_id));
   return inert<InboxState>({
     inboxSessions: fixtures.inboxSessions ?? [],
     unreadBySession,
     unreadLoaded: true,
     totalUnread,
-    unreadByCategory: unreadByCategory(unreadBySession, botSessions),
+    unreadByCategory: unreadByCategory(unreadBySession, botSessionIds(fixtures)),
     // Every notification switch on, as a new install has them.
     badgeTotal: totalUnread,
     unreadSessions: counts.filter((n) => n > 0).length,
@@ -78,6 +82,10 @@ function projectsValue(fixtures: WorkbenchFixtures): WorkbenchProjectsTree {
   });
 }
 
+// Nothing is docked or being dragged: the chat header's Show Page control reads these.
+const dock = inert<DockValue>({ order: [], pins: [], isPinned: () => false, isDocked: () => false, pinFor: () => null });
+const showPageDrag = inert<ShowPageDragValue>({ active: false });
+
 /** The providers the Workbench surfaces read, served from fixtures. The API and Bots providers are the
  *  real ones, reading the frame's API fixtures through the network stub (`apiResponses`); the Bots
  *  provider publishes its roster to the real roster bridge the Inbox sorts by. */
@@ -110,13 +118,17 @@ export function DesignShell({
               <WindowManagerContext.Provider value={inert<WindowManagerValue>({ windows: [], focusedId: null, gestureActive: false })}>
                 <WorkbenchInboxContext.Provider value={inbox}>
                   <WorkbenchProjectsContext.Provider value={projects}>
-                    <BotRosterProvider>
-                      <BotsProvider>
-                        <StatusContext.Provider value={status}>
-                          <ThemeContext.Provider value={themeValue}>{children}</ThemeContext.Provider>
-                        </StatusContext.Provider>
-                      </BotsProvider>
-                    </BotRosterProvider>
+                    <DockContext.Provider value={dock}>
+                      <ShowPageDragContext.Provider value={showPageDrag}>
+                        <BotRosterProvider>
+                          <BotsProvider>
+                            <StatusContext.Provider value={status}>
+                              <ThemeContext.Provider value={themeValue}>{children}</ThemeContext.Provider>
+                            </StatusContext.Provider>
+                          </BotsProvider>
+                        </BotRosterProvider>
+                      </ShowPageDragContext.Provider>
+                    </DockContext.Provider>
                   </WorkbenchProjectsContext.Provider>
                 </WorkbenchInboxContext.Provider>
               </WindowManagerContext.Provider>

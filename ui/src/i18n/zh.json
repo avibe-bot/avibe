@@ -3354,6 +3354,7 @@
   },
   "appShell": {
     "title": "Avibe",
+    "logoAlt": "Avibe 标志",
     "subtitle": "Agent OS",
     "workspaceLabel": "设置",
     "moreSettings": "更多设置",
