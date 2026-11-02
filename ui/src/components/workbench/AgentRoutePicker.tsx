@@ -7,6 +7,8 @@ import clsx from 'clsx';
 import { useApi } from '../../context/ApiContext';
 import type { SessionSpeed, VibeAgentBrief } from '../../context/ApiContext';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
+import { useBots } from '../../context/BotsContext';
+import { isSelectableAgent, liveBotAgentNames } from '../../lib/bots';
 import type { EffortMenu } from '../settings/models/types';
 import { loadBackendModelsWithRefresh, modelOptionLabel, supersedesHubAnswer, useAddModelExit } from '../../lib/backendModels';
 import { isEffortSupported, refusedSavedEffort, resolveEffortOptions } from '../../lib/effortOptions';
@@ -219,11 +221,16 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
     () => new Set((allowedBackends ?? []).map((item) => item.trim()).filter(Boolean)),
     [allowedBackends],
   );
+  // Only selectable Agents are offered: a Bot's Agent never is (docs/plans/bots.md D1),
+  // though a route already on one still shows it as its current value above.
+  const { bots, listed: botsListed } = useBots();
+  const botAgents = useMemo(() => liveBotAgentNames({ bots, listed: botsListed }), [bots, botsListed]);
   const visibleAgents = useMemo(
     () => agents.filter(
-      (agent) => agent.enabled && !agent.archived && (allowedBackendSet.size === 0 || allowedBackendSet.has(agent.backend)),
+      (agent) => isSelectableAgent(agent, botAgents)
+        && (allowedBackendSet.size === 0 || allowedBackendSet.has(agent.backend)),
     ),
-    [agents, allowedBackendSet],
+    [agents, allowedBackendSet, botAgents],
   );
 
   useEffect(() => {

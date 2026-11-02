@@ -146,6 +146,7 @@ export const BotsProvider = ({ children }: { children: ReactNode }) => {
       enabled,
       bots,
       loaded: enabled && loaded,
+      listed: enabled && listed,
       mainBot: bots.find((bot) => bot.builtin) ?? null,
       statusBySession,
       botForSession: (sessionId) => (sessionId ? bySession.get(sessionId) : undefined),
@@ -160,7 +161,7 @@ export const BotsProvider = ({ children }: { children: ReactNode }) => {
       profileRequest: enabled ? profileRequest : null,
       closeProfile: () => setProfileRequest(null),
     };
-  }, [enabled, ownerBots, loaded, ownerStatuses, mainDefault, afterWrite, moveBot, profileRequest]);
+  }, [enabled, ownerBots, loaded, listed, ownerStatuses, mainDefault, afterWrite, moveBot, profileRequest]);
 
   // The Inbox above the router splits its counts by this list (BotRosterContext).
   // A reader who is not the Owner has none to wait for; the Owner's is known once

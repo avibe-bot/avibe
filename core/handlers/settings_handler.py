@@ -522,32 +522,32 @@ class SettingsHandler(BaseHandler):
         settings_key = self._get_settings_key(context)
         current_routing = self._get_settings_manager(context).get_channel_routing(settings_key)
 
-        # The Agents the Web route picker lists, on a backend this runtime can run.
+        from core.vibe_agents import is_selectable_agent
+
+        # The Agents the Web route picker lists, on a backend this runtime can run. A Bot's Agent is internal to
+        # its Bot, so it is listed only for a scope that already runs it, which keeps it until changed.
         runnable = {backend for backend in self.controller.agent_service.agents if self._is_backend_enabled(backend)}
         store = self.controller.vibe_agent_store
         listed = await asyncio.to_thread(store.list_agents, include_disabled=False)
+        current = self.controller.resolve_vibe_agent_for_context(context, required=False)
+        current_id = current.id if current is not None else ""
         catalog_order = {backend: index for index, backend in enumerate(AGENT_BACKENDS)}
         agents = [
             AgentChoice(agent.id, agent.name, agent.backend, agent.model, agent.reasoning_effort)
             for agent in listed
-            if agent.backend in runnable
+            if agent.backend in runnable and (is_selectable_agent(agent) or agent.id == current_id)
         ]
-        current = self.controller.resolve_vibe_agent_for_context(context, required=False)
         im_client = self._get_im_client(context)
         data = RoutingModalData(
             agents=agents,
-            current_agent=current.id if current is not None else "",
+            current_agent=current_id,
             current_routing=current_routing,
             agent_option_limit=getattr(im_client, "route_option_limit", None),
         )
-        from core.vibe_agents import is_bot_agent
-
-        bot_ids = {row.id for row in listed if is_bot_agent(row)}
-        workers = [agent for agent in agents if agent.id not in bot_ids]
-        if data.agent(data.current_agent) is None and workers:
+        if data.agent(data.current_agent) is None and agents:
             # The scope's Agent cannot run here. As for a default Agent, the built-in backend's is the
-            # replacement only when no other Agent is listed, and a Bot is never the replacement.
-            data.current_agent = min(workers, key=lambda agent: implicit_default_rank(agent.backend)).id
+            # replacement only when no other Agent is listed; a Bot's is never listed to replace it.
+            data.current_agent = min(agents, key=lambda agent: implicit_default_rank(agent.backend)).id
         current_agent = data.agent(data.current_agent)
         shown = data.agent(data.shown_agent(selected_agent))
         # A form refreshed per change loads only the shown Agent's backend; the others load every listed one.

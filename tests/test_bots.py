@@ -448,3 +448,25 @@ def test_vibey_and_the_default_agent_stay_workers(service):
         with pytest.raises(AgentBotLockedError):
             store.set_default_agent_name(name)
     assert store.get_default_agent_name() == "writer"
+
+
+def test_selectable_agents_are_the_enabled_ones_minus_current_bots(service):
+    """Every picker and new-route guard reads this set (``bots.md`` D1); ``--agent`` runs do not (D4)."""
+    from core.vibe_agents import is_selectable_agent
+
+    store = service.store
+    store.create(name="writer", backend="vibey")
+    store.create(name="idle", backend="claude")
+    store.update("idle", enabled=False)
+    main = service.ensure_main_bot()
+    bot = service.create_bot(display_name="Researcher")
+
+    def selectable() -> set[str]:
+        return {agent.name for agent in store.list_agents() if is_selectable_agent(agent)}
+
+    assert {"vibey", "writer"} <= selectable()
+    assert not {main.agent.name, bot.agent.name, "idle"} & selectable()
+    service.set_bot("writer", display_name="Writer")
+    assert "writer" not in selectable()
+    service.remove_bot(bot.handle)
+    assert bot.agent.name in selectable()

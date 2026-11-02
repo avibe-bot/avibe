@@ -33,6 +33,16 @@ own. A Session has none of these; a Bot has all three.
   the Agent record's metadata. The Bot's role is the Agent's description (the
   Bots roster shows it); a richer persona goes in the Agent's system prompt.
 - One Agent is at most one Bot.
+- A Bot's Agent is internal to the Bot (owner decision, 2026-11-02): users and
+  pickers see only the Bot. Every Agent picker (the chat route picker, the
+  new-session composer, a Project's Agent, IM routing in Settings and in IM
+  forms, setup's default) offers enabled Agents minus the Agents of current
+  Bots, the main Bot's `main` included; a removed Bot's Agent is an ordinary
+  Agent again. The server refuses moving a Session, a Project, an IM scope, or
+  the default onto a Bot's Agent, with a localized `agent_is_bot` error; a route
+  already on one keeps it and shows it until changed. `is_selectable_agent`
+  (`core/vibe_agents.py`) owns the rule, and the Web's `isSelectableAgent`
+  applies it to the Agent rows' `bot` field.
 - Only Vibey-backend Agents can be set as a Bot, and a Bot's Agent cannot
   change backend.
 - Removing the Bot role keeps its Session and directory, hidden everywhere;
@@ -107,7 +117,11 @@ own. A Session has none of these; a Bot has all three.
   the Bot's conversation. Choosing a colleague and starting a fresh worker of
   a role are two intents with two flags.
 - The prompt's roster gains a Bots table. The Agents table omits Agents that
-  are Bots; the CLI still accepts them with `--agent`.
+  are Bots; the CLI still accepts them with `--agent`. This is by design the
+  one place a Bot's Agent stays reachable as an Agent (D1), so saved Tasks,
+  Watches, and scripts never break when an Agent becomes a Bot; a Session
+  created through the Web API with an explicit Bot's Agent is accepted the same
+  way, though no picker offers one.
 - An input from a Bot is labelled `[Harness: agent run <run> from @<bot:main>]`.
 - A Bot's conversation handles one message at a time; messages from Agents and
   Bots queue behind the user's.

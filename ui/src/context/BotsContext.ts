@@ -19,6 +19,8 @@ export interface BotsState {
   bots: Bot[];
   /** The first read has answered (successfully or not). */
   loaded: boolean;
+  /** The server has returned a list: a failed read is not "no Bots". */
+  listed: boolean;
   mainBot: Bot | null;
   /** Each Bot Session's agent status; a Session not yet read is absent. */
   statusBySession: Record<string, BotRuntimeStatus>;
@@ -47,6 +49,7 @@ const EMPTY: BotsState = {
   enabled: false,
   bots: [],
   loaded: false,
+  listed: false,
   mainBot: null,
   statusBySession: {},
   botForSession: () => undefined,

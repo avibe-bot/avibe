@@ -191,6 +191,12 @@ class ProjectAgentUnavailableError(ValueError):
         self.agent_name = agent_name
 
 
+class ProjectAgentIsBotError(ProjectAgentUnavailableError):
+    """The requested Agent is a Bot's, which no new project route may name (``core.vibe_agents.is_selectable_agent``)."""
+
+    code = "agent_is_bot"
+
+
 class ProjectAgentAudienceError(ProjectAgentUnavailableError):
     """Retained for the coded 400 contract; no longer raised at assignment time.
 
@@ -607,9 +613,7 @@ def update_project(
     if agent_id is not _UNSET and str(agent_id or "").strip():
         cleaned_agent_id = str(agent_id).strip()
         selected_agent = conn.execute(
-            select(agents.c.id, agents.c.name, agents.c.enabled, agents.c.archived_at)
-            .where(agents.c.id == cleaned_agent_id)
-            .limit(1)
+            select(agents).where(agents.c.id == cleaned_agent_id).limit(1)
         ).mappings().first()
         if selected_agent is None:
             raise ProjectAgentUnavailableError(agent_name=cleaned_agent_id)
@@ -617,6 +621,7 @@ def update_project(
         if not preserves_current_identity:
             if not bool(selected_agent["enabled"]) or selected_agent["archived_at"] is not None:
                 raise ProjectAgentUnavailableError(agent_name=selected_agent["name"])
+            _require_not_bot_agent(selected_agent)
         agent_name = selected_agent["name"]
     elif agent_name is not _UNSET:
         requested_agent = str(agent_name or "").strip() or None
@@ -628,7 +633,7 @@ def update_project(
             except ValueError as exc:
                 raise ProjectAgentUnavailableError(agent_name=requested_agent) from exc
             available_agent = conn.execute(
-                select(agents.c.id, agents.c.name)
+                select(agents)
                 .where(agents.c.normalized_name == normalized_agent)
                 .where(agents.c.enabled == 1)
                 .where(agents.c.archived_at.is_(None))
@@ -636,6 +641,7 @@ def update_project(
             ).mappings().first()
             if available_agent is None:
                 raise ProjectAgentUnavailableError(agent_name=requested_agent)
+            _require_not_bot_agent(available_agent)
             agent_name = available_agent["name"]
     for field_name, value in (
         ("agent_name", agent_name),
@@ -649,6 +655,14 @@ def update_project(
         _write_scope_settings(conn, scope_id, settings_values, now)
 
     return _project_for_context(conn, context, _project_payload(conn, scope_id))
+
+
+def _require_not_bot_agent(row: Any) -> None:
+    """Refuse a newly bound Agent that is a Bot's: a Project already bound to one keeps it until changed."""
+    from core.vibe_agents import VibeAgentStore, is_bot_agent
+
+    if is_bot_agent(VibeAgentStore._from_row(row)):
+        raise ProjectAgentIsBotError(agent_name=row["name"])
 
 
 def archive_project(

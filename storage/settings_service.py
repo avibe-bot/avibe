@@ -165,6 +165,12 @@ class ScopeAgentUnavailableError(ValueError):
         self.agent_name = agent_name
 
 
+class ScopeAgentIsBotError(ScopeAgentUnavailableError):
+    """The route names a Bot's Agent, which no new route may name (``core.vibe_agents.is_selectable_agent``)."""
+
+    code = "agent_is_bot"
+
+
 class SQLiteSettingsService:
     def __init__(self, db_path: Path):
         self.db_path = db_path
@@ -431,22 +437,25 @@ class SQLiteSettingsService:
     def _require_enabled_agent_binding(conn: Connection, agent_name: str | None) -> str | None:
         if not agent_name:
             return None
-        from core.vibe_agents import normalize_agent_name
+        from core.vibe_agents import VibeAgentStore, is_bot_agent, normalize_agent_name
 
         try:
             normalized_name = normalize_agent_name(agent_name)
         except ValueError as exc:
             raise ScopeAgentUnavailableError(agent_name=agent_name) from exc
         available = conn.execute(
-            select(agents.c.name)
+            select(agents)
             .where(agents.c.normalized_name == normalized_name)
             .where(agents.c.enabled == 1)
             .where(agents.c.archived_at.is_(None))
             .limit(1)
-        ).scalar_one_or_none()
+        ).mappings().first()
         if available is None:
             raise ScopeAgentUnavailableError(agent_name=agent_name)
-        return str(available)
+        if is_bot_agent(VibeAgentStore._from_row(available)):
+            # Only a new binding is checked here: a scope already on a Bot's Agent keeps it until changed.
+            raise ScopeAgentIsBotError(agent_name=str(available["name"]))
+        return str(available["name"])
 
     def _upsert_scope_settings(self, conn: Connection, *, scope_id: str, **values: Any) -> None:
         """Insert or update one scope's settings row by scope_id — no delete.

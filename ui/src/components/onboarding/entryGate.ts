@@ -3,6 +3,7 @@ import type { CollectionReadAuthority } from '../settings/models/collectionReadA
 import { runtimeIsRunning } from '../settings/models/runtimeLifecycle';
 import type { AgentSupply, RuntimeDependency, SupplyStatus } from '../settings/models/types';
 import { BUILTIN_BACKENDS, isBuiltinBackend, type AgentBackendId } from '@/lib/agentBackends';
+import { isSelectableAgent } from '@/lib/bots';
 import { ASSISTANT_ORDER, type AssistantId } from './collaborationTimeline';
 import { readSetupTargets } from './setupTargets';
 
@@ -70,8 +71,6 @@ export type EntryAdmission =
 
 /** A configured route whose sources are all unusable is not a runnable route. */
 const RUNNABLE_SUPPLY: ReadonlySet<SupplyStatus> = new Set<SupplyStatus>(['ok', 'degraded']);
-
-const usableAgent = (agent: VibeAgentBrief): boolean => agent.enabled && !agent.archived;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -144,7 +143,8 @@ export function entryCandidates(evidence: EntryEvidence): EntryCandidate[] {
   return ENTRY_ORDER.flatMap((backend) => {
     if (!backendUsable(backend, connectionOf.get(backend), supplyOf.get(backend), evidence.cliHealthy)) return [];
     return evidence.agents
-      .filter((agent) => agent.backend === backend && usableAgent(agent))
+      // An Agent a new chat can start on, so never a Bot's: setup may make it the default.
+      .filter((agent) => agent.backend === backend && isSelectableAgent(agent))
       .flatMap((agent) => {
         const modelId = routeRunnable(supplyOf.get(backend), agent.name);
         return modelId ? [{ agent, backend, modelId }] : [];
