@@ -569,3 +569,110 @@ test('the default Agent is offered as a Bot nowhere, and both ways in say what t
   await expect(dialog.getByRole('button', { name: 'Set as Bot' })).toBeDisabled();
   expect(denied).toEqual([]);
 });
+
+// The browser half of the server's Bot-removal contract (docs/plans/bots.md D1):
+// once a Bot is removed its Session is hidden, so every open tab drops it from
+// the Inbox and badges the server's number, without a reload. The fixture is the
+// server: one state behind both tabs, publishing what the real one publishes.
+test('two open tabs follow a Bot removal and a switch change to the server\'s badge', async ({ page }) => {
+  const tabs = [page, await page.context().newPage()];
+  const server = {
+    bots: [MAIN, CSO, PM],
+    sessions: INBOX.sessions,
+    preferences: { enabled: true, bots: true, sessions: false },
+  };
+  const unread = () => Object.fromEntries(server.sessions.filter((row) => row.unread_count > 0).map((row) => [row.session_id, row.unread_count]));
+  const badgeTotal = () => server.sessions.reduce((sum, row) => {
+    const bot = server.bots.some((candidate) => `ses_${candidate.handle}` === row.session_id);
+    const loud = server.preferences.enabled && (bot ? server.preferences.bots : server.preferences.sessions);
+    return sum + (loud ? row.unread_count : 0);
+  }, 0);
+  // What the server publishes reaches every open stream.
+  const publish = (type: string, data: object) => Promise.all(tabs.map((tab) => tab.evaluate(
+    ([name, body]) => (window as unknown as { __serverEvent: (type: string, data: object) => void }).__serverEvent(name, body),
+    [type, data] as const,
+  )));
+
+  const denials: string[][] = [];
+  for (const tab of tabs) {
+    denials.push((await serveBots(tab, 'zh', server.bots)).denied);
+    await tab.addInitScript(() => {
+      const streams = new Set<EventTarget>();
+      class FixtureEvents extends EventTarget {
+        readyState = 1;
+        constructor() { super(); streams.add(this); }
+        close() { streams.delete(this); this.readyState = 2; }
+      }
+      Object.defineProperty(window, 'EventSource', { value: FixtureEvents });
+      const target = window as unknown as { __serverEvent: (type: string, data: object) => void; __appBadges: number[] };
+      target.__serverEvent = (type, data) => streams.forEach((stream) => stream.dispatchEvent(new MessageEvent(type, {
+        data: JSON.stringify({ type, data }),
+      })));
+      target.__appBadges = [];
+      Object.defineProperty(navigator, 'setAppBadge', { configurable: true, value: async (count: number) => { target.__appBadges.push(count); } });
+      Object.defineProperty(navigator, 'clearAppBadge', { configurable: true, value: async () => { target.__appBadges.push(0); } });
+    });
+    await tab.route('**/api/bots', (route) => (route.request().method() === 'GET'
+      ? route.fulfill({ json: { ok: true, bots: server.bots.map(payload) } })
+      : route.fallback()));
+    await tab.route('**/api/inbox**', (route) => {
+      const only = new URL(route.request().url()).searchParams.get('session');
+      const sessions = only ? server.sessions.filter((row) => row.session_id === only) : server.sessions;
+      const map = unread();
+      return route.fulfill({ json: {
+        sessions, next_cursor: null, unread_by_session: map,
+        unread_total: Object.values(map).reduce((sum, n) => sum + n, 0), unread_sessions: Object.keys(map).length,
+        badge_total: badgeTotal(),
+      } });
+    });
+    await tab.route('**/api/notifications/preferences', async (route) => {
+      if (route.request().method() === 'PUT') {
+        server.preferences = { ...server.preferences, ...route.request().postDataJSON() };
+        await route.fulfill({ json: { ok: true, preferences: server.preferences } });
+        await publish('notifications.preferences.updated', { user_key: 'local', preferences: server.preferences });
+        return;
+      }
+      return route.fulfill({ json: { ok: true, preferences: server.preferences } });
+    });
+    await tab.route('**/api/bots/cso', async (route) => {
+      if (route.request().method() !== 'DELETE') return route.fallback();
+      // Removing the Bot hides its Session everywhere the server answers.
+      server.bots = server.bots.filter((bot) => bot.handle !== 'cso');
+      server.sessions = server.sessions.filter((row) => row.session_id !== 'ses_cso');
+      await route.fulfill({ json: { ok: true, bot: payload(CSO, 1) } });
+      await publish('bots.changed', { handle: 'cso' });
+    });
+    await tab.setViewportSize(DESKTOP);
+    await open(tab, '/', { lang: 'zh' });
+  }
+  const [a] = tabs;
+  const lastBadge = (tab: Page) => tab.evaluate(() => (window as unknown as { __appBadges: number[] }).__appBadges.at(-1));
+
+  // Sessions are muted: both tabs count the Bot's 2.
+  for (const tab of tabs) await expect(sidebarOf(tab).getByRole('link', { name: '收件箱，2 条未读' })).toBeVisible();
+
+  await sidebarOf(a).getByRole('button', { name: '首席安全官，2 条未读' }).click({ button: 'right' });
+  await a.getByRole('menu').getByRole('menuitem', { name: '移出伙伴' }).click();
+  // Its Session is gone, not moved to Sessions: only the muted Session's 3 remains.
+  await expect.poll(() => badgeTotal()).toBe(0);
+  for (const tab of tabs) {
+    await expect(sidebarOf(tab).getByRole('button', { name: /^首席安全官/ })).toHaveCount(0);
+    await expect(sidebarOf(tab).getByRole('link', { name: '收件箱：有未读，通知已关闭' })).toBeVisible();
+    await expect.poll(() => lastBadge(tab)).toBe(0);
+  }
+
+  const inbox = sidebarOf(a).getByRole('link', { name: '收件箱：有未读，通知已关闭' });
+  await inbox.hover();
+  const popover = a.getByRole('dialog', { name: '收件箱' });
+  await expect(popover).not.toContainText('首席安全官');
+  await popover.getByRole('button', { name: '通知设置' }).click();
+  await popover.getByRole('switch', { name: '会话消息' }).click();
+
+  // Both tabs show the number the server gives every reader.
+  await expect.poll(() => badgeTotal()).toBe(3);
+  for (const tab of tabs) {
+    await expect(sidebarOf(tab).getByRole('link', { name: '收件箱，3 条未读' })).toBeVisible();
+    await expect.poll(() => lastBadge(tab)).toBe(3);
+  }
+  for (const denied of denials) expect(denied).toEqual([]);
+});

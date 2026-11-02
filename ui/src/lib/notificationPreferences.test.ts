@@ -16,8 +16,8 @@ const MASTER_OFF = { enabled: false, bots: true, sessions: true };
 
 describe('notification preferences', () => {
   // Two Bot replies in the main Bot's and a colleague's conversation, nine in
-  // ordinary Sessions, one of them a removed Bot's.
-  const unread = { ses_main: 1, ses_cso: 1, ses_retired: 4, sesz9y8x7w6v5: 5, sesq1w2e3r4t5: 0 };
+  // ordinary Sessions, one of them with an id that merely starts like a Bot's.
+  const unread = { ses_main: 1, ses_cso: 1, ses_ordinary: 4, sesz9y8x7w6v5: 5, sesq1w2e3r4t5: 0 };
   const counts = unreadByCategory(unread, new Set(['ses_main', 'ses_cso']));
 
   it("splits unread by the live Bot list, not by the id's prefix", () => {

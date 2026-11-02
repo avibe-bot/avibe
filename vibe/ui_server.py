@@ -13507,6 +13507,31 @@ def _workbench_event_heartbeat_frame() -> str:
     return f'event: heartbeat\ndata: {{"interval_ms":{interval_ms}}}\n\n'
 
 
+#: Frames that hand the client an Inbox row, which it adds to its feed and counts.
+_INBOX_ROW_EVENTS = frozenset({"inbox.session.updated"})
+
+
+def _inbox_row_hidden_from(context, payload: str) -> bool:
+    """Whether an Inbox row names a Session this reader's ``GET /api/inbox`` leaves out.
+
+    That read hides the Bot Sessions in ``_hidden_bot_session_ids`` (a removed Bot's
+    for the Owner, every Bot's for anyone else; ``docs/plans/bots.md`` D1), and a
+    realtime row must not hand one back: the client would show and count a Session
+    the server says does not exist for it. Decided per recipient here, on the
+    delivery worker thread rather than the loop of the process that published the
+    row, so every open client and the desktop host get the same answer. Only ids in
+    the Bots' namespace pay for the read.
+    """
+    from storage.agent_session_rows import is_bot_session_id
+
+    data = _workbench_event_data(payload)
+    session_id = data.get("session_id") if data is not None else None
+    if not isinstance(session_id, str) or not is_bot_session_id(session_id):
+        return False
+    with _projects_engine().connect() as conn:
+        return session_id in _hidden_bot_session_ids(conn, context)
+
+
 def _workbench_event_visible_to_context(context, event_type: str, payload: str) -> bool:
     if event_type == "notifications.preferences.updated":
         data = _workbench_event_data(payload)
@@ -13514,6 +13539,8 @@ def _workbench_event_visible_to_context(context, event_type: str, payload: str) 
             data is not None
             and data.get("user_key") == _notification_user_key_for_context(context)
         )
+    if event_type in _INBOX_ROW_EVENTS and _inbox_row_hidden_from(context, payload):
+        return False
     if context is None:
         return True
     if event_type == "show.event":

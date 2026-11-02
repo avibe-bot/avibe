@@ -151,12 +151,19 @@ it is still delivered, listed, and unread.
   Session, the server's definition. The client reads it from the Owner's live
   Bot list (`BotsProvider`, refetched on `bots.changed`), which a small bridge
   (`BotRosterContext`) carries up to the Inbox provider above the router; a
-  removed Bot's `ses_` Session is an ordinary Session, and a reader without Bots
-  has one category. The client computes the badge from its live unread map and
-  the switches, and the aggregate badges wait until the map, the switches, and
-  the Bot list are all known. A shared fixture
+  reader without Bots has one category. The client computes the badge from its
+  live unread map and the switches, and the aggregate badges wait until the
+  map, the switches, and the Bot list are all known. A shared fixture
   (`ui/src/lib/notificationBadge.fixture.json`) runs against both this
-  computation and the server's `badge_total`.
+  computation and the server's `badge_total`, including across a Bot's removal.
+- A removed Bot's Session is hidden (`bots.md` D1), not reclassified. Which
+  Sessions exist is the server's answer alone: the event stream drops an
+  `inbox.session.updated` row for a Session the recipient's `GET /api/inbox`
+  hides (the same `hidden_bot_session_ids` owner, per recipient, on the delivery
+  worker thread); on `bots.changed` an open client re-reads its unread map and, while the feed
+  is shown, its window; and a re-read of the window drops loaded rows the server
+  no longer returns within the range it re-read, so a change missed while the
+  stream was down converges on reconnect too.
 - Sidebar Inbox icon: a cyan number for `badge_total`; a grey dot with no number
   when `badge_total` is 0 and anything is unread.
 
