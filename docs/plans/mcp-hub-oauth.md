@@ -218,8 +218,9 @@ rule. `GET /api/mcp/oauth/callback` (session-exempt, §3); `POST /api/mcp/{name}
 UI: needs-login rows and the detail panel render Log in as
 `<a href={origin}/api/mcp/{name}/oauth/start target="_blank" rel="noopener">`
 styled as a button. No `window.open`, no `about:blank`, no await before opening. Avibe stays in
-the original tab; the callback 302s the authorize tab to `/skills?mcp=…&oauth=success`, and the
-original tab `load()`s on `focus`/`visibilitychange`. Paste mode also opens the existing paste
+the original tab; the callback 302s the authorize tab to `/skills?mcp=…&oauth=success`, which opens the
+MCP tab on that server and says the login completed once, and the original tab `load()`s on
+`focus`/`visibilitychange`. Paste mode also opens the existing paste
 dialog in the original tab when the link is clicked. After add, among added/unchanged `needs_login` servers: exactly one, Web, `oauthMode=direct`,
 not desktop shell, and no failures → close the dialog and `location.assign` the start URL in
 the current tab (callback 302s back to `/skills?mcp=<name>&oauth=success`). Two or more, any

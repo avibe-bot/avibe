@@ -10,7 +10,7 @@ const webFetch = globalSkills.find((s) => s.name === 'web-fetch')!;
 
 const panel = (node: ReactNode) => (
   <div className={consolePageClass}>
-    <div className="flex w-[440px] flex-col p-5">{node}</div>
+    <div className="flex w-full flex-col p-5">{node}</div>
   </div>
 );
 

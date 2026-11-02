@@ -76,6 +76,36 @@ export function skillsApi(skills: SkillBrief[], checks: SkillCheckItem[] = []): 
 
 export const skillsFixtures = (api: Record<string, unknown>): WorkbenchFixtures => ({ bots: [mainBot], api });
 
+/** The avibe project's own skills; its view also lists the global ones it inherits. */
+export const avibeSkills: SkillBrief[] = [
+  projectSkill('repo-conventions', '本仓库的提交、PR 与目录约定：改代码前先读它。', '0.3.0'),
+  projectSkill('scenario-tests', '按场景目录跑真实回归，并整理失败证据。', '1.2.0'),
+  projectSkill('regression-runner', '按需拉起 Incus 回归环境，跑完自动回收。', '0.5.0'),
+];
+
+/** The reads the Skills page makes in the Project scope of the avibe project (`?scope=project&project=proj_avibe`). */
+export function projectSkillsApi(): Record<string, unknown> {
+  const skills = [...avibeSkills, ...globalSkills.slice(0, 2)];
+  return {
+    ...skillsApi(globalSkills, globalChecks),
+    '/api/skills?scope=all&project_id=proj_avibe': { ok: true, summary: { global: 2, project: avibeSkills.length }, skills },
+    '/api/skills/check?scope=project&project_id=proj_avibe': {
+      ok: true,
+      skills: avibeSkills.map(({ name, version }) => ({ name, scope: 'project', status: 'up_to_date', localVersion: version, remoteVersion: version })),
+    },
+  };
+}
+
+/** A .zip the Add dialog's upload tab holds, at a realistic size. */
+export const skillZip = () => new File([new Uint8Array(240 * 1024)], 'pdf-toolkit.zip', { type: 'application/zip' });
+
+/** What fetching `anthropics/skills` (or unpacking pdf-toolkit.zip) finds. */
+export const discoveredSkills = [
+  { name: 'pdf-tools', description: '填写、合并、拆分 PDF，并抽取其中的文字与表格。' },
+  { name: 'docx-tools', description: '读写 Word 文档，保留样式与批注。' },
+  { name: 'pptx-tools', description: '从 Markdown 大纲生成幻灯片。' },
+];
+
 export const registryItem = (
   id: number,
   name: string,
