@@ -589,6 +589,9 @@ class BotService:
                 "avatar": avatar_record if avatar is not None else previous.get("avatar"),
                 "position": self._next_position(conn),
             }
+            # Setting a removed Bot again reconnects its conversation as the user left it.
+            if isinstance(previous.get("hide_details"), bool):
+                record["hide_details"] = previous["hide_details"]
             self._write_record(conn, agent, record)
             agent = self._reload(conn, agent.id)
             self._sync_session_title(conn, bot_session_id(handle), name)

@@ -266,6 +266,14 @@ def test_hide_details_is_on_until_turned_off_for_that_bot_alone(service):
     assert refused.value.code == "bot_hide_details_invalid"
     assert service.get_bot("beta").hide_details is True
 
+    # The paths that rebuild a Bot record keep the switch: the main Bot's repair, which
+    # every Bot list read runs, and setting a removed Bot again.
+    service.update_bot("main", hide_details=False)
+    service.ensure_main_bot()
+    assert service.get_bot("main").hide_details is False
+    service.remove_bot("alpha")
+    assert service.set_bot("alpha", display_name="Alpha").hide_details is False
+
 
 def test_bot_operations_are_the_owners(service):
     from vibe.authorization import AuthorizationContext, InstanceAuthorizationError
