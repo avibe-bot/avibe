@@ -9,10 +9,13 @@ import { useToast } from '../../../context/ToastContext';
 import { useInstanceAuthorization } from '../../../context/InstanceAuthorizationContext';
 import { isDesktopShell } from '../../../lib/desktopShell';
 import { mcpAddOauthAction } from '../../../lib/mcpAddOauth';
+import { buildMcpFormJson, EMPTY_MCP_ADD_FORM, parseMcpTarget, type McpAddFormState } from '../../../lib/mcpAddForm';
 import { Badge } from '../../ui/badge';
 import { Button } from '../../ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from '../../ui/dialog';
+import { SegmentedRadio } from '../../ui/segmented';
 import { Textarea } from '../../ui/textarea';
+import { McpAddForm } from './McpAddForm';
 import { buttonVariants } from '../../ui/button-variants';
 
 function oauthStartHref(name: string): string {
@@ -122,6 +125,8 @@ export const McpHubSection: React.FC = () => {
   const [showAdd, setShowAdd] = useState(false);
   const [addText, setAddText] = useState('');
   const [addError, setAddError] = useState<string | null>(null);
+  const [addTab, setAddTab] = useState<'json' | 'form'>('json');
+  const [addForm, setAddForm] = useState<McpAddFormState>(EMPTY_MCP_ADD_FORM);
   const [loginFor, setLoginFor] = useState<{ name: string } | null>(null);
   const [callbackText, setCallbackText] = useState('');
   const [confirmDelete, setConfirmDelete] = useState<McpServerSummary | null>(null);
@@ -241,16 +246,26 @@ export const McpHubSection: React.FC = () => {
   const closeAdd = () => {
     setShowAdd(false);
     setAddText('');
+    setAddTab('json');
+    setAddForm(EMPTY_MCP_ADD_FORM);
     setAddError(null);
     setAddResult(null);
   };
 
+  const addFormTarget = parseMcpTarget(addForm.target);
+  const addPayload = addTab === 'json'
+    ? (addText.trim() ? addText : null)
+    : addForm.name.trim() && (addFormTarget.kind === 'http' || addFormTarget.kind === 'stdio')
+      ? buildMcpFormJson({ name: addForm.name, target: addFormTarget, rows: addForm.rows, cwd: addForm.cwd })
+      : null;
+
   const onAdd = async () => {
+    if (addPayload === null) return;
     setBusy('add');
     setAddError(null);
     setAddResult(null);
     try {
-      const res = await api.addMcp(addText);
+      const res = await api.addMcp(addPayload);
       const added = res.added ?? [];
       const unchanged = res.unchanged ?? [];
       const failed = res.failed ?? [];
@@ -502,8 +517,23 @@ export const McpHubSection: React.FC = () => {
             </div>
           ) : (
             <>
-              <Textarea value={addText} onChange={(event) => setAddText(event.target.value)} className="min-h-40 font-mono text-[12px]" placeholder={t('mcpHub.pastePlaceholder')} />
-              <p className="text-[11px] text-muted">{t('mcpHub.pasteHint')}</p>
+              <SegmentedRadio
+                value={addTab}
+                onChange={setAddTab}
+                ariaLabel={t('mcpHub.addMode')}
+                options={[
+                  { id: 'json', label: t('mcpHub.addModeJson') },
+                  { id: 'form', label: t('mcpHub.addModeForm') },
+                ]}
+              />
+              {addTab === 'json' ? (
+                <>
+                  <Textarea value={addText} onChange={(event) => setAddText(event.target.value)} className="min-h-40 font-mono text-[12px]" placeholder={t('mcpHub.pastePlaceholder')} />
+                  <p className="text-[11px] text-muted">{t('mcpHub.pasteHint')}</p>
+                </>
+              ) : (
+                <McpAddForm value={addForm} onChange={setAddForm} />
+              )}
               {addError ? <div className="whitespace-pre-wrap text-[12px] text-destructive-ink">{addError}</div> : null}
             </>
           )}
@@ -513,7 +543,7 @@ export const McpHubSection: React.FC = () => {
             ) : (
               <>
                 <Button type="button" variant="outline" onClick={closeAdd}>{t('common.cancel')}</Button>
-                <Button type="button" disabled={busy !== null || !addText.trim()} onClick={() => void onAdd()}>
+                <Button type="button" disabled={busy !== null || addPayload === null} onClick={() => void onAdd()}>
                   {busy === 'add' ? <Loader2 className="size-3.5 animate-spin" /> : null}
                   {t('mcpHub.add')}
                 </Button>

@@ -139,7 +139,10 @@ Skills & MCP page, MCP tab. No status badges, enable toggle, or edit dialog.
 - Toolbar: 技能 | MCP, search, `+ 添加 MCP`. Header `刷新` = discover all.
 - Row: transport icon, name, command/URL, tool count · transport, source chip (Avibe/Claude/Codex/OpenCode).
 - Detail: connection, tools, `vibe mcp <name> <tool>`, last refreshed. Footer: 刷新 / 删除.
-- Add dialog: JSON textarea, 取消 / 添加. Invalid JSON or failed refresh keeps the dialog open.
+- Add dialog: `SegmentedRadio` tabs 粘贴 JSON (default, textarea) / 表单, then 取消 / 添加. Invalid JSON or failed refresh keeps the dialog open.
+  - The form (`ui/src/lib/mcpAddForm.ts`) builds the same `{"mcpServers": {name: {...}}}` text and calls the same add API. No new endpoint and no new persisted fields.
+  - One "URL or command" input: `^https?://` gives HTTP `url` (a malformed URL is an error, never a command). Otherwise a shell-style tokenizer with no shell and no expansion. Operators, unclosed quotes and Windows paths point to JSON.
+  - Header/env rows, plus a collapsed stdio `cwd`. Anything else stays JSON-only. Tab inputs persist across switches.
 - Delete: Avibe source removes artifacts. Native source **removes the entry from its owning native file** (Claude `mcpServers`, Codex `[mcp_servers.<name>]` + sub-tables, OpenCode `mcp`) by a text edit that keeps every other byte, then drops Avibe's snapshot. Owner-confirmed; the dialog names the file and says the other agent loses the server. The result must parse to the original minus that entry, else nothing is written (`invalid_native_config`). An entry already gone only drops the snapshot. Only the canonical (first) source is edited. No backups or undo. *Decision reversed 2026-11-01 (owner): earlier MVP hid native deletes in `.hidden.json`; released `.hidden.json` names stay honored, new deletes no longer write it.*
 
 ## 6. Discovery and versions
