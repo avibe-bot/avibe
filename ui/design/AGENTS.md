@@ -12,12 +12,12 @@ Avibe's UI designs live here. A frame is a static React render of one surface in
 
 - Draw shipped surfaces with the shipped component (`@/components/...`) and fixtures; never redraw them.
 - Draw what does not exist yet in `kit/`. When it ships, the frame switches to the shipped component, the kit copy is deleted, and the status becomes `shipped`.
-- Frames hold no logic: no handlers, no effects, no fetching. State comes from fixtures (`WorkbenchFixtures`): a provider that reads the API gets its response from `fixtures.api` or a typed fixture field, and a remembered preference comes from `fixtures.storage`. Add a fixture field rather than mocking inside a frame.
+- Frames hold no logic: no handlers, no effects, no fetching. State comes from fixtures (`WorkbenchFixtures`): a provider that reads the API gets its response from `fixtures.api` or a typed fixture field, a remembered preference comes from `fixtures.storage`, and a deep link a component reads from the document URL comes from `fixtures.search`. Add a fixture field rather than mocking inside a frame.
 - Tokens only: no raw colors, sizes, or shadows that `src/index.css` does not define. Add a token there if one is missing.
 - Each frame states its size, its themes (default both), and its status: `proposed` (being designed), `approved` (signed off, ready to build), or `shipped` (renders shipped components only). A proposal becomes `approved` in the PR the owner approves.
 - Kit copy is draft copy and may be written inline; it moves to `src/i18n` when the component ships.
 - When a shipped component mixes data hooks and markup, draw it whole; to redesign part of it, prefer splitting it into a view (props only) and a container, then draw the view.
-- Size a frame to include any popover, menu, or card it shows; set `hover` to capture a hover state.
+- Size a frame to include any popover, menu, or card it shows; set `hover` to capture a hover state, and `wait` when a read starts on a timer (a debounced search).
 - Code that implements a design names its frame id (`ui/design: sidebar/bots/three`), not a description of a drawing.
 
 ## Loop

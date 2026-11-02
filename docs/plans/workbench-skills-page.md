@@ -2,7 +2,7 @@
 
 > **Branch**: `feature/workbench-skills` (from `origin/master` @ `88c8afe`)
 > **Status**: Design finalized 2026-05-30 — ready to build.
-> **Design source of truth**: `../avibe-docs/design.pen` — frames listed in §2. Read them via the `pencil` MCP tools, not text.
+> **Design source of truth**: the design frames in `ui/design/frames/skills/` (`skills/*`). The Pencil frames §2 lists were the design this page was first built from; that file is retired.
 > **Owner**: cyhhao
 > **Core principle**: extreme reuse + first-principles. Reuse a primitive → extend it → only then build new. Never re-roll a one-off variant inline. **Pixel-perfect 1:1 with the design is a hard requirement** (see §8).
 

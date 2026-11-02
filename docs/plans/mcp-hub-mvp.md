@@ -3,7 +3,7 @@
 > Status: implemented (instance-global Hub). Official latest stable Python MCP SDK, no generated Skills. OAuth: see `docs/plans/mcp-hub-oauth.md`.
 > Model: auto-discover reachable servers and register them; no draft/enable lifecycle.
 > Principle: smallest complete design; reuse existing caller context, IPC, credentials, i18n and owner lifecycle; no speculative defenses.
-> Design source of truth: `avibe-docs/design.pen`, frames `avibe — Skills & MCP · …`.
+> Design source of truth: the design frames `skills/mcp/*` (`ui/design/frames/skills/mcp.design.tsx`).
 
 ## 1. Change contract
 
@@ -206,7 +206,7 @@ Acceptance:
 3. Add through page/`vibe mcp-add` writes only the Avibe store and the server appears after the call returns.
 4. Delete of an Avibe server removes it. Delete of a native server removes that entry from its native file (owner-confirmed), preserving the rest of the file.
 5. Help/list work with the owner down; schema-to-flag contracts hold; injected prompt examples are parser-tested.
-6. UI matches the Pencil frames; leftover MVP `state.json` enabled flags and drafts load safely (ignored).
+6. UI matches the `skills/mcp/*` design frames; leftover MVP `state.json` enabled flags and drafts load safely (ignored).
 7. Avibe-spawned sessions do not load native MCP (C3 unchanged).
 
 ## 11. Next action

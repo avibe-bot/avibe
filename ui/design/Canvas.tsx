@@ -3,6 +3,7 @@ import { useEffect, type ReactNode } from 'react';
 import type { DesignLang, DesignTheme, Frame } from './frame';
 import { ALL_FRAMES } from './registry';
 import { DesignShell } from './shell/DesignShell';
+import { designLocation } from './shell/location';
 import { designNetwork } from './shell/network';
 
 function FrameBox({ frame, theme }: { frame: Frame; theme: DesignTheme }) {
@@ -23,18 +24,22 @@ function FrameBox({ frame, theme }: { frame: Frame; theme: DesignTheme }) {
 /** One frame at its exact size: what the screenshot tool captures. */
 function Single({ frame, theme }: { frame: Frame; theme: DesignTheme }) {
   useEffect(() => {
+    // After the frame's effects (a component may have cleared the deep link it read).
+    designLocation.restore();
     document.documentElement.setAttribute('data-theme', theme);
     let cancelled = false;
-    // Ready once fonts are in and the providers' fixture reads have settled.
+    // Ready once fonts are in and the providers' fixture reads have settled, including a read that
+    // starts on a timer when the frame says to wait for it.
     void document.fonts.ready
       .then(() => designNetwork.quiet())
+      .then(() => (frame.wait ? new Promise((resolve) => setTimeout(resolve, frame.wait)).then(() => designNetwork.quiet()) : undefined))
       .then(() => {
         if (!cancelled) document.body.dataset.designReady = 'true';
       });
     return () => {
       cancelled = true;
     };
-  }, [theme]);
+  }, [frame, theme]);
   return <FrameBox frame={frame} theme={theme} />;
 }
 
