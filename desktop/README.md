@@ -197,8 +197,12 @@ is not part of the application or private Runtime.
 - Intel macOS (`x86_64-apple-darwin`);
 - Windows x64 (`x86_64-pc-windows-msvc`).
 
-Windows NSIS artifacts remain unsigned acceptance builds; Authenticode is
-tracked in [#1976](https://github.com/avibe-bot/avibe/issues/1976). Windows ARM64
+Windows NSIS artifacts remain unsigned acceptance builds; see the public
+[Code signing policy](https://docs.avibe.bot/code-signing-policy) and
+[Privacy policy](https://docs.avibe.bot/privacy). SignPath application submission
+is not approval, and Avibe does not currently sign Windows releases through
+SignPath. Authenticode is tracked in
+[#1976](https://github.com/avibe-bot/avibe/issues/1976). Windows ARM64
 stays outside the current product gate.
 
 ### macOS signing and notarization

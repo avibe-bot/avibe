@@ -87,6 +87,34 @@ def test_notes_shell_does_not_mutate_notes_when_remote_tag_cannot_be_bound(tmp_p
     assert _fixture_git(workspace, "rev-parse", f"refs/tags/{tag}^{{commit}}") == source
 
 
+def test_release_notes_append_bilingual_policy_links_before_publication(tmp_path):
+    """Both release kinds must get policy links even if generated prose omits them."""
+    job = _job("release_ai.yml", "release")
+    step = _step(job, "Append code signing and privacy policy links")
+    assert "if" not in step  # Applies to stable and TEST, independent of desktop gates.
+    steps = job["steps"]
+    assert steps.index(_step(job, "Generate release notes (OpenAI)")) < steps.index(step)
+    assert steps.index(step) < steps.index(_step(job, "Create GitHub-only Release"))
+    assert steps.index(step) < steps.index(_step(job, "Update official release notes"))
+
+    (tmp_path / "docs").mkdir()
+    shutil.copy2(ROOT / "docs/release-policy-footer.md", tmp_path / "docs")
+    notes = tmp_path / "release.md"
+    original = "# Highlights\nA feature.\n\n---\n\n# 更新\n一个功能。\n"
+    notes.write_text(original, encoding="utf-8")
+    subprocess.run(
+        ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", step["run"]],
+        cwd=tmp_path, check=True, capture_output=True, text=True, timeout=5,
+    )
+    result = notes.read_text(encoding="utf-8")
+    assert result.startswith(original)
+    for prefix in ("https://docs.avibe.bot", "https://docs.avibe.bot/zh"):
+        assert f"({prefix}/code-signing-policy)" in result
+        assert f"({prefix}/privacy)" in result
+    assert "Code signing policy" in result
+    assert "代码签名政策" in result
+
+
 def _fixture_git(directory, *arguments):
     return subprocess.run(
         ["git", "-C", str(directory), "-c", "user.name=Release test",

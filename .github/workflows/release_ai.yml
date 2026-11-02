@@ -574,6 +574,10 @@ jobs:
             printf "\n\nFull Changelog: %s\n" "$COMPARE_URL" >> release.md
           fi
 
+      - name: Append code signing and privacy policy links
+        shell: bash
+        run: cat docs/release-policy-footer.md >> release.md
+
       - name: Preserve silent-update marker (tag annotation or existing release body)
         shell: bash
         env:

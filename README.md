@@ -360,8 +360,21 @@ OpenCode may pause tool calls for approval unless `~/.config/opencode/opencode.j
 
 - **Local-first** — Avibe runs on your machine; your code and agent processes stay there.
 - **No public inbound ports** — Socket Mode / WebSocket / long-polling only for chat control.
-- **Your keys, your data** — stored under `~/.avibe/`; agent prompts go only to the model sources you configure. Existing installs keep `~/.vibe_remote/` as a compatibility path.
+- **Your keys, your data** — local state is stored under `~/.avibe/`. Model calls, messaging, tools, updates, and optional Cloud/voice services make external requests; see the [Privacy policy](https://docs.avibe.bot/privacy) for destinations and control limits. Existing installs keep `~/.vibe_remote/` as a compatibility path.
 - **Fail-closed remote access** — `avibe.bot` brokers identity and the tunnel, never your workspace.
+
+## Code signing policy
+
+Avibe submitted a SignPath Foundation application on November 2, 2026. It has
+not been approved, and Windows releases are not signed through SignPath.
+Read the [Code signing policy](https://docs.avibe.bot/code-signing-policy) for
+roles, scope, and requirements before signing can start. Current Windows
+installers are not Authenticode-signed; desktop update-verification signatures
+and macOS Developer ID signing are separate. Signing does not guarantee that
+SmartScreen reputation warnings disappear.
+
+[Downloads and installation](https://docs.avibe.bot/get-started/install) ·
+[Privacy policy](https://docs.avibe.bot/privacy)
 
 ---
 

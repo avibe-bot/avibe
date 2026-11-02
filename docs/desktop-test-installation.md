@@ -2,6 +2,14 @@
 
 ## Desktop TEST installation
 
+[Code signing policy](https://docs.avibe.bot/code-signing-policy) ·
+[Privacy policy](https://docs.avibe.bot/privacy) ·
+[代码签名政策（Code signing policy）](https://docs.avibe.bot/zh/code-signing-policy) ·
+[隐私政策](https://docs.avibe.bot/zh/privacy)
+
+SignPath application submission is not approval; Avibe does not currently sign
+Windows releases through SignPath. See the policy for status and responsibilities.
+
 This GitHub prerelease is for desktop testing. Download the installer matching
 your machine: `aarch64-apple-darwin.dmg` for Apple silicon,
 `x86_64-apple-darwin.dmg` for Intel Macs, or `x86_64-pc-windows-msvc.exe` for

@@ -360,8 +360,19 @@ bash -o pipefail -c 'curl -fsSL https://opencode.ai/install | bash'
 
 - **本地优先**——Avibe 跑在你的机器上，代码和 agent 进程都留在那。
 - **无公网入站端口**——聊天控制只用 Socket Mode / WebSocket / 长轮询。
-- **你的密钥，你的数据**——存放在 `~/.avibe/`；agent 的 prompt 只发给你配置的模型来源。已有安装会保留 `~/.vibe_remote/` 作为兼容路径。
+- **你的密钥，你的数据**——本地状态存放在 `~/.avibe/`。模型调用、消息平台、工具、更新及可选的云服务/语音功能会发起外部请求；目的地和控制限制见[隐私政策](https://docs.avibe.bot/zh/privacy)。已有安装会保留 `~/.vibe_remote/` 作为兼容路径。
 - **远程访问默认拒绝**——`avibe.bot` 负责身份和隧道，从不经手你的工作区。
+
+## 代码签名政策（Code signing policy）
+
+Avibe 已于 2026 年 11 月 2 日提交 SignPath Foundation 申请。申请尚未获批，
+Windows 版本没有通过 SignPath 签名。
+[代码签名政策](https://docs.avibe.bot/zh/code-signing-policy)说明角色、范围及启用签名前的要求。
+当前 Windows 安装包没有 Authenticode 签名；桌面更新验证签名和 macOS Developer ID
+签名与之相互独立。代码签名不能保证 SmartScreen 信誉警告消失。
+
+[下载与安装](https://docs.avibe.bot/zh/get-started/install) ·
+[隐私政策](https://docs.avibe.bot/zh/privacy)
 
 ---
 

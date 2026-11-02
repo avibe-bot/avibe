@@ -3,6 +3,18 @@
 This document contains the release-specific details that are too operational
 for `AGENTS.md`. The workflows are the source of truth for the final commands.
 
+## Code signing policy
+
+The public [Code signing policy](https://docs.avibe.bot/code-signing-policy)
+and [Privacy policy](https://docs.avibe.bot/privacy) are canonical. SignPath
+application submission is not approval or permission to sign: current Windows
+installers remain unsigned. Updater signatures and macOS signing are separate.
+
+`Release (AI Notes)` appends `docs/release-policy-footer.md` deterministically
+to future stable and TEST notes. Keep both languages aligned with the canonical
+status, updating the footer when that status changes. Do not backfill or alter
+published releases. This footer changes no signing, approval, or publication gate.
+
 ## Tags and notifications
 
 - Tags advance the latest version number, for example `v1.0.1` to `v1.0.2`.
