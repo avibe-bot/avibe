@@ -21,8 +21,7 @@ type SearchPaletteProps = {
 };
 
 // One footer keyboard hint: a key-cap pill + its label (↑↓ Navigate, etc.).
-// Mirrors design.pen UM9dm → Hint (Key cornerRadius 5 / #FFFFFF0F / border,
-// mono key + Inter muted label).
+// Key cornerRadius 5 / #FFFFFF0F / border, mono key + Inter muted label.
 const FooterHint: React.FC<{ keyLabel: string; label: string }> = ({ keyLabel, label }) => (
   <span className="flex items-center gap-1.5">
     <kbd className="flex items-center justify-center rounded-[5px] border border-border bg-foreground/[0.06] px-1.5 py-0.5 font-mono text-[10px] font-bold text-muted">
@@ -33,7 +32,7 @@ const FooterHint: React.FC<{ keyLabel: string; label: string }> = ({ keyLabel, l
 );
 
 // Desktop ⌘K command palette for global app + message-content search
-// (design.pen sUCZo).
+// (ui/design: search/search-palette/open).
 // A centered 720px modal: a query row (mint search glyph + text input + an Esc
 // pill), a scrollable results area grouped by session via the shared
 // <SearchResultGroup>, and a footer of keyboard hints. Message hits stay

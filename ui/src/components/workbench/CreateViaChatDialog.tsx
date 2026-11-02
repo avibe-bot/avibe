@@ -17,7 +17,7 @@ interface CreateViaChatDialogProps {
   onClose: () => void;
 }
 
-// Mirrors design.pen AbIUE — single 500px-wide violet-glow card that
+// ui/design: harness/create-via-chat/task — single 500px-wide violet-glow card that
 // invites the user to describe a task/watch in natural language. The
 // "Open chat" button creates a fresh session under the selected project
 // and seeds it with an intent-shaped first user message; the agent

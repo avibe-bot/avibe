@@ -1488,7 +1488,7 @@ export const AgentsPage: React.FC = () => {
   return (
     <div className="mx-auto flex w-full max-w-[1200px] flex-col gap-5 py-2">
       <CapabilityTabs />
-      {/* Header — shared WorkbenchPageHeader (design.pen: 40px mint icon + title + subtitle). */}
+      {/* Header — shared WorkbenchPageHeader (40px mint icon + title + subtitle). */}
       <WorkbenchPageHeader
         icon={<Bot className="size-5" />}
         title={t('agents.title')}
@@ -1531,7 +1531,7 @@ export const AgentsPage: React.FC = () => {
         />
       )}
 
-      {/* Toolbar — design.pen Imduv: search + backend filter + spacer + Import + 新建 Agent */}
+      {/* Toolbar: search + backend filter + spacer + Import + 新建 Agent */}
       <div className={clsx('flex flex-wrap items-center gap-2.5', activeTab === 'running' ? 'hidden' : detailOpen && 'max-lg:hidden')}>
         <div className="flex h-9 w-full items-center gap-2 rounded-md border border-input bg-background px-3 transition-colors focus-within:border-ring focus-within:ring-2 focus-within:ring-ring sm:w-[320px]">
           <Search className="size-3.5 shrink-0 text-muted" />
@@ -1899,7 +1899,7 @@ interface BackendFilterProps {
   onChange: (next: Backend | 'all') => void;
 }
 
-// Compact Popover trigger that mirrors design.pen dMFRl — funnel icon +
+// Compact Popover trigger — funnel icon +
 // "Backend: All" label + chevron. Replaces the old hand-rolled checkbox.
 export const BackendFilter: React.FC<BackendFilterProps> = ({ value, onChange }) => {
   const { t } = useTranslation();
@@ -1997,7 +1997,7 @@ interface DetailProps {
   onClose: () => void;
 }
 
-// Mirrors design.pen s7QaWQ. Header (name + close X) → Enable card →
+// ui/design: agents/agents-page/definitions. Header (name + close X) → Enable card →
 // Name → Backend (read-only) → Model (Combobox) → Reasoning effort →
 // System Prompt (collapsible) → footer Run / Delete. Name is editable
 // for user agents. The backend renames the row and its references atomically;
@@ -2404,7 +2404,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
 
   return (
     <div className="flex flex-col gap-3.5">
-      {/* Header row — design.pen j5dGQ8 without DEFAULT badge (now read-
+      {/* Header row, without a DEFAULT badge (now read-
           only via the list-row pill; the panel always shows the agent's
           current identity, not its "is-default" status). */}
       <div className="flex items-start gap-2.5">
@@ -2428,7 +2428,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
 
       <AgentBotCard agent={agent} canEdit={canEdit} isDefault={isDefault} />
 
-      {/* Enable toggle — design.pen EWTY7 */}
+      {/* Enable toggle */}
       <div
         className={clsx(
           'flex items-center justify-between gap-3 rounded-[10px] border px-3.5 py-3',
@@ -2540,7 +2540,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
         />
       </Field>
 
-      {/* Backend (read-only) — design.pen JUopp. "creation-time only ·
+      {/* Backend (read-only). "creation-time only ·
           locked" hint sits inside the value chip on the right so users
           don't mistake it for a note about the field above (the name). */}
       <Field label={t('agents.detail.backend')}>
@@ -2606,7 +2606,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
         )}
       </Field>
 
-      {/* Reasoning effort — design.pen LsjxT. A model whose catalog row states
+      {/* Reasoning effort. A model whose catalog row states
           no efforts has nothing to choose, so the field is absent rather than an
           empty outline the user would read as a control that failed to load. */}
       {(effortOptions.length > 0 || refusedEffort) && (
@@ -2669,7 +2669,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
       </Field>
       )}
 
-      {/* System prompt — design.pen y3mRv: collapsed by default. Token
+      {/* System prompt: collapsed by default. Token
           estimate (cheap heuristic, see lib/tokenEstimate) replaces the
           old character count so it's actually useful for budgeting. The
           textarea-level hint was deleted because the field label + the

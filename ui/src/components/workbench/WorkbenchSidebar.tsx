@@ -303,8 +303,8 @@ export const SessionRow: React.FC<{
   );
 };
 
-// One project row + (when expanded) the session list under it. Mirrors
-// design.pen N96dsm/C68Ul (project row) and C7clY/R2C8U (session row).
+// One project row + (when expanded) the session list under it
+// (ui/design: sidebar/workbench-sidebar/unread-expanded).
 const ProjectRow: React.FC<{
   project: WorkbenchProject;
   expanded: boolean;
@@ -734,7 +734,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
                 className={({ isActive }) =>
                   clsx(
                     'relative grid size-8 place-items-center rounded-lg border transition-colors',
-                    // Cyan active state per design.pen ze15A — mint is reserved
+                    // Cyan active state — mint is reserved
                     // for sessions / projects so the two reads stay distinct.
                     isActive
                       ? 'border-cyan/40 bg-cyan-soft shadow-glow-sm-cyan'

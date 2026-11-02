@@ -36,7 +36,7 @@ interface NewAgentDialogProps {
   onCreated: (agent: VibeAgentFull) => void;
 }
 
-// Mirrors design.pen ``gwn5C``. Single-step form: backend (immutable after
+// ui/design: agents/dialogs/new-agent. Single-step form: backend (immutable after
 // create) → name → model + effort → optional system prompt.
 export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, onCreated }) => {
   const { t } = useTranslation();

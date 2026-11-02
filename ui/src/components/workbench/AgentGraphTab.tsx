@@ -40,7 +40,7 @@ const LIVENESS_POLL_INTERVAL_MS = 30000;
 
 type GraphPayload = AgentGraphResult & { live_unreachable?: boolean };
 
-// Desktop-only fill height for the canvas + detail panel (design.pen KfgtJ —
+// Desktop-only fill height for the canvas + detail panel (ui/design: agents/run-graph/graph —
 // fill_container). The desktop app shell is document-flow (no bounded-height
 // ancestor to inherit `h-full` from), so we size the graph area to the viewport
 // below its own measured top rather than a fixed calc: wrapped filters / warning
@@ -391,7 +391,7 @@ export const AgentGraphTab: React.FC = () => {
   const selectedTrigger = selectedTriggerId ? triggersById.get(selectedTriggerId) ?? null : null;
   const detailOpen = !!selectedNode || !!selectedTrigger;
 
-  // The detail panel matches the canvas height on desktop (design.pen KfgtJ) so
+  // The detail panel matches the canvas height on desktop (ui/design: agents/run-graph/graph) so
   // the two columns read as one pane; its body scrolls when the content is taller
   // than the fill. On mobile (fillHeight === undefined) it stays natural-height.
   const panelBoxClass = clsx(

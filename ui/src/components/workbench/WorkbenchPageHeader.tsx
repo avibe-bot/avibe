@@ -25,8 +25,8 @@ export interface WorkbenchPageHeaderProps {
 
 /**
  * Shared workbench page header: a 40px accent icon-box + title + subtitle +
- * optional right-aligned actions. Mirrors design.pen (the Agents / Skills page
- * headers are identical bar the icon + copy). Extracted so capability pages
+ * optional right-aligned actions (ui/design: agents/agents-page/definitions; the
+ * Agents / Skills page headers are identical bar the icon + copy). Extracted so capability pages
  * reuse one header instead of re-rolling the markup.
  */
 export function WorkbenchPageHeader({

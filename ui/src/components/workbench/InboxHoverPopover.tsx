@@ -52,8 +52,8 @@ type Section = {
   unread: number;
 };
 
-// 360px floating popover that opens when the user hovers the Inbox icon. Mirrors
-// design.pen KmQ1L (header, a few conversation cards, an "open full inbox" link),
+// 360px floating popover that opens when the user hovers the Inbox icon
+// (ui/design: sidebar/inbox-popover/open): header, a few conversation cards, an "open full inbox" link,
 // split into Bots and Sessions for a caller with Bots
 // (docs/plans/workbench-refinements.md §1). The bell swaps the body for the
 // notification switches in place, so the hover popover never has to host a second
