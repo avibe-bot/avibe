@@ -77,6 +77,28 @@ try {
         console.log(JSON.stringify({ frame: frame.id, theme: t, ms: Date.now() - started, errors: [`not ready after 15s (stage: ${stage})`, ...errors] }));
         continue;
       }
+      // Real pointer clicks, so components that open on pointerdown open, and a focus a click moves
+      // draws no keyboard ring.
+      const missing = [];
+      for (const spec of frame.click ?? []) {
+        // `{t:<key>}` is copy in the frame's language, resolved by the page.
+        let target = spec;
+        for (const [token, key] of spec.matchAll(/\{t:([^}]+)\}/g)) {
+          target = target.replace(token, await page.evaluate((k) => window.__DESIGN__.t(k), key));
+        }
+        const clicked = await page.click(target, { timeout: 5_000 }).then(() => true, () => false);
+        if (!clicked) {
+          missing.push(target);
+          break;
+        }
+        await page.waitForTimeout(300);
+        await page.evaluate(() => window.__DESIGN__.quiet());
+      }
+      if (missing.length) {
+        failed = true;
+        console.log(JSON.stringify({ frame: frame.id, theme: t, ms: Date.now() - started, errors: [`nothing to click for ${missing[0]}`, ...errors] }));
+        continue;
+      }
       if (frame.hover) {
         // Hover states open on a delay and may fetch; wait them out.
         await page.hover(frame.hover);
@@ -115,7 +137,7 @@ if (manifestPath && shots.length) {
   const fresh = new Map(
     shots.map((s) => [
       key(s),
-      { id: s.id, file: s.file, title: s.title, status: s.status, theme: s.theme, lang, width: s.width, height: s.height, hash: s.hash, src: relative(dirname(out), s.png).split('\\').join('/') },
+      { id: s.id, file: s.file, title: s.title, status: s.status, theme: s.theme, lang, width: s.width, height: s.height, interaction: Boolean(s.hover || s.click?.length), hash: s.hash, src: relative(dirname(out), s.png).split('\\').join('/') },
     ]),
   );
   const merged = [...previous.filter((s) => known.has(s.id) && !fresh.has(key(s))), ...fresh.values()].sort((a, b) => key(a).localeCompare(key(b)));
