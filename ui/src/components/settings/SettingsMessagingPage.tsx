@@ -36,7 +36,7 @@ function formatSavedAt(value: number | null, t: TFunction) {
     : t('settings.messagingStatusAgo').replace('{{seconds}}', String(deltaSec));
 }
 
-// Mirrors design.pen TDgw0 (VR/CM/Messaging):
+// ui/design: settings/messaging/default.
 // msgIntro 15px semibold + 12px muted, msgSec1 cornerRadius 12 fill --background
 // stroke --border, value rows padding [14, 20] separated by bottom border.
 export const SettingsMessagingPage: React.FC = () => {

@@ -50,7 +50,7 @@ const STATUS_TONE: Record<
   },
 };
 
-// Mirrors design.pen Hns4E (VR/CM/Diagnostics):
+// ui/design: settings/diagnostics/issues.
 // diagHero: cornerRadius 14, fill --surface-2, mint stroke 33%, blur 32 y16 spread -8 #5BFFA014.
 // diagPulse: 42×42 mint-soft circle with blur 16 #5BFFA070 spread -4 glow.
 // diagG: cornerRadius 12, fill --background, stroke --border. Item rows [10, 20].
@@ -95,7 +95,7 @@ export const DoctorPanel: React.FC<DoctorPanelProps> = ({
   return (
     <div className={clsx('flex w-full flex-col gap-5', isPage && 'h-full')}>
       {/* diagHero */}
-      {/* Not `shadow-mint-card-sm`: design.pen draws this card at y16, and that
+      {/* Not `shadow-mint-card-sm`: this card's glow sits at y16, and that
           rung is y8. Card washes are not this change's scope -- 41 of them are
           still literals -- so it keeps its own value rather than being snapped
           to the nearest rung. */}

@@ -20,7 +20,7 @@ type SettingsPanelProps = {
   variant?: 'panel' | 'preference';
 };
 
-// Mirrors design.pen O8BNR/B6qFRA (svcSec1 / msgSec1):
+// ui/design: settings/service/default, settings/messaging/default.
 // cornerRadius 12, fill --background, stroke --border 1px,
 // header padding [16, 20] with bottom border, rows padding [12, 20].
 export const SettingsPanel: React.FC<SettingsPanelProps> = ({
@@ -158,9 +158,9 @@ export const SearchField: React.FC<SearchFieldProps> = ({
   </div>
 );
 
-// Mirrors design.pen FALFE / ylboi (mint switch on): cornerRadius 9999,
+// ui/design: settings/messaging/default. On: cornerRadius 9999,
 // fill --mint, blur 8 #5BFFA055 glow, 38×22 with knob inset 3.
-// Off state mirrors fcMl6 (Switch/Unchecked): fill + stroke = --border-strong
+// Off: fill + stroke = --border-strong
 // (14% white dark / 14% black light) for sufficient contrast against bg-background.
 interface ToggleSwitchProps {
   enabled: boolean;
@@ -222,8 +222,8 @@ type SettingsResourceRowProps = {
 };
 
 // Shared "managed resource" card: lead icon tile + title (+ inline badges) +
-// detail line, with a right-aligned action cluster. Mirrors design.pen
-// qVHh4 (VR/CM/Backends) cards; used by both the Backends and Dependencies
+// detail line, with a right-aligned action cluster (ui/design:
+// settings/dependencies/default); used by both the Backends and Dependencies
 // settings pages so the row shell stays one concept in one home.
 export const SettingsResourceRow: React.FC<SettingsResourceRowProps> = ({
   icon: Icon,

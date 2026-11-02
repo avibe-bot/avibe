@@ -705,7 +705,7 @@ export const UserList: React.FC = () => {
           </label>
         </div>
 
-        {/* User cards — design.pen asPXu (VR/RoutingConfig) shared with /groups */}
+        {/* User cards (ui/design: settings/direct-messages/default) */}
         <div className="flex-1 space-y-3 overflow-y-auto">
           {visibleUsers.length === 0 ? (
             <div className="rounded-xl border border-dashed border-border bg-surface-3/60 p-8 text-center text-[13px] text-muted">
@@ -840,7 +840,7 @@ export const UserList: React.FC = () => {
                     )}
                   </div>
 
-                  {/* Expanded body — design.pen asPXu (VR/RoutingConfig) shared with /groups, no @mention toggle */}
+                  {/* Expanded body — RoutingConfigPanel shared with /groups, no @mention toggle (ui/design: settings/direct-messages/expanded) */}
                   {expanded && (
                     <RoutingConfigPanel
                       value={userConfig}

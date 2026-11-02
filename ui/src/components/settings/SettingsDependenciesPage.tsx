@@ -35,7 +35,7 @@ import { errorMessage } from '@/lib/errorMessage';
 import { useDependencyChecks } from './useDependencyChecks';
 import { AvaultAuthorizationNotice } from '../ui/avault-authorization-notice';
 
-// Mirrors design.pen "vibe-remote — Settings · Dependencies": one card per
+// ui/design: settings/dependencies/default. One card per
 // required local runtime (icon tile + name/REQUIRED + detail + status pill +
 // action), reusing the Backends-page card shape. askill + the Show Page
 // runtime and CPA auto-install during `vibe runtime prepare`; this page surfaces

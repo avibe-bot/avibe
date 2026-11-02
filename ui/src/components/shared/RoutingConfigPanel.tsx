@@ -8,7 +8,7 @@ import { ToggleSwitch } from '../settings/SettingsPrimitives';
 import { AgentRoutePicker } from '../workbench/AgentRoutePicker';
 import type { VibeAgentBrief } from '../../context/ApiContext';
 
-// Mirrors design.pen `asPXu` (VR/RoutingConfig). Shared between groups (channels)
+// ui/design: settings/direct-messages/expanded. Shared between groups (channels)
 // and users — same form, same fields, same styles. The only difference is whether
 // the @mention requirement segmented toggle is shown.
 //

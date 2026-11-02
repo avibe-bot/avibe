@@ -1,5 +1,6 @@
 import type { InboxSession, InstanceCapabilities, WorkbenchProject, WorkbenchSession } from '@/context/ApiContext';
 import type { BotRuntimeStatus } from '@/context/BotsContext';
+import type { RuntimeStatus } from '@/context/StatusContext';
 import type { Bot, BotAvatar } from '@/lib/bots';
 import { OWNER_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
 
@@ -8,6 +9,8 @@ import { DESIGN_NOW } from './clock';
 /** What a frame can set. Everything is optional; omitted parts are empty, not loading. */
 export interface WorkbenchFixtures {
   capabilities?: InstanceCapabilities;
+  /** The service status the shell polls (`GET /status`), as the Status provider serves it. */
+  status?: RuntimeStatus;
   projects?: WorkbenchProject[];
   sessionsByProject?: Record<string, WorkbenchSession[]>;
   expandedProjects?: string[];
@@ -25,7 +28,8 @@ export interface WorkbenchFixtures {
 
 /** Everything the frame's providers fetch, as the network stub serves it. */
 export function apiResponses(fixtures: WorkbenchFixtures = {}): Record<string, unknown> {
-  const responses: Record<string, unknown> = {};
+  // Any write first reads a CSRF token, so every frame can draw a component that saves.
+  const responses: Record<string, unknown> = { '/api/csrf-token': { csrf_token: 'design' } };
   if (fixtures.bots) responses['/api/bots'] = { ok: true, bots: fixtures.bots };
   // Every Bot Session is read for its status dot; idle unless the frame says otherwise.
   for (const { session_id: sessionId } of fixtures.bots ?? []) {
