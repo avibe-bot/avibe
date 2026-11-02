@@ -397,6 +397,10 @@ export interface ComposerProps {
   placeholder?: string;
   /** The "working" placeholder override (a Bot's conversation names the Bot). */
   busyPlaceholder?: string;
+  /** A message sent while busy reaches the running Turn at once instead of
+   *  waiting for it (a Bot's conversation, docs/plans/bots.md D4): the button
+   *  then says Send, without the "later" badge. */
+  busySendsNow?: boolean;
   /** Disable sending (e.g. while the caller creates a session + navigates).
    *  Also suppresses every live-turn control — see ``busyControls``. */
   disabled?: boolean;
@@ -464,6 +468,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   onDraftChange,
   placeholder,
   busyPlaceholder,
+  busySendsNow = false,
   disabled = false,
   sendDisabled = false,
   className,
@@ -1865,16 +1870,18 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 variant="accent"
                 size="icon"
                 onClick={submit}
-                aria-label={t('chat.compose.queueSend')}
-                title={t('chat.compose.queueSend')}
+                aria-label={t(busySendsNow ? 'chat.compose.send' : 'chat.compose.queueSend')}
+                title={t(busySendsNow ? 'chat.compose.send' : 'chat.compose.queueSend')}
                 className="size-9 shrink-0"
               >
                 <span className="relative inline-flex">
                   <Send className="size-4" />
-                  <Clock
-                    className="absolute -bottom-1 -right-1 size-2.5 rounded-full bg-surface-2"
-                    strokeWidth={2.5}
-                  />
+                  {!busySendsNow && (
+                    <Clock
+                      className="absolute -bottom-1 -right-1 size-2.5 rounded-full bg-surface-2"
+                      strokeWidth={2.5}
+                    />
+                  )}
                 </span>
               </Button>
             )}

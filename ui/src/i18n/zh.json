@@ -4773,6 +4773,9 @@
       "useDefault": "恢复默认"
     },
     "conversation": {
+      "sendStatusUnknown": "暂时无法确认这条消息是否已送到{{name}}，请先看看对话记录，避免重复发送。",
+      "attachmentsUnavailable": "部分附件已不可用，这条消息还没送达。请重新上传附件后再发送。",
+      "waitingMessage": "待处理的消息",
       "working": "{{name}} 正在处理…",
       "delivering": "送达中 · {{count}}",
       "notDelivered": "还没送达 · {{count}}",

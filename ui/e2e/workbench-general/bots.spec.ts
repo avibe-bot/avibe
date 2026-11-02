@@ -125,6 +125,28 @@ async function serveBots(page: Page, lang: Lang, bots: FixtureBot[]) {
 
 const sidebarOf = (page: Page) => page.locator('aside').filter({ has: page.locator('#workbench-capability-nav') });
 
+// Everything a Bot's conversation shows or announces outside the sidebar: text,
+// and the accessible names, tooltips, and placeholders. A Bot takes the user's
+// message into the Turn it is on (docs/plans/bots.md D4), so none of it may speak
+// of a queue.
+const queueWords = (page: Page) => page.evaluate(() => {
+  const pattern = /排队|队列|queue/i;
+  const found: string[] = [];
+  const outsideSidebar = (element: Element | null) => !element?.closest('aside, script, style');
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (outsideSidebar(node.parentElement) && pattern.test(node.textContent ?? '')) found.push(node.textContent!.trim());
+  }
+  for (const element of document.body.querySelectorAll('*')) {
+    if (!outsideSidebar(element)) continue;
+    for (const name of ['aria-label', 'title', 'placeholder', 'data-placeholder', 'aria-placeholder', 'aria-description']) {
+      const value = element.getAttribute(name);
+      if (value && pattern.test(value)) found.push(`${name}=${value}`);
+    }
+  }
+  return found;
+});
+
 for (const theme of ['light', 'dark'] as const) {
   test(`the Bots strip takes the Inbox's place, with its hover card and menu (${theme})`, async ({ page }) => {
     const { denied } = await serveBots(page, 'zh', [MAIN, CSO, PM]);
@@ -383,10 +405,14 @@ for (const theme of ['light', 'dark'] as const) {
 
     // Working: the composer names the Bot and promises no queue.
     await expect(main.getByText('首席安全官 正在处理…')).toBeVisible();
-    await expect(main).not.toContainText('排队');
+    expect(await queueWords(page)).toEqual([]);
 
     await composer.click();
     await page.keyboard.type('先看 avault-core，别的放一放。');
+    // With a draft, the send button beside Stop sends it into the Turn: it says Send.
+    const send = main.getByRole('button', { name: '发送', exact: true });
+    await expect(send).toHaveAttribute('title', '发送');
+    expect(await queueWords(page)).toEqual([]);
     await page.keyboard.press('Enter');
     await expect(main.getByText('先看 avault-core，别的放一放。')).toBeVisible();
     await expect(page.locator('[data-queue-row]')).toHaveCount(0);
@@ -403,9 +429,17 @@ for (const theme of ['light', 'dark'] as const) {
     await expect(page.locator('[data-queue-row]').getByRole('button', { name: '不发了' })).toBeVisible();
     // It is not in the conversation: it has not reached the Bot.
     await expect(page.locator('[data-message-id="msg-2"]')).toHaveCount(0);
-    await expect(main).not.toContainText('排队');
+    expect(await queueWords(page)).toEqual([]);
     await page.mouse.move(900, 300);
     await page.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-steer-refused-${theme}.png` });
+
+    // Sending it now is refused by the Turn too: the notice says so in the same words.
+    await page.route(`**/api/sessions/${sessionId}/queue/*/send-now`, (route) => route.fulfill({
+      json: { ok: true, status: 'queued', reason: 'native_turn_not_steerable' },
+    }));
+    await strip.getByRole('button', { name: '立即发送' }).click();
+    await expect(page.getByText('还是没能插进首席安全官正在处理的这一轮，这一轮结束后就会收到。')).toBeVisible();
+    expect(await queueWords(page)).toEqual([]);
     expect(sent).toEqual(['先看 avault-core，别的放一放。', '顺便把结论发我邮箱。']);
     expect(denied).toEqual([]);
   });
@@ -439,6 +473,10 @@ for (const theme of ['light', 'dark'] as const) {
       background_activities: [{
         id: 'watch:wat-2', backend: 'vibey', runtime_key: 'vibey', session_id: sessionId, kind: 'watch', status: 'running',
         description: 'avault#413 review', started_at: ago(4), updated_at: ago(1), item_kind: 'watch', label: 'avault#413 review',
+      }, {
+        // A message this Bot sent another Bot, not started there yet.
+        id: 'agent_run:run-7', backend: 'vibey', runtime_key: 'vibey', session_id: sessionId, kind: 'agent_run', status: 'queued',
+        description: null, started_at: ago(2), updated_at: ago(2), item_kind: 'agent_run', label: null,
       }],
       pending_activity_output_count: 0, connection: 'connected',
     };
@@ -502,6 +540,11 @@ for (const theme of ['light', 'dark'] as const) {
     await expect(main.getByText('执行过程', { exact: false }).first()).toBeVisible();
     await expect(main.getByRole('status').filter({ hasText: '后台任务' })).toBeVisible();
     await expect(report).toContainText('CI 全部通过了');
+    // Even with the details shown, a message waiting elsewhere is not "queued".
+    await main.getByRole('button', { name: '展开后台任务' }).click();
+    await expect(page.getByText('待处理的消息').first()).toBeVisible();
+    expect(await queueWords(page)).toEqual([]);
+    await page.keyboard.press('Escape');
     await page.mouse.move(900, 300);
     await page.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-hide-details-off-${theme}.png` });
     expect(denied).toEqual([]);
