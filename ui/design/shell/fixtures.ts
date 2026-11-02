@@ -28,6 +28,9 @@ export interface WorkbenchFixtures {
   storage?: Record<string, string>;
   /** API responses by path plus query (`/api/inbox?session=ses_pm&limit=1`) or by path, for anything else a frame fetches. */
   api?: Record<string, unknown>;
+  /** Proposed copy for shipped strings, by locale key: a shipped component in this frame reads it in place
+   *  of today's (`chat.compose.placeholder`). Like kit copy, it moves to `src/i18n` when the design ships. */
+  copy?: Record<string, { zh: string; en: string }>;
 }
 
 /** Everything the frame's providers fetch, as the network stub serves it. */
