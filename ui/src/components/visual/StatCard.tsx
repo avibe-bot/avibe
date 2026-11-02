@@ -8,7 +8,7 @@ interface StatCardProps extends React.HTMLAttributes<HTMLDivElement> {
   icon?: React.ReactNode;
 }
 
-// Mirrors design.pen Card/Stat (NbtYJ): rounded-12, fill --background,
+// ui/design: models/activity/usage-24h. rounded-12, fill --background,
 // border --border, padding 20, gap 6.
 export const StatCard: React.FC<StatCardProps> = ({
   label,

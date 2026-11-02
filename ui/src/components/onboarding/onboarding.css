@@ -1,11 +1,12 @@
 /* Onboarding surface — Welcome and assistant setup.
  *
- * Geometry, fills and motion follow `avibe-docs/design_desktop.pen` and the authored
- * animation in Show session `ses36vg559de2`. The values below are component-scoped on
- * purpose: they encode exact approved design numbers without moving any global token.
+ * Geometry, fills and motion follow the setup design frames (ui/design: setup/intro,
+ * setup/providers, setup/assistants) and the authored animation in Show session
+ * `ses36vg559de2`. The values below are component-scoped on purpose: they encode exact
+ * approved design numbers without moving any global token.
  *
- * The `Web setup` frames and the `Web setup · Responsive rules & states` note are the
- * measured reference for everything below. The frames draw the composition at discrete
+ * The frames at each window size (`default`, `short`, `large`, `phone`) are the
+ * measured reference for everything below. They draw the composition at discrete
  * readings — a 232-tall card under an 800px window, 262 under 900, 300 above 1000, 330
  * at 1920x1080 and 258 stacked on a phone — each with its own header height, heading
  * type, card interior and action size. The bands below are exactly those readings:
@@ -26,14 +27,15 @@
   --ob-card-border: #ffffff1c;
   --ob-active-border: #5bffa057;
   /* The reference's active and hovered card wear one tight halo — `0 2px 12px
-     #5BFFA038` in dark, `0 2px 16px -4px #10B98124` in light (mK2JX / ZaXoW) —
+     #5BFFA038` in dark, `0 2px 16px -4px #10B98124` in light (ui/design:
+     setup/assistants/card-hover) —
      not a spreadless 28px bloom. The same shadow names the working card in the
      introduction and the hovered card in the connection, which is the whole
      point of one composition seen twice. */
   --ob-active-shadow: var(--shadow-glow-onboarding-mint);
   --ob-divider: #ffffff14;
   /* The enable switch the connection puts in the role's slot: a 42x24 track with
-     a 2px border and a 16px thumb, drawn per theme by the reference (eq9QT) —
+     a 2px border and a 16px thumb, drawn per theme (ui/design: setup/assistants/default) —
      dark keeps a lit border on the on-state, light keeps none. */
   --ob-idle-dot: #4c5060;
   --ob-skeleton: #ffffff12;
@@ -197,7 +199,7 @@
   :root:not([data-theme="dark"]) .onboarding-shell {
     --ob-card: #ffffff;
     --ob-card-border: #08081212;
-    /* The light frame's own active card (ZaXoW): a #10B981 edge over a 16/-4
+    /* The light theme's own active card (ui/design: setup/assistants/card-hover): a #10B981 edge over a 16/-4
        #10B98124 halo, and no inset highlight — that top line is the dark card's
        lit rim, and on white it reads as a seam. */
     --ob-active-border: #10b981;
@@ -820,7 +822,7 @@
 /* The reviewer reads a diff rather than writing one: the code is there from the start,
    a removed line and two added ones are tinted across the row, and the working card's
    sweep is what reads as the review passing over it. The tint spans the row and no
-   further, as design_desktop.pen draws it: an outdent past the skeleton is only cut
+   further (ui/design: setup/intro/default): an outdent past the skeleton is only cut
    square by the skeleton's clip. */
 .onboarding-skeleton-review .onboarding-code-row { border-radius: 3px; }
 .onboarding-code-row[data-diff="removed"] { background: var(--ob-diff-removed); }
@@ -1042,8 +1044,8 @@
   height: var(--ob-action-icon);
 }
 
-/* The reference draws this CTA as a flat mint fill — design.pen has no glow on any
-   button, and `brand` carries one at rest. The fill, the label pairing and the hover
+/* The setup draws this CTA as a flat mint fill (ui/design: setup/intro/default) — no
+   glow, while `brand` carries one at rest. The fill, the label pairing and the hover
    stay the variant's; only the halo goes, which is presentation and nothing else. */
 .onboarding-primary-action {
   box-shadow: none;

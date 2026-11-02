@@ -30,7 +30,7 @@ Status: adopted (2026-11-02). Avibe's UI designs live in `ui/design/` as frames;
   frame at its size.
 - `npm run design:shot` renders frames with Playwright (2x PNG, animations off, portals included, optional
   clicks and a hover, for states only an interaction opens) once fonts are loaded and the network is quiet (after the frame's `wait`, for a read that starts on a
-  timer), and fails on any console error. CI runs it with the browser checks, and `typecheck:design` with the
+  timer, and again after each click, for a transition it starts on a timer), and fails on any console error. CI runs it with the browser checks, and `typecheck:design` with the
   static checks, so a product change that breaks a frame fails its PR.
 - `npm run design:export` copies the canvas, the screenshots, and `frames.json` into the current Session's Show
   Page and writes `<DesignFrame>`, which embeds frames live (crisp, interactive) without any Show Page change.

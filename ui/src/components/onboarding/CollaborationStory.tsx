@@ -68,7 +68,7 @@ function WorkStatus({ active, done, progress }: { active: boolean; done: boolean
 }
 
 // Every skeleton line as its share of the block it is measured in, so the cards draw
-// the widths design_desktop.pen draws at any scale. A code line is a share of the bar
+// the same widths at any scale (ui/design: setup/intro/default). A code line is a share of the bar
 // column that starts after the line number, a test line a share of the content box
 // (the checkbox and its gap are laid beside it, not out of it).
 const CODE_INDENT = [0, 10, 20, 20, 10, 0];

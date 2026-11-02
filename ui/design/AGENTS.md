@@ -17,7 +17,7 @@ Avibe's UI designs live here. A frame is a static React render of one surface in
 - Each frame states its size, its themes (default both), and its status: `proposed` (being designed), `approved` (signed off, ready to build), or `shipped` (renders shipped components only). A proposal becomes `approved` in the PR the owner approves.
 - Kit copy is draft copy and may be written inline; it moves to `src/i18n` when the component ships.
 - When a shipped component mixes data hooks and markup, draw it whole; to redesign part of it, prefer splitting it into a view (props only) and a container, then draw the view.
-- Size a frame to include any popover, menu, or card it shows; set `hover` to capture a hover state, `click` (in order; name copy as `{t:<i18n key>}` so it works in both languages) to capture a state only a click opens, and `wait` when a read starts on a timer (a debounced search). Prefer a fixture or the page's URL state over `click` when the product offers one.
+- Size a frame to include any popover, menu, or card it shows; set `hover` to capture a hover state, `click` (in order; name copy as `{t:<i18n key>}` so it works in both languages) to capture a state only a click opens, and `wait` when a read starts on a timer (a debounced search) or a click starts a timed transition (it is waited out again after each click). Prefer a fixture or the page's URL state over `click` when the product offers one.
 - Code that implements a design names its frame id (`ui/design: sidebar/bots/three`), not a description of a drawing.
 
 ## Loop

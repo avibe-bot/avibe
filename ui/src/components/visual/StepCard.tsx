@@ -8,7 +8,7 @@ interface StepCardProps extends Omit<React.HTMLAttributes<HTMLDivElement>, 'titl
   icon?: React.ReactNode;
 }
 
-// Mirrors design.pen Card/Step (CdFKF):
+// Card geometry:
 //  rounded-12, fill --surface-2, padding 32, gap 16
 //  shadow blur 48 / color #5BFFA014 / offset y24 / spread -12
 //  stroke #5BFFA033 (mint @ 0.20) 1px

@@ -7,7 +7,7 @@ interface ProgressBarProps extends React.HTMLAttributes<HTMLDivElement> {
   width?: number | string;
 }
 
-// Segmented mint-glow progress bar (design.pen wProgress / wbProg).
+// Segmented mint-glow progress bar.
 // Active + completed segments fill mint; future segments are border-tinted.
 export const ProgressBar: React.FC<ProgressBarProps> = ({
   segments,

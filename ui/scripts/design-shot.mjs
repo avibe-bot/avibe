@@ -93,6 +93,11 @@ try {
         }
         await page.waitForTimeout(300);
         await page.evaluate(() => window.__DESIGN__.quiet());
+        // A click that starts a timed transition (a screen handoff) is waited out like a timed read.
+        if (frame.wait) {
+          await page.waitForTimeout(frame.wait);
+          await page.evaluate(() => window.__DESIGN__.quiet());
+        }
       }
       if (missing.length) {
         failed = true;

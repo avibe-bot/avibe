@@ -122,7 +122,7 @@ const normalizeAgents = (source: any): Record<string, AgentState> => {
   );
 };
 
-// Mirrors design.pen JHgjz (Backends wizard step) and qVHh4 (Settings → Backends).
+// ui/design: setup/assistants/default (the setup step's AI assistants screen).
 // Each backend renders as a two-row card: a header row (icon, label, one-line
 // description, status pill, enable switch) and an action row (configure
 // provider / set up Allow / install). Detection runs automatically on mount —
