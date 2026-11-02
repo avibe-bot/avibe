@@ -43,6 +43,7 @@ WEB_PUSH_DISPOSITION_NO_SUBSCRIPTION = "no_subscription"
 WEB_PUSH_DISPOSITION_PROVIDER_FAILURE = "provider_failure"
 WEB_PUSH_DISPOSITION_SUPPRESSED_READ = "suppressed_read"
 WEB_PUSH_DISPOSITION_MUTED = "muted"
+WEB_PUSH_DISPOSITION_HIDDEN = "hidden"
 
 WEB_PUSH_DISPOSITION_CONFIG_UNAVAILABLE = "config_unavailable"
 
@@ -945,6 +946,37 @@ def _filter_project_authorized_user_keys(
     return authorized
 
 
+def _owners_hidden_from_session(
+    conn: Any,
+    *,
+    session_id: str | None,
+    user_keys: list[str],
+    contexts: dict[str, AuthorizationContext],
+) -> list[str]:
+    """Owners whose Inbox leaves this Session out, so a push would open a conversation they cannot see.
+
+    ``hidden_bot_session_ids`` owns that set, as it does for ``GET /api/inbox`` and the
+    event stream: a removed Bot's Session for the Owner, every Bot's for anyone else
+    (``docs/plans/bots.md`` D1). Only ids in the Bots' namespace pay for the read. A
+    remote owner without a current context is treated as unable to see it.
+    """
+
+    from storage.agent_session_rows import is_bot_session_id
+
+    if not session_id or not is_bot_session_id(session_id):
+        return []
+    from core.bots import hidden_bot_session_ids
+
+    hidden: list[str] = []
+    for user_key in user_keys:
+        context = None if user_key == "local" else contexts.get(user_key)
+        if user_key != "local" and context is None:
+            hidden.append(user_key)
+        elif session_id in hidden_bot_session_ids(conn, context):
+            hidden.append(user_key)
+    return hidden
+
+
 def _badge_count_for_user_key(
     conn: Any,
     *,
@@ -1108,6 +1140,25 @@ def _send_to_enabled_subscriptions(payload: dict[str, Any]) -> None:
                     "disposition": None,
                     "reason": "local fallback with remote access disabled",
                 }
+
+            # A Session hidden from an owner is not a muted category for them: it is not
+            # in their Inbox at all, so nothing about it may reach their devices.
+            hidden_keys = _owners_hidden_from_session(
+                conn,
+                session_id=session_id,
+                user_keys=authorized_keys,
+                contexts=contexts,
+            )
+            for user_key in hidden_keys:
+                attempt["owners"][user_key] = {
+                    "policy": attempt["owners"].get(user_key, {}).get("policy") or (
+                        "local" if user_key == "local" else "unknown"
+                    ),
+                    "disposition": WEB_PUSH_DISPOSITION_HIDDEN,
+                    "reason": "the Session is hidden from this owner's Inbox",
+                }
+                logger.info("web push: skipping owner %s: the Session is hidden from them", user_key)
+            authorized_keys = [user_key for user_key in authorized_keys if user_key not in hidden_keys]
 
             from core.notification_categories import category_for_session_id, current_bot_session_ids
             from core.notification_preferences import category_is_loud, get_notification_preferences
