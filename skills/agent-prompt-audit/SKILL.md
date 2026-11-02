@@ -2,7 +2,7 @@
 name: agent-prompt-audit
 slug: agent-prompt-audit
 description: Audit and improve the prompt surface of Avibe Agents across backends (Claude, Codex/GPT, OpenCode) — global and project rules, Agent system prompts, Skills, delegation briefs, and Task and Watch messages — using real run evidence. Use when an Agent misbehaves (stalls, over-asks, over-reaches, ignores or over-applies a rule), after a model or backend change, or when the user asks to review, clean up, or tighten prompts.
-version: 0.1.1
+version: 0.1.2
 ---
 
 # Agent Prompt Audit
@@ -46,8 +46,8 @@ hand work to each other, so the costliest defects are lifecycle gaps: a
 "stop/wait" with no statement of what the turn produces instead, asking
 permission for reversible in-scope steps, continuing without bounds after
 repeated failure, waiting with no durable waiter or expiry meaning, briefs
-missing the goal or report target, callbacks that say "done" without the
-result, and Task/Watch messages that restate rules on every fire.
+missing the goal or report target, callbacks or reports that say "done"
+without the result, and Task/Watch messages that restate rules on every fire.
 
 **One home per rule, at the layer whose timing fits.** Always-loaded and
 recurring text has the most leverage and deserves the most scrutiny.
@@ -113,7 +113,8 @@ recurring Task or Watch, `vibe runs list --global --definition-id <id>` gathers 
 fires across per-run Sessions. A stuck delegated turn stays `running`, so include
 long-running rows when the complaint is a stall; ordinary IM turns have no
 `agent_runs` row, so read that Session's messages instead. A delegated run can succeed while
-its report never arrives; check `callback_status` and `callback_error` when the
+its report never arrives. Without `--callback` the result returns only if the receiver
+reports back; with one, check `callback_status` and `callback_error` when the
 complaint is a missing result. Two starting points, each run
 with `vibe data query --sql-file <file>` (or `--sql-file -` for stdin):
 
@@ -153,7 +154,7 @@ check against the transcript, not verdicts.
 | Did far more than asked | Autonomy with no scope bound or definition of done, most often on strong Claude models |
 | Followed a rule where it made no sense | A bare prohibition with no reason or scope, most often on GPT/Codex; pressure language (caps, `MUST/NEVER`) |
 | Behaves differently across Agents or backends | The same rule at different strengths in different layers; backend-specific tool names in shared text |
-| Delegated work came back unusable | A brief missing goal, acceptance evidence, or report target; a callback that says "done" without the result |
+| Delegated work came back unusable | A brief missing goal, acceptance evidence, or report target; a callback or report that says "done" without the result |
 | Recurring Task or Watch runs drift or repeat themselves | The fire message restates loaded rules, names finished work, or asks for output the recipient cannot act on |
 | Stale commands, paths, or answers | Facts that no longer match the CLI or code; fossils like named-model workarounds or "now / no longer" phrasing |
 

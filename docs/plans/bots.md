@@ -133,10 +133,12 @@ own. A Session has none of these; a Bot has all three.
   Agents, and Harness inputs interleave. Replies are not attributed: Bot
   conversations show them as they are, and 「隐藏细节」 hides only Harness
   inputs, activity, and background-task banners.
-- Delivery: PR 1 adds the failure notice, the hint, and `--callback`, and
-  gives `--bot` no callback by default. PR 2 flips the default for
-  `--agent`, `--session-id`, and the forks once every caller that relies on a
-  callback is updated.
+- Delivery: PR 1 (#3162) added the failure notice, the hint, and
+  `--callback`, and gave `--bot` no callback by default. PR 2 flips the
+  default for `--agent`, `--session-id`, and the forks, with the built-in
+  Skills and docs that stated the old default. The background-work banner
+  lists the runs a Session started (`source_actor`) and still running, with
+  or without a callback, and says on each whether its result returns there.
 - `vibe bot list | show | create | set | update | remove` manages Bots, so the
   main Bot can add a colleague when asked in conversation. `create` makes a
   Vibey Agent and its Bot; `set` makes an existing Vibey Agent a Bot; `remove`

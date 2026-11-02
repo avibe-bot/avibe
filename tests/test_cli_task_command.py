@@ -406,7 +406,8 @@ def test_agent_run_help_states_session_callback_and_fork_rules(capsys) -> None:
     text = " ".join(capsys.readouterr().out.split())
     assert "or a fork. Runs are async." in text
     assert "--callback Return the final reply to this Session" in text
-    assert "Elsewhere, pass --callback-session-id, --no-callback, or --sync." in text
+    assert "Only --callback returns the final reply; a run that fails still tells the caller." in text
+    assert "--no-callback No-op (the default)" in text
     assert "--session-id ID Join this Session's running turn, or start one if idle" in text
     assert "--queue With --session-id: wait for the running turn" in text
     assert "Fork this Session's context, backend, scope, and cwd" in text
@@ -3795,9 +3796,9 @@ def test_agent_run_refuses_the_reserved_session_with_no_side_effects(
     session with an empty ``agent_backend``, which is what "accepts no turn" was
     supposed to forbid.
 
-    ``--no-callback`` is load-bearing, not noise: without it the command stops earlier
-    on ``missing_async_callback``, which would let this test pass on a tree with the hole
-    wide open. The flag is what makes the run reach admission.
+    ``--no-callback`` is kept as the review quoted it. It once made the run reach
+    admission past the callback-policy refusal; callbacks are now opt-in (bots.md D4),
+    so the command reaches admission with or without it.
 
     Zero side effects: no queued Run (the durable artifact the scheduler would have
     picked up) and no ``messages`` row. Positive control: the ordinary session queues.

@@ -290,3 +290,28 @@ def test_agent_prompt_audit_examples_parse_against_the_real_cli() -> None:
             parser.parse_args(argv)
         except SystemExit as exc:
             raise AssertionError(f"agent-prompt-audit teaches an unparseable command: {example!r}") from exc
+
+
+def test_no_guidance_says_a_run_returns_its_result_by_default() -> None:
+    """bots.md D4 (2026-11-03): no `vibe agent run` gets a callback unless `--callback` asks for one."""
+    stale = (
+        "return through callbacks",
+        "callbacks return to this conversation by default",
+        "to this conversation by default",
+        "is sent back to this conversation",
+        "callback policy",
+        "callback 策略",
+    )
+    paths = [
+        ROOT / "core/prompts/harness-agents.md",
+        ROOT / "skills/use-avibe-harness/SKILL.md",
+        ROOT / "skills/agent-prompt-audit/SKILL.md",
+        *_use_avibe_references(),
+        *(ROOT / "docs" / name for name in ("CLI.md", "CLI_ZH.md", "COMMANDS.md", "COMMANDS_ZH.md")),
+    ]
+    for path in paths:
+        body = " ".join(path.read_text().split()).lower()
+        for text in stale:
+            assert text.lower() not in body, f"{path.relative_to(ROOT)} still says {text!r}"
+    for path in ("core/prompts/harness-agents.md", "skills/use-avibe-harness/SKILL.md", "skills/use-avibe/references/harness.md"):
+        assert "only with `--callback`" in _read(path), path

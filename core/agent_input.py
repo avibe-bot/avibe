@@ -139,7 +139,7 @@ def _address(session: str) -> tuple[str, str]:
     bot = _BOT_SESSION.fullmatch(session)
     if bot:
         return f"@<bot:{bot.group(1)}>", f"vibe agent run --bot {bot.group(1)} --message ..."
-    return f"#{session}", f"vibe agent run --session-id {session} --no-callback --message ..."
+    return f"#{session}", f"vibe agent run --session-id {session} --message ..."
 
 
 def harness_hint(spec: Mapping[str, Any], *, receiver: Any = None) -> str:

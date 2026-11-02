@@ -54,6 +54,7 @@ import { resultFooterParts } from '../../lib/resultFooter';
 import {
   activityItemKind,
   activityKindI18nKey,
+  activityReturnI18nKey,
   harnessNavPath,
   isQueuedRun,
   resolveActivityLabel,
@@ -3375,8 +3376,13 @@ const ActivityRow: React.FC<{
   // A queued delegated run is waiting, not executing — mute its icon box so it
   // cannot read as in-progress (its kind label already says "Queued message").
   const queued = isQueuedRun(item);
+  const returnKey = activityReturnI18nKey(item);
   const subtitle =
-    kind === 'backend_activity' && item.backend ? `${getBackendUiMeta(item.backend).label} · ${relative}` : relative;
+    kind === 'backend_activity' && item.backend
+      ? `${getBackendUiMeta(item.backend).label} · ${relative}`
+      : returnKey
+        ? `${relative} · ${t(`chat.activities.return.${returnKey}`)}`
+        : relative;
   const body = (
     <>
       <span

@@ -1573,6 +1573,8 @@ export type SessionActivityState = {
   label?: string | null;
   since?: string;
   schedule_type?: 'at' | 'cron' | null;
+  // A delegated run only: its final reply returns to this Session, or its target reports back.
+  returns_here?: boolean | null;
 };
 
 export type ModelRecoveryState = {

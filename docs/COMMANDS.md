@@ -996,6 +996,8 @@ Important options:
 - `--model`
 - `--reasoning-effort`
 - `--close-after`
+- `--callback`
+- `--callback-session-id`
 - `--sync`
 - `--message`
 - `--message-file`
@@ -1005,8 +1007,10 @@ It is background by default, which suits sub-agent style calls; `--visible`
 makes it user-facing, and `--same-scope` or `--scope-id` places it.
 
 Runs are asynchronous by default: the command queues the run, prints one `run`
-object with its `id` and `session_id`, and uses the callback policy to deliver
-the final result later. Use `--sync` only when the terminal should wait for completion.
+object with its `id` and `session_id`. The final result returns to a Session
+only with `--callback` (the caller) or `--callback-session-id`; a run that does
+not complete always tells the caller Session. Use `--sync` only when the terminal
+should wait for completion.
 
 `--close-after` applies to a new or forked Session. It releases that Agent
 runtime after the Run settles while keeping the Session, transcript, and Run
@@ -1084,5 +1088,5 @@ vibe
 vibe status
 vibe doctor
 vibe task list --global
-vibe agent run --no-callback --session-id sesk8m4q2p7x --message 'Share the latest build summary.'
+vibe agent run --session-id sesk8m4q2p7x --message 'Share the latest build summary.'
 ```

@@ -713,15 +713,16 @@ Run an Agent directly. Runs are async by default and do not store a scheduled
 task definition. Use `--sync` only when the terminal should wait for completion.
 
 ```bash
-vibe agent run --no-callback --agent release-reviewer --message 'Review the latest deployment result.'
+vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
+vibe agent run --callback --agent release-reviewer --message 'Review the latest deployment result and send me the findings.'
 vibe agent run --sync --agent release-reviewer --message 'Review the latest deployment result and print it here.'
-vibe agent run --no-callback --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
+vibe agent run --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
 vibe agent run --session-id sesk8m4q2p7x --queue --message 'Do this after the current turn.'
 vibe agent run --bot cso --message 'Review the new login flow for security risks.'
-vibe agent run --no-callback --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
+vibe agent run --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
 vibe agent run --session-id sesworker123 --callback-session-id sescaller456 --message 'Run the delegated investigation.'
-vibe agent run --no-callback --scope-id slack::channel::C999 --visible --agent release-reviewer --message 'Post the deployment summary.'
-vibe agent run --close-after --no-callback --agent release-reviewer --message 'Run a disposable batch review.'
+vibe agent run --scope-id slack::channel::C999 --visible --agent release-reviewer --message 'Post the deployment summary.'
+vibe agent run --close-after --agent release-reviewer --message 'Run a disposable batch review.'
 ```
 
 Without `--session-id` or a fork flag, the run creates a new background Session
@@ -743,8 +744,6 @@ queued behind the Bot's earlier messages, as with `--queue`, so a Bot handles
 one message at a time. A Bot keeps one conversation on its own model:
 `--agent`, `--session-id`, the fork flags, `--model`, `--reasoning-effort`,
 the placement flags, `--cwd`, and `--close-after` are refused with `--bot`.
-A message to a Bot creates no callback unless `--callback` asks for one, and
-needs no callback policy outside an Agent shell.
 `--agent` keeps its meaning for an Agent that is also a Bot: it starts a new
 Session of that Agent, never a message to the Bot.
 
@@ -771,17 +770,15 @@ The command prints one `run` object: its `id`, `status`, `run_type`,
 finished run record. `callback_notice` appears only when a run on the caller's
 own Session gets no callback because the result already lands there.
 
-Async runs need an explicit callback policy unless the command is running inside
-an Avibe-injected Agent environment. Use `--callback` (from an Agent shell) or
-`--callback-session-id` when the final result text should return to a Session as
-a follow-up Agent message; use `--no-callback` when you intentionally want to
-inspect the run later with `vibe runs show` or by listing/polling runs.
-Agent-initiated `--agent`, `--session-id`, and fork runs default the callback to
-the current caller Session; `--bot` does not. Whatever the callback, a run that
-ends failed, cancelled, or interrupted tells the caller Session that it did not
-complete, with the reason, and a run without a callback tells its target where
-to report back: the target's input carries a line naming the sender and the
-exact `vibe agent run` command. The callback is independent
+No run creates a callback unless it asks for one, whatever its target. Use
+`--callback` (from an Agent shell) or `--callback-session-id` when the final
+result text should return to a Session as a follow-up Agent message; otherwise
+read it later with `vibe runs show`. `--no-callback` is accepted and changes
+nothing. Whatever the callback, a run that ends failed, cancelled, or
+interrupted tells the caller Session that it did not complete, with the reason,
+and a run without a callback tells its target where to report back: the
+target's input carries a line naming the sender and the exact `vibe agent run`
+command. The callback is independent
 from ordinary delivery: if the target run also posts to its IM scope, the caller
 Session still receives the result. Process messages such as system notes, tool
 calls, and intermediate assistant updates are not included.

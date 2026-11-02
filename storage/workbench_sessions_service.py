@@ -1768,6 +1768,7 @@ def _harness_banner_item(
     updated_at: str,
     backend: str = "",
     schedule_type: str | None = None,
+    returns_here: bool | None = None,
 ) -> dict[str, Any]:
     """Shape one harness row like a serialized background activity.
 
@@ -1801,16 +1802,29 @@ def _harness_banner_item(
         "label": label,
         "since": since,
         "schedule_type": schedule_type,
+        # A delegated run only: whether its final reply returns to this Session, or its target reports back.
+        "returns_here": returns_here,
     }
 
 
 def _returns_its_result():
     """A run whose ``callback_session_id`` gets its result, not only a failure notice (``docs/plans/bots.md`` D4).
 
-    A run that asked for no callback still names its sender there, to tell it when the run did not complete; the
-    sender is not waiting on it, so it is no delegated work returning here.
+    A run that asked for no callback still names its sender there, to tell it when the run did not complete.
     """
     return func.coalesce(func.json_extract(agent_runs.c.metadata_json, "$.callback_mode"), "") != "failure"
+
+
+def _dispatched_by_or_returning_to(session_id: str):
+    """A run this Session started (``source_actor``), callback or not, or one whose result returns here.
+
+    Without a callback the run's target reports back when the work is done, so the work is still this Session's
+    to follow (``docs/plans/bots.md`` D4).
+    """
+    return or_(
+        and_(agent_runs.c.source_kind == "agent", agent_runs.c.source_actor == session_id),
+        and_(agent_runs.c.callback_session_id == session_id, _returns_its_result()),
+    )
 
 
 def derive_session_harness_activities(conn: Connection, session_id: str) -> list[dict[str, Any]]:
@@ -1826,8 +1840,8 @@ def derive_session_harness_activities(conn: Connection, session_id: str) -> list
     - enabled, live scheduled tasks managed by this session; creation provenance
       is authoritative, with the bound session as a legacy fallback for
       definitions that predate provenance capture;
-    - queued/running delegated agent runs whose callback returns here (work this
-      session dispatched and is waiting on);
+    - queued/running delegated agent runs this session started, callback or not,
+      or whose callback returns here;
     - enabled, live watches such a delegated run created in its target session
       (creation provenance ``metadata_json.created_by.caller.run_id``), whether or
       not the run has finished: the work it dispatched goes on in them.
@@ -1937,8 +1951,7 @@ def derive_session_harness_activities(conn: Connection, session_id: str) -> list
             .where(run_definitions.c.deleted_at.is_(None))
             .where(run_definitions.c.session_id != session_id)
             .where(agent_runs.c.run_type == "agent_run")
-            .where(agent_runs.c.callback_session_id == session_id)
-            .where(_returns_its_result())
+            .where(_dispatched_by_or_returning_to(session_id))
             .order_by(run_definitions.c.created_at, run_definitions.c.id)
         )
         .mappings()
@@ -1961,17 +1974,17 @@ def derive_session_harness_activities(conn: Connection, session_id: str) -> list
             )
         )
 
-    # Delegated agent runs this session dispatched and is waiting on: the run
-    # executes elsewhere but its result returns here (``callback_session_id``)
-    # and it is not yet terminal. ``run_type='agent_run'`` excludes task/watch
-    # execution runs (already represented by their definitions above); the
-    # self-run guard keeps a session's OWN foreground turn — reported via
-    # ``foreground``, not the banner — out of the union. ``callback_status =
-    # 'pending'`` further limits this to async/detached runs that will actually
-    # post back: a synchronous ``--sync`` run carries ``callback_session_id`` but
-    # a null ``callback_status`` (the caller is waiting inline, no callback owed).
-    # Active-run cardinality is small, so the (run_type, status) index carries
-    # this without a dedicated ``callback_session_id`` index.
+    # Delegated agent runs this session dispatched, or whose result returns here,
+    # that are not yet terminal: the run executes elsewhere, and each row says
+    # whether its final reply returns here or its target reports back.
+    # ``run_type='agent_run'`` excludes task/watch execution runs (already
+    # represented by their definitions above); the self-run guard keeps a
+    # session's OWN foreground turn — reported via ``foreground``, not the
+    # banner — out of the union. ``callback_status = 'pending'`` further limits
+    # this to async/detached runs: a synchronous ``--sync`` run carries a null
+    # ``callback_status`` while the caller waits inline. Active-run cardinality
+    # is small, so the (run_type, status) index carries this without a
+    # dedicated ``callback_session_id`` or ``source_actor`` index.
     run_rows = (
         conn.execute(
             select(
@@ -1984,6 +1997,7 @@ def derive_session_harness_activities(conn: Connection, session_id: str) -> list
                 agent_runs.c.created_at,
                 agent_runs.c.started_at,
                 agent_runs.c.updated_at,
+                and_(agent_runs.c.callback_session_id == session_id, _returns_its_result()).label("returns_here"),
                 message_deliveries.c.state.label("delivery_state"),
                 message_deliveries.c.submitted_at.label("delivery_submitted_at"),
                 message_deliveries.c.turn_id.label("delivery_turn_id"),
@@ -1995,15 +2009,14 @@ def derive_session_harness_activities(conn: Connection, session_id: str) -> list
                     message_deliveries.c.id == agent_runs.c.delivery_id,
                 )
             )
-            .where(agent_runs.c.callback_session_id == session_id)
             .where(agent_runs.c.run_type == "agent_run")
             .where(agent_runs.c.callback_status == "pending")
-            .where(_returns_its_result())
             .where(agent_runs.c.status.in_(_ACTIVE_RUN_STATUSES))
+            .where(_dispatched_by_or_returning_to(session_id))
             .where(
                 or_(
                     agent_runs.c.session_id.is_(None),
-                    agent_runs.c.session_id != agent_runs.c.callback_session_id,
+                    agent_runs.c.session_id != session_id,
                 )
             )
             .order_by(agent_runs.c.created_at, agent_runs.c.id)
@@ -2060,6 +2073,7 @@ def derive_session_harness_activities(conn: Connection, session_id: str) -> list
                 since=since,
                 updated_at=str(row["updated_at"] or since),
                 backend=str(row["agent_backend"] or ""),
+                returns_here=bool(row["returns_here"]),
             )
         )
     return items

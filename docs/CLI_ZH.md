@@ -575,15 +575,16 @@ Session，且在目标 Session 已存在时仍然会被拒绝。
 `--sync`。
 
 ```bash
-vibe agent run --no-callback --agent release-reviewer --message 'Review the latest deployment result.'
+vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
+vibe agent run --callback --agent release-reviewer --message 'Review the latest deployment result and send me the findings.'
 vibe agent run --sync --agent release-reviewer --message 'Review the latest deployment result and print it here.'
-vibe agent run --no-callback --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
+vibe agent run --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
 vibe agent run --session-id sesk8m4q2p7x --queue --message 'Do this after the current turn.'
 vibe agent run --bot cso --message 'Review the new login flow for security risks.'
-vibe agent run --no-callback --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
+vibe agent run --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
 vibe agent run --session-id sesworker123 --callback-session-id sescaller456 --message 'Run the delegated investigation.'
-vibe agent run --no-callback --scope-id slack::channel::C999 --visible --agent release-reviewer --message 'Post the deployment summary.'
-vibe agent run --close-after --no-callback --agent release-reviewer --message 'Run a disposable batch review.'
+vibe agent run --scope-id slack::channel::C999 --visible --agent release-reviewer --message 'Post the deployment summary.'
+vibe agent run --close-after --agent release-reviewer --message 'Run a disposable batch review.'
 ```
 
 没有 `--session-id` 也没有 fork 参数时，这次运行会为 `--agent` 新建一个后台
@@ -598,8 +599,7 @@ Session 空闲时立即启动；只有明确拒绝后才回退到 P3。它不会
 `--bot <handle>` 按代号给伙伴（Bot）的永久 Session 发消息（见 `vibe bot`）。这次运行会像
 `--queue` 一样排在伙伴之前的消息之后，所以伙伴一次只处理一条消息。伙伴只有一个对话，
 用自己的模型：`--agent`、`--session-id`、fork 参数、`--model`、`--reasoning-effort`、
-位置参数、`--cwd` 和 `--close-after` 都不能与 `--bot` 一起使用。给伙伴的消息除非用
-`--callback` 要求，否则不创建 callback，在 Agent shell 之外也不需要指定 callback 策略。对同时是伙伴的
+位置参数、`--cwd` 和 `--close-after` 都不能与 `--bot` 一起使用。对同时是伙伴的
 Agent，`--agent` 的含义不变：它新建该 Agent 的一个 Session，而不是给伙伴发消息。
 
 当一个新 Agent Session 需要从现有 Session 的 native backend 上下文分叉，而不是空白开始时，
@@ -621,11 +621,9 @@ Session 或 fork）设置模型，该 Session 之后的轮次会沿用它。
 `--sync` 会用结束后的 run 记录替换它。只有当 run 落在调用方自己的 Session、
 结果已直接回到那里因而不再回调时，才会附带 `callback_notice`。
 
-异步 run 需要明确 callback 策略，除非命令运行在 Avibe 已注入 caller context
-的 Agent 环境内。当最终结果文本需要回到某个 Session 时，使用 `--callback`（在 Agent
-shell 内）或 `--callback-session-id`；当你有意不自动回调、后续会通过 `vibe runs show`
-或 runs 列表/轮询查看结果时，使用 `--no-callback`。Agent 内部发起的 `--agent`、
-`--session-id` 和 fork 运行默认把 callback 指向当前调用方 Session；`--bot` 不会。无论有没有
+无论目标是什么，run 都不创建 callback，除非明确要求。当最终结果文本需要回到某个
+Session 时，使用 `--callback`（在 Agent shell 内）或 `--callback-session-id`；否则之后用
+`vibe runs show` 查看结果。`--no-callback` 仍被接受，但不改变任何行为。无论有没有
 callback，以失败、取消或中断结束的 run 都会告诉调用方 Session 它没有完成以及原因；没有
 callback 的 run 会告诉目标该向谁汇报：目标的输入里有一行写明发送方和确切的
 `vibe agent run` 命令。这个 callback 与普通投递相互独立：

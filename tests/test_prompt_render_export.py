@@ -104,6 +104,20 @@ _BOTS_ROSTER_INTRO = '### Bots and Agents\nYou can address two kinds of workers.
 _PREVIOUS_AGENTS_INTRO = '### Agents\nThe table below is generated from currently enabled Agents at prompt-injection time. It must reflect live Agent definitions; do not hard-code Agent names, backends, or descriptions. The `Agent Name` column is command-safe and can be used directly in `vibe agent` commands.\n\n'
 _BOT_RULES = '\nBot rules:\n- Message a Bot with `vibe agent run --bot <bot> --message ...`. The message joins its conversation, behind its earlier messages, and the command returns at once.\n- Reach a Bot only through `--bot`, never through `--agent` or `--session-id`. `--model` and `--reasoning-effort` do not apply.\n\nAgent rules:\n'
 _PREVIOUS_RULES = '\nRules:\n'
+_CONTINUE_SESSION_RULE = "only when the work should continue that same existing Session.\n"
+_PREVIOUS_CONTINUE_SESSION_RULE = (
+    "only when the work should continue that same existing Session. Async callbacks return to this conversation by default.\n"
+)
+_CALLBACK_RULES = (
+    "- A run's final reply returns here only with `--callback` (`--callback-session-id <id>` sends it to that Session); "
+    "a run that does not complete always reports here.\n"
+    "- `--sync` changes waiting behavior, not session identity: runs are async by default; "
+    "synchronous runs wait for the result and are still recorded in `vibe runs`.\n"
+)
+_PREVIOUS_CALLBACK_RULES = (
+    "- `--sync` changes waiting behavior, not session identity: default async runs in the background and return "
+    "through callbacks; synchronous runs wait for the result and are still recorded in `vibe runs`.\n"
+)
 _TYPED_MENTIONS = '### Mentions in user messages\nThe Web composer inserts typed references into the message text:\n- `@<bot:name>` points at a Bot. Message it with `vibe agent run --bot <name> ...`.\n- `@<agent:name>` points at an Agent. Run it with `vibe agent run --agent <name> ...`.\n- `#<session-id>` points at a Session. Resume it with `vibe agent run --session-id <session-id> ...`, or read it with `vibe data query`.\n- `@<name>` without a type, found in older messages, points at an Agent.\n\nA mention says whom the user pointed at, not what to do; decide the action from the message. A mention of yourself needs no command. Only these bracketed forms are references; a bare `@` or `#` in prose is ordinary text.'
 _PREVIOUS_MENTIONS = '### Mentions in user messages\nOn the Web chat the user composes with `@` / `#` autocomplete, which inserts stable references into their message text:\n- `@<agent-name>` points at that enabled Agent (see the table above). Act on it with `vibe agent run --agent <agent-name> ...`.\n- `#<session-id>` points at that Session. Resume it with `vibe agent run --session-id <session-id> ...`, or read its history with `vibe data query`.\n\nTreat these as the user pointing at that Agent or Session, and decide the action from context. Only the bracketed `@<...>` / `#<...>` forms are references; a bare `@` or `#` in prose is ordinary text.'
 
@@ -611,6 +625,9 @@ def test_approved_guidance_changes_preserve_all_other_injection_bytes(monkeypatc
         assert text.count(_BOTS_ROSTER_INTRO) == text.count(_BOT_RULES) == text.count(_TYPED_MENTIONS) == 1
         text = text.replace(_BOTS_ROSTER_INTRO, _PREVIOUS_AGENTS_INTRO)
         text = text.replace(_BOT_RULES, _PREVIOUS_RULES)
+        assert text.count(_CONTINUE_SESSION_RULE) == text.count(_CALLBACK_RULES) == 1
+        text = text.replace(_CONTINUE_SESSION_RULE, _PREVIOUS_CONTINUE_SESSION_RULE)
+        text = text.replace(_CALLBACK_RULES, _PREVIOUS_CALLBACK_RULES)
         text = text.replace(_TYPED_MENTIONS, _PREVIOUS_MENTIONS)
         text = text.replace(_HARNESS_SOURCE_GUIDANCE, "")
         text = text.replace(_SESSION_TITLE_STEPS, _PREVIOUS_SESSION_TITLE_STEPS)
@@ -628,6 +645,7 @@ def test_approved_guidance_changes_preserve_all_other_injection_bytes(monkeypatc
     # Harness line that says what a `[Harness: ...]` input is, and restoring the
     # two-call Session Title steps that `--if-untitled` replaced, and restoring the
     # retired shared preferences file paragraphs and their section heading, and
-    # restoring the Agents roster and untyped mentions the Bots roster replaced.
+    # restoring the Agents roster and untyped mentions the Bots roster replaced,
+    # and restoring the Agent rules that said async runs return through callbacks.
     # Every other byte/order stays pinned, including all Claude/OpenCode output.
     assert digest == "262c7cbabbbb0bfefa4a69511d805d28f76a3559bd511184006242f831b4836e"
