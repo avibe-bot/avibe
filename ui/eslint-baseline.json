@@ -458,7 +458,7 @@
       "avibe/localized-user-text": 4
     },
     "src/components/workbench/NewAgentDialog.tsx": {
-      "react-hooks/set-state-in-effect": 3
+      "react-hooks/set-state-in-effect": 2
     },
     "src/components/workbench/NewProjectDialog.tsx": {
       "avibe/localized-user-text": 2

@@ -130,16 +130,15 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
 
   // Keep the chosen effort valid as backend/model (and thus the option list)
   // change, so handleSubmit never sends an effort the backend would reject
-  // (e.g. picking Codex `xhigh` then switching to Claude).
-  useEffect(() => {
-    if (effortOptions.length === 0) {
-      setEffort(null);
-      return;
-    }
-    if (effort === null || !effortOptions.includes(effort)) {
-      setEffort(effortOptions.includes('medium') ? 'medium' : effortOptions[0]);
-    }
-  }, [effortOptions, effort]);
+  // (e.g. picking Codex `xhigh` then switching to Claude). It moves during
+  // render, not in an effect: an effect runs after the new menu is committed,
+  // and Create, enabled in that commit, would send the effort the menu dropped.
+  const offeredEffort = effortOptions.length === 0
+    ? null
+    : effort !== null && effortOptions.includes(effort)
+      ? effort
+      : effortOptions.includes('medium') ? 'medium' : effortOptions[0];
+  if (offeredEffort !== effort) setEffort(offeredEffort);
 
   const canSubmit = name.trim().length > 0 && !submitting && catalogAnswered;
 
