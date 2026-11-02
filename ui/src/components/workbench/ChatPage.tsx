@@ -3830,9 +3830,10 @@ interface ChatHeaderBarProps {
 // which renders the header alone rather than mounting the whole page.
 export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, showPageMode, showPageBusy, onToggleShowPage, onPrepareShowPageLaunch, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnlyReason, writable = readOnlyReason === null, showPageAccess = null, canOpenShowPage = true, canManageShowPage = true, canManageInstance = false, canPinToDock = false, sessionActions, titleFieldRef }) => {
   const { t } = useTranslation();
-  // A Bot's conversation (docs/plans/bots.md D5) shows the Bot — avatar, display
-  // name, and "Edit profile" — in place of the editable title. Its id says it is
-  // a Bot's before the Bot list answers; until then the title stays static.
+  // A Bot's conversation (docs/plans/bots.md D5) shows the Bot — avatar and display
+  // name — in place of the editable title; "Edit profile" is the first row of its
+  // ⋯ menu. Its id says it is a Bot's before the Bot list answers; until then the
+  // title stays static.
   const { botForSession, displayName: botDisplayName, openProfile: openBotProfile } = useBots();
   const conversationBot = botForSession(session.id);
   const botConversation = isBotSessionId(session.id);
@@ -3848,7 +3849,18 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
   // ``!readOnly`` twice over: useSessionActions already yields an empty list for a
   // read-only session, and the withdrawal is re-stated here so this header cannot
   // grow a ⋯ full of guaranteed-409 rows if a future caller passes actions anyway.
-  const headerSessionActions = sessionActions ?? [];
+  const headerSessionActions: SessionActionDescriptor[] = conversationBot && writable
+    ? [
+      {
+        id: 'profile',
+        group: 'organize',
+        icon: Pencil,
+        label: t('bots.conversation.editProfile'),
+        onSelect: () => openBotProfile({ kind: 'edit', handle: conversationBot.handle }),
+      },
+      ...(sessionActions ?? []),
+    ]
+    : sessionActions ?? [];
   const hasSessionActions = writable && headerSessionActions.length > 0;
   const defaultAgent = defaultAgentName ? agents.find((agent) => agent.name === defaultAgentName) : null;
   const sessionAgentLabel = sessionAgentDisplayName(session, agents);
@@ -3884,20 +3896,6 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
           <div className="flex min-w-0 items-center gap-2">
             <BotAvatar avatar={conversationBot.avatar} name={botDisplayName(conversationBot)} size={26} />
             <span className="min-w-0 truncate text-[16px] font-bold text-foreground">{botDisplayName(conversationBot)}</span>
-            {writable && (
-              <Button
-                type="button"
-                variant="ghost"
-                size="xs"
-                onClick={() => openBotProfile({ kind: 'edit', handle: conversationBot.handle })}
-                aria-label={t('bots.conversation.editProfile')}
-                className="shrink-0 text-muted hover:text-foreground"
-              >
-                <Pencil className="size-3" />
-                {/* A phone's header keeps the pencil alone; the name needs the room. */}
-                <span className="max-md:hidden">{t('bots.conversation.editProfile')}</span>
-              </Button>
-            )}
           </div>
         ) : (
           <TitleField

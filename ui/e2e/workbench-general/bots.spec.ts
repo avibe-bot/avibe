@@ -281,13 +281,14 @@ for (const theme of ['light', 'dark'] as const) {
     await open(page, '/chat/ses_cso', { lang: 'en', theme });
     const header = page.locator('[data-chat-header]');
     await expect(header).toContainText('首席安全官');
-    await expect(header.getByRole('button', { name: 'Edit profile' })).toBeVisible();
+    // The header is back, the Bot, and ⋯: Edit profile is the menu's first row.
+    await expect(header.getByRole('button', { name: 'Edit profile' })).toHaveCount(0);
     // No rename: the name is not a click-to-edit title, and the menu offers no
     // rename, archive, pin, or hide.
     await expect(header.locator('input')).toHaveCount(0);
     await header.getByRole('button', { name: 'Session actions' }).first().click();
     const actions = page.getByRole('group', { name: 'Session actions' });
-    await expect(actions.getByRole('button')).toHaveText(['Fork session']);
+    await expect(actions.getByRole('button')).toHaveText(['Edit profile', 'Fork session']);
     await page.keyboard.press('Escape');
     // The empty conversation shows the Bot's role; the open Bot carries the ring.
     await expect(page.locator('main')).toContainText('依赖与权限的安全审计，每周汇报');
@@ -301,7 +302,8 @@ for (const theme of ['light', 'dark'] as const) {
     await page.mouse.move(900, 300);
     await page.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-conversation-${theme}.png` });
 
-    await header.getByRole('button', { name: 'Edit profile' }).click();
+    await header.getByRole('button', { name: 'Session actions' }).first().click();
+    await page.getByRole('group', { name: 'Session actions' }).getByRole('button', { name: 'Edit profile' }).click();
     const dialog = page.getByRole('dialog', { name: 'Edit profile' });
     await expect(dialog.getByRole('textbox').first()).toHaveValue('首席安全官');
     await expect(dialog.getByText('@cso')).toBeVisible();
