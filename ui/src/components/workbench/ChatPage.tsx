@@ -4,7 +4,7 @@ import { useDesktopWindowChrome } from '../../context/DesktopWindowChromeContext
 import { Fragment, forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, Bell, Bot, ChevronDown, ChevronRight, Clock, Eye, GitFork, Image as ImageIcon, Info, Loader2, MapPin, MessageSquare, MessageSquareQuote, Pencil, Terminal, Undo2, UploadCloud, X } from 'lucide-react';
+import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, Bell, Bot, ChevronDown, ChevronRight, Clock, Eye, EyeOff, GitFork, Image as ImageIcon, Info, Loader2, MapPin, MessageSquare, MessageSquareQuote, Pencil, Terminal, Undo2, UploadCloud, X } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -14,7 +14,7 @@ import { useToast } from '../../context/ToastContext';
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import { useBots } from '../../context/BotsContext';
-import { isBotSessionId, isSelectableAgent, liveBotAgentNames, type BotAvatar as BotAvatarSpec } from '../../lib/bots';
+import { conversationDetails, isBotSessionId, isSelectableAgent, liveBotAgentNames, type BotAvatar as BotAvatarSpec } from '../../lib/bots';
 import { BotAvatar } from '../ui/bot-avatar';
 import { useRegisterComposerTarget, type ComposerInsertTarget } from '../../context/ComposerBridgeContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
@@ -267,7 +267,7 @@ export const ChatPage: React.FC = () => {
   // A Bot's permanent conversation (docs/plans/bots.md D5): the header shows the
   // Bot, and the Session cannot be archived or renamed. The id namespace says so
   // before the Bot list has answered; the list supplies the face.
-  const { bots, listed: botsListed, displayName: botDisplayName } = useBots();
+  const { bots, listed: botsListed, displayName: botDisplayName, botForSession } = useBots();
   const botConversation = isBotSessionId(sessionId);
   const [sessionCanChat, setSessionCanChat] = useState(false);
   const canChat = capabilities.can_chat && sessionCanChat;
@@ -2897,6 +2897,14 @@ export const ChatPage: React.FC = () => {
   const agentDisplayName = sessionAgentDisplayName(session, agents);
   // A runtime-owned row never inherits the default Agent, so it borrows no avatar from it.
   const agentBackend = sessionAgentBackend(session, agents, readOnlyReason === 'system' ? null : defaultAgentName);
+  // A Bot's conversation reads like talking to a person while its "Hide details"
+  // is on (docs/plans/bots.md D5): on unless the Bot turned it off, including
+  // before the Bot list has answered. Anything else shows what it always has.
+  const details = botConversation
+    ? conversationDetails(botForSession(sessionId)?.hide_details ?? true, showAgentActivity)
+    : { executionProcess: showAgentActivity, harnessMessages: true, backgroundTasks: true };
+  // The in-chat ways to the Settings switch stay only where it decides what shows.
+  const offersActivitySwitch = canEditAgentActivityVisibility && details.harnessMessages;
 
   return (
     // Fill the viewport so the transcript is the only scrolling region and
@@ -3034,8 +3042,9 @@ export const ChatPage: React.FC = () => {
           onAskInNewSession={askInNewSession}
           readOnly={!writable}
           followingTailRef={followingTailRef}
+          showHarnessMessages={details.harnessMessages}
           activity={{
-            enabled: showAgentActivity,
+            enabled: details.executionProcess,
             beforeAnchor: activityByAnchor.before,
             afterAnchor: activityByAnchor.after,
             topGroups: activityByAnchor.top,
@@ -3043,10 +3052,10 @@ export const ChatPage: React.FC = () => {
             liveStartedAt,
             cardExpanded: activityCardExpanded,
             onToggleCard: () => setActivityCardExpanded((v) => !v),
-            onEnable: canEditAgentActivityVisibility
+            onEnable: offersActivitySwitch
               ? () => setAgentActivityVisibility(true)
               : undefined,
-            onDisable: canEditAgentActivityVisibility
+            onDisable: offersActivitySwitch
               ? () => setAgentActivityVisibility(false)
               : undefined,
             expanded: expandedActivity,
@@ -3076,7 +3085,7 @@ export const ChatPage: React.FC = () => {
         <ActivityStrip
           state={runtimeState}
           sessionId={sessionId ?? ''}
-          enabled={bannerEnabled === true}
+          enabled={bannerEnabled === true && details.backgroundTasks}
         />
         {/* Archive reclaims all unsent input (queued rows, pending rows, draft),
             so an archived chat loads with an empty queue. A stale tab can still be
@@ -3691,8 +3700,9 @@ interface ChatRoutePickerProps {
   /** A queued ``onPatch`` write is still in flight. */
   patchSaving?: boolean;
   working: boolean;
-  /** A Bot's conversation: its Agent is the Bot, so only the model, effort, and
-   *  speed move (docs/plans/bots.md D5); the server refuses any other route. */
+  /** A Bot's conversation: its Agent is internal to the Bot, so the picker shows
+   *  and moves only the model, effort, and speed (docs/plans/bots.md D5); the
+   *  server refuses any other route. */
   lockAgent?: boolean;
 }
 
@@ -3738,14 +3748,9 @@ const ChatRoutePicker: React.FC<ChatRoutePickerProps> = ({ session, agents, defa
     ? concreteBackend
     : pendingForkBackend ?? (backendLocked ? concreteBackend : null);
   const canClearToDefault = !lockAgent && !backendLocked && !nativeBound;
-  // A Bot's conversation names its Bot on the picker, as everywhere else in chat.
-  const { botForSession, displayName: botDisplayName } = useBots();
-  const routeBot = lockAgent ? botForSession(session.id) : undefined;
-  const pickableAgents = lockAgent
-    ? agents
-      .filter((agent) => agent.name === session.agent_name)
-      .map((agent) => (routeBot ? { ...agent, display_name: botDisplayName(routeBot) } : agent))
-    : agents;
+  // A Bot's conversation shows only the model and effort: its Agent is the Bot's
+  // own, read here only for its backend and default model.
+  const pickableAgents = lockAgent ? agents.filter((agent) => agent.name === session.agent_name) : agents;
   const pickerDisabled = working && !concreteBackend && !pendingForkBackend;
   const defaultRoute = defaultAgent
     ? {
@@ -3830,10 +3835,12 @@ interface ChatHeaderBarProps {
 // which renders the header alone rather than mounting the whole page.
 export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, showPageMode, showPageBusy, onToggleShowPage, onPrepareShowPageLaunch, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnlyReason, writable = readOnlyReason === null, showPageAccess = null, canOpenShowPage = true, canManageShowPage = true, canManageInstance = false, canPinToDock = false, sessionActions, titleFieldRef }) => {
   const { t } = useTranslation();
-  // A Bot's conversation (docs/plans/bots.md D5) shows the Bot — avatar, display
-  // name, and "Edit profile" — in place of the editable title. Its id says it is
-  // a Bot's before the Bot list answers; until then the title stays static.
-  const { botForSession, displayName: botDisplayName, openProfile: openBotProfile } = useBots();
+  // A Bot's conversation (docs/plans/bots.md D5) shows the Bot — avatar and display
+  // name — in place of the editable title, with its profile and "Hide details" in
+  // the ⋯ menu. Its id says it is a Bot's before the Bot list answers; until then
+  // the title stays static.
+  const { botForSession, displayName: botDisplayName, openProfile: openBotProfile, setHideDetails } = useBots();
+  const { showToast } = useToast();
   const conversationBot = botForSession(session.id);
   const botConversation = isBotSessionId(session.id);
   const windowChrome = useDesktopWindowChrome();
@@ -3848,7 +3855,30 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
   // ``!readOnly`` twice over: useSessionActions already yields an empty list for a
   // read-only session, and the withdrawal is re-stated here so this header cannot
   // grow a ⋯ full of guaranteed-409 rows if a future caller passes actions anyway.
-  const headerSessionActions = sessionActions ?? [];
+  const botActions: SessionActionDescriptor[] = conversationBot && writable
+    ? [
+        {
+          id: 'profile',
+          group: 'organize',
+          icon: Pencil,
+          label: t('bots.conversation.editProfile'),
+          onSelect: () => openBotProfile({ kind: 'edit', handle: conversationBot.handle }),
+        },
+        {
+          id: 'details',
+          group: 'organize',
+          icon: EyeOff,
+          label: t('bots.conversation.hideDetails'),
+          checked: conversationBot.hide_details,
+          onSelect: () => {
+            void setHideDetails(conversationBot.handle, !conversationBot.hide_details).then((saved) => {
+              if (!saved) showToast(t('bots.conversation.hideDetailsFailed'), 'error');
+            });
+          },
+        },
+      ]
+    : [];
+  const headerSessionActions = [...botActions, ...(sessionActions ?? [])];
   const hasSessionActions = writable && headerSessionActions.length > 0;
   const defaultAgent = defaultAgentName ? agents.find((agent) => agent.name === defaultAgentName) : null;
   const sessionAgentLabel = sessionAgentDisplayName(session, agents);
@@ -3884,20 +3914,6 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
           <div className="flex min-w-0 items-center gap-2">
             <BotAvatar avatar={conversationBot.avatar} name={botDisplayName(conversationBot)} size={26} />
             <span className="min-w-0 truncate text-[16px] font-bold text-foreground">{botDisplayName(conversationBot)}</span>
-            {writable && (
-              <Button
-                type="button"
-                variant="ghost"
-                size="xs"
-                onClick={() => openBotProfile({ kind: 'edit', handle: conversationBot.handle })}
-                aria-label={t('bots.conversation.editProfile')}
-                className="shrink-0 text-muted hover:text-foreground"
-              >
-                <Pencil className="size-3" />
-                {/* A phone's header keeps the pencil alone; the name needs the room. */}
-                <span className="max-md:hidden">{t('bots.conversation.editProfile')}</span>
-              </Button>
-            )}
           </div>
         ) : (
           <TitleField
@@ -4160,6 +4176,9 @@ interface TranscriptProps {
   // POST a message (409), and Quote would insert into a composer that can never
   // send. Hidden/frozen rather than left clickable-and-erroring.
   readOnly: boolean;
+  /** Harness input draws as rows (default). Off in a Bot's conversation with
+   *  "Hide details" on, where only what the Bot says shows. */
+  showHarnessMessages?: boolean;
   // Owned by ChatPage, driven here: true while the viewport follows the live
   // tail. Lifted so the retained-window trim (ChatPage.appendMessage) can tell
   // when dropping the oldest rows is safe (reader pinned to the bottom).
@@ -4217,6 +4236,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
   onQuoteSelection,
   onAskInNewSession,
   readOnly,
+  showHarnessMessages = true,
   followingTailRef,
   activity,
   footer,
@@ -4397,7 +4417,10 @@ export const Transcript: React.FC<TranscriptProps> = ({
   // §3). Which groups are open is this page's memory for the open Session only:
   // a group is open while any of its members is in the set, so it stays open as
   // it grows at either end, and a Session switch starts every group collapsed.
-  const transcriptItems = useMemo(() => groupHarnessRuns(messages, { hasOlder }), [messages, hasOlder]);
+  const transcriptItems = useMemo(
+    () => groupHarnessRuns(messages, { hasOlder, hideHarness: !showHarnessMessages }),
+    [messages, hasOlder, showHarnessMessages],
+  );
   // Group keys carried from the previous grouping, so a group keeps its element
   // as it grows (see ``stableHarnessGroupKeys``). Updated during render, the
   // React pattern for state derived from the previous render's state.
@@ -4469,7 +4492,8 @@ export const Transcript: React.FC<TranscriptProps> = ({
       </>
     );
   };
-  const empty = messages.length === 0 && !working;
+  // With Harness rows hidden, a conversation that holds nothing else reads as new.
+  const empty = (showHarnessMessages ? messages.length === 0 : transcriptItems.length === 0 && !hasOlder) && !working;
   // The end-of-history line answers "why did paging stop?" — a question only a
   // reader who actually scrolled can have asked. A chat that fits the viewport
   // never paged, so there the same line is noise rather than an answer.

@@ -1,6 +1,10 @@
+/* @vitest-environment jsdom */
+
 import { renderToStaticMarkup } from 'react-dom/server';
+import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { Archive, EyeOff, GitFork, Pencil, Pin } from 'lucide-react';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { Popover, PopoverTrigger } from '../ui/popover';
 import {
@@ -87,6 +91,26 @@ describe('SessionActionMenu', () => {
     expect(html).toContain('cursor-not-allowed text-muted');
     expect(html).not.toContain('text-[10.5px] leading-tight text-muted');
     expect(html).toContain('Fork session');
+  });
+
+  // A Bot's "Hide details" (docs/plans/bots.md D5) is a setting, not a command:
+  // the menu stays open so the flip is seen to take.
+  it('draws a setting as a switch that flips without closing the menu', async () => {
+    const onAction = vi.fn();
+    const onSelect = vi.fn();
+    render(
+      <SessionActionMenu
+        actions={[row({ id: 'details', group: 'organize', label: 'Hide details', icon: EyeOff, checked: true, onSelect })]}
+        onAction={onAction}
+        label="Session actions"
+      />,
+    );
+
+    const toggle = screen.getByRole('switch', { name: 'Hide details' });
+    expect(toggle.getAttribute('aria-checked')).toBe('true');
+    await userEvent.setup().click(toggle);
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    expect(onAction).not.toHaveBeenCalled();
   });
 
   it('swaps a pending row’s icon for a spinner', () => {

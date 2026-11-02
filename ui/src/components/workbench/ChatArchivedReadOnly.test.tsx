@@ -50,7 +50,7 @@ const render = (ui: ReactElement) =>
 
 const session = (over: Partial<WorkbenchSession> = {}): WorkbenchSession =>
   ({
-    id: 'ses_01J8XK5M8T',
+    id: 'ses01J8XK5M8T',
     scope_id: 'scope-1',
     project_id: 'proj-1',
     title: 'Model Hub',
@@ -141,8 +141,8 @@ describe('archived 409 convergence', () => {
 
   it('never stamps one chat’s archive onto the chat the user moved to', () => {
     const other = session({ id: 'ses_other' });
-    expect(markSessionArchived(other, 'ses_01J8XK5M8T')).toBe(other);
-    expect(markSessionArchived(null, 'ses_01J8XK5M8T')).toBeNull();
+    expect(markSessionArchived(other, 'ses01J8XK5M8T')).toBe(other);
+    expect(markSessionArchived(null, 'ses01J8XK5M8T')).toBeNull();
   });
 
   it('is identity-stable once archived, so it cannot spin a re-render', () => {
@@ -165,6 +165,8 @@ describe('read-only transcript withdraws session writes', () => {
       quote: true,
       askInNew: false,
     });
+    // A Bot's conversation is never forked from the Web (docs/plans/bots.md D5).
+    expect(transcriptSelectionActions(session({ id: 'ses_cso' }), false)).toEqual({ quote: true, askInNew: false });
     // Archived: Quote would land in a disabled composer, and the fork endpoint
     // refuses an archived source outright (archive is terminal — no fork out).
     expect(transcriptSelectionActions(session({ status: 'archived' }), true)).toEqual({
@@ -791,7 +793,7 @@ describe('read-only transcript locks the secret-request cards', () => {
       id: 'vrq_stale',
       request_type: 'provision',
       secret_name: 'STALE_API_KEY',
-      requester: { session_id: 'ses_01J8XK5M8T' },
+      requester: { session_id: 'ses01J8XK5M8T' },
       delivery: {},
       status: 'pending',
       message_id: null,

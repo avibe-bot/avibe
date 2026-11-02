@@ -6,6 +6,7 @@ import type { LucideIcon } from 'lucide-react';
 
 import { Button } from '../ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
+import { SwitchTrack } from '../ui/switch';
 import { chatHeaderSessionActions, mobileChatSessionActions } from './chatSessionActions';
 import { SESSION_ROW_ACTION_BUTTON_CLASS } from './sessionRowLayout';
 
@@ -14,7 +15,10 @@ import { SESSION_ROW_ACTION_BUTTON_CLASS } from './sessionRowLayout';
 // header. The actions themselves (labels, writes, pending state) come from
 // useSessionActions.tsx; surfaces opt into only the capabilities they can render.
 
-export type SessionActionId = 'pin' | 'reference' | 'fork' | 'pet' | 'rename' | 'visibility' | 'archive';
+export type SessionActionId =
+  | 'pin' | 'reference' | 'fork' | 'pet' | 'rename' | 'visibility' | 'archive'
+  // A Bot's conversation (docs/plans/bots.md D5): its profile and its "Hide details" switch.
+  | 'profile' | 'details';
 
 /** Menu grouping — rendered with a hairline divider between groups. */
 export type SessionActionGroup = 'organize' | 'continue' | 'lifecycle';
@@ -32,6 +36,9 @@ export interface SessionActionDescriptor {
   /** A write is in flight: the icon becomes a spinner and the row stops accepting clicks. */
   pending?: boolean;
   danger?: boolean;
+  /** A setting rather than a command: the row is a switch showing this state, and
+   *  choosing it flips the setting without closing the menu. */
+  checked?: boolean;
   onSelect: () => void;
 }
 
@@ -121,6 +128,7 @@ export const SessionActionMenu: React.FC<{
           previous != null && GROUP_ORDER.indexOf(previous.group) !== GROUP_ORDER.indexOf(action.group);
         const reason = action.disabled ? action.title : undefined;
         const reasonId = reason ? `${menuId}-${action.id}-reason` : undefined;
+        const toggle = action.checked !== undefined;
         return (
           <div
             key={action.id}
@@ -131,6 +139,8 @@ export const SessionActionMenu: React.FC<{
                 itemsRef.current[index] = node;
               }}
               type="button"
+              role={toggle ? 'switch' : undefined}
+              aria-checked={toggle ? action.checked : undefined}
               aria-disabled={action.disabled || undefined}
               aria-describedby={reasonId}
               onClick={() => {
@@ -139,7 +149,8 @@ export const SessionActionMenu: React.FC<{
                   return;
                 }
                 setDisclosedReasonId(null);
-                onAction?.(action.id);
+                // A switch stays in its open menu, so the change is seen to take.
+                if (!toggle) onAction?.(action.id);
                 action.onSelect();
               }}
               onBlur={() => {
@@ -179,6 +190,7 @@ export const SessionActionMenu: React.FC<{
                 />
               )}
               <span className="flex-1 truncate">{action.label}</span>
+              {toggle && <SwitchTrack checked={action.checked === true} />}
               {action.hint && (
                 <span className="shrink-0 font-mono text-[10px] text-muted" aria-hidden="true">
                   {action.hint}

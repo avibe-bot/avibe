@@ -45,6 +45,16 @@ describe('groupHarnessRuns', () => {
     expect(shape(groupHarnessRuns([harness('h1'), vault], { hasOlder: true }))).toEqual([['h1', 'v1']]);
   });
 
+  it('draws no Harness row at all when Harness is hidden, the first included', () => {
+    const messages = [harness('h0'), reply('r1'), harness('h1'), harness('h2'), reply('r2'), user('u1')];
+
+    const items = groupHarnessRuns(messages, { hasOlder: false, hideHarness: true });
+
+    expect(shape(items)).toEqual(['r1', 'r2', 'u1']);
+    // The replies keep their places in the loaded list.
+    expect(items.map((item) => (item.kind === 'message' ? item.index : -1))).toEqual([1, 4, 5]);
+  });
+
   it("keeps the Session's first message out of groups, once it is known to be first", () => {
     const messages = [harness('brief'), harness('h1'), harness('h2')];
 

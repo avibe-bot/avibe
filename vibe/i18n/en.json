@@ -418,6 +418,7 @@
       "bot_main_not_removable": "The main Bot cannot be removed.",
       "bot_main_position": "The main Bot always comes first.",
       "bot_position_invalid": "A Bot's position is a whole number from 1.",
+      "bot_hide_details_invalid": "Hide details is either on or off.",
       "bot_main_unavailable": "The main Bot is not available right now."
     },
     "agentNameValidation": {

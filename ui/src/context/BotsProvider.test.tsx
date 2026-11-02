@@ -26,11 +26,11 @@ vi.mock('./ApiContext', async () => {
 
 const MAIN: Bot = {
   handle: 'main', display_name: '', avatar: { kind: 'mascot' }, role: 'First point of contact',
-  agent_name: 'main', session_id: 'ses_main', position: 0, builtin: true,
+  agent_name: 'main', session_id: 'ses_main', position: 0, builtin: true, hide_details: true,
 };
 const CSO: Bot = {
   handle: 'cso', display_name: 'Security Lead', avatar: null, role: 'Audits',
-  agent_name: 'cso', session_id: 'ses_cso', position: 1, builtin: false,
+  agent_name: 'cso', session_id: 'ses_cso', position: 1, builtin: false, hide_details: true,
 };
 
 function fakeApi() {

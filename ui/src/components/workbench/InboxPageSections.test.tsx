@@ -41,7 +41,7 @@ vi.mock('react-i18next', () => ({
 vi.mock('../ui/markdown', () => ({ Markdown: ({ content }: { content: string }) => <p>{content}</p> }));
 
 const bots: Bot[] = [
-  { handle: 'cso', display_name: 'CSO', avatar: null, role: '', agent_name: 'cso', session_id: 'ses_cso', position: 1, builtin: false },
+  { handle: 'cso', display_name: 'CSO', avatar: null, role: '', agent_name: 'cso', session_id: 'ses_cso', position: 1, builtin: false, hide_details: true },
 ];
 const botsState = {
   enabled: true,

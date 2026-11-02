@@ -909,7 +909,7 @@ export type ApiContextType = {
   setBot: (payload: { agent_name: string; display_name: string; avatar?: BotEmojiAvatarInput | null }) => Promise<Bot>;
   updateBot: (
     handle: string,
-    payload: { display_name?: string; avatar?: BotEmojiAvatarInput | null; position?: number },
+    payload: { display_name?: string; avatar?: BotEmojiAvatarInput | null; position?: number; hide_details?: boolean },
   ) => Promise<Bot>;
   removeBot: (handle: string) => Promise<void>;
   uploadBotAvatar: (handle: string, image: Blob) => Promise<Bot>;

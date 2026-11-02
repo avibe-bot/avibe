@@ -248,6 +248,25 @@ def test_positions_order_bots_after_the_main_bot(service):
         service.update_bot("main", position=2)
 
 
+def test_hide_details_is_on_until_turned_off_for_that_bot_alone(service):
+    from core.bots import BotError
+
+    for name in ("Alpha", "Beta"):
+        service.create_bot(display_name=name)
+    # No Bot record carries the switch until it is first turned: absent is on.
+    assert {bot.handle: bot.hide_details for bot in service.list_bots()} == {"main": True, "alpha": True, "beta": True}
+
+    assert service.update_bot("alpha", hide_details=False).hide_details is False
+    service.update_bot("alpha", display_name="Alpha Prime")
+    assert {bot.handle: bot.hide_details for bot in service.list_bots()} == {"main": True, "alpha": False, "beta": True}
+    assert service.get_bot("alpha").to_payload()["hide_details"] is False
+
+    with pytest.raises(BotError) as refused:
+        service.update_bot("beta", hide_details="off")
+    assert refused.value.code == "bot_hide_details_invalid"
+    assert service.get_bot("beta").hide_details is True
+
+
 def test_bot_operations_are_the_owners(service):
     from vibe.authorization import AuthorizationContext, InstanceAuthorizationError
 

@@ -109,6 +109,17 @@ async function serveBots(page: Page, lang: Lang, bots: FixtureBot[]) {
     await page.route(`**/api/sessions/${sessionId}/draft`, (route) => route.fulfill({ json: { ok: true, draft: { text: '', updated_at: null } } }));
   }
   await page.route('**/api/asr/status', (route) => route.fulfill({ json: { available: false } }));
+  // Model Hub's catalog for Vibey, which every Bot runs on.
+  const catalogModel = (id: string, displayName: string) => ({
+    id, origin: 'builtin', display_name: displayName, models_dev_id: null, context_window: null, max_output_tokens: null,
+    input_modalities: [], output_modalities: [], supports_tools: null, supports_reasoning: true,
+    reasoning_efforts: ['low', 'medium', 'high'], locked: false, routeable: true, effort_menu: { omitted: [], not_on: {} },
+    fast_mode: false, fast_mode_confirmed: false,
+  });
+  await page.route('**/api/models/agents/vibey/models', (route) => route.fulfill({ json: { ok: true, agent: {
+    backend: 'vibey', mode: 'hub',
+    catalog_models: [catalogModel('gpt-6-astra', 'GPT-6 Astra'), catalogModel('claude-opus-4-7', 'Claude Opus 4.7')],
+  } } }));
   return { denied };
 }
 
@@ -281,32 +292,137 @@ for (const theme of ['light', 'dark'] as const) {
     await open(page, '/chat/ses_cso', { lang: 'en', theme });
     const header = page.locator('[data-chat-header]');
     await expect(header).toContainText('首席安全官');
-    await expect(header.getByRole('button', { name: 'Edit profile' })).toBeVisible();
+    // The header is back, avatar, name, and ⋯: the profile lives in the menu.
+    await expect(header.getByRole('button', { name: 'Edit profile' })).toHaveCount(0);
     // No rename: the name is not a click-to-edit title, and the menu offers no
-    // rename, archive, pin, or hide.
+    // rename, archive, pin, hide, or fork.
     await expect(header.locator('input')).toHaveCount(0);
     await header.getByRole('button', { name: 'Session actions' }).first().click();
     const actions = page.getByRole('group', { name: 'Session actions' });
-    await expect(actions.getByRole('button')).toHaveText(['Fork session']);
+    await expect(actions.getByRole('button')).toHaveText(['Edit profile']);
+    await expect(actions.getByRole('switch', { name: 'Hide details' })).toHaveAttribute('aria-checked', 'true');
+    await expect(actions).not.toContainText('Fork');
+    await page.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-conversation-menu-${theme}.png`, clip: { x: 0, y: 0, width: 900, height: 320 } });
     await page.keyboard.press('Escape');
     // The empty conversation shows the Bot's role; the open Bot carries the ring.
     await expect(page.locator('main')).toContainText('依赖与权限的安全审计，每周汇报');
     await expect(page.getByRole('button', { name: '首席安全官, 2 unread', exact: true })).toHaveAttribute('aria-current', 'page');
-    // The composer moves the model only: the Agent is the Bot's, named by the Bot but not offered.
-    await page.locator('main').getByRole('button', { name: /^首席安全官/ }).click();
+    // The composer's route is the model and effort alone: no Bot name, no Agent level.
+    const route = page.locator('main').getByRole('button', { name: /^(gpt-6-astra|GPT-6 Astra)/ });
+    await expect(route).not.toContainText('首席安全官');
+    await route.click();
     await expect(page.getByText('Model', { exact: true })).toBeVisible();
-    await expect(page.getByRole('button', { name: /^Agent/ })).toHaveCount(0);
+    await expect(page.getByText('Agent', { exact: true })).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'New agent' })).toHaveCount(0);
+    await page.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-conversation-route-${theme}.png` });
     await page.keyboard.press('Escape');
     await page.mouse.move(900, 300);
     await page.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-conversation-${theme}.png` });
 
-    await header.getByRole('button', { name: 'Edit profile' }).click();
+    await header.getByRole('button', { name: 'Session actions' }).first().click();
+    await page.getByRole('group', { name: 'Session actions' }).getByRole('button', { name: 'Edit profile' }).click();
     const dialog = page.getByRole('dialog', { name: 'Edit profile' });
     await expect(dialog.getByRole('textbox').first()).toHaveValue('首席安全官');
     await expect(dialog.getByText('@cso')).toBeVisible();
     await expect(dialog.getByText('Fixed once the Bot exists')).toBeVisible();
     await page.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-edit-${theme}.png` });
+    expect(denied).toEqual([]);
+  });
+
+  // "Hide details" (docs/plans/bots.md D5): on by default, a Bot's conversation
+  // reads like talking to a person. The Watch that woke the Bot, the execution
+  // process, and the background-task banner stay out; the Bot's report on the
+  // Watch, and the thinking bubble while it works, stay in. Off, they return, the
+  // execution process because Settings shows Agent activity here.
+  test(`"Hide details" keeps a Bot's conversation to what it says (${theme})`, async ({ page }) => {
+    const { denied } = await serveBots(page, 'zh', [MAIN, { ...CSO, running: true }, PM]);
+    const sessionId = 'ses_cso';
+    const row = (id: string, minutes: number, fields: Record<string, unknown>) => ({
+      id, scope_id: null, session_id: sessionId, platform: 'avibe', source: 'agent', author_id: null, author_name: null,
+      native_message_id: null, parent_native_message_id: null, content: {}, metadata: {}, created_at: ago(minutes), updated_at: ago(minutes),
+      ...fields,
+    });
+    const messages = [
+      row('msg-ask', 30, { author: 'user', type: 'user', source: 'user', text: '盯一下 avault 的依赖升级 PR，CI 过了告诉我。' }),
+      row('msg-watch', 6, {
+        author: 'harness', type: 'harness', source: 'harness', author_name: 'watch', author_id: 'wat-1',
+        text: '[Harness: Watch wat-1] avault#412 CI completed: 18 checks passed.',
+      }),
+      row('msg-report', 5, {
+        author: 'agent', type: 'result', text: 'avault 的依赖升级 PR 的 CI 全部通过了，没有新的高危依赖，可以合并。',
+        metadata: { author_agent_id: 'agt-cso', author_backend: 'vibey' },
+      }),
+    ];
+    const turnState = {
+      in_flight: true, foreground: 'running', native_turn_started: true, pending_input_count: 0,
+      background_activities: [{
+        id: 'watch:wat-2', backend: 'vibey', runtime_key: 'vibey', session_id: sessionId, kind: 'watch', status: 'running',
+        description: 'avault#413 review', started_at: ago(4), updated_at: ago(1), item_kind: 'watch', label: 'avault#413 review',
+      }],
+      pending_activity_output_count: 0, connection: 'connected',
+    };
+    const session = {
+      id: sessionId, scope_id: null, project_id: null, title: CSO.display_name, agent_id: 'agt-cso', agent_name: 'cso',
+      agent_backend: 'vibey', agent_variant: 'vibey', model: 'gpt-6-astra', reasoning_effort: 'high', speed: null, status: 'active',
+      agent_status: 'running', pinned: false, visibility: 'foreground', workdir: '/fixture/.avibe/bots/cso',
+      native_session_id: 'native-cso', metadata: { kind: 'bot' }, created_at: ago(600), updated_at: ago(1),
+    };
+    await page.route(`**/api/sessions/${sessionId}/bootstrap`, (route) => route.fulfill({ json: {
+      session, capabilities: { can_chat: true }, agents: AGENTS, default_agent_name: 'vibey',
+      // Settings shows Agent activity everywhere.
+      config: { ui: { show_agent_activity: true } },
+      messages, queued: [], next_after_id: null, next_before_id: null, draft: { text: '', updated_at: null }, turn_state: turnState,
+    } }));
+    await page.route(`**/api/sessions/${sessionId}`, (route) => route.fulfill({ json: session }));
+    await page.route(`**/api/sessions/${sessionId}/turn-state`, (route) => route.fulfill({ json: turnState }));
+    await page.route(`**/api/sessions/${sessionId}/activity**`, (route) => route.fulfill({ json: { groups: [{
+      id: 'grp-report', anchor_message_id: 'msg-report', anchor_position: 'before', open: false, status: 'done',
+      steps: 4, duration_ms: 42_000, started_at: ago(6), ended_at: ago(5),
+    }] } }));
+    let hideDetails = true;
+    const patches: unknown[] = [];
+    await page.route('**/api/bots', (route) => route.fulfill({ json: { ok: true, bots: [MAIN, CSO, PM].map((bot, index) => ({
+      ...payload(bot, index), ...(bot.handle === 'cso' ? { hide_details: hideDetails } : {}),
+    })) } }));
+    await page.route('**/api/bots/cso', (route) => {
+      const body = route.request().postDataJSON() as { hide_details: boolean };
+      patches.push(body);
+      hideDetails = body.hide_details;
+      return route.fulfill({ json: { ok: true, bot: { ...payload(CSO, 1), hide_details: hideDetails } } });
+    });
+    await page.setViewportSize(DESKTOP);
+    await open(page, `/chat/${sessionId}`, { lang: 'zh', theme });
+    const main = page.locator('main');
+    const report = page.locator('[data-message-id="msg-report"]');
+
+    // On, the default: the Bot's report stands as its own message.
+    await expect(report).toContainText('CI 全部通过了');
+    await expect(report).toContainText('首席安全官');
+    await expect(page.locator('[data-message-id="msg-ask"]')).toBeVisible();
+    await expect(page.locator('[data-message-id="msg-watch"]')).toHaveCount(0);
+    await expect(main.getByText('执行过程', { exact: false })).toHaveCount(0);
+    await expect(main.getByRole('status').filter({ hasText: '后台任务' })).toHaveCount(0);
+    // It is working: it shows as the Bot typing, not as its steps.
+    const typing = main.locator('.vr-typing-dot').first();
+    await expect(typing).toBeVisible();
+    await page.mouse.move(900, 300);
+    await page.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-hide-details-on-${theme}.png` });
+
+    const header = page.locator('[data-chat-header]');
+    await header.getByRole('button', { name: '会话操作' }).first().click();
+    const toggle = page.getByRole('group', { name: '会话操作' }).getByRole('switch', { name: '隐藏细节' });
+    await toggle.click();
+    await expect.poll(() => patches).toEqual([{ hide_details: false }]);
+    await expect(toggle).toHaveAttribute('aria-checked', 'false');
+    await page.keyboard.press('Escape');
+
+    // Off: the Watch, the execution process, and the background task return.
+    await expect(page.locator('[data-message-id="msg-watch"]')).toBeVisible();
+    await expect(main.getByText('执行过程', { exact: false }).first()).toBeVisible();
+    await expect(main.getByRole('status').filter({ hasText: '后台任务' })).toBeVisible();
+    await expect(report).toContainText('CI 全部通过了');
+    await page.mouse.move(900, 300);
+    await page.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-hide-details-off-${theme}.png` });
     expect(denied).toEqual([]);
   });
 }
@@ -415,7 +531,7 @@ test('on a short window the dialog scrolls to its footer', async ({ page }) => {
   expect(denied).toEqual([]);
 });
 
-test("a Bot's replies and its route read as the Bot, not its Agent", async ({ page }) => {
+test("a Bot's replies read as the Bot, and its route as its model", async ({ page }) => {
   const { denied } = await serveBots(page, 'en', [MAIN, CSO, PM]);
   await page.setViewportSize(DESKTOP);
   await open(page, '/chat/ses_main', { lang: 'en' });
@@ -425,7 +541,9 @@ test("a Bot's replies and its route read as the Bot, not its Agent", async ({ pa
   await expect(reply).toContainText('Vibey');
   await expect(reply).not.toContainText('main');
   await expect(reply.locator('.bot-avatar-mascot')).toHaveCount(1);
-  await expect(page.locator('main').getByRole('button', { name: /^Vibey/ })).toBeVisible();
+  // The composer's route names the model, never the Bot's Agent.
+  await expect(page.locator('main').getByRole('button', { name: /^(gpt-6-astra|GPT-6 Astra)/ })).toBeVisible();
+  await expect(page.locator('main').getByRole('button', { name: /^main/ })).toHaveCount(0);
   expect(denied).toEqual([]);
 });
 

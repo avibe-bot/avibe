@@ -179,12 +179,25 @@ Owner decisions 2026-11-01, from the mockups in this Session's Show Page
   metadata. An uploaded avatar is scaled to 256px and saved as `avatar.png` in
   the Bot's own directory, so the Bot can see and replace it and Git keeps
   every version; the UI serves that file. No prompt text describes the avatar.
-- **Bot conversation page.** The header shows the avatar and display name with
-  "Edit profile"; there is no archive or rename. The composer's model picker
-  changes that Bot Session's model, as `ses_main` already allows. Bot Sessions
-  do not get the session-title prompt section; their title is the display
-  name. A new Bot gets its Session at once but no automatic self-introduction;
-  the empty conversation shows its role.
+- **Bot conversation page.** The header is back, avatar, display name, and `…`;
+  there is no archive, rename, or fork (the selection's "Ask in a new session"
+  forks too, so it is not offered). The `…` menu holds "Edit profile" and the
+  "Hide details" switch (owner decision, 2026-11-02). The composer's route
+  button shows only the model and reasoning effort (and speed where the route
+  has it), never the Bot's name; its menu offers only the model and effort, with
+  no Agent level. Bot Sessions do not get the session-title prompt section;
+  their title is the display name. A new Bot gets its Session at once but no
+  automatic self-introduction; the empty conversation shows its role.
+- **Hide details** (owner decision, 2026-11-02). A switch per Bot, stored on the
+  Bot record so every device agrees, and on by default (a record without it
+  reads as on), so a Bot conversation reads like talking to a person. On, the
+  conversation hides the execution process (Activity chips and cards, the
+  running card included), Harness messages (rows and groups), and the
+  background-task banner; while the Bot works it shows the thinking bubble. Off,
+  Harness messages and the banner show, and the execution process shows when the
+  Settings switch "Show Agent Activity" is also on. The Bot's own replies always
+  show, including its answers to hidden Harness input: a Bot reporting a Watch
+  result to the user reads as the Bot speaking first.
 - **Desktop pet.** It keeps the Vibey mascot art; its bubble uses the main
   Bot's display name.
 
@@ -419,10 +432,10 @@ API invalidates immediately.
 
 | Route | Purpose |
 | --- | --- |
-| `GET /api/bots` | Bots in display order: handle, display name (empty means the localized default for the main Bot), avatar (`emoji` with hue, `image` with URL, or the main Bot's mascot), role, Agent name, Session id, position, built-in flag |
+| `GET /api/bots` | Bots in display order: handle, display name (empty means the localized default for the main Bot), avatar (`emoji` with hue, `image` with URL, or the main Bot's mascot), role, Agent name, Session id, position, built-in flag, Hide details |
 | `POST /api/bots` | Create: display name, handle (optional), role, avatar (optional), model (optional). Makes the Vibey Agent, the Bot, its directory, and its Session |
 | `POST /api/bots/set` | Make an existing Vibey Agent a Bot: Agent name, display name, avatar |
-| `PATCH /api/bots/{handle}` | Display name, emoji avatar, position |
+| `PATCH /api/bots/{handle}` | Display name, emoji avatar, position, Hide details (`hide_details`) |
 | `DELETE /api/bots/{handle}` | Remove the Bot role (the main Bot refuses) |
 | `PUT /api/bots/{handle}/avatar` | Upload an image; stored as `avatar.png` in the Bot's directory |
 | `GET /api/bots/{handle}/avatar` | Serve that image |

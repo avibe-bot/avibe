@@ -54,6 +54,7 @@ def test_the_bot_lifecycle_over_http(client, tmp_path):
         "session_id": "ses_main",
         "position": 0,
         "builtin": True,
+        "hide_details": True,
     }
     assert client.get("/api/sessions/ses_main").status_code == 200
 
@@ -74,6 +75,14 @@ def test_the_bot_lifecycle_over_http(client, tmp_path):
     assert client.get("/api/sessions/ses_cso").get_json()["title"] == "安全官"
     refused = client.patch("/api/bots/cso", json={"handle": "x"}, headers=csrf_headers(client))
     assert refused.status_code == 400
+    shown = client.patch("/api/bots/cso", json={"hide_details": False}, headers=csrf_headers(client))
+    assert shown.get_json()["bot"]["hide_details"] is False
+    assert {row["handle"]: row["hide_details"] for row in client.get("/api/bots").get_json()["bots"]} == {
+        "main": True,
+        "cso": False,
+    }
+    invalid = client.patch("/api/bots/cso", json={"hide_details": "no"}, headers=csrf_headers(client))
+    assert (invalid.status_code, invalid.get_json()["error"]["code"]) == (400, "bot_hide_details_invalid")
 
     image = io.BytesIO()
     from PIL import Image
