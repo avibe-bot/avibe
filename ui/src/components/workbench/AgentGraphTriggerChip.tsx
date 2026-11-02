@@ -13,7 +13,7 @@ interface AgentGraphTriggerChipProps {
 }
 
 // Task/Watch trigger source — a violet chip that sits left of the session it
-// fires (spec frame anu5U). Click selects it and opens the in-graph trigger
+// fires (ui/design: agents/run-graph/graph). Click selects it and opens the in-graph trigger
 // detail panel (A11), same interaction as a session node — the old jump to
 // Harness survives as a secondary link inside that panel. Fills its parent so
 // the canvas box + dagre layout stay in lockstep.

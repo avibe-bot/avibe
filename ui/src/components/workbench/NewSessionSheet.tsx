@@ -21,7 +21,7 @@ interface NewSessionSheetProps {
 // The workbench center ＋ opens this instead of jumping to the home canvas.
 // Pick a project (chips, most-recent first), describe the task, and it creates
 // the session + submits the message before routing to /chat — the same flow as
-// the desktop Workbench home, surfaced as a mobile bottom sheet (design.pen KSXXB).
+// the desktop Workbench home, surfaced as a mobile bottom sheet (ui/design: mobile/new-session-sheet/open).
 // The create flow itself lives in the shared useNewSession hook (one source of
 // truth with the home); the sheet only owns its open/close + draft lifecycle.
 export const NewSessionSheet: React.FC<NewSessionSheetProps> = ({ open, onClose, onOpen }) => {

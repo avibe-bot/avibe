@@ -98,7 +98,7 @@ type ReasoningOption = { value: string; label: string };
 
 const EMPTY_REASONING_OPTIONS: Record<string, ReasoningOption[]> = {};
 
-// design.pen Q5xIZa — one cyan-ringed trigger showing `[backend] agent · model ·
+// ui/design: settings/direct-messages/expanded — one cyan-ringed trigger showing `[backend] agent · model ·
 // effort` that opens a three-column cascading menu (Agent → Model → Effort).
 // Picking an agent seeds model/effort from its defaults; the model column is
 // fetched lazily per backend. CONTROLLED so it serves both the chat header
