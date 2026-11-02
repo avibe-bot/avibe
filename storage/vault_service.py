@@ -226,6 +226,10 @@ class InvalidSigningKeyError(InvalidRequestError):
     pass
 
 
+class InvalidSigningContextError(InvalidRequestError):
+    pass
+
+
 class UnsupportedProtectionError(VaultServiceError):
     """A caller attempted the wrong delivery path for a protection tier."""
 
@@ -4440,7 +4444,7 @@ def create_sign_request(
         and signing_context.get("kind") != "avault-agent-operation"
         and scheme not in {"ecdsa-secp256k1-recoverable", "ecdsa-secp256k1-der"}
     ):
-        raise InvalidRequestError("EVM signing contexts require an ECDSA scheme")
+        raise InvalidSigningContextError("EVM signing contexts require an ECDSA scheme")
     payload_audience = _request_audience_from_requester(requester)
     request_id = _id("vrq")
     delivery_payload = dict(delivery or {})

@@ -1,5 +1,5 @@
 {
-  "source": "Avibe vibe/api.py _vault_sandbox_canonical_json; exact pure helpers extracted via Python AST, 2026-11-02",
+  "source": "vault-sandbox src/operationContext.ts stableJson, commit fee07fe7f0153ae4e4b29dd0154703dc236fbce4; generated with the actual JavaScript consumer via esbuild and Node.js",
   "payload": {
     "message": {
       "": 9007199254740991,

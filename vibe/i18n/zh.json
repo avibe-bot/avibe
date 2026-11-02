@@ -292,7 +292,7 @@
       "invalidDigest": "签名摘要必须是十六进制编码的 32 字节数据。",
       "invalidParameters": "签名请求包含不支持的参数。目前仅支持空脚本树的 BIP86 密钥路径签名，不支持脚本树或 Merkle 根。",
       "invalidContext": "签名上下文无效或与请求不一致。请检查类型、摘要、字段和规范编码后重新创建请求。Agent 操作必须以 avault-agent-operation:v1 域开头，后接真实换行符和非空操作文本。",
-      "invalidRequest": "无法完成此签名请求。请检查密钥和请求详情后重新创建。EVM 和 EIP-712 上下文必须使用 ECDSA 方案。",
+      "contextSchemeMismatch": "EVM 和 EIP-712 签名上下文必须使用 ECDSA 方案。请选择兼容的方案后重新创建请求。",
       "invalidSignature": "返回的签名编码无效，或无法通过已固定公钥和请求摘要的验证。该签名未作为成功结果交付。"
     },
     "requestNotification": {

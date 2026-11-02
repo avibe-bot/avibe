@@ -292,7 +292,7 @@
       "invalidDigest": "The signing digest must be exactly 32 bytes encoded as hexadecimal.",
       "invalidParameters": "The signing request contains unsupported parameters. Only empty-tree BIP86 key-path signing is supported; script trees and Merkle roots are not supported.",
       "invalidContext": "The signing context is invalid or does not match the request. Check its type, digest, fields and canonical encoding, then recreate the request. Agent operations require the avault-agent-operation:v1 domain followed by a newline and non-empty operation text.",
-      "invalidRequest": "This signing request cannot be completed. Check the key and request details, then recreate it. EVM and EIP-712 contexts require an ECDSA scheme.",
+      "contextSchemeMismatch": "EVM and EIP-712 signing contexts require an ECDSA scheme. Recreate the request with a compatible scheme.",
       "invalidSignature": "The returned signature has an invalid encoding or does not verify against the pinned key and requested digest. It was not delivered as a successful result."
     },
     "requestNotification": {

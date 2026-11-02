@@ -302,12 +302,40 @@ def test_real_sandbox_fixture_traverses_input_validator_persistence_and_signed_r
     assert api._vault_sandbox_canonical_json(canonical_fixture) == SANDBOX["canonicalUnsignedContext"]
 
 
+@pytest.mark.parametrize("state, expected", [
+    ("denied", "sign request is not pending"),
+    ("expired", "sign request has expired"),
+])
+def test_web_sign_lifecycle_errors_preserve_the_actual_reason(monkeypatch, state, expected):
+    """Localizing new validation must not relabel an approval race as an EVM scheme error."""
+    from tests.ui_server_test_helpers import csrf_headers
+    from vibe import ui_server
+
+    request_id = create_key(approval=True)
+    with api._vault_engine().begin() as conn:
+        if state == "denied":
+            vault_service.deny_request(conn, request_id)
+        else:
+            conn.execute(vault_requests.update().where(vault_requests.c.id == request_id).values(expires_at="2000-01-01T00:00:00Z"))
+    sign = Mock()
+    monkeypatch.setattr(api, "avault_sign", sign)
+    client = ui_server.app.test_client()
+    response = client.post(
+        "/api/vault/sign", headers=csrf_headers(client),
+        json={"name": "KEY", "digest": DIGEST, "scheme": KEYPATH, "request_id": request_id},
+    )
+    assert response.status_code == 409
+    assert response.get_json()["message"] == expected
+    sign.assert_not_called()
+
+
 @pytest.mark.parametrize("language", ["en", "zh"])
 @pytest.mark.parametrize("case, english, chinese", [
     ("key", "Signing requires", "签名需要"),
     ("protected", "Protected Bitcoin", "暂不支持保护档"),
     ("parameters", "The signing request contains", "签名请求包含"),
     ("context", "The signing context is invalid", "签名上下文无效"),
+    ("scheme-pair", "EVM and EIP-712 signing contexts", "EVM 和 EIP-712 签名上下文"),
     ("signature", "The returned signature", "返回的签名"),
 ])
 def test_web_signing_errors_are_localized_but_cli_stays_english(monkeypatch, capfd, language, case, english, chinese):
@@ -318,12 +346,14 @@ def test_web_signing_errors_are_localized_but_cli_stays_english(monkeypatch, cap
     config = settings_service.load_config_or_default()
     config.language = language
     monkeypatch.setattr(settings_service, "load_config_or_default", lambda: config)
-    create_key(public_key=None if case == "key" else INTERNAL, protection="protected" if case == "protected" else "standard")
+    create_key(public_key=None if case == "key" else INTERNAL, protection="protected" if case in {"protected", "scheme-pair"} else "standard")
     payload = {"name": "KEY", "digest": DIGEST, "scheme": KEYPATH}
     if case == "parameters":
         payload["delivery"] = {"taproot_tree": []}
     if case == "context":
         payload["signing_context"] = {"kind": []}
+    if case == "scheme-pair":
+        payload.update({"scheme": RAW, "signing_context": {"kind": "eip-712-typed-data", "digestAlgorithm": "eip712", "typedData": {}, "digest": DIGEST}})
     monkeypatch.setattr(api, "avault_sign", Mock(return_value={"signature": "01" * 64}))
     client = ui_server.app.test_client()
     response = client.post("/api/vault/sign", json=payload, headers=csrf_headers(client))
@@ -370,7 +400,9 @@ def test_context_uses_utf16_sort_order_and_rejects_extra_top_level_fields():
     fixture = json.loads((FIXTURES / "canonical-json-utf16.json").read_text())
     context = {"kind": "eip-712-typed-data", "digestAlgorithm": "eip712", "digest": DIGEST, "typedData": fixture["payload"]}
     validated = api._verifiable_signing_context_from_payload({"signing_context": context}, digest=DIGEST)
-    assert api._vault_sandbox_canonical_json(validated["typedData"]) == fixture["canonical"]
+    canonical = api._vault_sandbox_canonical_json(validated["typedData"])
+    assert canonical == fixture["canonical"]
+    assert hashlib.sha256(canonical.encode("utf-8")).hexdigest() == fixture["sha256"]
     for key, value in (("merkleRoot", ""), ("display", {})):
         with pytest.raises(api.VaultApiError, match="unsupported fields"):
             api._verifiable_signing_context_from_payload({"signing_context": {**context, key: value}}, digest=DIGEST)

@@ -52,6 +52,9 @@ these tests.
   approval warning does not imply that BTC addresses are displayed on that card.
 - **Errors:** new signing validation failures carry backend catalog keys. The
   Web response renders the configured language; CLI diagnostics remain English.
+  Only the specific new validation failures get these keys: existing lifecycle
+  errors (denied, expired, mismatched requests) retain their actual reason rather
+  than being relabeled as a context/scheme failure.
 
 ## Known by design and rollout
 
@@ -83,8 +86,10 @@ real wallet operation, data migration or credential change is part of this PR.
 | Optional Core runner below | Actual `python -m vibe vault sign` → API → avault → Core acceptance for even/odd P, rawtr compatibility, DER SegWit, tamper rejection | Independent node acceptance detects unusable but well-formed signatures |
 
 The Rust and sandbox PRs own their private-key primitive and real sandbox RPC
-regressions respectively. No test claims a JS primitive is a deployed protected
-Bitcoin workflow.
+regressions respectively. Canonical JSON expected bytes and their UTF-8 hash are
+regenerated with the actual JavaScript consumer, not the Python producer under
+test; the fixture README records the independent reproduction command. No test
+claims a JS primitive is a deployed protected Bitcoin workflow.
 
 ## Optional actual sandbox wire acceptance
 

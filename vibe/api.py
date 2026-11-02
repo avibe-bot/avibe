@@ -3599,7 +3599,7 @@ def _attach_signed_sign_operation_context(
     except vault_service.InvalidSigningKeyError as exc:
         raise VaultApiError(str(exc), code="invalid_signing_key", status=409) from exc
     except vault_service.InvalidRequestError as exc:
-        raise VaultApiError(str(exc), code="invalid_request", status=409, message_key="vault.signing.invalidRequest") from exc
+        raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
 
 
 def _sign_request_response_audience(request: dict[str, Any]) -> str:
@@ -4494,8 +4494,10 @@ def request_vault_sign(payload: dict, *, user_context: Any = None) -> dict:
         raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.InvalidSigningKeyError as exc:
         raise VaultApiError(str(exc), code="invalid_signing_key", status=409) from exc
+    except vault_service.InvalidSigningContextError as exc:
+        raise VaultApiError(str(exc), code="invalid_request", status=409, message_key="vault.signing.contextSchemeMismatch") from exc
     except vault_service.InvalidRequestError as exc:
-        raise VaultApiError(str(exc), code="invalid_request", status=409, message_key="vault.signing.invalidRequest") from exc
+        raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="vault_error") from exc
     request = _attach_signed_sign_operation_context(
@@ -5774,8 +5776,10 @@ def vault_sign(payload: dict) -> dict:
         raise VaultApiError(f"request '{exc}' not found", code="request_not_found", status=404) from exc
     except vault_service.InvalidSigningKeyError as exc:
         raise VaultApiError(str(exc), code="invalid_signing_key", status=409) from exc
+    except vault_service.InvalidSigningContextError as exc:
+        raise VaultApiError(str(exc), code="invalid_request", status=409, message_key="vault.signing.contextSchemeMismatch") from exc
     except vault_service.InvalidRequestError as exc:
-        raise VaultApiError(str(exc), code="invalid_request", status=409, message_key="vault.signing.invalidRequest") from exc
+        raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="vault_error") from exc
 
