@@ -1662,29 +1662,8 @@ def get_inbox_session(
 ) -> Optional[dict[str, Any]]:
     """Return one session's inbox row (or None if it has no agent ``result`` /
     terminal ``notify`` yet). Used to build realtime ``inbox.session.updated``
-    payloads, and the row is what gates the Web Push for the message too.
-
-    A removed Bot's Session is hidden from every reader (``docs/plans/bots.md``
-    D1), so it has no row here either: the realtime event and the push are never
-    sent for it, and open clients and the desktop host see the same Sessions as
-    ``GET /api/inbox``. The hidden set comes from the one owner of it
-    (``hidden_bot_session_ids``); only ids in the Bots' namespace pay for the
-    read. Other members never see any Bot Session, which the event stream
-    enforces per recipient."""
-    from storage.agent_session_rows import BOT_SESSION_ID_PREFIX, hidden_bot_session_ids
-
-    hidden = (
-        hidden_bot_session_ids(conn, owner=True)
-        if str(session_id).startswith(BOT_SESSION_ID_PREFIX)
-        else None
-    )
-    rows = list_inbox_sessions(
-        conn,
-        platform=platform,
-        only_session=session_id,
-        limit=1,
-        hidden_session_ids=hidden,
-    )["sessions"]
+    payloads."""
+    rows = list_inbox_sessions(conn, platform=platform, only_session=session_id, limit=1)["sessions"]
     return rows[0] if rows else None
 
 

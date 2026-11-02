@@ -314,33 +314,41 @@ def test_the_inbox_includes_bot_sessions_for_the_owner_only(service):
         assert messages_service.total_unread(conn, hidden_session_ids=member_hidden) == 0
 
 
-def test_a_removed_bots_session_has_no_realtime_inbox_row(service):
-    """Every ``inbox.session.updated`` (and the push it gates) is built from this row: a hidden Session has none."""
+def test_a_removed_bots_session_reaches_no_reader_as_a_realtime_inbox_row(service):
+    """The stream must not hand back a Session the reader's ``GET /api/inbox`` leaves out (D1)."""
+    import json
+
     from storage import messages_service
     from storage.db import create_sqlite_engine
-
-    def reply(text: str) -> None:
-        with create_sqlite_engine().begin() as conn:
-            messages_service.append(
-                conn, scope_id=None, session_id=bot.session_id, platform="avibe", author="agent",
-                message_type="result", text=text,
-            )
-
-    def row():
-        with create_sqlite_engine().connect() as conn:
-            return messages_service.get_inbox_session(conn, bot.session_id)
+    from vibe.authorization import AuthorizationContext, instance_owner_context
+    from vibe.ui_server import _workbench_event_visible_to_context
 
     bot = service.create_bot(display_name="Researcher")
-    reply("done")
-    assert row()["session_id"] == bot.session_id
+    with create_sqlite_engine().begin() as conn:
+        messages_service.append(
+            conn, scope_id=None, session_id=bot.session_id, platform="avibe", author="agent",
+            message_type="result", text="done",
+        )
+    with create_sqlite_engine().connect() as conn:
+        row = messages_service.get_inbox_session(conn, bot.session_id)
+    frame = json.dumps({"type": "inbox.session.updated", "data": row})
+    ordinary = json.dumps({"type": "inbox.session.updated", "data": {**row, "session_id": "sesordinary1"}})
+    member = AuthorizationContext(instance_role="member", is_remote=True, subject="m1")
+    readers = (None, instance_owner_context())
+
+    def delivered(context, payload=frame) -> bool:
+        return _workbench_event_visible_to_context(context, "inbox.session.updated", payload)
+
+    assert all(delivered(reader) for reader in readers)
+    assert not delivered(member)
 
     service.remove_bot(bot.handle)
-    # A turn still lands in the kept Session; the Inbox projection does not announce it.
-    reply("after removal")
-    assert row() is None
+    # A turn can still land in the kept Session; no reader is told about it.
+    assert not any(delivered(reader) for reader in readers)
+    assert all(delivered(reader, ordinary) for reader in readers)
 
     service.set_bot(bot.agent.name, display_name="Researcher")
-    assert (row()["session_id"], row()["unread_count"]) == (bot.session_id, 2)
+    assert all(delivered(reader) for reader in readers)
 
 
 def test_agents_list_exposes_bot_info(service):
