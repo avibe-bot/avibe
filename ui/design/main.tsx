@@ -12,7 +12,6 @@ import type { DesignLang, DesignTheme } from './frame';
 import { ALL_FRAMES } from './registry';
 import { installFixedClock } from './shell/clock';
 import { apiResponses } from './shell/fixtures';
-import { designLocation } from './shell/location';
 import { designNetwork, installDesignNetwork } from './shell/network';
 
 installFixedClock();
@@ -26,7 +25,6 @@ void i18n.changeLanguage(lang);
 const shown = ALL_FRAMES.find((f) => f.id === params.get('frame'));
 designNetwork.setResponses(apiResponses(shown?.fixtures));
 designStorage.seed(shown?.fixtures?.storage);
-designLocation.enter(shown?.fixtures?.search);
 
 declare global {
   interface Window {

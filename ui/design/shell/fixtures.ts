@@ -22,8 +22,6 @@ export interface WorkbenchFixtures {
   botStatus?: Record<string, BotRuntimeStatus>;
   /** Web Storage entries the frame starts with (a remembered preference, such as a collapsed section). */
   storage?: Record<string, string>;
-  /** Query parameters the document URL carries, for a component that reads a deep link from `window.location` (`mcp=github`). */
-  search?: string;
   /** API responses by path plus query (`/api/inbox?session=ses_pm&limit=1`) or by path, for anything else a frame fetches. */
   api?: Record<string, unknown>;
 }
