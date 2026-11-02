@@ -29,6 +29,8 @@ export const agentsApi = {
   },
   '/api/workbench/prefs': { ok: true, background_work_banner_enabled: true, fast_mode_default: false },
   '/api/models/agents/vibey/models': { ok: false },
+  // The composer asks whether voice input is available; frames draw it without Cloud voice.
+  '/api/asr/status': { available: false },
 };
 
 /** Several Bots, unread on two of them, the PM running. */

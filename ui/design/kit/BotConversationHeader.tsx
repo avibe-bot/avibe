@@ -1,9 +1,9 @@
 // A Bot conversation's header on a phone, with the Bot as a switch: tapping the
 // avatar and name opens every Bot (BotSwitchSheet), and a cyan count on the
 // chevron says other Bots have unread replies. The rest is the shipped header
-// (back, Edit profile, Show Page, session menu), drawn over the shipped page at
+// (back, Show Page, the ⋯ menu that holds Edit profile since #3152), drawn over the shipped page at
 // the same size. It stays above the switch sheet's scrim, so the sheet reads as its.
-import { ArrowLeft, ChevronDown, MoreHorizontal, Pencil, Presentation } from 'lucide-react';
+import { ArrowLeft, ChevronDown, MoreHorizontal, Presentation } from 'lucide-react';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 
@@ -52,9 +52,6 @@ export function BotConversationHeader({ current, open = false }: { current: stri
             )}
           </span>
         </button>
-        <Button type="button" variant="ghost" size="xs" aria-label={t('bots.conversation.editProfile')} className="shrink-0 text-muted">
-          <Pencil className="size-3" />
-        </Button>
         <div className="ml-auto flex items-center gap-1.5">
           <Button type="button" variant="ghost" size="sm" aria-label={draft('可视化', 'Visualize')} className="h-7 shrink-0 gap-1.5 px-2">
             <Presentation className="size-3.5" />
