@@ -33,6 +33,7 @@ const index = {
   shots: [
     { id: 'sidebar/bots/three', title: '伙伴 · 3 个伙伴', status: 'approved', theme: 'light', width: 248, height: 190, hash: 'h1', src: 'shots/sidebar/bots/three.light.png' },
     { id: 'sidebar/bots/three', title: '伙伴 · 3 个伙伴', status: 'approved', theme: 'dark', lang: 'en', width: 248, height: 190, hash: 'h2', src: 'shots/sidebar/bots/three.dark.png' },
+    { id: 'models/page/add-subscription-menu', title: '添加订阅', status: 'shipped', theme: 'light', width: 1440, height: 1200, interaction: true, hash: 'h3', src: 'shots/models/page/add-subscription-menu.light.png' },
   ],
 };
 
@@ -76,5 +77,16 @@ describe('DesignFrame', () => {
     setAnnotating(false);
     expect(screen.getAllByTitle(/伙伴 · 3 个伙伴/)).toHaveLength(2);
     expect(screen.queryAllByRole('img')).toHaveLength(0);
+  });
+
+  it('shows a frame that takes a click or hover as its screenshot, which holds that state', async () => {
+    installAnnotationApi(false);
+    render(<DesignFrame id="models/page/add-subscription-menu" themes={['light']} />);
+
+    const shot = await screen.findByRole('img');
+    expect(shot.getAttribute('src')).toBe('./design/shots/models/page/add-subscription-menu.light.png?v=h3');
+    expect(document.querySelector('iframe')).toBeNull();
+    // Opening it alone still runs it live.
+    expect(screen.getByText('单独打开').getAttribute('href')).toBe('./design/canvas/design.html?frame=models%2Fpage%2Fadd-subscription-menu&theme=light&lang=zh');
   });
 });

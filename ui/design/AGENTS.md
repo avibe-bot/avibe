@@ -17,7 +17,7 @@ Avibe's UI designs live here. A frame is a static React render of one surface in
 - Each frame states its size, its themes (default both), and its status: `proposed` (being designed), `approved` (signed off, ready to build), or `shipped` (renders shipped components only). A proposal becomes `approved` in the PR the owner approves.
 - Kit copy is draft copy and may be written inline; it moves to `src/i18n` when the component ships.
 - When a shipped component mixes data hooks and markup, draw it whole; to redesign part of it, prefer splitting it into a view (props only) and a container, then draw the view.
-- Size a frame to include any popover, menu, or card it shows; set `hover` to capture a hover state, and `wait` when a read starts on a timer (a debounced search).
+- Size a frame to include any popover, menu, or card it shows; set `hover` to capture a hover state, `click` (in order) to capture a state only a click opens, and `wait` when a read starts on a timer (a debounced search). Prefer a fixture or the page's URL state over `click` when the product offers one.
 - Code that implements a design names its frame id (`ui/design: sidebar/bots/three`), not a description of a drawing.
 
 ## Loop
@@ -32,7 +32,7 @@ Avibe's UI designs live here. A frame is a static React render of one surface in
 Show designs in your own Session's Show Page, next to your explanation:
 
 1. `npm run design:export -- <id prefix>` copies the live canvas, a screenshot of each frame, and `frames.json` into `public/design/` of this Session's Show Page, and writes `src/design/DesignFrame.tsx` there.
-2. In a page: `import { DesignFrame } from "../design/DesignFrame"`, then `<DesignFrame id="sidebar/bots/three" />`. Each frame runs the real components in an iframe (crisp, scalable, hover and popovers work) and links to its screenshot.
+2. In a page: `import { DesignFrame } from "../design/DesignFrame"`, then `<DesignFrame id="sidebar/bots/three" />`. Each frame runs the real components in an iframe (crisp, scalable, hover and popovers work) and links to its screenshot; a frame with `hover` or `click` is shown as its screenshot, which holds that state.
 3. While the Show Page's annotation is on, each frame is drawn as its screenshot so the overlay can reach it; an annotation names the frame (`设计帧 <id>`) and theme. Read it back to the frame file before you change anything.
 
 The repository is the source: never edit designs in a Show Page.

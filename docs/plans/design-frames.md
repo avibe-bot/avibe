@@ -29,13 +29,14 @@ Status: adopted (2026-11-02). Avibe's UI designs live in `ui/design/` as frames;
 - The canvas (`ui/design.html`, not part of the production build) shows every frame, each in its own iframe so
   themes, portals, and routing never leak between frames. `?frame=<id>&theme=light|dark&lang=zh|en` renders one
   frame at its size.
-- `npm run design:shot` renders frames with Playwright (2x PNG, animations off, portals included, an optional
-  hover) once fonts are loaded and the network is quiet (after the frame's `wait`, for a read that starts on a
+- `npm run design:shot` renders frames with Playwright (2x PNG, animations off, portals included, optional
+  clicks and a hover, for states only an interaction opens) once fonts are loaded and the network is quiet (after the frame's `wait`, for a read that starts on a
   timer), and fails on any console error. CI runs it with the browser checks, and `typecheck:design` with the
   static checks, so a product change that breaks a frame fails its PR.
 - `npm run design:export` copies the canvas, the screenshots, and `frames.json` into the current Session's Show
   Page and writes `<DesignFrame>`, which embeds frames live (crisp, interactive) without any Show Page change.
-  Each shot keeps the language it was exported in. While the Show Page's annotation is on, `<DesignFrame>` draws
+  Each shot keeps the language it was exported in; a frame that needs a click or hover is embedded as its
+  screenshot, since the live frame opens before the interaction. While the Show Page's annotation is on, `<DesignFrame>` draws
   each frame as its screenshot through the overlay's public window API, so annotations reach it and name the
   frame.
 

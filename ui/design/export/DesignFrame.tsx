@@ -8,10 +8,12 @@
 //
 // A live frame is an iframe, which the Show Page's annotation overlay cannot reach. While
 // annotation is on, each frame is drawn as its screenshot instead, in the same place and size,
-// so it can be annotated like any image; the image's alt names the frame and theme.
+// so it can be annotated like any image; the image's alt names the frame and theme. A frame whose
+// state takes a hover or click (`interaction`) is always drawn as its screenshot, which shows that
+// state; "单独打开" still opens it live.
 import { useEffect, useRef, useState } from "react"
 
-type Shot = { id: string; title: string; status: string; theme: "light" | "dark"; lang?: string; width: number; height: number; hash: string; src: string }
+type Shot = { id: string; title: string; status: string; theme: "light" | "dark"; lang?: string; width: number; height: number; interaction?: boolean; hash: string; src: string }
 type Index = { lang: string; shots: Shot[] }
 
 let index: Promise<Index> | null = null
@@ -67,7 +69,7 @@ export function DesignFrame({ id, themes = ["light", "dark"] }: { id: string; th
       </figcaption>
       <div className="flex max-w-full flex-wrap items-start gap-3">
         {shots.map((shot) => (
-          <Live key={shot.theme} shot={shot} lang={data.lang} still={annotating} />
+          <Live key={shot.theme} shot={shot} lang={data.lang} annotating={annotating} />
         ))}
       </div>
     </figure>
@@ -75,7 +77,8 @@ export function DesignFrame({ id, themes = ["light", "dark"] }: { id: string; th
 }
 
 /** The frame itself, running the real components; scaled down to fit narrow screens. */
-function Live({ shot, lang, still }: { shot: Shot; lang: string; still: boolean }) {
+function Live({ shot, lang, annotating }: { shot: Shot; lang: string; annotating: boolean }) {
+  const still = annotating || shot.interaction === true
   const box = useRef<HTMLDivElement>(null)
   const [scale, setScale] = useState(1)
   useEffect(() => {
@@ -111,7 +114,7 @@ function Live({ shot, lang, still }: { shot: Shot; lang: string; still: boolean 
         )}
       </div>
       <div className="flex gap-3 text-[10px] text-muted-foreground">
-        <span>{shot.theme === "dark" ? "深色" : "浅色"}{still ? " · 批注中，显示截图" : ""}</span>
+        <span>{shot.theme === "dark" ? "深色" : "浅色"}{annotating ? " · 批注中，显示截图" : shot.interaction ? " · 截图（点击或悬停后的状态）" : ""}</span>
         <a href={src} target="_blank" rel="noreferrer" className="hover:underline">单独打开</a>
         <a href={image} target="_blank" rel="noreferrer" className="hover:underline">
           截图

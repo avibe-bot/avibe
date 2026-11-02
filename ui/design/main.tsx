@@ -31,14 +31,14 @@ designLocation.enter(shown?.fixtures?.search);
 declare global {
   interface Window {
     __DESIGN__?: {
-      frames: { id: string; file: string; title: string; status: string; width: number; height: number; themes: DesignTheme[]; hover?: string }[];
+      frames: { id: string; file: string; title: string; status: string; width: number; height: number; themes: DesignTheme[]; hover?: string; click?: string[] }[];
       unfixtured: () => string[];
       quiet: () => Promise<void>;
     };
   }
 }
 window.__DESIGN__ = {
-  frames: ALL_FRAMES.map((f) => ({ id: f.id, file: f.file, title: f.title, status: f.status, width: f.width, height: f.height, themes: f.themes ?? ['light', 'dark'], hover: f.hover })),
+  frames: ALL_FRAMES.map((f) => ({ id: f.id, file: f.file, title: f.title, status: f.status, width: f.width, height: f.height, themes: f.themes ?? ['light', 'dark'], hover: f.hover, click: f.click })),
   unfixtured: () => designNetwork.unfixtured(),
   quiet: () => designNetwork.quiet(),
 };
