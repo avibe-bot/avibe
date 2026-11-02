@@ -1,4 +1,4 @@
-import type { InboxSession, InstanceCapabilities, WorkbenchProject, WorkbenchSession } from '@/context/ApiContext';
+import type { InboxSession, InstanceCapabilities, WorkbenchMessage, WorkbenchProject, WorkbenchSession } from '@/context/ApiContext';
 import type { BotRuntimeStatus } from '@/context/BotsContext';
 import type { RuntimeStatus } from '@/context/StatusContext';
 import type { Bot, BotAvatar } from '@/lib/bots';
@@ -138,3 +138,91 @@ export const demoBots = [
   bot('cso', '首席安全官', '依赖与权限的安全审计，每周汇报', { kind: 'emoji', emoji: '🛡️', hue: 200 }, 1),
   bot('pm', '产品经理', '需求池整理与优先级', { kind: 'emoji', emoji: '🧭', hue: 42 }, 2),
 ];
+
+/** A fourth Bot, for a team that no longer fits at a glance. */
+export const researchBot = bot('research', '市场研究员', '竞品与市场动态，每周五一份简报', { kind: 'emoji', emoji: '🔭', hue: 265 }, 3);
+
+/** One transcript row of a Session, as `GET /api/sessions/<id>/bootstrap` returns it. */
+export const message = (sessionId: string, id: string, author: 'user' | 'agent', text: string, minutesAgo: number): WorkbenchMessage => ({
+  id,
+  scope_id: null,
+  session_id: sessionId,
+  platform: 'avibe',
+  author,
+  type: author === 'user' ? 'user' : 'result',
+  source: author === 'user' ? 'user' : 'agent',
+  author_id: null,
+  author_name: null,
+  native_message_id: null,
+  parent_native_message_id: null,
+  text,
+  content: { text },
+  metadata: author === 'agent' ? { author_backend: 'vibey' } : {},
+  created_at: at(minutesAgo),
+  updated_at: at(minutesAgo),
+  delivered_at: null,
+  read_at: null,
+});
+
+const turnState = (running: boolean) => ({
+  in_flight: running,
+  foreground: running ? 'running' : 'idle',
+  native_turn_started: running,
+  pending_input_count: 0,
+  background_activities: [],
+  pending_activity_output_count: 0,
+  connection: 'connected',
+});
+
+/** The API a Bot's conversation page reads: its Session, transcript, and turn state, with its
+ *  Agent listed as the Bot so the reply header and route read as the Bot. */
+export function botConversationApi(subject: Bot, bots: Bot[], messages: WorkbenchMessage[], running = false): Record<string, unknown> {
+  const id = subject.session_id;
+  const agents = bots.map((each) => ({
+    id: `agent_${each.handle}`,
+    name: each.agent_name,
+    backend: 'vibey',
+    enabled: true,
+    archived: false,
+    source: each.builtin ? 'builtin' : 'user',
+    model: 'gpt-6-astra',
+    reasoning_effort: 'high',
+    description: each.role,
+    bot: { handle: each.handle, display_name: each.display_name, builtin: each.builtin },
+  }));
+  const conversation = session(id, '', subject.display_name, {
+    scope_id: null,
+    project_id: null,
+    agent_id: `agent_${subject.handle}`,
+    agent_name: subject.agent_name,
+    agent_status: running ? 'running' : 'idle',
+    workdir: `/Users/demo/.avibe/bots/${subject.handle}`,
+    metadata: { kind: subject.builtin ? 'main' : 'bot' },
+  });
+  return {
+    [`/api/sessions/${id}`]: conversation,
+    [`/api/sessions/${id}/bootstrap`]: {
+      session: conversation,
+      capabilities: { can_chat: true },
+      agents,
+      default_agent_name: 'vibey',
+      config: { ui: {} },
+      messages,
+      queued: [],
+      next_after_id: null,
+      next_before_id: null,
+      draft: { text: '', updated_at: null },
+      turn_state: turnState(running),
+    },
+    [`/api/sessions/${id}/turn-state`]: turnState(running),
+    [`/api/show-pages/${id}/access`]: {
+      ok: true, mode: 'unmanaged', ownership_status: 'unmanaged', access_level: 'private',
+      can_use: true, can_manage: false, can_publish_public: false, group_ids: [],
+    },
+    '/api/vault/requests': { ok: true, requests: [] },
+    '/api/workbench/prefs': { ok: true, background_work_banner_enabled: true, fast_mode_default: false },
+    '/api/asr/status': { available: false },
+    '/api/models/agents/vibey/models': { ok: false },
+  };
+}
+

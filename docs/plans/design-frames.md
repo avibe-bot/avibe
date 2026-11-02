@@ -20,7 +20,8 @@ Status: adopted (2026-11-02). Avibe's UI designs live in `ui/design/` as frames;
   shipped component with fixtures; what is not shipped yet is drawn with `ui/design/kit/` components that use
   only product tokens and assets, and switches to the shipped component when it ships.
 - `DesignShell` serves the providers Workbench surfaces read (router, toast, authorization, unsaved changes,
-  window manager, Inbox, project tree) from fixtures, and runs the real `ApiProvider` and `BotsProvider`.
+  window manager, Inbox and its Bot roster, project tree, Dock) from fixtures, and runs the real `ApiProvider`
+  and `BotsProvider`.
   `fetch` and `EventSource` are answered in the page from the frame's API fixtures (by path and query, then by
   path), so no frame reaches a server; paths a frame fetched without a fixture are reported. Each frame gets
   fresh in-memory Web Storage (seeded by its `storage` fixture) and a fixed clock, so a viewer's remembered

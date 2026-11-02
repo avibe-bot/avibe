@@ -33,6 +33,10 @@
    the bar. */
 :root {
   --mobile-nav-clearance: calc(5.5rem + env(safe-area-inset-bottom));
+  /* The tab bar's own height with the inset: a sheet or control above the bar starts here. */
+  --mobile-nav-height: calc(4.75rem + env(safe-area-inset-bottom));
+  /* The home-indicator inset alone, for padding a bottom edge clear of it. */
+  --safe-area-bottom: env(safe-area-inset-bottom);
 }
 
 /* Height of the desktop shell's overlay title bar. On macOS the shell draws the
@@ -129,6 +133,13 @@
     Consolas, monospace;
   --font-display: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
     Helvetica, Arial, sans-serif;
+
+  /* Compact type below text-xs (12px): tab labels, captions, and timestamps at 10px;
+     counts on avatars, tabs, and tags at 9px. */
+  --text-2xs: 0.625rem;
+  --text-2xs--line-height: 0.875rem;
+  --text-3xs: 0.5625rem;
+  --text-3xs--line-height: 0.875rem;
 
   --radius-xs: 4px;
   --radius-sm: 6px;
