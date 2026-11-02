@@ -216,7 +216,7 @@
   --model-hub-quota-row-gap: 14px;
   --model-hub-quota-nested-indent: 12px;
 
-  /* Tools tab: hosted tools (frames pDd61, kPTBo). Reuses the usage tab's type scale. */
+  /* Tools tab: hosted tools (ui/design: models/tools/default). Reuses the usage tab's type scale. */
   --model-hub-tools-gap: 16px;
   --model-hub-tool-group-gap: 10px;
   --model-hub-tool-pad-x: 20px;
@@ -1589,7 +1589,7 @@
   min-height: var(--model-hub-source-table-row-height);
   padding-block: var(--model-hub-source-table-padding-y);
 }
-/* Capability chips (frame FB4vC): their own column from md, a full-width line
+/* Capability chips (ui/design: models/source-detail/capabilities): their own column from md, a full-width line
    under the model id below it. */
 @media (min-width: 768px) {
   .model-hub-source-table--capabilities {
@@ -2174,7 +2174,7 @@
 
 /* 用量 tab.
  *
- * design.pen has no frame for this tab on the local surface, so the geometry is
+ * The tab had no drawing of its own when it was built, so the geometry is
  * borrowed from the source table above rather than invented: the same 18px
  * gutter, 36px head, 11px column label, and wash-05 head fill. Importing a
  * second panel's spacing into the middle of this one would read as two

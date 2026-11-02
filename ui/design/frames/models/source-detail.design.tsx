@@ -7,10 +7,11 @@ import { readyRegion } from '@/components/settings/models/regionRead';
 import type { Source } from '@/components/settings/models/types';
 
 import { frames } from '../../frame';
-import { baseApi, chatgptPro, claudeMax, hostedTools, relayGpt, tavily, usageApi } from './fixtures';
+import { baseApi, chatgptPro, claudeMax, hostedTools, relayClaude, relayGpt, tavily, usageApi } from './fixtures';
 
 const pending: TrackSourceMutation = () => new Promise(() => {});
 const tools = readyRegion(hostedTools());
+const revokedTools = readyRegion(hostedTools({ tavilyRevoked: true }));
 const gatewayBackends = new Set(['claude', 'codex', 'opencode', 'vibey'] as const);
 const noPending = new Set<never>();
 
@@ -19,12 +20,12 @@ const noPending = new Set<never>();
  * sheet on a phone). The dialog itself is inline in SettingsModelsPage and opens from page
  * state, so these frames draw the panel without it.
  */
-const detail = (source: Source, serviceView = false) => () => (
+const detail = (source: Source, serviceView = false, hosted = tools) => () => (
   <div className="flex h-full flex-col">
     <SourceDetailPanel
       source={source}
       serviceView={serviceView}
-      hostedTools={tools}
+      hostedTools={hosted}
       hostedPending={noPending}
       onRetryHostedTools={() => {}}
       onClearHostedRefusal={() => {}}
@@ -42,6 +43,7 @@ const detail = (source: Source, serviceView = false) => () => (
   </div>
 );
 
+const tavilyRevoked: Source = { ...tavily, state: { status: 'needs_action', retry_at: null, detail_key: 'models.source.needs_action.credential_revoked' } };
 const chatgptExpired: Source = { ...chatgptPro, state: { status: 'needs_action', retry_at: null, detail_key: 'models.source.needs_action.oauth_expired' } };
 
 const designFrames = frames([
@@ -53,6 +55,15 @@ const designFrames = frames([
     status: 'shipped',
     fixtures: { api: baseApi },
     render: detail(relayGpt),
+  },
+  {
+    name: 'capabilities',
+    title: '供应商详情 · 模型能力标签（ai-relay-claude）',
+    width: 720,
+    height: 624,
+    status: 'shipped',
+    fixtures: { api: baseApi },
+    render: detail(relayClaude),
   },
   {
     name: 'subscription',
@@ -80,6 +91,15 @@ const designFrames = frames([
     status: 'shipped',
     fixtures: { api: { ...baseApi, ...usageApi() } },
     render: detail(tavily, true),
+  },
+  {
+    name: 'search-service-revoked',
+    title: '供应商详情 · 搜索服务密钥无效（Tavily）',
+    width: 720,
+    height: 624,
+    status: 'shipped',
+    fixtures: { api: { ...baseApi, ...usageApi() } },
+    render: detail(tavilyRevoked, true, revokedTools),
   },
   {
     name: 'test',

@@ -64,11 +64,32 @@ const opencodeCandidates = ok({
   },
 });
 
-const api = { ...hubApi({ agents: menuAgents }), '/api/models/agents/opencode/models/candidates': opencodeCandidates };
+/** Codex before any provider supplies more: only its built-in models to choose from. */
+const codexBuiltinOnly = ok({
+  candidates: {
+    builtin: [
+      { id: 'gpt-6-astra-codex', display_name: 'GPT-6 Astra Codex', reasoning_efforts: ['low', 'medium', 'high', 'xhigh'], suppliers: [], origin: 'builtin' },
+      { id: 'gpt-5.6-codex-mini', display_name: 'GPT-5.6 Codex mini', reasoning_efforts: ['low', 'medium', 'high'], suppliers: [], origin: 'builtin' },
+    ],
+    providers: [],
+    in_list: [],
+  },
+});
+
+const api = {
+  ...hubApi({ agents: menuAgents }),
+  '/api/models/agents/opencode/models/candidates': opencodeCandidates,
+  '/api/models/agents/codex/models/candidates': codexBuiltinOnly,
+};
+
+const picker = (backend: AgentBackend, listed: ReadonlySet<string>) => () => (
+  <BackendModelPickerDialog open backend={backend} listedIds={listed} onCancel={() => {}} onAdd={() => {}} onCustom={() => {}} />
+);
 
 const editing = backendModel('claude-opus-4-8', { origin: 'provider', reasoning_efforts: claudeEfforts, supports_reasoning: true, supports_tools: true, context_window: 1_000_000, max_output_tokens: 128_000 });
 
 const opencodeListed = new Set(['deepseek-v4', 'deepseek-v4-reasoner', 'claude-sonnet-5', 'gpt-5.6-sol']);
+const codexListed = new Set(['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini']);
 const claudeTaken = new Set(['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-5']);
 
 const designFrames = frames([
@@ -106,16 +127,25 @@ const designFrames = frames([
     height: 820,
     status: 'shipped',
     fixtures: { api },
-    render: () => (
-      <BackendModelPickerDialog
-        open
-        backend="opencode"
-        listedIds={opencodeListed}
-        onCancel={() => {}}
-        onAdd={() => {}}
-        onCustom={() => {}}
-      />
-    ),
+    render: picker('opencode', opencodeListed),
+  },
+  {
+    name: 'add-models-no-providers',
+    title: '添加模型 · 供应商还没有更多模型（Codex）',
+    width: 1000,
+    height: 820,
+    status: 'shipped',
+    fixtures: { api },
+    render: picker('codex', codexListed),
+  },
+  {
+    name: 'add-models-phone',
+    title: '添加模型 · 手机',
+    width: 390,
+    height: 844,
+    status: 'shipped',
+    fixtures: { api },
+    render: picker('opencode', opencodeListed),
   },
   {
     name: 'edit-model',
