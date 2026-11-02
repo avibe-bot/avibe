@@ -15,7 +15,7 @@ export const modelsSurfaceKind = (agents: AgentSupply[], sources: Source[]): Mod
     ? 'direct_empty'
     : 'gateway';
 
-/** Frame 09 has no region failure surface, so only two fresh reads may select it. */
+/** The direct-only home (ui/design: models/page/direct) has no region failure surface, so only two fresh reads may select it. */
 export const modelsSurfaceKindFromReads = (
   agentsRead: RegionRead<AgentSupply[]>,
   sourcesRead: RegionRead<Source[]>,

@@ -2,7 +2,7 @@
  *
  * Every color resolves through a theme token, so the surface follows the app's
  * light/dark switch instead of assuming the dark frame it was drawn on. The base
- * block carries design.pen's dark values; the two light blocks below mirror the
+ * block carries the dark values; the two light blocks below mirror the
  * structure index.css uses ([data-theme="light"] for the explicit pick, the media
  * query for "system") and re-state only what cannot simply flip channel.
  *
@@ -13,7 +13,7 @@
  * --muted, whose light value is already contrast-matched to its dark one.
  *
  * Accent washes need no light branch: color-mix over --gold / --violet / --mint /
- * --cyan / --destructive lands on design.pen's dark hex in dark mode and follows
+ * --cyan / --destructive lands on the dark accent hex in dark mode and follows
  * the light accents on its own. Accent *inks* do need one, because an accent
  * dimmed toward transparency reads as "quiet" over black and "washed out" over
  * white; light re-anchors those on the full ink.
@@ -85,7 +85,7 @@
 
   /* Danger and success roles, shared by the key dialog and the adopt drawer.
    * The danger ink mixes toward --foreground rather than transparency: that is
-   * what lifts dark --destructive-ink to design.pen's #ff8a8a and deepens the
+   * what lifts dark --destructive-ink to #ff8a8a and deepens the
    * light one instead of fading it into the surface. */
   --model-hub-danger-ink: color-mix(in srgb, var(--destructive-ink) 80%, var(--foreground));
   --model-hub-danger-fill: color-mix(in srgb, var(--destructive) 7.8%, transparent);
@@ -3893,7 +3893,7 @@ a.model-hub-order-price:hover { text-decoration: underline; }
 }
 
 .model-hub-picker-row--suppliers {
-  /* What a stacked row measures (frame B‴): the strip sits 4px under the name
+  /* What a stacked row measures: the strip sits 4px under the name
    * it belongs to. The indent is not a length — the strip starts where the
    * entry does, which is already past the checkbox. */
   --model-hub-picker-stack-gap: 4px;

@@ -96,7 +96,7 @@ type RouteTarget = {
   modelId: string;
   opener: HTMLElement | null;
 };
-// Frame 13's rows, derived from the one subscription-vendor vocabulary rather
+// The 添加订阅 menu's rows, derived from the one subscription-vendor vocabulary rather
 // than restated here. `subscriptionOptions.ts` owns which vendors are offered and
 // what custody each has, so this menu cannot drift out of the same order the
 // dialog's chooser reads.
@@ -1606,8 +1606,8 @@ export const SettingsModelsPage: React.FC = () => {
                   {/* The tab strip belongs to the Hub, not to the source
                       inventory. Usage and switch history both outlive the Sources
                       they name, so deleting the last Source may not remove the only
-                      route to either record. Frame 09 predates these tabs; it still
-                      owns the direct-only body of `sources`. */}
+                      route to either record. The direct-only body of `sources` is
+                      DirectHome (ui/design: models/page/direct). */}
                   <HubTabs tab={tab} onChange={setTab} />
                   {tab === 'quota' ? <QuotaTab
                       quota={quotaRead}

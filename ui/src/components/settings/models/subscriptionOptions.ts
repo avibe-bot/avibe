@@ -18,9 +18,9 @@
 // meant to need a decision here rather than to inherit one.
 import type { Source, SupplyChannel } from './types';
 
-/** Menu order is frame 13's order: the two subscriptions the chooser has a
+/** Menu order is the 添加订阅 menu's order: the two subscriptions the chooser has a
  *  recommendation for, then the hub-held ones. It is not the engine table's order
- *  and not the API-key catalog's A–Z — nothing here sorts, the frame ranked them. */
+ *  and not the API-key catalog's A–Z — nothing here sorts, the menu ranks them. */
 export const SUBSCRIPTION_VENDORS = ['anthropic', 'openai', 'gemini', 'kimi', 'xai'] as const;
 export type SubscriptionVendor = (typeof SUBSCRIPTION_VENDORS)[number];
 
@@ -41,7 +41,7 @@ const SUBSCRIPTION_CHOOSER = {
   openai: { copy: 'chatgpt', brand: 'ChatGPT' },
 } as const satisfies Record<string, { copy: SubscriptionVendorCopy; brand: string }>;
 
-/** The copy family frame 04's chooser is written in, and the brand name its title
+/** The copy family the chooser (ui/design: models/add-provider/claude) is written in, and the brand name its title
  *  interpolates. `null` is the answer for a hub-held vendor, and it is the reason
  *  this returns one: every line the chooser renders names a plan, a consequence of
  *  a channel, or a ToS note, and a chooser rendered for a vendor with none of them
@@ -89,8 +89,8 @@ export const subscriptionOptionOrder = (vendor: string): SupplyChannel[] =>
 
 /** Which channel the menu recommends, or `null` when the vendor has no native
  *  channel to recommend against. A hub-held row carries no badge: 网关推荐 over the
- *  only custody there is recommends nothing, and frame 13 draws a badge because
- *  both of its rows had a choice to rank. */
+ *  only custody there is recommends nothing, and the menu draws a badge only where
+ *  a row has a choice to rank. */
 export const subscriptionMenuRecommendation = (
   vendor: SubscriptionVendor,
 ): 'native' | 'gateway' | null => {

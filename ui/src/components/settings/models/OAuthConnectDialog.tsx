@@ -1,4 +1,4 @@
-// Add-subscription dialog (frame 04). RENDERS DECLARATIVELY from the runtime-declared
+// Add-subscription dialog (ui/design: models/add-provider/claude). RENDERS DECLARATIVELY from the runtime-declared
 // oauth-flow presentation (S1 gap ③): `expects` ∈ none | paste_code |
 // paste_callback_url selects the step-2 control; there is NO vendor→form table
 // in the UI. Composes the shared OAuth atoms (OAuthLinkRow / OAuthDeviceCodeRow

@@ -34,7 +34,11 @@ function Single({ frame, theme }: { frame: Frame; theme: DesignTheme }) {
       .then(() => designNetwork.quiet())
       .then(() => (frame.wait ? new Promise((resolve) => setTimeout(resolve, frame.wait)).then(() => designNetwork.quiet()) : undefined))
       .then(() => {
-        if (!cancelled) document.body.dataset.designReady = 'true';
+        if (cancelled) return;
+        // A dialog moves focus into itself as it opens. A person who opened it with the
+        // pointer sees no focus ring there, but a document nobody has touched draws one.
+        if (document.activeElement instanceof HTMLElement && document.activeElement !== document.body) document.activeElement.blur();
+        document.body.dataset.designReady = 'true';
       });
     return () => {
       cancelled = true;
