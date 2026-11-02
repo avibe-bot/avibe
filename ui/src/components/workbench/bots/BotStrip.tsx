@@ -18,14 +18,13 @@ import clsx from 'clsx';
 
 import { useApi, type InboxSession } from '../../../context/ApiContext';
 import { useBots, type BotRuntimeStatus } from '../../../context/BotsContext';
-import { useToast } from '../../../context/ToastContext';
 import { useUnsavedChangesActionGuard } from '../../../context/useUnsavedChangesActionGuard';
 import { botSessionPath, type Bot } from '@/lib/bots';
-import { errorMessage } from '@/lib/errorMessage';
 import { formatRelativeTime } from '@/lib/relativeTime';
 import { Markdown } from '../../ui/markdown';
 import { Popover, PopoverAnchor, PopoverContent } from '../../ui/popover';
 import { BotAvatar } from '../../ui/bot-avatar';
+import { RemoveBotDialog } from './RemoveBotDialog';
 
 // A slot is 50px wide (the 40px avatar, its 2px ring, and room for the name) with
 // 4px between slots and 2px of padding at either end: the main Bot, two more,
@@ -57,6 +56,10 @@ export const BotStrip: React.FC<{
 }> = ({ unreadBySession }) => {
   const { t } = useTranslation();
   const { enabled, bots, statusBySession, displayName, openProfile, moveBot } = useBots();
+  const navigate = useNavigate();
+  const location = useLocation();
+  // The Bot whose removal waits on the confirmation; the strip has one dialog for all its slots.
+  const [removing, setRemoving] = useState<Bot | null>(null);
   const [rowWidth, setRowWidth] = useState<number | null>(null);
   const [fade, setFade] = useState(false);
   const rowRef = useRef<HTMLDivElement | null>(null);
@@ -141,6 +144,7 @@ export const BotStrip: React.FC<{
     suppressHover: draggingHandle !== null,
     scrollEpoch,
     admitsHover,
+    onRemove: setRemoving,
   });
 
   const addSlot = (
@@ -219,6 +223,18 @@ export const BotStrip: React.FC<{
         </div>
         {!inline && <div className="shrink-0 pt-1.5">{addSlot}</div>}
       </div>
+      {removing && (
+        <RemoveBotDialog
+          bot={removing}
+          open
+          onOpenChange={(open) => {
+            if (!open) setRemoving(null);
+          }}
+          onRemoved={() => {
+            if (location.pathname === botSessionPath(removing)) navigate('/');
+          }}
+        />
+      )}
     </section>
   );
 };
@@ -242,6 +258,8 @@ type BotSlotProps = {
   scrollEpoch: number;
   /** False for an enter that only a scroll caused, with the pointer still where it was. */
   admitsHover: (event: React.MouseEvent) => boolean;
+  /** Asks to remove this Bot: the strip confirms first (ui/design: agents/bots-redesign/remove-bot). */
+  onRemove: (bot: Bot) => void;
 };
 
 type SlotDrag = Pick<ReturnType<typeof useSortable>, 'attributes' | 'listeners' | 'setNodeRef' | 'transform' | 'transition' | 'isDragging'>;
@@ -252,13 +270,12 @@ const SortableBotSlot: React.FC<BotSlotProps & { sortable: boolean }> = ({ sorta
   return <BotSlot {...props} drag={sortable ? drag : undefined} />;
 };
 
-const BotSlot: React.FC<BotSlotProps & { drag?: SlotDrag }> = ({ bot, name, unread, status, suppressHover, scrollEpoch, admitsHover, drag }) => {
+const BotSlot: React.FC<BotSlotProps & { drag?: SlotDrag }> = ({ bot, name, unread, status, suppressHover, scrollEpoch, admitsHover, onRemove, drag }) => {
   const { t } = useTranslation();
   const api = useApi();
   const navigate = useNavigate();
   const location = useLocation();
-  const { showToast } = useToast();
-  const { openProfile, afterWrite } = useBots();
+  const { openProfile } = useBots();
   const authorizeRouteAction = useUnsavedChangesActionGuard();
   const path = botSessionPath(bot);
   const selected = location.pathname === path;
@@ -341,19 +358,6 @@ const BotSlot: React.FC<BotSlotProps & { drag?: SlotDrag }> = ({ bot, name, unre
     const authorization = authorizeRouteAction();
     if (!authorization) return;
     authorization.runNavigation(() => navigate(path));
-  };
-
-  const remove = async () => {
-    setMenuOpen(false);
-    try {
-      await api.removeBot(bot.handle);
-      showToast(t('bots.removed', { name }), 'success');
-      if (selected) navigate('/');
-    } catch (err) {
-      showToast(errorMessage(err) || t('bots.removeFailed'), 'error');
-    } finally {
-      void afterWrite();
-    }
   };
 
   const label = unread > 0 ? t('bots.slotLabelUnread', { name, count: unread }) : name;
@@ -449,13 +453,15 @@ const BotSlot: React.FC<BotSlotProps & { drag?: SlotDrag }> = ({ bot, name, unre
               <button
                 type="button"
                 role="menuitem"
-                onClick={() => void remove()}
+                onClick={() => {
+                  setMenuOpen(false);
+                  onRemove(bot);
+                }}
                 className="flex items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[13px] text-destructive-ink transition hover:bg-destructive/[0.08]"
               >
                 <UserMinus className="size-4" />
                 {t('bots.menu.remove')}
               </button>
-              <p className="px-2.5 pb-1.5 text-[11px] leading-relaxed text-muted">{t('bots.menu.removeNote')}</p>
             </>
           )}
         </PopoverContent>

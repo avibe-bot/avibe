@@ -107,6 +107,12 @@ export function conversationDetails(hideDetails: boolean, showAgentActivity: boo
   };
 }
 
+/** What a Bot is for: its Agent's description (D1). The main Bot's is a built-in
+ *  English line, so it reads as `mainRole`, the reader's-language copy. */
+export function botRole(bot: Pick<Bot, 'role' | 'builtin'>, mainRole: string): string {
+  return bot.builtin ? mainRole : bot.role;
+}
+
 export function botSessionPath(bot: Pick<Bot, 'session_id'>): string {
   return `/chat/${encodeURIComponent(bot.session_id)}`;
 }

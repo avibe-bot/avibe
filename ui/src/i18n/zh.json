@@ -4465,7 +4465,8 @@
   },
   "agents": {
     "title": "Agents",
-    "subtitle": "已登记 {{count}} 个 Agent。",
+    "subtitle": "{{count}} 个 Agent",
+    "subtitleWithBots": "{{bots}} 个伙伴 · {{agents}} 个 Agent",
     "remoteReadOnly": "只读",
     "remoteReadOnlyHint": "远程模式下此资源为只读。",
     "tabs": {
@@ -4624,7 +4625,6 @@
       }
     },
     "showDisabled": "显示已禁用",
-    "statusEnabled": "已启用",
     "statusDisabled": "已停用",
     "newAgent": "新建 Agent",
     "import": "导入",
@@ -4634,31 +4634,24 @@
     "importNoneFound": "磁盘上没有找到可导入的 {{backend}} Agent。",
     "renameSuccess": "Agent 已重命名",
     "searchPlaceholder": "搜索 Agent…",
-    "backendFilter": "Backend",
+    "searchPlaceholderWithBots": "搜索伙伴或 Agent…",
+    "backendFilterLabel": "Backend:",
     "backendAll": "全部",
     "noConfig": "未配置模型或系统提示词",
     "empty": "还没有 Agent。先创建一个,再开始对话。",
     "noSearchMatch": "没有匹配的 Agent。",
+    "noSearchMatchWithBots": "没有匹配的伙伴或 Agent。",
     "selectPrompt": "选择一个 Agent 查看配置。",
     "makeDefault": "设为默认",
     "deleteConfirm": "确认归档 Agent \"{{name}}\"？它将从 Agent 列表中消失，但已有会话和自动化仍会使用已保存的配置。",
     "detail": {
       "enabled": "已启用",
-      "enabledHint": "关掉后此 Agent 不会被新会话选用,已运行的会话不受影响",
-      "alwaysEnabledHint": "{{name}} 是内置 Agent，始终启用，仍可调整模型、Effort 与系统提示词。",
-      "defaultTitle": "默认 Agent",
-      "defaultHint": "未指定 Agent 的新会话和 IM 消息都会路由到这个 Agent。",
-      "defaultActive": "默认",
+      "on": "启用",
       "setDefault": "设为默认",
-      "defaultNeedsEnabled": "请先启用该 Agent 再设为默认。",
       "defaultSet": "{{name}} 已设为默认 Agent。",
       "name": "名称",
       "description": "描述",
       "descriptionPlaceholder": "这个 Agent 用来做什么…",
-      "backend": "后端",
-      "backendLocked": "创建时确定 · 不可改",
-      "nativeBackend": "{{backend}} CLI",
-      "backendName": "{{backend}}",
       "model": "模型",
       "modelPlaceholder": "选择或输入模型",
       "modelEmpty": "找不到匹配的模型,可以直接输入。",
@@ -4668,9 +4661,7 @@
       "systemPromptCount": "~{{count}} tokens",
       "systemPromptExpand": "展开编辑器",
       "systemPromptEditorHint": "在更大的编辑器里编写系统提示词，并实时预览 Markdown。",
-      "systemLocked": "系统 Agent 不可删除,仍可调整模型、Effort 与系统提示词。",
-      "run": "运行",
-      "nameLocked": "用作引用 ID,创建后不可改"
+      "run": "运行"
     },
     "runDialog": {
       "title": "用此 Agent 开一个会话",
@@ -4703,9 +4694,12 @@
   "bots": {
     "sectionLabel": "伙伴",
     "mainDefaultName": "歪比",
+    "mainBadge": "主伙伴",
+    "mainRole": "你的第一联系人：和你商量，替你分派和跟进",
     "tag": "伙伴",
     "handle": "@{{handle}}",
     "handlePrefix": "@",
+    "handleHint": "代号：命令行用它找到这位伙伴，创建后不变",
     "mentionName": "@{{name}}",
     "add": "添加",
     "addLabel": "添加伙伴",
@@ -4716,6 +4710,10 @@
     "openConversation": "进入对话",
     "removed": "已将{{name}}移出伙伴",
     "removeFailed": "未能移出这个伙伴",
+    "removeConfirm": {
+      "title": "把{{name}}移出伙伴？",
+      "body": "对话和记忆都会保留，它回到 Agents 列表里；之后重新设为伙伴，就能接着聊。"
+    },
     "reorderInstructions": "按空格键拿起伙伴，用方向键移动，再按空格键放下，或按 Esc 取消。",
     "reorderPickedUp": "已拿起{{name}}。",
     "reorderPosition": "{{name}}，第 {{position}} 位，共 {{count}} 位。",
@@ -4726,8 +4724,7 @@
       "label": "{{name}}的操作",
       "editProfile": "编辑资料",
       "dragToReorder": "拖动调整顺序",
-      "remove": "移出伙伴",
-      "removeNote": "对话和记忆都会保留，重新设为伙伴即可接回。"
+      "remove": "移出伙伴"
     },
     "dialog": {
       "addTitle": "添加伙伴",
@@ -4788,13 +4785,7 @@
       "emptyBody": "这段对话会一直延续：{{name}}会把重要的事记在自己的记忆里，并按顺序处理消息。"
     },
     "agents": {
-      "badge": "伙伴",
       "setAsBot": "设为伙伴",
-      "setAsBotHint": "给它一个名字、一个头像，以及一段带记忆的常驻对话。",
-      "setAsBotNeedsEnabled": "请先启用这个 Agent，再设为伙伴。",
-      "isBotTitle": "这个 Agent 是伙伴「{{name}}」",
-      "isBotHint": "设为伙伴期间，它保持启用、名字不变，也不能归档或删除；如需这样做，请先移出伙伴。",
-      "isMainBotHint": "主伙伴的 Agent 是内置的：始终启用，不能移出。",
       "openConversation": "进入对话",
       "editProfile": "编辑资料"
     }

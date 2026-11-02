@@ -385,7 +385,7 @@
       "react-hooks/set-state-in-effect": 2
     },
     "src/components/workbench/AgentsPage.tsx": {
-      "avibe/localized-user-text": 8,
+      "avibe/localized-user-text": 1,
       "no-useless-assignment": 1,
       "react-hooks/immutability": 1,
       "react-hooks/preserve-manual-memoization": 1,
