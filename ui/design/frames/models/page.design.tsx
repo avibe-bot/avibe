@@ -60,7 +60,7 @@ const designFrames = frames([
     status: 'shipped',
     route,
     fixtures: settingsFixtures(hubApi({ agents: demoAgents })),
-    click: ['role=button[name="添加订阅"]'],
+    click: ['role=button[name="{t:settings.models.upstream.addSubscription}"]'],
     render: page,
   },
   {
@@ -71,7 +71,7 @@ const designFrames = frames([
     status: 'shipped',
     route,
     fixtures: settingsFixtures(hubApi({ agents: demoAgents })),
-    click: ['role=button[name="添加供应商"]'],
+    click: ['role=button[name="{t:settings.models.searchServices.addProvider}"]'],
     render: page,
   },
   {

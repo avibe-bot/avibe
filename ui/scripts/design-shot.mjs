@@ -80,7 +80,12 @@ try {
       // Real pointer clicks, so components that open on pointerdown open, and a focus a click moves
       // draws no keyboard ring.
       const missing = [];
-      for (const target of frame.click ?? []) {
+      for (const spec of frame.click ?? []) {
+        // `{t:<key>}` is copy in the frame's language, resolved by the page.
+        let target = spec;
+        for (const [token, key] of spec.matchAll(/\{t:([^}]+)\}/g)) {
+          target = target.replace(token, await page.evaluate((k) => window.__DESIGN__.t(k), key));
+        }
         const clicked = await page.click(target, { timeout: 5_000 }).then(() => true, () => false);
         if (!clicked) {
           missing.push(target);
