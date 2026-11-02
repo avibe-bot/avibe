@@ -17,8 +17,7 @@ interface WizardChromeProps {
   className?: string;
 }
 
-// Top bar + progress rail used by the Wizard. Mirrors the wTop / wbProg cluster
-// across welcome, backends, platforms, slack creds and summary frames in design.pen.
+// Top bar + progress rail of the earlier multi-step wizard.
 export const WizardChrome: React.FC<WizardChromeProps> = ({
   current,
   total,

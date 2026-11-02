@@ -32,7 +32,7 @@ interface SummaryProps {
   isLast: boolean;
 }
 
-// Mirrors design.pen X9wTM (Summary): mint-accented WizardCard with 72×72 check
+// Mint-accented WizardCard with 72×72 check
 // halo, 38px title, recap rows, then secondary toggles and quick-start tips.
 export const Summary: React.FC<SummaryProps> = ({ data, onBack }) => {
   const { t } = useTranslation();

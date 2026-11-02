@@ -18,8 +18,8 @@ import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { Select } from '../ui/select';
 
-// Per-platform brand-tinted tile container colors (matches design.pen wT*L
-// frames: Slack purple-soft, Discord indigo-soft, etc.).
+// Per-platform brand-tinted tile container colors (Slack purple-soft,
+// Discord indigo-soft, etc.).
 const PLATFORM_TILE_STYLES: Record<string, { bg: string; border: string }> = {
   slack: { bg: 'bg-[#4A154B26]', border: 'border-[#4A154B66]' },
   discord: { bg: 'bg-[#5865F226]', border: 'border-[#5865F255]' },
@@ -510,7 +510,7 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
     );
   }
 
-  // Wizard mode — design.pen jXiOv: WizardCard with a required always-on Avibe
+  // Wizard mode — WizardCard with a required always-on Avibe
   // Workbench card on the left and an optional grid of third-party chat
   // platforms on the right. Primary platform is implicit: first selected, then
   // locked to that order.
@@ -600,7 +600,7 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
                       {platformText(t, option, 'title', platform.title_key)}
                     </span>
                     {/* Selection indicator on the phone row only; on sm+ the
-                        mint border carries the selected state (design.pen). */}
+                        mint border carries the selected state. */}
                     {active ? (
                       <CircleCheckBig className="ml-auto size-5 shrink-0 text-mint-ink sm:hidden" strokeWidth={2.25} />
                     ) : (

@@ -29,7 +29,9 @@ export interface FrameSpec {
    *  page's URL state when the product offers one. */
   click?: string[];
   /** Milliseconds the frame waits, once its reads have settled, before it is ready: for a read that starts
-   *  on a timer (a debounced search), so the screenshot shows its result rather than its spinner. */
+   *  on a timer (a debounced search), so the screenshot shows its result rather than its spinner. The
+   *  screenshot waits it out again after each `click`, for a click that starts a timed transition (setup's
+   *  screen handoff). */
   wait?: number;
   render: () => ReactNode;
 }

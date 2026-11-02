@@ -185,7 +185,9 @@ That task-specific direction overrides the repository AGENTS default `design.pen
 work only. Do not replace/copy either canvas or change the repository-wide rule. The handoff
 remains immutable. PR0 has not inspected native Pencil frames: L1–L3 must inspect/export the
 named frames and verify their token/geometry mapping before UI implementation and fidelity
-claims. Source literals are reference measurements, not CSS prescriptions.
+claims. Source literals are reference measurements, not CSS prescriptions. Since 2026-11-02
+the setup's design source is its frames (`ui/design/frames/setup/`); the Pencil documents are
+archived.
 
 **Anchor pair.** One `.onboarding-setup-footer` rendered by the shell, containing one
 `.onboarding-action-w.onboarding-primary-action` and, below it, one

@@ -1,6 +1,5 @@
-// Exact authored vectors from avibe-docs/design_desktop.pen.
-// Source SHA256: 115c69604b50e32823bcead4bd6c9269c8178b58d66a73b2e00db4a06d2caeb3.
-// Welcome: dAO38 / o2x2l0 / Rxw0c; inset OpenCode: VE60T (also dialog v9S8Li).
+// Exact authored vectors of the assistants' brand marks, as the setup cards and the
+// connection dialog draw them (ui/design: setup/intro/default, setup/connection-dialog).
 // vibey: traced from assets/mascot/cloud-tuanzi-logo-mono.png, with the outline
 // thickened inward and the eyes enlarged so the mascot still reads at 14–28px.
 export const BACKEND_BRAND_MARKS = {
