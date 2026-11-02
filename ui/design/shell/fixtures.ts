@@ -2,13 +2,17 @@ import type { InboxSession, InstanceCapabilities, WorkbenchProject, WorkbenchSes
 import type { BotRuntimeStatus } from '@/context/BotsContext';
 import type { RuntimeStatus } from '@/context/StatusContext';
 import type { Bot, BotAvatar } from '@/lib/bots';
-import { OWNER_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
+import { OWNER_INSTANCE_CAPABILITIES, type InstanceKind } from '@/lib/sessionInfo';
 
 import { DESIGN_NOW } from './clock';
 
 /** What a frame can set. Everything is optional; omitted parts are empty, not loading. */
 export interface WorkbenchFixtures {
   capabilities?: InstanceCapabilities;
+  /** An Organization instance (shared transcripts name their senders); a personal one when omitted. */
+  instanceKind?: InstanceKind;
+  /** The principal the viewer's own Chat rows are written as (`local`, `remote:<sub>`). */
+  readerPrincipal?: string;
   /** The service status the shell polls (`GET /status`), as the Status provider serves it. */
   status?: RuntimeStatus;
   projects?: WorkbenchProject[];

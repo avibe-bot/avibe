@@ -8,7 +8,7 @@
 
 export type SenderTone = 'gold' | 'violet';
 
-// The two solid-fill accents the design draws for senders (design.pen nlrCu).
+// The two solid-fill accents the design draws for senders (ui/design: chat/conversation/organization).
 // Mint is the agent's own avatar and stays reserved for it.
 const SENDER_TONES: readonly SenderTone[] = ['gold', 'violet'];
 

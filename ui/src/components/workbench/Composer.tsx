@@ -455,7 +455,7 @@ export interface ComposerHandle {
 // plus (when ``sessionId`` is set) attachment upload and voice input on the left.
 // Shared by the chat view (ChatPage) and the Workbench home so both use one input
 // component instead of each hand-rolling its own. Owns its draft value; callers
-// react via onSend / onDraftChange. design.pen kxEkn.
+// react via onSend / onDraftChange. ui/design: chat/composer/draft.
 export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer({
   onSend,
   busy = false,

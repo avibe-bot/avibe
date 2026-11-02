@@ -98,7 +98,13 @@ export function DesignShell({
   const status = useMemo(() => statusValue(fixtures), [fixtures]);
   const themeValue = useMemo(() => ({ mode: theme, resolvedTheme: theme, setMode: () => {}, cycleMode: () => {} }), [theme]);
   const authorization = useMemo(
-    () => ({ remote: false, instanceKind: null, instanceRole: 'owner' as const, capabilities: fixtures.capabilities ?? owner }),
+    () => ({
+      remote: false,
+      instanceKind: fixtures.instanceKind ?? null,
+      instanceRole: 'owner' as const,
+      capabilities: fixtures.capabilities ?? owner,
+      readerPrincipal: fixtures.readerPrincipal,
+    }),
     [fixtures],
   );
   return (

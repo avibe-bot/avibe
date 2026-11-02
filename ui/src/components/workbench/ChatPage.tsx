@@ -234,7 +234,7 @@ type SessionPatchWrite = {
   group: SessionWriteGroup;
 };
 
-// Mirrors design.pen kxEkn — the inline header replaces the old "Session
+// ui/design: chat/conversation/default — the inline header replaces the old "Session
 // settings" dialog. Title is click-to-edit; the cyan-bordered pill on the
 // right opens a single popover that drives agent / model / effort all at
 // once so the user doesn't have to navigate three different menus.
@@ -3917,7 +3917,7 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
   const defaultAgent = defaultAgentName ? agents.find((agent) => agent.name === defaultAgentName) : null;
   const sessionAgentLabel = sessionAgentDisplayName(session, agents);
   const header = (
-    // A single compact row (design.pen IDQ5n): back button + click-to-edit
+    // A single compact row (ui/design: chat/header/title-hover): back button + click-to-edit
     // title and the session menu on the left, page controls on the right. The
     // live agent/model/effort picker sits in the composer's action row (see
     // ChatRoutePicker); a read-only session names its frozen route here. The bar
@@ -4338,7 +4338,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
       <ForkSourceBanner sourceSessionId={forkSourceSessionId} sourceTitle={forkSourceSessionTitle} />
     ) : null;
   // One line at the head of a shared transcript saying why the bubbles below
-  // now carry names (design.pen nlrCu). Organization instances only — on a
+  // now carry names (ui/design: chat/conversation/organization). Organization instances only — on a
   // personal one there is nothing to explain.
   const organizationNotice =
     instanceKind === 'organization' ? (
@@ -5127,7 +5127,7 @@ export const MessageRow = memo(function MessageRow({
 
   // Deep-link jump target dressing applied to every row's outer wrapper:
   //  - ``data-message-id`` lets the transcript locate the row to scroll to.
-  //  - ``msg-highlight`` paints the brief mint fade (design.pen tBlve).
+  //  - ``msg-highlight`` paints the brief mint fade.
   // Each branch composes this onto its own ``justify-*`` so alignment is kept.
   const rowClass = (extra: string) => clsx('flex w-full', extra, highlighted && 'msg-highlight');
 
@@ -5283,7 +5283,7 @@ export const MessageRow = memo(function MessageRow({
     </span>
   );
 
-  // ----- Annotation: the Show Page card, sided by direction (design.pen m31JWV)
+  // ----- Annotation: the Show Page card, sided by direction (ui/design: chat/annotation/default)
   if (row.kind === 'annotation') {
     return (
       <AnnotationMessage
@@ -5343,7 +5343,7 @@ export const MessageRow = memo(function MessageRow({
   // ----- User: right-aligned neutral bubble (kept distinct from agent mint) ---
   if (isUser) {
     // On an Organization instance the bubble gets a head naming who wrote it
-    // (design.pen nlrCu) — which also carries the time, so the hover stamp
+    // (ui/design: chat/conversation/organization) — which also carries the time, so the hover stamp
     // underneath would just repeat it. A personal instance keeps the row
     // exactly as it was: one owner, nothing to attribute.
     const senderHead =

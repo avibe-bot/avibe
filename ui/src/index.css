@@ -843,7 +843,7 @@ pre,
   animation: vr-typing 1.2s infinite ease-in-out;
 }
 
-/* Deep-link search-match highlight (workbench ChatPage P5, design.pen tBlve):
+/* Deep-link search-match highlight (workbench ChatPage P5):
    the message jumped to from the search palette gets a brief mint-soft wash
    that fades to transparent over ~3s. Uses the same --mint-soft token as the
    agent bubble so it reads as "this is the match" without a hard flash. The

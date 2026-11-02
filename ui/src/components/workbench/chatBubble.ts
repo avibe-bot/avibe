@@ -1,10 +1,10 @@
 // The two message-bubble shapes the chat column draws, in one place.
 //
-// design.pen TxFKk rule 03 says the annotation card's bubble IS the existing
+// The annotation card's rule 03 says its bubble IS the existing
 // chat bubble — same width rule, same radius, same timestamp — because an
 // annotation is a message, not a widget, and a second bubble shape in the same
-// column reads as a different product. The frame backs that literally: its
-// annotation bubbles are byte-identical to the ordinary user / Claude bubbles
+// column reads as a different product. ui/design: chat/annotation/default draws
+// that literally: its annotation bubbles are the ordinary user / agent bubbles
 // drawn beside them.
 //
 // Naming these makes that rule a fact instead of a comment: the card cannot

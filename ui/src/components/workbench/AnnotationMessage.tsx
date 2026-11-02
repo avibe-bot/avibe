@@ -8,8 +8,8 @@ import { RoleAvatar } from './RoleAvatar';
 
 // A Show Page annotation, in chat. Both directions are the same message type —
 // the user annotating the page, and the agent marking it back — and the card's
-// title is what says which. Design: design.pen m31JWV (states) + TxFKk (anatomy
-// and rules); the rule numbers cited below are that frame's.
+// title is what says which. Design: ui/design: chat/annotation/default. The
+// numbered rules cited below are the card's design rules, each stated where it applies.
 //
 // The card is a row component, not a page fragment: it takes the body,
 // attachment and timestamp nodes the transcript already builds and only adds

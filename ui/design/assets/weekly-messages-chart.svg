@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540" font-family="Helvetica, Arial, sans-serif">
+<rect width="960" height="540" fill="#ffffff"/>
+<text x="84" y="52" font-size="22" font-weight="700" fill="#1f2328">Weekly messages by surface</text>
+<text x="84" y="76" font-size="14" fill="#57606a">Web chat vs. IM, last 8 weeks</text>
+<line x1="84" y1="470.0" x2="920" y2="470.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="72" y="475.0" font-size="13" fill="#57606a" text-anchor="end">0</text>
+<line x1="84" y1="376.5" x2="920" y2="376.5" stroke="#d0d7de" stroke-width="1"/>
+<text x="72" y="381.5" font-size="13" fill="#57606a" text-anchor="end">200</text>
+<line x1="84" y1="283.0" x2="920" y2="283.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="72" y="288.0" font-size="13" fill="#57606a" text-anchor="end">400</text>
+<line x1="84" y1="189.5" x2="920" y2="189.5" stroke="#d0d7de" stroke-width="1"/>
+<text x="72" y="194.5" font-size="13" fill="#57606a" text-anchor="end">600</text>
+<line x1="84" y1="96.0" x2="920" y2="96.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="72" y="101.0" font-size="13" fill="#57606a" text-anchor="end">800</text>
+<rect x="100.8" y="277.4" width="33.4" height="192.6" fill="#2da44e" rx="2"/>
+<rect x="138.2" y="292.4" width="33.4" height="177.6" fill="#8250df" rx="2"/>
+<text x="136.2" y="494" font-size="13" fill="#57606a" text-anchor="middle">W37</text>
+<rect x="205.3" y="251.2" width="33.4" height="218.8" fill="#2da44e" rx="2"/>
+<rect x="242.8" y="285.3" width="33.4" height="184.7" fill="#8250df" rx="2"/>
+<text x="240.8" y="494" font-size="13" fill="#57606a" text-anchor="middle">W38</text>
+<rect x="309.8" y="257.3" width="33.4" height="212.7" fill="#2da44e" rx="2"/>
+<rect x="347.2" y="269.0" width="33.4" height="201.0" fill="#8250df" rx="2"/>
+<text x="345.2" y="494" font-size="13" fill="#57606a" text-anchor="middle">W39</text>
+<rect x="414.3" y="222.2" width="33.4" height="247.8" fill="#2da44e" rx="2"/>
+<rect x="451.8" y="272.7" width="33.4" height="197.3" fill="#8250df" rx="2"/>
+<text x="449.8" y="494" font-size="13" fill="#57606a" text-anchor="middle">W40</text>
+<rect x="518.8" y="188.6" width="33.4" height="281.4" fill="#2da44e" rx="2"/>
+<rect x="556.2" y="250.3" width="33.4" height="219.7" fill="#8250df" rx="2"/>
+<text x="554.2" y="494" font-size="13" fill="#57606a" text-anchor="middle">W41</text>
+<rect x="623.3" y="168.9" width="33.4" height="301.1" fill="#2da44e" rx="2"/>
+<rect x="660.8" y="241.9" width="33.4" height="228.1" fill="#8250df" rx="2"/>
+<text x="658.8" y="494" font-size="13" fill="#57606a" text-anchor="middle">W42</text>
+<rect x="727.8" y="142.3" width="33.4" height="327.7" fill="#2da44e" rx="2"/>
+<rect x="765.2" y="229.2" width="33.4" height="240.8" fill="#8250df" rx="2"/>
+<text x="763.2" y="494" font-size="13" fill="#57606a" text-anchor="middle">W43</text>
+<rect x="832.3" y="111.0" width="33.4" height="359.0" fill="#2da44e" rx="2"/>
+<rect x="869.8" y="217.6" width="33.4" height="252.4" fill="#8250df" rx="2"/>
+<text x="867.8" y="494" font-size="13" fill="#57606a" text-anchor="middle">W44</text>
+<line x1="84" y1="470" x2="920" y2="470" stroke="#57606a" stroke-width="1.2"/>
+<rect x="730" y="40" width="12" height="12" fill="#2da44e" rx="2"/><text x="748" y="51" font-size="13" fill="#1f2328">Web chat</text>
+<rect x="830" y="40" width="12" height="12" fill="#8250df" rx="2"/><text x="848" y="51" font-size="13" fill="#1f2328">IM</text>
+</svg>

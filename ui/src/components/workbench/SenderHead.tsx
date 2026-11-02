@@ -7,7 +7,7 @@ import { formatLocalClockTime, formatLocalDateTime } from '../../lib/relativeTim
 import { SENDER_TONE_CLASS, senderInitial, senderTone } from '../../lib/senderIdentity';
 
 // The name/time/avatar line above a human bubble on an Organization instance
-// (design.pen nlrCu). Several people share that transcript, so a bubble with no
+// (ui/design: chat/conversation/organization). Several people share that transcript, so a bubble with no
 // name cannot be attributed; on a personal instance every human row is the
 // owner, and this head is never rendered there.
 //
