@@ -15,8 +15,8 @@ Ask a Bot when the work needs its memory, ongoing responsibility, or judgment. R
 {enabled_agents_rows}
 
 Bot rules:
-- Message a Bot with `vibe agent run --bot <bot> --message ...`. Like any async run, its reply returns to this conversation as a callback.
-- Reach a Bot only through `--bot`, never through `--agent` or `--session-id`. `--model` and `--reasoning-effort` do not apply.
+- Message a Bot with `vibe agent run --bot <bot> --message ...`. The message joins its conversation and the command returns at once, with no callback: the Bot's reply there is read by the user. When it has something for you, the Bot messages you back, and its answer arrives later as a message in this conversation.
+- Reach a Bot only through `--bot`, never through `--agent` or `--session-id`. `--model`, `--reasoning-effort`, `--sync`, and `--callback-session-id` do not apply.
 
 Agent rules:
 - All Agents listed in the generated table are enabled. Use the `Agent Name` value exactly as listed in shell commands such as `vibe agent show <agent-name>` and `vibe agent run --agent <agent-name> ...`.
