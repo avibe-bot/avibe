@@ -404,7 +404,8 @@ def test_agent_run_help_states_session_callback_and_fork_rules(capsys) -> None:
 
     assert exc.value.code == 0
     text = " ".join(capsys.readouterr().out.split())
-    assert "Runs are async: the final result returns to the caller Session." in text
+    assert "or a fork. Runs are async." in text
+    assert "--callback Return the final reply to this Session" in text
     assert "Elsewhere, pass --callback-session-id, --no-callback, or --sync." in text
     assert "--session-id ID Join this Session's running turn, or start one if idle" in text
     assert "--queue With --session-id: wait for the running turn" in text

@@ -7010,7 +7010,14 @@ def cmd_agent_run(args):
             callback_by_default=not bot_target,
         )
         if callback_session_id:
-            _validate_callback_session_id(callback_session_id, help_command="vibe agent run --help")
+            try:
+                _validate_callback_session_id(callback_session_id, help_command="vibe agent run --help")
+            except TaskCliError:
+                if callback_mode != AGENT_RUN_CALLBACK_FAILURE_ONLY:
+                    raise
+                # The failure notice is a guarantee Avibe adds, not a route the caller asked for: a caller
+                # Session it cannot post to leaves the run without that notice instead of refusing the run.
+                callback_session_id, callback_mode = None, None
         close_after = bool(getattr(args, "close_after", False))
         # The caller's own authority, resolved once. A remote caller reserves
         # under it; a local caller stays ``None`` and keeps Owner semantics.

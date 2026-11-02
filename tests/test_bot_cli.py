@@ -179,12 +179,17 @@ def test_a_bot_message_has_no_callback_and_tells_the_bot_where_to_report(home, c
         ("ses_main", ["--session-id", "ses_cso", "--no-callback"], ("ses_main", "failure")),
         # A run on the caller's own Session lands there already.
         ("ses_main", ["--bot", "main"], (None, None)),
+        # A caller Session Avibe cannot post to drops the failure notice it added; it does not refuse the run.
+        ("ses_gone", ["--bot", "cso"], (None, None)),
+        ("ses_gone", ["--session-id", "ses_cso", "--no-callback"], (None, None)),
         # Outside an Agent shell there is no sender to tell.
         (None, ["--bot", "cso"], (None, None)),
         (None, ["--session-id", "ses_cso", "--no-callback"], (None, None)),
         # Refused.
         ("ses_main", ["--bot", "cso", "--callback", "--no-callback"], "conflicting_callback_policy"),
         (None, ["--bot", "cso", "--callback"], "callback_without_caller"),
+        # A callback the caller asked for still has to reach a Session.
+        ("ses_gone", ["--bot", "cso", "--callback"], "invalid_session_id"),
         (None, ["--session-id", "ses_cso"], "missing_async_callback"),
     ],
 )
