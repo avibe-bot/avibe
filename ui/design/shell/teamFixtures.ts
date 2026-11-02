@@ -1,7 +1,7 @@
 // The Bot team the mobile Bots designs share: the main Bot with one unread reply,
 // the security lead with two, the PM at work, and a fourth Bot that is idle.
 import type { WorkbenchFixtures } from './fixtures';
-import { demoBots, demoProjects, demoSessions, inboxRow, mainBot, message, researchBot } from './fixtures';
+import { bot, demoBots, demoProjects, demoSessions, inboxRow, mainBot, message, researchBot } from './fixtures';
 
 export const team = [...demoBots, researchBot];
 
@@ -74,3 +74,32 @@ export const csoTranscript = [
   message('ses_cso', 'c2', 'agent', 'avault 依赖里发现 2 个高危漏洞，已整理修复建议和影响范围：令牌刷新路径需要先升级，登录本身没有问题。', 12),
 ];
 
+
+/** More Bots than the strip shows at once: it scrolls sideways and Add stays pinned. */
+export const manyBots = [
+  ...team,
+  bot('finance', '财务助理', '账单、报销与预算', null, 4),
+  bot('designer', 'Designer', 'Interface and visual design', { kind: 'emoji', emoji: '🎨', hue: 330 }, 5),
+  bot('writer', '文案', '发布说明与对外文案', { kind: 'emoji', emoji: '✍️', hue: 150 }, 6),
+  bot('legal', '法务', '合同与开源许可审查', { kind: 'emoji', emoji: '⚖️', hue: 12 }, 7),
+];
+
+export const manyFixtures: WorkbenchFixtures = {
+  ...teamFixtures,
+  bots: manyBots,
+  botStatus: { ses_pm: 'running', ses_writer: 'running' },
+  unreadBySession: { ses_main: 1, ses_cso: 2, ses_legal: 1, ses_demo_cache: 3 },
+};
+
+/** What the user says while holding the main Bot, as the recognizer streams it. */
+export const spoken = {
+  text: '帮我看一下周一发布前还差哪些安全审查，',
+  stash: '有问题直接约首席安全官',
+  final: '帮我看一下周一发布前还差哪些安全审查，有问题直接约首席安全官。',
+};
+
+/** The main Bot's conversation right after the voice message went in: it is already working on it. */
+export const afterVoiceTranscript = [
+  ...mainTranscript,
+  message('ses_main', 'm4', 'user', spoken.final, 0),
+];

@@ -1,4 +1,4 @@
-// Inside a Bot's conversation, on a phone, in every variant: the shipped chat page,
+// Inside a Bot's conversation, on a phone: the shipped chat page,
 // with the header's Bot as a switch. Tapping the avatar and name opens every Bot;
 // the cyan count on the chevron says other Bots have unread replies. The header and
 // the sheet are kit proposals drawn over the shipped page.

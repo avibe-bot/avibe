@@ -1,7 +1,6 @@
 // Every Bot in one sheet, the main Bot first: what each is doing or last said,
-// unread, and running. Opened by a long press on the center (variant A) and by
-// tapping the name in any Bot's conversation (all variants); picking a row opens
-// that Bot's conversation.
+// unread, and running. Opened by tapping the name in a Bot's conversation
+// (BotConversationHeader); picking a row opens that Bot's conversation.
 import { Check, UserPlus } from 'lucide-react';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
@@ -14,17 +13,15 @@ import { formatRelativeTime } from '@/lib/relativeTime';
 import { BotFace } from './BotFace';
 import { useDraft } from './draft';
 
-export function BotSwitchSheet({ current, aboveTabBar = false }: { current?: string; aboveTabBar?: boolean }) {
+export function BotSwitchSheet({ current }: { current?: string }) {
   const { t } = useTranslation();
   const draft = useDraft();
   const { bots, displayName, statusBySession } = useBots();
   const { inboxSessions, unreadBySession } = useWorkbenchInbox();
-  // Above the tab bar it stays under a pressed center (variant A); over a conversation it is the top layer.
-  const bottom = aboveTabBar ? 'bottom-(--mobile-nav-height) z-40 pb-3' : 'bottom-0 z-50 pb-4';
   return (
     <div className="md:hidden" role="dialog" aria-modal="true" aria-label={draft('伙伴', 'Bots')}>
-      <div className={clsx('fixed inset-x-0 top-0 z-40 bg-background/70 backdrop-blur-sm', aboveTabBar ? 'bottom-(--mobile-nav-height)' : 'bottom-0')} />
-      <div className={clsx('fixed inset-x-0 max-h-3/4 overflow-y-auto rounded-t-3xl border border-border bg-surface px-3 pt-2 shadow-xl', bottom)}>
+      <div className="fixed inset-0 z-40 bg-background/70 backdrop-blur-sm" />
+      <div className="fixed inset-x-0 bottom-0 z-50 max-h-3/4 overflow-y-auto rounded-t-3xl border border-border bg-surface px-3 pb-4 pt-2 shadow-xl">
         <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-border" />
         <div className="mb-2 flex items-center justify-between gap-3 px-1">
           <h2 className="text-lg font-bold text-foreground">{draft('伙伴', 'Bots')}</h2>
@@ -74,7 +71,7 @@ export function BotSwitchSheet({ current, aboveTabBar = false }: { current?: str
             );
           })}
         </ul>
-        {!aboveTabBar && <div className="h-(--safe-area-bottom)" />}
+        <div className="h-(--safe-area-bottom)" />
       </div>
     </div>
   );
