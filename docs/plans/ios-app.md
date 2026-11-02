@@ -169,12 +169,25 @@ The owner reports these issues in the Home Screen app:
 The composer is a Lexical `contenteditable`
 (`ui/src/components/workbench/MentionEditor.tsx`). Keyboard layout is patched
 in `ui/src/lib/useIosKeyboardInset.ts`, which corrects the container height
-after the visual viewport settles. Its focus check covers only `TEXTAREA` and
-`INPUT`, not the `contenteditable`. IME composition, paste, and third-party
-keyboard input in a `contenteditable` go through WebKit's editing code, so a
-Swift, Capacitor, or Tauri shell would all inherit them. Which symptoms come
-from WebKit and which from Lexical is not measured yet. Phase 0a runs the exit
-checklist on the web composer inside the shell to find out (section 15).
+after the visual viewport settles. IME composition, paste, and third-party
+keyboard input in a `contenteditable` go through WebKit's editing code and
+Lexical's input handling, so a Swift, Capacitor, or Tauri shell would all
+inherit them.
+
+The parallel iOS input lane (Session `sesv4sph5q36q`) has attributed most of
+the symptoms. Its device lab, which compares a plain `textarea`, a bare
+`contenteditable`, bare Lexical, and `MentionEditor`, has not finished.
+
+| Symptom | Attribution | Fix |
+| --- | --- | --- |
+| Pinyin candidates sometimes missing | Prime suspect: when composition starts in an empty editor or right after a key press, Lexical on iOS inserts a zero-width character and sets the selection from script. Lexical core behavior, unchanged in 0.53. | The native composer |
+| Keyboard pushing the composer | `useIosKeyboardInset` was validated on a `textarea`; its focus check misses the `contenteditable` | Web: avibe-bot/avibe#3166, which still corrects only after the viewport settles. Native: `keyboardLayoutGuide`. |
+| Accessory bar | WebKit; a page cannot remove it | Shell flag or the native composer |
+| Typeless blank | Not found in Web code; still under device-lab investigation | Measured in Phase 0a |
+| Typing stops after quick Paste | Not yet attributed | Measured in Phase 0a |
+
+Phase 0a runs the exit checklist on the web composer inside the shell to
+measure what remains (section 15).
 
 ### Shell-level fixes, with or without the native composer (Phase 0a)
 
@@ -213,6 +226,11 @@ carrying `{trigger, value, data}`, draws it as a chip (an `NSTextAttachment`
 view), deletes it atomically, and serializes to the same
 `{text, references}` that `MentionEditor` emits. One JSON fixture of marker
 texts and references is tested on both sides.
+
+**Composition rule**: while `markedTextRange` is non-nil, native never changes
+`text` or `selectedRange`, never inserts a chip, and defers draft saves and
+re-rendering until composition ends. Paste uses the system paste; pasted
+images go to the attachment path instead of the text.
 
 **Drafts** stay web-owned. Native emits a debounced `composer.change`, and the
 web persists it as today (`onDraftChange`). On attach the web passes the saved
@@ -766,8 +784,10 @@ every item with the native composer.
 
 - **iPhone behavior is unverified.** It is cited, or inferred from shared
   WebKit code, and has not been observed on a device (section 15).
-- **The cause of the input problems is unmeasured.** Some may be Lexical rather
-  than WebKit. Phase 0a measures this, and the native composer avoids both.
+- **The input problems are only partly attributed.** Missing Pinyin candidates
+  point at Lexical's composition handling; Typeless and quick Paste are still
+  open. Phase 0a measures them, and the native composer avoids both WebKit's
+  and Lexical's paths.
 - **The accessory-bar technique uses a private class** (DPLA 3.3.1(A)). It
   stays behind a flag, and the native composer removes the need for it in
   chat.
