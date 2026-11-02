@@ -1,0 +1,470 @@
+{
+  "platform": "slack",
+  "platforms": {
+    "enabled": [
+      "slack",
+      "discord",
+      "telegram"
+    ],
+    "primary": "slack"
+  },
+  "platform_catalog": [
+    {
+      "id": "slack",
+      "config_key": "slack",
+      "title_key": "platform.slack.title",
+      "description_key": "platform.slack.desc",
+      "credential_fields": [
+        "bot_token"
+      ],
+      "capabilities": {
+        "supports_channels": true,
+        "supports_threads": true,
+        "supports_buttons": true,
+        "supports_quick_replies": true,
+        "supports_message_editing": true,
+        "supports_message_deletion": true,
+        "markdown_upload_returns_message_id": false,
+        "quick_reply_single_column": false,
+        "quick_reply_max_per_row": null,
+        "supports_typing_indicator": true,
+        "typing_indicator_requires_clear": false,
+        "typing_indicator_best_effort": true,
+        "supports_reaction_indicator": true,
+        "supports_message_indicator": true,
+        "supports_message_indicator_delete": false,
+        "preferred_processing_indicator": "typing",
+        "force_preferred_processing_indicator": false,
+        "supports_status_bubble": true,
+        "supports_toolcall_delivery": true
+      },
+      "kind": "im"
+    },
+    {
+      "id": "discord",
+      "config_key": "discord",
+      "title_key": "platform.discord.title",
+      "description_key": "platform.discord.desc",
+      "credential_fields": [
+        "bot_token"
+      ],
+      "capabilities": {
+        "supports_channels": true,
+        "supports_threads": true,
+        "supports_buttons": true,
+        "supports_quick_replies": true,
+        "supports_message_editing": true,
+        "supports_message_deletion": true,
+        "markdown_upload_returns_message_id": true,
+        "quick_reply_single_column": false,
+        "quick_reply_max_per_row": null,
+        "supports_typing_indicator": true,
+        "typing_indicator_requires_clear": false,
+        "typing_indicator_best_effort": false,
+        "supports_reaction_indicator": true,
+        "supports_message_indicator": true,
+        "supports_message_indicator_delete": false,
+        "preferred_processing_indicator": "typing",
+        "force_preferred_processing_indicator": false,
+        "supports_status_bubble": true,
+        "supports_toolcall_delivery": true
+      },
+      "kind": "im"
+    },
+    {
+      "id": "telegram",
+      "config_key": "telegram",
+      "title_key": "platform.telegram.title",
+      "description_key": "platform.telegram.desc",
+      "credential_fields": [
+        "bot_token"
+      ],
+      "capabilities": {
+        "supports_channels": true,
+        "supports_threads": false,
+        "supports_buttons": true,
+        "supports_quick_replies": true,
+        "supports_message_editing": true,
+        "supports_message_deletion": true,
+        "markdown_upload_returns_message_id": true,
+        "quick_reply_single_column": true,
+        "quick_reply_max_per_row": null,
+        "supports_typing_indicator": true,
+        "typing_indicator_requires_clear": false,
+        "typing_indicator_best_effort": false,
+        "supports_reaction_indicator": true,
+        "supports_message_indicator": true,
+        "supports_message_indicator_delete": true,
+        "preferred_processing_indicator": "typing",
+        "force_preferred_processing_indicator": false,
+        "supports_status_bubble": false,
+        "supports_toolcall_delivery": true
+      },
+      "kind": "im"
+    },
+    {
+      "id": "lark",
+      "config_key": "lark",
+      "title_key": "platform.lark.title",
+      "description_key": "platform.lark.desc",
+      "credential_fields": [
+        "app_id",
+        "app_secret"
+      ],
+      "capabilities": {
+        "supports_channels": true,
+        "supports_threads": true,
+        "supports_buttons": true,
+        "supports_quick_replies": true,
+        "supports_message_editing": true,
+        "supports_message_deletion": false,
+        "markdown_upload_returns_message_id": true,
+        "quick_reply_single_column": false,
+        "quick_reply_max_per_row": 3,
+        "supports_typing_indicator": false,
+        "typing_indicator_requires_clear": false,
+        "typing_indicator_best_effort": false,
+        "supports_reaction_indicator": true,
+        "supports_message_indicator": true,
+        "supports_message_indicator_delete": false,
+        "preferred_processing_indicator": "reaction",
+        "force_preferred_processing_indicator": false,
+        "supports_status_bubble": true,
+        "supports_toolcall_delivery": true
+      },
+      "kind": "im"
+    },
+    {
+      "id": "wechat",
+      "config_key": "wechat",
+      "title_key": "platform.wechat.title",
+      "description_key": "platform.wechat.desc",
+      "credential_fields": [
+        "bot_token"
+      ],
+      "capabilities": {
+        "supports_channels": false,
+        "supports_threads": false,
+        "supports_buttons": false,
+        "supports_quick_replies": false,
+        "supports_message_editing": false,
+        "supports_message_deletion": false,
+        "markdown_upload_returns_message_id": false,
+        "quick_reply_single_column": false,
+        "quick_reply_max_per_row": null,
+        "supports_typing_indicator": true,
+        "typing_indicator_requires_clear": true,
+        "typing_indicator_best_effort": false,
+        "supports_reaction_indicator": false,
+        "supports_message_indicator": true,
+        "supports_message_indicator_delete": false,
+        "preferred_processing_indicator": "typing",
+        "force_preferred_processing_indicator": true,
+        "supports_status_bubble": false,
+        "supports_toolcall_delivery": false
+      },
+      "kind": "im"
+    },
+    {
+      "id": "avibe",
+      "config_key": "avibe",
+      "title_key": "platform.avibe.title",
+      "description_key": "platform.avibe.desc",
+      "credential_fields": [],
+      "capabilities": {
+        "supports_channels": true,
+        "supports_threads": true,
+        "supports_buttons": true,
+        "supports_quick_replies": true,
+        "supports_message_editing": true,
+        "supports_message_deletion": false,
+        "markdown_upload_returns_message_id": true,
+        "quick_reply_single_column": false,
+        "quick_reply_max_per_row": null,
+        "supports_typing_indicator": false,
+        "typing_indicator_requires_clear": false,
+        "typing_indicator_best_effort": false,
+        "supports_reaction_indicator": false,
+        "supports_message_indicator": true,
+        "supports_message_indicator_delete": false,
+        "preferred_processing_indicator": "typing",
+        "force_preferred_processing_indicator": false,
+        "supports_status_bubble": false,
+        "supports_toolcall_delivery": true
+      },
+      "kind": "workbench"
+    }
+  ],
+  "agent_backend_catalog": [
+    {
+      "id": "vibey",
+      "display_name": "Vibey",
+      "config_key": "vibey",
+      "default_cli": null,
+      "default_enabled": true,
+      "latest_probe": null,
+      "capabilities": {
+        "supports_cli": false,
+        "supports_native_sessions": false,
+        "supports_runtime_refresh": false,
+        "supports_web_oauth": false,
+        "supports_install": false
+      },
+      "builtin": true,
+      "description_key": "settings.backends.vibeyDescription",
+      "settings_route": "/settings/backends/vibey"
+    },
+    {
+      "id": "opencode",
+      "display_name": "OpenCode",
+      "config_key": "opencode",
+      "default_cli": "opencode",
+      "default_enabled": true,
+      "latest_probe": [
+        "github",
+        "sst/opencode"
+      ],
+      "capabilities": {
+        "supports_cli": true,
+        "supports_native_sessions": true,
+        "supports_runtime_refresh": true,
+        "supports_web_oauth": true,
+        "supports_install": true
+      },
+      "builtin": false,
+      "description_key": "settings.backends.opencodeDescription",
+      "settings_route": "/settings/backends/opencode"
+    },
+    {
+      "id": "claude",
+      "display_name": "Claude Code",
+      "config_key": "claude",
+      "default_cli": "claude",
+      "default_enabled": true,
+      "latest_probe": [
+        "npm",
+        "@anthropic-ai/claude-code"
+      ],
+      "capabilities": {
+        "supports_cli": true,
+        "supports_native_sessions": true,
+        "supports_runtime_refresh": true,
+        "supports_web_oauth": true,
+        "supports_install": true
+      },
+      "builtin": false,
+      "description_key": "settings.backends.claudeDescription",
+      "settings_route": "/settings/backends/claude"
+    },
+    {
+      "id": "codex",
+      "display_name": "Codex",
+      "config_key": "codex",
+      "default_cli": "codex",
+      "default_enabled": false,
+      "latest_probe": [
+        "npm",
+        "@openai/codex"
+      ],
+      "capabilities": {
+        "supports_cli": true,
+        "supports_native_sessions": true,
+        "supports_runtime_refresh": true,
+        "supports_web_oauth": true,
+        "supports_install": true
+      },
+      "builtin": false,
+      "description_key": "settings.backends.codexDescription",
+      "settings_route": "/settings/backends/codex"
+    }
+  ],
+  "setup_state": {
+    "needs_setup": false,
+    "configured_platforms": [
+      "slack",
+      "discord",
+      "telegram"
+    ],
+    "missing_credentials": []
+  },
+  "mode": "self_host",
+  "version": "v2",
+  "slack": {
+    "proxy_url": null,
+    "team_id": "T0ACMEVIBE",
+    "team_name": "acme-vibe",
+    "app_id": "A02M9KZDP",
+    "require_mention": false,
+    "require_bind": false,
+    "disable_link_unfurl": false,
+    "has_bot_token": true,
+    "bot_token_length": 39,
+    "has_app_token": true,
+    "app_token_length": 26,
+    "has_signing_secret": false,
+    "signing_secret_length": 0
+  },
+  "discord": {
+    "proxy_url": null,
+    "application_id": "112233445566778899",
+    "require_mention": false,
+    "require_bind": false,
+    "thread_auto_archive_minutes": 10080,
+    "has_bot_token": true,
+    "bot_token_length": 21
+  },
+  "telegram": {
+    "proxy_url": null,
+    "require_mention": true,
+    "require_bind": false,
+    "forum_auto_topic": true,
+    "use_webhook": false,
+    "webhook_url": null,
+    "allowed_chat_ids": null,
+    "allowed_user_ids": null,
+    "has_bot_token": true,
+    "bot_token_length": 30,
+    "has_webhook_secret_token": false,
+    "webhook_secret_token_length": 0
+  },
+  "lark": null,
+  "wechat": null,
+  "avibe": {
+    "proxy_url": null,
+    "enabled": true
+  },
+  "runtime": {
+    "default_cwd": "/Users/demo/work",
+    "log_level": "INFO",
+    "show_page_api_timeout_seconds": 90.0,
+    "resource_governance": {
+      "mode": "auto"
+    },
+    "harness_prompt_echo": true,
+    "harness_run_sweep_interval_seconds": 60,
+    "harness_run_orphan_grace_seconds": 120,
+    "harness_run_queued_ttl_seconds": 1800,
+    "harness_run_hold_ttl_seconds": 3600,
+    "agent_events_trace_retention_enabled": true,
+    "agent_events_trace_retention_days": 30,
+    "skill_observability_enabled": true
+  },
+  "agents": {
+    "opencode": {
+      "enabled": true,
+      "cli_path": "opencode",
+      "auto_update": true,
+      "default_agent": null,
+      "default_reasoning_effort": null,
+      "error_retry_limit": 1,
+      "active_turn_timeout_seconds": 0,
+      "legacy_turn_timeout_neutralized": true,
+      "default_provider": null
+    },
+    "claude": {
+      "enabled": true,
+      "cli_path": "claude",
+      "auto_update": true,
+      "idle_timeout_seconds": 600,
+      "auth_mode": "oauth",
+      "api_key": null,
+      "base_url": null,
+      "auth_mode_set": false,
+      "api_key_length": 0,
+      "has_api_key": false
+    },
+    "codex": {
+      "enabled": false,
+      "cli_path": "codex",
+      "auto_update": true,
+      "idle_timeout_seconds": 600,
+      "auth_mode": "oauth",
+      "api_key": null,
+      "base_url": null,
+      "oauth_relay_marker": null,
+      "api_key_length": 0,
+      "has_api_key": false
+    },
+    "avault": {
+      "cli_path": "avault"
+    }
+  },
+  "model_hub": {
+    "enabled": true,
+    "runtime_default_applied": true,
+    "sources": [],
+    "agents": {}
+  },
+  "gateway": null,
+  "ui": {
+    "setup_host": "127.0.0.1",
+    "setup_port": 5123,
+    "open_browser": true,
+    "chat_message_font_size": 14,
+    "show_agent_activity": false,
+    "show_tool_calls": true,
+    "trusted_public_origins": [],
+    "instance_name": "",
+    "system_hostname": "demo-mac.local",
+    "default_instance_name": "demo-mac.local"
+  },
+  "remote_access": {
+    "provider": "vibe_cloud",
+    "vibe_cloud": {
+      "enabled": false,
+      "backend_url": "https://avibe.bot",
+      "public_url": "",
+      "instance_id": "",
+      "instance_kind": "",
+      "client_id": "",
+      "issuer": "",
+      "authorization_endpoint": "",
+      "token_endpoint": "",
+      "jwks_uri": "",
+      "redirect_uri": "",
+      "cloudflared_path": "",
+      "transport_protocol": "auto",
+      "auto_recovery": true,
+      "optimization_profile": "balanced",
+      "edge_ip_version": "4",
+      "edge_bind_address": "",
+      "dev_login_hint": "",
+      "paired": false
+    }
+  },
+  "audio_asr": {
+    "enabled": true,
+    "echo_transcript": true,
+    "enabled_configured": false,
+    "timeout_seconds": 60.0,
+    "endpoint_path": "/v1/audio/transcriptions",
+    "model": "qwen3-asr-flash",
+    "max_file_bytes": null
+  },
+  "update": {
+    "auto_update": true,
+    "check_interval_minutes": 60,
+    "idle_minutes": 30,
+    "notify_admins": true
+  },
+  "ack_mode": "reaction",
+  "language": "zh",
+  "show_duration": true,
+  "include_time_info": true,
+  "include_user_info": true,
+  "reply_enhancements": true,
+  "agent_progress_style": "off",
+  "agent_status_heartbeat_ms": 8000,
+  "agent_status_no_output_ms": 180000,
+  "setup_completed": true,
+  "config_recovery": {
+    "required": false,
+    "warnings": []
+  },
+  "capabilities": {
+    "model_hub": {
+      "enabled": true
+    }
+  },
+  "agent_supply_blocks": {}
+}

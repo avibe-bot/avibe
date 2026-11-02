@@ -1161,7 +1161,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
   };
 
   // ====================================================================
-  // PAGE MODE: redesigned layout (matches design.pen frame A7h8Wv)
+  // PAGE MODE (ui/design: settings/groups/default)
   // - Header with title + 240px search + Rescan
   // - Tabs row (All channels + per-platform with PlatformIcon + counts)
   // - Per-tab notes (Discord guild picker, Telegram discovery info)
@@ -1222,7 +1222,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
     return (
       <>
         <div className="flex h-full flex-col gap-5">
-          {/* Page header — design.pen iXX59 */}
+          {/* Page header */}
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div className="flex flex-col gap-1.5">
               <h1 className="text-[28px] font-bold leading-tight tracking-[-0.4px] text-foreground">
@@ -1253,7 +1253,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
             </div>
           </div>
 
-          {/* Platform Tabs — design.pen O2hb2M */}
+          {/* Platform Tabs */}
           <div className="flex items-end gap-1 overflow-x-auto border-b border-border">
             <button
               type="button"
@@ -1442,7 +1442,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
             </div>
           )}
 
-          {/* List header — design.pen xQq1G */}
+          {/* List header */}
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="text-[13px] text-muted">
               {pageTab === 'all'
@@ -1471,7 +1471,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
             </div>
           </div>
 
-          {/* Channel rows — design.pen JrNBe / M8FRiG / KywfU */}
+          {/* Channel rows */}
           <div className="flex-1 space-y-3 overflow-y-auto">
             {visibleRows.length === 0 && (
               <div className="rounded-xl border border-dashed border-border bg-surface-3/60 p-8 text-center text-muted">
@@ -1639,7 +1639,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                     )}
                   </div>
 
-                  {/* Expanded body — design.pen asPXu (VR/RoutingConfig) — shared with /users */}
+                  {/* Expanded body — RoutingConfigPanel, shared with /users */}
                   {expanded && (
                     <>
                       <RoutingConfigPanel

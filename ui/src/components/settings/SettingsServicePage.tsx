@@ -13,9 +13,9 @@ import { Button } from '@/components/ui/button';
 import { setConfigField } from '@/lib/configMutations';
 import { applyAppTitle } from '@/lib/documentTitle';
 
-// Mirrors design.pen mHUcm (VR/CM/Service): two cards.
-// svcSec1: header [16, 20] + value rows [12, 20] with bottom borders.
-// svcSec2: single row card with title + value pill (read-only mono).
+// ui/design: settings/service/default. Two cards:
+// run control: header [16, 20] + value rows [12, 20] with bottom borders;
+// log file: single row card with title + value pill (read-only mono).
 export const SettingsServicePage: React.FC = () => {
   const { t } = useTranslation();
   const { status, control } = useStatus();
@@ -343,7 +343,7 @@ export const SettingsServicePage: React.FC = () => {
         />
       </SettingsPanel>
 
-      {/* Mirrors design.pen CuVKM (svcSec2): single-row read-only value pill */}
+      {/* Log file: single-row read-only value pill */}
       <SettingsPanel>
         <div className="flex flex-col gap-3 px-5 py-4 md:flex-row md:items-center md:justify-between">
           <div className="text-[13px] font-medium text-foreground">{t('settings.logFileLabel')}</div>

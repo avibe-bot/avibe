@@ -4,6 +4,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { ApiProvider } from '@/context/ApiContext';
 import { BotsProvider } from '@/context/BotsProvider';
 import { InstanceAuthorizationContext } from '@/context/InstanceAuthorizationContext';
+import { StatusContext, type RuntimeStatus } from '@/context/StatusContext';
 import { ToastProvider } from '@/context/ToastProvider';
 import { UnsavedChangesContext } from '@/context/unsavedChangesContext';
 import { WindowManagerContext, type WindowManagerValue } from '@/context/WindowManagerContext';
@@ -44,6 +45,11 @@ function inboxValue(fixtures: WorkbenchFixtures): InboxState {
   });
 }
 
+function statusValue(fixtures: WorkbenchFixtures) {
+  const status: RuntimeStatus = fixtures.status ?? {};
+  return { status, health: true, refreshStatus: () => Promise.resolve(status), control: () => Promise.resolve(null) };
+}
+
 function projectsValue(fixtures: WorkbenchFixtures): WorkbenchProjectsTree {
   const expanded = new Set(fixtures.expandedProjects ?? []);
   return inert<WorkbenchProjectsTree>({
@@ -73,6 +79,7 @@ function projectsValue(fixtures: WorkbenchFixtures): WorkbenchProjectsTree {
 export function DesignShell({ fixtures = {}, route = '/', children }: { fixtures?: WorkbenchFixtures; route?: string; children: ReactNode }) {
   const inbox = useMemo(() => inboxValue(fixtures), [fixtures]);
   const projects = useMemo(() => projectsValue(fixtures), [fixtures]);
+  const status = useMemo(() => statusValue(fixtures), [fixtures]);
   const authorization = useMemo(
     () => ({ remote: false, instanceKind: null, instanceRole: 'owner' as const, capabilities: fixtures.capabilities ?? owner }),
     [fixtures],
@@ -86,7 +93,9 @@ export function DesignShell({ fixtures = {}, route = '/', children }: { fixtures
               <WindowManagerContext.Provider value={inert<WindowManagerValue>({ windows: [], focusedId: null, gestureActive: false })}>
                 <WorkbenchInboxContext.Provider value={inbox}>
                   <WorkbenchProjectsContext.Provider value={projects}>
-                    <BotsProvider>{children}</BotsProvider>
+                    <BotsProvider>
+                      <StatusContext.Provider value={status}>{children}</StatusContext.Provider>
+                    </BotsProvider>
                   </WorkbenchProjectsContext.Provider>
                 </WorkbenchInboxContext.Provider>
               </WindowManagerContext.Provider>
