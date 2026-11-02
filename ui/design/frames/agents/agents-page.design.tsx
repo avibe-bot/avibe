@@ -19,6 +19,16 @@ const designFrames = frames([
     render: consolePage(page),
   },
   {
+    name: 'main-bot',
+    title: 'Agents · 选中主伙伴的 Agent',
+    width: 1192,
+    height: 1320,
+    status: 'shipped',
+    route: '/agents?tab=definitions&agent=main',
+    fixtures: workbenchFixtures(agentsApi('main')),
+    render: consolePage(page),
+  },
+  {
     name: 'phone',
     title: 'Agents · 手机（能力页）',
     width: 390,
