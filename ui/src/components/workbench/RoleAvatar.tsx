@@ -2,8 +2,8 @@ import clsx from 'clsx';
 
 // The tone-tinted 24px chip that leads every message head in Chat — agent,
 // system, harness and annotation all draw the same geometry, so a new row kind
-// inherits exactly the avatar its neighbours already have (design.pen m31JWV
-// draws the Claude head and the annotation head identically).
+// inherits exactly the avatar its neighbours already have (ui/design:
+// chat/annotation/default draws the agent head and the annotation head identically).
 //
 // Lives in its own module rather than inside ChatPage so a row component can
 // reuse it without importing the whole page back.

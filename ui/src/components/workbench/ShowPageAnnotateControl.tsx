@@ -35,7 +35,7 @@ interface ModeDef {
 const MODES: readonly ModeDef[] = [
   {
     id: 'smart',
-    // mouse-pointer-click (matches design.pen + Lane R overlay). Sparkles is
+    // mouse-pointer-click (ui/design: chat/header/annotate-smart, and the Lane R overlay). Sparkles is
     // reserved for AI-generate affordances elsewhere in the workbench.
     icon: MousePointerClick,
     labelKey: 'chat.showPage.annotate.smart',

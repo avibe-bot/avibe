@@ -1,7 +1,7 @@
 import type { TranslationKey } from '@/i18n/types';
 // What a Show Page annotation draws in chat, distilled from ``content.annotation``.
-// Design: design.pen m31JWV (states) + TxFKk (anatomy and rules); the rule
-// numbers cited below are that frame's.
+// Design: ui/design: chat/annotation/default. The numbered rules cited below are
+// the card's design rules, each stated where it applies.
 //
 // Pure, and separate from the card component, so the transcript's branch mapper
 // can depend on it without a lib → component import.
