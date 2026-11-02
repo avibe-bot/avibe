@@ -782,8 +782,61 @@ function MultilineInsertFixPlugin() {
   return null;
 }
 
+// The list's least distance from either screen edge, and the cap on its width.
+const MENU_EDGE_GAP = 8;
+
+/**
+ * Keeps the picker whole on screen horizontally. It opens at the caret, so typed
+ * near the right edge of a phone it would run off the screen: shift it left as
+ * far as it needs, never past the left edge. Lexical's own clamp measures the
+ * menu once, before its results render, and not again as the caret moves, so it
+ * cannot do this. The shift is recomputed whenever the list resizes (results
+ * arrive), its anchor moves (the caret), or the viewport changes, and is derived
+ * from the unshifted position each time, so it never compounds. Horizontal only:
+ * see MentionMenu for why the vertical side is not measured.
+ */
+function useWithinViewport(ref: React.RefObject<HTMLElement | null>) {
+  useLayoutEffect(() => {
+    const element = ref.current;
+    if (!element) return undefined;
+    let shift = 0;
+    const place = () => {
+      const rect = element.getBoundingClientRect();
+      const viewport = window.visualViewport;
+      const minLeft = (viewport?.offsetLeft ?? 0) + MENU_EDGE_GAP;
+      const maxRight = (viewport ? viewport.offsetLeft + viewport.width : document.documentElement.clientWidth) - MENU_EDGE_GAP;
+      const left = rect.left - shift;
+      const right = rect.right - shift;
+      let next = right > maxRight ? maxRight - right : 0;
+      if (left + next < minLeft) next = minLeft - left;
+      if (Math.abs(next - shift) < 0.5) return;
+      shift = next;
+      element.style.translate = shift ? `${shift}px 0` : '';
+    };
+    place();
+    const resized = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(place);
+    resized?.observe(element);
+    // The anchor is the element Lexical moves to the caret on every keystroke.
+    const moved = element.parentElement && typeof MutationObserver !== 'undefined'
+      ? new MutationObserver(place)
+      : null;
+    if (moved && element.parentElement) moved.observe(element.parentElement, { attributes: true, attributeFilter: ['style'] });
+    window.addEventListener('resize', place);
+    window.visualViewport?.addEventListener('resize', place);
+    return () => {
+      resized?.disconnect();
+      moved?.disconnect();
+      window.removeEventListener('resize', place);
+      window.visualViewport?.removeEventListener('resize', place);
+    };
+  }, [ref]);
+}
+
 const MentionMenu = forwardRef<HTMLUListElement, BeautifulMentionsMenuProps>(
-  ({ loading: _loading, children, ...props }, ref) => (
+  ({ loading: _loading, children, ...props }, forwardedRef) => {
+    const ref = useRef<HTMLUListElement | null>(null);
+    useWithinViewport(ref);
+    return (
     // Always open ABOVE the caret as an out-of-flow overlay — the chat composer is
     // pinned to the viewport bottom. Pinning the BOTTOM edge to the anchor (caret)
     // means the list grows UPWARD as async results load, with no reposition or
@@ -794,14 +847,20 @@ const MentionMenu = forwardRef<HTMLUListElement, BeautifulMentionsMenuProps>(
     // timing). The plugin's own flip needs a 1–2 item list AND a tall multiline
     // composer to trigger, which our 5–8 item menus effectively never hit.
     <ul
-      ref={ref}
+      ref={(node) => {
+        ref.current = node;
+        if (typeof forwardedRef === 'function') forwardedRef(node);
+        else if (forwardedRef) forwardedRef.current = node;
+      }}
       data-mention-picker
-      className="absolute left-0 z-50 mb-4 !bottom-full !top-auto max-h-64 min-w-[15rem] list-none overflow-y-auto overflow-x-hidden rounded-md border border-border bg-panel p-1 text-text shadow-md"
+      // Never wider than the screen less its gaps, so the shift above can always fit it.
+      className="absolute left-0 z-50 mb-4 !bottom-full !top-auto max-h-64 min-w-[min(15rem,calc(100vw-1rem))] max-w-[calc(100vw-1rem)] list-none overflow-y-auto overflow-x-hidden rounded-md border border-border bg-panel p-1 text-text shadow-md"
       {...props}
     >
       {children}
     </ul>
-  ),
+    );
+  },
 );
 MentionMenu.displayName = 'MentionMenu';
 
