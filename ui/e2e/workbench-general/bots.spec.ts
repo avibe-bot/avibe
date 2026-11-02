@@ -446,6 +446,52 @@ test('with more Bots than fit, the strip scrolls and Add stays pinned at the rig
   expect(denied).toEqual([]);
 });
 
+// The card sits to the right of its avatar, over the rest of the strip, so a
+// scroll takes it away at once; avatars sliding under a still pointer open
+// nothing, and the next avatar the pointer moves onto opens its own card.
+test('scrolling the strip closes the hover card until the pointer moves onto an avatar', async ({ page }) => {
+  const { denied } = await serveBots(page, 'en', [MAIN, CSO, PM, ...EXTRA]);
+  await page.setViewportSize(DESKTOP);
+  await open(page, '/', { lang: 'en' });
+  const strip = sidebarOf(page).getByRole('region', { name: 'Bots' });
+  const scroller = strip.locator('[data-bot-handle]').first().locator('xpath=..');
+  const cards = page.getByRole('dialog');
+  const centre = async (handle: string) => {
+    const box = (await strip.locator(`[data-bot-handle="${handle}"] button`).boundingBox())!;
+    return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  };
+
+  for (const scroll of ['wheel', 'drag or touch'] as const) {
+    const start = await centre('cso');
+    await page.mouse.move(start.x, start.y, { steps: 3 });
+    await expect(cards.filter({ hasText: '@cso' })).toBeVisible();
+    if (scroll === 'wheel') await page.mouse.wheel(120, 0);
+    // Any other scroll reaches the strip as the same scroll event.
+    else await scroller.evaluate((node) => node.scrollBy({ left: 120 }));
+    await expect(cards).toHaveCount(0);
+    // Another avatar now sits under the still pointer: well past the open delay, no card.
+    await page.waitForTimeout(800);
+    await expect(cards).toHaveCount(0);
+    // Moving within that avatar is not moving onto one.
+    await page.mouse.move(start.x + 3, start.y + 1);
+    await page.waitForTimeout(500);
+    await expect(cards).toHaveCount(0);
+    // The next avatar the pointer moves onto opens its card.
+    const next = await scroller.evaluate((node, x) => {
+      const slot = [...node.querySelectorAll<HTMLElement>('[data-bot-handle]')]
+        .find((item) => item.getBoundingClientRect().left > x + 10);
+      return slot!.dataset.botHandle!;
+    }, start.x);
+    const target = await centre(next);
+    await page.mouse.move(target.x, target.y, { steps: 3 });
+    await expect(cards.filter({ hasText: `@${next}` })).toBeVisible();
+    await page.mouse.move(900, 600);
+    await expect(cards).toHaveCount(0);
+    await scroller.evaluate((node) => node.scrollTo({ left: 0 }));
+  }
+  expect(denied).toEqual([]);
+});
+
 test('only the Owner sees the Bots strip', async ({ page }) => {
   const { denied } = await serveBots(page, 'en', [MAIN, CSO]);
   await page.route('**/api/session', (route) => route.fulfill({ json: {
