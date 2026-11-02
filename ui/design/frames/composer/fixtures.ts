@@ -7,10 +7,19 @@ import { agentsApi, csoTranscript, team, teamFixtures } from '../../shell/teamFi
 
 const cso = team.find((each) => each.handle === 'cso')!;
 
-/** The placeholder that teaches the gesture, wherever a hold would record. */
-export const holdCopy = {
+/** The placeholder that teaches the gesture, wherever a hold would record. While a Bot works, its
+ *  conversation names it and says nothing about a queue: a message to a Bot always goes straight in
+ *  (owner, 2026-11-02), typed or spoken, and a hold still records. */
+const holdCopy = {
   'chat.compose.placeholder': { zh: '输入消息，或按住说话', en: 'Message, or hold to talk' },
 };
+const botCopy = {
+  ...holdCopy,
+  'chat.compose.placeholderBusy': { zh: '首席安全官正在处理…', en: 'Chief Security Officer is working…' },
+};
+
+/** A file staged in the composer with no text: a hold still records, and it goes with the message. */
+export const staged = 'avault-依赖扫描.png';
 
 // No Cloud token is minted in a frame: the composer only prewarms it.
 const speech = { '/api/asr/status': { available: true }, '/api/cloud/token': { ok: false } };
@@ -60,7 +69,7 @@ export function csoFixtures({
       [`/api/sessions/${cso.session_id}/bootstrap`]: { ...bootstrap, draft: { text: draft, updated_at: null } },
       ...speech,
     },
-    copy: copy ? holdCopy : undefined,
+    copy: copy ? botCopy : undefined,
   };
 }
 

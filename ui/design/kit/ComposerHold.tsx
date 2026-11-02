@@ -11,7 +11,7 @@
 //
 // Drawn over the shipped chat page: this layer covers the page above the composer and lays
 // its own surface exactly over the shipped composer (an invisible shipped Composer sizes it).
-import { CloudOff, Loader2, MessageSquare, Mic, MicOff, MousePointer2, PenLine, RotateCcw, Send, TextCursor, Trash2, X } from 'lucide-react';
+import { CloudOff, Loader2, MessageSquare, Mic, MicOff, MousePointer2, Paperclip, PenLine, RotateCcw, Send, TextCursor, Trash2, X } from 'lucide-react';
 import clsx from 'clsx';
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -66,6 +66,7 @@ export function ComposerHoldLayer({
   seconds = 0,
   long = false,
   progress = 0.6,
+  attachment,
 }: {
   device: HoldDevice;
   to: HoldTarget;
@@ -77,6 +78,8 @@ export function ComposerHoldLayer({
   long?: boolean;
   /** How far the desktop ring has filled while pressing, 0 to 1. */
   progress?: number;
+  /** A file staged in the composer: it goes with the spoken message, and the card says so. */
+  attachment?: string;
 }) {
   const target = useTarget(to);
   const live = phase === 'listening' || phase === 'recording' || phase === 'armed';
@@ -100,6 +103,7 @@ export function ComposerHoldLayer({
               actions={<InterruptedActions />}
             />
           )}
+          {attachment && showCard && <AttachmentLine name={attachment} />}
           {live && (device === 'phone' ? <VoiceCancelTarget armed={phase === 'armed'} /> : <DesktopHint armed={phase === 'armed'} />)}
           {note && <HoldNoteCard note={note} device={device} />}
         </div>
@@ -196,6 +200,20 @@ function PressRing({ progress }: { progress: number }) {
 /** The operating system's arrow, drawn so a still frame shows where the mouse is. Not product UI. */
 function SystemPointer({ className }: { className: string }) {
   return <MousePointer2 className={clsx('absolute size-5 fill-foreground stroke-background', className)} aria-hidden="true" />;
+}
+
+/** What else goes with the spoken message: the files staged in the composer. */
+function AttachmentLine({ name }: { name: string }) {
+  const draft = useDraft();
+  return (
+    <span className="flex max-w-full items-center gap-1.5 rounded-full border border-border-strong bg-surface px-3 py-1 text-xs text-muted shadow-md">
+      <Paperclip className="size-3.5 shrink-0" />
+      <span className="min-w-0 truncate">
+        {draft('附件会和语音一起发送：', 'Sent with the message: ')}
+        <span className="font-medium text-foreground">{name}</span>
+      </span>
+    </span>
+  );
 }
 
 /** The desktop counterpart of the touch cancel target: there is nothing to slide to. */
