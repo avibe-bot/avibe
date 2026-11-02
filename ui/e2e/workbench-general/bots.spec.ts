@@ -570,6 +570,76 @@ test('the default Agent is offered as a Bot nowhere, and both ways in say what t
   expect(denied).toEqual([]);
 });
 
+// Long copy never widens the add/edit dialog past its own width: an Agent's
+// description, a name, a role, or the main Bot's name is truncated or wrapped,
+// and every control stays inside the dialog (regression pass 5, 1365×900).
+test('long names, roles, and Agent descriptions keep the Bot dialog at its width', async ({ page }) => {
+  const longName = '负责依赖、权限、密钥轮换与供应链安全审计的首席安全与合规官员兼发布前最终把关人';
+  const longRole = 'Audits dependencies, permissions, secret rotation, and the supply chain before every release, and reports a weekly summary with the open risks, owners, and deadlines';
+  const longBot: FixtureBot = { handle: 'compliance', display_name: longName, avatar: null, role: longRole };
+  const mainLong: FixtureBot = { ...MAIN, display_name: 'VibeyTheFirstPointOfContactForEverythingThatHappensAroundHere' };
+  const { denied } = await serveBots(page, 'zh', [mainLong, CSO, PM, longBot]);
+  const longAgent = {
+    ...AGENTS[2],
+    id: 'agt-roster', name: 'e2e-roster-3117',
+    description: 'Temporary regression Agent for prompt-tier verification; no autonomous work, only explicit requests during a regression pass',
+  };
+  await page.route(
+    (url) => url.pathname === '/api/agents',
+    (route) => route.fulfill({ json: { ok: true, agents: [...AGENTS, longAgent], default_agent_name: 'vibey' } }),
+  );
+  await page.setViewportSize({ width: 1365, height: 900 });
+  await open(page, '/', { lang: 'zh', theme: 'light' });
+
+  const fits = async (name: string) => {
+    const dialog = page.getByRole('dialog', { name });
+    await expect(dialog).toBeVisible();
+    const box = await dialog.evaluate((element) => {
+      const edge = element.getBoundingClientRect();
+      const controls = [...element.querySelectorAll('button, input, textarea')]
+        .map((control) => control.getBoundingClientRect())
+        .filter((rect) => rect.width > 0);
+      // Text that runs out of its own box (no ellipsis, nothing scrolling it) overlaps its neighbours.
+      const spilled = [...element.querySelectorAll<HTMLElement>('*')]
+        .filter((node) => node.clientWidth > 0 && [...node.childNodes].some((child) => child.nodeType === Node.TEXT_NODE && child.textContent?.trim()))
+        .filter((node) => {
+          const style = getComputedStyle(node);
+          return style.textOverflow !== 'ellipsis' && style.overflowX === 'visible' && node.scrollWidth > node.clientWidth + 1;
+        })
+        .map((node) => node.textContent?.slice(0, 40));
+      return {
+        scrollWidth: element.scrollWidth,
+        clientWidth: element.clientWidth,
+        right: edge.right,
+        controlsRight: Math.max(...controls.map((rect) => rect.right)),
+        spilled,
+      };
+    });
+    expect(box.scrollWidth).toBeLessThanOrEqual(box.clientWidth);
+    expect(box.controlsRight).toBeLessThanOrEqual(box.right);
+    expect(box.spilled).toEqual([]);
+    return dialog;
+  };
+
+  await sidebarOf(page).getByRole('button', { name: '添加伙伴' }).click();
+  let dialog = await fits('添加伙伴');
+  await dialog.getByRole('textbox').first().fill(longName);
+  await dialog.getByRole('textbox').nth(1).fill(longRole);
+  await fits('添加伙伴');
+  await dialog.getByRole('radio', { name: '从已有 Agent 设为伙伴' }).click();
+  await expect(dialog.getByRole('radio', { name: /e2e-roster-3117/ })).toBeVisible();
+  dialog = await fits('添加伙伴');
+  await dialog.getByRole('radio', { name: /e2e-roster-3117/ }).click();
+  await expect(dialog.getByRole('button', { name: '设为伙伴' })).toBeEnabled();
+  await fits('添加伙伴');
+  await page.keyboard.press('Escape');
+
+  await page.locator('[data-bot-handle="compliance"] button').first().click({ button: 'right' });
+  await page.getByRole('menuitem', { name: '编辑资料' }).click();
+  await fits('编辑资料');
+  expect(denied).toEqual([]);
+});
+
 // The browser half of the server's Bot-removal contract (docs/plans/bots.md D1):
 // once a Bot is removed its Session is hidden, so every open tab drops it from
 // the Inbox and badges the server's number, without a reload. The fixture is the
