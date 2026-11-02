@@ -1309,7 +1309,7 @@ export const AgentsPage: React.FC = () => {
   // Bots and Agents are two concepts (docs/plans/bots.md D1): a Bot's Agent is
   // never listed as an Agent. The live Bot list decides once it has answered, so a
   // Bot added or removed since the Agent rows were read moves its Agent at once.
-  const botAgents = liveBotAgentNames({ bots: liveBots, listed: botsListed });
+  const botAgents = useMemo(() => liveBotAgentNames({ bots: liveBots, listed: botsListed }), [liveBots, botsListed]);
   const listedAgents = useMemo(
     () => agents.filter((agent) => (botAgents ? !botAgents.has(agent.name) : !agent.bot)),
     [agents, botAgents],
@@ -1690,14 +1690,15 @@ interface DetailProps {
   onClose: () => void;
 }
 
-// ui/design: agents/agents-page/definitions. Header (name + close X) → Enable card →
-// Name → Backend (read-only) → Model (Combobox) → Reasoning effort →
-// System Prompt (collapsible) → footer Run / Delete. Name is editable
-// for user agents. The backend renames the row and its references atomically;
-// system agents keep their locked identity. Without `canEdit` the panel degrades
-// to a read-only view of the same fields; Run follows `canRun` instead, so a
-// read-only definition can still be launched by whoever may use it.
-const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, canRun, onChange, onSetDefault, onRename, onDelete, onClose }) => {
+// The selected Bot's or Agent's panel (ui/design: agents/bots-redesign/bot,
+// agents/bots-redesign/agent, agents/bots-redesign/default-agent). A Bot shows its
+// face, name, and role, the way into its conversation, and Remove; an Agent shows
+// its name as the title (renamed in place: the backend renames the row and its
+// references atomically), its backend, an "On" switch where it can be turned off,
+// and its description. Both then edit the model, effort, and system prompt. Only
+// what applies is drawn; a field the reader cannot change reads as text, and Run
+// follows `canRun`, so a read-only definition can still be launched by whoever may use it.
+export const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, canRun, onChange, onSetDefault, onRename, onDelete, onClose }) => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
@@ -2170,7 +2171,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
                         if (e.key === 'Escape') cancelFieldEdit('name', serverSnapshotRef.current.name);
                       }}
                       disabled={renaming}
-                      className="min-w-0 max-w-full rounded-md bg-transparent text-lg font-bold text-foreground outline-none transition hover:bg-surface-2 focus:bg-surface-2 focus:ring-2 focus:ring-ring"
+                      className="field-sizing-content min-w-0 max-w-full rounded-md bg-transparent text-lg font-bold text-foreground outline-none transition hover:bg-surface-2 focus:bg-surface-2 focus:ring-2 focus:ring-ring"
                     />
                     <Pencil className="size-3 shrink-0 text-muted" aria-hidden="true" />
                   </>
