@@ -93,7 +93,7 @@ export const VaultProvisionDialogProvider: React.FC<{
 };
 
 /**
- * One pending vault request rendered as an inline chat card (design: Form A). Provision opens
+ * One pending vault request rendered as an inline chat card (ui/design: vault/chat-requests/cards). Provision opens
  * the shared {@link VaultSecretDialog}; access / sign open the shared {@link VaultApprovalDialog}
  * — the same dialogs the Vaults page uses. `onResolved` lets the container refresh its list.
  */

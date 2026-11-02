@@ -1,5 +1,8 @@
 # Vaults UI — Design Alignment (restore design.pen)
 
+> **Design source of truth**: the design frames in `ui/design/frames/vault/` (`vault/*`). The Pencil
+> frames below were the design this alignment was checked against; that file is retired.
+
 ## Why
 
 The shipped Vaults UI drifted from the `design.pen` frames (the visual source of

@@ -12,7 +12,7 @@ import { VaultRequestCard } from './vault-request-card';
 
 /**
  * In-scroll list of the pending request cards that belong at the end of the chat transcript
- * (design: Form A): approvals, plus provision forms still waiting for their turn's reply. The
+ * (ui/design: vault/chat-requests/cards): approvals, plus provision forms still waiting for their turn's reply. The
  * caller decides which requests belong here. Each APPROVAL card is observed individually so the
  * floating bar reflects exactly which approvals have scrolled off-viewport; a provision form
  * never enters that bar.
@@ -80,7 +80,7 @@ export const VaultChatRequests: React.FC<{
 };
 
 /**
- * Floating approval bar (design: Form B). The bar shows above the composer for approval (access /
+ * Floating approval bar (ui/design: vault/chat-requests/cards). The bar shows above the composer for approval (access /
  * sign) requests whose in-scroll card has scrolled off-viewport, so a waiting approval is never
  * missed; clicking opens the oldest off-screen one in the shared approval dialog.
  *

@@ -60,7 +60,7 @@ plain `DialogHeader` title), so they read as two different things.
 ### Dialog unification
 
 Two shared components under `ui/src/components/ui/`, one consistent header style (icon tile +
-title + subtitle, design.pen `F4N19`/`vyed5`):
+title + subtitle, ui/design: `vault/secret-dialog/*`):
 
 1. **`VaultSecretDialog`** — Dialog wrapping `VaultSecretForm` (create *and* provide modes).
    Callers: Vaults "Add", Vaults pending-provision (`PendingRequestsSection`), the `$<NAME>`
