@@ -268,7 +268,6 @@ export const AgentsPage: React.FC = () => {
   const api = useApi();
   const { showToast } = useToast();
   const {
-    afterWrite: afterBotWrite,
     enabled: botsEnabled,
     bots: liveBots,
     listed: botsListed,
@@ -1350,14 +1349,10 @@ export const AgentsPage: React.FC = () => {
   const updateField = async (patch: VibeAgentUpdatePayload): Promise<void> => {
     if (!selected) return;
     const name = selected.name;
-    const isBot = Boolean(selected.bot);
     const operation = beginSelectedMutation(name);
     let mutationSettled = false;
     try {
       const result = await api.updateVibeAgent(name, patch);
-      // A Bot's role is its Agent's description (docs/plans/bots.md D1): the strip,
-      // its card, and Edit profile show what was saved once the Bots are read again.
-      if (result.ok && isBot && 'description' in patch) void afterBotWrite();
       const settled = await settleSelectedMutation(operation, result.ok ? undefined : result);
       mutationSettled = true;
       if (!settled.ok) throw settled.error;

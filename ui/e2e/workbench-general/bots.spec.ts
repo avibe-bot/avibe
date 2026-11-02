@@ -169,9 +169,15 @@ for (const theme of ['light', 'dark'] as const) {
     const menu = page.getByRole('menu');
     await expect(menu.getByRole('menuitem', { name: '编辑资料' })).toBeVisible();
     await expect(menu.getByRole('menuitem', { name: '移出伙伴' })).toBeVisible();
-    await expect(menu).toContainText('对话和记忆都会保留');
     await page.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-menu-${theme}.png`, clip: { x: 0, y: 0, width: 620, height: 460 } });
-    await page.keyboard.press('Escape');
+    // Removing asks first and says what stays (ui/design: agents/bots-redesign/remove-bot).
+    await menu.getByRole('menuitem', { name: '移出伙伴' }).click();
+    const confirm = page.getByRole('dialog', { name: '把首席安全官移出伙伴？' });
+    await expect(confirm).toContainText('对话和记忆都会保留');
+    await page.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-remove-confirm-${theme}.png` });
+    await confirm.getByRole('button', { name: '取消' }).click();
+    await expect(confirm).toHaveCount(0);
+    await expect(strip.getByRole('button', { name: '首席安全官，2 条未读' })).toBeVisible();
 
     // The main Bot has no remove.
     await slots.first().getByRole('button').click({ button: 'right' });
@@ -726,7 +732,7 @@ test('dragging a Bot along the strip moves it, and the main Bot stays first', as
 });
 
 for (const theme of ['light', 'dark'] as const) {
-  test(`the Agents page marks Bots and offers "Set as Bot" on eligible Vibey Agents (${theme})`, async ({ page }) => {
+  test(`the Agents page shows Bots as Bots, and offers "Set as Bot" on eligible Vibey Agents (${theme})`, async ({ page }) => {
     const { denied } = await serveBots(page, 'en', [MAIN, CSO, PM]);
     for (const agent of AGENTS) {
       await page.route(`**/api/agents/${agent.name}`, (route) => route.fulfill({ json: {
@@ -736,38 +742,33 @@ for (const theme of ['light', 'dark'] as const) {
     }
     await page.setViewportSize(DESKTOP);
     await open(page, '/agents', { lang: 'en', theme });
-    const row = page.getByRole('button', { name: /^cso/ });
-    await expect(row.getByText('Bot', { exact: true })).toBeVisible();
+    const content = page.getByRole('main');
+    const panel = content.locator('aside');
+    // Bots come first, by name; a Bot's Agent is never listed as an Agent, the main Bot's included.
+    const bot = content.getByRole('button', { name: /^首席安全官/ });
+    await expect(bot).toBeVisible();
+    await expect(content.getByRole('button', { name: /^Product Lead/ })).toBeVisible();
+    await expect(content.getByRole('button', { name: /^reviewer/ })).toBeVisible();
+    await expect(content.getByRole('button', { name: /^cso/ })).toHaveCount(0);
+    await expect(content.getByRole('button', { name: /^main/ })).toHaveCount(0);
     // The built-in worker is never offered as a Bot (D9).
-    await page.getByRole('button', { name: /^vibey/ }).click();
-    await expect(page.getByText('Vibe Agent · Vibey backend')).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Set as Bot' })).toHaveCount(0);
-    await row.click();
-    const detail = page.getByText('This Agent is the Bot 首席安全官');
-    await expect(detail).toBeVisible();
-    // While it is a Bot it keeps its name and stays enabled; no delete is offered.
-    await expect(page.locator('input[value="cso"]')).toBeDisabled();
-    await expect(page.getByRole('switch')).toBeDisabled();
-    await expect(page.getByRole('button', { name: 'Delete' })).toHaveCount(0);
+    await content.getByRole('button', { name: /^vibey/ }).click();
+    await expect(panel.getByText('Default', { exact: true })).toBeVisible();
+    await expect(panel.getByRole('button', { name: 'Set as Bot' })).toHaveCount(0);
+
+    // A Bot opens as itself: its conversation and removal, none of an Agent's controls.
+    await bot.click();
+    await expect(panel.getByRole('button', { name: 'Open conversation' })).toBeVisible();
+    await expect(panel.getByRole('button', { name: 'Edit profile' })).toBeVisible();
+    await expect(panel.getByText('@cso')).toBeVisible();
+    await expect(panel.getByRole('switch')).toHaveCount(0);
+    await expect(panel.getByRole('button', { name: 'Delete' })).toHaveCount(0);
+    await expect(panel.getByRole('button', { name: 'Run' })).toHaveCount(0);
+    await expect(panel.locator('input[value="cso"]')).toHaveCount(0);
     await page.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-agents-bot-${theme}.png` });
 
-    // A Bot's role is its Agent's description: saving it reads the Bots again.
-    if (theme === 'light') {
-      let botReads = 0;
-      page.on('request', (request) => {
-        if (request.method() === 'GET' && new URL(request.url()).pathname === '/api/bots') botReads += 1;
-      });
-      await page.route('**/api/agents/cso', (route) => (route.request().method() === 'PATCH'
-        ? route.fulfill({ json: { ok: true, agent: { ...AGENTS[3], description: 'Weekly audits', display_name: 'cso', archived_at: null, updated_at: ago(1), system_prompt: null, metadata: {}, created_at: ago(600) } } })
-        : route.fallback()));
-      const description = page.locator('textarea').first();
-      await description.fill('Weekly audits');
-      await description.blur();
-      await expect.poll(() => botReads).toBeGreaterThan(0);
-    }
-
-    await page.getByRole('button', { name: /^security-auditor/ }).click();
-    const set = page.getByRole('button', { name: 'Set as Bot' });
+    await content.getByRole('button', { name: /^security-auditor/ }).click();
+    const set = panel.getByRole('button', { name: 'Set as Bot' });
     await expect(set).toBeEnabled();
     await page.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-agents-set-${theme}.png` });
     await set.click();
@@ -778,7 +779,7 @@ for (const theme of ['light', 'dark'] as const) {
   });
 }
 
-test('the default Agent is offered as a Bot nowhere, and both ways in say what to do first', async ({ page }) => {
+test('the default Agent is offered as a Bot nowhere, and the add dialog says what to do first', async ({ page }) => {
   const { denied } = await serveBots(page, 'en', [MAIN, CSO, PM]);
   // The user made their own Agent the default; the server refuses it as a Bot
   // (`bot_agent_default`) until another Agent is the default.
@@ -795,9 +796,10 @@ test('the default Agent is offered as a Bot nowhere, and both ways in say what t
   const reason = 'It is the default Agent. Make another Agent the default first, then set it as a Bot.';
 
   await open(page, '/agents', { lang: 'en', theme: 'light' });
-  await page.getByRole('button', { name: /^security-auditor/ }).click();
-  await expect(page.getByText(reason)).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Set as Bot' })).toBeDisabled();
+  await page.getByRole('main').getByRole('button', { name: /^security-auditor/ }).click();
+  // The Agents page draws only what applies: the default Agent has no "Set as Bot".
+  await expect(page.getByRole('main').locator('aside').getByText('Default', { exact: true })).toBeVisible();
+  await expect(page.getByRole('main').getByRole('button', { name: 'Set as Bot' })).toHaveCount(0);
 
   await sidebarOf(page).getByRole('button', { name: 'Add a Bot' }).click();
   const dialog = page.getByRole('dialog', { name: 'Add a Bot' });
@@ -962,6 +964,7 @@ test('two open tabs follow a Bot removal and a switch change to the server\'s ba
 
   await sidebarOf(a).getByRole('button', { name: '首席安全官，2 条未读' }).click({ button: 'right' });
   await a.getByRole('menu').getByRole('menuitem', { name: '移出伙伴' }).click();
+  await a.getByRole('dialog', { name: '把首席安全官移出伙伴？' }).getByRole('button', { name: '移出伙伴' }).click();
   // Its Session is gone, not moved to Sessions: only the muted Session's 3 remains.
   await expect.poll(() => badgeTotal()).toBe(0);
   for (const tab of tabs) {
