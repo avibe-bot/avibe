@@ -306,6 +306,51 @@ def test_push_gating_records_muted_and_badge_total_excludes_quiet_category(
     engine.dispose()
 
 
+def test_push_skips_a_removed_bots_session_and_records_hidden(monkeypatch, isolated_state):
+    """A push for a Session the owner's Inbox hides would open a conversation they cannot see (D1)."""
+    from core.bots import BotService
+    from core import web_push_notifications
+    from storage import web_push_service
+    from storage.db import create_sqlite_engine
+
+    with BotService() as service:
+        service.ensure_main_bot()
+        bot = service.create_bot(display_name="Researcher")
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        before = _seed_result(conn, scope_id=None, session_id=bot.session_id, text="Before removal")
+        web_push_service.upsert_subscription(
+            conn,
+            user_key="local",
+            payload={
+                "endpoint": "https://push.example.test/hidden-bot",
+                "keys": {"p256dh": "p256dh", "auth": "auth"},
+            },
+        )
+    sent: list[dict] = []
+    monkeypatch.setattr(web_push_notifications.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr("core.web_push.send_web_push", lambda *, subscription, payload: sent.append(payload))
+
+    def push(message: dict) -> dict:
+        web_push_notifications._send_to_enabled_subscriptions(
+            {"title": "Researcher", "body": message["text"], "session_id": bot.session_id, "message_id": message["id"]}
+        )
+        return web_push_notifications.recent_delivery_dispositions(user_key="local")[0]["owners"]["local"]
+
+    # Every switch is on: while it is a Bot, its reply is pushed.
+    assert push(before)["disposition"] == web_push_notifications.WEB_PUSH_DISPOSITION_SENT
+    assert len(sent) == 1
+
+    with BotService() as service:
+        service.remove_bot(bot.handle)
+    with engine.begin() as conn:
+        # An explicit run can still land a reply in the kept Session.
+        after = _seed_result(conn, scope_id=None, session_id=bot.session_id, text="After removal")
+    assert push(after)["disposition"] == web_push_notifications.WEB_PUSH_DISPOSITION_HIDDEN
+    assert len(sent) == 1
+    engine.dispose()
+
+
 def test_service_worker_badge_prefers_badge_total_and_falls_back_to_unread_total():
     worker = (Path(__file__).resolve().parents[1] / "ui" / "public" / "push-sw.js").read_text()
     assert "payload?.badge_total ?? payload?.unread_total" in worker

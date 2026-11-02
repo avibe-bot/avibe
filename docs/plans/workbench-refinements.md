@@ -188,7 +188,10 @@ it is still delivered, listed, and unread.
 - Web Push: `_send_to_enabled_subscriptions` drops, after authorization and the
   Project policy, the owners for whom the message is quiet, recording a new
   `muted` disposition in the diagnostics ring; `_badge_count_for_user_key`
-  returns `badge_total`.
+  returns `badge_total`. Before that, it drops the owners whose Inbox hides the
+  Session (`hidden_bot_session_ids`: a removed Bot's for the Owner, every Bot's
+  for anyone else), recording `hidden`: a push must not open a conversation the
+  owner cannot see.
 - Service worker: the badge refresh reads `badge_total`, falling back to
   `unread_total` for an older server.
 - Desktop runtime-host: the Dock badge reads `badge_total` (falling back to
