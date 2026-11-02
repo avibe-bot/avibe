@@ -3,10 +3,10 @@
 // state, so these frames draw the tab's body in the Settings pane.
 import { readyRegion, unreadRegion } from '@/components/settings/models/regionRead';
 import { ToolsTab } from '@/components/settings/models/ToolsTab';
-import type { HostedToolsStatus, Source } from '@/components/settings/models/types';
+import type { HostedRefusal, HostedToolStatus, HostedToolsStatus, Source } from '@/components/settings/models/types';
 
 import { frames } from '../../frame';
-import { baseApi, demoSources, hostedTools, settingsPaneClass, tavily } from './fixtures';
+import { at, baseApi, demoSources, hostedTools, relayGpt, settingsPaneClass, tavily } from './fixtures';
 
 const noPending = new Set<never>();
 
@@ -26,6 +26,13 @@ const tools = (read: ReturnType<typeof readyRegion<HostedToolsStatus>>, sources:
     />
   </div>
 );
+
+/** The image-generation card alone, as the tab draws it when the gateway offers no image model. */
+const imageOnly = (image: Partial<Extract<HostedToolStatus, { name: 'image_generate' }>>): HostedToolsStatus => {
+  const tool = hostedTools().tools.find((t) => t.name === 'image_generate')!;
+  return { tools: [{ ...tool, default_model: null, effective_default: null, models: [], ...image } as HostedToolStatus] };
+};
+const refusedImage: HostedRefusal = { source_id: relayGpt.id, model_id: 'gpt-image-2', aspect: 'call', at: at(-90), reason: 'http_400 unsupported_model' };
 
 const revokedTavily: Source = { ...tavily, state: { status: 'needs_action', retry_at: null, detail_key: 'models.source.needs_action.credential_revoked' } };
 
@@ -56,6 +63,33 @@ const designFrames = frames([
     status: 'shipped',
     fixtures: { api: baseApi },
     render: tools(readyRegion(hostedTools({ tavilyRevoked: true })), demoSources.map((s) => (s.id === tavily.id ? revokedTavily : s))),
+  },
+  {
+    name: 'image-refused',
+    title: '工具 · 图片生成 · 唯一的图片模型被拒绝',
+    width: 1280,
+    height: 320,
+    status: 'shipped',
+    fixtures: { api: baseApi },
+    render: tools(readyRegion(imageOnly({ image_offered_by: ['openai'], status: { latest_ok: null, verified: [], refused: [refusedImage] } }))),
+  },
+  {
+    name: 'image-no-provider',
+    title: '工具 · 图片生成 · 还没有能生成图片的供应商',
+    width: 1280,
+    height: 280,
+    status: 'shipped',
+    fixtures: { api: baseApi },
+    render: tools(readyRegion(imageOnly({ image_offered_by: ['openai', 'gemini'], status: { latest_ok: null, verified: [], refused: [] } }))),
+  },
+  {
+    name: 'image-one-vendor',
+    title: '工具 · 图片生成 · 只差一家的 API Key',
+    width: 1280,
+    height: 280,
+    status: 'shipped',
+    fixtures: { api: baseApi },
+    render: tools(readyRegion(imageOnly({ image_offered_by: ['openai'], status: { latest_ok: null, verified: [], refused: [] } }))),
   },
   {
     name: 'read-failed',
