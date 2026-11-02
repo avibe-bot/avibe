@@ -133,7 +133,7 @@ function avaultP2Ready(dep: DependencyItem | null): boolean {
   return dep?.status === 'ready' && versionAtLeast(dep.version, AVAULT_P2_MIN_VERSION);
 }
 
-/** Shared field label — 13px medium, matches design.pen create-dialog field labels. */
+/** Shared field label — 13px medium (ui/design: vault/secret-dialog/create). */
 const FIELD_LABEL = 'text-[13px] font-medium text-foreground';
 
 /** The sandbox-sealed protected keypair the form holds between "Generate key" and submit. */
@@ -1053,7 +1053,7 @@ export const VaultSecretForm: React.FC<{
     </div>
   );
 
-  // Protection selector — two cards (Standard / Protected) matching design.pen `vyed5`.
+  // Protection selector — two cards (Standard / Protected); ui/design: vault/secret-dialog/create.
   const protectionCards = (
     <div className="flex flex-col gap-1.5">
       <span className={FIELD_LABEL}>{t('vaults.dialog.protection')}</span>
@@ -1240,14 +1240,14 @@ export const VaultSecretForm: React.FC<{
     );
   }
 
-  // ---- Provision ($NAME) mode — design.pen `F4N19` (SecureInputCard) ------------------
+  // ---- Provision ($NAME) mode — ui/design: vault/secret-dialog/provide ---------------
   // A provision fulfils a specific value the agent asked for, so kind stays fixed to static.
   // The metadata below (protection tier, tags, Advanced proxy policy) uses the SAME field
   // components and layout as create mode, so the two dialogs read and behave identically.
   if (isProvision) {
     return (
       <form className={cn('flex min-w-0 flex-col gap-4', className)} onSubmit={onSubmit}>
-        {/* Name highlight — the secret the agent is waiting on (design.pen `F4N19`). */}
+        {/* Name highlight — the secret the agent is waiting on. */}
         <div className="flex items-center gap-3 rounded-xl bg-accent/15 p-3.5">
           <Asterisk className="size-[18px] shrink-0 text-accent-ink" />
           <div className="flex min-w-0 flex-1 flex-col gap-0.5">
@@ -1302,7 +1302,7 @@ export const VaultSecretForm: React.FC<{
     );
   }
 
-  // ---- Create mode — design.pen `vyed5` ----------------------------------------------
+  // ---- Create mode — ui/design: vault/secret-dialog/create ----------------------------
   return (
     <form className={cn('flex min-w-0 flex-col gap-4', className)} onSubmit={onSubmit}>
       {/* Kind — 2-segment toggle (Static value | Signing key). */}

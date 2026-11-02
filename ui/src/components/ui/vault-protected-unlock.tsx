@@ -30,8 +30,8 @@ function friendlyError(t: TFunction, raw: string): string {
 const PANEL = 'flex flex-col gap-4 rounded-2xl border border-border bg-surface px-6 pb-5 pt-6';
 
 /**
- * Protected-tier setup / unlock panel — design.pen frames `kAmWj` (setup) and `g5Q7F`
- * (unlock). The panel is form-free: it often lives inside the create dialog's own `<form>`,
+ * Protected-tier setup / unlock panel (ui/design: vault/protected-unlock/setup and
+ * vault/protected-unlock/unlock). The panel is form-free: it often lives inside the create dialog's own `<form>`,
  * so a nested `<form>` here would be invalid HTML and (in practice) trigger a full-page reload.
  * Every action is a button `onClick`. The unlocked VMK is cached for the session by
  * {@link useProtectedVault}.
@@ -111,7 +111,7 @@ export const VaultProtectedUnlock: React.FC<{
     </div>
   );
 
-  // ---- Setup (needs-setup): design.pen `kAmWj` ---------------------------------------
+  // ---- Setup (needs-setup): ui/design: vault/protected-unlock/setup -------------------
   if (vault.status === 'needs-setup') {
     return (
       <div className={PANEL}>
@@ -174,7 +174,7 @@ export const VaultProtectedUnlock: React.FC<{
     );
   }
 
-  // ---- Unlock (locked): design.pen `g5Q7F` -------------------------------------------
+  // ---- Unlock (locked): ui/design: vault/protected-unlock/unlock ----------------------
   const showUnlockPasskey = !inBrowser && vault.hasPasskey() && canUsePasskey && vault.passkeyUsableHere();
   return (
     <div className={PANEL}>

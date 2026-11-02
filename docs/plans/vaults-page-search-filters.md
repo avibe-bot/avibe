@@ -78,6 +78,6 @@ lint; CI owns the broad suite. Never restart or probe the live local runtime.
   they hide its target, preserves sort, then resumes the existing row menu.
   This exception was approved by the orchestrator; it adds no new UI.
 - Public EN/ZH documentation is coordinated by the orchestrator in avibe-docs.
-- No bulk actions or design.pen edits. Hub frame `y4rw5Q` needs Pencil follow-up.
+- No bulk actions. The page's design frames are `vault/page/*` in `ui/design/`.
 - Mobile width was checked in hermetic Chromium; a real-device / local Incus
   manual acceptance check remains, including touch and the integrated shell.

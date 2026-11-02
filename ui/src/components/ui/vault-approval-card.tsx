@@ -124,7 +124,7 @@ type BindingsKey = { requestId: string; duration: VaultGrantDuration };
 const PREPARED_BINDINGS = { maxAgeMs: 20_000, refreshMs: 15_000, latestOnly: true };
 const bindingsIssued = (reply: VaultAgentBindingsBatchResult) => reply.ok;
 
-// design.pen `SKBld` / `pRtHq`: a borderless detail list (no inner card) with sentence-case
+// ui/design: vault/approval/access, vault/approval/sign: a borderless detail list (no inner card) with sentence-case
 // muted row labels at a fixed width and the value flowing to fill.
 const ROW = 'flex items-start gap-2.5 text-sm';
 const ROW_LABEL = 'w-[74px] shrink-0 pt-0.5 text-[12px] text-muted';
@@ -138,7 +138,7 @@ const DetailRow: React.FC<{ label: string; children: React.ReactNode }> = ({ lab
 
 /**
  * Full approval surface for a single pending vault request (access or sign), rendering
- * the daemon's approval card (design.pen frames ① / ②). Standard and protected tiers are
+ * the daemon's approval card (ui/design: vault/approval/*). Standard and protected tiers are
  * both handled here, upholding the cardinal invariant: protected secrets are unlocked,
  * signed, or DEK-released entirely in the browser, and only public material (a signature
  * or an avault-bound DEK blind box) is ever submitted to the daemon.
@@ -472,7 +472,7 @@ export const VaultApprovalCard: React.FC<{
 
   return (
     <div className="flex min-w-0 flex-col gap-4">
-      {/* Header — design.pen `SKBld` (access, gold lock) / `pRtHq` (sign, violet pen). */}
+      {/* Header — gold lock for access, violet pen for sign (ui/design: vault/approval/access, vault/approval/sign). */}
       <div className="flex items-start gap-3">
         <div
           className={cn(

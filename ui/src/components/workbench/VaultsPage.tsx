@@ -297,7 +297,7 @@ function earliestRequestExpiry(requests: VaultRequest[]): number | null {
   return earliest;
 }
 
-/** Compact mm:ss / h:mm:ss countdown for a grant chip (design.pen `y4rw5Q` shows `12:34`). */
+/** Compact mm:ss / h:mm:ss countdown for a grant chip (ui/design: vault/page/default shows `12:34`). */
 function chipCountdown(rem: { h: number; m: number; s: number }): string {
   const pad = (n: number) => n.toString().padStart(2, '0');
   return rem.h > 0 ? `${rem.h}:${pad(rem.m)}:${pad(rem.s)}` : `${pad(rem.m)}:${pad(rem.s)}`;
@@ -330,7 +330,7 @@ function describeGrant(g: VaultGrant, t: TFunction): { Icon: typeof KeyRound; la
 }
 
 /**
- * Active-grant chip (design.pen `y4rw5Q` ACTIVE GRANTS row): a compact mint pill describing
+ * Active-grant chip (ui/design: vault/page/default, the active grants row): a compact mint pill describing
  * how the protected set was selected (explicit secrets, a tag, or a skill), a live countdown,
  * and an inline × to revoke. A grant is a fixed protected set keyed by grant_id — the chip
  * summarizes its `source_selector`, never a group.

@@ -8,8 +8,8 @@ import { ConfirmDialog } from './confirm-dialog';
 import { VaultSecretForm } from './vault-secret-form';
 
 /**
- * The single add/provide-secret dialog: a consistent branded header (design.pen
- * `F4N19`/`vyed5`) over {@link VaultSecretForm}. Reused by every entry point — the
+ * The single add/provide-secret dialog: a consistent branded header (ui/design:
+ * vault/secret-dialog/*) over {@link VaultSecretForm}. Reused by every entry point — the
  * Vaults "Add" button, a Vaults pending-provision row, the `$<NAME>` chat card, and
  * the chat provision card — so they are visually and behaviorally identical.
  *
