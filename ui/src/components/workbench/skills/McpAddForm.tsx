@@ -14,8 +14,15 @@ export function McpAddForm({ value, onChange }: { value: McpAddFormState; onChan
   const target = parseMcpTarget(value.target);
   const isHttp = target.kind === 'http';
   const rowsLabel = isHttp ? t('mcpHub.form.headers') : t('mcpHub.form.env');
+  // Env and header rows stay separate so flipping the input never turns stdio secrets into remote headers.
+  const rowsKey = isHttp ? 'headerRows' : 'envRows';
+  const rows = value[rowsKey];
+  const setRows = (next: McpKeyValueRow[]) => onChange({ ...value, [rowsKey]: next });
   const setRow = (index: number, patch: Partial<McpKeyValueRow>) =>
-    onChange({ ...value, rows: value.rows.map((row, i) => (i === index ? { ...row, ...patch } : row)) });
+    setRows(rows.map((row, i) => (i === index ? { ...row, ...patch } : row)));
+  // null follows the content: collapsed when empty, expanded once rows exist.
+  const [rowsToggled, setRowsToggled] = useState<boolean | null>(null);
+  const rowsOpen = rowsToggled ?? rows.length > 0;
 
   return (
     <div className="flex flex-col gap-3">
@@ -42,18 +49,23 @@ export function McpAddForm({ value, onChange }: { value: McpAddFormState; onChan
       </label>
       <div className="flex flex-col gap-1.5">
         <div className="flex items-center justify-between text-[12px] text-foreground">
-          <span>{rowsLabel}</span>
-          <Button
+          <button
             type="button"
-            variant="outline"
-            size="xs"
-            onClick={() => onChange({ ...value, rows: [...value.rows, { key: '', value: '' }] })}
+            className="flex items-center gap-1 text-[12px] text-foreground"
+            aria-expanded={rowsOpen}
+            onClick={() => setRowsToggled(!rowsOpen)}
           >
-            <Plus className="size-3" />
-            {t('mcpHub.form.addRow')}
-          </Button>
+            {rowsOpen ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+            {t('mcpHub.form.rowsToggle', { label: rowsLabel, count: rows.length })}
+          </button>
+          {rowsOpen ? (
+            <Button type="button" variant="outline" size="xs" onClick={() => setRows([...rows, { key: '', value: '' }])}>
+              <Plus className="size-3" />
+              {t('mcpHub.form.addRow')}
+            </Button>
+          ) : null}
         </div>
-        {value.rows.map((row, index) => (
+        {rowsOpen && rows.map((row, index) => (
           <div key={index} className="flex items-center gap-1.5">
             <Input
               aria-label={t('mcpHub.form.key', { label: rowsLabel })}
@@ -73,7 +85,7 @@ export function McpAddForm({ value, onChange }: { value: McpAddFormState; onChan
               variant="ghost"
               size="xs"
               aria-label={t('mcpHub.form.removeRow')}
-              onClick={() => onChange({ ...value, rows: value.rows.filter((_, i) => i !== index) })}
+              onClick={() => setRows(rows.filter((_, i) => i !== index))}
             >
               <X className="size-3" />
             </Button>

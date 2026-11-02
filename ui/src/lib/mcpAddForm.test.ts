@@ -14,6 +14,7 @@ describe('parseMcpTarget', () => {
     ['cd /tmp && tool', { kind: 'error', issue: 'shellOperator' }],
     ['tool "a | b"', { kind: 'stdio', command: 'tool', args: ['a | b'] }],
     ['C:\\tools\\server.exe --port 1', { kind: 'error', issue: 'windowsPath' }],
+    ["node 'relative\\server.js'", { kind: 'error', issue: 'windowsPath' }],
     ['https://example.com/mcp', { kind: 'http', url: 'https://example.com/mcp' }],
     ['https://exa mple.com/mcp', { kind: 'error', issue: 'invalidUrl' }],
     ['http://', { kind: 'error', issue: 'invalidUrl' }],
@@ -25,9 +26,9 @@ describe('parseMcpTarget', () => {
 });
 
 describe('buildMcpFormJson', () => {
-  it('drops blank keys and omits empty optional sections', () => {
+  it('sends only the detected kind rows, drops blank keys and omits empty sections', () => {
     expect(JSON.parse(buildMcpFormJson({
-      name: ' docs ', target: { kind: 'http', url: 'https://example.com/mcp' }, rows: [{ key: ' ', value: 'x' }], cwd: '/ignored',
+      name: ' docs ', target: { kind: 'http', url: 'https://example.com/mcp' }, headerRows: [{ key: ' ', value: 'x' }], envRows: [{ key: 'SECRET', value: 's' }], cwd: '/ignored',
     }))).toEqual({ mcpServers: { docs: { type: 'http', url: 'https://example.com/mcp' } } });
   });
 });

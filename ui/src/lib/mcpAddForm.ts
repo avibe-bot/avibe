@@ -19,11 +19,12 @@ export type McpKeyValueRow = { key: string; value: string };
 export type McpAddFormState = {
   name: string;
   target: string;
-  rows: McpKeyValueRow[];
+  envRows: McpKeyValueRow[];
+  headerRows: McpKeyValueRow[];
   cwd: string;
 };
 
-export const EMPTY_MCP_ADD_FORM: McpAddFormState = { name: '', target: '', rows: [], cwd: '' };
+export const EMPTY_MCP_ADD_FORM: McpAddFormState = { name: '', target: '', envRows: [], headerRows: [], cwd: '' };
 
 const OPERATORS = ['&&', '||', '$(', '|', ';', '>', '<', '`'];
 const WINDOWS_PATH = /^[A-Za-z]:[\\/]/;
@@ -48,7 +49,10 @@ export function parseMcpTarget(input: string): McpTarget {
     const ch = text[i];
     if (quote === "'") {
       if (ch === "'") quote = null;
-      else current += ch;
+      else {
+        if (ch === '\\') windowsPath = true;
+        current += ch;
+      }
       continue;
     }
     if (quote === '"') {
@@ -91,13 +95,10 @@ export function parseMcpTarget(input: string): McpTarget {
 }
 
 export function buildMcpFormJson({
-  name, target, rows, cwd,
-}: {
-  name: string;
-  target: Extract<McpTarget, { kind: 'http' | 'stdio' }>;
-  rows: McpKeyValueRow[];
-  cwd: string;
-}): string {
+  name, target, envRows, headerRows, cwd,
+}: Omit<McpAddFormState, 'target'> & { target: Extract<McpTarget, { kind: 'http' | 'stdio' }> }): string {
+  // Only the detected kind's rows are sent: stdio env often holds secrets that must never become remote headers.
+  const rows = target.kind === 'http' ? headerRows : envRows;
   const pairs = Object.fromEntries(rows.filter((row) => row.key.trim()).map((row) => [row.key.trim(), row.value]));
   const hasPairs = Object.keys(pairs).length > 0;
   const server: Record<string, unknown> = target.kind === 'http'

@@ -256,7 +256,7 @@ export const McpHubSection: React.FC = () => {
   const addPayload = addTab === 'json'
     ? (addText.trim() ? addText : null)
     : addForm.name.trim() && (addFormTarget.kind === 'http' || addFormTarget.kind === 'stdio')
-      ? buildMcpFormJson({ name: addForm.name, target: addFormTarget, rows: addForm.rows, cwd: addForm.cwd })
+      ? buildMcpFormJson({ name: addForm.name, target: addFormTarget, envRows: addForm.envRows, headerRows: addForm.headerRows, cwd: addForm.cwd })
       : null;
 
   const onAdd = async () => {

@@ -6719,7 +6719,8 @@
       "kindHttp": "HTTP",
       "kindStdio": "stdio",
       "headerKeyPlaceholder": "Authorization",
-      "envKeyPlaceholder": "API_KEY"
+      "envKeyPlaceholder": "API_KEY",
+      "rowsToggle": "{{label}} ({{count}})"
     }
   }
 }
