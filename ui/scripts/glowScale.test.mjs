@@ -16,16 +16,15 @@ import { eachStylesheet } from './stylesheets.mjs';
 //
 // The first cut of this scale got that wrong in a way the guard could not see.
 // Each rung was set to roughly the middle of the literals it had to absorb, so
-// `sm` came out at spread -2px -- a number that appears nowhere in design.pen
-// and nowhere in this tree, where every 16px glow was already -4px. Every
-// converted site then moved off its frame to reach it, and the guard passed,
-// because a token was a token.
+// `sm` came out at spread -2px -- a number no design drew and nothing in this
+// tree used, where every 16px glow was already -4px. Every converted site then
+// moved to reach it, and the guard passed, because a token was a token.
 //
-// design.pen does not carry three loose triples. It draws one shape: a glow is
-// centred, its spread is a quarter of its blur, and its colour is the accent at
-// #5BFFA070. diagPulse (16/-4), heroPulse (24/-6), diagHero (32/-8) and
-// StepCard (48/-12) all agree, and welCard at blur 64 holds -12, so -12 is the
-// cap rather than a fifth data point.
+// The scale is not three loose triples. It is one shape (index.css, drawn in
+// ui/design: system/shape/glows): a glow is centred, its spread is a quarter of
+// its blur, and its colour is the accent at #5BFFA070 -- 16/-4, 24/-6, 32/-8,
+// 48/-12 -- and a wider glow still holds -12, so -12 is the cap rather than a
+// fifth data point.
 //
 // So this asserts the rule, not the current numbers. A rung added later is
 // covered without editing the test, and a rung nudged off the rule fails here
@@ -51,7 +50,7 @@ const CSS = fs.readFileSync(new URL('../src/index.css', import.meta.url), 'utf8'
 // where the rule would have computed a value is the exception eating one field
 // wider than it was granted: `wire` is off the rule because `drop-shadow()`
 // takes no SPREAD, which says nothing about its blur, and a `\d+px` there let
-// the 4px design.pen draws become 40px with the suite green. An exception names
+// the wire's 4px become 40px with the suite green. An exception names
 // the field it excuses and fixes the rest.
 const OFF_RULE = {
   dot: {
@@ -63,7 +62,7 @@ const OFF_RULE = {
     holds: /^0 0 4px color-mix\(in srgb, var\(--[a-z]+\) 40%, transparent\)$/,
   },
   cta: {
-    why: 'owner-set: themed blur (2026-08-14) and 0.6 alpha, not from design.pen',
+    why: 'owner-set: themed blur (2026-08-14) and 0.6 alpha, off the scale\'s rule',
     holds: /^0 0 \d+px -4px rgba\(\d+, \d+, \d+, 0\.6\)$/,
   },
   // The sidebar's selected nav row keeps the general rule's geometry and alpha --

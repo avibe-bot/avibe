@@ -5,8 +5,8 @@ import { fieldBaseClass } from './field';
 
 export type TextareaProps = React.TextareaHTMLAttributes<HTMLTextAreaElement>;
 
-// Multi-line field. Shares the unified field surface (design.pen Textarea
-// Group/Default); only the height + vertical padding differ from Input.
+// Multi-line field. Shares the unified field surface (ui/design:
+// system/fields/all); only the height + vertical padding differ from Input.
 export const Textarea = React.forwardRef<HTMLTextAreaElement, TextareaProps>(({ className, ...props }, ref) => (
   <textarea
     ref={ref}

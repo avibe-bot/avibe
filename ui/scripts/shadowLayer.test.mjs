@@ -224,7 +224,7 @@ describe('what drop-shadow() refuses to carry', () => {
   const spreads = (value) => spreadOffencesInDropShadow(value, SIZED);
 
   // The whole point of the separate walk: the glow classifier stops AT a managed
-  // token because its geometry is read against design.pen, and that is exactly
+  // token because its geometry is declared once in index.css, and that is exactly
   // the wrong stop for a question the token cannot answer about itself.
   it('opens a managed token the glow walk is finished with', () => {
     expect(spreads('var(--shadow-glow-md-mint)').length).toBe(1);

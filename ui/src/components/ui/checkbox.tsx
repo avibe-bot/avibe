@@ -21,8 +21,7 @@ export interface CheckboxProps {
  * in `@radix-ui/react-dialog`, and a checkbox this simple doesn't warrant a
  * new one). Mint fill + the fill's paired label colour for the check when
  * checked (dark on the dark theme's neon mint, white on light's vivid one);
- * bordered surface when not. Visual contract mirrors design.pen's multi-select
- * rows. The checked state is carried by the fill swap, not by the glyph alone —
+ * bordered surface when not (ui/design: system/choices/all). The checked state is carried by the fill swap, not by the glyph alone —
  * bg-mint against bg-surface-3 plus aria-checked — so the glyph inherits the
  * brand pairing rather than needing a contrasting icon token of its own.
  */

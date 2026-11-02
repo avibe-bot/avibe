@@ -8,7 +8,7 @@ export const buttonVariants = cva(
   {
     variants: {
       variant: {
-        // Mint primary — flat, no glow shadow (design.pen Button/Default).
+        // Mint primary — flat, no glow shadow (ui/design: system/buttons/variants).
         default: 'gap-1.5 bg-primary text-primary-foreground hover:bg-primary-hover',
         // Brand CTA — bright bg + brand-color glow shadow + bold text.
         // The fill is the accent itself and the label its paired *-foreground: a dark
@@ -32,8 +32,8 @@ export const buttonVariants = cva(
         // per-accent radius would be the same drift this variant exists to remove, and
         // routing it through a variable is what makes it theme-dependent at all — this
         // codebase has no `light:`/`dark:` Tailwind variant, so a per-theme value is
-        // always a CSS variable. design.pen has no glow on any Button, so the value is
-        // ours to hold, not the design's; keep the four in lockstep.
+        // always a CSS variable. No other Button glows, so the value belongs to these
+        // four alone; keep them in lockstep.
         // Solid mint buttons use the semantic primary pair. This keeps the
         // foreground contract owned by the theme (`--primary-foreground`) in
         // both modes instead of coupling the variant to the palette alias.
@@ -59,7 +59,7 @@ export const buttonVariants = cva(
         // which helps light's white label but drags dark's #080812 label the wrong
         // way. --destructive-hover is declared per theme like every other brand fill.
         destructive: 'gap-1.5 bg-destructive text-destructive-foreground hover:bg-destructive-hover',
-        // Pink-soft destructive — design.pen T09T8Z. Pink fill + pink border
+        // Pink-soft destructive (ui/design: system/buttons/variants). Pink fill + pink border
         // + pink text/icon, used for in-panel delete CTAs where a full
         // destructive shouts too loud. Drives the --pink / --pink-soft tokens
         // (see index.css); the old bg-[#FF5B8A14] one-off plus an unresolved

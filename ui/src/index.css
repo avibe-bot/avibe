@@ -138,7 +138,7 @@
   --radius-2xl: 20px;
   --radius-3xl: 24px;
 
-  /* Card wash shadows (matches design.pen). The colour is `--card-wash` rather
+  /* Card wash shadows (ui/design: system/shape/radius-shadows). The colour is `--card-wash` rather
      than a literal because this block is `@theme inline`: Tailwind substitutes
      each entry's value into the generated utility, so a light-theme override of
      the token itself would compile to nothing and the wash would keep the dark
@@ -149,22 +149,21 @@
   --shadow-mint-card: 0 24px 48px -12px var(--card-wash);
   --shadow-mint-card-lg: 0 32px 64px -12px var(--card-wash);
 
-  /* The accent glow scale, read off design.pen: `dot` is the Landing Page's
-     status dot, `xs` a control track, `sm` its icon tile and the Doctor pulse,
-     `md` its nav CTA, eyebrow badge and the Dashboard hero pulse, `lg` its hero
-     button, `xl` the Welcome logo. Geometry and alpha come from those frames,
-     with one departure: the dot glows at full alpha over near-black, and ours
-     also sit on lit panels, so `dot` is clamped to 0.9 -- the brightest value
-     the call sites were already using.
+  /* The accent glow scale (ui/design: system/shape/glows): `dot` is a status
+     dot, `xs` a control track, `sm` an icon tile and the Doctor pulse, `md` a
+     nav CTA, the eyebrow badge and the Dashboard hero pulse, `lg` a hero
+     button, `xl` the Welcome logo. A dot glows at 0.9 rather than full alpha,
+     because ours also sit on lit panels -- the brightest value the call sites
+     were already using.
 
-     `cta` is the exception that is not from design.pen. Its blur is themed
-     because a neon that reads on black barely registers over a white card
-     (owner decision 2026-08-14); its 0.6 is likewise owner-set.
+     `cta` is the exception to the scale's rule. Its blur is themed because a
+     neon that reads on black barely registers over a white card (owner
+     decision 2026-08-14); its 0.6 is likewise owner-set.
 
-     The colour, unlike the blur, does NOT vary by theme. design.pen's Light
-     frame recolours the card washes above to the light brand mint and keeps
-     every glow on the dark neon, so these stay literal instead of routing
-     through a runtime variable the way `--card-wash` does. */
+     The colour, unlike the blur, does NOT vary by theme. Light recolours the
+     card washes above to the light brand mint and keeps every glow on the dark
+     neon, so these stay literal instead of routing through a runtime variable
+     the way `--card-wash` does. */
   --shadow-glow-dot-mint: 0 0 8px rgba(91, 255, 160, 0.9);
   --shadow-glow-dot-gold: 0 0 8px rgba(255, 200, 87, 0.9);
   --shadow-glow-dot-destructive: 0 0 8px rgba(255, 107, 107, 0.9);
@@ -180,29 +179,25 @@
      escaped the guard entirely, not that the light was wrong. That does leave
      `wire` as the one role whose colour follows the theme, through `--mint` and
      friends, while every role above stays on the dark neon by design. Aligning
-     them would repaint the wires in Light, so it is a design.pen decision and
-     not this file's to take. */
+     them would repaint the wires in Light: a design change, to draw in the
+     frames first rather than to make here in passing. */
   --shadow-glow-wire-mint: 0 0 4px color-mix(in srgb, var(--mint) 40%, transparent);
   --shadow-glow-wire-cyan: 0 0 4px color-mix(in srgb, var(--cyan) 40%, transparent);
   --shadow-glow-wire-violet: 0 0 4px color-mix(in srgb, var(--violet) 40%, transparent);
 
-  /* The sized rungs are derived from one rule design.pen follows, not chosen
-     one triple at a time: a glow is centred, its spread is a quarter of its
-     blur, and its colour is the accent at #5BFFA070. Five annotated frames
-     agree -- diagPulse 16/-4, heroPulse 24/-6, diagHero 32/-8, StepCard 48/-12
-     -- and welCard, at blur 64, still holds -12, so that is the cap.
+  /* The sized rungs follow one rule, not a triple chosen at a time: a glow is
+     centred, its spread is a quarter of its blur, and its colour is the accent
+     at #5BFFA070. The spread stops at -12: a glow wider than 48px keeps it.
 
-     Reading the rule off the design rather than off the call sites is what
-     makes the rungs land on their frames. The first cut of this scale did the
-     opposite: it took each rung from the middle of the literals it had to
-     absorb, which produced `sm` at -2px -- a spread written nowhere in
-     design.pen and nowhere in this tree -- and every 16px glow moved off its
-     frame to reach it. glowScale.test.mjs asserts the rule so a rung cannot be
-     nudged back off it.
+     The rule comes first and the call sites follow it. The first cut of this
+     scale did the opposite: it took each rung from the middle of the literals
+     it had to absorb, which produced `sm` at -2px -- a spread no design drew
+     and nothing in this tree used -- and every 16px glow moved to reach it.
+     glowScale.test.mjs asserts the rule so a rung cannot be nudged back off it.
 
-     The rungs stop at the blurs design.pen actually draws. `xs` and `xl` exist
-     because 12px and 48px glows are in the tree; without them a hero logo gets
-     snapped to 32px, which is not a token conversion but a redesign. */
+     The rungs stop at the blurs the product draws. `xs` and `xl` exist because
+     12px and 48px glows are in the tree; without them a hero logo gets snapped
+     to 32px, which is not a token conversion but a redesign. */
   --shadow-glow-xs-mint: 0 0 12px -3px rgba(91, 255, 160, 0.44);
   --shadow-glow-xs-cyan: 0 0 12px -3px rgba(63, 224, 229, 0.44);
 
@@ -335,8 +330,8 @@
   --cyan-soft: rgba(63, 224, 229, 0.16);
   --cyan-ink: #3fe0e5;
   --cyan-hover: #56e4e8;
-  /* Fill and ink both carry design.pen's #7c5bff. An accent is never moved off
-     its design value to buy contrast — see the light block for the decision.
+  /* Fill and ink both carry #7c5bff. An accent is never moved off
+     its brand value to buy contrast — see the light block for the decision.
      Violet is the only accent whose label is white in BOTH themes, which is why
      it needs its own --violet-foreground rather than borrowing a theme rule: the
      Button used a hard-coded text-white, so nothing declared the pair and the
@@ -366,9 +361,9 @@
   --onboarding-glow-blur: 12px;
   --onboarding-glow-spread: 0px;
   --onboarding-glow-alpha: 22%;
-  /* Colour of the card wash shadows (`--shadow-mint-card*`). design.pen writes it
-     as the frame's own brand mint at 0.078, which is why it is the one part of
-     those shadows that moves between themes. */
+  /* Colour of the card wash shadows (`--shadow-mint-card*`): each theme's own
+     brand mint at 0.078, which is why it is the one part of those shadows that
+     moves between themes. */
   --card-wash: rgba(91, 255, 160, 0.078);
 
   /* The onboarding enable switch, drawn per theme by the reference: a lit border
@@ -382,7 +377,7 @@
   --switch-onboarding-thumb-off: #9ba3b8;
   --switch-onboarding-thumb-on: #080812;
 
-  /* Page-family gradients (mirror design.pen 1:1). Layers ordered top-most first. */
+  /* Page-family gradients (ui/design: system/colors/gradients). Layers ordered top-most first. */
   --gradient-console:
     radial-gradient(50% 40% at 5% 5%, rgba(91, 255, 160, 0.20), rgba(91, 255, 160, 0) 100%),
     radial-gradient(40% 50% at 95% 40%, rgba(63, 224, 229, 0.122), rgba(63, 224, 229, 0) 100%),
@@ -429,11 +424,11 @@
     --popover: #ffffff;
     --popover-foreground: #0a0a14;
 
-    /* Fills keep design.pen's vivid light accents *and* its white label — the
+    /* Fills keep the vivid light accents *and* a white label — the
        pairing the product shipped before it was briefly deepened. The brand
        pair is a product decision, not an oversight: an AI-colleague product
        should read as alive rather than muted, so the accent stays at full
-       saturation and the label stays white the way the design drew it. That
+       saturation and the label stays white. That
        costs AA on the label (white on #10b981 is 2.54:1), so
        validate-theme.mjs exempts these pairs by *pinning* the ratio each was
        accepted at rather than skipping them — drift in either token changes
@@ -463,7 +458,7 @@
     --border: rgba(8, 8, 18, 0.08);
     --border-strong: rgba(8, 8, 18, 0.14);
     --input: rgba(8, 8, 18, 0.12);
-    /* design.pen's mint at 50%. It composites to ~1.5:1 on every light surface,
+    /* The light brand mint at 50%. It composites to ~1.5:1 on every light surface,
        under the 3:1 non-text floor, and stays there by the same owner decision
        as the fills above: the ring is a hint drawn beside a focused control,
        and the brand value is not traded away to raise its ratio. */
@@ -546,9 +541,8 @@
 
     --bg-page: var(--gradient-console);
 
-    /* design.pen's Light frame keeps the dark frame's geometry and 0.078 and
-
-       swaps only the hue to the light brand mint. */
+    /* Light keeps the dark wash's geometry and 0.078 and swaps only the hue
+       to the light brand mint. */
     --card-wash: rgba(16, 185, 129, 0.078);
     --switch-onboarding-track-off: #d7dce5;
     --switch-onboarding-border-off: #00000000;
@@ -681,8 +675,8 @@
 
   --bg-page: var(--gradient-console);
 
-  /* design.pen's Light frame keeps the dark frame's geometry and 0.078 and
-     swaps only the hue to the light brand mint. */
+  /* Light keeps the dark wash's geometry and 0.078 and swaps only the hue
+     to the light brand mint. */
   --card-wash: rgba(16, 185, 129, 0.078);
 
   /* Wider CTA glow than dark: the same neon spreads far less over a white card,
@@ -843,7 +837,7 @@ pre,
   animation: vr-typing 1.2s infinite ease-in-out;
 }
 
-/* Deep-link search-match highlight (workbench ChatPage P5, design.pen tBlve):
+/* Deep-link search-match highlight (workbench ChatPage P5):
    the message jumped to from the search palette gets a brief mint-soft wash
    that fades to transparent over ~3s. Uses the same --mint-soft token as the
    agent bubble so it reads as "this is the match" without a hard flash. The
