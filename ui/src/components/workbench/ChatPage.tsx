@@ -267,7 +267,7 @@ export const ChatPage: React.FC = () => {
   // A Bot's permanent conversation (docs/plans/bots.md D5): the header shows the
   // Bot, and the Session cannot be archived or renamed. The id namespace says so
   // before the Bot list has answered; the list supplies the face.
-  const { bots, loaded: botsLoaded, displayName: botDisplayName } = useBots();
+  const { bots, listed: botsListed, displayName: botDisplayName } = useBots();
   const botConversation = isBotSessionId(sessionId);
   const [sessionCanChat, setSessionCanChat] = useState(false);
   const canChat = capabilities.can_chat && sessionCanChat;
@@ -2108,7 +2108,7 @@ export const ChatPage: React.FC = () => {
       const q = query.trim().toLowerCase();
       // The live Bot list decides which Agents are Bots: this page's Agent rows are
       // a bootstrap snapshot, and a Bot removed since then is an Agent again.
-      const botAgents = liveBotAgentNames({ bots, loaded: botsLoaded });
+      const botAgents = liveBotAgentNames({ bots, listed: botsListed });
       const botResults: MentionSearchResult[] = bots
         .filter((bot) => !q || botDisplayName(bot).toLowerCase().includes(q) || bot.handle.includes(q))
         .map((bot) => ({ kind: 'bot', handle: bot.handle, display_name: botDisplayName(bot), avatar: bot.avatar }));
@@ -2121,7 +2121,7 @@ export const ChatPage: React.FC = () => {
         .map((a) => ({ kind: 'agent', name: a.name, agent_id: a.id, backend: a.backend, description: a.description }));
       return [...botResults, ...agentResults];
     },
-    [agents, bots, botsLoaded, botDisplayName],
+    [agents, bots, botsListed, botDisplayName],
   );
 
   // # reference source: recent active sessions machine-wide (excluding the current

@@ -604,9 +604,13 @@ describe('AgentRoutePicker', () => {
   });
 
   // A Bot's Agent is internal to its Bot (docs/plans/bots.md D1). The rows are a
-  // snapshot from before `writer` became a Bot and `cso` stopped being one, so the
-  // live Bot list decides; the main Bot's `main` is never offered either.
-  it('offers no Bot\'s Agent, by the live Bot list, while a route on one still names it', async () => {
+  // snapshot from before `writer` became a Bot and `cso` stopped being one: a list
+  // the server returned decides, while a read that failed leaves the rows' word.
+  // The main Bot's `main` is never offered, and a route on it still names it.
+  it.each([
+    { live: { loaded: true, listed: true }, offered: ['claudesonnet', 'codexgpt', 'csom'] },
+    { live: { loaded: true, listed: false }, offered: ['claudesonnet', 'codexgpt', 'writerm'] },
+  ])('offers no Bot\'s Agent (Bot list read: $live.listed)', async ({ live, offered }) => {
     const user = userEvent.setup();
     const vibey = (name: string, bot: AgentBotSummary | null = null) =>
       agent({ id: `agt-${name}`, name, display_name: name, backend: 'vibey', model: 'm', bot });
@@ -616,9 +620,9 @@ describe('AgentRoutePicker', () => {
       vibey('writer'),
       vibey('cso', { handle: 'cso', display_name: 'CSO', builtin: false }),
     ];
-    const bots = ['main', 'writer'].map((name) => ({ agent_name: name, handle: name }) as Bot);
+    const bots = live.listed ? ['main', 'writer'].map((name) => ({ agent_name: name, handle: name }) as Bot) : [];
     render(
-      <BotsContext.Provider value={{ loaded: true, bots } as unknown as BotsState}>
+      <BotsContext.Provider value={{ ...live, bots } as unknown as BotsState}>
         <MemoryRouter>
           <AgentRoutePicker
             value={{ agent_name: 'main', agent_id: 'agt-main', agent_backend: 'vibey', model: 'm' }}
@@ -631,10 +635,10 @@ describe('AgentRoutePicker', () => {
 
     await user.click(screen.getByRole('button', { name: /main/ }));
     await screen.findByText('chat.picker.model');
-    const offered = within(screen.getByText('chat.picker.agent').parentElement as HTMLElement)
+    const options = within(screen.getByText('chat.picker.agent').parentElement as HTMLElement)
       .getAllByRole('button')
       .map((option) => option.textContent);
-    expect(offered).toEqual(['claudesonnet', 'codexgpt', 'csom', 'chat.picker.newAgent']);
+    expect(options).toEqual([...offered, 'chat.picker.newAgent']);
   });
 });
 

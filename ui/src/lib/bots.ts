@@ -58,11 +58,12 @@ export function eligibleForBot(agent: {
   return agent.backend === 'vibey' && agent.enabled && !agent.archived && !agent.bot && agent.source !== 'builtin';
 }
 
-/** The Agents of the Bots as the live list knows them, or `null` before it has been
- *  read (and for anyone but the Owner, who has no list): Agent rows are a snapshot,
- *  and a Bot added or removed since they were read moves its Agent at once. */
-export function liveBotAgentNames(live: { bots: readonly Pick<Bot, 'agent_name'>[]; loaded: boolean }): Set<string> | null {
-  return live.loaded ? new Set(live.bots.map((bot) => bot.agent_name)) : null;
+/** The Agents of the Bots as the live list knows them, or `null` until the server
+ *  has returned one (a failed read is not "no Bots", and anyone but the Owner has no
+ *  list): Agent rows are a snapshot, and a Bot added or removed since they were read
+ *  moves its Agent at once. */
+export function liveBotAgentNames(live: { bots: readonly Pick<Bot, 'agent_name'>[]; listed: boolean }): Set<string> | null {
+  return live.listed ? new Set(live.bots.map((bot) => bot.agent_name)) : null;
 }
 
 /** Whether a picker offers an Agent (docs/plans/bots.md D1): enabled, not archived,

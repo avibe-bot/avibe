@@ -223,8 +223,8 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   );
   // Only selectable Agents are offered: a Bot's Agent never is (docs/plans/bots.md D1),
   // though a route already on one still shows it as its current value above.
-  const { bots, loaded: botsLoaded } = useBots();
-  const botAgents = useMemo(() => liveBotAgentNames({ bots, loaded: botsLoaded }), [bots, botsLoaded]);
+  const { bots, listed: botsListed } = useBots();
+  const botAgents = useMemo(() => liveBotAgentNames({ bots, listed: botsListed }), [bots, botsListed]);
   const visibleAgents = useMemo(
     () => agents.filter(
       (agent) => isSelectableAgent(agent, botAgents)
