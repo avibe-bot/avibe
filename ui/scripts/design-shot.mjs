@@ -5,10 +5,12 @@
 //   npm run design:shot -- sidebar/bots      frames whose id starts with the argument
 //   npm run design:shot -- --theme dark --lang en --out /tmp/shots
 //   --manifest <file>                        also merge a JSON index of the shots into <file>
+//   --jobs <n>                               frames shot at once (default: up to 4, one less than the CPUs)
 //
 // Exits 1 when a frame logs a console error or fails to render, so it doubles as `design:check`.
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { availableParallelism } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -27,6 +29,7 @@ const theme = option('theme', null);
 const lang = option('lang', 'zh');
 const out = resolve(option('out', join(uiRoot, 'design', '.shots')));
 const manifestPath = option('manifest', null);
+const jobs = Math.max(1, Number(option('jobs', String(Math.min(4, Math.max(1, availableParallelism() - 1))))));
 const prefixes = args;
 
 const server = await createServer({ root: uiRoot, logLevel: 'error', server: { port: 0, strictPort: false } });
@@ -34,93 +37,94 @@ await server.listen();
 const base = server.resolvedUrls.local[0];
 const browser = await chromium.launch();
 const context = await browser.newContext({ deviceScaleFactor: 2 });
-const errors = [];
+
 // Each frame gets a fresh page. One page navigated from frame to frame for the whole run
 // occasionally stopped evaluating a frame's modules after a hundred or so navigations: the
 // document loaded, every request finished, no error was logged, and the frame never rendered.
-async function openPage() {
-  const opened = await context.newPage();
-  opened.on('console', (message) => {
+async function shoot(frame, t) {
+  const errors = [];
+  const page = await context.newPage();
+  page.on('console', (message) => {
     if (message.type() === 'error') errors.push(message.text());
   });
-  opened.on('pageerror', (error) => errors.push(String(error)));
-  return opened;
+  page.on('pageerror', (error) => errors.push(String(error)));
+  const started = Date.now();
+  const failure = (reason) => ({ line: { frame: frame.id, theme: t, ms: Date.now() - started, errors: [reason, ...errors] } });
+  try {
+    await page.setViewportSize({ width: frame.width, height: frame.height });
+    await page.goto(`${base}design.html?frame=${encodeURIComponent(frame.id)}&theme=${t}&lang=${lang}`);
+    const ready = await page.waitForSelector('body[data-design-ready]', { timeout: 15_000 }).then(() => true, () => false);
+    if (!ready) {
+      const stage = await Promise.race([
+        page.evaluate(() => document.body.dataset.designStage ?? 'load').catch(() => 'navigation'),
+        new Promise((resolve) => setTimeout(() => resolve('unresponsive'), 2000)),
+      ]);
+      return failure(`not ready after 15s (stage: ${stage})`);
+    }
+    // Real pointer clicks, so components that open on pointerdown open, and a focus a click moves
+    // draws no keyboard ring.
+    for (const spec of frame.click ?? []) {
+      // `{t:<key>}` is copy in the frame's language, resolved by the page.
+      let target = spec;
+      for (const [token, key] of spec.matchAll(/\{t:([^}]+)\}/g)) {
+        target = target.replace(token, await page.evaluate((k) => window.__DESIGN__.t(k), key));
+      }
+      const clicked = await page.click(target, { timeout: 5_000 }).then(() => true, () => false);
+      if (!clicked) return failure(`nothing to click for ${target}`);
+      await page.waitForTimeout(300);
+      await page.evaluate(() => window.__DESIGN__.quiet());
+      // A click that starts a timed transition (a screen handoff) is waited out like a timed read.
+      if (frame.wait) {
+        await page.waitForTimeout(frame.wait);
+        await page.evaluate(() => window.__DESIGN__.quiet());
+      }
+    }
+    if (frame.hover) {
+      // Hover states open on a delay and may fetch; wait them out.
+      await page.hover(frame.hover);
+      await page.waitForTimeout(800);
+      await page.evaluate(() => window.__DESIGN__.quiet());
+    }
+    const file = join(out, `${frame.id}.${t}.png`);
+    await mkdir(dirname(file), { recursive: true });
+    // The viewport is the frame, so popovers and dialogs portaled to <body> are captured too.
+    const png = await page.screenshot({ path: file, animations: 'disabled', clip: { x: 0, y: 0, width: frame.width, height: frame.height } });
+    const unfixtured = await page.evaluate(() => window.__DESIGN__.unfixtured());
+    return {
+      line: { frame: frame.id, theme: t, file, ms: Date.now() - started, unfixtured, errors },
+      shot: { ...frame, theme: t, png: file, hash: createHash('sha1').update(png).digest('hex').slice(0, 10) },
+    };
+  } finally {
+    await page.close();
+  }
 }
-let page = await openPage();
 
 let failed = false;
 const shots = [];
 let all = [];
 try {
   // The frame list, without rendering the canvas (every frame in an iframe).
-  await page.goto(`${base}design.html?list&lang=${lang}`);
-  await page.waitForFunction(() => window.__DESIGN__);
-  all = await page.evaluate(() => window.__DESIGN__.frames);
+  const list = await context.newPage();
+  await list.goto(`${base}design.html?list&lang=${lang}`);
+  await list.waitForFunction(() => window.__DESIGN__);
+  all = await list.evaluate(() => window.__DESIGN__.frames);
+  await list.close();
   const selected = all.filter((f) => prefixes.length === 0 || prefixes.some((p) => f.id.startsWith(p)));
   if (selected.length === 0) throw new Error(`no frame matches ${prefixes.join(', ')}`);
-  for (const frame of selected) {
-    for (const t of theme ? [theme] : frame.themes) {
-      await page.close();
-      page = await openPage();
-      errors.length = 0;
-      const started = Date.now();
-      await page.setViewportSize({ width: frame.width, height: frame.height });
-      await page.goto(`${base}design.html?frame=${encodeURIComponent(frame.id)}&theme=${t}&lang=${lang}`);
-      const ready = await page.waitForSelector('body[data-design-ready]', { timeout: 15_000 }).then(() => true, () => false);
-      if (!ready) {
-        // Name the frame and keep going, so one run reports every frame that fails.
-        failed = true;
-        const stage = await Promise.race([
-          page.evaluate(() => document.body.dataset.designStage ?? 'load').catch(() => 'navigation'),
-          new Promise((resolve) => setTimeout(() => resolve('unresponsive'), 2000)),
-        ]);
-        console.log(JSON.stringify({ frame: frame.id, theme: t, ms: Date.now() - started, errors: [`not ready after 15s (stage: ${stage})`, ...errors] }));
-        continue;
-      }
-      // Real pointer clicks, so components that open on pointerdown open, and a focus a click moves
-      // draws no keyboard ring.
-      const missing = [];
-      for (const spec of frame.click ?? []) {
-        // `{t:<key>}` is copy in the frame's language, resolved by the page.
-        let target = spec;
-        for (const [token, key] of spec.matchAll(/\{t:([^}]+)\}/g)) {
-          target = target.replace(token, await page.evaluate((k) => window.__DESIGN__.t(k), key));
-        }
-        const clicked = await page.click(target, { timeout: 5_000 }).then(() => true, () => false);
-        if (!clicked) {
-          missing.push(target);
-          break;
-        }
-        await page.waitForTimeout(300);
-        await page.evaluate(() => window.__DESIGN__.quiet());
-        // A click that starts a timed transition (a screen handoff) is waited out like a timed read.
-        if (frame.wait) {
-          await page.waitForTimeout(frame.wait);
-          await page.evaluate(() => window.__DESIGN__.quiet());
-        }
-      }
-      if (missing.length) {
-        failed = true;
-        console.log(JSON.stringify({ frame: frame.id, theme: t, ms: Date.now() - started, errors: [`nothing to click for ${missing[0]}`, ...errors] }));
-        continue;
-      }
-      if (frame.hover) {
-        // Hover states open on a delay and may fetch; wait them out.
-        await page.hover(frame.hover);
-        await page.waitForTimeout(800);
-        await page.evaluate(() => window.__DESIGN__.quiet());
-      }
-      const file = join(out, `${frame.id}.${t}.png`);
-      await mkdir(dirname(file), { recursive: true });
-      // The viewport is the frame, so popovers and dialogs portaled to <body> are captured too.
-      const png = await page.screenshot({ path: file, animations: 'disabled', clip: { x: 0, y: 0, width: frame.width, height: frame.height } });
-      const unfixtured = await page.evaluate(() => window.__DESIGN__.unfixtured());
-      const result = { frame: frame.id, theme: t, file, ms: Date.now() - started, unfixtured, errors: [...errors] };
-      if (errors.length) failed = true;
-      shots.push({ ...frame, theme: t, png: file, hash: createHash('sha1').update(png).digest('hex').slice(0, 10) });
-      console.log(JSON.stringify(result));
+  const tasks = selected.flatMap((frame) => (theme ? [theme] : frame.themes).map((t) => [frame, t]));
+  // Frames are shot side by side: most of a frame's time is waiting (reads, clicks, transitions).
+  let next = 0;
+  const worker = async () => {
+    while (next < tasks.length) {
+      const [frame, t] = tasks[next++];
+      const { line, shot } = await shoot(frame, t);
+      if (!shot || line.errors.length) failed = true;
+      if (shot) shots.push(shot);
+      // A frame that fails is named and the run goes on, so one run reports every failing frame.
+      console.log(JSON.stringify(line));
     }
-  }
+  };
+  await Promise.all(Array.from({ length: Math.min(jobs, tasks.length) }, worker));
 } catch (error) {
   failed = true;
   console.error(String(error));

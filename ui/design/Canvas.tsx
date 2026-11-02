@@ -1,7 +1,6 @@
 import { useEffect, type ReactNode } from 'react';
 
 import type { DesignLang, DesignTheme, Frame } from './frame';
-import { ALL_FRAMES } from './registry';
 import { DesignShell } from './shell/DesignShell';
 import { designNetwork } from './shell/network';
 
@@ -58,19 +57,19 @@ const STATUS_CLASS: Record<string, string> = {
 };
 
 /** Every frame, grouped by file, each theme side by side: the artboards. */
-function Canvas({ lang }: { lang: DesignLang }) {
-  const files = [...new Set(ALL_FRAMES.map((f) => f.file))];
+function Canvas({ lang, frames }: { lang: DesignLang; frames: Frame[] }) {
+  const files = [...new Set(frames.map((f) => f.file))];
   return (
     <div data-theme="light" className="min-h-screen bg-muted-soft px-10 py-8 text-foreground">
       <h1 className="text-[22px] font-bold">Avibe Design</h1>
       <p className="mt-1 text-[13px] text-muted">
-        {ALL_FRAMES.length} frames · ?frame=&lt;id&gt;&amp;theme=light|dark&amp;lang=zh|en renders one frame at its size
+        {frames.length} frames · ?frame=&lt;id&gt;&amp;theme=light|dark&amp;lang=zh|en renders one frame at its size
       </p>
       {files.map((file) => (
         <section key={file} className="mt-10">
           <h2 className="font-mono text-[12px] font-bold uppercase tracking-[0.16em] text-muted">{file}</h2>
           <div className="mt-4 flex flex-wrap items-start gap-10">
-            {ALL_FRAMES.filter((f) => f.file === file).map((frame) => (
+            {frames.filter((f) => f.file === file).map((frame) => (
               <figure key={frame.id} className="flex flex-col gap-2">
                 <figcaption className="flex items-center gap-2 text-[12px]">
                   <span className="font-semibold">{frame.title}</span>
@@ -101,14 +100,14 @@ function Canvas({ lang }: { lang: DesignLang }) {
   );
 }
 
-/** The canvas, or one frame when the URL names it (`?frame=<id>&theme=light|dark`). */
-export function DesignRoot({ params }: { params: URLSearchParams }): ReactNode {
+/** The canvas, or one frame when the URL names it (`?frame=<id>&theme=light|dark`). `frames` is every
+ *  frame for the canvas; `frame` is the one the URL names, loaded alone. */
+export function DesignRoot({ params, frames, frame }: { params: URLSearchParams; frames: Frame[]; frame?: Frame }): ReactNode {
   const lang: DesignLang = params.get('lang') === 'en' ? 'en' : 'zh';
   // `?list` renders nothing: the screenshot tool reads `window.__DESIGN__.frames` from it.
   if (params.has('list')) return null;
   const id = params.get('frame');
-  if (!id) return <Canvas lang={lang} />;
-  const frame = ALL_FRAMES.find((f) => f.id === id);
+  if (!id) return <Canvas lang={lang} frames={frames} />;
   if (!frame) return <p>Unknown frame {id}</p>;
   return <Single frame={frame} theme={params.get('theme') === 'dark' ? 'dark' : 'light'} />;
 }
