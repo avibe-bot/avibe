@@ -16,7 +16,7 @@ const hub = () => (
 );
 
 const form = (value: McpAddFormState) => () => (
-  <div className="w-[512px] rounded-lg border border-border bg-background p-6">
+  <div className="w-full max-w-lg rounded-xl border border-border bg-card p-6 shadow-xl">
     <McpAddForm value={value} onChange={() => undefined} />
   </div>
 );
