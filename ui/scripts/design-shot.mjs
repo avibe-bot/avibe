@@ -33,29 +33,50 @@ const server = await createServer({ root: uiRoot, logLevel: 'error', server: { p
 await server.listen();
 const base = server.resolvedUrls.local[0];
 const browser = await chromium.launch();
-const page = await browser.newPage({ deviceScaleFactor: 2 });
+const context = await browser.newContext({ deviceScaleFactor: 2 });
 const errors = [];
-page.on('console', (message) => {
-  if (message.type() === 'error') errors.push(message.text());
-});
-page.on('pageerror', (error) => errors.push(String(error)));
+// Each frame gets a fresh page. One page navigated from frame to frame for the whole run
+// occasionally stopped evaluating a frame's modules after a hundred or so navigations: the
+// document loaded, every request finished, no error was logged, and the frame never rendered.
+async function openPage() {
+  const opened = await context.newPage();
+  opened.on('console', (message) => {
+    if (message.type() === 'error') errors.push(message.text());
+  });
+  opened.on('pageerror', (error) => errors.push(String(error)));
+  return opened;
+}
+let page = await openPage();
 
 let failed = false;
 const shots = [];
 let all = [];
 try {
-  await page.goto(`${base}design.html?lang=${lang}`);
+  // The frame list, without rendering the canvas (every frame in an iframe).
+  await page.goto(`${base}design.html?list&lang=${lang}`);
   await page.waitForFunction(() => window.__DESIGN__);
   all = await page.evaluate(() => window.__DESIGN__.frames);
   const selected = all.filter((f) => prefixes.length === 0 || prefixes.some((p) => f.id.startsWith(p)));
   if (selected.length === 0) throw new Error(`no frame matches ${prefixes.join(', ')}`);
   for (const frame of selected) {
     for (const t of theme ? [theme] : frame.themes) {
+      await page.close();
+      page = await openPage();
       errors.length = 0;
       const started = Date.now();
       await page.setViewportSize({ width: frame.width, height: frame.height });
       await page.goto(`${base}design.html?frame=${encodeURIComponent(frame.id)}&theme=${t}&lang=${lang}`);
-      await page.waitForSelector('body[data-design-ready]', { timeout: 15_000 });
+      const ready = await page.waitForSelector('body[data-design-ready]', { timeout: 15_000 }).then(() => true, () => false);
+      if (!ready) {
+        // Name the frame and keep going, so one run reports every frame that fails.
+        failed = true;
+        const stage = await Promise.race([
+          page.evaluate(() => document.body.dataset.designStage ?? 'load').catch(() => 'navigation'),
+          new Promise((resolve) => setTimeout(() => resolve('unresponsive'), 2000)),
+        ]);
+        console.log(JSON.stringify({ frame: frame.id, theme: t, ms: Date.now() - started, errors: [`not ready after 15s (stage: ${stage})`, ...errors] }));
+        continue;
+      }
       if (frame.hover) {
         // Hover states open on a delay and may fetch; wait them out.
         await page.hover(frame.hover);
