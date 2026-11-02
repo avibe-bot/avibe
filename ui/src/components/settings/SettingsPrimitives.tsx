@@ -14,7 +14,7 @@ type SettingsPanelProps = {
   /**
    * `panel` (default) is the machine-management section: a header ruled off from
    * a list of rows. `preference` is the quieter single-preference card used by
-   * ordinary Settings (ui/design: settings/general/default) — one 22px pad and no internal
+   * ordinary Settings (design.pen le5QU / Q8zxF1) — one 22px pad and no internal
    * divider, because its header and its control are one statement.
    */
   variant?: 'panel' | 'preference';

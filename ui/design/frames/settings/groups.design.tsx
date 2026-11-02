@@ -35,6 +35,17 @@ const designFrames = frames([
     render: page,
   },
   {
+    name: 'expanded',
+    title: '设置 · 群组 · 展开一个群组的路由',
+    width: 1440,
+    height: 1000,
+    status: 'shipped',
+    route,
+    fixtures,
+    click: ['text=ai-bots'],
+    render: page,
+  },
+  {
     name: 'phone',
     title: '设置 · 群组 · 手机',
     width: 390,

@@ -227,7 +227,7 @@ const PLACEMENT_CHOICES: readonly ChoiceCard<SettingsMenuPlacement>[] = [
   },
 ];
 
-// ui/design: settings/general/default — ordinary Settings: interface language and appearance, both
+// design r6G6P — ordinary Settings: interface language and appearance, both
 // saved the moment they are picked. The standalone frame owns an 880px content
 // column inside a 944px outer frame at the desktop reference width.
 export const SettingsGeneralPage: React.FC = () => {

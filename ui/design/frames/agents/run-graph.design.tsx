@@ -70,6 +70,17 @@ const designFrames = frames([
     ),
   },
   {
+    name: 'node-selected',
+    title: 'Agents · 运行图 · 选中一个会话节点',
+    width: 1192,
+    height: 900,
+    status: 'shipped',
+    route: '/agents?tab=running',
+    fixtures,
+    click: ['text=avault 沙箱 · 后端 lane'],
+    render: consolePage(page),
+  },
+  {
     name: 'phone',
     title: 'Agents · 运行图 · 手机（分组列表）',
     width: 390,

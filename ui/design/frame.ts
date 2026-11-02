@@ -6,6 +6,8 @@ export type DesignTheme = 'light' | 'dark';
 export type DesignLang = 'zh' | 'en';
 /** proposed: still being designed; approved: the owner signed it off; shipped: it renders the shipped components only. */
 export type FrameStatus = 'proposed' | 'approved' | 'shipped';
+/** Where a frame's router starts. */
+export type FrameRoute = string | { pathname: string; search?: string; state?: unknown };
 
 export interface FrameSpec {
   /** Unique within its file; the frame id is `<file path under frames/>/<name>`. */
@@ -18,8 +20,9 @@ export interface FrameSpec {
   themes?: DesignTheme[];
   /** Data the real providers serve to the frame. */
   fixtures?: WorkbenchFixtures;
-  /** Initial route for components that read the location. */
-  route?: string;
+  /** Initial route for components that read the location: a path (with any query), or a location that
+   *  also carries router state a page reads on arrival (`{ pathname: '/', state: { onboardingCompleted: true } }`). */
+  route?: FrameRoute;
   /** A CSS selector the screenshot hovers before capturing, for hover states (cards, menus). */
   hover?: string;
   /** What the screenshot clicks, in order, before capturing: a state only a click opens (a menu, a

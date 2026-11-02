@@ -19,6 +19,26 @@ const fixtures = workbenchFixtures(agentsApi(), {
   ],
 });
 
+// The setup wizard lands on the home with `{ onboardingCompleted: true }`; the banner shows once the
+// home's backend answers ready.
+const setupComplete = {
+  ...fixtures,
+  api: {
+    ...fixtures.api,
+    '/api/backend/vibey/connection': {
+      ok: true,
+      backend: 'vibey',
+      installed: true,
+      enabled: true,
+      auth: 'none',
+      application: 'applied',
+      ready: true,
+      entry_eligible: true,
+    },
+  },
+};
+const fromSetup = { pathname: '/', state: { onboardingCompleted: true } };
+
 const designFrames = frames([
   {
     name: 'desktop',
@@ -28,6 +48,26 @@ const designFrames = frames([
     status: 'shipped',
     route: '/',
     fixtures,
+    render: home,
+  },
+  {
+    name: 'setup-complete',
+    title: '工作台 · 刚完成设置（就绪横幅）',
+    width: 1440,
+    height: 900,
+    status: 'shipped',
+    route: fromSetup,
+    fixtures: setupComplete,
+    render: home,
+  },
+  {
+    name: 'setup-complete-phone',
+    title: '工作台 · 刚完成设置 · 手机',
+    width: 390,
+    height: 844,
+    status: 'shipped',
+    route: fromSetup,
+    fixtures: setupComplete,
     render: home,
   },
   {

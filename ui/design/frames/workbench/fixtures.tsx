@@ -25,6 +25,8 @@ export const shellApi = {
   // The composer's voice input and the desktop-only Computer Use line, as a browser install answers them.
   '/api/asr/status': { available: false },
   '/api/desktop/computer-use/status': { supported: false },
+  // Push is set up and another device subscribes; this browser has not turned it on.
+  '/api/web-push/status': { ok: true, configured: true, public_key: 'BDesignVapidPublicKey', subscription_count: 1, current_subscription_enabled: false },
 };
 
 /** A running install with the demo projects and Bots, plus whatever the page reads. */
