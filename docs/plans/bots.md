@@ -107,7 +107,19 @@ own. A Session has none of these; a Bot has all three.
 ### D4. CLI, roster, and provenance
 
 - `vibe agent run --bot <handle> --message ...` sends to `ses_<handle>`, with
-  validation. Async by default; the reply returns to the caller as a callback.
+  validation, and returns at once. It creates no callback, and refuses
+  `--callback-session-id` and `--sync` (owner decision, 2026-11-02).
+- **Bots talk to each other by messaging, not by callbacks** (owner decision,
+  2026-11-02). A Bot's reply in its own conversation is what the user reads
+  there. With a callback, a Bot's answer to another Bot appeared in its own
+  conversation as if said to the user, and travelled back without the Bot
+  choosing to send it. Instead, a Bot that has something for the sender (a
+  result, a question, a decision) messages it explicitly: `--bot <handle>` for
+  a Bot, `--session-id <id> --no-callback` for a Session. When nothing in the
+  Turn is for the user, the Bot ends it with a silent reply. Whoever asked a
+  Bot hears back as a message in its own conversation. `--agent` and
+  `--session-id` keep their callbacks for now; dropping callbacks altogether
+  is a later decision.
 - `vibe bot list | show | create | set | update | remove` manages Bots, so the
   main Bot can add a colleague when asked in conversation. `create` makes a
   Vibey Agent and its Bot; `set` makes an existing Vibey Agent a Bot; `remove`
@@ -127,8 +139,9 @@ own. A Session has none of these; a Bot has all three.
   Bots queue behind the user's.
 - No hop limit between Bots (owner decision, 2026-11-01): Bots are meant to
   message each other, and run lineage is not reliable enough to enforce one.
-  The prompt's rule to answer in the reply rather than send back with `--bot`
-  is the guard against ping-pong.
+  The guard against ping-pong is the prompt: message another Bot only when it
+  needs something (a result, a question, a decision), and never answer an
+  acknowledgement or a thank-you.
 - CLI examples in the prompts get parser-backed contract tests.
 
 ### D5. Web surfaces
@@ -345,8 +358,8 @@ Ask a Bot when the work needs its memory, ongoing responsibility, or judgment. R
 {enabled_agents_rows}
 
 Bot rules:
-- Message a Bot with `vibe agent run --bot <bot> --message ...`. Like any async run, its reply returns to this conversation as a callback.
-- Reach a Bot only through `--bot`, never through `--agent` or `--session-id`. `--model` and `--reasoning-effort` do not apply.
+- Message a Bot with `vibe agent run --bot <bot> --message ...`. The message joins its conversation and the command returns at once, with no callback: the Bot's reply there is read by the user. When it has something for you, the Bot messages you back, and its answer arrives later as a message in this conversation.
+- Reach a Bot only through `--bot`, never through `--agent` or `--session-id`. `--model`, `--reasoning-effort`, `--sync`, and `--callback-session-id` do not apply.
 
 Agent rules:
 (the existing --agent, --session-id, --fork-*, and --sync rules, unchanged)
@@ -367,13 +380,16 @@ A mention says whom the user pointed at, not what to do; decide the action from 
 
 ### You are a Bot (Bot Sessions only)
 
-Worded to stay true in a fork, which shares this system prompt.
+Worded to stay true in a fork, which shares this system prompt. `{role_sentence}` is ` Your role: {description}.`, or empty without a description.
 
 ```markdown
 ## You are a Bot
-You are {display_name}, the Bot `@<bot:{handle}>`. Your one permanent conversation is Session `{session_id}`: it never ends, older context is condensed as it grows, and its full record stays readable with `vibe data query` on `session_id = '{session_id}'`.
+You are {display_name}, the Bot `@<bot:{handle}>`.{role_sentence} Your one permanent conversation is Session `{session_id}`: it never ends, older context is condensed as it grows, and its full record stays readable with `vibe data query` on `session_id = '{session_id}'`.
 
-Other Bots and Agents also message you there. Their inputs begin with a `[Harness: ...]` line naming the sender; they are not the user's words. Your reply returns to the sender automatically, so answer in your reply and do not send it back with `--bot`.
+Other Bots and Sessions also message you there. Their inputs begin with a `[Harness: ...]` line naming the sender, such as `from @<bot:main>` for a Bot or `from #<session-id>` for a Session; they are not the user's words. Whatever you reply in this conversation is read by the user, not by the sender:
+- To answer or report to a Bot, message it with `vibe agent run --bot <bot> --message ...`; to answer a Session, use `vibe agent run --session-id <session-id> --no-callback --message ...`. When nothing in the Turn is for the user, end it with a silent reply.
+- Message another Bot only when it needs something from you: a result, a question, or a decision. Never answer an acknowledgement or a thank-you, so two Bots never trade them back and forth.
+- When you ask another Bot for something, its answer arrives later as a message in this conversation, not as a callback.
 ```
 
 ### Your memory (every Bot)

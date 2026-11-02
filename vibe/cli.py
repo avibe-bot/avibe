@@ -6855,13 +6855,22 @@ _BOT_RUN_CONFLICTS = (
     ("cwd", "--cwd"),
     ("close_after", "--close-after"),
 )
+#: What waits for a reply. A Bot's reply is said to the user in its own conversation; to answer a Bot or a Session
+#: that messaged it, the Bot messages it back (``docs/plans/bots.md`` D4), so there is nothing to wait for.
+_BOT_RUN_REPLY_FLAGS = (
+    ("callback_session_id", "--callback-session-id"),
+    ("sync_run", "--sync"),
+    ("wait_timeout", "--wait-timeout"),
+)
 
 
 def _resolve_bot_run_target(args) -> None:
-    """``--bot <handle>``: the Bot's permanent Session, queued (``docs/plans/bots.md`` D4).
+    """``--bot <handle>``: a message into the Bot's permanent Session, queued, with no callback (bots.md D4).
 
-    A Bot keeps one conversation on its own model, so the flags that pick or shape a Session do not apply. The
-    Session and directory are prepared here when missing, then the run continues as a queued ``--session-id`` run.
+    A Bot keeps one conversation on its own model, so the flags that pick or shape a Session do not apply. Its
+    reply there is read by the user, never returned to the sender: Bots answer each other by messaging back, so a
+    callback, ``--sync``, and its wait do not apply either. The Session and directory are prepared here when
+    missing, then the run continues as a queued ``--session-id`` run with no callback.
     """
     from core.bots import MAIN_BOT_HANDLE, BotError, BotService
 
@@ -6874,6 +6883,17 @@ def _resolve_bot_run_target(args) -> None:
             hint=(
                 "A Bot has one permanent Session on its own model. Message it with --bot alone; "
                 "start a fresh worker of an Agent with --agent instead."
+            ),
+            help_command="vibe agent run --help",
+        )
+    waits = [flag for attr, flag in _BOT_RUN_REPLY_FLAGS if getattr(args, attr, None) not in (None, False, "")]
+    if waits:
+        raise TaskCliError(
+            f"--bot cannot be combined with {', '.join(waits)}",
+            code="bot_run_no_callback",
+            hint=(
+                "A message to a Bot has no callback and nothing to wait for. The Bot answers, when it has "
+                "something for you, by messaging you back; its answer arrives as a message in your conversation."
             ),
             help_command="vibe agent run --help",
         )
@@ -6896,6 +6916,7 @@ def _resolve_bot_run_target(args) -> None:
         ) from exc
     args.session_id = bot.session_id
     args.queue = True
+    args.no_callback = True
 
 
 def cmd_agent_run(args):

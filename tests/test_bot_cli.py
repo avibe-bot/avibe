@@ -94,11 +94,6 @@ def test_agent_run_bot_refuses_flags_that_pick_or_shape_a_session(home, capsys, 
     assert (result, payload["code"]) == (1, "bot_run_conflict")
 
 
-def test_agent_run_bot_without_a_caller_needs_a_callback_choice(home, capsys):
-    result, payload, _store = _agent_run(home, capsys, ["--bot", "main", "--message", "hi"])
-    assert (result, payload["code"]) == (1, "missing_async_callback")
-
-
 def test_help_examples_parse_against_the_real_cli():
     """The examples in ``vibe bot --help`` and ``vibe agent run --help`` are live callers."""
     examples = re.findall(r"^\s+(vibe (?:bot|agent run) .+)$", cli._bot_examples_text() + cli._agent_run_examples_text(), re.M)
@@ -118,3 +113,64 @@ def test_cli_reference_bot_examples_parse(doc):
     parser = cli.build_parser()
     for example in examples:
         parser.parse_args(shlex.split(example)[1:])
+
+
+def test_a_bot_message_from_a_bot_has_no_callback_and_names_its_sender(home, capsys, monkeypatch):
+    """bots.md D4 (2026-11-02): `--bot` delivers a message, queued, with no callback; the Bot reads its sender."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from core.agent_input import AgentInputMetadata
+    from core.handlers.message_handler import MessageHandler
+    from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore, parse_session_key
+
+    from core.bots import BotService
+
+    with BotService() as bots:
+        bots.ensure_main_bot()
+        bots.create_bot(display_name="Security", handle="cso")
+    # The main Bot's own shell: an Agent run there defaults its callback to the caller, which --bot must not.
+    monkeypatch.setenv("AVIBE_SESSION_ID", "ses_main")
+    result, payload, store = _agent_run(home, capsys, ["--bot", "cso", "--message", "Review the login flow."])
+    assert result == 0, payload
+    assert "callback_session_id" not in payload["run"] and "callback_notice" not in payload
+    stored = store.get_run(payload["run"]["id"])
+    assert (stored["session_id"], stored["callback_session_id"], stored["callback_status"]) == ("ses_cso", None, None)
+    assert stored["metadata"]["delivery_intent"] == "queue"
+    assert (stored["source_kind"], stored["source_actor"]) == ("agent", "ses_main")
+
+    # The input the cso Bot receives, through the scheduler's own dispatch context for this run.
+    controller = SimpleNamespace(
+        platform_settings_managers={"slack": SimpleNamespace(get_store=lambda: SimpleNamespace(get_user=lambda *_a, **_k: None))},
+        get_im_client_for_context=lambda _context: SimpleNamespace(
+            should_use_thread_for_reply=lambda: True, should_use_thread_for_dm_session=lambda: False,
+        ),
+    )
+    service = ScheduledTaskService(controller=controller, store=ScheduledTaskStore(home / "scheduled.json"))
+    context = asyncio.run(service._build_context(
+        parse_session_key("slack::channel::C123"),
+        execution_id=stored["id"],
+        task_id=None,
+        trigger_kind="agent_run",
+        metadata={**(stored["metadata"] or {}), "source_kind": stored["source_kind"],
+                  "source_actor": stored["source_actor"], "parent_run_id": stored["parent_run_id"],
+                  "callback_session_id": stored["callback_session_id"]},
+    ))
+    prepared = asyncio.run(MessageHandler.prepare_input_metadata(object(), context, human=False))
+    assert isinstance(prepared, AgentInputMetadata)
+    first_line = prepared.render("Review the login flow.", SimpleNamespace(include_time_info=False)).splitlines()[0]
+    assert first_line == f"[Harness: agent run {stored['id']} from @<bot:main>]"
+
+
+@pytest.mark.parametrize(
+    "extra", [["--callback-session-id", "sesabc1234567"], ["--sync"], ["--sync", "--wait-timeout", "5"]]
+)
+def test_agent_run_bot_refuses_waiting_for_a_reply(home, capsys, extra):
+    result, payload, _store = _agent_run(home, capsys, ["--bot", "main", *extra, "--message", "hi"])
+    assert (result, payload["code"]) == (1, "bot_run_no_callback")
+
+
+def test_agent_run_bot_needs_no_callback_policy_outside_an_agent_shell(home, capsys):
+    result, payload, store = _agent_run(home, capsys, ["--bot", "main", "--message", "hi"])
+    assert result == 0, payload
+    assert store.get_run(payload["run"]["id"])["callback_session_id"] is None

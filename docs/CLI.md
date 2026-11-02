@@ -717,7 +717,7 @@ vibe agent run --no-callback --agent release-reviewer --message 'Review the late
 vibe agent run --sync --agent release-reviewer --message 'Review the latest deployment result and print it here.'
 vibe agent run --no-callback --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
 vibe agent run --session-id sesk8m4q2p7x --queue --message 'Do this after the current turn.'
-vibe agent run --no-callback --bot cso --message 'Review the new login flow for security risks.'
+vibe agent run --bot cso --message 'Review the new login flow for security risks.'
 vibe agent run --no-callback --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
 vibe agent run --session-id sesworker123 --callback-session-id sescaller456 --message 'Run the delegated investigation.'
 vibe agent run --no-callback --scope-id slack::channel::C999 --visible --agent release-reviewer --message 'Post the deployment summary.'
@@ -743,6 +743,11 @@ queued behind the Bot's earlier messages, as with `--queue`, so a Bot handles
 one message at a time. A Bot keeps one conversation on its own model:
 `--agent`, `--session-id`, the fork flags, `--model`, `--reasoning-effort`,
 the placement flags, `--cwd`, and `--close-after` are refused with `--bot`.
+A message to a Bot creates no callback and the command returns at once:
+the Bot's reply in its conversation is read by the user, and a Bot that has
+something for the sender messages it back. `--callback-session-id`, `--sync`,
+and `--wait-timeout` are refused with `--bot`, and no callback policy is needed
+outside an Agent shell.
 `--agent` keeps its meaning for an Agent that is also a Bot: it starts a new
 Session of that Agent, never a message to the Bot.
 

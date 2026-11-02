@@ -579,7 +579,7 @@ vibe agent run --no-callback --agent release-reviewer --message 'Review the late
 vibe agent run --sync --agent release-reviewer --message 'Review the latest deployment result and print it here.'
 vibe agent run --no-callback --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
 vibe agent run --session-id sesk8m4q2p7x --queue --message 'Do this after the current turn.'
-vibe agent run --no-callback --bot cso --message 'Review the new login flow for security risks.'
+vibe agent run --bot cso --message 'Review the new login flow for security risks.'
 vibe agent run --no-callback --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
 vibe agent run --session-id sesworker123 --callback-session-id sescaller456 --message 'Run the delegated investigation.'
 vibe agent run --no-callback --scope-id slack::channel::C999 --visible --agent release-reviewer --message 'Post the deployment summary.'
@@ -598,7 +598,10 @@ Session 空闲时立即启动；只有明确拒绝后才回退到 P3。它不会
 `--bot <handle>` 按代号给伙伴（Bot）的永久 Session 发消息（见 `vibe bot`）。这次运行会像
 `--queue` 一样排在伙伴之前的消息之后，所以伙伴一次只处理一条消息。伙伴只有一个对话，
 用自己的模型：`--agent`、`--session-id`、fork 参数、`--model`、`--reasoning-effort`、
-位置参数、`--cwd` 和 `--close-after` 都不能与 `--bot` 一起使用。对同时是伙伴的
+位置参数、`--cwd` 和 `--close-after` 都不能与 `--bot` 一起使用。给伙伴的消息不创建
+callback，命令立即返回：伙伴在自己对话里的回复是给用户看的，伙伴有内容要给发送方时会主动
+发消息回去。`--callback-session-id`、`--sync` 和 `--wait-timeout` 不能与 `--bot` 一起使用，
+在 Agent shell 之外也不需要指定 callback 策略。对同时是伙伴的
 Agent，`--agent` 的含义不变：它新建该 Agent 的一个 Session，而不是给伙伴发消息。
 
 当一个新 Agent Session 需要从现有 Session 的 native backend 上下文分叉，而不是空白开始时，
