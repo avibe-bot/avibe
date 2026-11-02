@@ -37,6 +37,8 @@ from config.atomic_io import write_atomic
 from config.v2_config import V2Config
 from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, display_name_for_backend, is_native_cli_backend
 from core.scheduled_tasks import (
+    AGENT_RUN_CALLBACK_FAILURE_ONLY,
+    AGENT_RUN_CALLBACK_MODE_METADATA_KEY,
     AGENT_RUN_CLOSE_AFTER_METADATA_KEY,
     AGENT_RUN_DELIVERY_QUEUE,
     AGENT_RUN_DELIVERY_STEER,
@@ -5882,6 +5884,13 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
             hint="Agent runs are async by default. Pass --sync when the CLI should wait, or remove --wait-timeout.",
             help_command=help_command,
         )
+    if bool(getattr(args, "callback", False)) and bool(getattr(args, "no_callback", False)):
+        raise TaskCliError(
+            "use either --callback or --no-callback, not both",
+            code="conflicting_callback_policy",
+            hint="Pass --callback to have the final reply return to this Session, or leave both out for no callback.",
+            help_command=help_command,
+        )
     if (getattr(args, "callback_session_id", None) or "").strip() and bool(getattr(args, "no_callback", False)):
         raise TaskCliError(
             "use either --callback-session-id or --no-callback, not both",
@@ -6443,45 +6452,64 @@ def _agent_run_is_async(args) -> bool:
     return not bool(getattr(args, "sync_run", False))
 
 
-def _resolve_callback_session_id(args, caller_context, *, target_session_id: Optional[str] = None):
-    """The Session a Run's result returns to, plus a notice only when the caller's flags do not imply it.
+def _resolve_callback_route(
+    args,
+    caller_context,
+    *,
+    target_session_id: Optional[str] = None,
+    callback_by_default: bool = True,
+) -> tuple[Optional[str], Optional[str], Optional[dict]]:
+    """Where a Run's outcome goes: ``(session id, callback mode, notice)`` (``docs/plans/bots.md`` D4).
 
-    An explicit ``--callback-session-id`` or ``--no-callback``, and the caller-Session
-    default inside an Agent shell, all leave ``run.callback_session_id`` saying what
-    happened. The one surprise is a run on the caller's own Session, which gets no
-    callback because the result already lands there.
+    A callback returns the final reply to a Session: ``--callback-session-id`` names it, ``--callback`` (and,
+    for targets that still default to one, the caller-Session default inside an Agent shell) picks the caller.
+    Without a callback the caller Session is still told when the run does not complete, so a failure always
+    reaches the sender: mode ``failure``. A run on the caller's own Session gets neither, because its result
+    already lands there.
     """
 
     explicit_callback = (getattr(args, "callback_session_id", None) or "").strip() or None
-    is_async = _agent_run_is_async(args)
     if explicit_callback:
-        return explicit_callback, None
-    if bool(getattr(args, "no_callback", False)):
-        return None, None
-    if caller_context is not None:
-        caller_session_id = caller_context.session_id
-        if target_session_id and target_session_id == caller_session_id:
-            return None, {
-                "code": "async_self_run_without_callback",
-                "message": (
-                    "Started Agent Run on the caller Session without a callback. "
-                    "The target Session will receive the run result directly, so Avibe did not create a duplicate callback turn."
-                ),
-            }
-        return caller_session_id, None
-    if not is_async:
-        return None, None
-    raise TaskCliError(
-        "This async Agent Run has no callback target.",
-        code="missing_async_callback",
-        hint=(
-            "Pass --callback-session-id <session-id> to send the final result back to a specific Agent Session, "
-            "or pass --no-callback to run without an automatic follow-up and inspect the result later with "
-            "`vibe runs show <run-id>` or by polling/listing runs for the target Session. "
-            "`--callback-session-id` identifies the Session that should receive the delegated run's final result."
-        ),
-        help_command="vibe agent run --help",
+        return explicit_callback, None, None
+    caller_session_id = caller_context.session_id if caller_context is not None else None
+    on_caller = bool(target_session_id and caller_session_id and target_session_id == caller_session_id)
+    wants_callback = bool(getattr(args, "callback", False)) or (
+        callback_by_default and not bool(getattr(args, "no_callback", False))
     )
+    if wants_callback:
+        if caller_session_id:
+            if on_caller:
+                return None, None, {
+                    "code": "async_self_run_without_callback",
+                    "message": (
+                        "Started Agent Run on the caller Session without a callback. "
+                        "The target Session will receive the run result directly, so Avibe did not create a duplicate callback turn."
+                    ),
+                }
+            return caller_session_id, None, None
+        if bool(getattr(args, "callback", False)):
+            raise TaskCliError(
+                "--callback needs a caller Session",
+                code="callback_without_caller",
+                hint="Run it from an Avibe Agent shell, or pass --callback-session-id <session-id>.",
+                help_command="vibe agent run --help",
+            )
+        if _agent_run_is_async(args):
+            raise TaskCliError(
+                "This async Agent Run has no callback target.",
+                code="missing_async_callback",
+                hint=(
+                    "Pass --callback-session-id <session-id> to send the final result back to a specific Agent Session, "
+                    "or pass --no-callback to run without an automatic follow-up and inspect the result later with "
+                    "`vibe runs show <run-id>` or by polling/listing runs for the target Session. "
+                    "`--callback-session-id` identifies the Session that should receive the delegated run's final result."
+                ),
+                help_command="vibe agent run --help",
+            )
+        return None, None, None
+    if caller_session_id and not on_caller:
+        return caller_session_id, AGENT_RUN_CALLBACK_FAILURE_ONLY, None
+    return None, None, None
 
 
 def _reserve_cli_session(
@@ -6855,22 +6883,12 @@ _BOT_RUN_CONFLICTS = (
     ("cwd", "--cwd"),
     ("close_after", "--close-after"),
 )
-#: What waits for a reply. A Bot's reply is said to the user in its own conversation; to answer a Bot or a Session
-#: that messaged it, the Bot messages it back (``docs/plans/bots.md`` D4), so there is nothing to wait for.
-_BOT_RUN_REPLY_FLAGS = (
-    ("callback_session_id", "--callback-session-id"),
-    ("sync_run", "--sync"),
-    ("wait_timeout", "--wait-timeout"),
-)
-
-
 def _resolve_bot_run_target(args) -> None:
-    """``--bot <handle>``: a message into the Bot's permanent Session, queued, with no callback (bots.md D4).
+    """``--bot <handle>``: a message into the Bot's permanent Session, queued (``docs/plans/bots.md`` D4).
 
-    A Bot keeps one conversation on its own model, so the flags that pick or shape a Session do not apply. Its
-    reply there is read by the user, never returned to the sender: Bots answer each other by messaging back, so a
-    callback, ``--sync``, and its wait do not apply either. The Session and directory are prepared here when
-    missing, then the run continues as a queued ``--session-id`` run with no callback.
+    A Bot keeps one conversation on its own model, so the flags that pick or shape a Session do not apply. Like
+    every run it asks for no callback unless ``--callback`` says so (``_resolve_callback_route``). The Session and
+    directory are prepared here when missing, then the run continues as a queued ``--session-id`` run.
     """
     from core.bots import MAIN_BOT_HANDLE, BotError, BotService
 
@@ -6883,17 +6901,6 @@ def _resolve_bot_run_target(args) -> None:
             hint=(
                 "A Bot has one permanent Session on its own model. Message it with --bot alone; "
                 "start a fresh worker of an Agent with --agent instead."
-            ),
-            help_command="vibe agent run --help",
-        )
-    waits = [flag for attr, flag in _BOT_RUN_REPLY_FLAGS if getattr(args, attr, None) not in (None, False, "")]
-    if waits:
-        raise TaskCliError(
-            f"--bot cannot be combined with {', '.join(waits)}",
-            code="bot_run_no_callback",
-            hint=(
-                "A message to a Bot has no callback and nothing to wait for. The Bot answers, when it has "
-                "something for you, by messaging you back; its answer arrives as a message in your conversation."
             ),
             help_command="vibe agent run --help",
         )
@@ -6916,13 +6923,13 @@ def _resolve_bot_run_target(args) -> None:
         ) from exc
     args.session_id = bot.session_id
     args.queue = True
-    args.no_callback = True
 
 
 def cmd_agent_run(args):
     reserved_session_id: Optional[str] = None
     try:
-        if (getattr(args, "bot", None) or "").strip():
+        bot_target = bool((getattr(args, "bot", None) or "").strip())
+        if bot_target:
             _resolve_bot_run_target(args)
         caller_context = caller_context_from_env()
         visibility = (getattr(args, "visibility", None) or "background").strip()
@@ -6995,7 +7002,13 @@ def cmd_agent_run(args):
             # may only restate it -- so admitting the caller to the Session
             # answers both halves of the turn it is about to queue.
             _require_cli_turn_authority(session_id, help_command="vibe agent run --help")
-        callback_session_id, callback_notice = _resolve_callback_session_id(args, caller_context, target_session_id=session_id)
+        callback_session_id, callback_mode, callback_notice = _resolve_callback_route(
+            args,
+            caller_context,
+            target_session_id=session_id,
+            # A message to a Bot asks for no callback unless --callback says so (bots.md D4).
+            callback_by_default=not bot_target,
+        )
         if callback_session_id:
             _validate_callback_session_id(callback_session_id, help_command="vibe agent run --help")
         close_after = bool(getattr(args, "close_after", False))
@@ -7076,6 +7089,8 @@ def cmd_agent_run(args):
         )
         if close_after:
             provenance_metadata[AGENT_RUN_CLOSE_AFTER_METADATA_KEY] = True
+        if callback_mode:
+            provenance_metadata[AGENT_RUN_CALLBACK_MODE_METADATA_KEY] = callback_mode
         request_store = _task_request_store()
         request = request_store.enqueue_agent_run(
             agent_name=agent.name if agent else None,
@@ -7116,7 +7131,8 @@ def cmd_agent_run(args):
                     "session_id": session_id,
                     "scope_id": _scope_id_payload_from_session(session_id),
                     "visibility": target.visibility if session_id else visibility,
-                    "callback_session_id": callback_session_id,
+                    # Only a callback is reported here; a failure-only route is not one (bots.md D4).
+                    "callback_session_id": None if callback_mode else callback_session_id,
                 }
             ),
         }
@@ -17958,7 +17974,7 @@ def build_parser():
         help="Run an Avibe Agent",
         description=(
     "Run an Agent turn in a new background Session (--agent), an existing Session "
-            "(--session-id), or a fork. Runs are async: the final result returns to the caller Session."
+            "(--session-id), or a fork. Runs are async."
         ),
         epilog=_agent_run_examples_text(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -17986,16 +18002,13 @@ def build_parser():
     agent_run_parser.add_argument("--model", help="Model the new Session keeps ('vibe agent models')")
     agent_run_parser.add_argument("--reasoning-effort", metavar="EFFORT", help="Reasoning effort the new Session keeps")
     agent_run_parser.add_argument("--cwd", metavar="DIR", help="Working directory for a new, unforked Session")
-    agent_run_parser.add_argument("--callback-session-id", metavar="ID", help="Send the result to this Session instead")
-    agent_run_parser.add_argument(
-        "--no-callback",
-        action="store_true",
-        help="Send the result nowhere; read it with 'vibe runs show'",
-    )
+    agent_run_parser.add_argument("--callback", action="store_true", help="Return the final reply to this Session")
+    agent_run_parser.add_argument("--callback-session-id", metavar="ID", help="Return it to this Session instead")
+    agent_run_parser.add_argument("--no-callback", action="store_true", help="No callback (failures still return)")
     agent_run_parser.add_argument(
         "--close-after",
         action="store_true",
-        help="Release the new Session's runtime when the run ends",
+        help="Release the new Session's runtime at the end",
     )
     agent_run_parser.add_argument("--sync", dest="sync_run", action="store_true", help="Wait and print the finished run")
     agent_run_parser.add_argument("--wait-timeout", metavar="SEC", type=float, help="With --sync: maximum seconds to wait")

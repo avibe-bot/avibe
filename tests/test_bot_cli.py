@@ -115,27 +115,26 @@ def test_cli_reference_bot_examples_parse(doc):
         parser.parse_args(shlex.split(example)[1:])
 
 
-def test_a_bot_message_from_a_bot_has_no_callback_and_names_its_sender(home, capsys, monkeypatch):
-    """bots.md D4 (2026-11-02): `--bot` delivers a message, queued, with no callback; the Bot reads its sender."""
+def test_a_bot_message_has_no_callback_and_tells_the_bot_where_to_report(home, capsys, monkeypatch):
+    """bots.md D4 (2026-11-03): `--bot` asks for no callback; a failure still returns to the sender, and the
+    Bot's input names the sender, the request, and the command to report back with."""
     import asyncio
     from types import SimpleNamespace
 
-    from core.agent_input import AgentInputMetadata
+    from core.bots import BotService
     from core.handlers.message_handler import MessageHandler
     from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore, parse_session_key
-
-    from core.bots import BotService
 
     with BotService() as bots:
         bots.ensure_main_bot()
         bots.create_bot(display_name="Security", handle="cso")
-    # The main Bot's own shell: an Agent run there defaults its callback to the caller, which --bot must not.
     monkeypatch.setenv("AVIBE_SESSION_ID", "ses_main")
     result, payload, store = _agent_run(home, capsys, ["--bot", "cso", "--message", "Review the login flow."])
     assert result == 0, payload
     assert "callback_session_id" not in payload["run"] and "callback_notice" not in payload
     stored = store.get_run(payload["run"]["id"])
-    assert (stored["session_id"], stored["callback_session_id"], stored["callback_status"]) == ("ses_cso", None, None)
+    assert (stored["session_id"], stored["callback_session_id"]) == ("ses_cso", "ses_main")
+    assert stored["metadata"]["callback_mode"] == "failure"
     assert stored["metadata"]["delivery_intent"] == "queue"
     assert (stored["source_kind"], stored["source_actor"]) == ("agent", "ses_main")
 
@@ -157,20 +156,50 @@ def test_a_bot_message_from_a_bot_has_no_callback_and_names_its_sender(home, cap
                   "callback_session_id": stored["callback_session_id"]},
     ))
     prepared = asyncio.run(MessageHandler.prepare_input_metadata(object(), context, human=False))
-    assert isinstance(prepared, AgentInputMetadata)
-    first_line = prepared.render("Review the login flow.", SimpleNamespace(include_time_info=False)).splitlines()[0]
-    assert first_line == f"[Harness: agent run {stored['id']} from @<bot:main>]"
+    lines = prepared.render("Review the login flow.", SimpleNamespace(include_time_info=False)).splitlines()
+    assert lines == [
+        f"[Harness: agent run {stored['id']} from @<bot:main>]",
+        "[No callback. When the work is done, you can report to @<bot:main> with "
+        "`vibe agent run --bot main --message ...`.]",
+        "Review the login flow.",
+    ]
 
 
 @pytest.mark.parametrize(
-    "extra", [["--callback-session-id", "sesabc1234567"], ["--sync"], ["--sync", "--wait-timeout", "5"]]
+    ("caller", "argv", "route"),
+    [
+        # From an Agent shell: no callback for a Bot unless asked; a failure always returns.
+        ("ses_main", ["--bot", "cso"], ("ses_main", "failure")),
+        ("ses_main", ["--bot", "cso", "--no-callback"], ("ses_main", "failure")),
+        ("ses_main", ["--bot", "cso", "--callback"], ("ses_main", None)),
+        ("ses_main", ["--bot", "cso", "--callback-session-id", "ses_cso"], ("ses_cso", None)),
+        ("ses_main", ["--bot", "cso", "--sync", "--wait-timeout", "0.01"], ("ses_main", "failure")),
+        # Other targets keep their callback by default until the second step flips it.
+        ("ses_main", ["--session-id", "ses_cso"], ("ses_main", None)),
+        ("ses_main", ["--session-id", "ses_cso", "--no-callback"], ("ses_main", "failure")),
+        # A run on the caller's own Session lands there already.
+        ("ses_main", ["--bot", "main"], (None, None)),
+        # Outside an Agent shell there is no sender to tell.
+        (None, ["--bot", "cso"], (None, None)),
+        (None, ["--session-id", "ses_cso", "--no-callback"], (None, None)),
+        # Refused.
+        ("ses_main", ["--bot", "cso", "--callback", "--no-callback"], "conflicting_callback_policy"),
+        (None, ["--bot", "cso", "--callback"], "callback_without_caller"),
+        (None, ["--session-id", "ses_cso"], "missing_async_callback"),
+    ],
 )
-def test_agent_run_bot_refuses_waiting_for_a_reply(home, capsys, extra):
-    result, payload, _store = _agent_run(home, capsys, ["--bot", "main", *extra, "--message", "hi"])
-    assert (result, payload["code"]) == (1, "bot_run_no_callback")
+def test_the_callback_flag_matrix(home, capsys, monkeypatch, caller, argv, route):
+    from core.bots import BotService
 
-
-def test_agent_run_bot_needs_no_callback_policy_outside_an_agent_shell(home, capsys):
-    result, payload, store = _agent_run(home, capsys, ["--bot", "main", "--message", "hi"])
+    with BotService() as bots:
+        bots.ensure_main_bot()
+        bots.create_bot(display_name="Security", handle="cso")
+    if caller:
+        monkeypatch.setenv("AVIBE_SESSION_ID", caller)
+    result, payload, store = _agent_run(home, capsys, [*argv, "--message", "hi"])
+    if isinstance(route, str):
+        assert (result, payload["code"]) == (1, route)
+        return
     assert result == 0, payload
-    assert store.get_run(payload["run"]["id"])["callback_session_id"] is None
+    stored = store.get_run(payload["run"]["id"])
+    assert (stored["callback_session_id"], (stored["metadata"] or {}).get("callback_mode")) == route

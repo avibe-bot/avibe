@@ -7007,6 +7007,73 @@ def test_agent_run_callback_enqueues_only_result_to_caller_session(tmp_path: Pat
     assert callback_run["metadata"]["source_session_id"] == "target-session"
 
 
+@pytest.mark.parametrize("mode", [None, "failure"], ids=["callback", "no-callback"])
+@pytest.mark.parametrize(
+    ("outcome", "expected_body"),
+    [
+        ("succeeded", None),
+        ("failed", "Error: provider unavailable"),
+        ("canceled", "The run was canceled before producing a result."),
+        ("interrupted", "The run failed before producing a result.\n\nReason: the service restarted."),
+    ],
+)
+def test_a_run_that_did_not_complete_always_tells_its_sender(
+    tmp_path: Path, monkeypatch, mode, outcome, expected_body
+) -> None:
+    """docs/plans/bots.md D4 (2026-11-03): a failure reaches the sender with or without a callback, with the reason.
+
+    A completed run tells a callback its result and tells a sender without one nothing.
+    """
+    from core.scheduled_tasks import AGENT_RUN_CALLBACK_MODE_METADATA_KEY
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    caller_session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id="target-session",
+        message="delegated work",
+        agent_name="codex",
+        callback_session_id=caller_session_id,
+        metadata={AGENT_RUN_CALLBACK_MODE_METADATA_KEY: mode} if mode else None,
+    )
+    if outcome == "canceled":
+        assert request_store.cancel_run(request.id)
+    else:
+        assert request_store.claim(request.id) is not None
+        if outcome == "succeeded":
+            request_store.complete(request, ok=True, session_id="target-session")
+            store = SQLiteBackgroundTaskStore()
+            try:
+                store.record_run_message(
+                    request.id, text="the result", message_id=f"suppressed:{request.id}", terminal_status="succeeded"
+                )
+            finally:
+                store.close()
+        elif outcome == "failed":
+            request_store.complete(request, ok=False, error="provider unavailable", session_id="target-session")
+        else:
+            request_store.complete(request, ok=False, interrupt_reason="restarted", session_id="target-session")
+    service = _callback_service(tmp_path=tmp_path, request_store=request_store)
+
+    asyncio.run(service._drain_callbacks())
+
+    original = request_store.get_run(request.id)
+    told = [
+        run
+        for run in request_store.list_runs()
+        if run.get("source_kind") == "callback" and run.get("parent_run_id") == request.id
+    ]
+    if outcome == "succeeded":
+        assert [run["message"] for run in told] == ([] if mode else ["the result"])
+        assert original["callback_status"] == ("skipped" if mode else "sent")
+        return
+    assert [run["message"] for run in told] == [expected_body]
+    assert told[0]["session_id"] == caller_session_id
+    marker = "notice" if mode else "terminal"
+    assert told[0]["source_actor"] == f"{request.id}:{marker}:{original['status']}"
+    assert original["callback_status"] == "sent"
+
+
 def test_one_terminal_turn_callbacks_once_per_callback_session(
     tmp_path: Path,
     monkeypatch,

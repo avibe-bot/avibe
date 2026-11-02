@@ -33,7 +33,7 @@ from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import OperationalError
 
 from core.delivery_target import normalize_message_kind
-from core.agent_input import AgentInputMetadata, harness_source
+from core.agent_input import AgentInputMetadata, harness_hint, harness_source
 from core.backend_failure import backend_failure_notification_output, harness_run_identity
 from core.message_context import (
     TERMINAL_COMMIT_KEY,
@@ -2745,6 +2745,11 @@ class SessionTurnManager:
                 # Runs or callbacks shares a merge key but not a sender, and the leader's
                 # provenance alone would attribute every body to the first one.
                 "harness_sources": [harness_source(spec) for spec in _batch_harness_sources(first, payloads)],
+                # And where each one's result goes, named once per distinct hint (``harness_hints``).
+                "harness_hints": [
+                    harness_hint(spec, receiver=context.platform_specific.get("agent_session_id"))
+                    for spec in _batch_harness_sources(first, payloads)
+                ],
                 "message_content": {
                     "text": "\n".join(
                         str(payload.get("text") or "")

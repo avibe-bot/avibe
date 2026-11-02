@@ -8091,26 +8091,31 @@ def test_flush_suppressed_segment_claims_each_delivery_id_in_one_turn(tmp_path, 
 
 
 @pytest.mark.parametrize(
-    ("trigger", "spec", "expected"),
+    ("trigger", "spec", "expected", "hints"),
     [
         pytest.param(
             "agent_run", {"source_kind": "agent", "source_actor": "sescaller01"},
             "[Harness: agent run run-1 from #sescaller01; agent run run-2 from #sescaller01]",
+            # Where the result goes, once per distinct target (docs/plans/bots.md D4).
+            ["[No callback. When the work is done, you can report to #sescaller01 with "
+             "`vibe agent run --session-id sescaller01 --no-callback --message ...`.]"],
             id="agent-runs-from-one-caller",
         ),
         pytest.param(
             "agent_run", {"source_kind": "callback", "source_session_id": "seschild01"},
             "[Harness: callback of run run-1 from #seschild01; callback of run run-2 from #seschild01]",
+            [],
             id="callbacks-from-one-session",
         ),
         pytest.param(
             "watch", {"task_definition_id": "def-watch", "task_definition_name": "deploy"},
             '[Harness: Watch def-watch "deploy"]',
+            [],
             id="firings-of-one-watch",
         ),
     ],
 )
-def test_flush_merged_batch_names_each_bodys_sender(tmp_path, monkeypatch, trigger, spec, expected):
+def test_flush_merged_batch_names_each_bodys_sender(tmp_path, monkeypatch, trigger, spec, expected, hints):
     """A merged batch's Harness line attributes every body, not only the leader's."""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     from core.handlers.message_handler import MessageHandler
@@ -8138,6 +8143,7 @@ def test_flush_merged_batch_names_each_bodys_sender(tmp_path, monkeypatch, trigg
     prepared = asyncio.run(MessageHandler.prepare_input_metadata(object(), context, human=False))
     rendered = prepared.render(text, types.SimpleNamespace(include_time_info=False, include_user_info=True))
     assert rendered.splitlines()[0] == expected
+    assert rendered.splitlines()[1 : 1 + len(hints) + 1] == [*hints, "first body"]
 
 
 def test_flush_does_not_coalesce_scheduled_callbacks_with_different_delivery(tmp_path, monkeypatch):

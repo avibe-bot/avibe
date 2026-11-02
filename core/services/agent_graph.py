@@ -36,7 +36,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.engine import Engine
 
 from storage.agent_session_rows import session_openable_in_chat
@@ -454,6 +454,7 @@ def _load_runs(conn, candidate_ids: set[str]) -> dict[str, list[dict[str, Any]]]
             agent_runs.c.callback_session_id,
             agent_runs.c.callback_status,
             agent_runs.c.callback_run_id,
+            func.json_extract(agent_runs.c.metadata_json, "$.callback_mode").label("callback_mode"),
             agent_runs.c.created_at,
             agent_runs.c.started_at,
             agent_runs.c.completed_at,
@@ -474,6 +475,14 @@ def _load_runs(conn, candidate_ids: set[str]) -> dict[str, list[dict[str, Any]]]
     return grouped
 
 
+def _draws_callback_edge(run: Mapping[str, Any]) -> bool:
+    """A callback edge needs a recorded status (A4). A run that asked for no callback only reports a failure to its
+    sender (``docs/plans/bots.md`` D4), so it draws one only once that notice was sent."""
+    if not (run.get("callback_session_id") and run.get("callback_status")):
+        return False
+    return run.get("callback_mode") != "failure" or run.get("callback_status") == "sent"
+
+
 def _lineage_refs(runs_by_session: dict[str, list[dict[str, Any]]]) -> set[str]:
     """Session ids referenced as a spawn caller or callback target by any run."""
     refs: set[str] = set()
@@ -485,7 +494,7 @@ def _lineage_refs(runs_by_session: dict[str, list[dict[str, Any]]]) -> set[str]:
             # (A4: callback edges need a non-null status). A run that merely
             # recorded a return route otherwise promotes an unconnected root that
             # consumes cap/count with no report edge.
-            if run.get("callback_session_id") and run.get("callback_status"):
+            if _draws_callback_edge(run):
                 refs.add(run["callback_session_id"])
     return refs
 
@@ -535,7 +544,7 @@ def _build_edges(
             # Contract A4: only emit a callback edge once a callback_status is
             # recorded. A run that merely routes a callback (sync-delegated,
             # null status — nothing will be delivered) produces no edge.
-            if run.get("callback_session_id") and run.get("callback_status"):
+            if _draws_callback_edge(run):
                 key = (session_id, run["callback_session_id"])
                 agg = callback.setdefault(key, {"status": None, "last_run_id": None, "last_at": None})
                 if agg["last_at"] is None or _newer(agg["last_at"], created):

@@ -76,7 +76,13 @@ HARNESS_SOURCE_FIELDS = (
     "source_actor",
     "source_session_id",
     "parent_run_id",
+    "callback_session_id",
+    "callback_mode",
 )
+#: ``callback_mode`` of a run that asked for no callback: only a failure is reported (``core.scheduled_tasks``).
+_CALLBACK_FAILURE_ONLY = "failure"
+#: ``source_actor`` of a failure notice: ``<run>:notice:<status>`` (``core.scheduled_tasks``).
+_NOTICE_ACTOR_MARKER = ":notice:"
 
 
 def harness_source(spec: Mapping[str, Any]) -> str:
@@ -113,6 +119,10 @@ def harness_source(spec: Mapping[str, Any]) -> str:
         parts = ["webhook", definition, name]
     elif trigger == "agent_run" and source_kind == "callback" and actor.startswith("vault:"):
         parts = ["Vault request", _token(actor[len("vault:") :])]
+    elif trigger == "agent_run" and source_kind == "callback" and _NOTICE_ACTOR_MARKER in actor:
+        # A run that asked for no callback still tells its sender when it did not complete.
+        parent = _token(spec.get("parent_run_id")) or _token(actor.split(":", 1)[0])
+        parts = ["agent run", parent, "did not complete", origin.replace("from ", "in ", 1)]
     elif trigger == "agent_run" and source_kind == "callback":
         # A terminal callback's actor is ``<run>:terminal:<status>``; the run is the parent.
         parent = _token(spec.get("parent_run_id")) or _token(actor.split(":", 1)[0])
@@ -122,6 +132,50 @@ def harness_source(spec: Mapping[str, Any]) -> str:
     else:
         parts = [trigger or "background input", run_id, origin]
     return " ".join(part for part in parts if part)
+
+
+def _address(session: str) -> tuple[str, str]:
+    """How a Session is named in a hint, and the command that messages it."""
+    bot = _BOT_SESSION.fullmatch(session)
+    if bot:
+        return f"@<bot:{bot.group(1)}>", f"vibe agent run --bot {bot.group(1)} --message ..."
+    return f"#{session}", f"vibe agent run --session-id {session} --no-callback --message ..."
+
+
+def harness_hint(spec: Mapping[str, Any], *, receiver: Any = None) -> str:
+    """Where an Agent run's result goes, for the line after its ``[Harness: ...]`` label.
+
+    Progressive disclosure instead of system prompt guidance (``docs/plans/bots.md`` D4): a run with a
+    callback returns its final reply to that Session by itself; a run without one is reported by an explicit
+    message, so the input names the sender and the exact command. Empty for every other input.
+    """
+    if _token(spec.get("task_trigger_kind")) != "agent_run":
+        return ""
+    source_kind = _token(spec.get("source_kind"))
+    if source_kind not in {"agent", "cli"}:
+        return ""
+    receiver = _token(receiver)
+    callback = _token(spec.get("callback_session_id"))
+    if callback and str(spec.get("callback_mode") or "") != _CALLBACK_FAILURE_ONLY:
+        if callback == receiver:
+            return ""
+        return f"Callback: your final reply returns to {_address(callback)[0]} automatically."
+    sender = _token(spec.get("source_actor")) if source_kind == "agent" else ""
+    if not sender or sender == receiver:
+        return ""
+    name, command = _address(sender)
+    return f"No callback. When the work is done, you can report to {name} with `{command}`."
+
+
+def harness_hints(spec: Mapping[str, Any]) -> tuple[str, ...]:
+    """The hint lines of a dispatched input: one per distinct hint of a merged batch, in its order."""
+    merged = spec.get("harness_hints")
+    hints = (
+        [str(hint) for hint in merged]
+        if isinstance(merged, (list, tuple))
+        else [harness_hint(spec, receiver=spec.get("agent_session_id"))]
+    )
+    return tuple(dict.fromkeys(hint for hint in hints if hint.strip()))
 
 
 def harness_label(spec: Mapping[str, Any]) -> str:
@@ -149,6 +203,8 @@ class AgentInputMetadata:
     user_id: str | None = None
     user_name: str | None = None
     harness_source: str | None = None
+    #: Lines after the ``[Harness: ...]`` one: where the result of an Agent run goes (``harness_hints``).
+    harness_hints: tuple[str, ...] = ()
     #: The block the first turn after a backend switch carries ahead of everything else
     #: (``core/session_handoff.py``); it is context for the model, not part of the input.
     handoff: str | None = None
@@ -157,6 +213,7 @@ class AgentInputMetadata:
         lines: list[str] = [self.handoff.rstrip() + "\n"] if self.handoff and self.handoff.strip() else []
         if self.harness_source:
             lines.append(f"{HARNESS_MARKER} {self.harness_source}]")
+            lines.extend(f"[{hint}]" for hint in self.harness_hints)
         if getattr(config, "include_time_info", True):
             current = now or datetime.now().astimezone()
             if current.tzinfo is None:

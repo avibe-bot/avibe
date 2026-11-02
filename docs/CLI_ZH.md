@@ -598,10 +598,8 @@ Session 空闲时立即启动；只有明确拒绝后才回退到 P3。它不会
 `--bot <handle>` 按代号给伙伴（Bot）的永久 Session 发消息（见 `vibe bot`）。这次运行会像
 `--queue` 一样排在伙伴之前的消息之后，所以伙伴一次只处理一条消息。伙伴只有一个对话，
 用自己的模型：`--agent`、`--session-id`、fork 参数、`--model`、`--reasoning-effort`、
-位置参数、`--cwd` 和 `--close-after` 都不能与 `--bot` 一起使用。给伙伴的消息不创建
-callback，命令立即返回：伙伴在自己对话里的回复是给用户看的，伙伴有内容要给发送方时会主动
-发消息回去。`--callback-session-id`、`--sync` 和 `--wait-timeout` 不能与 `--bot` 一起使用，
-在 Agent shell 之外也不需要指定 callback 策略。对同时是伙伴的
+位置参数、`--cwd` 和 `--close-after` 都不能与 `--bot` 一起使用。给伙伴的消息除非用
+`--callback` 要求，否则不创建 callback，在 Agent shell 之外也不需要指定 callback 策略。对同时是伙伴的
 Agent，`--agent` 的含义不变：它新建该 Agent 的一个 Session，而不是给伙伴发消息。
 
 当一个新 Agent Session 需要从现有 Session 的 native backend 上下文分叉，而不是空白开始时，
@@ -624,10 +622,13 @@ Session 或 fork）设置模型，该 Session 之后的轮次会沿用它。
 结果已直接回到那里因而不再回调时，才会附带 `callback_notice`。
 
 异步 run 需要明确 callback 策略，除非命令运行在 Avibe 已注入 caller context
-的 Agent 环境内。当最终结果文本需要回到调用方 Session 时，使用
-`--callback-session-id`；当你有意不自动回调、后续会通过 `vibe runs show`
-或 runs 列表/轮询查看结果时，使用 `--no-callback`。Agent 内部发起的 Harness
-调用会默认把 callback 指向当前调用方 Session。这个 callback 与普通投递相互独立：
+的 Agent 环境内。当最终结果文本需要回到某个 Session 时，使用 `--callback`（在 Agent
+shell 内）或 `--callback-session-id`；当你有意不自动回调、后续会通过 `vibe runs show`
+或 runs 列表/轮询查看结果时，使用 `--no-callback`。Agent 内部发起的 `--agent`、
+`--session-id` 和 fork 运行默认把 callback 指向当前调用方 Session；`--bot` 不会。无论有没有
+callback，以失败、取消或中断结束的 run 都会告诉调用方 Session 它没有完成以及原因；没有
+callback 的 run 会告诉目标该向谁汇报：目标的输入里有一行写明发送方和确切的
+`vibe agent run` 命令。这个 callback 与普通投递相互独立：
 即使目标 run 已经把结果发到了自己的 IM scope，调用方 Session 仍然会收到结果并触发一次
 跟进 Agent 消息。system、tool call、assistant 中间过程消息不会包含在 callback 里。
 
