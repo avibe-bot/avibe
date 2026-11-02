@@ -12926,7 +12926,7 @@ async def sessions_messages_create(session_id: str):
         """Atomically persist one unaccepted submission as a Delivery."""
         from core.input_admission import InputEnvelope, InputProvenance, InputSender, admit_input
         from storage import message_deliveries
-        from storage.agent_session_rows import reserve_write_lock
+        from storage.agent_session_rows import is_bot_session, reserve_write_lock
 
         with engine.begin() as conn:
             reserve_write_lock(conn)
@@ -12958,6 +12958,7 @@ async def sessions_messages_create(session_id: str):
                 content=content if isinstance(content, dict) else None,
                 metadata=message_metadata,
                 message_kind=message_kind,
+                to_bot=is_bot_session(conn, session_id),
             )
             from core.backend_failure_retry import existing_retry
 

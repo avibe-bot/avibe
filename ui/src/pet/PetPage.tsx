@@ -1656,6 +1656,10 @@ const MainReplyBubble: React.FC<Omit<MainDetailProps, 'visible'> & { open: boole
 
 const MainDetail: React.FC<MainDetailProps> = (props) => {
   const { t } = useTranslation();
+  // A message to a Bot waits only when its Turn refused it (docs/plans/bots.md
+  // D4): say it has not reached the Bot yet, not that it is queued.
+  const { botForSession, displayName } = useBots();
+  const waitingFor = botForSession(props.binding);
   const innerRef = useRef<HTMLDivElement>(null);
   const lastResultRef = useRef<HTMLDivElement>(null);
   const resultKey = `${props.binding}\u0000${props.exchange.results.at(-1)?.id ?? ''}`;
@@ -1716,7 +1720,11 @@ const MainDetail: React.FC<MainDetailProps> = (props) => {
         </div>
       )}
       {props.voiceNeedsCloud && <p className="pet-mini-detail-muted">{t('pet.voice.cloudRequired')}</p>}
-      {props.queued && <p className="pet-mini-detail-muted">{t('pet.queued')}</p>}
+      {props.queued && (
+        <p className="pet-mini-detail-muted">
+          {waitingFor ? t('pet.queuedForBot', { name: displayName(waitingFor) }) : t('pet.queued')}
+        </p>
+      )}
       {/* The pinned Open in Avibe button is where the rest of the tail lives. */}
       {!props.exchange.unreadComplete && <p className="pet-mini-detail-muted">{t('pet.moreInAvibe')}</p>}
       {props.vaultRequestIds.map((id) => <Button key={id} variant="outline" size="sm" className="justify-start gap-2" onClick={() => void petBridge.open(vaultRequestLink(id))}><KeyRound className="size-3.5" />{t('pet.vaultRequest')}</Button>)}

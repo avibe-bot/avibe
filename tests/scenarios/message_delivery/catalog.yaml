@@ -544,5 +544,15 @@ scenarios:
       - tests/test_input_admission.py::test_a_source_owned_admission_event_carries_the_decision
       - tests/test_input_admission.py::test_an_input_that_already_has_a_delivery_gets_it_back
       - tests/test_input_admission.py::test_the_record_names_whichever_policy_decided
+  - id: MESSAGE-DELIVERY-339
+    name: The user's own message to a Bot is P1 (docs/plans/bots.md D4); the Web composer route (Web, phone, desktop pet) admits it so, an idle Bot starts on it at once, a working Bot has it steered into the exact active Turn, and a definitive refusal leaves it undelivered in the P3 FIFO; another Bot's or Agent's input to a Bot and an ordinary Session's Web composer input keep their priority
+    status: covered
+    kind: contract
+    layer: contract
+    test:
+      - tests/test_input_admission.py::test_each_source_is_admitted_with_its_released_priority_and_records_the_decision
+      - tests/test_bot_user_delivery.py::test_an_idle_bot_starts_on_the_users_message_at_once
+      - tests/test_bot_user_delivery.py::test_a_working_bot_takes_the_users_message_into_its_turn
+      - tests/test_bot_user_delivery.py::test_an_ordinary_session_keeps_the_composers_queue
 next_priority:
-  - MESSAGE-DELIVERY-339
+  - MESSAGE-DELIVERY-340

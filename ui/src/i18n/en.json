@@ -4775,6 +4775,12 @@
       "useDefault": "Use the default"
     },
     "conversation": {
+      "working": "{{name}} is working…",
+      "delivering": "Delivering · {{count}}",
+      "notDelivered": "Not delivered yet · {{count}}",
+      "notDeliveredHint": "{{name}} couldn't take this mid-turn. It gets it as soon as this turn ends.",
+      "sendDeferred": "Still couldn't reach {{name}} mid-turn. It gets this as soon as this turn ends.",
+      "cancelSend": "Don't send",
       "hideDetails": "Hide details",
       "hideDetailsFailed": "Couldn't save Hide details. Try again.",
       "editProfile": "Edit profile",
@@ -6551,6 +6557,7 @@
     "inputPlaceholder": "Message Vibey…",
     "send": "Send",
     "queued": "Queued — it will run after the current turn.",
+    "queuedForBot": "Not delivered yet: {{name}} gets it as soon as this turn ends.",
     "moreInAvibe": "More replies in Avibe",
     "empty": "No messages yet. Say something to get started.",
     "vaultRequest": "Approval needed — open in Avibe",

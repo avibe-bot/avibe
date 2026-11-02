@@ -2441,9 +2441,12 @@ export const ChatPage: React.FC = () => {
         await reconcileFailure(res.code === 'stop_failed');
         return;
       } else if (res?.status === 'queued') {
-        setError(t(res.reason === 'attachments_unavailable'
-          ? 'chat.queue.attachmentsUnavailable'
-          : 'chat.queue.sendDeferred'));
+        const deferredBot = botForSession(sid);
+        setError(res.reason === 'attachments_unavailable'
+          ? t('chat.queue.attachmentsUnavailable')
+          : deferredBot
+            ? t('bots.conversation.sendDeferred', { name: botDisplayName(deferredBot) })
+            : t('chat.queue.sendDeferred'));
       } else if (res?.status === 'empty') {
         // Nothing was actually flushed (a stale queue item already gone) — no
         // turn is starting, so drop the optimistic working state + resync.
@@ -2465,7 +2468,7 @@ export const ChatPage: React.FC = () => {
         setSendingQueueNow(false);
       }
     }
-  }, [api, sessionId, queue, sendingQueueNow, t, refreshQueue, markWorking]);
+  }, [api, sessionId, queue, sendingQueueNow, t, refreshQueue, markWorking, botForSession, botDisplayName]);
 
   useEffect(() => {
     refresh();
@@ -2897,11 +2900,17 @@ export const ChatPage: React.FC = () => {
   const agentDisplayName = sessionAgentDisplayName(session, agents);
   // A runtime-owned row never inherits the default Agent, so it borrows no avatar from it.
   const agentBackend = sessionAgentBackend(session, agents, readOnlyReason === 'system' ? null : defaultAgentName);
+  // Who the conversation is with: the Bot, by the name the user gave it, or its
+  // Session title (which follows that name) until the Bot list has answered.
+  const conversationBot = botConversation ? botForSession(sessionId) : undefined;
+  const conversationBotName = conversationBot
+    ? botDisplayName(conversationBot)
+    : botConversation ? session.title?.trim() || null : null;
   // A Bot's conversation reads like talking to a person while its "Hide details"
   // is on (docs/plans/bots.md D5): on unless the Bot turned it off, including
   // before the Bot list has answered. Anything else shows what it always has.
   const details = botConversation
-    ? conversationDetails(botForSession(sessionId)?.hide_details ?? true, showAgentActivity)
+    ? conversationDetails(conversationBot?.hide_details ?? true, showAgentActivity)
     : { executionProcess: showAgentActivity, harnessMessages: true, backgroundTasks: true };
   // The in-chat ways to the Settings switch stay only where it decides what shows.
   const offersActivitySwitch = canEditAgentActivityVisibility && details.harnessMessages;
@@ -3098,6 +3107,7 @@ export const ChatPage: React.FC = () => {
             onRecall={recallQueued}
             onSendNow={sendQueueNow}
             sendingNow={sendingQueueNow}
+            botName={conversationBotName}
           />
         )}
         {sessionId && !readOnly && capabilities.can_use_vault_secrets && pendingApprovals.length > 0 ? (
@@ -3118,6 +3128,7 @@ export const ChatPage: React.FC = () => {
           onSearchAgents={searchAgents}
           onSearchSessions={searchSessions}
           readOnlyReason={readOnlyReason}
+          botName={conversationBotName}
           // Hidden with the rest of the chat surface in Show Page mode, which is
           // also where the header used to withdraw the picker.
           actions={writable ? (
@@ -3157,7 +3168,9 @@ export const QueueRow: React.FC<{
   item: WorkbenchMessage;
   onRemove: (id: string) => void;
   onRecall: (item: WorkbenchMessage) => void;
-}> = ({ item, onRemove, onRecall }) => {
+  /** In a Bot's conversation removing a row means not sending it (no queue there). */
+  inBotConversation?: boolean;
+}> = ({ item, onRemove, onRecall, inBotConversation = false }) => {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   // The row's own focusable anchor. An attachment control that stops existing —
@@ -3318,8 +3331,8 @@ export const QueueRow: React.FC<{
         size="icon"
         onClick={() => onRemove(item.id)}
         disabled={fenced}
-        aria-label={t('chat.queue.remove')}
-        title={t('chat.queue.remove')}
+        aria-label={t(inBotConversation ? 'bots.conversation.cancelSend' : 'chat.queue.remove')}
+        title={t(inBotConversation ? 'bots.conversation.cancelSend' : 'chat.queue.remove')}
         className="size-6 shrink-0 text-muted hover:text-destructive-ink"
       >
         <X className="size-3.5" />
@@ -3538,7 +3551,12 @@ export const QueueStrip: React.FC<{
   onRecall: (item: WorkbenchMessage) => void;
   onSendNow: () => void;
   sendingNow?: boolean;
-}> = ({ queue, onRemove, onRecall, onSendNow, sendingNow = false }) => {
+  /** A Bot's conversation, by the Bot's name. The user's messages there are P1
+   *  (docs/plans/bots.md D4): a row here is one still being steered in, or one
+   *  the Bot's Turn refused, which reaches the Bot when that Turn ends. The strip
+   *  says so, as not delivered yet, and never calls it a queue. */
+  botName?: string | null;
+}> = ({ queue, onRemove, onRecall, onSendNow, sendingNow = false, botName = null }) => {
   const { t } = useTranslation();
   if (queue.length === 0) return null;
   const held = queue.filter((item) => item.requires_explicit_retry === true);
@@ -3552,13 +3570,19 @@ export const QueueStrip: React.FC<{
   const reconciling = queue[0].state === 'reconciling_steer';
   const busy = sendingNow || headFenced;
   const buttonBusy = sendingNow || (headFenced && !reconciling);
+  const waiting = queue.some((item) => !isQueueDeliveryFenced(item));
+  const title = retryRequired
+    ? t('chat.queue.retryRequired', { count: queue.length })
+    : botName
+      ? t(waiting ? 'bots.conversation.notDelivered' : 'bots.conversation.delivering', { count: queue.length })
+      : t('chat.queue.title', { count: queue.length });
   return (
     <div className="shrink-0 px-4 md:px-8">
       <div className="mx-auto w-full max-w-[1080px] rounded-xl border border-cyan/25 bg-cyan/[0.04] p-2">
         <div className="flex items-center justify-between px-1 pb-1.5">
           <span className="inline-flex items-center gap-1.5 font-mono text-[10px] font-bold uppercase tracking-[0.1em] text-cyan-ink">
             <Clock className="size-3" />
-            {t(retryRequired ? 'chat.queue.retryRequired' : 'chat.queue.title', { count: queue.length })}
+            {title}
           </span>
           <Button
             type="button"
@@ -3591,12 +3615,17 @@ export const QueueStrip: React.FC<{
             {t(agentUnavailable ? 'chat.queue.retryHintAgentUnavailable' : 'chat.queue.retryHint')}
           </p>
         )}
+        {/* Why the user's own message is still here: the Bot's Turn refused it. A
+            message from another Bot or Agent waits behind the user's by design. */}
+        {botName && !retryRequired && queue.some((item) => item.source === 'user' && !isQueueDeliveryFenced(item)) && (
+          <p className="px-1 pb-1.5 text-[11px] text-muted">{t('bots.conversation.notDeliveredHint', { name: botName })}</p>
+        )}
         <div
           data-queue-batch="true"
           className="flex max-h-32 flex-col overflow-y-auto rounded-lg bg-surface-2"
         >
           {queue.map((item) => (
-            <QueueRow key={item.id} item={item} onRemove={onRemove} onRecall={onRecall} />
+            <QueueRow key={item.id} item={item} onRemove={onRemove} onRecall={onRecall} inBotConversation={botName !== null} />
           ))}
         </div>
       </div>
@@ -3621,9 +3650,11 @@ interface ComposeProps {
   // this is the REASON and not a boolean. "Archived, read-only" is the wrong sentence
   // on a runtime-owned row that was never archived.
   readOnlyReason: SessionReadOnlyReason | null;
+  /** A Bot's conversation: the Bot's name, for the "working" placeholder. */
+  botName?: string | null;
 }
 
-const Compose: React.FC<ComposeProps> = ({ composerRef, actions, readLatestAgentReply, onSend, onStop, busy, sessionId, initialDraft, onDraftChange, onSearchAgents, onSearchSessions, readOnlyReason }) => {
+const Compose: React.FC<ComposeProps> = ({ composerRef, actions, readLatestAgentReply, onSend, onStop, busy, sessionId, initialDraft, onDraftChange, onSearchAgents, onSearchSessions, readOnlyReason, botName }) => {
   const { t } = useTranslation();
   const readOnly = readOnlyReason !== null;
   return (
@@ -3667,6 +3698,9 @@ const Compose: React.FC<ComposeProps> = ({ composerRef, actions, readLatestAgent
               ? t('chat.compose.placeholderArchived')
               : undefined
         }
+        // A Bot takes the user's message into the Turn it is on (docs/plans/bots.md
+        // D4), so its conversation names who is working and promises no queue.
+        busyPlaceholder={botName ? t('bots.conversation.working', { name: botName }) : undefined}
         autoFocus={!readOnly}
       />
     </div>

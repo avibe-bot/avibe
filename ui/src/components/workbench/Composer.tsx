@@ -395,6 +395,8 @@ export interface ComposerProps {
    *  except while ``disabled``, where this override always wins so the caller's
    *  reason (e.g. "archived, read-only") is what the user reads. */
   placeholder?: string;
+  /** The "working" placeholder override (a Bot's conversation names the Bot). */
+  busyPlaceholder?: string;
   /** Disable sending (e.g. while the caller creates a session + navigates).
    *  Also suppresses every live-turn control — see ``busyControls``. */
   disabled?: boolean;
@@ -461,6 +463,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   initialDraft = null,
   onDraftChange,
   placeholder,
+  busyPlaceholder,
   disabled = false,
   sendDisabled = false,
   className,
@@ -1746,7 +1749,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           <MentionEditor
             ref={mentionRef}
             className="flex-1"
-            placeholder={busyControls ? t('chat.compose.placeholderBusy') : placeholder ?? t('chat.compose.placeholder')}
+            placeholder={busyControls ? busyPlaceholder ?? t('chat.compose.placeholderBusy') : placeholder ?? t('chat.compose.placeholder')}
             disabled={disabled || voiceDraftReadOnly}
             autoFocus={autoFocus}
             initialText={initialDraft}
@@ -1814,7 +1817,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             // button was inert). Fixed here so every caller inherits it.
             disabled={disabled}
             readOnly={voiceDraftReadOnly}
-            placeholder={busyControls ? t('chat.compose.placeholderBusy') : placeholder ?? t('chat.compose.placeholder')}
+            placeholder={busyControls ? busyPlaceholder ?? t('chat.compose.placeholderBusy') : placeholder ?? t('chat.compose.placeholder')}
             className="max-h-40 min-h-9 min-w-0 flex-1 resize-none bg-transparent py-2 text-[13px] leading-5 text-foreground outline-none placeholder:text-muted"
           />
         )}

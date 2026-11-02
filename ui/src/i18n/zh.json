@@ -4775,6 +4775,12 @@
       "useDefault": "恢复默认"
     },
     "conversation": {
+      "working": "{{name}} 正在处理…",
+      "delivering": "送达中 · {{count}}",
+      "notDelivered": "还没送达 · {{count}}",
+      "notDeliveredHint": "没能插进{{name}}正在处理的这一轮，这一轮结束后就会收到。",
+      "sendDeferred": "还是没能插进{{name}}正在处理的这一轮，这一轮结束后就会收到。",
+      "cancelSend": "不发了",
       "hideDetails": "隐藏细节",
       "hideDetailsFailed": "「隐藏细节」没能保存，请再试一次。",
       "editProfile": "编辑资料",
@@ -6551,6 +6557,7 @@
     "inputPlaceholder": "和歪比说…",
     "send": "发送",
     "queued": "已排队，当前这轮结束后执行。",
+    "queuedForBot": "还没送达，{{name}}这一轮结束后就会收到。",
     "moreInAvibe": "更多回复请在 Avibe 中查看",
     "empty": "还没有消息，说点什么开始吧。",
     "vaultRequest": "需要授权，在 Avibe 中打开",
