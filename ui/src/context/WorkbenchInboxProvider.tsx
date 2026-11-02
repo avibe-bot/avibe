@@ -556,9 +556,20 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         retryAfterInvalidation();
       } else {
         const snapshotsToRevalidate = acceptFeedRows(read, result.sessions, true);
+        // The read is the server's whole answer for every row that sorts above its
+        // last one, or for all of them when there is no further page. A loaded row
+        // in that range that the answer leaves out is one this reader may no longer
+        // see — a removed Bot's Session (docs/plans/bots.md D1), say, while the
+        // stream was down — so it goes, with no event needed to say so. Rows below
+        // that edge were not re-read and stay.
+        const edge = result.sessions.at(-1);
+        const reread = (row: InboxSession) =>
+          result.next_cursor === null || (edge !== undefined && byActivityDesc(row, edge) < 0);
         setInboxSessions((prev) => {
           const incoming = new Map(result.sessions.map((s) => [s.session_id, s]));
-          const merged = prev.map((s) => incoming.get(s.session_id) ?? s);
+          const merged = prev
+            .filter((s) => incoming.has(s.session_id) || !reread(s))
+            .map((s) => incoming.get(s.session_id) ?? s);
           const have = new Set(prev.map((s) => s.session_id));
           for (const s of result.sessions) if (!have.has(s.session_id)) merged.push(s);
           merged.sort(byActivityDesc);
@@ -840,6 +851,16 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         // Dropping the window is also what makes this the authoritative page-one
         // read rather than a reconcile onto rows that are no longer there.
         if (isFeedActive()) readFeedForActiveConsumer();
+      },
+      // The Bot roster decides which Sessions this reader may see: removing a Bot
+      // hides its Session and setting it again brings it back (bots.md D1), with
+      // no Inbox event of its own. The server owns that answer, so read it again
+      // rather than reclassify locally. Owing the whole map does exactly that: it
+      // fences the reads already in flight, and the read that pays it is the
+      // window's reconcile while the feed is shown (which drops rows the server
+      // no longer returns) or the counts read while it is not.
+      onBotsChanged: () => {
+        oweWholeUnread();
       },
       onInboxSessionUpdated: (row) => {
         targetedSnapshotsRef.current.delete(row.session_id);

@@ -2613,7 +2613,9 @@ def test_one_sessions_inbox_row_reads_only_that_sessions_rows(isolated_state):
     engine = create_sqlite_engine()
     with engine.begin() as conn:
         scope_id = _seed_scope(conn)
-        for session_id in ("ses_one", "ses_other"):
+        # Generated ids, which never carry ``_``: an id in the Bots' ``ses_`` namespace
+        # also reads which Bot Sessions are hidden (``get_inbox_session``).
+        for session_id in ("sesone", "sesother"):
             _seed_titled_session(conn, scope_id, session_id, session_id)
             _insert_msg(conn, scope_id, session_id, "agent", "unread reply", "2026-05-30T10:00:00Z", read=False)
     statements: list[tuple[str, tuple]] = []
@@ -2623,7 +2625,7 @@ def test_one_sessions_inbox_row_reads_only_that_sessions_rows(isolated_state):
         statements.append((statement, tuple(parameters)))
 
     with engine.connect() as conn:
-        row = messages_service.get_inbox_session(conn, "ses_one")
+        row = messages_service.get_inbox_session(conn, "sesone")
         [(statement, parameters)] = statements
         plan = [str(step[3]) for step in conn.exec_driver_sql(f"EXPLAIN QUERY PLAN {statement}", parameters)]
 

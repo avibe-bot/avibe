@@ -5,8 +5,9 @@ import { createContext, useContext } from 'react';
  *
  *  The answer is the server's: a Session is a Bot's while it is the permanent
  *  Session of a current Bot, which is exactly the Owner's live Bot list
- *  (`BotsProvider`, refetched on `bots.changed`). A removed Bot's `ses_` Session
- *  is an ordinary Session again, and a reader who is not the Owner has no Bots.
+ *  (`BotsProvider`, refetched on `bots.changed`). A removed Bot's Session is
+ *  hidden, not reclassified: the Inbox re-reads on `bots.changed` and the server
+ *  leaves it out. A reader who is not the Owner has no Bots.
  *
  *  `BotsProvider` lives inside the router, under the authorization it needs,
  *  while the Inbox and the badges it drives live above the router. This bridge

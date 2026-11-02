@@ -24,10 +24,11 @@ export const NOTIFICATIONS_SETTINGS_PATH = '/settings/notifications';
 /**
  * A Session is a Bot conversation while it is a current Bot's permanent Session,
  * the server's own definition (`core/notification_categories.py`). The caller
- * passes the Bot Sessions it knows, the live Bot list (`BotRosterContext`); a
- * removed Bot's `ses_` Session is therefore an ordinary Session, as it is on the
- * server. One classifier serves the feed rows and the unread map, so a row's
- * section and the count it adds to cannot disagree.
+ * passes the Bot Sessions it knows, the live Bot list (`BotRosterContext`), not
+ * an id pattern. (A removed Bot's Session is not here at all: the server hides it
+ * from every Inbox read and event, docs/plans/bots.md D1.) One classifier serves
+ * the feed rows and the unread map, so a row's section and the count it adds to
+ * cannot disagree.
  */
 export const inboxCategory = (sessionId: string, botSessionIds: ReadonlySet<string>): InboxCategory =>
   (botSessionIds.has(sessionId) ? 'bot' : 'session');

@@ -829,12 +829,12 @@ describe('Demand-driven shell bootstrap', () => {
       Object.defineProperty(navigator, 'clearAppBadge', { configurable: true, value: clearAppBadge });
 
       try {
-        // Two unread replies from a Bot; five from an ordinary Session and three
-        // from a removed Bot's, which the server counts as a Session too.
+        // Two unread replies from a Bot; five and three from ordinary Sessions,
+        // one with an id that merely starts like a Bot's: the list decides.
         const listInbox = vi.fn(async (_args: ListInboxArgs) => ({
           sessions: [],
           next_cursor: null,
-          unread_by_session: { ses_cso: 2, sesa1b2c3d4e5: 5, ses_retired: 3 },
+          unread_by_session: { ses_cso: 2, sesa1b2c3d4e5: 5, ses_ordinary: 3 },
         }));
         apiRef.current = { listInbox, connectWorkbenchEvents: vi.fn(() => vi.fn()) };
         const roster: BotRoster = { sessionIds: new Set(['ses_main', 'ses_cso']), known: true };

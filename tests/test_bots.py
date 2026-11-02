@@ -314,6 +314,35 @@ def test_the_inbox_includes_bot_sessions_for_the_owner_only(service):
         assert messages_service.total_unread(conn, hidden_session_ids=member_hidden) == 0
 
 
+def test_a_removed_bots_session_has_no_realtime_inbox_row(service):
+    """Every ``inbox.session.updated`` (and the push it gates) is built from this row: a hidden Session has none."""
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+
+    def reply(text: str) -> None:
+        with create_sqlite_engine().begin() as conn:
+            messages_service.append(
+                conn, scope_id=None, session_id=bot.session_id, platform="avibe", author="agent",
+                message_type="result", text=text,
+            )
+
+    def row():
+        with create_sqlite_engine().connect() as conn:
+            return messages_service.get_inbox_session(conn, bot.session_id)
+
+    bot = service.create_bot(display_name="Researcher")
+    reply("done")
+    assert row()["session_id"] == bot.session_id
+
+    service.remove_bot(bot.handle)
+    # A turn still lands in the kept Session; the Inbox projection does not announce it.
+    reply("after removal")
+    assert row() is None
+
+    service.set_bot(bot.agent.name, display_name="Researcher")
+    assert (row()["session_id"], row()["unread_count"]) == (bot.session_id, 2)
+
+
 def test_agents_list_exposes_bot_info(service):
     from vibe import api
 

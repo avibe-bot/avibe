@@ -197,9 +197,9 @@ describe('with Bots', () => {
     expect(screen.queryByText('bots.tag')).toBeNull();
   });
 
-  it("files a removed Bot's Session with the Sessions, as the server counts it", () => {
-    // `ses_retired` keeps its id after its Bot is removed, but it is not in the live list.
-    mountWithBots([botRow('ses_cso', 1), { ...row(7, 2), session_id: 'ses_retired' }], { ses_cso: 1, ses_retired: 4 });
+  it('files a Session that is not on the Bot list with the Sessions, whatever its id', () => {
+    // The live list decides, as on the server; an id pattern does not.
+    mountWithBots([botRow('ses_cso', 1), { ...row(7, 2), session_id: 'ses_ordinary' }], { ses_cso: 1, ses_ordinary: 4 });
     const sessionsSection = screen.getByText('workbench.inbox.sections.sessions').closest('section')!;
     expect(sessionsSection.textContent).toContain('Session 7');
     const botsSection = screen.getByText('workbench.inbox.sections.bots').closest('section')!;

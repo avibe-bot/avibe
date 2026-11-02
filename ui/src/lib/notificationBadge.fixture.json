@@ -1,47 +1,80 @@
 {
-  "description": "One set of Inbox unread data and switches, with the category split and badge both sides must compute. Read by ui/src/lib/notificationPreferences.test.ts (the page's live badge) and tests/test_notification_badge_parity.py (the server's badge_total).",
+  "description": "Inbox unread data and switches, with the category split and badge both sides must compute. `cases` run the page's pure functions (ui/src/lib/notificationPreferences.test.ts) and the server's (tests/test_notification_badge_parity.py) on one unread map as the server reports it. `removed_bot` runs the same numbers across a roster change: through GET /api/inbox on the server, and through a live client that held the Bot's unread before the change (ui/src/context/WorkbenchInboxProvider.botRoster.test.tsx).",
   "unread_by_session": {
     "ses_main": 1,
     "ses_cso": 2,
-    "ses_retired": 3,
     "sesa1b2c3d4e5": 4,
     "sesz9y8x7w6v5": 5
   },
   "cases": [
     {
-      "name": "Owner, every switch on; a removed Bot's ses_ Session is an ordinary Session",
+      "name": "Owner, every switch on",
       "bot_session_ids": ["ses_main", "ses_cso"],
       "preferences": { "enabled": true, "bots": true, "sessions": true },
-      "unread_by_category": { "bot": 3, "session": 12 },
-      "badge_total": 15
+      "unread_by_category": { "bot": 3, "session": 9 },
+      "badge_total": 12
     },
     {
       "name": "Owner, Session messages muted",
       "bot_session_ids": ["ses_main", "ses_cso"],
       "preferences": { "enabled": true, "bots": true, "sessions": false },
-      "unread_by_category": { "bot": 3, "session": 12 },
+      "unread_by_category": { "bot": 3, "session": 9 },
       "badge_total": 3
     },
     {
       "name": "Owner, Bot messages muted",
       "bot_session_ids": ["ses_main", "ses_cso"],
       "preferences": { "enabled": true, "bots": false, "sessions": true },
-      "unread_by_category": { "bot": 3, "session": 12 },
-      "badge_total": 12
+      "unread_by_category": { "bot": 3, "session": 9 },
+      "badge_total": 9
     },
     {
       "name": "Owner, master switch off",
       "bot_session_ids": ["ses_main", "ses_cso"],
       "preferences": { "enabled": false, "bots": true, "sessions": true },
-      "unread_by_category": { "bot": 3, "session": 12 },
+      "unread_by_category": { "bot": 3, "session": 9 },
       "badge_total": 0
     },
     {
-      "name": "A reader without Bots: everything is a Session",
+      "name": "Not on the Bot list, whatever the id: everything is a Session",
       "bot_session_ids": [],
       "preferences": { "enabled": true, "bots": true, "sessions": false },
-      "unread_by_category": { "bot": 0, "session": 15 },
+      "unread_by_category": { "bot": 0, "session": 12 },
       "badge_total": 0
     }
-  ]
+  ],
+  "removed_bot": {
+    "description": "The Owner removes the Bot `retired` while its Session has 3 unread replies. From then on its Session is hidden (docs/plans/bots.md D1), not an ordinary Session: the server leaves it out of the unread map, so neither category and no badge counts it.",
+    "bots": ["cso", "retired"],
+    "removed": "retired",
+    "agent_replies": {
+      "ses_main": 1,
+      "ses_cso": 2,
+      "ses_retired": 3,
+      "sesa1b2c3d4e5": 4,
+      "sesz9y8x7w6v5": 5
+    },
+    "before": {
+      "bot_session_ids": ["ses_main", "ses_cso", "ses_retired"],
+      "unread_by_session": { "ses_main": 1, "ses_cso": 2, "ses_retired": 3, "sesa1b2c3d4e5": 4, "sesz9y8x7w6v5": 5 }
+    },
+    "after": {
+      "bot_session_ids": ["ses_main", "ses_cso"],
+      "unread_by_session": { "ses_main": 1, "ses_cso": 2, "sesa1b2c3d4e5": 4, "sesz9y8x7w6v5": 5 }
+    },
+    "cases": [
+      {
+        "name": "every switch on",
+        "preferences": { "enabled": true, "bots": true, "sessions": true },
+        "unread_by_category": { "bot": 3, "session": 9 },
+        "badge_total": 12
+      },
+      {
+        "name": "Session messages muted",
+        "preferences": { "enabled": true, "bots": true, "sessions": false },
+        "unread_by_category": { "bot": 3, "session": 9 },
+        "badge_total": 3
+      }
+    ]
+  }
 }
