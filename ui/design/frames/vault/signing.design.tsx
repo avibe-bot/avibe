@@ -34,7 +34,7 @@ const request = {
 } satisfies VaultRequest;
 const noop = () => {};
 
-export default frames([
+const designFrames = frames([
   {
     name: 'capabilities', title: 'Vault · Bitcoin signing limitations',
     width: 1200, height: 800, status: 'shipped', route: '/vaults', fixtures,
@@ -51,3 +51,5 @@ export default frames([
     render: () => <div className="p-6"><VaultApprovalCard onResolved={noop} onCancel={noop} request={{ ...request, delivery: { ...request.delivery, scheme: 'schnorr-secp256k1-bip340' } }} /></div>,
   },
 ]);
+
+export default designFrames;
