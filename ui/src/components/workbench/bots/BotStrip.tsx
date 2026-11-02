@@ -38,6 +38,14 @@ const horizontalOnly: Modifier = ({ transform }) => ({ ...transform, y: 0 });
 
 const unreadLabel = (count: number) => (count > 99 ? '99+' : String(count));
 
+type PointerPoint = { x: number; y: number };
+
+// Within this distance a pointer has not moved: pointer and mouse events of one
+// position may differ by the fraction a mouse event rounds away.
+const STILL_PX = 1;
+const samePoint = (a: PointerPoint, b: PointerPoint) =>
+  Math.abs(a.x - b.x) <= STILL_PX && Math.abs(a.y - b.y) <= STILL_PX;
+
 // The Bots strip (docs/plans/bots.md D5): the Owner's standing members as a row
 // of 40px avatars in the Inbox's old place, the main Bot first. The open Bot has
 // a mint ring, unread is a cyan count, a running Turn a pulsing mint dot. With
@@ -54,6 +62,33 @@ export const BotStrip: React.FC<{
   const rowRef = useRef<HTMLDivElement | null>(null);
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const [draggingHandle, setDraggingHandle] = useState<string | null>(null);
+  // Scrolling takes the hover card away at once, and no card opens again until
+  // the pointer itself moves onto an avatar: a scroll slides avatars under a
+  // still pointer, and the enter the browser reports for that is not the user
+  // pointing at one. `scrollHold` keeps where the pointer stood when the strip
+  // scrolled; `scrollEpoch` tells every slot to close.
+  const lastPointer = useRef<PointerPoint | null>(null);
+  const scrollHold = useRef<PointerPoint | null>(null);
+  const [scrollEpoch, setScrollEpoch] = useState(0);
+  const notePointer = (event: React.PointerEvent | React.WheelEvent) => {
+    const point = { x: event.clientX, y: event.clientY };
+    lastPointer.current = point;
+    if (scrollHold.current && !samePoint(scrollHold.current, point)) scrollHold.current = null;
+  };
+  const onStripScroll = () => {
+    updateFade();
+    if (scrollHold.current) return;
+    // A touch scroll leaves no pointer position; the next enter is then admitted.
+    scrollHold.current = lastPointer.current ?? { x: Number.NaN, y: Number.NaN };
+    setScrollEpoch((epoch) => epoch + 1);
+  };
+  const admitsHover = useCallback((event: React.MouseEvent) => {
+    const held = scrollHold.current;
+    if (!held) return true;
+    if (samePoint(held, { x: event.clientX, y: event.clientY })) return false;
+    scrollHold.current = null;
+    return true;
+  }, []);
 
   useLayoutEffect(() => {
     const row = rowRef.current;
@@ -104,6 +139,8 @@ export const BotStrip: React.FC<{
     unread: unreadBySession[bot.session_id] ?? 0,
     status: statusBySession[bot.session_id],
     suppressHover: draggingHandle !== null,
+    scrollEpoch,
+    admitsHover,
   });
 
   const addSlot = (
@@ -123,7 +160,15 @@ export const BotStrip: React.FC<{
   );
 
   return (
-    <section aria-label={t('bots.sectionLabel')} className="flex shrink-0 flex-col gap-1">
+    <section
+      aria-label={t('bots.sectionLabel')}
+      className="mb-2.5 flex shrink-0 flex-col gap-1"
+      onPointerMove={notePointer}
+      onPointerLeave={() => {
+        scrollHold.current = null;
+      }}
+      onWheel={notePointer}
+    >
       <div className="flex h-4 items-center px-1">
         <span className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted">
           {t('bots.sectionLabel')}
@@ -132,7 +177,7 @@ export const BotStrip: React.FC<{
       <div ref={rowRef} className="flex min-w-0 items-start">
         <div
           ref={scrollerRef}
-          onScroll={updateFade}
+          onScroll={onStripScroll}
           className={clsx(
             'flex min-w-0 items-start gap-1 overflow-x-auto px-0.5 pb-0.5 pt-1.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden',
             !inline && 'flex-1',
@@ -193,6 +238,10 @@ type BotSlotProps = {
   unread: number;
   status: BotRuntimeStatus | undefined;
   suppressHover: boolean;
+  /** Bumped when the strip starts to scroll: an open or pending card closes at once. */
+  scrollEpoch: number;
+  /** False for an enter that only a scroll caused, with the pointer still where it was. */
+  admitsHover: (event: React.MouseEvent) => boolean;
 };
 
 type SlotDrag = Pick<ReturnType<typeof useSortable>, 'attributes' | 'listeners' | 'setNodeRef' | 'transform' | 'transition' | 'isDragging'>;
@@ -203,7 +252,7 @@ const SortableBotSlot: React.FC<BotSlotProps & { sortable: boolean }> = ({ sorta
   return <BotSlot {...props} drag={sortable ? drag : undefined} />;
 };
 
-const BotSlot: React.FC<BotSlotProps & { drag?: SlotDrag }> = ({ bot, name, unread, status, suppressHover, drag }) => {
+const BotSlot: React.FC<BotSlotProps & { drag?: SlotDrag }> = ({ bot, name, unread, status, suppressHover, scrollEpoch, admitsHover, drag }) => {
   const { t } = useTranslation();
   const api = useApi();
   const navigate = useNavigate();
@@ -214,7 +263,11 @@ const BotSlot: React.FC<BotSlotProps & { drag?: SlotDrag }> = ({ bot, name, unre
   const path = botSessionPath(bot);
   const selected = location.pathname === path;
   const running = status === 'running';
-  const [hoverOpen, setHoverOpen] = useState(false);
+  // A card belongs to the scroll epoch it opened in, so a scroll of the strip
+  // closes it, and one still waiting on its delay, at once.
+  const [hoverEpoch, setHoverEpoch] = useState<number | null>(null);
+  const hoverOpen = hoverEpoch === scrollEpoch;
+  const setHoverOpen = (open: boolean) => setHoverEpoch(open ? scrollEpoch : null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [latest, setLatest] = useState<InboxSession | null | undefined>(undefined);
   const openTimer = useRef<number | null>(null);
@@ -243,14 +296,15 @@ const BotSlot: React.FC<BotSlotProps & { drag?: SlotDrag }> = ({ bot, name, unre
     if (suppressHover || isDragging) clearTimers();
   }, [suppressHover, isDragging]);
 
-  const queueOpen = () => {
-    if (suppressHover || menuOpen) return;
+  const queueOpen = (event: React.MouseEvent) => {
+    if (suppressHover || menuOpen || !admitsHover(event)) return;
     if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
     closeTimer.current = null;
     if (hoverOpen || openTimer.current !== null) return;
+    const epoch = scrollEpoch;
     openTimer.current = window.setTimeout(() => {
       openTimer.current = null;
-      setHoverOpen(true);
+      setHoverEpoch(epoch);
     }, 350);
   };
   const queueClose = () => {
