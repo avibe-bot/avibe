@@ -11,14 +11,20 @@
 
 let restingHeight = 0;
 
+/** Whether focusing this element raises the on-screen keyboard: a text field,
+ *  or a contenteditable such as the Lexical chat composer. Every keyboard-aware
+ *  check asks this one predicate, so none of them can forget the composer. */
+export function isTextEntryElement(el: Element | null | undefined): el is HTMLElement {
+  if (!(el instanceof HTMLElement)) return false;
+  const tag = el.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable;
+}
+
 // True when a text field is focused — i.e. the soft keyboard could be up — so the
 // resize handler knows whether a shrink is "keyboard" or just a window/orientation
 // change.
 function isEditableFocused(): boolean {
-  const el = typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null;
-  if (!el) return false;
-  const tag = el.tagName;
-  return tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable;
+  return typeof document !== 'undefined' && isTextEntryElement(document.activeElement);
 }
 
 if (typeof window !== 'undefined' && window.visualViewport) {

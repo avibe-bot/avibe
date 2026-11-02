@@ -1,5 +1,7 @@
 import { type RefObject, useEffect } from 'react';
 
+import { isTextEntryElement } from './softKeyboard';
+
 // Keep a bottom-pinned composer glued to the on-screen keyboard on mobile iOS
 // Safari (incl. the iOS 26 regression where `position: fixed` stops being
 // honored, `dvh` under-resolves, and `visualViewport` values are
@@ -13,7 +15,12 @@ import { type RefObject, useEffect } from 'react';
 //   • size the fixed full-screen surface to the TRUE visible bottom
 //     (visualViewport.offsetTop + visualViewport.height) — 100dvh under-resolves
 //     with the keyboard open, which is why the composer stops short of the bottom;
-//   • pull the focused field into view (scrollIntoView) as a backstop.
+//   • pull the focused field into view (scrollIntoView) as a backstop, only as
+//     far as needed, and never while an input method is composing: the scroll
+//     waits for compositionend, so it cannot land between a keystroke and its
+//     candidates.
+// "Focused field" includes the contenteditable chat composer (Lexical), not only
+// inputs and textareas; the hook predates that composer and missed it.
 // On blur, restore full height and nudge the scroll to work around the iOS 26 bug
 // where visualViewport.offsetTop fails to revert after the keyboard closes.
 //
@@ -30,17 +37,23 @@ export function useIosKeyboardInset(containerRef: RefObject<HTMLDivElement | nul
 
     let settle = 0;
     let active = false;
-
-    const isEditable = (el: Element | null): boolean =>
-      !!el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT');
+    let composing = false;
+    let revealAfterComposition = false;
 
     const correct = () => {
       const el = containerRef.current;
       // True bottom of the visible area, in layout coords (see header comment).
       if (el) el.style.height = `${Math.round(vv.offsetTop + vv.height)}px`;
-      if (isEditable(document.activeElement)) {
-        (document.activeElement as HTMLElement).scrollIntoView({ block: 'end', behavior: 'smooth' });
+      const focused = document.activeElement;
+      if (!isTextEntryElement(focused)) return;
+      if (composing) {
+        revealAfterComposition = true;
+        return;
       }
+      // `nearest` moves nothing when the field is already in sight: the stacked
+      // composer keeps its action row below the editor, and aligning the
+      // editor's own bottom edge to the keyboard would push that row under it.
+      focused.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     };
     // Debounce: nothing moves DURING the open/close animation; correct once the
     // visual viewport stops changing.
@@ -48,12 +61,23 @@ export function useIosKeyboardInset(containerRef: RefObject<HTMLDivElement | nul
       window.clearTimeout(settle);
       settle = window.setTimeout(correct, 140);
     };
+    const onCompositionStart = () => {
+      composing = true;
+    };
+    const onCompositionEnd = () => {
+      composing = false;
+      if (!revealAfterComposition) return;
+      revealAfterComposition = false;
+      onViewport();
+    };
     const onFocusOut = () => {
       window.setTimeout(() => {
         // Focus moved to ANOTHER field (e.g. title → composer) with the keyboard
         // still up — keep the inset; resetting here would expand the surface back
         // behind the keyboard and obscure the composer until the next vv event.
-        if (isEditable(document.activeElement)) return;
+        if (isTextEntryElement(document.activeElement)) return;
+        composing = false;
+        revealAfterComposition = false;
         const el = containerRef.current;
         if (el) el.style.height = '';
         // iOS 26: offsetTop can stay > 0 after dismiss; a 1px scroll forces recalc.
@@ -70,6 +94,8 @@ export function useIosKeyboardInset(containerRef: RefObject<HTMLDivElement | nul
       vv.addEventListener('resize', onViewport);
       vv.addEventListener('scroll', onViewport);
       document.addEventListener('focusout', onFocusOut);
+      document.addEventListener('compositionstart', onCompositionStart, true);
+      document.addEventListener('compositionend', onCompositionEnd, true);
     };
     const deactivate = () => {
       if (!active) return;
@@ -78,6 +104,10 @@ export function useIosKeyboardInset(containerRef: RefObject<HTMLDivElement | nul
       vv.removeEventListener('resize', onViewport);
       vv.removeEventListener('scroll', onViewport);
       document.removeEventListener('focusout', onFocusOut);
+      document.removeEventListener('compositionstart', onCompositionStart, true);
+      document.removeEventListener('compositionend', onCompositionEnd, true);
+      composing = false;
+      revealAfterComposition = false;
       // Clear any stale inline height so the desktop/md layout takes over.
       const el = containerRef.current;
       if (el) el.style.height = '';
