@@ -4441,8 +4441,8 @@ def create_sign_request(
             _public_meta(row.get("public_meta")).get("signing_public_key")
         )
     if signing_context is None:
-        if row.get("protection") == "protected":
-            raise InvalidSigningContextError("protected signing requires a verifiable signing_context")
+        if row.get("protection") == "protected" and scheme == vault_bitcoin.BITCOIN_SCHEME:
+            raise InvalidSigningContextError("protected Bitcoin signing requires a verifiable signing_context")
     elif not isinstance(signing_context, dict):
         raise InvalidSigningContextError("signing_context must be an object")
     else:
@@ -4707,7 +4707,7 @@ def complete_sign_request(
         if not isinstance(signing_context, dict):
             if secret_row.get("protection") == "protected":
                 raise InvalidSigningContextError("Bitcoin signing request is missing a persisted signing_context")
-        elif signing_context.get("kind") == vault_bitcoin.BITCOIN_CONTEXT_KIND:
+        elif secret_row.get("protection") == "protected" or signing_context.get("kind") == vault_bitcoin.BITCOIN_CONTEXT_KIND:
             signing_public_key = require_compressed_signing_public_key(
                 _public_meta(secret_row.get("public_meta")).get("signing_public_key")
             )

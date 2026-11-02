@@ -24,7 +24,6 @@ MIN_PREVOUT_SATS = 1
 MAX_TRANSACTION_BYTES = 137
 MAX_TRANSACTION_HEX = MAX_TRANSACTION_BYTES * 2
 _HEX_RE = re.compile(r"^[0-9a-f]+$")
-_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class BitcoinContextError(ValueError):
@@ -381,7 +380,7 @@ def validate_scheme_pairing(
     expected_digest: str,
     scheme: str,
     compressed_public_key: str | None = None,
-) -> ValidatedBitcoinContext:
+) -> ValidatedBitcoinContext | None:
     if isinstance(context, dict) and context.get("kind") == BITCOIN_CONTEXT_KIND:
         if scheme != BITCOIN_SCHEME:
             _fail("Bitcoin Taproot signing_context requires schnorr-secp256k1-bip341-keypath")
@@ -392,4 +391,4 @@ def validate_scheme_pairing(
         )
     if scheme == BITCOIN_SCHEME:
         _fail("schnorr-secp256k1-bip341-keypath requires a bitcoin-taproot-keypath-v1 signing_context")
-    return None  # type: ignore[return-value]
+    return None

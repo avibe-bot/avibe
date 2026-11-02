@@ -174,7 +174,7 @@ describe('VaultApprovalCard signing-address contract', () => {
     ['standard', 'schnorr-secp256k1-bip340', []],
     ['standard', 'ecdsa-secp256k1-der', ['segwit', 'legacy']],
     ['protected', 'schnorr-secp256k1-bip340', []],
-    ['protected', 'schnorr-secp256k1-bip341-keypath', ['taproot']],
+    ['protected', 'schnorr-secp256k1-bip341-keypath', []],
     ['protected', 'ecdsa-secp256k1-der', []],
     ['protected', 'ecdsa-secp256k1-recoverable', ['ethereum']],
   ] as const)('shows only truthful addresses for %s %s', async (protection, scheme, visible) => {

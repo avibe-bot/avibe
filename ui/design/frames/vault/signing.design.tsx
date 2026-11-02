@@ -1,5 +1,5 @@
 // Signing capability is shown alongside existing addresses, without changing keys.
-import { VaultApprovalCard } from '@/components/ui/vault-approval-card';
+import { VaultApprovalCard, VaultSigningIdentity } from '@/components/ui/vault-approval-card';
 import { VaultsPage } from '@/components/workbench/VaultsPage';
 import type { VaultRequest, VaultSecret } from '@/context/ApiContext';
 
@@ -22,22 +22,15 @@ const fixtures = workbenchFixtures({
   '/api/vault/secrets': { ok: true, secrets: [standard, { ...standard, name: 'PROTECTED_BTC_KEY', protection: 'protected' }] },
   '/api/vault/grants': { ok: true, grants: [] },
   '/api/vault/requests': { ok: true, requests: [] },
-  '/api/vault/vmk': { ok: true, exists: false },
+  '/api/vault/avault-authorization': { ok: true, required: false, detected_at: null, attempt: null },
   '/api/dependencies': { deps: [] },
   '/api/skills': { ok: true, skills: [] },
 });
 const request = {
-  id: 'vrq_design_sign', request_type: 'sign', secret_name: 'PROTECTED_BTC_KEY', requester: {},
+  id: 'vrq_design_sign', request_type: 'sign', secret_name: standard.name, requester: {},
   status: 'pending', message_id: null, created_at: standard.created_at, decided_at: null, expires_at: null,
-  delivery: {
-    digest: '00'.repeat(32), scheme: 'schnorr-secp256k1-bip341-keypath',
-    signing_context: {
-      kind: 'bitcoin-taproot-keypath-v1', network: 'signet', unsignedTransaction: '0200000001' + '11'.repeat(32) + '0000000000fdffffff01' + '8096980000000000225120' + '22'.repeat(32) + '00000000',
-      prevout: { amountSats: 10000000, scriptPubKey: '5120' + '33'.repeat(32) },
-      digestAlgorithm: 'bip341-sighash-default-keypath', digest: '00'.repeat(32),
-    },
-  },
-  card: { request_type: 'sign', secret_name: 'PROTECTED_BTC_KEY', kind: 'keypair', protection: 'protected' },
+  delivery: { digest: '00'.repeat(32), scheme: 'schnorr-secp256k1-bip341-keypath' },
+  card: { request_type: 'sign', secret_name: standard.name, kind: 'keypair', protection: 'standard' },
 } satisfies VaultRequest;
 const noop = () => {};
 
@@ -51,6 +44,12 @@ const designFrames = frames([
     name: 'keypath', title: 'Vault · BIP86 approval identity',
     width: 640, height: 460, status: 'shipped', fixtures,
     render: () => <div className="p-6"><VaultApprovalCard onResolved={noop} onCancel={noop} request={request} /></div>,
+  },
+  {
+    name: 'protected-keypath', title: 'Vault · Protected Bitcoin secure-window warning',
+    width: 640, height: 180, status: 'shipped', fixtures,
+    // The same view as the real approval card, without its custody/network container.
+    render: () => <div className="p-6"><VaultSigningIdentity scheme="schnorr-secp256k1-bip341-keypath" addresses={standard.signing_addresses ?? null} protectedKey /></div>,
   },
   {
     name: 'raw', title: 'Vault · Raw BIP340 is not the Taproot address',
