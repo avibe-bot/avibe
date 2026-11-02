@@ -8731,6 +8731,13 @@ def _vault_secret_row(secret: dict) -> dict:
             "description": secret.get("description"),
             "policy": secret.get("policy"),
             "signing_addresses": secret.get("signing_addresses"),
+            "bitcoin_signing_warning": (
+                "Protected Bitcoin transaction signing is not supported yet. BTC addresses are for identifying existing funds, not a promise of spend support."
+                if secret.get("kind") == "keypair" and secret.get("protection") == "protected"
+                else "Taproot requires schnorr-secp256k1-bip341-keypath and a supporting avault build; raw BIP340 cannot spend these Taproot addresses."
+                if secret.get("kind") == "keypair" and (secret.get("signing_addresses") or {}).get("btc_taproot")
+                else None
+            ),
             "per_use_sign": bool(secret.get("per_use_sign")) or None,
         }
     )
@@ -10658,6 +10665,9 @@ def cmd_vault_sign(args):
         return 1
     except api.VaultApiError as exc:
         _print_task_error(TaskCliError(str(exc), code=exc.code, help_command=help_command))
+        return 1
+    except vault_service.InvalidSigningKeyError as exc:
+        _print_task_error(TaskCliError(str(exc), code="invalid_signing_key", help_command=help_command))
         return 1
     except vault_service.InvalidRequestError as exc:
         _print_task_error(TaskCliError(str(exc), code="invalid_request", help_command=help_command))
@@ -18515,7 +18525,12 @@ def build_parser():
     vault_sign_parser.add_argument(
         "--scheme",
         default="ecdsa-secp256k1-recoverable",
-        choices=["ecdsa-secp256k1-recoverable", "ecdsa-secp256k1-der", "schnorr-secp256k1-bip340"],
+        choices=[
+            "ecdsa-secp256k1-recoverable",
+            "ecdsa-secp256k1-der",
+            "schnorr-secp256k1-bip340",
+            "schnorr-secp256k1-bip341-keypath",
+        ],
         help="Signature scheme",
     )
     vault_sign_parser.add_argument("--session-id", help="Agent Session ID. Defaults from AVIBE_SESSION_ID inside an Agent shell.")

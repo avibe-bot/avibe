@@ -1,0 +1,12 @@
+{
+  "source": "vault-sandbox src/operationContext.ts stableJson, commit fee07fe7f0153ae4e4b29dd0154703dc236fbce4; generated with the actual JavaScript consumer via esbuild and Node.js",
+  "payload": {
+    "message": {
+      "": 9007199254740991,
+      "😀": -9007199254740991
+    },
+    "text": "用户 🚀"
+  },
+  "canonical": "{\"message\":{\"😀\":-9007199254740991,\"\":9007199254740991},\"text\":\"用户 🚀\"}",
+  "sha256": "a412c7d7d314f80a9320659810f9db5a5fd6e9da07536850670537f3b001f587"
+}

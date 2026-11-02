@@ -5781,10 +5781,14 @@ def settings_get():
 
 
 def _vault_error_response(exc):
+    from core.services import settings as settings_service
     from vibe import api
 
     if isinstance(exc, api.VaultApiError):
-        return jsonify({"ok": False, "code": exc.code, "message": str(exc)}), exc.status
+        message = str(exc)
+        if exc.message_key:
+            message = t(exc.message_key, settings_service.load_config_or_default().language)
+        return jsonify({"ok": False, "code": exc.code, "message": message}), exc.status
     return jsonify({"ok": False, "code": "vault_error", "message": str(exc)}), 400
 
 

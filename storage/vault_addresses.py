@@ -193,17 +193,29 @@ def _p2wpkh(compressed: bytes) -> str:
 
 
 def _p2tr(compressed: bytes) -> str:
+    return _segwit_encode("bc", 1, taproot_output_key_xonly(compressed).to_bytes(32, "big"))
+
+
+def taproot_output_key_xonly(public_key: bytes | str) -> int:
+    """Return the BIP341 key-path output key x-coordinate for a public key.
+
+    This is public-only BIP86 derivation: the internal key is lifted to even Y
+    and tweaked with ``TaggedHash("TapTweak", P.x)`` and an empty script tree.
+    A zero tweak is valid under BIP341 and therefore must not be rejected.
+    """
+    compressed = _normalize_compressed(public_key if isinstance(public_key, str) else public_key.hex())
     x, _ = _point(compressed)
     x_bytes = x.to_bytes(32, "big")
-    # BIP341 key-path taproot: internal key is the x-only key lifted to even Y,
-    # tweaked by t = tagged_hash("TapTweak", x) with no script tree.
     internal = _point(b"\x02" + x_bytes)
     tweak = int.from_bytes(_tagged_hash("TapTweak", x_bytes), "big")
-    if not 0 < tweak < _N:
+    if tweak >= _N:
         raise ValueError("invalid taproot tweak")
-    tweak_point = ec.derive_private_key(tweak, ec.SECP256K1()).public_key().public_numbers()
-    output_x, _ = _point_add(internal, (tweak_point.x, tweak_point.y))
-    return _segwit_encode("bc", 1, output_x.to_bytes(32, "big"))
+    if tweak == 0:
+        output = internal
+    else:
+        tweak_point = ec.derive_private_key(tweak, ec.SECP256K1()).public_key().public_numbers()
+        output = _point_add(internal, (tweak_point.x, tweak_point.y))
+    return output[0]
 
 
 def derive_addresses(public_key_hex: str) -> dict[str, str]:

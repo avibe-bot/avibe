@@ -62,7 +62,7 @@ def _sealed(suffix: str = "1") -> Sealed:
 PROTECTED_SIGNING_PUBLIC_META = {
     "signing_public_key": {
         "curve": "secp256k1",
-        "public_key": "02" + "cd" * 32,
+        "public_key": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
     }
 }
 
@@ -71,7 +71,7 @@ def _signing_context_json(digest: str) -> str:
     return json.dumps(
         {
             "kind": "avault-agent-operation",
-            "canonicalPreimage": f"vault-sign-test:{digest}",
+            "canonicalPreimage": f"avault-agent-operation:v1\nvault-sign-test:{digest}",
             "digestAlgorithm": "avault-operation-hash-v1",
             "digest": digest,
         }
@@ -272,6 +272,21 @@ def test_vault_skill_cli_examples_are_parser_backed():
         assert example[0] == "vibe"
         parsed = parser.parse_args(example[1:])
         assert parsed.command == "vault"
+
+
+@pytest.mark.parametrize("protection", ["standard", "protected"])
+@pytest.mark.parametrize("command", [cli.cmd_vault_list, cli.cmd_vault_find])
+def test_keypair_listing_warns_about_bitcoin_signing_capability(capfd, protection, command):
+    _create_standard_secret("BTC_KEY", kind="keypair", protection=protection, public_meta=PROTECTED_SIGNING_PUBLIC_META)
+    assert command(_ns()) == 0
+    secret = json.loads(capfd.readouterr().out)["secrets"][0]
+    assert secret["signing_addresses"]["btc_taproot"].startswith("bc1p")
+    warning = secret["bitcoin_signing_warning"]
+    if protection == "protected":
+        assert "not supported" in warning
+    else:
+        assert "schnorr-secp256k1-bip341-keypath" in warning
+        assert "raw BIP340 cannot spend" in warning
 
 
 def test_vault_parser_does_not_expose_plaintext_set_command():
@@ -881,7 +896,7 @@ def test_record_ref_errors_are_structured_before_delivery(
 def test_sign_cli_standard_key_returns_inline_signature_without_request(capfd, monkeypatch):
     from vibe import api
 
-    signature = {"signature": "ab" * 64, "recovery_id": 1}
+    signature = {"signature": "01" * 64, "recovery_id": 0}
     sign = Mock(return_value=signature)
     monkeypatch.setattr(api, "avault_sign", sign)
     with cli._open_vault_engine().begin() as conn:
@@ -909,7 +924,7 @@ def test_sign_cli_standard_key_returns_inline_signature_without_request(capfd, m
 def test_sign_request_and_await_cli_reads_approved_signature_for_always_ask_standard_key(capfd, monkeypatch):
     from vibe import api
 
-    monkeypatch.setattr(api, "avault_sign", Mock(return_value={"signature": "ab" * 64, "recovery_id": 1}))
+    monkeypatch.setattr(api, "avault_sign", Mock(return_value={"signature": "01" * 64, "recovery_id": 0}))
     with cli._open_vault_engine().begin() as conn:
         vault_service.create_secret(
             conn,
@@ -945,7 +960,7 @@ def test_sign_request_and_await_cli_reads_approved_signature_for_always_ask_stan
 
     assert payload["kind"] == "vault_request_result"
     assert payload["status"] == "approved"
-    assert payload["result"] == {"type": "signature", "signature": {"signature": "ab" * 64, "recovery_id": 1}}
+    assert payload["result"] == {"type": "signature", "signature": {"signature": "01" * 64, "recovery_id": 0}}
 
 
 def test_sign_request_cli_requires_context_for_protected_keypair(capfd):
@@ -1042,7 +1057,7 @@ def test_vault_await_wait_keeps_waiting_from_signing_status(capfd, monkeypatch):
     wait_mock = Mock(
         return_value={
             "request": {"id": req["id"], "status": "approved"},
-            "result": {"type": "signature", "signature": {"signature": "ab" * 64, "recovery_id": 1}},
+            "result": {"type": "signature", "signature": {"signature": "01" * 64, "recovery_id": 0}},
         }
     )
     monkeypatch.setattr(cli, "_wait_for_vault_request", wait_mock)
@@ -1052,7 +1067,7 @@ def test_vault_await_wait_keeps_waiting_from_signing_status(capfd, monkeypatch):
 
     wait_mock.assert_called_once_with(req["id"], timeout=5.0)
     assert payload["status"] == "approved"
-    assert payload["result"] == {"type": "signature", "signature": {"signature": "ab" * 64, "recovery_id": 1}}
+    assert payload["result"] == {"type": "signature", "signature": {"signature": "01" * 64, "recovery_id": 0}}
 
 
 def test_run_calls_avault_with_env_mapping_and_records_delivery(tmp_path, capfd, monkeypatch):

@@ -166,6 +166,37 @@ const approveWhenReady = async () => {
 // window, so a daemon round trip after the click (the regression) often leaves that window on its
 // placeholder, and a refresh during the release supersedes the contexts it is releasing. The
 // VaultsPage reveal tests cover only the reveal context, not these binding contexts.
+describe('VaultApprovalCard signing-address contract', () => {
+  // An address is a statement about which public key authorizes the signature,
+  // not just a list of every address derivable from the same secret.
+  it.each([
+    ['standard', 'schnorr-secp256k1-bip341-keypath', ['taproot']],
+    ['standard', 'schnorr-secp256k1-bip340', []],
+    ['standard', 'ecdsa-secp256k1-der', ['segwit', 'legacy']],
+    ['protected', 'schnorr-secp256k1-bip340', []],
+    ['protected', 'ecdsa-secp256k1-der', []],
+    ['protected', 'ecdsa-secp256k1-recoverable', ['ethereum']],
+  ] as const)('shows only truthful addresses for %s %s', async (protection, scheme, visible) => {
+    const addresses = {
+      btc_taproot: 'taproot', btc_segwit: 'segwit', btc_legacy: 'legacy', eth: 'ethereum',
+    };
+    api.listVaultSecrets.mockResolvedValue({ secrets: [{ name: 'ETH_KEY', signing_addresses: addresses }] });
+    const request: VaultRequest = {
+      ...standardSignRequest,
+      delivery: { ...standardSignRequest.delivery, scheme },
+      card: { ...standardSignRequest.card, protection },
+    };
+    await act(async () => {
+      render(<I18nextProvider i18n={i18n}><VaultApprovalCard request={request} onResolved={vi.fn()} onCancel={vi.fn()} /></I18nextProvider>);
+    });
+    expect(api.listVaultSecrets).toHaveBeenCalled();
+    for (const address of Object.values(addresses)) {
+      expect(screen.queryByText(address) !== null).toBe(visible.some((value) => value === address));
+    }
+    expect(screen.queryByText(en.vaults.approval.protectedBitcoinWarning) !== null).toBe(protection === 'protected');
+  });
+});
+
 describe('VaultApprovalCard protected access approval', () => {
   // Per-record DEKs must survive secret-level grouping. Single-record approvals do not catch
   // deduplicating material by its base secret name or omitting standard always-ask field labels.

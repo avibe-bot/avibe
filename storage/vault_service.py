@@ -69,6 +69,7 @@ SUPPORTED_SIGNATURE_SCHEMES = {
     "ecdsa-secp256k1-recoverable",
     "ecdsa-secp256k1-der",
     "schnorr-secp256k1-bip340",
+    "schnorr-secp256k1-bip341-keypath",
 }
 REQUEST_AUDIENCE_AGENT = "agent"
 REQUEST_AUDIENCE_UI = "ui"
@@ -218,6 +219,14 @@ class RequestNotFoundError(VaultServiceError):
 
 
 class InvalidRequestError(VaultServiceError):
+    pass
+
+
+class InvalidSigningKeyError(InvalidRequestError):
+    pass
+
+
+class InvalidSigningContextError(InvalidRequestError):
     pass
 
 
@@ -2307,6 +2316,24 @@ def sign_headless_allowed(row: dict[str, Any]) -> bool:
 def sign_needs_approval(conn: Connection, name: str, *, user_context: Any = None) -> bool:
     """True when `vibe vault sign` must create a pending approval request for `name`."""
     return not sign_headless_allowed(require_secret_access(conn, name, user_context=user_context))
+
+
+def require_compressed_signing_public_key(signing_key: Any) -> str:
+    """Check the pinned public point before an approval is persisted or a key is used."""
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    message = "signing requires a pinned compressed secp256k1 public key"
+    public_key = signing_key.get("public_key") if isinstance(signing_key, dict) else None
+    if not isinstance(public_key, str) or signing_key.get("curve") != "secp256k1":
+        raise InvalidSigningKeyError(message)
+    try:
+        encoded = bytes.fromhex(public_key)
+        if len(public_key) != 66 or len(encoded) != 33 or encoded[0] not in {2, 3}:
+            raise ValueError("not a compressed public key")
+        ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256K1(), encoded)
+    except ValueError as exc:
+        raise InvalidSigningKeyError(message) from exc
+    return public_key.lower()
 
 
 def _reject_unsignable_keypair(row: dict[str, Any], name: str) -> None:
@@ -4405,6 +4432,19 @@ def create_sign_request(
     if row.get("signer_kind") not in (None, "local"):
         raise InvalidRequestError(f"{name} is not locally signable")
     _reject_unsignable_keypair(row, name)
+    if row.get("protection") == "protected" and scheme == "schnorr-secp256k1-bip341-keypath":
+        raise InvalidRequestError(
+            "protected Bitcoin Taproot key-path signing is not supported yet; wait for a supported Bitcoin approval workflow without changing the key or its protection"
+        )
+    if row.get("protection") == "protected" or scheme == "schnorr-secp256k1-bip341-keypath":
+        require_compressed_signing_public_key(_public_meta(row.get("public_meta")).get("signing_public_key"))
+    if (
+        row.get("protection") == "protected"
+        and isinstance(signing_context, dict)
+        and signing_context.get("kind") != "avault-agent-operation"
+        and scheme not in {"ecdsa-secp256k1-recoverable", "ecdsa-secp256k1-der"}
+    ):
+        raise InvalidSigningContextError("EVM signing contexts require an ECDSA scheme")
     payload_audience = _request_audience_from_requester(requester)
     request_id = _id("vrq")
     delivery_payload = dict(delivery or {})
@@ -4581,18 +4621,38 @@ def _validate_signature_payload(scheme: str, signature: dict[str, Any]) -> None:
             raise InvalidRequestError("recoverable secp256k1 signatures must be 64 bytes")
         if type(recovery_id) is not int or recovery_id not in {0, 1, 2, 3}:
             raise InvalidRequestError("recoverable secp256k1 signatures require recovery_id 0..3")
+        r = int.from_bytes(sig_bytes[:32], "big")
+        s = int.from_bytes(sig_bytes[32:], "big")
+        if not (1 <= r < 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141):
+            raise InvalidRequestError("recoverable secp256k1 signatures have invalid r")
+        if not (1 <= s <= 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0):
+            raise InvalidRequestError("recoverable secp256k1 signatures must use low-S")
         return
     if scheme == "ecdsa-secp256k1-der":
-        if len(sig_bytes) < 8 or sig_bytes[0] != 0x30:
-            raise InvalidRequestError("DER secp256k1 signatures must be DER-encoded")
         if recovery_id is not None:
             raise InvalidRequestError("DER secp256k1 signatures must not include recovery_id")
+        try:
+            from cryptography.hazmat.primitives.asymmetric import utils
+
+            r, s = utils.decode_dss_signature(sig_bytes)
+        except (ValueError, TypeError) as exc:
+            raise InvalidRequestError("DER secp256k1 signatures must be valid DER") from exc
+        if not (1 <= r < 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141):
+            raise InvalidRequestError("DER secp256k1 signatures have invalid r")
+        if not (1 <= s <= 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0):
+            raise InvalidRequestError("DER secp256k1 signatures must use low-S")
         return
-    if scheme == "schnorr-secp256k1-bip340":
+    if scheme in {"schnorr-secp256k1-bip340", "schnorr-secp256k1-bip341-keypath"}:
         if len(sig_bytes) != 64:
             raise InvalidRequestError("BIP340 Schnorr signatures must be 64 bytes")
         if recovery_id is not None:
             raise InvalidRequestError("BIP340 Schnorr signatures must not include recovery_id")
+        r = int.from_bytes(sig_bytes[:32], "big")
+        s = int.from_bytes(sig_bytes[32:], "big")
+        if r >= 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F:
+            raise InvalidRequestError("BIP340 Schnorr signatures have invalid r")
+        if s >= 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141:
+            raise InvalidRequestError("BIP340 Schnorr signatures have invalid s")
         return
 
 def complete_sign_request(

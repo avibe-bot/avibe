@@ -100,6 +100,8 @@ def _browser_ecdsa_signature_for_digest(digest: str, *, key_value: int = 1) -> t
     )
     der = private_key.sign(bytes.fromhex(digest), ec.ECDSA(utils.Prehashed(hashes.SHA256())))
     r, s = utils.decode_dss_signature(der)
+    if s > api._SECP256K1_N // 2:
+        s = api._SECP256K1_N - s
     recovery_id = next(
         index
         for index in range(4)
@@ -117,7 +119,7 @@ def _browser_ecdsa_signature_for_digest(digest: str, *, key_value: int = 1) -> t
 def _signing_context(digest: str) -> dict:
     return {
         "kind": "avault-agent-operation",
-        "canonicalPreimage": f"vault-sign-test:{digest}",
+        "canonicalPreimage": f"avault-agent-operation:v1\nvault-sign-test:{digest}",
         "digestAlgorithm": "avault-operation-hash-v1",
         "digest": digest,
     }
@@ -1955,7 +1957,7 @@ def test_sign_wrapper_sends_name_and_envelope_to_avault(monkeypatch):
 
 
 def test_standard_keypair_signs_via_avault(monkeypatch):
-    sign = Mock(return_value={"signature": "sig", "recovery_id": 1})
+    sign = Mock(return_value={"signature": "01" * 64, "recovery_id": 0})
     monkeypatch.setattr(api, "avault_sign", sign)
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("key")))
     api.create_vault_secret(
@@ -1967,7 +1969,7 @@ def test_standard_keypair_signs_via_avault(monkeypatch):
         }
     )
     result = api.vault_sign({"name": "ETH_KEY", "digest": "00" * 32, "scheme": "ecdsa-secp256k1-recoverable"})
-    assert result == {"ok": True, "signature": {"signature": "sig", "recovery_id": 1}}
+    assert result == {"ok": True, "signature": {"signature": "01" * 64, "recovery_id": 0}}
     sign.assert_called_once_with(_sealed("key"), "00" * 32, "ecdsa-secp256k1-recoverable", name="ETH_KEY")
     with api._vault_engine().connect() as conn:
         meta = vault_service.get_secret_meta(conn, "ETH_KEY")
@@ -1976,7 +1978,7 @@ def test_standard_keypair_signs_via_avault(monkeypatch):
 
 
 def test_standard_keypair_sign_returns_signature_when_usage_audit_fails(monkeypatch):
-    sign = Mock(return_value={"signature": "sig", "recovery_id": 1})
+    sign = Mock(return_value={"signature": "01" * 64, "recovery_id": 0})
     monkeypatch.setattr(api, "avault_sign", sign)
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("key")))
     api.create_vault_secret(
@@ -1991,7 +1993,7 @@ def test_standard_keypair_sign_returns_signature_when_usage_audit_fails(monkeypa
 
     result = api.vault_sign({"name": "ETH_KEY", "digest": "00" * 32, "scheme": "ecdsa-secp256k1-recoverable"})
 
-    assert result == {"ok": True, "signature": {"signature": "sig", "recovery_id": 1}}
+    assert result == {"ok": True, "signature": {"signature": "01" * 64, "recovery_id": 0}}
     sign.assert_called_once_with(_sealed("key"), "00" * 32, "ecdsa-secp256k1-recoverable", name="ETH_KEY")
 
 
@@ -2366,7 +2368,7 @@ def test_deny_vault_request_api(monkeypatch):
 
 
 def test_agent_sign_request_approved_via_avault_sign(monkeypatch):
-    sign = Mock(return_value={"signature": "ab" * 64, "recovery_id": 1})
+    sign = Mock(return_value={"signature": "01" * 64, "recovery_id": 0})
     monkeypatch.setattr(api, "avault_sign", sign)
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("key")))
     api.create_vault_secret(
@@ -2392,8 +2394,8 @@ def test_agent_sign_request_approved_via_avault_sign(monkeypatch):
 
     assert completed["ok"] is True
     assert completed["request"]["status"] == "approved"
-    assert completed["request"]["delivery"]["signature"] == {"signature": "ab" * 64, "recovery_id": 1}
-    assert api.get_vault_request(requested["request"]["id"])["result"]["signature"] == {"signature": "ab" * 64, "recovery_id": 1}
+    assert completed["request"]["delivery"]["signature"] == {"signature": "01" * 64, "recovery_id": 0}
+    assert api.get_vault_request(requested["request"]["id"])["result"]["signature"] == {"signature": "01" * 64, "recovery_id": 0}
     sign.assert_called_once_with(_sealed("key"), "00" * 32, "ecdsa-secp256k1-recoverable", name="ETH_KEY")
     with api._vault_engine().connect() as conn:
         audit_row = conn.execute(
@@ -2406,7 +2408,7 @@ def test_agent_sign_request_approved_via_avault_sign(monkeypatch):
 
 
 def test_vault_sign_standard_key_without_request_signs_headlessly(monkeypatch):
-    signature = {"signature": "ab" * 64, "recovery_id": 1}
+    signature = {"signature": "01" * 64, "recovery_id": 0}
     sign = Mock(return_value=signature)
     monkeypatch.setattr(api, "avault_sign", sign)
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("key")))
@@ -2427,7 +2429,7 @@ def test_vault_sign_standard_key_without_request_signs_headlessly(monkeypatch):
 
 
 def test_vault_sign_standard_always_ask_without_request_requires_approval(monkeypatch):
-    sign = Mock(return_value={"signature": "ab" * 64, "recovery_id": 1})
+    sign = Mock(return_value={"signature": "01" * 64, "recovery_id": 0})
     notify = Mock()
     monkeypatch.setattr(api, "avault_sign", sign)
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("key")))
@@ -2484,7 +2486,7 @@ def test_agent_sign_claims_request_before_avault_sign(monkeypatch):
             ).scalar_one()
             with pytest.raises(vault_service.InvalidRequestError):
                 vault_service.deny_request(conn, request_id)
-        return {"signature": "ab" * 64, "recovery_id": 1}
+        return {"signature": "01" * 64, "recovery_id": 0}
 
     monkeypatch.setattr(api, "avault_sign", Mock(side_effect=sign_after_attempted_deny))
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("key")))
