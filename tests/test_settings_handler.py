@@ -904,7 +904,15 @@ def test_handle_routing_modal_update_uses_the_visible_current_agent() -> None:
     assert update_calls[0]["selected_agent"] == "id-opencode"
 
 
-def test_a_routing_save_the_store_refuses_is_reported_not_confirmed(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("is_bot", "reason"),
+    [
+        (False, "Agent `gone` is unavailable for this route."),
+        # Listed by a form opened before it became a Bot's (docs/plans/bots.md D1).
+        (True, "Agent `gone` belongs to a Bot and can't be chosen as an Agent."),
+    ],
+)
+def test_a_routing_save_the_store_refuses_is_reported_not_confirmed(tmp_path, monkeypatch, is_bot, reason) -> None:
     """IM forms used to confirm a routing change whose save had failed, because the save swallowed errors."""
     from config import paths
     from config.v2_settings import ChannelSettings, SettingsStore
@@ -917,9 +925,19 @@ def test_a_routing_save_the_store_refuses_is_reported_not_confirmed(tmp_path, mo
         manager.store.update_channel("-100123", ChannelSettings(enabled=True), platform="telegram")
         handler, send_message = _make_handler(manager)
         handler.controller._get_settings_key = lambda _context: "-100123"
+        if is_bot:
+            from core.bots import BotService
+            from core.vibe_agents import VibeAgentStore
+
+            store = VibeAgentStore(manager.store.db_path)
+            try:
+                store.create(name="gone", backend="vibey")
+                BotService(store).set_bot("gone", display_name="Gone")
+            finally:
+                store.close()
         # Listed by the form, but not an enabled Agent the store can bind.
         handler.controller.vibe_agent_store.agents.append(
-            SimpleNamespace(id="id-gone", name="gone", backend="claude", model=None, enabled=True)
+            SimpleNamespace(id="id-gone", name="gone", backend="vibey" if is_bot else "claude", model=None, enabled=True)
         )
 
         with patch.object(handler, "_routing_update_needs_new_session_hint", return_value=False):
@@ -931,7 +949,7 @@ def test_a_routing_save_the_store_refuses_is_reported_not_confirmed(tmp_path, mo
 
         text = send_message.await_args.args[1]
         assert text.startswith("❌"), text
-        assert "Agent `gone` is unavailable for this route." in text
+        assert reason in text
         assert manager.get_channel_routing("-100123").agent_name is None
         assert manager.store.find_channel("-100123", platform="telegram").routing.agent_name is None
     finally:

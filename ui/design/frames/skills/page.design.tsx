@@ -1,8 +1,9 @@
-// The shipped Skills page (Workbench · Skills & MCP, Skills tab, Global scope), rendered from `/api/skills*` fixtures.
+// The shipped Skills page (Workbench · Skills & MCP, Skills tab), rendered from `/api/skills*` fixtures; the
+// Project scope and an open skill come from the page's link (`?scope=project&project=…&skill=…`).
 import { SkillsPage } from '@/components/workbench/SkillsPage';
 
 import { frames } from '../../frame';
-import { consoleContentClass, consolePageClass, globalChecks, globalSkills, skillsApi, skillsFixtures } from './fixtures';
+import { consoleContentClass, consolePageClass, globalChecks, globalSkills, projectSkillsApi, skillsApi, skillsFixtures } from './fixtures';
 
 export const skillsPage = () => (
   <div className={consolePageClass}>
@@ -21,6 +22,26 @@ const designFrames = frames([
     status: 'shipped',
     route: '/skills',
     fixtures: skillsFixtures(skillsApi(globalSkills, globalChecks)),
+    render: skillsPage,
+  },
+  {
+    name: 'selected',
+    title: '技能 · 打开技能详情',
+    width: 1192,
+    height: 860,
+    status: 'shipped',
+    route: '/skills?skill=web-fetch',
+    fixtures: skillsFixtures(skillsApi(globalSkills, globalChecks)),
+    render: skillsPage,
+  },
+  {
+    name: 'project',
+    title: '技能 · 项目范围',
+    width: 1192,
+    height: 860,
+    status: 'shipped',
+    route: '/skills?scope=project&project=proj_avibe',
+    fixtures: skillsFixtures(projectSkillsApi()),
     render: skillsPage,
   },
   {
@@ -66,6 +87,16 @@ const designFrames = frames([
     height: 844,
     status: 'shipped',
     route: '/skills',
+    fixtures: skillsFixtures(skillsApi(globalSkills, globalChecks)),
+    render: skillsPage,
+  },
+  {
+    name: 'selected-phone',
+    title: '技能 · 手机 · 技能详情',
+    width: 390,
+    height: 700,
+    status: 'shipped',
+    route: '/skills?skill=web-fetch',
     fixtures: skillsFixtures(skillsApi(globalSkills, globalChecks)),
     render: skillsPage,
   },

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Compass, Download, Info, Loader2, Lock, Plus, RefreshCw, Search, Terminal, WandSparkles } from 'lucide-react';
 import clsx from 'clsx';
+import { useSearchParams } from 'react-router-dom';
 
 import { useApi } from '../../context/ApiContext';
 import type { SkillBrief, SkillCheckItem, SkillScope, WorkbenchProject } from '../../context/ApiContext';
@@ -16,6 +17,7 @@ import { ProjectPicker } from './skills/ProjectPicker';
 import { AddSkillDialog } from './skills/AddSkillDialog';
 import { BrowseRegistryDialog } from './skills/BrowseRegistryDialog';
 import { McpHubSection } from './skills/McpHubSection';
+import { skillsLinkFromParams, type SkillsLink, type SkillsTab } from './skills/skillsLink';
 import { errorMessage } from '@/lib/errorMessage';
 import { Badge } from '../ui/badge';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
@@ -29,11 +31,13 @@ export const SkillsPage: React.FC = () => {
   const { capabilities } = useInstanceAuthorization();
   const canManage = capabilities.can_use_skills;
 
-  const [pageTab, setPageTab] = useState<'skills' | 'mcp'>('skills');
-  const [scope, setScope] = useState<SkillScope>('global');
+  const [searchParams] = useSearchParams();
+  const link = skillsLinkFromParams(searchParams);
+  const [pageTab, setPageTab] = useState<SkillsTab>(link.tab);
+  const [scope, setScope] = useState<SkillScope>(link.scope);
   const showMcp = pageTab === 'mcp';
   const [projects, setProjects] = useState<WorkbenchProject[]>([]);
-  const [projectId, setProjectId] = useState<string | null>(null);
+  const [projectId, setProjectId] = useState<string | null>(link.project);
   const [skills, setSkills] = useState<SkillBrief[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -42,10 +46,26 @@ export const SkillsPage: React.FC = () => {
   const [projectNoFolder, setProjectNoFolder] = useState(false);
   const [search, setSearch] = useState('');
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  // A `?skill=` link opens its skill once the list holds it; a click or a close replaces it.
+  const [linkedSkill, setLinkedSkill] = useState<string | null>(link.skill);
   const [showAdd, setShowAdd] = useState(false);
   const [showBrowse, setShowBrowse] = useState(false);
   const [checkMap, setCheckMap] = useState<Record<string, SkillCheckItem>>({});
   const [updating, setUpdating] = useState(false);
+
+  // A link that changes while the page is open (arriving, or going away again on a bare
+  // navigation) moves the view, one param at a time, so what the user clicked since stays.
+  const [arrived, setArrived] = useState<SkillsLink>(link);
+  if (link.tab !== arrived.tab || link.scope !== arrived.scope || link.project !== arrived.project || link.skill !== arrived.skill) {
+    if (link.tab !== arrived.tab) setPageTab(link.tab);
+    if (link.scope !== arrived.scope) setScope(link.scope);
+    if (link.project && link.project !== arrived.project) setProjectId(link.project);
+    if (link.skill !== arrived.skill) {
+      setSelectedKey(null);
+      setLinkedSkill(link.skill);
+    }
+    setArrived(link);
+  }
 
   const activeProject = projects.find((p) => p.id === projectId) ?? null;
   // A folderless project can't hold project-scoped skills (askill needs a real
@@ -154,7 +174,16 @@ export const SkillsPage: React.FC = () => {
   const filtered = useMemo(() => skills.filter(matches), [skills, matches]);
   const projectLocal = useMemo(() => filtered.filter((s) => s.scope === 'project'), [filtered]);
   const inheritedGlobal = useMemo(() => filtered.filter((s) => s.scope === 'global'), [filtered]);
-  const selected = useMemo(() => skills.find((s) => skillKey(s) === selectedKey) ?? null, [skills, selectedKey]);
+  const selected = useMemo(() => {
+    if (selectedKey) return skills.find((s) => skillKey(s) === selectedKey) ?? null;
+    if (!linkedSkill) return null;
+    // The project's own copy before an inherited global one.
+    return skills.find((s) => s.name === linkedSkill && s.scope === scope) ?? skills.find((s) => s.name === linkedSkill) ?? null;
+  }, [skills, selectedKey, linkedSkill, scope]);
+  const select = (key: string | null) => {
+    setSelectedKey(key);
+    setLinkedSkill(null);
+  };
   // In Project scope `skills` also carries inherited-global rows; only
   // project-local installs should mark a registry result as already installed,
   // so users can still add a project-local copy of a globally installed skill.
@@ -171,7 +200,7 @@ export const SkillsPage: React.FC = () => {
       const res = await api.removeSkill(selected.name, { scope: selected.scope, projectId: projectArg });
       if (res.ok) {
         showToast(t('skills.removeSuccess', { name: selected.name }), 'success');
-        setSelectedKey(null);
+        select(null);
         await refresh();
       } else {
         showToast(res.error?.message ?? selected.name, 'error');
@@ -213,8 +242,8 @@ export const SkillsPage: React.FC = () => {
         skill={skill}
         inherited={inherited}
         updateAvailable={checkMap[skillKey(skill)]?.status === 'update_available'}
-        selected={selectedKey === skillKey(skill)}
-        onSelect={() => setSelectedKey(skillKey(skill))}
+        selected={selected !== null && skillKey(selected) === skillKey(skill)}
+        onSelect={() => select(skillKey(skill))}
       />
     ));
 
@@ -242,7 +271,7 @@ export const SkillsPage: React.FC = () => {
       />
 
       <div className="flex flex-wrap items-center gap-2.5">
-        <SegmentedRadio<'skills' | 'mcp'>
+        <SegmentedRadio<SkillsTab>
           value={pageTab}
           onChange={setPageTab}
           ariaLabel={t('skills.pageTitle')}
@@ -401,7 +430,7 @@ export const SkillsPage: React.FC = () => {
               projectName={activeProject?.display_name}
               check={checkMap[skillKey(selected)]}
               updating={updating}
-              onClose={() => setSelectedKey(null)}
+              onClose={() => select(null)}
               onUpdate={onUpdate}
               onRemove={onRemove}
               canManage={canManage && (selected.scope !== 'project' || Boolean(activeProject?.capabilities?.can_chat))}

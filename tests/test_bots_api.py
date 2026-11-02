@@ -116,3 +116,71 @@ def test_a_bots_agent_is_refused_as_the_default_over_http(client):
     assert (refused.status_code, refused.get_json()["code"]) == (409, "agent_is_bot")
     vibey = client.post("/api/bots/set", json={"agent_name": "vibey", "display_name": "V"}, headers=csrf_headers(client))
     assert (vibey.status_code, vibey.get_json()["error"]["code"]) == (409, "bot_agent_builtin")
+
+
+def _new_route_target(client, surface: str, tmp_path, name: str) -> str:
+    if surface == "scope":
+        return name
+    folder = tmp_path / name
+    folder.mkdir()
+    project = client.post("/api/projects", json={"folder_path": str(folder)}, headers=csrf_headers(client)).get_json()
+    if surface == "project":
+        return project["id"]
+    return client.post("/api/sessions", json={"project_id": project["id"]}, headers=csrf_headers(client)).get_json()["id"]
+
+
+def _route_to(client, surface: str, target: str, agent: str, *, model: str | None = None, stored: str | None = None):
+    """Point one Session, Project, or IM channel at ``agent`` through its Web route."""
+    if surface == "session":
+        return client.patch(f"/api/sessions/{target}", json={"agent_name": agent, "model": model}, headers=csrf_headers(client))
+    if surface == "project":
+        return client.patch(f"/api/projects/{target}", json={"agent_name": agent, "model": model}, headers=csrf_headers(client))
+    return client.patch(
+        "/api/settings/scope",
+        json={
+            "platform": "slack",
+            "scope": "channel",
+            "id": target,
+            "changes": {"routing": {"agent_name": agent, "model": model}},
+            "expected_agent_name": stored,
+        },
+        headers=csrf_headers(client),
+    )
+
+
+@pytest.fixture()
+def settings_store():
+    from config.v2_settings import SettingsStore
+
+    SettingsStore.reset_instance()
+    yield
+    SettingsStore.reset_instance()
+
+
+@pytest.mark.parametrize("surface", ["session", "project", "scope"])
+def test_no_new_route_names_a_bots_agent_and_one_already_on_it_keeps_it(client, settings_store, tmp_path, surface):
+    """A Bot's Agent is internal to its Bot (``bots.md`` D1); refusals are the localized ``agent_is_bot``."""
+    from core.vibe_agents import VibeAgentStore
+
+    store = VibeAgentStore()
+    try:
+        store.create(name="writer", backend="vibey")
+    finally:
+        store.close()
+    kept = _new_route_target(client, surface, tmp_path, "kept")
+    fresh = _new_route_target(client, surface, tmp_path, "fresh")
+    assert _route_to(client, surface, kept, "writer").status_code == 200
+    made = client.post("/api/bots/set", json={"agent_name": "writer", "display_name": "Writer"}, headers=csrf_headers(client))
+    assert made.status_code == 200, made.get_json()
+
+    # A route already on the Bot's Agent keeps it while its other fields change.
+    assert _route_to(client, surface, kept, "writer", model="m2", stored="writer").status_code == 200
+    for agent in ("writer", "main"):
+        refused = _route_to(client, surface, fresh, agent)
+        error = refused.get_json()["error"]
+        assert (refused.status_code, error["code"]) == (409, "agent_is_bot"), refused.get_json()
+        assert error["message"] == f"Agent `{agent}` belongs to a Bot and can't be chosen as an Agent."
+
+    # A removed Bot's Agent is an ordinary Agent again.
+    assert client.delete("/api/bots/writer", headers=csrf_headers(client)).status_code == 200
+    assert _route_to(client, surface, fresh, "writer").status_code == 200

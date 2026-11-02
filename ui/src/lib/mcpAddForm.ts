@@ -14,6 +14,8 @@ export type McpTarget =
   | { kind: 'stdio'; command: string; args: string[] }
   | { kind: 'error'; issue: McpTargetIssue };
 
+export type McpAddTab = 'json' | 'form';
+
 export type McpKeyValueRow = { key: string; value: string };
 
 export type McpAddFormState = {
@@ -110,4 +112,12 @@ export function buildMcpFormJson({
       ...(cwd.trim() ? { cwd: cwd.trim() } : {}),
     };
   return JSON.stringify({ mcpServers: { [name.trim()]: server } }, null, 2);
+}
+
+/** The text the Add MCP dialog submits for its active tab, or null while that tab cannot submit. */
+export function mcpAddPayload(tab: McpAddTab, text: string, form: McpAddFormState): string | null {
+  if (tab === 'json') return text.trim() ? text : null;
+  const target = parseMcpTarget(form.target);
+  if (!form.name.trim() || (target.kind !== 'http' && target.kind !== 'stdio')) return null;
+  return buildMcpFormJson({ ...form, target });
 }

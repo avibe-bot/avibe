@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { useTranslation } from 'react-i18next';
 import { ChevronDown, ChevronRight, Globe, Loader2, Plus, RefreshCw, Search, Terminal, Trash2, X } from 'lucide-react';
 import clsx from 'clsx';
+import { useSearchParams } from 'react-router-dom';
 
 import { useApi } from '../../../context/ApiContext';
 import type { McpError, McpServerSummary } from '../../../context/ApiContext';
@@ -9,7 +10,7 @@ import { useToast } from '../../../context/ToastContext';
 import { useInstanceAuthorization } from '../../../context/InstanceAuthorizationContext';
 import { isDesktopShell } from '../../../lib/desktopShell';
 import { mcpAddOauthAction } from '../../../lib/mcpAddOauth';
-import { buildMcpFormJson, EMPTY_MCP_ADD_FORM, parseMcpTarget, type McpAddFormState } from '../../../lib/mcpAddForm';
+import { EMPTY_MCP_ADD_FORM, mcpAddPayload, type McpAddFormState, type McpAddTab } from '../../../lib/mcpAddForm';
 import { Badge } from '../../ui/badge';
 import { Button } from '../../ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from '../../ui/dialog';
@@ -108,6 +109,240 @@ function McpToolCard({
   );
 }
 
+export interface McpServerDetailProps {
+  server: McpServerSummary;
+  canManage: boolean;
+  /** Tool cards the user opened, by tool name. */
+  expandedTools: Record<string, boolean>;
+  /** Another MCP operation is running; the actions wait for it. */
+  busy: boolean;
+  refreshing: boolean;
+  onToggleTool: (name: string) => void;
+  onClose: () => void;
+  onRefresh: () => void;
+  onRemove: () => void;
+  onActivateLogin: (name: string) => void;
+}
+
+/** The detail panel of the selected server (ui/design: skills/mcp-detail/refreshing). */
+export function McpServerDetail({
+  server: current,
+  canManage,
+  expandedTools,
+  busy,
+  refreshing,
+  onToggleTool,
+  onClose,
+  onRefresh,
+  onRemove,
+  onActivateLogin,
+}: McpServerDetailProps) {
+  const { t } = useTranslation();
+  return (
+    <div className="flex min-w-0 flex-col gap-3.5 self-start rounded-2xl border border-border-strong bg-surface p-5">
+      <div className="flex items-start gap-3">
+        <span className="flex size-10 shrink-0 items-center justify-center rounded-[10px] border border-border bg-surface-3">
+          {current.transport === 'stdio' ? <Terminal className="size-5" /> : <Globe className="size-5" />}
+        </span>
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div className="flex items-center gap-2">
+            <span className="truncate font-mono text-[16px] font-bold text-foreground">{current.name}</span>
+            <Badge className={clsx('font-mono text-[9px] uppercase', SOURCE_CHIP[current.source ?? 'avibe'])}>
+              {t(`mcpHub.source.${current.source ?? 'avibe'}`)}
+            </Badge>
+          </div>
+          <div className="truncate font-mono text-[11px] text-muted" title={current.command || current.url || undefined}>
+            {current.command || current.url}
+          </div>
+        </div>
+        <Button type="button" variant="ghost" size="icon" className="size-6" onClick={onClose} aria-label={t('common.close')}>
+          <X className="size-3.5" />
+        </Button>
+      </div>
+      <div className="flex flex-col gap-1.5">
+        <span className="font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted">{t('mcpHub.tools')}</span>
+        {(current.tools ?? []).map((tool) => (
+          <McpToolCard
+            key={tool.name}
+            name={tool.name}
+            description={tool.description}
+            expanded={Boolean(expandedTools[tool.name])}
+            onToggle={() => onToggleTool(tool.name)}
+          />
+        ))}
+      </div>
+      <div className="rounded-[10px] border border-border bg-surface-3 px-3 py-2.5 font-mono text-[11px] text-muted">
+        {t('mcpHub.callHint', { name: current.name })}
+      </div>
+      <div className="font-mono text-[10px] text-muted">
+        {current.generatedAt && current.serverVersion
+          ? t('mcpHub.generatedAtWithVersion', { time: current.generatedAt, version: current.serverVersion })
+          : current.generatedAt
+            ? t('mcpHub.generatedAt', { time: current.generatedAt })
+            : current.serverVersion
+              ? t('mcpHub.serverVersion', { version: current.serverVersion })
+              : null}
+      </div>
+      {current.auth === 'needs_login' ? <LoginLink name={current.name} className={buttonVariants({ variant: 'brand', size: 'sm' })} onActivate={onActivateLogin}>{t('mcpHub.login')}</LoginLink> : null}
+      {canManage ? (
+        <div className="flex items-center gap-2 pt-1">
+          <Button type="button" variant="outline" size="xs" disabled={busy} onClick={onRefresh}>
+            {refreshing ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
+            {t('mcpHub.refresh')}
+          </Button>
+          <Button type="button" variant="ghost" size="xs" onClick={onRemove}>
+            <Trash2 className="size-3.5" />
+            {t('mcpHub.remove')}
+          </Button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+export interface McpLoginDialogProps {
+  /** The server being logged in to in paste mode; null keeps the dialog closed. */
+  name: string | null;
+  callbackText: string;
+  busy: boolean;
+  onCallbackTextChange: (text: string) => void;
+  onComplete: () => void;
+  onClose: () => void;
+  onActivateLogin: (name: string) => void;
+}
+
+/** Paste-mode OAuth: authorize in a new tab, then paste the callback URL (ui/design: skills/mcp/login-paste). */
+export function McpLoginDialog({ name, callbackText, busy, onCallbackTextChange, onComplete, onClose, onActivateLogin }: McpLoginDialogProps) {
+  const { t } = useTranslation();
+  return (
+    <Dialog open={name !== null} onOpenChange={(open) => (!open ? onClose() : undefined)}>
+      <DialogContent className="max-w-lg" closeLabel={t('common.close')}>
+        <DialogTitle>{t('mcpHub.loginTitle')}</DialogTitle>
+        <DialogDescription>{t('mcpHub.loginHint')}</DialogDescription>
+        {name ? <LoginLink name={name} className={buttonVariants({ variant: 'outline' })} onActivate={onActivateLogin}>{t('mcpHub.openAuthorize')}</LoginLink> : null}
+        <Textarea value={callbackText} onChange={(event) => onCallbackTextChange(event.target.value)} className="min-h-20 font-mono text-[12px]" placeholder={t('mcpHub.callbackPlaceholder')} />
+        <DialogFooter><Button type="button" variant="outline" onClick={onClose}>{t('common.cancel')}</Button><Button type="button" disabled={!callbackText.trim() || busy} onClick={onComplete}>{t('mcpHub.completeLogin')}</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+export interface McpAddDialogProps {
+  open: boolean;
+  text: string;
+  error: string | null;
+  /** After an add whose servers need login: their start links, and the lines that failed. */
+  result: { names: string[]; failedLines: string[] } | null;
+  /** Another MCP operation is running; Add waits for it. */
+  busy: boolean;
+  adding: boolean;
+  onTextChange: (text: string) => void;
+  /** Paste JSON (default) or the form; each keeps its input across switches. */
+  tab: McpAddTab;
+  onTabChange: (tab: McpAddTab) => void;
+  form: McpAddFormState;
+  onFormChange: (form: McpAddFormState) => void;
+  onAdd: () => void;
+  onClose: () => void;
+  onDone: () => void;
+  onActivateLogin: (name: string) => void;
+}
+
+/** Paste `mcpServers` JSON or fill a form to add servers (ui/design: skills/mcp/add, skills/mcp/add-form*). */
+export function McpAddDialog({ open, text, error, result, busy, adding, onTextChange, tab, onTabChange, form, onFormChange, onAdd, onClose, onDone, onActivateLogin }: McpAddDialogProps) {
+  const { t } = useTranslation();
+  return (
+    <Dialog open={open} onOpenChange={(next) => (!next ? onClose() : undefined)}>
+      <DialogContent className="max-w-lg" closeLabel={t('common.close')}>
+        <DialogTitle>{t('mcpHub.addTitle')}</DialogTitle>
+        <DialogDescription>{result ? t('mcpHub.addResultHint') : t('mcpHub.addSubtitle')}</DialogDescription>
+        {result ? (
+          <div className="flex flex-col gap-2">
+            {result.names.map((name) => (
+              <p key={name} className="flex items-center gap-2 text-[12px] text-foreground">
+                <span>{t('mcpHub.needsLoginAfterAdd', { name })}</span>
+                <LoginLink name={name} className={buttonVariants({ variant: 'brand', size: 'xs' })} onActivate={onActivateLogin}>
+                  {t('mcpHub.goAuthorize')}
+                </LoginLink>
+              </p>
+            ))}
+            {result.failedLines.map((line) => (
+              <div key={line} className="text-[12px] text-destructive-ink">{line}</div>
+            ))}
+          </div>
+        ) : (
+          <>
+            <SegmentedRadio
+              value={tab}
+              onChange={onTabChange}
+              ariaLabel={t('mcpHub.addMode')}
+              options={[
+                { id: 'json', label: t('mcpHub.addModeJson') },
+                { id: 'form', label: t('mcpHub.addModeForm') },
+              ]}
+            />
+            {tab === 'json' ? (
+              <>
+                <Textarea value={text} onChange={(event) => onTextChange(event.target.value)} className="min-h-40 font-mono text-[12px]" placeholder={t('mcpHub.pastePlaceholder')} />
+                <p className="text-[11px] text-muted">{t('mcpHub.pasteHint')}</p>
+              </>
+            ) : (
+              <McpAddForm value={form} onChange={onFormChange} />
+            )}
+            {error ? <div className="whitespace-pre-wrap text-[12px] text-destructive-ink">{error}</div> : null}
+          </>
+        )}
+        <DialogFooter>
+          {result ? (
+            <Button type="button" variant="brand" onClick={onDone}>{t('common.done')}</Button>
+          ) : (
+            <>
+              <Button type="button" variant="outline" onClick={onClose}>{t('common.cancel')}</Button>
+              <Button type="button" disabled={busy || mcpAddPayload(tab, text, form) === null} onClick={onAdd}>
+                {adding ? <Loader2 className="size-3.5 animate-spin" /> : null}
+                {t('mcpHub.add')}
+              </Button>
+            </>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+export interface McpRemoveDialogProps {
+  /** The server to delete; null keeps the dialog closed. */
+  server: McpServerSummary | null;
+  busy: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}
+
+/** Confirms deleting a server, from Avibe or from its native config file (ui/design: skills/mcp/remove). */
+export function McpRemoveDialog({ server, busy, onConfirm, onCancel }: McpRemoveDialogProps) {
+  const { t } = useTranslation();
+  return (
+    <Dialog open={server !== null} onOpenChange={(open) => (!open ? onCancel() : undefined)}>
+      <DialogContent className="max-w-md" closeLabel={t('common.close')}>
+        <DialogTitle>{t('mcpHub.removeConfirm', { name: server?.name ?? '' })}</DialogTitle>
+        <DialogDescription>
+          {server?.source === 'avibe' ? t('mcpHub.removeAvibeHint') : t('mcpHub.removeNativeHint', {
+                name: server?.name ?? '',
+                path: server?.sourcePath ?? '',
+                agent: t(`mcpHub.source.${server?.source ?? 'avibe'}`),
+              })}
+        </DialogDescription>
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={onCancel}>{t('common.cancel')}</Button>
+          <Button type="button" variant="destructive" disabled={busy} onClick={onConfirm}>
+            {t('mcpHub.remove')}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export const McpHubSection: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
@@ -118,14 +353,22 @@ export const McpHubSection: React.FC = () => {
   const [oauthMode, setOauthMode] = useState<'direct' | 'paste'>('direct');
   const [addResult, setAddResult] = useState<{ names: string[]; failedLines: string[] } | null>(null);
   const [search, setSearch] = useState('');
-  const [selected, setSelected] = useState<string | null>(() => new URLSearchParams(window.location.search).get('mcp'));
+  const [searchParams, setSearchParams] = useSearchParams();
+  const linkedServer = searchParams.get('mcp');
+  const [selected, setSelected] = useState<string | null>(linkedServer);
+  // A `?mcp=` link that changes while the hub is open selects its server; clicks since stay the user's.
+  const [arrivedServer, setArrivedServer] = useState(linkedServer);
+  if (linkedServer !== arrivedServer) {
+    setArrivedServer(linkedServer);
+    if (linkedServer) setSelected(linkedServer);
+  }
   const [expandedFor, setExpandedFor] = useState<string | null>(null);
   const [expandedTools, setExpandedTools] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [addText, setAddText] = useState('');
   const [addError, setAddError] = useState<string | null>(null);
-  const [addTab, setAddTab] = useState<'json' | 'form'>('json');
+  const [addTab, setAddTab] = useState<McpAddTab>('json');
   const [addForm, setAddForm] = useState<McpAddFormState>(EMPTY_MCP_ADD_FORM);
   const [loginFor, setLoginFor] = useState<{ name: string } | null>(null);
   const [callbackText, setCallbackText] = useState('');
@@ -164,15 +407,19 @@ export const McpHubSection: React.FC = () => {
     }
   }, [api, describe, showToast, t]);
 
+  // The OAuth login returns with `?oauth=success`: say so once, and drop it so a reload does not.
+  const oauthReturn = searchParams.get('oauth') === 'success';
+  const oauthAnnounced = useRef(false);
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    if (params.get('oauth') === 'success') {
-      showToast(t('mcpHub.loginComplete'), 'success');
-    }
-    if (params.has('mcp') || params.has('oauth')) {
-      window.history.replaceState({}, '', window.location.pathname);
-    }
-  }, [load, showToast, t]);
+    if (!oauthReturn || oauthAnnounced.current) return;
+    oauthAnnounced.current = true;
+    showToast(t('mcpHub.loginComplete'), 'success');
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.delete('oauth');
+      return next;
+    }, { replace: true });
+  }, [oauthReturn, setSearchParams, showToast, t]);
   const [listed, setListed] = useState(false);
   if (!listed) {
     setListed(true);
@@ -252,12 +499,7 @@ export const McpHubSection: React.FC = () => {
     setAddResult(null);
   };
 
-  const addFormTarget = parseMcpTarget(addForm.target);
-  const addPayload = addTab === 'json'
-    ? (addText.trim() ? addText : null)
-    : addForm.name.trim() && (addFormTarget.kind === 'http' || addFormTarget.kind === 'stdio')
-      ? buildMcpFormJson({ name: addForm.name, target: addFormTarget, envRows: addForm.envRows, headerRows: addForm.headerRows, cwd: addForm.cwd })
-      : null;
+  const addPayload = mcpAddPayload(addTab, addText, addForm);
 
   const onAdd = async () => {
     if (addPayload === null) return;
@@ -426,151 +668,55 @@ export const McpHubSection: React.FC = () => {
         </div>
 
         {current ? (
-          <div className="flex min-w-0 flex-col gap-3.5 self-start rounded-2xl border border-border-strong bg-surface p-5">
-            <div className="flex items-start gap-3">
-              <span className="flex size-10 shrink-0 items-center justify-center rounded-[10px] border border-border bg-surface-3">
-                {current.transport === 'stdio' ? <Terminal className="size-5" /> : <Globe className="size-5" />}
-              </span>
-              <div className="flex min-w-0 flex-1 flex-col">
-                <div className="flex items-center gap-2">
-                  <span className="truncate font-mono text-[16px] font-bold text-foreground">{current.name}</span>
-                  <Badge className={clsx('font-mono text-[9px] uppercase', SOURCE_CHIP[current.source ?? 'avibe'])}>
-                    {t(`mcpHub.source.${current.source ?? 'avibe'}`)}
-                  </Badge>
-                </div>
-                <div className="truncate font-mono text-[11px] text-muted" title={current.command || current.url || undefined}>
-                  {current.command || current.url}
-                </div>
-              </div>
-              <Button type="button" variant="ghost" size="icon" className="size-6" onClick={() => setSelected(null)} aria-label={t('common.close')}>
-                <X className="size-3.5" />
-              </Button>
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <span className="font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted">{t('mcpHub.tools')}</span>
-              {(current.tools ?? []).map((tool) => (
-                <McpToolCard
-                  key={tool.name}
-                  name={tool.name}
-                  description={tool.description}
-                  expanded={Boolean(expandedTools[tool.name])}
-                  onToggle={() => setExpandedTools((prev) => ({ ...prev, [tool.name]: !prev[tool.name] }))}
-                />
-              ))}
-            </div>
-            <div className="rounded-[10px] border border-border bg-surface-3 px-3 py-2.5 font-mono text-[11px] text-muted">
-              {t('mcpHub.callHint', { name: current.name })}
-            </div>
-            <div className="font-mono text-[10px] text-muted">
-              {current.generatedAt && current.serverVersion
-                ? t('mcpHub.generatedAtWithVersion', { time: current.generatedAt, version: current.serverVersion })
-                : current.generatedAt
-                  ? t('mcpHub.generatedAt', { time: current.generatedAt })
-                  : current.serverVersion
-                    ? t('mcpHub.serverVersion', { version: current.serverVersion })
-                    : null}
-            </div>
-            {current.auth === 'needs_login' ? <LoginLink name={current.name} className={buttonVariants({ variant: 'brand', size: 'sm' })} onActivate={onActivateLogin}>{t('mcpHub.login')}</LoginLink> : null}
-            {canManage ? (
-              <div className="flex items-center gap-2 pt-1">
-                <Button type="button" variant="outline" size="xs" disabled={busy !== null} onClick={() => void onRefreshOne(current.name)}>
-                  {busy === `refresh:${current.name}` ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
-                  {t('mcpHub.refresh')}
-                </Button>
-                <Button type="button" variant="ghost" size="xs" onClick={() => setConfirmDelete(current)}>
-                  <Trash2 className="size-3.5" />
-                  {t('mcpHub.remove')}
-                </Button>
-              </div>
-            ) : null}
-          </div>
+          <McpServerDetail
+            server={current}
+            canManage={canManage}
+            expandedTools={expandedTools}
+            busy={busy !== null}
+            refreshing={busy === `refresh:${current.name}`}
+            onToggleTool={(name) => setExpandedTools((prev) => ({ ...prev, [name]: !prev[name] }))}
+            onClose={() => setSelected(null)}
+            onRefresh={() => void onRefreshOne(current.name)}
+            onRemove={() => setConfirmDelete(current)}
+            onActivateLogin={onActivateLogin}
+          />
         ) : null}
       </div>
 
-      <Dialog open={loginFor !== null} onOpenChange={(open) => (!open ? setLoginFor(null) : undefined)}>
-        <DialogContent className="max-w-lg" closeLabel={t('common.close')}>
-          <DialogTitle>{t('mcpHub.loginTitle')}</DialogTitle>
-          <DialogDescription>{t('mcpHub.loginHint')}</DialogDescription>
-          {loginFor ? <LoginLink name={loginFor.name} className={buttonVariants({ variant: 'outline' })} onActivate={onActivateLogin}>{t('mcpHub.openAuthorize')}</LoginLink> : null}
-          <Textarea value={callbackText} onChange={(event) => setCallbackText(event.target.value)} className="min-h-20 font-mono text-[12px]" placeholder={t('mcpHub.callbackPlaceholder')} />
-          <DialogFooter><Button type="button" variant="outline" onClick={() => setLoginFor(null)}>{t('common.cancel')}</Button><Button type="button" disabled={!callbackText.trim() || busy !== null} onClick={() => void onCompleteLogin()}>{t('mcpHub.completeLogin')}</Button></DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <McpLoginDialog
+        name={loginFor?.name ?? null}
+        callbackText={callbackText}
+        busy={busy !== null}
+        onCallbackTextChange={setCallbackText}
+        onComplete={() => void onCompleteLogin()}
+        onClose={() => setLoginFor(null)}
+        onActivateLogin={onActivateLogin}
+      />
 
-      <Dialog open={showAdd} onOpenChange={(open) => (!open ? closeAdd() : undefined)}>
-        <DialogContent className="max-w-lg" closeLabel={t('common.close')}>
-          <DialogTitle>{t('mcpHub.addTitle')}</DialogTitle>
-          <DialogDescription>{addResult ? t('mcpHub.addResultHint') : t('mcpHub.addSubtitle')}</DialogDescription>
-          {addResult ? (
-            <div className="flex flex-col gap-2">
-              {addResult.names.map((name) => (
-                <p key={name} className="flex items-center gap-2 text-[12px] text-foreground">
-                  <span>{t('mcpHub.needsLoginAfterAdd', { name })}</span>
-                  <LoginLink name={name} className={buttonVariants({ variant: 'brand', size: 'xs' })} onActivate={onActivateLogin}>
-                    {t('mcpHub.goAuthorize')}
-                  </LoginLink>
-                </p>
-              ))}
-              {addResult.failedLines.map((line) => (
-                <div key={line} className="text-[12px] text-destructive-ink">{line}</div>
-              ))}
-            </div>
-          ) : (
-            <>
-              <SegmentedRadio
-                value={addTab}
-                onChange={setAddTab}
-                ariaLabel={t('mcpHub.addMode')}
-                options={[
-                  { id: 'json', label: t('mcpHub.addModeJson') },
-                  { id: 'form', label: t('mcpHub.addModeForm') },
-                ]}
-              />
-              {addTab === 'json' ? (
-                <>
-                  <Textarea value={addText} onChange={(event) => setAddText(event.target.value)} className="min-h-40 font-mono text-[12px]" placeholder={t('mcpHub.pastePlaceholder')} />
-                  <p className="text-[11px] text-muted">{t('mcpHub.pasteHint')}</p>
-                </>
-              ) : (
-                <McpAddForm value={addForm} onChange={setAddForm} />
-              )}
-              {addError ? <div className="whitespace-pre-wrap text-[12px] text-destructive-ink">{addError}</div> : null}
-            </>
-          )}
-          <DialogFooter>
-            {addResult ? (
-              <Button type="button" variant="brand" onClick={() => { closeAdd(); void load(); }}>{t('common.done')}</Button>
-            ) : (
-              <>
-                <Button type="button" variant="outline" onClick={closeAdd}>{t('common.cancel')}</Button>
-                <Button type="button" disabled={busy !== null || addPayload === null} onClick={() => void onAdd()}>
-                  {busy === 'add' ? <Loader2 className="size-3.5 animate-spin" /> : null}
-                  {t('mcpHub.add')}
-                </Button>
-              </>
-            )}
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <McpAddDialog
+        open={showAdd}
+        text={addText}
+        error={addError}
+        result={addResult}
+        busy={busy !== null}
+        adding={busy === 'add'}
+        onTextChange={setAddText}
+        tab={addTab}
+        onTabChange={setAddTab}
+        form={addForm}
+        onFormChange={setAddForm}
+        onAdd={() => void onAdd()}
+        onClose={closeAdd}
+        onDone={() => { closeAdd(); void load(); }}
+        onActivateLogin={onActivateLogin}
+      />
 
-      <Dialog open={confirmDelete !== null} onOpenChange={(open) => (!open ? setConfirmDelete(null) : undefined)}>
-        <DialogContent className="max-w-md" closeLabel={t('common.close')}>
-          <DialogTitle>{t('mcpHub.removeConfirm', { name: confirmDelete?.name ?? '' })}</DialogTitle>
-          <DialogDescription>
-            {confirmDelete?.source === 'avibe' ? t('mcpHub.removeAvibeHint') : t('mcpHub.removeNativeHint', {
-                  name: confirmDelete?.name ?? '',
-                  path: confirmDelete?.sourcePath ?? '',
-                  agent: t(`mcpHub.source.${confirmDelete?.source ?? 'avibe'}`),
-                })}
-          </DialogDescription>
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setConfirmDelete(null)}>{t('common.cancel')}</Button>
-            <Button type="button" variant="destructive" disabled={busy !== null} onClick={() => void onDelete()}>
-              {t('mcpHub.remove')}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <McpRemoveDialog
+        server={confirmDelete}
+        busy={busy !== null}
+        onConfirm={() => void onDelete()}
+        onCancel={() => setConfirmDelete(null)}
+      />
     </div>
   );
 };
