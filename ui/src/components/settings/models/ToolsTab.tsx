@@ -1,5 +1,5 @@
-// 工具 — the hosted tools Vibey may use (`vibey-hosted-tools.md` §8.1, design.pen
-// frames pDd61 and kPTBo).
+// 工具 — the hosted tools Vibey may use (`vibey-hosted-tools.md` §8.1, ui/design:
+// models/tools/default).
 //
 // One card per tool, grouped by capability, each with one switch, on by default.
 // A card says only what real use learned: the latest run, and the Sources that

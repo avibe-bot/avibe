@@ -1,5 +1,5 @@
-// A Source model's capability chips (`vibey-hosted-tools.md` §8.2, design.pen
-// frame yjGXx): one per hosted tool with a record, and one per reasoning effort
+// A Source model's capability chips (`vibey-hosted-tools.md` §8.2, ui/design:
+// models/source-detail/capabilities): one per hosted tool with a record, and one per reasoning effort
 // the Source refused. No record draws nothing, because unused is the normal
 // state rather than a problem. Every chip comes from real requests; a refusal
 // chip carries the clear that lets the next request try this Source again.

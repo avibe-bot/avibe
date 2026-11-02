@@ -7,13 +7,23 @@ import type {
   AgentSupply,
   BackendModel,
   ChainHealth,
+  HostedExecutionMode,
+  HostedFetchExecutorCandidate,
+  HostedServiceExecutorCandidate,
+  HostedSuccess,
+  HostedToolPriceUnit,
   HostedToolsStatus,
   MigrationItem,
   ModelSupply,
+  PricedUsage,
+  QuotaSummary,
+  QuotaWindow,
+  ResolutionEvent,
   RouteOrigin,
   RuntimeDependency,
   RuntimeHealth,
   Source,
+  SourceQuotaValue,
   SourceState,
   SuppliedModel,
   UsageBucket,
@@ -242,32 +252,107 @@ export const runtime = (health: RuntimeHealth = 'ok', enabled = true): RuntimeDe
 
 // ── Hosted tools ────────────────────────────────────────────────────────
 
-const searchPrice = (usd: number) => ({ unit: 'search' as const, usd_per_1k: usd, extra: [], as_of: '2026-10-24', url: 'https://avibe.bot' });
-
-export const hostedTools = (): HostedToolsStatus => ({
-  tools: [
-    {
-      name: 'web_search',
-      enabled: true,
-      prefer_native: true,
-      services: {},
-      service_order: [tavily.id],
-      executor_order: null,
-      effective_order: [tavily.id, 'src_exakeyless', relayClaude.id],
-      status: { latest_ok: null, verified: [], refused: [] },
-      executor_candidates: [
-        { kind: 'service', source_id: tavily.id, model_id: 'tavily/search', billing: 'metered', relay: false, price: searchPrice(8), settings: { results: 5, enabled: true }, state: STANDBY, trial_pending: false, cooldown_until: null },
-        { kind: 'service', source_id: 'src_exakeyless', model_id: 'exa/mcp', billing: 'metered', relay: false, price: searchPrice(0), settings: { results: 5, enabled: true }, state: ACTIVE, trial_pending: false, cooldown_until: null },
-        { kind: 'model', source_id: relayClaude.id, model_id: 'claude-haiku-5', billing: 'metered', relay: true, price: { ...searchPrice(10), unit: 'call' } },
-      ],
-      service_vendors: [
-        { id: 'tavily', name: 'Tavily', results_max: 20, price: searchPrice(8), free_tier: null, source_ids: [tavily.id], facts: { tool_only: true, auto_enroll: false, free_check: true } },
-        { id: 'exa', name: 'Exa', results_max: 10, price: searchPrice(7), free_tier: null, source_ids: [], facts: { tool_only: true, auto_enroll: false, free_check: false } },
-        { id: 'exa-mcp', name: 'Exa (free)', results_max: 100, price: searchPrice(0), free_tier: 'Free; IP rate-limited', source_ids: ['src_exakeyless'], facts: { tool_only: true, auto_enroll: false, free_check: false, built_in: true, requires_setup: false } },
-      ],
-    },
-  ],
+const price = <U extends HostedToolPriceUnit>(unit: U, usd: number, url = 'https://avibe.bot') => ({ unit, usd_per_1k: usd, extra: [], as_of: '2026-10-24', url });
+const searchService = (id: string, model: string, usd: number, state: SourceState = STANDBY): HostedServiceExecutorCandidate => ({
+  kind: 'service', source_id: id, model_id: model, billing: 'metered', relay: false, price: price('search', usd), settings: { results: 5, enabled: true }, state, trial_pending: false, cooldown_until: null,
 });
+const fetchService = (kind: 'local' | 'service', id: string, model: string, usd: number, state: SourceState = ACTIVE): HostedFetchExecutorCandidate => ({
+  kind, source_id: id, model_id: model, billing: 'metered', relay: false, price: price('fetch', usd), settings: { enabled: true }, state, trial_pending: false, cooldown_until: null,
+});
+const verified = (src: Source | string, model: string, mode: HostedExecutionMode, minutesAgo: number): HostedSuccess =>
+  ({ source_id: typeof src === 'string' ? src : src.id, model_id: model, mode, at: at(-minutesAgo) });
+
+export type HostedToolsSpec = {
+  /** Tavily is added as a search service (otherwise only the built-in free Exa searches). */
+  tavilyAdded?: boolean;
+  /** Tavily's key was revoked: it stopped, and searches moved on to the next service. */
+  tavilyRevoked?: boolean;
+};
+
+/** The four hosted tools as Vibey uses them: search with services and model executors, web fetch, X search, images. */
+export const hostedTools = ({ tavilyAdded = true, tavilyRevoked = false }: HostedToolsSpec = {}): HostedToolsStatus => {
+  const tavilyState: SourceState = tavilyRevoked ? { status: 'needs_action', retry_at: null, detail_key: 'models.source.needs_action.credential_revoked' } : STANDBY;
+  const tavilyIds = tavilyAdded ? [tavily.id] : [];
+  const searchOrder = [...tavilyIds, 'src_exakeyless', relayClaude.id, chatgptPro.id];
+  return {
+    tools: [
+      {
+        name: 'web_search',
+        enabled: true,
+        prefer_native: true,
+        services: {},
+        service_order: tavilyIds,
+        executor_order: null,
+        effective_order: searchOrder,
+        status: {
+          latest_ok: tavilyRevoked ? verified('src_exakeyless', 'exa/mcp', 'service', 4) : verified(chatgptPro, 'gpt-6-astra', 'native', 12),
+          verified: [
+            verified(chatgptPro, 'gpt-6-astra', 'native', 12),
+            verified(relayClaude, 'claude-opus-5', 'native', 95),
+            ...(tavilyAdded && !tavilyRevoked ? [verified(tavily, 'tavily/search', 'service', 40)] : []),
+          ],
+          refused: [
+            { source_id: deepseek.id, model_id: 'deepseek-v4', aspect: 'call', at: at(-300), reason: '400 unsupported_tool_type' },
+            { source_id: relayClaude.id, model_id: 'claude-opus-4-8', aspect: 'call', at: at(-720), reason: '400 invalid_request_error' },
+          ],
+        },
+        executor_candidates: [
+          ...(tavilyAdded ? [searchService(tavily.id, 'tavily/search', 8, tavilyState)] : []),
+          searchService('src_exakeyless', 'exa/mcp', 0, ACTIVE),
+          { kind: 'model', source_id: relayClaude.id, model_id: 'claude-haiku-5', billing: 'metered', relay: true, price: price('call', 10) },
+          { kind: 'model', source_id: chatgptPro.id, model_id: 'gpt-5.6-sol', billing: 'monthly', relay: false, price: price('call', 10) },
+        ],
+        service_vendors: [
+          { id: 'tavily', name: 'Tavily', results_max: 20, price: price('search', 8), free_tier: '1,000 credits / month', source_ids: tavilyIds, facts: { tool_only: true, auto_enroll: false, free_check: true } },
+          { id: 'exa', name: 'Exa', results_max: 10, price: price('search', 7), free_tier: null, source_ids: [], facts: { tool_only: true, auto_enroll: false, free_check: false } },
+          { id: 'deepseek', name: 'DeepSeek', results_max: 50, price: price('search', 0.75), free_tier: null, source_ids: [], facts: { tool_only: false, auto_enroll: true, free_check: true } },
+          { id: 'exa-mcp', name: 'Exa (free)', results_max: 100, price: price('search', 0), free_tier: 'Free; IP rate-limited', source_ids: ['src_exakeyless'], facts: { tool_only: true, auto_enroll: false, free_check: false, built_in: true, requires_setup: false } },
+        ],
+      },
+      {
+        name: 'web_fetch',
+        enabled: true,
+        services: {},
+        executor_order: null,
+        effective_order: ['src_localfetch', ...tavilyIds, 'src_exakeyless', 'src_jinakeyless'],
+        status: { latest_ok: verified('src_localfetch', 'local/fetch', 'service', 8), verified: [verified('src_localfetch', 'local/fetch', 'service', 8)], refused: [] },
+        executor_candidates: [
+          fetchService('local', 'src_localfetch', 'local/fetch', 0),
+          ...(tavilyAdded ? [fetchService('service', tavily.id, 'tavily/extract', 1.6, tavilyState)] : []),
+          fetchService('service', 'src_exakeyless', 'exa/mcp', 0),
+          fetchService('service', 'src_jinakeyless', 'jina/reader', 0),
+        ],
+        service_vendors: [
+          { id: 'local', name: 'Local', price: price('fetch', 0), capabilities: ['web_fetch'], content_types: ['html', 'pdf', 'text', 'markdown', 'json'], source_ids: ['src_localfetch'], facts: { built_in: true, requires_setup: false, auto_enroll: true } },
+          { id: 'tavily', name: 'Tavily', price: price('fetch', 1.6), capabilities: ['web_fetch'], content_types: ['markdown'], source_ids: tavilyIds, facts: { built_in: false, requires_setup: true, auto_enroll: true } },
+          { id: 'exa', name: 'Exa', price: price('fetch', 1), capabilities: ['web_fetch'], content_types: ['markdown'], source_ids: [], facts: { built_in: false, requires_setup: true, auto_enroll: true } },
+          { id: 'exa-mcp', name: 'Exa (free)', price: price('fetch', 0), capabilities: ['web_fetch'], content_types: ['markdown'], source_ids: ['src_exakeyless'], facts: { built_in: true, requires_setup: false, auto_enroll: true } },
+          { id: 'jina-reader', name: 'Jina Reader (free)', price: price('fetch', 0), capabilities: ['web_fetch'], content_types: ['markdown'], source_ids: ['src_jinakeyless'], facts: { built_in: true, requires_setup: false, auto_enroll: true } },
+        ],
+      },
+      {
+        name: 'x_search',
+        enabled: true,
+        executor_order: null,
+        effective_order: [],
+        executor_candidates: [],
+        status: { latest_ok: null, verified: [], refused: [] },
+      },
+      {
+        name: 'image_generate',
+        enabled: true,
+        default_model: null,
+        effective_default: { source_id: chatgptPro.id, model_id: 'gpt-image-2' },
+        models: [
+          { source_id: chatgptPro.id, model_id: 'gpt-image-2', description: 'GPT Image 2', billing: 'monthly', price: null },
+          { source_id: relayGpt.id, model_id: 'gpt-image-2', description: 'GPT Image 2', billing: 'metered', price: { usd: 0.042, basis: 'list' } },
+        ],
+        image_offered_by: ['openai', 'gemini', 'xai'],
+        status: { latest_ok: verified(chatgptPro, 'gpt-image-2', 'direct', 180), verified: [verified(chatgptPro, 'gpt-image-2', 'direct', 180)], refused: [] },
+      },
+    ],
+  };
+};
 
 // ── Usage ──
 
@@ -275,8 +360,8 @@ const HOUR = 60;
 const usageCounters = (requests: number, cost: number): UsageCounters => ({
   requests,
   token_reports: requests,
-  input_tokens: requests * 18_400,
-  cached_input_tokens: requests * 61_000,
+  input_tokens: requests * 62_000,
+  cached_input_tokens: requests * 43_600,
   output_tokens: requests * 2_300,
   api_cost_usd: cost,
   excluded_tokens: 0,
@@ -307,7 +392,7 @@ export function usageReport(windowKey: UsageWindowKey = '24h'): UsageReport {
       return requests > 0 ? [{ source_id: src.id, model_id: model, ...usageCounters(requests, requests * COST_PER_REQUEST[model]) }] : [];
     });
     if (load > 8) rows.push({ kind: 'service', source_id: tavily.id, service_id: 'tavily/search', tool: 'web_search', requests: 2, billable_requests: 2, uncertain_requests: 0, reported_requests: 0, api_cost_usd: 0.016, reported_usd: 0, api_cost_lower_bound: false });
-    return { key: at(start).slice(0, hourly ? 13 : 10), start_at: at(start), end_at: at(start + step), history_complete: index < count - 1, rows };
+    return { key: at(start).slice(0, hourly ? 13 : 10), start_at: at(start), end_at: at(start + step), history_complete: true, rows };
   });
   const modelRows = buckets.flatMap((bucket) => bucket.rows).filter((row): row is UsageBucketRow => row.kind !== 'service');
   const sum = (rows: UsageBucketRow[]) => {
@@ -329,7 +414,7 @@ export function usageReport(windowKey: UsageWindowKey = '24h'): UsageReport {
       label: src.display_name,
       last_metered_at: at(-12),
       ...sum(modelRows.filter((row) => row.source_id === src.id)),
-      models: USAGE_MIX.filter(([s]) => s === src).map(([, model]) => ({ model_id: model, label: null, ...sum(modelRows.filter((row) => row.model_id === model && row.source_id === src.id)) })),
+      models: USAGE_MIX.filter(([s]) => s === src).map(([, model]) => ({ model_id: model, label: model, ...sum(modelRows.filter((row) => row.model_id === model && row.source_id === src.id)) })),
     })),
     services: [{ source_id: tavily.id, service_id: 'tavily/search', tool: 'web_search', label: 'Tavily', service_label: 'Tavily Search', last_metered_at: at(-40), requests: searches, billable_requests: searches, uncertain_requests: 0, reported_requests: 0, api_cost_usd: searches * 0.008, reported_usd: 0, api_cost_lower_bound: false, priced: true }],
     days: [],
@@ -337,6 +422,60 @@ export function usageReport(windowKey: UsageWindowKey = '24h'): UsageReport {
     pricing: { currency: 'USD', price_table_date: '2026-10-30' },
   };
 }
+
+// ── Subscription quota and the switch log ──────────────────────────────
+
+const quotaWindow = (over: Partial<QuotaWindow> & Pick<QuotaWindow, 'id' | 'used_pct'>): QuotaWindow => ({
+  kind: 'session', label: over.id, window_seconds: 18_000, resets_at: at(130), ...over,
+});
+const weekly = (id: string, used: number): QuotaWindow => quotaWindow({ id, label: id, kind: 'weekly', used_pct: used, window_seconds: 604_800, resets_at: at(4 * 24 * 60 + 300) });
+const priced = (api_cost_usd: number): PricedUsage => ({ api_cost_usd, excluded_tokens: 0, api_cost_lower_bound: false });
+const value = (over: Partial<SourceQuotaValue>): SourceQuotaValue => ({
+  currency: 'USD', price_table_date: '2026-10-30', plan_key: null, fee_usd: null, multiple: null, week: priced(0),
+  period: { basis: 'rolling_30d', from_day: '2026-10-03', to_day: '2026-11-01', renews_on: null, ...priced(0) },
+  ...over,
+});
+
+/** Claude Max and ChatGPT Pro, each with its session and weekly windows and what the month was worth at API prices. */
+export const quotaSummary = ({ claudeExpired = false } = {}): QuotaSummary => ({
+  refresh_interval_seconds: 300,
+  sources: [
+    {
+      source_id: claudeMax.id, vendor: 'anthropic', display_name: claudeMax.display_name, account_label: claudeMax.account_label ?? null,
+      plan: 'max', fetched_at: at(-2), state: claudeExpired ? 'auth_expired' : 'ok',
+      windows: claudeExpired ? [] : [quotaWindow({ id: 'five_hour', used_pct: 64 }), weekly('seven_day', 41), weekly('seven_day_opus', 23)],
+      value: value({
+        plan_key: 'claude_max_20x', fee_usd: 200, multiple: 5.62, week: priced(318.4),
+        period: { basis: 'billing_cycle', from_day: '2026-10-12', to_day: '2026-11-01', renews_on: '2026-11-12', ...priced(1124.6) },
+      }),
+    },
+    {
+      source_id: chatgptPro.id, vendor: 'openai', display_name: chatgptPro.display_name, account_label: chatgptPro.account_label ?? null,
+      plan: 'pro', fetched_at: at(-1), state: 'ok',
+      windows: [quotaWindow({ id: 'primary_window', label: 'primary_window', used_pct: 22, resets_at: at(47) }), weekly('secondary_window', 58)],
+      value: value({ plan_key: 'chatgpt_pro', fee_usd: 200, multiple: 2.31, week: priced(121.2), period: { basis: 'rolling_30d', from_day: '2026-10-03', to_day: '2026-11-01', renews_on: null, ...priced(462.9) } }),
+    },
+  ],
+  value: { currency: 'USD', price_table_date: '2026-10-30', week: priced(439.6), period: { sources: 2, fee_usd: 400, multiple: 3.97, ...priced(1587.5) } },
+});
+
+const event = (minutesAgo: number, over: Omit<ResolutionEvent, 'id' | 'ts'>): ResolutionEvent => ({ id: `evt_${minutesAgo}`, ts: at(-minutesAgo), ...over });
+
+/** The switch log: a quota run-out and recovery, a cooling relay, a login that needs action. */
+export const switchEvents: ResolutionEvent[] = [
+  event(6, { agent: 'claude', kind: 'recover', model_id: 'claude-opus-5', from_source: relayClaude.id, to_source: claudeMax.id, reason: 'recovery', severity: 'info',
+    human_zh: 'Claude Code 的 claude-opus-5 切回 Claude Max（额度已恢复）', human_en: 'Claude Code moved claude-opus-5 back to Claude Max (quota restored)' }),
+  event(42, { agent: 'codex', kind: 'needs_action', model_id: null, from_source: chatgptPro.id, to_source: null, reason: 'credential_expired', severity: 'action_required',
+    human_zh: 'ChatGPT Pro 登录已过期，需要重新登录', human_en: 'ChatGPT Pro sign-in expired; sign in again' }),
+  event(43, { agent: 'codex', kind: 'switch', model_id: 'gpt-6-astra', from_source: chatgptPro.id, to_source: relayGpt.id, reason: 'credential_expired', billing_note: 'entered_metered', severity: 'info',
+    human_zh: 'Codex 的 gpt-6-astra 从 ChatGPT Pro 切到 ai-relay-gpt（登录过期，开始按量计费）', human_en: 'Codex moved gpt-6-astra from ChatGPT Pro to ai-relay-gpt (sign-in expired; now metered)' }),
+  event(190, { agent: 'opencode', kind: 'cooldown', model_id: 'deepseek-v4', from_source: deepseek.id, to_source: null, reason: 'rate_limited', severity: 'info',
+    human_zh: 'DeepSeek 被限流，冷却 2 分钟', human_en: 'DeepSeek was rate limited; cooling down for 2 minutes' }),
+  event(305, { agent: 'claude', kind: 'switch', model_id: 'claude-opus-5', from_source: claudeMax.id, to_source: relayClaude.id, reason: 'quota_exhausted', billing_note: 'entered_metered', severity: 'info',
+    human_zh: 'Claude Code 的 claude-opus-5 从 Claude Max 切到 ai-relay-claude（5 小时额度用完）', human_en: 'Claude Code moved claude-opus-5 from Claude Max to ai-relay-claude (5-hour quota used up)' }),
+  event(1460, { agent: 'system', kind: 'channel_switch', model_id: 'claude-sonnet-5', from_source: claudeMax.id, to_source: claudeMax.id, reason: 'manual', severity: 'info',
+    human_zh: 'Claude Max 改由 Claude Code 本机登录提供', human_en: 'Claude Max is now served by the Claude Code login on this machine' }),
+];
 
 // ── The page's reads ────────────────────────────────────────────────────
 

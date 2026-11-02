@@ -1,5 +1,5 @@
-// 最近切换 — the human-readable resolution-event feed (design.pen 「产品改造 V6
-// 01」). Shows the three most recent by default; 查看全部 opens the list and walks
+// 最近切换 — the human-readable resolution-event feed (ui/design:
+// models/activity/logs). Shows the three most recent by default; 查看全部 opens the list and walks
 // the endpoint's `before` cursor page by page, so 全部 means the whole feed and not
 // just the rows the page happened to fetch first.
 //
@@ -133,7 +133,7 @@ export const RecentSwitchesCard: React.FC<{
         </div>
       ) : (
         <div className="flex flex-col">
-          {/* Phones stack the timestamp above the sentence (design.pen M01 m01Ev):
+          {/* Phones stack the timestamp above the sentence (ui/design: models/activity/logs-phone):
               the desktop 92px time column left the message ~200px at 360, so a
               one-line event wrapped to three or four. */}
           {shown.map((event) => (
