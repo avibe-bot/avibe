@@ -1,12 +1,9 @@
-import type { TranslationKey } from '@/i18n/types';
-import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ChevronDown, Layers } from 'lucide-react';
 import clsx from 'clsx';
 
 import type { WorkbenchMessage } from '../../context/ApiContext';
 import { chatTriggerLink, harnessChipLabelKey } from '../../lib/chatTrigger';
-import { formatLocalClockTime } from '../../lib/relativeTime';
 import { RoleAvatar } from './RoleAvatar';
 
 // The left rail that ties an expanded group's rows together. Each row draws its
@@ -16,37 +13,11 @@ import { RoleAvatar } from './RoleAvatar';
 export const HARNESS_GROUP_RAIL =
   'relative ml-3 pl-4 before:absolute before:-top-3 before:bottom-0 before:left-0 before:w-0.5 before:rounded-full before:bg-cyan/25';
 
-// An Agent callback reads "From · <session>" on its own row, but "From" alone
-// says nothing in a count, so the count uses the self-contained "From agent".
-const summaryKey = (message: WorkbenchMessage): TranslationKey => {
-  const key = harnessChipLabelKey(message);
-  return key === 'chat.source.from' ? 'chat.source.harness' : key;
-};
-
-const sameLocalDay = (a: string, b: string): boolean => {
-  const x = new Date(a);
-  const y = new Date(b);
-  return x.getFullYear() === y.getFullYear() && x.getMonth() === y.getMonth() && x.getDate() === y.getDate();
-};
-
-const localDay = (iso: string): string => {
-  const d = new Date(iso);
-  return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-};
-
-// First to last member, as wall-clock times; the day appears once the run
-// crosses midnight, which overnight Watch runs do.
-const timeSpan = (first: string, last: string): string => {
-  if (sameLocalDay(first, last)) return `${formatLocalClockTime(first)}–${formatLocalClockTime(last)}`;
-  return `${localDay(first)} ${formatLocalClockTime(first)}–${localDay(last)} ${formatLocalClockTime(last)}`;
-};
-
 /**
  * The row a run of Harness messages folds into (docs/plans/workbench-refinements.md
- * §3). Collapsed, it is the whole group: a count, where the messages came from,
- * when, and the latest one, stacked over two sheets that say there is more
- * underneath. Expanded, it is only the head; the Transcript draws the members
- * below it on the rail.
+ * §3). Collapsed, it is the whole group: a count and the latest message,
+ * stacked over two sheets that say there is more underneath. Expanded, it is
+ * only the head; the Transcript draws the members below it on the rail.
  */
 export function HarnessGroup({
   groupKey,
@@ -62,34 +33,16 @@ export function HarnessGroup({
 }) {
   const { t } = useTranslation();
   const latest = members[members.length - 1];
-  const sources = useMemo(() => {
-    const counts = new Map<TranslationKey, number>();
-    for (const message of members) {
-      const key = summaryKey(message);
-      counts.set(key, (counts.get(key) ?? 0) + 1);
-    }
-    return [...counts];
-  }, [members]);
   const countLabel = t('chat.harnessGroup.count', { count: members.length });
   const link = chatTriggerLink(latest, t('chat.source.agentFallback'));
   const latestSource = link?.kind === 'source' ? link.label : t(harnessChipLabelKey(latest));
 
   const head = (
-    <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 px-0.5 text-left">
+    <span className="flex min-w-0 items-center gap-2 px-0.5 text-left">
       <RoleAvatar tone="cyan">
         <Layers />
       </RoleAvatar>
       <span className="shrink-0 text-[11px] font-semibold text-cyan-ink">{countLabel}</span>
-      <span className="inline-flex min-w-0 flex-wrap items-center gap-x-1.5 text-[11px] text-muted">
-        {sources.map(([key, count]) => (
-          <span key={key} className="whitespace-nowrap">
-            {t('chat.harnessGroup.sourceCount', { label: t(key), n: count })}
-          </span>
-        ))}
-      </span>
-      <span className="whitespace-nowrap font-mono text-[10px] text-muted">
-        {timeSpan(members[0].created_at, latest.created_at)}
-      </span>
     </span>
   );
 

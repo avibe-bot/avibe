@@ -5281,7 +5281,6 @@
     "harnessGroup": {
       "count": "{{count}} 条 Harness 消息",
       "latest": "最新",
-      "sourceCount": "· {{label}} {{n}}",
       "expand": "展开",
       "collapseCount": "收起这 {{count}} 条"
     },

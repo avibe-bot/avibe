@@ -5281,7 +5281,6 @@
     "harnessGroup": {
       "count": "{{count}} Harness messages",
       "latest": "Latest",
-      "sourceCount": "· {{label}} {{n}}",
       "expand": "Expand",
       "collapseCount": "Collapse these {{count}}"
     },

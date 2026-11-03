@@ -300,10 +300,10 @@ it is still delivered, listed, and unread.
 ### Look
 
 - Collapsed, the default: a header with a cyan `RoleAvatar` (layers icon),
-  "N Harness messages", per-source counts using the existing source labels,
-  and the first and last times; below it a dashed chip stacked over two offset
-  sheets, showing "Latest", the latest member's source, and its one-line
-  preview. The whole chip toggles.
+  "N Harness messages"; below it a dashed chip stacked over two offset sheets,
+  showing "Latest", the latest member's source, and its one-line preview. The
+  whole chip toggles. The header carries no per-source counts or time span:
+  the latest chip already names a source, and each member keeps its own.
 - Expanded: the same header with "Collapse"; the members in their existing
   rendering, with their Activity chips, on a cyan left rail; a trailing collapse
   link.
