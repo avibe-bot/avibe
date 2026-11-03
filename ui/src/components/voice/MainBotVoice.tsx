@@ -1,0 +1,141 @@
+import { useEffect } from 'react';
+import { ArrowUpRight, CloudOff, MicOff, RotateCcw, X } from 'lucide-react';
+import clsx from 'clsx';
+import { useTranslation } from 'react-i18next';
+
+import type { BotAvatar as BotAvatarSpec } from '@/lib/bots';
+import { BotAvatar } from '../ui/bot-avatar';
+import type { useHoldToTalk } from './useHoldToTalk';
+import { VoiceCancelTarget, VoiceCard, VoiceInterruptedActions } from './VoiceCard';
+import { VoiceMark } from './VoiceMark';
+
+// Holding the main Bot in the middle of the phone's tab bar (ui/design: mobile/main-bot-voice/*):
+// the take's card above the bar with the cancel target under it, and afterwards one toast
+// above the bar that says what happened. The hold itself is `useHoldToTalk`.
+
+/** What the overlay and the toast draw from a hold: its state and the choices it offers. */
+export type HoldView = Pick<
+  ReturnType<typeof useHoldToTalk>,
+  'phase' | 'interruptReason' | 'text' | 'stash' | 'seconds' | 'outcome' | 'canRetry' | 'sendInterrupted' | 'retry' | 'discard' | 'dismiss'
+>;
+type Hold = HoldView;
+type MainBot = { name: string; avatar: BotAvatarSpec | null };
+
+/** A take with nothing heard that could not be transcribed: the design's toast, not the card. */
+const failedQuietly = (hold: Hold) => hold.phase === 'interrupted' && hold.interruptReason === 'failed' && !hold.text.trim();
+
+/** The card while the take runs, settles, or waits after being cut off. */
+export function MainBotHoldOverlay({ hold, bot }: { hold: Hold; bot: MainBot }) {
+  const { t } = useTranslation();
+  const { phase } = hold;
+  if (phase === 'idle' || phase === 'pressing' || failedQuietly(hold)) return null;
+  const holding = phase === 'listening' || phase === 'recording' || phase === 'armed';
+  return (
+    <div className="md:hidden" role="dialog" aria-modal="true" aria-label={t('voice.to', { name: bot.name })}>
+      <div className="fixed inset-x-0 top-0 bottom-(--mobile-nav-height) z-40 bg-background/80 backdrop-blur-sm" />
+      <div className="fixed inset-x-0 bottom-(--mobile-nav-height) z-50 flex flex-col items-center gap-5 px-5 pb-10">
+        <VoiceCard
+          to={{ name: bot.name, avatar: bot.avatar }}
+          phase={phase}
+          text={hold.text}
+          stash={hold.stash}
+          seconds={hold.seconds}
+          reason={hold.interruptReason ?? 'dropped'}
+          actions={
+            <VoiceInterruptedActions
+              canRetry={hold.canRetry}
+              canSend={Boolean(hold.text.trim())}
+              onDiscard={hold.discard}
+              onRetry={hold.retry}
+              onSend={hold.sendInterrupted}
+            />
+          }
+        />
+        {holding && <VoiceCancelTarget armed={phase === 'armed'} />}
+      </div>
+    </div>
+  );
+}
+
+// How long an outcome stays up. A failure that can be retried waits for the reader.
+const TOAST_MS = 4_000;
+
+/** What the last press led to, as one toast above the bar. Errors leave typing as the way on:
+ *  a tap on the main Bot opens its conversation. */
+export function MainBotVoiceToast({ hold, bot, onView }: { hold: Hold; bot: MainBot; onView: () => void }) {
+  const { t } = useTranslation();
+  const { outcome, dismiss } = hold;
+  const failed = failedQuietly(hold);
+  useEffect(() => {
+    if (!outcome) return;
+    const timer = setTimeout(dismiss, TOAST_MS);
+    return () => clearTimeout(timer);
+  }, [outcome, dismiss]);
+  if (!outcome && !failed) return null;
+  const tone = outcome === 'denied' || failed ? 'border-destructive/35' : outcome === 'sent' ? 'border-mint/40 shadow-glow-md-mint' : 'border-border-strong';
+  return (
+    <div className="pointer-events-none fixed inset-x-0 bottom-(--mobile-nav-height) z-50 flex justify-center px-4 pb-9 md:hidden" role="status">
+      <div className={clsx('pointer-events-auto flex w-full max-w-sm items-start gap-3 rounded-2xl border bg-surface-2 px-3.5 py-3 shadow-xl', tone)}>
+        {outcome === 'sent' && <BotAvatar avatar={bot.avatar} name={bot.name} size={28} />}
+        {outcome === 'cancelled' && <X className="mt-0.5 size-4 shrink-0 text-muted" />}
+        {(outcome === 'too-short' || outcome === 'asking') && <MicOff className="mt-0.5 size-4 shrink-0 text-muted" />}
+        {(outcome === 'denied' || failed) && <MicOff className="mt-0.5 size-4 shrink-0 text-destructive-ink" />}
+        {outcome === 'unavailable' && <CloudOff className="mt-0.5 size-4 shrink-0 text-muted" />}
+        <div className="flex min-w-0 flex-1 flex-col gap-0.5 text-xs leading-relaxed">
+          {failed ? (
+            <>
+              <span className="font-semibold text-foreground">{t('pet.voice.failed')}</span>
+              <span className="text-muted">{t('voice.failedBody')}</span>
+            </>
+          ) : (
+            <>
+              {outcome === 'sent' && (
+                <>
+                  <span className="flex items-center gap-1.5 font-semibold text-foreground">
+                    {t('voice.sent', { name: bot.name })}
+                    <VoiceMark />
+                  </span>
+                  <span className="line-clamp-1 text-muted">{hold.text}</span>
+                </>
+              )}
+              {outcome === 'cancelled' && <span className="text-foreground">{t('voice.cancelled')}</span>}
+              {outcome === 'too-short' && <span className="text-foreground">{t('voice.tooShort')}</span>}
+              {outcome === 'asking' && <span className="text-foreground">{t('voice.asking')}</span>}
+              {outcome === 'denied' && (
+                <>
+                  <span className="font-semibold text-foreground">{t('voice.deniedTitle')}</span>
+                  <span className="text-muted">{t('voice.deniedBody', { name: bot.name })}</span>
+                </>
+              )}
+              {outcome === 'unavailable' && (
+                <>
+                  <span className="text-foreground">{t('pet.voice.cloudRequired')}</span>
+                  <span className="text-muted">{t('voice.tapToType', { name: bot.name })}</span>
+                </>
+              )}
+            </>
+          )}
+        </div>
+        {outcome === 'sent' && !failed && (
+          <button type="button" onClick={() => { dismiss(); onView(); }} className="flex shrink-0 items-center gap-0.5 self-center text-xs font-semibold text-mint-ink">
+            {t('voice.view')}
+            <ArrowUpRight className="size-3.5" />
+          </button>
+        )}
+        {failed && (
+          <span className="flex shrink-0 items-center gap-1 self-center">
+            {hold.canRetry && (
+              <button type="button" onClick={hold.retry} className="flex items-center gap-1 text-xs font-semibold text-mint-ink">
+                <RotateCcw className="size-3.5" />
+                {t('voice.retry')}
+              </button>
+            )}
+            <button type="button" onClick={hold.discard} aria-label={t('voice.discard')} className="grid size-6 place-items-center rounded-md text-muted hover:text-foreground">
+              <X className="size-3.5" />
+            </button>
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}

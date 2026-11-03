@@ -1,5 +1,7 @@
 // The Bot team the mobile Bots designs share: the main Bot with one unread reply,
 // the security lead with two, the PM at work, and a fourth Bot that is idle.
+import { VOICE_MESSAGE_METADATA } from '@/lib/voiceMessage';
+
 import type { WorkbenchFixtures } from './fixtures';
 import { bot, demoBots, demoProjects, demoSessions, inboxRow, mainBot, message, researchBot } from './fixtures';
 
@@ -105,5 +107,6 @@ export const spoken = {
 /** The main Bot's conversation right after the voice message went in: it is already working on it. */
 export const afterVoiceTranscript = [
   ...mainTranscript,
-  message('ses_main', 'm4', 'user', spoken.final, 0),
+  // Sent by holding the main Bot: the message says it was spoken.
+  { ...message('ses_main', 'm4', 'user', spoken.final, 0), metadata: VOICE_MESSAGE_METADATA },
 ];

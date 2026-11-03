@@ -61,7 +61,7 @@ const MAX_BROWSER_TIMEOUT_MS = 2_147_483_647;
 const PREPARED_REVEAL = { maxAgeMs: 30_000, refreshMs: 20_000, latestOnly: false };
 const revealContextIssued = (reply: VaultRevealContextResult) => Boolean(reply?.ok && reply.context);
 
-const messageFromError = (err: unknown) => (err instanceof Error ? err.message : String(err));
+const messageFromError = (t: TFunction, err: unknown) => vaultErrorMessage(t, err, err instanceof Error ? err.message : String(err));
 /** All allowed proxy-fetch hosts on a secret (for the `proxy · <host> +N` badge). */
 const proxyHosts = (s: VaultSecret): string[] => {
   const hosts = (s.policy as { allowed_hosts?: string[] })?.allowed_hosts;
@@ -542,7 +542,7 @@ const PendingRequestsSection: React.FC<{
         onResolved();
         return true;
       } catch (err: unknown) {
-        showToast(messageFromError(err), 'warning');
+        showToast(messageFromError(t, err), 'warning');
         return false;
       }
     },
@@ -666,7 +666,7 @@ export const VaultsPage: React.FC = () => {
       setSecrets(res.secrets ?? []);
       setNow(Date.now());
     } catch (err: unknown) {
-      setError(messageFromError(err));
+      setError(messageFromError(t, err));
     } finally {
       setLoading(false);
     }
@@ -683,7 +683,7 @@ export const VaultsPage: React.FC = () => {
     } catch {
       setGrants([]);
     }
-  }, [api, canReadVaultState]);
+  }, [api, canReadVaultState, t]);
 
   useEffect(() => {
     refresh();
@@ -831,10 +831,10 @@ export const VaultsPage: React.FC = () => {
         const res = await api.getVaultAudit({ limit: 50 });
         setAudit(res.events ?? []);
       } catch (err: unknown) {
-        setError(messageFromError(err));
+        setError(messageFromError(t, err));
       }
     }
-  }, [api, showAudit]);
+  }, [api, showAudit, t]);
 
   const [deleteTarget, setDeleteTarget] = useState<VaultSecret | null>(null);
   const [editTarget, setEditTarget] = useState<VaultSecret | null>(null);
@@ -906,7 +906,7 @@ export const VaultsPage: React.FC = () => {
       showToast(t('vaults.deleted', { name: secret.name }), 'success');
       refresh();
     } catch (err: unknown) {
-      setError(messageFromError(err));
+      setError(messageFromError(t, err));
     } finally {
       setDeleteTarget(null);
     }
@@ -922,7 +922,7 @@ export const VaultsPage: React.FC = () => {
       showToast(t('vaults.grants.revoked', { target: label }), 'success');
       refresh();
     } catch (err: unknown) {
-      setError(messageFromError(err));
+      setError(messageFromError(t, err));
     }
   };
 

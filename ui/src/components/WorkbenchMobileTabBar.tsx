@@ -3,13 +3,17 @@ import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Plus } from 'lucide-react';
 
+import { useApi } from '../context/ApiContext';
 import { useBots } from '../context/BotsContext';
 import { useWorkbenchInbox } from '../context/WorkbenchInboxContext';
-import { MAIN_BOT_SESSION_ID, botSessionPath } from '../lib/bots';
-import { MobileTabBar, type ShellNavItem } from './MobileChrome';
+import { MAIN_BOT_SESSION_ID, botSessionPath, type BotAvatar as BotAvatarSpec } from '../lib/bots';
+import { MobileTabBar, type BotCenterPhase, type ShellNavItem } from './MobileChrome';
+import { MainBotHoldOverlay, MainBotVoiceToast } from './voice/MainBotVoice';
+import { useHoldToTalk, type HoldPhase } from './voice/useHoldToTalk';
 
 // The Workbench's phone tab bar and what sits in its middle. For the Owner it is
-// the main Bot: a tap opens its conversation (ui/design: mobile/workbench-tab/team).
+// the main Bot: a tap opens its conversation (ui/design: mobile/workbench-tab/team),
+// and pressing and holding speaks to it (ui/design: mobile/main-bot-voice/*).
 // Everyone else keeps the new-session ＋ (ui/design: mobile/workbench-tab/member).
 // The main Bot's Session id is fixed, so the center is there from the first paint,
 // with the main Bot's default name and mascot until the Bot list answers.
@@ -19,29 +23,61 @@ export const WorkbenchMobileTabBar: React.FC<{
   onNewSession?: () => void;
 }> = ({ items, onNewSession }) => {
   const { t } = useTranslation();
-  const navigate = useNavigate();
-  const { enabled, mainBot, displayName, statusBySession } = useBots();
-  const { unreadBySession } = useWorkbenchInbox({ feed: false });
-  if (enabled) {
-    const name = mainBot ? displayName(mainBot) : t('bots.mainDefaultName');
-    return (
-      <MobileTabBar
-        items={items}
-        bot={{
-          avatar: mainBot ? mainBot.avatar : { kind: 'mascot' },
-          name,
-          label: t('appShell.openMainBot', { name }),
-          unread: unreadBySession[MAIN_BOT_SESSION_ID] ?? 0,
-          running: statusBySession[MAIN_BOT_SESSION_ID] === 'running',
-          onClick: () => navigate(botSessionPath({ session_id: MAIN_BOT_SESSION_ID })),
-        }}
-      />
-    );
-  }
+  const { enabled } = useBots();
+  if (enabled) return <MainBotTabBar items={items} />;
   return (
     <MobileTabBar
       items={items}
       center={onNewSession ? { onClick: onNewSession, label: t('appShell.newSession'), icon: Plus } : undefined}
     />
+  );
+};
+
+const CENTER_PHASE: Record<HoldPhase, BotCenterPhase> = {
+  idle: 'idle',
+  pressing: 'pressed',
+  listening: 'recording',
+  recording: 'recording',
+  armed: 'armed',
+  settling: 'settling',
+  interrupted: 'idle',
+};
+
+/** The Owner's bar: the main Bot in the middle, tap to open, hold to speak. After a take the
+ *  reader stays where they are; the toast's View opens the conversation. */
+const MainBotTabBar: React.FC<{ items: ShellNavItem[] }> = ({ items }) => {
+  const { t } = useTranslation();
+  const api = useApi();
+  const navigate = useNavigate();
+  const { mainBot, displayName, statusBySession } = useBots();
+  const { unreadBySession } = useWorkbenchInbox({ feed: false });
+  const name = mainBot ? displayName(mainBot) : t('bots.mainDefaultName');
+  const avatar: BotAvatarSpec | null = mainBot ? mainBot.avatar : { kind: 'mascot' };
+  const open = () => navigate(botSessionPath({ session_id: MAIN_BOT_SESSION_ID }));
+  const hold = useHoldToTalk({
+    send: async (text, metadata) => {
+      await api.sendSessionMessage(MAIN_BOT_SESSION_ID, { text, metadata });
+      return true;
+    },
+    onTap: open,
+  });
+  return (
+    <>
+      <MobileTabBar
+        items={items}
+        bot={{
+          avatar,
+          name,
+          label: t('appShell.openMainBot', { name }),
+          unread: unreadBySession[MAIN_BOT_SESSION_ID] ?? 0,
+          running: statusBySession[MAIN_BOT_SESSION_ID] === 'running',
+          onClick: open,
+          phase: CENTER_PHASE[hold.phase],
+          hold: hold.bind,
+        }}
+      />
+      <MainBotHoldOverlay hold={hold} bot={{ name, avatar }} />
+      <MainBotVoiceToast hold={hold} bot={{ name, avatar }} onView={open} />
+    </>
   );
 };

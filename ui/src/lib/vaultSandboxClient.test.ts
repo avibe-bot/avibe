@@ -2,7 +2,8 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { VaultSandboxClient } from './vaultSandboxClient';
+import { VaultSandboxClient, openVaultAuthorizationWindow, resetVaultSandboxClient } from './vaultSandboxClient';
+import { stubBlankPopup, stubReleaseFetch } from './__fixtures__/vaultSandboxTransport';
 import type { VaultConfirmSurface } from './vaultConfirmSurface';
 
 const visibleSurface: VaultConfirmSurface = {
@@ -42,6 +43,7 @@ type TestVaultSandboxClient = {
 };
 
 afterEach(() => {
+  resetVaultSandboxClient();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   Reflect.deleteProperty(document, 'elementFromPoint');
@@ -158,15 +160,18 @@ describe('VaultSandboxClient interactive request surface', () => {
     const setModalVisible = vi.spyOn(client, 'setModalVisible');
     const postMessage = vi.spyOn(iframe.contentWindow!, 'postMessage').mockImplementation(() => undefined);
 
+    stubReleaseFetch();
+    stubBlankPopup();
+    const authorization = openVaultAuthorizationWindow()!;
     const result = client.request<{ blindBoxes: unknown[] }>(
       'approveRelease',
       { items: [] },
-      { interactive: true, authorizationWindow: 'window-0123456789abcdef' },
+      { interactive: true, authorizationWindow: authorization.id },
     );
     await vi.waitFor(() => expect(postMessage).toHaveBeenCalledTimes(1));
 
     const [wire] = postMessage.mock.calls[0];
-    expect(wire).toMatchObject({ op: 'approveRelease', authorizationWindow: 'window-0123456789abcdef' });
+    expect(wire).toMatchObject({ op: 'approveRelease', authorizationWindow: authorization.id });
     expect(wire).not.toHaveProperty('surface');
     expect(setModalVisible).not.toHaveBeenCalled();
     expect(iframe.style.visibility).not.toBe('visible');

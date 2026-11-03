@@ -6,7 +6,8 @@ import type {
 import type { BlindBox, ProtectedRecordEnvelope, SignatureResult, SignatureScheme } from './vaultCrypto';
 import {
   VAULT_SANDBOX_EXPECTED_BUILD_HASH,
-  VAULT_SANDBOX_INTEGRITY_ENFORCED,
+  VAULT_SANDBOX_VERSION,
+  VAULT_SANDBOX_RELEASE_PATH,
   VAULT_SANDBOX_IFRAME_URL,
   VAULT_SANDBOX_IFRAME_RESOURCE_PATH,
   VAULT_SANDBOX_MANIFEST_PATH,
@@ -129,7 +130,9 @@ export class VaultSandboxError extends Error {
   }
 }
 
-let integrityPromise: Promise<void> | null = null;
+let generationController = new AbortController();
+const clients = new Set<VaultSandboxClient>();
+const authorizationWindows = new Map<string, VaultAuthorizationWindow & { ready: Promise<void>; assertOpen: () => void }>();
 let singleton: Promise<VaultSandboxClient> | null = null;
 let activeClient: VaultSandboxClient | null = null;
 // Bumped on every reset. A create() that started before a reset checks this after its handshake:
@@ -167,39 +170,47 @@ export type VaultAuthorizationWindow = {
   close: () => void;
 };
 
-/**
- * Open the top-level sandbox authorization window for one protected operation (protocol v2
- * §6.6). Call it synchronously from the user's approval click, before any await: the window needs
- * that gesture, and opening it here lets the sandbox skip the in-frame launcher card. Pass the id
- * to the operation and close the handle when the operation settles. Returns null when the browser
- * blocks the window; the sandbox then falls back to its own launcher.
- */
+/** Reserve user activation without loading protected code. Each popup is inert
+ * until its own verification finishes. The RPC awaits that result by id, so a
+ * failed/cancelled popup can never silently fall back to an unverified window. */
 export function openVaultAuthorizationWindow(): VaultAuthorizationWindow | null {
   const id = randomId();
-  const url = new URL(VAULT_SANDBOX_IFRAME_URL);
-  const appearance = getVaultSandboxAppearance();
-  url.searchParams.set('mode', 'authorize');
-  url.searchParams.set('id', id);
-  url.searchParams.set('locale', appearance.locale);
-  url.searchParams.set('theme', appearance.theme);
-  // No noopener: the sandbox window reaches the requesting sandbox frame through its opener.
-  const popup = openLinkInNewContext(url.toString(), 'popup,width=520,height=760');
+  const generation = clientGeneration;
+  const signal = generationController.signal;
+  const popup = openLinkInNewContext('about:blank', 'popup,width=520,height=760');
   if (!popup) return null;
-  return {
-    id,
-    close: () => {
-      try {
-        if (!popup.closed) popup.close();
-      } catch {
-        // The sandbox may already have closed its window.
-      }
-    },
+  let closed = false;
+  const close = (): void => {
+    closed = true;
+    authorizationWindows.delete(id);
+    try { if (!popup.closed) popup.close(); } catch { /* Already closed. */ }
   };
+  const assertOpen = (): void => {
+    if (closed || popup.closed || generation !== clientGeneration) {
+      throw new VaultSandboxError('sandbox_reset', 'Sandbox authorization was cancelled', true);
+    }
+  };
+  const ready = verifyVaultSandboxIntegrity(signal).then(() => {
+    assertOpen();
+    const url = new URL(VAULT_SANDBOX_IFRAME_URL);
+    url.hash = new URLSearchParams({ mode: 'authorize', id, ...getVaultSandboxAppearance() }).toString();
+    popup.location.replace(url.toString());
+  }).catch((error: unknown) => {
+    // Keep the failed promise until the caller closes the handle: the RPC must
+    // receive the integrity error, not reinterpret failure as a blocked popup.
+    const cancelled = closed || popup.closed || generation !== clientGeneration;
+    try { if (!popup.closed) popup.close(); } catch { /* Already closed. */ }
+    if (cancelled) throw new VaultSandboxError('sandbox_reset', 'Sandbox authorization was cancelled', true);
+    throw error;
+  });
+  void ready.catch(() => undefined); // The eventual RPC observes this rejection.
+  const handle = { id, close, ready, assertOpen };
+  authorizationWindows.set(id, handle);
+  return handle;
 }
 
 function base64(bytes: ArrayBuffer): string {
-  const raw = String.fromCharCode(...new Uint8Array(bytes));
-  return btoa(raw);
+  return btoa(String.fromCharCode(...new Uint8Array(bytes)));
 }
 
 async function sha256Subresource(value: ArrayBuffer): Promise<string> {
@@ -210,57 +221,56 @@ function failIntegrity(message: string): never {
   throw new VaultSandboxError('sandbox_integrity_failed', message);
 }
 
-function sameManifestShape(live: unknown): live is typeof VAULT_SANDBOX_PINNED_MANIFEST {
-  if (!isObject(live) || live.algorithm !== VAULT_SANDBOX_PINNED_MANIFEST.algorithm || !isObject(live.resources)) {
-    return false;
-  }
-  const liveResources = live.resources as Record<string, unknown>;
-  const pinnedEntries = Object.entries(VAULT_SANDBOX_PINNED_MANIFEST.resources);
-  if (Object.keys(liveResources).length !== pinnedEntries.length) return false;
-  return pinnedEntries.every(([path, digest]) => liveResources[path] === digest);
-}
-
-export async function verifyVaultSandboxIntegrity(): Promise<void> {
-  if (integrityPromise) return integrityPromise;
-  integrityPromise = (async () => {
+/** No successful cache: every new frame or parent-created popup checks again.
+ * Hash the manifest bytes too; redirects, CORS/network/parse failures are never
+ * an invitation to trust a mutable endpoint or downgrade protected custody. */
+export async function verifyVaultSandboxIntegrity(signal?: AbortSignal): Promise<void> {
+  const controller = new AbortController();
+  const abort = (): void => controller.abort();
+  signal?.addEventListener('abort', abort, { once: true });
+  if (signal?.aborted) abort();
+  const timer = setTimeout(abort, DEFAULT_TIMEOUT_MS);
+  try {
     if (typeof window === 'undefined' || typeof crypto === 'undefined' || !crypto.subtle) {
       failIntegrity('Sandbox integrity requires Web Crypto in a browser context');
     }
-    const manifestUrl = `${VAULT_SANDBOX_ORIGIN}${VAULT_SANDBOX_MANIFEST_PATH}`;
-    const manifestResponse = await fetch(manifestUrl, { cache: 'no-store', mode: 'cors', credentials: 'omit' });
-    if (!manifestResponse.ok) {
-      failIntegrity(`Unable to fetch sandbox manifest (${manifestResponse.status})`);
+    const pin = VAULT_SANDBOX_PINNED_MANIFEST;
+    const resources: Record<string, string> = pin.resources;
+    if (pin.schema !== 1 || pin.algorithm !== 'sha256' || VAULT_SANDBOX_ORIGIN !== 'https://sandbox.avibe.bot'
+      || !/^[a-f0-9]{64}$/.test(pin.buildHash)
+      || !VAULT_SANDBOX_REQUIRED_RESOURCE_PATHS.includes(VAULT_SANDBOX_IFRAME_RESOURCE_PATH)
+      || VAULT_SANDBOX_REQUIRED_RESOURCE_PATHS.some((path) => !path.startsWith(VAULT_SANDBOX_RELEASE_PATH)
+        || !/^sha256-[A-Za-z0-9+/]{43}=$/.test(resources[path]))) {
+      failIntegrity('Invalid locally pinned sandbox release');
     }
-    const liveManifest = await manifestResponse.json();
-    if (!sameManifestShape(liveManifest)) {
-      failIntegrity('Sandbox manifest does not match the pinned build manifest');
-    }
-    if (!VAULT_SANDBOX_REQUIRED_RESOURCE_PATHS.includes(VAULT_SANDBOX_IFRAME_RESOURCE_PATH)) {
-      failIntegrity('Sandbox iframe URL is not pinned in the build manifest');
-    }
-
-    await Promise.all(
-      VAULT_SANDBOX_REQUIRED_RESOURCE_PATHS.map(async (path) => {
-        const response = await fetch(`${VAULT_SANDBOX_ORIGIN}${path}`, {
-          cache: 'no-store',
-          mode: 'cors',
-          credentials: 'omit',
-        });
-        if (!response.ok) {
-          failIntegrity(`Unable to fetch sandbox resource ${path} (${response.status})`);
-        }
-        const actual = await sha256Subresource(await response.arrayBuffer());
-        const expected = VAULT_SANDBOX_PINNED_MANIFEST.resources[path];
-        if (actual !== expected) {
-          failIntegrity(`Sandbox resource hash mismatch for ${path}`);
-        }
-      }),
-    );
-  })().catch((err) => {
-    integrityPromise = null;
-    throw err;
-  });
-  return integrityPromise;
+    const verify = async (path: string, expected: string): Promise<ArrayBuffer> => {
+      const url = `${VAULT_SANDBOX_ORIGIN}${path}`;
+      const response = await fetch(url, {
+        cache: 'no-store', mode: 'cors', credentials: 'omit', redirect: 'error', signal: controller.signal,
+      });
+      if (response.status !== 200 || response.redirected || response.url !== url || response.type !== 'cors') {
+        failIntegrity(`Sandbox resource was missing, redirected, or not CORS-readable: ${path}`);
+      }
+      const bytes = await response.arrayBuffer();
+      if (await sha256Subresource(bytes) !== expected) failIntegrity(`Sandbox resource hash mismatch: ${path}`);
+      return bytes;
+    };
+    const manifestBytes = await verify(VAULT_SANDBOX_MANIFEST_PATH, pin.manifestHash);
+    const manifest = JSON.parse(new TextDecoder().decode(manifestBytes)) as unknown;
+    if (!isObject(manifest) || manifest.buildHash !== pin.buildHash || manifest.sandboxOrigin !== pin.sandboxOrigin
+      || manifest.schema !== pin.schema || manifest.algorithm !== pin.algorithm
+      || JSON.stringify(manifest.resources) !== JSON.stringify(pin.resources)) failIntegrity('Sandbox manifest identity mismatch');
+    await Promise.all(VAULT_SANDBOX_REQUIRED_RESOURCE_PATHS.map((path) => verify(path, resources[path])));
+    if (controller.signal.aborted) failIntegrity('Sandbox verification was cancelled or timed out');
+  } catch (error) {
+    if (signal?.aborted) throw new VaultSandboxError('sandbox_reset', 'Sandbox verification was cancelled', true);
+    if (error instanceof VaultSandboxError) throw error;
+    failIntegrity('Unable to verify the pinned sandbox release. Check connectivity and update Avibe if necessary.');
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', abort);
+    controller.abort();
+  }
 }
 
 function serializeSandboxError(error: { code?: string; message?: string; retryable?: boolean } | string): VaultSandboxError {
@@ -355,19 +365,21 @@ export class VaultSandboxClient {
   // the top-level sandbox window and never trusts a parent hit-test claim.
   private interactiveRequests = new Set<string>();
   private surfaceRefreshTimer: number | null = null;
+  private destroyed = false;
+  private cancelReady: (() => void) | null = null;
 
   private constructor(iframe: HTMLIFrameElement) {
     this.iframe = iframe;
     this.readyPromise = this.waitForReady();
     window.addEventListener('message', this.handleMessage);
+    clients.add(this);
   }
 
   static async create(): Promise<VaultSandboxClient> {
     // Snapshot the reset generation so we can discard this client if a reset lands mid-creation.
     const generation = clientGeneration;
-    // Gated during pre-launch iteration — see VAULT_SANDBOX_INTEGRITY_ENFORCED. When off, the
-    // parent still origin-isolates the sandbox; it just doesn't fail-closed on a manifest mismatch.
-    if (VAULT_SANDBOX_INTEGRITY_ENFORCED) await verifyVaultSandboxIntegrity();
+    await verifyVaultSandboxIntegrity(generationController.signal);
+    if (generation !== clientGeneration) throw new VaultSandboxError('sandbox_reset', 'Sandbox was reset during verification', true);
     const iframe = document.createElement('iframe');
     iframe.title = 'Avibe protected vault sandbox';
     iframe.allow = 'publickey-credentials-get; publickey-credentials-create; clipboard-write';
@@ -395,22 +407,26 @@ export class VaultSandboxClient {
     const client = new VaultSandboxClient(iframe);
     iframe.src = VAULT_SANDBOX_IFRAME_URL;
     document.body.appendChild(iframe);
-    await client.handshake();
-    if (generation !== clientGeneration) {
-      // A reset (e.g. Strict enabled) landed while we were handshaking — this client pinned the
-      // pre-reset policy. Discard it and fail so the caller re-acquires a fresh, correctly-pinned
-      // client instead of proceeding under the stale policy.
+    try {
+      await client.handshake();
+      if (generation !== clientGeneration) throw new VaultSandboxError('sandbox_reset', 'Sandbox client was reset during creation', true);
+      activeClient = client;
+      return client;
+    } catch (error) {
       client.destroy();
-      throw new VaultSandboxError('sandbox_reset', 'Sandbox client was reset during creation', true);
+      throw error;
     }
-    activeClient = client;
-    return client;
   }
 
   private get target(): Window {
+    this.assertLive();
     const target = this.iframe.contentWindow;
     if (!target) throw new VaultSandboxError('sandbox_unavailable', 'Sandbox iframe is unavailable', true);
     return target;
+  }
+
+  private assertLive(): void {
+    if (this.destroyed) throw new VaultSandboxError('sandbox_reset', 'Sandbox client was reset', true);
   }
 
   private ensureBackdrop(): HTMLDivElement {
@@ -519,19 +535,27 @@ export class VaultSandboxClient {
 
   private waitForReady(): Promise<ReadyMessage> {
     return new Promise((resolve, reject) => {
-      const timer = window.setTimeout(() => {
+      const cleanup = (): void => {
+        window.clearTimeout(timer);
         window.removeEventListener('message', onMessage);
+        this.cancelReady = null;
+      };
+      const timer = window.setTimeout(() => {
+        cleanup();
         reject(new VaultSandboxError('sandbox_ready_timeout', 'Sandbox did not become ready', true));
       }, DEFAULT_TIMEOUT_MS);
+      this.cancelReady = () => {
+        cleanup();
+        reject(new VaultSandboxError('sandbox_reset', 'Sandbox client was reset', true));
+      };
       const onMessage = (event: MessageEvent) => {
         if (event.origin !== VAULT_SANDBOX_ORIGIN || event.source !== this.iframe.contentWindow) return;
         const ready = parseReadyMessage(event.data);
         if (!ready) return;
-        window.clearTimeout(timer);
-        window.removeEventListener('message', onMessage);
+        cleanup();
         const operations = ready.capabilities?.operations ?? [];
         const missing = REQUIRED_OPS.filter((op) => !operations.includes(op));
-        if (ready.build?.buildHash !== VAULT_SANDBOX_EXPECTED_BUILD_HASH) {
+        if (ready.build?.buildHash !== VAULT_SANDBOX_EXPECTED_BUILD_HASH || ready.build?.sandboxVersion !== VAULT_SANDBOX_VERSION) {
           reject(new VaultSandboxError('sandbox_build_mismatch', 'Sandbox build hash does not match the pinned manifest'));
         } else if (missing.length > 0) {
           reject(new VaultSandboxError('sandbox_capability_mismatch', `Sandbox is missing operations: ${missing.join(', ')}`));
@@ -547,6 +571,7 @@ export class VaultSandboxClient {
     if (event.origin !== VAULT_SANDBOX_ORIGIN || event.source !== this.iframe.contentWindow) return;
     const eventMessage = parseEventMessage(event.data);
     if (eventMessage) {
+      if (!this.handshaken) return;
       this.handleEvent(eventMessage);
       return;
     }
@@ -586,7 +611,8 @@ export class VaultSandboxClient {
     // Pull the daemon-persisted policy so the very first ceremony runs under the configured
     // window/strict values; best-effort — a failure leaves the default policy in place.
     await refreshVaultSandboxPolicy();
-    await this.request(
+    this.assertLive();
+    const result = await this.request<unknown>(
       'handshake',
       {
         parentOrigin: window.location.origin,
@@ -597,6 +623,12 @@ export class VaultSandboxClient {
       },
       { timeoutMs: DEFAULT_TIMEOUT_MS },
     );
+    if (!isObject(result) || result.accepted !== true || result.sandboxOrigin !== VAULT_SANDBOX_ORIGIN
+      || result.channel !== CHANNEL || result.version !== VERSION || !isObject(result.build)
+      || result.build.buildHash !== VAULT_SANDBOX_EXPECTED_BUILD_HASH || result.build.sandboxVersion !== VAULT_SANDBOX_VERSION) {
+      throw new VaultSandboxError('sandbox_build_mismatch', 'Sandbox handshake did not accept the pinned release');
+    }
+    this.assertLive();
     this.handshaken = true;
     this.setAppearance(getVaultSandboxAppearance());
   }
@@ -626,6 +658,17 @@ export class VaultSandboxClient {
     options: { timeoutMs?: number; interactive?: boolean; authorizationWindow?: string } = {},
   ): Promise<T> {
     await this.readyPromise;
+    this.assertLive();
+    if (options.authorizationWindow) {
+      const authorization = authorizationWindows.get(options.authorizationWindow);
+      if (!authorization) throw new VaultSandboxError('sandbox_reset', 'Sandbox authorization window is no longer available', true);
+      await authorization.ready;
+      authorization.assertOpen();
+      this.assertLive();
+      if (authorizationWindows.get(options.authorizationWindow) !== authorization) {
+        throw new VaultSandboxError('sandbox_reset', 'Sandbox authorization was cancelled', true);
+      }
+    }
     const id = randomId();
     // Interactive ops expand the iframe before sending so the launcher card is visible before the
     // request reaches the sandbox. The final authorization is completed in a top-level window;
@@ -646,6 +689,7 @@ export class VaultSandboxClient {
       if (this.interactiveRequests.size === 0 && this.modalVisible) this.setModalVisible(false);
       throw error;
     }
+    this.assertLive();
     const promise = new Promise<T>((resolve, reject) => {
       const timer = window.setTimeout(() => {
         this.pending.delete(id);
@@ -659,18 +703,29 @@ export class VaultSandboxClient {
         timer,
       });
     });
-    this.target.postMessage(
-      {
-        channel: CHANNEL,
-        version: VERSION,
-        id,
-        op,
-        payload: payload ?? {},
-        ...(surface ? { surface } : {}),
-        ...(options.authorizationWindow ? { authorizationWindow: options.authorizationWindow } : {}),
-      },
-      VAULT_SANDBOX_ORIGIN,
-    );
+    try {
+      this.target.postMessage(
+        {
+          channel: CHANNEL,
+          version: VERSION,
+          id,
+          op,
+          payload: payload ?? {},
+          ...(surface ? { surface } : {}),
+          ...(options.authorizationWindow ? { authorizationWindow: options.authorizationWindow } : {}),
+        },
+        VAULT_SANDBOX_ORIGIN,
+      );
+    } catch (error) {
+      const pending = this.pending.get(id);
+      if (pending) {
+        window.clearTimeout(pending.timer);
+        this.pending.delete(id);
+        this.interactiveRequests.delete(id);
+        if (this.pending.size === 0 && this.modalVisible) this.setModalVisible(false);
+        pending.reject(error instanceof Error ? error : new Error('Sandbox message could not be sent'));
+      }
+    }
     return promise;
   }
 
@@ -769,6 +824,10 @@ export class VaultSandboxClient {
    * a Strict change reaches the internal auto-unlock path immediately.
    */
   destroy(): void {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    clients.delete(this);
+    this.cancelReady?.();
     window.removeEventListener('message', this.handleMessage);
     for (const [, pending] of this.pending) {
       window.clearTimeout(pending.timer);
@@ -816,10 +875,12 @@ export async function getVaultSandboxClient(): Promise<VaultSandboxClient> {
 export function resetVaultSandboxClient(): void {
   // Advance the generation first so any in-flight create() discards itself on completion.
   clientGeneration += 1;
-  const client = activeClient;
+  generationController.abort();
+  generationController = new AbortController();
   singleton = null;
   activeClient = null;
-  client?.destroy();
+  for (const client of [...clients]) client.destroy();
+  for (const handle of [...authorizationWindows.values()]) handle.close();
 }
 
 export function getActiveVaultSandboxClient(): VaultSandboxClient | null {

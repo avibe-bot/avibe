@@ -6,6 +6,7 @@ import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import type { ReactElement } from 'react';
 import en from '@/i18n/en.json';
+import zh from '@/i18n/zh.json';
 import type { VaultSecret } from '@/context/ApiContext';
 import { VaultSecretForm } from './vault-secret-form';
 
@@ -34,7 +35,7 @@ vi.mock('@/lib/vaultCrypto', async (original) => ({
 }));
 const i18n = createInstance();
 void i18n.use(initReactI18next).init({
-  lng: 'en', fallbackLng: 'en', resources: { en: { translation: en } }, interpolation: { escapeValue: false },
+  lng: 'en', fallbackLng: 'en', resources: { en: { translation: en }, zh: { translation: zh } }, interpolation: { escapeValue: false },
 });
 const form = (element: ReactElement) => <I18nextProvider i18n={i18n}>{element}</I18nextProvider>;
 const change = (label: string, value: string) => fireEvent.change(screen.getByLabelText(label), { target: { value } });
@@ -47,7 +48,8 @@ const nameInputs = () => [1, 2, 3, 4].flatMap((index) => {
   return input ? [input.value] : [];
 });
 const submitButton = () => screen.getByRole('button', { name: 'Save & let the agent continue' }) as HTMLButtonElement;
-beforeEach(() => {
+beforeEach(async () => {
+  await i18n.changeLanguage('en');
   api.listDependencies.mockResolvedValue({ ok: true, deps: [{ id: 'avault', status: 'ready', version: '0.1.6' }] });
   api.createVaultSecret.mockResolvedValue({ ok: true });
   vault.sealValue.mockImplementation(async (_name, _kind, value) => {
@@ -56,6 +58,29 @@ beforeEach(() => {
   });
 });
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
+
+// The Generate-key catch owns this presentation independently of the form's submit catch.
+// Rejecting the public hook here exercises the actual button and error surface without keys.
+it.each(['en', 'zh'] as const)('localizes protected Generate-key integrity/reset errors in %s and preserves unknown-code detail', async (language) => {
+  await i18n.changeLanguage(language);
+  const copy = language === 'zh' ? zh : en;
+  const onCreated = vi.fn();
+  render(form(<VaultSecretForm requestSpec={{ kind: 'keypair', protection: 'protected' }} onCancel={vi.fn()} onCreated={onCreated} />));
+  fireEvent.change(screen.getByRole('textbox', { name: `${copy.vaults.dialog.name} ${copy.vaults.dialog.nameHint}` }), { target: { value: 'TEST_KEY' } });
+  const generate = await screen.findByRole('button', { name: copy.vaults.dialog.signingGenerateCta });
+  for (const code of ['sandbox_integrity_failed', 'sandbox_reset', 'future_sandbox_error'] as const) {
+    const detail = 'Specific sandbox failure detail';
+    vault.sealValue.mockRejectedValueOnce(Object.assign(new Error(detail), { code }));
+    await waitFor(() => expect((generate as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(generate);
+    const expected = code === 'future_sandbox_error' ? detail : copy.errors[code];
+    expect(await screen.findByText(expected)).toBeTruthy();
+    if (code !== 'future_sandbox_error') expect(screen.queryByText(detail)).toBeNull();
+    expect(vault.sealValue).toHaveBeenLastCalledWith('TEST_KEY', 'keypair');
+  }
+  expect(api.createVaultSecret).not.toHaveBeenCalled();
+  expect(onCreated).not.toHaveBeenCalled();
+});
 
 it('checks only avault when the secret form opens, without creating a secret', async () => {
   render(form(<VaultSecretForm onCancel={vi.fn()} onCreated={vi.fn()} />));

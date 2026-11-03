@@ -2951,6 +2951,10 @@
     "retry": "重试"
   },
   "errors": {
+    "sandbox_integrity_failed": "无法验证受保护保险库的安全代码，已阻止打开。请检查网络并更新 Avibe 后重试，不要绕过验证或重新创建通行密钥。",
+    "sandbox_build_mismatch": "受保护保险库沙箱与当前 Avibe 版本不匹配。请更新 Avibe 或联系支持；现有密钥和通行密钥未改变。",
+    "sandbox_reset": "本次受保护保险库操作已取消或重置。请从 Avibe 重试，以重新验证沙箱。",
+    "sandbox_ready_timeout": "已验证的保险库沙箱未能启动。请检查网络、更新 Avibe 后重试。",
     "avault_authorization_required": "avault 需要在运行 Avibe 的 Mac 上完成一次性的 macOS 钥匙串授权。请选择「授权 avault」，然后在那台 Mac 上回应对话框。",
     "stale_login_session": "Avibe 仍运行在一个已经结束的 macOS 登录会话中。请在 Mac 当前桌面的终端运行 `vibe restart`，然后重试。请不要重复重试此操作。",
     "invalid_field_name": "字段名须为 1–64 个小写字母、数字或下划线，且以字母开头。",
@@ -3361,7 +3365,7 @@
     "openControlPanel": "设置",
     "backToWorkbench": "工作台",
     "newSession": "新建",
-    "openMainBot": "{{name}}：打开对话",
+    "openMainBot": "{{name}}：点一下打开对话，按住说话",
     "navigationLabel": "控制台",
     "statusLabel": "服务状态",
     "versionLabel": "版本",
@@ -4809,17 +4813,18 @@
       "sendStatusUnknown": "暂时无法确认这条消息是否已送到{{name}}，请先看看对话记录，避免重复发送。",
       "attachmentsUnavailable": "部分附件已不可用，这条消息还没送达。请重新上传附件后再发送。",
       "waitingMessage": "待处理的消息",
-      "working": "{{name}} 正在处理…",
+      "placeholder": "给{{name}}发消息…",
+      "working": "{{name}}正在忙，有话可以接着说…",
       "delivering": "送达中 · {{count}}",
       "notDelivered": "还没送达 · {{count}}",
-      "notDeliveredHint": "没能插进{{name}}正在处理的这一轮，这一轮结束后就会收到。",
-      "sendDeferred": "还是没能插进{{name}}正在处理的这一轮，这一轮结束后就会收到。",
+      "notDeliveredHint": "{{name}}正忙着手上的事，忙完就会看到你发的消息。",
+      "sendDeferred": "{{name}}还没忙完手上的事，忙完就会看到你发的消息。",
       "cancelSend": "不发了",
       "hideDetails": "隐藏细节",
       "hideDetailsFailed": "「隐藏细节」没能保存，请再试一次。",
       "editProfile": "编辑资料",
-      "emptyTitle": "这是你和{{name}}对话的开始",
-      "emptyBody": "这段对话会一直延续：{{name}}会把重要的事记在自己的记忆里，并按顺序处理消息。"
+      "emptyTitle": "嗨，我是{{name}}",
+      "emptyBody": "想做的事、想记住的事，直接告诉我就好。我一直在这儿，也会记得我们聊过的。"
     },
     "agents": {
       "setAsBot": "设为伙伴",
@@ -6671,6 +6676,32 @@
       "unknown": "IM"
     },
     "removeReference": "移除对 {{title}} 的引用"
+  },
+  "voice": {
+    "to": "说给{{name}}",
+    "cutOff": "已中断",
+    "interrupted": {
+      "dropped": "连接断了，已经听到的都在上面。可以直接发送，或者重试转写这段录音。",
+      "failed": "没能转成文字，录音还在。可以重试转写，或者发送已经听到的部分。",
+      "system": "录音被打断了，已经听到的都在上面。可以直接发送。",
+      "sendFailed": "没发出去，文字还在，可以再发一次。"
+    },
+    "retry": "重试",
+    "send": "发送",
+    "discard": "不要了",
+    "releaseToCancel": "松开取消",
+    "slideToCancel": "上滑取消 · 松开发送",
+    "mark": "语音",
+    "sent": "已发给{{name}}",
+    "view": "查看",
+    "cancelled": "已取消，没有发送。",
+    "tooShort": "没听到说话。按住再说一次，或点一下打字。",
+    "asking": "请在系统弹窗里允许使用麦克风，然后再按住说话。",
+    "deniedTitle": "无法使用麦克风",
+    "deniedBody": "在系统设置里允许使用麦克风；也可以点一下{{name}}打字。",
+    "tapToType": "点一下{{name}}打字。",
+    "failedBody": "一个字都没识别出来，录音还在，可以重试转写。",
+    "dismiss": "关闭"
   },
   "mcpHub": {
     "title": "MCP",

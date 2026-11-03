@@ -651,6 +651,26 @@ scenarios:
     supporting_tests:
       - tests/test_mcp_hub_api.py::test_oauth_start_link_redirects_to_authorize_url
   - id: AUTH-SETUP-136
+    name: Protected Vault setup and authorization load only the locally pinned release
+    status: partial
+    kind: historical_regression
+    layer: scenario
+    missing_layer: live-passkey-e2e
+    backend: web
+    reason: >-
+      The integrity rule belongs to actual browser document and asset loading,
+      not a Python RPC mock. Chromium and WebKit run the actual client and
+      source-built sandbox with network denied and public synthetic metadata;
+      setup and authorization stop before any real credential or approval.
+      A pytest wrapper cannot exercise native SRI or popup activation. Live
+      publication, physical iOS/PWA activation and real passkey acceptance need
+      separate authorization and are not claimed by this offline closed loop.
+    owning_layer: L4 integrated acceptance (authorized published release and real passkey)
+    supporting_tests:
+      - ui/e2e/vault-integrity/integrity.spec.ts
+      - ui/src/lib/vaultSandboxIntegrity.test.ts
+      - tests/test_vault_rest.py
+  - id: AUTH-SETUP-137
     name: MCP Hub global and project servers with the same name keep separate OAuth pending grants, tokens and return views
     status: covered
     kind: concurrency

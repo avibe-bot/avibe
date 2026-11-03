@@ -94,9 +94,12 @@ Key code facts:
   countdown; nothing explains they are unrelated.
 - The v1 design's anti-clickjacking geometry/visibility checks
   (IntersectionObserver, min-size, fail-closed) are **not implemented**.
-- Sandbox integrity pinning is deliberately off pre-launch
-  (`vaultSandboxManifest.ts`, `VAULT_SANDBOX_INTEGRITY_ENFORCED = false`);
-  unchanged by this proposal, still a firm pre-launch gate.
+- Historical pre-launch integrity deferral is superseded by
+  [vault-sandbox-integrity.md](vault-sandbox-integrity.md): new parents enforce
+  one source-derived immutable pin, including inert popup preopen and same-build
+  ceremony pairing. Old `dev` parents have a separately frozen compatibility
+  root; they are never a fallback for the enforced path. Publication remains a
+  separately authorized security rollout.
 
 ### Why this happened
 
@@ -347,33 +350,36 @@ period for queued mobile-browser messages.
 The parent's approval click is the user gesture that opens this window, so the
 user reviews and approves the operation in one sandbox surface:
 
-1. The parent opens `…/index.html?mode=authorize&id=<id>&locale&theme`
-   synchronously in the click, before any await, and sends the id as the
-   top-level `authorizationWindow` field of the interactive RPC envelope
-   (`[A-Za-z0-9_-]{16,128}`; any other value fails the request with
-   `invalid_payload`). The parent keeps the frame collapsed for that request.
+1. The parent reserves an inert `about:blank` window synchronously in the click,
+   before any await. It independently fetches/hashes the locally pinned manifest
+   and runtime resources, then navigates that same handle to
+   `…/v/<source-input-sha256>/index.html#mode=authorize&id=<id>&locale&theme`.
+   The interactive RPC awaits this popup's verification before sending the id
+   as its top-level `authorizationWindow` field (`[A-Za-z0-9_-]{16,128}`; any
+   other value fails with `invalid_payload`). Verification failure/reset closes
+   the owned handle without protected navigation. The parent keeps the frame
+   collapsed for that request.
 2. The first authorization inside the request claims the id once; a second
    authorization in the same request (the lock-race retry) finds no id and
    falls back to the launcher below.
 3. The popup has no requester reference of its own, so it announces
    `authorization-ready` every 500 ms to each same-origin frame of its opener,
    with its own origin as the target origin. The requesting frame pairs with
-   the window whose ready message carries its id and ignores every other
-   source. The popup accepts `authorization-request` only from a frame of its
-   opener and replies only to that frame, so PRF output never leaves the
-   sandbox origin.
+   the window whose ready message carries its id and exact build/version, and
+   ignores every other source. The popup accepts `authorization-request` only
+   from a frame of its opener with the same build/version and replies only to
+   that frame, so PRF output never leaves the sandbox origin.
 4. A window that does not announce itself within 30 seconds, or closes, fails
    the operation with the retryable `authorization_window_closed`. The parent
    closes its handle when the operation settles.
-5. Nothing the request needs may wait on the daemon after the click. A Home
-   Screen app on iOS is frozen about two seconds after it opens a window, and
-   WebKit blocks a window opened after an await, so a daemon round trip between
-   opening the window and sending the request often leaves the window on its
-   placeholder. Before the click, the parent obtains the daemon-signed
-   contexts (§7.1, §7.4) and starts the sandbox client, whose first build
-   fetches, hashes, and handshakes. The action stays unavailable, showing
-   that it is preparing, until both are ready. The click only opens the window
-   and sends the request.
+5. Daemon-signed contexts (§7.1, §7.4) and the initial verified/handshaken sandbox
+   client are prepared before the click; the action stays unavailable until
+   they are ready. Fresh popup verification still performs asynchronous static
+   resource fetches after the click, without reusing an earlier success. Only
+   the inert window reservation is synchronous. Home Screen iOS suspension can
+   interrupt post-click work, so physical iOS/PWA activation remains a separate
+   release check; offline Chromium/WebKit coverage does not claim it. A retry
+   must verify again, never skip integrity to meet a timing window.
 
 Without an id (the browser blocked the parent's window, or an older parent),
 the embedded sandbox renders a visible launcher card whose click opens the
@@ -562,7 +568,7 @@ is only about keeping master shippable.
   (§7.2, deletes `promptSealInput`; import cut), setup PRF-on-create fast
   path, setup+first-seal fold, reveal entry in secret detail.
 - **Phase D — policy & polish**: settings UI (window length, Strict), TTL
-  language sweep (i18n), remove v1 ops from the sandbox, re-pin integrity
+  language sweep (i18n), remove v1 ops from the sandbox, publish the reviewed integrity release
   manifest + versioned iframe URL (existing pre-launch gate, tracked
   separately).
 

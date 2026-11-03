@@ -66,6 +66,7 @@ export default defineConfig({
         fileURLToPath(new URL('../vibe/message_types.json', import.meta.url)),
         fileURLToPath(new URL('../vibe/data/api_key_vendors.json', import.meta.url)),
         fileURLToPath(new URL('../vibe/data/media_types.json', import.meta.url)),
+        fileURLToPath(new URL('../vibe/data/vault_sandbox_release.json', import.meta.url)),
       ],
     },
     proxy: {

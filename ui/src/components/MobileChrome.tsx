@@ -1,7 +1,8 @@
-import React from 'react';
+import React, { type CSSProperties } from 'react';
 import { Link, NavLink, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
+import { Loader2, Mic } from 'lucide-react';
 
 import { Button } from './ui/button';
 import { InstallHint } from './InstallHint';
@@ -57,8 +58,19 @@ export const MobileNavLink: React.FC<{ item: ShellNavItem }> = ({ item }) => {
 
 export type CenterButton = { label: string; icon: React.ComponentType<{ className?: string }>; to?: string; onClick?: () => void };
 
+/** Where a press on the center is (ui/design: mobile/main-bot-voice/*): resting, pressed (not
+ *  yet a hold), recording, recording with the finger in the cancel zone, or released and settling. */
+export type BotCenterPhase = 'idle' | 'pressed' | 'recording' | 'armed' | 'settling';
+
+/** The pointer handlers a press-and-hold puts on the center (`useHoldToTalk().bind`). */
+export type BotCenterHold = Pick<
+  React.DOMAttributes<HTMLButtonElement>,
+  'onPointerDown' | 'onPointerMove' | 'onPointerUp' | 'onPointerCancel' | 'onLostPointerCapture' | 'onContextMenu' | 'onClick'
+> & { style?: CSSProperties };
+
 /** The main Bot in the middle of the bar (ui/design: mobile/workbench-tab/team): its
- *  avatar lifted above the bar's edge, its unread count, its running dot, its name. */
+ *  avatar lifted above the bar's edge, its unread count, its running dot, its name. A
+ *  tap opens its conversation; with `hold`, pressing and holding speaks to it. */
 export type BotCenter = {
   avatar: BotAvatarSpec | null;
   name: string;
@@ -67,22 +79,53 @@ export type BotCenter = {
   unread: number;
   running: boolean;
   onClick: () => void;
+  phase?: BotCenterPhase;
+  hold?: BotCenterHold;
 };
 
-export const MobileBotCenter: React.FC<BotCenter> = ({ avatar, name, label, unread, running, onClick }) => (
-  <button
-    type="button"
-    onClick={onClick}
-    aria-label={label}
-    className="flex min-w-0 flex-1 flex-col items-center justify-end gap-1 px-1 pb-2 text-2xs"
-  >
-    {/* Lifted out of the row, so the bar keeps its height and the avatar rises above its edge. */}
-    <span className={clsx('relative -mt-5 rounded-full bg-surface p-0.5 ring-2 transition', running ? 'shadow-glow-lg-mint ring-mint' : 'shadow-glow-md-mint ring-mint/45')}>
-      <BotFace avatar={avatar} name={name} size={50} unread={unread} running={running} />
-    </span>
-    <span className={clsx('max-w-full truncate font-semibold', running ? 'text-mint-ink' : 'text-foreground')}>{name}</span>
-  </button>
-);
+export const MobileBotCenter: React.FC<BotCenter> = ({ avatar, name, label, unread, running, onClick, phase = 'idle', hold }) => {
+  const voice = phase === 'recording' || phase === 'armed' || phase === 'settling';
+  return (
+    <button
+      type="button"
+      {...hold}
+      // A press the hold answered (its tap opens the conversation) spends the click that follows;
+      // any other click — the keyboard's, or a press the hold left alone — opens it here.
+      onClick={(event) => {
+        hold?.onClick?.(event);
+        if (!event.defaultPrevented) onClick();
+      }}
+      aria-label={label}
+      className="flex min-w-0 flex-1 flex-col items-center justify-end gap-1 px-1 pb-2 text-2xs"
+    >
+      {/* Lifted out of the row, so the bar keeps its height and the avatar rises above its edge. */}
+      <span
+        className={clsx(
+          'relative -mt-5 rounded-full bg-surface p-0.5 ring-2 transition',
+          phase === 'idle' && (running ? 'shadow-glow-lg-mint ring-mint' : 'shadow-glow-md-mint ring-mint/45'),
+          phase === 'pressed' && 'scale-95 shadow-glow-md-mint ring-mint',
+          phase === 'recording' && 'scale-110 shadow-glow-xl-mint ring-4 ring-mint',
+          phase === 'armed' && 'scale-105 opacity-70 ring-4 ring-destructive/70',
+          phase === 'settling' && 'shadow-glow-lg-mint ring-mint',
+        )}
+      >
+        {phase === 'recording' && <span className="absolute -inset-2 animate-ping rounded-full border-2 border-mint/50 motion-reduce:animate-none" aria-hidden="true" />}
+        <BotFace avatar={avatar} name={name} size={50} unread={voice ? 0 : unread} running={phase === 'idle' && running} />
+        {(phase === 'recording' || phase === 'armed') && (
+          <span className={clsx('absolute -bottom-1 -right-1 grid size-5 place-items-center rounded-full text-primary-foreground', phase === 'armed' ? 'bg-destructive' : 'bg-mint')}>
+            <Mic className="size-3" />
+          </span>
+        )}
+        {phase === 'settling' && (
+          <span className="absolute -bottom-1 -right-1 grid size-5 place-items-center rounded-full bg-surface text-mint-ink">
+            <Loader2 className="size-3.5 animate-spin" />
+          </span>
+        )}
+      </span>
+      <span className={clsx('max-w-full truncate font-semibold', running || voice ? 'text-mint-ink' : 'text-foreground')}>{name}</span>
+    </button>
+  );
+};
 
 // Workbench mobile tabs flank a raised center: the main Bot for the Owner, a
 // new-session action for everyone else.
@@ -100,8 +143,10 @@ export const MobileTabBar: React.FC<{ items: ShellNavItem[]; center?: CenterButt
   const half = Math.ceil(items.length / 2);
   const left = items.slice(0, half);
   const right = items.slice(half);
+  // While the main Bot is held the bar rises above the take's scrim, so the held avatar stays bright.
+  const raised = bot?.phase !== undefined && bot.phase !== 'idle';
   return (
-    <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-surface/96 px-2 pt-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))] backdrop-blur md:hidden">
+    <nav className={clsx('fixed inset-x-0 bottom-0 border-t border-border bg-surface/96 px-2 pt-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))] backdrop-blur md:hidden', raised ? 'z-50' : 'z-40')}>
       <div className="flex items-end justify-between gap-1">
         {left.map((item) => <MobileNavLink key={item.to ?? item.label} item={item} />)}
         {bot ? <MobileBotCenter {...bot} /> : center && <NewSessionCenter center={center} />}

@@ -22,13 +22,14 @@ import { useBots } from '@/context/BotsContext';
 import { referenceToMarker, type MentionReference, type SessionReference } from '@/lib/mentions';
 import { ShowPageVoiceDictation } from '@/lib/showPageVoiceDictation';
 import { VoiceTranscriptionError } from '@/lib/voiceTranscription';
+import { VOICE_MESSAGE_METADATA } from '@/lib/voiceMessage';
 
 import { PetAvatar, type PetPose } from './PetAvatar';
 import { PetOpenButton } from './PetOpenButton';
 import { REPLY_LINGER_RESUME_MS, useReplyLinger } from './useReplyLinger';
 import { onPetHover, petBridge, sessionLink, vaultRequestLink, type PetLayout } from './petBridge';
 import { petPanel, usePetPanel } from './petPanel';
-import { DICTATED_MESSAGE_METADATA, petComposer, usePetComposer } from './petComposer';
+import { petComposer, usePetComposer } from './petComposer';
 import { petShell, useOnSummon, usePetBinding, usePetDismissed } from './petShell';
 import { derivePetPose, derivePetState, latestExchange, latestFailureNotice, openQuickReplies } from './petState';
 import { useConversationAgentSnapshot } from './useConversationAgentWorking';
@@ -568,7 +569,7 @@ const PetSurface: React.FC = () => {
   const submit = async () => {
     const submitted = draft;
     // Dictated and sent as it was heard: the Agent is told it may hold recognition errors.
-    const metadata = petComposer.isDictated(submitted) ? DICTATED_MESSAGE_METADATA : undefined;
+    const metadata = petComposer.isDictated(submitted) ? VOICE_MESSAGE_METADATA : undefined;
     if (!(await send(submitted, metadata)) || !epoch.isCurrent()) return;
     if (petComposer.clearDraftIf(submitted)) setComposing(false);
   };
@@ -1572,7 +1573,17 @@ const MessageContent: React.FC<{ message: WorkbenchMessage }> = ({ message }) =>
  * Animates a box between two widths CSS cannot interpolate (its content's width
  * and the column's): from the width last drawn to the new one, then hands the
  * width back to CSS. Reduced motion switches at once.
+ *
+ * Widths are read as laid out, in the units `style.width` sets, never from the
+ * visual box: an ancestor's transform (the slot's entrance scale) would
+ * otherwise be recorded as the width, and nothing re-measures once it ends,
+ * so the morph would start narrower than what is drawn and twitch inward.
  */
+const laidOutWidth = (node: HTMLElement) => {
+  const width = parseFloat(getComputedStyle(node).width);
+  return Number.isFinite(width) ? width : null;
+};
+
 function useWidthMorph(key: unknown, reducedMotion: boolean) {
   const ref = useRef<HTMLDivElement>(null);
   const drawn = useRef<number | null>(null);
@@ -1580,7 +1591,7 @@ function useWidthMorph(key: unknown, reducedMotion: boolean) {
   useLayoutEffect(() => {
     const node = ref.current;
     if (!node || typeof ResizeObserver === 'undefined') return undefined;
-    const observer = new ResizeObserver(() => { drawn.current = node.getBoundingClientRect().width; });
+    const observer = new ResizeObserver(() => { drawn.current = laidOutWidth(node); });
     observer.observe(node);
     return () => observer.disconnect();
   }, []);
@@ -1602,8 +1613,8 @@ function useWidthMorph(key: unknown, reducedMotion: boolean) {
     // Whatever was moving lands at once when there is nothing to animate.
     settle('');
     if (!changed || reducedMotion) return undefined;
-    const to = node.getBoundingClientRect().width;
-    if (from === null || Math.abs(from - to) < 1) return undefined;
+    const to = laidOutWidth(node);
+    if (from === null || to === null || Math.abs(from - to) < 1) return undefined;
     settle(`${from}px`);
     node.style.width = `${to}px`;
     const release = (event: TransitionEvent) => {

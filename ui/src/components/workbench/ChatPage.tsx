@@ -18,6 +18,8 @@ import { useBots } from '../../context/BotsContext';
 import { conversationDetails, isBotSessionId, isSelectableAgent, liveBotAgentNames, type BotAvatar as BotAvatarSpec } from '../../lib/bots';
 import { BotAvatar } from '../ui/bot-avatar';
 import { BotConversationTitle } from './bots/BotSwitch';
+import { VoiceMark } from '../voice/VoiceMark';
+import { isVoiceMessage } from '../../lib/voiceMessage';
 import { useRegisterComposerTarget, type ComposerInsertTarget } from '../../context/ComposerBridgeContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
 import type { SessionActivityItemKind, SessionActivityState, SessionRuntimeState, VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
@@ -3726,7 +3728,9 @@ const Compose: React.FC<ComposeProps> = ({ composerRef, actions, readLatestAgent
               t('chat.compose.placeholderSystem')
             : readOnlyReason === 'archived'
               ? t('chat.compose.placeholderArchived')
-              : undefined
+              : botName
+                ? t('bots.conversation.placeholder', { name: botName })
+                : undefined
         }
         // A Bot takes the user's message into the Turn it is on (docs/plans/bots.md
         // D4), so its conversation names who is working and promises no queue.
@@ -3742,8 +3746,10 @@ interface TitleFieldHandle {
   startEditing: () => void;
 }
 
-// A Bot's empty conversation shows who it is: there is no automatic
-// self-introduction, so its role is what the user reads first (D5).
+// A Bot's empty conversation is the Bot greeting the user in its own voice: there
+// is no automatic self-introduction, so this is what the user reads first (D5). A
+// custom Bot adds the role the user wrote for it; the main Bot's role is Agent-facing
+// text, so its caller passes none.
 const BotConversationEmpty: React.FC<{ name: string; avatar: BotAvatarSpec | null; role: string }> = ({ name, avatar, role }) => {
   const { t } = useTranslation();
   return (
@@ -3751,7 +3757,7 @@ const BotConversationEmpty: React.FC<{ name: string; avatar: BotAvatarSpec | nul
       <BotAvatar avatar={avatar} name={name} size={64} />
       <div className="max-w-[420px] text-[15px] font-semibold text-foreground">{t('bots.conversation.emptyTitle', { name })}</div>
       {role && <div className="max-w-[440px] text-[13px] leading-relaxed text-foreground/80">{role}</div>}
-      <div className="max-w-[440px] text-[12px] leading-relaxed text-muted">{t('bots.conversation.emptyBody', { name })}</div>
+      <div className="max-w-[440px] text-balance text-[13px] leading-relaxed text-muted">{t('bots.conversation.emptyBody', { name })}</div>
     </div>
   );
 };
@@ -4824,7 +4830,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
         <BotConversationEmpty
           name={botDisplayName(conversationBot)}
           avatar={conversationBot.avatar}
-          role={conversationBot.role}
+          role={conversationBot.builtin ? '' : conversationBot.role}
         />
       ) : (
         <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center text-muted">
@@ -5390,7 +5396,13 @@ export const MessageRow = memo(function MessageRow({
             {bodyNode}
             {attachmentsNode}
           </div>
-          {senderHead ? null : time}
+          {/* A spoken message says so under its bubble (ui/design: mobile/main-bot-voice/i-conversation). */}
+          {isVoiceMessage(message.metadata) ? (
+            <div className="flex items-center gap-1.5">
+              {senderHead ? null : time}
+              <VoiceMark />
+            </div>
+          ) : senderHead ? null : time}
         </div>
       </div>
     );
@@ -5449,7 +5461,7 @@ export const MessageRow = memo(function MessageRow({
             size="xs"
             onClick={() => onHarnessOpenChange?.(message.id, !expanded)}
             aria-expanded={expanded}
-            className="h-auto max-w-[360px] justify-start gap-2 rounded-xl rounded-tl-md border border-dashed border-cyan/40 bg-cyan/[0.05] px-3 py-1.5 hover:bg-cyan/[0.10]"
+            className="h-auto max-w-[min(100%,360px)] justify-start gap-2 rounded-xl rounded-tl-md border border-dashed border-cyan/40 bg-cyan/[0.05] px-3 py-1.5 hover:bg-cyan/[0.10]"
           >
             <span className="min-w-0 truncate text-[12px] text-muted">
               {expanded ? t('chat.collapse') : message.text?.trim() || '—'}

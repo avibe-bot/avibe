@@ -120,6 +120,10 @@ describe('BotConversationTitle', () => {
     const rows = within(sheet).getAllByRole('listitem').map((row) => row.textContent);
     expect(rows[0]).toContain('Vibey');
     expect(rows[0]).toContain('bots.mainBadge');
+    // Without a message yet, a row shows the role; the main Bot's is its UI copy, never
+    // the Agent-facing description it stores.
+    expect(rows[0]).toContain('bots.mainRole');
+    expect(rows[0]).not.toContain('Vibey role');
     expect(rows[2]).toContain('bots.runningPreview:{"preview":"The backlog is ranked."}');
     expect(rows[1]).toContain('Security lead role');
     expect(within(sheet).getByRole('button', { current: 'page' }).textContent).toContain('Security lead');

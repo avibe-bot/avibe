@@ -1,6 +1,9 @@
 # Cross-origin protected Vault crypto sandbox
 
-Status: design plan only, no implementation.
+Status: historical architecture design; the implemented integrity/retention
+contract and separately authorized rollout are in [vault-sandbox-integrity.md](vault-sandbox-integrity.md).
+That contract supersedes the pre-launch integrity deferral, not the accepted
+HTML-navigation/central-host equivocation residual described below.
 Owner: Vaults workstream.
 Date: 2026-07-07.
 
