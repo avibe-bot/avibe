@@ -3,7 +3,12 @@ import en from '../../src/i18n/en.json' with { type: 'json' };
 import zh from '../../src/i18n/zh.json' with { type: 'json' };
 
 const file = { name: '发布说明 中文.txt', mimeType: 'text/plain', buffer: Buffer.from('版本内容 ✓') };
-const input = (page: Page) => page.getByPlaceholder(en.workbench.home.inputPlaceholder);
+const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+// The home composer: with speech available its idle placeholder names hold-to-talk, and while a
+// tap dictation owns the box it is the plain one.
+const input = (page: Page) => page.getByPlaceholder(
+  new RegExp(`^(${escape(en.voice.composer.homePlaceholder)}|${escape(en.workbench.home.inputPlaceholder)})$`),
+);
 const send = (page: Page) => page.getByRole('button', { name: en.chat.compose.send, exact: true });
 const writes = (page: Page, suffix: string) => page.evaluate((suffix) => window.homeMedia.writes.filter((write) => write.path.endsWith(suffix)), suffix);
 const attach = async (page: Page) => page.locator('input[type=file]').setInputFiles(file);

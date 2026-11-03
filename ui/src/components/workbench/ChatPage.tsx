@@ -19,6 +19,7 @@ import { conversationDetails, isBotSessionId, isSelectableAgent, liveBotAgentNam
 import { BotAvatar } from '../ui/bot-avatar';
 import { BotConversationTitle } from './bots/BotSwitch';
 import { VoiceMark } from '../voice/VoiceMark';
+import type { VoiceTarget } from '../voice/VoiceCard';
 import { isVoiceMessage } from '../../lib/voiceMessage';
 import { useRegisterComposerTarget, type ComposerInsertTarget } from '../../context/ComposerBridgeContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
@@ -3130,7 +3131,7 @@ export const ChatPage: React.FC = () => {
           key={sessionId}
           composerRef={composerRef}
           readLatestAgentReply={readLatestAgentReply}
-          onSend={(text, attachments, references) => sendMessage(text, attachments, undefined, references)}
+          onSend={(text, attachments, references, metadata) => sendMessage(text, attachments, metadata, references)}
           onStop={stopMessage}
           busy={working}
           sessionId={sessionId ?? ''}
@@ -3140,6 +3141,9 @@ export const ChatPage: React.FC = () => {
           onSearchSessions={searchSessions}
           readOnlyReason={readOnlyReason}
           botName={conversationBotName}
+          voiceTarget={conversationBotName
+            ? { name: conversationBotName, avatar: conversationBot?.avatar ?? null }
+            : { name: session.title || t('chat.untitled'), title: t('voice.composer.toSession', { title: session.title || t('chat.untitled') }) }}
           // Hidden with the rest of the chat surface in Show Page mode, which is
           // also where the header used to withdraw the picker.
           actions={writable ? (
@@ -3670,7 +3674,7 @@ interface ComposeProps {
   /** The live route picker for the composer's action row; null when read-only. */
   actions: React.ReactNode;
   readLatestAgentReply: ComposerProps['readLatestAgentReply'];
-  onSend: (text: string, attachments?: ComposerAttachment[], references?: MentionReference[]) => void;
+  onSend: (text: string, attachments?: ComposerAttachment[], references?: MentionReference[], metadata?: Record<string, unknown>) => void;
   onStop: () => void;
   busy: boolean;
   sessionId: string;
@@ -3684,9 +3688,11 @@ interface ComposeProps {
   readOnlyReason: SessionReadOnlyReason | null;
   /** A Bot's conversation: the Bot's name, for the "working" placeholder. */
   botName?: string | null;
+  /** Who a message spoken by holding the composer goes to. */
+  voiceTarget: VoiceTarget;
 }
 
-const Compose: React.FC<ComposeProps> = ({ composerRef, actions, readLatestAgentReply, onSend, onStop, busy, sessionId, initialDraft, onDraftChange, onSearchAgents, onSearchSessions, readOnlyReason, botName }) => {
+const Compose: React.FC<ComposeProps> = ({ composerRef, actions, readLatestAgentReply, onSend, onStop, busy, sessionId, initialDraft, onDraftChange, onSearchAgents, onSearchSessions, readOnlyReason, botName, voiceTarget }) => {
   const { t } = useTranslation();
   const readOnly = readOnlyReason !== null;
   return (
@@ -3736,6 +3742,9 @@ const Compose: React.FC<ComposeProps> = ({ composerRef, actions, readLatestAgent
         // D4), so its conversation names who is working and promises no queue.
         busyPlaceholder={botName ? t('bots.conversation.working', { name: botName }) : undefined}
         busySendsNow={botName != null}
+        // Where a hold would record, the Bot's line also names the gesture.
+        holdPlaceholder={botName ? t('voice.composer.botPlaceholder', { name: botName }) : undefined}
+        voiceTarget={voiceTarget}
         autoFocus={!readOnly}
       />
     </div>

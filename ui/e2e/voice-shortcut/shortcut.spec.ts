@@ -5,6 +5,7 @@ declare global {
   interface Window {
     voiceShortcutTest: {
       sent: string[];
+      spoken: { text: string; metadata: Record<string, unknown> }[];
     };
   }
 }

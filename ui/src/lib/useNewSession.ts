@@ -57,7 +57,8 @@ export interface NewSessionState {
   setSpeed: (speed: SessionSpeed) => void;
   /** Creates the selected session, uploads staged files, submits once, then
    * returns the navigation target. Failures leave the caller's draft intact. */
-  send: (text: string, attachments?: ComposerAttachment[]) => Promise<{ sessionId: string } | null>;
+  /** ``metadata`` rides on the first message (a spoken one is ``{ input: 'voice' }``). */
+  send: (text: string, attachments?: ComposerAttachment[], metadata?: Record<string, unknown>) => Promise<{ sessionId: string } | null>;
   upsertSelectProject: (project: WorkbenchProject) => void;
 }
 
@@ -343,7 +344,7 @@ export function useNewSession({ active = true, loadErrorText, createFailedText, 
     : defaultAgentName;
 
   const send = useCallback(
-    async (text: string, attachments: ComposerAttachment[] = []): Promise<{ sessionId: string } | null> => {
+    async (text: string, attachments: ComposerAttachment[] = [], metadata?: Record<string, unknown>): Promise<{ sessionId: string } | null> => {
       const trimmed = text.trim();
       // Never create from a stale/empty/in-flight state; no target → caller opens New Project.
       if (uncertainRef.current) return null;
@@ -413,7 +414,11 @@ export function useNewSession({ active = true, loadErrorText, createFailedText, 
           response = await apiFetch(`/api/sessions/${encodeURIComponent(pending.id)}/messages`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text: trimmed, ...(uploaded.length ? { content: { text: trimmed, attachments: uploaded } } : {}) }),
+            body: JSON.stringify({
+              text: trimmed,
+              ...(uploaded.length ? { content: { text: trimmed, attachments: uploaded } } : {}),
+              ...(metadata ? { metadata } : {}),
+            }),
           });
         } catch {
           uncertain();

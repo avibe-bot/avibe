@@ -204,7 +204,7 @@ describe('Workbench first-task home', () => {
     renderHome();
     await user.type(input(), '先做中文文档');
     await user.click(screen.getByRole('button', { name: en.chat.compose.send }));
-    expect(newSession.send).toHaveBeenCalledWith('先做中文文档', []);
+    expect(newSession.send).toHaveBeenCalledWith('先做中文文档', [], undefined);
     expect(await screen.findByText('chat-page')).toBeTruthy();
   });
 
@@ -478,6 +478,6 @@ describe('Workbench continuation row', () => {
 
     await user.type(input(), '继续用聊天');
     await user.click(screen.getByRole('button', { name: en.chat.compose.send }));
-    expect(newSession.send).toHaveBeenCalledWith('继续用聊天', []);
+    expect(newSession.send).toHaveBeenCalledWith('继续用聊天', [], undefined);
   });
 });
