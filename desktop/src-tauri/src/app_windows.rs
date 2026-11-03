@@ -14,6 +14,9 @@ pub(crate) static LAUNCH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::cons
 
 const WINDOW_PREFIX: &str = "avibe-app-";
 const NEW_WINDOW_MARKER: &str = "--new-";
+// Identity only: survives same-origin navigation and grants no shell IPC.
+const NATIVE_APP_WINDOW_MARKER: &str =
+    "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_NATIVE_APP_WINDOW__', { value: true });";
 
 pub(crate) fn is_app_window(label: &str) -> bool {
     label.starts_with(WINDOW_PREFIX)
@@ -56,11 +59,7 @@ pub(crate) fn target_url(origin: &LoopbackOrigin, target: &AppWindowTarget) -> U
     match target {
         AppWindowTarget::Builtin(app_id) => {
             url.set_path(&format!("/apps/{app_id}"));
-            url.set_query(Some(if *app_id == "terminal" {
-                "standalone=1&ephemeral=1"
-            } else {
-                "standalone=1"
-            }));
+            url.set_query(Some("standalone=1"));
         }
         AppWindowTarget::ShowPage(session_id) => {
             url.set_path(&format!("/show/{session_id}/"));
@@ -101,6 +100,7 @@ pub(crate) fn open(
         .disable_drag_drop_handler()
         .visible(false)
         .focused(false)
+        .initialization_script(NATIVE_APP_WINDOW_MARKER)
         .on_new_window(|url, _features| crate::handle_new_window_request(url))
         .build()
         .map_err(|error| format!("Failed to create the native app window: {error}"))?;
@@ -232,7 +232,7 @@ mod tests {
         );
         assert_eq!(
             target_url(&origin, &AppWindowTarget::Builtin("terminal")).as_str(),
-            "http://127.0.0.1:5123/apps/terminal?standalone=1&ephemeral=1"
+            "http://127.0.0.1:5123/apps/terminal?standalone=1"
         );
     }
 

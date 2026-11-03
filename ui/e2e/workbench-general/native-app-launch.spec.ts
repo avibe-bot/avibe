@@ -103,7 +103,11 @@ test('native Terminal windows use independent disposable sessions and preserve b
       socket.send(JSON.stringify({ type: 'ready', persistent: true }));
     });
     const count = sessions.length;
-    await page.goto(`/apps/terminal?standalone=1${native ? '&ephemeral=1' : ''}`);
+    if (native) await page.addInitScript(() => {
+      if (window.self === window.top) Object.defineProperty(window, '__AVIBE_NATIVE_APP_WINDOW__', { value: true });
+    });
+    // Also covers a hard same-origin navigation from a Show Page without query flags.
+    await page.goto(native ? '/apps/terminal' : '/apps/terminal?standalone=1');
     await expect.poll(() => sessions.length).toBe(count + 1);
     return page;
   };
@@ -129,3 +133,66 @@ test('native Terminal windows use independent disposable sessions and preserve b
   expect(sessions[3]).toBe(persistent);
   expect(deleted).not.toContain(persistent);
 });
+
+for (const width of [720, 1200]) {
+  test(`native Files at ${width}px: Open Terminal Here preserves cwd and session ownership`, async ({ context }) => {
+    const browser = await context.newPage();
+    await serveProduct(browser);
+    const persistentSessions = new Set<string>();
+    await browser.routeWebSocket('**/api/terminal/*', socket => {
+      persistentSessions.add(new URL(socket.url()).pathname.split('/').at(-1)!);
+      socket.send(JSON.stringify({ type: 'ready', persistent: true }));
+    });
+    await browser.goto('/apps/terminal?standalone=1');
+    await expect.poll(() => persistentSessions.size).toBe(1);
+    const persistent = [...persistentSessions][0];
+
+    const native = await context.newPage();
+    await native.setViewportSize({ width, height: 800 });
+    await serveProduct(native);
+    await native.addInitScript(() => {
+      if (window.self === window.top) Object.defineProperty(window, '__AVIBE_NATIVE_APP_WINDOW__', { value: true });
+    });
+    await native.route('**/api/files/list?**', route => route.fulfill({ json: {
+      ok: true, path: '/fixture/work', parent: '/fixture',
+      entries: [{ name: 'native-folder', kind: 'dir', size: null, mtime: null, ext: '' }],
+    } }));
+    const attached = new Map<string, string | null>();
+    let connections = 0;
+    await native.routeWebSocket('**/api/terminal/*', socket => {
+      const url = new URL(socket.url());
+      connections++;
+      attached.set(url.pathname.split('/').at(-1)!, url.searchParams.get('cwd'));
+      socket.send(JSON.stringify({ type: 'ready', persistent: true }));
+    });
+    await native.route('**/api/terminal/*', route => route.fulfill({ status: 204 }));
+    await native.goto('/apps/files?standalone=1');
+    await native.getByText('native-folder', { exact: true }).click({ button: 'right' });
+    await native.getByRole('menuitem', { name: 'Open Terminal Here', exact: true }).click();
+    await expect.poll(() => attached.size).toBe(1);
+    expect([...attached.values()]).toEqual(['/fixture/work/native-folder']);
+    expect(attached.has(persistent)).toBe(false);
+    expect(new URL(native.url()).searchParams.has('cwd')).toBe(false);
+
+    if (width < 768) {
+      await expect(native).toHaveURL(/\/apps\/terminal/);
+      await native.reload();
+      await expect.poll(() => attached.size).toBe(2);
+      await native.goBack();
+      await expect(native.getByText('native-folder', { exact: true })).toBeVisible();
+      const beforeForward = connections;
+      await native.goForward();
+      await expect.poll(() => connections).toBeGreaterThan(beforeForward);
+      // A confirmed DELETE releases a slot, so history traversal may safely reuse it.
+      expect([...attached.values()].every(cwd => cwd === '/fixture/work/native-folder')).toBe(true);
+      expect(attached.has(persistent)).toBe(false);
+    } else {
+      await expect(native.getByRole('dialog', { name: 'Terminal', exact: true })).toBeVisible();
+      await expect(native).toHaveURL(/\/apps\/files/);
+    }
+    await browser.reload();
+    await expect(browser.getByRole('button', { name: 'New tab', exact: true })).toBeVisible();
+    expect([...persistentSessions]).toEqual([persistent]);
+    expect(await browser.evaluate(() => localStorage.getItem('avibe.terminal.sessionId'))).toBe(persistent);
+  });
+}

@@ -941,6 +941,14 @@ fn the_workbench_learns_it_runs_in_the_shell_from_one_top_level_marker() {
         reader.contains("window.__AVIBE_DESKTOP_APP_WINDOWS__ === true"),
         "the Workbench must probe the native app window marker"
     );
+    assert!(
+        shipping_source("src/app_windows.rs").contains("if (window.self === window.top) Object.defineProperty(window, '__AVIBE_NATIVE_APP_WINDOW__', { value: true })"),
+        "native children must define the shared identity key at the top level"
+    );
+    assert!(
+        reader.contains("window.__AVIBE_NATIVE_APP_WINDOW__ === true"),
+        "app pages must read the same child identity key"
+    );
 }
 
 #[test]

@@ -13,6 +13,8 @@ declare global {
     readonly __AVIBE_DESKTOP_COMPUTER_USE__?: true;
     /** The main Workbench can ask the shell to open standalone native app windows. */
     readonly __AVIBE_DESKTOP_APP_WINDOWS__?: true;
+    /** Identity of a native App child window; grants no IPC capabilities. */
+    readonly __AVIBE_NATIVE_APP_WINDOW__?: true;
     /** The current Workbench handled the shell's update-popover request. */
     __AVIBE_DESKTOP_UPDATES_HANDLED__?: boolean;
   }
@@ -28,6 +30,10 @@ declare global {
  */
 export function isDesktopShell(): boolean {
   return typeof window !== 'undefined' && window.__AVIBE_DESKTOP_SHELL__ === true;
+}
+
+export function isNativeAppWindow(): boolean {
+  return typeof window !== 'undefined' && window.__AVIBE_NATIVE_APP_WINDOW__ === true;
 }
 
 /**
