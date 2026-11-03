@@ -1479,12 +1479,17 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   );
   const hold = useHoldToTalk({
     send: async (text: string, metadata: VoiceMessageMetadata) => {
+      // One send at a time, typed or spoken: the staged files go with exactly one message.
+      if (pendingRef.current) return false;
+      pendingRef.current = true;
       const sent = readyAttachments;
       let started: boolean | void;
       try {
         started = await onSend(text, sent, undefined, metadata);
       } catch {
         return false;
+      } finally {
+        pendingRef.current = false;
       }
       if (started === false) return false;
       // The staged files went with the message.
@@ -1506,13 +1511,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     onSystemInterrupt: 'interrupt',
   });
   const holdBusy = hold.phase !== 'idle';
-  // The touch styles that keep the system's long press (callout, selection, scroll) off a box
-  // a hold may start on; never on a box with text or focus, which the system owns.
-  const holdTouchable = holdOpen && !inputFocused && !holdBusy;
-  const holdTouchableRef = useRef(holdTouchable);
-  useLayoutEffect(() => {
-    holdTouchableRef.current = holdTouchable;
-  });
+  // A take owns the box from the press to its end: Enter and Send wait, so its staged files go
+  // with one message only.
+  const canSubmitNow = canSubmit && !holdBusy;
+  // The touch styles that keep the system's long press (callout, selection, scroll) off a box a
+  // hold may start on, kept through the press it took; never on a box with text or focus, which
+  // the system owns.
+  const holdTouchable = holdOpen && !inputFocused && hold.phase !== 'interrupted';
+  // A touch press the hold took, decided at its pointerdown (which comes before its touchstart),
+  // so the touch stays suppressed however soon the hold's own state lands.
+  const touchHeldRef = useRef(false);
   useEffect(() => {
     if (hold.phase !== 'idle' || !holdRefocusRef.current) return;
     holdRefocusRef.current = false;
@@ -1543,9 +1551,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   };
   const holdHandlers = mediaEnabled ? {
     onPointerDown: (event: React.PointerEvent<HTMLDivElement>) => {
+      touchHeldRef.current = false;
       // The controls in the box are buttons, never a hold.
       if (isInteractiveTarget(event.target)) return;
-      if (event.button === 0 && hold.phase === 'idle' && canHoldNow(event.pointerType)) {
+      // The same conditions the hook takes a press on.
+      const takes = event.button === 0 && hold.phase === 'idle' && canHoldNow(event.pointerType) && !isVoiceCaptureActive();
+      touchHeldRef.current = takes && event.pointerType !== 'mouse';
+      if (takes) {
         const rect = event.currentTarget.getBoundingClientRect();
         setHoldPoint({ x: event.clientX - rect.left, y: event.clientY - rect.top });
         setHoldPointer(event.pointerType === 'mouse' ? 'mouse' : 'touch');
@@ -1579,29 +1591,28 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     const box = boxRef.current;
     if (!box || !mediaEnabled) return;
     const onTouchStart = (event: TouchEvent) => {
-      // Exactly when the hook will take the press: one it refuses must keep its tap (focus).
-      if (
-        !holdTouchableRef.current
-        || pendingRef.current
-        || isVoiceCaptureActive()
-        || isInteractiveTarget(event.target)
-        || editorFocused()
-      ) return;
-      event.preventDefault();
+      // Only a press the hold took: one it refused keeps its tap (focus) and its menu.
+      if (touchHeldRef.current) event.preventDefault();
     };
     const onTouchEnd = () => {
+      touchHeldRef.current = false;
       if (!tapFocusRef.current) return;
       tapFocusRef.current = false;
       focusInput();
     };
+    const onTouchCancel = () => {
+      touchHeldRef.current = false;
+    };
     box.addEventListener('touchstart', onTouchStart, { passive: false });
     box.addEventListener('touchend', onTouchEnd);
+    box.addEventListener('touchcancel', onTouchCancel);
     return () => {
       box.removeEventListener('touchstart', onTouchStart);
       box.removeEventListener('touchend', onTouchEnd);
+      box.removeEventListener('touchcancel', onTouchCancel);
     };
     // The box is a different element per layout.
-  }, [editorFocused, focusInput, layout, mediaEnabled]);
+  }, [focusInput, layout, mediaEnabled]);
 
   useLayoutEffect(() => {
     if (!focusNextVoiceControlRef.current) return;
@@ -1766,7 +1777,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   };
 
   const submit = async () => {
-    if (!canSubmit || pendingRef.current) return;
+    if (!canSubmitNow || pendingRef.current) return;
     // Mention path: the live text lives in valueRef (value isn't mirrored there).
     const submitted = (useMentions ? valueRef.current : value).trim();
     const sent = readyAttachments;
@@ -2080,7 +2091,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 affordance for it, but only when there's something to send: a cyan
                 "queue" button left of Stop. Paper-plane + a small clock badge
                 reads as "send, but later / into the queue". */}
-            {!voiceCaptureActive && canSubmit && (
+            {!voiceCaptureActive && canSubmitNow && (
               <Button
                 type="button"
                 variant="accent"
@@ -2119,7 +2130,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             variant="default"
             size="icon"
             onClick={submit}
-            disabled={!canSubmit}
+            disabled={!canSubmitNow}
             aria-label={t('chat.compose.send')}
             className="size-9 shrink-0"
           >

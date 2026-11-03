@@ -314,3 +314,68 @@ describe('what the composer shows', () => {
     expect(hookMock.dismiss).toHaveBeenCalled();
   });
 });
+
+describe('one send at a time', () => {
+  it('keeps Send and Enter off while a take owns the box, so staged files go with one message', async () => {
+    hookMock.state = { phase: 'settling', text: 'Look at this' };
+    const onSend = vi.fn(() => true);
+    const { container } = renderComposer({ onSend });
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledWith('/api/asr/status'));
+    globalThis.URL.createObjectURL = vi.fn(() => 'blob:scan');
+    globalThis.URL.revokeObjectURL = vi.fn();
+    fireEvent.change(container.querySelector<HTMLInputElement>('input[type="file"]')!, {
+      target: { files: [new File(['png'], 'scan.png', { type: 'image/png' })] },
+    });
+    await screen.findByText('scan.png');
+    expect(screen.getByRole('button', { name: en.chat.compose.send })).toHaveProperty('disabled', true);
+    fireEvent.keyDown(textarea(), { key: 'Enter' });
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it('refuses a spoken send while another send is on its way', async () => {
+    let release!: (value: boolean) => void;
+    const onSend = vi.fn(() => new Promise<boolean>((resolve) => { release = resolve; }));
+    renderComposer({ onSend });
+    await asrAvailable();
+    let first!: Promise<boolean>;
+    act(() => {
+      first = hookMock.options!.send('First', VOICE_MESSAGE_METADATA);
+    });
+    await expect(hookMock.options!.send('Second', VOICE_MESSAGE_METADATA)).resolves.toBe(false);
+    await act(async () => {
+      release(true);
+      await first;
+    });
+    expect(onSend).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('the system’s touch gestures', () => {
+  const touchStart = (target: Element) => {
+    const event = new Event('touchstart', { bubbles: true, cancelable: true });
+    target.dispatchEvent(event);
+    return event;
+  };
+
+  it('keeps a touch the hold took away from the system, even once the hold has started', async () => {
+    const { rerender } = renderComposer();
+    await asrAvailable();
+    fireEvent.pointerDown(textarea(), { button: 0, pointerType: 'touch' });
+    // The hold's own state lands before the touch's touchstart.
+    hookMock.state = { phase: 'pressing' };
+    rerender(view());
+    expect(touchStart(textarea()).defaultPrevented).toBe(true);
+    // And the touch styles stay on through the press (jsdom keeps only the standard one).
+    expect(box().style.touchAction).toBe('none');
+  });
+
+  it('leaves a touch the hold refused to the system', async () => {
+    renderComposer();
+    await asrAvailable();
+    act(() => textarea().focus());
+    fireEvent.pointerDown(textarea(), { button: 0, pointerType: 'touch' });
+    expect(touchStart(textarea()).defaultPrevented).toBe(false);
+    fireEvent.pointerDown(screen.getByRole('button', { name: en.chat.compose.attach }), { button: 0, pointerType: 'touch' });
+    expect(touchStart(screen.getByRole('button', { name: en.chat.compose.attach })).defaultPrevented).toBe(false);
+  });
+});
