@@ -24,6 +24,7 @@ from core.native_dispatch_phase import (
     set_dispatch_phase,
 )
 from core.processing_indicator import ProcessingIndicatorService
+from core.prompt_registry import prompt_text
 from core.resource_governance import AgentResourceFailure
 from modules.agents.base import AgentRequest
 from modules.agents.model_hub import OpenCodeOverlay, launch_for_context, models_next_step_text
@@ -4104,6 +4105,8 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms(monkeypatch, c
         assert calls[0]["system"].count(custom_prompt) == 1
     assert calls[0]["tools"] == {"question": False, "skill": False}
     assert calls[0]["model"] == {"providerID": "openai", "modelID": "gpt-5.4"}
+    # The prompt is built for the model the Turn is sent to.
+    assert calls[0]["system"].count(prompt_text("gpt-reporting-prompt")) == 1
     assert calls[0]["reasoning_effort"] == "high"
     assert calls[0]["attempt_id"] == ATTEMPT_ID
     assert "message_id" not in calls[0]

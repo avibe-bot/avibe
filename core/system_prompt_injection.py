@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 #   on demand, never while composing the conversation's stable prompt.
 # - Working principles are a static, unconditional prefix before Session and
 #   capability details; never gate them on a backend, Skill, or Turn.
+# - Model-family guidance follows the principles and is gated only on the Turn's
+#   resolved model, which is stable Session configuration.
 # - Author all injected prose in the registry. Production text and debug JSON
 #   must consume the same ordered rendered blocks; Studio never assembles prose.
 # - The registry owns composition order. Keep static Skill usage guidance after
@@ -317,10 +319,12 @@ def build_system_prompt_blocks(
     skills_project_base: str | Path | None = None,
     skill_catalog_sink: list[dict[str, Any]] | None = None,
     bot: BotPromptInfo | None = None,
+    model: str = "",
 ) -> list[RenderedPromptBlock]:
     """The production composition, also exported by the debug command.
 
     ``bot`` is the Bot a Vibey Turn runs as (``bot_for_turn``); only then are the Bot sections rendered.
+    ``model`` is the model the Turn runs on; an OpenAI GPT model also gets the GPT reporting section.
     """
 
     skills = None
@@ -341,6 +345,11 @@ def build_system_prompt_blocks(
         render_prompt_block("base-capabilities-intro"),
         render_prompt_block("agent-working-principles"),
     ]
+    if model:
+        from vibe.models_dev_catalog import model_vendor
+
+        if model_vendor(model) == "openai":
+            blocks.append(render_prompt_block("gpt-reporting-prompt"))
     if isinstance(bot, dict):
         bot = BotPromptInfo(**bot)
     if bot is not None:

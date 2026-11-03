@@ -67,6 +67,12 @@ def _first_party_vendor(
     return max(matches, key=lambda item: len(item["prefix"]))["vendor_id"]
 
 
+def model_vendor(model_id: str) -> str | None:
+    """The first-party vendor of the model family ``model_id`` names, past any provider or Source prefix."""
+
+    return _first_party_vendor(str(model_id or "").rsplit("/", 1)[-1], load_model_vendor_map())
+
+
 def native_protocol_for_model_id(
     model_id: str,
     *,

@@ -223,7 +223,7 @@ async def test_preview_uses_stored_project_base_over_current_scope(preview_host,
     context = _build_session_context(SESSION)
     request = request_preview.build_preview_request(host.controller, context)
     assert request.context.platform_specific["agent_run_target"]["project_base"] == str(stored_project)
-    sections, _ = await host.harness.agent._avibe_sections(request, cwd=str(cwd))
+    sections, _ = await host.harness.agent._avibe_sections(request, cwd=str(cwd), model="menu-alias")
     assert any("stored-bound-skill" in block.text for block in sections)
     assert all("scope-skill" not in block.text for block in sections)
     remove = deny_effects(host, monkeypatch)

@@ -38,6 +38,7 @@ from core.native_dispatch_phase import (
     set_dispatch_phase,
 )
 from core.handlers.model_hub.service import ModelHubError
+from core.prompt_registry import prompt_text
 from modules.claude_sdk_compat import CLAUDE_SDK_MAX_BUFFER_SIZE
 from modules.im import MessageContext
 from tests import hang_guard
@@ -166,6 +167,7 @@ async def test_claude_prompt_guidance_respects_the_effective_tool_allowlist(
         "agent_name": "claude",
         "session_anchor": "slack_C123",
         "agent_system_prompt": None,
+        "model": None,
     }
 
     await handler._build_claude_system_prompt(
@@ -258,6 +260,57 @@ def test_selected_agent_launch_uses_cli_skill_path_without_computer_use_mcp(
     assert all("Computer use" not in prompt for prompt in rendered_prompts)
     assert getattr(first.options, "allowed_tools", None) == allowed_tools
     assert first.options.mcp_servers == {}  # no server at all, native ones included
+
+
+@pytest.mark.parametrize("subagent", [None, "restricted"])
+@pytest.mark.parametrize("model,gpt", [("gpt-5.5", True), ("claude-sonnet-4-6", False)])
+def test_cold_and_cached_launches_build_the_prompt_for_the_launch_model(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    subagent: str | None,
+    model: str,
+    gpt: bool,
+) -> None:
+    """Both launch paths render the same prompt for the model, so a cached client is reused, not replaced."""
+
+    clients: list[Any] = []
+    rendered_prompts: list[str] = []
+    original_prompt_builder = session_handler_module.build_system_prompt_injection
+
+    class Client:
+        def __init__(self, options: Any) -> None:
+            self.options = options
+            clients.append(self)
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            return None
+
+    def build_prompt(**kwargs: Any) -> str:
+        prompt = original_prompt_builder(**kwargs)
+        rendered_prompts.append(prompt)
+        return prompt
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", Client)
+    monkeypatch.setattr(session_handler_module, "build_system_prompt_injection", build_prompt)
+    handler = SessionHandler(_Controller(tmp_path))
+    monkeypatch.setattr(handler, "_load_agent_file", lambda *_args: {"prompt": "Agent file prompt.", "model": "inherit"})
+
+    async def run() -> tuple[Any, Any]:
+        context = MessageContext(user_id="U123", channel_id="C123")
+        first = await handler.get_or_create_claude_session(context, subagent_name=subagent, subagent_model=model)
+        second = await handler.get_or_create_claude_session(context, subagent_name=subagent, subagent_model=model)
+        return first, second
+
+    first, second = asyncio.run(run())
+
+    assert second is first and len(clients) == 1
+    assert len(rendered_prompts) == 2
+    guidance = prompt_text("gpt-reporting-prompt")
+    assert [prompt.count(guidance) for prompt in rendered_prompts] == [int(gpt)] * 2
 
 
 class _StubClaudeAgentOptions:

@@ -36,6 +36,7 @@ COMPONENT_TIERS = {
     "tool-environment": 3,
     "base-capabilities-intro": 1,
     "agent-working-principles": 1,
+    "gpt-reporting-prompt": 1,
     "base-capabilities-body": 1,
     "show-pages-prompt": 1,
     "quick-replies-prompt": 1,

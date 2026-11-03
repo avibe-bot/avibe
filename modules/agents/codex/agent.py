@@ -4013,7 +4013,7 @@ class CodexAgent(BaseAgent):
         request: AgentRequest,
     ) -> Optional[str]:
         """Render the developer instructions applied at the next Turn boundary."""
-        _, _, _, agent_instructions = self._resolve_codex_agent_settings(request)
+        _, model, _, agent_instructions = self._resolve_codex_agent_settings(request)
         platform = (
             request.context.platform
             or (request.context.platform_specific or {}).get("platform")
@@ -4034,6 +4034,7 @@ class CodexAgent(BaseAgent):
             skills_cwd=getattr(request, "working_path", None),
             skills_project_base=managed_skill_project_base(request.context),
             skill_catalog_sink=skill_catalog_sink,
+            model=model or "",
         )
 
         request.skill_catalog_observation = skill_catalog_sink[0] if skill_catalog_sink else None

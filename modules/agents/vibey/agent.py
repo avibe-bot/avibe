@@ -402,7 +402,7 @@ class VibeyAgent(BaseAgent):
             return
         if turn.stop_requested:
             return await self._settle_stopped(turn)
-        sections, skill_catalog = await self._avibe_sections(request, cwd)
+        sections, skill_catalog = await self._avibe_sections(request, cwd, model=turn.router.preflight.endpoint.model_id)
         builtin_agent = await asyncio.to_thread(self._is_builtin_agent, request)
         environment = await asyncio.to_thread(self._turn_environment, request, cwd)
         files = await asyncio.to_thread(load_instruction_files, cwd, paths.get_global_instructions_path(), include_empty=True)
@@ -1107,7 +1107,7 @@ class VibeyAgent(BaseAgent):
 
         router = HubModelRouter(no_resolve, self._providers, first=selected)
         cwd = request.working_path
-        sections, _ = await self._avibe_sections(request, cwd)
+        sections, _ = await self._avibe_sections(request, cwd, model=selected.endpoint.model_id)
         builtin_agent = await asyncio.to_thread(self._is_builtin_agent, request)
         environment = await asyncio.to_thread(self._turn_environment, request, cwd)
         files = await asyncio.to_thread(load_instruction_files, cwd, paths.get_global_instructions_path(), include_empty=True)
@@ -1690,8 +1690,10 @@ class VibeyAgent(BaseAgent):
         body = strip_silent_blocks(value)
         return self._with_images(body, images) if final else body
 
-    async def _avibe_sections(self, request: AgentRequest, cwd: str) -> tuple[list[RenderedPromptBlock], Optional[dict]]:
-        """Avibe's injected prompt sections and the skill catalog they offered.
+    async def _avibe_sections(
+        self, request: AgentRequest, cwd: str, *, model: str,
+    ) -> tuple[list[RenderedPromptBlock], Optional[dict]]:
+        """Avibe's injected prompt sections, for the model the Turn's route resolved, and the skill catalog they offered.
 
         Built off the event loop as the other backends build them: skill resolution
         scans the ordinary static Skill directories.
@@ -1718,6 +1720,7 @@ class VibeyAgent(BaseAgent):
                 skills_cwd=cwd or None,
                 skills_project_base=managed_skill_project_base(context),
                 skill_catalog_sink=skill_catalog_sink,
+                model=model,
             )
 
         sections = await asyncio.to_thread(build)
