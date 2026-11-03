@@ -31,13 +31,6 @@ const subscribe = (listener: () => void) => {
   return () => { listeners.delete(listener); };
 };
 
-/**
- * What a dictated message carries, so the Agent reads it as speech recognition
- * (`core/agent_input.is_voice_input`) and the conversation marks it. The same
- * contract as the hold-to-talk surfaces' `{ input: 'voice' }`.
- */
-export const DICTATED_MESSAGE_METADATA = { input: 'voice' } as const;
-
 export const petComposer = {
   isUncertain: (sessionId: string | null): boolean => (
     Boolean(sessionId && uncertainSessions.has(sessionId))

@@ -22,13 +22,14 @@ import { useBots } from '@/context/BotsContext';
 import { referenceToMarker, type MentionReference, type SessionReference } from '@/lib/mentions';
 import { ShowPageVoiceDictation } from '@/lib/showPageVoiceDictation';
 import { VoiceTranscriptionError } from '@/lib/voiceTranscription';
+import { VOICE_MESSAGE_METADATA } from '@/lib/voiceMessage';
 
 import { PetAvatar, type PetPose } from './PetAvatar';
 import { PetOpenButton } from './PetOpenButton';
 import { REPLY_LINGER_RESUME_MS, useReplyLinger } from './useReplyLinger';
 import { onPetHover, petBridge, sessionLink, vaultRequestLink, type PetLayout } from './petBridge';
 import { petPanel, usePetPanel } from './petPanel';
-import { DICTATED_MESSAGE_METADATA, petComposer, usePetComposer } from './petComposer';
+import { petComposer, usePetComposer } from './petComposer';
 import { petShell, useOnSummon, usePetBinding, usePetDismissed } from './petShell';
 import { derivePetPose, derivePetState, latestExchange, latestFailureNotice, openQuickReplies } from './petState';
 import { useConversationAgentSnapshot } from './useConversationAgentWorking';
@@ -568,7 +569,7 @@ const PetSurface: React.FC = () => {
   const submit = async () => {
     const submitted = draft;
     // Dictated and sent as it was heard: the Agent is told it may hold recognition errors.
-    const metadata = petComposer.isDictated(submitted) ? DICTATED_MESSAGE_METADATA : undefined;
+    const metadata = petComposer.isDictated(submitted) ? VOICE_MESSAGE_METADATA : undefined;
     if (!(await send(submitted, metadata)) || !epoch.isCurrent()) return;
     if (petComposer.clearDraftIf(submitted)) setComposing(false);
   };
