@@ -18,6 +18,8 @@ import { useBots } from '../../context/BotsContext';
 import { conversationDetails, isBotSessionId, isSelectableAgent, liveBotAgentNames, type BotAvatar as BotAvatarSpec } from '../../lib/bots';
 import { BotAvatar } from '../ui/bot-avatar';
 import { BotConversationTitle } from './bots/BotSwitch';
+import { VoiceMark } from '../voice/VoiceMark';
+import { isVoiceMessage } from '../../lib/voiceMessage';
 import { useRegisterComposerTarget, type ComposerInsertTarget } from '../../context/ComposerBridgeContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
 import type { SessionActivityItemKind, SessionActivityState, SessionRuntimeState, VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
@@ -5390,7 +5392,13 @@ export const MessageRow = memo(function MessageRow({
             {bodyNode}
             {attachmentsNode}
           </div>
-          {senderHead ? null : time}
+          {/* A spoken message says so under its bubble (ui/design: mobile/main-bot-voice/i-conversation). */}
+          {isVoiceMessage(message.metadata) ? (
+            <div className="flex items-center gap-1.5">
+              {senderHead ? null : time}
+              <VoiceMark />
+            </div>
+          ) : senderHead ? null : time}
         </div>
       </div>
     );

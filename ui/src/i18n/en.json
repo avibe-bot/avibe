@@ -3361,7 +3361,7 @@
     "openControlPanel": "Settings",
     "backToWorkbench": "Workbench",
     "newSession": "New",
-    "openMainBot": "{{name}}: open the conversation",
+    "openMainBot": "{{name}}: tap to open, hold to speak",
     "navigationLabel": "Console",
     "statusLabel": "Service status",
     "versionLabel": "Version",
@@ -6671,6 +6671,32 @@
       "unknown": "IM"
     },
     "removeReference": "Remove reference to {{title}}"
+  },
+  "voice": {
+    "to": "To {{name}}",
+    "cutOff": "Cut off",
+    "interrupted": {
+      "dropped": "The connection dropped. Everything heard so far is above: send it, or retry transcribing the recording.",
+      "failed": "This couldn't be transcribed; the recording is kept. Retry, or send what was heard.",
+      "system": "The take was interrupted. Everything heard so far is above, ready to send.",
+      "sendFailed": "It wasn't sent; the text is kept. Send it again."
+    },
+    "retry": "Retry",
+    "send": "Send",
+    "discard": "Discard",
+    "releaseToCancel": "Release to cancel",
+    "slideToCancel": "Slide up to cancel · release to send",
+    "mark": "Voice",
+    "sent": "Sent to {{name}}",
+    "view": "View",
+    "cancelled": "Cancelled. Nothing was sent.",
+    "tooShort": "Nothing heard. Hold to try again, or tap to type.",
+    "asking": "Allow the microphone in the system prompt, then hold again.",
+    "deniedTitle": "The microphone is off",
+    "deniedBody": "Allow the microphone in system settings, or tap {{name}} to type.",
+    "tapToType": "Tap {{name}} to type.",
+    "failedBody": "Nothing was recognized; the recording is kept, so you can retry.",
+    "dismiss": "Dismiss"
   },
   "mcpHub": {
     "title": "MCP",

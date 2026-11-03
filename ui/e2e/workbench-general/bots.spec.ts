@@ -1049,7 +1049,18 @@ for (const theme of ['light', 'dark'] as const) {
     await expect(page.getByRole('button', { name: '在 中文项目 里新建会话' })).toBeVisible();
     await page.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-phone-workbench-${theme}.png` });
 
-    await nav.getByRole('button', { name: '歪比：打开对话' }).click();
+    // ui/design: mobile/main-bot-voice/m-unavailable: holding the center opens no conversation;
+    // without the speech service it says so, and a tap still opens the conversation.
+    const center = nav.getByRole('button', { name: '歪比：点一下打开对话，按住说话' });
+    const box = (await center.boundingBox())!;
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.waitForTimeout(450);
+    await page.mouse.up();
+    await expect(page.getByRole('status').filter({ hasText: '语音输入需要 Avibe Cloud' })).toBeVisible();
+    await expect(page).toHaveURL(/\/projects(\?|$)/);
+
+    await center.click();
     await expect(page).toHaveURL(/\/chat\/ses_main$/);
     const header = page.locator('[data-chat-header]');
     // The other Bots' unread replies ride on the switch: the security lead's 2.
