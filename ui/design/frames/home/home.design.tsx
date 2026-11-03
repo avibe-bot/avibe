@@ -59,7 +59,7 @@ const desktop = (state: State, spec = false) => () => (
   <DesktopScreen page={<HomePage pending={state.desktop} tip={state.tip} member={state.member} spec={spec} />} />
 );
 const phone = (state: State, spec = false) => () => (
-  <PhoneScreen bare tabBar={<ShippedTabBar inboxBadge={state.inboxBadge} />}>
+  <PhoneScreen bare flat tabBar={<ShippedTabBar inboxBadge={state.inboxBadge} />}>
     <HomePage pending={state.phone} tip={state.tip} member={state.member} compact spec={spec} />
   </PhoneScreen>
 );
@@ -69,7 +69,7 @@ const phone = (state: State, spec = false) => () => (
 const keyboardUp = (state: State) => () => (
   <div className="flex h-full flex-col overflow-hidden bg-background text-foreground">
     <MobileBrandHeader />
-    <div className="flex min-h-0 flex-1 flex-col page-glow-console">
+    <div className="flex min-h-0 flex-1 flex-col bg-background">
       <HomePage pending={state.phone} tip={state.tip} member={state.member} compact keyboard />
     </div>
     <SoftKeyboard />
