@@ -5,6 +5,7 @@
 //   npm run design:shot -- sidebar/bots      frames whose id starts with the argument
 //   npm run design:shot -- --theme dark --lang en --out /tmp/shots
 //   --manifest <file>                        also merge a JSON index of the shots into <file>
+//   --canvas <dir>                           the canvas folder the manifest names, beside <file> (default: canvas)
 //   --jobs <n>                               frames shot at once (default: up to 4, one less than the CPUs)
 //
 // Exits 1 when a frame logs a console error or fails to render, so it doubles as `design:check`.
@@ -29,6 +30,7 @@ const theme = option('theme', null);
 const lang = option('lang', 'zh');
 const out = resolve(option('out', join(uiRoot, 'design', '.shots')));
 const manifestPath = option('manifest', null);
+const canvas = option('canvas', 'canvas');
 const jobs = Math.max(1, Number(option('jobs', String(Math.min(4, Math.max(1, availableParallelism() - 1))))));
 const prefixes = args;
 
@@ -134,7 +136,10 @@ try {
 }
 
 if (manifestPath && shots.length) {
-  // Merge: re-rendered shots replace their entries, frames that no longer exist drop out.
+  // One manifest can index frames of several repositories (avibe-bot-backend exports into the same
+  // Show Page), each entry naming its canvas; entries from before that live in `canvas`. Merge:
+  // entries of other canvases stay; re-rendered shots replace their entries, and frames of this
+  // canvas that no longer exist drop out.
   const known = new Set(all.map((f) => f.id));
   let previous = [];
   try {
@@ -142,14 +147,15 @@ if (manifestPath && shots.length) {
   } catch {
     previous = [];
   }
-  const key = (s) => `${s.id}.${s.theme}`;
+  const key = (s) => `${s.canvas ?? 'canvas'}:${s.id}.${s.theme}`;
   const fresh = new Map(
     shots.map((s) => [
-      key(s),
-      { id: s.id, file: s.file, title: s.title, status: s.status, theme: s.theme, lang, width: s.width, height: s.height, interaction: Boolean(s.hover || s.click?.length), hash: s.hash, src: relative(dirname(out), s.png).split('\\').join('/') },
+      key({ ...s, canvas }),
+      { id: s.id, file: s.file, title: s.title, status: s.status, theme: s.theme, lang, width: s.width, height: s.height, interaction: Boolean(s.hover || s.click?.length), hash: s.hash, src: relative(dirname(manifestPath), s.png).split('\\').join('/'), canvas },
     ]),
   );
-  const merged = [...previous.filter((s) => known.has(s.id) && !fresh.has(key(s))), ...fresh.values()].sort((a, b) => key(a).localeCompare(key(b)));
+  const kept = previous.filter((s) => (s.canvas ?? 'canvas') !== canvas || (known.has(s.id) && !fresh.has(key(s))));
+  const merged = [...kept, ...fresh.values()].sort((a, b) => key(a).localeCompare(key(b)));
   await mkdir(dirname(manifestPath), { recursive: true });
   await writeFile(manifestPath, JSON.stringify({ generatedAt: new Date().toISOString(), lang, shots: merged }, null, 2));
 }

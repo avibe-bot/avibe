@@ -55,4 +55,7 @@ Status: adopted (2026-11-02). Avibe's UI designs live in `ui/design/` as frames;
 
 ## Follow-ups
 
-- Draw `avibe-bot-backend` surfaces (the avibe.bot site and console) the same way in that repository.
+- `avibe-bot-backend` designs the avibe.bot site and console the same way, in its `design/`
+  (avibe-bot/avibe-backend#300); its baseline frames follow. Its `design:export` writes into the same Show
+  Page: each `frames.json` entry names its canvas folder (`canvas`, or `avibe-bot/canvas`), and
+  `<DesignFrame>`, the same file in both repositories, loads each frame from its own canvas.
