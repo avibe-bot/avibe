@@ -1,7 +1,7 @@
 {
-  "version": "0.16.3",
+  "version": "0.17.0",
   "impersonate": "chrome150",
-  "verified_at": "2026-10-25",
+  "verified_at": "2026-11-03",
   "sec_ch_ua": "\"Not;A=Brand\";v=\"8\", \"Chromium\";v=\"150\", \"Google Chrome\";v=\"150\"",
   "platforms": {
     "darwin": {"platform": "macOS", "ua_os": "Macintosh; Intel Mac OS X 10_15_7"},

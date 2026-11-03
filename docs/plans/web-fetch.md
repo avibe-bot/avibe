@@ -244,7 +244,18 @@ Both transports negotiate HTTP/2 for HTTPS and accept HTTP/1.1-only servers.
 Initial release pair: **`curl_cffi==0.16.3`, `chrome150`, Chrome/150 UA and
 client hints**. Verified on 2026-10-24 by an isolated package import and
 `Curl.impersonate("chrome150") == 0`, without a target request; the tagged docs
-lag the wheel. Do not use the moving `chrome` alias. Catalog holds version,
+lag the wheel.
+
+Current verified pair (2026-11-03): **`curl_cffi==0.17.0`, `chrome150`, the same
+Chrome/150 UA and client hints**. The new dependency still implements the named
+preset; the macOS arm64 wheel reports curl-impersonate 2.3.1 with native
+Brotli 1.2.1 and Zstd 1.5.7. This adopts the upstream Brotli security update
+without switching browser identities. The package pin and catalog version move
+together; the runtime's version-mismatch guard and native packaging gate remain
+unchanged. Existing offline-preset and loopback transport/TLS tests cover the
+accepted profile, emitted headers, numeric pinning, HTTP/2, and bounded codecs.
+
+Do not use the moving `chrome` alias. Catalog holds version,
 OS-specific UA/client hints, header order and `verified_at`; stable dependency
 updates bump them together and run consistency fixtures. Use the preset's
 browser headers/order as the baseline, with coherent OS tokens and locale.
@@ -271,12 +282,13 @@ impersonate Chrome TLS; its
 `transport_degraded` marker explicitly states that exception and it must not
 silently choose another browser profile.
 
-Repository packaging facts checked at #2924's merge:
+Repository packaging facts checked at #2924's merge (native wheel coverage
+rechecked for 0.17.0 on 2026-11-03):
 
 | Path / platform | Integration |
 | --- | --- |
 | `pyproject.toml`, `uv.lock` | Python >=3.10; add the pinned native dependency with CPython/platform markers, HTTP/2, `trafilatura>=2.3.1` (Apache-2.0) and `pypdf>=6.21.2`; lock the reviewed stable versions. Native libcurl provides br/zstd without Python codec packages; degraded HTTPX uses stdlib gzip/deflate. Keep core import lazy. |
-| macOS x86_64 / arm64 | 0.16.3 publishes `cp310-abi3` wheels tagged macOS 10.9+ / 11.0+. |
+| macOS x86_64 / arm64 | 0.17.0 retains `cp310-abi3` wheels tagged macOS 10.9+ / 11.0+. |
 | Linux x86_64 / aarch64, including WSL | `cp310-abi3` wheels for glibc 2.17+ and musl 1.2+. No system curl/browser/Homebrew prerequisite. |
 | Windows x86_64 / arm64 | Both wheel families exist; `install.ps1` currently chooses x64 CPython 3.12 on Windows Arm for other dependency constraints. Do not claim full native-Arm support. |
 | `install.sh`, `install.ps1`, `vibe/upgrade.py` | Normal wheel metadata resolves dependencies in the new install generation before launcher activation. Direct `uv tool install`/pip follows the same metadata; no fetch-time package install. |
@@ -853,8 +865,10 @@ Checked 2026-10-24; implementation re-verifies its pinned versions before shippi
 - Anthropic: `https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-fetch-tool`.
 - Jina: `https://jina.ai/reader/`, `https://docs.jina.ai/`,
   `https://docs.jina.ai/openapi.json`, `https://jina.ai/legal/`.
-- curl_cffi wheel manifest: `https://pypi.org/pypi/curl-cffi/0.16.3/json`;
-  pinned adapter: `https://github.com/lexiforest/curl_cffi/tree/v0.16.3/curl_cffi`;
+- curl_cffi native pair rechecked 2026-11-03: wheel manifest
+  `https://pypi.org/pypi/curl-cffi/0.17.0/json`;
+  pinned adapter: `https://github.com/lexiforest/curl_cffi/tree/ae03f3702678b76a2500746e1a5a7ccd1d7f6302/curl_cffi`;
+  release/security notes: `https://github.com/lexiforest/curl_cffi/releases/tag/v0.17.0`;
   libcurl pin: `https://curl.se/libcurl/c/CURLOPT_RESOLVE.html`.
 - HTTPcore backend/SNI/peer APIs: `https://www.encode.io/httpcore/network-backends/`,
   `https://www.encode.io/httpcore/extensions/`.
