@@ -13,6 +13,11 @@ const api = vi.hoisted(() => ({
   getBackendConnection: vi.fn(),
   updateSession: vi.fn(),
   setFastModeDefault: vi.fn(),
+  // Getting started and the tip read these; their own tests (home/HomeGuide.test.tsx) own the answers.
+  getHomePreferences: vi.fn(),
+  updateHomePreferences: vi.fn(),
+  getConfig: vi.fn(),
+  remoteAccessStatus: vi.fn(),
 }));
 const posts = vi.hoisted(() => ({
   calls: [] as Array<{ path: string; body: Record<string, unknown> }>,
@@ -162,6 +167,10 @@ beforeEach(() => {
   api.getBackendConnection.mockResolvedValue(connection('api_key'));
   api.updateSession.mockResolvedValue({});
   api.setFastModeDefault.mockResolvedValue({});
+  api.getHomePreferences.mockResolvedValue({ setup_later_on: null, setup_not_needed: [], tip_hidden_on: null, tips_enabled: false });
+  api.updateHomePreferences.mockImplementation(async () => ({}));
+  api.getConfig.mockResolvedValue({ platforms: { enabled: ['slack'] } });
+  api.remoteAccessStatus.mockResolvedValue({ ok: true, paired: true });
   newSession.projects = [];
   newSession.target = undefined;
   newSession.send.mockResolvedValue({ sessionId: 'ses_new' });
@@ -181,7 +190,7 @@ describe('the Owner home (ui/design: home/home/c-ready-desktop)', () => {
     renderHome();
     expect(await screen.findByTestId('route')).toHaveProperty('textContent', 'locked:gpt-6-astra');
     expect(api.getBackendConnection).toHaveBeenCalledWith('vibey');
-    expect(screen.getByRole('heading').textContent).toMatch(/What’s next\?$/);
+    expect(screen.getByRole('heading', { level: 1 }).textContent).toMatch(/What’s next\?$/);
     await user.type(textbox(), 'Plan my week');
     await user.click(sendButton());
     await waitFor(() => expect(where()).toBe('/chat/ses_main'));
@@ -261,7 +270,7 @@ describe('the Owner home without a model (ui/design: home/home/a-new-desktop)', 
     expect(textbox()).toHaveProperty('disabled', true);
     expect(textbox().placeholder).toBe(en.workbench.home.noModelPlaceholder);
     expect(screen.getByRole('button', { name: en.workbench.home.asks.addBot })).toHaveProperty('disabled', true);
-    expect(screen.getByRole('heading').textContent).toMatch(/I’m Vibey\.$/);
+    expect(screen.getByRole('heading', { level: 1 }).textContent).toMatch(/I’m Vibey\.$/);
     expect(screen.queryByTestId('route')).toBeNull();
     await user.click(addModel);
     expect(where()).toBe('/settings/models');

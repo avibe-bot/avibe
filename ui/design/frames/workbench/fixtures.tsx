@@ -56,3 +56,21 @@ export const phoneShell = (path: string, page: ReactNode) => () => (
     </Route>
   </Routes>
 );
+
+/** The facts the home's Getting started reads, as the server answers them (ui/design: home/home/*). */
+export type HomeFacts = { model: boolean; push: boolean; computerUse: boolean; chatApps: boolean; paired: boolean };
+
+export const homeFactsApi = ({ model, push, computerUse, chatApps, paired }: HomeFacts) => ({
+  '/api/backend/vibey/connection': {
+    ok: true, backend: 'vibey', installed: true, enabled: true, supply_mode: 'hub',
+    auth: model ? 'api_key' : 'none', application: 'applied', ready: model, entry_eligible: model,
+  },
+  // Push is set up on the server and this device has not turned it on; unconfigured, nothing to turn on.
+  '/api/web-push/status': { ok: true, configured: push, public_key: 'BDesignVapidPublicKey', subscription_count: 0, current_subscription_enabled: false },
+  '/api/desktop/computer-use/status': computerUse
+    ? { supported: true, status: 'ready', reason: null }
+    : { supported: true, status: 'needs_permission', reason: 'accessibility' },
+  '/api/config': { ...settingsConfig, platforms: { ...settingsConfig.platforms, enabled: chatApps ? ['slack'] : [] } },
+  '/api/remote-access/status': { ok: true, enabled: paired, paired, running: paired },
+  '/api/home/preferences': { ok: true, preferences: { setup_later_on: null, setup_not_needed: [], tip_hidden_on: null, tips_enabled: true } },
+});

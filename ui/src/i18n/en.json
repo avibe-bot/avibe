@@ -481,6 +481,10 @@
         "title": "Desktop Mini",
         "description": "Show the Desktop Mini pet on your desktop.",
         "saveFailed": "The Desktop Mini setting could not be saved."
+      },
+      "homeTips": {
+        "title": "Tips on the home",
+        "description": "A capability you have not tried yet, one a day, on the home."
       }
     },
     "shortcuts": {
@@ -3399,6 +3403,79 @@
         "working": "{{count}} working",
         "unread": "{{count}} unread"
       },
+      "setup": {
+        "title": "Get started",
+        "more": "{{count}} more",
+        "later": "Later",
+        "notNeeded": "Not needed",
+        "model": {
+          "title": "Give {{name}} a model",
+          "why": "A subscription or API key you have",
+          "action": "Add one"
+        },
+        "notifications": {
+          "title": "Turn on notifications",
+          "why": "Hear as soon as work is done or needs you.",
+          "action": "Turn on"
+        },
+        "computer_use": {
+          "title": "Allow Computer Use",
+          "why": "Grant Accessibility and Screen Recording.",
+          "action": "Grant"
+        },
+        "chat_apps": {
+          "title": "Connect a chat app",
+          "why": "Reach {{name}} from Slack, Lark, or WeChat.",
+          "action": "Connect"
+        },
+        "phone": {
+          "title": "Continue on your phone",
+          "why": "Pair Avibe Cloud.",
+          "action": "Pair"
+        }
+      },
+      "tips": {
+        "label": "Tip of the day",
+        "try": "Try",
+        "previous": "Previous",
+        "next": "Next",
+        "hide": "Hide for today",
+        "bots": {
+          "title": "Bots",
+          "why": "Give an ongoing job a Bot with a name and a memory."
+        },
+        "showPages": {
+          "title": "Show Pages",
+          "why": "Have a conversation draw its result as a page.",
+          "ask": "Draw this week’s project progress as a page"
+        },
+        "tasks": {
+          "title": "Tasks and Watches",
+          "why": "Run on a schedule, or when something happens.",
+          "ask": "Every morning at 9, summarize yesterday’s progress across the projects for me"
+        },
+        "vault": {
+          "title": "Vault",
+          "why": "Agents use keys without ever seeing them."
+        },
+        "skills": {
+          "title": "Skills & MCP",
+          "why": "Install one and every Agent can use it."
+        },
+        "chatApps": {
+          "title": "Chat apps",
+          "why": "Reach {{name}} from Slack, Lark, or WeChat."
+        },
+        "desktopPet": {
+          "title": "The desktop pet",
+          "why": "Hold the voice shortcut in any app to talk to {{name}}.",
+          "whyShortcut": "Hold {{shortcut}} in any app to talk to {{name}}."
+        },
+        "voice": {
+          "title": "Voice",
+          "why": "On a phone, hold {{name}} in the tab bar to talk."
+        }
+      },
       "asks": {
         "addBot": "Add a Bot",
         "addBotAsk": "Add a Bot that owns security",
@@ -3417,8 +3494,6 @@
       "addModel": "Add a model",
       "inputPlaceholder": "Tell the agent what you want…",
       "noProjectForChat": "No projects yet — add one before starting a chat",
-      "ready": "{{backend}} is ready to go",
-      "readyDismiss": "Dismiss",
       "computerUse": {
         "off": "Computer Use is off",
         "offDetail": "Turn it on from the native Avibe control when you want to use it.",

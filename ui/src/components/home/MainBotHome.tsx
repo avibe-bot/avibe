@@ -19,8 +19,8 @@ import { Composer, type ComposerAttachment, type ComposerHandle } from '../workb
 import { HomeAsks } from './HomeAsks';
 import { useHomeAsks } from './homeCopy';
 import { HomeGreeting } from './HomeGreeting';
+import { HomeGuide } from './HomeGuide';
 import { HomeLayout } from './HomeLayout';
-import { SetupReadyBanner } from './SetupReadyBanner';
 import { useMainBotRoute, useNoModel } from './useMainBot';
 
 const MAIN_BOT_PATH = botSessionPath({ session_id: MAIN_BOT_SESSION_ID });
@@ -127,8 +127,8 @@ export function MainBotHome() {
   const session = route.session;
   return (
     <HomeLayout>
-      <SetupReadyBanner backend={backend} />
       <HomeGreeting bot={mainBot} name={name} introduce={noModel} />
+      <HomeGuide owner noModel={noModel} name={name} onAsk={(ask) => composerRef.current?.setDraft(ask)} />
       <HomeAsks asks={asks} quiet={noModel} onAsk={(ask) => composerRef.current?.setDraft(ask)} />
       <div className="flex flex-col gap-2">
         <Composer

@@ -215,3 +215,29 @@ export async function disableWebPush(api: ApiContextType): Promise<boolean> {
   }
   return Boolean(endpoint);
 }
+
+/**
+ * Whether this device gets push notifications, read without changing anything: `on` (this
+ * device's subscription is registered and enabled), `off` (push could be turned on here), or
+ * `unavailable` (the browser cannot, iOS needs the app on the Home Screen first, push is not set
+ * up on the server, or the read failed). Turning it on, or repairing a subscription, is
+ * `enableWebPush`'s job.
+ */
+export async function readWebPushDeviceState(api: ApiContextType): Promise<'on' | 'off' | 'unavailable'> {
+  if (!getWebPushSupportState().supported) return 'unavailable';
+  try {
+    const existing = await getExistingWebPushSubscription();
+    const status = await api.getWebPushStatus(existing
+      ? {
+          endpoint: existing.endpoint,
+          subscription: existing.toJSON(),
+          device_id: await getWebPushDeviceId(),
+          previous_endpoints: await getRememberedWebPushEndpoints(),
+        }
+      : undefined);
+    if (!status?.ok || !status.configured) return 'unavailable';
+    return existing && status.current_subscription_enabled ? 'on' : 'off';
+  } catch {
+    return 'unavailable';
+  }
+}

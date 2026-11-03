@@ -2,11 +2,28 @@ import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'rea
 
 import { isTouchCapableDevice } from '../../lib/softKeyboard';
 
-// The home's one centered group (ui/design: home/home/z-layout-spec, home/home/z-layout-spec-phone).
-// Its blocks keep one order, one width, and one gap; the group sits a little above the middle of
-// the page, the free space above and below it split 2 : 3, so a block that comes or goes re-centers
-// the whole group. When the page is too short the free space shrinks first (to 24 on a desktop, 8 on
-// a phone), then the page scrolls; the gap never shrinks. A large window keeps the 768 group.
+// The home's layout (ui/design: home/home/*, approved with the layout spec in #3174):
+// 1. One order: greeting → Getting started (while something is missing) → tip of the day (with a
+//    model, unless hidden today) → the four asks → the composer, the group's last block, never
+//    pinned to the page's bottom.
+// 2. One centered group, a little high: the free space above and below it splits 2 : 3. A block
+//    that comes or goes re-centers the group; the order stays.
+// 3. One gap between any two blocks: 28 on a desktop, 16 on a phone. When the page is short the
+//    free space shrinks first (to 24 on a desktop, 8 on a phone), then the page scrolls; the gap
+//    never shrinks.
+// 4. One width for every block: 768 at most on a desktop (a large window keeps it), the screen less
+//    16 a side on a phone, edges aligned.
+// 5. One lead at a time: with no model only "Give <Bot> a model" is accented, the greeting
+//    introduces the Bot, the asks are quiet, and the composer is disabled with "Add a model" where
+//    its route goes (the same page as "Add one", Settings · Models). With a model the greeting asks
+//    what is next, and the asks and the tip invite a first try.
+// 6. Buttons: only the one lead is solid; a card's small actions are text buttons, no border or
+//    fill, a soft wash on hover. The composer's route shows the model and effort alone.
+// 7. A phone: no face in the greeting (the tab bar's center is the main Bot); Getting started shows
+//    one item. A member: the project chips sit right above the composer, 8 apart, one block with it.
+// 8. The phone keyboard: the group does not re-center in the shorter visible area. The page keeps
+//    its keyboard-free height and moves up whole, so the composer rests on the keyboard; the header
+//    and the blocks above move off screen, and the keyboard covers the tab bar.
 
 /** The page column the shell gives the home: it fills the space beside the sidebar (on a phone,
  *  between the header and the tab bar) and lays the group out in it. */
@@ -19,11 +36,11 @@ export function HomeLayout({ children }: { children: ReactNode }) {
       className="flex w-full flex-1 flex-col"
       style={heldHeight === null ? undefined : { minHeight: heldHeight }}
     >
-      <div aria-hidden="true" className="min-h-2 shrink grow-2 md:min-h-6" />
+      <div aria-hidden="true" data-home-space="above" className="min-h-2 shrink grow-2 md:min-h-6" />
       <div className="mx-auto flex w-full max-w-3xl shrink-0 flex-col gap-4 md:gap-7">
         {children}
       </div>
-      <div aria-hidden="true" className="min-h-2 shrink grow-3 md:min-h-6" />
+      <div aria-hidden="true" data-home-space="below" className="min-h-2 shrink grow-3 md:min-h-6" />
     </div>
   );
 }

@@ -590,7 +590,7 @@ export const AppShell: React.FC = () => {
               : isFullScreenMobile
                 ? 'h-full p-0 md:mx-auto md:h-auto md:px-10 md:py-8'
               // The home lays its one group out in a column that fills the page: the
-              // scroll area on a phone, the window on a desktop (ui/design: home/home/z-layout-spec).
+              // scroll area on a phone, the window on a desktop (ui/design: home/home/*; the rules are in HomeLayout).
               : isWorkbenchHome
                 ? 'flex min-h-full flex-col px-4 md:min-h-screen md:px-10 md:py-8'
             : 'mx-auto px-4 pt-4 pb-5 md:px-10 md:py-8',

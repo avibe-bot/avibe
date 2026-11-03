@@ -13,6 +13,7 @@ import { ProjectPicker } from '../workbench/ProjectPicker';
 import { HomeAsks } from './HomeAsks';
 import { useHomeAsks } from './homeCopy';
 import { HomeGreeting } from './HomeGreeting';
+import { HomeGuide } from './HomeGuide';
 import { HomeLayout } from './HomeLayout';
 
 /**
@@ -63,6 +64,7 @@ export function MemberHome() {
     <>
       <HomeLayout>
         <HomeGreeting bot={null} name="" introduce={false} />
+        <HomeGuide owner={false} noModel={false} name="" onAsk={(ask) => composerRef.current?.setDraft(ask)} />
         <HomeAsks asks={asks} quiet={false} onAsk={(ask) => composerRef.current?.setDraft(ask)} />
         <div className="flex flex-col gap-2">
           {(ns.projects.length > 0 || canCreateProject) && (
