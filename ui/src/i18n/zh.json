@@ -3387,23 +3387,35 @@
     "placeholderTitle": "你的 AI 工作台正在搭建",
     "placeholderBody": "Agents、Skills、Harness、Vaults 将会汇聚到这里。现在先进控制面板配置平台和 backend。",
     "home": {
-      "heroTitle": "今天想搭点什么？",
-      "heroBody": "在下面输入想做的事，Agent 会按你的描述执行。你也可以从下面的建议开始。",
-      "suggestions": {
-        "exploreTitle": "探索项目",
-        "exploreBody": "了解工作区中的文件",
-        "exploreDraft": "请帮我梳理这个项目的结构和主要模块",
-        "researchTitle": "研究一个问题",
-        "researchBody": "把一个主题整理成实用简报",
-        "researchDraft": "帮我研究这个主题，整理成一份简短实用的简报",
-        "planTitle": "制定计划",
-        "planBody": "把目标拆成可执行的下一步",
-        "planDraft": "帮我把这个目标拆成具体、可执行的步骤"
+      "greeting": {
+        "morning": "早上好，今天做什么？",
+        "afternoon": "下午好，今天做什么？",
+        "evening": "晚上好，今天做什么？",
+        "morningIntro": "早上好，我是{{name}}",
+        "afternoonIntro": "下午好，我是{{name}}",
+        "eveningIntro": "晚上好，我是{{name}}"
       },
+      "status": {
+        "working": "{{count}} 位在忙",
+        "unread": "{{count}} 条未读"
+      },
+      "asks": {
+        "addBot": "加一个伙伴",
+        "addBotAsk": "帮我加一个负责安全的伙伴",
+        "remember": "记住一件事",
+        "rememberAsk": "记住：周一上午不排会",
+        "projectStatus": "项目进展如何",
+        "projectStatusAsk": "各个项目进展怎么样？",
+        "startInProject": "在项目里开工",
+        "startInProjectAsk": "在 {{project}} 里，",
+        "startNewProjectAsk": "帮我新建一个项目：",
+        "weeklyReport": "每周一发周报",
+        "weeklyReportAsk": "每周一早上发我一份周报"
+      },
+      "placeholder": "和{{name}}说…",
+      "noModelPlaceholder": "接上模型后就能说话",
+      "addModel": "去接模型",
       "inputPlaceholder": "和 Agent 聊点什么…",
-      "openProject": "打开项目",
-      "manageAgents": "管理 Agents",
-      "createTask": "建后台任务",
       "noProjectForChat": "还没有项目 — 先添加一个，再开始对话",
       "ready": "{{backend}} 已连接，可以开始工作",
       "readyDismiss": "关闭",
@@ -3442,11 +3454,8 @@
         "shellNotRunningDetail": "请打开或重新打开 Avibe 桌面应用，以使用电脑操作。",
         "daemonUnreachableDetail": "桌面驱动当前无法连接。请关闭并重新开启电脑操作；如果问题重复出现，请重新打开 Avibe。",
         "controllerUnavailableDetail": "当前无法连接 Avibe Controller。请等待服务恢复后再使用电脑操作 CLI。",
-        "socketPathTooLongDetail": "macOS 无法创建受管理的驱动端点。请更新或重新安装 Avibe 桌面应用。",
-        "finishInSettings": "在设置中完成"
-      },
-      "continueOnPhone": "在手机 APP 上继续",
-      "connectChatApps": "聊天应用可在<settings>设置</settings>中连接"
+        "socketPathTooLongDetail": "macOS 无法创建受管理的驱动端点。请更新或重新安装 Avibe 桌面应用。"
+      }
     },
     "openControlPanel": "进入控制面板",
     "projectsLabel": "项目",

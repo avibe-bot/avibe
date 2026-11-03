@@ -3387,23 +3387,35 @@
     "placeholderTitle": "Your AI workbench is coming together",
     "placeholderBody": "Agents, Skills, Harness, and Vaults will live here. For now, jump into the control panel to configure platforms and backends.",
     "home": {
-      "heroTitle": "What should we build today?",
-      "heroBody": "Describe what you want and an agent will run it. Or start with one of the suggestions below.",
-      "suggestions": {
-        "exploreTitle": "Explore a project",
-        "exploreBody": "Get to know your project's structure",
-        "exploreDraft": "Walk me through this project and how its main parts fit together",
-        "researchTitle": "Research a topic",
-        "researchBody": "Get a clear, practical overview",
-        "researchDraft": "Research this topic and summarize what matters in a short brief",
-        "planTitle": "Make a plan",
-        "planBody": "Turn your goal into a step-by-step plan",
-        "planDraft": "Help me turn this goal into a concrete step-by-step plan"
+      "greeting": {
+        "morning": "Good morning. What’s next?",
+        "afternoon": "Good afternoon. What’s next?",
+        "evening": "Good evening. What’s next?",
+        "morningIntro": "Good morning. I’m {{name}}.",
+        "afternoonIntro": "Good afternoon. I’m {{name}}.",
+        "eveningIntro": "Good evening. I’m {{name}}."
       },
+      "status": {
+        "working": "{{count}} working",
+        "unread": "{{count}} unread"
+      },
+      "asks": {
+        "addBot": "Add a Bot",
+        "addBotAsk": "Add a Bot that owns security",
+        "remember": "Remember this",
+        "rememberAsk": "Remember: no meetings Monday mornings",
+        "projectStatus": "Project status",
+        "projectStatusAsk": "How are the projects going?",
+        "startInProject": "Start in a project",
+        "startInProjectAsk": "In {{project}}, ",
+        "startNewProjectAsk": "Create a new project for me: ",
+        "weeklyReport": "Weekly report",
+        "weeklyReportAsk": "Send me a report every Monday morning"
+      },
+      "placeholder": "Message {{name}}…",
+      "noModelPlaceholder": "Talk once it has a model",
+      "addModel": "Add a model",
       "inputPlaceholder": "Tell the agent what you want…",
-      "openProject": "Open project",
-      "manageAgents": "Manage agents",
-      "createTask": "Schedule background work",
       "noProjectForChat": "No projects yet — add one before starting a chat",
       "ready": "{{backend}} is ready to go",
       "readyDismiss": "Dismiss",
@@ -3442,11 +3454,8 @@
         "shellNotRunningDetail": "Open or reopen the Avibe desktop app to make Computer Use available.",
         "daemonUnreachableDetail": "The desktop driver is not reachable. Turn Computer Use off and on; reopen Avibe if it repeats.",
         "controllerUnavailableDetail": "The Avibe Controller is not reachable. Wait for the service to recover before using the Computer Use CLI.",
-        "socketPathTooLongDetail": "macOS could not create the managed driver socket. Update or reinstall the Avibe desktop app.",
-        "finishInSettings": "Finish in Settings"
-      },
-      "continueOnPhone": "Continue on your phone",
-      "connectChatApps": "Connect chat apps in <settings>Settings</settings>"
+        "socketPathTooLongDetail": "macOS could not create the managed driver socket. Update or reinstall the Avibe desktop app."
+      }
     },
     "openControlPanel": "Open Control Panel",
     "projectsLabel": "Projects",

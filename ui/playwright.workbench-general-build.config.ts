@@ -5,19 +5,9 @@ import { defineConfig, devices } from '@playwright/test';
  * the built app instead of the dev server.
  *
  * `setup-handoff.spec.ts` is here because what it grades is a lifecycle: the
- * home reads the backend once per question asked, and StrictMode's development
- * double-mount asks it twice — a bundle-only claim about request count cannot be
- * made against a server that deliberately runs every effect twice.
- *
- * `mobile-continuation.spec.ts` drives the workspace chip's manager branch, and
- * the directory browser inside it cannot be driven on the dev server: React's
- * StrictMode mounts, cleans up and re-mounts every component in development, and
- * `DirectoryBrowser`'s `mountedRef` is only ever set to `false` by that cleanup —
- * never back to `true` — so the browse response is discarded and the picker sits
- * in a permanent loading state. That is a development-only trap in a shared
- * primitive this PR does not touch (StrictMode is inert in a production build),
- * so the spec runs against the bundle users actually get rather than working
- * around it here or changing that component.
+ * home reads the backend for the question it asks, and StrictMode's development
+ * double-mount asks it twice — a claim about which reads the home makes is made
+ * against the bundle, not a server that deliberately runs every effect twice.
  *
  * `composer-mention-picker.spec.ts` is here for the same StrictMode reason: on the
  * dev server the `#`/`@` typeahead's first open in a freshly mounted editor
@@ -31,7 +21,7 @@ import { defineConfig, devices } from '@playwright/test';
  */
 export default defineConfig({
   testDir: './e2e/workbench-general',
-  testMatch: ['**/mobile-continuation.spec.ts', '**/setup-handoff.spec.ts', '**/composer-mention-picker.spec.ts'],
+  testMatch: ['**/setup-handoff.spec.ts', '**/composer-mention-picker.spec.ts'],
   outputDir: './e2e/.artifacts/workbench-general/run',
   workers: 1,
   retries: 0,

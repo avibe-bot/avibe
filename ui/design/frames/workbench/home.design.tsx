@@ -2,6 +2,8 @@
 // sidebar's bottom cluster; on a phone the header and tab bar around it.
 import { Workbench } from '@/components/Workbench';
 
+import { OWNER_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
+
 import { frames } from '../../frame';
 import { demoSessions, inboxRow } from '../../shell/fixtures';
 import { agentsApi } from '../agents/fixtures';
@@ -19,24 +21,27 @@ const fixtures = workbenchFixtures(agentsApi(), {
   ],
 });
 
-// The setup wizard lands on the home with `{ onboardingCompleted: true }`; the banner shows once the
-// home's backend answers ready.
-const setupComplete = {
-  ...fixtures,
-  api: {
-    ...fixtures.api,
-    '/api/backend/vibey/connection': {
-      ok: true,
-      backend: 'vibey',
-      installed: true,
-      enabled: true,
-      auth: 'none',
-      application: 'applied',
-      ready: true,
-      entry_eligible: true,
-    },
+// The main Bot's backend as `/api/backend/<backend>/connection` reports it: a model is connected
+// (an API key supplies it), or none is (the composer waits for one).
+const connection = (auth: 'api_key' | 'none') => ({
+  '/api/backend/vibey/connection': {
+    ok: true, backend: 'vibey', installed: true, enabled: true, supply_mode: 'hub',
+    auth, application: 'applied', ready: auth !== 'none', entry_eligible: auth !== 'none',
   },
+});
+const ready = { ...fixtures, api: { ...fixtures.api, ...connection('api_key') } };
+const noModel = { ...fixtures, api: { ...fixtures.api, ...connection('none') } };
+// Two Bots at work: "2 working" lists them to pick from.
+const busy = { ...ready, botStatus: { ses_main: 'running' as const, ses_pm: 'running' as const } };
+// A member without Bots: the project chips stand right above the composer.
+const member = {
+  ...ready,
+  capabilities: { ...OWNER_INSTANCE_CAPABILITIES, is_instance_owner: false, can_manage_instance: false },
+  bots: [],
 };
+
+// The setup wizard lands on the home with `{ onboardingCompleted: true }`; the banner shows once the
+// main Bot's backend answers ready.
 const fromSetup = { pathname: '/', state: { onboardingCompleted: true } };
 
 const designFrames = frames([
@@ -47,27 +52,58 @@ const designFrames = frames([
     height: 900,
     status: 'shipped',
     route: '/',
-    fixtures,
+    fixtures: ready,
+    render: home,
+  },
+  {
+    name: 'desktop-1280',
+    title: '工作台 · 桌面 1280×720',
+    width: 1280,
+    height: 720,
+    status: 'shipped',
+    route: '/',
+    fixtures: ready,
     render: home,
   },
   {
     name: 'setup-complete',
-    title: '工作台 · 刚完成设置（就绪横幅）',
+    title: '工作台 · 刚完成设置（就绪横幅，整组的第一块）',
     width: 1440,
     height: 900,
     status: 'shipped',
     route: fromSetup,
-    fixtures: setupComplete,
+    fixtures: ready,
     render: home,
   },
   {
-    name: 'setup-complete-phone',
-    title: '工作台 · 刚完成设置 · 手机',
-    width: 390,
-    height: 844,
+    name: 'desktop-no-model',
+    title: '工作台 · 桌面 · 还没有模型：问候自我介绍，建议变灰，输入框禁用并给出「去接模型」',
+    width: 1440,
+    height: 900,
     status: 'shipped',
-    route: fromSetup,
-    fixtures: setupComplete,
+    route: '/',
+    fixtures: noModel,
+    render: home,
+  },
+  {
+    name: 'desktop-busy',
+    title: '工作台 · 桌面 · 两位伙伴在忙：点「2 位在忙」列出它们',
+    width: 1440,
+    height: 900,
+    status: 'shipped',
+    route: '/',
+    fixtures: busy,
+    click: ['main >> text=/^2 (位在忙|working)$/'],
+    render: home,
+  },
+  {
+    name: 'desktop-member',
+    title: '工作台 · 桌面 · 没有伙伴的成员：项目选择紧贴输入框',
+    width: 1440,
+    height: 900,
+    status: 'shipped',
+    route: '/',
+    fixtures: member,
     render: home,
   },
   {
@@ -77,7 +113,48 @@ const designFrames = frames([
     height: 844,
     status: 'shipped',
     route: '/',
-    fixtures,
+    fixtures: ready,
+    render: home,
+  },
+  {
+    name: 'phone-small',
+    title: '工作台 · 手机 375×667',
+    width: 375,
+    height: 667,
+    status: 'shipped',
+    route: '/',
+    fixtures: ready,
+    render: home,
+  },
+  {
+    name: 'setup-complete-phone',
+    title: '工作台 · 刚完成设置 · 手机',
+    width: 390,
+    height: 844,
+    status: 'shipped',
+    route: fromSetup,
+    fixtures: ready,
+    render: home,
+  },
+  {
+    name: 'phone-busy',
+    title: '工作台 · 手机 · 两位伙伴在忙：底部列表',
+    width: 390,
+    height: 844,
+    status: 'shipped',
+    route: '/',
+    fixtures: busy,
+    click: ['main >> text=/^2 (位在忙|working)$/'],
+    render: home,
+  },
+  {
+    name: 'phone-no-model',
+    title: '工作台 · 手机 · 还没有模型',
+    width: 390,
+    height: 844,
+    status: 'shipped',
+    route: '/',
+    fixtures: noModel,
     render: home,
   },
 ]);

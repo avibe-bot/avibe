@@ -589,6 +589,10 @@ export const AppShell: React.FC = () => {
               ? 'h-full p-0 md:h-auto md:min-h-screen'
               : isFullScreenMobile
                 ? 'h-full p-0 md:mx-auto md:h-auto md:px-10 md:py-8'
+              // The home lays its one group out in a column that fills the page: the
+              // scroll area on a phone, the window on a desktop (ui/design: home/home/z-layout-spec).
+              : isWorkbenchHome
+                ? 'flex min-h-full flex-col px-4 md:min-h-screen md:px-10 md:py-8'
             : 'mx-auto px-4 pt-4 pb-5 md:px-10 md:py-8',
         )}>
           {/* A crashing page only replaces the content area — the sidebar + chrome stay usable, and

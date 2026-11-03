@@ -46,9 +46,12 @@ export function apiResponses(fixtures: WorkbenchFixtures = {}): Record<string, u
   const responses: Record<string, unknown> = { '/api/csrf-token': { csrf_token: 'design' } };
   if (fixtures.bots) responses['/api/bots'] = { ok: true, bots: fixtures.bots, limit: fixtures.botLimit ?? botLimitOf(fixtures.bots) };
   // Every Bot Session is read for its status dot; idle unless the frame says otherwise.
-  for (const { session_id: sessionId } of fixtures.bots ?? []) {
+  for (const { session_id: sessionId, builtin } of fixtures.bots ?? []) {
     const status = fixtures.botStatus?.[sessionId] ?? 'idle';
-    responses[`/api/sessions/${sessionId}`] = session(sessionId, '', '', { scope_id: null, project_id: null, agent_status: status });
+    const row = session(sessionId, '', '', { scope_id: null, project_id: null, agent_status: status });
+    responses[`/api/sessions/${sessionId}`] = row;
+    // The main Bot's conversation is also read through `/api/sessions/main`, which creates it on first use.
+    if (builtin) responses['/api/sessions/main'] = { session: row };
   }
   return { ...responses, ...fixtures.api };
 }

@@ -76,6 +76,49 @@ export const sessionWriteStandsAlone = (
   refused: object,
 ): boolean => (group === 'route' ? overwritesRefusedFields(pending, refused) : true);
 
+// ── One session write, as every surface that edits a Session row sends it ────
+//
+// The `session-route` and `session-meta` writers are shared by every surface
+// that edits a Session row (the conversation's header and picker, the home's
+// composer for the main Bot), and whichever is mounted serves the burst, so they
+// agree on one payload. An edit is applied optimistically, so the request that
+// follows carries the row it was made for: it is recorded under that session's id
+// (the screen may already be elsewhere by the time it flushes) and carries that
+// surface's read-ordering gate. It also carries which of the row's field groups
+// it belongs to, because the optimistic record it commits against is per group —
+// the writer key alone says that to the writer, not to the sender it hands the
+// payload to.
+export type SessionPatchWrite<T extends object> = {
+  changes: Partial<T>;
+  gate: SessionRowRefreshGate;
+  group: SessionWriteGroup;
+};
+
+/** Within ONE group the clicks made while a request is in flight are transit
+ *  rather than intent, so they fold into a single follow-up PATCH: an effort
+ *  clicked behind an Agent switch was composed against that switch, so if the
+ *  request fails the follow-up goes with it and the re-read shows what the server
+ *  actually holds — a half-applied route is worse than a visible rollback. Across
+ *  groups nothing folds, because they do not share a writer at all. The newest
+ *  gate wins: it belongs to the mount that is on screen now and whose reads the
+ *  reconcile has to fence. */
+export const mergeSessionPatchWrites = <T extends object>(
+  prev: SessionPatchWrite<T>,
+  next: SessionPatchWrite<T>,
+): SessionPatchWrite<T> => ({
+  changes: { ...prev.changes, ...next.changes },
+  gate: next.gate,
+  group: next.group,
+});
+
+/** Whether a refused request takes the write behind it down with it is decided by
+ *  the group that owns those fields, from the two payloads' relation (see
+ *  `sessionWriteStandsAlone`). */
+export const sessionPatchWriteStandsAlone = <T extends object>(
+  pending: SessionPatchWrite<T>,
+  refused: SessionPatchWrite<T>,
+): boolean => sessionWriteStandsAlone(pending.group, pending.changes, refused.changes);
+
 // ── What a row's OPEN writes are holding, keyed by session id and group ─────
 //
 // The gate below orders reads against writes within one chat's lifetime: it is
