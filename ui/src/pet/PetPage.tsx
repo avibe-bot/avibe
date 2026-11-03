@@ -923,7 +923,9 @@ const PetSurface: React.FC = () => {
         className="pet-mini-avatar-button"
         // A click opens or closes Vibey's recent turns (§5.1).
         aria-label={t('pet.recentTurns')}
-        aria-expanded={historyOpen}
+        // A history with nothing to draw (no conversation yet) is not expanded:
+        // the click opened only the input.
+        aria-expanded={historyOpen && !noReplyDetail}
         data-pet-hit
         onClick={(event) => {
           if (event.detail !== 0) return;
@@ -1091,7 +1093,7 @@ const PetSurface: React.FC = () => {
           </div>
         </div>
         <SpeechSlot open={voice.busy || composing || showReplyBubble || resolvingMain || !binding}>
-          {bubbleDrawn && showReplyBubble && binding ? (
+          {bubbleDrawn && binding ? (
             // Still drawn while the slot closes, so it fades out rather than vanishing.
             <div
               // Its own identity, so a notice drawn in the same place replaces

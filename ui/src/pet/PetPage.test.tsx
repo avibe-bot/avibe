@@ -429,6 +429,19 @@ describe('main-only resolution', () => {
 });
 
 describe('PetPage Vibey conversation', () => {
+  // With nothing to show, a Vibey click opens the input alone (#3057), so the
+  // avatar must not announce its history as expanded.
+  it('opens the input for a first message without announcing an expanded history', async () => {
+    tails.S = [];
+    mainSession('S');
+    render(<PetPage />);
+    const avatar = await screen.findByLabelText('pet.recentTurns');
+    await userEvent.click(avatar);
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'pet.inputPlaceholder' })).toBeTruthy());
+    expect(document.querySelector('.pet-mini-detail.is-open')).toBeNull();
+    expect(avatar.getAttribute('aria-expanded')).toBe('false');
+  });
+
   it('shows a turn the agent could not run, with the way to fix it', async () => {
     tails.S = [
       message('u', 'S', { author: 'user', type: 'user', text: 'hello' }),
@@ -2987,7 +3000,12 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
   it('leaves an unread dot when an untouched reply times out, then clears it on expansion', async () => {
     await runToResult();
     await act(async () => { vi.advanceTimersByTime(20_100); });
-    await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')).toBeNull());
+    await waitFor(() => expect(bubbleOpen()).toBe(false));
+    // Still drawn in its closing slot, so it fades out rather than vanishing;
+    // the closed slot keeps it out of reach.
+    const hidden = document.querySelector('.pet-mini-reply-bubble')!;
+    expect(hidden.closest('.pet-mini-slot')?.getAttribute('aria-hidden')).toBe('true');
+    expect(hidden.closest('[inert]')).not.toBeNull();
     expect(document.querySelector('.pet-mini-avatar-unread-dot')).not.toBeNull();
     fireEvent.click(screen.getByLabelText('pet.recentTurns'));
     await waitFor(() => expect(document.querySelector('.pet-mini-detail.is-open')).not.toBeNull());
@@ -3062,7 +3080,6 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
     await screen.findByLabelText('pet.recentTurns');
     await emit((h) => h.onMessageUpdated?.({ ...old, text: 'Old reply, edited' }));
     expect(bubbleOpen()).toBe(false);
-    expect(document.querySelector('.pet-mini-reply-bubble')).toBeNull();
   });
 
   it('hands keyboard focus to Vibey when a loading notice replaces the bubble', async () => {

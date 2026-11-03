@@ -241,6 +241,8 @@ jobs:
               # The Workbench shell measured in a browser (sidebar, Settings frame, phone home).
               # Its own line here: on lane 2's workbench-general line it would lengthen the longer lane.
               npm run test:workbench-general -- geometry.spec.ts
+              # The desktop pet's mini window, in Chromium and in WebKit (the macOS shell's engine).
+              npm run test:pet-mini
           - lane: 2
             suites: |
               npm run test:project-order
