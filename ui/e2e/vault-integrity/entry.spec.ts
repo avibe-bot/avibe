@@ -1,0 +1,176 @@
+// AUTH-SETUP-137: intercepted synthetic addresses, real Vault consumers and entry gate.
+import { test, expect, type BrowserContext, type Page } from '@playwright/test';
+import type { VaultRequest, VaultSecret } from '../../src/context/ApiContext';
+import en from '../../src/i18n/en.json' with { type: 'json' };
+import zh from '../../src/i18n/zh.json' with { type: 'json' };
+
+const server = 'http://127.0.0.1:5238';
+const fixturePath = '/e2e/vault-integrity/entry-fixture.html';
+const secret: VaultSecret = { name: 'PUBLIC_TEST_TOKEN', kind: 'static', protection: 'protected', source: 'user', signer_kind: null,
+  tags: [], policy: {}, default_field: 'value', fields: ['value'], last_used_at: null, use_count: 0, created_at: '', updated_at: 'fixture-v1' };
+const access: VaultRequest = { id: 'fixture-access', request_type: 'access', secret_name: secret.name, status: 'pending', requester: {},
+  message_id: null, created_at: '', decided_at: null, expires_at: null, delivery: {},
+  card: { request_type: 'access', protection: 'protected', secret_names: [secret.name], protected_secret_names: [secret.name],
+    grant_options: [{ grant_id: 'fixture-grant', unlock_material: [{ name: secret.name,
+      envelope: { ciphertext: 'invalid', nonce: 'invalid', wrap_meta: '{}' } }] }] } };
+const sign: VaultRequest = { ...access, id: 'fixture-sign', request_type: 'sign',
+  delivery: { digest: '00'.repeat(32), scheme: 'ecdsa-secp256k1-recoverable' },
+  card: { request_type: 'sign', secret_name: 'PUBLIC_TEST_KEY', protection: 'protected', kind: 'keypair' } };
+
+async function harness(context: BrowserContext, page: Page, origin: string, request = access) {
+  const prohibited: string[] = [];
+  const writes: string[] = [];
+  const errors: string[] = [];
+  const popups: Page[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  page.on('popup', (popup) => popups.push(popup));
+  await context.addInitScript(() => {
+    // No physical credentials or installed browser state, even if a regression
+    // gets past the entry gate. No sandbox resources are served by this harness.
+    Object.defineProperty(navigator, 'credentials', { value: {
+      create: () => { throw new Error('Credentials are forbidden'); },
+      get: () => { throw new Error('Credentials are forbidden'); },
+    } });
+  });
+  await context.routeWebSocket('**', (socket) => socket.close());
+  await context.route('**/*', async (route) => {
+    const req = route.request();
+    const url = new URL(req.url());
+    if (url.origin !== origin) { prohibited.push(req.url()); return route.abort('blockedbyclient'); }
+    if (url.pathname === '/settings/remote-access') { prohibited.push('document reload into Settings'); return route.abort('blockedbyclient'); }
+    if (url.pathname.startsWith('/api/')) {
+      const key = `${req.method()} ${url.pathname}`;
+      const read: Record<string, unknown> = {
+        '/api/session': { remote: false, instance_kind: 'personal' },
+        '/api/vault/secrets': { ok: true, secrets: [secret] },
+        '/api/vault/requests': { ok: true, requests: [request] },
+        '/api/vault/grants': { ok: true, grants: [] },
+        '/api/vault/settings': { ok: true, settings: {} },
+        '/api/vault/avault-authorization': { ok: true, required: false, supported: false, attempt: null },
+        '/api/dependencies': { ok: true, deps: [{ id: 'avault', status: 'ready', version: '0.1.6' }] },
+        '/api/skills': { ok: true, skills: [] },
+        '/api/csrf-token': { csrf_token: 'public-fixture-only' },
+      };
+      if (req.method() === 'GET' && url.pathname in read) return route.fulfill({ json: read[url.pathname] });
+      if (req.method() === 'GET' && url.pathname.includes('/events')) return route.fulfill({ status: 200, contentType: 'text/event-stream', body: ': offline fixture\n\n' });
+      if (key === `POST /api/vault/requests/${request.id}/deny` || key === 'POST /api/vault/sign') {
+        writes.push(key); return route.fulfill({ json: { ok: true } });
+      }
+      if (key === `PATCH /api/vault/secrets/${secret.name}`) {
+        writes.push(key); return route.fulfill({ json: { ok: true, secret: { ...secret, ...req.postDataJSON() } } });
+      }
+      // Preparation, settings mutation, credentials, grants and protected writes
+      // are forbidden. Record before rejecting; a caught failure cannot hide it.
+      prohibited.push(key);
+      return route.fulfill({ status: 500, json: { ok: false, code: 'fixture-forbidden' } });
+    }
+    // The browser retains the synthetic origin, but only this test-owned Vite
+    // server receives traffic. Never resolve/contact the LAN IP or public host.
+    const response = await route.fetch({ url: `${server}${url.pathname}${url.search}`, maxRedirects: 0 });
+    return route.fulfill({ response });
+  });
+  return { prohibited, writes, errors, popups };
+}
+
+for (const [origin, language, current] of [
+  ['http://192.0.2.1:5123', 'zh', access],
+  ['https://custom.example', 'en', sign],
+  ['https://demo.avibe.bot:8443', 'en', access],
+] as const) test(`early ${language} approval notice at ${origin}; deny and navigation remain usable`, async ({ context, page }) => {
+  const copy = language === 'zh' ? zh : en;
+  const observed = await harness(context, page, origin, current);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const url = `${origin}${fixturePath}?lang=${language}&request_id=${current.id}`;
+  await page.goto(url);
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.getByText(copy.vaults.entry.addressTitle)).toBeVisible();
+  await expect(dialog.getByRole('button', { name: current.request_type === 'sign' ? copy.vaults.approval.sign : copy.vaults.approval.approve, exact: true })).toBeDisabled();
+  await expect(dialog.locator('.animate-spin')).toHaveCount(0);
+  await expect(page.locator('iframe')).toHaveCount(0);
+  await dialog.getByText(copy.vaults.entry.addressTitle).scrollIntoViewIfNeeded();
+  await dialog.evaluate(async (element) => { await Promise.all(element.getAnimations().map((animation) => animation.finished.catch(() => undefined))); });
+  await page.screenshot({ path: test.info().outputPath(`unsupported-${language}.png`) });
+  await dialog.getByRole('button', { name: copy.vaults.approval.deny, exact: true }).click();
+  await expect.poll(() => observed.writes).toEqual([`POST /api/vault/requests/${current.id}/deny`]);
+  await expect(dialog).toHaveCount(0);
+  await page.goto(url); // Synthetic pending request is deliberately not persisted.
+  const documentIdentity = await page.evaluate(() => performance.timeOrigin);
+  await page.getByRole('link', { name: copy.vaults.entry.remoteAccess }).click();
+  await expect(page).toHaveURL(`${origin}/settings/remote-access`);
+  await expect(page.getByRole('heading', { name: 'Remote Access destination fixture' })).toBeVisible();
+  expect(await page.evaluate(() => performance.timeOrigin)).toBe(documentIdentity);
+  await page.getByRole('button', { name: 'Back to Vaults' }).click();
+  // The actual Settings surface retains the approval dialog, including on mobile.
+  await expect(page.getByRole('dialog').getByText(copy.vaults.entry.addressTitle)).toBeVisible();
+  expect(observed.prohibited).toEqual([]);
+  expect(observed.errors).toEqual([]);
+  expect(observed.popups).toEqual([]);
+});
+
+test('unsupported reveal/edit/create stop before preparation, but metadata, cancel and Standard stay available', async ({ context, page }) => {
+  const origin = 'http://192.0.2.1:5123';
+  const observed = await harness(context, page, origin);
+  await page.goto(`${origin}${fixturePath}?reveal=${secret.name}`);
+  await expect(page.getByRole('menu').getByText(en.vaults.entry.addressTitle)).toBeVisible();
+  await expect(page.getByRole('menuitem', { name: en.vaults.reveal.show, exact: true })).toBeDisabled();
+  await expect(page.getByRole('menuitem', { name: en.vaults.reveal.copy, exact: true })).toBeDisabled();
+  page.setDefaultTimeout(8_000);
+  await page.getByRole('menuitem', { name: en.vaults.editSecret }).click();
+  expect(observed.errors).toEqual([]);
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.getByText(en.vaults.entry.addressTitle)).toBeVisible();
+  await dialog.getByLabel('Default field name').fill('password');
+  await dialog.getByRole('button', { name: 'Save value', exact: true }).click();
+  await expect.poll(() => observed.writes).toEqual([`PATCH /api/vault/secrets/${secret.name}`]);
+  await dialog.getByRole('button', { name: en.vaults.dialog.cancel, exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await page.goto(`${origin}${fixturePath}?add=protected`);
+  await expect(dialog.getByText(en.vaults.entry.addressTitle)).toBeVisible();
+  await expect(dialog.getByRole('button', { name: en.vaults.dialog.createSecret, exact: true })).toBeDisabled();
+  await dialog.getByPlaceholder(en.vaults.dialog.valuePlaceholder).fill('public-fixture-draft');
+  await expect(dialog.getByText(en.vaults.entry.draftWarning)).toBeVisible();
+  await dialog.getByRole('link', { name: en.vaults.entry.remoteAccess }).click();
+  await expect(page.getByRole('heading', { name: 'Remote Access destination fixture' })).toBeVisible();
+  expect(new URL(page.url()).search).toBe('');
+  await page.getByRole('button', { name: 'Back to Vaults' }).click();
+  // Existing DialogContent suspension unmounts the form (explicitly disclosed);
+  // the dialog reopens, but secret drafts are never persisted or put in the URL.
+  await expect(dialog.getByPlaceholder(en.vaults.dialog.valuePlaceholder)).toHaveValue('');
+  await dialog.getByRole('button', { name: en.vaults.dialog.standardProtection, exact: false }).click();
+  await expect(dialog.getByText(en.vaults.entry.addressTitle)).toHaveCount(0);
+  await dialog.getByRole('button', { name: en.vaults.dialog.cancel, exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(observed.prohibited).toEqual([]);
+  expect(observed.errors).toEqual([]);
+  expect(observed.popups).toEqual([]);
+  await expect(page.locator('iframe')).toHaveCount(0);
+});
+
+test('supported HTTPS with missing Web Crypto gives browser advice, not a Remote Access enable prompt', async ({ context, page }) => {
+  const origin = 'https://fixture.avibe.bot';
+  await context.addInitScript(() => Object.defineProperty(crypto, 'subtle', { value: undefined }));
+  const observed = await harness(context, page, origin);
+  await page.goto(`${origin}${fixturePath}?request_id=${access.id}`);
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.getByText(en.vaults.entry.browserTitle)).toBeVisible();
+  await expect(dialog.getByText(en.vaults.entry.browserHelp)).toBeVisible();
+  await expect(dialog.getByRole('link', { name: en.vaults.entry.remoteAccess })).toHaveCount(0);
+  await expect(dialog.getByRole('button', { name: en.vaults.approval.approve, exact: true })).toBeDisabled();
+  expect(observed.prohibited).toEqual([]);
+  expect(observed.popups).toEqual([]);
+});
+
+test('non-owner has no Remote Access link; standard signing remains on the ordinary API path', async ({ context, page }) => {
+  const origin = 'http://192.0.2.1:5123';
+  const standard = { ...sign, card: { ...sign.card, protection: 'standard' } };
+  const observed = await harness(context, page, origin, standard);
+  await page.goto(`${origin}${fixturePath}?role=member&reveal=${secret.name}`);
+  await expect(page.getByText(en.vaults.entry.memberHelp)).toBeVisible();
+  await expect(page.getByRole('link', { name: en.vaults.entry.remoteAccess })).toHaveCount(0);
+  await page.goto(`${origin}${fixturePath}?role=member&request_id=${standard.id}`);
+  await page.getByRole('dialog').getByRole('button', { name: en.vaults.approval.sign, exact: true }).click();
+  await expect.poll(() => observed.writes).toEqual(['POST /api/vault/sign']);
+  expect(observed.prohibited).toEqual([]);
+  expect(observed.errors).toEqual([]);
+  expect(observed.popups).toEqual([]);
+});

@@ -21,6 +21,9 @@ export function releaseResponse(url: string, bytes = releaseBytes(url)): Respons
 }
 
 export function stubReleaseFetch() {
+  // jsdom has no secure-context algorithm; these release transport fixtures run
+  // at its loopback URL. Entry regressions override this explicitly.
+  vi.stubGlobal('isSecureContext', true);
   vi.stubGlobal('crypto', webcrypto);
   const fetch = vi.fn(async (input: string | URL | Request) => releaseResponse(String(input)));
   vi.stubGlobal('fetch', fetch);

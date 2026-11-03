@@ -1,7 +1,8 @@
 import { webcrypto } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { vaultFreshSetup, vaultUnlocked, vaultUnlockExpiresAt, webauthnAvailable } from './useProtectedVault';
+import { vaultFreshSetup, vaultUnlocked, vaultUnlockExpiresAt } from './useProtectedVault';
+import { webauthnAvailable } from './vaultEntry';
 import {
   VAULT_SANDBOX_EXPECTED_BUILD_HASH,
   VAULT_SANDBOX_IFRAME_URL,

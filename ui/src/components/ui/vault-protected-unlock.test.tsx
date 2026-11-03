@@ -2,7 +2,7 @@
 
 import type { ComponentProps } from 'react';
 import { createInstance } from 'i18next';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -53,6 +53,24 @@ const locales = [
     guidance: '请使用兼容的浏览器。在运行 Avibe 的电脑上，通过 localhost 或 127.0.0.1 打开 Vaults；在其他设备上，使用你的 HTTPS avibe.bot 地址。不支持局域网 HTTP 地址（如 192.168.x.x）。',
   },
 ] as const;
+
+describe('entry notice takes precedence over stale vault status', () => {
+  it.each(['checking', 'error', 'unlocked'] as const)('does not spin, retry or claim availability for %s at LAN HTTP', async (status) => {
+    vi.stubGlobal('location', new URL('http://192.0.2.1:5123'));
+    const i18n = createInstance();
+    await i18n.use(initReactI18next).init({ lng: 'en', resources: { en: { translation: en } } });
+    const vault = { ...lockedVault('locked'), status };
+    const dismiss = vi.fn();
+    render(<I18nextProvider i18n={i18n}><VaultProtectedUnlock vault={vault} onDismiss={dismiss} /></I18nextProvider>);
+    expect(screen.getByText(en.vaults.entry.addressTitle)).toBeTruthy();
+    expect(screen.queryByText(en.vaults.protectedUnlock.checking)).toBeNull();
+    expect(screen.queryByText(en.vaults.protectedUnlock.unlocked)).toBeNull();
+    expect(screen.queryByText(en.vaults.protectedUnlock.retry)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: en.vaults.protectedUnlock.cancel }));
+    expect(dismiss).toHaveBeenCalledOnce();
+    expect(vault.setupPasskey).not.toHaveBeenCalled();
+  });
+});
 
 describe.each(['needs-setup', 'locked'] as const)('protected vault %s entry guidance', (status) => {
   it.each(locales)('renders actionable, loopback-aware $lng guidance without starting a ceremony', async ({ lng, guidance }) => {

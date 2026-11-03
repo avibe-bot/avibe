@@ -670,4 +670,29 @@ scenarios:
       - ui/e2e/vault-integrity/integrity.spec.ts
       - ui/src/lib/vaultSandboxIntegrity.test.ts
       - tests/test_vault_rest.py
+  - id: AUTH-SETUP-137
+    name: Unsupported Vault entry stops before preparation and offers a safe address continuation
+    status: covered
+    kind: historical_regression
+    layer: browser
+    backend: web
+    reason: >-
+      The closed loop mounts the real Vaults page, approval/create/edit consumers,
+      API provider, entry assessment and Settings overlay in Chromium and WebKit.
+      Synthetic HTTP LAN, custom HTTPS and non-default-port Avibe origins are
+      intercepted before network access. Protected preparation, sandbox requests,
+      credentials and unexpected writes are denied and recorded. Deny, standard
+      signing, metadata edits and Settings navigation complete against inert
+      fixtures. Browser-capability advice is distinct from address advice.
+      This browser-owned contract has no Python RPC analogue; actual passkey/PRF
+      support and published-release acceptance remain AUTH-SETUP-136's live limits.
+    supporting_tests:
+      - ui/e2e/vault-integrity/entry.spec.ts
+      - ui/e2e/vault-integrity/integrity.spec.ts
+      - ui/src/lib/vaultEntry.test.tsx
+      - ui/src/components/ui/vault-protected-unlock.test.tsx
+      - ui/src/components/ui/vault-approval-card.test.tsx
+      - ui/src/components/ui/vault-secret-form.test.tsx
+      - ui/src/components/ui/vault-secret-fields-editor.test.tsx
+      - ui/src/components/workbench/VaultsPage.test.tsx
 next_priority: []

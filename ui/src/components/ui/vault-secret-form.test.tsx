@@ -1,5 +1,6 @@
 /* @vitest-environment jsdom */
 
+import { webcrypto } from 'node:crypto';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { createInstance } from 'i18next';
@@ -49,6 +50,8 @@ const nameInputs = () => [1, 2, 3, 4].flatMap((index) => {
 });
 const submitButton = () => screen.getByRole('button', { name: 'Save & let the agent continue' }) as HTMLButtonElement;
 beforeEach(async () => {
+  vi.stubGlobal('crypto', webcrypto);
+  vi.stubGlobal('isSecureContext', true);
   await i18n.changeLanguage('en');
   api.listDependencies.mockResolvedValue({ ok: true, deps: [{ id: 'avault', status: 'ready', version: '0.1.6' }] });
   api.createVaultSecret.mockResolvedValue({ ok: true });
@@ -57,7 +60,22 @@ beforeEach(async () => {
     return { envelope, establishingVmk: true, authzFactorRegistration: { challenge_id: 'setup' } };
   });
 });
-afterEach(() => { cleanup(); vi.clearAllMocks(); });
+afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
+
+it('blocks protected creation before refresh/seal at an unsupported address, even with stale unlocked state; cancel remains usable', async () => {
+  vi.stubGlobal('location', new URL('http://192.0.2.1:5123'));
+  vi.stubGlobal('isSecureContext', false);
+  const cancel = vi.fn();
+  render(form(<VaultSecretForm fixedName="TOKEN" defaultProtection="protected" onCancel={cancel} onCreated={vi.fn()} />));
+  fireEvent.change(screen.getByPlaceholderText(en.vaults.dialog.valuePlaceholder), { target: { value: 'public-test-draft' } });
+  expect(submitButton().disabled).toBe(true);
+  fireEvent.click(submitButton());
+  expect(vault.refresh).not.toHaveBeenCalled();
+  expect(vault.sealValue).not.toHaveBeenCalled();
+  expect(api.createVaultSecret).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.request.dismiss }));
+  expect(cancel).toHaveBeenCalledOnce();
+});
 
 // The Generate-key catch owns this presentation independently of the form's submit catch.
 // Rejecting the public hook here exercises the actual button and error surface without keys.

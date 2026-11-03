@@ -2953,6 +2953,9 @@
   "errors": {
     "sandbox_integrity_failed": "Protected Vault was not opened because its security code could not be verified. Check your connection and update Avibe, then retry. Do not bypass verification or recreate your passkey.",
     "sandbox_build_mismatch": "The protected Vault sandbox does not match this Avibe release. Update Avibe or contact support; your existing secrets and passkey are unchanged.",
+    "sandbox_entry_unavailable": "Protected Vault cannot run from this address or browser context. Use a compatible browser at your HTTPS avibe.bot address via Settings → Remote Access, or localhost / 127.0.0.1 on the computer running Avibe.",
+    "sandbox_browser_unavailable": "Protected Vault needs a secure browser context with Web Crypto. Open Avibe directly in an up-to-date compatible browser, not inside another page or embedded browser.",
+    "sandbox_browser_required": "Continue this protected Vault step in your browser, not the desktop app.",
     "sandbox_reset": "This protected Vault attempt was cancelled or reset. Retry from Avibe to verify a fresh sandbox.",
     "sandbox_ready_timeout": "The verified Vault sandbox did not start. Check your connection, update Avibe, and retry.",
     "avault_authorization_required": "avault needs a one-time macOS Keychain authorization on the Mac running Avibe. Choose Authorize avault, then answer the dialog on that Mac.",
@@ -5947,6 +5950,15 @@
       "referenceDefault": "<name/> alone resolves to the default field, <field/>.",
       "singleFile": "File upload supports one value. Switch to Text before adding fields.",
       "editHelp": "Save each row after editing · blank values stay unchanged"
+    },
+    "entry": {
+      "addressTitle": "Protected Vault is unavailable at this address",
+      "browserTitle": "Protected Vault is unavailable in this browser context",
+      "browserHelp": "This address is supported, but the browser context lacks secure access or Web Crypto. Open Avibe directly in an up-to-date compatible browser, not inside another page or embedded browser.",
+      "ownerHelp": "Open Settings → Remote Access, enable Remote Access if needed, then reopen Vaults using its HTTPS address. No settings are changed automatically.",
+      "memberHelp": "Ask the instance owner to enable Remote Access and share its HTTPS address, then reopen Vaults there.",
+      "draftWarning": "Opening settings clears unsaved inputs in this dialog.",
+      "remoteAccess": "Open Remote Access settings"
     },
     "protectedUnlock": {
       "checking": "Checking your protected vault…",

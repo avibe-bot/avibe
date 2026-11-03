@@ -5,7 +5,8 @@ import { useApi, type VaultFieldValuePayload, type VaultSecret } from '@/context
 import { sealBlindBox, standardCreateBlindBoxContext } from '@/lib/vaultCrypto';
 import { vaultErrorMessage } from '@/lib/vaultErrors';
 import { useProtectedVault } from '@/lib/useProtectedVault';
-import { openVaultsInBrowser, vaultPasskeyNeedsBrowser } from '@/lib/vaultBrowserHandoff';
+import { vaultEntryIssue } from '@/lib/vaultEntry';
+import { openVaultsInBrowser } from '@/lib/vaultBrowserHandoff';
 import { MAX_VAULT_FIELDS, vaultDefaultField, vaultFieldNameIssue, vaultFieldNames, vaultRecordName } from '@/lib/vaultFields';
 import { isAvaultAuthorizationRequired } from '@/lib/useAvaultAuthorization';
 import { AvaultAuthorizationNotice } from './avault-authorization-notice';
@@ -78,15 +79,15 @@ export function VaultSecretFieldsEditor({
   const fields = vaultFieldNames(current);
   const defaultField = vaultDefaultField(current);
   const isProtected = current.protection === 'protected';
-  const passkeyNeedsBrowser = vaultPasskeyNeedsBrowser();
+  const entryIssue = vaultEntryIssue();
   const locked = disabled || busy;
   const fieldsCorrupt = current.fields_state === 'corrupt';
   const fieldMutationLocked = locked || fieldsCorrupt;
-  const canWriteValue = !isProtected || vault.status === 'unlocked';
+  const canWriteValue = !isProtected || (!entryIssue && vault.status === 'unlocked');
 
   useEffect(() => {
-    if (isProtected && !passkeyNeedsBrowser) void refresh();
-  }, [isProtected, passkeyNeedsBrowser, refresh]);
+    if (isProtected && !entryIssue) void refresh();
+  }, [isProtected, entryIssue, refresh]);
 
   const hasErrorCode = (result: unknown, code: string): boolean =>
     typeof result === 'object' && result !== null && 'code' in result && result.code === code;
@@ -440,7 +441,7 @@ export function VaultSecretFieldsEditor({
       </VaultFieldList>
       {showNameRule ? <span className="text-[11px] text-muted">{t('vaults.fields.nameRule')}</span> : null}
       <VaultFieldReferences secretName={current.name} fields={fields} defaultField={defaultField} />
-      {isProtected && <VaultProtectedUnlock vault={vault} secretName={current.name}
+      {isProtected && <VaultProtectedUnlock warnDraftDiscard vault={vault} secretName={current.name}
         onContinueInBrowser={() => openVaultsInBrowser({ kind: 'edit', secretName: current.name })} />}
       {busy && <Loader2 className="size-4 animate-spin text-muted" />}
       {saved && <p role="status" className="text-xs text-mint-ink">{t('vaults.fields.saved')}</p>}

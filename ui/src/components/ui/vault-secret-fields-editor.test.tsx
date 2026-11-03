@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { webcrypto } from 'node:crypto';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
@@ -54,6 +55,8 @@ const renderEditor = (entry = secret) => render(
   <I18nextProvider i18n={i18n}><VaultSecretFieldsEditor secret={entry} disabled={false} onBusyChange={vi.fn()} /></I18nextProvider>,
 );
 beforeEach(() => {
+  vi.stubGlobal('crypto', webcrypto);
+  vi.stubGlobal('isSecureContext', true);
   api.updateVaultSecret.mockReset();
   api.updateVaultSecretField.mockReset();
   api.deleteVaultSecretField.mockReset();
@@ -69,7 +72,27 @@ beforeEach(() => {
   api.listVaultSecrets.mockResolvedValue({ ok: true, secrets: [secret] });
 
 });
-afterEach(async () => { cleanup(); eventHandlers = null; vi.clearAllMocks(); await i18n.changeLanguage('en'); });
+afterEach(async () => { cleanup(); eventHandlers = null; vi.clearAllMocks(); vi.unstubAllGlobals(); await i18n.changeLanguage('en'); });
+
+// Entry gating must stop ciphertext writes, not metadata management. The stale
+// unlocked hook state here cannot override the real current-address assessment.
+it('blocks protected field replacement before refresh but permits a metadata-only rename on LAN HTTP', async () => {
+  vi.stubGlobal('location', new URL('http://192.0.2.1:5123'));
+  vi.stubGlobal('isSecureContext', false);
+  const protectedSecret = { ...secret, protection: 'protected' };
+  const renamed = { ...protectedSecret, default_field: 'credential', fields: ['credential', 'username'] };
+  api.updateVaultSecret.mockResolvedValue({ ok: true, secret: renamed });
+  renderEditor(protectedSecret);
+  change('Value for password', 'public-test-draft');
+  expect((screen.getByRole('button', { name: 'Save password' }) as HTMLButtonElement).disabled).toBe(true);
+  expect(vault.refresh).not.toHaveBeenCalled();
+  expect(vault.sealValue).not.toHaveBeenCalled();
+  change('Value for password', '');
+  change('Default field name', 'credential');
+  fireEvent.click(screen.getByRole('button', { name: 'Save password' }));
+  await waitFor(() => expect(api.updateVaultSecret).toHaveBeenCalledWith('LOGIN', { default_field: 'credential' }, { handleError: false }));
+  expect(api.updateVaultSecretField).not.toHaveBeenCalled();
+});
 
 // The editor owns metadata versions between browser encryptions. Form creation and crypto
 // tests cannot catch a second field write reusing the first version, or a default rename

@@ -15,7 +15,9 @@ import {
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { partitionTags } from '@/lib/vaultTags';
 import { useProtectedVault, useVaultSandboxWarm, type ProtectedUnlockMaterial } from '@/lib/useProtectedVault';
-import { openVaultsInBrowser, vaultPasskeyNeedsBrowser } from '@/lib/vaultBrowserHandoff';
+import { openVaultsInBrowser } from '@/lib/vaultBrowserHandoff';
+import { vaultEntryIssue } from '@/lib/vaultEntry';
+import { VaultEntryNotice } from './vault-entry-notice';
 import { vaultApprovalNeedsPasskey } from '@/lib/vaultRequestPlacement';
 import { vaultHasNamedFieldShape, vaultFieldNames } from '@/lib/vaultFields';
 import { usePreparedRequest } from '@/lib/usePreparedRequest';
@@ -283,7 +285,9 @@ export const VaultApprovalCard: React.FC<{
   const needsProtectedApproval = useMemo(() => vaultApprovalNeedsPasskey(request), [request]);
   // Where passkeys can't run, the approver finishes this request in the browser instead; nothing
   // (no binding contexts, no sandbox ceremony) starts here.
-  const approveInBrowser = needsProtectedApproval && vaultPasskeyNeedsBrowser();
+  const entryIssue = needsProtectedApproval ? vaultEntryIssue() : null;
+  const approveInBrowser = entryIssue === 'desktop';
+  const entryBlocked = !!entryIssue && !approveInBrowser;
   const canApprove = capabilities.can_use_vault_secrets;
   const canManageDelete = capabilities.can_manage_instance;
   // Set once this card has approved or denied its request, which is then no longer pending.
@@ -293,22 +297,22 @@ export const VaultApprovalCard: React.FC<{
     [api],
   );
   const bindings = usePreparedRequest(
-    canApprove && !isSign && !isDelete && !approveInBrowser && materials.length > 0 && option?.grant_id && !busy && !resolved
+    canApprove && !isSign && !isDelete && !entryIssue && materials.length > 0 && option?.grant_id && !busy && !resolved
       ? { requestId: request.id, duration: grantDurationApiValue(effectiveGrantDuration) }
       : null,
     sendBindings,
     bindingsIssued,
     PREPARED_BINDINGS,
   );
-  const sandboxReady = useVaultSandboxWarm(needsProtectedApproval && !approveInBrowser);
-  // Until both are ready the approve button waits, so its click never waits on either.
-  const preparing = !isDelete && !busy && (!sandboxReady || bindings.pending);
+  const sandboxReady = useVaultSandboxWarm(canApprove && needsProtectedApproval && !entryIssue);
+  // An unsupported entry has actionable guidance, not an endless preparing spinner.
+  const preparing = !entryIssue && !isDelete && !busy && (!sandboxReady || bindings.pending);
 
   useEffect(() => {
-    if (needsProtectedApproval && !approveInBrowser) void vault.refresh();
+    if (canApprove && needsProtectedApproval && !entryIssue) void vault.refresh();
     // vault.refresh is stable (useCallback); only re-check when protected handling becomes required.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [needsProtectedApproval, approveInBrowser]);
+  }, [canApprove, needsProtectedApproval, entryIssue]);
 
   const finish = useCallback(
     (run: () => Promise<void>) => {
@@ -482,7 +486,7 @@ export const VaultApprovalCard: React.FC<{
     );
   }
 
-  const approveDisabled = busy || preparing || !canApprove || (isDelete && !canManageDelete) || (!isSign && !isDelete && !option);
+  const approveDisabled = busy || preparing || entryBlocked || !canApprove || (isDelete && !canManageDelete) || (!isSign && !isDelete && !option);
 
   return (
     <div className="flex min-w-0 flex-col gap-4">
@@ -656,7 +660,7 @@ export const VaultApprovalCard: React.FC<{
 
       {/* Protected approval: the sandbox performs any required passkey ceremony as part
           of the approval operation, so this card only shows the design's operation note. */}
-      {needsProtectedApproval ? (
+      {entryBlocked ? <VaultEntryNotice issue={entryIssue} /> : needsProtectedApproval ? (
         <span className="flex items-start gap-2 rounded-lg bg-mint-soft px-3 py-2.5 text-[11.5px] text-foreground">
           <ShieldCheck className="mt-0.5 size-[15px] shrink-0 text-mint-ink" />
           {approveInBrowser
