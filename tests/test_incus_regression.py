@@ -5,6 +5,7 @@ import contextlib
 import importlib.util
 import json
 import os
+import re
 import shlex
 import shutil
 import stat
@@ -5171,6 +5172,8 @@ def test_an_update_records_the_revision_its_sync_copied(
     def record(name):
         def wrapper(*args, **kwargs):
             calls.append(name)
+            if name == "build":
+                assert kwargs["source_commit"] == synced
             if name == moved_during:
                 return move_checkout()
             return set()
@@ -5470,13 +5473,40 @@ def test_update_builds_ui_before_editable_install() -> None:
         remote=None,
     )
 
-    install_index = next(i for i, command in enumerate(commands) if "pip install -e ." in command)
+    install_index = next(i for i, command in enumerate(commands) if "/bin/uv sync --locked" in command)
     build_index = next(i for i, command in enumerate(commands) if "npm run build" in command)
     assert build_index < install_index
+    lock_index = next(i for i, command in enumerate(commands) if "/bin/uv lock --check" in command)
+    assert lock_index < next(i for i, command in enumerate(commands) if "npm ci" in command)
+
+
+def test_regression_installer_uses_its_declared_tool_environment() -> None:
+    """Exact app synchronization must not own or prune its running installer."""
+    commands = []
+
+    class RecordingRunner:
+        def run(self, command, **kwargs):
+            commands.append(" ".join(command))
+            return subprocess.CompletedProcess(command, 0)
+
+    target = incus_regression.RegressionTarget("master", "master", "avr-master", "avibe-master", 15130, "127.0.0.1", 5123)
+    uv = incus_regression.ensure_regression_uv(RecordingRunner(), target, remote=None)
+    assert uv == "/opt/avibe/regression-tools/bin/uv"
+    assert len(commands) == 1
+    command = commands[0]
+    assert "sudo -H -u avibe" in command
+    assert "python3 -m venv /opt/avibe/regression-tools" in command
+    assert "/opt/avibe/regression-tools/bin/python -m pip install" in command
+    assert "--only-binary=:all: --no-deps -r /opt/avibe/source/scripts/requirements-regression.txt" in command
+    assert "/opt/avibe/venv" not in command
+    requirements = Path(incus_regression.__file__).with_name("requirements-regression.txt").read_text()
+    pins = [line for line in requirements.splitlines() if line and not line.startswith("#")]
+    assert len(pins) == 1 and re.fullmatch(r"uv==\d+\.\d+\.\d+", pins[0])
 
 
 @pytest.mark.parametrize("venv_exists", [False, True])
-def test_python_environment_is_created_by_its_owner_and_reinstalled_only_when_needed(venv_exists: bool) -> None:
+@pytest.mark.parametrize("force_deps", [False, True])
+def test_python_environment_is_owned_and_lock_synced_on_every_update(venv_exists: bool, force_deps: bool) -> None:
     commands = []
 
     class RecordingRunner:
@@ -5489,14 +5519,26 @@ def test_python_environment_is_created_by_its_owner_and_reinstalled_only_when_ne
     fingerprints = {"python": "p", "ui_deps": "d", "ui_source": "s"}
     incus_regression.update_dependencies_and_build(
         RecordingRunner(), target, previous_fingerprints=fingerprints, next_fingerprints=fingerprints,
-        force_deps=False, build_ui=True, force_ui=False, remote=None,
+        force_deps=force_deps, build_ui=True, force_ui=False, remote=None,
+        source_commit="123456789abcdef0123456789abcdef0123456789a",
     )
 
-    creation = [command for command in commands if "python3 -m venv" in command]
+    creation = [command for command in commands if "python3 -m venv --without-pip /opt/avibe/venv" in command]
     assert len(creation) == (0 if venv_exists else 1)
-    assert all("sudo -H -u avibe" in command for command in creation)
-    assert any("pip install -e ." in command for command in commands) is not venv_exists
-    assert all("chown" not in command for command in commands)
+    assert all("sudo -H -u avibe" in command for command in commands)
+    lock_check = next(command for command in commands if "/bin/uv lock --check" in command)
+    python = "/opt/avibe/venv/bin/python" if venv_exists else "python3"
+    assert f"--python {python} --no-python-downloads" in lock_check
+    if creation:
+        assert commands.index(lock_check) < commands.index(creation[0])
+    sync = next(command for command in commands if "/bin/uv sync --locked" in command)
+    assert "--no-default-groups --python /opt/avibe/venv/bin/python --no-python-downloads" in sync
+    assert ("--reinstall" in sync) is force_deps
+    for command in (lock_check, sync):
+        assert "UV_PROJECT_ENVIRONMENT=/opt/avibe/venv" in command
+        assert "SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0.dev0+123456789abc" in command
+        assert "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_OS=0.0.0.dev0+123456789abc" in command
+    assert all("chown" not in command and "> /etc/avibe-regression.env" not in command for command in commands)
 
 
 def test_python_environment_creation_failure_stops_deployment() -> None:
@@ -5508,9 +5550,10 @@ def test_python_environment_creation_failure_stops_deployment() -> None:
             commands.append(joined)
             if "pyvenv.cfg" in joined:
                 return subprocess.CompletedProcess(command, 1)
-            assert "python3 -m venv" in joined
-            assert "|| true" not in joined
-            raise subprocess.CalledProcessError(1, command)
+            if "python3 -m venv --without-pip /opt/avibe/venv" in joined:
+                assert "|| true" not in joined
+                raise subprocess.CalledProcessError(1, command)
+            return subprocess.CompletedProcess(command, 0)
 
     target = incus_regression.RegressionTarget("master", "master", "avr-master", "avibe-master", 15130, "127.0.0.1", 5123)
     with pytest.raises(subprocess.CalledProcessError):
@@ -5518,7 +5561,8 @@ def test_python_environment_creation_failure_stops_deployment() -> None:
             FailingRunner(), target, previous_fingerprints={}, next_fingerprints={},
             force_deps=False, build_ui=True, force_ui=False, remote=None,
         )
-    assert len(commands) == 2
+    assert "python3 -m venv --without-pip /opt/avibe/venv" in commands[-1]
+    assert not any("uv sync" in command or "npm" in command for command in commands)
 
 
 def test_force_ui_rebuilds_with_realtime_enabled_by_default() -> None:
@@ -5553,7 +5597,8 @@ def test_force_ui_rebuilds_with_realtime_enabled_by_default() -> None:
     joined = "\n".join(commands)
     assert "cd ui && npm ci" in joined
     assert "cd ui && npm run build" in joined
-    assert "pip install -e ." not in joined
+    assert "/bin/uv sync --locked" in joined
+    assert "--reinstall" not in joined
 
 
 def run_ui_update(
@@ -5657,7 +5702,7 @@ def test_missing_ui_dist_overrides_no_build_ui_before_editable_install() -> None
     )
 
     joined = "\n".join(commands)
-    install_index = next(i for i, command in enumerate(commands) if "pip install -e ." in command)
+    install_index = next(i for i, command in enumerate(commands) if "/bin/uv sync --locked" in command)
     build_index = next(i for i, command in enumerate(commands) if "npm run build" in command)
     assert "test -d ui/dist && test -f ui/dist/index.html" in joined
     assert "cd ui && npm ci" in joined
@@ -5934,7 +5979,8 @@ def test_missing_ui_dist_rebuilds_even_when_python_is_unchanged() -> None:
     joined = "\n".join(commands)
     assert "test -d ui/dist && test -f ui/dist/index.html" in joined
     assert "cd ui && npm run build" in joined
-    assert "pip install -e ." not in joined
+    assert "/bin/uv sync --locked" in joined
+    assert "--reinstall" not in joined
 
 
 @pytest.mark.parametrize("invalid_timeout", ["-1", "0", "not-an-integer", "0.5"])

@@ -71,6 +71,7 @@ OPENCODE_INSTALL_SH = (
 REGRESSION_NODE_MAJOR = 22
 REGRESSION_NODE_MIN_VERSION = "22.23.4"
 VENV_DIR = "/opt/avibe/venv"
+REGRESSION_TOOLS_DIR = "/opt/avibe/regression-tools"
 METADATA_DIR = "/var/lib/avibe-regression"
 METADATA_PATH = f"{METADATA_DIR}/metadata.json"
 FINGERPRINT_PATH = f"{METADATA_DIR}/fingerprints.json"
@@ -2076,7 +2077,7 @@ def invalidate_fingerprints(runner: Runner, target: RegressionTarget, *, remote:
     A recorded fingerprint claims "the artifact in the instance was produced
     from this input". The moment a rebuild starts, that claim stops holding for
     the artifact it names: ``npm ci`` empties ``ui/node_modules``, ``npm run
-    build`` writes into ``ui/dist``, ``pip install`` rewrites the venv. A run
+    build`` writes into ``ui/dist``, ``uv sync`` rewrites the venv. A run
     that dies mid-build would otherwise leave the old claim on disk, and if the
     next update syncs the same inputs again -- a rollback, or a rerun after
     fixing the environment rather than the source -- that stale claim licenses
@@ -2507,6 +2508,25 @@ def normalize_runtime_config(runner: Runner, target: RegressionTarget, *, remote
     )
 
 
+def ensure_regression_uv(runner: Runner, target: RegressionTarget, *, remote: str | None) -> str:
+    """Provision declared installer tooling outside the venv exact sync prunes."""
+    tools = shlex.quote(REGRESSION_TOOLS_DIR)
+    requirements = shlex.quote(f"{SOURCE_DIR}/scripts/requirements-regression.txt")
+    runner.run(
+        tenant_exec(
+            target,
+            f"set -eu\n"
+            f"if [ ! -x {tools}/bin/python ] || [ ! -x {tools}/bin/pip ]; then\n"
+            f"  python3 -m venv {tools}\n"
+            f"fi\n"
+            f"{tools}/bin/python -m pip install --disable-pip-version-check "
+            f"--only-binary=:all: --no-deps -r {requirements}",
+            remote=remote,
+        )
+    )
+    return f"{REGRESSION_TOOLS_DIR}/bin/uv"
+
+
 def update_dependencies_and_build(
     runner: Runner,
     target: RegressionTarget,
@@ -2517,6 +2537,7 @@ def update_dependencies_and_build(
     build_ui: bool,
     force_ui: bool,
     remote: str | None,
+    source_commit: str = "",
 ) -> set[str]:
     """Bring the instance's artifacts up to date; report which ones it reconciled.
 
@@ -2530,23 +2551,27 @@ def update_dependencies_and_build(
     venv_exists = runner.run(
         tenant_exec(
             target,
-            f"test -f {venv}/pyvenv.cfg && test -x {venv}/bin/python && test -x {venv}/bin/pip",
+            f"test -f {venv}/pyvenv.cfg && test -x {venv}/bin/python",
             remote=remote,
         ),
         check=False,
     ).returncode == 0
+    uv = ensure_regression_uv(runner, target, remote=remote)
+    # Source sync omits .git and preserving the runtime env may preserve an old
+    # SCM override. Scope the current identity to these builds, not that env file.
+    version = f"0.0.0.dev0+{source_commit[:12]}" if source_commit else "0.0.0.dev0"
+    build_env = [
+        "env", f"UV_PROJECT_ENVIRONMENT={VENV_DIR}", "UV_FROZEN=0",
+        f"SETUPTOOLS_SCM_PRETEND_VERSION={version}", f"SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_OS={version}",
+    ]
+    # sync can create/recreate an environment before validating its lock. Check
+    # first so a missing/stale lock cannot mutate the app venv or start a UI build.
+    # An existing venv must select its own interpreter, not a different PATH one.
+    python = f"{VENV_DIR}/bin/python" if venv_exists else "python3"
+    lock_check = [uv, "lock", "--check", "--python", python, "--no-python-downloads"]
+    runner.run(tenant_exec(target, shlex.join([*build_env, *lock_check]), remote=remote))
     if not venv_exists:
-        runner.run(tenant_exec(target, f"python3 -m venv {venv}", remote=remote))
-    python_changed = (
-        force_deps
-        or not venv_exists
-        or previous_fingerprints.get("python") != next_fingerprints.get("python")
-        or not previous_fingerprints
-    )
-    if python_changed:
-        runner.run(tenant_exec(target, f"{VENV_DIR}/bin/python -m pip install -U pip wheel", remote=remote))
-    else:
-        print("Python dependency fingerprint unchanged; skipping pip install.")
+        runner.run(tenant_exec(target, f"python3 -m venv --without-pip {venv}", remote=remote))
     needs_ui_dist = not instance_ui_dist_exists(runner, target, remote=remote)
     should_build_ui = build_ui or needs_ui_dist
     if needs_ui_dist and not build_ui:
@@ -2580,10 +2605,13 @@ def update_dependencies_and_build(
             )
         else:
             print("UI source fingerprint unchanged; skipping npm run build.")
-    if python_changed:
-        runner.run(tenant_exec(target, f"{VENV_DIR}/bin/pip install -e .", remote=remote))
-    # ``python`` is always reconciled: it either just installed, or it was
-    # skipped because the previous fingerprint already equalled this one.
+    # Old fingerprints described pyproject/lock inputs, not the installed set.
+    # Audit every update, including legacy equal-fingerprint environments and
+    # drift. uv itself reuses matching packages and removes unselected ones.
+    sync = [uv, "sync", "--locked", "--no-default-groups", "--python", f"{VENV_DIR}/bin/python", "--no-python-downloads"]
+    if force_deps:
+        sync.append("--reinstall")
+    runner.run(tenant_exec(target, shlex.join([*build_env, *sync]), remote=remote))
     reconciled = {"python"}
     if should_build_ui:
         reconciled |= {"ui_deps", "ui_source"}
@@ -2933,6 +2961,7 @@ def cmd_up(args: argparse.Namespace) -> int:
                 build_ui=not args.no_build_ui,
                 force_ui=args.force_ui,
                 remote=args.remote,
+                source_commit=identity.commit,
             )
             # ``prepare_show_runtime`` below is unconditional, so the run either
             # reconciles the show runtime or fails outright.
@@ -3357,7 +3386,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Allow reset-mode config/all to delete Avibe Cloud pairing state from the master regression environment.",
     )
     up.add_argument("--clean", action="store_true", help="Wipe the synced source completely, including the UI dependency tree and build output a sync normally keeps.")
-    up.add_argument("--force-deps", action="store_true", help="Force Python dependency refresh.")
+    up.add_argument("--force-deps", action="store_true", help="Reinstall Python dependencies at their locked versions.")
     up.add_argument("--no-build-ui", action="store_true", help="Skip npm ci/build for UI assets.")
     up.add_argument("--force-ui", action="store_true", help="Force npm ci and npm run build even when the UI fingerprint is unchanged.")
     up.set_defaults(func=cmd_up)

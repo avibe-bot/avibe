@@ -156,9 +156,12 @@ uncommitted source files, and similarly named files inside test fixtures remain
 source inputs. When checking a master deployment against its Git tree, compare
 the filtered files and symlinks; empty directories carry no versioned content.
 UI assets are built in the instance. Editable installation generates its own
-Python version file when installation is needed; otherwise the source checkout
-supports its build-less version fallback, and `/api/version` identifies the
-deployed commit from the source receipt. Show Runtime uses the regression
+Python version file when installation is needed, using a build-local development
+version derived from the synced source commit (no `.git` is sent). An unchanged
+editable install need not rebuild; the source checkout then supports its
+build-less version fallback. `/api/version` identifies the deployed commit from
+the source receipt, not install-time metadata. The build override does not
+rewrite the preserved runtime environment. Show Runtime uses the regression
 archive prepared below, not a host's generated release-packaging manifest.
 
 Show Runtime resolves the upstream commit on each update, but builds only when
@@ -382,7 +385,8 @@ Useful flags:
 - `--seed none`: build a worktree environment as a fresh install; see above.
 - `--env-file <path>`: load this env file instead of discovering `.env.regression`.
 - `--clean`: compatibility flag; normal syncs already remove stale source files.
-- `--force-deps`: force Python dependency refresh.
+- `--force-deps`: reinstall Python dependencies at their locked versions (including
+  repairing damaged installed files); never resolve newer versions.
 - `--no-build-ui`: skip UI asset build.
 - `--dry-run`: print the planned Incus commands without changing the host.
 
@@ -446,10 +450,30 @@ The runner fingerprints dependency inputs:
 - UI source: `ui/src`, `ui/public`, `ui/index.html`, Vite config, and TypeScript config
 - Show Runtime provider/ref
 
-If fingerprints are unchanged, the runner skips unnecessary Python dependency
-installation. Source syncs replace the source tree, so UI dependencies and UI
-assets are rebuilt for each update to avoid serving stale or missing `ui/dist`
-content.
+Python dependencies are audited and exact-synchronized on **every** update,
+including unchanged fingerprints from older runner versions. The pinned `uv`
+installer is declared in `scripts/requirements-regression.txt` and provisioned
+as user `avibe` in `/opt/avibe/regression-tools`, outside both synced source and
+the application venv. It validates `uv.lock` before creating/changing the app
+venv or building UI, then runs `uv sync --locked --no-default-groups` against
+`/opt/avibe/venv` after UI assets are available. An existing venv keeps its own
+Python interpreter; the runner never downloads another Python.
+
+A missing or stale lock fails the update rather than resolving or rewriting it.
+Source sync and service stop still precede this check, and existing failure
+recovery remains: it is a boundary on app-venv/UI mutation, not a transactional
+rollback of the whole update.
+Only runtime dependencies and the editable project are selected, not dev groups
+or optional extras. Versions can upgrade or downgrade to the lock; unselected
+packages (including manually installed test tools) are removed from the product
+venv. Keep test tooling in a separate environment. `uv` may retain the legacy
+venv's bootstrap `pip`; build-isolation requirements retain their existing
+build-time resolution policy.
+
+The Python fingerprint remains an input receipt, not permission to skip checking
+the installed set. UI dependencies and assets still use fingerprints together
+with on-disk availability: reusable trees can be kept, while missing dependencies
+or bundles are rebuilt even when fingerprints match.
 
 ## Secret Safety
 
