@@ -5,7 +5,9 @@ from unittest.mock import AsyncMock, Mock, call, patch
 
 import pytest
 
+from core.prompt_registry import prompt_text
 from modules.agents.codex.agent import CodexAgent, CodexPromptRefreshUnavailableError
+from modules.im import MessageContext
 from tests.codex_generation_support import acquire_returning, init_generation_state
 
 
@@ -216,3 +218,20 @@ async def test_dispatch_renders_once_even_for_empty_prompt_and_transport_recover
     agent._start_turn.assert_awaited_once_with(
         fresh if recover else transport, request, "thread-contract", developer_instructions=prompt
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model,gpt", [("gpt-5.5", True), ("claude-sonnet-4-6", False), (None, False)])
+async def test_developer_instructions_follow_the_thread_model(monkeypatch, model, gpt):
+    monkeypatch.setattr("core.managed_skills.resolve_skills", lambda *_args, **_kwargs: [])
+    agent = _agent({})
+    agent.controller.config = SimpleNamespace(platform="avibe", reply_enhancements=True)
+    agent.controller.get_codex_overrides.return_value = (None, model, "high")
+    request = _request()
+    request.context = MessageContext(
+        user_id="reviewer", channel_id="review", platform="avibe",
+        platform_specific={"agent_session_id": "contract-session"},
+    )
+    assert agent._resolve_codex_agent_settings(request)[1] == model
+    instructions = await agent._build_thread_developer_instructions(request)
+    assert instructions.count(prompt_text("gpt-reporting-prompt")) == int(gpt)

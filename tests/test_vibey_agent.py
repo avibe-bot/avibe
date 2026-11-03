@@ -67,6 +67,7 @@ from core.agent_core.messages import (
 )
 from core.agent_core.tools.base import CallInstance, JobStatus, ToolResult, ToolSpec
 from core.message_dispatcher import ConsolidatedMessageDispatcher
+from core.prompt_registry import prompt_text
 from core.services.agent_steering import ActiveSteerTarget, SteerOutcome, SteerRequest
 from core.session_turns import SessionTurnManager
 from modules.agents.vibey import VibeyAgent
@@ -2617,6 +2618,21 @@ async def test_the_system_prompt_lists_every_tool_the_run_offers(engine, session
     assert "Use edit for precise changes" in system
     # Short text between tool calls may never reach the user's transcript (the shared interim threshold).
     assert "- Only your final reply is reliably shown to the user; put anything the user must see in it" in system
+
+
+@pytest.mark.parametrize("model,gpt", (("gpt-5.5", True), ("test-model", False)))
+async def test_the_gpt_reporting_section_follows_the_model_the_turn_is_sent_to(
+    engine, session, tmp_path, published, model, gpt
+) -> None:
+    harness = _Harness(engine, tmp_path, "avibe", [[Done(assistant("ok"))]])
+    request = harness.request("hi")
+    request.vibe_agent_model = model
+
+    await harness.agent.handle_message(request)
+
+    sent = harness.provider.requests[0]
+    assert sent.endpoint.model_id == model
+    assert sent.system.count(prompt_text("gpt-reporting-prompt")) == int(gpt)
 
 
 @pytest.mark.parametrize("finds_rg", (True, False))

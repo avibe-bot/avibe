@@ -274,6 +274,34 @@ def test_evidence_led_principle_is_shared_by_production_export_and_studio(monkey
         assert _PREVIOUS_VERIFICATION_PRINCIPLE not in text
 
 
+@pytest.mark.parametrize("backend", AGENT_BACKENDS)
+@pytest.mark.parametrize("model,gpt", [
+    ("gpt-5.5", True), ("openai/gpt-5.4-codex", True), ("avibe-0123456789abcdef01234567/o3", True),
+    ("claude-opus-4-7", False), ("anthropic/claude-sonnet-4-6", False), ("gemini-3-pro", False), ("", False),
+])
+def test_gpt_reporting_follows_the_principles_only_for_gpt_models(monkeypatch, backend, model, gpt):
+    _environment(monkeypatch)
+    request = _inputs(backend)
+    request["options"]["model"] = model
+    result = render_prompt_context(request)
+    options = dict(request["options"])
+    options["backend"] = backend
+    options["context"] = MessageContext(**options["context"])
+    production = build_system_prompt_injection(agent_instructions=request["agent_instructions"], **options)
+    if backend == "codex":
+        production = CodexAgent._render_developer_prompt_snapshot(production)
+    assert result["text"] == production
+
+    ids = [block["id"] for block in result["blocks"]]
+    guidance = prompt_text("gpt-reporting-prompt")
+    assert production.count(guidance) == int(gpt)
+    assert ("gpt-reporting-prompt" in ids) is gpt
+    if gpt:
+        assert ids[ids.index("agent-working-principles") + 1] == "gpt-reporting-prompt"
+    without = dict(request, options={key: value for key, value in request["options"].items() if key != "model"})
+    assert result["text"].replace(guidance, "") == render_prompt_context(without)["text"]
+
+
 def test_runtime_snapshot_has_only_tags_and_verbatim_content():
     prompt = "User-authored 内容 {unchanged}\n"
     assert prompt_text("runtime-snapshot-open") == "<avibe_runtime_instructions>\n\n"
@@ -362,7 +390,10 @@ def test_exported_sources_cover_all_rendered_branches(monkeypatch):
         AGENT_BACKENDS, ("off", "managed", "self-managed"), ("empty", "manual", "pages"),
     ):
         _environment(monkeypatch, history, skill_mode)
-        result = render_prompt_context(_inputs(backend, history, skill_mode))
+        request = _inputs(backend, history, skill_mode)
+        if backend == "codex":
+            request["options"]["model"] = "gpt-5.5"
+        result = render_prompt_context(request)
         visited.update(block["id"] for block in result["blocks"])
     assert visited == {module.id for module in PROMPT_MODULES}
 

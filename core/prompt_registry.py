@@ -76,6 +76,8 @@ PROMPT_MODULES: tuple[PromptModule, ...] = (
     PromptModule("runtime-snapshot-open", "Codex Runtime Snapshot Start", "runtime-snapshot-open.md", trailing_newlines=2),
     PromptModule("base-capabilities-intro", "Base Capabilities Intro", "base-capabilities-intro.md", trailing_newlines=2),
     PromptModule("agent-working-principles", "Agent Working Principles", "agent-working-principles.md", trailing_newlines=2),
+    # Only for a turn whose resolved model is an OpenAI GPT model (``model_vendor``).
+    PromptModule("gpt-reporting-prompt", "GPT Reporting", "gpt-reporting.md", trailing_newlines=2),
     # A Bot's own sections (docs/plans/bots.md): byte-stable for every Turn of the Bot and for its forks.
     PromptModule("bot-identity-prompt", "You Are a Bot", "bot-identity.md", trailing_newlines=2, placeholders=("display_name", "handle", "role_sentence", "session_id")),
     PromptModule("bot-memory-prompt", "Bot Memory", "bot-memory.md", trailing_newlines=2, placeholders=("workdir", "session_id")),

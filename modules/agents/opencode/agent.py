@@ -1857,6 +1857,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 skills_cwd=request.working_path if binding_bound else None,
                 skills_project_base=project_base,
                 skill_catalog_sink=skill_catalog_sink,
+                model=model_str,
             )
             raw_settings_key = _raw_settings_key_from_session_key(request.session_key)
             platform_payload = request.context.platform_specific or {}

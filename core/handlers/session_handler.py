@@ -703,6 +703,7 @@ class SessionHandler(BaseHandler):
             working_path=working_path,
             claude_config=launch_inputs.config if launch_inputs is not None else None,
             agent_allowed_tools=None,
+            model=current_model,
         )
         if await self._replace_stale_cached_claude_client(
             composite_key,
@@ -779,6 +780,7 @@ class SessionHandler(BaseHandler):
             working_path=working_path,
             claude_config=launch_inputs.config if launch_inputs is not None else None,
             agent_allowed_tools=resolved_agent.allowed_tools,
+            model=desired_model,
         )
         if await self._replace_stale_cached_claude_client(
             composite_key,
@@ -1696,6 +1698,7 @@ class SessionHandler(BaseHandler):
             working_path=working_path,
             claude_config=claude_config,
             agent_allowed_tools=agent_allowed_tools,
+            model=runtime_model,
         )
 
         # Echo native input frames so the long-lived receiver can correlate
@@ -1940,6 +1943,7 @@ class SessionHandler(BaseHandler):
         skill_catalog_sink: list[dict] | None = None,
         claude_config: Any = None,
         agent_allowed_tools: list[str] | None = None,
+        model: Optional[str],
     ) -> str | Dict[str, str]:
         if claude_config is None:
             claude_config = self.config.claude
@@ -1964,6 +1968,7 @@ class SessionHandler(BaseHandler):
             skills_cwd=working_path,
             skills_project_base=managed_skill_project_base(context),
             skill_catalog_sink=skill_catalog_sink,
+            model=model or "",
         )
 
         if base_prompt:
