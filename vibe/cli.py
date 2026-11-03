@@ -8735,7 +8735,7 @@ def _vault_secret_row(secret: dict) -> dict:
             "policy": secret.get("policy"),
             "signing_addresses": secret.get("signing_addresses"),
             "bitcoin_signing_warning": (
-                "Protected Bitcoin transaction signing is not supported yet. BTC addresses are for identifying existing funds, not a promise of spend support."
+                "Protected Bitcoin signing is limited to typed, bounded Taproot key-path approvals in a compatible sandbox; legacy and SegWit-v0 inputs remain unsupported, and network labels are requester-selected metadata."
                 if secret.get("kind") == "keypair" and secret.get("protection") == "protected"
                 else "Taproot requires schnorr-secp256k1-bip341-keypath and a supporting avault build; raw BIP340 cannot spend these Taproot addresses."
                 if secret.get("kind") == "keypair" and (secret.get("signing_addresses") or {}).get("btc_taproot")

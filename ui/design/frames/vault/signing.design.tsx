@@ -1,5 +1,5 @@
 // Signing capability is shown alongside existing addresses, without changing keys.
-import { VaultApprovalCard } from '@/components/ui/vault-approval-card';
+import { VaultApprovalCard, VaultSigningIdentity } from '@/components/ui/vault-approval-card';
 import { VaultsPage } from '@/components/workbench/VaultsPage';
 import type { VaultRequest, VaultSecret } from '@/context/ApiContext';
 
@@ -44,6 +44,12 @@ const designFrames = frames([
     name: 'keypath', title: 'Vault · BIP86 approval identity',
     width: 640, height: 460, status: 'shipped', fixtures,
     render: () => <div className="p-6"><VaultApprovalCard onResolved={noop} onCancel={noop} request={request} /></div>,
+  },
+  {
+    name: 'protected-keypath', title: 'Vault · Protected Bitcoin secure-window warning',
+    width: 640, height: 180, status: 'shipped', fixtures,
+    // The same view as the real approval card, without its custody/network container.
+    render: () => <div className="p-6"><VaultSigningIdentity scheme="schnorr-secp256k1-bip341-keypath" addresses={standard.signing_addresses ?? null} protectedKey /></div>,
   },
   {
     name: 'raw', title: 'Vault · Raw BIP340 is not the Taproot address',

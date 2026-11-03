@@ -238,6 +238,9 @@ jobs:
               npm run test:badge-triggers
               # Against the built app: StrictMode's dev double-mount drops the picker's first open.
               npm run test:workbench-general-build -- composer-mention-picker.spec.ts
+              # The Workbench shell measured in a browser (sidebar, Settings frame, phone home).
+              # Its own line here: on lane 2's workbench-general line it would lengthen the longer lane.
+              npm run test:workbench-general -- geometry.spec.ts
           - lane: 2
             suites: |
               npm run test:project-order

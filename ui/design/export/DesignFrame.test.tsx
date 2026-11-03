@@ -34,6 +34,8 @@ const index = {
     { id: 'sidebar/bots/three', title: '伙伴 · 3 个伙伴', status: 'approved', theme: 'light', width: 248, height: 190, hash: 'h1', src: 'shots/sidebar/bots/three.light.png' },
     { id: 'sidebar/bots/three', title: '伙伴 · 3 个伙伴', status: 'approved', theme: 'dark', lang: 'en', width: 248, height: 190, hash: 'h2', src: 'shots/sidebar/bots/three.dark.png' },
     { id: 'models/page/add-subscription-menu', title: '添加订阅', status: 'shipped', theme: 'light', width: 1440, height: 1200, interaction: true, hash: 'h3', src: 'shots/models/page/add-subscription-menu.light.png' },
+    // avibe-bot-backend's export, into the same Show Page.
+    { id: 'console/home/dual-role', title: '控制面板', status: 'shipped', theme: 'light', lang: 'zh', width: 1440, height: 2350, hash: 'h4', src: 'avibe-bot/shots/console/home/dual-role.light.png', canvas: 'avibe-bot/canvas' },
   ],
 };
 
@@ -88,5 +90,14 @@ describe('DesignFrame', () => {
     expect(document.querySelector('iframe')).toBeNull();
     // Opening it alone still runs it live.
     expect(screen.getByText('单独打开').getAttribute('href')).toBe('./design/canvas/design.html?frame=models%2Fpage%2Fadd-subscription-menu&theme=light&lang=zh');
+  });
+
+  it('runs a frame exported from another repository on that repository\'s canvas', async () => {
+    installAnnotationApi(false);
+    render(<DesignFrame id="console/home/dual-role" themes={['light']} />);
+
+    const frame = await screen.findByTitle(/控制面板/);
+    expect(frame.getAttribute('src')).toBe('./design/avibe-bot/canvas/design.html?frame=console%2Fhome%2Fdual-role&theme=light&lang=zh');
+    expect(screen.getByText('截图').getAttribute('href')).toBe('./design/avibe-bot/shots/console/home/dual-role.light.png?v=h4');
   });
 });

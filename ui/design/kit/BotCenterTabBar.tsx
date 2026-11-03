@@ -1,22 +1,29 @@
-// The raised center of the mobile tab bar is the main Bot (owner direction,
-// 2026-11-02). Tap: open its conversation. Press and hold: speak to it; the
-// recording overlay (MainBotVoice) takes over above the bar. There is no
-// new-session sheet here any more; new sessions start from a project row.
+// The main Bot in the middle of the tab bar while a press turns into speech
+// (owner direction, 2026-11-02). The bar and a tap on its center are shipped
+// (WorkbenchMobileTabBar); pressing and holding is not yet, so this draws the
+// shipped bar's tabs around the center in each phase of a press. The recording
+// overlay (MainBotVoice) takes over above the bar.
 import { Loader2, Mic } from 'lucide-react';
 import clsx from 'clsx';
 
 import { MobileNavLink, type ShellNavItem } from '@/components/MobileChrome';
+import { BotFace } from '@/components/workbench/bots/BotFace';
 import { useBots } from '@/context/BotsContext';
 import { useWorkbenchInbox } from '@/context/WorkbenchInboxContext';
 
-import { BotFace } from './BotFace';
+import { WithShippedTabs } from '../shell/PhoneScreen';
 import { useDraft } from './draft';
 
 /** Where a press on the center is: resting, pressed (not yet a hold), recording,
  *  recording with the finger in the cancel zone, or released and settling. */
 export type CenterPhase = 'idle' | 'pressed' | 'recording' | 'armed' | 'settling';
 
-export function BotCenterTabBar({ items, phase = 'idle' }: { items: ShellNavItem[]; phase?: CenterPhase }) {
+/** The shipped tabs around the center in `phase`. */
+export function BotCenterTabBar({ inboxBadge, phase = 'idle' }: { inboxBadge: number; phase?: CenterPhase }) {
+  return <WithShippedTabs inboxBadge={inboxBadge}>{(items) => <Bar items={items} phase={phase} />}</WithShippedTabs>;
+}
+
+function Bar({ items, phase }: { items: ShellNavItem[]; phase: CenterPhase }) {
   const draft = useDraft();
   const { mainBot, displayName, statusBySession } = useBots();
   const { unreadBySession } = useWorkbenchInbox({ feed: false });
@@ -47,7 +54,7 @@ export function BotCenterTabBar({ items, phase = 'idle' }: { items: ShellNavItem
             >
               {phase === 'recording' && <span className="absolute -inset-2 animate-ping rounded-full border-2 border-mint/50 motion-reduce:animate-none" aria-hidden="true" />}
               <BotFace
-                bot={mainBot}
+                avatar={mainBot.avatar}
                 name={name}
                 size={50}
                 unread={voice ? 0 : unreadBySession[mainBot.session_id] ?? 0}

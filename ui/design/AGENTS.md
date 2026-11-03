@@ -6,7 +6,7 @@ Avibe's UI designs live here. A frame is a static React render of one surface in
 
 - `frames/<area>/<name>.design.tsx`: one file per surface; it default-exports `frames([...])`, one frame per state. A frame id is `<area>/<name>/<state>`.
 - `kit/`: components a design proposes that are not shipped yet. They use only product tokens (Tailwind classes from `src/index.css`), assets, and `src/components/ui` primitives.
-- `shell/`: the providers frames render in (`DesignShell`), fixture builders (`fixtures.ts`), the screens as AppShell lays them out (`SidebarColumn`, `PhoneScreen`), the fixed clock, frame-local Web Storage, and the network stub.
+- `shell/`: the providers frames render in (`DesignShell`), fixture builders (`fixtures.ts`), the screens as AppShell lays them out (`SidebarColumn`, `DesktopScreen`, `PhoneScreen`), the fixed clock, frame-local Web Storage, and the network stub.
 
 ## Rules
 
@@ -15,7 +15,7 @@ Avibe's UI designs live here. A frame is a static React render of one surface in
 - Frames hold no logic: no handlers, no effects, no fetching. State comes from fixtures (`WorkbenchFixtures`): a provider that reads the API gets its response from `fixtures.api` or a typed fixture field, a remembered preference comes from `fixtures.storage`, and a view a page reads from its URL comes from the frame's `route` (path and query). Add a fixture field rather than mocking inside a frame.
 - Tokens only: no raw colors, sizes, or shadows that `src/index.css` does not define. Add a token there if one is missing.
 - Each frame states its size, its themes (default both), and its status: `proposed` (being designed), `approved` (signed off, ready to build), or `shipped` (renders shipped components only). A proposal becomes `approved` in the PR the owner approves.
-- Kit copy is draft copy and may be written inline; it moves to `src/i18n` when the component ships.
+- Kit copy is draft copy and may be written inline; it moves to `src/i18n` when the component ships. Proposed copy for a string a shipped component already reads goes in the frame's `copy` fixture, by locale key, and moves to `src/i18n` the same way.
 - When a shipped component mixes data hooks and markup, draw it whole; to redesign part of it, prefer splitting it into a view (props only) and a container, then draw the view.
 - Size a frame to include any popover, menu, or card it shows; set `hover` to capture a hover state, `click` (in order; name copy as `{t:<i18n key>}` so it works in both languages) to capture a state only a click opens, and `wait` when a read starts on a timer (a debounced search) or a click starts a timed transition (it is waited out again after each click). Prefer a fixture or the page's URL state over `click` when the product offers one.
 - Code that implements a design names its frame id (`ui/design: sidebar/bots/three`), not a description of a drawing.
@@ -31,7 +31,7 @@ Avibe's UI designs live here. A frame is a static React render of one surface in
 
 Show designs in your own Session's Show Page, next to your explanation:
 
-1. `npm run design:export -- <id prefix>` copies the live canvas, a screenshot of each frame, and `frames.json` into `public/design/` of this Session's Show Page, and writes `src/design/DesignFrame.tsx` there.
+1. `npm run design:export -- <id prefix>` copies the live canvas, a screenshot of each frame, and `frames.json` into `public/design/` of this Session's Show Page, and writes `src/design/DesignFrame.tsx` there. avibe-bot-backend's `design:export` writes into the same places (its canvas under `public/design/avibe-bot/`), and `frames.json` indexes both, so one page can embed frames of either repository.
 2. In a page: `import { DesignFrame } from "../design/DesignFrame"`, then `<DesignFrame id="sidebar/bots/three" />`. Each frame runs the real components in an iframe (crisp, scalable, hover and popovers work) and links to its screenshot; a frame with `hover` or `click` is shown as its screenshot, which holds that state.
 3. While the Show Page's annotation is on, each frame is drawn as its screenshot so the overlay can reach it; an annotation names the frame (`设计帧 <id>`) and theme. Read it back to the frame file before you change anything.
 

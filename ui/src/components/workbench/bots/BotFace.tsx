@@ -1,14 +1,16 @@
 // A Bot's avatar with the strip's signals (BotStrip): a cyan unread count at the
-// top right and a pulsing mint dot at the bottom right while a Turn runs.
+// top right and a pulsing mint dot at the bottom right while a Turn runs. The phone's
+// center tab, a Bot conversation's header, and the Bot switch sheet draw it
+// (ui/design: mobile/workbench-tab/team, mobile/bot-conversation/switch).
 import clsx from 'clsx';
 
 import { BotAvatar } from '@/components/ui/bot-avatar';
-import type { Bot } from '@/lib/bots';
+import type { BotAvatar as BotAvatarSpec } from '@/lib/bots';
 
 const unreadLabel = (count: number) => (count > 99 ? '99+' : String(count));
 
 export function BotFace({
-  bot,
+  avatar,
   name,
   size,
   unread = 0,
@@ -16,7 +18,7 @@ export function BotFace({
   dotWell = 'bg-surface',
   className,
 }: {
-  bot: Bot;
+  avatar: BotAvatarSpec | null;
   name: string;
   size: number;
   unread?: number;
@@ -27,7 +29,7 @@ export function BotFace({
 }) {
   return (
     <span className={clsx('relative inline-grid shrink-0', className)}>
-      <BotAvatar avatar={bot.avatar} name={name} size={size} />
+      <BotAvatar avatar={avatar} name={name} size={size} />
       {unread > 0 && (
         <span className="absolute -right-1.5 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-cyan px-1 font-mono text-3xs font-bold text-accent-foreground shadow-glow-xs-cyan">
           {unreadLabel(unread)}

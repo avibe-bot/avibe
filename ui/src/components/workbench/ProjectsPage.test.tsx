@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useParams } from 'react-router-dom';
 
 import { InstanceAuthorizationContext } from '../../context/InstanceAuthorizationContext';
 import type { ProjectSessionsState } from '../../context/WorkbenchProjectsContext';
@@ -22,6 +22,7 @@ const tree = vi.hoisted(() => ({
   sessions: [] as WorkbenchSession[],
   loadMore: vi.fn(),
   toggleExpanded: vi.fn(),
+  createSessionForProject: vi.fn(),
 }));
 
 vi.mock('../../context/WorkbenchInboxContext', () => ({
@@ -32,7 +33,7 @@ vi.mock('../../context/WorkbenchProjectsContext', () => ({
   useWorkbenchProjectsActions: () => ({
     renameProject: vi.fn(),
     archiveProject: vi.fn(),
-    createSessionForProject: vi.fn(),
+    createSessionForProject: tree.createSessionForProject,
     renameSession: vi.fn(),
   }),
   useWorkbenchProjectsTree: () => {
@@ -71,6 +72,7 @@ vi.mock('./useSessionActions', () => ({
 }));
 
 vi.mock('./NewProjectDialog', () => ({ NewProjectDialog: () => null }));
+vi.mock('./bots/BotStrip', () => ({ BotStrip: () => null }));
 vi.mock('./ProjectAgentsMdDialog', () => ({ ProjectAgentsMdDialog: () => null }));
 vi.mock('./ProjectSettingsDialog', () => ({ ProjectSettingsDialog: () => null }));
 
@@ -106,6 +108,8 @@ const session = (index: number): WorkbenchSession =>
     metadata: {},
   }) as WorkbenchSession;
 
+const ChatProbe = () => <div data-testid="chat">{useParams().sessionId}</div>;
+
 function renderPage() {
   const view = render(
     <InstanceAuthorizationContext.Provider
@@ -117,7 +121,10 @@ function renderPage() {
       }}
     >
       <MemoryRouter initialEntries={['/projects']}>
-        <ProjectsPage />
+        <Routes>
+          <Route path="/projects" element={<ProjectsPage />} />
+          <Route path="/chat/:sessionId" element={<ChatProbe />} />
+        </Routes>
       </MemoryRouter>
     </InstanceAuthorizationContext.Provider>,
   );
@@ -129,6 +136,7 @@ beforeEach(() => {
   tree.sessions = Array.from({ length: 16 }, (_, index) => session(index + 1));
   tree.loadMore.mockReset();
   tree.toggleExpanded.mockReset();
+  tree.createSessionForProject.mockReset();
   clearMobileProjectsListSnapshot();
 });
 
@@ -182,6 +190,50 @@ describe('ProjectsPage mobile session window', () => {
     await user.click(screen.getByText('Alpha'));
     expect(screen.getByText('Session 8')).toBeTruthy();
     expect(screen.queryByText('Session 9')).toBeNull();
+    view.unmount();
+  });
+});
+
+// ui/design: mobile/workbench-tab/team: every project row has a ＋ beside its ⋯ that
+// starts a Session in that project, the same flow as the ⋯ menu's New session.
+describe('ProjectsPage new session from a project row', () => {
+  it('starts a Session in that project and opens it, remembering the list for the way back', async () => {
+    const user = userEvent.setup();
+    tree.createSessionForProject.mockResolvedValue({ id: 'ses_new' });
+    const view = renderPage();
+    await user.click(screen.getByRole('button', { name: 'projects.loadMore' }));
+
+    await user.click(screen.getByRole('button', { name: 'projects.newSessionIn' }));
+
+    expect(tree.createSessionForProject).toHaveBeenCalledWith('proj_a');
+    expect((await screen.findByTestId('chat')).textContent).toBe('ses_new');
+    expect(readMobileProjectsListSnapshot().visibleCounts).toEqual({ proj_a: 16 });
+    view.unmount();
+  });
+
+  it('starts one Session when the ＋ is tapped again before the first one answers', async () => {
+    const user = userEvent.setup();
+    let answer: (session: { id: string }) => void = () => {};
+    tree.createSessionForProject.mockReturnValue(new Promise((resolve) => { answer = resolve; }));
+    const view = renderPage();
+
+    const plus = screen.getByRole('button', { name: 'projects.newSessionIn' });
+    await user.click(plus);
+    await user.click(plus);
+    answer({ id: 'ses_new' });
+
+    expect((await screen.findByTestId('chat')).textContent).toBe('ses_new');
+    expect(tree.createSessionForProject).toHaveBeenCalledTimes(1);
+    view.unmount();
+  });
+
+  it('offers the ＋ only on the projects the reader can chat in', () => {
+    tree.projects = [
+      project,
+      { ...project, id: 'proj_b', display_name: 'Beta', capabilities: { ...project.capabilities, can_chat: false } },
+    ];
+    const view = renderPage();
+    expect(screen.getAllByRole('button', { name: 'projects.newSessionIn' })).toHaveLength(1);
     view.unmount();
   });
 });

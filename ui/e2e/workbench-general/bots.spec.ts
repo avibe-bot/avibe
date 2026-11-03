@@ -1031,3 +1031,40 @@ test('two open tabs follow a Bot removal and a switch change to the server\'s ba
   }
   for (const denied of denials) expect(denied).toEqual([]);
 });
+
+// ui/design: mobile/workbench-tab/team, mobile/bot-conversation/switch: on a phone the
+// Workbench tab carries the Bots strip and a ＋ on every project, the middle of the
+// bar is the main Bot, and a Bot's name in its conversation switches to another Bot.
+const PHONE = { width: 390, height: 844 };
+for (const theme of ['light', 'dark'] as const) {
+  test(`on a phone the main Bot is the bar's center, and a Bot's name switches Bots (${theme})`, async ({ page }) => {
+    const { denied } = await serveBots(page, 'zh', [MAIN, CSO, PM]);
+    await page.setViewportSize(PHONE);
+    await open(page, '/projects', { lang: 'zh', theme });
+
+    const nav = page.locator('nav.fixed.bottom-0');
+    await expect(nav.getByRole('link', { name: '工作台' })).toBeVisible();
+    await expect(nav.getByRole('button', { name: '新建', exact: true })).toHaveCount(0);
+    await expect(page.locator('main').getByRole('button', { name: '首席安全官，2 条未读', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: '在 中文项目 里新建会话' })).toBeVisible();
+    await page.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-phone-workbench-${theme}.png` });
+
+    await nav.getByRole('button', { name: '歪比：打开对话' }).click();
+    await expect(page).toHaveURL(/\/chat\/ses_main$/);
+    const header = page.locator('[data-chat-header]');
+    // The other Bots' unread replies ride on the switch: the security lead's 2.
+    const trigger = header.getByRole('button', { name: '歪比，切换伙伴' });
+    await expect(trigger.getByLabel('其他伙伴有 2 条未读')).toHaveText('2');
+    await trigger.click();
+    const sheet = page.getByRole('dialog', { name: '伙伴' });
+    await expect(sheet.getByRole('listitem')).toHaveCount(3);
+    await expect(sheet.locator('button[aria-current="page"]')).toContainText('歪比');
+    await page.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-phone-switch-${theme}.png` });
+
+    await sheet.getByRole('button', { name: /首席安全官/ }).click();
+    await expect(page).toHaveURL(/\/chat\/ses_cso$/);
+    await expect(sheet).toHaveCount(0);
+    await expect(header.getByRole('button', { name: '首席安全官，切换伙伴' })).toBeVisible();
+    expect(denied).toEqual([]);
+  });
+}

@@ -29,7 +29,7 @@ Status: adopted (2026-11-02). Avibe's UI designs live in `ui/design/` as frames;
 - The canvas (`ui/design.html`, not part of the production build) shows every frame, each in its own iframe so
   themes, portals, and routing never leak between frames. `?frame=<id>&theme=light|dark&lang=zh|en` renders one
   frame at its size and loads only that frame's file, so a frame's load time does not grow with the number of
-  frames.
+  frames. Every product stylesheet is loaded in every frame, as the app build makes them global.
 - `npm run design:shot` renders frames with Playwright (2x PNG, animations off, portals included, optional
   clicks and a hover, for states only an interaction opens) once fonts are loaded and the network is quiet (after the frame's `wait`, for a read that starts on a
   timer, and again after each click, for a transition it starts on a timer), and fails on any console error. CI runs it with the browser checks, and `typecheck:design` with the
@@ -55,4 +55,7 @@ Status: adopted (2026-11-02). Avibe's UI designs live in `ui/design/` as frames;
 
 ## Follow-ups
 
-- Draw `avibe-bot-backend` surfaces (the avibe.bot site and console) the same way in that repository.
+- `avibe-bot-backend` designs the avibe.bot site and console the same way, in its `design/`
+  (avibe-bot/avibe-backend#300); its baseline frames follow. Its `design:export` writes into the same Show
+  Page: each `frames.json` entry names its canvas folder (`canvas`, or `avibe-bot/canvas`), and
+  `<DesignFrame>`, the same file in both repositories, loads each frame from its own canvas.

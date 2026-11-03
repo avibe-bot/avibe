@@ -283,7 +283,9 @@ def test_keypair_listing_warns_about_bitcoin_signing_capability(capfd, protectio
     assert secret["signing_addresses"]["btc_taproot"].startswith("bc1p")
     warning = secret["bitcoin_signing_warning"]
     if protection == "protected":
-        assert "not supported" in warning
+        assert "typed" in warning
+        assert "legacy" in warning
+        assert "requester-selected metadata" in warning
     else:
         assert "schnorr-secp256k1-bip341-keypath" in warning
         assert "raw BIP340 cannot spend" in warning

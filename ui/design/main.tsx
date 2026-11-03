@@ -6,6 +6,10 @@ import { createRoot } from 'react-dom/client';
 
 import i18n from '@/i18n';
 import '@/index.css';
+// The app build makes every product stylesheet global: one a component imports applies to every
+// surface, including ones that use its classes without importing it. A frame document loads only
+// its own frame file, so it loads them all here. The pet's sheets ship in its own lazy window.
+import.meta.glob(['/src/**/*.css', '!/src/index.css', '!/src/pet/**'], { eager: true });
 
 import { DesignRoot } from './Canvas';
 import type { DesignLang, DesignTheme } from './frame';
@@ -42,6 +46,7 @@ async function boot() {
   // One document draws one frame (the canvas puts each in its own iframe), so its API
   // fixtures are in place before any provider can fetch.
   designNetwork.setResponses(apiResponses(shown?.fixtures));
+  for (const [key, text] of Object.entries(shown?.fixtures?.copy ?? {})) i18n.addResource(lang, 'translation', key, text[lang]);
   designStorage.seed(shown?.fixtures?.storage);
   window.__DESIGN__ = {
     frames: frames.map((f) => ({ id: f.id, file: f.file, title: f.title, status: f.status, width: f.width, height: f.height, themes: f.themes ?? ['light', 'dark'], hover: f.hover, click: f.click, wait: f.wait })),
