@@ -651,7 +651,7 @@ scenarios:
     supporting_tests:
       - tests/test_mcp_hub_api.py::test_oauth_start_link_redirects_to_authorize_url
   - id: AUTH-SETUP-136
-    name: MCP Hub global and project servers with the same name keep separate OAuth pending grants and tokens
+    name: MCP Hub global and project servers with the same name keep separate OAuth pending grants, tokens and return views
     status: covered
     kind: concurrency
     layer: scenario

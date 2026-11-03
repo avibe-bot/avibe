@@ -247,7 +247,7 @@ def test_mcp_hub_oauth_login_completes_through_owner_callback(monkeypatch, tmp_p
 
 
 def test_mcp_hub_same_name_oauth_logins_stay_in_their_scope(monkeypatch, tmp_path):
-    """Scenario: AUTH-SETUP-136 — global and project `github` logins keep separate pending grants and tokens."""
+    """Scenario: AUTH-SETUP-136 — global and project `github` logins keep separate pending grants, tokens and return views."""
     from tests.scenario_harness.core import BaseScenarioHarness, ScenarioExpect, ScenarioRunner
     from tests.test_mcp_hub_oauth import _LoopbackOauth
     from core.mcp_hub import oauth as mcp_oauth
@@ -310,7 +310,13 @@ def test_mcp_hub_same_name_oauth_logins_stay_in_their_scope(monkeypatch, tmp_pat
     def complete(scope):
         params = {"state": started[scope]["state"][0], "code": "code-1", "iss": servers[scope].origin}
         done = client.get("/api/mcp/oauth/callback?" + urllib.parse.urlencode(params))
-        assert done.status_code == 302 and "oauth=success" in done.headers["Location"]
+        assert done.status_code == 302
+        location = urllib.parse.urlparse(done.headers["Location"])
+        back = {"mcp": ["github"], "oauth": ["success"]}
+        if scope == "project":
+            back.update(scope=["project"], project=[project_id])
+        # Each login returns to the view it started from: same server name, its own scope.
+        assert (location.path, urllib.parse.parse_qs(location.query)) == ("/skills", back)
 
     def complete_project(_h):
         complete("project")

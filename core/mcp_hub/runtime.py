@@ -19,7 +19,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import anyio
 
@@ -998,13 +998,18 @@ class McpRuntime:
             url_future = asyncio.get_running_loop().create_future()
             callback_future = asyncio.get_running_loop().create_future()
             origin = str(payload.get("origin") or "").rstrip("/")
+            # A Web project login returns to that project's view; the project is the validated request's own.
+            back = {"mcp": str(name)}
+            if payload.get("project"):
+                back.update(scope="project", project=str(payload["project"]))
+            back["oauth"] = "success"
             record = {
                 "name": name,
                 "callback": callback_future,
                 "url": url_future,
                 "redirect_uri": redirect_uri,
                 "mode": mode,
-                "returnUrl": f"{origin}/skills?mcp={name}&oauth=success" if origin else f"/skills?mcp={name}&oauth=success",
+                "returnUrl": f"{origin}/skills?{urlencode(back)}",
             }
 
             async def redirect_handler(url: str) -> None:
