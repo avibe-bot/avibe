@@ -18,13 +18,15 @@ bridge contract**, `window.avibeNative`. iOS implements it first, a thin Kotlin
 shell implements the same contract for Android later, and the Web UI calls it
 from one module.
 
-- **Text input**: the owner's main pain in the Home Screen app is typing: the
-  accessory bar, the keyboard pushing the composer, missing Chinese IME
-  candidates, input stopping after quick Paste, blank third-party keyboards. The
-  composer is a Lexical `contenteditable`, so any `WKWebView` app inherits these
-  problems whether it is Swift, Capacitor, or Tauri. A native `UITextView`
-  composer avoids them; shell-level keyboard fixes help even before it ships
-  (section 5).
+- **Text input**: the owner's main pain in the Home Screen app is typing. An
+  iPhone device lab (section 5) narrowed it down: IME candidates and keyboard
+  open/close work in every input, quick Paste breaking Pinyin is iOS system
+  behavior, and what remains on the web side is the accessory bar, Lexical
+  nudging the page with `window.scrollBy`, layout corrected only after the
+  keyboard settles, and the Home Screen app reloading after a brief switch
+  away. The shell fixes the reload and can fix the layout (Phase 0a); a native
+  `UITextView` composer removes the rest (Phase 0b), and 0a's measurements
+  decide whether 0b is still worth its cost.
 - **Microphone**: the shell answers WebKit's media-capture permission request
   itself (`WKUIDelegate`, iOS 15+), so WebKit never shows its own prompt; iOS
   shows its system microphone dialog once per install. A sealed spike confirmed
@@ -174,20 +176,22 @@ keyboard input in a `contenteditable` go through WebKit's editing code and
 Lexical's input handling, so a Swift, Capacitor, or Tauri shell would all
 inherit them.
 
-The parallel iOS input lane (Session `sesv4sph5q36q`) has attributed most of
-the symptoms. Its device lab, which compares a plain `textarea`, a bare
-`contenteditable`, bare Lexical, and `MentionEditor`, has not finished.
+The parallel iOS input lane (Session `sesv4sph5q36q`) ran a device lab that
+compares a plain `textarea`, a bare `contenteditable`, bare Lexical, and
+`MentionEditor`. The owner ran it on an iPhone Home Screen web app on
+2026-11-03, and the lane checked the logs:
 
-| Symptom | Attribution | Fix |
+| Symptom | Device result | Consequence |
 | --- | --- | --- |
-| Pinyin candidates sometimes missing | Prime suspect: when composition starts in an empty editor or right after a key press, Lexical on iOS inserts a zero-width character and sets the selection from script. Lexical core behavior, unchanged in 0.53. | The native composer |
-| Keyboard pushing the composer | `useIosKeyboardInset` was validated on a `textarea`; its focus check misses the `contenteditable` | Web: avibe-bot/avibe#3166, which still corrects only after the viewport settles. Native: `keyboardLayoutGuide`. |
+| Pinyin candidates sometimes missing | Not reproduced; candidates and composition are normal in every input, `MentionEditor` included | Recheck on the checklist; no dedicated fix |
+| Keyboard pushing the composer | Keyboard open and close are normal in every input. On the first candidate pick in an empty editor, Lexical calls `window.scrollBy` and moves the page; a plain `textarea` does not | Shell: resize the web view to `keyboardLayoutGuide`. Native composer: removes Lexical from the path. The web-only fix avibe-bot/avibe#3166 has no device evidence and is recommended for closing. |
+| Typing stops after quick Paste (letters go straight in, Pinyin no longer composes) | iOS system behavior: the same in a plain `textarea` | Probably the same in `UITextView`; verify once, no app-side handling |
+| Typeless blank | Intermittent, not reproduced. Lead: the Home Screen web app reloads the whole page after a few seconds away | A shell app keeps its page across brief app switches; recheck on the checklist |
 | Accessory bar | WebKit; a page cannot remove it | Shell flag or the native composer |
-| Typeless blank | Not found in Web code; still under device-lab investigation | Measured in Phase 0a |
-| Typing stops after quick Paste | Not yet attributed | Measured in Phase 0a |
 
-Phase 0a runs the exit checklist on the web composer inside the shell to
-measure what remains (section 15).
+The Web UI keeps its current composer on mobile web; it does not switch to a
+`textarea`. Phase 0a runs the exit checklist on the web composer inside the
+shell to measure what remains (section 15).
 
 ### Shell-level fixes, with or without the native composer (Phase 0a)
 
@@ -723,7 +727,8 @@ Effort assumes one Agent lane per track, with owner review between phases.
 | Web UI | `native.ts`, `isNativeShell()`, `useIosKeyboardInset` off in the shell, Web Push toggle and install hint hidden, haptics calls, "Open on iPhone" QR | 3 days, parallel |
 
 Exit: run the section 15 checklist on the web composer, to measure which input
-problems a shell alone fixes. The microphone items must pass.
+problems a shell alone fixes. The microphone items must pass. The results
+decide whether 0b starts (section 16).
 
 ### Phase 0b: native composer, about 2.5 weeks
 
@@ -769,8 +774,8 @@ every item with the native composer.
 | # | Check | Pass |
 | --- | --- | --- |
 | 1 | System Chinese IME: candidates appear on every keystroke; composition (marked text) commits correctly; no stray Latin letters after commit | Every time over a 5-minute session |
-| 2 | Quick Paste from the keyboard, then keep typing | Typing continues without refocusing |
-| 3 | Typeless and one other third-party keyboard | Keyboard renders, inserts text, and dictation results arrive |
+| 2 | Quick Paste from the keyboard, then keep typing | Same behavior as a plain `UITextView` (iOS stops Pinyin composition after quick Paste even in a native field); record, not a gate |
+| 3 | Typeless and one other third-party keyboard, including after switching away for a few seconds and back | Keyboard renders, inserts text, and dictation results arrive; the page is not reloaded |
 | 4 | Keyboard show and hide, including rotation and switching keyboards | The composer stays pinned to the keyboard; the transcript does not jump; no gap or overlap |
 | 5 | Form accessory bar | Not shown above the keyboard |
 | 6 | Microphone | The iOS dialog appears once per install; no further prompt after idle periods, background and foreground, or cold launches |
@@ -784,10 +789,12 @@ every item with the native composer.
 
 - **iPhone behavior is unverified.** It is cited, or inferred from shared
   WebKit code, and has not been observed on a device (section 15).
-- **The input problems are only partly attributed.** Missing Pinyin candidates
-  point at Lexical's composition handling; Typeless and quick Paste are still
-  open. Phase 0a measures them, and the native composer avoids both WebKit's
-  and Lexical's paths.
+- **The case for the native composer is narrower than first thought.** The
+  device lab found IME candidates normal and quick Paste to be iOS behavior
+  (section 5). Phase 0b's value rests on keyboard tracking, the accessory bar
+  without a private API, removing Lexical's page nudge, and native
+  hold-to-talk. Phase 0a's checklist results should confirm it before 0b
+  starts.
 - **The accessory-bar technique uses a private class** (DPLA 3.3.1(A)). It
   stays behind a flag, and the native composer removes the need for it in
   chat.
@@ -810,8 +817,8 @@ every item with the native composer.
    and `keyboardLayoutGuide` need 15).
 3. Build machine or macOS CI runner.
 4. Phase 0 scope: put Phase 0a (shell and keyboard fixes) on TestFlight
-   internal as soon as it is ready and add the native composer in 0b, or wait
-   for 0b. Push follows in Phase 1 either way.
+   internal as soon as it is ready and decide 0b (native composer) from its
+   checklist results, or commit to 0b now. Push follows in Phase 1 either way.
 5. Approve the APNs relay on avibe.bot as a new backend path (product and
    security review), and provide the APNs `.p8` key.
 6. Approve the instance login handoff endpoints (security review).
