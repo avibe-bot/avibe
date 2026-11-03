@@ -543,6 +543,8 @@ export type RemoteAccessStatus = {
   network_path?: TunnelNetworkPath;
   error?: string;
   optimization_started?: boolean;
+  retry_at?: string | null;
+  retry_after_seconds?: number;
   pending_pairing?: {
     phase: 'prepared' | 'redeemed' | 'applied' | 'revoked' | 'retirement_pending' | 'invalid';
     can_resume: boolean;
@@ -4709,7 +4711,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     pairVibeCloudRemoteAccess: (payload) => postJson('/api/remote-access/vibe-cloud/pair', payload),
     startRemoteAccess: () => postJson('/api/remote-access/start', {}),
     stopRemoteAccess: () => postJson('/api/remote-access/stop', {}),
-    optimizeRemoteAccessRoute: () => postJson('/api/remote-access/optimize-route', {}),
+    optimizeRemoteAccessRoute: () => postJson('/api/remote-access/optimize-route', {}, { handleError: false }),
     getRemoteAccessNetworkInterfaces: () => getJson('/api/remote-access/network-interfaces'),
     saveRemoteAccessSettings: (settings) => postJson('/api/remote-access/settings', settings),
     diagnoseRemoteAccess: () => postJson('/api/remote-access/diagnostics', {}),

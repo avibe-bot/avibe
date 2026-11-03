@@ -20,6 +20,18 @@ from vibe import remote_access, runtime
 pytestmark = [pytest.mark.reap_processes, pytest.mark.usefixtures("reap_helper_spawns")]
 
 
+@pytest.fixture(autouse=True)
+def isolated_recovery(monkeypatch):
+    monkeypatch.setattr(remote_access, "_RECOVERY_STATE", remote_access.tunnel_quality.empty_recovery())
+    monkeypatch.setattr(remote_access, "_RECOVERY_THREAD", None)
+    monkeypatch.setattr(remote_access, "_RECOVERY_CANCEL_EVENT", threading.Event())
+    monkeypatch.setattr(remote_access, "_QUALITY_CONTEXT", None)
+    monkeypatch.setattr(remote_access, "_PREFERRED_PROTOCOL", None)
+    monkeypatch.setattr(remote_access, "_QUALITY_EVALUATOR", remote_access.tunnel_quality.QualityEvaluator())
+    monkeypatch.setattr(remote_access, "_QUALITY_MONITOR_STARTED", False)
+    monkeypatch.setattr(remote_access, "_report_runtime_status_async", lambda *args, **kwargs: None)
+
+
 def _quality(median: float) -> dict:
     return {
         "ha_connections": 4,
@@ -805,19 +817,17 @@ def test_ra_tq_033_unavailable_route_bypasses_recovery_cooldown(
     monkeypatch.setattr(remote_access.threading, "Thread", FakeThread)
     with remote_access._RECOVERY_LOCK:
         remote_access._RECOVERY_THREAD = None
-        remote_access._RECOVERY_ATTEMPTS[:] = [now - 600]
         remote_access._RECOVERY_STATE["next_attempt_at"] = remote_access.tunnel_quality.utc_timestamp(now + 3600)
-        remote_access._RECOVERY_EMERGENCY_BYPASS_USED = False
+        remote_access._RECOVERY_STATE["last_trigger"] = "latency"
 
     try:
         result = remote_access.optimize_route(trigger="availability")
     finally:
         with remote_access._RECOVERY_LOCK:
             remote_access._RECOVERY_THREAD = None
-            remote_access._RECOVERY_ATTEMPTS.clear()
             remote_access._RECOVERY_STATE.clear()
             remote_access._RECOVERY_STATE.update(remote_access.tunnel_quality.empty_recovery())
-            remote_access._RECOVERY_EMERGENCY_BYPASS_USED = False
+            remote_access._RECOVERY_STATE["last_trigger"] = "latency"
 
     assert result["ok"] is expected_started
     assert len(started) == int(expected_started)
@@ -842,7 +852,6 @@ def test_optimize_route_reserves_single_candidate_atomically(monkeypatch, tmp_pa
         remote_access._RECOVERY_THREAD = None
         remote_access._RECOVERY_STATE.clear()
         remote_access._RECOVERY_STATE.update(remote_access.tunnel_quality.empty_recovery())
-        remote_access._RECOVERY_MANUAL_BYPASS_USED = False
 
     try:
         first = remote_access.optimize_route(trigger="manual")
@@ -853,34 +862,347 @@ def test_optimize_route_reserves_single_candidate_atomically(monkeypatch, tmp_pa
 
     assert first["ok"] is True
     assert second["ok"] is False
-    assert second["error"] == "route_optimization_unavailable"
+    assert second["error"] == "route_optimization_evaluating"
     assert len(started) == 1
 
 
-def test_zero_connection_recovery_bypasses_attempt_budget_once(monkeypatch) -> None:
-    now = time.time()
-    first_thread = object()
-    second_thread = object()
-    with remote_access._RECOVERY_LOCK:
+def test_ra_tq_033_unavailable_retries_use_connector_backoff(monkeypatch) -> None:
+    """Outage retries bypass performance debt, but stay bounded after failure."""
+    now = 2_000_000_000.0
+    monkeypatch.setattr(remote_access.time, "time", lambda: now)
+    remote_access._RECOVERY_STATE.update(
+        last_trigger="latency", attempt_count_window=10,
+        next_attempt_at=remote_access.tunnel_quality.utc_timestamp(now + 300),
+    )
+    assert remote_access._reserve_recovery(object(), manual=False, emergency=True, now=now) is None
+    remote_access._set_recovery_state(state="evaluating", last_trigger="availability")
+    for delay in (15, 30, 60, 120, 120):
+        remote_access._finish_recovery(trigger="availability", result="failed", previous_median=None, result_median=None)
         remote_access._RECOVERY_THREAD = None
-        remote_access._RECOVERY_ATTEMPTS[:] = [now - 10, now - 5]
-        remote_access._RECOVERY_STATE["next_attempt_at"] = remote_access.tunnel_quality.utc_timestamp(now + 900)
-        remote_access._RECOVERY_EMERGENCY_BYPASS_USED = False
+        assert remote_access._parse_timestamp(remote_access._recovery_payload()["next_attempt_at"]) == pytest.approx(now + delay)
+        assert remote_access._reserve_recovery(object(), manual=False, emergency=True, now=now + delay - 1) == "route_optimization_auto_wait"
+        now += delay
+        assert remote_access._reserve_recovery(object(), manual=False, emergency=True, now=now) is None
 
-    try:
-        first = remote_access._reserve_recovery(first_thread, manual=False, emergency=True, now=now)
-        with remote_access._RECOVERY_LOCK:
-            remote_access._RECOVERY_THREAD = None
-        second = remote_access._reserve_recovery(second_thread, manual=False, emergency=True, now=now)
-    finally:
-        with remote_access._RECOVERY_LOCK:
-            remote_access._RECOVERY_THREAD = None
-            remote_access._RECOVERY_ATTEMPTS.clear()
-            remote_access._RECOVERY_STATE.update(remote_access.tunnel_quality.empty_recovery())
-            remote_access._RECOVERY_EMERGENCY_BYPASS_USED = False
 
-    assert first is True
-    assert second is False
+def test_ra_tq_036_manual_retries_ignore_auto_debt_and_debounce_does_not_slide(monkeypatch):
+    """RA-TQ-036: Manual intent bypasses automatic debt without sliding debounce."""
+    now = 2_000_000_000.0
+    started = []
+
+    class FakeThread:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def start(self):
+            started.append(self)
+
+    monkeypatch.setattr(remote_access.time, "time", lambda: now)
+    monkeypatch.setattr(remote_access.threading, "Thread", FakeThread)
+    monkeypatch.setattr(remote_access, "status", lambda config=None: {"running": True})
+    monkeypatch.setattr(remote_access, "_fresh_active_comparison_snapshot", lambda *args, **kwargs: _quality(250))
+    remote_access._RECOVERY_STATE.update(
+        state="cooldown", attempt_count_window=10,
+        last_attempt_at=remote_access.tunnel_quality.utc_timestamp(now - 60),
+        next_attempt_at=remote_access.tunnel_quality.utc_timestamp(now + 6 * 3600),
+    )
+    for _ in range(3):
+        result = remote_access.optimize_route(trigger="manual")
+        assert result["ok"] is True
+        before_duplicate = remote_access._recovery_payload()
+        assert remote_access.optimize_route()["error"] == "route_optimization_evaluating"
+        assert remote_access._recovery_payload() == before_duplicate
+        remote_access._finish_recovery(trigger="manual", result="no_improvement", previous_median=250, result_median=240)
+        remote_access._RECOVERY_THREAD = None
+        finished = now
+        before_debounce = remote_access._recovery_payload()
+        for seconds in (1, 5, 9):
+            now = finished + seconds
+            refusal = remote_access.optimize_route()
+            assert refusal["error"] == "route_optimization_debounce"
+            assert refusal["retry_at"] == remote_access.tunnel_quality.utc_timestamp(finished + 10)
+            assert refusal["retry_after_seconds"] == 10 - seconds
+            assert remote_access._recovery_payload() == before_debounce
+        now = finished + 10
+    assert len(started) == 3
+
+
+def test_ra_tq_037_performance_retry_streak_cap_expiry_and_success(monkeypatch):
+    """RA-TQ-037: Retry delay follows unsuccessful streaks and resets on success."""
+    now = 2_000_000_000.0
+    monkeypatch.setattr(remote_access.time, "time", lambda: now)
+    for count, delay in enumerate((60, 120, 300, 300), start=1):
+        remote_access._finish_recovery(trigger="latency", result="failed", previous_median=250, result_median=None)
+        recovery = remote_access._recovery_payload()
+        assert recovery["attempt_count_window"] == count
+        assert remote_access._parse_timestamp(recovery["next_attempt_at"]) == now + delay
+        assert remote_access._reserve_recovery(object(), manual=False, emergency=False, now=now + delay - 1) == "route_optimization_auto_wait"
+        now += delay
+        remote_access._normalize_recovery_schedule(legacy=False, now=now)
+        assert remote_access._recovery_payload()["state"] == "idle"
+        assert remote_access._reserve_recovery(object(), manual=False, emergency=False, now=now) is None
+        remote_access._RECOVERY_THREAD = None
+    remote_access._finish_recovery(trigger="latency", result="improved", previous_median=250, result_median=120)
+    assert remote_access._recovery_payload()["attempt_count_window"] == 0
+    assert remote_access._recovery_payload()["next_attempt_at"] is None
+    remote_access._finish_recovery(trigger="latency", result="failed", previous_median=250, result_median=None)
+    assert remote_access._parse_timestamp(remote_access._recovery_payload()["next_attempt_at"]) == now + 60
+
+
+@pytest.mark.parametrize("version", [1, 2])
+@pytest.mark.parametrize("age", [30, 1800])
+def test_ra_tq_038_legacy_history_rebases_once_and_discards_bypass(monkeypatch, version, age):
+    """RA-TQ-038: Upgrade rebases old debt once and never restores manual lockout."""
+    now = 2_000_000_000.0
+    monkeypatch.setattr(remote_access.time, "time", lambda: now)
+    monkeypatch.setattr(remote_access.threading.Thread, "start", lambda self: None)
+    runtime.write_json(remote_access._quality_history_path(), {
+        "schema_version": version,
+        "recovery": {**remote_access.tunnel_quality.empty_recovery(),
+                     "state": "cooldown", "last_result": "failed", "last_trigger": "latency",
+                     "last_attempt_at": remote_access.tunnel_quality.utc_timestamp(now - age),
+                     "next_attempt_at": remote_access.tunnel_quality.utc_timestamp(now - age + 21600),
+                     "attempt_count_window": 10},
+        "attempts": [now - 60, now - 30], "manual_bypass_used": True,
+        "emergency_bypass_used": True,
+    })
+    remote_access.start_tunnel_quality_monitor()
+    recovery = remote_access._recovery_payload()
+    assert recovery["attempt_count_window"] == 1
+    expected_due = remote_access.tunnel_quality.utc_timestamp(now + 30) if age == 30 else None
+    assert recovery["next_attempt_at"] == expected_due
+    # Persist and restart through the actual history owner: no new postponement.
+    remote_access._persist_quality_snapshot({"recovery": recovery})
+    history = runtime.read_json(remote_access._quality_history_path())
+    assert "manual_bypass_used" not in history
+    assert "attempts" not in history
+    now += 5
+    remote_access._QUALITY_MONITOR_STARTED = False
+    remote_access.start_tunnel_quality_monitor()
+    assert remote_access._recovery_payload()["next_attempt_at"] == expected_due
+    assert remote_access._reserve_recovery(object(), manual=True, emergency=False, now=now) is None
+
+
+@pytest.mark.parametrize("change", ["pid", "protocol", "edge_bind_address", "edge_ip_version", "unknown", "colo"])
+def test_ra_tq_039_observed_context_resets_external_debt_not_missing_evidence(monkeypatch, change):
+    config = _config()
+    remote_access._write_state(111, config, "/fake/cloudflared", "http://metrics", "auto")
+    remote_access._observe_quality_context("quic")
+    evaluator = remote_access._QUALITY_EVALUATOR
+    remote_access._RECOVERY_STATE.update(state="cooldown", attempt_count_window=3, next_attempt_at="2035-01-01T00:00:00Z")
+    state = remote_access._read_state()
+    protocol = "quic"
+    if change == "pid":
+        state["active"]["pid"] = 222
+    elif change == "protocol":
+        protocol = "http2"
+    elif change == "unknown":
+        protocol = "unknown"
+    elif change == "edge_bind_address":
+        state[change] = "192.0.2.10"
+    elif change == "edge_ip_version":
+        state[change] = "6"
+    else:
+        state["colo"] = "new"
+    runtime.write_json(remote_access._state_path(), state)
+    remote_access._observe_quality_context(protocol)
+    changed = change not in {"unknown", "colo"}
+    assert (remote_access._QUALITY_EVALUATOR is not evaluator) is changed
+    assert remote_access._recovery_payload()["attempt_count_window"] == (0 if changed else 3)
+
+
+def test_ra_tq_039_completion_records_rollback_context_missed_by_monitor(monkeypatch):
+    """RA-TQ-039: An optimizer-owned rollback retains its completion's retry debt."""
+    now = 2_000_000_000.0
+    monkeypatch.setattr(remote_access.time, "time", lambda: now)
+    config = _config()
+    remote_access._write_state(111, config, "/fake/cloudflared", "http://metrics", "quic")
+    remote_access._observe_quality_context("quic")
+    remote_access._RECOVERY_STATE.update(attempt_count_window=2)
+    # A tail evaluation promoted then rolled back between monitor ticks. Its
+    # rollback uses a new PID, but must not look like an external replacement.
+    remote_access._write_state(333, config, "/fake/cloudflared", "http://rollback", "quic")
+    remote_access._finish_recovery(trigger="tail_latency", result="no_improvement", previous_median=None, result_median=None, previous_protocol="quic", result_protocol="quic")
+    finished = remote_access._recovery_payload()
+    remote_access._observe_quality_context("quic")
+    assert remote_access._recovery_payload() == finished
+    assert finished["attempt_count_window"] == 3
+    assert remote_access._parse_timestamp(finished["next_attempt_at"]) == now + 300
+
+
+def test_ra_tq_036_manual_comparison_scrapes_instead_of_reusing_cached_path(monkeypatch):
+    old = {**_quality(400), "sampled_at": remote_access.tunnel_quality.utc_timestamp(time.time())}
+    monkeypatch.setattr(remote_access, "_state_connector", lambda name: {"metrics_url": "http://metrics", "requested_protocol": "quic"})
+    monkeypatch.setattr(remote_access.tunnel_quality, "scrape_metrics", lambda url: _metrics_sample())
+    previous = remote_access._fresh_active_comparison_snapshot({"tunnel_quality": old}, trigger="manual", now=time.time())
+    assert previous["rtt_ms"]["median"] == 77.5
+    assert previous["protocol"] == "quic"
+
+
+def test_ra_tq_036_second_manual_evaluation_during_same_automatic_wait(monkeypatch):
+    """Regression: the released once-per-episode bypass rejected the second call."""
+    now = 2_000_000_000.0
+    started = []
+
+    class FakeThread:
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            started.append(self)
+
+    monkeypatch.setattr(remote_access.time, "time", lambda: now)
+    monkeypatch.setattr(remote_access.threading, "Thread", FakeThread)
+    monkeypatch.setattr(remote_access, "status", lambda config=None: {"running": True})
+    monkeypatch.setattr(remote_access, "_fresh_active_comparison_snapshot", lambda *args, **kwargs: _quality(250))
+    remote_access._RECOVERY_STATE.update(
+        state="cooldown", next_attempt_at=remote_access.tunnel_quality.utc_timestamp(now + 21600),
+        last_attempt_at=remote_access.tunnel_quality.utc_timestamp(now - 60),
+    )
+    assert remote_access.optimize_route()["ok"] is True
+    remote_access._RECOVERY_THREAD = None  # The first evaluation has completed.
+    now += 31 * 60
+    assert remote_access.optimize_route()["ok"] is True
+    assert len(started) == 2
+
+
+def test_ra_tq_036_manual_evaluation_compares_fresh_baseline_before_candidate(monkeypatch, tmp_path):
+    config, active_pid, candidate_pid, alive = _setup_recovery(monkeypatch, tmp_path, _quality(180))
+    results = []
+    measurements = []
+    monkeypatch.setattr(remote_access, "_finish_recovery", lambda **result: results.append(result))
+
+    def measure(config, protocol, metrics_url, *, attempts):
+        measurements.append(remote_access._read_pid())
+        return _request_path(100, 150, 200), {**_quality(100), "protocol": "quic"}
+
+    monkeypatch.setattr(remote_access, "_measure_promoted_route", measure)
+    monkeypatch.setattr(runtime, "stop_pid", lambda pid, timeout=8: alive.discard(pid) or True)
+    remote_access._run_route_optimization(config, "manual", {**_quality(250), "protocol": "quic"}, manual=True)
+    assert measurements == [active_pid]
+    assert remote_access._read_pid() == active_pid  # 180 is worse than fresh 100, not better than stale 250.
+    assert candidate_pid not in alive
+    assert results[0]["result"] == "no_improvement"
+    assert results[0]["previous_median"] == 100
+
+
+@pytest.mark.parametrize(
+    ("success", "latency", "profile", "expected"),
+    [(False, 3500, "balanced", "availability"), (True, 1500, "balanced", "tail_latency"),
+     (True, 600, "low_latency", "tail_latency"), (True, 600, "stable", "manual")],
+)
+def test_ra_tq_036_manual_measures_enough_real_samples_for_path_policy(monkeypatch, tmp_path, success, latency, profile, expected):
+    config, _active_pid, _candidate_pid, alive = _setup_recovery(monkeypatch, tmp_path, _quality(180))
+    config.remote_access.vibe_cloud.optimization_profile = profile
+    config.save()
+    results = []
+    probes = []
+    monkeypatch.setattr(remote_access.time, "sleep", lambda delay: None)
+    monkeypatch.setattr(remote_access, "_finish_recovery", lambda **result: results.append(result))
+    monkeypatch.setattr(runtime, "stop_pid", lambda pid, timeout=8: alive.discard(pid) or True)
+
+    def probe(*args, **kwargs):
+        probes.append(remote_access._read_pid())
+        return remote_access.tunnel_quality.RequestPathSample(time.time(), (latency,), (success,))
+
+    def evaluate_tail(config, binary, previous):
+        assert previous["request_path"]["confidence"] == "high"
+        assert previous["request_path"]["sample_count"] == 30
+        return "no_improvement", "quic", previous["request_path"]
+
+    monkeypatch.setattr(remote_access.tunnel_quality, "probe_request_path", probe)
+    monkeypatch.setattr(remote_access, "_run_tail_protocol_recovery", evaluate_tail)
+    remote_access._run_route_optimization(config, "manual", {**_quality(80), "protocol": "quic"}, manual=True)
+    assert len(probes) == 30
+    assert results[0]["trigger"] == expected
+    if not success:
+        assert results[0]["result"] == "improved"  # Restored availability, despite worse QUIC RTT.
+
+
+def test_ra_tq_037_final_trigger_owns_retry_streak(monkeypatch):
+    now = 2_000_000_000.0
+    monkeypatch.setattr(remote_access.time, "time", lambda: now)
+    remote_access._RECOVERY_STATE.update(state="evaluating", last_trigger="latency", attempt_count_window=10)
+    # The active process can exit *during* a performance evaluation.
+    remote_access._finish_recovery(trigger="availability", result="failed", previous_median=250, result_median=None)
+    recovery = remote_access._recovery_payload()
+    assert recovery["attempt_count_window"] == 1
+    assert remote_access._parse_timestamp(recovery["next_attempt_at"]) == now + 15
+
+
+def test_ra_tq_039_monitor_discards_sample_if_completion_replaces_connector(monkeypatch, tmp_path):
+    real_set = remote_access._set_recovery_state
+    config, _active_pid, _candidate_pid, alive = _setup_recovery(monkeypatch, tmp_path, _quality(180))
+    remote_access._write_state(111, config, "/fake/cloudflared", "http://old", "quic")
+    remote_access._observe_quality_context("quic")
+    remote_access._RECOVERY_STATE.update(last_trigger="tail_latency", attempt_count_window=2)
+    monkeypatch.setattr(remote_access, "_set_recovery_state", real_set)
+    monkeypatch.setattr(remote_access, "_public_health_url", lambda config: None)
+    published = []
+    monkeypatch.setattr(remote_access, "_persist_quality_snapshot", lambda snapshot, **kwargs: published.append(snapshot) or True)
+
+    def late_sample(url):
+        # Promotion/finish races an already-started scrape of the previous PID.
+        alive.add(333)
+        remote_access._pid_path().write_text("333")
+        remote_access._write_state(333, config, "/fake/cloudflared", "http://new", "http2")
+        remote_access._finish_recovery(trigger="tail_latency", result="no_improvement", previous_median=None, result_median=None, previous_protocol="quic")
+        return _metrics_sample()
+
+    def stop_tick(seconds):
+        raise _StopMonitor
+
+    monkeypatch.setattr(remote_access.tunnel_quality, "scrape_metrics", late_sample)
+    monkeypatch.setattr(remote_access.time, "sleep", stop_tick)
+    with pytest.raises(_StopMonitor):
+        remote_access._quality_monitor_loop(15, remote_access._quality_state_path())
+    assert remote_access._recovery_payload()["attempt_count_window"] == 3
+    assert remote_access._recovery_payload()["next_attempt_at"] is not None
+    assert remote_access._QUALITY_CONTEXT["protocol"] == "http2"
+    assert len(published) == 1  # Completion only, never the obsolete scrape.
+
+
+@pytest.mark.parametrize("owner", ["candidate", "draining", "pending_tail_rollback"])
+def test_ra_tq_039_failed_transition_remains_owned_without_live_worker(monkeypatch, owner):
+    config = _config()
+    remote_access._write_state(111, config, "/fake/cloudflared", "http://old", "quic")
+    remote_access._observe_quality_context("quic")
+    remote_access._RECOVERY_STATE.update(attempt_count_window=2)
+    remote_access._write_state(333, config, "/fake/cloudflared", "http://new", "http2")
+    state = remote_access._read_state()
+    state[owner] = {"active_pid": 333, "previous_protocol": "quic"} if owner == "pending_tail_rollback" else {"pid": 222}
+    runtime.write_json(remote_access._state_path(), state)
+    remote_access._finish_recovery(trigger="tail_latency", result="failed", previous_median=None, result_median=None, previous_protocol="quic")
+    finished = remote_access._recovery_payload()
+    assert remote_access._QUALITY_CONTEXT["protocol"] == "http2"
+    assert remote_access._observe_quality_context("http2") is False
+    assert remote_access._recovery_payload() == finished
+
+
+@pytest.mark.parametrize("change", ["stop", "disable"])
+@pytest.mark.parametrize("trigger", ["latency", "tail_latency"])
+def test_ra_tq_041_stop_or_disable_wins_candidate_promotion_race(monkeypatch, tmp_path, change, trigger):
+    """RA-TQ-041: Stop/disable between evaluation and promotion prevents cutover."""
+    config, active_pid, candidate_pid, alive = _setup_recovery(monkeypatch, tmp_path, _quality(100))
+    results = []
+    monkeypatch.setattr(remote_access, "_finish_recovery", lambda **result: results.append(result))
+    monkeypatch.setattr(runtime, "stop_pid", lambda pid, timeout=8: alive.discard(pid) or True)
+
+    def before_promotion(**changes):
+        if changes.get("state") == "draining":
+            if change == "stop":
+                remote_access._RECOVERY_CANCEL_EVENT.set()
+            else:
+                config.remote_access.vibe_cloud.enabled = False
+                config.save()
+        return changes
+
+    monkeypatch.setattr(remote_access, "_set_recovery_state", before_promotion)
+    previous = {**_quality(250), "protocol": "quic", "request_path": _request_path(700, 1400, 2000)}
+    remote_access._run_route_optimization(config, trigger, previous)
+    assert remote_access._read_pid() == active_pid
+    assert candidate_pid not in alive
+    assert results[0]["result"] == "failed"
 
 
 def test_optimize_route_does_not_start_without_fresh_active_sample(monkeypatch) -> None:
@@ -895,7 +1217,7 @@ def test_optimize_route_does_not_start_without_fresh_active_sample(monkeypatch) 
     result = remote_access.optimize_route(trigger="manual")
 
     assert result["ok"] is False
-    assert result["error"] == "route_optimization_unavailable"
+    assert result["error"] == "route_optimization_evidence_unavailable"
 
 
 @pytest.mark.parametrize(
@@ -1000,6 +1322,8 @@ def test_manual_optimization_uses_active_availability_trigger(monkeypatch) -> No
             started.append(self)
 
     monkeypatch.setattr(remote_access, "status", lambda config=None: {"running": True, "tunnel_quality": quality})
+    monkeypatch.setattr(remote_access, "_state_connector", lambda name: {"metrics_url": "http://metrics"} if name == "active" else None)
+    monkeypatch.setattr(remote_access.tunnel_quality, "scrape_metrics", lambda url: _metrics_sample(connections=3))
     monkeypatch.setattr(remote_access, "_set_recovery_state", lambda **changes: changes)
     monkeypatch.setattr(remote_access.threading, "Thread", FakeThread)
     with remote_access._RECOVERY_LOCK:
@@ -1473,7 +1797,7 @@ def test_failed_candidate_with_unknown_identity_remains_tracked(monkeypatch, tmp
     assert state["candidate"]["pid"] == candidate_pid
     assert remote_access._candidate_pid_path().read_text(encoding="utf-8") == str(candidate_pid)
     assert results[0]["result"] == "no_improvement"
-    assert remote_access._reserve_recovery(object(), manual=False, emergency=False, now=time.time()) is False
+    assert remote_access._reserve_recovery(object(), manual=False, emergency=False, now=time.time()) == "remote_access_busy"
 
 
 def test_startup_resets_inflight_recovery_without_connector(monkeypatch, tmp_path) -> None:
