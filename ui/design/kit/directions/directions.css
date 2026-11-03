@@ -1,0 +1,482 @@
+/* Visual directions (proposed, 2026-11-03): one stylesheet that re-skins the shipped surfaces a frame
+   draws, so each direction is judged on the real screens. It applies inside a document that holds a
+   `[data-direction]` root (kit/directions/Direction.tsx): the tokens are set on that root, which sits
+   inside the frame's themed box, and on the body, which portals (the Apps launcher) render into. Each
+   frame is its own document, so the scope never reaches another frame.
+
+   What it holds, and where each part goes once a direction is approved:
+   1. Token values (the custom properties below): they replace the palettes in `src/index.css`.
+   2. Scale remaps (radius, the small-type floor, title sizes): `@theme inline` bakes radius into each
+      utility, so a value change there is simulated here by remapping the utility inside the scope.
+      In the rollout it is the token value itself.
+   3. Component rules, written against the shipped markup: each names the component it stands for and
+      becomes a change in that component (or one shared class) in the rollout. They are the part of a
+      direction no token can carry: what glows, what is a card, which accent means what.
+
+   The `--dir-*` properties are the proposed new tokens; the rollout names them as `src/index.css`
+   tokens. Nothing here is product code: the frames under `frames/directions/` are its only reader. */
+
+/* ------------------------------------------------------------------------------------------------
+   Shared state language. Every direction uses the same rules; only the values below differ.
+   - selected thing (a Bot, an Agent, a card that stands for one object): its own edge lights up,
+     a mint hairline plus a soft mint glow, with no gap and no second ring;
+   - selected navigation (a tab, a nav row): a quiet fill, never a glow;
+   - running: the mint dot breathes;
+   - unread: a cyan count, and cyan means nothing else;
+   - focus: the shipped mint ring, unchanged.
+   ------------------------------------------------------------------------------------------------ */
+
+:is([data-direction], body:has([data-direction])) {
+  --dir-selected-edge: 0 0 0 2px var(--mint), 0 0 14px 0 color-mix(in srgb, var(--mint) 50%, transparent);
+  --dir-center-edge: 0 0 0 1.5px color-mix(in srgb, var(--mint) 60%, transparent),
+    0 6px 18px -6px color-mix(in srgb, var(--mint) 55%, transparent);
+  --dir-card-bg: var(--surface);
+  --dir-card-border: var(--border);
+  --dir-card-radius: 14px;
+  --dir-control-bg: transparent;
+  --dir-control-border: var(--border-strong);
+  --dir-title-size: 24px;
+  --dir-title-weight: 700;
+  --dir-title-tracking: 0;
+  --dir-section-size: 12px;
+  --dir-section-weight: 600;
+  --dir-section-color: var(--muted);
+  --dir-body-size: 13px;
+  --dir-agent-bubble-bg: color-mix(in srgb, var(--mint) 7%, transparent);
+  --dir-agent-bubble-border: transparent;
+  --dir-agent-bubble-pad: 0.875rem;
+  --dir-user-bubble-bg: color-mix(in srgb, var(--foreground) 6%, transparent);
+  --dir-user-bubble-border: transparent;
+  --dir-composer-shadow: 0 10px 30px -12px rgba(0, 0, 0, 0.55);
+  --dir-composer-border: var(--border-strong);
+  --dir-primary-bg: var(--primary);
+  --dir-primary-fg: var(--primary-foreground);
+  --dir-tab-active-bg: color-mix(in srgb, var(--mint) 8%, transparent);
+  --dir-tab-active-fg: var(--mint-ink);
+  --dir-nav-active-bg: var(--nav-selected-bg);
+  --dir-nav-active-border: var(--nav-selected-border);
+  --dir-header-tile: flex;
+  --dir-tile-bg: var(--surface-3);
+  --dir-tile-fg: var(--foreground);
+  --dir-brand-bar-border: var(--border);
+}
+
+/* ---- C · 整理 (brand, cleaned): today's palette and shape, with the noise taken out. ---- */
+
+:is([data-direction="c"], body:has([data-direction="c"])) {
+  --gradient-console:
+    radial-gradient(55% 40% at 0% 0%, rgba(91, 255, 160, 0.07), rgba(91, 255, 160, 0) 100%),
+    #080812;
+  --gradient-settings: var(--gradient-console);
+  --card-wash: rgba(0, 0, 0, 0.45);
+  --dir-card-bg: var(--surface);
+  --dir-tile-bg: var(--mint-soft);
+  --dir-tile-fg: var(--mint-ink);
+}
+
+[data-theme="light"] :is([data-direction="c"], body:has([data-direction="c"])) {
+  --gradient-console: #f4f6fb;
+  --gradient-settings: #f4f6fb;
+  --card-wash: rgba(8, 8, 18, 0.06);
+  --dir-composer-shadow: 0 8px 24px -12px rgba(8, 8, 18, 0.14);
+  --dir-selected-edge: 0 0 0 2px var(--mint), 0 0 16px 0 color-mix(in srgb, var(--mint) 45%, transparent);
+}
+
+/* ---- A · 细线 (hairline): white and near-black, one hairline per boundary, tight radius, dense type.
+   Mint is the light of state; the primary action is ink. ---- */
+
+:is([data-direction="a"], body:has([data-direction="a"])) {
+  --background: #0a0a0c;
+  --foreground: #ededef;
+  --surface: #0f0f12;
+  --surface-2: #131317;
+  --surface-3: #0c0c0e;
+  --card: #0f0f12;
+  --popover: #131317;
+  --secondary: #131317;
+  --muted: #8a8a94;
+  --muted-soft: #0f0f12;
+  --border: rgba(255, 255, 255, 0.07);
+  --border-strong: rgba(255, 255, 255, 0.11);
+  --input: rgba(255, 255, 255, 0.1);
+  --sidebar-background: #0d0d10;
+  --nav-selected-bg: rgba(255, 255, 255, 0.06);
+  --nav-selected-border: transparent;
+  --nav-hover-bg: rgba(255, 255, 255, 0.04);
+  --bot-mascot-well: #16161b;
+  --gradient-console: #0a0a0c;
+  --gradient-settings: #0a0a0c;
+  --card-wash: rgba(0, 0, 0, 0.5);
+
+  --dir-selected-edge: 0 0 0 1.5px var(--mint), 0 0 12px -1px color-mix(in srgb, var(--mint) 50%, transparent);
+  --dir-card-radius: 10px;
+  --dir-title-size: 20px;
+  --dir-title-weight: 600;
+  --dir-title-tracking: -0.01em;
+  --dir-section-size: 12px;
+  --dir-section-color: var(--muted);
+  --dir-agent-bubble-bg: var(--surface);
+  --dir-agent-bubble-border: var(--border);
+  --dir-user-bubble-bg: var(--surface-2);
+  --dir-user-bubble-border: transparent;
+  --dir-composer-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --dir-primary-bg: var(--foreground);
+  --dir-primary-fg: var(--background);
+  --dir-tab-active-bg: transparent;
+  --dir-tab-active-fg: var(--foreground);
+  --dir-header-tile: none;
+}
+
+[data-theme="light"] :is([data-direction="a"], body:has([data-direction="a"])) {
+  --background: #ffffff;
+  --foreground: #0a0a0f;
+  --surface: #ffffff;
+  --surface-2: #ffffff;
+  --surface-3: #f5f5f6;
+  --card: #ffffff;
+  --popover: #ffffff;
+  --secondary: #f5f5f6;
+  --muted: #6b6b76;
+  --muted-soft: #f5f5f6;
+  --border: rgba(10, 10, 15, 0.08);
+  --border-strong: rgba(10, 10, 15, 0.13);
+  --input: rgba(10, 10, 15, 0.13);
+  --sidebar-background: #fafafa;
+  --nav-selected-bg: rgba(10, 10, 15, 0.05);
+  --nav-hover-bg: rgba(10, 10, 15, 0.035);
+  --mint-ink: #059669;
+  --primary-ink: #059669;
+  --cyan-ink: #0e7490;
+  --bot-mascot-well: #ffffff;
+  --gradient-console: #ffffff;
+  --gradient-settings: #ffffff;
+  --card-wash: rgba(10, 10, 15, 0.06);
+
+  --dir-selected-edge: 0 0 0 1.5px var(--mint), 0 0 12px 0 color-mix(in srgb, var(--mint) 45%, transparent);
+  --dir-user-bubble-bg: #f4f4f5;
+  --dir-composer-shadow: 0 1px 2px rgba(10, 10, 15, 0.05);
+}
+
+/* ---- B · 层次 (layers): surfaces separated by tone, not lines. Cards are tonal blocks with no
+   border, the agent speaks as plain text, type is larger and the page breathes. ---- */
+
+:is([data-direction="b"], body:has([data-direction="b"])) {
+  --background: #0b0b10;
+  --surface: #15151c;
+  --surface-2: #1b1b23;
+  --surface-3: #101016;
+  --card: #15151c;
+  --popover: #1b1b23;
+  --secondary: #15151c;
+  --muted: #9a9aa6;
+  --muted-soft: #15151c;
+  --border: rgba(255, 255, 255, 0.05);
+  --border-strong: rgba(255, 255, 255, 0.09);
+  --input: rgba(255, 255, 255, 0.09);
+  --sidebar-background: #111118;
+  --nav-selected-bg: rgba(255, 255, 255, 0.07);
+  --nav-selected-border: transparent;
+  --nav-hover-bg: rgba(255, 255, 255, 0.045);
+  --bot-mascot-well: #1d1d26;
+  --gradient-console: #0b0b10;
+  --gradient-settings: #0b0b10;
+  --card-wash: rgba(0, 0, 0, 0.5);
+
+  --dir-card-bg: var(--surface);
+  --dir-card-border: transparent;
+  --dir-card-radius: 18px;
+  --dir-control-bg: var(--surface-2);
+  --dir-control-border: transparent;
+  --dir-title-size: 26px;
+  --dir-title-weight: 700;
+  --dir-title-tracking: -0.015em;
+  --dir-section-size: 13px;
+  --dir-section-weight: 600;
+  --dir-section-color: var(--muted);
+  --dir-body-size: 14px;
+  --dir-agent-bubble-bg: transparent;
+  --dir-agent-bubble-border: transparent;
+  --dir-agent-bubble-pad: 0px;
+  --dir-user-bubble-bg: var(--surface-2);
+  --dir-composer-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.7);
+  --dir-composer-border: var(--border);
+  --dir-tab-active-bg: rgba(255, 255, 255, 0.07);
+  --dir-tab-active-fg: var(--foreground);
+  --dir-header-tile: none;
+  --dir-brand-bar-border: transparent;
+}
+
+[data-theme="light"] :is([data-direction="b"], body:has([data-direction="b"])) {
+  --background: #ffffff;
+  --foreground: #0d0d12;
+  --surface: #f4f4f6;
+  --surface-2: #ffffff;
+  --surface-3: #ebebef;
+  --card: #f4f4f6;
+  --popover: #ffffff;
+  --secondary: #f4f4f6;
+  --muted: #6e6e78;
+  --muted-soft: #f4f4f6;
+  --border: rgba(10, 10, 15, 0.06);
+  --border-strong: rgba(10, 10, 15, 0.1);
+  --input: rgba(10, 10, 15, 0.1);
+  --sidebar-background: #f4f4f6;
+  --nav-selected-bg: rgba(10, 10, 15, 0.07);
+  --nav-hover-bg: rgba(10, 10, 15, 0.04);
+  --mint-ink: #059669;
+  --primary-ink: #059669;
+  --cyan-ink: #0e7490;
+  --bot-mascot-well: #ffffff;
+  --gradient-console: #ffffff;
+  --gradient-settings: #ffffff;
+  --card-wash: rgba(10, 10, 15, 0.06);
+
+  --dir-selected-edge: 0 0 0 2px var(--mint), 0 0 14px 0 color-mix(in srgb, var(--mint) 40%, transparent);
+  --dir-user-bubble-bg: #f0f0f3;
+  --dir-composer-shadow: 0 6px 24px -8px rgba(10, 10, 15, 0.14);
+  --dir-tab-active-bg: rgba(10, 10, 15, 0.06);
+}
+
+/* ------------------------------------------------------------------------------------------------
+   Component rules, shared by the three directions.
+   ------------------------------------------------------------------------------------------------ */
+
+/* Decoration does not glow: glow is the light of state (selected, running), so a glowing icon tile,
+   nav row, card, badge, or launcher reads as noise next to it. (src/index.css glow roles; the
+   rollout drops these call sites, and C alone keeps the CTA glow.) */
+body:has([data-direction]) :is(
+  .shadow-glow-xs-mint, .shadow-glow-xs-cyan,
+  .shadow-glow-sm-mint, .shadow-glow-sm-cyan, .shadow-glow-sm-violet, .shadow-glow-sm-gold,
+  .shadow-glow-md-mint, .shadow-glow-md-cyan, .shadow-glow-md-violet, .shadow-glow-md-gold,
+  .shadow-glow-lg-mint, .shadow-glow-lg-cyan, .shadow-glow-lg-violet, .shadow-glow-xl-mint,
+  .shadow-glow-nav-mint, .shadow-mint-card-sm, .shadow-mint-card, .shadow-mint-card-lg
+) {
+  box-shadow: none;
+}
+body:has([data-direction]:not([data-direction="c"])) :is(.shadow-glow-cta-mint, .shadow-glow-cta-cyan, .shadow-glow-cta-violet, .shadow-glow-cta-gold) {
+  box-shadow: none;
+}
+
+/* The brand mark sits on its own, without a mint frame (WorkbenchSidebar, MobileBrandHeader). */
+body:has([data-direction]) img.border-mint\/35,
+body:has([data-direction]) img.border-mint\/30 {
+  border-color: transparent;
+  background: transparent;
+}
+
+/* Page headers: no eyebrow that repeats the title, no glowing icon tile beside it
+   (WorkbenchPageHeader, InboxPage header). One title, one muted line under it. */
+body:has([data-direction]) .tracking-\[0\.18em\].text-mint-ink {
+  display: none;
+}
+body:has([data-direction]) .size-10.rounded-\[10px\].border,
+body:has([data-direction]) .size-12.rounded-2xl.border-mint\/30 {
+  display: var(--dir-header-tile);
+  border-color: transparent;
+  background: var(--dir-tile-bg);
+  color: var(--dir-tile-fg);
+}
+body:has([data-direction]) :is(h1.text-\[24px\], h1.text-2xl) {
+  font-size: var(--dir-title-size);
+  font-weight: var(--dir-title-weight);
+  letter-spacing: var(--dir-title-tracking);
+}
+
+/* Section labels are sentence-case sans, not tracked mono: tracking spreads CJK characters apart
+   (「伙 伴」) and uppercase does nothing to them (WorkbenchSidebar, BotStrip, ProjectsPage). */
+body:has([data-direction]) .font-mono.uppercase.tracking-\[0\.18em\] {
+  font-family: var(--font-sans);
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: var(--dir-section-size);
+  font-weight: var(--dir-section-weight);
+  color: var(--dir-section-color);
+}
+@media (max-width: 767px) {
+  /* B sets its phone section titles larger, as grouped lists on a phone do. */
+  :is([data-direction="b"], body:has([data-direction="b"])) {
+    --dir-section-size: 16px;
+    --dir-section-color: var(--foreground);
+  }
+  /* The phone Workbench tab: 「项目」 takes the same section style as 「伙伴」 above it. */
+  body:has([data-direction]) h1.text-xl.font-bold {
+    font-size: var(--dir-section-size);
+    font-weight: var(--dir-section-weight);
+    color: var(--dir-section-color);
+  }
+}
+
+/* Unread is cyan wherever it is counted: the sidebar's Session count, the phone Inbox tab, and the
+   Inbox card's open button used mint, the Bots strip cyan (WorkbenchSidebar, MobileNavLink, InboxPage). */
+body:has([data-direction]) :is(.bg-mint.font-mono.text-\[10px\], .bg-mint.font-mono.text-\[9px\]) {
+  background: var(--cyan);
+  color: var(--accent-foreground);
+}
+
+/* The selected Bot: the avatar's own edge lights up; no 2px gap, no ring drawn outside it (BotStrip;
+   the polish lane's shared selected class takes this value). */
+body:has([data-direction]) [data-bot-handle] > button[aria-current="page"] {
+  box-shadow: none;
+}
+body:has([data-direction]) [data-bot-handle] > button[aria-current="page"] > span:first-child,
+body:has([data-direction]) .dir-selected > span:first-child {
+  box-shadow: var(--dir-selected-edge);
+}
+
+/* The main Bot in the phone tab bar: the avatar is the button, lit at its edge; no well, no second
+   circle inside the ring (WorkbenchMobileTabBar). */
+body:has([data-direction]) nav .-mt-5.rounded-full.p-0\.5 {
+  padding: 0;
+  background: transparent;
+  box-shadow: var(--dir-center-edge);
+}
+body:has([data-direction]) nav .-mt-5.rounded-full .bot-avatar-mascot {
+  box-shadow: none;
+}
+
+/* Running: the dot breathes instead of pinging (BotFace, BotStrip, the tab bar). */
+@keyframes dir-breathe {
+  0%, 100% { opacity: 0.15; transform: scale(1.1); }
+  50% { opacity: 0.6; transform: scale(2); }
+}
+body:has([data-direction]) .animate-ping {
+  animation: dir-breathe 2.4s ease-in-out infinite;
+}
+
+/* Inbox cards: one surface, no mint frame, no glow, no 「AGENT」 eyebrow; the project is a muted
+   prefix, not a cyan pill; the actions are quiet controls (InboxPage). */
+body:has([data-direction]) article[data-inbox-session-id] {
+  border-color: var(--dir-card-border);
+  background: var(--dir-card-bg);
+  border-radius: var(--dir-card-radius);
+  box-shadow: none;
+}
+body:has([data-direction]) article[data-inbox-session-id] .uppercase.tracking-wider {
+  display: none;
+}
+body:has([data-direction]) article[data-inbox-session-id] .text-cyan-ink.border-border-strong {
+  border-color: transparent;
+  background: transparent;
+  padding-left: 0;
+  color: var(--muted);
+  font-weight: 500;
+}
+body:has([data-direction]) article[data-inbox-session-id] button {
+  border-color: var(--dir-control-border);
+  background: var(--dir-control-bg);
+  color: var(--foreground);
+}
+
+/* Chat bubbles (chatBubble.ts): the user's words on a quiet fill, the agent's per direction. */
+body:has([data-direction]) .bg-mint\/\[0\.09\].border-mint\/25 {
+  background: var(--dir-agent-bubble-bg);
+  border-color: var(--dir-agent-bubble-border);
+  padding-left: var(--dir-agent-bubble-pad);
+  padding-right: var(--dir-agent-bubble-pad);
+}
+body:has([data-direction]) .bg-foreground\/\[0\.06\].border-border-strong.rounded-2xl {
+  background: var(--dir-user-bubble-bg);
+  border-color: var(--dir-user-bubble-border);
+}
+
+/* The composer: a clean edge and a short, clean shadow instead of a long grey one cast upward
+   (Composer). */
+body:has([data-direction]) .rounded-2xl.border.border-border-strong.bg-surface-2 {
+  border-color: var(--dir-composer-border);
+  box-shadow: var(--dir-composer-shadow);
+}
+
+/* The primary action (Button `default` and `brand`, the send button). */
+body:has([data-direction]) :is(button, a).bg-primary:not([role="switch"]) {
+  background: var(--dir-primary-bg);
+  color: var(--dir-primary-fg);
+  font-weight: 600;
+}
+
+/* The Apps launcher is a quiet control, not a glowing cyan pill (AppsLauncher). */
+body:has([data-direction]) button.rounded-full.bg-cyan-soft {
+  background: var(--dir-control-bg);
+  border-color: var(--dir-control-border);
+  font-weight: 600;
+}
+
+/* Selected navigation: a quiet fill and the ink colour, no frame, no glow (MobileNavLink). */
+body:has([data-direction]) nav a[aria-current="page"].bg-mint\/\[0\.08\] {
+  background: var(--dir-tab-active-bg);
+  color: var(--dir-tab-active-fg);
+  font-weight: 600;
+}
+body:has([data-direction]) a[aria-current="page"].border-mint\/30 {
+  background: var(--dir-nav-active-bg);
+  border-color: var(--dir-nav-active-border);
+}
+
+/* Agents: the selected tab is the ink underline, not violet (AgentsPageView); a selected Agent or Bot
+   is a selected thing, so its edge lights up rather than its fill turning mint. */
+body:has([data-direction]) .border-b-2.border-violet {
+  border-color: var(--foreground);
+  color: var(--foreground);
+}
+body:has([data-direction]) .border-b-2.border-violet svg {
+  color: var(--foreground);
+}
+body:has([data-direction]) button.rounded-xl.border[aria-current="true"] {
+  border-color: transparent;
+  background: var(--dir-card-bg);
+  box-shadow: var(--dir-selected-edge);
+}
+body:has([data-direction]) button.rounded-xl.border:not([aria-current="true"]) {
+  border-color: var(--dir-card-border);
+  background: var(--dir-card-bg);
+}
+
+/* The Workbench home's icon tile: neutral, the brand light kept for its icon (Workbench). */
+body:has([data-direction]) .size-14.rounded-2xl.border-mint\/40 {
+  border-color: transparent;
+  background: var(--dir-tile-bg);
+}
+
+/* Phone: the project rows and their count chip (ProjectsPage); the brand bar (MobileBrandHeader). */
+body:has([data-direction]) .overflow-hidden.rounded-xl.border.border-border.bg-surface {
+  border-color: var(--dir-card-border);
+  background: var(--dir-card-bg);
+  border-radius: var(--dir-card-radius);
+}
+body:has([data-direction]) .project-drag-header .font-mono.text-\[10px\] {
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+body:has([data-direction]) header.sticky.top-0.z-40 {
+  border-color: var(--dir-brand-bar-border);
+  height: calc(3rem + env(safe-area-inset-top));
+}
+
+/* ------------------------------------------------------------------------------------------------
+   Scale remaps: what a token change does once the direction lands in src/index.css.
+   ------------------------------------------------------------------------------------------------ */
+
+/* A: a tighter radius scale, and the small-type floor raised from 10px to 11px. */
+body:has([data-direction="a"]) .rounded-md { border-radius: 6px; }
+body:has([data-direction="a"]) .rounded-lg { border-radius: 8px; }
+body:has([data-direction="a"]) .rounded-xl { border-radius: 10px; }
+body:has([data-direction="a"]) .rounded-2xl { border-radius: 12px; }
+body:has([data-direction="a"]) .rounded-3xl { border-radius: 14px; }
+body:has([data-direction="a"]) .rounded-tr-md { border-top-right-radius: 4px; }
+body:has([data-direction="a"]) .rounded-tl-md { border-top-left-radius: 4px; }
+body:has([data-direction="a"]) .text-\[10px\] { font-size: 11px; }
+
+/* B: today's radius, a larger body size, the floor raised to 11px, no borders on cards. */
+body:has([data-direction="b"]) .text-\[13px\] { font-size: var(--dir-body-size); }
+body:has([data-direction="b"]) .text-\[10px\] { font-size: 11px; }
+body:has([data-direction="b"]) .rounded-2xl.border.border-border.bg-surface-2 {
+  border-color: transparent;
+  background: transparent;
+}
+body:has([data-direction="b"]) aside.border-r {
+  border-color: transparent;
+}
+body:has([data-direction="b"]) [data-chat-header] {
+  border-bottom-color: transparent;
+  background: var(--background);
+}
