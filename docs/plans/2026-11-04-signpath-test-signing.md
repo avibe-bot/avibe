@@ -24,6 +24,25 @@ The test certificate is self-signed, `CN=Test certificate for 'Avibe [OSS]'`,
 valid until 2029-11-03, DER SHA-256
 `38f8d097ed29ecd73394e347a401c0d099379e89e1c47a3843f442041829bc0a`.
 
+## Prerequisites
+
+Some setup lives outside this repository:
+
+- **SignPath GitHub App.** The official SignPath GitHub App must be installed for
+  the repository owner, with repository access limited to the selected
+  repository. Without it, the submit step fails before any signing request
+  exists, with `Failed to retrieve GitHub App token`. Operators must review and
+  approve the permissions GitHub shows at installation. Limiting repository
+  selection does not remove the organization-level permissions the App requests.
+- **Test-only submitter.** The GitHub environment `signpath-test` holds
+  `SIGNPATH_TEST_API_TOKEN`. It is the API token of a dedicated, test-only
+  SignPath CI user that submits only to the `test-signing` policy. It is never a
+  production submitter.
+- **Branch access.** The environment's deployment branches are `master` and,
+  while its PR is open, the task branch. The `test-signing` policy requires the
+  trusted GitHub build system and origin verification. It accepts builds of
+  `.github/workflows/desktop-package.yml` from the same branches.
+
 ## Goal and contract
 
 An explicit manual run of `desktop-self-contained-package` with
@@ -97,4 +116,24 @@ only `SIGNPATH_TEST_API_TOKEN`, and no other test job references any secret.
 - [x] Verifier script and focused tests
 - [x] Workflow jobs and contract tests
 - [ ] PR, exact-head Codex review, CI
-- [ ] Real dispatched run evidence (orchestrator)
+- [x] Real dispatched run evidence (orchestrator)
+
+## Evidence
+
+Workflow run 41685355395 ran on implementation commit `60d3c45`. Its second
+attempt, after the GitHub App was installed, passed build, sign, and verify.
+The first attempt failed before creating a signing request because the App was
+missing. SignPath request `10b7075b-dc3e-4a87-93f4-c40357d0e094` completed.
+The verification report showed:
+
+- The signed installer is the 181,648,326-byte unsigned installer plus 2 zero
+  padding bytes and an 8,360-byte certificate table.
+- The signer certificate matched the pin. Authenticode reported `UnknownError`
+  without trust and `Valid` with only the pinned certificate trusted.
+- The tampered copy was rejected as `payload`, and Authenticode reported
+  `HashMismatch`. The foreign-certificate copy was rejected as `certificate`.
+
+This evidence covers commit `60d3c45` only; later documentation-only commits did
+not rebuild. It shows test signing, not production signing. Only the outer
+installer PE was signed, with the test certificate. The embedded executables
+were not signed.
