@@ -1,5 +1,7 @@
 # Apps — design-fidelity alignment (post-#679 polish)
 
+> **Design source of truth**: the design frames in `ui/design/frames/apps/` (`apps/*`). The Pencil frames this plan names were the design it was built from; that file is retired.
+
 After #679 shipped windowed Apps, runtime eyeballing surfaced that the three apps
 drifted from their **design.pen** frames (built code-green but never visually
 verified against the design). Alex's directive: **strictly align all three apps to

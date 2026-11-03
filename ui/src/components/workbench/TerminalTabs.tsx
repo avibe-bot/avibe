@@ -54,7 +54,7 @@ function deleteTerminalSession(sid: string, slot: number, keepalive = false): vo
 
 // A multi-tab terminal: a tab bar (each tab = its own backend session) over the lazy
 // xterm view. Reusable — the standalone Terminal app and (later) the editor's integrated
-// terminal both mount this. Design: design.pen `iwYIX`.
+// terminal both mount this. ui/design: apps/terminal/*.
 //   - windowed: every tab is an ephemeral, slot-bounded session, disposed on close.
 //   - route (non-windowed): the FIRST tab keeps the persistent localStorage session (so it
 //     reconnects across reloads); extra tabs are slot-bounded like the windowed ones.
@@ -208,7 +208,7 @@ export const TerminalTabs: React.FC<{
 
   return (
     <div className="flex h-full min-h-0 w-full flex-col bg-surface">
-      {/* Tab bar (iwYIX): tabs + ＋, combined status + persistence chip on the right. */}
+      {/* Tab bar (ui/design: apps/terminal/tabs): tabs + ＋, combined status + persistence chip on the right. */}
       <div className="flex items-center gap-1 border-b border-border bg-surface-2/70 px-2 py-1">
         <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
           {tabs.map((tab, i) => (

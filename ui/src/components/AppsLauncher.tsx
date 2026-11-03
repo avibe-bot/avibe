@@ -10,7 +10,7 @@ import { useWindowManager } from '../context/WindowManagerContext';
 import { useShowPageDrag } from '../context/showPageDrag';
 import { useRouteSurfaceActive } from '../lib/routeSurfaceActivity';
 
-// The sidebar bottom-left "Apps" button that reveals the Dock.
+// The sidebar bottom-left "Apps" button that reveals the Dock (ui/design: apps/dock/hover, apps/dock/open).
 //   - hover        → the Dock floats up ABOVE the button (transient preview; the
 //                    cursor can move straight onto it). Mirrors InboxHoverPopover.
 //   - click        → pin / unpin toggle (sticky). Unpinning hides it immediately

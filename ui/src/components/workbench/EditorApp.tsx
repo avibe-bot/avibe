@@ -90,7 +90,7 @@ function fontZoomIntent(e: KeyboardEvent): FontZoom | null {
   return null;
 }
 
-// Human language label for the status bar (design dnYPx shows e.g. "TypeScript React").
+// Human language label for the status bar (e.g. "TypeScript React"; ui/design: apps/editor/file).
 const LANGUAGE_LABEL: Record<string, string> = {
   ts: 'TypeScript',
   tsx: 'TypeScript React',
@@ -136,7 +136,7 @@ function languageLabel(filename: string | undefined): string | undefined {
   return LANGUAGE_LABEL[ext];
 }
 
-// The Editor IDE (design dnYPx + welcome w0qoC): activity bar + collapsible explorer tree +
+// The Editor IDE (ui/design: apps/editor/file, apps/editor/welcome): activity bar + collapsible explorer tree +
 // editor tabs + Monaco + cyan status bar; a VS-Code-style welcome when nothing is open. Monaco is
 // fully integrated here. Files opens a file via openApp('editor', { params: { path } }). Open
 // Folder / Save use the in-window FilePicker (browsing the real filesystem), and New File opens an
@@ -699,7 +699,7 @@ export const EditorApp: React.FC<{
 
         {/* Left panel — Explorer (Files view) or the cross-file Search view. Collapses via the
             active activity-bar icon; drag its right border to resize. Explorer is ALWAYS present in
-            Files view (design w0qoC keeps it in the welcome state). */}
+            Files view, the welcome state included (ui/design: apps/editor/welcome). */}
         {!explorerCollapsed && (
         <div
           className="relative flex shrink-0 flex-col overflow-hidden border-r border-border bg-surface-2"
@@ -852,7 +852,7 @@ export const EditorApp: React.FC<{
         </div>
       </div>
 
-      {/* Status bar (cyan, design dnYPx). The design mock shows a git branch + problem counts on
+      {/* Status bar (cyan, ui/design: apps/editor/file). An earlier mock showed a git branch + problem counts on
           the left, but we have no real git/diagnostics data for an arbitrary folder — showing a
           hardcoded "master · 0 ⚠ 0" would be misleading, so those are omitted until wired. The
           right side (cursor / indentation / language) is real. */}
