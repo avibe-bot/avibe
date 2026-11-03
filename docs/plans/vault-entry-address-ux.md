@@ -59,18 +59,44 @@ capabilities gets direct, compatible-browser advice instead of an enable prompt.
 
 ## Validation
 
-`AUTH-SETUP-137` owns the offline closed loop in the existing
+`AUTH-SETUP-137` is a bounded approval-consumer contract: three named, collected
+Vitest cases prove EN/ZH early advice, blocked protected preparation (including
+unhydrated protected metadata), usable deny, owner-only remediation and unchanged
+standard signing. Both Python citation-shape validation and JavaScript/Vitest
+case resolution apply. The row does not claim a whole browser continuation from
+these consumer-only citations.
+
+The supplementary offline closed loop remains in the existing
 `ui/e2e/vault-integrity` Playwright harness. It uses actual consumers/providers,
 Settings navigation and browser origin semantics, synthetic public metadata,
 network interception and a test-owned Vite server. Protected preparation,
 external traffic, real credentials and unexpected writes are forbidden. The
 existing integrity harness adds a synthetic default-port HTTPS Avibe control
-against actual sandbox CSP/RPC, alongside loopback controls.
+against actual sandbox CSP/RPC, alongside loopback controls. The catalog's UI
+collector resolves Vitest, not Playwright; browser files are supporting pointers,
+not catalog-resolved cases. Browser acceptance is run and reported separately.
 
 Focused unit regressions cover the real shared guard and preparation consumers,
 EN/ZH rendering, stale status, permissions, direct hook entry, localized
-synchronous failures and metadata/standard/cancel behavior. Phase-1 copy/helper
-regressions remain. Native frames are `vault/entry-notice/*`; browser acceptance
-also captures the real mobile approval dialog. No physical passkey, production
-runtime, LAN service, sandbox publication, cryptographic or funds action is part
-of this acceptance.
+synchronous failures and metadata/standard/cancel behavior. The old capability
+helper is private but remains production-used inside `vaultEntryIssue`; loopback,
+no-parent-WebAuthn and missing-WebCrypto regressions now use that public boundary.
+Copy tests keep every other precondition valid and restore only WebCrypto to
+prove it caused the notice, without executing a protected operation.
+
+Desktop-to-browser round trips model an allowed loopback, secure context and
+Node WebCrypto, not a mocked assessment. Every resume must reach a permitted
+positive state: enabled approval plus binding preparation/warm-up; setup's loss
+acknowledgment and enabled Add a passkey; enabled unlock for provision/edit; or
+enabled reveal plus context preparation for the same field. Shape-correct inert
+contexts and mocked custody hooks allow readiness without real credentials,
+network or ceremony. The tests still forbid any automatic protected operation.
+Missing browser prerequisites previously let mere presence/no-operation checks
+pass while the entire continuation was blocked; those same fixtures now fail
+all nine round-trip controls. The four localized copy controls also fail if
+restoring WebCrypto leaves an accidental secure-context block in place.
+
+Native frames are `vault/entry-notice/*`; browser acceptance also captures the
+real mobile approval dialog. No physical passkey, production runtime, LAN
+service, sandbox publication, cryptographic or funds action is part of this
+acceptance.

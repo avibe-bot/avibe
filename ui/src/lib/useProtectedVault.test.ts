@@ -1,8 +1,7 @@
-import { webcrypto } from 'node:crypto';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import { vaultFreshSetup, vaultUnlocked, vaultUnlockExpiresAt } from './useProtectedVault';
-import { webauthnAvailable } from './vaultEntry';
+import { vaultEntryIssue } from './vaultEntry';
 import {
   VAULT_SANDBOX_EXPECTED_BUILD_HASH,
   VAULT_SANDBOX_IFRAME_URL,
@@ -11,8 +10,6 @@ import {
   VAULT_SANDBOX_PINNED_MANIFEST,
   VAULT_SANDBOX_REQUIRED_RESOURCE_PATHS,
 } from './vaultSandboxManifest';
-
-afterEach(() => vi.unstubAllGlobals());
 
 describe('protected vault sandbox cutover', () => {
   it('pins the deployed sandbox build and only verifies runtime resources', () => {
@@ -26,33 +23,7 @@ describe('protected vault sandbox cutover', () => {
   });
 
   it('fails closed outside a browser context', () => {
-    expect(webauthnAvailable()).toBe(false);
-  });
-
-  // Parent WebCrypto enables integrity verification. WebAuthn belongs to the
-  // HTTPS sandbox, not to the parent's IP/port or navigator.credentials.
-  // These capability doubles test the helper, not browser secure-context rules.
-  it.each([
-    'http://localhost:5123',
-    'http://127.0.0.1:5123',
-    'http://127.0.0.1:15130',
-    'http://[::1]:5123',
-    'https://public-fixture.avibe.bot',
-  ])('allows a WebCrypto-capable parent at %s without parent-origin WebAuthn', (origin) => {
-    vi.stubGlobal('window', { location: new URL(origin) });
-    vi.stubGlobal('crypto', webcrypto);
-    vi.stubGlobal('navigator', undefined);
-    expect(webauthnAvailable()).toBe(true);
-  });
-
-  it.each([
-    { origin: 'http://192.168.2.3:5123', crypto: { subtle: undefined } },
-    { origin: 'http://127.0.0.1:5123', crypto: undefined },
-    { origin: 'https://public-fixture.avibe.bot', crypto: { subtle: undefined } },
-  ])('fails closed without parent WebCrypto at $origin', ({ origin, crypto }) => {
-    vi.stubGlobal('window', { location: new URL(origin) });
-    vi.stubGlobal('crypto', crypto);
-    expect(webauthnAvailable()).toBe(false);
+    expect(vaultEntryIssue()).toBe('browser');
   });
 });
 

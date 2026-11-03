@@ -75,7 +75,6 @@ vi.mock('../../context/ToastContext', () => ({
 
 vi.mock('../../lib/useProtectedVault', () => ({
   useProtectedVault: () => ({ revealProtectedValue, status: 'locked', refresh: vi.fn(), hasPasskey: () => false }),
-  webauthnAvailable: () => false,
   useVaultSandboxWarm,
   useVaultLock: () => ({ unlocked: false, remainingMs: 0, lockNow: vi.fn() }),
 }));

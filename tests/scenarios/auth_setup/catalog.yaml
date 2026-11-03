@@ -671,21 +671,29 @@ scenarios:
       - ui/src/lib/vaultSandboxIntegrity.test.ts
       - tests/test_vault_rest.py
   - id: AUTH-SETUP-137
-    name: Unsupported Vault entry stops before preparation and offers a safe address continuation
+    name: Unsupported protected approval stops preparation and keeps owner-aware guidance and deny
     status: covered
     kind: historical_regression
-    layer: browser
+    layer: contract
     backend: web
+    test:
+      - ui/src/lib/vaultEntry.test.tsx::AUTH-SETUP-137 shows early en access/sign guidance, disables only protected approval, and preserves deny
+      - ui/src/lib/vaultEntry.test.tsx::AUTH-SETUP-137 shows early zh access/sign guidance, disables only protected approval, and preserves deny
+      - ui/src/lib/vaultEntry.test.tsx::AUTH-SETUP-137 gives non-owners owner guidance without a forbidden settings link; standard signing still works
     reason: >-
-      The closed loop mounts the real Vaults page, approval/create/edit consumers,
-      API provider, entry assessment and Settings overlay in Chromium and WebKit.
-      Synthetic HTTP LAN, custom HTTPS and non-default-port Avibe origins are
-      intercepted before network access. Protected preparation, sandbox requests,
-      credentials and unexpected writes are denied and recorded. Deny, standard
-      signing, metadata edits and Settings navigation complete against inert
-      fixtures. Browser-capability advice is distinct from address advice.
-      This browser-owned contract has no Python RPC analogue; actual passkey/PRF
-      support and published-release acceptance remain AUTH-SETUP-136's live limits.
+      Covered is bounded to the real approval consumer and entry guards with
+      inert daemon/transport responses: EN/ZH advice before preparation, disabled
+      protected access/sign approval (including unhydrated protected metadata),
+      deny completion, an owner-only Settings link, and unchanged standard signing.
+      These collected Vitest cases do not prove the whole browser continuation.
+      The supplementary Playwright suite mounts the real Vaults page, create/edit
+      consumers, API provider and Settings overlay in Chromium and WebKit using
+      intercepted synthetic origins. It separately checks deny, metadata edits,
+      no-reload Settings/Back, form draft clearing and browser-capability advice.
+      The catalog collector resolves Vitest, not Playwright; those browser files
+      remain supporting pointers, not executable citations for this bounded row.
+      Actual passkey/PRF and published-release acceptance retain AUTH-SETUP-136's
+      live limits.
     supporting_tests:
       - ui/e2e/vault-integrity/entry.spec.ts
       - ui/e2e/vault-integrity/integrity.spec.ts

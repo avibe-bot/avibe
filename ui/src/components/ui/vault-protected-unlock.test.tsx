@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import { webcrypto } from 'node:crypto';
 import type { ComponentProps } from 'react';
 import { createInstance } from 'i18next';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
@@ -39,17 +40,23 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-// The real component consumes both locales in two different fallback branches.
-// Parent-page tests mock this panel or its capability helper; key-parity tests
-// cannot catch copy that incorrectly rejects 127.0.0.1 or recommends LAN HTTP.
-// Withhold only the browser capability, not the helper or the rendered message.
+// Both statuses use the shared entry notice. Independent EN/ZH expectations protect
+// the loopback/remote distinction; key parity cannot detect misleading advice.
+// Make all other prerequisites valid, then restore only WebCrypto to prove it —
+// not an earlier address/secure-context rejection — selected this notice.
 const locales = [
   {
     lng: 'en',
+    title: 'Protected Vault is unavailable in this browser context',
+    setup: 'Add a passkey',
+    unlock: 'Unlock with passkey',
     guidance: 'Use a compatible browser. On the computer running Avibe, open Vaults from localhost or 127.0.0.1; on other devices, use your HTTPS avibe.bot address. LAN HTTP addresses (such as 192.168.x.x) are not supported.',
   },
   {
     lng: 'zh',
+    title: '当前浏览器环境无法使用受保护的 Vault',
+    setup: '添加 passkey',
+    unlock: '用 passkey 解锁',
     guidance: '请使用兼容的浏览器。在运行 Avibe 的电脑上，通过 localhost 或 127.0.0.1 打开 Vaults；在其他设备上，使用你的 HTTPS avibe.bot 地址。不支持局域网 HTTP 地址（如 192.168.x.x）。',
   },
 ] as const;
@@ -73,7 +80,9 @@ describe('entry notice takes precedence over stale vault status', () => {
 });
 
 describe.each(['needs-setup', 'locked'] as const)('protected vault %s entry guidance', (status) => {
-  it.each(locales)('renders actionable, loopback-aware $lng guidance without starting a ceremony', async ({ lng, guidance }) => {
+  it.each(locales)('renders actionable, loopback-aware $lng guidance only while WebCrypto is missing, without starting a ceremony', async ({ lng, guidance, title, setup, unlock }) => {
+    vi.stubGlobal('location', new URL('http://127.0.0.1:5123'));
+    vi.stubGlobal('isSecureContext', true);
     vi.stubGlobal('crypto', { subtle: undefined });
     const i18n = createInstance();
     await i18n.use(initReactI18next).init({
@@ -83,11 +92,28 @@ describe.each(['needs-setup', 'locked'] as const)('protected vault %s entry guid
       interpolation: { escapeValue: false },
     });
     const vault = lockedVault(status);
-    render(<I18nextProvider i18n={i18n}><VaultProtectedUnlock vault={vault} /></I18nextProvider>);
+    const panel = <I18nextProvider i18n={i18n}><VaultProtectedUnlock vault={vault} /></I18nextProvider>;
+    const view = render(panel);
 
+    expect(screen.getByText(title)).toBeTruthy();
     expect(screen.getByText(guidance)).toBeTruthy();
     expect(screen.queryAllByRole('button')).toEqual([]);
     expect(screen.queryByRole('checkbox')).toBeNull();
+    expect(vault.setupPasskey).not.toHaveBeenCalled();
+
+    vi.stubGlobal('crypto', webcrypto);
+    // A new element forces the real component to reassess; no helper is mocked.
+    view.rerender(<I18nextProvider i18n={i18n}><VaultProtectedUnlock vault={vault} /></I18nextProvider>);
+    expect(screen.queryByText(guidance)).toBeNull();
+    expect(screen.queryByText(title)).toBeNull();
+    const action = screen.getByRole('button', { name: status === 'needs-setup' ? setup : unlock }) as HTMLButtonElement;
+    if (status === 'needs-setup') {
+      expect(action.disabled).toBe(true);
+      fireEvent.click(screen.getByRole('checkbox'));
+    }
+    expect(action.disabled).toBe(false);
+    // lockedVault shares one forbidden spy across discovery, setup, unlock and
+    // every key/value operation, so this asserts all stay untouched after recovery.
     expect(vault.setupPasskey).not.toHaveBeenCalled();
   });
 });

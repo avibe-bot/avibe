@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 // AUTH-SETUP-137: real consumers, preparation and client; only the daemon/transport is inert.
+import { webcrypto } from 'node:crypto';
 import { act, cleanup, fireEvent, render, renderHook, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { createInstance } from 'i18next';
@@ -49,23 +50,32 @@ afterEach(() => { cleanup(); resetVaultSandboxClient(); vi.restoreAllMocks(); vi
 // never mount approval's effects or call the real client.
 describe('unsupported Vault entries', () => {
   it.each([
-    'http://localhost:5123', 'http://127.0.0.1:15130', 'http://[::1]:5123',
+    'http://localhost:5123', 'http://127.0.0.1:5123', 'http://127.0.0.1:15130', 'http://[::1]:5123',
     'https://localhost:5123', 'https://127.0.0.1:15130', 'https://[::1]:5123',
     'https://avibe.bot', 'https://demo.avibe.bot:443', 'https://one.two.avibe.bot',
   ])('keeps the CSP/RPC-supported %s entry available without probing parent credentials', (url) => {
     origin(url);
     vi.stubGlobal('PublicKeyCredential', undefined);
+    vi.stubGlobal('navigator', undefined);
     expect(vaultEntryIssue()).toBeNull();
     expect(openVaultAuthorizationWindow()).toBeNull(); // Popup blocked by the fixture, not the entry gate.
     expect(window.open).toHaveBeenCalledOnce();
   });
 
-  it('rejects missing parent WebCrypto even at a supported origin', async () => {
-    origin('https://demo.avibe.bot');
-    vi.stubGlobal('crypto', { subtle: undefined });
-    expect(vaultEntryIssue()).toBe('browser');
-    await expect(getVaultSandboxClient()).rejects.toMatchObject({ code: 'sandbox_browser_unavailable' });
+  // Moved from the private capability helper to the production assessment boundary.
+  // Restoring only WebCrypto clears a browser failure, but never legitimizes LAN HTTP.
+  it.each([
+    { url: 'http://127.0.0.1:5123', crypto: undefined, issue: 'browser' },
+    { url: 'https://demo.avibe.bot', crypto: { subtle: undefined }, issue: 'browser' },
+    { url: 'http://192.168.2.3:5123', crypto: { subtle: undefined }, issue: 'address' },
+  ])('fails closed without parent WebCrypto at $url', async ({ url, crypto, issue }) => {
+    origin(url);
+    vi.stubGlobal('crypto', crypto);
+    expect(vaultEntryIssue()).toBe(issue);
+    await expect(getVaultSandboxClient()).rejects.toMatchObject({ code: issue === 'browser' ? 'sandbox_browser_unavailable' : 'sandbox_entry_unavailable' });
     expect(fetch).not.toHaveBeenCalled();
+    vi.stubGlobal('crypto', webcrypto);
+    expect(vaultEntryIssue()).toBe(issue === 'address' ? 'address' : null);
   });
   it.each([
     ['http://192.0.2.1:5123', false], ['http://192.0.2.1:5123', true],
@@ -97,7 +107,7 @@ describe('unsupported Vault entries', () => {
     expect(document.querySelector('iframe')).toBeNull();
   });
 
-  it.each(['en', 'zh'] as const)('shows early %s access/sign guidance, disables only protected approval, and preserves deny', async (language) => {
+  it.each(['en', 'zh'] as const)('AUTH-SETUP-137 shows early %s access/sign guidance, disables only protected approval, and preserves deny', async (language) => {
     origin('http://192.0.2.1:5123', false);
     await i18n.changeLanguage(language);
     const copy = language === 'zh' ? zh : en;
@@ -120,7 +130,7 @@ describe('unsupported Vault entries', () => {
     }
   });
 
-  it('gives non-owners owner guidance without a forbidden settings link; standard signing still works', async () => {
+  it('AUTH-SETUP-137 gives non-owners owner guidance without a forbidden settings link; standard signing still works', async () => {
     origin('https://custom.example');
     await i18n.changeLanguage('en');
     authorization.capabilities.can_manage_instance = false;
