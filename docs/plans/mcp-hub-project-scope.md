@@ -88,8 +88,8 @@ Non-goals:
 <project folder>/.mcp.json             # repository-owned, Claude Code format, no secrets
 ~/.avibe/project_mcp/<key>/            # private cache (0700 dirs, 0600 files); key per D1
 └── <name>/
-    ├── secrets.json                   # {"v": 1, "env": {...}, "headers": {...}}; env doubles as placeholder variables
-    ├── approval.json                  # {"v": 1, "hash": "...", "approvedAt": "...", "by": "..."}
+    ├── secrets.json                   # {"env": {...}, "headers": {...}}; env doubles as placeholder variables
+    ├── approval.json                  # {"fingerprint": "..."} of the raw .mcp.json entry (D3)
     ├── oauth.json                     # same shape as global (mcp-hub-oauth.md §6)
     ├── current.json                   # published revision pointer
     └── revisions/<rev>/               # merged definition / manifest / tools / commands
