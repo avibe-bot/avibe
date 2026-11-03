@@ -55,19 +55,19 @@ Non-goals:
   `<project root>/.mcp.json`. So Web Project Sessions, IM channels whose workdir
   is a project folder, background and forked Sessions all get the same answer
   Skills gives them. The cache key (`<key>` below) is the Avibe Project id
-  (`proj_<hex>`) when the root is an **active** Project's folder
-  (`projects_service._find_project_by_workdir` plus an explicit `enabled`
-  check; that helper also returns archived Projects), otherwise
-  `dir-<sha256(realpath(root))[:12]>`. A root with no `.mcp.json` → global only.
+  (`proj_<hex>`) when the root is a Project's folder
+  (`projects_service._find_project_by_workdir`; archived included — archive
+  changes nothing here), otherwise `dir-<sha256(realpath(root))[:12]>`. A root
+  with no `.mcp.json` → global only.
 - **D2 Visibility.** Project Session sees global ∪ own Project; same name →
   the Project server shadows the global one. Other Projects are never visible.
 - **D3 Approval.** Every server defined by a repository `.mcp.json`, stdio and
   HTTP, is `pending_approval` until an Owner approves it: it does not start,
-  is not advertised, and cannot be called. Approval binds to
-  `{"v": 1, "hash": sha256(canonical JSON of the raw .mcp.json entry)}`, i.e.
-  **before** placeholder substitution, so secrets never enter the hash and
-  rotating a secret does not need re-approval. Any change to the raw entry needs
-  approval again.
+  connect, refresh or advertise, and cannot be called. Approval binds to the
+  fingerprint (canonical JSON) of the **raw** entry, before placeholder
+  substitution — secrets never enter it and rotating a secret does not need
+  re-approval. Any change to the raw entry needs approval again. The record is
+  one file holding the fingerprint; no version, timestamp or author fields.
 - **D4 Placeholders.** `${VAR}` is accepted in a project `.mcp.json` only inside
   `url`, env values and header values (not in `command`/`args`, which would put
   secrets in argv). It is a "secret needed here" marker with **one namespace**:
@@ -95,22 +95,23 @@ Non-goals:
     └── revisions/<rev>/               # merged definition / manifest / tools / commands
 ```
 
-- Parsing reuses `definition_from_provider` with an `allow_placeholders` switch
-  limited to D4's fields; client-specific keys stay ignored.
-- Writes to `.mcp.json` (D5) are atomic, preserve other servers and unknown
-  top-level and per-server keys, and are refused with a reload when the file's
-  `(mtime, size, hash)` changed since it was read (external edit, git checkout).
-- Unreadable or invalid `.mcp.json` → that Project has no project servers, a
-  warning in the log and an error banner in the Project view; prompt, CLI and
-  startup never fail. Unreadable cache files degrade that server to
-  `needs_config` or unlisted.
+- Parsing reuses `definition_from_provider` unchanged (so client-specific keys
+  stay ignored): placeholders are resolved in the raw entry first, then the
+  parser runs; an unsubstituted placeholder never reaches it.
+- Writes to `.mcp.json` (D5) reuse `native.py`'s compare-and-replace atomic
+  write and preserve other servers and unknown top-level and per-server keys; a
+  changed file is re-read, never overwritten from stale memory.
+- Unreadable or invalid `.mcp.json` or cache files: that entry is skipped with a
+  warning; prompt, CLI and startup never fail. One boundary catch, no
+  per-file enumeration; a bad file is never overwritten by Avibe.
 
 ## 5. Effective definition (load-time merge)
 
 For each raw `.mcp.json` entry:
 
-1. Substitute `${VAR}` in D4 fields from `secrets.env`. Missing →
-   `needs_config`.
+1. Substitute `${VAR}` in D4 fields from `secrets.env`; a missing variable
+   makes the entry show as `needs_config` with the missing names — derived on
+   load, not a persisted state.
 2. `env = {...file.env, ...secrets.env}`.
 3. Headers merge by case-insensitive name; cache wins.
 4. stdio `cwd`: absent → project folder; relative → resolved against the
@@ -154,19 +155,16 @@ Consumers, none of which decide scope on their own:
   the project of its own cwd, as `vibe skill list` does. Controller down →
   `unavailable`, no second offline read path. Management on a shadowed name
   targets the visible (project) server; `--global` targets the global one.
+  Mutations reuse the CLI's existing Owner authentication — one rule for all
+  scopes; calling an approved server creates its runtime cache as usual.
 - **Call and management contract.** `vibe mcp <server> <tool>` sends
   `workingDirectory` and `projectBase` (filled as above) plus `sessionId`. The
   Controller derives the scope with D1 and resolves the name in that visible
   set before any connection; outside it → `not_found`. Missing inputs → global
   scope. Every management operation (add, `--login`, `--logout`, `--refresh`,
   `--remove`, `--approve`, configure secrets) carries the same two inputs and is
-  validated the same way; the Controller never accepts a client-supplied scope
-  id.
-- **Authority in `dir-` scopes.** Approve, configure secrets, add, remove and
-  login there require the instance Owner (the CLI mutation path already
-  authenticates). For anyone else a `dir-` scope is read-only: list and call
-  approved servers; nothing is created in the cache and nothing starts. A
-  readable directory never becomes a manageable scope on its own.
+  validated the same way. Scope ids are never client-supplied: the Controller
+  derives the scope itself from those inputs.
 - **Web.** `/api/mcp*` take `project=<proj id>` (Web manages Avibe Projects;
   `dir-` keys are reachable from Sessions and CLI only). Reads check
   `project_access_service.can_read_project`; mutations (add, remove, refresh,
@@ -177,7 +175,7 @@ Consumers, none of which decide scope on their own:
 ## 7. Storage and runtime keys
 
 - `repository` becomes a `Store(root)`; global is `Store(~/.avibe/mcp)`, a
-  project root is `Store(~/.avibe/project_mcp/<key>)`. `_stale` cleanup and `_admit`
+  project scope is `Store(~/.avibe/project_mcp/<key>)`. `_stale` cleanup and `_admit`
   operate per Store, so project packages are never treated as global leftovers.
 - One key type `ScopedName(scope, name)` replaces `name` in package locks,
   connection keys (`(scope, name, revision, session)`, including the `("open",)`
@@ -190,34 +188,30 @@ Consumers, none of which decide scope on their own:
 
 ## 8. Lifecycle
 
-- **Discovery.** One single-flight load per cache key. The existing discover
-  pass covers active Avibe Projects that have a folder; a `dir-` root loads on
-  first resolve; concurrent loads or stale checks for the same key collapse into
-  one. It runs off the loop (`asyncio.to_thread` for file and DB work), one key
-  at a time, with a bounded per-root server count.
-- **Staleness.** When the resolver serves a Project caller, a bounded
-  `stat(mtime, size)` of `.mcp.json` runs in a thread; only on change is the
-  file read and each entry re-hashed. A changed entry loses approval and is
-  refreshed in the background. No watcher.
+- **Loading.** On demand, when a caller's scope first resolves. No periodic
+  per-Project pass and no pre-discovery of all Projects. Concurrency is the
+  existing per-package lock under the package `ScopedName`; no second
+  coordinator. File and DB work stays off the Controller loop
+  (`asyncio.to_thread`).
+- **Staleness.** On resolve, the current `.mcp.json` is read in a thread and
+  compared entry-by-entry against the cached fingerprints; unchanged entries
+  keep their approval and publication, changed or new entries need approval
+  again (D3), removed entries become invisible immediately. No watcher, no
+  mtime fast path.
 - **Remove.** Through Avibe: remove the entry from `.mcp.json` (D5 write rules)
   and delete its cache directory. Removed by hand: dropped at the next staleness
   check, cache deleted then.
-- **Projects.** Archived Project → its key falls back to `dir-` at the next
-  resolve (the explicit `enabled` check in D1), so its servers need approval
-  again there; the `proj_` cache is kept for un-archive.
-  Folder moved → `proj_` cache kept (keyed by id); a moved `dir-` root starts a
-  new cache. Missing folder → no project servers. A `proj_` cache whose Project
-  row no longer exists is an orphan the discover pass deletes. `dir-` caches
-  are not auto-deleted (the folder may come back); `vibe mcp --projects`
-  (Owner) lists every project cache with its root, server count and last use,
-  and `--remove-project-cache <key>` deletes one.
+- **Projects.** Archive changes nothing: the folder still resolves to its
+  `proj_` cache and approvals. A `proj_` cache whose Project row no longer
+  exists stays on disk unused (harmless, private); removing it is not a
+  feature. Removing a server through Avibe deletes its cache directory
+  together with the `.mcp.json` entry.
 
 ## 9. Surfaces
 
 - **Web.** Skills & MCP page gets a Global / Project switch (reuse the Skills
   project-scope pattern and frames). Project view lists `.mcp.json` servers with
-  state badges; a project server that shadows a global one shows "overrides
-  global". Actions: Approve, Configure secrets (key/value editor writing
+  state badges and their scope. Actions: Approve, Configure secrets (key/value editor writing
   `secrets.json`, showing placeholder names), Login, Remove. The two-tab Add
   dialog targets the current view's scope. Design frames under
   `ui/design/frames/skills/`; all copy through i18n.
@@ -237,10 +231,19 @@ Consumers, none of which decide scope on their own:
 
 ## 11. Persisted shapes
 
-New paths only. Global files unchanged; no migration. Every new file carries a
-version field; unreadable files degrade per §4.
+New paths only. Global files unchanged; no migration. New files use the shapes
+of §4 and D3 (a `secrets.json` of env/headers, a fingerprint file); no version
+fields — the format is defined by this release and evolved by safe degradation
+when a real change comes. Unreadable files degrade per §4.
 
 ## 12. Resolved owner decisions (2026-11-03)
+
+Round-3 trim (both reviewers, folded): drop per-file version fields, the
+`--projects`/`--remove-project-cache` tooling, the archived-Project fallback
+branch, per-root server-count bounds, and the dedicated single-flight
+coordinator; reuse the existing package locks, atomic write, Owner
+authentication and project access service instead. `dir-` scopes stay (D1 is
+the Skills rule; astra) with no special authority tier (astra).
 
 1. Write-back: Avibe rewrites `.mcp.json` atomically on add/edit/remove (D5).
 2. Placeholders: one namespace (D4).
