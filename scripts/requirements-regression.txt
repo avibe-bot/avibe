@@ -1,0 +1,3 @@
+# Installer tooling lives outside the exact-synced application environment.
+# Keep aligned with the pinned uv used by the repository's Python CI.
+uv==0.12.10
