@@ -527,7 +527,7 @@ export const VaultSecretForm: React.FC<{
     } catch (err) {
       if (gen !== keypairGenRef.current) return;
       setProtectedKeypair(null);
-      setKeypairError(err instanceof Error ? err.message : String(err));
+      setKeypairError(vaultErrorMessage(t, err, t('vaults.request.saveFailed')));
     } finally {
       if (gen === keypairGenRef.current) setGeneratingKeypair(false);
     }
