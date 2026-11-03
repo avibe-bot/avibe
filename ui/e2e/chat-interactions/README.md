@@ -10,6 +10,9 @@ Chromium and WebKit browsers. CI runs this suite in `lint / ui-checks`.
 - A completed toolbar touch consumes the trailing `touchend` default action,
   so native tap processing cannot undo Select all after `pointerup`. This is
   not a selection lock: later clearing or selecting other text still works.
+- A Harness row's preview chip, and a Harness group collapsed or expanded on
+  its rail, stay inside the row's bubble column at phone widths: a long preview
+  truncates instead of sizing the chip past the screen edge.
 - Desktop, keyboard, assistive clicks, incomplete gestures, and the bounded
   missing-terminal-event recovery retain their existing behavior.
 
@@ -22,6 +25,8 @@ No live Avibe state, credentials, or user browser profile is used.
 
 - Browser layout tests cover 320/390/768px and both languages. The old row layout
   fails the measured next-line assertion; jsdom cannot measure this contract.
+- The Harness layout test measures every box against its row's column at 320 and
+  390px. The old fixed 360px chip spills 72px past it at 320px.
 - Component tests own the touch completion contract, incomplete gesture and
   subsequent clearing. The pre-fix handler leaves `touchend` uncancelled.
 - Native browser taps in Chromium and WebKit additionally verify React's real
