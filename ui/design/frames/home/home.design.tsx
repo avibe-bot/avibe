@@ -2,12 +2,12 @@
 // partly set up, everything set up, and a member without Bots, on the desktop app at three window
 // sizes (the centering depends on the height) and on two phones, plus the layout spec and a phone
 // with the keyboard up. The page is kit (Home.tsx); the sidebar, the header, the tab bar (the main
-// Bot in its center), the composer, the project chips, and the keyboard stand-in are shipped or approved.
+// Bot in its center), the composer, and the project chips are shipped; the keyboard is the shell's stand-in.
 import { MobileBrandHeader } from '@/components/MobileChrome';
 import { OWNER_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
 
 import { frames, type FrameSpec } from '../../frame';
-import { SoftKeyboard } from '../../kit/ComposerHold';
+import { SoftKeyboard } from '../../shell/HeldComposer';
 import { HomePage, type SetupGap } from '../../kit/Home';
 import { DesktopScreen } from '../../shell/DesktopScreen';
 import type { WorkbenchFixtures } from '../../shell/fixtures';
