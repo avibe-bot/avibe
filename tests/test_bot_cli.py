@@ -69,7 +69,7 @@ def test_bot_create_and_set_say_the_limit_to_the_agent_that_runs_them(home, monk
     for argv in (("bot", "create", "--name", "Zeta"), ("bot", "set", "reviewer", "--name", "Reviewer")):
         code, refused = _run(monkeypatch, capsys, *argv)
         assert (code, refused["code"]) == (1, "bot_limit_reached"), argv
-        assert "at most 5 Bots besides the main Bot" in refused["error"]
+        assert "at most 5 Bots, not counting the main Bot" in refused["error"]
         assert "`vibe bot remove <handle>`" in refused["error"] and "conversation and memory" in refused["error"]
 
 

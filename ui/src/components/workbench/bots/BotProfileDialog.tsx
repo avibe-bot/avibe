@@ -8,7 +8,7 @@ import { ApiError, useApi, type VibeAgentBrief } from '../../../context/ApiConte
 import { useBots, type BotProfileRequest } from '../../../context/BotsContext';
 import { useToast } from '../../../context/ToastContext';
 import { errorMessage } from '@/lib/errorMessage';
-import { BOT_HANDLE_RE, botRole, botSessionPath, eligibleForBot, type Bot, type BotEmojiAvatarInput } from '@/lib/bots';
+import { BOT_HANDLE_RE, botRole, botSessionPath, eligibleForBot, type Bot, type BotEmojiAvatarInput, type BotLimit } from '@/lib/bots';
 import { Button } from '../../ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '../../ui/dialog';
 import { Input } from '../../ui/input';
@@ -18,6 +18,7 @@ import { Textarea } from '../../ui/textarea';
 import { AgentRoutePicker, type AgentRoutePatch } from '../AgentRoutePicker';
 import { BotAvatar } from '../../ui/bot-avatar';
 import { BotAvatarPicker, type BotAvatarChoice } from './BotAvatarPicker';
+import { BotLimitReason } from './BotLimitReason';
 
 
 type HandleState =
@@ -82,8 +83,14 @@ const BotProfileForm: React.FC<{ request: BotProfileRequest; onClose: () => void
   const [route, setRoute] = useState<{ model: string | null; reasoning_effort: string | null } | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // The server refused for want of a place: another device or Bot took the last one first.
-  const [limitRefused, setLimitRefused] = useState(false);
+  // The server refused for want of a place (another device or Bot took the last one first),
+  // while the list still read as `refusedAt`. The refusal speaks until the next read of the list.
+  const [refusedAt, setRefusedAt] = useState<BotLimit | null>(null);
+  // The list as it reads now, not as it read when the submit began.
+  const limitRef = useRef(limit);
+  useEffect(() => {
+    limitRef.current = limit;
+  }, [limit]);
   const suggestionRef = useRef<{ controller: AbortController; promise: Promise<string | null> } | null>(null);
 
   const mainName = mainBot ? displayName(mainBot) : t('bots.mainDefaultName');
@@ -184,8 +191,11 @@ const BotProfileForm: React.FC<{ request: BotProfileRequest; onClose: () => void
   // Adding waits until a Bot is removed (D12; ui/design: sidebar/bot-profile/at-limit): the
   // dialog says so in the words the Agents page uses, whether it opened at the limit or the
   // server refused because another add took the last place first.
-  const placesTaken = request.kind === 'create' && limit && (atLimit || limitRefused)
-    ? { taken: Math.max(limit.count, limitRefused ? limit.max : 0), max: limit.max }
+  // From then on the list decides: once it is read again, a place freed meanwhile lets the
+  // user add what they entered without reopening the dialog.
+  const refusalCurrent = refusedAt !== null && limit === refusedAt;
+  const placesTaken = request.kind === 'create' && limit && (atLimit || refusalCurrent)
+    ? { count: Math.max(limit.count, refusalCurrent ? limit.max : 0), max: limit.max }
     : null;
 
   const handleError = handleDraft !== null && handleDraft !== '' && !BOT_HANDLE_RE.test(handleDraft)
@@ -280,8 +290,8 @@ const BotProfileForm: React.FC<{ request: BotProfileRequest; onClose: () => void
       onClose();
       navigate(botSessionPath(bot));
     } catch (err) {
-      if (err instanceof ApiError && err.code === 'bot_limit_reached' && limit) {
-        setLimitRefused(true);
+      if (err instanceof ApiError && err.code === 'bot_limit_reached' && limitRef.current) {
+        setRefusedAt(limitRef.current);
         // The add that took the place has published `bots.changed`; read it now if the stream is not live.
         void afterWrite();
         return;
@@ -426,8 +436,9 @@ const BotProfileForm: React.FC<{ request: BotProfileRequest; onClose: () => void
         {placesTaken && (
           <p role="status" className="flex items-start gap-2 rounded-lg border border-border bg-foreground/[0.03] px-3 py-2 text-[12px] leading-relaxed text-muted">
             <Info className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
-            <span className="min-w-0 flex-1">{t('bots.limit.reached', { max: placesTaken.max })}</span>
-            <span className="shrink-0 font-mono">{t('bots.limit.places', placesTaken)}</span>
+            <span className="min-w-0 flex-1">
+              <BotLimitReason limit={placesTaken} mainName={mainName} />
+            </span>
           </p>
         )}
         {request.kind === 'create' && tab === 'agent' && (

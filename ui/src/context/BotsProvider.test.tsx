@@ -164,7 +164,8 @@ describe('saving a Bot from the dialog reads the Bots once', () => {
 // limit from the same read as the list, and a refusal that still happens says the same.
 describe('the add dialog and the places for custom Bots', () => {
   const create = () => screen.getByRole('button', { name: 'bots.dialog.create' }) as HTMLButtonElement;
-  const reason = 'bots.limit.reached:{"max":5}';
+  // The main Bot does not count, so the reason names it.
+  const reason = 'bots.limit.reached:{"max":5,"main":"bots.mainDefaultName"}';
 
   it('opened with every place taken, says why and adds nothing', async () => {
     const { api } = fakeApi();
@@ -179,9 +180,10 @@ describe('the add dialog and the places for custom Bots', () => {
     expect(screen.queryByText(/^bots\.dialog\.chatHint/)).toBeNull();
   });
 
-  it('shows the same words when another add took the last place first', async () => {
-    const { api } = fakeApi();
-    api.listBots.mockResolvedValue({ bots: [MAIN, CSO], limit: { count: 4, max: 5 } });
+  it('shows the same words when another add took the last place first, until the list frees a place', async () => {
+    const { api, stream } = fakeApi();
+    // Every read parses a fresh body, as `api.listBots` does.
+    api.listBots.mockImplementation(async () => ({ bots: [MAIN, CSO], limit: { count: 4, max: 5 } }));
     const suggestBotHandle = vi.fn(async () => ({ handle: 'zeta', source: 'transliteration' }));
     const createBot = vi.fn(async () => {
       throw new ApiError('最多 5 位伙伴，移出一位后可以再添加。移出的伙伴会保留对话和记忆。', 409, 'bot_limit_reached');
@@ -189,6 +191,8 @@ describe('the add dialog and the places for custom Bots', () => {
     Object.assign(api, { suggestBotHandle, createBot });
     renderDialog(api, <OpenCreate />);
     await flush();
+    // A live stream: the list is read again only when the server says it changed.
+    act(() => stream.handlers?.onConnectionState?.('connected'));
     expect(screen.queryByText(reason)).toBeNull();
     expect(screen.getByText(/^bots\.dialog\.chatHint/)).toBeTruthy();
 
@@ -197,11 +201,18 @@ describe('the add dialog and the places for custom Bots', () => {
     await flush();
 
     expect(createBot).toHaveBeenCalledTimes(1);
-    // The list may not have caught up yet; the refusal itself says every place is taken.
+    // The list has not been read since; the refusal itself says every place is taken.
     expect(await screen.findByText(reason)).toBeTruthy();
     expect(screen.getByText('bots.limit.places:{"taken":5,"max":5}')).toBeTruthy();
     expect(screen.queryByRole('alert')).toBeNull();
     expect(create().disabled).toBe(true);
+
+    // Then a Bot is removed elsewhere: the next read decides, and what was entered can be added.
+    act(() => stream.handlers?.onBotsChanged?.({ handle: 'pm' }));
+    await flush();
+    expect(screen.queryByText(reason)).toBeNull();
+    expect(create().disabled).toBe(false);
+    expect(screen.getByDisplayValue('Zeta')).toBeTruthy();
   });
 });
 

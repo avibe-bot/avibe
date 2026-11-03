@@ -32,6 +32,7 @@ import { BotAvatar } from '../ui/bot-avatar';
 import { Button } from '../ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { BackendAvatar } from '../visual';
+import { BotLimitReason } from './bots/BotLimitReason';
 import { CapabilityTabs } from './CapabilityTabs';
 import { WorkbenchPageHeader } from './WorkbenchPageHeader';
 
@@ -61,6 +62,8 @@ export interface AgentsPageViewProps {
   agentCount: number;
   /** The places for custom Bots: once all are taken, Add stays in place, disabled, and says why (D12). */
   botLimit: BotLimit | null;
+  /** The main Bot, whatever the search keeps: the limit names it, since it does not count. */
+  mainBot: Bot | null;
   onAddBot: () => void;
   /** The Agents the search and filter keep, without any Bot's Agent; the view orders them. */
   agents: VibeAgentBrief[];
@@ -116,6 +119,7 @@ export const AgentsPageView: React.FC<AgentsPageViewProps> = ({
   botCount,
   agentCount,
   botLimit,
+  mainBot,
   onAddBot,
   agents,
   defaultAgentName,
@@ -201,6 +205,7 @@ export const AgentsPageView: React.FC<AgentsPageViewProps> = ({
                 onSelect={onSelect}
                 onAdd={canEdit ? onAddBot : undefined}
                 limit={botLimit}
+                mainBotName={mainBot ? botDisplayName(mainBot, t('bots.mainDefaultName')) : t('bots.mainDefaultName')}
               />
             )}
             {showAgents && (
@@ -288,6 +293,7 @@ function BotsSection({
   onSelect,
   onAdd,
   limit,
+  mainBotName,
 }: {
   bots: Bot[];
   /** Agents the gateway cannot run for want of a model: a Bot whose Agent is one says so. */
@@ -297,6 +303,7 @@ function BotsSection({
   /** Absent without the right to add one. */
   onAdd?: () => void;
   limit: BotLimit | null;
+  mainBotName: string;
 }) {
   const { t } = useTranslation();
   const full = limit !== null && botLimitReached(limit);
@@ -323,11 +330,10 @@ function BotsSection({
               <Plus className="size-4" />
             </span>
             <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-              <span className="flex items-center gap-2">
-                <span className="text-sm font-semibold opacity-70">{t('bots.addLabel')}</span>
-                <span className="font-mono text-xs">{t('bots.limit.places', { taken: limit.count, max: limit.max })}</span>
+              <span className="text-sm font-semibold opacity-70">{t('bots.addLabel')}</span>
+              <span className="text-xs leading-snug">
+                <BotLimitReason limit={limit} mainName={mainBotName} />
               </span>
-              <span className="text-xs leading-snug">{t('bots.limit.reached', { max: limit.max })}</span>
             </span>
           </button>
         ) : (

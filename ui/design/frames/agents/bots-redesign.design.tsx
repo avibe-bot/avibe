@@ -131,6 +131,7 @@ const page = ({
       botCount={bots?.length ?? 0}
       agentCount={listed.length}
       botLimit={botLimit}
+      mainBot={bots?.find((bot) => bot.builtin) ?? null}
       onAddBot={noop}
       agents={listed}
       defaultAgentName="vibey"

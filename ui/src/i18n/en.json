@@ -4827,7 +4827,7 @@
       "emptyBody": "Just tell me what you'd like to get done, or anything you'd like me to keep in mind. I'm always here, and I'll remember what we talk about."
     },
     "limit": {
-      "reached": "Up to {{max}} Bots. Remove one to add another.",
+      "reached": "Up to {{max}} Bots, not counting {{main}}. Remove one to add another.",
       "places": "{{taken}}/{{max}}"
     },
     "agents": {

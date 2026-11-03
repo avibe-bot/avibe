@@ -383,7 +383,7 @@ def test_five_current_custom_bots_fill_the_places(service):
 
     service.store.create(name="zeta", backend="vibey")
     assert _refused_for_room(lambda: service.create_bot(display_name="Zeta", handle="zeta-bot")) == {
-        "limit": 5, "count": 5,
+        "limit": 5, "count": 5, "main": "",
     }
     _refused_for_room(lambda: service.set_bot("zeta", display_name="Zeta"))
     assert not any(bot.handle.startswith("zeta") for bot in service.list_bots())

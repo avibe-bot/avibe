@@ -89,15 +89,17 @@ def _not_found(handle: str) -> BotError:
     return BotError("bot_not_found", f"Bot '{handle}' not found", status=404, handle=handle)
 
 
-def _limit_reached(count: int) -> BotError:
+def _limit_reached(count: int, main_name: str) -> BotError:
+    """``main`` is the main Bot's display name as stored: empty means the reader's localized default."""
     return BotError(
         "bot_limit_reached",
-        f"You can have at most {MAX_CUSTOM_BOTS} Bots besides the main Bot, and you have {count}. Remove one with "
-        "`vibe bot remove <handle>` to add another; a removed Bot keeps its conversation and memory, and setting it "
-        "again reconnects them.",
+        f"You can have at most {MAX_CUSTOM_BOTS} Bots, not counting the main Bot, and you have {count}. Remove one "
+        "with `vibe bot remove <handle>` to add another; a removed Bot keeps its conversation and memory, and setting "
+        "it again reconnects them.",
         status=409,
         limit=MAX_CUSTOM_BOTS,
         count=count,
+        main=main_name,
     )
 
 
@@ -344,9 +346,10 @@ def bot_limit_payload(bots: Iterable[Bot]) -> dict[str, int]:
 def require_room_for_bot(conn: Connection) -> None:
     """Refuse adding a Bot once ``MAX_CUSTOM_BOTS`` count. Run it under the write lock of the transaction that adds
     the Bot, so two adds racing for the last place cannot both take it."""
-    count = bot_limit_payload(list_bots_in(conn))["count"]
+    bots = list_bots_in(conn)
+    count = bot_limit_payload(bots)["count"]
     if count >= MAX_CUSTOM_BOTS:
-        raise _limit_reached(count)
+        raise _limit_reached(count, next((bot.display_name for bot in bots if bot.builtin), ""))
 
 
 def hidden_bot_session_ids(conn: Connection, context: AuthorizationContext | None) -> list[str]:

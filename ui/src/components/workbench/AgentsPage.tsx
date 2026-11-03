@@ -31,6 +31,7 @@ import { useInstanceAuthorization } from '../../context/InstanceAuthorizationCon
 import { useBots } from '../../context/BotsContext';
 import { BotAvatar } from '../ui/bot-avatar';
 import { botRole, botSessionPath, eligibleForBot, liveBotAgentNames } from '../../lib/bots';
+import { BotLimitReason } from './bots/BotLimitReason';
 import { RemoveBotDialog } from './bots/RemoveBotDialog';
 import { AgentGlyph, AgentsPageView } from './AgentsPageView';
 import { AgentGraphTab } from './AgentGraphTab';
@@ -272,6 +273,7 @@ export const AgentsPage: React.FC = () => {
     bots: liveBots,
     listed: botsListed,
     limit: botLimit,
+    mainBot,
     displayName: botDisplayName,
     openProfile: openBotProfile,
   } = useBots();
@@ -1513,6 +1515,7 @@ export const AgentsPage: React.FC = () => {
         bots={botsEnabled ? filteredBots : null}
         botCount={liveBots.length}
         botLimit={botsEnabled ? botLimit : null}
+        mainBot={mainBot}
         agentCount={listedAgents.length}
         onAddBot={() => openBotProfile({ kind: 'create' })}
         agents={filteredAgents}
@@ -2439,7 +2442,10 @@ export const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canE
             {/* Above the row, so it stays beside "Set as Bot" wherever the row wraps. */}
             {botLimit && (
               <p id={botLimitNoteId} className="basis-full text-xs leading-snug text-muted">
-                {t('bots.limit.reached', { max: botLimit.max })}
+                <BotLimitReason
+                  limit={botLimit}
+                  mainName={bots.mainBot ? bots.displayName(bots.mainBot) : t('bots.mainDefaultName')}
+                />
               </p>
             )}
             {canRun && (
@@ -2465,9 +2471,6 @@ export const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canE
               >
                 <UserPlus className="size-3" />
                 {t('bots.agents.setAsBot')}
-                {botLimit && (
-                  <span className="font-mono text-muted">{t('bots.limit.places', { taken: botLimit.count, max: botLimit.max })}</span>
-                )}
               </Button>
             )}
             <div className="flex-1" />

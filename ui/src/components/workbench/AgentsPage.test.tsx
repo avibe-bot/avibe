@@ -3462,18 +3462,20 @@ describe('AgentsPage Bots and Agents', () => {
     renderPage(agentsApi([vibey, mainAgent, csoAgent, helper]), { canManageAgents: true, bots });
     await waitFor(() => expect(agentRow('helper')).toBeTruthy());
 
+    // The main Bot is in the list but not in the count, so the reason names it, beside the count.
+    const reason = 'bots.limit.reached:{"max":5,"main":"bots.mainDefaultName"}';
+    const places = 'bots.limit.places:{"taken":5,"max":5}';
     const add = screen.getByText('bots.addLabel').closest('button')!;
     expect(add.disabled).toBe(true);
-    expect(within(add).getByText('bots.limit.places:{"taken":5,"max":5}')).toBeTruthy();
-    expect(within(add).getByText('bots.limit.reached:{"max":5}')).toBeTruthy();
+    expect(within(add).getByText(places).parentElement).toBe(within(add).getByText(reason));
 
     fireEvent.click(agentRow('helper')!);
     await waitFor(() => expect(within(panel()).getByDisplayValue('helper')).toBeTruthy());
     const setAsBot = within(panel()).getByText('bots.agents.setAsBot').closest('button')!;
     expect(setAsBot.disabled).toBe(true);
-    expect(within(setAsBot).getByText('bots.limit.places:{"taken":5,"max":5}')).toBeTruthy();
-    const reason = within(panel()).getByText('bots.limit.reached:{"max":5}');
-    expect(setAsBot.getAttribute('aria-describedby')).toBe(reason.id);
+    const note = within(panel()).getByText(reason);
+    expect(within(note).getByText(places)).toBeTruthy();
+    expect(setAsBot.getAttribute('aria-describedby')).toBe(note.id);
     fireEvent.click(setAsBot);
     expect(bots.openProfile).not.toHaveBeenCalled();
   });

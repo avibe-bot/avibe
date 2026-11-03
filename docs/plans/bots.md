@@ -390,8 +390,9 @@ Owner decision, 2026-11-03.
   `counts_toward_limit`).
 - Every way to add a Bot (`POST /api/bots`, `POST /api/bots/set`,
   `vibe bot create`, `vibe bot set`) is refused once five count, with
-  `bot_limit_reached`: it says the limit and that removing a Bot frees a place,
-  and that a removed Bot keeps its conversation and memory. The check runs
+  `bot_limit_reached`: it says the limit, that the main Bot does not count (by
+  its current display name on the Web), that removing a Bot frees a place, and
+  that a removed Bot keeps its conversation and memory. The check runs
   under the write lock of the transaction that adds the Bot, so two adds racing
   for the last place cannot both take it. This refusal is also what the main
   Bot reads when it runs `vibe bot create`; no prompt text describes the limit.
@@ -403,9 +404,12 @@ Owner decision, 2026-11-03.
   - the sidebar's avatar strip (desktop and the phone's Workbench) and the
     phone's Bot switch sheet have no Add at all: their room goes to the Bots;
   - the Agents page keeps its Add card and 「设为伙伴」 in place, disabled, with
-    the reason and the count (「最多 5 位伙伴，移出一位后可以再添加」, `5/5`);
+    the reason and the count beside it (「最多 5 位伙伴（不含歪比），移出一位后可以再添加
+    5/5」). The reason names the main Bot by its current display name, because
+    the page lists it among the Bots while the count leaves it out;
   - the add dialog shows the same notice and adds nothing, and shows it too
-    when the server refuses because another add took the last place first.
+    when the server refuses because another add took the last place first,
+    until the list is read again and says whether a place is free.
 
 ## Prompt drafts
 

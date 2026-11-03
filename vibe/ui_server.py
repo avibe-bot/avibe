@@ -10212,7 +10212,11 @@ def _bot_error_response(exc: Exception):
     if isinstance(exc, BotError):
         lang = _request_ui_language()
         key = f"error.bots.{exc.code}"
-        message = t(key, lang, **{"handle": "", **exc.details})
+        values = {"handle": "", **exc.details}
+        if "main" in values and not values["main"]:
+            # The main Bot's empty display name reads as its localized default.
+            values["main"] = t("error.bots.mainBotDefaultName", lang)
+        message = t(key, lang, **values)
         return _coded_error_response(exc.code, str(exc) if message == key else message, exc.status, details=exc.details)
     if isinstance(exc, PermissionError):
         return jsonify({"ok": False, "error": "instance_access_forbidden", "required_role": "owner"}), 403
