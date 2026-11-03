@@ -253,7 +253,7 @@ scenarios:
     status: covered
     kind: user_experience
     layer: component
-    test: ui/src/components/RemoteAccess.test.tsx
+    test: ui/src/components/RemoteAccess.test.tsx::RA-TQ-040 explains automatic waiting without disabling a manual retry
   - id: RA-TQ-041
     name: Stop and disable win the race between candidate evaluation and promotion
     status: covered

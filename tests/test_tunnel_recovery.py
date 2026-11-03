@@ -886,7 +886,7 @@ def test_ra_tq_033_unavailable_retries_use_connector_backoff(monkeypatch) -> Non
 
 
 def test_ra_tq_036_manual_retries_ignore_auto_debt_and_debounce_does_not_slide(monkeypatch):
-    """Repeated manual intent bypasses every automatic deadline, not just once."""
+    """RA-TQ-036: Manual intent bypasses automatic debt without sliding debounce."""
     now = 2_000_000_000.0
     started = []
 
@@ -928,6 +928,7 @@ def test_ra_tq_036_manual_retries_ignore_auto_debt_and_debounce_does_not_slide(m
 
 
 def test_ra_tq_037_performance_retry_streak_cap_expiry_and_success(monkeypatch):
+    """RA-TQ-037: Retry delay follows unsuccessful streaks and resets on success."""
     now = 2_000_000_000.0
     monkeypatch.setattr(remote_access.time, "time", lambda: now)
     for count, delay in enumerate((60, 120, 300, 300), start=1):
@@ -951,6 +952,7 @@ def test_ra_tq_037_performance_retry_streak_cap_expiry_and_success(monkeypatch):
 @pytest.mark.parametrize("version", [1, 2])
 @pytest.mark.parametrize("age", [30, 1800])
 def test_ra_tq_038_legacy_history_rebases_once_and_discards_bypass(monkeypatch, version, age):
+    """RA-TQ-038: Upgrade rebases old debt once and never restores manual lockout."""
     now = 2_000_000_000.0
     monkeypatch.setattr(remote_access.time, "time", lambda: now)
     monkeypatch.setattr(remote_access.threading.Thread, "start", lambda self: None)
@@ -1010,6 +1012,7 @@ def test_ra_tq_039_observed_context_resets_external_debt_not_missing_evidence(mo
 
 
 def test_ra_tq_039_completion_records_rollback_context_missed_by_monitor(monkeypatch):
+    """RA-TQ-039: An optimizer-owned rollback retains its completion's retry debt."""
     now = 2_000_000_000.0
     monkeypatch.setattr(remote_access.time, "time", lambda: now)
     config = _config()
@@ -1179,6 +1182,7 @@ def test_ra_tq_039_failed_transition_remains_owned_without_live_worker(monkeypat
 @pytest.mark.parametrize("change", ["stop", "disable"])
 @pytest.mark.parametrize("trigger", ["latency", "tail_latency"])
 def test_ra_tq_041_stop_or_disable_wins_candidate_promotion_race(monkeypatch, tmp_path, change, trigger):
+    """RA-TQ-041: Stop/disable between evaluation and promotion prevents cutover."""
     config, active_pid, candidate_pid, alive = _setup_recovery(monkeypatch, tmp_path, _quality(100))
     results = []
     monkeypatch.setattr(remote_access, "_finish_recovery", lambda **result: results.append(result))

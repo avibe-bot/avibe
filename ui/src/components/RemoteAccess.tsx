@@ -329,7 +329,9 @@ export const RemoteAccess: React.FC = () => {
     ? status.retry_at
     : Number.isFinite(lastAttempt) ? new Date(lastAttempt + 10_000).toISOString() : null;
   const autoRetryAt = quality?.recovery.next_attempt_at;
-  const clock = useDeadlineClock(manualRetryAt && Date.parse(manualRetryAt) > Date.now() ? manualRetryAt : autoRetryAt);
+  const manualClock = useDeadlineClock(manualRetryAt);
+  const automaticClock = useDeadlineClock(autoRetryAt);
+  const clock = Math.max(manualClock, automaticClock);
   const manualDebounce = Boolean(manualRetryAt && Date.parse(manualRetryAt) > clock);
   const retryTime = (value: string) => new Date(value).toLocaleTimeString();
   const qualityFresh = quality
