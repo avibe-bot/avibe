@@ -251,8 +251,13 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
 
   const settle = useCallback((current: Take, words: string) => {
     if (take.current !== current || current.ending === 'cancel') return;
-    if (current.ending === 'system') {
-      interrupt('system', words.trim() || `${current.heard.text}${current.heard.stash}`.trim());
+    // Only a release sends. A take that ended any other way — the system took the press, or
+    // another voice surface took the microphone mid-hold and finished it — keeps its words.
+    if (current.ending !== 'send') {
+      current.ending = 'system';
+      const heard = words.trim() || `${current.heard.text}${current.heard.stash}`.trim();
+      if (heard) interrupt('system', heard);
+      else end('cancelled');
       return;
     }
     if (!words.trim()) {

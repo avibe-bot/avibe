@@ -343,6 +343,22 @@ describe('useHoldToTalk', () => {
     expect(hold.text).toBe('写到一半了');
   });
 
+  // Another voice surface claiming the microphone finishes the pipeline without a release.
+  it('sends nothing when the take finishes without a release, and keeps its words', async () => {
+    const el = await mount();
+    await holdFor(el);
+    await speak('还没说完');
+    await act(async () => pipeline.takes[0].resolve('还没说完'));
+    await flush();
+    expect(send).not.toHaveBeenCalled();
+    expect(hold.phase).toBe('interrupted');
+    expect(hold.interruptReason).toBe('system');
+    expect(hold.text).toBe('还没说完');
+    up(el);
+    await flush();
+    expect(send).not.toHaveBeenCalled();
+  });
+
   it('cancels at once on Escape, wherever focus is', async () => {
     const el = await mount();
     await holdFor(el);
