@@ -1789,6 +1789,32 @@ describe('desktop mini v2 interaction contract', () => {
     });
   });
 
+  it.each([
+    ['sent untouched', '', (input: HTMLElement) => userEvent.type(input, '{Enter}'), 'cleaned words', { input: 'voice' }],
+    ['edited before sending', '', (input: HTMLElement) => userEvent.type(input, ' now{Enter}'), 'cleaned words now', undefined],
+    ['added to typed text', 'typed before voice', (input: HTMLElement) => userEvent.type(input, '{Enter}'), 'typed before voice cleaned words', undefined],
+  ])('sends a dictated message as voice only as it was heard: %s', async (label, typedFirst, finishUp, text, metadata) => {
+    const done = deferred<string>();
+    class Dictation {
+      done = done.promise;
+      start = async () => {};
+      finish = () => {};
+      abort = () => {};
+    }
+    await withVoiceEnv(() => true, Dictation, async () => {
+      mainSession('S'); render(<PetPage />); tapHotkey();
+      if (typedFirst) await userEvent.type(await screen.findByRole('textbox'), typedFirst);
+      await userEvent.click(await screen.findByLabelText('pet.voice.open'));
+      await userEvent.click(screen.getByLabelText('pet.voice.stop'));
+      await act(async () => done.resolve('cleaned words'));
+      const input = await screen.findByRole('textbox');
+      await finishUp(input);
+      await waitFor(() => expect(api.sendSessionMessage).toHaveBeenCalledTimes(1));
+      expect(api.sendSessionMessage).toHaveBeenCalledWith('S', { text, ...(metadata ? { metadata } : {}) });
+      expect(label).toBeTruthy();
+    });
+  });
+
   it('cancels an in-flight finish so Escape and an epoch change do not stick on Finishing', async () => {
     const done = deferred<string>();
     const abort = vi.fn();
