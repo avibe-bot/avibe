@@ -4,8 +4,11 @@ import { Route, Routes } from 'react-router-dom';
 import { FolderTree, Grid2x2, Inbox, LayoutGrid } from 'lucide-react';
 import clsx from 'clsx';
 
-import { MobileBrandHeader, type ShellNavItem } from '@/components/MobileChrome';
+import { MobileBrandHeader, MobileTabBar, type BotCenterPhase, type ShellNavItem } from '@/components/MobileChrome';
+import { MainBotHoldOverlay, MainBotVoiceToast, type HoldView } from '@/components/voice/MainBotVoice';
 import { WorkbenchMobileTabBar } from '@/components/WorkbenchMobileTabBar';
+import { useBots } from '@/context/BotsContext';
+import { useWorkbenchInbox } from '@/context/WorkbenchInboxContext';
 import { ChatPage } from '@/components/workbench/ChatPage';
 
 /** A tabbed page as AppShell draws it below md: the brand header, the page in the
@@ -67,6 +70,58 @@ export function WithShippedTabs({ inboxBadge = 0, children }: { inboxBadge?: num
 export function ShippedTabBar({ inboxBadge = 0 }: { inboxBadge?: number }) {
   const items = useShippedTabs(inboxBadge);
   return <WorkbenchMobileTabBar items={items} onNewSession={() => {}} />;
+}
+
+/** The Owner's bar with the main Bot in one phase of a press (WorkbenchMobileTabBar draws the same
+ *  center from a live hold). */
+export function BotCenterTabBar({ inboxBadge = 0, phase }: { inboxBadge?: number; phase: BotCenterPhase }) {
+  const { t } = useTranslation();
+  const items = useShippedTabs(inboxBadge);
+  const { mainBot, displayName, statusBySession } = useBots();
+  const { unreadBySession } = useWorkbenchInbox({ feed: false });
+  if (!mainBot) return null;
+  const name = displayName(mainBot);
+  return (
+    <MobileTabBar
+      items={items}
+      bot={{
+        avatar: mainBot.avatar,
+        name,
+        label: t('appShell.openMainBot', { name }),
+        unread: unreadBySession[mainBot.session_id] ?? 0,
+        running: statusBySession[mainBot.session_id] === 'running',
+        onClick: () => {},
+        phase,
+      }}
+    />
+  );
+}
+
+/** The shipped take card and toast over a page, in the state `hold` describes. */
+export function MainBotVoiceLayer({ hold }: { hold: Partial<HoldView> }) {
+  const { mainBot, displayName } = useBots();
+  if (!mainBot) return null;
+  const view: HoldView = {
+    phase: 'idle',
+    interruptReason: null,
+    text: '',
+    stash: '',
+    seconds: 0,
+    outcome: null,
+    canRetry: true,
+    sendInterrupted: () => {},
+    retry: () => {},
+    discard: () => {},
+    dismiss: () => {},
+    ...hold,
+  };
+  const bot = { name: displayName(mainBot), avatar: mainBot.avatar };
+  return (
+    <>
+      <MainBotHoldOverlay hold={view} bot={bot} />
+      <MainBotVoiceToast hold={view} bot={bot} onView={() => {}} />
+    </>
+  );
 }
 
 /** A conversation, full screen as on a phone (no brand header, no tab bar), drawn by the shipped

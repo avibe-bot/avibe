@@ -3361,7 +3361,7 @@
     "openControlPanel": "设置",
     "backToWorkbench": "工作台",
     "newSession": "新建",
-    "openMainBot": "{{name}}：打开对话",
+    "openMainBot": "{{name}}：点一下打开对话，按住说话",
     "navigationLabel": "控制台",
     "statusLabel": "服务状态",
     "versionLabel": "版本",
@@ -6671,6 +6671,32 @@
       "unknown": "IM"
     },
     "removeReference": "移除对 {{title}} 的引用"
+  },
+  "voice": {
+    "to": "说给{{name}}",
+    "cutOff": "已中断",
+    "interrupted": {
+      "dropped": "连接断了，已经听到的都在上面。可以直接发送，或者重试转写这段录音。",
+      "failed": "没能转成文字，录音还在。可以重试转写，或者发送已经听到的部分。",
+      "system": "录音被打断了，已经听到的都在上面。可以直接发送。",
+      "sendFailed": "没发出去，文字还在，可以再发一次。"
+    },
+    "retry": "重试",
+    "send": "发送",
+    "discard": "不要了",
+    "releaseToCancel": "松开取消",
+    "slideToCancel": "上滑取消 · 松开发送",
+    "mark": "语音",
+    "sent": "已发给{{name}}",
+    "view": "查看",
+    "cancelled": "已取消，没有发送。",
+    "tooShort": "没听到说话。按住再说一次，或点一下打字。",
+    "asking": "请在系统弹窗里允许使用麦克风，然后再按住说话。",
+    "deniedTitle": "无法使用麦克风",
+    "deniedBody": "在系统设置里允许使用麦克风；也可以点一下{{name}}打字。",
+    "tapToType": "点一下{{name}}打字。",
+    "failedBody": "一个字都没识别出来，录音还在，可以重试转写。",
+    "dismiss": "关闭"
   },
   "mcpHub": {
     "title": "MCP",

@@ -21,7 +21,7 @@ import { Composer } from '@/components/workbench/Composer';
 import { useBots } from '@/context/BotsContext';
 
 import { useDraft } from './draft';
-import { VoiceCancelTarget, VoiceCard, type VoiceTarget } from './MainBotVoice';
+import { VoiceCancelTarget, VoiceCard, type VoiceTarget } from '@/components/voice/VoiceCard';
 
 
 export type HoldDevice = 'desktop' | 'phone';

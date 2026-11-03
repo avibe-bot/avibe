@@ -16,6 +16,7 @@ import {
 import {
   VoiceRealtimeSession,
   type VoiceRealtimeOptions,
+  type VoiceRealtimePreview,
 } from './voiceRealtime';
 
 type PendingVoiceSegment = VoiceTranscriptionSegment & {
@@ -33,6 +34,8 @@ export type ShowPageVoiceDictationInput = {
   captureClaim?: VoiceCaptureClaim;
   maxFileBytes?: number | null;
   onPreview?: (text: string) => void;
+  /** The same preview, with the settled text and the tail the recognizer may still revise apart. */
+  onPreviewParts?: (preview: VoiceRealtimePreview) => void;
 };
 
 export type ShowPageVoiceDictationDependencies = {
@@ -138,7 +141,10 @@ export class ShowPageVoiceDictation {
         before: this.input.before,
         after: this.input.after,
         signal: this.abortController.signal,
-        onPreview: (preview) => this.input.onPreview?.(`${preview.text}${preview.stash}`.trim()),
+        onPreview: (preview) => {
+          this.input.onPreview?.(`${preview.text}${preview.stash}`.trim());
+          this.input.onPreviewParts?.(preview);
+        },
         onError: () => {
           if (this.abortController.signal.aborted) return;
           this.realtimeState = 'failed';

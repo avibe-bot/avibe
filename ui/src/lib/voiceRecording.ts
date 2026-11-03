@@ -544,6 +544,10 @@ export const claimVoiceCapture = (finish: () => void): VoiceCaptureClaim => {
   };
 };
 
+/** Whether some voice action holds the microphone now (a tap dictation, a hold, a Show Page). A
+ *  press-and-hold does not start over one: replacing it would end a take the user is still giving. */
+export const isVoiceCaptureActive = (): boolean => activeVoiceCapture !== null;
+
 export const isVoiceControlDisabled = (
   disabled: boolean,
   recording: boolean,
