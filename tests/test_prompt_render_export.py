@@ -33,6 +33,14 @@ _EVIDENCE_LED_PRINCIPLE = (
     "Ground judgments in facts and take responsibility for their reliability and practical value. "
     "Turn uncertainty into motivation for exploration and action, rather than an excuse to stop prematurely."
 )
+_VERIFY_AND_COMMUNICATE_PRINCIPLE = (
+    _EVIDENCE_LED_PRINCIPLE
+    + " Verify to get the work right; report to help the other person understand and decide, "
+    "which matters more than looking thorough or covered. Speak as a trusted colleague giving your own judgment, "
+    "not a proof, an audit log, or insurance against being wrong; uncertainty is information for their decision, "
+    "not cover for you. Own your conclusions: if one proves wrong, say so and fix it, "
+    "which costs far less than hedging everything."
+)
 _PREVIOUS_HISTORY_GUIDANCE = (
     "use `vibe data query` to recover Sessions and Messages by keyword, time, scope, Agent, or run history "
     "instead of relying on memory or asking the user to repeat context."
@@ -253,7 +261,7 @@ def test_custom_instructions_only_change_the_final_content_block(monkeypatch, ba
 
 
 @pytest.mark.parametrize("backend", AGENT_BACKENDS)
-def test_evidence_led_principle_is_shared_by_production_export_and_studio(monkeypatch, backend):
+def test_verify_and_communicate_principle_is_shared_by_production_export_and_studio(monkeypatch, backend):
     _environment(monkeypatch)
     request = _inputs(backend)
     rendered = render_prompt_context(request)
@@ -270,7 +278,7 @@ def test_evidence_led_principle_is_shared_by_production_export_and_studio(monkey
     assert rendered["text"] == production
     assert studio["source_path"] == "core/prompts/agent-working-principles.md"
     for text in (prompt_text("agent-working-principles"), production, studio["source"]):
-        assert text.count(_EVIDENCE_LED_PRINCIPLE) == 1
+        assert text.count(_VERIFY_AND_COMMUNICATE_PRINCIPLE) == 1
         assert _PREVIOUS_VERIFICATION_PRINCIPLE not in text
 
 
@@ -614,7 +622,7 @@ def test_approved_guidance_changes_preserve_all_other_injection_bytes(monkeypatc
         _environment(monkeypatch, history, skill_mode)
         blocks = render_prompt_context(_inputs(backend, history, skill_mode))["blocks"]
         text = "".join(block["text"] for block in blocks if block["id"] not in changed)
-        assert text.count(_EVIDENCE_LED_PRINCIPLE) == 1
+        assert text.count(_VERIFY_AND_COMMUNICATE_PRINCIPLE) == 1
         assert text.count(_HISTORY_AS_MEMORY_GUIDANCE) == 1
         assert text.count(_FOLLOW_THROUGH_PRINCIPLE) == 1
         assert text.count(_NEW_SESSION_MODEL_GUIDANCE) == 1
@@ -634,12 +642,13 @@ def test_approved_guidance_changes_preserve_all_other_injection_bytes(monkeypatc
         text = text.replace(_NEW_SESSION_MODEL_GUIDANCE, _PREVIOUS_FORK_OVERRIDE_GUIDANCE)
         text = text.replace(_HISTORY_AS_MEMORY_GUIDANCE, _PREVIOUS_HISTORY_GUIDANCE)
         text = text.replace(_FOLLOW_THROUGH_PRINCIPLE, _PREVIOUS_FOLLOW_THROUGH_PRINCIPLE)
-        outputs.append(text.replace(_EVIDENCE_LED_PRINCIPLE, _PREVIOUS_VERIFICATION_PRINCIPLE))
+        outputs.append(text.replace(_VERIFY_AND_COMMUNICATE_PRINCIPLE, _PREVIOUS_VERIFICATION_PRINCIPLE))
     digest = hashlib.sha256(json.dumps(outputs, ensure_ascii=False).encode()).hexdigest()
     # Captured before editing from 1e9ba96bc61b0e86027d4871553e68e8ed85c1ac,
     # omitting only the approved Computer Use and Skill-loading guidance blocks
     # (including the Codex-only reuse sentence) and restoring the previous
-    # verification principle and conversation-history guidance and Follow-through
+    # verification principle (before its evidence-led and reporting text) and
+    # conversation-history guidance and Follow-through
     # principle, and the Harness rule that a run's --model applies
     # only to forks (now: to any new Session a run creates), and without the
     # Harness line that says what a `[Harness: ...]` input is, and restoring the
