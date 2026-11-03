@@ -226,15 +226,20 @@ const designFrames = frames([
       {skillsPage()}
       <McpConfigureDialog
         server={projectServer('sentry')}
-        envRows={[
-          { key: 'SENTRY_ORG', value: 'avibe' },
-          { key: 'SENTRY_TOKEN', value: '' },
-        ]}
-        headerRows={[]}
+        env={{
+          rows: [
+            { key: 'SENTRY_ORG', value: 'avibe' },
+            { key: 'SENTRY_ENVIRONMENT', value: '', empty: true },
+            { key: 'SENTRY_TOKEN', value: '' },
+          ],
+          edited: true,
+          cleared: false,
+        }}
+        headers={{ rows: [], edited: false, cleared: true }}
         error={null}
         busy={false}
-        onEnvRowsChange={() => {}}
-        onHeaderRowsChange={() => {}}
+        onEnvChange={() => {}}
+        onHeadersChange={() => {}}
         onSave={() => {}}
         onCancel={() => {}}
       />

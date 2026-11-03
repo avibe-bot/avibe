@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ChevronDown, ChevronRight, Globe, KeyRound, Loader2, Plus, RefreshCw, Search, ShieldCheck, Terminal, Trash2, X } from 'lucide-react';
+import { ChevronDown, ChevronRight, Eraser, Globe, KeyRound, Loader2, Plus, RefreshCw, Search, ShieldCheck, Terminal, Trash2, X } from 'lucide-react';
 import clsx from 'clsx';
 import { useSearchParams } from 'react-router-dom';
 
@@ -10,7 +10,7 @@ import { useToast } from '../../../context/ToastContext';
 import { useInstanceAuthorization } from '../../../context/InstanceAuthorizationContext';
 import { isDesktopShell } from '../../../lib/desktopShell';
 import { mcpAddOauthAction } from '../../../lib/mcpAddOauth';
-import { EMPTY_MCP_ADD_FORM, mcpAddPayload, mcpConfigurePayload, type McpAddFormState, type McpAddTab, type McpKeyValueRow } from '../../../lib/mcpAddForm';
+import { EMPTY_MCP_ADD_FORM, mcpAddPayload, mcpConfigureMap, mcpConfigurePayload, type McpAddFormState, type McpAddTab, type McpConfigureMap } from '../../../lib/mcpAddForm';
 import { mcpPath } from '../../../lib/mcpPath';
 import { Badge } from '../../ui/badge';
 import { Button } from '../../ui/button';
@@ -458,30 +458,54 @@ export function McpApproveDialog({ server, busy, onConfirm, onCancel }: McpAppro
 export interface McpConfigureDialogProps {
   /** The project server to configure; null keeps the dialog closed. */
   server: McpServerSummary | null;
-  envRows: McpKeyValueRow[];
-  headerRows: McpKeyValueRow[];
+  env: McpConfigureMap;
+  headers: McpConfigureMap;
   error: string | null;
   busy: boolean;
-  onEnvRowsChange: (rows: McpKeyValueRow[]) => void;
-  onHeaderRowsChange: (rows: McpKeyValueRow[]) => void;
+  onEnvChange: (map: McpConfigureMap) => void;
+  onHeadersChange: (map: McpConfigureMap) => void;
   onSave: () => void;
   onCancel: () => void;
 }
 
 /** Sets a project server's `${VAR}` values and headers; stored values are never shown (ui/design: skills/mcp/configure). */
-export function McpConfigureDialog({ server, envRows, headerRows, error, busy, onEnvRowsChange, onHeaderRowsChange, onSave, onCancel }: McpConfigureDialogProps) {
+export function McpConfigureDialog({ server, env, headers, error, busy, onEnvChange, onHeadersChange, onSave, onCancel }: McpConfigureDialogProps) {
   const { t } = useTranslation();
   const missing = server?.missingVariables ?? [];
-  const section = (label: string, rows: McpKeyValueRow[], onChange: (rows: McpKeyValueRow[]) => void, keyPlaceholder: string) => (
+  // Editing rows marks the map for replacement; Clear is the one explicit way to send an empty map.
+  const section = (label: string, map: McpConfigureMap, onChange: (map: McpConfigureMap) => void, keyPlaceholder: string) => (
     <div className="flex flex-col gap-1.5">
-      <div className="flex items-center justify-between text-[12px] text-foreground">
-        {label}
-        <Button type="button" variant="outline" size="xs" onClick={() => onChange([...rows, { key: '', value: '' }])}>
-          <Plus className="size-3" />
-          {t('mcpHub.form.addRow')}
-        </Button>
+      <div className="flex items-center justify-between gap-1.5 text-[12px] text-foreground">
+        <span className="flex-1">{label}</span>
+        {map.cleared ? (
+          <Button type="button" variant="outline" size="xs" onClick={() => onChange({ ...map, cleared: false })}>
+            {t('mcpHub.configureUndoClear')}
+          </Button>
+        ) : (
+          <>
+            <Button type="button" variant="ghost" size="xs" onClick={() => onChange({ ...map, cleared: true })}>
+              <Eraser className="size-3" />
+              {t('mcpHub.configureClear')}
+            </Button>
+            <Button type="button" variant="outline" size="xs" onClick={() => onChange({ ...map, edited: true, rows: [...map.rows, { key: '', value: '' }] })}>
+              <Plus className="size-3" />
+              {t('mcpHub.form.addRow')}
+            </Button>
+          </>
+        )}
       </div>
-      <McpKeyValueRows label={label} rows={rows} onChange={onChange} keyPlaceholder={keyPlaceholder} secret />
+      {map.cleared ? (
+        <p className="text-[12px] text-muted">{t('mcpHub.configureCleared')}</p>
+      ) : (
+        <McpKeyValueRows
+          label={label}
+          rows={map.rows}
+          onChange={(rows) => onChange({ ...map, edited: true, rows })}
+          keyPlaceholder={keyPlaceholder}
+          secret
+          allowEmpty
+        />
+      )}
     </div>
   );
   return (
@@ -492,14 +516,14 @@ export function McpConfigureDialog({ server, envRows, headerRows, error, busy, o
         {missing.length ? (
           <p className="text-[12px] text-foreground">{t('mcpHub.configureMissing', { names: missing.join(', ') })}</p>
         ) : null}
-        {section(t('mcpHub.configureVariables'), envRows, onEnvRowsChange, t('mcpHub.form.envKeyPlaceholder'))}
+        {section(t('mcpHub.configureVariables'), env, onEnvChange, t('mcpHub.form.envKeyPlaceholder'))}
         {server?.transport !== 'stdio'
-          ? section(t('mcpHub.form.headers'), headerRows, onHeaderRowsChange, t('mcpHub.form.headerKeyPlaceholder'))
+          ? section(t('mcpHub.form.headers'), headers, onHeadersChange, t('mcpHub.form.headerKeyPlaceholder'))
           : null}
         {error ? <div className="whitespace-pre-wrap text-[12px] text-destructive-ink">{error}</div> : null}
         <DialogFooter>
           <Button type="button" variant="outline" onClick={onCancel}>{t('common.cancel')}</Button>
-          <Button type="button" variant="brand" disabled={busy || mcpConfigurePayload(envRows, headerRows) === null} onClick={onSave}>
+          <Button type="button" variant="brand" disabled={busy || mcpConfigurePayload(env, headers) === null} onClick={onSave}>
             {busy ? <Loader2 className="size-3.5 animate-spin" /> : null}
             {t('mcpHub.configureSave')}
           </Button>
@@ -547,8 +571,8 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null }) 
   const [confirmDelete, setConfirmDelete] = useState<McpServerSummary | null>(null);
   const [confirmApprove, setConfirmApprove] = useState<McpServerSummary | null>(null);
   const [configureFor, setConfigureFor] = useState<McpServerSummary | null>(null);
-  const [envRows, setEnvRows] = useState<McpKeyValueRow[]>([]);
-  const [headerRows, setHeaderRows] = useState<McpKeyValueRow[]>([]);
+  const [configureEnv, setConfigureEnv] = useState<McpConfigureMap>(mcpConfigureMap);
+  const [configureHeaders, setConfigureHeaders] = useState<McpConfigureMap>(mcpConfigureMap);
   const [configureError, setConfigureError] = useState<string | null>(null);
   const loginInFlight = useRef(false);
 
@@ -768,6 +792,8 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null }) 
       }
       setConfirmApprove(null);
       await load();
+    } catch {
+      showToast(t('mcpHub.failed'), 'error');
     } finally {
       setBusy(null);
     }
@@ -776,13 +802,13 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null }) 
   // Stored values are never shown: the editor starts with each `${VAR}` name and an empty value.
   const openConfigure = (server: McpServerSummary) => {
     setConfigureFor(server);
-    setEnvRows((server.placeholders?.length ? server.placeholders : server.missingVariables ?? []).map((key) => ({ key, value: '' })));
-    setHeaderRows([]);
+    setConfigureEnv(mcpConfigureMap((server.placeholders?.length ? server.placeholders : server.missingVariables ?? []).map((key) => ({ key, value: '' }))));
+    setConfigureHeaders(mcpConfigureMap());
     setConfigureError(null);
   };
 
   const onConfigure = async () => {
-    const secrets = mcpConfigurePayload(envRows, headerRows);
+    const secrets = mcpConfigurePayload(configureEnv, configureHeaders);
     if (!configureFor || !projectId || secrets === null) return;
     const name = configureFor.name;
     setBusy(`configure:${name}`);
@@ -794,9 +820,11 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null }) 
         return;
       }
       setConfigureFor(null);
-      setEnvRows([]);
-      setHeaderRows([]);
+      setConfigureEnv(mcpConfigureMap());
+      setConfigureHeaders(mcpConfigureMap());
       await load();
+    } catch {
+      setConfigureError(t('mcpHub.failed'));
     } finally {
       setBusy(null);
     }
@@ -957,14 +985,14 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null }) 
 
       <McpConfigureDialog
         server={configureFor}
-        envRows={envRows}
-        headerRows={headerRows}
+        env={configureEnv}
+        headers={configureHeaders}
         error={configureError}
         busy={busy !== null}
-        onEnvRowsChange={setEnvRows}
-        onHeaderRowsChange={setHeaderRows}
+        onEnvChange={setConfigureEnv}
+        onHeadersChange={setConfigureHeaders}
         onSave={() => void onConfigure()}
-        onCancel={() => { setConfigureFor(null); setEnvRows([]); setHeaderRows([]); }}
+        onCancel={() => { setConfigureFor(null); setConfigureEnv(mcpConfigureMap()); setConfigureHeaders(mcpConfigureMap()); }}
       />
     </div>
   );

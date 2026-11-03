@@ -1,25 +1,30 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ChevronDown, ChevronRight, Plus, X } from 'lucide-react';
+import { Ban, ChevronDown, ChevronRight, Plus, X } from 'lucide-react';
 
 import { parseMcpTarget, type McpAddFormState, type McpKeyValueRow } from '../../../lib/mcpAddForm';
 import { Badge } from '../../ui/badge';
 import { Button } from '../../ui/button';
 import { Input } from '../../ui/input';
 
-/** Key/value inputs of an env or header map (Add form, Configure dialog); `secret` masks typed values. */
+/**
+ * Key/value inputs of an env or header map (Add form, Configure dialog); `secret` masks typed values
+ * and `allowEmpty` adds a per-row "empty value" choice, the only way a blank value is meant.
+ */
 export function McpKeyValueRows({
   label,
   rows,
   onChange,
   keyPlaceholder,
   secret = false,
+  allowEmpty = false,
 }: {
   label: string;
   rows: McpKeyValueRow[];
   onChange: (next: McpKeyValueRow[]) => void;
   keyPlaceholder: string;
   secret?: boolean;
+  allowEmpty?: boolean;
 }) {
   const { t } = useTranslation();
   const setRow = (index: number, patch: Partial<McpKeyValueRow>) =>
@@ -40,9 +45,24 @@ export function McpKeyValueRows({
             type={secret ? 'password' : undefined}
             autoComplete={secret ? 'off' : undefined}
             value={row.value}
+            disabled={row.empty}
+            placeholder={row.empty ? t('mcpHub.configureEmptyValue') : undefined}
             onChange={(event) => setRow(index, { value: event.target.value })}
             className="font-mono"
           />
+          {allowEmpty ? (
+            <Button
+              type="button"
+              variant={row.empty ? 'outline' : 'ghost'}
+              size="xs"
+              aria-label={t('mcpHub.configureEmptyValue')}
+              aria-pressed={Boolean(row.empty)}
+              title={t('mcpHub.configureEmptyValue')}
+              onClick={() => setRow(index, { empty: !row.empty, value: '' })}
+            >
+              <Ban className="size-3" />
+            </Button>
+          ) : null}
           <Button
             type="button"
             variant="ghost"

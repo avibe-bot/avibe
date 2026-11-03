@@ -127,8 +127,11 @@ describe('McpHubSection project view', () => {
     expect(actions('echo')).toEqual([en.mcpHub.refresh, en.mcpHub.remove]);
   });
 
-  it('configures with exactly the entered maps and never shows a stored value', async () => {
-    api.configureMcp.mockResolvedValue({ ok: false, error: { type: 'invalid_definition', message: 'env: bad key', field: 'env' } });
+  it('configures only the maps the user changed or cleared, and never shows a stored value', async () => {
+    api.configureMcp
+      .mockResolvedValueOnce({ ok: false, error: { type: 'invalid_definition', message: 'env: bad key', field: 'env' } })
+      .mockRejectedValueOnce(new Error('csrf'))
+      .mockResolvedValueOnce({ ok: true, state: 'ok' });
     renderHub();
     await screen.findByText('tokened');
     fireEvent.click(rowButton('tokened'));
@@ -137,23 +140,39 @@ describe('McpHubSection project view', () => {
     expect(within(dialog).getByText(en.mcpHub.configureMissing.replace('{{names}}', 'API_TOKEN'))).toBeTruthy();
     const variables = en.mcpHub.configureVariables;
     const keys = within(dialog).getAllByLabelText(`${variables} key`) as HTMLInputElement[];
-    const values = within(dialog).getAllByLabelText(`${variables} value`) as HTMLInputElement[];
+    const values = () => within(dialog).getAllByLabelText(`${variables} value`) as HTMLInputElement[];
     expect(keys.map((node) => node.value)).toEqual(['API_TOKEN', 'REGION']);
-    expect(values.map((node) => [node.value, node.type])).toEqual([['', 'password'], ['', 'password']]);
-    const save = within(dialog).getByRole('button', { name: en.mcpHub.configureSave });
-    expect((save as HTMLButtonElement).disabled).toBe(true);
+    expect(values().map((node) => [node.value, node.type])).toEqual([['', 'password'], ['', 'password']]);
+    const save = within(dialog).getByRole('button', { name: en.mcpHub.configureSave }) as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
 
-    fireEvent.change(values[0], { target: { value: 'tok-1' } });
-    fireEvent.click(within(dialog).getAllByRole('button', { name: en.mcpHub.form.removeRow })[1]);
+    // A named row left blank blocks Save until the user explicitly chooses an empty value.
+    fireEvent.change(values()[0], { target: { value: 'tok-1' } });
+    expect(save.disabled).toBe(true);
+    fireEvent.click(within(dialog).getAllByRole('button', { name: en.mcpHub.configureEmptyValue })[1]);
+    expect(save.disabled).toBe(false);
+    fireEvent.click(save);
+    // Untouched headers are omitted; the typed error keeps the dialog and its input.
+    await waitFor(() => expect(api.configureMcp).toHaveBeenNthCalledWith(1, 'tokened', { env: { API_TOKEN: 'tok-1', REGION: '' } }, 'proj_a'));
+    expect(await within(dialog).findByText(en.mcpHub.errors.invalid_definition.replace('{{message}}', 'env: bad key'))).toBeTruthy();
+
+    // Clearing a map is its own visible action and sends an empty map; a rejected request keeps the dialog.
+    fireEvent.click(within(dialog).getAllByRole('button', { name: en.mcpHub.configureClear })[1]);
+    expect(within(dialog).getByText(en.mcpHub.configureCleared)).toBeTruthy();
+    fireEvent.click(save);
+    await waitFor(() => expect(api.configureMcp).toHaveBeenNthCalledWith(2, 'tokened', { env: { API_TOKEN: 'tok-1', REGION: '' }, headers: {} }, 'proj_a'));
+    expect(await within(dialog).findByText(en.mcpHub.failed)).toBeTruthy();
+    expect(values()[0].value).toBe('tok-1');
+
+    // Undo restores the untouched headers; new header values replace the stored map.
+    fireEvent.click(within(dialog).getByRole('button', { name: en.mcpHub.configureUndoClear }));
     const headers = en.mcpHub.form.headers;
     fireEvent.click(within(dialog).getAllByRole('button', { name: en.mcpHub.form.addRow })[1]);
     fireEvent.change(within(dialog).getByLabelText(`${headers} key`), { target: { value: 'X-Team' } });
     fireEvent.change(within(dialog).getByLabelText(`${headers} value`), { target: { value: 'core' } });
     fireEvent.click(save);
-
-    await waitFor(() => expect(api.configureMcp).toHaveBeenCalledTimes(1));
-    expect(api.configureMcp).toHaveBeenCalledWith('tokened', { env: { API_TOKEN: 'tok-1' }, headers: { 'X-Team': 'core' } }, 'proj_a');
-    expect(await within(dialog).findByText(en.mcpHub.errors.invalid_definition.replace('{{message}}', 'env: bad key'))).toBeTruthy();
+    await waitFor(() => expect(api.configureMcp).toHaveBeenNthCalledWith(3, 'tokened', { env: { API_TOKEN: 'tok-1', REGION: '' }, headers: { 'X-Team': 'core' } }, 'proj_a'));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   });
 
   it('adds to the project and keeps the project on every login link', async () => {
@@ -176,7 +195,7 @@ describe('McpHubSection project view', () => {
   });
 
   it('approves only after the trust confirmation', async () => {
-    api.approveMcp.mockResolvedValue({ ok: true, state: 'ok' });
+    api.approveMcp.mockRejectedValueOnce(new Error('csrf')).mockResolvedValueOnce({ ok: true, state: 'ok' });
     renderHub();
     await screen.findByText('pending');
     fireEvent.click(rowButton('pending'));
@@ -185,8 +204,12 @@ describe('McpHubSection project view', () => {
     expect(within(dialog).getByText(en.mcpHub.approveCommandHint.replace('{{path}}', '/work/alpha/.mcp.json'))).toBeTruthy();
     expect(within(dialog).getByText('node ./tools/mcp.js')).toBeTruthy();
     expect(api.approveMcp).not.toHaveBeenCalled();
+    // A rejected request keeps the confirmation open and reports the failure.
     fireEvent.click(within(dialog).getByRole('button', { name: en.mcpHub.approve }));
-    await waitFor(() => expect(api.approveMcp).toHaveBeenCalledWith('pending', 'proj_a'));
+    expect(await screen.findByText(en.mcpHub.failed)).toBeTruthy();
+    expect(screen.getByRole('dialog')).toBe(dialog);
+    fireEvent.click(within(dialog).getByRole('button', { name: en.mcpHub.approve }));
+    await waitFor(() => expect(api.approveMcp).toHaveBeenNthCalledWith(2, 'pending', 'proj_a'));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     expect(api.listMcpServers).toHaveBeenCalledTimes(2);
   });

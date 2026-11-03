@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom';
@@ -147,6 +147,17 @@ describe('SkillsPage links', () => {
 
 describe('SkillsPage MCP project view', () => {
   it('lists the selected project, follows the picker, and goes back to the global hub', async () => {
+    const listed = api.listMcpServers.getMockImplementation()!;
+    let releaseAlpha: () => void = () => undefined;
+    const projectRow = (name: string, project: string) => ({ name, source: 'project', scope: `project:${project}`, state: 'ok', auth: 'none', transport: 'http', url: `https://${name}.example/mcp`, toolCount: 0 });
+    api.listMcpServers.mockImplementation((project: string | null) => {
+      if (project === 'proj_a') {
+        // Alpha's list arrives only after the user has moved on to beta.
+        return new Promise((resolve) => { releaseAlpha = () => resolve({ ok: true, oauthMode: 'direct', servers: [projectRow('alpha-only', 'proj_a')] }); });
+      }
+      if (project === 'proj_b') return Promise.resolve({ ok: true, oauthMode: 'direct', servers: [projectRow('beta-only', 'proj_b')] });
+      return listed(project);
+    });
     renderPage('/skills?tab=mcp');
     await screen.findByText('suno');
     expect(api.listMcpServers).toHaveBeenLastCalledWith(null);
@@ -155,6 +166,10 @@ describe('SkillsPage MCP project view', () => {
     fireEvent.click(screen.getByRole('button', { name: 'alpha' }));
     fireEvent.click(await screen.findByRole('button', { name: 'beta' }));
     await waitFor(() => expect(api.listMcpServers).toHaveBeenLastCalledWith('proj_b'));
+    await screen.findByText('beta-only');
+    await act(async () => releaseAlpha());
+    expect(screen.queryByText('alpha-only')).toBeNull();
+    expect(screen.getByText('beta-only')).toBeTruthy();
     fireEvent.click(tab(en.skills.scopeGlobal));
     await waitFor(() => expect(api.listMcpServers).toHaveBeenLastCalledWith(null));
   });

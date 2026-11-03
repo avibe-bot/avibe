@@ -16,7 +16,8 @@ export type McpTarget =
 
 export type McpAddTab = 'json' | 'form';
 
-export type McpKeyValueRow = { key: string; value: string };
+/** `empty` marks a value the user explicitly chose to leave empty (Configure dialog only). */
+export type McpKeyValueRow = { key: string; value: string; empty?: boolean };
 
 export type McpAddFormState = {
   name: string;
@@ -101,20 +102,33 @@ export function mcpKeyValueMap(rows: McpKeyValueRow[]): Record<string, string> {
   return Object.fromEntries(rows.filter((row) => row.key.trim()).map((row) => [row.key.trim(), row.value]));
 }
 
+/** One map of the Configure dialog: untouched until the user edits its rows or explicitly clears it. */
+export type McpConfigureMap = { rows: McpKeyValueRow[]; edited: boolean; cleared: boolean };
+
+export const mcpConfigureMap = (rows: McpKeyValueRow[] = []): McpConfigureMap => ({ rows, edited: false, cleared: false });
+
+type ConfigureMapPayload = Record<string, string> | undefined | null;
+
+function configureMapPayload(map: McpConfigureMap): ConfigureMapPayload {
+  if (map.cleared) return {};
+  const keyed = map.rows.filter((row) => row.key.trim());
+  // Removing every row is not a clear; only the explicit Clear action sends an empty map.
+  if (!map.edited || keyed.length === 0) return undefined;
+  // Stored values are never shown, so a blank value counts only when the user chose "empty value".
+  if (keyed.some((row) => row.value === '' && !row.empty)) return null;
+  return mcpKeyValueMap(keyed.map((row) => (row.empty ? { ...row, value: '' } : row)));
+}
+
 /**
- * What the Configure dialog sends: each map that has rows replaces the stored one, an empty
- * editor leaves its stored map alone. Null while nothing is entered or a named row has no value,
- * since stored values are never shown and a blank one would silently overwrite a secret.
+ * What the Configure dialog sends: an edited map replaces the stored one, a cleared map is sent
+ * as `{}`, and an untouched map is omitted so its stored values stay. Null while nothing would be
+ * sent or an edited row has a blank value the user did not explicitly choose.
  */
-export function mcpConfigurePayload(envRows: McpKeyValueRow[], headerRows: McpKeyValueRow[]): { env?: Record<string, string>; headers?: Record<string, string> } | null {
-  const keyed = [...envRows, ...headerRows].filter((row) => row.key.trim());
-  if (keyed.length === 0 || keyed.some((row) => row.value === '')) return null;
-  const env = mcpKeyValueMap(envRows);
-  const headers = mcpKeyValueMap(headerRows);
-  return {
-    ...(Object.keys(env).length ? { env } : {}),
-    ...(Object.keys(headers).length ? { headers } : {}),
-  };
+export function mcpConfigurePayload(env: McpConfigureMap, headers: McpConfigureMap): { env?: Record<string, string>; headers?: Record<string, string> } | null {
+  const envMap = configureMapPayload(env);
+  const headerMap = configureMapPayload(headers);
+  if (envMap === null || headerMap === null || (envMap === undefined && headerMap === undefined)) return null;
+  return { ...(envMap ? { env: envMap } : {}), ...(headerMap ? { headers: headerMap } : {}) };
 }
 
 export function buildMcpFormJson({
