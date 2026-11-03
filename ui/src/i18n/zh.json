@@ -2951,6 +2951,10 @@
     "retry": "重试"
   },
   "errors": {
+    "sandbox_integrity_failed": "无法验证受保护保险库的安全代码，已阻止打开。请检查网络并更新 Avibe 后重试，不要绕过验证或重新创建通行密钥。",
+    "sandbox_build_mismatch": "受保护保险库沙箱与当前 Avibe 版本不匹配。请更新 Avibe 或联系支持；现有密钥和通行密钥未改变。",
+    "sandbox_reset": "本次受保护保险库操作已取消或重置。请从 Avibe 重试，以重新验证沙箱。",
+    "sandbox_ready_timeout": "已验证的保险库沙箱未能启动。请检查网络、更新 Avibe 后重试。",
     "avault_authorization_required": "avault 需要在运行 Avibe 的 Mac 上完成一次性的 macOS 钥匙串授权。请选择「授权 avault」，然后在那台 Mac 上回应对话框。",
     "stale_login_session": "Avibe 仍运行在一个已经结束的 macOS 登录会话中。请在 Mac 当前桌面的终端运行 `vibe restart`，然后重试。请不要重复重试此操作。",
     "invalid_field_name": "字段名须为 1–64 个小写字母、数字或下划线，且以字母开头。",

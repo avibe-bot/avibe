@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Check, Copy, ExternalLink, Globe, KeyRound, Link2, Loader2, LockKeyhole, PenTool, Puzzle, ShieldCheck, Tag, Trash2, Wallet } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { vaultErrorMessage } from '@/lib/vaultErrors';
 
 import {
   useApi,
@@ -316,12 +317,12 @@ export const VaultApprovalCard: React.FC<{
       setNeedsAvaultAuthorization(false);
       run()
         .catch((err: unknown) => {
-          setError(err instanceof Error ? err.message : String(err));
+          setError(vaultErrorMessage(t, err, t('vaults.approval.errors.failed')));
           setNeedsAvaultAuthorization(isAvaultAuthorizationRequired(err));
         })
         .finally(() => setBusy(false));
     },
-    [],
+    [t],
   );
 
   // Protected access with a session is bound to it: the daemon-signed contexts the sandbox consents

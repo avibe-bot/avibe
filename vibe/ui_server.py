@@ -254,7 +254,12 @@ TRACEBACK_EXCEPTION_PATTERN = re.compile(
 )
 CSRF_COOKIE_NAME = "vibe_csrf_token"
 CSRF_HEADER_NAME = "X-Vibe-CSRF-Token"
-VAULT_SANDBOX_ORIGIN = "https://sandbox.avibe.bot"
+# One packaged pin is imported by the UI and read here; no environment override.
+_VAULT_SANDBOX_RELEASE = json.loads((Path(__file__).parent / "data" / "vault_sandbox_release.json").read_text(encoding="utf-8"))
+VAULT_SANDBOX_ORIGIN = _VAULT_SANDBOX_RELEASE["sandboxOrigin"]
+if VAULT_SANDBOX_ORIGIN != "https://sandbox.avibe.bot" or not re.fullmatch(r"[a-f0-9]{64}", _VAULT_SANDBOX_RELEASE["buildHash"]):
+    raise RuntimeError("Invalid packaged Vault sandbox release pin")
+VAULT_SANDBOX_FRAME_SOURCE = f"{VAULT_SANDBOX_ORIGIN}/v/{_VAULT_SANDBOX_RELEASE['buildHash']}/"
 # WebAuthn is delegated to the cross-origin sandbox iframe via Permissions-Policy. Chrome only
 # honors the delegation when the allowlist includes `self`: an origin-only allowlist
 # (`("origin")`, no self) does NOT reach the cross-origin child — verified empirically against
@@ -3084,19 +3089,18 @@ def add_csrf_cookie(response: Response) -> Response:
 
 
 def _merge_csp_frame_src(existing: str | None) -> str:
-    required = ["'self'", VAULT_SANDBOX_ORIGIN]
+    # Do not union with a broader host/wildcard policy: retaining old sandbox
+    # releases must not let parent XSS embed a weaker release. First-party Show
+    # and file frames keep 'self'; Show documents have their own policy below.
+    required = ["'self'", VAULT_SANDBOX_FRAME_SOURCE]
     if not existing:
         return f"frame-src {' '.join(required)}"
     directives = [part.strip() for part in existing.split(";") if part.strip()]
     for index, directive in enumerate(directives):
-        name, _, rest = directive.partition(" ")
+        name, _, _rest = directive.partition(" ")
         if name.lower() != "frame-src":
             continue
-        tokens = rest.split()
-        for token in required:
-            if token not in tokens:
-                tokens.append(token)
-        directives[index] = f"frame-src {' '.join(tokens)}"
+        directives[index] = f"frame-src {' '.join(required)}"
         return "; ".join(directives)
     directives.append(f"frame-src {' '.join(required)}")
     return "; ".join(directives)

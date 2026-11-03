@@ -8,6 +8,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { VaultGrantDuration, VaultRequest } from '@/context/ApiContext';
 import type { BlindBox } from '@/lib/vaultCrypto';
 import en from '@/i18n/en.json';
+import zh from '@/i18n/zh.json';
+import { resetVaultSandboxClient } from '@/lib/vaultSandboxClient';
+import { stubReleaseFetch } from '@/lib/__fixtures__/vaultSandboxTransport';
 import { VaultApprovalCard } from './vault-approval-card';
 
 const api = vi.hoisted(() => ({
@@ -40,7 +43,7 @@ const i18n = createInstance();
 void i18n.use(initReactI18next).init({
   lng: 'en',
   fallbackLng: 'en',
-  resources: { en: { translation: en } },
+  resources: { en: { translation: en }, zh: { translation: zh } },
   interpolation: { escapeValue: false },
 });
 
@@ -119,7 +122,9 @@ const issuedFor = (grantDuration: VaultGrantDuration) => ({
 });
 const blindBox = { scheme: 'hpke-x25519-hkdfsha256-aes256gcm-v1', enc: 'enc', ct: 'ct' } as unknown as BlindBox;
 
-beforeEach(() => {
+beforeEach(async () => {
+  await i18n.changeLanguage('en');
+  stubReleaseFetch();
   // Only the card's refresh interval is faked, so promises and Testing Library keep real timers.
   vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
   authorization.capabilities.can_use_vault_secrets = true;
@@ -135,10 +140,12 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  resetVaultSandboxClient();
   cleanup();
   vi.useRealTimers();
   vi.clearAllMocks();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 const card = () => (
@@ -148,7 +155,7 @@ const card = () => (
 );
 
 const openWindow = () => {
-  const popup = { closed: false, close: vi.fn() };
+  const popup = { closed: false, location: { replace: vi.fn() }, close: vi.fn(() => { popup.closed = true; }) };
   const open = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window);
   return { popup, open };
 };
@@ -204,6 +211,29 @@ describe('VaultApprovalCard signing-address contract', () => {
 });
 
 describe('VaultApprovalCard protected access approval', () => {
+  it.each(['en', 'zh'] as const)('renders the actionable integrity error in %s through the real approval catch', async (language) => {
+    await i18n.changeLanguage(language);
+    const catalog = language === 'zh' ? zh : en;
+    vault.approveProtectedRelease.mockRejectedValue(Object.assign(new Error('raw network diagnostic'), { code: 'sandbox_integrity_failed' }));
+    openWindow();
+    render(card());
+    const approve = screen.getByRole('button', { name: i18n.t('vaults.approval.approve'), exact: true });
+    await vi.waitFor(() => expect((approve as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(approve);
+    expect(await screen.findByText(catalog.errors.sandbox_integrity_failed)).toBeTruthy();
+    expect(screen.queryByText('raw network diagnostic')).toBeNull();
+    expect(api.fulfillVaultAccessRequest).not.toHaveBeenCalled();
+  });
+
+  it.each(['Operation cancelled', 'Request expired', 'Permission denied'])('preserves specific non-integrity failure: %s', async (message) => {
+    vault.approveProtectedRelease.mockRejectedValue(new Error(message));
+    openWindow();
+    render(card());
+    await approveWhenReady();
+    expect(await screen.findByText(message)).toBeTruthy();
+    expect(screen.queryByText(en.errors.sandbox_integrity_failed)).toBeNull();
+  });
+
   // Per-record DEKs must survive secret-level grouping. Single-record approvals do not catch
   // deduplicating material by its base secret name or omitting standard always-ask field labels.
   it.each(['protected', 'standard'] as const)('groups %s fields by secret and releases every protected record', async (protection) => {
@@ -262,7 +292,8 @@ describe('VaultApprovalCard protected access approval', () => {
     expect(open).toHaveBeenCalledOnce();
     await vi.waitFor(() => expect(vault.approveProtectedRelease).toHaveBeenCalledOnce());
     const [items, authorizationWindow] = vault.approveProtectedRelease.mock.calls[0];
-    expect(authorizationWindow).toBe(new URL(String(open.mock.calls[0][0])).searchParams.get('id'));
+    expect(open.mock.calls[0][0]).toBe('about:blank');
+    expect(authorizationWindow).toMatch(/^[a-f0-9]{32}$/);
     expect(items.map((item: { context: unknown }) => item.context)).toEqual([{ issuedFor: duration }]);
 
     vi.advanceTimersByTime(60_000);

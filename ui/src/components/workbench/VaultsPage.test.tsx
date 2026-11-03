@@ -11,6 +11,9 @@ import en from '../../i18n/en.json';
 import zh from '../../i18n/zh.json';
 import type { VaultGrant, VaultSecret } from '../../context/ApiContext';
 import { RouteSurfaceActiveContext } from '../../lib/routeSurfaceActivity';
+import { resetVaultSandboxClient } from '../../lib/vaultSandboxClient';
+import { VAULT_SANDBOX_IFRAME_URL } from '../../lib/vaultSandboxManifest';
+import { stubBlankPopup, stubReleaseFetch } from '../../lib/__fixtures__/vaultSandboxTransport';
 
 import { InstanceAuthorizationContext, type InstanceAuthorizationValue } from '../../context/InstanceAuthorizationContext';
 import { OWNER_INSTANCE_CAPABILITIES } from '../../lib/sessionInfo';
@@ -536,13 +539,10 @@ describe('PERMISSIONS-016 VaultsPage wakes an Editor on the bare vaults.updated 
   });
 });
 
-// A popup opened after an await has lost the click's user activation and is blocked, which would
-// silently bring back the sandbox's own launcher card and its second approval click. A Home Screen
-// app on iOS is also frozen about two seconds after it opens a window, so nothing that window needs
-// may be fetched after the click: the open row menu keeps a fresh reveal context, Show and Copy wait
-// for it and for the sandbox client, and one secret's context never waits on another's. A menu
-// fetch that failed is not kept, or the click would replay that failure, and a menu held open past
-// the context's freshness bound refreshes it rather than fetching after the click.
+// A popup must be reserved synchronously to retain the click's user activation. The page prepares
+// its daemon-signed context and sandbox client before that click; fresh popup integrity verification
+// still runs after it, before protected navigation. Physical iOS/PWA suspension is a separate release
+// check. A failed menu fetch is not kept, and an open menu refreshes a stale signed context.
 describe('VaultsPage protected reveal', () => {
   const protectedSecret = (name: string) => ({
     name,
@@ -562,11 +562,14 @@ describe('VaultsPage protected reveal', () => {
   beforeEach(() => {
     // Only the menu's refresh interval is faked, so promises and Testing Library keep real timers.
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    stubReleaseFetch();
     api.listVaultSecrets.mockResolvedValue({ secrets: [protectedSecret('alpha')] });
     revealProtectedValue.mockResolvedValue(undefined);
   });
 
   afterEach(() => {
+    resetVaultSandboxClient();
+    vi.unstubAllGlobals();
     vi.useRealTimers();
   });
 
@@ -580,17 +583,29 @@ describe('VaultsPage protected reveal', () => {
   };
 
   const clickShowValue = async () => {
-    const popup = { closed: false, close: vi.fn() };
-    const open = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window);
+    // Keep the public hook operation pending while the REAL opener verifies source-fixture bytes.
+    // Settling it immediately would close the handle before asynchronous verification can finish.
+    let finish!: () => void;
+    revealProtectedValue.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    const popup = stubBlankPopup();
+    const open = vi.mocked(window.open);
     await vi.waitFor(() => expect(showValue().disabled).toBe(false));
     fireEvent.click(showValue());
     // Asserted synchronously after the click dispatch, before any awaited work can run.
-    expect(open).toHaveBeenCalledOnce();
-    const opened = new URL(String(open.mock.calls[0][0]));
-    expect(opened.searchParams.get('mode')).toBe('authorize');
+    expect(open).toHaveBeenCalledExactlyOnceWith('about:blank', '_blank', 'popup,width=520,height=760');
+    expect(popup.location.replace).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(popup.location.replace).toHaveBeenCalledOnce());
+    const opened = new URL(String(popup.location.replace.mock.calls[0][0]));
+    expect(`${opened.origin}${opened.pathname}`).toBe(VAULT_SANDBOX_IFRAME_URL);
+    expect(opened.search).toBe('');
+    const params = new URLSearchParams(opened.hash.slice(1));
+    expect(params.get('mode')).toBe('authorize');
+    expect(params.get('id')).toMatch(/^[a-f0-9]{32}$/);
     await vi.waitFor(() => expect(revealProtectedValue).toHaveBeenCalledOnce());
-    expect(revealProtectedValue.mock.calls[0][2]).toBe(opened.searchParams.get('id'));
+    expect(revealProtectedValue.mock.calls[0][2]).toBe(params.get('id'));
+    finish();
     await vi.waitFor(() => expect(popup.close).toHaveBeenCalledOnce());
+    expect(popup.closed).toBe(true);
     return { open };
   };
 

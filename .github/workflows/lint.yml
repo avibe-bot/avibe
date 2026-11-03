@@ -234,6 +234,7 @@ jobs:
               npm run test:onboarding-fidelity -- hub-ownership.spec.ts provider-gate.spec.ts lineup.spec.ts
               npm run test:home-media
               npm run test:voice-shortcut
+              npm run test:vault-integrity
               npm run test:chat-selection
               npm run test:badge-triggers
               # Against the built app: StrictMode's dev double-mount drops the picker's first open.
