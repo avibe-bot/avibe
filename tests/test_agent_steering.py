@@ -45,7 +45,7 @@ STEER_TEXT = "补充：**不要改写**\n```python\nprint('λ')\n```"
 ATTEMPT_ID = "atm_1234567890abcdef1234567890abcdef"
 
 
-@pytest.fixture(params=["plain", "human", "harness"])
+@pytest.fixture(params=["plain", "human", "dictated", "harness"])
 def native_input(request, monkeypatch):
     now = datetime(2026, 9, 6, 11, 10, tzinfo=timezone.utc)
     monkeypatch.setattr("core.agent_input.datetime", SimpleNamespace(
@@ -55,6 +55,11 @@ def native_input(request, monkeypatch):
         return None, ""
     if request.param == "human":
         return AgentInputMetadata(user_id="incoming", user_name="Sender"), "[Now: 2026-09-06 11:10:00 UTC+00:00]\n[Sender<incoming>]\n"
+    if request.param == "dictated":
+        return AgentInputMetadata(user_id="incoming", user_name="Sender", voice=True), (
+            "[Now: 2026-09-06 11:10:00 UTC+00:00]\n[Sender<incoming>]\n"
+            "[Input: voice dictation; may contain speech-recognition errors]\n"
+        )
     return AgentInputMetadata(harness_source="agent run run-1 from #source-session"), (
         "[Harness: agent run run-1 from #source-session]\n[Now: 2026-09-06 11:10:00 UTC+00:00]\n"
     )
@@ -655,14 +660,15 @@ async def test_codex_steer_reconciliation_cache_keeps_only_unknown_receipts() ->
 
 
 @pytest.mark.anyio
-async def test_codex_start_renders_now_after_runtime_prompt_preparation(monkeypatch):
+@pytest.mark.parametrize("voice", [False, True], ids=["typed", "dictated"])
+async def test_codex_start_renders_now_after_runtime_prompt_preparation(monkeypatch, voice):
     """Scenario: MESSAGE-DELIVERY-318."""
     current = datetime(2026, 9, 6, 11, 0, tzinfo=timezone.utc)
     monkeypatch.setattr("core.agent_input.datetime", SimpleNamespace(
         now=lambda: SimpleNamespace(astimezone=lambda: current)
     ))
     request = _primary_request(backend="codex")
-    request.input_metadata = AgentInputMetadata(user_id="sender", user_name="Sender")
+    request.input_metadata = AgentInputMetadata(user_id="sender", user_name="Sender", voice=voice)
     agent = init_generation_state(object.__new__(CodexAgent))
     agent.config = SimpleNamespace(include_time_info=True, include_user_info=True)
     agent.controller = SimpleNamespace()
@@ -685,7 +691,10 @@ async def test_codex_start_renders_now_after_runtime_prompt_preparation(monkeypa
     await agent._start_turn(transport, request, "native-thread", developer_instructions="runtime instructions")
     agent._inject_thread_developer_instructions.assert_awaited_once()
     params = transport.send_request.await_args.args[1]
-    assert params["input"] == [{"type": "text", "text": "[Now: 2026-09-06 11:10:00 UTC+00:00]\n[Sender<sender>]\nprimary"}]
+    dictated = "[Input: voice dictation; may contain speech-recognition errors]\n" if voice else ""
+    assert params["input"] == [
+        {"type": "text", "text": f"[Now: 2026-09-06 11:10:00 UTC+00:00]\n[Sender<sender>]\n{dictated}primary"}
+    ]
     assert request.message == request.user_message == "primary"
 
 

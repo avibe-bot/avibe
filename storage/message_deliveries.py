@@ -26,7 +26,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection
 
-from core.agent_input import HARNESS_SOURCE_FIELDS
+from core.agent_input import HARNESS_SOURCE_FIELDS, is_voice_input
 from core.delivery_target import normalize_message_kind
 from storage.delivery_states import (
     CLAIMABLE_QUEUE_STATES,
@@ -667,6 +667,9 @@ def message_merge_identity(value: dict[str, Any]) -> tuple[Any, ...]:
         legacy_admitted_user_id(metadata)
         if value.get("platform") == "avibe" and not value.get("author_id") else None,
         _delegated_authority_merge_identity(metadata),
+        # Dictated and typed inputs never share a batch: the merged Message keeps the first
+        # one's metadata, and the Agent reads one input mode per input (``is_voice_input``).
+        is_voice_input(metadata),
     )
 
 
