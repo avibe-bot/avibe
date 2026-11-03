@@ -126,6 +126,8 @@ CONNECTOR_LIFECYCLE_WAIT_SECONDS = 20.0
 CLEANUP_LOCK_WAIT_SECONDS = 60.0
 RECOVERY_EVALUATION_SECONDS = 45.0
 RECOVERY_DRAIN_SECONDS = 35.0
+RECOVERY_MANUAL_DEBOUNCE_SECONDS = 10
+RECOVERY_RETRY_POLICY_VERSION = 2
 QUALITY_COMPARISON_MAX_AGE_SECONDS = 2 * QUALITY_SAMPLE_SECONDS
 REQUEST_PATH_PROBE_ATTEMPTS = 3
 REQUEST_PATH_PROBE_TIMEOUT_SECONDS = 3.5
@@ -140,10 +142,9 @@ _QUALITY_SNAPSHOT_PATH: Path | None = None
 _RECOVERY_LOCK = threading.Lock()
 _RECOVERY_THREAD: threading.Thread | None = None
 _RECOVERY_STATE = tunnel_quality.empty_recovery()
-_RECOVERY_ATTEMPTS: list[float] = []
 _RECOVERY_CANCEL_EVENT = threading.Event()
-_RECOVERY_MANUAL_BYPASS_USED = False
-_RECOVERY_EMERGENCY_BYPASS_USED = False
+# Local-only identity: never included in the hosted quality aggregate.
+_QUALITY_CONTEXT: dict[str, Any] | None = None
 _PREFERRED_PROTOCOL: str | None = None
 _RESOURCE_ACL_SYNC_LOCK = threading.Lock()
 _RESOURCE_ACL_SYNC_POLL_LOCK = threading.Lock()
@@ -2883,9 +2884,8 @@ def _persist_quality_snapshot(
             "schema_version": 2,
             "evaluator": _QUALITY_EVALUATOR.export_state(),
             "recovery": json.loads(json.dumps(_RECOVERY_STATE)),
-            "attempts": list(_RECOVERY_ATTEMPTS[-100:]),
-            "manual_bypass_used": _RECOVERY_MANUAL_BYPASS_USED,
-            "emergency_bypass_used": _RECOVERY_EMERGENCY_BYPASS_USED,
+            "retry_policy_version": RECOVERY_RETRY_POLICY_VERSION,
+            "context": _QUALITY_CONTEXT,
             "preferred_protocol": _PREFERRED_PROTOCOL,
         }
     runtime.write_json(quality_path.with_name(_quality_history_path().name), monitor_state)
@@ -2906,6 +2906,9 @@ def _recovery_payload() -> dict[str, Any]:
 
 def _set_recovery_state(**changes: Any) -> dict[str, Any]:
     with _RECOVERY_LOCK:
+        new_trigger = changes.get("last_trigger")
+        if new_trigger is not None and (new_trigger == "availability") != (_RECOVERY_STATE.get("last_trigger") == "availability"):
+            changes.setdefault("attempt_count_window", 0)
         _RECOVERY_STATE.update(changes)
         payload = json.loads(json.dumps(_RECOVERY_STATE))
     snapshot = tunnel_quality_snapshot()
@@ -2926,36 +2929,129 @@ def _parse_timestamp(value: Any) -> float | None:
         return None
 
 
-def _reserve_recovery(thread: threading.Thread, *, manual: bool, emergency: bool, now: float) -> bool:
-    global _RECOVERY_THREAD, _RECOVERY_MANUAL_BYPASS_USED, _RECOVERY_EMERGENCY_BYPASS_USED
+def _recovery_refusal_locked(*, manual: bool, emergency: bool, now: float) -> str | None:
+    if _RECOVERY_THREAD is not None:
+        return "route_optimization_evaluating"
+    if _connector_lane_reserved_locked():
+        return "remote_access_busy"
+    last_attempt = _parse_timestamp(_RECOVERY_STATE.get("last_attempt_at"))
+    if manual:
+        if last_attempt is not None and now < last_attempt + RECOVERY_MANUAL_DEBOUNCE_SECONDS:
+            return "route_optimization_debounce"
+        return None
+    next_attempt = _parse_timestamp(_RECOVERY_STATE.get("next_attempt_at"))
+    # An outage supersedes performance debt, but not the bounded outage retry.
+    if emergency and _RECOVERY_STATE.get("last_trigger") != "availability":
+        return None
+    if next_attempt is not None and now < next_attempt:
+        return "route_optimization_auto_wait"
+    return None
+
+
+def _reserve_recovery(thread: threading.Thread, *, manual: bool, emergency: bool, now: float) -> str | None:
+    global _RECOVERY_THREAD
     with _RECOVERY_LOCK:
-        if _connector_lane_reserved_locked():
-            return False
-        next_attempt = _parse_timestamp(_RECOVERY_STATE.get("next_attempt_at"))
-        cooling_down = next_attempt is not None and now < next_attempt
-        recent = [attempt for attempt in _RECOVERY_ATTEMPTS if attempt >= now - 30 * 60]
-        if manual:
-            if len(recent) >= 2:
-                return False
-            if cooling_down:
-                if _RECOVERY_MANUAL_BYPASS_USED:
-                    return False
-                _RECOVERY_MANUAL_BYPASS_USED = True
+        refusal = _recovery_refusal_locked(manual=manual, emergency=emergency, now=now)
+        if refusal is None:
             _RECOVERY_THREAD = thread
-            return True
-        if cooling_down or len(recent) >= 2:
-            if not emergency or _RECOVERY_EMERGENCY_BYPASS_USED:
+        return refusal
+
+
+def _connector_retry_delay(attempt_count: int) -> float:
+    return min(QUALITY_SAMPLE_SECONDS * 2 ** min(max(attempt_count - 1, 0), 4), CONNECTOR_RESTART_MAX_DELAY_SECONDS)
+
+
+def _recovery_backoff_seconds(attempt_count: int, *, trigger: str | None = None) -> float:
+    if trigger == "availability":
+        return _connector_retry_delay(attempt_count)
+    return (60, 120, 300)[min(max(attempt_count - 1, 0), 2)]
+
+
+def _normalize_recovery_schedule(*, legacy: bool, now: float) -> None:
+    """Rebase released cooldowns once; never move a current deadline on restart."""
+
+    with _RECOVERY_LOCK:
+        if _RECOVERY_STATE.get("state") in {"evaluating", "draining"}:
+            return  # Reconciliation owns interrupted attempts.
+        if _RECOVERY_STATE.get("last_result") == "improved":
+            _RECOVERY_STATE.update(state="idle", next_attempt_at=None, attempt_count_window=0)
+            return
+        if legacy:
+            # Old counts included successes and were not windowed. Only the last
+            # unsuccessful attempt is trustworthy as a consecutive streak.
+            failed = _RECOVERY_STATE.get("last_result") in {"failed", "no_improvement"}
+            count = 1 if failed else 0
+            _RECOVERY_STATE["attempt_count_window"] = count
+            old_due = _parse_timestamp(_RECOVERY_STATE.get("next_attempt_at"))
+            if old_due is not None:
+                last = _parse_timestamp(_RECOVERY_STATE.get("last_attempt_at"))
+                anchor = min(last, now) if last is not None else now
+                due = min(old_due, anchor + _recovery_backoff_seconds(max(count, 1), trigger=_RECOVERY_STATE.get("last_trigger")))
+                _RECOVERY_STATE["next_attempt_at"] = tunnel_quality.utc_timestamp(due)
+        due = _parse_timestamp(_RECOVERY_STATE.get("next_attempt_at"))
+        if due is None or due <= now:
+            _RECOVERY_STATE.update(state="idle", next_attempt_at=None)
+
+
+def _connector_quality_context(protocol: str | None = None) -> dict[str, Any] | None:
+    state = _read_state() or {}
+    active = state.get("active") or {"pid": state.get("pid"), "metrics_url": state.get("metrics_url")}
+    if not isinstance(active, dict) or not isinstance(active.get("pid"), int):
+        return None
+    requested = active.get("requested_protocol")
+    # Missing metrics / unknown transport is not proof of a path change.
+    effective = requested if requested in {"quic", "http2"} else protocol
+    context = {
+        "pid": active["pid"],
+        "started_at": active.get("started_at"),
+        "metrics_url": active.get("metrics_url"),
+        "edge_ip_version": state.get("edge_ip_version", "4"),
+        "edge_bind_address": state.get("edge_bind_address", ""),
+    }
+    if effective in {"quic", "http2"}:
+        context["protocol"] = effective
+    return context
+
+
+def _observe_quality_context(
+    protocol: str | None = None,
+    *,
+    owned: bool = False,
+    sampled_connector: dict[str, Any] | None = None,
+) -> bool:
+    """Accept only evidence bound to this connector, outside an owned transition."""
+
+    global _QUALITY_CONTEXT, _QUALITY_EVALUATOR
+    try:
+        with _connector_lifecycle(timeout=CLEANUP_LOCK_WAIT_SECONDS if owned else 0), _RECOVERY_LOCK:
+            if not owned and _connector_lane_reserved_locked():
                 return False
-            _RECOVERY_EMERGENCY_BYPASS_USED = True
-        _RECOVERY_THREAD = thread
-        return True
-
-
-def _recovery_backoff_seconds(attempt_count: int) -> int:
-    schedule = [15 * 60, 30 * 60, 60 * 60, 120 * 60]
-    if attempt_count <= len(schedule):
-        return schedule[attempt_count - 1]
-    return 6 * 60 * 60
+            context = _connector_quality_context(protocol)
+            if sampled_connector is not None and any(
+                sampled_connector.get(key) != (context or {}).get(key)
+                for key in ("pid", "started_at", "metrics_url")
+            ):
+                return False
+            if context is None:
+                return True
+            previous = _QUALITY_CONTEXT
+            same_connector = previous is not None and all(
+                previous.get(key) == context.get(key) for key in ("pid", "started_at", "metrics_url")
+            )
+            if same_connector and "protocol" not in context and previous.get("protocol") in {"quic", "http2"}:
+                context["protocol"] = previous["protocol"]
+            changed = previous is not None and any(
+                key in previous and previous[key] != value for key, value in context.items()
+            )
+            _QUALITY_CONTEXT = context
+            if changed:
+                _QUALITY_EVALUATOR = tunnel_quality.QualityEvaluator()
+                # Only the completion owns debt for optimizer promotion/rollback.
+                if not owned:
+                    _RECOVERY_STATE.update(state="idle", next_attempt_at=None, attempt_count_window=0)
+            return True
+    except _ConnectorLifecycleBusy:
+        return False
 
 
 def _automatic_recovery_enabled(config: V2Config | None = None) -> bool:
@@ -3036,7 +3132,7 @@ def _fresh_active_comparison_snapshot(
     now: float,
 ) -> dict[str, Any] | None:
     quality = current.get("tunnel_quality")
-    if isinstance(quality, dict):
+    if isinstance(quality, dict) and trigger != "manual":
         sampled_at = _parse_timestamp(quality.get("sampled_at"))
         age = now - sampled_at if sampled_at is not None else None
         rtt = quality.get("rtt_ms")
@@ -3072,6 +3168,7 @@ def _fresh_active_comparison_snapshot(
         sample,
         connector_count=1,
         recovery=_recovery_payload(),
+        effective_protocol=_effective_protocol(active, sample),
     )
     if trigger == "tail_latency":
         return None
@@ -3080,58 +3177,64 @@ def _fresh_active_comparison_snapshot(
     return snapshot
 
 
+def _optimization_refused(current: dict[str, Any], error: str, now: float) -> dict[str, Any]:
+    recovery = _recovery_payload()
+    retry_at = recovery.get("next_attempt_at") if error == "route_optimization_auto_wait" else None
+    if error == "route_optimization_debounce":
+        last = _parse_timestamp(recovery.get("last_attempt_at"))
+        if last is not None:
+            retry_at = tunnel_quality.utc_timestamp(last + RECOVERY_MANUAL_DEBOUNCE_SECONDS)
+    return {
+        **current, "ok": False, "error": error, "retry_at": retry_at,
+        "retry_after_seconds": max(0, int((_parse_timestamp(retry_at) or now) - now + 0.999)),
+    }
+
+
 def optimize_route(config: V2Config | None = None, *, trigger: str = "manual") -> dict[str, Any]:
-    """Start one non-blocking make-before-break recovery attempt."""
+    """Reserve one evaluation; never put manual intent behind automatic debt."""
 
     global _RECOVERY_THREAD
     now = time.time()
     manual = trigger == "manual"
-    loaded_config = config
-    if loaded_config is None:
-        try:
-            loaded_config = V2Config.load()
-        except Exception:
-            loaded_config = None
-    current = status(loaded_config)
-    if not current.get("running"):
-        return {**current, "ok": False, "error": "remote_access_not_running"}
-    previous = _fresh_active_comparison_snapshot(current, trigger=trigger, now=now)
-    if previous is None:
-        return {**current, "ok": False, "error": "route_optimization_unavailable"}
-    effective_trigger = trigger
-    if manual:
-        effective_trigger = _QUALITY_EVALUATOR.recovery_trigger(
-            previous,
-            profile=(
-                _configured_optimization_profile(loaded_config)
-                if loaded_config is not None
-                else "balanced"
-            ),
-        ) or "manual"
-        if effective_trigger == "manual" and not isinstance(previous.get("rtt_ms"), dict):
-            request_path = previous.get("request_path")
-            if isinstance(request_path, dict) and request_path.get("confidence") in {"medium", "high"}:
-                effective_trigger = "tail_latency"
-            else:
-                return {**current, "ok": False, "error": "route_optimization_unavailable"}
+    current = status(config)
     try:
-        thread = threading.Thread(
-            target=_run_route_optimization,
-            args=(config, effective_trigger, previous),
-            name="vibe-tunnel-route-optimization",
-            daemon=True,
-        )
-        emergency = tunnel_quality.route_unavailable(previous)
-        if not _reserve_recovery(thread, manual=manual, emergency=emergency, now=now):
-            return {**current, "ok": False, "error": "route_optimization_unavailable"}
-        _RECOVERY_CANCEL_EVENT.clear()
-        _set_recovery_state(state="evaluating", last_trigger=effective_trigger)
-        thread.start()
+        with _connector_lifecycle(timeout=0):
+            current = status(config)
+            if not current.get("running") or current.get("enabled") is False:
+                return _optimization_refused(current, "remote_access_not_running", now)
+            with _RECOVERY_LOCK:
+                # Reject duplicate clicks before taking any new measurements.
+                refusal = _recovery_refusal_locked(manual=manual, emergency=True, now=now)
+            if refusal in {"route_optimization_evaluating", "remote_access_busy", "route_optimization_debounce"}:
+                return _optimization_refused(current, refusal, now)
+            previous = _fresh_active_comparison_snapshot(current, trigger=trigger, now=now)
+            if previous is None:
+                return _optimization_refused(current, "route_optimization_evidence_unavailable", now)
+            effective_trigger = trigger
+            if manual and (int(previous.get("ha_connections") or 0) < 4 or tunnel_quality.route_unavailable(previous)):
+                effective_trigger = "availability"
+            thread = threading.Thread(
+                target=_run_route_optimization,
+                args=(config, effective_trigger, previous),
+                kwargs={"manual": manual},
+                name="vibe-tunnel-route-optimization",
+                daemon=True,
+            )
+            refusal = _reserve_recovery(
+                thread, manual=manual, emergency=tunnel_quality.route_unavailable(previous), now=now,
+            )
+            if refusal is not None:
+                return _optimization_refused(current, refusal, now)
+            _RECOVERY_CANCEL_EVENT.clear()
+            _set_recovery_state(state="evaluating", last_trigger=effective_trigger)
+            thread.start()
+    except _ConnectorLifecycleBusy:
+        return _optimization_refused(current, "remote_access_busy", now)
     except Exception as exc:
         with _RECOVERY_LOCK:
             if _RECOVERY_THREAD is locals().get("thread"):
                 _RECOVERY_THREAD = None
-        _set_recovery_state(state="idle", last_result="failed")
+        _finish_recovery(trigger=trigger, result="failed", previous_median=None, result_median=None)
         return {**current, "ok": False, "error": "route_optimization_start_failed", "detail": str(exc)}
     return {**status(config), "ok": True, "optimization_started": True}
 
@@ -3285,6 +3388,8 @@ def _measure_promoted_route(
     config: V2Config,
     protocol: str,
     metrics_url: str,
+    *,
+    attempts: int = PROTOCOL_EVALUATION_ATTEMPTS,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     url = _public_health_url(config)
     if url is None:
@@ -3294,7 +3399,7 @@ def _measure_promoted_route(
     connector_evaluator = tunnel_quality.QualityEvaluator()
     connector_snapshots: list[dict[str, Any]] = []
     try:
-        for index in range(PROTOCOL_EVALUATION_ATTEMPTS):
+        for index in range(attempts):
             if _RECOVERY_CANCEL_EVENT.is_set():
                 raise RuntimeError("route_optimization_cancelled")
             request_samples.append(
@@ -3318,7 +3423,7 @@ def _measure_promoted_route(
                         effective_protocol=protocol,
                     )
                 )
-            if index + 1 < PROTOCOL_EVALUATION_ATTEMPTS:
+            if index + 1 < attempts:
                 time.sleep(PROTOCOL_EVALUATION_INTERVAL_SECONDS)
     finally:
         session.close()
@@ -3404,13 +3509,16 @@ def _run_tail_protocol_recovery(
                 previous_protocol=previous_protocol,
                 result_protocol=protocol,
             )
-            replaced = _promote_candidate_connector(
-                candidate_pid,
-                pending_tail_rollback={
-                    "active_pid": candidate_pid,
-                    "previous_protocol": previous_protocol,
-                },
-            )
+            with _connector_lifecycle(), _CONNECTOR_LOCK:
+                if _RECOVERY_CANCEL_EVENT.is_set() or not V2Config.load().remote_access.vibe_cloud.enabled:
+                    raise RuntimeError("route_optimization_cancelled")
+                replaced = _promote_candidate_connector(
+                    candidate_pid,
+                    pending_tail_rollback={
+                        "active_pid": candidate_pid,
+                        "previous_protocol": previous_protocol,
+                    },
+                )
             promoted = True
             if not _drain_tracked_connector(replaced):
                 raise RuntimeError("old_connector_not_drained")
@@ -3477,13 +3585,14 @@ def _finish_recovery(
 ) -> None:
     now = time.time()
     _QUALITY_EVALUATOR.reset_healthy_samples()
+    _observe_quality_context(result_protocol if result == "improved" else None, owned=True)
     with _RECOVERY_LOCK:
-        _RECOVERY_ATTEMPTS.append(now)
-        del _RECOVERY_ATTEMPTS[:-100]
-        attempt_count = int(_RECOVERY_STATE.get("attempt_count_window") or 0) + 1
-    next_attempt = now + _recovery_backoff_seconds(attempt_count)
+        same_episode = (trigger == "availability") == (_RECOVERY_STATE.get("last_trigger") == "availability")
+        previous_count = int(_RECOVERY_STATE.get("attempt_count_window") or 0) if same_episode else 0
+        attempt_count = 0 if result == "improved" else previous_count + 1
+    next_attempt = now + _recovery_backoff_seconds(attempt_count, trigger=trigger) if attempt_count else None
     _set_recovery_state(
-        state="cooldown",
+        state="cooldown" if next_attempt is not None else "idle",
         last_attempt_at=tunnel_quality.utc_timestamp(now),
         last_trigger=trigger,
         last_result=result,
@@ -3495,7 +3604,7 @@ def _finish_recovery(
         result_p95_ms=result_p95,
         previous_p99_ms=previous_p99,
         result_p99_ms=result_p99,
-        next_attempt_at=tunnel_quality.utc_timestamp(next_attempt),
+        next_attempt_at=tunnel_quality.utc_timestamp(next_attempt) if next_attempt is not None else None,
         attempt_count_window=attempt_count,
     )
     _report_runtime_status_async(event="route_optimization")
@@ -3505,6 +3614,8 @@ def _run_route_optimization(
     config: V2Config | None,
     trigger: str,
     previous: dict[str, Any] | None = None,
+    *,
+    manual: bool = False,
 ) -> None:
     global _RECOVERY_THREAD
     candidate_pid: int | None = None
@@ -3526,8 +3637,38 @@ def _run_route_optimization(
         binary = _resolve_binary(loaded)
         active = _state_connector("active")
         active_pid = int(active.get("pid")) if active and isinstance(active.get("pid"), int) else _read_pid()
-        if not binary or not cloud.tunnel_token or not _is_cloudflared_pid(active_pid):
+        if not binary or not cloud.enabled or not cloud.tunnel_token or not _is_cloudflared_pid(active_pid):
             raise RuntimeError("active_connector_unavailable")
+        if manual and trigger != "availability":
+            # The lane is already reserved, but the active connector stays in
+            # service while we measure the *current* path (including HTTP/2).
+            metrics_url = (active or {}).get("metrics_url")
+            if not isinstance(metrics_url, str) or previous_protocol is None:
+                raise RuntimeError("request_path_comparison_unavailable")
+            fresh_path, fresh_connector = _measure_promoted_route(
+                loaded, previous_protocol, metrics_url,
+                attempts=tunnel_quality.REQUEST_PATH_HIGH_CONFIDENCE_SAMPLES,
+            )
+            if fresh_connector is None or fresh_path is None or fresh_path.get("confidence") != "high":
+                raise RuntimeError("request_path_comparison_unavailable")
+            previous = {**fresh_connector, "request_path": fresh_path}
+            if int(previous.get("ha_connections") or 0) < 4 or tunnel_quality.route_unavailable(previous):
+                trigger = "availability"
+            elif float(previous.get("request_errors_per_minute") or 0) >= 3 or float(previous.get("packet_loss_per_minute") or 0) >= 10:
+                trigger = "errors"
+            elif not isinstance(previous.get("rtt_ms"), dict) or tunnel_quality.request_path_needs_recovery(
+                fresh_path, profile=_configured_optimization_profile(loaded),
+            ):
+                trigger = "tail_latency"
+            else:
+                trigger = "manual"
+            recovery_trigger = trigger
+            previous_rtt = previous.get("rtt_ms") or {}
+            previous_median = previous_rtt.get("median")
+            previous_path = fresh_path
+            previous_p95 = _request_path_metric(fresh_path, "p95")
+            previous_p99 = _request_path_metric(fresh_path, "p99")
+            _set_recovery_state(last_trigger=trigger)
         if trigger == "tail_latency":
             result, result_protocol, result_path = _run_tail_protocol_recovery(
                 loaded,
@@ -3549,6 +3690,9 @@ def _run_route_optimization(
             return
         with _connector_lifecycle(), _CONNECTOR_LOCK:
             if _RECOVERY_CANCEL_EVENT.is_set():
+                raise RuntimeError("route_optimization_cancelled")
+            live_config = V2Config.load()
+            if not live_config.remote_access.vibe_cloud.enabled or _RECOVERY_CANCEL_EVENT.is_set():
                 raise RuntimeError("route_optimization_cancelled")
             active = _state_connector("active")
             active_pid = int(active.get("pid")) if active and isinstance(active.get("pid"), int) else _read_pid()
@@ -3606,6 +3750,8 @@ def _run_route_optimization(
         result_median = float(result_rtt["median"]) if isinstance(result_rtt, dict) and result_rtt.get("median") is not None else None
         _set_recovery_state(state="draining")
         with _connector_lifecycle(), _CONNECTOR_LOCK:
+            if _RECOVERY_CANCEL_EVENT.is_set() or not V2Config.load().remote_access.vibe_cloud.enabled:
+                raise RuntimeError("route_optimization_cancelled")
             state = _read_state() or {}
             active = state.get("active") if isinstance(state.get("active"), dict) else {"pid": _read_pid()}
             old_pid = active.get("pid") if isinstance(active, dict) else None
@@ -3704,6 +3850,7 @@ class _ConnectorRestartSchedule:
 
     delay_seconds: float = QUALITY_SAMPLE_SECONDS
     due_at: float | None = None
+    attempts: int = 0
 
 
 def _exited_connector_requested(config: V2Config | None) -> bool:
@@ -3766,7 +3913,8 @@ def _restart_exited_connector(
             if not _exited_connector_requested(config):
                 return False
             schedule.due_at = None
-            schedule.delay_seconds = min(2 * schedule.delay_seconds, CONNECTOR_RESTART_MAX_DELAY_SECONDS)
+            schedule.attempts += 1
+            schedule.delay_seconds = _connector_retry_delay(schedule.attempts + 1)
             logger.warning("Tunnel connector exited; restarting it")
             # Only explicit starts record the request and only stop() withdraws it.
             result = _start(None, record_request=False, install_failure=install_failure)
@@ -3783,10 +3931,8 @@ def _quality_monitor_loop(
     *,
     orphan_candidate_pending: bool = False,
 ) -> None:
-    global _QUALITY_MONITOR_STARTED, _RECOVERY_MANUAL_BYPASS_USED, _RECOVERY_EMERGENCY_BYPASS_USED
+    global _QUALITY_MONITOR_STARTED
     last_report_at = 0.0
-    last_active_pid: int | None = None
-    last_effective_protocol = "unknown"
     restart_schedule = _ConnectorRestartSchedule()
     request_session = _public_probe_session()
     try:
@@ -3815,9 +3961,6 @@ def _quality_monitor_loop(
                     sample = tunnel_quality.scrape_metrics(metrics_url)
                 except Exception:
                     logger.debug("Tunnel metrics scrape failed", exc_info=True)
-            if active_pid != last_active_pid:
-                _QUALITY_EVALUATOR.reset_request_window()
-                last_active_pid = active_pid
             try:
                 loaded = V2Config.load()
             except Exception:
@@ -3831,13 +3974,7 @@ def _quality_monitor_loop(
                 continue
             configured_protocol = _configured_protocol(loaded) if loaded is not None else "auto"
             effective_protocol = _effective_protocol(active, sample)
-            if (
-                last_effective_protocol in {"quic", "http2"}
-                and effective_protocol in {"quic", "http2"}
-                and effective_protocol != last_effective_protocol
-            ):
-                _QUALITY_EVALUATOR.reset_request_window()
-            last_effective_protocol = effective_protocol
+            _normalize_recovery_schedule(legacy=False, now=time.time())
             request_path_sample = None
             recovery_state = _recovery_payload().get("state")
             public_health_url = _public_health_url(loaded) if loaded is not None else None
@@ -3859,34 +3996,42 @@ def _quality_monitor_loop(
                 except Exception:
                     logger.debug("Tunnel request-path probe failed", exc_info=True)
             previous_snapshot = tunnel_quality_snapshot()
-            snapshot = _QUALITY_EVALUATOR.update(
-                sample,
-                connector_count=connector_count,
-                recovery=_recovery_payload(),
-                configured_protocol=configured_protocol,
-                effective_protocol=effective_protocol,
-                request_path_sample=request_path_sample,
-            )
+            snapshot = None
             try:
-                if not _persist_quality_snapshot(snapshot, expected_path=quality_path):
-                    return
+                # The active identity may have changed during either scrape or
+                # public probes. Never attach its old protocol/sample to a new PID.
+                with _connector_lifecycle(timeout=0):
+                    if _observe_quality_context(
+                        effective_protocol if sample is not None else None, sampled_connector=active,
+                    ):
+                        snapshot = _QUALITY_EVALUATOR.update(
+                            sample,
+                            connector_count=connector_count,
+                            recovery=_recovery_payload(),
+                            configured_protocol=configured_protocol,
+                            effective_protocol=effective_protocol,
+                            request_path_sample=request_path_sample,
+                        )
+                        if snapshot.get("state") == "healthy" and _QUALITY_EVALUATOR.healthy_samples >= 120:
+                            with _RECOVERY_LOCK:
+                                _RECOVERY_STATE.update(state="idle", next_attempt_at=None, attempt_count_window=0)
+                            snapshot["recovery"] = _recovery_payload()
+                        if not _persist_quality_snapshot(snapshot, expected_path=quality_path):
+                            return
+            except _ConnectorLifecycleBusy:
+                pass
             except OSError:
                 logger.debug("Tunnel quality state path disappeared; stopping monitor", exc_info=True)
                 return
+            if snapshot is None:
+                time.sleep(max(0.1, interval_seconds - (time.monotonic() - started_at)))
+                continue
             if (
                 previous_snapshot is not None
                 and (previous_snapshot.get("state"), previous_snapshot.get("grade"))
                 != (snapshot.get("state"), snapshot.get("grade"))
             ):
                 _report_runtime_status_async(event="tunnel_quality_changed")
-            if snapshot.get("state") == "healthy" and _QUALITY_EVALUATOR.healthy_samples >= 120:
-                recovery = _recovery_payload()
-                if recovery.get("state") != "idle" or int(recovery.get("attempt_count_window") or 0) > 0:
-                    with _RECOVERY_LOCK:
-                        _RECOVERY_ATTEMPTS.clear()
-                        _RECOVERY_MANUAL_BYPASS_USED = False
-                        _RECOVERY_EMERGENCY_BYPASS_USED = False
-                    _set_recovery_state(state="idle", next_attempt_at=None, attempt_count_window=0)
             optimization_profile = (
                 _configured_optimization_profile(loaded)
                 if loaded is not None
@@ -3898,7 +4043,7 @@ def _quality_monitor_loop(
             )
             if running and not metrics_url:
                 trigger = "availability"
-            if trigger and _automatic_recovery_enabled(loaded):
+            if trigger and loaded is not None and loaded.remote_access.vibe_cloud.enabled and _automatic_recovery_enabled(loaded):
                 optimize_route(trigger=trigger)
             now = time.monotonic()
             if now - last_report_at >= QUALITY_REPORT_SECONDS:
@@ -4190,7 +4335,7 @@ def _normalize_orphaned_recovery_state() -> None:
 
 
 def start_tunnel_quality_monitor(interval_seconds: float = QUALITY_SAMPLE_SECONDS) -> None:
-    global _PREFERRED_PROTOCOL, _QUALITY_EVALUATOR, _QUALITY_MONITOR_STARTED, _RECOVERY_MANUAL_BYPASS_USED, _RECOVERY_EMERGENCY_BYPASS_USED
+    global _PREFERRED_PROTOCOL, _QUALITY_EVALUATOR, _QUALITY_MONITOR_STARTED, _QUALITY_CONTEXT
     with _QUALITY_MONITOR_LOCK:
         if _QUALITY_MONITOR_STARTED:
             return
@@ -4198,9 +4343,7 @@ def start_tunnel_quality_monitor(interval_seconds: float = QUALITY_SAMPLE_SECOND
         with _RECOVERY_LOCK:
             _RECOVERY_STATE.clear()
             _RECOVERY_STATE.update(tunnel_quality.empty_recovery())
-            _RECOVERY_ATTEMPTS.clear()
-            _RECOVERY_MANUAL_BYPASS_USED = False
-            _RECOVERY_EMERGENCY_BYPASS_USED = False
+            _QUALITY_CONTEXT = None
         persisted = runtime.read_json(_quality_history_path())
         if isinstance(persisted, dict) and persisted.get("schema_version") in {1, 2}:
             evaluator_state = persisted.get("evaluator")
@@ -4212,11 +4355,13 @@ def start_tunnel_quality_monitor(interval_seconds: float = QUALITY_SAMPLE_SECOND
                     _RECOVERY_STATE.update(
                         {key: recovery_state[key] for key in _RECOVERY_STATE if key in recovery_state}
                     )
-                attempts = persisted.get("attempts")
-                if isinstance(attempts, list):
-                    _RECOVERY_ATTEMPTS[:] = [float(item) for item in attempts if isinstance(item, (int, float))][-100:]
-                _RECOVERY_MANUAL_BYPASS_USED = bool(persisted.get("manual_bypass_used"))
-                _RECOVERY_EMERGENCY_BYPASS_USED = bool(persisted.get("emergency_bypass_used"))
+                context = persisted.get("context")
+                if isinstance(context, dict):
+                    _QUALITY_CONTEXT = context
+            _normalize_recovery_schedule(
+                legacy=persisted.get("retry_policy_version") != RECOVERY_RETRY_POLICY_VERSION,
+                now=time.time(),
+            )
             preferred_protocol = persisted.get("preferred_protocol")
             _PREFERRED_PROTOCOL = str(preferred_protocol) if preferred_protocol in {"quic", "http2"} else None
         orphan_candidate_pending = not _reconcile_orphan_candidate_when_free()

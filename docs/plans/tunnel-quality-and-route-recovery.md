@@ -144,7 +144,7 @@ request-path comparison:
 7. If neither candidate is materially better, start a replacement using the
    previous explicit protocol, promote it make-before-break, drain the rejected
    connector, and record `no_improvement`.
-8. The existing cooldown and attempt budget apply to protocol attempts. A
+8. The bounded automatic retry schedule applies to protocol attempts. A
    successful `auto` attempt persists the verified protocol preference; pinned
    modes never rewrite it.
 
@@ -500,6 +500,41 @@ A degraded state returns to healthy only after five continuous minutes with:
 
 This prevents flapping around a threshold.
 
+## Optimizer retry repair change contract
+
+Acceptance (2026-11-03):
+
+- Manual evaluation ignores automatic performance cooldown and obsolete bypass
+  flags. The existing lifecycle/candidate lane remains exclusive; repeated clicks
+  neither create work nor extend deadlines. Only a ten-second completion debounce
+  applies. Manual evaluation measures the active path before replacing it.
+- Consecutive unsuccessful performance attempts retry after 60, 120, then 300
+  seconds (cap). Improvement resets the streak; no rolling attempt gate applies.
+- Unavailable routes bypass performance debt and reuse the exited-connector
+  backoff policy (one sample interval, doubling to 120 seconds) for bounded
+  attempts. Explicit stop/disable intent and existing process restart ownership
+  are unchanged.
+- Observed connector identity, effective protocol, or applied bind/IP-family
+  changes invalidate old evidence and external replacements reset retry debt.
+  Optimizer-owned promotion/rollback does not erase its own failure schedule.
+  No external-IP polling, latency, or colo heuristic is added; an invisible
+  gateway change remains manually retryable.
+- Released histories load without the persistent one-time bypass lockout. Old
+  deadlines are rebased against the recorded last attempt and the new bounded
+  policy; restarting does not repeatedly postpone a due attempt.
+- Local status distinguishes evaluation, lifecycle contention, evidence
+  unavailability, manual debounce, and automatic waiting. Automatic waiting
+  does not disable manual evaluation. Existing bilingual components/copy are
+  reused, with a repository-native frame for the changed waiting state.
+
+Owning validation: extend the existing recovery/evaluator tests and tunnel
+scenario catalog for repeated manual retries, legacy histories, schedule
+expiry/cap/reset, context/rollback, and lane/lifecycle/stop safety; focused pytest,
+changed-file Ruff, UI tests/build and design-frame rendering. Live route quality
+and public-cloud behavior remain environment-dependent checks, not unit-test
+claims. Authentication, pairing, promotion thresholds, protocol pins, and
+make-before-break/drain/rollback contracts do not change.
+
 ## Candidate Attempt Schedule
 
 There is no periodic candidate while healthy.
@@ -510,29 +545,59 @@ route remains degraded, retry using episode-local backoff:
 
 ```text
 attempt 1: immediately
-attempt 2: 15 minutes later
-attempt 3: 30 minutes later
-attempt 4: 60 minutes later
-attempt 5: 120 minutes later
-later attempts: every 6 hours while continuously degraded
+attempt 2: 1 minute later
+attempt 3: 2 minutes later
+later attempts: every 5 minutes while continuously degraded
 ```
 
 Additional rules:
 
-- Never run more than one candidate.
-- Never run more than two attempts in a rolling 30-minute window.
-- A manual Optimize Route action may bypass the current cooldown once, but it
-  cannot create a second concurrent candidate. Its promotion criteria follow
-  the active degradation signal (availability, errors/loss, or latency), while
-  `manual` remains only the cooldown-bypass reason.
-- Thirty healthy minutes after the latest attempt reset the episode and attempt
-  count.
-- Service restart resumes persisted cooldown instead of immediately retrying.
-- When the active route is unavailable, availability restoration takes priority
-  over cooldown; one emergency candidate attempt is allowed. A route is
-  unavailable when the connector reports zero ready connections or the
-  high-confidence request window has no successful probe, because cloudflared
-  can keep reporting a ready connection after its transport has died.
+- Never run more than one evaluation or candidate; lifecycle changes keep the
+  same cross-process lock and shared candidate lane.
+- Manual Optimize Route ignores the automatic deadline. Only a ten-second
+  debounce after completion applies, and denied clicks never move that deadline.
+  It scrapes current connector evidence and, for an available route, measures a
+  fresh high-confidence request/connector baseline (30 bounded public probes)
+  in the reserved worker before replacement. The configured optimization profile
+  still selects request-tail eligibility; automatic confidence gates are unchanged.
+  Promotion still follows availability, errors/loss, latency, or request tails.
+- The wire-compatible `attempt_count_window` now counts consecutive unsuccessful
+  attempts in the current performance/availability episode. Improvement resets
+  it immediately. Thirty healthy minutes also clear the episode.
+- A known external connector identity, effective protocol, or applied bind/IP
+  family change resets evidence and retry debt. Optimizer-owned promotions and
+  rollback reset evidence but retain the completion's unsuccessful streak. The
+  final context is recorded at completion even if the monitor missed intermediate
+  transitions. Missing protocol evidence, latency, and colo changes do not count.
+- Context remains local history, never hosted runtime-status fields. There is
+  no external-IP poller; invisible gateway changes can always be retried manually.
+- Service restart preserves current deadlines. Histories without the current
+  retry-policy marker ignore obsolete bypass flags and attempt lists, count only
+  the last known unsuccessful result, and bound the old deadline by last attempt
+  plus the new first delay. Already-expired deadlines stay due, not postponed on
+  every restart. History remains schema version 2, so older releases can still
+  load it while ignoring the additive policy/context fields. Interrupted
+  candidates remain owned by startup reconciliation.
+- An unavailable route bypasses performance cooldown. Subsequent outage failures
+  use the same connector-restart backoff policy: 15, 30, 60, then 120 seconds
+  (cap), in the existing recovery state, not a separate scheduler. A route is
+  unavailable when the connector reports zero ready connections or its
+  high-confidence request window has no successful probe. Exited connectors
+  continue to use the existing requested-connector restart owner; stop or disable
+  always wins, and performance cooldown never blocks that restart.
+
+### Local retry presentation
+
+The existing Optimize Route action remains available during automatic waiting.
+Its completion debounce ends after ten seconds without needing a page refresh.
+The configured-status row names the automatic retry time and explicitly states
+that manual evaluation is available; due times mean eligibility, not an
+unconditional scheduled reconnection. Auto-disabled instances show no automatic
+retry promise. Local API refusals distinguish `route_optimization_evaluating`,
+`remote_access_busy`, `route_optimization_debounce` (with `retry_at` and
+`retry_after_seconds`), `route_optimization_evidence_unavailable`, and
+`route_optimization_auto_wait`. An accepted evaluation is not a promise that a
+candidate is already running or that the path will improve.
 
 ## Make-Before-Break Recovery
 
@@ -572,7 +637,7 @@ only after sustained degradation and rejected quickly when unhealthy.
 5. Long-lived SSE/WebSocket clients may reconnect once when the grace period
    expires. The hostname, DNS, OIDC session, CSRF state, and local Avibe session
    secret do not change.
-6. Emit `tunnel_recovered`, update the quality snapshot, and enter cooldown.
+6. Emit `tunnel_recovered`, update the quality snapshot, and clear retry debt.
 
 This sequence removes the current break-before-make window and the mismatch in
 which Avibe escalates after 8 seconds while cloudflared defaults to a 30-second
@@ -671,7 +736,7 @@ Representative structured Doctor item:
   "status": "warn",
   "code": "remote_access.tunnel_latency_degraded",
   "message": "Remote access latency is degraded (median 259 ms, max 418 ms).",
-  "action": "Automatic route optimization will retry in 12 minutes.",
+  "action": "Automatic route optimization will retry in 2 minutes.",
   "details": {
     "grade": "poor",
     "protocol": "quic",
@@ -717,7 +782,7 @@ strip rather than adding nested cards:
 | --- | --- | --- | --- |
 | Healthy + good | Connection healthy | `84 ms - 4/4 paths - checked 8s ago` | None |
 | Healthy + fair | Connection normal | `168 ms - usable, slightly delayed` | Details |
-| Degraded + poor/critical | Connection slow | `259 ms - automatic optimization in 12 min` | Optimize now |
+| Degraded + poor/critical | Connection slow | `259 ms - automatic optimization in 2 min` | Optimize now |
 | Recovering | Optimizing connection | `Current access stays available while a better route is checked` | No duplicate action |
 | Unknown RTT | Connected | `Quality metrics are temporarily unavailable` | Run diagnostics |
 | Unavailable | Remote access unavailable | Existing start/repair guidance | Start or repair |
@@ -779,7 +844,7 @@ during rolling deployment. Example V1 payload:
       "previous_median_rtt_ms": 259,
       "result_median_rtt_ms": 84,
       "next_attempt_at": null,
-      "attempt_count_window": 1
+      "attempt_count_window": 0
     }
   }
 }

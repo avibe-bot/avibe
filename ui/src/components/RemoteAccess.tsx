@@ -29,6 +29,7 @@ import { useToast } from '../context/ToastContext';
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 import { onPageReactivated } from '../lib/pageActivity';
 import { getTunnelQualityDisplayState, getTunnelRequestPathDisplayState } from '../lib/tunnelQuality';
+import { useDeadlineClock } from './settings/models/useDeadlineClock';
 import { CompactField } from './settings/SettingsPrimitives';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
@@ -87,7 +88,9 @@ export const RemoteAccess: React.FC = () => {
     if (!code) {
       return t('errors.remote_access_unknown');
     }
-    return t(`errors.${code}`, { defaultValue: t('errors.remote_access_unknown') });
+    const seconds = payload && typeof payload === 'object' && 'retry_after_seconds' in payload
+      ? payload.retry_after_seconds : undefined;
+    return t(`errors.${code}`, { seconds, defaultValue: t('errors.remote_access_unknown') });
   };
 
   const refresh = useCallback(async (silent = false) => {
@@ -238,7 +241,11 @@ export const RemoteAccess: React.FC = () => {
     setActionMessage(null);
     try {
       const result = await api.optimizeRemoteAccessRoute();
-      setStatus(result);
+      if (typeof result.running === 'boolean') setStatus(result);
+      if (result.ok !== true) {
+        setActionMessage({ type: 'error', text: describeError(result) });
+        return;
+      }
       const message = t('remoteAccess.optimizeStarted');
       setActionMessage({ type: 'success', text: message });
       showToast(message, 'success');
@@ -317,9 +324,20 @@ export const RemoteAccess: React.FC = () => {
       ? t('common.running')
       : t('common.stopped');
   const quality = status?.tunnel_quality;
+  const lastAttempt = Date.parse(quality?.recovery.last_attempt_at || '');
+  const manualRetryAt = status?.error === 'route_optimization_debounce' && status.retry_at
+    ? status.retry_at
+    : Number.isFinite(lastAttempt) ? new Date(lastAttempt + 10_000).toISOString() : null;
+  const autoRetryAt = quality?.recovery.next_attempt_at;
+  const clock = useDeadlineClock(manualRetryAt && Date.parse(manualRetryAt) > Date.now() ? manualRetryAt : autoRetryAt);
+  const manualDebounce = Boolean(manualRetryAt && Date.parse(manualRetryAt) > clock);
+  const retryTime = (value: string) => new Date(value).toLocaleTimeString();
   const qualityFresh = quality
     ? Date.now() - Date.parse(quality.sampled_at) <= 150_000
     : false;
+  // Recovery has explicit terminal transitions; ageing metrics do not finish a
+  // live evaluation (a bounded manual baseline alone can take over 150 seconds).
+  const recoveryInFlight = quality?.recovery.state === 'evaluating' || quality?.recovery.state === 'draining';
   const qualityGrade = getTunnelQualityDisplayState(quality, qualityFresh);
   const qualityVariant = qualityGrade === 'good'
     ? 'success'
@@ -405,7 +423,7 @@ export const RemoteAccess: React.FC = () => {
           ? 'CrossCountry'
           : 'Unknown'
   }`);
-  const controlsDisabled = savingSettings || optimizing || (qualityFresh && quality?.state === 'recovering');
+  const controlsDisabled = savingSettings || optimizing || recoveryInFlight;
   const diagnosticRows = diagnostics ? [
     { key: 'dns', label: t('remoteAccess.diagnosticDns'), status: diagnostics.dns.status },
     { key: 'quic', label: t('remoteAccess.diagnosticQuic'), status: diagnostics.quic.status },
@@ -867,18 +885,28 @@ export const RemoteAccess: React.FC = () => {
                 <ExternalLink className="size-3 shrink-0" />
               </a>
             )}
+            {/* ui/design: settings/remote-access/automatic-wait */}
+            {running && qualityFresh && !recoveryInFlight && (
+              manualDebounce && manualRetryAt ? (
+                <p className="mt-1 text-[11px] text-muted">{t('remoteAccess.manualRetryAt', { time: retryTime(manualRetryAt) })}</p>
+              ) : status?.settings?.auto_recovery && autoRetryAt ? (
+                <p className="mt-1 text-[11px] text-muted">{Date.parse(autoRetryAt) > clock
+                  ? t('remoteAccess.automaticRetryAt', { time: retryTime(autoRetryAt) })
+                  : t('remoteAccess.automaticRetryDue')}</p>
+              ) : null
+            )}
           </div>
           <div className="flex flex-wrap gap-2">
             <Button
               type="button"
               variant="secondary"
               size="xs"
-              disabled={!running || optimizing || (qualityFresh && quality?.state === 'recovering')}
+              disabled={!running || optimizing || manualDebounce || savingSettings || recoveryInFlight}
               onClick={optimizeRoute}
               title={t('remoteAccess.optimizeRoute')}
             >
               <Route className="size-3.5" />
-              {optimizing || (qualityFresh && quality?.state === 'recovering')
+              {optimizing || recoveryInFlight
                 ? t('remoteAccess.optimizingRoute')
                 : t('remoteAccess.optimizeRoute')}
             </Button>

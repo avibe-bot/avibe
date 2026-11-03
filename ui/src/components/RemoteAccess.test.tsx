@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 import { RemoteAccess } from './RemoteAccess';
-import type { RemoteAccessStatus } from '../context/ApiContext';
+import type { RemoteAccessStatus, TunnelQualitySnapshot } from '../context/ApiContext';
 import { InstanceAuthorizationProvider } from '../context/InstanceAuthorizationProvider';
 import { normalizeSessionInfo, OWNER_INSTANCE_CAPABILITIES } from '../lib/sessionInfo';
 
@@ -84,6 +84,17 @@ const runningStatus = (overrides: Partial<RemoteAccessStatus> = {}): RemoteAcces
   ...overrides,
 });
 
+const cooldownQuality = (): TunnelQualitySnapshot => ({
+  schema_version: 2, state: 'degraded', grade: 'poor', sampled_at: new Date().toISOString(),
+  protocol: 'quic', connector_count: 1, ha_connections: 4,
+  rtt_ms: { min: 200, median: 250, max: 350 }, baseline_median_rtt_ms: 100,
+  edge_locations: [], window_seconds: 60, request_errors_per_minute: 0, packet_loss_per_minute: 0,
+  recovery: { state: 'cooldown', last_attempt_at: new Date(Date.now() - 30_000).toISOString(),
+    last_trigger: 'latency', last_result: 'no_improvement',
+    previous_median_rtt_ms: 250, result_median_rtt_ms: 240,
+    next_attempt_at: new Date(Date.now() + 120_000).toISOString(), attempt_count_window: 2 },
+});
+
 function renderPage(role: 'member' | 'owner' = 'owner') {
   const session = normalizeSessionInfo({
     remote: true, authenticated: true, authorization_state: 'current',
@@ -109,6 +120,54 @@ describe('RemoteAccess', () => {
     cleanup();
     vi.clearAllMocks();
   });
+
+  it('RA-TQ-040 explains automatic waiting without disabling a manual retry', async () => {
+    api.remoteAccessStatus.mockResolvedValue(runningStatus({ tunnel_quality: cooldownQuality() }));
+    renderPage();
+    await screen.findByText('remoteAccess.automaticRetryAt');
+    expect((screen.getByRole('button', { name: 'remoteAccess.optimizeRoute' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('RA-TQ-040 keeps ongoing evaluation visible when metric samples age out', async () => {
+    const quality = cooldownQuality();
+    quality.sampled_at = new Date(Date.now() - 180_000).toISOString();
+    quality.state = 'recovering';
+    quality.recovery.state = 'evaluating';
+    api.remoteAccessStatus.mockResolvedValue(runningStatus({ tunnel_quality: quality }));
+    renderPage();
+    const button = await screen.findByRole('button', { name: 'remoteAccess.optimizingRoute' });
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText('remoteAccess.qualityUnknown')).toBeTruthy();
+    fireEvent.click(button);
+    expect(api.optimizeRemoteAccessRoute).not.toHaveBeenCalled();
+  });
+
+  it('RA-TQ-040 enables manual retry when the short completion debounce expires', async () => {
+    vi.useFakeTimers();
+    try {
+      const quality = cooldownQuality();
+      quality.recovery.last_attempt_at = new Date().toISOString();
+      api.remoteAccessStatus.mockResolvedValue(runningStatus({ tunnel_quality: quality }));
+      await act(async () => { renderPage(); });
+      const button = screen.getByRole('button', { name: 'remoteAccess.optimizeRoute' }) as HTMLButtonElement;
+      expect(button.disabled).toBe(true);
+      expect(screen.getByText('remoteAccess.manualRetryAt')).toBeTruthy();
+      await act(async () => { vi.advanceTimersByTime(10_000); });
+      expect(button.disabled).toBe(false);
+      expect(screen.getByText('remoteAccess.automaticRetryAt')).toBeTruthy();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each(['route_optimization_evaluating', 'remote_access_busy', 'route_optimization_debounce', 'route_optimization_evidence_unavailable'])(
+    'RA-TQ-040 reports %s instead of claiming an evaluation started', async (error) => {
+      api.optimizeRemoteAccessRoute.mockResolvedValue(runningStatus({ ok: false, error, retry_after_seconds: 6 }));
+      renderPage();
+      fireEvent.click(await screen.findByRole('button', { name: 'remoteAccess.optimizeRoute' }));
+      await screen.findByText(`errors.${error}`);
+      expect(screen.queryByText('remoteAccess.optimizeStarted')).toBeNull();
+      expect(showToast).not.toHaveBeenCalled();
+    },
+  );
 
   it('RA-TQ-032 shows technical details when the remote status includes a network path', async () => {
     renderPage();
