@@ -22,7 +22,9 @@ vi.mock('./voice/useHoldToTalk', () => ({
     hold.options = options;
     return {
       phase: 'idle', interruptReason: null, text: '', stash: '', seconds: 0, progress: 0, outcome: null,
-      available: true, holdable: true, canRetry: false, bind: {},
+      // The hold has answered every pointer press here: it spends the click that follows.
+      available: true, holdable: true, canRetry: false,
+      bind: { onClick: (event: { detail: number; preventDefault: () => void }) => { if (event.detail !== 0) event.preventDefault(); } },
       sendInterrupted: () => {}, retry: () => {}, discard: () => {}, dismiss: () => {},
     };
   },

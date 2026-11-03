@@ -50,11 +50,14 @@ export const HOLD_MIN_TAKE_MS = 500;
 export type HoldToTalkOptions = {
   /** Sends the final text; resolves true once the message is accepted. */
   send: (text: string, metadata: VoiceMessageMetadata) => Promise<boolean>;
-  /** Whether a press may become a hold now; false leaves the press to the system. */
-  canHold?: () => boolean;
+  /** Whether this press may become a hold; false leaves it to the system. `pointerType` is the
+   *  press's (`mouse`, `touch`, `pen`): one surface can get both on a touchscreen laptop. */
+  canHold?: (pointerType: string) => boolean;
   /** A press released before `holdMs` without moving: called inside pointerup, so it may focus. */
   onTap?: () => void;
-  gesture?: Partial<HoldGesture>;
+  /** The gesture's numbers, or the numbers for a press's `pointerType` (a mouse and a finger
+   *  on one surface hold differently). Read when the press starts. */
+  gesture?: Partial<HoldGesture> | ((pointerType: string) => Partial<HoldGesture>);
   /** The box `leave` measures against, when it is not the pressed element. */
   bounds?: () => DOMRect | null;
   /** The system taking the press (background, window blur, a lost or cancelled pointer):
@@ -71,6 +74,8 @@ const HOLD_STYLE: CSSProperties = {
 
 type Press = {
   pointerId: number;
+  /** The numbers this press holds by, resolved for its pointer when it started. */
+  gesture: HoldGesture;
   x: number;
   y: number;
   element: HTMLElement;
@@ -117,11 +122,6 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
   useEffect(() => {
     latest.current = options;
   });
-  const gesture = { ...HOLD_GESTURE, ...options.gesture };
-  const gestureRef = useRef(gesture);
-  useEffect(() => {
-    gestureRef.current = gesture;
-  });
 
   const [phase, setPhase] = useState<HoldPhase>('idle');
   const [interruptReason, setInterruptReason] = useState<HoldInterruptReason | null>(null);
@@ -142,6 +142,9 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
   const armed = useRef(false);
   // Set while this hook releases the pointer itself, so its lostpointercapture is not the system's.
   const releasing = useRef(false);
+  // The last pointer press was the gesture's (a tap it answered, a hold, a press given back, or a
+  // press while a take is pending).
+  const handled = useRef(false);
   const mounted = useRef(true);
 
   const toPhase = useCallback((next: HoldPhase) => {
@@ -292,6 +295,9 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     });
     const current: Take = { dictation, startedAt: Date.now(), started: false, ending: 'none', granted, heard: { text: '', stash: '' } };
     take.current = current;
+    // The last take's words (kept for its toast) are not this one's.
+    setText('');
+    setStash('');
     toPhase('listening');
     vibrate();
     setSeconds(0);
@@ -305,6 +311,8 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
         return;
       }
       current.started = true;
+      // The take runs from here: setup time is not speech, so it cannot carry a slip past the minimum.
+      current.startedAt = Date.now();
       // A release (or the system) may come before the microphone is ready.
       if (current.ending === 'send' || current.ending === 'system') dictation.finish();
     }, (error: unknown) => {
@@ -420,11 +428,19 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
   }, []);
 
   const onPointerDown = useCallback((event: ReactPointerEvent<HTMLElement>) => {
+    if (press.current) return;
+    handled.current = false;
     if (event.button !== 0 || (IS_APPLE && event.ctrlKey)) return;
-    if (phaseRef.current !== 'idle' || press.current) return;
-    if (latest.current.canHold && !latest.current.canHold()) return;
+    // A take still settling or waiting after a cut-off owns the element: its click must not
+    // navigate away and drop it.
+    if (phaseRef.current !== 'idle') {
+      handled.current = true;
+      return;
+    }
+    if (latest.current.canHold && !latest.current.canHold(event.pointerType)) return;
     // A tap dictation (or another hold) has the microphone: this press is the system's.
     if (isVoiceCaptureActive()) return;
+    handled.current = true;
     const element = event.currentTarget;
     try {
       element.setPointerCapture?.(event.pointerId);
@@ -433,7 +449,9 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     }
     void prewarmVoiceCapture().catch(() => undefined);
     const startedAt = Date.now();
-    const { holdMs, ringDelayMs } = gestureRef.current;
+    const requested = latest.current.gesture;
+    const gesture: HoldGesture = { ...HOLD_GESTURE, ...(typeof requested === 'function' ? requested(event.pointerType) : requested) };
+    const { holdMs, ringDelayMs } = gesture;
     const tick = () => {
       const current = press.current;
       if (!current || current.startedAt !== startedAt) return;
@@ -443,6 +461,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     };
     press.current = {
       pointerId: event.pointerId,
+      gesture,
       x: event.clientX,
       y: event.clientY,
       element,
@@ -458,7 +477,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
   const onPointerMove = useCallback((event: ReactPointerEvent<HTMLElement>) => {
     const current = press.current;
     if (!current || event.pointerId !== current.pointerId) return;
-    const { slopPx, cancel, cancelPx, uncancelPx } = gestureRef.current;
+    const { slopPx, cancel, cancelPx, uncancelPx } = current.gesture;
     if (!take.current) {
       // Before the hold: moving gives the press back to the page.
       if (phaseRef.current === 'pressing' && Math.hypot(event.clientX - current.x, event.clientY - current.y) > slopPx) end(null);
@@ -498,10 +517,23 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     if (press.current && event.pointerId === press.current.pointerId) systemTook();
   }, [systemTook]);
 
+  // The click after a press the gesture answered is spent; any other click (a press the hook left
+  // to the system, the keyboard) is the element's own, and stays its default.
+  const onClick = useCallback((event: ReactMouseEvent<HTMLElement>) => {
+    if (!handled.current || event.detail === 0) return;
+    handled.current = false;
+    event.preventDefault();
+  }, []);
+
+  // Whether a press can be taken at all (no take is pending). It does not ask `canHold`, so
+  // `bind.style` is the touch styles whenever this is true: a surface whose `canHold` refuses
+  // at times (an editable field with text) sets those styles itself instead of spreading it.
   const holdable = phase !== 'interrupted';
   const onContextMenu = useCallback((event: ReactMouseEvent<HTMLElement>) => {
-    // The long press is the hold, not the system's menu.
-    if (phaseRef.current !== 'interrupted') event.preventDefault();
+    // A live press is the hold, not the system's menu (Android fires one on a long press).
+    // Otherwise the menu is the element's: a right-click on an idle composer still pastes.
+    const at = phaseRef.current;
+    if (at === 'pressing' || at === 'listening' || at === 'recording' || at === 'armed') event.preventDefault();
   }, []);
 
   const sendInterrupted = useCallback(() => {
@@ -557,6 +589,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       onPointerCancel,
       onLostPointerCapture,
       onContextMenu,
+      onClick,
       style: holdable ? HOLD_STYLE : undefined,
     },
     sendInterrupted,

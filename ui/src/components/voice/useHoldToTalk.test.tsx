@@ -5,6 +5,7 @@ import { useLayoutEffect } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { VoiceTranscriptionError } from '../../lib/voiceTranscription';
+import { MobileBotCenter } from '../MobileChrome';
 import { useHoldToTalk, type HoldToTalkOptions } from './useHoldToTalk';
 
 // The hold's whole path (ui/design: mobile/main-bot-voice/*) against a stand-in for the
@@ -28,6 +29,8 @@ const pipeline = vi.hoisted(() => ({
   asr: { available: true },
   permission: 'granted' as PermissionState,
   captureActive: false,
+  /** How long the microphone and audio graph take to open. */
+  startMs: 0,
 }));
 
 vi.mock('../../lib/showPageVoiceDictation', () => ({
@@ -45,7 +48,7 @@ vi.mock('../../lib/showPageVoiceDictation', () => ({
         done,
         resolve,
         reject,
-        start: vi.fn(async () => undefined),
+        start: vi.fn(() => new Promise<void>((ready) => setTimeout(ready, pipeline.startMs))),
         finish: vi.fn(),
         abort: vi.fn(() => reject(new VoiceTranscriptionError('cancelled'))),
         canRetry: vi.fn(() => true),
@@ -71,9 +74,11 @@ vi.mock('../../lib/voiceRecording', async (importOriginal) => ({
 
 class PointerEventShim extends MouseEvent {
   pointerId: number;
+  pointerType: string;
   constructor(type: string, init: PointerEventInit = {}) {
     super(type, init);
     this.pointerId = init.pointerId ?? 1;
+    this.pointerType = init.pointerType ?? 'touch';
   }
 }
 vi.stubGlobal('PointerEvent', PointerEventShim);
@@ -103,13 +108,18 @@ const flush = () => act(async () => {
   await Promise.resolve();
   await Promise.resolve();
 });
-const down = (el: HTMLElement, y = 500) => fireEvent.pointerDown(el, { button: 0, pointerId: 1, clientX: 100, clientY: y });
+const down = (el: HTMLElement, y = 500, pointerType = 'touch') => fireEvent.pointerDown(el, { button: 0, pointerId: 1, clientX: 100, clientY: y, pointerType });
 const move = (el: HTMLElement, y: number, x = 100) => fireEvent.pointerMove(el, { pointerId: 1, clientX: x, clientY: y });
 const up = (el: HTMLElement, y = 500) => fireEvent.pointerUp(el, { pointerId: 1, clientX: 100, clientY: y });
 async function holdFor(el: HTMLElement, ms = 300) {
   down(el);
   await act(async () => {
     vi.advanceTimersByTime(ms);
+  });
+  await flush();
+  // The microphone opens on a timer of its own (pipeline.startMs, 0 by default).
+  await act(async () => {
+    vi.advanceTimersByTime(0);
   });
   await flush();
 }
@@ -124,6 +134,7 @@ beforeEach(() => {
   pipeline.asr.available = true;
   pipeline.permission = 'granted';
   pipeline.captureActive = false;
+  pipeline.startMs = 0;
   send.mockReset().mockResolvedValue(true);
   onTap.mockReset();
   Object.defineProperty(navigator, 'permissions', {
@@ -345,4 +356,124 @@ describe('useHoldToTalk', () => {
     up(el);
     expect(send).not.toHaveBeenCalled();
   });
+
+  it('starts a new take with an empty transcript, not the words the last one sent', async () => {
+    const el = await mount();
+    await holdFor(el);
+    await speak('第一句');
+    await elapse(1_000);
+    up(el);
+    await act(async () => pipeline.takes[0].resolve('第一句'));
+    await flush();
+    expect(hold.outcome).toBe('sent');
+
+    await holdFor(el);
+    expect(hold.phase).toBe('listening');
+    expect([hold.text, hold.stash]).toEqual(['', '']);
+  });
+
+  // A composer on a touchscreen laptop gets a mouse and a finger: each press holds by its own numbers.
+  it('reads the gesture and canHold for the pointer that pressed', async () => {
+    const canHold = vi.fn((pointerType: string) => pointerType !== 'pen');
+    const el = await mount({
+      canHold,
+      gesture: (pointerType) => (pointerType === 'mouse' ? { holdMs: 500, cancel: 'leave', cancelPx: 16, uncancelPx: 0 } : {}),
+    });
+
+    down(el, 500, 'mouse');
+    await elapse(300);
+    expect(hold.phase).toBe('pressing');
+    await elapse(200);
+    await flush();
+    await elapse(0);
+    await flush();
+    expect(hold.phase).toBe('listening');
+    // A mouse cancels by leaving the box (16 px out), not by sliding up.
+    el.getBoundingClientRect = () => ({ left: 0, top: 400, right: 200, bottom: 600, width: 200, height: 200, x: 0, y: 400, toJSON: () => ({}) });
+    move(el, 420);
+    expect(hold.phase).toBe('listening');
+    move(el, 500, 217);
+    expect(hold.phase).toBe('armed');
+    up(el, 500);
+    await flush();
+    expect(hold.outcome).toBe('cancelled');
+
+    await holdFor(el);
+    expect(hold.phase).toBe('listening');
+    up(el);
+    await flush();
+
+    down(el, 500, 'pen');
+    await elapse(600);
+    expect(hold.phase).not.toBe('listening');
+    expect(canHold.mock.calls.map(([type]) => type)).toEqual(['mouse', 'touch', 'pen']);
+  });
+
+  it('keeps the right-click menu when idle, and takes it only while a press is live', async () => {
+    const el = await mount();
+    expect(fireEvent.contextMenu(el)).toBe(true);
+    down(el);
+    expect(fireEvent.contextMenu(el)).toBe(false);
+    await elapse(300);
+    await flush();
+    await elapse(0);
+    await flush();
+    expect(hold.phase).toBe('listening');
+    expect(fireEvent.contextMenu(el)).toBe(false);
+  });
+
+  it('measures the half-second floor from the microphone opening, not from the hold', async () => {
+    pipeline.startMs = 900;
+    const el = await mount();
+    await holdFor(el);
+    await elapse(900);
+    await flush();
+    await elapse(50);
+    up(el);
+    await flush();
+    expect(pipeline.takes[0].finish).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+    expect(hold.outcome).toBe('too-short');
+  });
 });
+
+// The main Bot's center with a live hold (ui/design: mobile/workbench-tab/team): a tap
+// opens the conversation exactly once, however the press went.
+describe('the main Bot center', () => {
+  const onClick = vi.fn();
+  function Center() {
+    const value = useHoldToTalk({ send, onTap: onClick });
+    return <MobileBotCenter avatar={null} name="Vibey" label="Vibey" unread={0} running={false} onClick={onClick} hold={value.bind} />;
+  }
+  const tap = async (el: HTMLElement) => {
+    down(el);
+    await elapse(100);
+    up(el);
+    fireEvent.click(el, { detail: 1 });
+  };
+  beforeEach(() => onClick.mockReset());
+
+  it('opens the conversation once for a tap the hold answered', async () => {
+    render(<Center />);
+    await act(async () => undefined);
+    await tap(screen.getByRole('button', { name: 'Vibey' }));
+    expect(onClick).toHaveBeenCalledTimes(1);
+  });
+
+  it('still opens it while another recorder holds the microphone', async () => {
+    pipeline.captureActive = true;
+    render(<Center />);
+    await act(async () => undefined);
+    await tap(screen.getByRole('button', { name: 'Vibey' }));
+    expect(pipeline.takes).toHaveLength(0);
+    expect(onClick).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens it from the keyboard', async () => {
+    render(<Center />);
+    await act(async () => undefined);
+    fireEvent.click(screen.getByRole('button', { name: 'Vibey' }), { detail: 0 });
+    expect(onClick).toHaveBeenCalledTimes(1);
+  });
+});
+

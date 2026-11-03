@@ -65,7 +65,7 @@ export type BotCenterPhase = 'idle' | 'pressed' | 'recording' | 'armed' | 'settl
 /** The pointer handlers a press-and-hold puts on the center (`useHoldToTalk().bind`). */
 export type BotCenterHold = Pick<
   React.DOMAttributes<HTMLButtonElement>,
-  'onPointerDown' | 'onPointerMove' | 'onPointerUp' | 'onPointerCancel' | 'onLostPointerCapture' | 'onContextMenu'
+  'onPointerDown' | 'onPointerMove' | 'onPointerUp' | 'onPointerCancel' | 'onLostPointerCapture' | 'onContextMenu' | 'onClick'
 > & { style?: CSSProperties };
 
 /** The main Bot in the middle of the bar (ui/design: mobile/workbench-tab/team): its
@@ -89,9 +89,11 @@ export const MobileBotCenter: React.FC<BotCenter> = ({ avatar, name, label, unre
     <button
       type="button"
       {...hold}
-      // With a hold, a pointer's tap comes from the gesture; the click left here is the keyboard's.
+      // A press the hold answered (its tap opens the conversation) spends the click that follows;
+      // any other click — the keyboard's, or a press the hold left alone — opens it here.
       onClick={(event) => {
-        if (!hold || event.detail === 0) onClick();
+        hold?.onClick?.(event);
+        if (!event.defaultPrevented) onClick();
       }}
       aria-label={label}
       className="flex min-w-0 flex-1 flex-col items-center justify-end gap-1 px-1 pb-2 text-2xs"
