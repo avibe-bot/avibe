@@ -6701,7 +6701,23 @@
     "deniedBody": "Allow the microphone in system settings, or tap {{name}} to type.",
     "tapToType": "Tap {{name}} to type.",
     "failedBody": "Nothing was recognized; the recording is kept, so you can retry.",
-    "dismiss": "Dismiss"
+    "dismiss": "Dismiss",
+    "composer": {
+      "placeholder": "Message, or hold to talk",
+      "homePlaceholder": "Tell the agent what you want, or hold to talk",
+      "keepHolding": "Keep holding to talk",
+      "releaseToSend": "Release to send",
+      "mouseHint": "Release to send · move off the box or press <key>Esc</key> to cancel",
+      "mouseArmed": "Release to cancel · move back to keep talking",
+      "withAttachments": "Sent with the message: <names>{{names}}</names>",
+      "editFirst": "Edit first",
+      "tooShort": "Nothing heard, so nothing was sent. Hold to try again, or type.",
+      "deniedBrowser": "Allow the microphone in the browser's site settings, or type instead.",
+      "deniedSystem": "Allow the microphone in system settings, or type instead.",
+      "toSession": "To “{{title}}”",
+      "toNewSession": "A new session in “{{project}}”",
+      "toHere": "To this conversation"
+    }
   },
   "mcpHub": {
     "title": "MCP",

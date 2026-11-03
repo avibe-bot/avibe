@@ -216,3 +216,11 @@ it('starts at the remembered fast default, creates with it, and makes a change t
   await act(async () => { await result.current.send('标准速度'); });
   expect(mocks.create).toHaveBeenLastCalledWith('中文项目', {});
 });
+it('carries a spoken first message’s metadata, and adds none to a typed one', async () => {
+  const { result } = mount();
+  await waitFor(() => expect(result.current.loaded).toBe(true));
+  await act(async () => { await result.current.send('说一句', [], { input: 'voice' }); });
+  expect(JSON.parse(mocks.fetch.mock.calls[0][1].body)).toEqual({ text: '说一句', metadata: { input: 'voice' } });
+  await act(async () => { await result.current.send('打一句'); });
+  expect(JSON.parse(mocks.fetch.mock.calls[1][1].body)).toEqual({ text: '打一句' });
+});

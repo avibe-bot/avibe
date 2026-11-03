@@ -81,8 +81,13 @@ export const Workbench: React.FC = () => {
     dismissed: bannerDismissed,
   });
 
-  const send = async (text: string, attachments: ComposerAttachment[] = []): Promise<boolean> => {
-    const result = await ns.send(text, attachments);
+  const send = async (
+    text: string,
+    attachments: ComposerAttachment[] = [],
+    _references?: unknown,
+    metadata?: Record<string, unknown>,
+  ): Promise<boolean> => {
+    const result = await ns.send(text, attachments, metadata);
     if (result) {
       // The first POST has completed. Navigation only opens its transcript;
       // handing initialMessage to ChatPage here would start a duplicate turn.
@@ -190,6 +195,13 @@ export const Workbench: React.FC = () => {
           }
           onSend={send}
           placeholder={t('workbench.home.inputPlaceholder')}
+          holdPlaceholder={t('voice.composer.homePlaceholder')}
+          voiceTarget={{
+            name: ns.target?.display_name ?? '',
+            title: ns.target
+              ? t('voice.composer.toNewSession', { project: ns.target.display_name })
+              : t('voice.composer.toHere'),
+          }}
           disabled={ns.sending || !ns.loaded}
           sendDisabled={Boolean(ns.uncertainSessionId)}
           className="max-w-[640px]"

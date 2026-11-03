@@ -45,7 +45,7 @@ const mocks = vi.hoisted(() => ({
   // Captured from the mocked leaf components: the route pick and the send are
   // both props ChatPage hands down, so driving them needs no DOM choreography.
   onPatch: null as null | ((patch: AgentRoutePatch) => void),
-  onSend: null as null | ((text: string) => void | Promise<unknown>),
+  onSend: null as null | ((text: string, attachments?: unknown[], references?: unknown[], metadata?: Record<string, unknown>) => void | Promise<unknown>),
   onStop: null as null | (() => void | Promise<unknown>),
 }));
 
@@ -132,7 +132,7 @@ vi.mock('./Composer', () => ({
     onStop,
     actions,
   }: {
-    onSend: (text: string) => void | Promise<unknown>;
+    onSend: (text: string, attachments?: unknown[], references?: unknown[], metadata?: Record<string, unknown>) => void | Promise<unknown>;
     onStop: () => void | Promise<unknown>;
     actions?: React.ReactNode;
   }) => {
@@ -429,6 +429,19 @@ describe('the chat row under an optimistic write', () => {
     // And the send did not disturb the write: one PATCH for the pick, one row
     // re-read on settle.
     expect(mocks.api.updateSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('sends a message spoken by holding the composer with its voice metadata', async () => {
+    await mountChat();
+    act(() => {
+      void mocks.onSend!('fix the token refresh first', [], undefined, { input: 'voice' });
+    });
+    await settle();
+    expect(messagePosts()).toHaveLength(1);
+    expect(JSON.parse(String((messagePosts()[0][1] as RequestInit).body))).toEqual({
+      text: 'fix the token refresh first',
+      metadata: { input: 'voice' },
+    });
   });
 
   it('folds the picks made during a route write into a single follow-up PATCH', async () => {
