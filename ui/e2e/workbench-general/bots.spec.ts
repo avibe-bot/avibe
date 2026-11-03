@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 
-import { DESKTOP, open, serveProduct, type Lang } from './support';
+import { DESKTOP, NARROW, open, serveProduct, type Lang } from './support';
 
 // The Bots surfaces (docs/plans/bots.md D3, D5) against a hermetic fixture: the
 // strip in the Inbox's old place with the Inbox as the brand row's icon, the
@@ -15,6 +15,8 @@ type FixtureBot = {
   avatar: { kind: 'mascot' } | { kind: 'emoji'; emoji: string; hue: number } | null;
   role: string;
   running?: boolean;
+  /** A conversation with nothing in it yet; the main Bot's otherwise has one reply. */
+  fresh?: boolean;
 };
 
 const MAIN: FixtureBot = { handle: 'main', display_name: '', avatar: { kind: 'mascot' }, role: "The user's main Bot and first point of contact." };
@@ -92,7 +94,7 @@ async function serveBots(page: Page, lang: Lang, bots: FixtureBot[]) {
     await page.route(`**/api/sessions/${sessionId}/bootstrap`, (route) => route.fulfill({ json: {
       session, capabilities: { can_chat: true }, agents: AGENTS, default_agent_name: 'vibey', config: { ui: {} },
       // The main Bot's conversation has one reply; the others start empty.
-      messages: bot.handle === 'main' ? [{
+      messages: bot.handle === 'main' && !bot.fresh ? [{
         id: 'msg-main-reply', scope_id: null, session_id: sessionId, platform: 'avibe', author: 'agent', type: 'result',
         source: 'agent', author_id: null, author_name: null, native_message_id: null, parent_native_message_id: null,
         text: 'The launch checklist is on track.', content: { text: 'The launch checklist is on track.' },
@@ -357,6 +359,56 @@ for (const theme of ['light', 'dark'] as const) {
     expect(denied).toEqual([]);
   });
 
+  // An empty Bot conversation is the Bot greeting the user in its own voice
+  // (docs/plans/bots.md D5). The main Bot's stored role is written for Agents, so
+  // it never shows: not there, and not on its hover card, which shows its UI copy.
+  test(`an empty Bot conversation greets the user, and the main Bot's Agent description never shows (${theme})`, async ({ page }) => {
+    const { denied } = await serveBots(page, 'zh', [{ ...MAIN, fresh: true }, CSO]);
+    await page.setViewportSize(DESKTOP);
+    await open(page, '/chat/ses_main', { lang: 'zh', theme });
+    const main = page.locator('main');
+    await expect(main).toContainText('嗨，我是歪比');
+    await expect(main).toContainText('想做的事、想记住的事，直接告诉我就好。我一直在这儿，也会记得我们聊过的。');
+    await expect(main).not.toContainText(MAIN.role);
+    await expect(main).not.toContainText('你的第一联系人');
+    // The composer names who the message goes to.
+    await expect(main.getByRole('textbox', { name: '给歪比发消息…' })).toBeVisible();
+    await page.mouse.move(900, 300);
+    await page.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-empty-main-${theme}.png` });
+
+    await sidebarOf(page).getByRole('button', { name: '歪比', exact: true }).hover();
+    const card = page.getByRole('dialog').filter({ hasText: '@main' });
+    await expect(card).toContainText('你的第一联系人：和你商量，替你分派和跟进');
+    await expect(card).not.toContainText(MAIN.role);
+
+    // A custom Bot keeps the role the user wrote for it, under its greeting.
+    await open(page, '/chat/ses_cso', { lang: 'zh', theme });
+    await expect(main).toContainText('嗨，我是首席安全官');
+    await expect(main).toContainText('依赖与权限的安全审计，每周汇报');
+    await expect(main.getByRole('textbox', { name: '给首席安全官发消息…' })).toBeVisible();
+    await page.mouse.move(900, 300);
+    await page.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-empty-custom-${theme}.png` });
+    expect(denied).toEqual([]);
+  });
+
+  test(`an empty Bot conversation greets the user in English on a phone (${theme})`, async ({ page }) => {
+    const { denied } = await serveBots(page, 'en', [{ ...MAIN, fresh: true }, CSO]);
+    await page.setViewportSize(NARROW);
+    await open(page, '/chat/ses_main', { lang: 'en', theme });
+    const main = page.locator('main');
+    await expect(main).toContainText("Hi, I'm Vibey");
+    await expect(main).toContainText("Just tell me what you'd like to get done, or anything you'd like me to keep in mind. I'm always here, and I'll remember what we talk about.");
+    await expect(main).not.toContainText(MAIN.role);
+    await expect(main.getByRole('textbox', { name: 'Message Vibey…' })).toBeVisible();
+    await page.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-empty-main-phone-${theme}.png` });
+
+    await open(page, '/chat/ses_cso', { lang: 'en', theme });
+    await expect(main).toContainText("Hi, I'm 首席安全官");
+    await expect(main).toContainText(CSO.role);
+    await page.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-empty-custom-phone-${theme}.png` });
+    expect(denied).toEqual([]);
+  });
+
   // The user's message to a Bot is P1 (docs/plans/bots.md D4, MESSAGE-DELIVERY-339):
   // the server takes it into the Turn the Bot is on, so the conversation names who
   // is working and promises no queue. Steered, it is simply the user's message;
@@ -404,7 +456,7 @@ for (const theme of ['light', 'dark'] as const) {
     const composer = main.getByRole('textbox').last();
 
     // Working: the composer names the Bot and promises no queue.
-    await expect(main.getByText('首席安全官 正在处理…')).toBeVisible();
+    await expect(main.getByText('首席安全官正在忙，有话可以接着说…')).toBeVisible();
     expect(await queueWords(page)).toEqual([]);
 
     await composer.click();
@@ -424,7 +476,7 @@ for (const theme of ['light', 'dark'] as const) {
     await page.keyboard.press('Enter');
     const strip = page.locator('[data-queue-batch]').locator('..');
     await expect(strip).toContainText('还没送达 · 1');
-    await expect(strip).toContainText('没能插进首席安全官正在处理的这一轮，这一轮结束后就会收到。');
+    await expect(strip).toContainText('首席安全官正忙着手上的事，忙完就会看到你发的消息。');
     await expect(page.locator('[data-queue-row]')).toContainText('顺便把结论发我邮箱。');
     await expect(page.locator('[data-queue-row]').getByRole('button', { name: '不发了' })).toBeVisible();
     // It is not in the conversation: it has not reached the Bot.
@@ -438,7 +490,7 @@ for (const theme of ['light', 'dark'] as const) {
       json: { ok: true, status: 'queued', reason: 'native_turn_not_steerable' },
     }));
     await strip.getByRole('button', { name: '立即发送' }).click();
-    await expect(page.getByText('还是没能插进首席安全官正在处理的这一轮，这一轮结束后就会收到。')).toBeVisible();
+    await expect(page.getByText('首席安全官还没忙完手上的事，忙完就会看到你发的消息。')).toBeVisible();
     expect(await queueWords(page)).toEqual([]);
     expect(sent).toEqual(['先看 avault-core，别的放一放。', '顺便把结论发我邮箱。']);
     expect(denied).toEqual([]);

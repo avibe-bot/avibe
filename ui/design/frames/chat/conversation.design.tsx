@@ -19,6 +19,8 @@ const messages = [
 ];
 
 const bot = chatSession({ id: 'ses_cso', project_id: null, scope_id: null, title: '首席安全官', agent_name: 'cso' });
+// The main Bot, whose Agent description is written for Agents and never shows here.
+const mainBot = chatSession({ id: 'ses_main', project_id: null, scope_id: null, title: null, agent_name: 'main' });
 
 const archived = [
   userSays('把 avault 升到 0.7.0，跑一遍依赖审计。', 60 * 26),
@@ -73,6 +75,16 @@ const designFrames = frames([
     status: 'shipped',
     route: chatRoute(bot.id),
     fixtures: chatFixtures({ session: bot }),
+    render: chatDesktop,
+  },
+  {
+    name: 'bot-main',
+    title: '会话 · 主伙伴的对话还没有消息',
+    width: 1192,
+    height: 640,
+    status: 'shipped',
+    route: chatRoute(mainBot.id),
+    fixtures: chatFixtures({ session: mainBot }),
     render: chatDesktop,
   },
   {
@@ -132,6 +144,16 @@ const designFrames = frames([
     status: 'shipped',
     route: chatRoute(bot.id),
     fixtures: chatFixtures({ session: bot }),
+    render: chatPhone,
+  },
+  {
+    name: 'phone-bot-main',
+    title: '会话 · 主伙伴的对话 · 手机',
+    width: 390,
+    height: 844,
+    status: 'shipped',
+    route: chatRoute(mainBot.id),
+    fixtures: chatFixtures({ session: mainBot }),
     render: chatPhone,
   },
 ]);

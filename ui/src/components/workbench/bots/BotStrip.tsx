@@ -19,7 +19,7 @@ import clsx from 'clsx';
 import { useApi, type InboxSession } from '../../../context/ApiContext';
 import { useBots, type BotRuntimeStatus } from '../../../context/BotsContext';
 import { useUnsavedChangesActionGuard } from '../../../context/useUnsavedChangesActionGuard';
-import { botSessionPath, type Bot } from '@/lib/bots';
+import { botRole, botSessionPath, type Bot } from '@/lib/bots';
 import { formatRelativeTime } from '@/lib/relativeTime';
 import { Markdown } from '../../ui/markdown';
 import { Popover, PopoverAnchor, PopoverContent } from '../../ui/popover';
@@ -280,6 +280,8 @@ const BotSlot: React.FC<BotSlotProps & { drag?: SlotDrag }> = ({ bot, name, unre
   const path = botSessionPath(bot);
   const selected = location.pathname === path;
   const running = status === 'running';
+  // The main Bot's stored role is written for Agents; the card shows its UI copy.
+  const role = botRole(bot, t('bots.mainRole'));
   // A card belongs to the scroll epoch it opened in, so a scroll of the strip
   // closes it, and one still waiting on its delay, at once.
   const [hoverEpoch, setHoverEpoch] = useState<number | null>(null);
@@ -488,7 +490,7 @@ const BotSlot: React.FC<BotSlotProps & { drag?: SlotDrag }> = ({ bot, name, unre
                 <span className="mt-0.5 block font-mono text-[11px] text-muted">{t('bots.handle', { handle: bot.handle })}</span>
               </span>
             </span>
-            {bot.role && <span className="line-clamp-3 text-[12px] leading-relaxed text-muted">{bot.role}</span>}
+            {role && <span className="line-clamp-3 text-[12px] leading-relaxed text-muted">{role}</span>}
             {(running || latest) && (
               <span className="block rounded-lg bg-foreground/[0.04] px-2.5 py-2 text-[12px] leading-relaxed text-foreground">
                 <span className={clsx('mb-0.5 block text-[10px] font-semibold', running ? 'text-mint-ink' : 'text-muted')}>

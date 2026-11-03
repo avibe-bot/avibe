@@ -4809,17 +4809,18 @@
       "sendStatusUnknown": "We couldn't confirm whether this reached {{name}}. Check the conversation before sending it again.",
       "attachmentsUnavailable": "An attachment is no longer available, so this message hasn't been delivered. Upload the attachment again to send it.",
       "waitingMessage": "Waiting message",
-      "working": "{{name}} is working…",
+      "placeholder": "Message {{name}}…",
+      "working": "{{name}} is on it — you can keep talking…",
       "delivering": "Delivering · {{count}}",
       "notDelivered": "Not delivered yet · {{count}}",
-      "notDeliveredHint": "{{name}} couldn't take this mid-turn. It gets it as soon as this turn ends.",
-      "sendDeferred": "Still couldn't reach {{name}} mid-turn. It gets this as soon as this turn ends.",
+      "notDeliveredHint": "{{name}} is in the middle of something and will see what you sent as soon as it's done.",
+      "sendDeferred": "{{name}} is still in the middle of something and will see what you sent as soon as it's done.",
       "cancelSend": "Don't send",
       "hideDetails": "Hide details",
       "hideDetailsFailed": "Couldn't save Hide details. Try again.",
       "editProfile": "Edit profile",
-      "emptyTitle": "This is the start of your conversation with {{name}}",
-      "emptyBody": "It carries on from here: {{name}} keeps what matters in its memory and handles messages in order."
+      "emptyTitle": "Hi, I'm {{name}}",
+      "emptyBody": "Just tell me what you'd like to get done, or anything you'd like me to keep in mind. I'm always here, and I'll remember what we talk about."
     },
     "agents": {
       "setAsBot": "Set as Bot",

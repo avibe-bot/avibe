@@ -235,7 +235,14 @@ Owner decisions 2026-11-01, from the mockups in this Session's Show Page
   has it), never the Bot's name; its menu offers only the model and effort, with
   no Agent level. Bot Sessions do not get the session-title prompt section;
   their title is the display name. A new Bot gets its Session at once but no
-  automatic self-introduction; the empty conversation shows its role.
+  automatic self-introduction. Its empty conversation is the Bot greeting the
+  user in its own voice (owner decision, 2026-11-03): "Hi, I'm …", then a short
+  line inviting them to say what to do or remember, with no product terms. A
+  custom Bot adds the role the user wrote; the composer reads "Message …".
+- **The main Bot's role in the UI.** Its stored role (the Agent description)
+  is written for Agents, so the UI never shows it. The empty conversation shows
+  no role line for it; the hover card, the switch sheet, and the Agents page
+  show its UI copy (`bots.mainRole`) instead.
 - **Hide details** (owner decision, 2026-11-02). A switch per Bot, stored on the
   Bot record so every device agrees, and on by default (a record without it
   reads as on), so a Bot conversation reads like talking to a person. On, the
