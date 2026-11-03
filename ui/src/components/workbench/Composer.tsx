@@ -1487,11 +1487,20 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       try {
         started = await onSend(text, sent, undefined, metadata);
       } catch {
-        return false;
+        started = false;
       } finally {
         pendingRef.current = false;
       }
-      if (started === false) return false;
+      if (started === false) {
+        // Here, the take keeps the words (interrupted, send again). If the user has since left this
+        // conversation, the take went with the composer: the words go to this session's draft,
+        // as a refused typed message's do, unless a new draft was started.
+        if (unmountedRef.current && !valueRef.current.trim()) {
+          valueRef.current = text;
+          onDraftChange?.(text);
+        }
+        return false;
+      }
       // The staged files went with the message.
       const sentIds = new Set(sent.map((attachment) => attachment.localId));
       for (const attachment of sent) {

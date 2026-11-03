@@ -379,3 +379,25 @@ describe('the system’s touch gestures', () => {
     expect(touchStart(screen.getByRole('button', { name: en.chat.compose.attach })).defaultPrevented).toBe(false);
   });
 });
+
+describe('a refused spoken send', () => {
+  it('stays with the take while the composer is here', async () => {
+    const onDraftChange = vi.fn();
+    renderComposer({ onSend: () => false, onDraftChange });
+    await asrAvailable();
+    await expect(hookMock.options!.send('Keep these words', VOICE_MESSAGE_METADATA)).resolves.toBe(false);
+    expect(onDraftChange).not.toHaveBeenCalled();
+  });
+
+  it('goes to the session’s draft once the user has left the conversation', async () => {
+    let refuse!: (value: boolean) => void;
+    const onDraftChange = vi.fn();
+    const { unmount } = renderComposer({ onSend: () => new Promise<boolean>((resolve) => { refuse = resolve; }), onDraftChange });
+    await asrAvailable();
+    const pending = hookMock.options!.send('Keep these words', VOICE_MESSAGE_METADATA);
+    unmount();
+    refuse(false);
+    await expect(pending).resolves.toBe(false);
+    expect(onDraftChange).toHaveBeenLastCalledWith('Keep these words');
+  });
+});
