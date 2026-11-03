@@ -32,6 +32,9 @@ const RESIZE_HANDLES: { dir: ResizeDir; className: string }[] = [
   { dir: 'sw', className: 'bottom-0 left-0 size-3 cursor-nesw-resize' },
 ];
 
+// The window chrome every app shares: traffic lights, the centered app icon and title, per-app
+// title-bar actions, drag and eight-way resize (ui/design: apps/desktop/windows, a focused window
+// over an inactive one; apps/desktop/maximized).
 export const AppWindow: React.FC<{
   /** Whether this retained window is the active shell surface. Inactive windows
    * stay mounted so app bodies keep their in-memory state, but their chrome and
