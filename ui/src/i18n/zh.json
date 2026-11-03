@@ -5968,7 +5968,7 @@
       "cancel": "取消",
       "passkeyUnrecoverableWarning": "这个 passkey 就是唯一的钥匙,丢了它,保护档里的密钥就再也找不回来了(没有备用恢复方式)。",
       "passkeyAck": "我明白:一旦丢失 passkey,这些密钥无法找回。",
-      "unlockUnavailableHere": "保护层保险库需要 passkey。请从 localhost 或你的 avibe.bot 地址打开 Vaults；127.0.0.1 这类原始 IP 无法使用 WebAuthn。",
+      "unlockUnavailableHere": "请使用兼容的浏览器。在运行 Avibe 的电脑上，通过 localhost 或 127.0.0.1 打开 Vaults；在其他设备上，使用你的 HTTPS avibe.bot 地址。不支持局域网 HTTP 地址（如 192.168.x.x）。",
       "browserNote": "桌面端无法使用 passkey。请在浏览器中继续（同一个 Avibe），在那里填写这个密钥。",
       "openInBrowser": "在浏览器中打开",
       "errors": {

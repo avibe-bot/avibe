@@ -212,6 +212,11 @@ function commitLocked(wrapMeta: string): void {
   notifyVaultLockChange();
 }
 
+/**
+ * Parent WebCrypto precondition for sandbox integrity checks, not an origin
+ * allowlist or a full WebAuthn/PRF capability probe. The HTTPS sandbox owns the
+ * credential RP, so neither the parent hostname nor its WebAuthn API gates this.
+ */
 export function webauthnAvailable(): boolean {
   return typeof window !== 'undefined' && typeof crypto !== 'undefined' && Boolean(crypto.subtle);
 }
