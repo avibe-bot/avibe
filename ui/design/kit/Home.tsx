@@ -1,10 +1,10 @@
-// Home v3 (owner, 2026-11-03 02:34): the composer is the anchor. It sits at the bottom,
-// exactly where a conversation's composer sits, and never moves between states. Above it
-// the blocks keep one order (greeting, getting started, tip, suggestions), one width (the
-// composer's), and one rule: a block that is absent takes no room, the blocks below it stay
-// put, and only the ones above move down. So the page settles toward the composer, never
-// piles up at the top. One thing leads at a time: a model while there is none, then the
-// composer itself. The composer and the project chips are the shipped ones.
+// Home v4 (owner, 2026-11-03 12:02): one centered group, not a chat page. From top to bottom the
+// blocks keep one order (greeting, getting started, tip, suggestions, composer), one width, and one
+// gap between any two of them; the composer is the group's last block, never pinned to the bottom.
+// The group sits in the middle of the page, a little above it (the space above and below it is split
+// 2 : 3), so a block that appears or goes away re-centers the whole group without changing its order.
+// One thing leads at a time: a model while there is none; after that the suggestions and the tip
+// invite a first try. The composer and the project chips are the shipped ones.
 import type { ReactNode } from 'react';
 import type { LucideIcon } from 'lucide-react';
 import {
@@ -55,7 +55,7 @@ function useGapCopy() {
     model: {
       icon: Cpu,
       title: draft(`给${name}接上模型`, `Give ${name} a model`),
-      why: draft('加一个已有的订阅或 API key。', 'Add a subscription or API key you already have.'),
+      why: draft('用已有的订阅或 API key', 'A subscription or API key you have'),
       action: draft('去添加', 'Add one'),
       blocking: true,
     },
@@ -87,18 +87,19 @@ function useGapCopy() {
   return rows;
 }
 
-/** What is still missing, one line per item. While there is no model only that item shows,
- *  in the accent; otherwise the first two show, quiet. The rest fold into "N more".
- *  "Later" hides the card until tomorrow; × on an item ("not needed") removes it for good. */
-export function GettingStarted({ pending }: { pending: SetupGap[] }) {
+/** What is still missing. While there is no model only that item shows, and it leads: the one
+ *  accented row on the page, with a short line on what it takes. Otherwise the first two show
+ *  (one on a phone), quiet, one line each. The rest fold into "N more". "Later" hides the card
+ *  until tomorrow; × on an item ("not needed") removes it for good. */
+export function GettingStarted({ pending, compact = false }: { pending: SetupGap[]; compact?: boolean }) {
   const draft = useDraft();
   const rows = useGapCopy();
   if (pending.length === 0) return null;
-  const shown = pending.includes('model') ? (['model'] as SetupGap[]) : pending.slice(0, 2);
+  const shown = pending.includes('model') ? (['model'] as SetupGap[]) : pending.slice(0, compact ? 1 : 2);
   const rest = pending.length - shown.length;
   return (
     <section className="flex w-full flex-col rounded-2xl border border-border bg-surface p-1.5 shadow-mint-card-sm">
-      <header className="flex h-8 items-center gap-2 px-2.5">
+      <header className={clsx('flex items-center gap-2 px-2.5', compact ? 'h-7' : 'h-8')}>
         <Rocket className="size-4 text-mint-ink" />
         <h2 className="text-sm font-semibold text-foreground">{draft('开始使用', 'Get started')}</h2>
         <span className="flex-1" />
@@ -113,12 +114,19 @@ export function GettingStarted({ pending }: { pending: SetupGap[] }) {
       {shown.map((gap) => {
         const { icon: Icon, title, why, action, blocking } = rows[gap];
         return (
-          <div key={gap} title={why} className={clsx('flex h-12 items-center gap-3 rounded-xl px-2.5', blocking && 'bg-gold-soft')}>
-            <span className={clsx('grid size-8 shrink-0 place-items-center rounded-lg', blocking ? 'bg-surface text-gold-ink' : 'bg-surface-2 text-muted')}>
-              <Icon className="size-4" />
+          <div key={gap} title={blocking ? undefined : why} className={clsx('flex items-center gap-3 rounded-xl px-2.5', blocking ? 'bg-gold-soft py-3' : compact ? 'h-11' : 'h-12')}>
+            <span className={clsx('grid shrink-0 place-items-center rounded-lg', blocking ? 'size-10 bg-surface text-gold-ink' : 'size-8 bg-surface-2 text-muted')}>
+              <Icon className={blocking ? 'size-5' : 'size-4'} />
             </span>
-            <span className={clsx('min-w-0 flex-1 truncate text-sm text-foreground', blocking ? 'font-semibold' : 'font-medium')}>{title}</span>
-            <Button type="button" variant={blocking ? 'brand' : 'outline'} size="xs" className="shrink-0 gap-1">
+            {blocking ? (
+              <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                <span className="truncate text-base font-semibold text-foreground">{title}</span>
+                <span className={clsx('text-xs text-muted', !compact && 'truncate')}>{why}</span>
+              </span>
+            ) : (
+              <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">{title}</span>
+            )}
+            <Button type="button" variant={blocking ? 'brand' : 'outline'} size={blocking ? 'sm' : 'xs'} className="shrink-0 gap-1">
               {action}
               <ChevronRight className="size-3.5" />
             </Button>
@@ -165,16 +173,18 @@ export function HomeStatus({ compact = false }: { compact?: boolean }) {
   );
 }
 
-/** One line: the main Bot, the greeting, and what is happening at the right. No subtitle. */
-function Greeting({ member, compact }: { member: boolean; compact: boolean }) {
+/** The main Bot's face, the greeting, and, below it, what is happening (only when something is). No subtitle.
+ *  Centered: it opens the group. Before there is a model the main Bot introduces itself, since it cannot
+ *  answer yet; after that it asks what to do. On a phone the face is left out: the tab bar's center is it. */
+function Greeting({ member, compact, noModel }: { member: boolean; compact: boolean; noModel: boolean }) {
   const draft = useDraft();
   const { mainBot, displayName } = useBots();
   const name = mainBot ? displayName(mainBot) : '';
   return (
-    <div className={clsx('flex items-center gap-3', compact ? 'h-8' : 'h-10')}>
-      {!member && mainBot && <BotAvatar avatar={mainBot.avatar} name={name} size={compact ? 28 : 40} />}
-      <h1 className={clsx('min-w-0 flex-1 truncate font-bold text-foreground', compact ? 'text-lg' : 'text-2xl')}>
-        {member ? draft('下午好，今天做什么？', 'Good afternoon. What’s next?') : draft(`下午好，跟${name}说吧`, `Good afternoon. Tell ${name}.`)}
+    <div className={clsx('flex flex-col items-center text-center', compact ? 'gap-2' : 'gap-3')}>
+      {!member && !compact && mainBot && <BotAvatar avatar={mainBot.avatar} name={name} size={64} />}
+      <h1 className={clsx('font-bold text-foreground', compact ? 'text-2xl' : 'text-3xl')}>
+        {noModel && name ? draft(`下午好，我是${name}`, `Good afternoon. I’m ${name}.`) : draft('下午好，今天做什么？', 'Good afternoon. What’s next?')}
       </h1>
       <HomeStatus compact={compact} />
     </div>
@@ -218,9 +228,14 @@ function Asks({ member, compact, quiet }: { member: boolean; compact: boolean; q
           type="button"
           title={ask}
           disabled={quiet}
-          className="flex h-11 min-w-0 items-center gap-2 rounded-xl border border-border bg-surface px-3 text-sm text-foreground transition hover:border-mint/40 hover:bg-mint-soft hover:text-mint-ink disabled:opacity-50"
+          className={clsx(
+            'flex min-w-0 items-center gap-2.5 rounded-xl border border-border bg-surface px-3 text-sm text-foreground transition hover:border-mint/40 hover:bg-mint-soft hover:text-mint-ink disabled:opacity-50',
+            compact ? 'h-11' : 'h-12',
+          )}
         >
-          <Icon className="size-4 shrink-0 text-muted" />
+          <span className={clsx('grid size-7 shrink-0 place-items-center rounded-lg', quiet ? 'bg-surface-2 text-muted' : 'bg-mint-soft text-mint-ink')}>
+            <Icon className="size-4" />
+          </span>
           <span className="truncate">{label}</span>
         </button>
       ))}
@@ -246,7 +261,7 @@ function useTips(): Tip[] {
 }
 
 /** The day's tip: a title, one sentence, and "Try". ‹ › for the others, × hides it until tomorrow.
- *  One line on a desktop; on a phone the controls ride on the title's line. */
+ *  One line on a desktop; on a phone the title over the sentence, and a swipe for the others. */
 export function TipOfTheDay({ index, member = false, compact = false }: { index: number; member?: boolean; compact?: boolean }) {
   const draft = useDraft();
   const tips = useTips().filter((tip) => !member || tip.member !== false);
@@ -267,19 +282,18 @@ export function TipOfTheDay({ index, member = false, compact = false }: { index:
     </span>
   );
   if (compact) {
+    // A phone swipes the card for the other tips, so only × stays beside "Try".
     return (
-      <section className="flex w-full gap-3 rounded-2xl border border-border bg-surface-2 py-2.5 pl-2.5 pr-1.5">
+      <section className="flex w-full items-center gap-3 rounded-2xl border border-border bg-surface-2 py-2.5 pl-2.5 pr-1">
         {mark}
-        <div className="flex min-w-0 flex-1 flex-col gap-1">
-          <div className="flex h-7 items-center gap-2">
-            <span className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">{tip.title}</span>
-            {controls}
-          </div>
-          <div className="flex items-center gap-2 pr-1">
-            <span className="min-w-0 flex-1 text-xs text-muted">{tip.why}</span>
-            {tryIt}
-          </div>
-        </div>
+        <span className="flex min-w-0 flex-1 flex-col">
+          <span className="truncate text-sm font-semibold text-foreground">{tip.title}</span>
+          <span className="text-xs text-muted">{tip.why}</span>
+        </span>
+        <span className="flex shrink-0 items-center gap-0.5">
+          {tryIt}
+          <button type="button" aria-label={draft('今天不再显示', 'Hide for today')} className="grid size-7 place-items-center rounded-md text-muted hover:bg-foreground/5 hover:text-foreground"><X className="size-4" /></button>
+        </span>
       </section>
     );
   }
@@ -297,33 +311,55 @@ export function TipOfTheDay({ index, member = false, compact = false }: { index:
   );
 }
 
-/** A block of the layout spec: its outline, its number, and when it shows. Off the spec it is just the block. */
-function Slot({ spec, label, children }: { spec?: boolean; label: string; children: ReactNode }) {
+/** A block of the layout spec: its outline, its number, and when it shows; above it, the gap to the
+ *  block before. Off the spec it is just the block. */
+function Slot({ spec, label, gap, compact = false, children }: { spec?: boolean; label: string; gap?: string; compact?: boolean; children: ReactNode }) {
   if (!spec) return <>{children}</>;
   return (
-    <div className="relative mx-auto w-full max-w-(--chat-column)">
+    <div className="relative w-full">
       {children}
-      <span aria-hidden className="pointer-events-none absolute -inset-1.5 rounded-2xl border-2 border-dashed border-cyan/60" />
-      <span className="absolute -top-3 right-4 rounded-full border border-cyan/50 bg-surface px-2 text-xs font-semibold leading-5 text-cyan-ink">{label}</span>
+      <span aria-hidden className="pointer-events-none absolute -inset-1 rounded-2xl border-2 border-dashed border-cyan/60" />
+      <span className="absolute -top-2.5 right-4 rounded-full border border-cyan/50 bg-surface px-2 text-xs font-semibold leading-4 text-cyan-ink">{label}</span>
+      {gap && (
+        <span className={clsx('absolute bottom-full left-4 z-10 flex items-center', compact ? 'h-4' : 'h-7')}>
+          <span className="rounded-full border border-violet/50 bg-surface px-2 text-xs font-semibold leading-4 text-violet-ink">{gap}</span>
+        </span>
+      )}
     </div>
   );
 }
 
-/** The spec frame's legend: the rules every state follows. */
+/** The free space above or below the group: 2 parts above, 3 below, so the group sits a little
+ *  above the middle. It shrinks first when the window is short (to 24, 8 on a phone), and then
+ *  the page scrolls. With the keyboard up nothing re-centers: the page moves up whole. */
+function Spacer({ part, compact, spec, label }: { part: 'above' | 'below'; compact: boolean; spec?: boolean; label?: string }) {
+  return (
+    <div className={clsx('relative shrink', compact ? 'min-h-2' : 'min-h-6', part === 'above' ? 'grow-2' : 'grow-3')}>
+      {spec && (
+        <span className={clsx('absolute inset-y-2 inset-x-0 grid place-items-center rounded-2xl border-2 border-dashed border-violet/50 bg-violet/5', !compact && 'mx-auto max-w-3xl')}>
+          <span className="rounded-full border border-violet/40 bg-surface px-2 text-xs font-semibold leading-5 text-violet-ink">{label}</span>
+        </span>
+      )}
+    </div>
+  );
+}
+
+/** The spec frame's legend: the rules every state follows, on a desktop and on a phone. */
 function SpecLegend() {
   const draft = useDraft();
   const rules = [
-    draft('顺序固定：① 问候 → ② 开始使用 → ③ 小技巧 → ④ 试试这样说 → ⑤ 输入框。', 'One order: ① greeting → ② getting started → ③ tip → ④ suggestions → ⑤ composer.'),
-    draft('⑤ 固定在底部，和对话页的输入框同一个位置、同一个宽度；内容从它往上排。', '⑤ sits at the bottom, where a conversation’s composer sits, at its width; the blocks stack up from it.'),
-    draft('不出现的区块不占位：它下面的区块不动，只有上面的下移。', 'An absent block takes no room: the blocks below stay put; only those above move down.'),
-    draft('所有区块和输入框同宽（最宽 1080），左右对齐；区块间距 16，问候下方 24。', 'Every block is the composer’s width (up to 1080), edges aligned; 16 between blocks, 24 under the greeting.'),
-    draft('一次一个重点：没有模型时只突出「接上模型」，输入框和建议都弱化；之后重点是输入框。', 'One lead at a time: with no model only that item is in the accent and the rest is quiet; then the composer leads.'),
-    draft('手机：同样的顺序和规则；试试这样说 2×2，输入框在底栏上方。', 'Phone: the same order and rules; suggestions 2×2; the composer just above the tab bar.'),
+    draft('顺序固定：① 问候 → ② 开始使用 → ③ 小技巧 → ④ 试试这样说 → ⑤ 输入框。输入框是这一组的最后一块，不钉在页面底部。', 'One order: ① greeting → ② getting started → ③ tip → ④ suggestions → ⑤ composer. The composer is the group’s last block, not pinned to the page’s bottom.'),
+    draft('整组居中、略偏上：上下留白按 2 : 3 分。区块出现或消失，整组重新居中，顺序不变。', 'The group is centered, a little high: the free space splits 2 : 3. A block that comes or goes re-centers the group; the order stays.'),
+    draft('一种间距：桌面 28，手机 16，任何两块之间都一样。窗口不够高时先收留白（桌面至少 24，手机 8），再让页面滚动；间距不压缩。', 'One gap: 28 on a desktop, 16 on a phone, between any two blocks. When the window is short the free space shrinks first (24 on a desktop, 8 on a phone at least), then the page scrolls; the gap never shrinks.'),
+    draft('一种宽度：所有区块和输入框同宽（桌面最宽 768，手机两边各留 16），左右对齐。', 'One width: every block and the composer (768 at most on a desktop, the screen less 16 a side on a phone), edges aligned.'),
+    draft('一次一个重点：没有模型时只突出「接上模型」，问候改成自我介绍，建议和输入框变灰（输入框禁用：建议，待定）。有了模型，问候问「今天做什么」，建议和小技巧邀请你试一次。', 'One lead: with no model only that item is accented, the greeting introduces the Bot, and the suggestions and composer are quiet (the composer disabled: proposed, open). With a model the greeting asks what’s next, and the suggestions and tip invite a first try.'),
+    draft('手机：问候不放头像（底栏中间就是它）；「开始使用」只露 1 项。成员：项目选择紧贴输入框上方（间距 8），和输入框算一块。', 'A phone: no face in the greeting (the tab bar’s center is it); getting started shows one item. A member: the project chips sit right above the composer (8 apart), one block with it.'),
+    draft('手机键盘弹起：整组不按变矮的可见区域重新居中，页面整体上移，让输入框贴在键盘上方；头部和上面的区块移出屏幕，底栏被键盘盖住。', 'A phone keyboard: the group does not re-center in the shorter visible area; the page moves up whole so the composer rests on the keyboard; the header and the blocks above move off screen, the keyboard covers the tab bar.'),
   ];
   return (
-    <section className="mb-auto flex flex-col gap-2 rounded-2xl border border-dashed border-cyan/50 bg-surface/80 p-4">
+    <section className="absolute right-8 top-8 flex w-80 flex-col gap-2 rounded-2xl border border-dashed border-cyan/50 bg-surface/90 p-4">
       <h2 className="text-sm font-semibold text-cyan-ink">{draft('首页版面结构', 'Home layout')}</h2>
-      <ol className="flex flex-col gap-1 text-xs text-foreground">
+      <ol className="flex list-decimal flex-col gap-1.5 pl-4 text-xs leading-relaxed text-foreground">
         {rules.map((rule) => <li key={rule}>{rule}</li>)}
       </ol>
     </section>
@@ -331,55 +367,79 @@ function SpecLegend() {
 }
 
 /** The whole home. `pending` is the setup still missing; `tip` which tip is up, or null when
- *  hidden for today; `member` a reader without Bots; `compact` a phone; `spec` outlines the blocks.
- *  The tip waits while there is no model: until the main Bot can work, teaching more is noise. */
-export function HomePage({ pending, tip, member = false, compact = false, spec = false }: { pending: SetupGap[]; tip: number | null; member?: boolean; compact?: boolean; spec?: boolean }) {
+ *  hidden for today; `member` a reader without Bots; `compact` a phone; `spec` outlines the blocks,
+ *  the gaps, and the free space; `keyboard` a phone with the keyboard up, the page moved up whole
+ *  until the composer rests on it. The tip waits while there is no model: until the main Bot can
+ *  work, teaching more is noise. With no model the composer is disabled (proposed, for the owner). */
+export function HomePage({
+  pending,
+  tip,
+  member = false,
+  compact = false,
+  spec = false,
+  keyboard = false,
+}: {
+  pending: SetupGap[];
+  tip: number | null;
+  member?: boolean;
+  compact?: boolean;
+  spec?: boolean;
+  keyboard?: boolean;
+}) {
   const draft = useDraft();
   const { mainBot, displayName } = useBots();
   const { projects } = useWorkbenchProjectsTree();
   const name = mainBot ? displayName(mainBot) : '';
   const noModel = pending.includes('model');
   const showTip = tip !== null && !noModel;
+  const gap = compact ? '16' : '28';
   return (
-    // A desktop page undoes the shell's padding as a conversation does, so the composer lands where its composer does.
-    <div className={clsx('flex flex-col', compact ? 'min-h-0 flex-1' : '-mx-10 -my-8 h-(--app-vvh)')}>
-      <div className={clsx('min-h-0 flex-1 overflow-y-auto', compact ? 'px-4 pt-5' : 'px-8 pt-8')}>
-        <div className="mx-auto flex min-h-full w-full max-w-(--chat-column) flex-col justify-end gap-4 pb-1">
-          {spec && <SpecLegend />}
-          <Slot spec={spec} label={draft('① 问候 · 总在', '① Greeting · always')}>
-            <div className="pb-2"><Greeting member={member} compact={compact} /></div>
+    // The page fills the space beside the sidebar (on a phone, between the header and the tab bar) and scrolls
+    // only when the group is taller than it. With the keyboard up the frame shows it moved up: its end on the keyboard.
+    <div
+      data-home-page
+      className={clsx(
+        'relative flex min-h-0 flex-col',
+        keyboard ? 'justify-end overflow-hidden' : 'overflow-y-auto',
+        compact ? 'flex-1 px-4' : 'h-full',
+      )}
+    >
+      {spec && !compact && <SpecLegend />}
+      {!keyboard && <Spacer part="above" compact={compact} spec={spec} label={draft('上方留白 · 2 份', 'Free space above · 2 parts')} />}
+      <div data-home-group className={clsx('mx-auto flex w-full shrink-0 flex-col', compact ? 'gap-4' : 'max-w-3xl gap-7')}>
+        <Slot spec={spec} label={draft('① 问候 · 总在', '① Greeting · always')}>
+          <Greeting member={member} compact={compact} noModel={noModel} />
+        </Slot>
+        {pending.length > 0 && (
+          <Slot spec={spec} compact={compact} gap={gap} label={draft('② 开始使用 · 有未完成项才出现', '② Getting started · while something is missing')}>
+            <GettingStarted pending={pending} compact={compact} />
           </Slot>
-          {pending.length > 0 && (
-            <Slot spec={spec} label={draft('② 开始使用 · 有未完成项才出现', '② Getting started · while something is missing')}>
-              <GettingStarted pending={pending} />
-            </Slot>
-          )}
-          {showTip && (
-            <Slot spec={spec} label={draft('③ 小技巧 · 有模型且今天没关掉', '③ Tip · with a model, unless hidden today')}>
-              <TipOfTheDay index={tip} member={member} compact={compact} />
-            </Slot>
-          )}
-          <Slot spec={spec} label={draft('④ 试试这样说 · 总在', '④ Suggestions · always')}>
-            <Asks member={member} compact={compact} quiet={noModel} />
+        )}
+        {showTip && (
+          <Slot spec={spec} compact={compact} gap={gap} label={draft('③ 小技巧 · 有模型且今天没关掉', '③ Tip · with a model, unless hidden today')}>
+            <TipOfTheDay index={tip} member={member} compact={compact} />
           </Slot>
-          {member && projects && projects.length > 0 && (
-            <ProjectPicker projects={projects} targetId={projects[0].id} onSelect={() => {}} onNewProject={() => {}} />
-          )}
-        </div>
-      </div>
-      {/* The conversation composer's own padding: this is the line it rests on. On a phone it clears the raised center of the tab bar. */}
-      <div className={clsx('shrink-0', compact ? 'px-4 pb-4 pt-3' : 'px-8 pb-4 pt-3')}>
-        <Slot spec={spec} label={draft('⑤ 输入框 · 总在，位置同对话页', '⑤ Composer · always, where a conversation’s is')}>
-          <Composer
-            layout="stacked"
-            stageMedia
-            onSend={async () => false}
-            disabled={noModel}
-            placeholder={noModel ? draft(`先给${name}接上模型，就能和它说话`, `Give ${name} a model first, then talk to it`) : member ? undefined : draft(`和${name}说…`, `Message ${name}…`)}
-            actions={<RouteLabel member={member} noModel={noModel} />}
-          />
+        )}
+        <Slot spec={spec} compact={compact} gap={gap} label={draft('④ 试试这样说 · 总在', '④ Suggestions · always')}>
+          <Asks member={member} compact={compact} quiet={noModel} />
+        </Slot>
+        <Slot spec={spec} compact={compact} gap={gap} label={draft('⑤ 输入框 · 总在，最后一块', '⑤ Composer · always, the last block')}>
+          <div className="flex flex-col gap-2">
+            {member && projects && projects.length > 0 && (
+              <ProjectPicker projects={projects} targetId={projects[0].id} onSelect={() => {}} onNewProject={() => {}} />
+            )}
+            <Composer
+              layout="stacked"
+              stageMedia
+              onSend={async () => false}
+              disabled={noModel}
+              placeholder={noModel ? draft('接上模型后就能说话', 'Talk once it has a model') : member ? undefined : draft(`和${name}说…`, `Message ${name}…`)}
+              actions={<RouteLabel member={member} noModel={noModel} />}
+            />
+          </div>
         </Slot>
       </div>
+      {keyboard ? <div className="h-4 shrink-0" /> : <Spacer part="below" compact={compact} spec={spec} label={draft('下方留白 · 3 份', 'Free space below · 3 parts')} />}
     </div>
   );
 }

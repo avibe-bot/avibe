@@ -28,7 +28,7 @@ export function PhoneScreen({
   overlay?: ReactNode;
   /** The Workbench home draws on flat background; every other page on the console glow. */
   flat?: boolean;
-  /** The page lays itself out as a column filling the main, clear of the tab bar (the home pins its composer there). */
+  /** The page lays itself out as a column filling the main, clear of the tab bar, and scrolls itself (the home centers its group there). */
   bare?: boolean;
 }) {
   return (
