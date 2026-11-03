@@ -1,5 +1,5 @@
 // A hosted tool call in the execution-process group (`vibey-hosted-tools.md` §6.4,
-// design.pen frames DA8aJ and t2P7VH): the query, how it ran (natively, by which
+// ui/design: chat/hosted-tools/search and chat/hosted-tools/image): the query, how it ran (natively, by which
 // executor, or directly on an image endpoint), what it cost when known, and the
 // sources or image it produced. Every mode draws the same card from the same record.
 import * as React from 'react';

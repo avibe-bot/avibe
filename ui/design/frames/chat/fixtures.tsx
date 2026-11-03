@@ -128,6 +128,47 @@ export const failureApi = (turnId: string) => ({
   '/api/models/sources': ok({ sources: [{ id: 'src_relaygpt', display_name: 'relay-gpt' }] }),
 });
 
+// ----- The execution process (执行过程) -----
+
+type ActivityRowWire = NonNullable<TurnActivityGroupWire['rows']>[number];
+
+let rowSeq = 0;
+const activityRow = (kind: ActivityRowWire['kind'], text: string, minutesAgo: number, extra: Partial<ActivityRowWire> = {}): ActivityRowWire => {
+  rowSeq += 1;
+  return { id: `evt_${rowSeq.toString(36).padStart(5, '0')}`, kind, text, created_at: at(minutesAgo), ...extra };
+};
+
+/** The agent's words between tool calls. */
+export const narration = (text: string, minutesAgo: number) => activityRow('assistant', text, minutesAgo);
+/** A tool call as the backend formats it: the tool's name and its arguments. */
+export const toolCall = (tool: string, args: Record<string, unknown>, minutesAgo: number) =>
+  activityRow('tool_call', `🔧 \`${tool}\` \`${JSON.stringify(args)}\``, minutesAgo);
+/** A hosted tool call (web search, web fetch, image generation): its card record rides on the row. */
+export const hostedCall = (hosted: unknown, minutesAgo: number) => activityRow('tool_call', '', minutesAgo, { hosted });
+
+/** One turn's execution process. A settled group sits just before the reply that ended it; an interrupted one
+ *  just after the message that started it; `open` marks the running turn's. */
+export function activityGroup(
+  id: string,
+  anchor: WorkbenchMessage,
+  rows: ActivityRowWire[],
+  extra: Partial<TurnActivityGroupWire> = {},
+): TurnActivityGroupWire {
+  const status = extra.status ?? 'done';
+  return {
+    id,
+    anchor_message_id: anchor.id,
+    anchor_position: status === 'interrupted' || status === 'running' ? 'after' : 'before',
+    open: status === 'running',
+    status,
+    steps: rows.length,
+    duration_ms: null,
+    started_at: rows[0]?.created_at ?? null,
+    rows,
+    ...extra,
+  };
+}
+
 export interface ChatFixture {
   /** The Session row; a Vibey chat in the avibe project unless the frame says otherwise. */
   session?: Partial<WorkbenchSession>;
@@ -138,8 +179,9 @@ export interface ChatFixture {
   turnState?: SessionRuntimeState;
   /** `config.ui` the bootstrap carries: the execution-process panel and its tool rows are switched here. */
   ui?: Record<string, unknown>;
-  /** Durable execution-process groups (`GET .../activity`), and each group's rows by id. */
-  activity?: { groups: TurnActivityGroupWire[]; rows?: Record<string, TurnActivityGroupWire> };
+  /** The execution-process groups, with their rows: the summary read lists them, and each group's rows
+   *  load when it opens (`GET .../activity?group_id=`). Drawn when `ui.show_agent_activity` is on. */
+  activity?: TurnActivityGroupWire[];
   /** Voice input is offered (Avibe Cloud paired). */
   voice?: boolean;
   /** Anything else the frame reads, such as agent media by `/api/media/<token>`. */
@@ -176,7 +218,7 @@ export function chatFixtures(chat: ChatFixture = {}): WorkbenchFixtures {
   const row = chatSession(chat.session);
   const base = `/api/sessions/${row.id}`;
   const turn = chat.turnState ?? idleTurn;
-  const activity = chat.activity ?? { groups: [] };
+  const groups = chat.activity ?? [];
   const ofSession = (rows: WorkbenchMessage[] = []) => rows.map((m) => ({ ...m, session_id: row.id }));
   return workbenchFixtures(
     {
@@ -195,10 +237,8 @@ export function chatFixtures(chat: ChatFixture = {}): WorkbenchFixtures {
       },
       [base]: { ...row, capabilities: { can_chat: true } },
       [`${base}/turn-state`]: turn,
-      [`${base}/activity`]: { groups: activity.groups },
-      ...Object.fromEntries(
-        Object.entries(activity.rows ?? {}).map(([id, group]) => [`${base}/activity?group_id=${id}`, group]),
-      ),
+      [`${base}/activity`]: { groups: groups.map(({ rows: _rows, ...summary }) => summary) },
+      ...Object.fromEntries(groups.map((group) => [`${base}/activity?group_id=${group.id}`, group])),
       [`/api/show-pages/${row.id}/access`]: showPageAccess,
       '/api/vault/requests': { ok: true, requests: [] },
       '/api/workbench/prefs': { background_work_banner_enabled: true },
