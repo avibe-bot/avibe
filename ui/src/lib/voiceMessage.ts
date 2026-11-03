@@ -1,6 +1,7 @@
-// A message spoken rather than typed. The hold-to-talk surfaces send it with this
-// metadata, the server keeps it on the message, and the conversation marks it
-// (VoiceMark) so the reader knows the words came from speech recognition.
+// A message spoken rather than typed: the one marker every voice surface sends (a hold
+// to talk, the desktop pet's dictation sent as heard). The server keeps it on the
+// message, the Agent reads it as speech recognition (`core/agent_input.is_voice_input`),
+// and the conversation marks it (VoiceMark).
 
 export type VoiceMessageMetadata = { input: 'voice' };
 
