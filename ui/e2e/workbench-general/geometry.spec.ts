@@ -270,6 +270,9 @@ test.describe('workbench home geometry', () => {
         '/api/inbox', '/api/notifications/preferences', '/api/version', '/api/events',
         // The home's Computer Use status line reads this on every mount.
         '/api/desktop/computer-use/status',
+        // The sidebar's Bots strip reads the Owner's Bots and each Bot Session's
+        // running state (docs/plans/bots.md D5); the fixture's one Bot is the main Bot.
+        '/api/bots', '/api/sessions/ses_main',
       ]);
       await page.route('**/api/**', (route) => {
         const request = route.request();
