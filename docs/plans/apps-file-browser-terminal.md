@@ -1,7 +1,7 @@
 # Workbench Apps: File Browser + Terminal — Implementation Plan
 
 Status: design locked (brainstorm complete), not yet implemented · Owner: TBD ·
-Design: `design.pen` (frames TBD) · Show Page: this feature's brainstorm page
+Design: the `apps/file-browser/*` and `apps/terminal/*` design frames in `ui/design/` · Show Page: this feature's brainstorm page
 
 ## 1. Background
 

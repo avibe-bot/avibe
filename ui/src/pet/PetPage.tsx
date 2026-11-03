@@ -28,7 +28,7 @@ import { PetOpenButton } from './PetOpenButton';
 import { REPLY_LINGER_RESUME_MS, useReplyLinger } from './useReplyLinger';
 import { onPetHover, petBridge, sessionLink, vaultRequestLink, type PetLayout } from './petBridge';
 import { petPanel, usePetPanel } from './petPanel';
-import { petComposer, usePetComposer } from './petComposer';
+import { DICTATED_MESSAGE_METADATA, petComposer, usePetComposer } from './petComposer';
 import { petShell, useOnSummon, usePetBinding, usePetDismissed } from './petShell';
 import { derivePetPose, derivePetState, latestExchange, latestFailureNotice, openQuickReplies } from './petState';
 import { useConversationAgentSnapshot } from './useConversationAgentWorking';
@@ -567,7 +567,9 @@ const PetSurface: React.FC = () => {
   }, [api, binding, canChat, data, draftReferences, epoch, setComposing, setDetailOpen, setPanel, setUncertain]);
   const submit = async () => {
     const submitted = draft;
-    if (!(await send(submitted)) || !epoch.isCurrent()) return;
+    // Dictated and sent as it was heard: the Agent is told it may hold recognition errors.
+    const metadata = petComposer.isDictated(submitted) ? DICTATED_MESSAGE_METADATA : undefined;
+    if (!(await send(submitted, metadata)) || !epoch.isCurrent()) return;
     if (petComposer.clearDraftIf(submitted)) setComposing(false);
   };
   const choose = (message: WorkbenchMessage, choice: string) => send(choice, { quick_reply_for: message.id });
@@ -1338,7 +1340,10 @@ function usePetVoice({ enabled, epoch, draft, onOpenComposer, onCaptureEnd }: { 
     void capture.dictation.done.then((text) => {
       if (!settle()) return;
       const next = text.trim();
-      onOpenComposer(next ? [before.trim(), next].filter(Boolean).join(' ') : before);
+      if (!next) { onOpenComposer(before); return; }
+      const value = [before.trim(), next].filter(Boolean).join(' ');
+      petComposer.noteDictation(before, value);
+      onOpenComposer(value);
     }).catch((reason: unknown) => fail(reason));
     void capture.dictation.start().then(() => {
       if (!epoch.isCurrent()) { capture.dictation.abort(); return; }

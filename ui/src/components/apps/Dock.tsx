@@ -22,7 +22,7 @@ type ResidentItem =
   | { kind: 'builtin'; id: string; def: AppDefinition }
   | { kind: 'showpage'; id: string; sessionId: string; title: string; iconVersion: string | null };
 
-// The unified Dock panel: app launcher + running indicators + minimized windows.
+// The unified Dock panel (ui/design: apps/dock/*): app launcher + running indicators + minimized windows.
 // Built-in apps and pinned Show Pages share one reorderable row (server-persisted
 // order); a running app's tile reveals a ＋ (and a right-click menu) to open
 // another window. EVERY tile — built-ins included (§7.1c) — can be unpinned from

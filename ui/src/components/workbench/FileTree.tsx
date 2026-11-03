@@ -33,7 +33,7 @@ import { ConfirmDialog } from '../ui/confirm-dialog';
 import { ContextMenu, ContextMenuItem } from '../ui/context-menu';
 import { InlineNameInput } from '../ui/inline-name-input';
 
-// Icon + accent per file extension (matches the explorer in design dnYPx).
+// Icon + accent per file extension (ui/design: apps/editor/file).
 const EXT: Record<string, { Icon: typeof FileIcon; color: string }> = {
   ts: { Icon: FileCode2, color: 'var(--cyan)' },
   tsx: { Icon: FileCode2, color: 'var(--cyan)' },
@@ -251,7 +251,7 @@ const Dir: React.FC<{ path: string; name: string; depth: number }> = ({ path, na
 // search can find was an inconsistency.
 const TREE_EXCLUDED_ENTRIES = new Set(['.git', '.svn', '.hg', 'CVS', '.DS_Store', 'Thumbs.db']);
 
-// The VS-Code-style explorer tree (design dnYPx): a root folder whose subfolders lazily expand via
+// The VS-Code-style explorer tree (ui/design: apps/editor/file): a root folder whose subfolders lazily expand via
 // listDir. Reused by the Editor IDE; emits file opens upward. Owns inline new-file/new-folder/rename
 // + delete via a right-click menu, and re-lists the affected folder after each mutation.
 export const FileTree: React.FC<{

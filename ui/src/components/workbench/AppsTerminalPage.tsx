@@ -20,7 +20,7 @@ function readCwd(state: unknown): string | null {
 
 // The Terminal app. `windowed` fills its AppWindow body; the route adds the page header.
 // The multi-tab UI + per-tab session/slot lifecycle lives in the reusable TerminalTabs
-// (so the editor's integrated terminal can mount the same thing later). Design: `iwYIX`.
+// (so the editor's integrated terminal can mount the same thing later). ui/design: apps/terminal/window, apps/terminal/phone.
 // windowId + params thread through for windowed mounts so the tab layout persists across reloads.
 export const AppsTerminalPage: React.FC<{ windowed?: boolean; windowId?: string; params?: Record<string, unknown> }> = ({ windowed = false, windowId, params }) => {
   const { t } = useTranslation();

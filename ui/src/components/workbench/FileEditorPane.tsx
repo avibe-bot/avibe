@@ -101,7 +101,7 @@ export const FileEditorPane: React.FC<{
   /** Report dirty state up (used by the Editor IDE to aggregate one close guard over its tabs). */
   onDirtyChange?: (dirty: boolean) => void;
   /**
-   * Drop the filename + save header strip. The Editor IDE (design dnYPx) shows the
+   * Drop the filename + save header strip. The Editor IDE (ui/design: apps/editor/file) shows the
    * filename + dirty dot in the tab and saves via ⌘S, so the per-pane header would
    * be a redundant second header. Standalone uses keep the header (default).
    */

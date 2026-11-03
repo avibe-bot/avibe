@@ -5,6 +5,7 @@ import type { Bot, BotAvatar } from '@/lib/bots';
 import { OWNER_INSTANCE_CAPABILITIES, type InstanceKind } from '@/lib/sessionInfo';
 
 import { DESIGN_NOW } from './clock';
+import type { DesignSocketMessage } from './network';
 
 /** What a frame can set. Everything is optional; omitted parts are empty, not loading. */
 export interface WorkbenchFixtures {
@@ -26,11 +27,15 @@ export interface WorkbenchFixtures {
   botStatus?: Record<string, BotRuntimeStatus>;
   /** Web Storage entries the frame starts with (a remembered preference, such as a collapsed section). */
   storage?: Record<string, string>;
-  /** API responses by path plus query (`/api/inbox?session=ses_pm&limit=1`) or by path, for anything else a frame fetches. */
+  /** API responses by path plus query (`/api/inbox?session=ses_pm&limit=1`) or by path, for anything else a frame fetches.
+   *  A `Response` is served as is (a file's raw text); a string at a page path (`/show/<id>/`) is the URL an iframe
+   *  the page opens there is drawn from (a design asset). */
   api?: Record<string, unknown>;
   /** Proposed copy for shipped strings, by locale key: a shipped component in this frame reads it in place
    *  of today's (`chat.compose.placeholder`). Like kit copy, it moves to `src/i18n` when the design ships. */
   copy?: Record<string, { zh: string; en: string }>;
+  /** Messages a WebSocket receives once it opens, by path prefix (`/api/terminal/`): the terminal's ready frame and output. */
+  sockets?: Record<string, DesignSocketMessage[]>;
 }
 
 /** Everything the frame's providers fetch, as the network stub serves it. */

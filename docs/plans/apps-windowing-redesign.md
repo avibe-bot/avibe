@@ -1,5 +1,7 @@
 # Apps Layer v2 — Windowing Redesign
 
+> **Design source of truth**: the design frames in `ui/design/frames/apps/` (`apps/*`). The Pencil frames this plan names were the design it was built from; that file is retired.
+
 ## Background
 
 The Apps layer v1 (File Browser + Terminal, PR #659) shipped as **full-page** routes

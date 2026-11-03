@@ -23,7 +23,9 @@ Status: adopted (2026-11-02). Avibe's UI designs live in `ui/design/` as frames;
   window manager, Inbox and its Bot roster, project tree, Dock) from fixtures, and runs the real `ApiProvider`
   and `BotsProvider`.
   `fetch` and `EventSource` are answered in the page from the frame's API fixtures (by path and query, then by
-  path), so no frame reaches a server; paths a frame fetched without a fixture are reported. Each frame gets
+  path; a `Response` fixture, such as a file's raw text, is served as is), a `WebSocket` delivers its `sockets`
+  fixture's messages, and an image at an API path or an iframe the page opens is drawn from the asset URL its
+  fixture names, else left blank, so no frame reaches a server; paths a frame touched without a fixture are reported. Each frame gets
   fresh in-memory Web Storage (seeded by its `storage` fixture) and a fixed clock, so a viewer's remembered
   preferences and the date never change a frame. No product code changes for this.
 - The canvas (`ui/design.html`, not part of the production build) shows every frame, each in its own iframe so

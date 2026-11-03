@@ -46,7 +46,7 @@ describe('SettingsPageShell', () => {
       </SettingsPageShell>,
     );
 
-    // design.pen Ozmrf: 27/600 over a 13 muted line.
+    // ui/design: settings/general/default: 27/600 over a 13 muted line.
     const heading = screen.getByRole('heading', { name: 'General' });
     expect(heading.className).toContain('text-[27px]');
     expect(heading.className).toContain('font-semibold');
