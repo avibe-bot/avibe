@@ -26,13 +26,11 @@ import {
 } from 'lucide-react';
 import clsx from 'clsx';
 
-import vibeyMascot from '@/assets/pet/vibey.png';
 import { BotAvatar } from '@/components/ui/bot-avatar';
 import { Button } from '@/components/ui/button';
 import { AgentRoutePicker } from '@/components/workbench/AgentRoutePicker';
 import { BotFace } from '@/components/workbench/bots/BotFace';
 import { Composer } from '@/components/workbench/Composer';
-import type { Bot } from '@/lib/bots';
 import { ProjectPicker } from '@/components/workbench/ProjectPicker';
 import { useBots } from '@/context/BotsContext';
 import { useWorkbenchInbox } from '@/context/WorkbenchInboxContext';
@@ -181,7 +179,7 @@ export function HomeStatus({ compact = false }: { compact?: boolean }) {
 }
 
 /** The main Bot's face, the greeting, and, below it, what is happening (only when something is). No subtitle.
- *  Centered: it opens the group. Before there is a model the main Bot introduces itself, since it cannot
+ *  Centered: it opens the group; the face stands alone (`plain`, #3192). Before there is a model the main Bot introduces itself, since it cannot
  *  answer yet; after that it asks what to do. On a phone the face is left out: the tab bar's center is it. */
 function Greeting({ member, compact, noModel }: { member: boolean; compact: boolean; noModel: boolean }) {
   const draft = useDraft();
@@ -189,7 +187,7 @@ function Greeting({ member, compact, noModel }: { member: boolean; compact: bool
   const name = mainBot ? displayName(mainBot) : '';
   return (
     <div className={clsx('flex flex-col items-center text-center', compact ? 'gap-2' : 'gap-3')}>
-      {!member && !compact && mainBot && <StandaloneFace bot={mainBot} name={name} />}
+      {!member && !compact && mainBot && <BotAvatar avatar={mainBot.avatar} name={name} size={64} plain />}
       <h1 className={clsx('font-bold text-foreground', compact ? 'text-2xl' : 'text-3xl')}>
         {noModel && name ? draft(`下午好，我是${name}`, `Good afternoon. I’m ${name}.`) : draft('下午好，今天做什么？', 'Good afternoon. What’s next?')}
       </h1>
@@ -209,19 +207,6 @@ function TextButton({ children, chevron = true }: { children: ReactNode; chevron
       {children}
       {chevron && <ChevronRight className="size-3.5" />}
     </button>
-  );
-}
-
-/** A face standing alone, as #3192 draws one (`BotAvatar plain`): the mascot straight on the page,
- *  without its well and hairline, and a faint shadow in light. Until #3192 ships its
- *  `--bot-mascot-plain-shadow`, the mascot's own shadow stands in; then this becomes `<BotAvatar plain />`.
- *  Any other avatar is its own disc. */
-function StandaloneFace({ bot, name }: { bot: Bot; name: string }) {
-  if (bot.avatar?.kind !== 'mascot') return <BotAvatar avatar={bot.avatar} name={name} size={64} />;
-  return (
-    <span className="grid size-16 shrink-0 place-items-center" aria-hidden="true">
-      <img src={vibeyMascot} alt="" draggable={false} className="size-full scale-[1.12] object-contain [filter:var(--bot-mascot-shadow)]" />
-    </span>
   );
 }
 
