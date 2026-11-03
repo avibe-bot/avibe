@@ -113,24 +113,28 @@ export const BotAvatarPicker: React.FC<BotAvatarPickerProps> = ({ current, onPic
       />
       {tab === 'emoji' ? (
         <>
-          <div className="grid grid-cols-8 gap-1.5" role="group" aria-label={t('bots.avatarPicker.emoji')}>
-            {BOT_AVATAR_EMOJIS.map((value) => {
-              const selected = current !== null && value === emoji;
-              return (
-                <button
-                  key={value}
-                  type="button"
-                  aria-pressed={selected}
-                  onClick={() => pickEmoji(value, hue)}
-                  className={clsx(
-                    'grid aspect-square place-items-center rounded-lg text-[17px] transition',
-                    selected ? 'bg-mint-soft ring-[1.5px] ring-inset ring-mint' : 'hover:bg-foreground/[0.05]',
-                  )}
-                >
-                  {value}
-                </button>
-              );
-            })}
+          <div className="grid grid-cols-8 gap-1.5">
+            {/* The radios lay out in the grid itself, so "More" takes the cell after the last one. */}
+            <div className="contents" role="radiogroup" aria-label={t('bots.avatarPicker.emoji')}>
+              {BOT_AVATAR_EMOJIS.map((value) => {
+                const selected = current !== null && value === emoji;
+                return (
+                  <button
+                    key={value}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    onClick={() => pickEmoji(value, hue)}
+                    className={clsx(
+                      'grid aspect-square place-items-center rounded-lg text-[17px] transition',
+                      selected ? 'bg-mint-soft ring-[1.5px] ring-inset ring-mint' : 'hover:bg-foreground/[0.05]',
+                    )}
+                  >
+                    {value}
+                  </button>
+                );
+              })}
+            </div>
             <button
               type="button"
               onClick={() => setAllOpen(true)}

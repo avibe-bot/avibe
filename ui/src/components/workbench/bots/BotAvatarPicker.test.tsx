@@ -38,7 +38,7 @@ describe('BotAvatarPicker', () => {
     const onPick = vi.fn();
     render(<BotAvatarPicker current={{ emoji: '🛡️', hue: 150 }} onPick={onPick} canUseDefault onError={() => {}} />);
 
-    fireEvent.click(screen.getByText('🧭'));
+    fireEvent.click(screen.getByRole('radio', { name: '🧭' }));
     expect(onPick).toHaveBeenLastCalledWith({ kind: 'emoji', emoji: '🧭', hue: 150 });
     expect(catalogLoaded).not.toHaveBeenCalled();
 
@@ -48,9 +48,9 @@ describe('BotAvatarPicker', () => {
     expect(onPick).toHaveBeenLastCalledWith({ kind: 'emoji', emoji: '🦊', hue: 150 });
 
     // Back on the leading set, which has no fox: "More" is where it shows as chosen.
-    const leading = within(screen.getByRole('group', { name: 'bots.avatarPicker.emoji' }));
-    expect(leading.queryAllByRole('button', { pressed: true })).toEqual([]);
-    expect(leading.getByRole('button', { name: 'bots.avatarPicker.moreChosen' }).textContent).toContain('🦊');
+    const leading = within(screen.getByRole('radiogroup', { name: 'bots.avatarPicker.emoji' }));
+    expect(leading.queryAllByRole('radio', { checked: true })).toEqual([]);
+    expect(screen.getByRole('button', { name: 'bots.avatarPicker.moreChosen' }).textContent).toContain('🦊');
   });
 
   it('opens every emoji as a sheet on a phone', async () => {
