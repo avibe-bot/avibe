@@ -346,6 +346,101 @@ def test_hide_details_is_on_until_turned_off_for_that_bot_alone(service):
     assert service.set_bot("alpha", display_name="Alpha").hide_details is False
 
 
+# --- at most five custom Bots (D12) ----------------------------------------------------------------------------------
+
+
+def _limit(service) -> dict:
+    from core.bots import bot_limit_payload
+
+    return bot_limit_payload(service.list_bots())
+
+
+def _refused_for_room(add) -> dict:
+    from core.bots import BotError
+
+    with pytest.raises(BotError) as refused:
+        add()
+    assert (refused.value.code, refused.value.status) == ("bot_limit_reached", 409)
+    assert "vibe bot remove" in str(refused.value)
+    return refused.value.details
+
+
+def test_five_current_custom_bots_fill_the_places(service):
+    service.ensure_main_bot()
+    # A system Bot (the reserved handles, D2) as a built-in one would be recorded: it takes no place.
+    memory = service.store.create(name="memory", backend="vibey")
+    with service.engine.begin() as conn:
+        service._write_record(conn, memory, {"handle": "memory", "display_name": "", "position": 0})
+    assert "memory" in [bot.handle for bot in service.list_bots()]
+    assert _limit(service) == {"count": 0, "max": 5}
+
+    for name in ("Alpha", "Beta", "Gamma"):
+        service.create_bot(display_name=name)
+    service.store.create(name="delta", backend="vibey")
+    service.set_bot("delta", display_name="Delta")
+    service.create_bot(display_name="Epsilon")
+    assert _limit(service) == {"count": 5, "max": 5}
+
+    service.store.create(name="zeta", backend="vibey")
+    assert _refused_for_room(lambda: service.create_bot(display_name="Zeta", handle="zeta-bot")) == {
+        "limit": 5, "count": 5,
+    }
+    _refused_for_room(lambda: service.set_bot("zeta", display_name="Zeta"))
+    assert not any(bot.handle.startswith("zeta") for bot in service.list_bots())
+
+    # A removed Bot frees its place; setting it again takes one.
+    service.remove_bot("beta")
+    assert _limit(service) == {"count": 4, "max": 5}
+    service.set_bot("zeta", display_name="Zeta")
+    _refused_for_room(lambda: service.set_bot("beta", display_name="Beta"))
+    service.remove_bot("zeta")
+    assert service.set_bot("beta", display_name="Beta").session_id == "ses_beta"
+
+
+def test_an_install_over_the_limit_keeps_every_bot_and_only_waits_to_add(service, monkeypatch):
+    import core.bots
+
+    # Bots made before the limit existed.
+    monkeypatch.setattr(core.bots, "MAX_CUSTOM_BOTS", 10)
+    for name in ("Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Eta"):
+        service.create_bot(display_name=name)
+    monkeypatch.undo()
+
+    assert _limit(service) == {"count": 7, "max": 5}
+    assert len(service.list_bots()) == 8
+    # Every Bot stays usable as it was.
+    service.update_bot("eta", position=1, display_name="Eta Prime", hide_details=False)
+    assert [bot.handle for bot in service.list_bots()][:2] == ["main", "eta"]
+    _refused_for_room(lambda: service.create_bot(display_name="Theta"))
+    for handle in ("alpha", "beta"):
+        service.remove_bot(handle)
+        _refused_for_room(lambda: service.create_bot(display_name="Theta"))
+    service.remove_bot("gamma")
+    assert service.create_bot(display_name="Theta").handle == "theta"
+    assert _limit(service) == {"count": 5, "max": 5}
+
+
+def test_two_adds_racing_for_the_last_place_take_it_once(service):
+    """The place is decided under the writer lock, in the transaction that inserts the Bot's Agent."""
+    from core.bots import BotService
+
+    for name in ("Alpha", "Beta", "Gamma", "Delta"):
+        service.create_bot(display_name=name)
+    service.store.create(name="epsilon", backend="vibey")
+    real_create = service.store._create
+
+    def another_device_adds_first(**kwargs):
+        # This create checked for room already; another process takes the last place before it inserts.
+        with BotService() as other:
+            other.set_bot("epsilon", display_name="Epsilon")
+        return real_create(**kwargs)
+
+    service.store._create = another_device_adds_first
+    _refused_for_room(lambda: service.create_bot(display_name="Zeta"))
+    assert service.store.get("zeta") is None
+    assert _limit(service) == {"count": 5, "max": 5}
+
+
 def test_bot_operations_are_the_owners(service):
     from vibe.authorization import AuthorizationContext, InstanceAuthorizationError
 

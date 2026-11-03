@@ -1,9 +1,11 @@
 // Bots in the sidebar (docs/plans/bots.md D5): the shipped strip, hover card, and Inbox icon,
-// drawn by the shipped sidebar from fixtures.
+// drawn by the shipped sidebar from fixtures. With every place for a custom Bot taken (D12) the
+// strip has no Add: its room goes to the Bots, and the Agents page says why adding waits.
 import { WorkbenchSidebar } from '@/components/workbench/WorkbenchSidebar';
 
 import { frames } from '../../frame';
 import { demoBots, demoProjects, inboxRow, mainBot, type WorkbenchFixtures } from '../../shell/fixtures';
+import { fullTeam } from '../../shell/teamFixtures';
 import { SidebarColumn } from '../../shell/SidebarColumn';
 
 const sidebar = () => (
@@ -43,6 +45,15 @@ const designFrames = frames([
     height: 360,
     status: 'shipped',
     fixtures: team,
+    render: sidebar,
+  },
+  {
+    name: 'at-limit',
+    title: '伙伴 · 刚好 5 位伙伴：没有「添加」，头像横向滑动',
+    width: 248,
+    height: 360,
+    status: 'shipped',
+    fixtures: { ...team, bots: fullTeam },
     render: sidebar,
   },
   {

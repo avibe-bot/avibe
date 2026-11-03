@@ -5,7 +5,7 @@ import type { PickerAgentCatalog } from '../components/settings/models/types';
 import type { AgentBackendId, NativeCliBackend, WebOAuthBackend } from '../lib/agentBackends';
 import { apiFetch, recoverRemoteAuthFromSessionProbe, withApiDeadline } from '../lib/apiFetch';
 import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
-import { parseBot, type AgentBotSummary, type Bot, type BotEmojiAvatarInput } from '../lib/bots';
+import { parseBot, parseBotLimit, type AgentBotSummary, type Bot, type BotEmojiAvatarInput, type BotLimit } from '../lib/bots';
 import { parseNotificationPreferences, type InboxCategory, type NotificationPreferences } from '../lib/notificationPreferences';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
 import type { AgentGraphParams, AgentGraphResult, AgentGraphVisibility } from '../lib/agentGraph';
@@ -905,7 +905,8 @@ export type ApiContextType = {
   // Bots (docs/plans/bots.md "Web API"): every route is the instance Owner's. The
   // writes reject with an ``ApiError`` carrying the server's localized message and
   // code, and raise no toast: the Bot dialogs show the refusal where it was made.
-  listBots: (params?: { cache?: boolean }) => Promise<Bot[]>;
+  /** The Bots in display order, and the places for custom Bots (`null` from a server without the limit). */
+  listBots: (params?: { cache?: boolean }) => Promise<{ bots: Bot[]; limit: BotLimit | null }>;
   createBot: (payload: {
     display_name: string;
     handle?: string | null;
@@ -4368,7 +4369,10 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const parsed = payload ? selectApiErrorFields(payload, 'Request failed: /api/bots') : null;
         throw new ApiError(parsed?.fallback ?? 'Request failed: /api/bots', 0, parsed?.code ?? null);
       }
-      return (payload.bots as unknown[]).map(parseBot).filter((bot): bot is Bot => bot !== null);
+      return {
+        bots: (payload.bots as unknown[]).map(parseBot).filter((bot): bot is Bot => bot !== null),
+        limit: parseBotLimit(payload.limit),
+      };
     },
     createBot: async (payload) => botFromResponse(await botRequest('/api/bots', {
       method: 'POST',

@@ -3308,6 +3308,8 @@ const botsState = (bots: Bot[], extra: Partial<BotsState> = {}): BotsState => ({
   loaded: true,
   listed: true,
   mainBot: bots.find((each) => each.builtin) ?? null,
+  limit: null,
+  atLimit: false,
   statusBySession: {},
   botForSession: (sessionId) => bots.find((each) => each.session_id === sessionId),
   botForAgent: (name) => bots.find((each) => each.agent_name === name),
@@ -3451,5 +3453,40 @@ describe('AgentsPage Bots and Agents', () => {
     expect(within(panel()).getByText('common.delete')).toBeTruthy();
     fireEvent.click(within(panel()).getByText('bots.agents.setAsBot').closest('button')!);
     expect(bots.openProfile).toHaveBeenCalledWith({ kind: 'create', tab: 'agent', agentName: 'helper' });
+  });
+
+  // docs/plans/bots.md D12; ui/design: agents/bots-redesign/at-limit. The page is where adding
+  // is explained: both ways to add stay in place, disabled, with the reason and the count.
+  it('keeps Add and Set as Bot in place once every place is taken, disabled and saying why', async () => {
+    const bots = botsState([mainBot, cso], { limit: { count: 5, max: 5 }, atLimit: true });
+    renderPage(agentsApi([vibey, mainAgent, csoAgent, helper]), { canManageAgents: true, bots });
+    await waitFor(() => expect(agentRow('helper')).toBeTruthy());
+
+    const add = screen.getByText('bots.addLabel').closest('button')!;
+    expect(add.disabled).toBe(true);
+    expect(within(add).getByText('bots.limit.places:{"taken":5,"max":5}')).toBeTruthy();
+    expect(within(add).getByText('bots.limit.reached:{"max":5}')).toBeTruthy();
+
+    fireEvent.click(agentRow('helper')!);
+    await waitFor(() => expect(within(panel()).getByDisplayValue('helper')).toBeTruthy());
+    const setAsBot = within(panel()).getByText('bots.agents.setAsBot').closest('button')!;
+    expect(setAsBot.disabled).toBe(true);
+    expect(within(setAsBot).getByText('bots.limit.places:{"taken":5,"max":5}')).toBeTruthy();
+    const reason = within(panel()).getByText('bots.limit.reached:{"max":5}');
+    expect(setAsBot.getAttribute('aria-describedby')).toBe(reason.id);
+    fireEvent.click(setAsBot);
+    expect(bots.openProfile).not.toHaveBeenCalled();
+  });
+
+  it('adds from the page while a place is free', async () => {
+    const bots = botsState([mainBot, cso], { limit: { count: 4, max: 5 }, atLimit: false });
+    renderPage(agentsApi([vibey, mainAgent, csoAgent, helper]), { canManageAgents: true, bots });
+    await waitFor(() => expect(agentRow('helper')).toBeTruthy());
+
+    const add = screen.getByText('bots.addLabel').closest('button')!;
+    expect(add.disabled).toBe(false);
+    expect(screen.queryByText(/^bots\.limit\./)).toBeNull();
+    fireEvent.click(add);
+    expect(bots.openProfile).toHaveBeenCalledWith({ kind: 'create' });
   });
 });

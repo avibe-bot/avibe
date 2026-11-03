@@ -15,6 +15,8 @@ update can neither set nor clear (``core.vibe_agents.STORE_OWNED_METADATA_KEYS``
 - **Avatars** (D5): a custom Bot shows an emoji on a hue, an uploaded image, or its name's first character. The main
   Bot always shows the Vibey mascot (owner decision, 2026-11-03): changing it is refused, and an avatar stored before
   that is ignored, not cleared, so no migration rewrites the record.
+- **At most five custom Bots** (D12): ``create`` and ``set`` are refused while ``MAX_CUSTOM_BOTS`` current Bots count
+  (``counts_toward_limit``). An install already over it keeps every Bot; only adding waits until one is removed.
 """
 
 from __future__ import annotations
@@ -54,8 +56,13 @@ logger = logging.getLogger(__name__)
 BOT_BACKEND = "vibey"
 BOT_HANDLE_PATTERN = re.compile(r"^[a-z][a-z0-9-]{1,23}$")
 BOT_HANDLE_MAX_LENGTH = 24
-#: Handles kept for the built-in Bots: the main Bot, and later the memory and operations Bots (D2).
-RESERVED_BOT_HANDLES = frozenset({MAIN_BOT_HANDLE, "memory", "ops"})
+#: The hidden system Bots to come: the memory and operations Bots (D2, D10).
+SYSTEM_BOT_HANDLES = frozenset({"memory", "ops"})
+#: Handles kept for the built-in Bots: the main Bot and the system Bots (D2).
+RESERVED_BOT_HANDLES = frozenset({MAIN_BOT_HANDLE, *SYSTEM_BOT_HANDLES})
+#: Custom Bots a user can have at once (D12). Attention is limited: a person talks with about five Bots a day, and the
+#: limit keeps Bots standing members rather than conversations.
+MAX_CUSTOM_BOTS = 5
 DISPLAY_NAME_MAX_LENGTH = 64
 AVATAR_FILENAME = "avatar.png"
 AVATAR_SIZE = 256
@@ -80,6 +87,18 @@ class BotError(ValueError):
 
 def _not_found(handle: str) -> BotError:
     return BotError("bot_not_found", f"Bot '{handle}' not found", status=404, handle=handle)
+
+
+def _limit_reached(count: int) -> BotError:
+    return BotError(
+        "bot_limit_reached",
+        f"You can have at most {MAX_CUSTOM_BOTS} Bots besides the main Bot, and you have {count}. Remove one with "
+        "`vibe bot remove <handle>` to add another; a removed Bot keeps its conversation and memory, and setting it "
+        "again reconnects them.",
+        status=409,
+        limit=MAX_CUSTOM_BOTS,
+        count=count,
+    )
 
 
 def _main_avatar_locked() -> BotError:
@@ -308,6 +327,28 @@ def list_bots_in(conn: Connection) -> list[Bot]:
     return sorted(bots, key=_display_order)
 
 
+def counts_toward_limit(bot: Bot) -> bool:
+    """Whether ``bot`` takes one of the ``MAX_CUSTOM_BOTS`` places: a current custom Bot (D12).
+
+    The main Bot and the system Bots do not count. A removed Bot is not a current Bot, so it frees its place, and
+    setting it again takes one.
+    """
+    return not bot.builtin and bot.handle not in SYSTEM_BOT_HANDLES
+
+
+def bot_limit_payload(bots: Iterable[Bot]) -> dict[str, int]:
+    """The limit as the Web reads it beside the Bot list: the places ``bots`` take, and how many there are."""
+    return {"count": sum(1 for bot in bots if counts_toward_limit(bot)), "max": MAX_CUSTOM_BOTS}
+
+
+def require_room_for_bot(conn: Connection) -> None:
+    """Refuse adding a Bot once ``MAX_CUSTOM_BOTS`` count. Run it under the write lock of the transaction that adds
+    the Bot, so two adds racing for the last place cannot both take it."""
+    count = bot_limit_payload(list_bots_in(conn))["count"]
+    if count >= MAX_CUSTOM_BOTS:
+        raise _limit_reached(count)
+
+
 def hidden_bot_session_ids(conn: Connection, context: AuthorizationContext | None) -> list[str]:
     """Bots' Sessions a reader may not see: every one for a non-Owner (D1), else those of removed Bots."""
     owner = context is None or context.is_instance_owner
@@ -493,6 +534,9 @@ class BotService:
         main Bot's model and effort (D5).
         """
         context = require_instance_role(authorization_context, "owner")
+        # Said first, since nothing else about this request can succeed; decided again under the lock below.
+        with self.engine.connect() as conn:
+            require_room_for_bot(conn)
         name = _clean_display_name(display_name, required=True)
         avatar_record = clean_emoji_avatar(avatar)
         if not str(model or "").strip():
@@ -505,7 +549,9 @@ class BotService:
         chosen: dict[str, str] = {}
 
         def claim(conn: Connection, agent: VibeAgent) -> None:
-            # Decided under the writer lock, in the inserting transaction, so two creates cannot take one handle.
+            # Decided under the writer lock, in the inserting transaction, so two creates cannot take one handle, and
+            # two adds cannot take the last place.
+            require_room_for_bot(conn)
             if requested is not None:
                 resolved = require_new_handle(conn, requested)
             else:
@@ -590,6 +636,7 @@ class BotService:
                 raise BotError("bot_agent_disabled", f"Agent '{agent.name}' is disabled", status=409)
             if agent_bot_record(agent) is not None:
                 raise BotError("bot_agent_is_bot", f"Agent '{agent.name}' is already a Bot", status=409)
+            require_room_for_bot(conn)
             previous = agent.metadata.get(BOT_METADATA_KEY)
             previous = dict(previous) if isinstance(previous, dict) else {}
             handle = str(previous.get("handle") or "")

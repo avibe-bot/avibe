@@ -79,11 +79,23 @@ export const csoTranscript = [
 ];
 
 
-/** More Bots than the strip shows at once: it scrolls sideways and Add stays pinned. */
-export const manyBots = [
+/** Every place for a custom Bot taken (docs/plans/bots.md D12): the main Bot and five more. */
+export const fullTeam = [
   ...team,
   bot('finance', '财务助理', '账单、报销与预算', null, 4),
   bot('designer', 'Designer', 'Interface and visual design', { kind: 'emoji', emoji: '🎨', hue: 330 }, 5),
+];
+
+export const fullFixtures: WorkbenchFixtures = {
+  ...teamFixtures,
+  bots: fullTeam,
+  botStatus: { ses_pm: 'running' },
+  unreadBySession: { ses_main: 1, ses_cso: 2, ses_demo_cache: 3 },
+};
+
+/** An install from before the limit, over it: it keeps every Bot, and the strip scrolls sideways. */
+export const manyBots = [
+  ...fullTeam,
   bot('writer', '文案', '发布说明与对外文案', { kind: 'emoji', emoji: '✍️', hue: 150 }, 6),
   bot('legal', '法务', '合同与开源许可审查', { kind: 'emoji', emoji: '⚖️', hue: 12 }, 7),
 ];

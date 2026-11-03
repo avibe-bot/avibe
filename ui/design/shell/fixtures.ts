@@ -1,7 +1,7 @@
 import type { InboxSession, InstanceCapabilities, WorkbenchMessage, WorkbenchProject, WorkbenchSession } from '@/context/ApiContext';
 import type { BotRuntimeStatus } from '@/context/BotsContext';
 import type { RuntimeStatus } from '@/context/StatusContext';
-import type { Bot, BotAvatar } from '@/lib/bots';
+import type { Bot, BotAvatar, BotLimit } from '@/lib/bots';
 import { OWNER_INSTANCE_CAPABILITIES, type InstanceKind } from '@/lib/sessionInfo';
 
 import { DESIGN_NOW } from './clock';
@@ -23,6 +23,8 @@ export interface WorkbenchFixtures {
   unreadBySession?: Record<string, number>;
   /** The Owner's Bots, served as `GET /api/bots` to the real Bots provider. */
   bots?: Bot[];
+  /** The places for custom Bots served beside them; by default the custom Bots in `bots` of five (`botLimitOf`). */
+  botLimit?: BotLimit;
   /** Agent status of Bot Sessions, by Session id (the running dot). */
   botStatus?: Record<string, BotRuntimeStatus>;
   /** Web Storage entries the frame starts with (a remembered preference, such as a collapsed section). */
@@ -42,7 +44,7 @@ export interface WorkbenchFixtures {
 export function apiResponses(fixtures: WorkbenchFixtures = {}): Record<string, unknown> {
   // Any write first reads a CSRF token, so every frame can draw a component that saves.
   const responses: Record<string, unknown> = { '/api/csrf-token': { csrf_token: 'design' } };
-  if (fixtures.bots) responses['/api/bots'] = { ok: true, bots: fixtures.bots };
+  if (fixtures.bots) responses['/api/bots'] = { ok: true, bots: fixtures.bots, limit: fixtures.botLimit ?? botLimitOf(fixtures.bots) };
   // Every Bot Session is read for its status dot; idle unless the frame says otherwise.
   for (const { session_id: sessionId } of fixtures.bots ?? []) {
     const status = fixtures.botStatus?.[sessionId] ?? 'idle';
@@ -52,6 +54,9 @@ export function apiResponses(fixtures: WorkbenchFixtures = {}): Record<string, u
 }
 
 export const owner = OWNER_INSTANCE_CAPABILITIES;
+
+/** What the server reports for these Bots (docs/plans/bots.md D12): every Bot but the main one takes one of five places. */
+export const botLimitOf = (bots: readonly Bot[]): BotLimit => ({ count: bots.filter((each) => !each.builtin).length, max: 5 });
 
 const at = (minutesAgo: number) => new Date(DESIGN_NOW - minutesAgo * 60_000).toISOString();
 

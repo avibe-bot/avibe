@@ -50,6 +50,8 @@ const state: BotsState = {
   loaded: true,
   listed: true,
   mainBot: team[0],
+  limit: { count: 2, max: 5 },
+  atLimit: false,
   statusBySession: { ses_pm: 'running' },
   botForSession: (id) => team.find((each) => each.session_id === id),
   botForAgent: () => undefined,
@@ -81,9 +83,9 @@ const ChatProbe = () => {
   );
 };
 
-function renderTitle(sessionId = 'ses_cso') {
+function renderTitle(sessionId = 'ses_cso', value: BotsState = state) {
   return render(
-    <BotsContext.Provider value={state}>
+    <BotsContext.Provider value={value}>
       <WorkbenchInboxContext.Provider value={inbox}>
         <MemoryRouter initialEntries={[`/chat/${sessionId}`]}>
           <Routes>
@@ -140,6 +142,15 @@ describe('BotConversationTitle', () => {
 
     expect(openProfile).toHaveBeenCalledWith({ kind: 'create' });
     expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  // docs/plans/bots.md D12: as on the sidebar strip, a full team leaves no Add in the sheet.
+  it('has no Add once every place for a custom Bot is taken', () => {
+    renderTitle('ses_cso', { ...state, limit: { count: 5, max: 5 }, atLimit: true });
+    fireEvent.click(screen.getByRole('button', { name: 'bots.switchBot:{"name":"Security lead"}' }));
+    const sheet = screen.getByRole('dialog');
+    expect(within(sheet).getAllByRole('listitem')).toHaveLength(3);
+    expect(within(sheet).queryByRole('button', { name: 'bots.add' })).toBeNull();
   });
 
   // A desktop has the sidebar's strip for switching, so the name stays a title.

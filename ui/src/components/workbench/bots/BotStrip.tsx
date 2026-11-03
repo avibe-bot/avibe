@@ -49,13 +49,16 @@ const samePoint = (a: PointerPoint, b: PointerPoint) =>
 // of 40px avatars in the Inbox's old place, the main Bot first. The open Bot has
 // a mint ring, unread is a cyan count, a running Turn a pulsing mint dot. With
 // room to spare "Add" follows the avatars; once they overflow they scroll
-// sideways with a fading right edge and "Add" stays pinned at the right.
+// sideways with a fading right edge and "Add" stays pinned at the right. With
+// every place for a custom Bot taken there is no "Add" at all (D12; ui/design:
+// sidebar/bots/at-limit): the strip's room goes to the Bots, and the Agents page
+// says why adding waits.
 export const BotStrip: React.FC<{
   /** The Inbox's per-session unread map: a Bot's count is its Session's (D5). */
   unreadBySession: Record<string, number>;
 }> = ({ unreadBySession }) => {
   const { t } = useTranslation();
-  const { enabled, bots, statusBySession, displayName, openProfile, moveBot } = useBots();
+  const { enabled, bots, atLimit, statusBySession, displayName, openProfile, moveBot } = useBots();
   const navigate = useNavigate();
   const location = useLocation();
   // The Bot whose removal waits on the confirmation; the strip has one dialog for all its slots.
@@ -105,7 +108,7 @@ export const BotStrip: React.FC<{
   }, [enabled]);
 
   // Inline while every avatar and "Add" fit; pinned "Add" once they do not.
-  const slots = bots.length + 1;
+  const slots = bots.length + (atLimit ? 0 : 1);
   const inline = rowWidth === null || slots * SLOT_WIDTH + (slots - 1) * SLOT_GAP + STRIP_PADDING <= rowWidth;
 
   const updateFade = useCallback(() => {
@@ -147,7 +150,7 @@ export const BotStrip: React.FC<{
     onRemove: setRemoving,
   });
 
-  const addSlot = (
+  const addSlot = atLimit ? null : (
     <div className="flex w-[50px] shrink-0 flex-col items-center gap-1">
       <button
         type="button"
@@ -221,7 +224,7 @@ export const BotStrip: React.FC<{
           </DndContext>
           {inline && addSlot}
         </div>
-        {!inline && <div className="shrink-0 pt-1.5">{addSlot}</div>}
+        {!inline && addSlot && <div className="shrink-0 pt-1.5">{addSlot}</div>}
       </div>
       {removing && (
         <RemoveBotDialog

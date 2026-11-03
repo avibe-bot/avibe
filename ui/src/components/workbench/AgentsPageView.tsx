@@ -26,7 +26,7 @@ import type { VibeAgentBrief } from '../../context/ApiContext';
 import type { AgentsTabKey } from '../../lib/agentsViewMemory';
 import { BACKEND_LABEL, BACKEND_ORDER, BACKEND_TEXT as BACKEND_ICON_CLASS, NATIVE_BACKEND_ORDER, isBackend, type Backend } from '../../lib/backendAccent';
 import type { NativeCliBackend } from '../../lib/agentBackends';
-import { botDisplayName, botRole, type Bot } from '../../lib/bots';
+import { botDisplayName, botLimitReached, botRole, type Bot, type BotLimit } from '../../lib/bots';
 import { Badge } from '../ui/badge';
 import { BotAvatar } from '../ui/bot-avatar';
 import { Button } from '../ui/button';
@@ -59,6 +59,8 @@ export interface AgentsPageViewProps {
   /** All Bots and all listed Agents, for the subtitle. */
   botCount: number;
   agentCount: number;
+  /** The places for custom Bots: once all are taken, Add stays in place, disabled, and says why (D12). */
+  botLimit: BotLimit | null;
   onAddBot: () => void;
   /** The Agents the search and filter keep, without any Bot's Agent; the view orders them. */
   agents: VibeAgentBrief[];
@@ -113,6 +115,7 @@ export const AgentsPageView: React.FC<AgentsPageViewProps> = ({
   bots,
   botCount,
   agentCount,
+  botLimit,
   onAddBot,
   agents,
   defaultAgentName,
@@ -197,6 +200,7 @@ export const AgentsPageView: React.FC<AgentsPageViewProps> = ({
                 selectedName={selectedName}
                 onSelect={onSelect}
                 onAdd={canEdit ? onAddBot : undefined}
+                limit={botLimit}
               />
             )}
             {showAgents && (
@@ -274,13 +278,16 @@ function SectionHeading({ title, count, actions }: { title: string; count: numbe
   );
 }
 
-/** The main Bot first, then the user's Bots in their strip order, then Add. */
+/** The main Bot first, then the user's Bots in their strip order, then Add. Once every place
+ *  for a custom Bot is taken, Add stays where it was, disabled, with the reason and the count
+ *  (D12; ui/design: agents/bots-redesign/at-limit). */
 function BotsSection({
   bots,
   withoutModel,
   selectedName,
   onSelect,
   onAdd,
+  limit,
 }: {
   bots: Bot[];
   /** Agents the gateway cannot run for want of a model: a Bot whose Agent is one says so. */
@@ -289,8 +296,10 @@ function BotsSection({
   onSelect: (agentName: string) => void;
   /** Absent without the right to add one. */
   onAdd?: () => void;
+  limit: BotLimit | null;
 }) {
   const { t } = useTranslation();
+  const full = limit !== null && botLimitReached(limit);
   return (
     <section className="flex flex-col gap-2.5">
       <SectionHeading title={t('bots.sectionLabel')} count={bots.length} />
@@ -304,7 +313,24 @@ function BotsSection({
             onSelect={() => onSelect(bot.agent_name)}
           />
         ))}
-        {onAdd && (
+        {onAdd && (full ? (
+          <button
+            type="button"
+            disabled
+            className="flex cursor-not-allowed items-center gap-3 rounded-xl border border-dashed border-border px-3.5 py-3 text-left text-muted"
+          >
+            <span className="grid size-10 shrink-0 place-items-center rounded-full border border-dashed border-current opacity-50">
+              <Plus className="size-4" />
+            </span>
+            <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+              <span className="flex items-center gap-2">
+                <span className="text-sm font-semibold opacity-70">{t('bots.addLabel')}</span>
+                <span className="font-mono text-xs">{t('bots.limit.places', { taken: limit.count, max: limit.max })}</span>
+              </span>
+              <span className="text-xs leading-snug">{t('bots.limit.reached', { max: limit.max })}</span>
+            </span>
+          </button>
+        ) : (
           <button
             type="button"
             onClick={onAdd}
@@ -315,7 +341,7 @@ function BotsSection({
             </span>
             <span className="text-sm font-semibold">{t('bots.addLabel')}</span>
           </button>
-        )}
+        ))}
       </div>
     </section>
   );

@@ -58,6 +58,21 @@ def test_bot_commands_print_json_envelopes(home, monkeypatch, capsys):
     assert (code, again["bot"]["session_id"]) == (0, "ses_cso")
 
 
+def test_bot_create_and_set_say_the_limit_to_the_agent_that_runs_them(home, monkeypatch, capsys):
+    """The main Bot adding a colleague in conversation reads this refusal (bots.md D12)."""
+    from core.bots import BotService
+
+    with BotService() as service:
+        for name in ("Alpha", "Beta", "Gamma", "Delta", "Epsilon"):
+            service.create_bot(display_name=name)
+        service.store.create(name="reviewer", backend="vibey")
+    for argv in (("bot", "create", "--name", "Zeta"), ("bot", "set", "reviewer", "--name", "Reviewer")):
+        code, refused = _run(monkeypatch, capsys, *argv)
+        assert (code, refused["code"]) == (1, "bot_limit_reached"), argv
+        assert "at most 5 Bots besides the main Bot" in refused["error"]
+        assert "`vibe bot remove <handle>`" in refused["error"] and "conversation and memory" in refused["error"]
+
+
 def test_bot_commands_are_the_owners():
     for leaf in ("list", "show", "create", "set", "update", "remove"):
         assert cli._CLI_COMMAND_FLOORS[("bot", leaf)] == "owner"
