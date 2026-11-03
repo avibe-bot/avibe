@@ -16,6 +16,7 @@ const access: VaultRequest = { id: 'fixture-access', request_type: 'access', sec
 const sign: VaultRequest = { ...access, id: 'fixture-sign', request_type: 'sign',
   delivery: { digest: '00'.repeat(32), scheme: 'ecdsa-secp256k1-recoverable' },
   card: { request_type: 'sign', secret_name: 'PUBLIC_TEST_KEY', protection: 'protected', kind: 'keypair' } };
+const standardSign = { ...sign, card: { ...sign.card, protection: 'standard' } };
 
 async function harness(context: BrowserContext, page: Page, origin: string, request = access) {
   const prohibited: string[] = [];
@@ -74,6 +75,17 @@ async function harness(context: BrowserContext, page: Page, origin: string, requ
   return { prohibited, writes, errors, popups, documents };
 }
 
+// Independent deep links belong to fresh built-in page/context fixtures, not
+// successive loads of a live ApiProvider. Keep the same strict ledger on each.
+async function expectSingleDocumentJourney(page: Page, observed: Awaited<ReturnType<typeof harness>>, url: string, writes: string[] = []) {
+  await expect(page.locator('iframe')).toHaveCount(0);
+  expect(observed.documents).toEqual([url]);
+  expect(observed.writes).toEqual(writes);
+  expect(observed.prohibited).toEqual([]);
+  expect(observed.errors).toEqual([]);
+  expect(observed.popups).toEqual([]);
+}
+
 // One pending request must survive Settings and return still blocked, then be denied.
 // Denying first and resetting with goto created a second document (and SSE/session
 // lifecycle); measuring identity only after that reset could not prove this journey.
@@ -119,16 +131,14 @@ for (const [origin, language, current] of [
   await dialog.getByRole('button', { name: copy.vaults.approval.deny, exact: true }).click();
   await expect.poll(() => observed.writes).toEqual([`POST /api/vault/requests/${current.id}/deny`]);
   await expect(dialog).toHaveCount(0);
-  expect(observed.documents).toEqual([url]);
-  expect(observed.prohibited).toEqual([]);
-  expect(observed.errors).toEqual([]);
-  expect(observed.popups).toEqual([]);
+  await expectSingleDocumentJourney(page, observed, url, [`POST /api/vault/requests/${current.id}/deny`]);
 });
 
-test('unsupported reveal/edit/create stop before preparation, but metadata, cancel and Standard stay available', async ({ context, page }) => {
+test('unsupported reveal/edit stops before preparation, but metadata and cancel stay available', async ({ context, page }) => {
   const origin = 'http://192.0.2.1:5123';
   const observed = await harness(context, page, origin);
-  await page.goto(`${origin}${fixturePath}?reveal=${secret.name}`);
+  const url = `${origin}${fixturePath}?reveal=${secret.name}`;
+  await page.goto(url);
   await expect(page.getByRole('menu').getByText(en.vaults.entry.addressTitle)).toBeVisible();
   await expect(page.getByRole('menuitem', { name: en.vaults.reveal.show, exact: true })).toBeDisabled();
   await expect(page.getByRole('menuitem', { name: en.vaults.reveal.copy, exact: true })).toBeDisabled();
@@ -142,7 +152,16 @@ test('unsupported reveal/edit/create stop before preparation, but metadata, canc
   await expect.poll(() => observed.writes).toEqual([`PATCH /api/vault/secrets/${secret.name}`]);
   await dialog.getByRole('button', { name: en.vaults.dialog.cancel, exact: true }).click();
   await expect(dialog).toHaveCount(0);
-  await page.goto(`${origin}${fixturePath}?add=protected`);
+  await expectSingleDocumentJourney(page, observed, url, [`PATCH /api/vault/secrets/${secret.name}`]);
+});
+
+test('unsupported create preserves Settings return, draft clearing, Standard and cancel', async ({ context, page }) => {
+  const origin = 'http://192.0.2.1:5123';
+  const observed = await harness(context, page, origin);
+  const url = `${origin}${fixturePath}?add=protected`;
+  await page.goto(url);
+  page.setDefaultTimeout(8_000);
+  const dialog = page.getByRole('dialog');
   await expect(dialog.getByText(en.vaults.entry.addressTitle)).toBeVisible();
   await expect(dialog.getByRole('button', { name: en.vaults.dialog.createSecret, exact: true })).toBeDisabled();
   await dialog.getByPlaceholder(en.vaults.dialog.valuePlaceholder).fill('public-fixture-draft');
@@ -158,37 +177,39 @@ test('unsupported reveal/edit/create stop before preparation, but metadata, canc
   await expect(dialog.getByText(en.vaults.entry.addressTitle)).toHaveCount(0);
   await dialog.getByRole('button', { name: en.vaults.dialog.cancel, exact: true }).click();
   await expect(dialog).toHaveCount(0);
-  expect(observed.prohibited).toEqual([]);
-  expect(observed.errors).toEqual([]);
-  expect(observed.popups).toEqual([]);
-  await expect(page.locator('iframe')).toHaveCount(0);
+  await expectSingleDocumentJourney(page, observed, url);
 });
 
 test('supported HTTPS with missing Web Crypto gives browser advice, not a Remote Access enable prompt', async ({ context, page }) => {
   const origin = 'https://fixture.avibe.bot';
   await context.addInitScript(() => Object.defineProperty(crypto, 'subtle', { value: undefined }));
   const observed = await harness(context, page, origin);
-  await page.goto(`${origin}${fixturePath}?request_id=${access.id}`);
+  const url = `${origin}${fixturePath}?request_id=${access.id}`;
+  await page.goto(url);
   const dialog = page.getByRole('dialog');
   await expect(dialog.getByText(en.vaults.entry.browserTitle)).toBeVisible();
   await expect(dialog.getByText(en.vaults.entry.browserHelp)).toBeVisible();
   await expect(dialog.getByRole('link', { name: en.vaults.entry.remoteAccess })).toHaveCount(0);
   await expect(dialog.getByRole('button', { name: en.vaults.approval.approve, exact: true })).toBeDisabled();
-  expect(observed.prohibited).toEqual([]);
-  expect(observed.popups).toEqual([]);
+  await expectSingleDocumentJourney(page, observed, url);
 });
 
-test('non-owner has no Remote Access link; standard signing remains on the ordinary API path', async ({ context, page }) => {
+test('non-owner protected guidance has no Remote Access link', async ({ context, page }) => {
   const origin = 'http://192.0.2.1:5123';
-  const standard = { ...sign, card: { ...sign.card, protection: 'standard' } };
-  const observed = await harness(context, page, origin, standard);
-  await page.goto(`${origin}${fixturePath}?role=member&reveal=${secret.name}`);
+  const observed = await harness(context, page, origin, standardSign);
+  const url = `${origin}${fixturePath}?role=member&reveal=${secret.name}`;
+  await page.goto(url);
   await expect(page.getByText(en.vaults.entry.memberHelp)).toBeVisible();
   await expect(page.getByRole('link', { name: en.vaults.entry.remoteAccess })).toHaveCount(0);
-  await page.goto(`${origin}${fixturePath}?role=member&request_id=${standard.id}`);
+  await expectSingleDocumentJourney(page, observed, url);
+});
+
+test('non-owner standard signing remains on the ordinary API path', async ({ context, page }) => {
+  const origin = 'http://192.0.2.1:5123';
+  const observed = await harness(context, page, origin, standardSign);
+  const url = `${origin}${fixturePath}?role=member&request_id=${standardSign.id}`;
+  await page.goto(url);
   await page.getByRole('dialog').getByRole('button', { name: en.vaults.approval.sign, exact: true }).click();
   await expect.poll(() => observed.writes).toEqual(['POST /api/vault/sign']);
-  expect(observed.prohibited).toEqual([]);
-  expect(observed.errors).toEqual([]);
-  expect(observed.popups).toEqual([]);
+  await expectSingleDocumentJourney(page, observed, url, ['POST /api/vault/sign']);
 });
