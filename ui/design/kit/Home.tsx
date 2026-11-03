@@ -26,10 +26,13 @@ import {
 } from 'lucide-react';
 import clsx from 'clsx';
 
+import vibeyMascot from '@/assets/pet/vibey.png';
 import { BotAvatar } from '@/components/ui/bot-avatar';
 import { Button } from '@/components/ui/button';
+import { AgentRoutePicker } from '@/components/workbench/AgentRoutePicker';
 import { BotFace } from '@/components/workbench/bots/BotFace';
 import { Composer } from '@/components/workbench/Composer';
+import type { Bot } from '@/lib/bots';
 import { ProjectPicker } from '@/components/workbench/ProjectPicker';
 import { useBots } from '@/context/BotsContext';
 import { useWorkbenchInbox } from '@/context/WorkbenchInboxContext';
@@ -126,10 +129,14 @@ export function GettingStarted({ pending, compact = false }: { pending: SetupGap
             ) : (
               <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">{title}</span>
             )}
-            <Button type="button" variant={blocking ? 'brand' : 'outline'} size={blocking ? 'sm' : 'xs'} className="shrink-0 gap-1">
-              {action}
-              <ChevronRight className="size-3.5" />
-            </Button>
+            {blocking ? (
+              <Button type="button" variant="brand" size="sm" className="shrink-0 gap-1">
+                {action}
+                <ChevronRight className="size-3.5" />
+              </Button>
+            ) : (
+              <TextButton>{action}</TextButton>
+            )}
             {!blocking && (
               <button type="button" aria-label={draft('不需要', 'Not needed')} title={draft('不需要', 'Not needed')} className="-mr-1 grid size-7 shrink-0 place-items-center rounded-md text-muted hover:bg-foreground/5 hover:text-foreground">
                 <X className="size-3.5" />
@@ -182,7 +189,7 @@ function Greeting({ member, compact, noModel }: { member: boolean; compact: bool
   const name = mainBot ? displayName(mainBot) : '';
   return (
     <div className={clsx('flex flex-col items-center text-center', compact ? 'gap-2' : 'gap-3')}>
-      {!member && !compact && mainBot && <BotAvatar avatar={mainBot.avatar} name={name} size={64} />}
+      {!member && !compact && mainBot && <StandaloneFace bot={mainBot} name={name} />}
       <h1 className={clsx('font-bold text-foreground', compact ? 'text-2xl' : 'text-3xl')}>
         {noModel && name ? draft(`下午好，我是${name}`, `Good afternoon. I’m ${name}.`) : draft('下午好，今天做什么？', 'Good afternoon. What’s next?')}
       </h1>
@@ -191,16 +198,48 @@ function Greeting({ member, compact, noModel }: { member: boolean; compact: bool
   );
 }
 
-/** The composer's route: the main Bot and its model, or that there is none yet. A member's shows the Agent. */
-function RouteLabel({ member, noModel }: { member: boolean; noModel: boolean }) {
-  const draft = useDraft();
-  const { mainBot, displayName } = useBots();
+/** A small action on a card: text only, no border or fill; hovering lights a soft wash. The one
+ *  lead on the page is the only solid button. */
+function TextButton({ children, chevron = true }: { children: ReactNode; chevron?: boolean }) {
   return (
-    <span className="flex items-center gap-1.5 text-xs">
-      {!member && mainBot && <BotAvatar avatar={mainBot.avatar} name={displayName(mainBot)} size={18} />}
-      <span className="font-semibold text-foreground">{member || !mainBot ? 'vibey' : displayName(mainBot)}</span>
-      <span className="font-mono text-muted">{noModel ? draft('· 还没有模型', '· no model yet') : `· gpt-6-astra · ${draft('高', 'high')}`}</span>
+    <button
+      type="button"
+      className="inline-flex h-7 shrink-0 items-center gap-0.5 rounded-md px-2 text-xs font-semibold text-mint-ink transition hover:bg-mint-soft"
+    >
+      {children}
+      {chevron && <ChevronRight className="size-3.5" />}
+    </button>
+  );
+}
+
+/** A face standing alone, as #3192 draws one (`BotAvatar plain`): the mascot straight on the page,
+ *  without its well and hairline, and a faint shadow in light. Until #3192 ships its
+ *  `--bot-mascot-plain-shadow`, the mascot's own shadow stands in; then this becomes `<BotAvatar plain />`.
+ *  Any other avatar is its own disc. */
+function StandaloneFace({ bot, name }: { bot: Bot; name: string }) {
+  if (bot.avatar?.kind !== 'mascot') return <BotAvatar avatar={bot.avatar} name={name} size={64} />;
+  return (
+    <span className="grid size-16 shrink-0 place-items-center" aria-hidden="true">
+      <img src={vibeyMascot} alt="" draggable={false} className="size-full scale-[1.12] object-contain [filter:var(--bot-mascot-shadow)]" />
     </span>
+  );
+}
+
+/** The composer's route, as in a Bot's conversation: the shipped picker with the Agent locked, so it
+ *  shows the model and effort alone (the placeholder already says who listens). A member's names the
+ *  Agent. With no model there is no route yet: the way to add one takes its place, to the same page
+ *  as "Add one" in Get started (Settings · Models). */
+function ComposerRoute({ member, noModel }: { member: boolean; noModel: boolean }) {
+  const draft = useDraft();
+  if (noModel) return <TextButton>{draft('去接模型', 'Add a model')}</TextButton>;
+  return (
+    <AgentRoutePicker
+      presentation="compact"
+      agentLocked={!member}
+      value={{ agent_name: 'vibey', agent_backend: 'vibey', model: 'gpt-6-astra', reasoning_effort: 'high' }}
+      agents={[]}
+      onChange={() => {}}
+    />
   );
 }
 
@@ -274,7 +313,7 @@ export function TipOfTheDay({ index, member = false, compact = false }: { index:
     </span>
   );
   const tryIt = (
-    <Button type="button" variant="outline" size="xs" className="shrink-0">{draft('试试', 'Try')}</Button>
+    <TextButton chevron={false}>{draft('试试', 'Try')}</TextButton>
   );
   const mark = (
     <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-gold-soft text-gold-ink">
@@ -351,8 +390,9 @@ function SpecLegend() {
     draft('顺序固定：① 问候 → ② 开始使用 → ③ 小技巧 → ④ 试试这样说 → ⑤ 输入框。输入框是这一组的最后一块，不钉在页面底部。', 'One order: ① greeting → ② getting started → ③ tip → ④ suggestions → ⑤ composer. The composer is the group’s last block, not pinned to the page’s bottom.'),
     draft('整组居中、略偏上：上下留白按 2 : 3 分。区块出现或消失，整组重新居中，顺序不变。', 'The group is centered, a little high: the free space splits 2 : 3. A block that comes or goes re-centers the group; the order stays.'),
     draft('一种间距：桌面 28，手机 16，任何两块之间都一样。窗口不够高时先收留白（桌面至少 24，手机 8），再让页面滚动；间距不压缩。', 'One gap: 28 on a desktop, 16 on a phone, between any two blocks. When the window is short the free space shrinks first (24 on a desktop, 8 on a phone at least), then the page scrolls; the gap never shrinks.'),
-    draft('一种宽度：所有区块和输入框同宽（桌面最宽 768，手机两边各留 16），左右对齐。', 'One width: every block and the composer (768 at most on a desktop, the screen less 16 a side on a phone), edges aligned.'),
-    draft('一次一个重点：没有模型时只突出「接上模型」，问候改成自我介绍，建议和输入框变灰（输入框禁用：建议，待定）。有了模型，问候问「今天做什么」，建议和小技巧邀请你试一次。', 'One lead: with no model only that item is accented, the greeting introduces the Bot, and the suggestions and composer are quiet (the composer disabled: proposed, open). With a model the greeting asks what’s next, and the suggestions and tip invite a first try.'),
+    draft('一种宽度：所有区块和输入框同宽（桌面最宽 768，大窗口也不放大；手机两边各留 16），左右对齐。', 'One width: every block and the composer (768 at most on a desktop, a large window included; the screen less 16 a side on a phone), edges aligned.'),
+    draft('一次一个重点：没有模型时只突出「接上模型」，问候改成自我介绍，建议变灰，输入框禁用，它的路由处给「去接模型」，和「去添加」去同一处（设置 · 模型）。有了模型，问候问「今天做什么」，建议和小技巧邀请你试一次。', 'One lead: with no model only that item is accented, the greeting introduces the Bot, the suggestions are quiet, and the composer is disabled, with “Add a model” where its route goes, to the same page as “Add one” (Settings · Models). With a model the greeting asks what’s next, and the suggestions and tip invite a first try.'),
+    draft('按钮：只有唯一的重点是实心主按钮；卡片上的小按钮（「打开」「去授权」「试试」）是文字按钮，没有边框和底色，悬停出浅底。输入框的路由和伙伴对话一样，只显示模型和推理强度。', 'Buttons: only the one lead is a solid button; a card’s small actions (Turn on, Grant, Try) are text, with no border or fill, and a soft wash on hover. The composer’s route shows the model and effort alone, as in a Bot’s conversation.'),
     draft('手机：问候不放头像（底栏中间就是它）；「开始使用」只露 1 项。成员：项目选择紧贴输入框上方（间距 8），和输入框算一块。', 'A phone: no face in the greeting (the tab bar’s center is it); getting started shows one item. A member: the project chips sit right above the composer (8 apart), one block with it.'),
     draft('手机键盘弹起：整组不按变矮的可见区域重新居中，页面整体上移，让输入框贴在键盘上方；头部和上面的区块移出屏幕，底栏被键盘盖住。', 'A phone keyboard: the group does not re-center in the shorter visible area; the page moves up whole so the composer rests on the keyboard; the header and the blocks above move off screen, the keyboard covers the tab bar.'),
   ];
@@ -370,7 +410,7 @@ function SpecLegend() {
  *  hidden for today; `member` a reader without Bots; `compact` a phone; `spec` outlines the blocks,
  *  the gaps, and the free space; `keyboard` a phone with the keyboard up, the page moved up whole
  *  until the composer rests on it. The tip waits while there is no model: until the main Bot can
- *  work, teaching more is noise. With no model the composer is disabled (proposed, for the owner). */
+ *  work, teaching more is noise. With no model the composer is disabled and offers the way to add one (owner, 2026-11-03). */
 export function HomePage({
   pending,
   tip,
@@ -434,7 +474,7 @@ export function HomePage({
               onSend={async () => false}
               disabled={noModel}
               placeholder={noModel ? draft('接上模型后就能说话', 'Talk once it has a model') : member ? undefined : draft(`和${name}说…`, `Message ${name}…`)}
-              actions={<RouteLabel member={member} noModel={noModel} />}
+              actions={<ComposerRoute member={member} noModel={noModel} />}
             />
           </div>
         </Slot>
