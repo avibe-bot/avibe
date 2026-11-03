@@ -1,7 +1,9 @@
 // The Agents page as the place where every Bot and Agent is configured (owner-approved 2026-11-02,
 // shipped): Bots get their own section by face and name, with Add and Remove on the page; the Agents
 // follow in one list; the panels draw only what applies. A Bot's Agent is never shown as an Agent:
-// it is not in the Agents list, and comes back to it only when the Bot is removed.
+// it is not in the Agents list, and comes back to it only when the Bot is removed. With every place
+// for a custom Bot taken (D12) the page is where adding is explained: Add and "Set as Bot" stay in
+// place, disabled, with the reason and the count.
 // Drawn from the shipped view (`AgentsPageView`) and panel (`AgentDetailPanel`) beside the shipped
 // sidebar at 1440×900, and on a phone.
 import type { ReactNode } from 'react';
@@ -14,7 +16,8 @@ import type { VibeAgentBrief, VibeAgentFull } from '@/context/ApiContext';
 import type { Bot } from '@/lib/bots';
 
 import { frames } from '../../frame';
-import { demoBots, demoProjects, mainBot, owner, type WorkbenchFixtures } from '../../shell/fixtures';
+import { botLimitOf, demoBots, demoProjects, mainBot, owner, type WorkbenchFixtures } from '../../shell/fixtures';
+import { fullTeam } from '../../shell/teamFixtures';
 import { SidebarColumn } from '../../shell/SidebarColumn';
 import { consoleContentClass, consolePageClass } from '../skills/fixtures';
 import { agentBrief, demoAgents } from './fixtures';
@@ -69,6 +72,7 @@ const modelMenus: Record<string, unknown> = {
 
 const team: WorkbenchFixtures = { projects: demoProjects, bots: demoBots, api: modelMenus };
 const fresh: WorkbenchFixtures = { projects: demoProjects, bots: [mainBot], api: modelMenus };
+const atLimit: WorkbenchFixtures = { projects: demoProjects, bots: fullTeam, api: modelMenus };
 const removed: WorkbenchFixtures = { projects: demoProjects, bots: demoBots.filter((bot) => bot.handle !== 'cso'), api: modelMenus };
 /** A member of a shared instance: Bots are the Owner's, so there are none here (D1). */
 const member: WorkbenchFixtures = { projects: demoProjects, capabilities: { ...owner, is_instance_owner: false }, api: modelMenus };
@@ -106,6 +110,7 @@ const page = ({
   bots = demoBots,
   ...props
 }: Partial<AgentsPageViewProps> & { rows?: VibeAgentBrief[]; bots?: Bot[] | null }) => {
+  const botLimit = bots ? botLimitOf(bots) : null;
   const botAgents = new Set((bots ?? []).map((bot) => bot.agent_name));
   const listed = rows.filter((agent) => !botAgents.has(agent.name) && !(bots === null && agent.bot));
   return (
@@ -125,6 +130,8 @@ const page = ({
       bots={bots}
       botCount={bots?.length ?? 0}
       agentCount={listed.length}
+      botLimit={botLimit}
+      mainBot={bots?.find((bot) => bot.builtin) ?? null}
       onAddBot={noop}
       agents={listed}
       defaultAgentName="vibey"
@@ -188,6 +195,16 @@ const designFrames = frames([
     render: desktop(page({ selectedName: 'vibey', detail: panel(full('vibey'), true) })),
   },
   {
+    name: 'at-limit',
+    title: '伙伴与 Agents · 已满 5 位：「添加伙伴」和「设为伙伴」变灰，写明原因和数量',
+    width: 1440,
+    height: 900,
+    status: 'shipped',
+    route: '/agents',
+    fixtures: atLimit,
+    render: desktop(page({ bots: fullTeam, selectedName: 'researcher', detail: panel(full('researcher')) })),
+  },
+  {
     name: 'remove-bot',
     title: '伙伴与 Agents · 移出伙伴前确认',
     width: 1440,
@@ -248,6 +265,26 @@ const designFrames = frames([
     route: '/agents',
     fixtures: team,
     render: phone(page({})),
+  },
+  {
+    name: 'phone-at-limit',
+    title: '伙伴与 Agents · 手机 · 已满 5 位：「添加伙伴」变灰，写明原因和数量（加高到伙伴区结尾）',
+    width: 390,
+    height: 1000,
+    status: 'shipped',
+    route: '/agents',
+    fixtures: atLimit,
+    render: phone(page({ bots: fullTeam })),
+  },
+  {
+    name: 'phone-agent-at-limit',
+    title: '伙伴与 Agents · 手机 · 已满 5 位：「设为伙伴」变灰，写明原因',
+    width: 390,
+    height: 844,
+    status: 'shipped',
+    route: '/agents',
+    fixtures: atLimit,
+    render: phone(page({ bots: fullTeam, selectedName: 'researcher', detail: panel(full('researcher')), detailOpen: true })),
   },
   {
     name: 'phone-bot',

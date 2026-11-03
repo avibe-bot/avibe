@@ -27,6 +27,25 @@ export type Bot = {
   hide_details: boolean;
 };
 
+/** The places for custom Bots, as `GET /api/bots` sends them beside the list
+ *  (docs/plans/bots.md D12): `count` current custom Bots of at most `max`. The
+ *  server owns what counts (`core.bots.counts_toward_limit`); the main Bot and
+ *  the system Bots do not. An install from before the limit can be over it. */
+export type BotLimit = { count: number; max: number };
+
+/** Whether adding a Bot waits until one is removed. Unknown limits never block:
+ *  the server still refuses, and the add dialog then says why. */
+export function botLimitReached(limit: BotLimit | null | undefined): boolean {
+  return limit != null && limit.count >= limit.max;
+}
+
+export function parseBotLimit(value: unknown): BotLimit | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Record<string, unknown>;
+  if (typeof raw.count !== 'number' || typeof raw.max !== 'number') return null;
+  return { count: raw.count, max: raw.max };
+}
+
 /** The Bot an Agent is, as Agent lists carry it. */
 export type AgentBotSummary = {
   handle: string;

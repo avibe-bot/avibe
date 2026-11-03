@@ -10212,7 +10212,11 @@ def _bot_error_response(exc: Exception):
     if isinstance(exc, BotError):
         lang = _request_ui_language()
         key = f"error.bots.{exc.code}"
-        message = t(key, lang, handle=exc.details.get("handle", ""))
+        values = {"handle": "", **exc.details}
+        if "main" in values and not values["main"]:
+            # The main Bot's empty display name reads as its localized default.
+            values["main"] = t("error.bots.mainBotDefaultName", lang)
+        message = t(key, lang, **values)
         return _coded_error_response(exc.code, str(exc) if message == key else message, exc.status, details=exc.details)
     if isinstance(exc, PermissionError):
         return jsonify({"ok": False, "error": "instance_access_forbidden", "required_role": "owner"}), 403
@@ -10227,7 +10231,7 @@ def _bot_owner_context():
 
 @app.route("/api/bots", methods=["GET"])
 def bots_list():
-    from core.bots import BotService
+    from core.bots import BotService, bot_limit_payload
 
     try:
         context = _bot_owner_context()
@@ -10236,7 +10240,8 @@ def bots_list():
             bots = service.list_bots(authorization_context=context)
     except Exception as exc:
         return _bot_error_response(exc)
-    return jsonify({"ok": True, "bots": [bot.to_payload() for bot in bots]})
+    # The limit rides with the list, so every add surface knows it from the same read (bots.md D12).
+    return jsonify({"ok": True, "bots": [bot.to_payload() for bot in bots], "limit": bot_limit_payload(bots)})
 
 
 @app.route("/api/bots", methods=["POST"])

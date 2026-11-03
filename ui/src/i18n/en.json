@@ -4826,6 +4826,10 @@
       "emptyTitle": "Hi, I'm {{name}}",
       "emptyBody": "Just tell me what you'd like to get done, or anything you'd like me to keep in mind. I'm always here, and I'll remember what we talk about."
     },
+    "limit": {
+      "reached": "Up to {{max}} Bots, not counting {{main}}. Remove one to add another.",
+      "places": "{{taken}}/{{max}}"
+    },
     "agents": {
       "setAsBot": "Set as Bot",
       "openConversation": "Open conversation",

@@ -376,6 +376,41 @@ by tier. Owned by `docs/plans/system-prompt-cache-tiers.md`, which applies to
 every Vibey Session. It also moves the date out of the environment block (the
 `[Now: ...]` line has it) and adds the `instructions` pending field.
 
+### D12. At most five custom Bots
+
+Owner decision, 2026-11-03.
+
+- A user can have at most five custom Bots. The main Bot does not count, and
+  neither do the hidden system Bots (the reserved `memory` and `ops` handles,
+  D2). Why: attention is limited. A person talks with about five Bots a day,
+  and the limit keeps Bots distinct from Sessions, so users do not come to
+  treat Bots as conversations.
+- What counts is the current Bots: a removed Bot frees its place, and setting
+  it again takes one. `core/bots.py` owns the rule (`MAX_CUSTOM_BOTS`,
+  `counts_toward_limit`).
+- Every way to add a Bot (`POST /api/bots`, `POST /api/bots/set`,
+  `vibe bot create`, `vibe bot set`) is refused once five count, with
+  `bot_limit_reached`: it says the limit, that the main Bot does not count (by
+  its current display name on the Web), that removing a Bot frees a place, and
+  that a removed Bot keeps its conversation and memory. The check runs
+  under the write lock of the transaction that adds the Bot, so two adds racing
+  for the last place cannot both take it. This refusal is also what the main
+  Bot reads when it runs `vibe bot create`; no prompt text describes the limit.
+- An install already over the limit keeps every Bot; only adding is refused
+  until fewer than five count.
+- `GET /api/bots` returns the limit beside the list (`limit`: `count` and
+  `max`), so every Web surface knows it from the same read. With every place
+  taken:
+  - the sidebar's avatar strip (desktop and the phone's Workbench) and the
+    phone's Bot switch sheet have no Add at all: their room goes to the Bots;
+  - the Agents page keeps its Add card and 「设为伙伴」 in place, disabled, with
+    the reason and the count beside it (「最多 5 位伙伴（不含歪比），移出一位后可以再添加
+    5/5」). The reason names the main Bot by its current display name, because
+    the page lists it among the Bots while the count leaves it out;
+  - the add dialog shows the same notice and adds nothing, and shows it too
+    when the server refuses because another add took the last place first,
+    until the list is read again and says whether a place is free.
+
 ## Prompt drafts
 
 English, per the repository rule. Placeholders in braces.
@@ -487,9 +522,9 @@ API invalidates immediately.
 
 | Route | Purpose |
 | --- | --- |
-| `GET /api/bots` | Bots in display order: handle, display name (empty means the localized default for the main Bot), avatar (`emoji` with hue, `image` with URL, or the main Bot's mascot), role, Agent name, Session id, position, built-in flag, Hide details |
-| `POST /api/bots` | Create: display name, handle (optional), role, avatar (optional), model (optional). Makes the Vibey Agent, the Bot, its directory, and its Session |
-| `POST /api/bots/set` | Make an existing Vibey Agent a Bot: Agent name, display name, avatar |
+| `GET /api/bots` | Bots in display order: handle, display name (empty means the localized default for the main Bot), avatar (`emoji` with hue, `image` with URL, or the main Bot's mascot), role, Agent name, Session id, position, built-in flag, Hide details; beside them, `limit` (`count` custom Bots of `max`, D12) |
+| `POST /api/bots` | Create: display name, handle (optional), role, avatar (optional), model (optional). Makes the Vibey Agent, the Bot, its directory, and its Session. Refused with `bot_limit_reached` once five custom Bots count (D12) |
+| `POST /api/bots/set` | Make an existing Vibey Agent a Bot: Agent name, display name, avatar. Refused the same way (D12) |
 | `PATCH /api/bots/{handle}` | Display name, emoji avatar (custom Bots only), position, Hide details (`hide_details`) |
 | `DELETE /api/bots/{handle}` | Remove the Bot role (the main Bot refuses) |
 | `PUT /api/bots/{handle}/avatar` | Upload an image (custom Bots only); stored as `avatar.png` in the Bot's directory |

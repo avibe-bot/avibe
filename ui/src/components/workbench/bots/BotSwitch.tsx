@@ -76,30 +76,33 @@ export function BotConversationTitle({ bot }: { bot: Bot }) {
 }
 
 /** Every Bot, the main Bot first: what each is doing or last said, unread, and running.
- *  Picking one opens its conversation; Add opens the shared add dialog. Mounted only
- *  while the sheet is open, so only then does it follow the Inbox feed for the previews. */
+ *  Picking one opens its conversation; Add opens the shared add dialog, and is not there
+ *  once every place for a custom Bot is taken (D12), as on the sidebar strip. Mounted
+ *  only while the sheet is open, so only then does it follow the Inbox feed for the previews. */
 function BotSwitchList({ current, onDone }: { current: string; onDone: () => void }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { bots, displayName, statusBySession, openProfile } = useBots();
+  const { bots, atLimit, displayName, statusBySession, openProfile } = useBots();
   const { inboxSessions, unreadBySession } = useWorkbenchInbox();
   return (
     <>
       <div className="flex items-center justify-between gap-3 px-1 pr-8">
         <DialogTitle className="text-lg font-bold">{t('bots.sectionLabel')}</DialogTitle>
-        <Button
-          type="button"
-          variant="outline"
-          size="xs"
-          className="gap-1 rounded-full"
-          onClick={() => {
-            onDone();
-            openProfile({ kind: 'create' });
-          }}
-        >
-          <UserPlus className="size-3.5" />
-          {t('bots.add')}
-        </Button>
+        {!atLimit && (
+          <Button
+            type="button"
+            variant="outline"
+            size="xs"
+            className="gap-1 rounded-full"
+            onClick={() => {
+              onDone();
+              openProfile({ kind: 'create' });
+            }}
+          >
+            <UserPlus className="size-3.5" />
+            {t('bots.add')}
+          </Button>
+        )}
       </div>
       <ul className="flex flex-col gap-1">
         {bots.map((bot) => {

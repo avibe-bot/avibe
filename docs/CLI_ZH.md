@@ -661,6 +661,10 @@ vibe bot remove cso
   或在其他伙伴中的位置。角色、模型或指令用 `vibe agent update` 修改。
 - `remove` 移出伙伴，保留 Agent、Session 和目录。主伙伴不能移出。
 
+除主伙伴外，最多 5 位伙伴。已有 5 位时，`create` 和 `set` 会以 `bot_limit_reached`
+拒绝；用 `remove` 移出一位即可空出位置（它的对话和记忆都会保留，重新设为伙伴后接上）。
+已经超过 5 位的安装会保留所有伙伴，只是要等少于 5 位后才能再添加。
+
 伙伴创建后代号不再改变：它的 Session 是 `ses_<handle>`，目录是
 `~/.avibe/bots/<handle>/`。主伙伴的 Session 是 `ses_main`。Agent 作为伙伴期间保持
 启用，不能改名或删除。目录一开始是一个空的 Git 仓库；Avibe 在伙伴 Session 的每个

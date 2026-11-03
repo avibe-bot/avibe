@@ -6,7 +6,7 @@ import { useApi } from './ApiContext';
 import { BotsContext, type BotProfileRequest, type BotRuntimeStatus, type BotsState } from './BotsContext';
 import { UNKNOWN_BOT_ROSTER, useBotRoster } from './BotRosterContext';
 import { useInstanceAuthorization } from './InstanceAuthorizationContext';
-import { botDisplayName, orderBots, type Bot } from '../lib/bots';
+import { botDisplayName, botLimitReached, orderBots, type Bot, type BotLimit } from '../lib/bots';
 
 /** Owns the Owner's Bot list (`GET /api/bots`) and each Bot Session's running state.
  *
@@ -22,6 +22,7 @@ export const BotsProvider = ({ children }: { children: ReactNode }) => {
   const { capabilities } = useInstanceAuthorization();
   const enabled = capabilities.is_instance_owner === true;
   const [ownerBots, setBots] = useState<Bot[]>([]);
+  const [ownerLimit, setLimit] = useState<BotLimit | null>(null);
   const [loaded, setLoaded] = useState(false);
   // A list the server returned, as opposed to a first read that merely ended.
   const [listed, setListed] = useState(false);
@@ -54,9 +55,10 @@ export const BotsProvider = ({ children }: { children: ReactNode }) => {
     if (!enabled) return;
     const read = ++readRef.current;
     try {
-      const next = await api.listBots({ cache: false });
+      const { bots: next, limit } = await api.listBots({ cache: false });
       if (read !== readRef.current) return;
       setBots(orderBots(next));
+      setLimit(limit);
       setListed(true);
       const known = sessionIdsRef.current;
       const fresh = next.map((bot) => bot.session_id).filter((id) => !known.has(id));
@@ -158,6 +160,7 @@ export const BotsProvider = ({ children }: { children: ReactNode }) => {
   const value = useMemo<BotsState>(() => {
     const bots = enabled ? ownerBots : [];
     const statusBySession = enabled ? ownerStatuses : {};
+    const limit = enabled ? ownerLimit : null;
     const bySession = new Map(bots.map((bot) => [bot.session_id, bot]));
     const byAgent = new Map(bots.map((bot) => [bot.agent_name, bot]));
     const byHandle = new Map(bots.map((bot) => [bot.handle, bot]));
@@ -167,6 +170,8 @@ export const BotsProvider = ({ children }: { children: ReactNode }) => {
       loaded: enabled && loaded,
       listed: enabled && listed,
       mainBot: bots.find((bot) => bot.builtin) ?? null,
+      limit,
+      atLimit: botLimitReached(limit),
       statusBySession,
       botForSession: (sessionId) => (sessionId ? bySession.get(sessionId) : undefined),
       botForAgent: (agentName) => (agentName ? byAgent.get(agentName) : undefined),
@@ -181,7 +186,7 @@ export const BotsProvider = ({ children }: { children: ReactNode }) => {
       profileRequest: enabled ? profileRequest : null,
       closeProfile: () => setProfileRequest(null),
     };
-  }, [enabled, ownerBots, loaded, listed, ownerStatuses, mainDefault, afterWrite, moveBot, setHideDetails, profileRequest]);
+  }, [enabled, ownerBots, ownerLimit, loaded, listed, ownerStatuses, mainDefault, afterWrite, moveBot, setHideDetails, profileRequest]);
 
   // The Inbox above the router splits its counts by this list (BotRosterContext).
   // A reader who is not the Owner has none to wait for; the Owner's is known once
