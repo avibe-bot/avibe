@@ -6,6 +6,10 @@ import { createRoot } from 'react-dom/client';
 
 import i18n from '@/i18n';
 import '@/index.css';
+// The app build makes every product stylesheet global: one a component imports applies to every
+// surface, including ones that use its classes without importing it. A frame document loads only
+// its own frame file, so it loads them all here. The pet's sheets ship in its own lazy window.
+import.meta.glob(['/src/**/*.css', '!/src/index.css', '!/src/pet/**'], { eager: true });
 
 import { DesignRoot } from './Canvas';
 import type { DesignLang, DesignTheme } from './frame';
