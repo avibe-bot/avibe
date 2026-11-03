@@ -3,7 +3,7 @@ import { DesktopWindowChrome } from './DesktopWindowChrome';
 import { desktopDragRegion } from '../lib/desktopShell';
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Link, Navigate, Outlet, useLocation, useNavigate } from 'react-router-dom';
-import { AlertTriangle, FolderTree, Grid2x2, Inbox, LayoutGrid, Plus, Settings } from 'lucide-react';
+import { AlertTriangle, FolderTree, Grid2x2, Inbox, LayoutGrid, Settings } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
@@ -28,7 +28,8 @@ import { MobileDockDrawer } from './apps/MobileDockDrawer';
 import { NewSessionSheet } from './workbench/NewSessionSheet';
 import { SearchPalette } from './workbench/search/SearchPalette';
 import { RouteSurfaceActivityBoundary } from './RouteSurfaceActivityBoundary';
-import { MobileBrandHeader, MobileTabBar, type ShellNavItem } from './MobileChrome';
+import { MobileBrandHeader, type ShellNavItem } from './MobileChrome';
+import { WorkbenchMobileTabBar } from './WorkbenchMobileTabBar';
 import { useViewportHeightVar } from '../lib/useViewportHeightVar';
 import { APP_SHELL_SCROLL_ID, forgetMobileProjectsListUnlessPreserved } from '../lib/mobileProjectsListMemory';
 import { useIsDesktop } from '../lib/useIsDesktop';
@@ -360,12 +361,13 @@ export const AppShell: React.FC = () => {
   }
 
   // Workbench mobile tabs flatten the (desktop-only) WorkbenchSidebar into a
-  // bottom tab bar: Inbox / Projects / Capabilities / More, around a center
-  // ＋ that opens the workbench canvas (new session). Capabilities routes to
-  // Agents and stays active across the four capability pages.
+  // bottom tab bar: Inbox / Workbench / Capabilities / Apps, around a center that
+  // is the main Bot for the Owner and the new-session ＋ for everyone else
+  // (WorkbenchMobileTabBar). Capabilities routes to Agents and stays active
+  // across the four capability pages.
   const workbenchTabs: ShellNavItem[] = [
     { to: '/inbox', label: t('nav.inbox'), icon: Inbox, badge: totalUnread },
-    { to: '/projects', label: t('nav.projects'), icon: FolderTree },
+    { to: '/projects', label: t('nav.workbench'), icon: FolderTree },
     ...(capabilities.can_use_agents || capabilities.can_use_skills || capabilities.can_use_vault_secrets ? [{
       to: capabilities.can_use_agents ? '/agents' : capabilities.can_use_skills ? '/skills' : '/vaults',
       label: t('nav.capabilities'),
@@ -596,11 +598,9 @@ export const AppShell: React.FC = () => {
       </main>
 
       {showBottomNav && (
-        <MobileTabBar
+        <WorkbenchMobileTabBar
           items={workbenchTabs}
-          center={capabilities.can_chat
-            ? { onClick: () => setNewSessionOpen(true), label: t('appShell.newSession'), icon: Plus }
-            : undefined}
+          onNewSession={capabilities.can_chat ? () => setNewSessionOpen(true) : undefined}
         />
       )}
 

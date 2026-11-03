@@ -1,10 +1,11 @@
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Route, Routes } from 'react-router-dom';
-import { FolderTree, Grid2x2, Inbox, LayoutGrid, Plus } from 'lucide-react';
+import { FolderTree, Grid2x2, Inbox, LayoutGrid } from 'lucide-react';
 import clsx from 'clsx';
 
-import { MobileBrandHeader, MobileTabBar, type ShellNavItem } from '@/components/MobileChrome';
+import { MobileBrandHeader, type ShellNavItem } from '@/components/MobileChrome';
+import { WorkbenchMobileTabBar } from '@/components/WorkbenchMobileTabBar';
 import { ChatPage } from '@/components/workbench/ChatPage';
 
 /** A tabbed page as AppShell draws it below md: the brand header, the page in the
@@ -46,7 +47,7 @@ function useShippedTabs(inboxBadge = 0): ShellNavItem[] {
   const { t } = useTranslation();
   return [
     { to: '/inbox', label: t('nav.inbox'), icon: Inbox, badge: inboxBadge },
-    { to: '/projects', label: t('nav.projects'), icon: FolderTree },
+    { to: '/projects', label: t('nav.workbench'), icon: FolderTree },
     {
       to: '/agents',
       label: t('nav.capabilities'),
@@ -62,11 +63,10 @@ export function WithShippedTabs({ inboxBadge = 0, children }: { inboxBadge?: num
   return <>{children(useShippedTabs(inboxBadge))}</>;
 }
 
-/** Today's tab bar: the four tabs around the raised new-session ＋. */
+/** The shipped tab bar: the four tabs around the main Bot for the Owner, around the new-session ＋ for a member. */
 export function ShippedTabBar({ inboxBadge = 0 }: { inboxBadge?: number }) {
-  const { t } = useTranslation();
   const items = useShippedTabs(inboxBadge);
-  return <MobileTabBar items={items} center={{ onClick: () => {}, label: t('appShell.newSession'), icon: Plus }} />;
+  return <WorkbenchMobileTabBar items={items} onNewSession={() => {}} />;
 }
 
 /** A conversation, full screen as on a phone (no brand header, no tab bar), drawn by the shipped
