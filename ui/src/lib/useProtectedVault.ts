@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useReducer, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { vaultErrorMessage } from './vaultErrors';
 
 import {
   useApi,
@@ -229,6 +231,7 @@ function registrationFromSandbox(value: unknown): VaultWebAuthnRegistrationPaylo
 
 export function useProtectedVault() {
   const api = useApi();
+  const { t } = useTranslation();
   const [status, setStatus] = useState<ProtectedVaultStatus>(sessionVault.status);
   const [error, setError] = useState<string | null>(null);
 
@@ -284,9 +287,9 @@ export function useProtectedVault() {
     } catch (err) {
       sessionVault.status = sessionVault.wrapMeta ? 'locked' : 'needs-setup';
       setStatus('error');
-      setError(err instanceof Error ? err.message : 'vmk-discovery-failed');
+      setError(vaultErrorMessage(t, err, 'vmk-discovery-failed'));
     }
-  }, [api]);
+  }, [api, t]);
 
   const setupPasskey = useCallback(async () => {
     const sandbox = await getVaultSandboxClient();

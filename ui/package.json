@@ -40,6 +40,7 @@
     "test:onboarding-fidelity": "node scripts/e2e-suite.mjs e2e/onboarding-fidelity/tsconfig.json playwright.onboarding-fidelity.config.ts",
     "test:workbench-general": "node scripts/e2e-suite.mjs e2e/workbench-general/tsconfig.json playwright.workbench-general.config.ts",
     "test:workbench-general-build": "node scripts/e2e-suite.mjs e2e/workbench-general/tsconfig.json playwright.workbench-general-build.config.ts",
+    "test:vault-integrity": "node scripts/e2e-suite.mjs e2e/vault-integrity/tsconfig.json playwright.vault-integrity.config.ts",
     "test:voice-shortcut": "node scripts/e2e-suite.mjs e2e/voice-shortcut/tsconfig.json playwright.voice-shortcut.config.ts",
     "test:pet-mini": "playwright test --config playwright.pet-mini.config.ts",
     "validate:catalog": "node scripts/validate-scenario-catalog.mjs",

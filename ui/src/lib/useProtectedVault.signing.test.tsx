@@ -7,7 +7,8 @@ import { act, cleanup, renderHook } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { useProtectedVault } from './useProtectedVault';
-import { VaultSandboxClient, type VaultSandboxSigningContext, type VaultSignedOperationContext } from './vaultSandboxClient';
+import { VaultSandboxClient, openVaultAuthorizationWindow, resetVaultSandboxClient, type VaultSandboxSigningContext, type VaultSignedOperationContext } from './vaultSandboxClient';
+import { stubBlankPopup, stubReleaseFetch } from './__fixtures__/vaultSandboxTransport';
 
 const fixture = JSON.parse(readFileSync(resolve(process.cwd(), '../tests/fixtures/vault_signing/protected-sign-context.json'), 'utf8')) as {
   signedContext: VaultSignedOperationContext;
@@ -21,6 +22,7 @@ vi.mock('./vaultSandboxClient', async (original) => ({
 }));
 
 afterEach(() => {
+  resetVaultSandboxClient();
   cleanup();
   document.body.replaceChildren();
   vi.restoreAllMocks();
@@ -64,14 +66,17 @@ describe('protected signing metadata → hook → real client → RPC', () => {
     // This is the server's hydrated keypair material shape, not a hand-projected RPC object.
     const material = { name: 'PRIVATE_TEST_KEY', kind: 'keypair', envelope };
     const signature = { signature: '01'.repeat(64) };
+    stubReleaseFetch();
+    stubBlankPopup();
+    const authorization = openVaultAuthorizationWindow()!;
     let signing!: Promise<unknown>;
     await act(async () => {
-      signing = result.current.signProtectedRequest(material, signingContext, scheme, context, 'window-sign-test');
+      signing = result.current.signProtectedRequest(material, signingContext, scheme, context, authorization.id);
     });
     await vi.waitFor(() => expect(postMessage).toHaveBeenCalledOnce());
     const [wire] = postMessage.mock.calls[0] as unknown as [{ id: string; op: string; payload: unknown; authorizationWindow: string }];
     expect(wire.op).toBe('sign');
-    expect(wire.authorizationWindow).toBe('window-sign-test');
+    expect(wire.authorizationWindow).toBe(authorization.id);
     expect(wire.payload).toEqual({
       material: { name: material.name, envelope },
       scheme, signingContext, context,

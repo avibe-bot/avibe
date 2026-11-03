@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from unittest.mock import Mock
 
@@ -10,7 +11,11 @@ from storage import vault_service
 from storage.vault_crypto import Sealed
 from tests.ui_server_test_helpers import csrf_headers
 from vibe import api
-from vibe.ui_server import app
+from vibe.ui_server import _merge_csp_frame_src, app
+
+
+_SANDBOX_PIN = json.loads((Path(__file__).parents[1] / "vibe/data/vault_sandbox_release.json").read_text(encoding="utf-8"))
+_EXPECTED_FRAME_POLICY = f"frame-src 'self' {_SANDBOX_PIN['sandboxOrigin']}/v/{_SANDBOX_PIN['buildHash']}/"
 
 
 def _sealed(suffix: str = "1") -> Sealed:
@@ -325,7 +330,7 @@ def test_rest_security_headers_delegate_webauthn_to_self_and_sandbox():
     assert 'clipboard-write=(self "https://sandbox.avibe.bot")' in permissions
     assert "publickey-credentials-get=*" not in permissions
     assert "publickey-credentials-create=*" not in permissions
-    assert "frame-src 'self' https://sandbox.avibe.bot" in response.headers["Content-Security-Policy"]
+    assert response.headers["Content-Security-Policy"] == _EXPECTED_FRAME_POLICY
 
 
 def test_spa_document_security_headers_delegate_webauthn_to_self_and_sandbox():
@@ -342,7 +347,12 @@ def test_spa_document_security_headers_delegate_webauthn_to_self_and_sandbox():
     assert 'clipboard-write=(self "https://sandbox.avibe.bot")' in permissions
     assert "publickey-credentials-get=*" not in permissions
     assert "publickey-credentials-create=*" not in permissions
-    assert "frame-src 'self' https://sandbox.avibe.bot" in response.headers["Content-Security-Policy"]
+    assert response.headers["Content-Security-Policy"] == _EXPECTED_FRAME_POLICY
+
+
+@pytest.mark.parametrize("policy", ["frame-src *", "frame-src https://sandbox.avibe.bot", "frame-src https:"])
+def test_frame_policy_cannot_reintroduce_a_retained_version_downgrade(policy):
+    assert _merge_csp_frame_src(f"default-src 'none'; {policy}") == f"default-src 'none'; {_EXPECTED_FRAME_POLICY}"
 
 
 def test_rest_vault_authz_options_use_sandbox_rp_origin():

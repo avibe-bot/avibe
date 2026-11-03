@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 
 import { webauthnAvailable } from '@/lib/useProtectedVault';
+import { vaultErrorMessage } from '@/lib/vaultErrors';
 import { vaultPasskeyNeedsBrowser } from '@/lib/vaultBrowserHandoff';
 import type { useProtectedVault } from '@/lib/useProtectedVault';
 import { Badge } from './badge';
@@ -58,7 +59,7 @@ export const VaultProtectedUnlock: React.FC<{
     try {
       await fn();
     } catch (err) {
-      vault.setError(friendlyError(t, err instanceof Error ? err.message : String(err)));
+      vault.setError(friendlyError(t, vaultErrorMessage(t, err, String(err))));
     } finally {
       setBusy(false);
     }

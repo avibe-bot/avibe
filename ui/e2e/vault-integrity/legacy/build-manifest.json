@@ -1,0 +1,11 @@
+{
+  "algorithm": "sha256",
+  "resources": {
+    "/assets/index.BA22Xa4x.js": "sha256-G5TuT9Wvbq20jNhfnTyIS8HJEs4UfeUE3zFHarEt984=",
+    "/assets/index.BA22Xa4x.js.map": "sha256-/vRMemVecu7uZMVfOig7/ZX1pbJJDk9z/UGnrf20fho=",
+    "/assets/index.DWmVXlS1.css": "sha256-g+YHj+48CIOVCkc6V+C4eO/XdB6TQu6HuRtnF04KDnA=",
+    "/assets/nodeCryptoShim.DTwgsOT4.js": "sha256-2Jr4p1Eu6bEPGgodAN8w7H7v/nkdob9vyK5uAmjpmrI=",
+    "/assets/nodeCryptoShim.DTwgsOT4.js.map": "sha256-XeygI0Eab/VrjUng2V68o/bOP8UijmyexNz7YkwH4j4=",
+    "/index.html": "sha256-pCxSiIT+48ft5ItizBF4Z0HwLQXVaShfGlongqB2yEs="
+  }
+}

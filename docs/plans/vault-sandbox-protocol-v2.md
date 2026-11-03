@@ -94,9 +94,12 @@ Key code facts:
   countdown; nothing explains they are unrelated.
 - The v1 design's anti-clickjacking geometry/visibility checks
   (IntersectionObserver, min-size, fail-closed) are **not implemented**.
-- Sandbox integrity pinning is deliberately off pre-launch
-  (`vaultSandboxManifest.ts`, `VAULT_SANDBOX_INTEGRITY_ENFORCED = false`);
-  unchanged by this proposal, still a firm pre-launch gate.
+- Historical pre-launch integrity deferral is superseded by
+  [vault-sandbox-integrity.md](vault-sandbox-integrity.md): new parents enforce
+  one source-derived immutable pin, including inert popup preopen and same-build
+  ceremony pairing. Old `dev` parents have a separately frozen compatibility
+  root; they are never a fallback for the enforced path. Publication remains a
+  separately authorized security rollout.
 
 ### Why this happened
 
@@ -562,7 +565,7 @@ is only about keeping master shippable.
   (§7.2, deletes `promptSealInput`; import cut), setup PRF-on-create fast
   path, setup+first-seal fold, reveal entry in secret detail.
 - **Phase D — policy & polish**: settings UI (window length, Strict), TTL
-  language sweep (i18n), remove v1 ops from the sandbox, re-pin integrity
+  language sweep (i18n), remove v1 ops from the sandbox, publish the reviewed integrity release
   manifest + versioned iframe URL (existing pre-launch gate, tracked
   separately).
 
