@@ -7,6 +7,57 @@ import { Badge } from '../../ui/badge';
 import { Button } from '../../ui/button';
 import { Input } from '../../ui/input';
 
+/** Key/value inputs of an env or header map (Add form, Configure dialog); `secret` masks typed values. */
+export function McpKeyValueRows({
+  label,
+  rows,
+  onChange,
+  keyPlaceholder,
+  secret = false,
+}: {
+  label: string;
+  rows: McpKeyValueRow[];
+  onChange: (next: McpKeyValueRow[]) => void;
+  keyPlaceholder: string;
+  secret?: boolean;
+}) {
+  const { t } = useTranslation();
+  const setRow = (index: number, patch: Partial<McpKeyValueRow>) =>
+    onChange(rows.map((row, i) => (i === index ? { ...row, ...patch } : row)));
+  return (
+    <>
+      {rows.map((row, index) => (
+        <div key={index} className="flex items-center gap-1.5">
+          <Input
+            aria-label={t('mcpHub.form.key', { label })}
+            value={row.key}
+            onChange={(event) => setRow(index, { key: event.target.value })}
+            className="font-mono"
+            placeholder={keyPlaceholder}
+          />
+          <Input
+            aria-label={t('mcpHub.form.value', { label })}
+            type={secret ? 'password' : undefined}
+            autoComplete={secret ? 'off' : undefined}
+            value={row.value}
+            onChange={(event) => setRow(index, { value: event.target.value })}
+            className="font-mono"
+          />
+          <Button
+            type="button"
+            variant="ghost"
+            size="xs"
+            aria-label={t('mcpHub.form.removeRow')}
+            onClick={() => onChange(rows.filter((_, i) => i !== index))}
+          >
+            <X className="size-3" />
+          </Button>
+        </div>
+      ))}
+    </>
+  );
+}
+
 /** Form tab of the Add MCP dialog. The parent owns state so it survives tab switches. */
 export function McpAddForm({ value, onChange }: { value: McpAddFormState; onChange: (next: McpAddFormState) => void }) {
   const { t } = useTranslation();
@@ -18,8 +69,6 @@ export function McpAddForm({ value, onChange }: { value: McpAddFormState; onChan
   const rowsKey = isHttp ? 'headerRows' : 'envRows';
   const rows = value[rowsKey];
   const setRows = (next: McpKeyValueRow[]) => onChange({ ...value, [rowsKey]: next });
-  const setRow = (index: number, patch: Partial<McpKeyValueRow>) =>
-    setRows(rows.map((row, i) => (i === index ? { ...row, ...patch } : row)));
   // null follows the content: collapsed when empty, expanded once rows exist.
   const [rowsToggled, setRowsToggled] = useState<boolean | null>(null);
   const rowsOpen = rowsToggled ?? rows.length > 0;
@@ -65,32 +114,14 @@ export function McpAddForm({ value, onChange }: { value: McpAddFormState; onChan
             </Button>
           ) : null}
         </div>
-        {rowsOpen && rows.map((row, index) => (
-          <div key={index} className="flex items-center gap-1.5">
-            <Input
-              aria-label={t('mcpHub.form.key', { label: rowsLabel })}
-              value={row.key}
-              onChange={(event) => setRow(index, { key: event.target.value })}
-              className="font-mono"
-              placeholder={isHttp ? t('mcpHub.form.headerKeyPlaceholder') : t('mcpHub.form.envKeyPlaceholder')}
-            />
-            <Input
-              aria-label={t('mcpHub.form.value', { label: rowsLabel })}
-              value={row.value}
-              onChange={(event) => setRow(index, { value: event.target.value })}
-              className="font-mono"
-            />
-            <Button
-              type="button"
-              variant="ghost"
-              size="xs"
-              aria-label={t('mcpHub.form.removeRow')}
-              onClick={() => setRows(rows.filter((_, i) => i !== index))}
-            >
-              <X className="size-3" />
-            </Button>
-          </div>
-        ))}
+        {rowsOpen ? (
+          <McpKeyValueRows
+            label={rowsLabel}
+            rows={rows}
+            onChange={setRows}
+            keyPlaceholder={isHttp ? t('mcpHub.form.headerKeyPlaceholder') : t('mcpHub.form.envKeyPlaceholder')}
+          />
+        ) : null}
       </div>
       {target.kind === 'stdio' ? (
         <div className="flex flex-col gap-1.5">

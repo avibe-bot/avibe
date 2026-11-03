@@ -96,12 +96,33 @@ export function parseMcpTarget(input: string): McpTarget {
   return { kind: 'stdio', command, args };
 }
 
+/** The map a key/value editor holds: rows with a key, keys trimmed, values exactly as typed. */
+export function mcpKeyValueMap(rows: McpKeyValueRow[]): Record<string, string> {
+  return Object.fromEntries(rows.filter((row) => row.key.trim()).map((row) => [row.key.trim(), row.value]));
+}
+
+/**
+ * What the Configure dialog sends: each map that has rows replaces the stored one, an empty
+ * editor leaves its stored map alone. Null while nothing is entered or a named row has no value,
+ * since stored values are never shown and a blank one would silently overwrite a secret.
+ */
+export function mcpConfigurePayload(envRows: McpKeyValueRow[], headerRows: McpKeyValueRow[]): { env?: Record<string, string>; headers?: Record<string, string> } | null {
+  const keyed = [...envRows, ...headerRows].filter((row) => row.key.trim());
+  if (keyed.length === 0 || keyed.some((row) => row.value === '')) return null;
+  const env = mcpKeyValueMap(envRows);
+  const headers = mcpKeyValueMap(headerRows);
+  return {
+    ...(Object.keys(env).length ? { env } : {}),
+    ...(Object.keys(headers).length ? { headers } : {}),
+  };
+}
+
 export function buildMcpFormJson({
   name, target, envRows, headerRows, cwd,
 }: Omit<McpAddFormState, 'target'> & { target: Extract<McpTarget, { kind: 'http' | 'stdio' }> }): string {
   // Only the detected kind's rows are sent: stdio env often holds secrets that must never become remote headers.
   const rows = target.kind === 'http' ? headerRows : envRows;
-  const pairs = Object.fromEntries(rows.filter((row) => row.key.trim()).map((row) => [row.key.trim(), row.value]));
+  const pairs = mcpKeyValueMap(rows);
   const hasPairs = Object.keys(pairs).length > 0;
   const server: Record<string, unknown> = target.kind === 'http'
     ? { type: 'http', url: target.url, ...(hasPairs ? { headers: pairs } : {}) }

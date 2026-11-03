@@ -280,7 +280,6 @@ export const SkillsPage: React.FC = () => {
             { id: 'mcp', label: t('skills.tabMcp') },
           ]}
         />
-        {showMcp ? null : (
         <SegmentedRadio<SkillScope>
           value={scope}
           onChange={setScope}
@@ -290,12 +289,11 @@ export const SkillsPage: React.FC = () => {
             { id: 'project', label: t('skills.scopeProject') },
           ]}
         />
-        )}
-        {showMcp ? null : (
-        <>
         {scope === 'project' && projects.length > 0 ? (
           <ProjectPicker projects={projects} value={projectId} onChange={setProjectId} />
         ) : null}
+        {showMcp ? null : (
+        <>
 
         <div className="flex min-w-[220px] flex-1 items-center gap-2 rounded-md border border-border-strong bg-surface px-3 py-2">
           <Search className="size-3.5 shrink-0 text-muted" />
@@ -330,14 +328,19 @@ export const SkillsPage: React.FC = () => {
 
       {scope === 'project' && activeProject?.folder_path ? (
         <div className="flex items-center gap-2 rounded-[10px] border border-border-strong bg-surface-2 px-3.5 py-2.5">
-          <span className="truncate font-mono text-[10.5px] text-muted">{activeProject.folder_path}/.agents/skills</span>
+          <span className="truncate font-mono text-[10.5px] text-muted">
+            {showMcp ? <>{activeProject.folder_path}/.mcp.json</> : <>{activeProject.folder_path}/.agents/skills</>}
+          </span>
           <div className="flex-1" />
           <Info className="size-3 text-muted" />
-          <span className="text-[11px] text-muted">{t('skills.globalAlsoAvailable')}</span>
+          <span className="text-[11px] text-muted">{t(showMcp ? 'mcpHub.globalAlsoAvailable' : 'skills.globalAlsoAvailable')}</span>
         </div>
       ) : null}
 
-      {showMcp ? <McpHubSection /> : (
+      {/* Each MCP view is its own hub: switching project or scope starts it fresh, so no state crosses. */}
+      {showMcp ? (scope === 'global' ? <McpHubSection key="global" /> : activeProject ? (
+        <McpHubSection key={activeProject.id} project={{ id: activeProject.id, name: activeProject.display_name }} />
+      ) : null) : (
       <>
       {error ? (
         <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive-ink">{error}</div>

@@ -7,6 +7,7 @@ import { apiFetch, recoverRemoteAuthFromSessionProbe, withApiDeadline } from '..
 import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
 import { parseBot, type AgentBotSummary, type Bot, type BotEmojiAvatarInput } from '../lib/bots';
 import { parseNotificationPreferences, type InboxCategory, type NotificationPreferences } from '../lib/notificationPreferences';
+import { mcpPath } from '../lib/mcpPath';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
 import type { AgentGraphParams, AgentGraphResult, AgentGraphVisibility } from '../lib/agentGraph';
 import { onPageReactivated, type PageReactivationListener } from '../lib/pageActivity';
@@ -580,8 +581,15 @@ export interface McpServerSummary {
   name: string;
   description?: string;
   transport?: string;
-  source?: 'avibe' | 'claude' | 'codex' | 'opencode';
+  source?: 'avibe' | 'claude' | 'codex' | 'opencode' | 'project';
   sourcePath?: string;
+  /** `global`, or the project scope of a row from the project's `.mcp.json`. */
+  scope?: string;
+  /** Project rows: pending_approval, needs_config, not_generated, needs_login or ok. */
+  state?: string;
+  /** Project rows: the `${VAR}` names still unset, and every name the entry uses. */
+  missingVariables?: string[];
+  placeholders?: string[];
   command?: string;
   url?: string;
   revision?: string | null;
@@ -988,8 +996,9 @@ export type ApiContextType = {
   importVibeAgents: (payload: { from?: NativeCliBackend; name?: string; all?: boolean; file?: string; backend?: string }) => Promise<{ ok: boolean; imported?: any[]; skipped?: any[]; error?: string; code?: string; message?: string }>;
   // Agent Skills — thin shells over the askill CLI (see /api/skills*).
   listSkills: (params?: { scope?: SkillScope | 'all'; projectId?: string; backends?: string[] }) => Promise<SkillsListResult>;
-  listMcpServers: () => Promise<McpResult & { servers?: McpServerSummary[]; oauthMode?: 'direct' | 'paste' }>;
-  addMcp: (text: string) => Promise<McpResult & {
+  // MCP calls take the Avibe project whose view they act in; without one they act on the global hub.
+  listMcpServers: (project?: string | null) => Promise<McpResult & { servers?: McpServerSummary[]; oauthMode?: 'direct' | 'paste' }>;
+  addMcp: (text: string, project?: string | null) => Promise<McpResult & {
     saved?: string[];
     name?: string;
     toolCount?: number;
@@ -997,11 +1006,14 @@ export type ApiContextType = {
     unchanged?: { name: string; auth?: McpServerSummary['auth'] }[];
     failed?: { name: string; error?: string; type?: string }[];
   }>;
-  discoverMcp: () => Promise<McpResult & { results?: { name: string; status: string; error?: string; toolCount?: number }[] }>;
-  refreshMcp: (name: string) => Promise<McpResult & { name?: string; toolCount?: number }>;
-  removeMcp: (name: string) => Promise<McpResult>;
-  completeMcpLogin: (name: string, callbackUrl: string) => Promise<McpOAuthMutationResult>;
-  getMcpServer: (name: string) => Promise<McpResult & { server?: McpServerSummary; tools?: McpTool[] }>;
+  discoverMcp: (project?: string | null) => Promise<McpResult & { results?: { name: string; status: string; error?: string; toolCount?: number }[] }>;
+  refreshMcp: (name: string, project?: string | null) => Promise<McpResult & { name?: string; toolCount?: number }>;
+  removeMcp: (name: string, project?: string | null) => Promise<McpResult>;
+  approveMcp: (name: string, project: string) => Promise<McpResult & { state?: string }>;
+  /** A supplied map replaces that stored map; an omitted one is kept. */
+  configureMcp: (name: string, secrets: { env?: Record<string, string>; headers?: Record<string, string> }, project: string) => Promise<McpResult & { state?: string }>;
+  completeMcpLogin: (name: string, callbackUrl: string, project?: string | null) => Promise<McpOAuthMutationResult>;
+  getMcpServer: (name: string, project?: string | null) => Promise<McpResult & { server?: McpServerSummary; tools?: McpTool[] }>;
   previewSkillSource: (source: string, params?: { projectId?: string }) => Promise<SkillsPreviewResult>;
   addSkill: (payload: { source: string; scope: SkillScope; projectId?: string; backends?: string[]; all?: boolean; skill?: string; copy?: boolean }) => Promise<SkillsMutationResult>;
   removeSkill: (name: string, params?: { scope?: SkillScope; projectId?: string; backends?: string[] }) => Promise<SkillsMutationResult>;
@@ -4515,13 +4527,15 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const qs = search.toString();
       return getCachedJson(qs ? `/api/skills?${qs}` : '/api/skills', 5_000);
     },
-    listMcpServers: () => getJson('/api/mcp', { handleError: false }),
-    addMcp: (text) => postJson('/api/mcp', { text }, { handleError: false }),
-    discoverMcp: () => postJson('/api/mcp/discover', {}, { handleError: false }),
-    refreshMcp: (name) => postJson(`/api/mcp/${encodeURIComponent(name)}/refresh`, {}, { handleError: false }),
-    removeMcp: (name) => deleteJson(`/api/mcp/${encodeURIComponent(name)}`, undefined, { handleError: false }),
-    completeMcpLogin: (name, callbackUrl) => postJson(`/api/mcp/${encodeURIComponent(name)}/oauth/complete`, { callbackUrl }, { handleError: false }),
-    getMcpServer: (name) => getJson(`/api/mcp/${encodeURIComponent(name)}`, { handleError: false }),
+    listMcpServers: (project) => getJson(mcpPath('', project), { handleError: false }),
+    addMcp: (text, project) => postJson(mcpPath('', project), { text }, { handleError: false }),
+    discoverMcp: (project) => postJson(mcpPath('/discover', project), {}, { handleError: false }),
+    refreshMcp: (name, project) => postJson(mcpPath(`/${encodeURIComponent(name)}/refresh`, project), {}, { handleError: false }),
+    removeMcp: (name, project) => deleteJson(mcpPath(`/${encodeURIComponent(name)}`, project), undefined, { handleError: false }),
+    approveMcp: (name, project) => postJson(mcpPath(`/${encodeURIComponent(name)}/approve`, project), {}, { handleError: false }),
+    configureMcp: (name, secrets, project) => postJson(mcpPath(`/${encodeURIComponent(name)}/configure`, project), secrets, { handleError: false }),
+    completeMcpLogin: (name, callbackUrl, project) => postJson(mcpPath(`/${encodeURIComponent(name)}/oauth/complete`, project), { callbackUrl }, { handleError: false }),
+    getMcpServer: (name, project) => getJson(mcpPath(`/${encodeURIComponent(name)}`, project), { handleError: false }),
     previewSkillSource: (source, params) =>
       postJson('/api/skills/preview', { source, project_id: params?.projectId }),
     addSkill: (payload) =>

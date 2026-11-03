@@ -1,16 +1,36 @@
 // The MCP tab of the shipped Skills & MCP page, rendered from `/api/mcp` fixtures. The tab and the open
 // server come from the page's link (`?tab=mcp`, `?mcp=<name>`); the OAuth login returns to
-// `/skills?mcp=<name>&oauth=success`. Dialogs are the shipped views, open over the page.
-import { McpAddDialog, McpLoginDialog, McpRemoveDialog } from '@/components/workbench/skills/McpHubSection';
+// `/skills?mcp=<name>&oauth=success`. Dialogs are the shipped views, open over the page. The Project
+// scope (`&scope=project&project=<id>`) lists that project's `.mcp.json` servers beside the global ones;
+// a project login returns there with the same params.
+import {
+  McpAddDialog,
+  McpApproveDialog,
+  McpConfigureDialog,
+  McpLoginDialog,
+  McpRemoveDialog,
+} from '@/components/workbench/skills/McpHubSection';
 
 import { EMPTY_MCP_ADD_FORM, type McpAddFormState, type McpAddTab } from '@/lib/mcpAddForm';
 
 import { frames } from '../../frame';
-import { globalChecks, globalSkills, mcpApi, mcpServers, skillsApi, skillsFixtures } from './fixtures';
+import { globalChecks, globalSkills, mcpApi, mcpServers, projectMcpApi, projectMcpServers, skillsApi, skillsFixtures } from './fixtures';
 import { skillsPage } from './page.design';
 
 const hubFixtures = (servers = mcpServers) => skillsFixtures({ ...skillsApi(globalSkills, globalChecks), ...mcpApi(servers) });
 const context7 = mcpServers.find((server) => server.name === 'context7')!;
+const projectRoute = '/skills?tab=mcp&scope=project&project=proj_avibe';
+const projectServer = (name: string) => projectMcpServers.find((server) => server.name === name)!;
+const projectFrame = (name: string, title: string, route: string, render: () => React.ReactNode) => ({
+  name,
+  title,
+  width: 1192,
+  height: 900,
+  status: 'shipped' as const,
+  route,
+  fixtures: skillsFixtures(projectMcpApi()),
+  render,
+});
 const pasted = `{
   "mcpServers": {
     "docs": {
@@ -191,6 +211,58 @@ const designFrames = frames([
     }),
     render: skillsPage,
   },
+  projectFrame('project', 'MCP · 项目范围 · 各状态', projectRoute, skillsPage),
+  projectFrame('project-pending', 'MCP · 项目 · 待批准详情', `${projectRoute}&mcp=repo-tools`, skillsPage),
+  projectFrame('project-needs-config', 'MCP · 项目 · 需要配置详情', `${projectRoute}&mcp=sentry`, skillsPage),
+  projectFrame('project-login-complete', 'MCP · 项目登录完成回到项目详情', `/skills?mcp=github&scope=project&project=proj_avibe&oauth=success`, skillsPage),
+  projectFrame('approve', 'MCP · 项目 · 批准确认', `${projectRoute}&mcp=repo-tools`, () => (
+    <>
+      {skillsPage()}
+      <McpApproveDialog server={projectServer('repo-tools')} busy={false} onConfirm={() => {}} onCancel={() => {}} />
+    </>
+  )),
+  projectFrame('configure', 'MCP · 项目 · 配置变量与 Headers', `${projectRoute}&mcp=sentry`, () => (
+    <>
+      {skillsPage()}
+      <McpConfigureDialog
+        server={projectServer('sentry')}
+        envRows={[
+          { key: 'SENTRY_ORG', value: 'avibe' },
+          { key: 'SENTRY_TOKEN', value: '' },
+        ]}
+        headerRows={[]}
+        error={null}
+        busy={false}
+        onEnvRowsChange={() => {}}
+        onHeaderRowsChange={() => {}}
+        onSave={() => {}}
+        onCancel={() => {}}
+      />
+    </>
+  )),
+  projectFrame('project-add', 'MCP · 项目 · 添加到 .mcp.json', projectRoute, () => (
+    <>
+      {skillsPage()}
+      <McpAddDialog
+        open
+        project={{ id: 'proj_avibe', name: 'avibe' }}
+        text={pasted}
+        error={null}
+        result={null}
+        busy={false}
+        adding={false}
+        onTextChange={() => {}}
+        tab="json"
+        onTabChange={() => {}}
+        form={EMPTY_MCP_ADD_FORM}
+        onFormChange={() => {}}
+        onAdd={() => {}}
+        onClose={() => {}}
+        onDone={() => {}}
+        onActivateLogin={() => {}}
+      />
+    </>
+  )),
   {
     name: 'phone',
     title: 'MCP · 手机',

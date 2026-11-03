@@ -6692,7 +6692,8 @@
       "avibe": "Avibe",
       "claude": "Claude",
       "codex": "Codex",
-      "opencode": "OpenCode"
+      "opencode": "OpenCode",
+      "project": "Project"
     },
     "transportStdio": "stdio",
     "transportHttp": "http",
@@ -6718,7 +6719,12 @@
       "usage": "{{message}}",
       "add_failed": "{{message}}",
       "add_partial": "{{message}}",
-      "internal": "MCP operation failed."
+      "internal": "MCP operation failed.",
+      "pending_approval": "This server is waiting for approval.",
+      "needs_config": "This server needs its variables set first.",
+      "not_generated": "The tools have not been generated yet; refresh the server.",
+      "config_changed": ".mcp.json changed while Avibe was writing it. Try again.",
+      "invalid_package": "The stored data of this server is unreadable: {{message}}"
     },
     "addedCount": "Added {{count}} MCP servers.",
     "addedPartial": "Added {{count}}; failed: {{failed}}",
@@ -6766,6 +6772,30 @@
       "headerKeyPlaceholder": "Authorization",
       "envKeyPlaceholder": "API_KEY",
       "rowsToggle": "{{label}} ({{count}})"
-    }
+    },
+    "state": {
+      "ok": "Ready",
+      "needs_login": "Needs login",
+      "pending_approval": "Pending approval",
+      "needs_config": "Needs config",
+      "not_generated": "Not generated"
+    },
+    "stateMissing": "{{state}}: {{names}}",
+    "pendingApprovalHint": "This server is defined in the project repository. Its tools stay off until an Owner approves it.",
+    "needsConfigHint": "Set these variables to finish setup: {{names}}",
+    "notGeneratedHint": "The tools have not been generated for the current definition. Refresh to connect and generate them.",
+    "approve": "Approve",
+    "approveConfirm": "Approve {{name}}?",
+    "approveCommandHint": "This command comes from {{path}} in the project repository. After approval, Avibe runs it on this machine for this project. If the entry changes, it needs approval again.",
+    "approveUrlHint": "This URL comes from {{path}} in the project repository. After approval, Avibe connects to it for this project. If the entry changes, it needs approval again.",
+    "configure": "Configure",
+    "configureTitle": "Configure {{name}}",
+    "configureHint": "Stored values are never shown. A list you fill in replaces the stored one; an empty list keeps it. Values are stored in plaintext on this machine, outside the repository.",
+    "configureMissing": "Missing: {{names}}",
+    "configureVariables": "Variables",
+    "configureSave": "Save",
+    "addProjectSubtitle": "Adds the servers to the .mcp.json of {{project}}. Each one waits for approval before its tools are available.",
+    "removeProjectHint": "This removes {{name}} from {{path}} and drops its approval, stored values and login on this machine.",
+    "globalAlsoAvailable": "Global MCP servers are available here too"
   }
 }

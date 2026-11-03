@@ -145,6 +145,39 @@ describe('SkillsPage links', () => {
   });
 });
 
+describe('SkillsPage MCP project view', () => {
+  it('lists the selected project, follows the picker, and goes back to the global hub', async () => {
+    renderPage('/skills?tab=mcp');
+    await screen.findByText('suno');
+    expect(api.listMcpServers).toHaveBeenLastCalledWith(null);
+    fireEvent.click(tab(en.skills.scopeProject));
+    await waitFor(() => expect(api.listMcpServers).toHaveBeenLastCalledWith('proj_a'));
+    fireEvent.click(screen.getByRole('button', { name: 'alpha' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'beta' }));
+    await waitFor(() => expect(api.listMcpServers).toHaveBeenLastCalledWith('proj_b'));
+    fireEvent.click(tab(en.skills.scopeGlobal));
+    await waitFor(() => expect(api.listMcpServers).toHaveBeenLastCalledWith(null));
+  });
+
+  it('returns a project OAuth login to that project and its own same-named row', async () => {
+    api.listMcpServers.mockImplementation(async (project: string | null) => ({
+      ok: true,
+      oauthMode: 'direct',
+      servers: [
+        project
+          ? { name: 'suno', source: 'project', scope: 'project:proj_b', state: 'ok', auth: 'none', transport: 'http', url: 'https://project.example/mcp', toolCount: 1 }
+          : { name: 'suno', source: 'avibe', scope: 'global', state: 'ok', auth: 'ok', transport: 'http', url: 'https://global.example/mcp', toolCount: 1 },
+      ],
+    }));
+    renderPage('/skills?mcp=suno&scope=project&project=proj_b&oauth=success');
+    expect(await screen.findByText(en.mcpHub.loginComplete)).toBeTruthy();
+    expect(api.listMcpServers.mock.calls).toEqual([['proj_b']]);
+    expect(await screen.findByText(en.mcpHub.callHint.replace('{{name}}', 'suno'))).toBeTruthy();
+    expect(screen.getAllByText('https://project.example/mcp').length).toBeGreaterThan(0);
+    expect(screen.queryByText('https://global.example/mcp')).toBeNull();
+  });
+});
+
 describe('skillsLinkFromParams', () => {
   const link = (query: string) => skillsLinkFromParams(new URLSearchParams(query));
 
