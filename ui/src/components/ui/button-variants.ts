@@ -71,11 +71,16 @@ export const buttonVariants = cva(
         'destructive-soft':
           'gap-1.5 border border-pink/45 bg-pink/15 text-pink-ink hover:border-pink/60 hover:bg-pink/[0.22]',
         link: 'text-primary-ink underline-offset-4 hover:underline',
+        // A card's small action (ui/design: home/home/*): text alone, no border or fill, a soft
+        // wash on hover. The one lead on a page stays solid (`brand`).
+        text: 'gap-0.5 font-semibold text-mint-ink hover:bg-mint-soft',
         accent: 'gap-1.5 border border-cyan/40 bg-cyan-soft text-cyan-ink hover:bg-cyan/15',
       },
       size: {
         // h-6 inline chips beside a chat notice (failure retry).
         '2xs': 'h-6 rounded-md px-2 text-[11px] [&_svg]:size-3',
+        // h-7 text actions on a card row or in the composer's action row.
+        compact: 'h-7 rounded-md px-2 text-xs [&_svg]:size-3.5',
         // h-8 toolbar buttons (LogsPanel/DoctorPanel/SettingsServicePage/AgentDetection toolbar).
         xs: 'h-8 px-3 text-[12px] [&_svg]:size-3.5',
         // h-9 config-inline CTAs (Slack/Discord/Telegram/...).

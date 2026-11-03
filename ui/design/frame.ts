@@ -21,7 +21,7 @@ export interface FrameSpec {
   /** Data the real providers serve to the frame. */
   fixtures?: WorkbenchFixtures;
   /** Initial route for components that read the location: a path (with any query), or a location that
-   *  also carries router state a page reads on arrival (`{ pathname: '/', state: { onboardingCompleted: true } }`). */
+   *  also carries router state a page reads on arrival (`{ pathname, state }`). */
   route?: FrameRoute;
   /** A CSS selector the screenshot hovers before capturing, for hover states (cards, menus). */
   hover?: string;
