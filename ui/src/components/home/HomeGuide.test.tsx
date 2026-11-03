@@ -37,6 +37,7 @@ import { BotsContext, type BotsState } from '../../context/BotsContext';
 import en from '../../i18n/en.json';
 import type { Bot } from '../../lib/bots';
 import { localDate, type HomePreferences } from '../../lib/homePreferences';
+import { resetCoalescedWrites } from '../../lib/useCoalescedWrite';
 import { HomeGuide } from './HomeGuide';
 import { dayNumber, tipsForDay } from './tips';
 
@@ -95,8 +96,17 @@ beforeEach(() => {
   push.state = 'unavailable';
   push.enable.mockReset();
   computerUse.read.mockResolvedValue({ kind: 'unsupported' });
-  api.getHomePreferences.mockResolvedValue(prefs());
-  api.updateHomePreferences.mockImplementation(async (changes: Partial<HomePreferences>) => prefs(changes));
+  // The server's record: a save merges into it (the not-needed list only grows), a read returns it.
+  let stored = prefs();
+  api.getHomePreferences.mockImplementation(async () => stored);
+  api.updateHomePreferences.mockImplementation(async (changes: Partial<HomePreferences>) => {
+    stored = {
+      ...stored,
+      ...changes,
+      setup_not_needed: [...new Set([...stored.setup_not_needed, ...(changes.setup_not_needed ?? [])])],
+    };
+    return stored;
+  });
   api.getConfig.mockResolvedValue({ platforms: { enabled: ['slack'] } });
   api.remoteAccessStatus.mockResolvedValue({ ok: true, paired: true });
   Reflect.deleteProperty(window, '__AVIBE_DESKTOP_SHELL__');
@@ -105,6 +115,8 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  // The account's writer is module state; each case starts with none in flight.
+  resetCoalescedWrites();
   Reflect.deleteProperty(window, '__AVIBE_DESKTOP_SHELL__');
 });
 
@@ -189,6 +201,26 @@ describe('Getting started remembers the account’s answers', () => {
     await user.click(screen.getByRole('button', { name: en.workbench.home.setup.later }));
     expect(api.updateHomePreferences).toHaveBeenLastCalledWith({ setup_later_on: today });
     expect(card()).toBeNull();
+  });
+
+  it('saves one change at a time, so the newest choice is the last one the server commits', async () => {
+    push.state = 'off';
+    api.getConfig.mockResolvedValue({ platforms: { enabled: [] } });
+    let release: () => void = () => {};
+    const save = api.updateHomePreferences.getMockImplementation()!;
+    api.updateHomePreferences.mockImplementationOnce((changes: Partial<HomePreferences>) =>
+      new Promise((resolve) => { release = () => resolve(save(changes)); }));
+    const user = userEvent.setup();
+    renderGuide();
+    await waitFor(() => expect(items()).toEqual(['Turn on notifications', 'Connect a chat app']));
+    await user.click(within(card()!).getAllByRole('button', { name: en.workbench.home.setup.notNeeded })[0]);
+    await user.click(within(card()!).getAllByRole('button', { name: en.workbench.home.setup.notNeeded })[0]);
+    // Both are gone at once; the second save waits behind the first.
+    expect(card()).toBeNull();
+    expect(api.updateHomePreferences.mock.calls).toEqual([[{ setup_not_needed: ['notifications'] }]]);
+    release();
+    await waitFor(() => expect(api.updateHomePreferences).toHaveBeenCalledTimes(2));
+    expect(api.updateHomePreferences.mock.calls[1]).toEqual([{ setup_not_needed: ['chat_apps'] }]);
   });
 
   it.each([

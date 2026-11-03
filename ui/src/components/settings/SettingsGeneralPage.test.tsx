@@ -680,9 +680,12 @@ describe('General settings — Desktop Mini', () => {
 
 describe('General settings — tips on the home', () => {
   it('turns the home’s tips off for the account, and only for a reader who has the home', async () => {
-    const stored = { setup_later_on: null, setup_not_needed: [], tip_hidden_on: null, tips_enabled: true };
-    api.getHomePreferences.mockResolvedValue(stored);
-    api.updateHomePreferences.mockImplementation(async (changes: object) => ({ ...stored, ...changes }));
+    let stored = { setup_later_on: null, setup_not_needed: [], tip_hidden_on: null, tips_enabled: true };
+    api.getHomePreferences.mockImplementation(async () => stored);
+    api.updateHomePreferences.mockImplementation(async (changes: object) => {
+      stored = { ...stored, ...changes };
+      return stored;
+    });
     const view = renderPage();
     expect(screen.queryByRole('switch', { name: en.settings.general.homeTips.title })).toBeNull();
     view.unmount();
