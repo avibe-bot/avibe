@@ -1,5 +1,7 @@
 # Editor Search (in-file + cross-file) — implementation plan
 
+> **Design source of truth**: the design frames in `ui/design/frames/apps/` (`apps/*`). The Pencil frames this plan names were the design it was built from; that file is retired.
+
 Phase 3 of the windowed-apps polish batch. Design approved in `design.pen`
 frame **`Apps · Editor Search (Dark)`** (`mIK0C`). Two surfaces:
 

@@ -76,7 +76,7 @@ import { FilePreview } from '../ui/file-preview';
 import { InlineNameInput } from '../ui/inline-name-input';
 import { FilePicker } from './FilePicker';
 
-// A code-file extension → its accent + glyph (mirrors design nknn2's colored type icons).
+// A code-file extension → its accent + glyph (the colored type icons; ui/design: apps/file-browser/window).
 const EXT_ICON: Record<string, { Icon: LucideIcon; color: string }> = {
   ts: { Icon: FileCode2, color: 'var(--cyan)' },
   tsx: { Icon: FileCode2, color: 'var(--cyan)' },
@@ -188,7 +188,7 @@ const LONG_PRESS_MOVE_PX = 8;
 // blank space for New File/Folder; drag a row onto a folder (row, rail, or breadcrumb) to move it;
 // the search box does a recursive file/folder NAME search under the current folder. Double-clicking a
 // text/code file opens it in the Editor window. Backend contract: ui/src/lib/filesApi.ts →
-// /api/files/*. Design: design.pen `nknn2`.
+// /api/files/*. ui/design: apps/file-browser/*.
 export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: string }> = ({ windowed = false }) => {
   const { t } = useTranslation();
   const wm = useWindowManager();

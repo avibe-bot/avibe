@@ -193,7 +193,7 @@ export const AppWindow: React.FC<{
   const Body = def.Component;
   const Icon = def.icon;
   // A Show Page window shows the app-avatar chip (favicon when the page has one,
-  // else the letter avatar) as its title-bar icon — the approved design (q4E5yl);
+  // else the letter avatar) as its title-bar icon (ui/design: apps/show-page-window/window);
   // built-in apps keep their registry Lucide icon.
   const showpageSid = win.appId === 'showpage' ? (win.params?.sessionId as string | undefined) : undefined;
   const showpageAvatar = showpageSid ? showPageAvatar(showpageSid, win.title ?? '') : null;

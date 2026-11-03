@@ -1,7 +1,7 @@
 # Dock-Pinned Show Page Apps
 
 Status: design approved-pending-owner-review · Plan created 2026-07-13
-Owner: PM session `sesf875xc5svz` · Design frames: `design.pen` (see §8)
+Owner: PM session `sesf875xc5svz` · Design frames: `apps/dock/*`, `apps/show-page-window/*`, `apps/library/*` in `ui/design/` (§8 lists the retired Pencil frames)
 
 ## 1. Background & Goal
 

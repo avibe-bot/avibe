@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%" viewBox="0 0 1040 680" preserveAspectRatio="xMidYMin slice" font-family="PingFang SC, Helvetica, Arial, sans-serif">
+<rect width="1040" height="680" fill="#f6f8fa"/>
+<text x="40" y="56" font-size="24" font-weight="700" fill="#1f2328">Q4 漏斗看板</text>
+<text x="40" y="82" font-size="14" fill="#57606a">由 Agent 生成 · 每 15 分钟从 CRM 同步</text>
+<rect x="880" y="40" width="120" height="30" rx="15" fill="#dafbe1"/><circle cx="900" cy="55" r="4" fill="#1a7f37"/><text x="912" y="60" font-size="13" font-weight="600" fill="#1a7f37">实时更新</text>
+<rect x="40" y="108" width="225" height="104" rx="12" fill="#ffffff" stroke="#d0d7de"/>
+<text x="60" y="138" font-size="13" fill="#57606a">访客</text>
+<text x="60" y="176" font-size="30" font-weight="700" fill="#1f2328">48,210</text>
+<text x="60" y="200" font-size="13" font-weight="600" fill="#1a7f37">+12.4% 较上周</text>
+<rect x="285" y="108" width="225" height="104" rx="12" fill="#ffffff" stroke="#d0d7de"/>
+<text x="305" y="138" font-size="13" fill="#57606a">注册</text>
+<text x="305" y="176" font-size="30" font-weight="700" fill="#1f2328">6,982</text>
+<text x="305" y="200" font-size="13" font-weight="600" fill="#1a7f37">+6.1% 较上周</text>
+<rect x="530" y="108" width="225" height="104" rx="12" fill="#ffffff" stroke="#d0d7de"/>
+<text x="550" y="138" font-size="13" fill="#57606a">付费</text>
+<text x="550" y="176" font-size="30" font-weight="700" fill="#1f2328">1,284</text>
+<text x="550" y="200" font-size="13" font-weight="600" fill="#1a7f37">+3.8% 较上周</text>
+<rect x="775" y="108" width="225" height="104" rx="12" fill="#ffffff" stroke="#d0d7de"/>
+<text x="795" y="138" font-size="13" fill="#57606a">转化率</text>
+<text x="795" y="176" font-size="30" font-weight="700" fill="#1f2328">2.66%</text>
+<text x="795" y="200" font-size="13" font-weight="600" fill="#cf222e">-0.4% 较上周</text>
+<rect x="40" y="232" width="960" height="410" rx="12" fill="#ffffff" stroke="#d0d7de"/>
+<text x="64" y="268" font-size="16" font-weight="700" fill="#1f2328">本周漏斗</text>
+<text x="976" y="268" font-size="13" fill="#57606a" text-anchor="end">10 月 26 日 – 11 月 1 日</text>
+<text x="64" y="326" font-size="14" fill="#1f2328">访问官网</text>
+<rect x="180" y="300" width="660" height="40" rx="8" fill="#0969da"/>
+<text x="852" y="326" font-size="14" font-weight="600" fill="#1f2328">48,210</text>
+<text x="64" y="390" font-size="14" fill="#1f2328">开始试用</text>
+<rect x="180" y="364" width="200" height="40" rx="8" fill="#218bff"/>
+<text x="392" y="390" font-size="14" font-weight="600" fill="#1f2328">14,630</text>
+<text x="976" y="390" font-size="13" fill="#57606a" text-anchor="end">上一步的 30.3%</text>
+<text x="64" y="454" font-size="14" fill="#1f2328">完成设置</text>
+<rect x="180" y="428" width="125" height="40" rx="8" fill="#54aeff"/>
+<text x="317" y="454" font-size="14" font-weight="600" fill="#1f2328">9,120</text>
+<text x="976" y="454" font-size="13" fill="#57606a" text-anchor="end">上一步的 62.3%</text>
+<text x="64" y="518" font-size="14" fill="#1f2328">邀请同事</text>
+<rect x="180" y="492" width="96" height="40" rx="8" fill="#8250df"/>
+<text x="288" y="518" font-size="14" font-weight="600" fill="#1f2328">6,982</text>
+<text x="976" y="518" font-size="13" fill="#57606a" text-anchor="end">上一步的 76.6%</text>
+<text x="64" y="582" font-size="14" fill="#1f2328">首次付费</text>
+<rect x="180" y="556" width="24" height="40" rx="8" fill="#1a7f37"/>
+<text x="216" y="582" font-size="14" font-weight="600" fill="#1f2328">1,284</text>
+<text x="976" y="582" font-size="13" fill="#57606a" text-anchor="end">上一步的 18.4%</text>
+</svg>

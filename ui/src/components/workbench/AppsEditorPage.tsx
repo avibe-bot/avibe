@@ -12,7 +12,7 @@ import { MobileAppHeader } from '../apps/MobileAppHeader';
 // The Editor app as a full-page route (sibling of /apps/files and /apps/terminal). The same IDE is
 // used on desktop and phones so explorer, search, tabs, recent files, and save-as do not disappear
 // on the smaller surface. The mobile shell starts with the explorer collapsed to leave the editor
-// readable, and the activity bar can reopen it when needed. Design: `dnYPx` (IDE) + `w0qoC` (welcome).
+// readable, and the activity bar can reopen it when needed. ui/design: apps/editor/file, apps/editor/welcome, apps/editor/phone.
 const EditorApp = lazy(() => import('./EditorApp').then((m) => ({ default: m.EditorApp })));
 
 // A file handed to the editor when navigating in from the File Browser (mobile) or a direct link.
