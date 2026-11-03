@@ -3525,6 +3525,7 @@
       "roleAgent": "Agent",
       "title": "Search",
       "entry": "Search",
+      "entryAll": "Search all sessions",
       "placeholder": "Search apps and messages",
       "hint": "Search apps and messages",
       "empty": "No apps or messages found",
@@ -3535,11 +3536,9 @@
       "kbdOpen": "Open",
       "kbdNewTab": "New Tab",
       "kbdClose": "Close",
-      "footerNote": "Apps and message content · all sessions",
-      "scopeAll": "all sessions"
+      "footerNote": "Apps and message content · all sessions"
     },
     "inbox": {
-      "eyebrow": "Inbox",
       "title": "Inbox",
       "headerCount": "{{unread}} unread · {{total}} total",
       "markAllRead": "Mark all read",

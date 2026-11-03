@@ -41,7 +41,7 @@ export function PhoneScreen({
           flat ? 'bg-background' : 'page-glow-console',
         )}
       >
-        {bare ? children : <div className="mx-auto w-full px-4 py-5">{children}</div>}
+        {bare ? children : <div className="mx-auto w-full px-4 pt-4 pb-5">{children}</div>}
       </main>
       {tabBar ?? <ShippedTabBar />}
       {overlay}

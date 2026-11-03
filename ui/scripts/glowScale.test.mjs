@@ -81,6 +81,18 @@ const OFF_RULE = {
   // in dark and `0 2px 16px -4px #10B98124` in light. Blur stays asserted from
   // ROLE_BLUR; the y offset, the spread and the alpha are pinned here, per theme,
   // because an exception that named one theme would leave the other unasserted.
+  // The selected Bot's avatar halo keeps the sized scale's `md` in Dark -- 24/-6 at
+  // 0.44 of the dark neon -- but over white that neon barely registers, so Light
+  // draws a wider, stronger halo of its own brand mint (owner, 2026-11-03). The hue
+  // follows the palette through the mix; spread and alpha are pinned per theme, and
+  // the blur is asserted from ROLE_BLUR like every other role's.
+  selected: {
+    why: 'the selected Bot avatar halo: md in dark; in light a wider, stronger halo of the light mint so it reads over white (owner, 2026-11-03/04)',
+    holds: {
+      dark: /^0 0 \d+px -6px color-mix\(in srgb, var\(--[a-z]+\) 44%, transparent\)$/,
+      light: /^0 0 \d+px 0px color-mix\(in srgb, var\(--[a-z]+\) 75%, transparent\)$/,
+    },
+  },
   onboarding: {
     why: 'the approved active/hover card halo: an offset drop shadow, not a centred glow',
     holds: {
@@ -106,6 +118,7 @@ const ROLE_BLUR = {
   dot: 8, wire: 4, xs: 12, sm: 16, md: 24, lg: 32, xl: 48, nav: 16,
   cta: { dark: 16, light: 20 },
   onboarding: { dark: 12, light: 16 },
+  selected: { dark: 24, light: 20 },
 };
 
 const blurOf = (role, theme) => {

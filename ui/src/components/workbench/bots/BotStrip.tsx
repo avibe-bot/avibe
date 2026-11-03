@@ -24,6 +24,7 @@ import { formatRelativeTime } from '@/lib/relativeTime';
 import { Markdown } from '../../ui/markdown';
 import { Popover, PopoverAnchor, PopoverContent } from '../../ui/popover';
 import { BotAvatar } from '../../ui/bot-avatar';
+import { PageSectionTitle } from '../PageSectionTitle';
 import { RemoveBotDialog } from './RemoveBotDialog';
 
 // A slot is 50px wide (the 40px avatar, its 2px ring, and room for the name) with
@@ -56,7 +57,10 @@ const samePoint = (a: PointerPoint, b: PointerPoint) =>
 export const BotStrip: React.FC<{
   /** The Inbox's per-session unread map: a Bot's count is its Session's (D5). */
   unreadBySession: Record<string, number>;
-}> = ({ unreadBySession }) => {
+  /** `sidebar`: the desktop sidebar's small section label. `page`: a section of a
+   *  phone's tab page (the Workbench tab), titled like the sections beside it. */
+  placement?: 'sidebar' | 'page';
+}> = ({ unreadBySession, placement = 'sidebar' }) => {
   const { t } = useTranslation();
   const { enabled, bots, atLimit, statusBySession, displayName, openProfile, moveBot } = useBots();
   const navigate = useNavigate();
@@ -169,24 +173,30 @@ export const BotStrip: React.FC<{
   return (
     <section
       aria-label={t('bots.sectionLabel')}
-      className="mb-2.5 flex shrink-0 flex-col gap-1"
+      className={clsx('flex shrink-0 flex-col', placement === 'sidebar' ? 'mb-2.5 gap-1' : 'gap-0')}
       onPointerMove={notePointer}
       onPointerLeave={() => {
         scrollHold.current = null;
       }}
       onWheel={notePointer}
     >
-      <div className="flex h-4 items-center px-1">
-        <span className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted">
-          {t('bots.sectionLabel')}
-        </span>
-      </div>
+      {placement === 'sidebar' ? (
+        <div className="flex h-4 items-center px-1">
+          <span className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted">
+            {t('bots.sectionLabel')}
+          </span>
+        </div>
+      ) : (
+        <PageSectionTitle title={t('bots.sectionLabel')} />
+      )}
       <div ref={rowRef} className="flex min-w-0 items-start">
         <div
           ref={scrollerRef}
           onScroll={onStripScroll}
           className={clsx(
-            'flex min-w-0 items-start gap-1 overflow-x-auto px-0.5 pb-0.5 pt-1.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden',
+            // `bot-strip-scroller` gives the selected avatar's halo room inside this
+            // scroll box, which would otherwise clip it to a hard-edged rectangle.
+            'bot-strip-scroller flex min-w-0 items-start gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden',
             !inline && 'flex-1',
             !inline && fade && 'bot-strip-fade',
           )}
@@ -400,12 +410,13 @@ const BotSlot: React.FC<BotSlotProps & { drag?: SlotDrag }> = ({ bot, name, unre
             aria-label={label}
             aria-current={selected ? 'page' : undefined}
             className={clsx(
-              'relative rounded-full p-[2px] transition-shadow focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/60',
-              selected ? 'shadow-[0_0_0_2px_var(--mint)]' : 'hover:shadow-[0_0_0_2px_var(--border-strong)]',
+              'bot-avatar-hover relative rounded-full p-[2px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/60',
               drag && 'touch-none',
             )}
           >
-            <BotAvatar avatar={bot.avatar} name={name} size={40} />
+            {/* The open Bot's own edge lights up (the shared selected look); a hovered
+                one shows a quiet edge in the same place. */}
+            <BotAvatar avatar={bot.avatar} name={name} size={40} selected={selected} className="transition-shadow" />
             {unread > 0 && (
               <span className="absolute -right-1.5 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-cyan px-1 font-mono text-[9px] font-bold text-accent-foreground shadow-glow-xs-cyan">
                 {unreadLabel(unread)}

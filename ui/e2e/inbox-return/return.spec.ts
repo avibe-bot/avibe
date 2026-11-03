@@ -125,7 +125,7 @@ test('does not reuse an old Chat position when a later Search visit returns', as
   await expect.poll(async () => Math.abs((await position(page)).top - before.top)).toBeLessThan(1);
   await page.locator('#app-shell-scroll').dispatchEvent('wheel', { deltaY: -1 });
   await scrollTo(page, 0);
-  if (isMobile) await page.getByText(copy('workbench.search.entry'), { exact: true }).click();
+  if (isMobile) await page.getByText(copy('workbench.search.entryAll'), { exact: true }).click();
   else await page.evaluate(() => { window.location.hash = '/search'; });
   await expect(page.getByRole('textbox', { name: copy('workbench.search.placeholder') })).toBeVisible();
   await page.goBack();
