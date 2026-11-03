@@ -478,8 +478,25 @@ Known data limitations for P1:
 
 ### 5.4 Input bubble
 
-- **Opens** after dictation, prefilled; or from the keyboard button, empty.
+- **Opens** after dictation, prefilled; or from the keyboard button, restoring
+  the current session's draft (empty when none exists).
   Either way it gets focus.
+- **Dismissal (owner decision, 2026-11-03):** a click delivered inside the Mini
+  window outside Vibey's image and the input closes the input, using the same
+  close path as the keyboard button. Both preserve the existing session draft
+  and selected references; reopening from the keyboard or the existing
+  automatic opening path restores them. Input controls and text selection
+  remain inside the input; the dock keeps its own keyboard and voice actions.
+  Vibey's click, double-click, hold and drag semantics do not change.
+  Window blur does not dismiss the input. Transparent desktop pass-through
+  areas continue to deliver clicks to the underlying app, not to Mini.
+  No change to automatic keyboard opening, voice capture, reply linger timing,
+  hover/input holds, unread dots, right-click hiding, or session-switch draft
+  ownership. Escape retains its explicit discard behavior below.
+  Validate at the existing `test:pet-mini` browser boundary: outside clicks
+  close the input, dismissal/reopening retains drafts, and clicking/selecting
+  inside the input keeps it open. Existing tests cover the pet gestures,
+  voice, send, references, and session switching.
 - **Look:** the same width as a card, radius 22px, background `#2a2a2e`,
   border `white / 10%`, padding 6px (14px left), no shadow.
 - **Textarea:** one line by default, auto-grows to 4 lines (96px), 13px,
@@ -904,7 +921,7 @@ GET /api/sessions/main
 - [ ] The marquee shows the realtime preview with the newest words visible,
       a 300ms slide and a 28px left fade.
 - [ ] Dictation ends in a prefilled, focused, unsent input bubble. The
-      keyboard button opens an empty one.
+      keyboard button restores the current session's draft.
 - [ ] The slot opens and closes with height and content motion (300ms); the
       cards slide with it.
 - [ ] Enter sends to main (IME-safe). The main card becomes the message and
