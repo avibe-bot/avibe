@@ -163,8 +163,58 @@ fn the_shell_enables_only_its_declared_capabilities() {
             "main-pet-bind",
             "main-pet-settings",
             "main-computer-use",
-            "main-desktop-update"
+            "main-desktop-update",
+            "main-app-windows"
         ])
+    );
+}
+
+#[test]
+fn native_app_windows_are_main_only_and_loopback_scoped() {
+    let grant = read_json(crate_dir().join("capabilities/main-app-windows.json"));
+    assert_eq!(grant["windows"], serde_json::json!([MAIN_WINDOW]));
+    assert_eq!(grant["local"], false);
+    assert_eq!(grant["permissions"], serde_json::json!(["allow-open-app-window"]));
+    let patterns = loopback_patterns(&grant);
+    for allowed in [
+        "http://127.0.0.1:5123/apps/files?standalone=1",
+        "http://[::1]:6174/show/session-1/",
+    ] {
+        let url = url::Url::parse(allowed).unwrap();
+        assert!(patterns.iter().any(|pattern| pattern.test(&url)), "{url}");
+    }
+    for rejected in ["https://example.com/apps/files", "http://192.168.1.2:5123/apps/files"] {
+        let url = url::Url::parse(rejected).unwrap();
+        assert!(!patterns.iter().any(|pattern| pattern.test(&url)), "{url}");
+    }
+}
+
+#[test]
+fn native_app_windows_follow_runtime_origin_and_exit_lifecycle() {
+    let source = shipping_source("src/lib.rs");
+    let origin = source
+        .split("fn set_active_origin(")
+        .nth(1)
+        .unwrap()
+        .split("/// The current bootstrap status")
+        .next()
+        .unwrap();
+    assert!(origin.contains("let changed"));
+    assert!(origin.contains("if changed"));
+    assert!(origin.contains("app_windows::close_all(app)"));
+
+    let exit = source
+        .split("fn authorize_exit(")
+        .nth(1)
+        .unwrap()
+        .split("#[cfg(target_os = \"macos\")]")
+        .next()
+        .unwrap();
+    assert!(exit.contains("app_windows::close_all(app)"));
+    assert!(source.contains(".with_filter(|label| label == MAIN_WINDOW)"));
+    assert!(
+        shipping_source("src/app_windows.rs").contains("label.starts_with(WINDOW_PREFIX)"),
+        "only app windows are closed during origin changes and exit"
     );
 }
 
@@ -512,6 +562,7 @@ fn every_shell_command_is_declared_so_its_permission_exists() {
         "bootstrap_status",
         "bootstrap_retry",
         "open_install_docs",
+        "open_app_window",
         "computer_use_enable",
         "computer_use_open_permission",
         "desktop_update_state",
@@ -831,6 +882,21 @@ fn the_workbench_learns_it_runs_in_the_shell_from_one_top_level_marker() {
         builder.contains(".initialization_script(DESKTOP_SHELL_MARKER)"),
         "every main window must define the marker before Workbench scripts run"
     );
+    assert!(builder.contains(".initialization_script(DESKTOP_APP_WINDOWS_MARKER)"));
+    let app_marker = source
+        .split("const DESKTOP_APP_WINDOWS_MARKER: &str =")
+        .nth(1)
+        .expect("native app window marker")
+        .split("\";\n")
+        .next()
+        .expect("native app window marker literal");
+    assert!(app_marker.contains("if (window.self === window.top)"));
+    assert!(app_marker.contains("__AVIBE_DESKTOP_APP_WINDOWS__"));
+    let app_windows = shipping_source("src/app_windows.rs");
+    assert!(
+        !app_windows.contains("DESKTOP_SHELL_MARKER") && !app_windows.contains("DESKTOP_APP_WINDOWS_MARKER"),
+        "native app windows must not inherit shell IPC markers"
+    );
     assert!(!source.contains("initialization_script_for_all_frames"));
     let marker = source
         .split("const DESKTOP_SHELL_MARKER: &str =")
@@ -860,6 +926,10 @@ fn the_workbench_learns_it_runs_in_the_shell_from_one_top_level_marker() {
     assert!(
         reader.contains("window.__AVIBE_DESKTOP_PET_SETTINGS__ === true"),
         "Settings must probe the Desktop Mini settings marker"
+    );
+    assert!(
+        reader.contains("window.__AVIBE_DESKTOP_APP_WINDOWS__ === true"),
+        "the Workbench must probe the native app window marker"
     );
 }
 
@@ -941,8 +1011,9 @@ fn native_lifecycle_controls_never_add_a_webview_permission() {
     ] {
         assert!(source.contains(required), "native lifecycle wiring missing {required}");
     }
-    // The three bootstrap commands and the two Computer Use guide actions.
-    assert_eq!(source.matches("#[tauri::command]").count(), 5);
+    // The three bootstrap commands, the native app window command, and the
+    // two Computer Use guide actions.
+    assert_eq!(source.matches("#[tauri::command]").count(), 6);
     for permission in capability()["permissions"].as_array().expect("capability permissions") {
         let permission = permission.as_str().expect("string permission");
         assert!(!permission.contains("autostart") && !permission.contains("tray") && !permission.contains("dialog"));

@@ -11,6 +11,8 @@ declare global {
     readonly __AVIBE_DESKTOP_PET_SETTINGS__?: true;
     /** The macOS shell answers the Computer Use guide's actions. */
     readonly __AVIBE_DESKTOP_COMPUTER_USE__?: true;
+    /** The main Workbench can ask the shell to open standalone native app windows. */
+    readonly __AVIBE_DESKTOP_APP_WINDOWS__?: true;
     /** The current Workbench handled the shell's update-popover request. */
     __AVIBE_DESKTOP_UPDATES_HANDLED__?: boolean;
   }
@@ -116,6 +118,43 @@ export function listenDesktopPetSettings(handler: DesktopPetSettingsListener): (
 
 type ShellInvoke = (command: string, args?: Record<string, unknown>) => Promise<unknown>;
 type ShellTransformCallback = (callback: (event: unknown) => void, once?: boolean) => number;
+
+export type DesktopAppWindowTarget = {
+  appId: string;
+  sessionId?: string | null;
+  title?: string;
+  newWindow: boolean;
+};
+
+const desktopAppWindowInvoke = (): ShellInvoke | null => {
+  const supported = isDesktopShell() && window.__AVIBE_DESKTOP_APP_WINDOWS__ === true;
+  if (!supported) return null;
+  const internals = (window as unknown as { __TAURI_INTERNALS__?: { invoke?: ShellInvoke } }).__TAURI_INTERNALS__;
+  return internals?.invoke ? internals.invoke.bind(internals) : null;
+};
+
+/**
+ * Ask the native shell to open a validated standalone app page. A missing
+ * marker, old shell, or rejected command is a compatibility signal: callers
+ * must continue with the existing in-Workbench WindowManager path.
+ */
+export async function tryOpenDesktopAppWindow(target: DesktopAppWindowTarget): Promise<boolean> {
+  const invoke = desktopAppWindowInvoke();
+  if (!invoke) return false;
+  try {
+    await invoke('open_app_window', {
+      request: {
+        appId: target.appId,
+        sessionId: target.sessionId ?? null,
+        title: target.title,
+        newWindow: target.newWindow,
+      },
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 const computerUseInvoke = (): ShellInvoke | null => {
   if (!isDesktopShell() || window.__AVIBE_DESKTOP_COMPUTER_USE__ !== true) return null;

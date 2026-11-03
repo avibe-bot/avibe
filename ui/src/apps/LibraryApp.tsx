@@ -26,6 +26,7 @@ import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { SearchField } from '../components/settings/SettingsPrimitives';
 import { openLinkInNewContext } from '../lib/pwaNavigation';
+import { tryOpenDesktopAppWindow } from '../lib/desktopShell';
 import { isDesktopViewport } from '../lib/useIsDesktop';
 
 // The App Library: the app manager, itself a built-in app (§7.1). Two views over
@@ -57,11 +58,13 @@ type LibraryTab = 'apps' | 'showpages';
  * with no standalone surface — the behavior above is unchanged.
  */
 function useOpenApp() {
+  const { t } = useTranslation();
   const wm = useWindowManager();
   const navigate = useNavigate();
   return useCallback(
-    (appId: AppId, opts?: { title?: string; sessionId?: string }, launch?: LaunchModifiers | null) => {
-      if (launch && appLaunchIntent(launch) === 'newTab') {
+    async (appId: AppId, opts?: { title?: string; sessionId?: string }, launch?: LaunchModifiers | null) => {
+      const intent = launch ? appLaunchIntent(launch) : 'activate';
+      if (intent === 'newTab') {
         const href = appTabHref({ appId, sessionId: opts?.sessionId });
         if (href) {
           openLinkInNewContext(href, 'noopener,noreferrer');
@@ -70,6 +73,13 @@ function useOpenApp() {
       }
       const desktop = isDesktopViewport();
       if (desktop) {
+        const href = appTabHref({ appId, sessionId: opts?.sessionId });
+        if (href && await tryOpenDesktopAppWindow({
+          appId,
+          sessionId: opts?.sessionId ?? null,
+          title: opts?.title ?? (appId === 'showpage' ? undefined : t(APP_REGISTRY[appId].titleKey)),
+          newWindow: intent === 'newWindow',
+        })) return;
         wm.openApp(appId, {
           title: opts?.title,
           params: opts?.sessionId ? { sessionId: opts.sessionId, title: opts.title } : undefined,
@@ -82,7 +92,7 @@ function useOpenApp() {
         navigate(`/apps/${appId}`);
       }
     },
-    [wm, navigate],
+    [wm, navigate, t],
   );
 }
 
