@@ -1376,8 +1376,13 @@ for (const reduced of [false, true]) {
     });
     await expect(page.locator('.pet-mini-reply-toggle')).toContainText('做完了');
     for (const frame of frames) expect(Math.abs(frame.centre - centre)).toBeLessThanOrEqual(1);
-    const widths = frames.map((frame) => frame.width);
-    for (let i = 1; i < widths.length; i += 1) expect(widths[i]).toBeGreaterThanOrEqual(widths[i - 1] - 0.5);
+    // The widening starts from the width drawn while thinking, so that width
+    // leads the sequence: the first animated frame is usually sampled after
+    // the morph began, and a start narrower than what was drawn (a twitch
+    // inward) would otherwise go unseen. Layout snaps widths to 1/64px, so a
+    // monotonic morph never steps back by more than that unit.
+    const widths = [narrow.width, ...frames.map((frame) => frame.width)];
+    for (let i = 1; i < widths.length; i += 1) expect(widths[i]).toBeGreaterThanOrEqual(widths[i - 1] - 1 / 64);
     expect(widths.at(-1)).toBeCloseTo(full, 0);
     const between = widths.filter((width) => width > narrow.width + 2 && width < full - 2);
     if (reduced) expect(between).toEqual([]);
