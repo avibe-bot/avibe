@@ -4809,17 +4809,18 @@
       "sendStatusUnknown": "暂时无法确认这条消息是否已送到{{name}}，请先看看对话记录，避免重复发送。",
       "attachmentsUnavailable": "部分附件已不可用，这条消息还没送达。请重新上传附件后再发送。",
       "waitingMessage": "待处理的消息",
-      "working": "{{name}} 正在处理…",
+      "placeholder": "给{{name}}发消息…",
+      "working": "{{name}}正在忙，有话可以接着说…",
       "delivering": "送达中 · {{count}}",
       "notDelivered": "还没送达 · {{count}}",
-      "notDeliveredHint": "没能插进{{name}}正在处理的这一轮，这一轮结束后就会收到。",
-      "sendDeferred": "还是没能插进{{name}}正在处理的这一轮，这一轮结束后就会收到。",
+      "notDeliveredHint": "{{name}}正忙着手上的事，忙完就会看到你发的消息。",
+      "sendDeferred": "{{name}}还没忙完手上的事，忙完就会看到你发的消息。",
       "cancelSend": "不发了",
       "hideDetails": "隐藏细节",
       "hideDetailsFailed": "「隐藏细节」没能保存，请再试一次。",
       "editProfile": "编辑资料",
-      "emptyTitle": "这是你和{{name}}对话的开始",
-      "emptyBody": "这段对话会一直延续：{{name}}会把重要的事记在自己的记忆里，并按顺序处理消息。"
+      "emptyTitle": "嗨，我是{{name}}",
+      "emptyBody": "想做的事、想记住的事，直接告诉我就好。我一直在这儿，也会记得我们聊过的。"
     },
     "agents": {
       "setAsBot": "设为伙伴",

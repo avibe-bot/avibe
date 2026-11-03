@@ -6,7 +6,7 @@ import clsx from 'clsx';
 
 import { useBots } from '../../../context/BotsContext';
 import { useWorkbenchInbox } from '../../../context/WorkbenchInboxContext';
-import { botSessionPath, type Bot } from '@/lib/bots';
+import { botRole, botSessionPath, type Bot } from '@/lib/bots';
 import { formatRelativeTime } from '@/lib/relativeTime';
 import { useIsDesktop } from '@/lib/useIsDesktop';
 import { BotAvatar } from '../../ui/bot-avatar';
@@ -104,6 +104,8 @@ function BotSwitchList({ current, onDone }: { current: string; onDone: () => voi
       <ul className="flex flex-col gap-1">
         {bots.map((bot) => {
           const name = displayName(bot);
+          // The main Bot's stored role is written for Agents; a row shows its UI copy.
+          const role = botRole(bot, t('bots.mainRole'));
           const row = inboxSessions.find((session) => session.session_id === bot.session_id);
           const running = statusBySession[bot.session_id] === 'running';
           const unread = unreadBySession[bot.session_id] ?? 0;
@@ -136,10 +138,10 @@ function BotSwitchList({ current, onDone }: { current: string; onDone: () => voi
                     {running ? (
                       <Trans
                         i18nKey="bots.runningPreview"
-                        values={{ preview: row?.preview_text || bot.role }}
+                        values={{ preview: row?.preview_text || role }}
                         components={{ running: <span className="font-semibold text-mint-ink" /> }}
                       />
-                    ) : (row?.preview_text || bot.role)}
+                    ) : (row?.preview_text || role)}
                   </span>
                 </span>
                 <span className="flex shrink-0 flex-col items-end gap-1">
