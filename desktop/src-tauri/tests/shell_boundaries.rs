@@ -190,35 +190,6 @@ fn native_app_windows_are_main_only_and_loopback_scoped() {
 }
 
 #[test]
-fn native_app_windows_follow_runtime_origin_and_exit_lifecycle() {
-    let source = shipping_source("src/lib.rs");
-    let origin = source
-        .split("fn set_active_origin(")
-        .nth(1)
-        .unwrap()
-        .split("/// The current bootstrap status")
-        .next()
-        .unwrap();
-    assert!(origin.contains("let changed"));
-    assert!(origin.contains("if changed"));
-    assert!(origin.contains("app_windows::close_all(app)"));
-
-    let exit = source
-        .split("fn authorize_exit(")
-        .nth(1)
-        .unwrap()
-        .split("#[cfg(target_os = \"macos\")]")
-        .next()
-        .unwrap();
-    assert!(exit.contains("app_windows::close_all(app)"));
-    assert!(source.contains(".with_filter(|label| label == MAIN_WINDOW)"));
-    assert!(
-        shipping_source("src/app_windows.rs").contains("label.starts_with(WINDOW_PREFIX)"),
-        "only app windows are closed during origin changes and exit"
-    );
-}
-
-#[test]
 fn desktop_update_commands_are_workbench_scoped() {
     let capability = read_json(crate_dir().join("capabilities/main-desktop-update.json"));
     assert_eq!(capability["windows"], serde_json::json!([MAIN_WINDOW]));

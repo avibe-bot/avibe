@@ -12,8 +12,12 @@ use url::Url;
 // Serialize bridge requests so rapid clicks cannot race the label lookup/build.
 pub(crate) static LAUNCH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-pub(crate) const WINDOW_PREFIX: &str = "avibe-app-";
+const WINDOW_PREFIX: &str = "avibe-app-";
 const NEW_WINDOW_MARKER: &str = "--new-";
+
+pub(crate) fn is_app_window(label: &str) -> bool {
+    label.starts_with(WINDOW_PREFIX)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum AppWindowTarget {
@@ -52,7 +56,11 @@ pub(crate) fn target_url(origin: &LoopbackOrigin, target: &AppWindowTarget) -> U
     match target {
         AppWindowTarget::Builtin(app_id) => {
             url.set_path(&format!("/apps/{app_id}"));
-            url.set_query(Some("standalone=1"));
+            url.set_query(Some(if *app_id == "terminal" {
+                "standalone=1&ephemeral=1"
+            } else {
+                "standalone=1"
+            }));
         }
         AppWindowTarget::ShowPage(session_id) => {
             url.set_path(&format!("/show/{session_id}/"));
@@ -115,7 +123,7 @@ pub(crate) fn close_all(app: &AppHandle) {
     let windows: Vec<WebviewWindow> = app
         .webview_windows()
         .into_iter()
-        .filter_map(|(label, window)| label.starts_with(WINDOW_PREFIX).then_some(window))
+        .filter_map(|(label, window)| is_app_window(&label).then_some(window))
         .collect();
     for window in windows {
         let _ = window.destroy();
@@ -222,6 +230,33 @@ mod tests {
             target_url(&origin, &AppWindowTarget::ShowPage("session-1".into())).as_str(),
             "http://127.0.0.1:5123/show/session-1/"
         );
+        assert_eq!(
+            target_url(&origin, &AppWindowTarget::Builtin("terminal")).as_str(),
+            "http://127.0.0.1:5123/apps/terminal?standalone=1&ephemeral=1"
+        );
+    }
+
+    #[test]
+    fn origin_and_exit_cleanup_selects_all_app_windows_and_never_main_or_pet() {
+        let mut labels = vec![crate::MAIN_WINDOW.to_owned(), crate::pet::PET_WINDOW.to_owned()];
+        let mut expected = Vec::new();
+        for target in [
+            AppWindowTarget::Builtin("files"),
+            AppWindowTarget::Builtin("terminal"),
+            AppWindowTarget::Builtin("editor"),
+            AppWindowTarget::ShowPage("session-1".into()),
+        ] {
+            let label = target.base_label();
+            expected.extend([label.clone(), format!("{label}{NEW_WINDOW_MARKER}1")]);
+        }
+        labels.extend(expected.clone());
+        labels.extend([
+            "settings".to_owned(),
+            "avibe-app".to_owned(),
+            "other-app-files".to_owned(),
+        ]);
+        let selected: Vec<_> = labels.into_iter().filter(|label| is_app_window(label)).collect();
+        assert_eq!(selected, expected);
     }
 
     #[test]

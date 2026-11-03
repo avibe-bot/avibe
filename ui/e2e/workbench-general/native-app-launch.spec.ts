@@ -82,3 +82,50 @@ for (const surface of ['Dock', 'Library', 'Search'] as const) {
     });
   }
 }
+
+test('native Terminal windows use independent disposable sessions and preserve browser reattachment', async ({ context }) => {
+  const sessions: string[] = [];
+  const deleted: string[] = [];
+  const openTerminal = async (native: boolean) => {
+    const page = await context.newPage();
+    await page.setViewportSize(DESKTOP);
+    await serveProduct(page);
+    await page.route('**/api/terminal/*', async route => {
+      expect(route.request().method()).toBe('DELETE');
+      deleted.push(new URL(route.request().url()).pathname.split('/').at(-1)!);
+      await route.fulfill({ status: 204 });
+    });
+    const attached = new Set<string>();
+    await page.routeWebSocket('**/api/terminal/*', socket => {
+      const session = new URL(socket.url()).pathname.split('/').at(-1)!;
+      if (!attached.has(session)) sessions.push(session);
+      attached.add(session);
+      socket.send(JSON.stringify({ type: 'ready', persistent: true }));
+    });
+    const count = sessions.length;
+    await page.goto(`/apps/terminal?standalone=1${native ? '&ephemeral=1' : ''}`);
+    await expect.poll(() => sessions.length).toBe(count + 1);
+    return page;
+  };
+
+  const first = await openTerminal(true);
+  await openTerminal(true);
+  const browser = await openTerminal(false);
+  expect(new Set(sessions).size).toBe(3);
+  const persistent = await browser.evaluate(() => localStorage.getItem('avibe.terminal.sessionId'));
+  expect(sessions[2]).toBe(persistent);
+  expect(sessions[0]).toMatch(new RegExp(`^${persistent}-.+-w\\d+$`));
+  expect(sessions[1]).toMatch(new RegExp(`^${persistent}-.+-w\\d+$`));
+
+  // Dispatch the browser lifecycle event while its request routing is still
+  // attached, so the fixture can observe the best-effort keepalive DELETE.
+  deleted.length = 0;
+  await first.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pagehide')));
+  await expect.poll(() => deleted).toContain(sessions[0]);
+  expect(deleted).not.toContain(sessions[1]);
+  expect(deleted).not.toContain(sessions[2]);
+  await browser.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pagehide')));
+  await openTerminal(false);
+  expect(sessions[3]).toBe(persistent);
+  expect(deleted).not.toContain(persistent);
+});

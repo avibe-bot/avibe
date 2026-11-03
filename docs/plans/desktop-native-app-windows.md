@@ -22,10 +22,13 @@ Run focused Rust and UI tests, the UI build, formatting, and the repository's re
 - Closing the main macOS window hides it under the existing lifecycle policy; child windows remain open. Explicit shell exit destroys them.
 - Main and child webviews use the default persistent webview data store, with no private profile or custom store. Authentication uses the same-origin `/api/session` request and cookies; it does not depend on copying a parent's `sessionStorage`.
 - Native launches are serialized to avoid duplicate labels from rapid activation. A completed build rechecks its origin so a concurrent Runtime transition cannot leave a stale child alive.
+- Rust adds `ephemeral=1` to native Terminal URLs. The standalone page reuses the internal window's slot-backed terminal lifecycle: each native window has independent shells, with the same best-effort session deletion on unload/close. Ordinary browser terminal tabs keep persistent reattachment.
 - Dock running indicators remain owned by existing internal windows. Parameterized launches (including chat visualization and editor paths) remain internal.
 
 ## Evidence
 
-The UI production build, focused app-launch/bridge unit tests (34), Rust target tests (4), shell boundary tests (48), UI test typechecking, and the repository lint baseline gate passed locally. Browser interaction coverage exercises Dock, Library, and search against native success, old shells, Web, rejected bridge calls, and Alt/Shift Show Page launches.
+The UI production build, focused app-launch/bridge unit tests, Rust target tests, shell boundary tests, UI test typechecking, and the repository lint baseline gate passed locally. Browser interaction coverage exercises Dock, Library, and search against native success, old shells, Web, rejected bridge calls, and Alt/Shift Show Page launches. A shared-storage terminal regression checks distinct native session IDs, disposal, and ordinary browser reattachment.
+
+Lifecycle selection has a pure-function test proving that cleanup selects every App window while excluding main and pet. Actual destruction on origin changes, clearing, and exit is part of isolated native acceptance; source-text matching is not used to claim that behavior.
 
 Native acceptance is pending an unlocked console. An isolated preview uses bundle identifier `bot.avibe.desktop.nativewindows.acceptance` and port `15177`. On November 4, 2026, the preview reached the local Workbench, but macOS reported `CGSSessionScreenIsLocked=Yes`; blank captures and unverified focus are not acceptance evidence. A durable unlock Watch resumes the remaining native checks and cleanup.

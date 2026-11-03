@@ -31,9 +31,10 @@ export const AppsTerminalPage: React.FC<{ windowed?: boolean; windowId?: string;
   const launchCwd = useMemo(() => readCwd(location.state), [location.state]);
   // A single-app browser tab (`/apps/terminal?standalone=1`): the shell drops its chrome, so the
   // terminal fills the whole web area — no page header, no card border, no padding around it.
-  // Still the ROUTE mount, so the first tab keeps its persistent reattachable session (unlike
-  // `windowed`, whose tabs are ephemeral).
+  // Ordinary browser tabs keep a persistent reattachable first session. Rust marks
+  // native windows ephemeral so each uses the existing independent slot-backed lifecycle.
   const standalone = useStandaloneAppTab();
+  const ephemeral = standalone && new URLSearchParams(location.search).get('ephemeral') === '1';
   const isDesktop = useIsDesktop();
   const mobileRoute = !windowed && !standalone && !isDesktop;
 
@@ -48,7 +49,7 @@ export const AppsTerminalPage: React.FC<{ windowed?: boolean; windowId?: string;
   if (standalone) {
     return (
       <div className="flex h-full w-full overflow-hidden bg-surface">
-        <TerminalTabs launchCwd={launchCwd} launchKey={launchCwd ? location.key : undefined} />
+        <TerminalTabs windowed={ephemeral} launchCwd={launchCwd} launchKey={launchCwd ? location.key : undefined} />
       </div>
     );
   }

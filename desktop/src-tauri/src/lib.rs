@@ -2383,7 +2383,7 @@ pub fn run() {
                     let active_origin = webview
                         .try_state::<Shell>()
                         .and_then(|shell| shell.active_origin.lock().ok().and_then(|active| active.clone()));
-                    if webview.label().starts_with(app_windows::WINDOW_PREFIX) {
+                    if app_windows::is_app_window(webview.label()) {
                         return active_origin.is_some_and(|origin| origin.matches_url_origin(url));
                     }
                     if navigation_is_allowed(url, active_origin.as_ref()) {
