@@ -10,6 +10,8 @@ import { referenceToMarker, type SessionReference } from '@/lib/mentions';
  * the composer to mount.
  */
 let draft = '';
+// The draft exactly as dictation last left it, while every word in it was spoken.
+let dictated: string | null = null;
 let references: SessionReference[] = [];
 const NO_REFERENCES: SessionReference[] = [];
 let draftSession: string | null | undefined;
@@ -28,6 +30,13 @@ const subscribe = (listener: () => void) => {
   listeners.add(listener);
   return () => { listeners.delete(listener); };
 };
+
+/**
+ * What a dictated message carries, so the Agent reads it as speech recognition
+ * (`core/agent_input.is_voice_input`) and the conversation marks it. The same
+ * contract as the hold-to-talk surfaces' `{ input: 'voice' }`.
+ */
+export const DICTATED_MESSAGE_METADATA = { input: 'voice' } as const;
 
 export const petComposer = {
   isUncertain: (sessionId: string | null): boolean => (
@@ -51,21 +60,40 @@ export const petComposer = {
     const candidates = selected ?? (sessionChanged ? NO_REFERENCES : references);
     const next = candidates.filter((reference) => value.includes(referenceToMarker(reference)));
     if (!sessionChanged && draft === value && next.length === references.length && next.every((reference, index) => reference === references[index])) return;
+    if (sessionChanged) dictated = null;
     draftSession = sessionId;
     draft = value;
     references = next;
     notify();
   },
+  /**
+   * Dictation turned the draft `before` into `value`. The result is spoken only
+   * when nothing typed was in it: `before` was empty or still exactly what an
+   * earlier dictation left. Words added to typed text make a typed message.
+   */
+  noteDictation(before: string, value: string) {
+    dictated = !before.trim() || (dictated !== null && before.trim() === dictated.trim()) ? value : null;
+  },
+  /**
+   * Whether `value`, about to be sent, is the dictated draft as it was left:
+   * any character the person typed or changed since makes it typed. Only
+   * surrounding whitespace is ignored, as the send trims it.
+   */
+  isDictated: (value: string): boolean => (
+    dictated !== null && Boolean(value.trim()) && value.trim() === dictated.trim()
+  ),
   bind(sessionId: string | null) {
     if (draftSession === sessionId) return;
     draftSession = sessionId;
     draft = '';
+    dictated = null;
     references = [];
     notify();
   },
   clearDraftIf(value: string) {
     if (draft !== value) return false;
     draft = '';
+    dictated = null;
     references = [];
     notify();
     return true;
