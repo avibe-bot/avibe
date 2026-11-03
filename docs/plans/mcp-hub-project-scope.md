@@ -169,14 +169,17 @@ Consumers, none of which decide scope on their own:
   `dir-` keys are reachable from Sessions and CLI only). Reads check
   `project_access_service.can_read_project`; mutations (add, remove, refresh,
   approve, configure secrets, login, logout) are Owner-only, go over IPC, and
-  the Controller re-checks the Project. Reads go to the project Store, not
-  straight to the global root.
+  the Controller re-checks the Project. Reads use the project scope root, not
+  the global root.
 
 ## 7. Storage and runtime keys
 
-- `repository` becomes a `Store(root)`; global is `Store(~/.avibe/mcp)`, a
-  project scope is `Store(~/.avibe/project_mcp/<key>)`. `_stale` cleanup and `_admit`
-  operate per Store, so project packages are never treated as global leftovers.
+- `repository` keeps its module functions. `mcp_root()` / `package_dir()` and
+  the functions built on them take the scope root (`~/.avibe/mcp` for global,
+  `~/.avibe/project_mcp/<key>` for a project), defaulting to the global root so
+  existing global callers are unchanged. No new Store class. `_stale` cleanup
+  and `_admit` run against the scope's root, so project packages are never
+  treated as global leftovers.
 - One key type `ScopedName(scope, name)` replaces `name` in package locks,
   connection keys (`(scope, name, revision, session)`, including the `("open",)`
   lock), `_oauth_tasks`, `_oauth_providers`, `_oauth_provider_locks`, and the
