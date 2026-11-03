@@ -429,6 +429,19 @@ describe('main-only resolution', () => {
 });
 
 describe('PetPage Vibey conversation', () => {
+  // With nothing to show, a Vibey click opens the input alone (#3057), so the
+  // avatar must not announce its history as expanded.
+  it('opens the input for a first message without announcing an expanded history', async () => {
+    tails.S = [];
+    mainSession('S');
+    render(<PetPage />);
+    const avatar = await screen.findByLabelText('pet.recentTurns');
+    await userEvent.click(avatar);
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'pet.inputPlaceholder' })).toBeTruthy());
+    expect(document.querySelector('.pet-mini-detail.is-open')).toBeNull();
+    expect(avatar.getAttribute('aria-expanded')).toBe('false');
+  });
+
   it('shows a turn the agent could not run, with the way to fix it', async () => {
     tails.S = [
       message('u', 'S', { author: 'user', type: 'user', text: 'hello' }),

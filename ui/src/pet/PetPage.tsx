@@ -923,7 +923,9 @@ const PetSurface: React.FC = () => {
         className="pet-mini-avatar-button"
         // A click opens or closes Vibey's recent turns (§5.1).
         aria-label={t('pet.recentTurns')}
-        aria-expanded={historyOpen}
+        // A history with nothing to draw (no conversation yet) is not expanded:
+        // the click opened only the input.
+        aria-expanded={historyOpen && !noReplyDetail}
         data-pet-hit
         onClick={(event) => {
           if (event.detail !== 0) return;

@@ -1163,6 +1163,7 @@ test('a Vibey click with no conversation yet opens the input and no empty histor
   // no history is drawn above it.
   await expect(page.getByRole('textbox')).toBeVisible();
   await expect(page.locator('.pet-mini-reply-bubble')).toHaveCount(0);
+  await expect(avatar).toHaveAttribute('aria-expanded', 'false');
 });
 
 test('holding Vibey still starts input, not the history', async ({ page }) => {
