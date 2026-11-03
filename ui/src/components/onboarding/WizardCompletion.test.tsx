@@ -190,6 +190,7 @@ describe('explicit any-one-ready completion', () => {
     expect(screen.queryByTestId('destination')).toBeNull();
     fireEvent.click(enter); fireEvent.click(enter);
     expect(await screen.findByTestId('destination')).toBeTruthy();
+    expect(screen.getByTestId('destination').textContent).toBe('{"onboardingCompleted":true}');
     expect(mock.api.mutateConfig).toHaveBeenCalledExactlyOnceWith([{ kind: 'set', path: ['setup_completed'], value: true }]);
     expect(mock.api.setDefaultVibeAgent).toHaveBeenCalledExactlyOnceWith('claude-agent');
     expect(mock.permission).not.toHaveBeenCalled(); expect(mock.control).not.toHaveBeenCalled();

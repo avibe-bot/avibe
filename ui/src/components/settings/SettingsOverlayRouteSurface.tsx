@@ -6,6 +6,7 @@ import { useTranslation } from 'react-i18next';
 
 import { RouteSurfaceActivityBoundary } from '@/components/RouteSurfaceActivityBoundary';
 import { Dialog, DialogSurfaceContent, DialogTitle } from '@/components/ui/dialog';
+import { useSetupHandoffDeparture } from '@/components/workbench/backendReadiness';
 import {
   closeSettingsOverlay,
   isSettingsEntryPath,
@@ -110,6 +111,11 @@ export const SettingsOverlayRouteSurface = ({
   // The route this surface renders behind any overlay — the retained origin
   // while Settings is open, the foreground route otherwise.
   const backgroundLocation = settingsSurfaceOpen ? origin.location : location;
+  // Which route is rendered here is also the only thing that can tell a real
+  // departure from the home apart from the route guard unmounting and remounting
+  // it in place, so the setup handoff reads it from here rather than guessing
+  // from a component's lifecycle.
+  useSetupHandoffDeparture(backgroundLocation.pathname);
   // A retained route replacing itself while Settings is open — a command route
   // like /apps/show/:id opening its window and handing back to the canvas —
   // moves the origin this surface returns to. The rewrite has to reach the

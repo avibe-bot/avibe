@@ -40,6 +40,10 @@ const member = {
   bots: [],
 };
 
+// The setup wizard lands on the home with `{ onboardingCompleted: true }`; the banner shows once the
+// main Bot's backend answers ready.
+const fromSetup = { pathname: '/', state: { onboardingCompleted: true } };
+
 const designFrames = frames([
   {
     name: 'desktop',
@@ -58,6 +62,16 @@ const designFrames = frames([
     height: 720,
     status: 'shipped',
     route: '/',
+    fixtures: ready,
+    render: home,
+  },
+  {
+    name: 'setup-complete',
+    title: '工作台 · 刚完成设置（就绪横幅，整组的第一块）',
+    width: 1440,
+    height: 900,
+    status: 'shipped',
+    route: fromSetup,
     fixtures: ready,
     render: home,
   },
@@ -109,6 +123,16 @@ const designFrames = frames([
     height: 667,
     status: 'shipped',
     route: '/',
+    fixtures: ready,
+    render: home,
+  },
+  {
+    name: 'setup-complete-phone',
+    title: '工作台 · 刚完成设置 · 手机',
+    width: 390,
+    height: 844,
+    status: 'shipped',
+    route: fromSetup,
     fixtures: ready,
     render: home,
   },

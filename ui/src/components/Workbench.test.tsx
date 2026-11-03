@@ -63,8 +63,14 @@ vi.mock('../lib/useIsDesktop', () => ({ useIsDesktop: () => viewport.desktop }))
 vi.mock('../context/InstanceAuthorizationContext', () => ({ useInstanceAuthorization: () => authorization }));
 // The picker's own tests own its menu; here it only says which route it was handed.
 vi.mock('./workbench/AgentRoutePicker', () => ({
-  AgentRoutePicker: ({ value, agentLocked }: { value: { model?: string | null }; agentLocked?: boolean }) => (
-    <span data-testid="route">{`${agentLocked ? 'locked' : 'open'}:${value.model ?? ''}`}</span>
+  AgentRoutePicker: ({ value, agentLocked, onChange }: {
+    value: { model?: string | null }; agentLocked?: boolean; onChange: (patch: Record<string, unknown>) => void;
+  }) => (
+    <>
+      <span data-testid="route">{`${agentLocked ? 'locked' : 'open'}:${value.model ?? ''}`}</span>
+      <button type="button" onClick={() => onChange({ model: 'model-a' })}>pick-a</button>
+      <button type="button" onClick={() => onChange({ model: 'model-b' })}>pick-b</button>
+    </>
   ),
 }));
 vi.mock('./workbench/NewProjectDialog', () => ({ NewProjectDialog: () => <div role="dialog" aria-label="new-project" /> }));
@@ -74,6 +80,8 @@ import { ToastProvider } from '../context/ToastProvider';
 import { WorkbenchInboxContext, type InboxState } from '../context/WorkbenchInboxContext';
 import { WorkbenchProjectsContext, type WorkbenchProjectsTree } from '../context/WorkbenchProjectsContext';
 import en from '../i18n/en.json';
+import { resetCoalescedWrites } from '../lib/useCoalescedWrite';
+import { resetOpenSessionRowWrites } from './workbench/sessionRowRefresh';
 import type { Bot } from '../lib/bots';
 import { Workbench } from './Workbench';
 
@@ -159,6 +167,9 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  // The Session writers are module state shared with the conversation; each case starts clean.
+  resetCoalescedWrites();
+  resetOpenSessionRowWrites();
 });
 
 describe('the Owner home (ui/design: home/home/c-ready-desktop)', () => {
@@ -186,8 +197,12 @@ describe('the Owner home (ui/design: home/home/c-ready-desktop)', () => {
     expect(textbox().value).toBe('Plan my week');
   });
 
-  it('does not offer a second send when it cannot tell whether the first arrived', async () => {
-    posts.answer = () => Promise.reject(new TypeError('network'));
+  it.each([
+    ['the response is lost', () => Promise.reject(new TypeError('network'))],
+    ['the dispatch timed out after the controller took it', () => Promise.resolve(new Response(JSON.stringify({ dispatch_error: 'dispatch_pending' }), { status: 504 }))],
+    ['the gateway failed', () => Promise.resolve(new Response('bad gateway', { status: 502 }))],
+  ])('does not offer a second send when %s', async (_case, answer) => {
+    posts.answer = answer;
     const user = userEvent.setup();
     renderHome();
     await user.type(textbox(), 'Plan my week');
@@ -197,6 +212,23 @@ describe('the Owner home (ui/design: home/home/c-ready-desktop)', () => {
     expect(textbox().value).toBe('Plan my week');
     expect(sendButton()).toHaveProperty('disabled', true);
     expect(posts.calls).toHaveLength(1);
+    expect(where()).toBe('/');
+  });
+
+  it('saves route picks one at a time to the main Bot, folding the ones made meanwhile into the next', async () => {
+    let release: () => void = () => {};
+    api.updateSession.mockImplementationOnce(() => new Promise((resolve) => { release = () => resolve({}); }));
+    const user = userEvent.setup();
+    renderHome();
+    await screen.findByTestId('route');
+    await user.click(screen.getByText('pick-a'));
+    await user.click(screen.getByText('pick-b'));
+    // The newest pick shows at once; its request waits behind the one in flight.
+    expect(screen.getByTestId('route').textContent).toBe('locked:model-b');
+    expect(api.updateSession.mock.calls).toEqual([['ses_main', { model: 'model-a' }]]);
+    act(() => release());
+    await waitFor(() => expect(api.updateSession).toHaveBeenCalledTimes(2));
+    expect(api.updateSession.mock.calls[1]).toEqual(['ses_main', { model: 'model-b' }]);
   });
 
   it('puts each whole ask in the composer without sending, and starts the project ask in the latest project', async () => {

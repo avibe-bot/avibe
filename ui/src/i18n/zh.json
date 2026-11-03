@@ -3417,6 +3417,8 @@
       "addModel": "去接模型",
       "inputPlaceholder": "和 Agent 聊点什么…",
       "noProjectForChat": "还没有项目 — 先添加一个，再开始对话",
+      "ready": "{{backend}} 已连接，可以开始工作",
+      "readyDismiss": "关闭",
       "computerUse": {
         "off": "电脑操作未开启",
         "offDetail": "需要使用时，请从 Avibe 原生控制中开启。",

@@ -3417,6 +3417,8 @@
       "addModel": "Add a model",
       "inputPlaceholder": "Tell the agent what you want…",
       "noProjectForChat": "No projects yet — add one before starting a chat",
+      "ready": "{{backend}} is ready to go",
+      "readyDismiss": "Dismiss",
       "computerUse": {
         "off": "Computer Use is off",
         "offDetail": "Turn it on from the native Avibe control when you want to use it.",

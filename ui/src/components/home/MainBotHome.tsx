@@ -20,6 +20,7 @@ import { HomeAsks } from './HomeAsks';
 import { useHomeAsks } from './homeCopy';
 import { HomeGreeting } from './HomeGreeting';
 import { HomeLayout } from './HomeLayout';
+import { SetupReadyBanner } from './SetupReadyBanner';
 import { useMainBotRoute, useNoModel } from './useMainBot';
 
 const MAIN_BOT_PATH = botSessionPath({ session_id: MAIN_BOT_SESSION_ID });
@@ -96,6 +97,16 @@ export function MainBotHome() {
       }
       if (!response.ok) {
         const body = await response.json().catch(() => null);
+        // Only a proven refusal frees the draft for another try; a timeout after the controller
+        // took the message (`dispatch_pending`), a 5xx, or anything else may already be in the
+        // conversation, so it is treated like a lost response (the same rule as useNewSession).
+        const refused = body?.state === 'retired'
+          || ([400, 403, 404, 409, 422].includes(response.status) && body?.dispatch_error !== 'dispatch_pending');
+        if (!refused) {
+          setUncertain(true);
+          setError(t('bots.conversation.sendStatusUnknown', { name }));
+          return false;
+        }
         const parsed = body ? selectApiErrorFields(body, `HTTP ${response.status}`) : null;
         setError(
           parsed
@@ -116,6 +127,7 @@ export function MainBotHome() {
   const session = route.session;
   return (
     <HomeLayout>
+      <SetupReadyBanner backend={backend} />
       <HomeGreeting bot={mainBot} name={name} introduce={noModel} />
       <HomeAsks asks={asks} quiet={noModel} onAsk={(ask) => composerRef.current?.setDraft(ask)} />
       <div className="flex flex-col gap-2">

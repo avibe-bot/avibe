@@ -6,7 +6,7 @@ import { defineConfig, devices } from '@playwright/test';
 export default defineConfig({
   testDir: './e2e/workbench-general',
   // Run against the built app instead — see playwright.workbench-general-build.config.ts.
-  testIgnore: ['**/composer-mention-picker.spec.ts'],
+  testIgnore: ['**/setup-handoff.spec.ts', '**/composer-mention-picker.spec.ts'],
   // Playwright empties `outputDir` at the start of every run, including a filtered
   // one, so the captures must NOT live inside it: a `-g` re-run of two shots would
   // otherwise delete the other sixteen. Traces get their own subdirectory and the

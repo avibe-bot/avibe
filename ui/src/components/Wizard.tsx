@@ -554,7 +554,7 @@ export function Wizard() {
       }
       // Confirmed persisted, so the journey is over whatever else changed meanwhile:
       // the lease exists to stop the next write, not to take back a finished setup.
-      navigate('/');
+      navigate('/', { state: { onboardingCompleted: true } });
     } finally { completing.current = false; }
   };
   // The stylesheet's stacked and folded reservations count the cards; the lineup is

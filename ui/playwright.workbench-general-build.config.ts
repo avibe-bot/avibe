@@ -4,7 +4,12 @@ import { defineConfig, devices } from '@playwright/test';
  * The same hermetic harness as `playwright.workbench-general.config.ts`, against
  * the built app instead of the dev server.
  *
- * `composer-mention-picker.spec.ts` is here because of React's StrictMode: on the
+ * `setup-handoff.spec.ts` is here because what it grades is a lifecycle: the
+ * home reads the backend for the question it asks, and StrictMode's development
+ * double-mount asks it twice — a claim about which reads the home makes is made
+ * against the bundle, not a server that deliberately runs every effect twice.
+ *
+ * `composer-mention-picker.spec.ts` is here for the same StrictMode reason: on the
  * dev server the `#`/`@` typeahead's first open in a freshly mounted editor
  * often never renders its list, so a spec about where that list lands would
  * grade the development double-mount rather than the picker. The built app
@@ -16,7 +21,7 @@ import { defineConfig, devices } from '@playwright/test';
  */
 export default defineConfig({
   testDir: './e2e/workbench-general',
-  testMatch: ['**/composer-mention-picker.spec.ts'],
+  testMatch: ['**/setup-handoff.spec.ts', '**/composer-mention-picker.spec.ts'],
   outputDir: './e2e/.artifacts/workbench-general/run',
   workers: 1,
   retries: 0,

@@ -1,0 +1,390 @@
+import { expect, test } from '@playwright/test';
+import type { Page } from '@playwright/test';
+
+import { DESKTOP, config, open, serveProduct } from './support';
+import { CONTRACT_VERSION } from '../../src/components/settings/models/types';
+
+/**
+ * The handoff the wizard makes to the home, driven end to end through the real
+ * product: the setup screen's own Enter, the real router, the real
+ * `ApiProvider`, and the home's own readiness read.
+ *
+ * What is under test is a claim about the running system. The wizard says setup
+ * finished; only the backend can say it is ready; and the banner may only speak
+ * once BOTH have, about the backend this home would actually run. So the
+ * fixture holds the home's read open — a state no unit test can stage, because
+ * the pending window only exists between a real navigation and a real response —
+ * and the banner must not appear until that read answers.
+ *
+ * The other half of the claim is that the banner is only a banner. The user is
+ * already working while it arrives, so the route they picked for the main Bot —
+ * the MODEL, which is the field a re-seeded default would quietly overwrite —
+ * has to read the same before it appears, after it appears, and after it is
+ * waved off. The home talks to the main Bot (ui/design: home/home/*), so its
+ * route is the main Bot's conversation and a pick is written there.
+ *
+ * Hermetic like the rest of the suite: every request is answered or refused by
+ * `serveProduct`, nothing reaches a running service, and the two config writes
+ * the flow makes (the provider bootstrap seed and setup completion) are answered
+ * from the same stateful fixture instance. Each test asserts nothing was refused.
+ */
+
+const COMPOSER = 'Message Vibey…';
+const DRAFT = '整理一下这周的发布说明';
+
+/**
+ * One installed, connected assistant and one applied bootstrap assistant. The main
+ * Bot's Agent runs on Codex in this fixture, so Codex is the only backend that can
+ * corroborate anything here — and the Hub supply fixture below still makes its
+ * route explicit.
+ */
+const CONNECTIONS: Record<string, Record<string, unknown>> = {
+  codex: { installed: true, enabled: true, auth: 'api_key', application: 'applied', ready: true, entry_eligible: true },
+  claude: { installed: true, enabled: true, auth: 'api_key', application: 'applied', ready: true, entry_eligible: true },
+  opencode: { installed: false, enabled: false, auth: 'none', application: 'stopped', ready: false, entry_eligible: false },
+};
+
+/**
+ * The default Agent's own model, and the other model its backend offers.
+ *
+ * `PICKED_MODEL` is deliberately NOT the default: a route still showing the
+ * Agent's default after the banner arrives proves nothing, because that is also
+ * what a route reset back to defaults would show. Only a model the user chose
+ * can tell "the pick survived" from "the default was re-applied".
+ */
+const AGENT_MODEL = 'gpt-5';
+const PICKED_MODEL = 'gpt-5-codex';
+const HUB_SOURCE_ID = 'source-openai-fixture';
+
+const HUB_SOURCE = {
+  id: HUB_SOURCE_ID,
+  vendor: 'openai',
+  kind: 'api_key',
+  display_name: 'OpenAI',
+  protocol: 'openai_chat',
+  base_url: null,
+  supply_channel: 'hub',
+  billing: 'metered',
+  state: { status: 'active', retry_at: null, detail_key: null },
+  models: [{
+    id: AGENT_MODEL,
+    display_name: 'GPT-5',
+    origin: 'discovered',
+    reasoning_efforts: [],
+    reasoning_efforts_source: null,
+  }],
+  last_discovered_at: '2026-01-01T00:00:00Z',
+};
+
+const HUB_CODEX_SUPPLY = {
+  backend: 'codex',
+  cli_present: true,
+  mode: 'hub',
+  menu_kind: 'fixed',
+  sources: {
+    order: [HUB_SOURCE_ID],
+    eligibility: [{
+      source_id: HUB_SOURCE_ID,
+      eligible: true,
+      reason_key: null,
+      in_current_model_chain: true,
+      process_availability_reason: null,
+    }],
+  },
+  routes: {},
+  builtin_models: [],
+  catalog_models: [],
+  menu: null,
+  model_supply: [{ model_id: AGENT_MODEL, route_origin: 'automatic', chain_length: 1, has_runnable_hop: true }],
+  named_agents: [{ name: 'codex', effective_model_id: AGENT_MODEL, supply_status: 'ok', route_reason: null }],
+  supply_status: 'ok',
+};
+
+const FULL_AGENTS = {
+  codex: {
+    id: 'agent-codex', name: 'codex', display_name: 'Codex', description: null,
+    backend: 'codex', model: AGENT_MODEL, reasoning_effort: null, enabled: true,
+    archived: false, archived_at: null, source: 'builtin', updated_at: '2026-01-01T00:00:00Z',
+    system_prompt: null, metadata: { builtin_default: true }, created_at: '2026-01-01T00:00:00Z',
+  },
+  claude: {
+    id: 'agent-claude', name: 'claude', display_name: 'Claude Code', description: null,
+    backend: 'claude', model: null, reasoning_effort: null, enabled: true,
+    archived: false, archived_at: null, source: 'builtin', updated_at: '2026-01-01T00:00:00Z',
+    system_prompt: null, metadata: { builtin_default: true }, created_at: '2026-01-01T00:00:00Z',
+  },
+} as const;
+
+const backendOf = (url: string) => new URL(url).pathname.split('/').at(-2) ?? '';
+
+/**
+ * The endpoints the setup flow needs, on top of the shared harness.
+ *
+ * Connection reads answer at once until setup is persisted; every read AFTER
+ * that is the home's own — the wizard is gone by then — and is held until the
+ * test lets it answer. That boundary is the product's, not the harness's: the
+ * completion write is what separates the setup-owned reads from the home's post-handoff reads.
+ */
+const withSetupApi = async (page: Page) => {
+  const homeReads: string[] = [];
+  const writes: unknown[] = [];
+  const routeWrites: unknown[] = [];
+  let completed = false;
+  // The main Bot's conversation, as the server holds it: the home reads its route and writes a pick to it.
+  let mainSession: Record<string, unknown> = {
+    id: 'ses_main', title: '', agent_id: 'agent-main', agent_name: 'main', agent_backend: 'codex',
+    agent_variant: 'codex', model: null, reasoning_effort: null, status: 'active', project_id: null,
+  };
+  let release = () => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+
+  await page.route('**/api/backend/*/connection', async (route) => {
+    const backend = backendOf(route.request().url());
+    if (completed) {
+      homeReads.push(backend);
+      await held;
+    }
+    await route.fulfill({ json: { ok: true, backend, ...CONNECTIONS[backend] } });
+  });
+  await page.route('**/api/backend/*/runtime*', (route) => {
+    const backend = backendOf(route.request().url());
+    return route.fulfill({
+      json: {
+        ok: true,
+        status: CONNECTIONS[backend]?.installed ? 'ok' : 'missing',
+        name: backend,
+        enabled: Boolean(CONNECTIONS[backend]?.enabled),
+        cli_path: backend,
+        resolved_path: `/fixture/bin/${backend}`,
+        installed: Boolean(CONNECTIONS[backend]?.installed),
+        current_version: '1.0.0',
+        latest_version: '1.0.0',
+        has_update: false,
+        supports_restart: true,
+        process_status: CONNECTIONS[backend]?.ready ? 'running' : 'stopped',
+      },
+    });
+  });
+  await page.route('**/api/opencode/permission-status', (route) => route.fulfill({ json: { ok: true, permission_allowed: true } }));
+  await page.route('**/api/models/sources', (route) => route.fulfill({ json: { ok: true, sources: [HUB_SOURCE] } }));
+  await page.route('**/api/models/migration/scan', (route) => route.fulfill({ json: { ok: true, scan: { items: [] } } }));
+  await page.route('**/api/models/runtime/status', (route) => route.fulfill({
+    json: {
+      ok: true,
+      runtime: {
+        contract_version: CONTRACT_VERSION,
+        enabled: true,
+        host_platform: 'linux',
+        manifest: { name: 'cliproxyapi', resolution: 'resolved', version: 'fixture', source_sha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', assets: [] },
+        status: { installed_version: 'fixture', verified: true, health: 'ok' },
+      },
+    },
+  }));
+  await page.route('**/api/models/agents**', (route) => route.fulfill({ json: { ok: true, agents: [HUB_CODEX_SUPPLY] } }));
+  // Preserve the existing brief catalog response while answering the uncached full
+  // records that setup reads to identify its builtin targets.
+  await page.route('**/api/agents**', (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.startsWith('/api/agents/')) {
+      const name = path.split('/').at(-1) ?? '';
+      const agent = FULL_AGENTS[name as keyof typeof FULL_AGENTS];
+      return route.fulfill({ json: agent
+        ? { ok: true, default_agent_name: 'codex', agent }
+        : { ok: false, agent: null, default_agent_name: 'codex' } });
+    }
+    return route.fulfill({
+      json: {
+        ok: true,
+        agents: [
+          { id: 'agent-codex', name: 'codex', backend: 'codex', enabled: true, model: AGENT_MODEL },
+          { id: 'agent-claude', name: 'claude', backend: 'claude', enabled: true },
+          { id: 'agent-main', name: 'main', backend: 'codex', enabled: true, model: AGENT_MODEL },
+        ],
+        default_agent_name: 'codex',
+      },
+    });
+  });
+  await page.route('**/api/codex/models', (route) => route.fulfill({
+    json: { ok: true, models: [AGENT_MODEL, PICKED_MODEL] },
+  }));
+  await page.route('**/api/cli/detect**', (route) => {
+    const binary = new URL(route.request().url()).searchParams.get('binary') ?? '';
+    const name = binary.split('/').pop() ?? '';
+    return route.fulfill({
+      json: CONNECTIONS[name]?.installed ? { found: true, path: `/fixture/bin/${name}` } : { found: false },
+    });
+  });
+  // The two config writes this flow makes: the provider bootstrap seed is not
+  // completion, and only the actual completion write changes the readback state.
+  await page.route('**/api/config', async (route) => {
+    const request = route.request();
+    if (request.method() === 'GET') return route.fulfill({ json: { ...config('en'), setup_completed: completed } });
+    if (request.method() !== 'POST') return route.fallback();
+    const payload = request.postDataJSON();
+    writes.push(payload);
+    if (payload?.setup_completed === true) completed = true;
+    return route.fulfill({ json: { ...config('en'), setup_completed: completed } });
+  });
+
+  await page.route('**/api/sessions/ses_main', async (route) => {
+    const request = route.request();
+    if (request.method() === 'PATCH') {
+      const payload = request.postDataJSON();
+      routeWrites.push(payload);
+      mainSession = { ...mainSession, ...payload };
+    } else if (request.method() !== 'GET') {
+      return route.fallback();
+    }
+    return route.fulfill({ json: mainSession });
+  });
+
+  return { homeReads, writes, routeWrites, release: () => release() };
+};
+
+const composer = (page: Page) => page.getByPlaceholder(COMPOSER);
+// The composer's route: the main Bot's Agent is locked, so the trigger names the model alone.
+const agentTrigger = (page: Page) => page.locator('main#app-shell-scroll').getByRole('button', { name: /gpt-5/ }).first();
+const banner = (page: Page) => page.getByText('Codex is ready to go');
+// The greeting follows the reader's clock; with a model it asks what is next.
+const heroTitle = (page: Page) => page.getByRole('heading', { level: 1, name: /What’s next\?$/ });
+/** Every connection read the home made after setup was about the main Bot's backend. */
+const readsOnlyCodex = (reads: string[]) => reads.length > 0 && reads.every((backend) => backend === 'codex');
+
+/** `gpt-5` is a prefix of `gpt-5-codex`, so "the trigger shows the Agent's own
+ *  default model" has to include the picked one being absent from it. */
+const expectDefaultModel = async (page: Page) => {
+  await expect(agentTrigger(page)).toContainText(AGENT_MODEL);
+  await expect(agentTrigger(page)).not.toContainText(PICKED_MODEL);
+};
+
+/** Walks the real wizard to the point where entering is the user's to do. */
+async function reachEntry(page: Page) {
+  await open(page, '/setup');
+  await page.getByRole('button', { name: 'Get started', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Add model providers', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Continue to assistants', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Choose your AI assistants', exact: true })).toBeVisible();
+  const enter = page.getByRole('button', { name: 'Enter workspace', exact: true });
+  await expect(enter).toBeEnabled();
+  return enter;
+}
+
+test.describe('Setup handoff to the Workbench home', () => {
+  test.use({ viewport: DESKTOP });
+
+  test('announces the backend only once it has answered for itself', async ({ page }, info) => {
+    // The page itself must not fail anywhere along the wizard-to-home path.
+    const pageErrors: string[] = [];
+    page.on('pageerror', (error) => pageErrors.push(error.message));
+    const denied = await serveProduct(page);
+    const setup = await withSetupApi(page);
+
+    const enter = await reachEntry(page);
+    await enter.click();
+
+    // The home, reached by the wizard's own navigation.
+    await expect(page).toHaveURL(/127\.0\.0\.1:5213\/$/);
+    await expect(heroTitle(page)).toBeVisible();
+    expect(setup.writes).toEqual([{}, { setup_completed: true }]);
+
+    // The home asked about the backend the main Bot actually runs — and nothing
+    // else. While those reads are open there is nothing corroborated, so the
+    // wizard's word alone draws no banner, and an unanswered read does not lock
+    // the composer either.
+    await expect.poll(() => readsOnlyCodex(setup.homeReads)).toBe(true);
+    await expect(banner(page)).toHaveCount(0);
+    await expect(composer(page)).toBeEnabled();
+
+    // The user starts working before anything is announced, and picks a model
+    // through the composer's own picker, which writes it to the main Bot's
+    // conversation like the conversation's own picker does.
+    await expectDefaultModel(page);
+    await agentTrigger(page).click();
+    await page.getByRole('button', { name: PICKED_MODEL, exact: true }).click();
+    await page.keyboard.press('Escape');
+    await expect(agentTrigger(page)).toContainText(PICKED_MODEL);
+    await expect.poll(() => setup.routeWrites).toEqual([expect.objectContaining({ model: PICKED_MODEL })]);
+    // Choosing a model is not choosing a backend: still only the main Bot's backend is asked about.
+    expect(readsOnlyCodex(setup.homeReads)).toBe(true);
+    await expect(banner(page)).toHaveCount(0);
+
+    setup.release();
+    await expect(banner(page)).toBeVisible();
+    // The home the wizard hands off to, as the user sees it (a click outside closes the picker).
+    await heroTitle(page).click();
+    await expect(page.getByText(AGENT_MODEL, { exact: true })).toHaveCount(0);
+    await page.screenshot({ path: info.outputPath('home-after-setup.png') });
+
+    // The model the user picked is untouched by the announcement arriving over
+    // it, and setup completion did not rewrite it: the bootstrap seed and
+    // completion remain the only two config writes this flow has made.
+    await expect(agentTrigger(page)).toContainText(PICKED_MODEL);
+    expect(setup.writes).toEqual([{}, { setup_completed: true }]);
+
+    // Dismissing is about the banner and nothing else: the home the user has
+    // already started using is untouched.
+    await composer(page).fill(DRAFT);
+    await page.getByRole('button', { name: 'Dismiss' }).click();
+    await expect(banner(page)).toHaveCount(0);
+    await expect(composer(page)).toHaveValue(DRAFT);
+    await expect(agentTrigger(page)).toContainText(PICKED_MODEL);
+
+    // The completion was consumed, not read: reloading restores the entry as it
+    // now stands, which no longer claims a setup just finished, so once the
+    // home's reads have answered it still says nothing about one.
+    const readsBeforeReload = setup.homeReads.length;
+    await page.reload();
+    await expect(heroTitle(page)).toBeVisible();
+    await expect.poll(() => setup.homeReads.length).toBeGreaterThan(readsBeforeReload);
+    await expect(composer(page)).toBeEnabled();
+    await expect(banner(page)).toHaveCount(0);
+    // The pick was written to the main Bot's conversation, so the new page shows
+    // it; the bootstrap seed and completion remain the only two config writes.
+    await expect(agentTrigger(page)).toContainText(PICKED_MODEL);
+    expect(setup.writes).toEqual([{}, { setup_completed: true }]);
+
+    expect(denied).toEqual([]);
+    expect(pageErrors).toEqual([]);
+  });
+
+  /**
+   * The announcement is about the visit the wizard handed off to, so leaving
+   * that visit ends it — and only the route can say a departure happened. The
+   * home is also unmounted and remounted in place by the setup route guard
+   * re-validating, which is NOT a departure and must still be able to announce;
+   * a lifetime read from the component's own cleanup cannot tell the two apart.
+   *
+   * Driven through the shell's own navigation rather than a harness router, so
+   * what is observed is the real one: real links, real guard, real surface.
+   */
+  test('forgets the announcement once the user leaves the home', async ({ page }) => {
+    const denied = await serveProduct(page);
+    const setup = await withSetupApi(page);
+
+    const enter = await reachEntry(page);
+    await enter.click();
+    await expect(heroTitle(page)).toBeVisible();
+    setup.release();
+    await expect(banner(page)).toBeVisible();
+
+    // Away, through the shell's own nav — and really away: the home's composer
+    // is gone, not covered.
+    await page.getByRole('link', { name: 'Agents', exact: true }).click();
+    await expect(page).toHaveURL(/\/agents$/);
+    await expect(composer(page)).toHaveCount(0);
+
+    // Back to the home as any other visit: nothing is owed, so once the home's
+    // own reads have answered, nothing is announced.
+    const readsBeforeReturn = setup.homeReads.length;
+    // Back through the shell's own brand row. Anchored, so the phone header's
+    // "avibe logo Avibe" could never stand in for it.
+    await page.getByRole('link', { name: /^Avibe/ }).click();
+    await expect(heroTitle(page)).toBeVisible();
+    await expect(composer(page)).toBeVisible();
+    await expect.poll(() => setup.homeReads.length).toBeGreaterThan(readsBeforeReturn);
+    await expect(composer(page)).toBeEnabled();
+    await expect(banner(page)).toHaveCount(0);
+
+    expect(denied).toEqual([]);
+  });
+});
