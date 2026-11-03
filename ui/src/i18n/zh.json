@@ -4774,7 +4774,36 @@
       "formats": "PNG、JPG、WebP，自动裁成圆形",
       "unsupported": "请选择 PNG、JPG 或 WebP 图片。",
       "tooLarge": "图片超过 10 MB。",
-      "useDefault": "恢复默认"
+      "useDefault": "恢复默认",
+      "more": "更多表情",
+      "moreChosen": "更多表情（已选 {{emoji}}）"
+    },
+    "emojiPicker": {
+      "search": "搜索，中英文都可以",
+      "back": "返回",
+      "recent": "最近使用",
+      "loading": "正在加载表情…",
+      "empty": "没有找到表情。",
+      "skinTone": "肤色：{{tone}}",
+      "tones": {
+        "none": "默认",
+        "light": "较浅肤色",
+        "mediumLight": "中等-浅肤色",
+        "medium": "中等肤色",
+        "mediumDark": "中等-深肤色",
+        "dark": "较深肤色"
+      },
+      "groups": {
+        "smileys": "笑脸与情感",
+        "people": "人与身体",
+        "animals": "动物与自然",
+        "food": "食物与饮料",
+        "travel": "旅行与地点",
+        "activities": "活动",
+        "objects": "物品",
+        "symbols": "符号",
+        "flags": "旗帜"
+      }
     },
     "conversation": {
       "sendStatusUnknown": "暂时无法确认这条消息是否已送到{{name}}，请先看看对话记录，避免重复发送。",

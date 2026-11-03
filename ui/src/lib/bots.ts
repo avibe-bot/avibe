@@ -124,9 +124,19 @@ export const BOT_HANDLE_RE = /^[a-z][a-z0-9-]{0,22}[a-z0-9]$/;
 /** The hues the avatar picker offers; a name-derived default draws from them too. */
 export const BOT_AVATAR_HUES = [200, 42, 150, 330, 265, 12, 180, 90] as const;
 
+/** The emoji the avatar picker leads with, one per role people give a Bot, in
+ *  rows of eight; any other emoji is one "More" away. All are Emoji 12 or older,
+ *  so every current system draws them, and fully qualified (with U+FE0F where
+ *  Unicode asks for it), so a pick reads the same here and in the full set. */
 export const BOT_AVATAR_EMOJIS = [
-  '🛡️', '🧭', '📊', '🎨', '🔭', '🧪', '📚', '💼',
-  '🛠️', '📝', '🌐', '🎯', '🤖', '🦉', '🐳', '🚀',
+  // security, product, research, writing, design, data, engineering, operations
+  '🛡️', '🧭', '🔬', '🖋️', '🎨', '📊', '💻', '🛠️',
+  // testing, launches, marketing, partners and people, support, finance, legal, schedule
+  '🧪', '🚀', '📣', '🤝', '🎧', '💰', '⚖️', '📅',
+  // admin, translation, review, ideas, coaching, learning, health, fitness
+  '🗂️', '🌐', '🔍', '💡', '🎯', '📚', '🩺', '💪',
+  // travel, home, cooking, growth, media, and two for any role
+  '✈️', '🏠', '🍳', '🌱', '🎬', '🤖', '🦉',
 ] as const;
 
 /** A stable hue from the name, so the default avatar keeps its color as the

@@ -98,6 +98,77 @@ def test_the_main_bot_is_always_enabled_and_cannot_leave(service):
     assert _session("ses_main")["title"] is None
 
 
+def test_the_main_bot_always_shows_the_mascot(service, home):
+    """Owner decision 2026-11-03: the main Bot's avatar cannot change, and one stored earlier is ignored."""
+    import io
+
+    from PIL import Image
+
+    from core.bots import BotError
+    from core.vibe_agents import agent_bot_record
+
+    bot = service.ensure_main_bot()
+    for avatar in ({"emoji": "🦊", "hue": 30}, None):
+        with pytest.raises(BotError) as refused:
+            service.update_bot("main", avatar=avatar)
+        assert (refused.value.code, refused.value.status) == ("bot_main_avatar", 409)
+    image = io.BytesIO()
+    Image.new("RGB", (64, 64), "red").save(image, format="PNG")
+    with pytest.raises(BotError) as uploaded:
+        service.set_avatar_image("main", image.getvalue())
+    assert uploaded.value.code == "bot_main_avatar"
+    assert not (home / "bots" / "main" / "avatar.png").exists()
+    # The name stays the user's to change.
+    assert service.update_bot("main", display_name="歪比").display_name == "歪比"
+
+    # What an earlier version let the user store stays in the record, unread.
+    (home / "bots" / "main" / "avatar.png").write_bytes(image.getvalue())
+    for stored in ({"kind": "emoji", "emoji": "🦊", "hue": 30}, {"kind": "image"}):
+        with service.engine.begin() as conn:
+            service._write_record(conn, bot.agent, {**agent_bot_record(bot.agent), "avatar": stored})
+        main = service.get_bot("main")
+        assert main.avatar == stored
+        assert main.to_payload()["avatar"] == {"kind": "mascot"}
+        with pytest.raises(BotError) as missing:
+            service.avatar_path("main")
+        assert missing.value.code == "bot_avatar_missing"
+
+
+@pytest.mark.parametrize(
+    "emoji",
+    [
+        "🦊",
+        "☺️",  # a text-default character with VS16
+        "1️⃣",  # a keycap
+        "🇨🇳",  # a country flag: two regional indicators
+        "🏴󠁧󠁢󠁳󠁣󠁴󠁿",  # a subdivision flag: tag characters, 7 code points
+        "👍🏽",  # a skin tone
+        "🧑‍🧑‍🧒‍🧒",  # a ZWJ family, 7 code points
+        "🚶🏻‍♀️‍➡️",  # ZWJ with a skin tone and a direction, 8 code points
+        "🧑🏻‍❤️‍💋‍🧑🏼",  # the longest RGI sequence: 10 code points
+    ],
+)
+def test_an_emoji_avatar_is_any_emoji_sequence(emoji):
+    from core.bots import clean_emoji_avatar
+
+    assert clean_emoji_avatar({"emoji": emoji, "hue": 210}) == {"kind": "emoji", "emoji": emoji, "hue": 210}
+
+
+def test_an_emoji_avatar_is_capped_in_code_points():
+    from core.bots import EMOJI_MAX_LENGTH, BotError, clean_emoji_avatar
+
+    flags = "🇺🇳" * (EMOJI_MAX_LENGTH // 2)
+    assert EMOJI_MAX_LENGTH == 16 and len(flags) == EMOJI_MAX_LENGTH
+    assert clean_emoji_avatar({"emoji": flags, "hue": 0})["emoji"] == flags
+    for invalid in (flags + "🇺", "", "🦊 🦊", "🦊\x07", None):
+        with pytest.raises(BotError) as refused:
+            clean_emoji_avatar({"emoji": invalid, "hue": 0})
+        assert refused.value.code == "bot_avatar_invalid"
+    for hue in (-1, 360, True, "10"):
+        with pytest.raises(BotError):
+            clean_emoji_avatar({"emoji": "🦊", "hue": hue})
+
+
 # --- Bot fields are the catalog's ---------------------------------------------------------------------------------
 
 

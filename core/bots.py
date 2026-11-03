@@ -12,6 +12,9 @@ update can neither set nor clear (``core.vibe_agents.STORE_OWNED_METADATA_KEYS``
 - Bots are the instance Owner's (D1): every operation here requires the Owner.
 - **Hide details** (D5): whether the Bot's conversation hides its execution process, Harness messages, and
   background tasks, so it reads like talking to a person. Kept on the Bot so every device agrees; on when absent.
+- **Avatars** (D5): a custom Bot shows an emoji on a hue, an uploaded image, or its name's first character. The main
+  Bot always shows the Vibey mascot (owner decision, 2026-11-03): changing it is refused, and an avatar stored before
+  that is ignored, not cleared, so no migration rewrites the record.
 """
 
 from __future__ import annotations
@@ -57,6 +60,8 @@ DISPLAY_NAME_MAX_LENGTH = 64
 AVATAR_FILENAME = "avatar.png"
 AVATAR_SIZE = 256
 AVATAR_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+#: Code points in one emoji avatar. The longest RGI sequences (a kiss or a couple with two skin tones, such as
+#: 🧑🏻‍❤️‍💋‍🧑🏼) have 10, a subdivision flag 7; the rest leaves room for longer sequences Unicode may add.
 EMOJI_MAX_LENGTH = 16
 HANDLE_SOURCE_MODEL = "model"
 HANDLE_SOURCE_TRANSLITERATION = "transliteration"
@@ -75,6 +80,11 @@ class BotError(ValueError):
 
 def _not_found(handle: str) -> BotError:
     return BotError("bot_not_found", f"Bot '{handle}' not found", status=404, handle=handle)
+
+
+def _main_avatar_locked() -> BotError:
+    return BotError("bot_main_avatar", "The main Bot always shows the Vibey mascot; its avatar cannot be changed",
+                    status=409)
 
 
 def _now() -> str:
@@ -225,6 +235,9 @@ class Bot:
         return str(self.agent.description or "")
 
     def avatar_payload(self) -> Optional[dict[str, Any]]:
+        if self.builtin:
+            # Whatever an earlier version let the user store, the main Bot is the mascot.
+            return {"kind": "mascot"}
         avatar = self.avatar or {}
         if avatar.get("kind") == "emoji":
             return {"kind": "emoji", "emoji": avatar.get("emoji"), "hue": avatar.get("hue")}
@@ -236,7 +249,7 @@ class Bot:
                 version = None
             if version is not None:
                 return {"kind": "image", "url": f"/api/bots/{self.handle}/avatar?v={version}"}
-        return {"kind": "mascot"} if self.builtin else None
+        return None
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -617,6 +630,8 @@ class BotService:
             reserve_write_lock(conn)
             bot = self._require_bot(conn, handle)
             VibeAgentStore._require_manageable_agent(conn, bot.agent, user_context=context)
+            if avatar is not ... and bot.builtin:
+                raise _main_avatar_locked()
             record = dict(agent_bot_record(bot.agent) or {})
             if display_name is not ...:
                 record["display_name"] = _clean_display_name(display_name, required=not bot.builtin)
@@ -657,9 +672,11 @@ class BotService:
 
     def set_avatar_image(self, handle: str, data: bytes, *, authorization_context: Any = None) -> Bot:
         """Store an uploaded avatar as ``avatar.png`` in the Bot's directory, scaled to 256px (D5)."""
-        require_instance_role(authorization_context, "owner")
-        png = scaled_avatar_png(data)
         bot = self.get_bot(handle, authorization_context=authorization_context)
+        if bot.builtin:
+            # Refused before anything is written: the main Bot's directory gets no avatar it would never show.
+            raise _main_avatar_locked()
+        png = scaled_avatar_png(data)
         directory = ensure_bot_directory(bot.handle)
         target = directory / AVATAR_FILENAME
         temporary = directory / f".{AVATAR_FILENAME}.tmp"
@@ -678,7 +695,7 @@ class BotService:
     def avatar_path(self, handle: str, *, authorization_context: Any = None) -> Path:
         bot = self.get_bot(handle, authorization_context=authorization_context)
         path = bot.directory / AVATAR_FILENAME
-        if (bot.avatar or {}).get("kind") != "image" or not path.is_file():
+        if bot.builtin or (bot.avatar or {}).get("kind") != "image" or not path.is_file():
             raise BotError("bot_avatar_missing", f"Bot '{handle}' has no uploaded avatar", status=404)
         return path
 

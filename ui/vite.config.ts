@@ -2,6 +2,8 @@ import { fileURLToPath, URL } from 'node:url'
 import react from '@vitejs/plugin-react'
 import { configDefaults, defineConfig } from 'vitest/config'
 
+import { emojiCatalog } from './scripts/emojiCatalog.ts'
+
 // Point the dev proxy at any running Avibe instance — e.g. the Incus regression
 // environment — with VIBE_UI_BACKEND=http://127.0.0.1:15130 npm run dev, so UI
 // work can be driven against real data without restarting the local service.
@@ -37,7 +39,7 @@ export default defineConfig({
   // Excluding the directory — rather than renaming the specs — keeps the trap
   // disarmed for every Playwright file added later.
   test: { exclude: [...configDefaults.exclude, 'e2e/**'] },
-  plugins: [react()],
+  plugins: [react(), emojiCatalog()],
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),
