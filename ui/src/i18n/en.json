@@ -4774,7 +4774,36 @@
       "formats": "PNG, JPG, or WebP, cropped to a circle",
       "unsupported": "Choose a PNG, JPG, or WebP image.",
       "tooLarge": "The image is larger than 10 MB.",
-      "useDefault": "Use the default"
+      "useDefault": "Use the default",
+      "more": "More emoji",
+      "moreChosen": "More emoji (chosen: {{emoji}})"
+    },
+    "emojiPicker": {
+      "search": "Search in English or Chinese",
+      "back": "Back",
+      "recent": "Recent",
+      "loading": "Loading emoji…",
+      "empty": "No emoji found.",
+      "skinTone": "Skin tone: {{tone}}",
+      "tones": {
+        "none": "Default",
+        "light": "Light",
+        "mediumLight": "Medium-light",
+        "medium": "Medium",
+        "mediumDark": "Medium-dark",
+        "dark": "Dark"
+      },
+      "groups": {
+        "smileys": "Smileys & emotion",
+        "people": "People & body",
+        "animals": "Animals & nature",
+        "food": "Food & drink",
+        "travel": "Travel & places",
+        "activities": "Activities",
+        "objects": "Objects",
+        "symbols": "Symbols",
+        "flags": "Flags"
+      }
     },
     "conversation": {
       "sendStatusUnknown": "We couldn't confirm whether this reached {{name}}. Check the conversation before sending it again.",

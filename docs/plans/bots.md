@@ -211,6 +211,17 @@ Owner decisions 2026-11-01, from the mockups in this Session's Show Page
     handle is the Agent name, locked.
   - Avatars come from an emoji with a background color, or an uploaded image
     cropped to a circle. AI-generated avatars are left out of the first version.
+  - The emoji grid leads with one emoji per role users commonly give a Bot;
+    its last cell, "More", opens every emoji the system draws (owner decision,
+    2026-11-03): grouped by category, searchable by CLDR names and keywords in
+    English and Chinese at once, recent picks first, with a skin tone. Its data
+    is built from Emojibase into its own lazily loaded chunk, never fetched from
+    a CDN. On a phone it opens as a sheet.
+  - **The main Bot's avatar is the Vibey mascot and cannot change** (owner
+    decision, 2026-11-03); only custom Bots get an avatar choice, and the main
+    Bot's display name stays editable. The server refuses an avatar change or
+    upload for it (`bot_main_avatar`), and an avatar stored before this is
+    ignored rather than cleared, so no migration rewrites the record.
   - The footer reminds the user they can also ask the main Bot to add one.
 - **Avatar storage.** An emoji avatar (emoji and hue) lives in the Agent
   metadata. An uploaded avatar is scaled to 256px and saved as `avatar.png` in
@@ -472,9 +483,9 @@ API invalidates immediately.
 | `GET /api/bots` | Bots in display order: handle, display name (empty means the localized default for the main Bot), avatar (`emoji` with hue, `image` with URL, or the main Bot's mascot), role, Agent name, Session id, position, built-in flag, Hide details |
 | `POST /api/bots` | Create: display name, handle (optional), role, avatar (optional), model (optional). Makes the Vibey Agent, the Bot, its directory, and its Session |
 | `POST /api/bots/set` | Make an existing Vibey Agent a Bot: Agent name, display name, avatar |
-| `PATCH /api/bots/{handle}` | Display name, emoji avatar, position, Hide details (`hide_details`) |
+| `PATCH /api/bots/{handle}` | Display name, emoji avatar (custom Bots only), position, Hide details (`hide_details`) |
 | `DELETE /api/bots/{handle}` | Remove the Bot role (the main Bot refuses) |
-| `PUT /api/bots/{handle}/avatar` | Upload an image; stored as `avatar.png` in the Bot's directory |
+| `PUT /api/bots/{handle}/avatar` | Upload an image (custom Bots only); stored as `avatar.png` in the Bot's directory |
 | `GET /api/bots/{handle}/avatar` | Serve that image |
 | `POST /api/bots/handle-suggestion` | Display name and role in; a free handle and its source (`model` or `transliteration`) out |
 

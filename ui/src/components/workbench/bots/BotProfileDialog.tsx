@@ -8,7 +8,7 @@ import { useApi, type VibeAgentBrief } from '../../../context/ApiContext';
 import { useBots, type BotProfileRequest } from '../../../context/BotsContext';
 import { useToast } from '../../../context/ToastContext';
 import { errorMessage } from '@/lib/errorMessage';
-import { BOT_HANDLE_RE, botSessionPath, eligibleForBot, type Bot, type BotEmojiAvatarInput } from '@/lib/bots';
+import { BOT_HANDLE_RE, botRole, botSessionPath, eligibleForBot, type Bot, type BotEmojiAvatarInput } from '@/lib/bots';
 import { Button } from '../../ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '../../ui/dialog';
 import { Input } from '../../ui/input';
@@ -277,13 +277,13 @@ const BotProfileForm: React.FC<{ request: BotProfileRequest; onClose: () => void
     }
   };
 
-  // The avatar shown: the pick, else what the Bot has, else the name's default.
-  const shownAvatar = avatar.kind === 'emoji'
-    ? { kind: 'emoji' as const, emoji: avatar.emoji, hue: avatar.hue }
-    : avatar.kind === 'keep'
-      ? editing?.avatar ?? null
-      : avatar.kind === 'default' && editing?.builtin
-        ? { kind: 'mascot' as const }
+  // The avatar shown: the main Bot's mascot, the pick, else what the Bot has, else the name's default.
+  const shownAvatar = editing?.builtin
+    ? { kind: 'mascot' as const }
+    : avatar.kind === 'emoji'
+      ? { kind: 'emoji' as const, emoji: avatar.emoji, hue: avatar.hue }
+      : avatar.kind === 'keep'
+        ? editing?.avatar ?? null
         : null;
   const avatarName = name.trim() || (editing ? displayName(editing) : '') || (tab === 'agent' ? pickedAgent?.name ?? '' : '');
   const hasNonDefaultAvatar = avatar.kind === 'emoji' || avatar.kind === 'image'
@@ -301,7 +301,10 @@ const BotProfileForm: React.FC<{ request: BotProfileRequest; onClose: () => void
       ? t('bots.dialog.fromAgentHint')
       : t('bots.dialog.chatHint', { name: mainName });
 
-  const avatarButton = (
+  // The main Bot always shows the Vibey mascot (owner decision, 2026-11-03): only its name is editable.
+  const avatarButton = editing?.builtin ? (
+    <BotAvatar avatar={shownAvatar} name={avatarName} size={64} className="shrink-0" />
+  ) : (
     <Popover open={pickerOpen} onOpenChange={setPickerOpen} modal>
       <PopoverTrigger asChild>
         <button
@@ -497,10 +500,10 @@ const BotProfileForm: React.FC<{ request: BotProfileRequest; onClose: () => void
         )}
 
         {(request.kind === 'edit' ? !editing?.builtin : tab === 'new') && roleField}
-        {request.kind === 'edit' && editing?.builtin && editing.role && (
+        {request.kind === 'edit' && editing?.builtin && (
           <div className="flex flex-col gap-1.5">
             <span className="text-[12px] font-semibold text-foreground">{t('bots.dialog.role')}</span>
-            <p className="text-[12px] leading-relaxed text-muted">{editing.role}</p>
+            <p className="text-[12px] leading-relaxed text-muted">{botRole(editing, t('bots.mainRole'))}</p>
           </div>
         )}
 

@@ -106,6 +106,22 @@ def test_the_bot_lifecycle_over_http(client, tmp_path):
     assert again.get_json()["bot"]["session_id"] == "ses_cso"
 
 
+def test_the_main_bots_avatar_is_refused_over_http_in_the_readers_language(client):
+    from PIL import Image
+
+    zh = {**csrf_headers(client), "Accept-Language": "zh-CN"}
+    patched = client.patch("/api/bots/main", json={"avatar": {"emoji": "🦊", "hue": 30}}, headers=zh)
+    error = patched.get_json()["error"]
+    assert (patched.status_code, error["code"], error["message"]) == (
+        409, "bot_main_avatar", "主伙伴始终使用 Vibey 吉祥物头像，不能更换。"
+    )
+    image = io.BytesIO()
+    Image.new("RGB", (64, 64), "blue").save(image, format="PNG")
+    uploaded = client.put("/api/bots/main/avatar", content=image.getvalue(), headers={**zh, "content-type": "image/png"})
+    assert (uploaded.status_code, uploaded.get_json()["error"]["code"]) == (409, "bot_main_avatar")
+    assert client.get("/api/bots").get_json()["bots"][0]["avatar"] == {"kind": "mascot"}
+
+
 def test_bot_sessions_refuse_archive_and_title_edits(client):
     client.post("/api/bots", json={"display_name": "Researcher"}, headers=csrf_headers(client))
     archived = client.delete("/api/sessions/ses_researcher", headers=csrf_headers(client))
