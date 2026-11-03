@@ -62,6 +62,8 @@ def _token(value: Any) -> str:
 
 #: How an input no person typed begins (``AgentInputMetadata.render``).
 HARNESS_MARKER = "[Harness:"
+#: The line a dictated input carries, after its time and sender lines (``AgentInputMetadata.render``).
+VOICE_INPUT_LINE = "[Input: voice dictation; may contain speech-recognition errors]"
 #: A Bot's permanent Session id, ``ses_<handle>`` (``core.bots.BOT_HANDLE_PATTERN``).
 _BOT_SESSION = re.compile(r"ses_([a-z][a-z0-9-]{1,23})")
 
@@ -142,6 +144,15 @@ def _address(session: str) -> tuple[str, str]:
     return f"#{session}", f"vibe agent run --session-id {session} --message ..."
 
 
+def is_voice_input(metadata: Any) -> bool:
+    """Whether a person's input was dictated: its message metadata says ``input: 'voice'``.
+
+    The hold-to-talk surfaces set it (``ui/src/lib/voiceMessage.ts``); anything else,
+    including no metadata at all, is typed.
+    """
+    return isinstance(metadata, Mapping) and metadata.get("input") == "voice"
+
+
 def harness_hint(spec: Mapping[str, Any], *, receiver: Any = None) -> str:
     """Where an Agent run's result goes, for the line after its ``[Harness: ...]`` label.
 
@@ -208,6 +219,9 @@ class AgentInputMetadata:
     #: The block the first turn after a backend switch carries ahead of everything else
     #: (``core/session_handoff.py``); it is context for the model, not part of the input.
     handoff: str | None = None
+    #: The person dictated this input (``is_voice_input``). A batch never mixes dictated and
+    #: typed inputs (``storage.message_deliveries.message_merge_identity``), so one flag covers it.
+    voice: bool = False
 
     def render(self, text: str, config: Any, *, now: datetime | None = None) -> str:
         lines: list[str] = [self.handoff.rstrip() + "\n"] if self.handoff and self.handoff.strip() else []
@@ -228,4 +242,7 @@ class AgentInputMetadata:
         if self.user_id and (getattr(config, "include_user_info", True) or forged):
             name = sanitize_identity(self.user_name or self.user_id)
             lines.append(f"[{name}<{sanitize_identity(self.user_id)}>]")
+        # How to read the words, so no display switch hides it.
+        if self.voice:
+            lines.append(VOICE_INPUT_LINE)
         return "\n".join([*lines, text]) if lines else text

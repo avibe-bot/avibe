@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from core.agent_input import AgentInputMetadata, without_legacy_metadata
+from core.agent_input import VOICE_INPUT_LINE, AgentInputMetadata, without_legacy_metadata
 from vibe.i18n import get_supported_languages, get_translator
 
 
@@ -225,6 +225,59 @@ def test_a_persons_message_is_never_tagged(tmp_path, include_time):
 
     assert "[Harness:" not in rendered
     assert rendered.endswith("[Alex<U1>]\nhello")
+
+
+@pytest.mark.parametrize("include_time", [False, True])
+@pytest.mark.parametrize("include_user", [False, True])
+def test_a_dictated_input_says_so_after_its_time_and_sender(include_time, include_user):
+    """A dictated input carries one line, after the per-input lines, whatever the display switches."""
+    config = SimpleNamespace(include_time_info=include_time, include_user_info=include_user)
+    now = datetime(2026, 9, 6, 11, tzinfo=timezone(timedelta(hours=8)))
+    body = "帮我看一下周一的发布"
+    typed = AgentInputMetadata(user_id="U1", user_name="Alex")
+    spoken = AgentInputMetadata(user_id="U1", user_name="Alex", voice=True)
+
+    lines = [
+        *(["[Now: 2026-09-06 11:00:00 UTC+08:00]"] if include_time else []),
+        *(["[Alex<U1>]"] if include_user else []),
+    ]
+    assert typed.render(body, config, now=now) == "\n".join([*lines, body])
+    assert spoken.render(body, config, now=now) == "\n".join([*lines, VOICE_INPUT_LINE, body])
+    assert VOICE_INPUT_LINE == "[Input: voice dictation; may contain speech-recognition errors]"
+
+
+@pytest.mark.parametrize(
+    ("metadata", "voice"),
+    [
+        pytest.param({"input": "voice"}, True, id="dictated"),
+        pytest.param({}, False, id="typed"),
+        pytest.param(None, False, id="no-metadata"),
+        pytest.param({"input": "keyboard"}, False, id="another-mode"),
+        pytest.param({"input": ["voice"]}, False, id="malformed"),
+    ],
+)
+def test_a_persons_input_is_marked_dictated_only_from_its_own_metadata(metadata, voice):
+    from core.handlers.message_handler import MessageHandler
+    from modules.im import MessageContext
+
+    context = MessageContext(
+        user_id="U1", channel_id="C1", platform="avibe",
+        platform_specific={} if metadata is None else {"message_metadata": metadata},
+    )
+    handler = SimpleNamespace(_input_user_name=AsyncMock(return_value="Alex"))
+    prepared = asyncio.run(MessageHandler.prepare_input_metadata(handler, context, human=True))
+
+    assert prepared == AgentInputMetadata(user_id="U1", user_name="Alex", voice=voice)
+
+
+def test_an_input_no_person_typed_is_never_marked_dictated(tmp_path):
+    from core.handlers.message_handler import MessageHandler
+
+    context = _scheduler_context(tmp_path, trigger_kind="watch", task_id="watch-1")
+    context.platform_specific["message_metadata"] = {"input": "voice"}
+    prepared = asyncio.run(MessageHandler.prepare_input_metadata(SimpleNamespace(), context, human=False))
+
+    assert prepared.voice is False
 
 
 @pytest.mark.parametrize("prefix", _RELEASED_PREFIXES)

@@ -1055,6 +1055,68 @@ async def test_resume_renders_a_recovered_steer_as_the_live_path_would(engine, s
     )
 
 
+async def test_a_dictated_input_reaches_vibey_with_its_line_live_and_recovered(engine, session, tmp_path, published) -> None:
+    """A dictated input is read as dictation: the live start's request, and a dictated steer recovered after a
+    restart through the Turn owner and the message handler, as the live steer path renders it."""
+    from types import MethodType
+    from unittest.mock import AsyncMock
+
+    from core.agent_input import VOICE_INPUT_LINE, AgentInputMetadata
+    from core.handlers.message_handler import MessageHandler
+
+    harness = _Harness(engine, tmp_path, "avibe", [[Done(assistant("ok"))], [Done(assistant("ok"))]])
+    owner = SessionTurnManager(
+        harness.controller, build_context=lambda sid: _context("avibe", sid, turn_id="", delivery_id="")
+    )
+    owner._engine = engine
+    harness.controller.session_turns._steer_input_metadata = owner._steer_input_metadata
+    handler = SimpleNamespace(_input_user_name=AsyncMock(return_value="Alex"))
+    harness.controller.message_handler = SimpleNamespace(
+        prepare_input_metadata=MethodType(MessageHandler.prepare_input_metadata, handler)
+    )
+    first = harness.request("check the release")
+    first.input_metadata = AgentInputMetadata(user_id="U1", user_name="Alex", voice=True)
+    await harness.agent.handle_message(first)
+    [live] = [entry for entry in await harness.context_rows() if entry.row_id == first.context.platform_specific["delivery_id"]]
+    assert f"{VOICE_INPUT_LINE}\ncheck the release" in live.message.content[-1].text
+
+    second = harness.request("watch the deploy")
+    turn_id = _turn(second.context)
+    harness.controller._native_start(second.context)
+    await harness.agent.store.consume_input(
+        SESSION, second.context.platform_specific["delivery_id"], UserMessage((text("watch the deploy"),))
+    )
+    with engine.begin() as conn:
+        # The person dictates a steer into the running Turn; the process exits before the loop consumes it.
+        steer = message_deliveries.insert_delivery(
+            conn,
+            delivery_id="dlv_dictated_steer",
+            session_id=SESSION,
+            priority="p1",
+            state="reserved",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=_SCOPES["avibe"], session_id=SESSION, platform="avibe", author="user",
+                source="user", message_type="user", text="also the smoke test", author_id="U1",
+                metadata={"input": "voice"},
+            ),
+            dispatch_text="also the smoke test",
+            now=NOW,
+        )
+        assert message_deliveries.open_steer_attempt_batch(
+            conn, deliveries=[steer], turn_id=turn_id,
+            attempt_id="att_dictated_steer", expected_native_turn_id=harness.controller.started[-1],
+        )
+        assert message_deliveries.materialize_steer_acceptance(
+            conn, leader_delivery_id=steer["id"], expected_attempt_id="att_dictated_steer", turn_id=turn_id, evidence={}
+        )
+
+    harness.new_agent()
+    await harness.agent.handle_message(harness.request("anything new?"))
+
+    [recovered] = [entry for entry in await harness.context_rows() if entry.row_id == "dlv_dictated_steer"]
+    assert recovered.message.content[-1].text.endswith(f"{VOICE_INPUT_LINE}\nalso the smoke test")
+
+
 async def _blocked_second_turn(engine, tmp_path, *, finished_step: bool):
     """A source whose first Turn ended with a reply and whose second Turn is live, blocked inside a tool call."""
     started, release = asyncio.Event(), asyncio.Event()

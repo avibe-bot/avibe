@@ -717,6 +717,84 @@ def test_fifo_segment_starts_one_turn_and_materializes_one_merged_message(manage
     assert stored["delivered_at"] == accepted[0]["materialized_at"]
 
 
+def test_fifo_segment_never_mixes_dictated_and_typed_inputs(managers) -> None:
+    """A batch is dictated or typed, never both: each Turn's input says how its words were entered, and a
+    merged Message keeps the voice mark only for words that were spoken."""
+    from core.agent_input import VOICE_INPUT_LINE
+    from core.handlers.message_handler import MessageHandler
+
+    manager, _other, engine, _engine_b, starts = managers
+    active_turn_id, _ = asyncio.run(_activate(manager, text="active"))
+    queued = [
+        asyncio.run(
+            manager.deliver(
+                DeliveryRequest(
+                    session_id="ses_fsm", priority="p3", content=text, author_id="remote:alice",
+                    message_kind="original", metadata=metadata,
+                ),
+                context=_context(),
+            )
+        )
+        for text, metadata in (
+            ("spoken one", {"input": "voice"}),
+            ("spoken two", {"input": "voice"}),
+            ("typed three", None),
+            ("typed four", {}),
+            ("spoken five", {"input": "voice"}),
+        )
+    ]
+    handler = SimpleNamespace(_input_user_name=AsyncMock(return_value="Alice"))
+    config = SimpleNamespace(include_time_info=False, include_user_info=True)
+
+    rendered_inputs: list[str] = []
+
+    def rendered(turn_id: str) -> str:
+        """The Turn's input as a backend renders it, from its claimed Deliveries, as its start hydrates them."""
+        rows = [_row(engine, str(item.delivery_id)) for item in queued]
+        batch = [row for row in rows if row["turn_id"] == turn_id]
+        context = _context()
+        manager._hydrate_delivery_batch_context(context, batch)
+        metadata = asyncio.run(MessageHandler.prepare_input_metadata(handler, context, human=True))
+        text = next(text for started, text in starts if started == turn_id)
+        rendered_inputs.append(metadata.render(text, config))
+        return rendered_inputs[-1]
+
+    manager._active_identity = lambda _backend, _session_id, logical_id: (logical_id, f"native-{logical_id}")
+
+    def native_start(turn_id: str) -> None:
+        context = _context()
+        context.platform_specific["turn_token"] = turn_id
+        context.platform_specific["agent_runtime_turn_token"] = f"runtime-{turn_id}"
+        manager.on_native_start(
+            context, backend="codex", runtime_key=f"runtime-key-{turn_id}", runtime_turn_id=f"runtime-{turn_id}",
+        )
+
+    turns: list[str] = []
+    previous = active_turn_id
+    for _ in range(3):
+        assert asyncio.run(manager.terminalize_turn(previous))
+        previous = next(turn_id for turn_id, _text in starts if turn_id not in {active_turn_id, *turns})
+        turns.append(previous)
+        assert rendered(previous)
+        native_start(previous)
+
+    assert [next(text for started, text in starts if started == turn_id) for turn_id in turns] == [
+        "spoken one\nspoken two", "typed three\ntyped four", "spoken five",
+    ]
+    assert rendered_inputs == [
+        f"[Alice<remote:alice>]\n{VOICE_INPUT_LINE}\nspoken one\nspoken two",
+        "[Alice<remote:alice>]\ntyped three\ntyped four",
+        f"[Alice<remote:alice>]\n{VOICE_INPUT_LINE}\nspoken five",
+    ]
+
+    with engine.connect() as conn:
+        merged = conn.execute(
+            select(messages).where(messages.c.id == _row(engine, str(queued[0].delivery_id))["message_id"])
+        ).mappings().one()
+    assert merged["content_text"] == "spoken one\nspoken two"
+    assert json.loads(merged["metadata_json"])["input"] == "voice"
+
+
 def test_fifo_segment_merges_only_one_authenticated_author(managers) -> None:
     manager, _other, engine, _engine_b, starts = managers
     active_turn_id, _ = asyncio.run(_activate(manager, text="active"))

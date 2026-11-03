@@ -46,6 +46,16 @@ This line replaces the released `From: #<session>` line, which named only the
 source Session of agent runs and callbacks. The Harness routing block of the
 injected system prompt says what the line means.
 
+A person's dictated input (its Message metadata says `input: "voice"`, which
+the hold-to-talk surfaces set) carries one more line after the clock and
+identity lines, independent of both switches:
+`[Input: voice dictation; may contain speech-recognition errors]`. It is a fact
+of that input, so it is rendered with the input, never in the system prompt.
+Dictated and typed inputs never share a batch (the input mode is part of
+`message_merge_identity`): a merged Message keeps its first Delivery's metadata,
+and each input carries one mode, so a queue that alternates them starts one Turn
+per run of the same mode.
+
 ## Scope
 
 - Keep metadata structured through normal starts, queued batches, and steering.

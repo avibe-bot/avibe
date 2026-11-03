@@ -11,7 +11,7 @@ from core.audio_asr import (
     append_audio_transcripts_to_message,
     format_audio_transcript_echo,
 )
-from core.agent_input import AgentInputMetadata, harness_hints, harness_label
+from core.agent_input import AgentInputMetadata, harness_hints, harness_label, is_voice_input
 from core.backend_failure import (
     CONTINUE_ON_VIBEY_NEXT_STEP,
     emit_backend_failure,
@@ -1541,7 +1541,12 @@ class MessageHandler(BaseHandler):
             # Every input no person typed names its sender, from its dispatch provenance.
             spec = context.platform_specific or {}
             return AgentInputMetadata(harness_source=harness_label(spec), harness_hints=harness_hints(spec))
-        return AgentInputMetadata(user_id=context.user_id, user_name=await self._input_user_name(context))
+        return AgentInputMetadata(
+            user_id=context.user_id,
+            user_name=await self._input_user_name(context),
+            # The durable Delivery's own metadata (``SessionTurnManager._hydrate_delivery_context``).
+            voice=is_voice_input((context.platform_specific or {}).get("message_metadata")),
+        )
 
     async def _input_user_name(self, context: MessageContext) -> str:
         payload = context.platform_specific or {}
