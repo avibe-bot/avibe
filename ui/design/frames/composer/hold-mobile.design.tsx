@@ -52,7 +52,7 @@ const small: [number, number] = [375, 667];
 const recording = { phase: 'recording', text: said.text, stash: said.stash, seconds: 6 } as const;
 
 const designFrames = frames([
-  frame('a-idle', '1 · 静止：输入框为空、键盘没弹起，占位提示「输入消息，或按住说话」', () => <PhoneConversation />),
+  frame('a-idle', '1 · 静止：输入框为空、键盘没弹起，占位提示「给首席安全官发消息，或按住说话」', () => <PhoneConversation />),
   frame('b-pressed', '2 · 按下（未到 300ms：松开 = 点一下，弹出键盘）', hold({ phase: 'pressing' })),
   frame('c-listening', '3 · 按满 300ms：开始录音，还没出字', hold({ phase: 'listening', seconds: 1 })),
   frame('d-recording', '4 · 录音中：实时转写，上滑取消 · 松开发送', hold(recording)),

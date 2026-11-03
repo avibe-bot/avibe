@@ -12,6 +12,7 @@ const cso = team.find((each) => each.handle === 'cso')!;
  *  is the plain one. A static frame has no focus and no live take, so it says so through the copy. */
 const noHint = {
   'voice.composer.placeholder': { zh: '输入消息…', en: 'Type a message…' },
+  'voice.composer.botPlaceholder': { zh: '给{{name}}发消息…', en: 'Message {{name}}…' },
 };
 
 /** A file staged in the composer with no text: a hold still records, and it goes with the message. */

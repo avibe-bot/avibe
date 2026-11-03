@@ -34,7 +34,7 @@ const hold = (state: Partial<ComposerHoldView>, extra: { attachments?: string[];
 const recording = { phase: 'recording', text: said.text, stash: said.stash, seconds: 6 } as const;
 
 const designFrames = frames([
-  frame('a-idle', '1 · 静止：输入框为空，占位提示「输入消息，或按住说话」', () => <DesktopScreen />),
+  frame('a-idle', '1 · 静止：输入框为空，占位提示「给首席安全官发消息，或按住说话」（普通会话是「输入消息，或按住说话」）', () => <DesktopScreen />),
   frame('b-pressing', '2 · 按下 150ms 后出现圆环，到 500ms 填满（期间移动 >6px = 普通点击）', hold({ phase: 'pressing', progress: 0.55 })),
   frame('b-pressing-1', '2a · 圆环刚出现', hold({ phase: 'pressing', progress: 0.2 })),
   frame('b-pressing-3', '2c · 圆环将满', hold({ phase: 'pressing', progress: 0.9 })),

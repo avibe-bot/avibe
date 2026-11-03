@@ -3742,6 +3742,8 @@ const Compose: React.FC<ComposeProps> = ({ composerRef, actions, readLatestAgent
         // D4), so its conversation names who is working and promises no queue.
         busyPlaceholder={botName ? t('bots.conversation.working', { name: botName }) : undefined}
         busySendsNow={botName != null}
+        // Where a hold would record, the Bot's line also names the gesture.
+        holdPlaceholder={botName ? t('voice.composer.botPlaceholder', { name: botName }) : undefined}
         voiceTarget={voiceTarget}
         autoFocus={!readOnly}
       />

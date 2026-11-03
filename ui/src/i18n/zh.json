@@ -6705,6 +6705,7 @@
     "composer": {
       "placeholder": "输入消息，或按住说话",
       "homePlaceholder": "和 Agent 聊点什么，或按住说话",
+      "botPlaceholder": "给{{name}}发消息，或按住说话",
       "keepHolding": "继续按住，开始说话",
       "releaseToSend": "松开发送",
       "mouseHint": "松开发送 · 移出输入框或按 <key>Esc</key> 取消",

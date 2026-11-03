@@ -6705,6 +6705,7 @@
     "composer": {
       "placeholder": "Message, or hold to talk",
       "homePlaceholder": "Tell the agent what you want, or hold to talk",
+      "botPlaceholder": "Message {{name}}, or hold to talk",
       "keepHolding": "Keep holding to talk",
       "releaseToSend": "Release to send",
       "mouseHint": "Release to send · move off the box or press <key>Esc</key> to cancel",
