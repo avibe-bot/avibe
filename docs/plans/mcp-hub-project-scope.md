@@ -49,12 +49,15 @@ Non-goals:
   start at the Session working directory and walk up to the run target's
   `project_base` when the working directory is inside it
   (`managed_skill_project_base`), otherwise to the nearest `.git` ancestor;
-  with neither, the working directory itself. The project config is
+  with neither, the working directory itself. Reuse `_project_directories` as
+  is: absolute `project_base` only, `PROJECT_ROOT_MAX_DIRECTORIES` bound, and
+  unreadable paths degrade to the working directory. The project config is
   `<project root>/.mcp.json`. So Web Project Sessions, IM channels whose workdir
   is a project folder, background and forked Sessions all get the same answer
   Skills gives them. The cache key (`<key>` below) is the Avibe Project id
-  (`proj_<hex>`) when the root is a Project's folder
-  (`projects_service._find_project_by_workdir`), otherwise
+  (`proj_<hex>`) when the root is an **active** Project's folder
+  (`projects_service._find_project_by_workdir` plus an explicit `enabled`
+  check; that helper also returns archived Projects), otherwise
   `dir-<sha256(realpath(root))[:12]>`. A root with no `.mcp.json` → global only.
 - **D2 Visibility.** Project Session sees global ∪ own Project; same name →
   the Project server shadows the global one. Other Projects are never visible.
@@ -138,19 +141,32 @@ Consumers, none of which decide scope on their own:
   (`skills_cwd`, `skills_project_base`) on every backend path (Vibey, Claude,
   Codex, OpenCode; IM, background and forked Sessions). It passes the same two
   values to `build_mcp_prompt_blocks(cwd, project_base)`; no new DB query on the
-  loop. Forks and `vibe agent run` children inherit the working directory and
-  project base exactly as they do for Skills.
+  loop. One asymmetric call site must keep its value as-is:
+  `modules/agents/opencode/agent.py` (~1858) passes a locally computed
+  `project_base`, not `managed_skill_project_base(context)`, and gates
+  `skills_cwd` on `binding_bound`; MCP reuses exactly those values so the two
+  features stay aligned. Forks and `vibe agent run` children inherit the
+  working directory and project base exactly as they do for Skills.
 - **CLI.** All reads (`--list`, `<server> --list`, `--help`, detail) move to IPC
   and carry the same working directory and project base the CLI already gets for
   Skills (`AVIBE_SKILL_WORKING_DIR`, `AVIBE_SKILL_PROJECT_BASE`, else the process
   cwd) plus `AVIBE_SESSION_ID`; the Controller applies D1. A user terminal gets
-  the project of its own cwd, as `vibe skill list` does. Controller down → `unavailable`, no second offline read path.
-  Management on a shadowed name (`--login`, `--logout`, `--refresh`, `--remove`,
-  `--approve`) targets the visible (project) server; `--global` targets the
-  global one.
-- **Call.** Admission resolves the name in the caller's visible set (D1 from the
-  call's working directory and project base) before any connection; outside it
-  → `not_found`.
+  the project of its own cwd, as `vibe skill list` does. Controller down →
+  `unavailable`, no second offline read path. Management on a shadowed name
+  targets the visible (project) server; `--global` targets the global one.
+- **Call and management contract.** `vibe mcp <server> <tool>` sends
+  `workingDirectory` and `projectBase` (filled as above) plus `sessionId`. The
+  Controller derives the scope with D1 and resolves the name in that visible
+  set before any connection; outside it → `not_found`. Missing inputs → global
+  scope. Every management operation (add, `--login`, `--logout`, `--refresh`,
+  `--remove`, `--approve`, configure secrets) carries the same two inputs and is
+  validated the same way; the Controller never accepts a client-supplied scope
+  id.
+- **Authority in `dir-` scopes.** Approve, configure secrets, add, remove and
+  login there require the instance Owner (the CLI mutation path already
+  authenticates). For anyone else a `dir-` scope is read-only: list and call
+  approved servers; nothing is created in the cache and nothing starts. A
+  readable directory never becomes a manageable scope on its own.
 - **Web.** `/api/mcp*` take `project=<proj id>` (Web manages Avibe Projects;
   `dir-` keys are reachable from Sessions and CLI only). Reads check
   `project_access_service.can_read_project`; mutations (add, remove, refresh,
@@ -161,7 +177,7 @@ Consumers, none of which decide scope on their own:
 ## 7. Storage and runtime keys
 
 - `repository` becomes a `Store(root)`; global is `Store(~/.avibe/mcp)`, a
-  Project is `Store(~/.avibe/project_mcp/<id>)`. `_stale` cleanup and `_admit`
+  project root is `Store(~/.avibe/project_mcp/<key>)`. `_stale` cleanup and `_admit`
   operate per Store, so project packages are never treated as global leftovers.
 - One key type `ScopedName(scope, name)` replaces `name` in package locks,
   connection keys (`(scope, name, revision, session)`, including the `("open",)`
@@ -174,9 +190,11 @@ Consumers, none of which decide scope on their own:
 
 ## 8. Lifecycle
 
-- **Discovery.** The existing discover pass also covers non-archived Avibe
-  Projects that have a folder; `dir-` roots are discovered on first resolve. It runs off the loop (`asyncio.to_thread` for file and DB
-  work), one Project at a time, with a bounded per-Project server count.
+- **Discovery.** One single-flight load per cache key. The existing discover
+  pass covers active Avibe Projects that have a folder; a `dir-` root loads on
+  first resolve; concurrent loads or stale checks for the same key collapse into
+  one. It runs off the loop (`asyncio.to_thread` for file and DB work), one key
+  at a time, with a bounded per-root server count.
 - **Staleness.** When the resolver serves a Project caller, a bounded
   `stat(mtime, size)` of `.mcp.json` runs in a thread; only on change is the
   file read and each entry re-hashed. A changed entry loses approval and is
@@ -184,12 +202,15 @@ Consumers, none of which decide scope on their own:
 - **Remove.** Through Avibe: remove the entry from `.mcp.json` (D5 write rules)
   and delete its cache directory. Removed by hand: dropped at the next staleness
   check, cache deleted then.
-- **Projects.** Archived Project → its folder resolves like any other directory
-  (D1), so its cache key falls back to `dir-`; the `proj_` cache is kept.
+- **Projects.** Archived Project → its key falls back to `dir-` at the next
+  resolve (the explicit `enabled` check in D1), so its servers need approval
+  again there; the `proj_` cache is kept for un-archive.
   Folder moved → `proj_` cache kept (keyed by id); a moved `dir-` root starts a
   new cache. Missing folder → no project servers. A `proj_` cache whose Project
-  row no longer exists is an orphan the discover pass deletes; `dir-` caches
-  are not cleaned automatically (small, and the folder may come back).
+  row no longer exists is an orphan the discover pass deletes. `dir-` caches
+  are not auto-deleted (the folder may come back); `vibe mcp --projects`
+  (Owner) lists every project cache with its root, server count and last use,
+  and `--remove-project-cache <key>` deletes one.
 
 ## 9. Surfaces
 
