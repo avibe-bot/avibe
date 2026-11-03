@@ -189,7 +189,7 @@ Consumers, none of which decide scope on their own:
   Folder moved → `proj_` cache kept (keyed by id); a moved `dir-` root starts a
   new cache. Missing folder → no project servers. A `proj_` cache whose Project
   row no longer exists is an orphan the discover pass deletes; `dir-` caches
-  unused for 90 days likewise.
+  are not cleaned automatically (small, and the folder may come back).
 
 ## 9. Surfaces
 
