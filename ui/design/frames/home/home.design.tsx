@@ -2,12 +2,11 @@
 // is, in every state; above it one order, one width, and one rule for an absent block.
 // Brand-new, partly set up, everything set up, and a member without Bots, on the desktop
 // app and on a phone, plus the layout spec. The page is kit (Home.tsx); the sidebar, the
-// tab bar, the composer, and the project chips are shipped.
+// tab bar (the main Bot in its center), the composer, and the project chips are shipped.
 import { OWNER_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
 
 import { frames } from '../../frame';
 import { HomePage, type SetupGap } from '../../kit/Home';
-import { WorkbenchTabBar } from '../../kit/WorkbenchTab';
 import { DesktopScreen } from '../../shell/DesktopScreen';
 import type { WorkbenchFixtures } from '../../shell/fixtures';
 import { PhoneScreen, ShippedTabBar } from '../../shell/PhoneScreen';
@@ -29,7 +28,7 @@ const desktop = (pending: SetupGap[], tip: number, isMember = false, spec = fals
   <DesktopScreen page={<HomePage pending={pending} tip={tip} member={isMember} spec={spec} />} />
 );
 const phone = (pending: SetupGap[], tip: number, inboxBadge: number) => () => (
-  <PhoneScreen bare tabBar={<WorkbenchTabBar inboxBadge={inboxBadge} />}>
+  <PhoneScreen bare tabBar={<ShippedTabBar inboxBadge={inboxBadge} />}>
     <HomePage pending={pending} tip={tip} compact />
   </PhoneScreen>
 );

@@ -28,13 +28,13 @@ import clsx from 'clsx';
 
 import { BotAvatar } from '@/components/ui/bot-avatar';
 import { Button } from '@/components/ui/button';
+import { BotFace } from '@/components/workbench/bots/BotFace';
 import { Composer } from '@/components/workbench/Composer';
 import { ProjectPicker } from '@/components/workbench/ProjectPicker';
 import { useBots } from '@/context/BotsContext';
 import { useWorkbenchInbox } from '@/context/WorkbenchInboxContext';
 import { useWorkbenchProjectsTree } from '@/context/WorkbenchProjectsContext';
 
-import { BotFace } from './BotFace';
 import { useDraft } from './draft';
 
 /** A setup gap the UI can already observe, and where it is fixed:
@@ -149,7 +149,7 @@ export function HomeStatus({ compact = false }: { compact?: boolean }) {
         <button type="button" className="inline-flex h-7 items-center gap-1.5 rounded-full border border-mint/30 bg-mint/5 pl-1 pr-2.5">
           <span className="flex -space-x-1.5">
             {running.map((bot) => (
-              <BotFace key={bot.handle} bot={bot} name={displayName(bot)} size={20} dotWell="bg-surface" />
+              <BotFace key={bot.handle} avatar={bot.avatar} name={displayName(bot)} size={20} dotWell="bg-surface" />
             ))}
           </span>
           <span className="text-mint-ink">{draft(`${running.length} 位在忙`, `${running.length} working`)}</span>
