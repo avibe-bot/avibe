@@ -32,3 +32,9 @@ The UI production build, focused app-launch/bridge unit tests, Rust target tests
 Lifecycle selection has a pure-function test proving that cleanup selects every App window while excluding main and pet. Actual destruction on origin changes, clearing, and exit is part of isolated native acceptance; source-text matching is not used to claim that behavior.
 
 Native acceptance is pending an unlocked console. An isolated preview uses bundle identifier `bot.avibe.desktop.nativewindows.acceptance` and port `15177`. On November 4, 2026, the preview reached the local Workbench, but macOS reported `CGSSessionScreenIsLocked=Yes`; blank captures and unverified focus are not acceptance evidence. A durable unlock Watch resumes the remaining native checks and cleanup.
+
+Native marker acceptance must show that the main Workbench successfully opens a native App window, then read `__AVIBE_DESKTOP_SHELL__` and `__AVIBE_DESKTOP_APP_WINDOWS__` in a child window and assert both are `undefined`.
+
+## Review diagnosis and scope decision
+
+Two reviewed heads exposed the same test-fidelity defect: newly added source assertions depended on Rust implementation identifiers. The first repair removed lifecycle matching but missed the marker assertions. The orchestrator independently verified the complete three-thread inventory and consumer tests on November 4, 2026, then authorized a test-only correction: remove identifier-based builder/constant/negative scans, retain the shared JS-key literal contract, and resolve every capability through Tauri's ACL machinery to verify that no App-window or webview label receives IPC on macOS or Windows. Actual injection and destruction remain native acceptance checks. Production behavior is unchanged; no JS engine or builder abstraction is added for tests.

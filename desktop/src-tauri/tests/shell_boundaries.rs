@@ -190,6 +190,54 @@ fn native_app_windows_are_main_only_and_loopback_scoped() {
 }
 
 #[test]
+fn no_capability_grants_ipc_to_native_app_windows() {
+    use std::collections::BTreeMap;
+    use tauri::utils::acl::{capability::Capability, manifest::Manifest, resolved::Resolved};
+    use tauri::utils::platform::Target;
+
+    let manifests: BTreeMap<String, Manifest> =
+        serde_json::from_str(include_str!(concat!(env!("OUT_DIR"), "/acl-manifests.json")))
+            .expect("the build's permission manifests");
+    let capabilities: BTreeMap<String, Capability> = std::fs::read_dir(crate_dir().join("capabilities"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "json"))
+        .map(|path| {
+            let capability: Capability = serde_json::from_value(read_json(path)).expect("valid capability");
+            (capability.identifier.clone(), capability)
+        })
+        .collect();
+    assert!(!capabilities.is_empty());
+    for target in [Target::MacOS, Target::Windows] {
+        let resolved = Resolved::resolve(&manifests, capabilities.clone(), target).expect("valid permissions");
+        assert!(!resolved.allowed_commands.is_empty());
+        for (command, grants) in resolved.allowed_commands {
+            for grant in grants {
+                for label in [
+                    "avibe-app-files",
+                    "avibe-app-files--new-1",
+                    "avibe-app-terminal",
+                    "avibe-app-terminal--new-2",
+                    "avibe-app-editor",
+                    "avibe-app-editor--new-3",
+                    "avibe-app-show-73657373696f6e2d31",
+                    "avibe-app-show-73657373696f6e2d31--new-4",
+                ] {
+                    assert!(
+                        !grant
+                            .windows
+                            .iter()
+                            .chain(&grant.webviews)
+                            .any(|pattern| pattern.matches(label)),
+                        "{command} must not grant IPC to {label}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn desktop_update_commands_are_workbench_scoped() {
     let capability = read_json(crate_dir().join("capabilities/main-desktop-update.json"));
     assert_eq!(capability["windows"], serde_json::json!([MAIN_WINDOW]));
@@ -853,20 +901,11 @@ fn the_workbench_learns_it_runs_in_the_shell_from_one_top_level_marker() {
         builder.contains(".initialization_script(DESKTOP_SHELL_MARKER)"),
         "every main window must define the marker before Workbench scripts run"
     );
-    assert!(builder.contains(".initialization_script(DESKTOP_APP_WINDOWS_MARKER)"));
-    let app_marker = source
-        .split("const DESKTOP_APP_WINDOWS_MARKER: &str =")
-        .nth(1)
-        .expect("native app window marker")
-        .split("\";\n")
-        .next()
-        .expect("native app window marker literal");
-    assert!(app_marker.contains("if (window.self === window.top)"));
-    assert!(app_marker.contains("__AVIBE_DESKTOP_APP_WINDOWS__"));
-    let app_windows = shipping_source("src/app_windows.rs");
+    // This JS key is a cross-language contract, independent of Rust identifiers.
+    // Actual main/child injection is covered by isolated native acceptance.
     assert!(
-        !app_windows.contains("DESKTOP_SHELL_MARKER") && !app_windows.contains("DESKTOP_APP_WINDOWS_MARKER"),
-        "native app windows must not inherit shell IPC markers"
+        source.contains("if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_APP_WINDOWS__', { value: true })"),
+        "the shell must define the shared app-window capability key at the top level"
     );
     assert!(!source.contains("initialization_script_for_all_frames"));
     let marker = source
