@@ -6,12 +6,13 @@ over control IPC. Env/header values never leave the owner files.
 
 from __future__ import annotations
 
-import asyncio
+from contextvars import ContextVar
 from typing import Any
 
-from core.mcp_hub import repository
 from core.mcp_hub.definition import parse_provider_json, provider_entry
 from core.mcp_hub.errors import McpHubError
+
+project_context: ContextVar[str | None] = ContextVar("mcp_project", default=None)
 
 _STATUS = {"usage": 400, "not_found": 404, "exists": 409, "unavailable": 503, "unknown_outcome": 502, "auth_required": 401, "invalid_callback": 400, "oauth": 400, "internal": 500}
 
@@ -21,11 +22,16 @@ def _error(exc: McpHubError) -> tuple[dict[str, Any], int]:
     return {"ok": False, "error": exc.payload()}, status
 
 
+def _with_project(payload: dict[str, Any]) -> dict[str, Any]:
+    project = project_context.get()
+    return {**payload, "project": project} if project else payload
+
+
 async def _owner(operation: str, payload: dict[str, Any]) -> dict[str, Any]:
     from vibe import internal_client
 
     try:
-        response = await internal_client.mcp_request(operation, payload)
+        response = await internal_client.mcp_request(operation, _with_project(payload))
     except internal_client.InternalServerUnavailable:
         raise McpHubError("unavailable", "The Avibe service is not running.") from None
     except internal_client.InternalServerTimeout:
@@ -56,7 +62,7 @@ async def run(handler, *args) -> tuple[dict[str, Any], int]:
 async def list_servers(origin: str | None = None, port: int | None = None) -> dict[str, Any]:
     from core.mcp_hub.oauth import redirect_mode
 
-    body: dict[str, Any] = {"ok": True, "servers": await asyncio.to_thread(repository.list_packages)}
+    body = await _owner("list", {})
     try:
         body["oauthMode"] = redirect_mode(origin, port=port)[0]
     except McpHubError:
@@ -82,18 +88,7 @@ async def add(body: dict[str, Any]) -> dict[str, Any]:
 
 
 async def detail(name: str) -> dict[str, Any]:
-    def _read() -> dict[str, Any]:
-        summary = repository.summarize(name)
-        published = repository.read_published(name)
-        payload: dict[str, Any] = {"ok": True, "server": summary}
-        if published is not None:
-            payload["tools"] = [
-                {"name": tool.get("name"), "description": tool.get("description") or ""}
-                for tool in published["tools"]
-            ]
-        return payload
-
-    return await asyncio.to_thread(_read)
+    return await _owner("detail", {"name": name})
 
 
 async def discover() -> dict[str, Any]:
@@ -129,3 +124,11 @@ async def oauth_complete(name: str, callback_url: str) -> dict[str, Any]:
 
 async def oauth_logout(name: str) -> dict[str, Any]:
     return await _owner("oauth_logout", {"name": name})
+
+
+async def approve(name: str) -> dict[str, Any]:
+    return await _owner("approve", {"name": name})
+
+
+async def configure(name: str, body: dict) -> dict[str, Any]:
+    return await _owner("configure", {"name": name, "secrets": body})

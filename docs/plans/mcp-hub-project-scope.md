@@ -76,10 +76,15 @@ Non-goals:
   token used in both an env value and a header is entered once. Unresolved →
   `needs_config` listing the missing names.
 - **D5 Write-back.** Adding, editing or removing a project server through Avibe
-  rewrites `<project root>/.mcp.json` atomically (§4 rules) with only
-  `type`/`command`/`args`/`url`/`cwd`; every env and header value goes to the
-  cache. Non-secret values a team wants in the repository are written into
-  `.mcp.json` by hand. Committing the file is the user's choice.
+  rewrites `<project root>/.mcp.json` atomically (§4 rules). Avibe writes only
+  `type`/`command`/`args`/`url`/`cwd`; env and header values supplied through
+  Avibe go to the cache. An edit replaces `command`/`args`/`url`, keeps the
+  file's own env/headers (including placeholders), `cwd`, `type` and unknown
+  keys, and drops the old kind's `type`/`cwd`/env/headers only when the
+  transport changes between stdio and HTTP. Configuring secrets touches only
+  `secrets.json`, never `.mcp.json`. Non-secret values a team wants in the
+  repository are written into `.mcp.json` by hand; Avibe does not inspect or
+  sanitize values a user writes there. Committing the file is the user's choice.
 - **D6 Global unchanged.**
 
 ## 4. Files
@@ -99,11 +104,18 @@ Non-goals:
   stay ignored): placeholders are resolved in the raw entry first, then the
   parser runs; an unsubstituted placeholder never reaches it.
 - Writes to `.mcp.json` (D5) reuse `native.py`'s compare-and-replace atomic
-  write and preserve other servers and unknown top-level and per-server keys; a
-  changed file is re-read, never overwritten from stale memory.
+  write and preserve other servers and unknown top-level and per-server keys.
+  One attempt: if the file changed after Avibe read it, the write fails with
+  `config_changed`, the external edit stays intact, and the user retries. An
+  unchanged document is not rewritten.
 - Unreadable or invalid `.mcp.json` or cache files: that entry is skipped with a
-  warning; prompt, CLI and startup never fail. One boundary catch, no
-  per-file enumeration; a bad file is never overwritten by Avibe.
+  warning; prompt, CLI and startup never fail. A skipped project entry still
+  shadows the same-named global server (it is `not_found`, never the global
+  one). Reads never repair or delete anything. Owner management (approve,
+  configure, remove) still resolves a configured entry whose cache is broken,
+  so `--configure` replaces an unreadable `secrets.json` and remove deletes the
+  cache. `--configure` validates the prospective merged definition before it
+  replaces `secrets.json`; a rejected input leaves the file byte-identical.
 
 ## 5. Effective definition (load-time merge)
 
@@ -127,12 +139,17 @@ so the call path needs only scope-aware keys (§7).
 `core/mcp_hub/scope.py` owns "which servers can this caller see":
 
 ```
-Scope = "global" | "project:<key>"
+Scope(key, project_root)                    # key "global" | "project:<key>"; .root is its cache root
 project_scope(working_directory, project_base) -> Scope | None   # D1, shares Skills' root walk
-visible(scopes: list[Scope]) -> {name: ScopedServer(scope, name, store)}
+resolve(scopes, name) -> ScopedName         # one name: reads only the caller's own .mcp.json entry
+summaries(scopes) -> [row]                  # list/prompt: global rows plus project rows
 ```
 
-Project wins on name. Prompt advertising counts only `ok` packages (as today);
+Project wins on name. A named lookup is bounded: the global path reads that
+one package directly, and a project name reads only its own `.mcp.json` entry
+and cache; it never scans other packages. List and prompt collect native
+definitions once per call. A damaged project package (for example a corrupt
+`current.json`) drops only that row. Prompt advertising counts only `ok` packages (as today);
 listing shows every state (`pending_approval`, `needs_config`, `needs_login`,
 `ok`, refresh failure).
 
@@ -165,8 +182,9 @@ Consumers, none of which decide scope on their own:
   `--remove`, `--approve`, configure secrets) carries the same two inputs and is
   validated the same way. Scope ids are never client-supplied: the Controller
   derives the scope itself from those inputs.
-- **Web.** `/api/mcp*` take `project=<proj id>` (Web manages Avibe Projects;
-  `dir-` keys are reachable from Sessions and CLI only). Reads check
+- **Web (API in step 1; the page is step 2, upcoming).** `/api/mcp*` take `project=<proj id>` (Web manages Avibe Projects;
+  `dir-` keys are reachable from Sessions and CLI only). `?project=` selects the
+  Project folder even when it has no `.mcp.json` yet, so a Web add creates it. Reads check
   `project_access_service.can_read_project`; mutations (add, remove, refresh,
   approve, configure secrets, login, logout) are Owner-only, go over IPC, and
   the Controller re-checks the Project. Reads use the project scope root, not
@@ -174,12 +192,12 @@ Consumers, none of which decide scope on their own:
 
 ## 7. Storage and runtime keys
 
-- `repository` keeps its module functions. `mcp_root()` / `package_dir()` and
-  the functions built on them take the scope root (`~/.avibe/mcp` for global,
-  `~/.avibe/project_mcp/<key>` for a project), defaulting to the global root so
-  existing global callers are unchanged. No new Store class. `_stale` cleanup
-  and `_admit` run against the scope's root, so project packages are never
-  treated as global leftovers.
+- `repository` keeps its module functions and signatures. The name argument
+  carries the scope: a `ScopedName` exposes its cache root (`~/.avibe/mcp` for
+  global, `~/.avibe/project_mcp/<key>` for a project) and `package_dir(name)`
+  uses it; a plain string is global, so existing global callers are unchanged.
+  No new Store class and no root parameters. Global `_stale` cleanup only scans
+  `~/.avibe/mcp`, so project packages are never treated as global leftovers.
 - One key type `ScopedName(scope, name)` replaces `name` in package locks,
   connection keys (`(scope, name, revision, session)`, including the `("open",)`
   lock), `_oauth_tasks`, `_oauth_providers`, `_oauth_provider_locks`, and the
@@ -196,14 +214,18 @@ Consumers, none of which decide scope on their own:
   existing per-package lock under the package `ScopedName`; no second
   coordinator. File and DB work stays off the Controller loop
   (`asyncio.to_thread`).
-- **Staleness.** On resolve, the current `.mcp.json` is read in a thread and
-  compared entry-by-entry against the cached fingerprints; unchanged entries
-  keep their approval and publication, changed or new entries need approval
-  again (D3), removed entries become invisible immediately. No watcher, no
-  mtime fast path.
-- **Remove.** Through Avibe: remove the entry from `.mcp.json` (D5 write rules)
-  and delete its cache directory. Removed by hand: dropped at the next staleness
-  check, cache deleted then.
+- **Staleness.** On resolve, the caller's `.mcp.json` entry is read in a thread
+  and compared against its cached fingerprint; an unchanged entry keeps its
+  approval and publication, a changed or new entry needs approval again (D3),
+  and a removed entry becomes invisible immediately. No watcher, no mtime fast
+  path, no cache writes on read.
+- **Remove.** Through Avibe (an explicit Owner remove): remove the entry from
+  `.mcp.json` (D5 write rules) and delete its cache directory under the
+  package lock. Removed by hand: the entry becomes invisible and its cache stays
+  (restoring the entry restores its approval and secrets). A later
+  `--remove <name>` resolves to the same-named global server, not the cache,
+  so the cache is dropped only by restoring the entry and then removing it
+  explicitly. No cleanup pass.
 - **Projects.** Archive changes nothing: the folder still resolves to its
   `proj_` cache and approvals. A `proj_` cache whose Project row no longer
   exists stays on disk unused (harmless, private); removing it is not a
@@ -212,7 +234,7 @@ Consumers, none of which decide scope on their own:
 
 ## 9. Surfaces
 
-- **Web.** Skills & MCP page gets a Global / Project switch (reuse the Skills
+- **Web (step 2, upcoming; not in step 1).** Skills & MCP page gets a Global / Project switch (reuse the Skills
   project-scope pattern and frames). Project view lists `.mcp.json` servers with
   state badges and their scope. Actions: Approve, Configure secrets (key/value editor writing
   `secrets.json`, showing placeholder names), Login, Remove. The two-tab Add
@@ -274,3 +296,28 @@ the Skills rule; astra) with no special authority tier (astra).
 1. Write-back: Avibe rewrites `.mcp.json` atomically on add/edit/remove (D5).
 2. Placeholders: one namespace (D4).
 3. Project identity follows project Skills, including IM channels (D1).
+
+## 14. Invalid persisted data: one owner per input (2026-11-03)
+
+Root cause of the repeated review findings: each reader probed raw persisted
+data on its own (`summary()` expanded raw `args`, indexed `tool["name"]`;
+`_effective` skipped the parser while a variable was missing; `_check_secrets`
+validated a map and then used the unvalidated one, so `null` passed). Every new
+consumer re-opened the same hole.
+
+Contract: persisted data becomes a typed value or an `McpHubError` at exactly
+one owner, and every consumer reads only the owner's output.
+
+| Input | Owner | Rule |
+| --- | --- | --- |
+| `.mcp.json` entry + `secrets.json` | `scope.load_server` (`_raw_entry`, `_secrets`, `_effective`) | `definition_from_provider` always runs; a missing `${VAR}` is replaced by a stand-in only for the check (`"0"` in env/header values; the whole `url` becomes `https://placeholder.invalid/` when any of its variables is missing, and is validated for real once complete), so `needs_config` never skips structure. The stand-in definition is never returned, stored, published or connected. Secrets pass `_check_secrets`, which returns `_string_map`'s result; a present `env`/`headers` must be a map (`null` included), for input and for the stored file alike. |
+| Published package (`current.json`, manifest, definition, tools, commands) | `repository.read_published` / `_load_revision` | Every field a reader consumes is type-checked before the package is returned (`_consumable`): manifest `description`/`auth`/`generatedAt` strings, `diagnostics` a string list, `serverInfo` an object with a string `version`; tools objects with a string `name` and optional string `description`; commands with string `name`/`description`, boolean `validated`, `flags` (string `flag`/`key`/`description`, a known `kind`, boolean `required`) and optional string-list `jsonOnlyKeys`. Absent optional fields keep their defaults; unknown fields are kept. A violation is `invalid_package`. |
+
+`definition_from_provider` itself turns any JSON value in any field into a
+definition or `invalid_definition`: each field is type-checked before it is
+used (set membership, iteration, string methods, `urlsplit`, `os.path`).
+
+Listing, the prompt index and `require_listed` catch only `McpHubError`, per
+entry: a bad entry is skipped (never replaced by a same-named global) and its
+siblings and the global catalog stay. A stored secrets file that fails the
+check is `invalid_package`, and `--configure` replaces it (repair).

@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from markdown_it import MarkdownIt
 
-from core.mcp_hub import repository as mcp_repository
+from core.mcp_hub import scope as mcp_scope
 from core import managed_skills, show_git
 from core.managed_skills import ManagedSkill
 from core.prompt_registry import PROMPT_MODULES, prompt_text
@@ -167,8 +167,8 @@ def _environment(monkeypatch, history="managed", skill_mode="pages"):
         for name in names
     ] if skill_mode != "empty" else []
     monkeypatch.setattr(managed_skills, "resolve_skills", lambda *_args, **_kwargs: skills)
-    servers = [{"name": f"docs-{index:02}", "description": "Docs"} for index in range(26 if skill_mode == "pages" else 1)]
-    monkeypatch.setattr(mcp_repository, "list_packages", lambda: servers)
+    servers = [{"name": f"docs-{index:02}", "description": "Docs", "state": "ok"} for index in range(26 if skill_mode == "pages" else 1)]
+    monkeypatch.setattr(mcp_scope, "summaries", lambda _selected: servers)
 
 
 @pytest.mark.parametrize("backend,history,skill_mode", itertools.product(

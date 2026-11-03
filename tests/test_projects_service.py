@@ -748,6 +748,45 @@ def test_duplicate_path_pick_prefers_active_then_recent(engine, tmp_path):
     assert found["scope_id"] == "avibe::project::proj_active"
 
 
+def test_path_lookup_is_bounded_by_the_folder(engine, tmp_path):
+    """MCP and Skills resolve a project per prompt and call, so the lookup reads only rows for that folder.
+
+    Driving by ``ix_scopes_platform_type`` visits every project; the plan must start at the workdir index and
+    sort only the rows that share the folder.
+    """
+    import sqlite3
+
+    from config import paths
+
+    with engine.begin() as conn:
+        for index in range(40):
+            (tmp_path / f"other-{index}").mkdir()
+            projects_service.create_project(conn, str(tmp_path / f"other-{index}"))
+        (tmp_path / "target").mkdir()
+        target = projects_service.create_project(conn, str(tmp_path / "target"))
+    statements = []
+
+    def capture(_conn, _cursor, statement, parameters, _context, _many):
+        if "scope_settings.workdir" in statement:
+            statements.append((statement, parameters))
+
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        with engine.connect() as conn:
+            found = projects_service._find_project_by_workdir(
+                conn, _remote_context("owner"), str((tmp_path / "target").resolve())
+            )
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+
+    assert found["scope_id"] == target["scope_id"]
+    (statement, parameters), = statements
+    with sqlite3.connect(paths.get_sqlite_state_path()) as raw:
+        plan = [row[-1] for row in raw.execute("EXPLAIN QUERY PLAN " + statement, parameters)]
+    assert plan[0].startswith("SEARCH scope_settings USING INDEX ix_scope_settings_workdir"), plan
+    assert not any("ix_scopes_platform_type" in step or step.startswith("SCAN") for step in plan), plan
+
+
 # --- Per-project default Agent ----------------------------------------------
 
 

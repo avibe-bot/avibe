@@ -131,6 +131,32 @@ def test_needs_login_package_lists_and_details_without_500(owner):
     assert payload.get("tools") == []
 
 
+def test_project_reads_require_project_access(owner, monkeypatch, tmp_path):
+    from storage import project_access_service, projects_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from vibe import ui_server
+    from vibe.authorization import AuthorizationContext
+
+    root = tmp_path / "restricted"
+    root.mkdir()
+    (root / ".mcp.json").write_text(json.dumps({"mcpServers": {"echo": {"command": sys.executable, "args": [FIXTURE]}}}))
+    ensure_sqlite_state()
+    with create_sqlite_engine().begin() as conn:
+        project_id = projects_service.create_project(conn, str(root))["id"]
+        intent = {"project_id": project_id, "revision": 1, "mode": "restricted", "bindings": []}
+        assert project_access_service.apply_project_access_intent(conn, intent).outcome == "applied"
+    client = app.test_client()
+    assert [row["name"] for row in client.get(f"/api/mcp?project={project_id}").get_json()["servers"]] == ["echo"]
+
+    editor = AuthorizationContext(instance_role="editor", email="member@example.com", is_remote=True)
+    monkeypatch.setattr(ui_server, "_request_authorization_context", lambda context=None: editor)
+    for path in (f"/api/mcp?project={project_id}", f"/api/mcp/echo?project={project_id}"):
+        response = client.get(path)
+        assert response.status_code == 404
+        assert response.get_json()["error"]["type"] == "not_found"
+
+
 def test_mcp_run_wraps_unexpected_errors_as_internal_object():
     from vibe import mcp_api
 
@@ -165,6 +191,8 @@ def test_malformed_json_add_returns_top_level_error_without_batch_arrays(owner):
         ("POST", "/api/mcp", "owner"),
         ("POST", "/api/mcp/discover", "owner"),
         ("POST", "/api/mcp/echo/refresh", "owner"),
+        ("POST", "/api/mcp/echo/approve", "owner"),
+        ("POST", "/api/mcp/echo/configure", "owner"),
         ("DELETE", "/api/mcp/echo", "owner"),
         ("GET", "/api/mcp/echo/oauth/start", "owner"),
         ("POST", "/api/mcp/echo/oauth/complete", "owner"),

@@ -58,6 +58,36 @@ def test_provider_type_spellings_and_ignored_enabled():
                       "s1": "streamable_http", "s2": "streamable_http"}
 
 
+_STDIO = {"command": "x"}
+_HTTP = {"url": "https://example.invalid/mcp"}
+_SCALARS = ([], {}, 1, True)
+
+
+def _json_variants():
+    """Any JSON value in any field is a typed usage error, never another exception."""
+
+    rows = []
+
+    def bad(base, field, values, reported=None):
+        for value in values:
+            rows.append(({**base, field: value}, "invalid_definition", reported or field))
+
+    bad(_STDIO, "type", _SCALARS)
+    bad(_HTTP, "type", _SCALARS)
+    bad(_STDIO, "command", (*_SCALARS, None))
+    bad(_STDIO, "args", ({}, 1, True, "a"))
+    bad(_STDIO, "args", ([None], [[]], [{}], [1]), "args[0]")
+    bad(_STDIO, "env", ([], 1, True, "a"))
+    bad(_STDIO, "env", ({"A": None}, {"A": []}, {"A": {}}, {"A": 1}), "env.A")
+    bad(_STDIO, "env", ({"A\n": "v"},), "env.A\n")
+    bad(_STDIO, "cwd", _SCALARS)
+    bad(_HTTP, "url", (*_SCALARS, None, "http://[oops", "http://[::1", "ftp://h/", "https://", "relative"))
+    bad(_HTTP, "headers", ([], 1, True, "a"))
+    bad(_HTTP, "headers", ({"X": None}, {"X": []}, {"X": {"y": "z"}}), "headers.X")
+    bad(_HTTP, "headers", ({"X\n": "v"},), "headers.X\n")
+    return rows
+
+
 @pytest.mark.parametrize(
     ("server", "error_type", "field"),
     [
@@ -69,6 +99,7 @@ def test_provider_type_spellings_and_ignored_enabled():
         ({"command": "x", "env": {"K": "${HOME:-/tmp}"}}, "invalid_definition", "env.K"),
         ({"command": "x", "cwd": "relative/dir"}, "invalid_definition", "cwd"),
         ({"url": "https://example.invalid/mcp", "args": ["a"]}, "invalid_definition", "args"),
+        *_json_variants(),
     ],
 )
 def test_page_rejects_unsupported_input_with_field(server, error_type, field):

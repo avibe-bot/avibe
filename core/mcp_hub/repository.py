@@ -21,6 +21,7 @@ from typing import Any, Optional
 
 from config import paths
 from config.atomic_io import write_atomic
+from core.mcp_hub import commands as mcp_commands
 from core.mcp_hub import native
 from core.mcp_hub import oauth as mcp_oauth
 from core.mcp_hub.definition import validate_name
@@ -40,7 +41,10 @@ def mcp_root() -> Path:
 
 
 def package_dir(name: str) -> Path:
-    return mcp_root() / validate_name(name)
+    """A ``ScopedName`` (``core/mcp_hub/scope.py``) carries its own scope root."""
+
+    root = getattr(name, "root", None) or mcp_root()
+    return root / validate_name(str(name))
 
 
 def _read_json(path: Path) -> Any:
@@ -57,8 +61,14 @@ def _ensure_root() -> Path:
     return root
 
 
+def is_project(name: object) -> bool:
+    """Whether ``name`` is a ``ScopedName`` of a project scope."""
+
+    return getattr(name, "project_root", None) is not None
+
+
 def _not_found(name: str) -> McpHubError:
-    return McpHubError("not_found", f"MCP server {name!r} does not exist.", hint="vibe mcp --list")
+    return McpHubError("not_found", f"MCP server {str(name)!r} does not exist.", hint="vibe mcp --list")
 
 
 # ---------------------------------------------------------------------------
@@ -100,14 +110,14 @@ def hidden_names() -> set[str]:
 def hide_name(name: str) -> None:
     with _HIDDEN_LOCK:
         _ensure_root()
-        names = sorted(hidden_names() | {validate_name(name)})
+        names = sorted(hidden_names() | {validate_name(str(name))})
         _write_json(_hidden_path(), {"names": names})
 
 
 def unhide_name(name: str) -> None:
     with _HIDDEN_LOCK:
         names = hidden_names()
-        names.discard(name)
+        names.discard(str(name))
         _ensure_root()
         _write_json(_hidden_path(), {"names": sorted(names)})
 
@@ -140,7 +150,7 @@ def write_avibe_definition(definition: dict[str, Any]) -> None:
 def rollback_avibe_definition(name: str, previous: Optional[dict[str, Any]], *, hidden: bool = False) -> None:
     """Undo an add that failed to refresh: restore the prior Avibe file or delete it."""
 
-    validate_name(name)
+    validate_name(str(name))
     path = _avibe_definition_path(name)
     if previous is not None:
         write_avibe_definition(previous)
@@ -159,7 +169,7 @@ def rollback_avibe_definition(name: str, previous: Optional[dict[str, Any]], *, 
 def unlist(name: str) -> None:
     """Drop ``current.json`` so a failed refresh is not listed, keeping revision files."""
 
-    validate_name(name)
+    validate_name(str(name))
     path = package_dir(name) / "current.json"
     if path.is_file():
         path.unlink()
@@ -173,8 +183,13 @@ def source_of(name: str) -> Optional[str]:
 
 
 def read_definition(name: str, servers: Optional[dict[str, native.NativeServer]] = None) -> dict[str, Any]:
-    """Avibe store wins; otherwise the canonical native file."""
+    """Avibe store wins; otherwise the canonical native file. Project names read ``.mcp.json``."""
 
+    if is_project(name):
+        from core.mcp_hub.scope import load_server
+
+        return load_server(name).require_definition()
+    name = str(name)
     avibe = read_avibe_definition(name)
     if avibe is not None:
         return avibe
@@ -197,8 +212,15 @@ def remove_package(name: str) -> str:
     """Avibe source: delete artifacts. Native source: delete the entry from its file.
 
     A native entry already gone from its file only drops Avibe's snapshot.
+    A project name is removed from ``.mcp.json`` together with its cache.
     """
 
+    if is_project(name):
+        from core.mcp_hub.scope import remove_server
+
+        remove_server(name)
+        return "project"
+    name = str(name)
     validate_name(name)
     directory = package_dir(name)
     kind = AVIBE if read_avibe_definition(name) is not None else None
@@ -264,6 +286,53 @@ def _current_revision(name: str) -> Optional[str]:
     return revision
 
 
+def _typed(item: dict[str, Any], key: str, kind: type, *, required: bool = False) -> bool:
+    return isinstance(item.get(key), kind) if required or key in item else True
+
+
+def _strings(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def _flag(flag: Any) -> bool:
+    return (
+        isinstance(flag, dict)
+        and all(_typed(flag, key, str, required=True) for key in ("flag", "key", "kind", "description"))
+        and flag["kind"] in mcp_commands.FLAG_KINDS
+        and _typed(flag, "required", bool, required=True)
+    )
+
+
+def _consumable(published: dict[str, Any]) -> bool:
+    """The fields readers use, with their types; absent optional fields keep their defaults.
+
+    Rows read manifest ``description``/``auth``/``generatedAt``/``serverInfo.version``/
+    ``diagnostics`` and tool ``description``; the CLI reads command ``description``,
+    ``validated``, ``flags`` and ``jsonOnlyKeys``. Every item has a string ``name``.
+    """
+
+    manifest, tools, commands = published["manifest"], published["tools"], published["commands"]
+    if not isinstance(published["definition"], dict) or not isinstance(tools, list) or not isinstance(commands, list):
+        return False
+    info = manifest.get("serverInfo", {})
+    return (
+        all(_typed(manifest, key, str) for key in ("description", "auth", "generatedAt"))
+        and _strings(manifest.get("diagnostics", []))
+        and isinstance(info, dict)
+        and _typed(info, "version", str)
+        and all(isinstance(tool, dict) and _typed(tool, "name", str, required=True) and _typed(tool, "description", str) for tool in tools)
+        and all(
+            isinstance(command, dict)
+            and all(_typed(command, key, str, required=True) for key in ("name", "description"))
+            and _typed(command, "validated", bool, required=True)
+            and isinstance(command.get("flags"), list)
+            and all(_flag(flag) for flag in command["flags"])
+            and _strings(command.get("jsonOnlyKeys", []))
+            for command in commands
+        )
+    )
+
+
 def _load_revision(name: str, revision: str) -> dict[str, Any]:
     directory = package_dir(name) / "revisions" / revision
     manifest = _read_json(directory / "manifest.json")
@@ -280,7 +349,7 @@ def _load_revision(name: str, revision: str) -> dict[str, Any]:
         "tools": _read_json(directory / "tools.json"),
         "commands": _read_json(directory / "commands.json"),
     }
-    if not isinstance(published["definition"], dict) or not isinstance(published["tools"], list) or not isinstance(published["commands"], list):
+    if not _consumable(published):
         raise McpHubError("invalid_package", f"{name}: revision {revision} has an unsupported shape.")
     return published
 
@@ -310,8 +379,8 @@ def new_revision_id() -> str:
 def publish(name: str, *, definition: dict[str, Any], manifest: dict[str, Any], tools: list, commands: list) -> str:
     """Write one published snapshot, then switch ``current.json``."""
 
-    _ensure_root()
     directory = package_dir(name)
+    ensure_private_directory(directory.parent)
     ensure_private_directory(directory)
     revision = new_revision_id()
     target = directory / "revisions" / revision

@@ -1,6 +1,6 @@
 """``vibe mcp``: per-server discovery and calls. Management is ``vibe mcp-add`` / ``vibe mcp-discover``.
 
-List and help read local artifacts only. Calls and management go to the Controller
+List and help use Controller-owned scope resolution. Calls and management go to the Controller
 over control IPC.
 
 Exit codes: 0 success, 2 usage/argument error, 1 any other failure.
@@ -9,19 +9,24 @@ Exit codes: 0 success, 2 usage/argument error, 1 any other failure.
 from __future__ import annotations
 
 import json
+import os
+from contextvars import ContextVar
 import sys
 from pathlib import Path
 from typing import Any, Optional
 
 from core.mcp_hub import commands as mcp_commands
-from core.mcp_hub import repository
 from core.mcp_hub.definition import parse_add_argv, provider_entry
 from core.mcp_hub.errors import McpHubError
+
+_GLOBAL = ContextVar("mcp_global", default=False)
 
 USAGE = """\
 usage:
   vibe mcp --list [--page N] [--format json]
   vibe mcp <server> --list [--format json]
+  vibe mcp <server> --approve
+  vibe mcp <server> --configure '{"env": {}, "headers": {}}'
   vibe mcp <server> --refresh
   vibe mcp <server> --remove
   vibe mcp <server> --login-complete '<callback URL>'
@@ -37,6 +42,11 @@ management (Owner):
   vibe mcp-add --transport http <name> <url>
   vibe mcp-add --json-stdin [--replace]
   vibe mcp-discover
+
+scope:
+  Servers from the project's .mcp.json shadow global servers of the same name.
+  `vibe mcp --global ...` and `vibe mcp-add --global ...` use only the global scope;
+  without it, mcp-add writes to the project's .mcp.json when one exists.
 """
 
 
@@ -71,7 +81,7 @@ def main(argv: list[str]) -> int:
     if denied is not None:
         return denied
     try:
-        return _dispatch(argv)
+        return _with_global(_dispatch, argv, 2)
     except McpHubError as cop:
         return _fail(cop)
 
@@ -84,7 +94,8 @@ def add_main(argv: list[str]) -> int:
     if denied is not None:
         return denied
     try:
-        return _add(argv)
+        split = argv.index("--") if "--" in argv else len(argv)
+        return _with_global(_add, argv, split)
     except McpHubError as cop:
         return _fail(cop)
 
@@ -136,7 +147,6 @@ def _format_json(options: list[str], allowed: set[str]) -> bool:
 
 def _root_list(argv: list[str]) -> int:
     from core.managed_skills import catalog_page_of
-    from core.mcp_hub.prompt import server_row
 
     page = 1
     if "--page" in argv:
@@ -147,7 +157,7 @@ def _root_list(argv: list[str]) -> int:
         page = int(value)
         argv = argv[:position] + argv[position + 2 :]
     as_json = _format_json(argv, {"--list"})
-    entries, next_page = catalog_page_of(repository.list_packages(), server_row, page)
+    entries, next_page = catalog_page_of(_request("list", {})["servers"], _list_row, page)
     if as_json:
         print(json.dumps({"servers": list(entries), "nextPage": next_page}, ensure_ascii=False, indent=2))
         return 0
@@ -155,18 +165,66 @@ def _root_list(argv: list[str]) -> int:
         print("No MCP servers.")
         return 0
     for item in entries:
-        print(escape(server_row(item)))
+        print(escape(_list_row(item)))
     if next_page is not None:
         print(f"\nMore servers are available. Run `vibe mcp --list --page {next_page}` to view more.")
     print("\nNext: vibe mcp <server> --list")
     return 0
 
 
+def _list_row(item: dict[str, Any]) -> str:
+    """A blocked project server shows what blocks it and the Owner command that unblocks it."""
+
+    from core.mcp_hub.prompt import server_row
+    from core.mcp_hub.scope import BLOCKED_STATES, state_note
+
+    if item.get("state") not in BLOCKED_STATES:
+        return server_row(item)
+    note, hint = state_note(item["name"], item["state"], item.get("missingVariables") or [])
+    return f"- {item['name']}: {note} — {hint}"
+
+
+def _with_global(run, argv: list[str], prefix: int) -> int:
+    """``--global`` among the first ``prefix`` arguments forces the global scope."""
+
+    forced = "--global" in argv[:prefix]
+    rest = [arg for index, arg in enumerate(argv) if not (index < prefix and arg == "--global")]
+    token = _GLOBAL.set(forced)
+    try:
+        return run(rest)
+    finally:
+        _GLOBAL.reset(token)
+
+
+def _scope_payload() -> dict[str, Any]:
+    """The Controller resolves visibility from the same inputs managed Skills use."""
+
+    return {
+        "workingDirectory": os.environ.get("AVIBE_SKILL_WORKING_DIR") or str(Path.cwd()),
+        "projectBase": os.environ.get("AVIBE_SKILL_PROJECT_BASE") or None,
+        "sessionId": os.environ.get("AVIBE_SESSION_ID") or None,
+        "global": _GLOBAL.get(),
+    }
+
+
+def _request(operation: str, payload: dict) -> dict:
+    from vibe import internal_client
+    try:
+        response = internal_client.mcp_request_sync(operation, {**_scope_payload(), **payload})
+    except internal_client.InternalServerUnavailable:
+        raise McpHubError("unavailable", "The Avibe service is not running.", hint="vibe start") from None
+    except internal_client.InternalServerTimeout:
+        raise McpHubError("unavailable", "The Avibe service did not answer.") from None
+    if not response.get("ok"):
+        raise McpHubError.from_payload(response.get("error"))
+    return response
+
+
 def _owner(operation: str, payload: dict[str, Any]) -> int:
     from vibe import internal_client
 
     try:
-        response = internal_client.mcp_request_sync(operation, payload)
+        response = internal_client.mcp_request_sync(operation, {**_scope_payload(), **payload})
     except internal_client.InternalServerUnavailable:
         raise McpHubError("unavailable", "The Avibe service is not running.", hint="vibe start") from None
     except internal_client.InternalServerTimeout:
@@ -229,9 +287,12 @@ def _add(args: list[str]) -> int:
 
 
 def _published(name: str) -> dict[str, Any]:
-    published = repository.read_published(name)
-    if published is None:
-        raise McpHubError("not_found", f"Unknown MCP server {name!r}.", hint="vibe mcp --list")
+    from core.mcp_hub.scope import BLOCKED_STATES, state_error
+
+    published = _request("detail", {"name": name})
+    server = published.get("server") or {}
+    if server.get("state") in BLOCKED_STATES:
+        raise state_error(name, server["state"], server.get("missingVariables") or [])
     return published
 
 
@@ -242,6 +303,24 @@ def _server(name: str, args: list[str]) -> int:
         validate_name(name)
     except McpHubError:
         raise McpHubError("not_found", f"Unknown MCP server {name!r}.", hint="vibe mcp --list") from None
+    if args and args[0] in {"--approve", "--configure"}:
+        denied = _admit("owner")
+        if denied is not None:
+            return denied
+        option = args[0]
+        payload = {"name": name}
+        if option == "--approve" and len(args) != 1:
+            raise McpHubError("usage", "--approve takes no arguments.", usage=True)
+        if option == "--configure":
+            if len(args) != 2:
+                raise McpHubError("usage", "--configure takes a JSON object of env/headers.", usage=True)
+            try:
+                payload["secrets"] = json.loads(args[1])
+            except ValueError:
+                raise McpHubError("usage", "Invalid secrets JSON.", usage=True) from None
+            if not isinstance(payload["secrets"], dict):
+                raise McpHubError("usage", "Secrets must be a JSON object.", usage=True)
+        return _owner(option[2:], payload)
     if args and args[0] in {"--login", "--logout", "--login-complete"}:
         denied = _admit("owner")
         if denied is not None:
@@ -311,7 +390,7 @@ def _server(name: str, args: list[str]) -> int:
 def _oauth_owner(operation: str, payload: dict[str, Any]) -> int:
     from vibe import internal_client
     try:
-        response = internal_client.mcp_request_sync(operation, payload)
+        response = internal_client.mcp_request_sync(operation, {**_scope_payload(), **payload})
     except internal_client.InternalServerUnavailable:
         raise McpHubError("unavailable", "The Avibe service is not running.", hint="vibe start") from None
     if not response.get("ok"):
@@ -325,6 +404,8 @@ def _oauth_owner(operation: str, payload: dict[str, Any]) -> int:
     else:
         print("MCP OAuth tokens removed.")
     return 0
+
+
 def _server_list(name: str, args: list[str]) -> int:
     as_json = _format_json(args, {"--list", "--help", "-h"})
     published = _published(name)
@@ -351,7 +432,7 @@ def _call(name: str, tool: str, arguments: dict[str, Any]) -> int:
     caller = caller_context_from_env()
     payload = {"name": name, "tool": tool, "arguments": arguments, "sessionId": caller.session_id if caller else None}
     try:
-        envelope = internal_client.mcp_request_sync("call", payload)
+        envelope = internal_client.mcp_request_sync("call", {**_scope_payload(), **payload})
     except internal_client.InternalServerUnavailable:
         raise McpHubError("unavailable", "The Avibe service is not running; the call was not sent.", hint="vibe start") from None
     except internal_client.InternalServerTimeout:

@@ -71,7 +71,7 @@ def _string_map(value: object, field: str, key_pattern: re.Pattern[str]) -> dict
         raise _invalid(field, f"{field} must be an object of string values.")
     result: dict[str, str] = {}
     for key, item in value.items():
-        if not isinstance(key, str) or not key_pattern.match(key):
+        if not isinstance(key, str) or not key_pattern.fullmatch(key):
             raise _invalid(f"{field}.{key}", f"{field} has an invalid name: {key!r}.")
         result[key] = _text(item, f"{field}.{key}", allow_empty=True)
     return result
@@ -95,6 +95,8 @@ def definition_from_provider(name: str, server: object) -> dict[str, Any]:
         raise _invalid("server", f"mcpServers.{name} must be an object.")
     # Backend-owned extras (env_vars, timeouts, …) are ignored, not rejected.
     kind = server.get("type")
+    if kind is not None and not isinstance(kind, str):
+        raise _invalid("type", "type must be a string.")
     if kind == "sse":
         raise McpHubError(
             "unsupported_transport_sse",
@@ -151,8 +153,12 @@ def definition_from_provider(name: str, server: object) -> dict[str, Any]:
 
 def _validate_url(value: object) -> str:
     url = _text(value, "url")
-    parts = urlsplit(url)
-    if parts.scheme not in {"http", "https"} or not parts.hostname:
+    try:
+        parts = urlsplit(url)
+        hostname = parts.hostname
+    except ValueError:
+        raise _invalid("url", "url must be an http(s) URL.") from None
+    if parts.scheme not in {"http", "https"} or not hostname:
         raise _invalid("url", "url must be an http(s) URL.")
     if parts.username is not None or parts.password is not None:
         raise _invalid("url", "url must not embed credentials; put them in an Authorization header.")

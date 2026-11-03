@@ -8,7 +8,6 @@ import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from config import paths
 from config.atomic_io import write_atomic
 from core.mcp_hub.errors import McpHubError
 from mcp.client.auth.oauth2 import OAuthClientProvider
@@ -18,7 +17,9 @@ logger = logging.getLogger(__name__)
 
 
 def oauth_path(name: str) -> Path:
-    return paths.get_vibe_remote_dir() / "mcp" / name / "oauth.json"
+    from core.mcp_hub.repository import package_dir
+
+    return package_dir(name) / "oauth.json"
 
 
 def delete_oauth(name: str) -> None:

@@ -246,6 +246,95 @@ def test_mcp_hub_oauth_login_completes_through_owner_callback(monkeypatch, tmp_p
         loopback.stop()
 
 
+def test_mcp_hub_same_name_oauth_logins_stay_in_their_scope(monkeypatch, tmp_path):
+    """Scenario: AUTH-SETUP-136 — global and project `github` logins keep separate pending grants and tokens."""
+    from tests.scenario_harness.core import BaseScenarioHarness, ScenarioExpect, ScenarioRunner
+    from tests.test_mcp_hub_oauth import _LoopbackOauth
+    from core.mcp_hub import oauth as mcp_oauth
+    from core.mcp_hub import scope as mcp_scope
+    from core.mcp_hub.runtime import McpRuntime
+    from storage import projects_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from tests.ui_server_test_helpers import csrf_headers, save_config
+    from vibe import internal_client
+
+    save_config(tmp_path).save()
+    servers = {"global": _LoopbackOauth(), "project": _LoopbackOauth()}
+    servers["project"].token_posts = 41  # issues access-42; the global server issues access-1
+    for server in servers.values():
+        server.start()
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / ".mcp.json").write_text(json.dumps({"mcpServers": {"github": {"url": f"{servers['project'].origin}/mcp"}}}))
+    ensure_sqlite_state()
+    with create_sqlite_engine().begin() as conn:
+        project_id = projects_service.create_project(conn, str(root))["id"]
+    runtime = McpRuntime()
+
+    async def forward(operation, payload, **_kwargs):
+        status, body = await runtime.submit(operation, payload)
+        assert status == 200
+        return json.loads(body)
+
+    monkeypatch.setattr(internal_client, "mcp_request", forward)
+    harness = BaseScenarioHarness()
+    runner = ScenarioRunner(harness)
+    client = app.test_client()
+    headers = csrf_headers(client)
+    query = {"global": "", "project": f"?project={project_id}"}
+    keys = {
+        "global": mcp_scope.ScopedName(mcp_scope.Scope(), "github"),
+        "project": mcp_scope.ScopedName(mcp_scope.project_scope(root, root), "github"),
+    }
+    started = {}
+
+    def states():
+        return {
+            scope: client.get(f"/api/mcp{query[scope]}").get_json()["servers"][0]["state"] for scope in ("global", "project")
+        }
+
+    def start(_h):
+        text = json.dumps({"mcpServers": {"github": {"url": f"{servers['global'].origin}/mcp"}}})
+        assert client.post("/api/mcp", json={"text": text}, headers=headers).get_json()["ok"]
+        approved = client.post(f"/api/mcp/github/approve{query['project']}", headers=headers).get_json()
+        assert approved["ok"], approved
+        for scope in ("global", "project"):
+            response = client.get(f"/api/mcp/github/oauth/start{query[scope]}", headers={"Sec-Fetch-Site": "same-origin"})
+            assert response.status_code == 302
+            assert response.headers["Location"].startswith(f"{servers[scope].origin}/authorize?")
+            started[scope] = urllib.parse.parse_qs(urllib.parse.urlparse(response.headers["Location"]).query)
+        assert started["global"]["state"] != started["project"]["state"]
+        assert states() == {"global": "needs_login", "project": "needs_login"}
+
+    def complete(scope):
+        params = {"state": started[scope]["state"][0], "code": "code-1", "iss": servers[scope].origin}
+        done = client.get("/api/mcp/oauth/callback?" + urllib.parse.urlencode(params))
+        assert done.status_code == 302 and "oauth=success" in done.headers["Location"]
+
+    def complete_project(_h):
+        complete("project")
+        assert states() == {"global": "needs_login", "project": "ok"}
+        assert f'"{servers["project"].access}"' in mcp_oauth.oauth_path(keys["project"]).read_text()
+        assert "access_token" not in mcp_oauth.oauth_path(keys["global"]).read_text()
+
+    def complete_global(_h):
+        complete("global")
+        assert states() == {"global": "ok", "project": "ok"}
+        assert f'"{servers["global"].access}"' in mcp_oauth.oauth_path(keys["global"]).read_text()
+        assert f'"{servers["global"].access}"' not in mcp_oauth.oauth_path(keys["project"]).read_text()
+
+    try:
+        for step, action in (("start", start), ("project", complete_project), ("global", complete_global)):
+            action(harness)
+            runner.history.append(step)
+        ScenarioExpect.step_history(runner, ["start", "project", "global"])
+    finally:
+        runtime.stop()
+        for server in servers.values():
+            server.stop()
+
+
 @pytest.mark.parametrize("vendor", ["openai", "anthropic", "gemini", "kimi", "xai"])
 @pytest.mark.parametrize("identity_case", ["valid", "invalid_utf8", "token_whitespace"])
 def test_subscription_identity_survives_oauth_completion_and_http_replay(monkeypatch, tmp_path, vendor, identity_case):

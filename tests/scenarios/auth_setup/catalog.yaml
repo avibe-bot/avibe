@@ -650,4 +650,11 @@ scenarios:
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_mcp_hub_oauth_login_completes_through_owner_callback
     supporting_tests:
       - tests/test_mcp_hub_api.py::test_oauth_start_link_redirects_to_authorize_url
+  - id: AUTH-SETUP-136
+    name: MCP Hub global and project servers with the same name keep separate OAuth pending grants and tokens
+    status: covered
+    kind: concurrency
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_mcp_hub_same_name_oauth_logins_stay_in_their_scope
 next_priority: []

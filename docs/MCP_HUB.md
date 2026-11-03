@@ -53,7 +53,7 @@ vibe mcp-add --json-stdin < servers.json
 - Supported transports are stdio and Streamable HTTP. SSE is not supported. HTTP servers that advertise OAuth can be logged in from the Skills page or with `vibe mcp <name> --login`.
 - Add never writes Claude/Codex/OpenCode files.
 - A Hub-entered `cwd` must be absolute.
-- `${VAR}` placeholders are not expanded.
+- `${VAR}` placeholders are not expanded in global servers (project servers: see below).
 
 ## Delete
 
@@ -63,6 +63,34 @@ vibe mcp-add --json-stdin < servers.json
 ```bash
 vibe mcp docs --remove
 ```
+
+## Project servers
+
+A project can keep MCP servers in `<project root>/.mcp.json`, in Claude Code's `mcpServers` format. The project root is the one project Skills use: the run target's project base, else the nearest `.git` ancestor, else the working directory.
+
+- **Scope.** A Session, `vibe mcp` and the prompt see global servers plus the servers of their own project's `.mcp.json`; never another project's. A project server shadows a global one with the same name. `vibe mcp --global ...` uses only global servers. The Web MCP page lists global servers only; a Project view is coming in a later release.
+- **Approval.** Every project server, stdio or HTTP, is **pending approval** until the instance Owner approves it: it does not start, connect, appear in the prompt, or accept calls. Approval binds to the raw `.mcp.json` entry, so any edit to that entry needs approval again; changing a secret does not.
+- **Secrets.** Write `${VAR}` in `url`, env values or header values (not in `command` or `args`). All placeholders of a server share one set of variables, supplied with `--configure` and stored outside the project. Until every variable is set, the server shows **needs config** and the missing names.
+- **Add.** Without `--global`, `vibe mcp-add` writes to the project's `.mcp.json` when the file exists. Avibe writes only `type`, `command`, `args`, `url` and `cwd`; env and header values given to `vibe mcp-add` go to the private cache, not to the file. Replacing an entry keeps the file's own env/headers (including placeholders), `cwd`, `type` and other keys. If the file changed while Avibe was writing it, the command fails with `config_changed`, keeps your edit, and can be retried.
+
+```bash
+vibe mcp github --approve
+vibe mcp github --configure '{"env": {"GITHUB_TOKEN": "<token>"}}'
+vibe mcp github --configure '{"headers": {"Authorization": "Bearer <token>"}}'
+```
+
+`--configure` replaces the `env` or `headers` map it is given and keeps the other. Invalid names or values are rejected and the stored secrets stay as they were. Approve, configure and remove are Owner-only.
+
+`vibe mcp --list` shows blocked servers with the command that unblocks them, for example `- github: pending approval — run vibe mcp github --approve`.
+
+Secrets, approval, OAuth tokens and published tools live in `<avibe-home>/project_mcp/<key>/<name>/` (owner-only `0700` directories, `0600` files). `<key>` is the Avibe Project id, or `dir-<hash>` for a folder that is not a Project.
+
+Limitations:
+
+- Avibe does not inspect or clean values you type into `.mcp.json`. Anything written there, including a literal token, is in your repository; use placeholders for secrets.
+- Deleting an entry from `.mcp.json` by hand hides the server at once, but its cached secrets, approval and tokens stay. Do not run `vibe mcp <name> --remove` afterwards: with the entry gone, the name resolves to the global server of that name, which would be removed instead, and the project cache would stay. To drop the cache, restore the entry, then run `vibe mcp <name> --remove` from the project. Restoring the same entry also restores its approval and secrets.
+- Scopes separate what Agents are shown, not what they can read: Agents run as the same OS user.
+- Other native project configs (OpenCode, Codex project config, Claude per-path entries) are not imported.
 
 ## OAuth login
 
@@ -94,7 +122,7 @@ vibe mcp docs search --query 'async Python' --limit 5
 vibe mcp docs search --args-json '{"query": "async Python", "limit": 5}'
 ```
 
-Lists and help work offline. A call prints one JSON envelope to stdout.
+Lists and help ask the running Avibe service, which resolves the caller's project; when it is stopped they report `unavailable`. A call prints one JSON envelope to stdout.
 
 Never retry a call that reports `unknown_outcome` blindly: the tool may already have acted.
 

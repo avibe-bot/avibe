@@ -21,6 +21,8 @@ from typing import Any, Mapping, Optional
 from sqlalchemy import select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection
+from sqlalchemy.sql.expression import UnaryExpression
+from sqlalchemy.sql.operators import custom_op
 
 from storage.agent_session_rows import reserve_write_lock
 from storage import project_access_service
@@ -119,7 +121,16 @@ def _find_project_by_workdir(
     404 the id-keyed paths answer with — rather than reporting "no match":
     reporting no match would mint a second project scope over a folder a
     restricted project already owns, which is a worse outcome than refusing.
+
+    The lookup is bounded by the folder: it reads ``scope_settings`` through
+    ``ix_scope_settings_workdir`` and joins each match by primary key. Unary
+    ``+`` keeps SQLite from driving the query by ``ix_scopes_platform_type``,
+    which would visit every project scope; the ORDER BY then sorts only the
+    rows that share this folder.
     """
+
+    def unindexed(column):
+        return UnaryExpression(column, operator=custom_op("+"), type_=column.type)
 
     row = (
         conn.execute(
@@ -128,11 +139,11 @@ def _find_project_by_workdir(
                 scopes.c.native_id,
                 scope_settings.c.enabled,
             )
-            .select_from(scopes.join(scope_settings, scope_settings.c.scope_id == scopes.c.id))
+            .select_from(scope_settings.join(scopes, scope_settings.c.scope_id == scopes.c.id))
             .where(
-                scopes.c.platform == PROJECT_PLATFORM,
-                scopes.c.scope_type == PROJECT_SCOPE_TYPE,
                 scope_settings.c.workdir == workdir,
+                unindexed(scopes.c.platform) == PROJECT_PLATFORM,
+                unindexed(scopes.c.scope_type) == PROJECT_SCOPE_TYPE,
             )
             .order_by(
                 scope_settings.c.enabled.desc(),
