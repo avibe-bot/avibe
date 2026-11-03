@@ -125,8 +125,8 @@ pub(crate) fn close_all(app: &AppHandle) {
 fn find_target_window(app: &AppHandle, base_label: &str) -> Option<WebviewWindow> {
     let mut labels: Vec<String> = app
         .webview_windows()
-        .into_iter()
-        .filter_map(|(label, _)| is_target_label(&label, base_label).then_some(label))
+        .into_keys()
+        .filter(|label| is_target_label(label, base_label))
         .collect();
     labels.sort_by_key(|label| (label != base_label, label.clone()));
     labels.into_iter().find_map(|label| app.get_webview_window(&label))
