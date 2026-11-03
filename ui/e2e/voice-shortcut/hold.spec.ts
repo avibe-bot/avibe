@@ -44,11 +44,14 @@ test('a click only focuses, and a right-click keeps the system menu', async ({ p
   const { x, y } = await composer(page);
   await page.mouse.click(x, y);
   await expect(page.getByRole('textbox')).toBeFocused();
-  const kept = page.evaluate(() => new Promise<boolean>((resolve) => {
-    window.addEventListener('contextmenu', (event) => setTimeout(() => resolve(!event.defaultPrevented)), { once: true });
-  }));
+  // Listen first, then right-click, then read what the menu event was left with.
+  await page.evaluate(() => {
+    window.addEventListener('contextmenu', (event) => {
+      setTimeout(() => { document.body.dataset.menuKept = String(!event.defaultPrevented); });
+    }, { once: true });
+  });
   await page.mouse.click(x, y, { button: 'right' });
-  expect(await kept).toBe(true);
+  await expect(page.locator('body')).toHaveAttribute('data-menu-kept', 'true');
   await page.waitForTimeout(800);
   expect(await page.evaluate(() => window.voiceShortcutTest.sent)).toEqual([]);
 });
