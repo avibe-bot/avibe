@@ -22,6 +22,8 @@ async function harness(context: BrowserContext, page: Page, origin: string, requ
   const writes: string[] = [];
   const errors: string[] = [];
   const popups: Page[] = [];
+  const documents: string[] = [];
+  page.on('request', (req) => { if (req.resourceType() === 'document') documents.push(req.url()); });
   page.on('pageerror', (error) => errors.push(error.message));
   page.on('popup', (popup) => popups.push(popup));
   await context.addInitScript(() => {
@@ -69,9 +71,12 @@ async function harness(context: BrowserContext, page: Page, origin: string, requ
     const response = await route.fetch({ url: `${server}${url.pathname}${url.search}`, maxRedirects: 0 });
     return route.fulfill({ response });
   });
-  return { prohibited, writes, errors, popups };
+  return { prohibited, writes, errors, popups, documents };
 }
 
+// One pending request must survive Settings and return still blocked, then be denied.
+// Denying first and resetting with goto created a second document (and SSE/session
+// lifecycle); measuring identity only after that reset could not prove this journey.
 for (const [origin, language, current] of [
   ['http://192.0.2.1:5123', 'zh', access],
   ['https://custom.example', 'en', sign],
@@ -83,25 +88,38 @@ for (const [origin, language, current] of [
   const url = `${origin}${fixturePath}?lang=${language}&request_id=${current.id}`;
   await page.goto(url);
   const dialog = page.getByRole('dialog');
-  await expect(dialog.getByText(copy.vaults.entry.addressTitle)).toBeVisible();
-  await expect(dialog.getByRole('button', { name: current.request_type === 'sign' ? copy.vaults.approval.sign : copy.vaults.approval.approve, exact: true })).toBeDisabled();
-  await expect(dialog.locator('.animate-spin')).toHaveCount(0);
-  await expect(page.locator('iframe')).toHaveCount(0);
+  const assertBlockedRequest = async () => {
+    await expect(dialog.getByText(copy.vaults.entry.addressTitle)).toBeVisible();
+    await expect(dialog.getByText(current.request_type === 'sign' ? 'PUBLIC_TEST_KEY' : secret.name, { exact: true }).first()).toBeVisible();
+    if (current.request_type === 'sign') await expect(dialog.getByText('00'.repeat(32), { exact: true })).toBeVisible();
+    await expect(dialog.getByRole('button', { name: current.request_type === 'sign' ? copy.vaults.approval.sign : copy.vaults.approval.approve, exact: true })).toBeDisabled();
+    await expect(dialog.locator('.animate-spin')).toHaveCount(0);
+    await expect(page.locator('iframe')).toHaveCount(0);
+    expect(observed.prohibited).toEqual([]);
+    expect(observed.writes).toEqual([]);
+    expect(observed.errors).toEqual([]);
+    expect(observed.popups).toEqual([]);
+  };
+  await assertBlockedRequest();
   await dialog.getByText(copy.vaults.entry.addressTitle).scrollIntoViewIfNeeded();
   await dialog.evaluate(async (element) => { await Promise.all(element.getAnimations().map((animation) => animation.finished.catch(() => undefined))); });
   await page.screenshot({ path: test.info().outputPath(`unsupported-${language}.png`) });
-  await dialog.getByRole('button', { name: copy.vaults.approval.deny, exact: true }).click();
-  await expect.poll(() => observed.writes).toEqual([`POST /api/vault/requests/${current.id}/deny`]);
-  await expect(dialog).toHaveCount(0);
-  await page.goto(url); // Synthetic pending request is deliberately not persisted.
+  const returnUrl = page.url();
   const documentIdentity = await page.evaluate(() => performance.timeOrigin);
   await page.getByRole('link', { name: copy.vaults.entry.remoteAccess }).click();
   await expect(page).toHaveURL(`${origin}/settings/remote-access`);
   await expect(page.getByRole('heading', { name: 'Remote Access destination fixture' })).toBeVisible();
   expect(await page.evaluate(() => performance.timeOrigin)).toBe(documentIdentity);
   await page.getByRole('button', { name: 'Back to Vaults' }).click();
-  // The actual Settings surface retains the approval dialog, including on mobile.
-  await expect(page.getByRole('dialog').getByText(copy.vaults.entry.addressTitle)).toBeVisible();
+  // The actual Settings surface retains this request, including on mobile.
+  await expect(page).toHaveURL(returnUrl);
+  expect(await page.evaluate(() => performance.timeOrigin)).toBe(documentIdentity);
+  await assertBlockedRequest();
+  // The only write identifies the very request we left open, after returning.
+  await dialog.getByRole('button', { name: copy.vaults.approval.deny, exact: true }).click();
+  await expect.poll(() => observed.writes).toEqual([`POST /api/vault/requests/${current.id}/deny`]);
+  await expect(dialog).toHaveCount(0);
+  expect(observed.documents).toEqual([url]);
   expect(observed.prohibited).toEqual([]);
   expect(observed.errors).toEqual([]);
   expect(observed.popups).toEqual([]);
