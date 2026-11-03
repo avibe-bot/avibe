@@ -40,6 +40,7 @@ import { localDate, type HomePreferences } from '../../lib/homePreferences';
 import { resetCoalescedWrites } from '../../lib/useCoalescedWrite';
 import { HomeGuide } from './HomeGuide';
 import { dayNumber, tipsForDay } from './tips';
+import { useHomePreferences } from './useHomePreferences';
 
 const i18n = createInstance();
 void i18n.use(initReactI18next).init({
@@ -296,6 +297,28 @@ describe('the tip of the day (ui/design: home/home/c-ready-*)', () => {
       expect(tipSection()).toBeNull();
       each.unmount();
     }
+  });
+
+  it('follows a change made elsewhere once it is saved, even after that surface has closed', async () => {
+    // Settings · General's switch, standing in for the page: another reader of the same record.
+    const Switch = () => {
+      const { preferences, update } = useHomePreferences();
+      return <button type="button" onClick={() => update({ tips_enabled: !preferences.tips_enabled })}>tips-switch</button>;
+    };
+    let release: () => void = () => {};
+    const save = api.updateHomePreferences.getMockImplementation()!;
+    api.updateHomePreferences.mockImplementationOnce((changes: Partial<HomePreferences>) =>
+      new Promise((resolve) => { release = () => resolve(save(changes)); }));
+    const user = userEvent.setup();
+    renderGuide();
+    await waitFor(() => expect(tipSection()).not.toBeNull());
+    const settings = render(<Switch />);
+    await user.click(screen.getByText('tips-switch'));
+    // Settings closes before the save lands; the home behind it still shows the tip.
+    settings.unmount();
+    expect(tipSection()).not.toBeNull();
+    release();
+    await waitFor(() => expect(tipSection()).toBeNull());
   });
 
   it('offers a member only the tips they can act on', async () => {

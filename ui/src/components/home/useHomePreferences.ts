@@ -4,7 +4,6 @@ import { useApi } from '../../context/ApiContext';
 import { DEFAULT_HOME_PREFERENCES, type HomePreferences } from '../../lib/homePreferences';
 import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { useCoalescedWrite } from '../../lib/useCoalescedWrite';
-import { useLatestRef } from '../../lib/useLatestRef';
 
 export interface HomePreferencesState {
   preferences: HomePreferences;
@@ -41,7 +40,7 @@ const mergeChanges = (prev: Changes, next: Changes): Changes => ({
  * A change shows at once and is saved through one writer for the account (`useCoalescedWrite`):
  * one request in flight, the changes made meanwhile folded into the next, so the newest choice is
  * also the last one the server commits. Each field stands on its own, so a refused save does not
- * drop the changes waiting behind it. Once a burst settles the record is read back.
+ * drop the changes waiting behind it. Once the writer is idle, every reader reads the record back.
  */
 export function useHomePreferences(): HomePreferencesState {
   const api = useApi();
@@ -73,22 +72,20 @@ export function useHomePreferences(): HomePreferencesState {
   const { write, isSaving } = useCoalescedWrite<Changes>('home-preferences', send, {
     merge: mergeChanges,
     standsAlone: () => true,
-    onSettled: useCallback(() => read(), [read]),
   });
-  // Reads wait for the writer: the burst's own settle reads the record back.
-  const savingRef = useLatestRef(isSaving(WRITE_KEY));
+  const saving = isSaving(WRITE_KEY);
 
+  // Read while shown and idle: on showing, when the surface is uncovered, when the window regains
+  // focus, and whenever the account's writer goes idle. That last one is every reader's, not only the
+  // writer's owner's: a change made in Settings settles after Settings has closed, and the home kept
+  // behind it reads the record back too.
   useEffect(() => {
-    if (!surfaceActive) return;
-    queueMicrotask(() => {
-      if (!savingRef.current) void read();
-    });
-    const onFocus = () => {
-      if (!savingRef.current) void read();
-    };
+    if (!surfaceActive || saving) return;
+    queueMicrotask(() => void read());
+    const onFocus = () => void read();
     window.addEventListener('focus', onFocus);
     return () => window.removeEventListener('focus', onFocus);
-  }, [read, savingRef, surfaceActive]);
+  }, [read, saving, surfaceActive]);
 
   const update = useCallback((changes: Changes) => {
     generationRef.current += 1;
