@@ -7,6 +7,7 @@ import { apiFetch, recoverRemoteAuthFromSessionProbe, withApiDeadline } from '..
 import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
 import { parseBot, parseBotLimit, type AgentBotSummary, type Bot, type BotEmojiAvatarInput, type BotLimit } from '../lib/bots';
 import { parseNotificationPreferences, type InboxCategory, type NotificationPreferences } from '../lib/notificationPreferences';
+import { parseHomePreferences, type HomePreferences } from '../lib/homePreferences';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
 import type { AgentGraphParams, AgentGraphResult, AgentGraphVisibility } from '../lib/agentGraph';
 import { onPageReactivated, type PageReactivationListener } from '../lib/pageActivity';
@@ -644,6 +645,9 @@ export type ApiContextType = {
   getNotificationPreferences: () => Promise<NotificationPreferences>;
   /** Writes only the switches named; the server merges them into the stored record. */
   updateNotificationPreferences: (changes: Partial<NotificationPreferences>) => Promise<NotificationPreferences>;
+  /** The account's home preferences; `setup_not_needed` in a change only adds items. */
+  getHomePreferences: () => Promise<HomePreferences>;
+  updateHomePreferences: (changes: Partial<HomePreferences>) => Promise<HomePreferences>;
   getWebPushStatus: (payload?: WebPushStatusPayload) => Promise<WebPushStatus>;
   getWebPushVapidPublicKey: () => Promise<{ ok: boolean; public_key: string }>;
   subscribeWebPush: (
@@ -3796,6 +3800,23 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         body: JSON.stringify(changes),
       });
       const saved = res.ok ? parseNotificationPreferences(payloadJson) : null;
+      if (!saved) throw new ApiError(`Request failed: ${path} (${res.status})`, res.status, null);
+      return saved;
+    },
+    getHomePreferences: async () => {
+      const path = '/api/home/preferences';
+      const preferences = parseHomePreferences(await getJson(path, { handleError: false }));
+      if (!preferences) throw new ApiError(`Request failed: ${path}`, 0, null);
+      return preferences;
+    },
+    updateHomePreferences: async (changes) => {
+      const path = '/api/home/preferences';
+      const { res, payloadJson } = await requestJson(path, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(changes),
+      });
+      const saved = res.ok ? parseHomePreferences(payloadJson) : null;
       if (!saved) throw new ApiError(`Request failed: ${path} (${res.status})`, res.status, null);
       return saved;
     },

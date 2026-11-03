@@ -7,9 +7,9 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const api = vi.hoisted(() => ({ mutateConfig: vi.fn() }));
+const api = vi.hoisted(() => ({ mutateConfig: vi.fn(), getHomePreferences: vi.fn(), updateHomePreferences: vi.fn() }));
 const apiHandouts = vi.hoisted(() => [] as { t: unknown; value: unknown }[]);
-const authorization = vi.hoisted(() => ({ capabilities: { can_manage_instance: true } }));
+const authorization = vi.hoisted(() => ({ capabilities: { can_manage_instance: true, can_chat: false } }));
 const media = vi.hoisted(() => ({
   prefersLight: false,
   listeners: new Set<() => void>(),
@@ -40,7 +40,11 @@ vi.mock('../../context/ApiContext', async () => {
     useApi: () => {
       const { t } = useTranslation();
       return useMemo(() => {
-        const value = { mutateConfig: (...args: unknown[]) => api.mutateConfig(...args) };
+        const value = {
+          mutateConfig: (...args: unknown[]) => api.mutateConfig(...args),
+          getHomePreferences: () => api.getHomePreferences(),
+          updateHomePreferences: (changes: unknown) => api.updateHomePreferences(changes),
+        };
         apiHandouts.push({ t, value });
         return value;
       }, [t]);
@@ -671,5 +675,29 @@ describe('General settings — Desktop Mini', () => {
       }));
     });
     await waitFor(() => expect(toggle.getAttribute('aria-checked')).toBe('true'));
+  });
+});
+
+describe('General settings — tips on the home', () => {
+  it('turns the home’s tips off for the account, and only for a reader who has the home', async () => {
+    const stored = { setup_later_on: null, setup_not_needed: [], tip_hidden_on: null, tips_enabled: true };
+    api.getHomePreferences.mockResolvedValue(stored);
+    api.updateHomePreferences.mockImplementation(async (changes: object) => ({ ...stored, ...changes }));
+    const view = renderPage();
+    expect(screen.queryByRole('switch', { name: en.settings.general.homeTips.title })).toBeNull();
+    view.unmount();
+
+    authorization.capabilities.can_chat = true;
+    try {
+      const user = userEvent.setup();
+      renderPage();
+      const toggle = await screen.findByRole('switch', { name: en.settings.general.homeTips.title });
+      await waitFor(() => expect(toggle.getAttribute('aria-checked')).toBe('true'));
+      await user.click(toggle);
+      expect(api.updateHomePreferences).toHaveBeenCalledWith({ tips_enabled: false });
+      await waitFor(() => expect(toggle.getAttribute('aria-checked')).toBe('false'));
+    } finally {
+      authorization.capabilities.can_chat = false;
+    }
   });
 });

@@ -26,6 +26,8 @@ async function serveProduct(page: Page, lang: Lang = 'en') {
     '/api/desktop/computer-use/status', '/api/bots', '/api/sessions/ses_main',
     // The Owner's home reads the main Bot's conversation through the read that creates it.
     '/api/sessions/main',
+    // The home's Getting started and tip, answered by the shared harness.
+    '/api/home/preferences', '/api/remote-access/status', '/api/web-push/status',
   ]);
   await page.route('**/api/**', (route) => {
     const request = route.request();

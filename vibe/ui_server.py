@@ -6963,6 +6963,33 @@ def notification_preferences_route():
     return jsonify({"ok": True, "preferences": public})
 
 
+@app.route("/api/home/preferences", methods=["GET", "PUT"])
+def home_preferences_route():
+    """The account's home preferences: Getting started put off or not needed, and the tips."""
+    from core.home_preferences import (
+        get_home_preferences,
+        public_home_preferences,
+        set_home_preferences,
+    )
+
+    user_key = _web_push_user_key()
+    if request.method == "GET":
+        return jsonify({"ok": True, "preferences": public_home_preferences(get_home_preferences(user_key))})
+
+    payload = request.json
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "invalid_payload"}), 400
+    fields = ("setup_later_on", "setup_not_needed", "tip_hidden_on", "tips_enabled")
+    updates = {field: payload[field] for field in fields if field in payload}
+    if not updates:
+        return jsonify({"ok": False, "error": "no_preferences"}), 400
+    try:
+        preferences = set_home_preferences(user_key, updates)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": "invalid_preferences", "message": str(exc)}), 400
+    return jsonify({"ok": True, "preferences": public_home_preferences(preferences)})
+
+
 def _notification_user_key_for_context(context: Any) -> str:
     if context is not None and getattr(context, "is_remote", False) and getattr(context, "subject", None):
         return f"remote:{context.subject}"

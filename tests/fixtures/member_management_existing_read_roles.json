@@ -34,6 +34,7 @@
   "GET /api/harness/runs/example": "editor",
   "GET /api/harness/tasks": "editor",
   "GET /api/harness/watches": "editor",
+  "GET /api/home/preferences": "viewer",
   "GET /api/inbox": "viewer",
   "GET /api/mcp": "editor",
   "GET /api/mcp/example": "editor",
@@ -146,6 +147,7 @@
   "POST /api/web-push/test": "viewer",
   "PUT /api/dock/order": "editor",
   "PUT /api/files/write": "editor",
+  "PUT /api/home/preferences": "viewer",
   "PUT /api/notifications/preferences": "viewer",
   "PUT /api/sessions/example/draft": "editor",
   "PUT /api/vault/secrets/example/fields/example": "editor"

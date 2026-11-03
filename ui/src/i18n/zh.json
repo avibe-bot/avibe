@@ -481,6 +481,10 @@
         "title": "桌面迷你窗",
         "description": "在桌面上显示桌宠迷你窗。",
         "saveFailed": "桌面迷你窗设置未能保存。"
+      },
+      "homeTips": {
+        "title": "首页小技巧",
+        "description": "每天在首页介绍一个你还没用过的能力。"
       }
     },
     "shortcuts": {
@@ -3399,6 +3403,79 @@
         "working": "{{count}} 位在忙",
         "unread": "{{count}} 条未读"
       },
+      "setup": {
+        "title": "开始使用",
+        "more": "还有 {{count}} 项",
+        "later": "稍后",
+        "notNeeded": "不需要",
+        "model": {
+          "title": "给{{name}}接上模型",
+          "why": "用已有的订阅或 API key",
+          "action": "去添加"
+        },
+        "notifications": {
+          "title": "打开通知",
+          "why": "做完事、需要你决定时第一时间告诉你。",
+          "action": "打开"
+        },
+        "computer_use": {
+          "title": "允许操作电脑",
+          "why": "授予辅助功能和屏幕录制权限。",
+          "action": "去授权"
+        },
+        "chat_apps": {
+          "title": "连接聊天应用",
+          "why": "在 Slack、飞书、微信里也能找{{name}}。",
+          "action": "去连接"
+        },
+        "phone": {
+          "title": "在手机上继续",
+          "why": "配对 Avibe Cloud。",
+          "action": "去配对"
+        }
+      },
+      "tips": {
+        "label": "每日小技巧",
+        "try": "试试",
+        "previous": "上一条",
+        "next": "下一条",
+        "hide": "今天不再显示",
+        "bots": {
+          "title": "伙伴",
+          "why": "给长期的事配一个有名字、有记忆的伙伴。"
+        },
+        "showPages": {
+          "title": "可视化页面",
+          "why": "让对话把结果画成一个页面。",
+          "ask": "把本周的项目进展画成一个页面"
+        },
+        "tasks": {
+          "title": "定时任务和监听",
+          "why": "到点自动做，或等某件事发生再做。",
+          "ask": "每天早上 9 点把昨天各项目的进展总结给我"
+        },
+        "vault": {
+          "title": "保险库",
+          "why": "密钥给 Agent 用，但它看不到原文。"
+        },
+        "skills": {
+          "title": "技能和 MCP",
+          "why": "装一个，所有 Agent 都多一项本事。"
+        },
+        "chatApps": {
+          "title": "聊天应用",
+          "why": "在 Slack、飞书、微信里找{{name}}。"
+        },
+        "desktopPet": {
+          "title": "桌面小窗",
+          "why": "在任何应用里按住语音快捷键，和{{name}}说话。",
+          "whyShortcut": "在任何应用里按住 {{shortcut}}，和{{name}}说话。"
+        },
+        "voice": {
+          "title": "语音",
+          "why": "手机上按住底栏中间的{{name}}说话。"
+        }
+      },
       "asks": {
         "addBot": "加一个伙伴",
         "addBotAsk": "帮我加一个负责安全的伙伴",
@@ -3417,8 +3494,6 @@
       "addModel": "去接模型",
       "inputPlaceholder": "和 Agent 聊点什么…",
       "noProjectForChat": "还没有项目 — 先添加一个，再开始对话",
-      "ready": "{{backend}} 已连接，可以开始工作",
-      "readyDismiss": "关闭",
       "computerUse": {
         "off": "电脑操作未开启",
         "offDetail": "需要使用时，请从 Avibe 原生控制中开启。",
