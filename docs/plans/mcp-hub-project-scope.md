@@ -229,14 +229,37 @@ Consumers, none of which decide scope on their own:
   `--strict-mcp-config` and no `--mcp-config` (`vibe/claude_config.py`); Codex
   and OpenCode do not read `.mcp.json`.
 
-## 11. Persisted shapes
+## 11. Reuse map (binding for implementation)
+
+Build on these; add a new mechanism only where this table has no entry.
+
+| Need | Reuse | Change needed |
+|---|---|---|
+| Project root | `core/managed_skills.py` `_project_directories` (+ `_working_directory`, `managed_skill_project_base`) | expose the root it already computes; no second walk |
+| Session/CLI inputs | `skills_cwd` / `skills_project_base` already passed to `build_system_prompt_blocks`; CLI env `AVIBE_SKILL_WORKING_DIR` / `AVIBE_SKILL_PROJECT_BASE` from `managed_skill_environment` | pass them on; no new env vars, no DB lookup |
+| Project id from folder | `storage/projects_service._find_project_by_workdir` | none |
+| Web project picker and access | `ui/.../skills/ProjectPicker.tsx`; `project_access_service.can_read_project` / `can_manage_project` | none |
+| Package store | `core/mcp_hub/repository.py` (publish, read_published, summarize, list, rollback) | `mcp_root()` / `package_dir()` take the scope root; same functions for both scopes |
+| Parse `.mcp.json` entries | `definition.definition_from_provider` | none (placeholders substituted first) |
+| Relative `cwd` | `native._resolve_cwd` | none |
+| Atomic compare-and-replace write | `config.atomic_io.write_atomic(..., before_replace=...)` as `native.py` uses it | none |
+| Discover, refresh, publish, connections, call, needs_login | `core/mcp_hub/runtime.py` existing paths and per-package locks | key by `ScopedName` instead of `name` |
+| OAuth storage, provider, callback | `core/mcp_hub/oauth.py` `AvibeTokenStorage`, `read_state`, the start link and callback route | storage path from the scope's package dir; pending record keeps `ScopedName` |
+| Prompt rows and paging | `core/mcp_hub/prompt.py` `build_mcp_prompt_blocks`, `catalog_page_of` | add the scope inputs |
+| CLI and Web transport | `vibe/internal_client.mcp_request`, `vibe/mcp_api.run`, `_mcp_route` | add scope inputs to payloads |
+| Secrets editor UI | `McpAddForm` key/value rows (env/headers) | reuse for Configure secrets |
+| Add dialog | `McpAddDialog` two tabs | target the current scope |
+| Confirm approve | existing `confirm-dialog` primitive | none |
+| Native MCP off in backends | `vibe/claude_config.py` `--strict-mcp-config` | none |
+
+## 12. Persisted shapes
 
 New paths only. Global files unchanged; no migration. New files use the shapes
 of §4 and D3 (a `secrets.json` of env/headers, a fingerprint file); no version
 fields — the format is defined by this release and evolved by safe degradation
 when a real change comes. Unreadable files degrade per §4.
 
-## 12. Resolved owner decisions (2026-11-03)
+## 13. Resolved owner decisions (2026-11-03)
 
 Round-3 trim (both reviewers, folded): drop per-file version fields, the
 `--projects`/`--remove-project-cache` tooling, the archived-Project fallback
