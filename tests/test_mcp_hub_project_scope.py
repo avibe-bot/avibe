@@ -291,6 +291,55 @@ def test_project_add_writes_back_atomically_and_keeps_secrets_private(tmp_path, 
     assert "echo" not in json.loads((root / ".mcp.json").read_text())["mcpServers"]
 
 
+def test_concurrent_writes_to_one_project_keep_every_server(tmp_path, monkeypatch):
+    """Per-server locks do not cover the shared ``.mcp.json``; both checks pass, then both replace."""
+    import threading
+
+    from core.mcp_hub import scope
+
+    root = _project(tmp_path / "repo", {})
+    both_checked = threading.Barrier(2, timeout=1)
+    write_atomic = scope.write_atomic
+
+    def checked_then_wait(path, text, *, before_replace, **kwargs):
+        def check():
+            before_replace()
+            try:
+                both_checked.wait()
+            except threading.BrokenBarrierError:
+                pass
+
+        write_atomic(path, text, before_replace=check, **kwargs)
+
+    monkeypatch.setattr(scope, "write_atomic", checked_then_wait)
+    errors = []
+
+    def write(name):
+        try:
+            scope.write_server(_key(root, name), ECHO, replace=False)
+        except Exception as exc:  # noqa: BLE001 - surfaced by the assertion below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=write, args=(name,)) for name in ("alpha", "beta")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    assert sorted(json.loads((root / ".mcp.json").read_text())["mcpServers"]) == ["alpha", "beta"]
+
+
+def test_a_project_without_a_folder_is_a_typed_error(runtime, monkeypatch):
+    from core.mcp_hub import scope
+
+    monkeypatch.setattr(scope, "_project_workdir", lambda _project_id: "")
+    for operation, payload in (("list", {}), ("add", {"servers": [{"name": "echo", "server": ECHO}]})):
+        status, body = asyncio.run(runtime.submit(operation, {"project": "proj_nofolder", **payload}))
+        assert status == 200  # a typed error; the HTTP layer maps ``usage`` to 400
+        assert json.loads(body)["error"]["type"] == "usage"
+    assert repository.list_names() == []
+
+
 @pytest.mark.parametrize(
     ("entry", "persisted", "rejected"),
     [

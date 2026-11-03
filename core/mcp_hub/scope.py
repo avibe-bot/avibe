@@ -16,6 +16,7 @@ import json
 import logging
 import re
 import shutil
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Union
@@ -41,6 +42,8 @@ BLOCKED_STATES = {"pending_approval", "needs_config"}
 # They only feed that check: a definition with a missing variable is never returned.
 _STAND_IN = "0"
 _URL_STAND_IN = "https://placeholder.invalid/"
+# Package locks are per server; this one covers the shared ``.mcp.json`` read-modify-replace.
+_DOCUMENT_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -131,6 +134,8 @@ def request_scopes(payload: dict[str, Any]) -> list[Scope]:
         return [Scope()]
     if payload.get("project"):
         workdir = _project_workdir(str(payload["project"]))
+        if not workdir:
+            raise McpHubError("usage", "This project has no folder, so it has no project MCP servers.")
         return [Scope(), project_scope(workdir, workdir, require_config=False)]
     return scopes(payload.get("workingDirectory"), payload.get("projectBase"))
 
@@ -507,15 +512,16 @@ def _write_document(path: Path, data: dict[str, Any], expected: Optional[str]) -
 def write_server(key: ScopedName, entry: Optional[dict[str, Any]], *, replace: bool = True) -> None:
     """One compare-and-replace of ``.mcp.json``; supplied env/headers go to the cache only."""
 
-    text, data = _document(key.scope)
-    before = copy.deepcopy(data)
-    servers = data.setdefault("mcpServers", {})
-    if entry is None:
-        servers.pop(key.name, None)
-    else:
-        _apply_entry(servers, key, entry, replace)
-    if text is None or data != before:
-        _write_document(_project_file(key.scope), data, text)
+    with _DOCUMENT_LOCK:
+        text, data = _document(key.scope)
+        before = copy.deepcopy(data)
+        servers = data.setdefault("mcpServers", {})
+        if entry is None:
+            servers.pop(key.name, None)
+        else:
+            _apply_entry(servers, key, entry, replace)
+        if text is None or data != before:
+            _write_document(_project_file(key.scope), data, text)
     if entry is None:
         return
     update = {field: entry[field] for field in ("env", "headers") if entry.get(field)}

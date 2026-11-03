@@ -184,7 +184,9 @@ Consumers, none of which decide scope on their own:
   derives the scope itself from those inputs.
 - **Web (API in step 1; the page is step 2, upcoming).** `/api/mcp*` take `project=<proj id>` (Web manages Avibe Projects;
   `dir-` keys are reachable from Sessions and CLI only). `?project=` selects the
-  Project folder even when it has no `.mcp.json` yet, so a Web add creates it. Reads check
+  Project folder even when it has no `.mcp.json` yet, so a Web add creates it. A
+  Project without a folder has no project scope: the API returns a `usage` error
+  and the page shows the global hub with a notice. Reads check
   `project_access_service.can_read_project`; mutations (add, remove, refresh,
   approve, configure secrets, login, logout) are Owner-only, go over IPC, and
   the Controller re-checks the Project. Reads use the project scope root, not
@@ -212,7 +214,9 @@ Consumers, none of which decide scope on their own:
 - **Loading.** On demand, when a caller's scope first resolves. No periodic
   per-Project pass and no pre-discovery of all Projects. Concurrency is the
   existing per-package lock under the package `ScopedName`; no second
-  coordinator. File and DB work stays off the Controller loop
+  coordinator. Writes to one `.mcp.json` from different server names also hold
+  one process-wide document lock across read, modify, check and replace, since
+  package locks do not cover the shared file. File and DB work stays off the Controller loop
   (`asyncio.to_thread`).
 - **Staleness.** On resolve, the caller's `.mcp.json` entry is read in a thread
   and compared against its cached fingerprint; an unchanged entry keeps its

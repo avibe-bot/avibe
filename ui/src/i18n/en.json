@@ -6831,6 +6831,7 @@
     "configureSave": "Save",
     "addProjectSubtitle": "Adds the servers to the .mcp.json of {{project}}. Each one waits for approval before its tools are available.",
     "removeProjectHint": "This removes {{name}} from {{path}} and drops its approval, stored values and login on this machine.",
-    "globalAlsoAvailable": "Global MCP servers are available here too"
+    "globalAlsoAvailable": "Global MCP servers are available here too",
+    "projectNoFolder": "This project has no folder configured, so it has no project MCP servers — showing global servers only."
   }
 }

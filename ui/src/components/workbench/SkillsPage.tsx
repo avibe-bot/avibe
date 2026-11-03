@@ -338,7 +338,12 @@ export const SkillsPage: React.FC = () => {
       ) : null}
 
       {/* Each MCP view is its own hub: switching project or scope starts it fresh, so no state crosses. */}
-      {showMcp ? (scope === 'global' ? <McpHubSection key="global" /> : activeProject ? (
+      {showMcp && scope === 'project' && activeProject && !projectHasFolder ? (
+        <div className="rounded-xl border border-gold/30 bg-gold/[0.06] px-4 py-3 text-[12px] text-muted">
+          {t('mcpHub.projectNoFolder')}
+        </div>
+      ) : null}
+      {showMcp ? (scope === 'global' || (activeProject && !projectHasFolder) ? <McpHubSection key="global" /> : activeProject ? (
         <McpHubSection key={activeProject.id} project={{ id: activeProject.id, name: activeProject.display_name }} />
       ) : null) : (
       <>

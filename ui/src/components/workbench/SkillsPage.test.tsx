@@ -174,6 +174,16 @@ describe('SkillsPage MCP project view', () => {
     await waitFor(() => expect(api.listMcpServers).toHaveBeenLastCalledWith(null));
   });
 
+  it('shows the global hub for a project without a folder and never asks for its project servers', async () => {
+    api.listProjects.mockResolvedValue({
+      projects: [{ ...project('proj_c', 'gamma'), folder_path: '', capabilities: { can_chat: true, has_folder: false } }],
+    });
+    renderPage('/skills?tab=mcp&scope=project&project=proj_c');
+    expect(await screen.findByText(en.mcpHub.projectNoFolder)).toBeTruthy();
+    await screen.findByText('suno');
+    expect(api.listMcpServers.mock.calls.every(([project]) => project === null)).toBe(true);
+  });
+
   it('returns a project OAuth login to that project and its own same-named row', async () => {
     api.listMcpServers.mockImplementation(async (project: string | null) => ({
       ok: true,
