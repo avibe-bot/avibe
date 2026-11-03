@@ -1091,7 +1091,7 @@ const PetSurface: React.FC = () => {
           </div>
         </div>
         <SpeechSlot open={voice.busy || composing || showReplyBubble || resolvingMain || !binding}>
-          {bubbleDrawn && showReplyBubble && binding ? (
+          {bubbleDrawn && binding ? (
             // Still drawn while the slot closes, so it fades out rather than vanishing.
             <div
               // Its own identity, so a notice drawn in the same place replaces

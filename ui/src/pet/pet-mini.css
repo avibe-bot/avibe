@@ -889,6 +889,10 @@ to {
   -webkit-line-clamp:3;
   overflow:hidden;
   word-break:break-word}
+/* With the history open, the reply is read in full above, and its height budget
+   (--pet-history-reserve) leaves the toggle row one summary line. */
+.pet-mini-reply-toggle[aria-expanded=true] .pet-mini-reply-summary {
+  -webkit-line-clamp:1}
 .pet-mini-message-attachments {
   display:flex;
   flex-direction:column;

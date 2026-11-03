@@ -1,5 +1,9 @@
 import { expect, test } from '@playwright/test';
 
+// Two Vibey clicks closer than this are a double-click, which opens the
+// conversation in Avibe (#3057); separate clicks wait it out.
+const DOUBLE_CLICK_GAP = 500;
+
 for (const theme of ['light', 'dark']) {
   for (const lang of ['en', 'zh']) {
     test(`collapsed bubble spacing and action copy (${theme}, ${lang})`, async ({ page }) => {
@@ -239,7 +243,8 @@ for (const theme of ['light', 'dark']) {
 }
 
 test('the reply bubble names Vibey as written', async ({ page }) => {
-  await page.goto('/e2e/pet-mini/fixture.html?main=true&layers=0');
+  // An input waiting behind the turn holds the bubble on screen.
+  await page.goto('/e2e/pet-mini/fixture.html?main=true&layers=0&queued=1');
   const eyebrow = page.locator('.pet-mini-bubble-speaker');
   await expect(eyebrow).toBeVisible();
   // innerText applies text-transform, so this is what the user reads.
@@ -369,31 +374,32 @@ for (const theme of ['light', 'dark']) {
         expect(bounds!.y).toBeGreaterThanOrEqual(box!.y);
         expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(box!.y + box!.height + 1);
       }
-      expect(await history.evaluate((node) => node.scrollHeight <= node.clientHeight + 1)).toBe(true);
+      // Opening the history opens the input beneath it too (#3057), so the box may
+      // scroll; it opens at its end, where the actions are.
       expect(await history.evaluate((node) => Math.abs(node.scrollHeight - node.clientHeight - node.scrollTop))).toBeLessThanOrEqual(1);
       expect((await page.locator('.pet-mini-collapsed').boundingBox())!.y).toBeGreaterThanOrEqual(0);
       expect(await avatar.boundingBox()).toEqual(anchor);
+      // The stack expands the list and closes the history. The input the
+      // history opened with stays and takes the slot (#3057), so the way back
+      // is Vibey: it opens its history again, folding the list; then it closes
+      // it, and opens it once more. Clicks are a double-click apart, which
+      // would open Avibe instead.
       await page.locator('.pet-mini-collapsed').click();
       await expect(page.locator('.pet-mini-scroll')).toBeVisible();
-      await expect(page.locator('.pet-mini-detail')).not.toHaveClass(/is-open/);
-      await page.locator('.pet-mini-reply-toggle').click();
+      await expect(page.locator('.pet-mini-detail.is-open')).toHaveCount(0);
+      await avatar.click();
       await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
+      await expect(page.locator('.pet-mini-scroll')).toHaveCount(0);
       await expect(page.locator('.pet-mini-detail')).toHaveClass(/is-open/);
-      // Vibey closes the open history, then opens it again with the stack
-      // still collapsed; the stack expands the list and closes the history;
-      // Vibey then collapses the list.
+      await page.waitForTimeout(DOUBLE_CLICK_GAP);
       await avatar.click();
-      await expect(page.locator('.pet-mini-detail')).not.toHaveClass(/is-open/);
+      await expect(page.locator('.pet-mini-detail.is-open')).toHaveCount(0);
+      await page.waitForTimeout(DOUBLE_CLICK_GAP);
       await avatar.click();
       await expect(page.locator('.pet-mini-detail')).toHaveClass(/is-open/);
       await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
-      await page.locator('.pet-mini-collapsed').click();
-      await expect(page.locator('.pet-mini-scroll')).toBeVisible();
-      await expect(page.locator('.pet-mini-detail')).not.toHaveClass(/is-open/);
-      await avatar.click();
-      await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
-      await expect(page.locator('.pet-mini-detail')).not.toHaveClass(/is-open/);
       expect(await avatar.boundingBox()).toEqual(anchor);
+      expect(await page.evaluate(() => window.petFixtureOpens)).toEqual([]);
     });
   }
 }
@@ -415,7 +421,7 @@ test('an empty activity stack takes no space while history remains usable withou
 });
 
 test('a close during a main outage lasts until the mini document reopens', async ({ page }) => {
-  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal');
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&queued=1');
   await page.locator('.pet-mini-collapsed').click();
   const card = page.locator('.pet-mini-card[data-session-id="ses_fixture_0"]');
   await expect(card).toBeVisible();
@@ -442,7 +448,7 @@ test('a close during a main outage lasts until the mini document reopens', async
 
 for (const trigger of ['reconnect', 'reactivation']) {
   test(`main resolves automatically after service recovery on ${trigger}`, async ({ page }) => {
-    await page.goto('/e2e/pet-mini/fixture.html?offline=true&activities=0');
+    await page.goto('/e2e/pet-mini/fixture.html?offline=true&activities=0&queued=1');
     await expect(page.getByText("Couldn't open the conversation with Vibey. Try again in a moment.")).toBeVisible();
     await expect(page.getByRole('button', { name: 'Open in Avibe', exact: true })).toBeVisible();
     await expect(page.getByRole('textbox')).toHaveCount(0);
@@ -510,7 +516,7 @@ for (const pose of ['idle', 'ready', 'sleeping']) {
 }
 
 test('the reply bubble tail starts on the bubble border instead of poking above it', async ({ page }) => {
-  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal');
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&queued=1');
   const bubble = page.locator('.pet-mini-reply-bubble');
   await expect(bubble).toBeVisible();
   const tail = await bubble.evaluate((node) => {
@@ -527,8 +533,9 @@ test('the reply bubble tail starts on the bubble border instead of poking above 
 });
 
 for (const theme of ['light', 'dark']) {
-  test(`history opens above a toggle that keeps its place (${theme})`, async ({ page }) => {
-    await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long&queued=1');
+  test(`history opens upward from its toggle, with the input below (${theme})`, async ({ page }) => {
+    // The history shows the latest reply alone (#3057); a long one scrolls.
+    await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long&reply=long&queued=1');
     await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
     const settle = () => page.evaluate(async () => {
       await Promise.all(document.getAnimations()
@@ -538,12 +545,8 @@ for (const theme of ['light', 'dark']) {
     const toggle = page.locator('.pet-mini-reply-toggle');
     const detail = page.locator('.pet-mini-reply-bubble .pet-mini-detail');
     const history = page.locator('.pet-mini-bubble-history');
-    const near = (a: { x: number; y: number; width: number; height: number } | null, b: typeof a) => {
-      for (const key of ['x', 'y', 'width', 'height'] as const) expect(Math.abs(a![key] - b![key])).toBeLessThanOrEqual(1);
-    };
     await expect(toggle).toBeVisible();
     await settle();
-    const collapsed = await toggle.boundingBox();
     expect(await toggle.getAttribute('aria-controls')).toBe(await detail.getAttribute('id'));
     await expect(toggle.locator('svg')).toHaveClass(/lucide-chevron-up/);
     await expect(toggle.locator('svg')).toHaveCSS('transform', 'none');
@@ -552,15 +555,16 @@ for (const theme of ['light', 'dark']) {
     await toggle.click();
     await expect(detail).toHaveClass(/is-open/);
     await settle();
-    near(await toggle.boundingBox(), collapsed);
-    // Opening upward: the history sits entirely above the toggle row.
+    // Opening upward: the history sits entirely above the toggle row, and the
+    // input it opens with (#3057) sits below the bubble.
+    const row = (await toggle.boundingBox())!;
     const box = (await history.boundingBox())!;
-    expect(box.y + box.height).toBeLessThanOrEqual(collapsed!.y + 1);
+    expect(box.y + box.height).toBeLessThanOrEqual(row.y + 1);
     expect(box.y).toBeGreaterThanOrEqual(0);
-    // The newest result is shown on open, so the earlier turns sit scrolled
-    // away under the top edge fade.
-    // Chat-style: it opens at the very bottom, so there is no bottom fade and
-    // the newest result is in view right above the toggle row.
+    const bubble = (await page.locator('.pet-mini-reply-bubble').boundingBox())!;
+    expect(bubble.y + bubble.height).toBeLessThanOrEqual((await page.locator('.pet-mini-input').boundingBox())!.y + 1);
+    // Chat-style: it opens at the very bottom of the reply, so its start sits
+    // scrolled away under the top edge fade and there is no bottom fade.
     expect(await history.evaluate((node) => Math.abs(node.scrollHeight - node.clientHeight - node.scrollTop))).toBeLessThanOrEqual(1);
     expect(await history.evaluate((node) => node.scrollTop)).toBeGreaterThan(0);
     const last = (await history.locator('.pet-mini-detail-result').last().boundingBox())!;
@@ -570,10 +574,10 @@ for (const theme of ['light', 'dark']) {
     await expect(toggle.locator('svg')).not.toHaveCSS('transform', 'none');
     await expect.poll(() => page.evaluate(() => window.petFixtureMarkReads)).toEqual(['ses_main']);
 
+    // Closing it leaves the input, which takes the slot alone.
     await toggle.click();
-    await expect(detail).not.toHaveClass(/is-open/);
-    await settle();
-    near(await toggle.boundingBox(), collapsed);
+    await expect(page.locator('.pet-mini-detail.is-open')).toHaveCount(0);
+    await expect(page.getByRole('textbox')).toBeVisible();
   });
 }
 
@@ -643,7 +647,7 @@ for (const theme of ['light', 'dark']) {
 }
 
 test('the history fades over a taller, darker band than the card list', async ({ page }) => {
-  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long&activities=8&queued=1');
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&reply=long&activities=8&queued=1');
   const mask = (selector: string) => page.locator(selector).evaluate((node) => (node as HTMLElement).style.maskImage || (node as HTMLElement).style.webkitMaskImage);
   const scrollTo = (selector: string, where: 'top' | 'middle') => page.locator(selector).evaluate((node, where) => {
     node.scrollTop = where === 'top' ? 0 : (node.scrollHeight - node.clientHeight) / 2;
@@ -678,37 +682,25 @@ test('the history fades over a taller, darker band than the card list', async ({
   await expect.poll(() => mask('.pet-mini-bubble-history')).toContain('rgb(0, 0, 0) 0px');
 });
 
-test('the history opens at the bottom and stays pinned there only while the reader is', async ({ page }) => {
-  // Everything is read, so each live reply replaces the shown one and nothing
-  // here is about mark-read; the open-once mark-read is covered above.
-  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long&unread=0&queued=1');
+test('the history shows the latest reply alone, and each new reply opens at its end', async ({ page }) => {
+  // Everything is read, so nothing here is about mark-read; the open-once
+  // mark-read is covered above.
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&reply=long&queued=1');
   const history = page.locator('.pet-mini-bubble-history');
   const gap = () => history.evaluate((node) => node.scrollHeight - node.clientHeight - node.scrollTop);
-  const height = () => history.evaluate((node) => node.scrollHeight);
   await page.locator('.pet-mini-reply-toggle').click();
   await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).toHaveClass(/is-open/);
   await expect.poll(gap).toBeLessThanOrEqual(1);
 
-  // Content arriving while the reader is at the bottom keeps them there.
-  const before = await height();
-  await page.evaluate(() => window.petFixtureMessage({ id: 'live_1', author: 'agent', type: 'result', text: '新的进展。'.repeat(30) }));
-  await expect.poll(height).toBeGreaterThan(before);
-  await expect.poll(gap).toBeLessThanOrEqual(1);
-
-  // A reader who has scrolled up is left where they are.
+  // A new reply replaces the shown one (#3057), and is a new place to read
+  // from: it opens at its end, even for a reader who had scrolled up the last.
   await history.evaluate((node) => { node.scrollTop = 0; });
   await expect.poll(() => history.evaluate((node) => node.scrollTop)).toBe(0);
-  const grown = await height();
-  await page.evaluate(() => window.petFixtureMessage({ id: 'live_2', author: 'agent', type: 'result', text: '又一条进展。'.repeat(60) }));
-  await expect.poll(height).toBeGreaterThan(grown);
-  expect(await history.evaluate((node) => node.scrollTop)).toBe(0);
-  expect(await page.evaluate(() => window.petFixtureMarkReads)).toEqual([]);
-
-  // A new latest input is a new place to read from: it re-opens at the end
-  // even for a reader who had scrolled up.
-  await page.evaluate(() => window.petFixtureMessage({ id: 'live_input', author: 'user', type: 'user', text: '再看看文档' }));
-  await expect(history).toContainText('再看看文档');
+  await page.evaluate(() => window.petFixtureMessage({ id: 'live_1', author: 'agent', type: 'result', text: '新的进展。'.repeat(60) }));
+  await expect(history).toContainText('新的进展。');
+  await expect(history).not.toContainText('这是一条很长的回复。');
   await expect.poll(gap).toBeLessThanOrEqual(1);
+  expect(await page.evaluate(() => window.petFixtureMarkReads)).toEqual([]);
 });
 
 test('a latest reply taller than the history opens at its end', async ({ page }) => {
@@ -826,6 +818,7 @@ for (const theme of ['light', 'dark']) {
     // A Vibey click opens and closes the history; the card moves with the
     // bubble beneath it but keeps its full form.
     for (const historyOpen of [true, false]) {
+      await page.waitForTimeout(DOUBLE_CLICK_GAP);
       await avatar.click();
       await settle();
       expect(await size()).toEqual(before);
@@ -923,7 +916,7 @@ test('with a lone card, Vibey closes the open history and leaves the card alone'
   };
   const before = await size();
   await avatar.click();
-  await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).not.toHaveClass(/is-open/);
+  await expect(page.locator('.pet-mini-detail.is-open')).toHaveCount(0);
   // The card moves down with the shrinking bubble, but keeps its full form.
   await expect(card.locator('.pet-mini-open')).toBeVisible();
   await expect(card.locator('.pet-mini-authorize')).toBeVisible();
@@ -934,7 +927,7 @@ test('with a lone card, Vibey closes the open history and leaves the card alone'
   await expect(page.locator('.pet-mini-scroll')).toHaveCount(0);
 });
 
-test('two or more cards expand from the stack, and a Vibey click collapses them', async ({ page }) => {
+test('two or more cards expand from the stack, and a Vibey click folds them as it opens its history', async ({ page }) => {
   await page.goto('/e2e/pet-mini/fixture.html?activities=2');
   const avatar = page.locator('.pet-mini-avatar-button');
   await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
@@ -944,19 +937,16 @@ test('two or more cards expand from the stack, and a Vibey click collapses them'
   await expect(page.locator('.pet-mini-scroll')).toBeVisible();
   await expect(page.locator('.pet-mini-card')).toHaveCount(2);
   await expect(avatar).toHaveAttribute('aria-expanded', 'false');
-  // Vibey collapses the expanded list and does nothing else.
-  await avatar.click();
-  await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
-  await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).not.toHaveClass(/is-open/);
-  // The next click is about Vibey: it opens the history, and the stack stays collapsed.
+  // Vibey opens its history and folds the expanded list into the stack (#3057).
   await avatar.click();
   await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).toHaveClass(/is-open/);
   await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
+  await expect(page.locator('.pet-mini-scroll')).toHaveCount(0);
   await expect(avatar).toHaveAttribute('aria-expanded', 'true');
   // Expanding the list closes the history: the two never share the space.
   await page.locator('.pet-mini-collapsed').click();
   await expect(page.locator('.pet-mini-scroll')).toBeVisible();
-  await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).not.toHaveClass(/is-open/);
+  await expect(page.locator('.pet-mini-detail.is-open')).toHaveCount(0);
   await expect(avatar).toHaveAttribute('aria-expanded', 'false');
 });
 
@@ -967,7 +957,9 @@ const bubbleSlot = (page: import('@playwright/test').Page) => page.locator('.pet
 // Whether the bubble itself is reported as a region (a card moving into its old
 // place is, rightly, a region of its own).
 const bubbleIsRegion = (page: import('@playwright/test').Page) => page.evaluate(() => {
-  const box = document.querySelector('.pet-mini-reply-bubble')!.getBoundingClientRect();
+  const node = document.querySelector('.pet-mini-reply-bubble');
+  if (!node) return false;
+  const box = node.getBoundingClientRect();
   return window.petLayoutHitRegions.some((rect) => Math.abs(rect.x - box.left) <= 1 && Math.abs(rect.width - box.width) <= 1 && rect.height > 1
     && Math.abs(rect.y + rect.height - box.bottom) <= 1);
 });
@@ -1049,7 +1041,8 @@ test('the pointer over the lingering reply holds it, and leaving leaves at least
   await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&running=1');
   await page.clock.runFor(500);
   await finishTurn(page);
-  await page.clock.runFor(9_000);
+  // Within the last second of the 20s linger.
+  await page.clock.runFor(19_000);
   await page.locator('.pet-mini-reply-toggle').hover();
   await page.clock.runFor(60_000);
   await expect(bubbleShown(page)).toBeVisible();
@@ -1091,7 +1084,7 @@ test('a Vibey click on the lingering reply opens its history, which does not lin
   await expect(bubbleShown(page)).toHaveCount(0);
 });
 
-test('the lingering reply\'s toggle row opens its history; closing it hides the bubble and hands focus to Vibey', async ({ page, browserName }) => {
+test('the lingering reply\'s toggle row opens its history; closing it hides the bubble and leaves focus in the input', async ({ page, browserName }) => {
   await page.clock.install();
   await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&running=1&activities=0');
   await page.clock.runFor(500);
@@ -1103,10 +1096,13 @@ test('the lingering reply\'s toggle row opens its history; closing it hides the 
   await page.keyboard.press('Enter');
   await page.clock.runFor(300);
   await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).toHaveClass(/is-open/);
+  // The history opened with the input (#3057); closing it from the toggle
+  // hides the bubble, and focus moves to the input that stays.
+  await page.locator('.pet-mini-reply-toggle').focus();
   await page.keyboard.press('Enter');
   await page.clock.runFor(300);
   await expect(bubbleShown(page)).toHaveCount(0);
-  await expect(page.locator('.pet-mini-avatar-button')).toBeFocused();
+  await expect(page.getByRole('textbox')).toBeFocused();
 });
 
 for (const [name, query] of [['a running turn', 'running=1'], ['a pending Vault handoff', 'history=actions']] as const) {
@@ -1136,7 +1132,7 @@ for (const theme of ['light', 'dark']) {
 
     // Closing the history leaves nothing active, so the bubble hides at once.
     await avatar.click();
-    await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).not.toHaveClass(/is-open/);
+    await expect(page.locator('.pet-mini-detail.is-open')).toHaveCount(0);
     await expect(bubbleShown(page)).toHaveCount(0);
     await expect(avatar).toHaveAttribute('aria-expanded', 'false');
   });
@@ -1149,18 +1145,24 @@ test('keyboard activation of Vibey toggles the history like a click', async ({ p
   await page.keyboard.press('Enter');
   await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).toHaveClass(/is-open/);
   await expect(avatar).toHaveAttribute('aria-expanded', 'true');
+  // Opening it opens the input and moves focus there (#3057); back on Vibey,
+  // the key closes it again.
+  await expect(page.getByRole('textbox')).toBeFocused();
+  await avatar.focus();
   await page.keyboard.press('Enter');
-  await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).not.toHaveClass(/is-open/);
+  await expect(page.locator('.pet-mini-detail.is-open')).toHaveCount(0);
   await expect(avatar).toHaveAttribute('aria-expanded', 'false');
 });
 
-test('a Vibey click with no conversation yet does nothing', async ({ page }) => {
+test('a Vibey click with no conversation yet opens the input and no empty history', async ({ page }) => {
   await page.goto('/e2e/pet-mini/fixture.html?main=false&activities=0');
   const avatar = page.locator('.pet-mini-avatar-button');
   await expect(avatar).toBeVisible();
   await avatar.click();
-  await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail.is-open')).toHaveCount(0);
-  await expect(avatar).toHaveAttribute('aria-expanded', 'false');
+  // The main card opens straight to the input (#3057); with nothing to show,
+  // no history is drawn above it.
+  await expect(page.getByRole('textbox')).toBeVisible();
+  await expect(page.locator('.pet-mini-reply-bubble')).toHaveCount(0);
 });
 
 test('holding Vibey still starts input, not the history', async ({ page }) => {
@@ -1188,7 +1190,7 @@ for (const theme of ['light', 'dark']) {
   for (const reduced of [false, true]) {
     test(`the history opens above a growing input and both fit the fixed window (${theme}, reduced=${reduced})`, async ({ page }) => {
       await page.emulateMedia({ reducedMotion: reduced ? 'reduce' : 'no-preference' });
-      await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long&activities=4');
+      await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long&reply=long&activities=4');
       await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
       const avatar = page.locator('.pet-mini-avatar-button');
       await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
@@ -1252,36 +1254,31 @@ for (const theme of ['light', 'dark']) {
 }
 
 for (const initiallyOpen of [false, true]) {
-  test(`a double-click never toggles history (initially open=${initiallyOpen})`, async ({ page }) => {
+  test(`a double-click opens the conversation in Avibe and leaves the card closed (initially open=${initiallyOpen})`, async ({ page }) => {
     await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long');
     const avatar = page.locator('.pet-mini-avatar-button');
     await expect(avatar).toBeVisible();
     await page.clock.install();
+    // Click times are read from performance.now(); the installed clock starts it
+    // at zero, which no real click ever reads, so let some time pass first.
+    await page.clock.runFor(DOUBLE_CLICK_GAP);
     if (initiallyOpen) {
       await avatar.click();
-      await page.clock.runFor(450);
+      // Past the double-click window, so the next click starts a new gesture.
+      await page.clock.runFor(DOUBLE_CLICK_GAP);
       await expect(avatar).toHaveAttribute('aria-expanded', 'true');
     }
-    // Record every committed aria-expanded value, including transient states
-    // that could otherwise disappear before Playwright's final assertion.
-    await avatar.evaluate((node, initial) => {
-      node.setAttribute('data-history-changed', 'false');
-      new MutationObserver((records) => {
-        if (records.some((record) => record.oldValue !== String(initial))
-          || node.getAttribute('aria-expanded') !== String(initial)) {
-          node.setAttribute('data-history-changed', 'true');
-        }
-      }).observe(node, { attributes: true, attributeOldValue: true, attributeFilter: ['aria-expanded'] });
-    }, initiallyOpen);
+    // The first click acts at once and the second opens Avibe, closing the
+    // card as it goes (#3057).
     await avatar.dblclick();
     await page.clock.runFor(600);
-    await expect.poll(() => page.evaluate(() => window.petFixtureOpens.length)).toBe(1);
-    await expect(avatar).toHaveAttribute('aria-expanded', String(initiallyOpen));
-    await expect(avatar).toHaveAttribute('data-history-changed', 'false');
-    if (!initiallyOpen) expect(await page.evaluate(() => window.petFixtureMarkReads)).toEqual([]);
+    await expect.poll(() => page.evaluate(() => window.petFixtureOpens)).toEqual(['avibe://session/ses_main']);
+    await expect(avatar).toHaveAttribute('aria-expanded', 'false');
+    await expect(page.locator('.pet-mini-detail.is-open')).toHaveCount(0);
     // The OS transfers key to the main window during pet_open.
     await page.evaluate(() => window.dispatchEvent(new Event('blur')));
-    await expect(avatar).toHaveAttribute('aria-expanded', String(initiallyOpen));
+    await expect(avatar).toHaveAttribute('aria-expanded', 'false');
+    // A drag afterwards opens nothing more.
     const box = (await avatar.boundingBox())!;
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
     await page.mouse.down();
@@ -1476,15 +1473,14 @@ for (const theme of ['light', 'dark']) {
     await expect(page.locator('.pet-mini-scroll')).toBeVisible();
     await settleMotion(page);
     await fits('.pet-mini-scroll');
+
+    // Input with the history: Vibey opens its history with the input (#3057),
+    // folding the list; the input is nearest Vibey, the bubble below it.
+    await page.waitForTimeout(DOUBLE_CLICK_GAP);
     await avatar.click();
     await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
-
-    // Input with the history: the input is nearest Vibey, the bubble below it.
-    await avatar.hover();
-    await page.getByRole('button', { name: '输入消息', exact: true }).click();
-    await page.getByRole('textbox').fill('帮我看一下这周的进展');
-    await avatar.click();
     await expect(page.locator('.pet-mini-detail')).toHaveClass(/is-open/);
+    await page.getByRole('textbox').fill('帮我看一下这周的进展');
     await settleMotion(page);
     const input = await fits('.pet-mini-input');
     const over = await fits('.pet-mini-reply-bubble');
