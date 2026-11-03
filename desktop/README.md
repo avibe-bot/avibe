@@ -627,6 +627,17 @@ rebuilt. Native packaging and a real
 installation on each supported architecture remain separate acceptance gates
 from unit/contract tests.
 
+A manual run with `signpath_test=true` and a prerelease version skips packaging
+and runs the SignPath TEST-signing integration test instead. It builds the
+Windows NSIS installer on GitHub-hosted runners, and SignPath signs the outer
+installer PE with its test certificate. `desktop/scripts/signpath_test_signing.py`
+then verifies the signed installer without relying on SignPath: it checks the
+pinned certificate, requires a `Valid` Authenticode result under ephemeral trust,
+confirms that only the signature was added, and runs two negative controls. The
+executables inside the installer are not signed, and the run publishes only
+short-lived test artifacts. Only the sign job binds the `signpath-test`
+environment. See `docs/plans/2026-11-04-signpath-test-signing.md`.
+
 ## Signed desktop updates (G2)
 
 The native updater remains the sole update owner, while the Workbench version
