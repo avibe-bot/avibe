@@ -288,12 +288,12 @@
   "vault": {
     "signing": {
       "invalidKey": "Signing requires a valid pinned compressed secp256k1 public key. No signature was delivered. Keep the existing key and its protection unchanged; repair the public-key metadata before retrying.",
-      "protectedUnsupported": "Protected Bitcoin Taproot key-path signing is not supported yet. Wait for a supported Bitcoin approval workflow without changing the key or its protection.",
+      "protectedUnsupported": "Protected Bitcoin Taproot signing requires the typed transaction approval workflow and a compatible sandbox. Keep legacy and SegWit-v0 inputs unsupported.",
       "missingContext": "Protected signing requires a verifiable signing context. Recreate the request with the complete operation details.",
       "invalidDigest": "The signing digest must be exactly 32 bytes encoded as hexadecimal.",
       "invalidParameters": "The signing request contains unsupported parameters. Only empty-tree BIP86 key-path signing is supported; script trees and Merkle roots are not supported.",
       "invalidContext": "The signing context is invalid or does not match the request. Check its type, digest, fields and canonical encoding, then recreate the request. Agent operations require the avault-agent-operation:v1 domain followed by a newline and non-empty operation text.",
-      "contextSchemeMismatch": "EVM and EIP-712 signing contexts require an ECDSA scheme. Recreate the request with a compatible scheme.",
+      "contextSchemeMismatch": "Bitcoin Taproot contexts require schnorr-secp256k1-bip341-keypath; EVM and EIP-712 contexts require an ECDSA scheme. Recreate the request with a compatible pairing.",
       "invalidSignature": "The returned signature has an invalid encoding or does not verify against the pinned key and requested digest. It was not delivered as a successful result."
     },
     "requestNotification": {

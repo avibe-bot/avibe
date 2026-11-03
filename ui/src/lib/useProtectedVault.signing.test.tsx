@@ -12,6 +12,7 @@ import { VaultSandboxClient, type VaultSandboxSigningContext, type VaultSignedOp
 const fixture = JSON.parse(readFileSync(resolve(process.cwd(), '../tests/fixtures/vault_signing/protected-sign-context.json'), 'utf8')) as {
   signedContext: VaultSignedOperationContext;
 };
+const bitcoinVectors = JSON.parse(readFileSync(resolve(process.cwd(), '../tests/fixtures/vault_bitcoin/core-fixtures.json'), 'utf8'));
 const sandbox = vi.hoisted(() => ({ get: vi.fn() }));
 vi.mock('@/context/ApiContext', () => ({ useApi: () => ({}) }));
 vi.mock('./vaultSandboxClient', async (original) => ({
@@ -30,7 +31,7 @@ describe('protected signing metadata → hook → real client → RPC', () => {
   // Card-only mocks missed material.kind being forwarded to the strict sandbox parser.
   // Only handshake/status and the transport response are simulated here; neither the hook's
   // sign method nor the client's serialization is replaced.
-  it('sends exactly the sandbox sign contract, not approval-card metadata', async () => {
+  it.each(['raw', 'bitcoin'] as const)('sends exactly the %s sandbox sign contract, not approval-card metadata', async (kind) => {
     vi.stubGlobal('BroadcastChannel', undefined);
     const iframe = document.createElement('iframe');
     document.body.appendChild(iframe);
@@ -44,7 +45,20 @@ describe('protected signing metadata → hook → real client → RPC', () => {
     sandbox.get.mockResolvedValue(client);
     const postMessage = vi.spyOn(iframe.contentWindow!, 'postMessage').mockImplementation(() => undefined);
     const { result } = renderHook(() => useProtectedVault());
-    const context = fixture.signedContext as VaultSignedOperationContext;
+    const context = structuredClone(fixture.signedContext) as VaultSignedOperationContext;
+    if (kind === 'bitcoin') {
+      const vector = bitcoinVectors.cases[0];
+      context.release!.scheme = 'schnorr-secp256k1-bip341-keypath';
+      context.release!.digest = vector.expected.taproot_digest_hex;
+      context.release!.signingContext = {
+        kind: 'bitcoin-taproot-keypath-v1', network: 'signet', unsignedTransaction: vector.unsigned_tx_hex,
+        prevout: { amountSats: vector.funding.spent_output_value_sats, scriptPubKey: vector.funding.spent_output_script_hex },
+        digestAlgorithm: 'bip341-sighash-default-keypath', digest: vector.expected.taproot_digest_hex,
+      };
+    }
+    // This boundary checks transport and independent parsing, not the fixture's daemon signature.
+    // Actual daemon signatures and fresh-UV use are tested by service and main.ts RPC tests.
+    const scheme = context.release!.scheme;
     const signingContext = context.release!.signingContext as VaultSandboxSigningContext;
     const envelope = { ciphertext: 'test-envelope', nonce: 'test-nonce', wrap_meta: 'test-meta' };
     // This is the server's hydrated keypair material shape, not a hand-projected RPC object.
@@ -52,7 +66,7 @@ describe('protected signing metadata → hook → real client → RPC', () => {
     const signature = { signature: '01'.repeat(64) };
     let signing!: Promise<unknown>;
     await act(async () => {
-      signing = result.current.signProtectedRequest(material, signingContext, 'schnorr-secp256k1-bip340', context, 'window-sign-test');
+      signing = result.current.signProtectedRequest(material, signingContext, scheme, context, 'window-sign-test');
     });
     await vi.waitFor(() => expect(postMessage).toHaveBeenCalledOnce());
     const [wire] = postMessage.mock.calls[0] as unknown as [{ id: string; op: string; payload: unknown; authorizationWindow: string }];
@@ -60,7 +74,7 @@ describe('protected signing metadata → hook → real client → RPC', () => {
     expect(wire.authorizationWindow).toBe('window-sign-test');
     expect(wire.payload).toEqual({
       material: { name: material.name, envelope },
-      scheme: 'schnorr-secp256k1-bip340', signingContext, context,
+      scheme, signingContext, context,
     });
     expect(material.kind).toBe('keypair'); // Projection must not mutate card data used elsewhere.
     // Optional cross-repository acceptance uses the real consumer, bundled from a specified
@@ -70,9 +84,15 @@ describe('protected signing metadata → hook → real client → RPC', () => {
         import assert from 'node:assert/strict';
         import { readFileSync } from 'node:fs';
         import { pathToFileURL } from 'node:url';
-        const { parseSignRequest } = await import(pathToFileURL(process.argv[1]).href);
+        const { parseSignRequest, verifySigningContext } = await import(pathToFileURL(process.argv[1]).href);
         const payload = JSON.parse(readFileSync(0, 'utf8'));
         assert.deepEqual(parseSignRequest(payload), payload);
+        const verified = verifySigningContext(payload.signingContext);
+        assert.equal(verified.digest, payload.context.release.digest);
+        if (payload.signingContext.kind === 'bitcoin-taproot-keypath-v1') {
+          assert.match(verified.display, /not chain proof/);
+          assert.throws(() => verifySigningContext({ ...payload.signingContext, prevout: { ...payload.signingContext.prevout, amountSats: payload.signingContext.prevout.amountSats + 1 } }), /digest/);
+        }
         assert.throws(() => parseSignRequest({ ...payload, material: { ...payload.material, kind: 'keypair' } }), /unsupported fields/);
       `, process.env.AVIBE_TEST_SANDBOX_SIGN_PARSER], { input: JSON.stringify(wire.payload), encoding: 'utf8' });
     }

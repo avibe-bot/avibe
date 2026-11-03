@@ -33,6 +33,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 
 from storage import vault_crypto, vault_webauthn
+from storage import vault_bitcoin
 from storage.lock import LockHolderState, MigrationFileLock, probe_lock_holder, remove_unheld_lock
 from storage.models import (
     agent_sessions,
@@ -2336,6 +2337,51 @@ def require_compressed_signing_public_key(signing_key: Any) -> str:
     return public_key.lower()
 
 
+def validate_bitcoin_signing_context(
+    signing_context: Any,
+    *,
+    digest: str,
+    scheme: str,
+    signing_key: Any,
+    protected: bool = False,
+) -> None:
+    """One preflight for typed Bitcoin, including headless and persisted callers.
+
+    Standard digest/agent-operation callers remain compatible. Protected keypath
+    requests cannot use that exception to omit or replace their typed context.
+    """
+    if not isinstance(signing_context, dict) or signing_context.get("kind") != vault_bitcoin.BITCOIN_CONTEXT_KIND:
+        if protected and scheme == vault_bitcoin.BITCOIN_SCHEME:
+            raise InvalidSigningContextError(
+                "protected Bitcoin signing requires a verifiable signing_context"
+                if signing_context is None else
+                "schnorr-secp256k1-bip341-keypath requires a bitcoin-taproot-keypath-v1 signing_context"
+            )
+        return
+    public_key = require_compressed_signing_public_key(signing_key)
+    try:
+        vault_bitcoin.validate_scheme_pairing(
+            signing_context, expected_digest=digest, scheme=scheme, compressed_public_key=public_key,
+        )
+    except vault_bitcoin.BitcoinContextError as exc:
+        raise InvalidSigningContextError(str(exc)) from exc
+
+
+def _validate_persisted_bitcoin_signing_context(conn: Connection, name: str, delivery: dict[str, Any]) -> None:
+    context = delivery.get("signing_context")
+    scheme = delivery.get("scheme")
+    if scheme != vault_bitcoin.BITCOIN_SCHEME and not (
+        isinstance(context, dict) and context.get("kind") == vault_bitcoin.BITCOIN_CONTEXT_KIND
+    ):
+        return
+    row = _require_row(conn, name)
+    validate_bitcoin_signing_context(
+        context, digest=delivery.get("digest"), scheme=scheme,
+        signing_key=_public_meta(row.get("public_meta")).get("signing_public_key"),
+        protected=row.get("protection") == "protected",
+    )
+
+
 def _reject_unsignable_keypair(row: dict[str, Any], name: str) -> None:
     if not _secret_agent_per_use_signable(row):
         raise InvalidRequestError(f"{name} is not per-use signable")
@@ -4425,6 +4471,8 @@ def create_sign_request(
 ) -> dict[str, Any]:
     if scheme not in SUPPORTED_SIGNATURE_SCHEMES:
         raise InvalidRequestError(f"unsupported signature scheme: {scheme}")
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise InvalidRequestError("signing digest must be exactly 32 lowercase hexadecimal bytes")
     context = resolve_resource_access_context(user_context)
     row = _require_secret_resource_access(conn, _require_row(conn, name), context)
     if row.get("kind") != "keypair":
@@ -4432,18 +4480,18 @@ def create_sign_request(
     if row.get("signer_kind") not in (None, "local"):
         raise InvalidRequestError(f"{name} is not locally signable")
     _reject_unsignable_keypair(row, name)
-    if row.get("protection") == "protected" and scheme == "schnorr-secp256k1-bip341-keypath":
-        raise InvalidRequestError(
-            "protected Bitcoin Taproot key-path signing is not supported yet; wait for a supported Bitcoin approval workflow without changing the key or its protection"
-        )
-    if row.get("protection") == "protected" or scheme == "schnorr-secp256k1-bip341-keypath":
-        require_compressed_signing_public_key(_public_meta(row.get("public_meta")).get("signing_public_key"))
-    if (
-        row.get("protection") == "protected"
-        and isinstance(signing_context, dict)
-        and signing_context.get("kind") != "avault-agent-operation"
-        and scheme not in {"ecdsa-secp256k1-recoverable", "ecdsa-secp256k1-der"}
-    ):
+    signing_key = _public_meta(row.get("public_meta")).get("signing_public_key")
+    if row.get("protection") == "protected" or scheme == vault_bitcoin.BITCOIN_SCHEME:
+        require_compressed_signing_public_key(signing_key)
+    if signing_context is not None and not isinstance(signing_context, dict):
+        raise InvalidSigningContextError("signing_context must be an object")
+    validate_bitcoin_signing_context(
+        signing_context, digest=digest, scheme=scheme, signing_key=signing_key,
+        protected=row.get("protection") == "protected",
+    )
+    if isinstance(signing_context, dict) and signing_context.get("kind") not in {
+        vault_bitcoin.BITCOIN_CONTEXT_KIND, "avault-agent-operation",
+    } and scheme not in {"ecdsa-secp256k1-recoverable", "ecdsa-secp256k1-der"}:
         raise InvalidSigningContextError("EVM signing contexts require an ECDSA scheme")
     payload_audience = _request_audience_from_requester(requester)
     request_id = _id("vrq")
@@ -4681,6 +4729,7 @@ def complete_sign_request(
     delivery_payload = delivery if isinstance(delivery, dict) else {}
     if delivery_payload.get("digest") != digest or delivery_payload.get("scheme") != scheme:
         raise InvalidRequestError("signature payload does not match the sign request")
+    _validate_persisted_bitcoin_signing_context(conn, name, delivery_payload)
     _validate_signature_payload(scheme, signature)
     completed_delivery = dict(delivery_payload)
     completed_delivery["signature"] = signature
@@ -4838,6 +4887,7 @@ def claim_sign_request(
     delivery_payload = delivery if isinstance(delivery, dict) else {}
     if delivery_payload.get("digest") != digest or delivery_payload.get("scheme") != scheme:
         raise InvalidRequestError("signature payload does not match the sign request")
+    _validate_persisted_bitcoin_signing_context(conn, name, delivery_payload)
     claim = conn.execute(
         vault_requests.update()
         .where(vault_requests.c.id == request_id, vault_requests.c.request_type == "sign", vault_requests.c.status == "pending")
@@ -4924,6 +4974,7 @@ def validate_sign_request(
     delivery_payload = delivery if isinstance(delivery, dict) else {}
     if delivery_payload.get("digest") != digest or delivery_payload.get("scheme") != scheme:
         raise InvalidRequestError("signature payload does not match the sign request")
+    _validate_persisted_bitcoin_signing_context(conn, name, delivery_payload)
     return _request_row_payload(row_dict, conn=conn, audience=REQUEST_AUDIENCE_AGENT)
 
 

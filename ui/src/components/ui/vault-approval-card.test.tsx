@@ -174,6 +174,7 @@ describe('VaultApprovalCard signing-address contract', () => {
     ['standard', 'schnorr-secp256k1-bip340', []],
     ['standard', 'ecdsa-secp256k1-der', ['segwit', 'legacy']],
     ['protected', 'schnorr-secp256k1-bip340', []],
+    ['protected', 'schnorr-secp256k1-bip341-keypath', []],
     ['protected', 'ecdsa-secp256k1-der', []],
     ['protected', 'ecdsa-secp256k1-recoverable', ['ethereum']],
   ] as const)('shows only truthful addresses for %s %s', async (protection, scheme, visible) => {
@@ -193,7 +194,12 @@ describe('VaultApprovalCard signing-address contract', () => {
     for (const address of Object.values(addresses)) {
       expect(screen.queryByText(address) !== null).toBe(visible.some((value) => value === address));
     }
-    expect(screen.queryByText(en.vaults.approval.protectedBitcoinWarning) !== null).toBe(protection === 'protected');
+    expect(screen.queryByText(en.vaults.approval.protectedBitcoinWarning) !== null).toBe(
+      protection === 'protected' && scheme === 'schnorr-secp256k1-bip341-keypath',
+    );
+    expect(screen.queryByText(en.vaults.approval.protectedWarning) !== null).toBe(
+      protection === 'protected' && scheme !== 'schnorr-secp256k1-bip341-keypath',
+    );
   });
 });
 

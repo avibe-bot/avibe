@@ -11,6 +11,7 @@ export const WRAP_META_VERSION = 1;
 export const SIGN_SCHEME_ECDSA_SECP256K1_RECOVERABLE = 'ecdsa-secp256k1-recoverable';
 export const SIGN_SCHEME_ECDSA_SECP256K1_DER = 'ecdsa-secp256k1-der';
 export const SIGN_SCHEME_SCHNORR_SECP256K1_BIP340 = 'schnorr-secp256k1-bip340';
+export const SIGN_SCHEME_SCHNORR_SECP256K1_BIP341_KEYPATH = 'schnorr-secp256k1-bip341-keypath';
 
 const KEY_BYTES = 32;
 const NONCE_BYTES = 12;
@@ -64,7 +65,8 @@ export type PasskeyUnlockFactor = {
 export type SignatureScheme =
   | typeof SIGN_SCHEME_ECDSA_SECP256K1_RECOVERABLE
   | typeof SIGN_SCHEME_ECDSA_SECP256K1_DER
-  | typeof SIGN_SCHEME_SCHNORR_SECP256K1_BIP340;
+  | typeof SIGN_SCHEME_SCHNORR_SECP256K1_BIP340
+  | typeof SIGN_SCHEME_SCHNORR_SECP256K1_BIP341_KEYPATH;
 
 export type SignatureResult = {
   scheme: SignatureScheme;
