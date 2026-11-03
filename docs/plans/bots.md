@@ -183,14 +183,24 @@ Owner decisions 2026-11-01, from the mockups in this Session's Show Page
   添加伙伴, 设为伙伴, 移出伙伴. Technical concepts (Agents, Harness, Vaults)
   stay in English, so the wording itself separates a role from a colleague.
 - **Avatar strip.** Bots appear as a row of 40px avatars with their names
-  below, the main Bot first. The current Bot has a mint ring; unread shows as
-  a cyan count; a running Turn shows as a pulsing mint dot. With few Bots an
-  "Add" slot (dashed circle) follows the avatars; with more, the avatars
-  scroll horizontally with a fading right edge and "Add" stays pinned at the
-  right.
-- **Theme.** The main Bot's avatar well follows the theme: white with a hairline
-  ring in light, dark in dark. Emoji avatars keep one hue with a light and a
-  dark well.
+  below, the main Bot first. The current Bot's own edge lights up mint with a
+  halo (the one shared selected look, `.bot-avatar-selected`, which the phone's
+  Bot switch sheet uses too; the halo is `--shadow-glow-selected-mint`, wider and
+  stronger in Light so it reads over white); unread shows as a cyan count; a running
+  Turn shows as a pulsing mint dot. With few Bots an "Add" slot (dashed circle)
+  follows the avatars; with more, the avatars scroll horizontally with a fading
+  right edge and "Add" stays pinned at the right.
+- **Theme.** Emoji avatars keep one hue with a light and a dark well. The main
+  Bot's mascot sits on the mint member of that family (the emoji wells'
+  saturation and lightness at the picker's mint hue), with no ring, so it is one
+  more disc beside them in both themes (owner, 2026-11-04).
+- **A face alone or in a list (owner decision, 2026-11-03).** Where a Bot
+  appears among other Bots (the strip, its hover card, the Inbox, the `@` list,
+  the Agents page, the switch sheet), the main Bot's mascot keeps its well, so
+  every Bot is the same disc. Where its face stands alone (a conversation's
+  header, its replies and empty state, and the phone tab bar's center), the
+  mascot is drawn without its well (`plain`); in Light it keeps a
+  soft shadow of its own so it still reads on a white surface.
 - **Hover card.** Hovering an avatar shows its full name, handle, role, and
   latest message or running step; clicking opens the conversation. This makes
   up for the strip having no message preview.

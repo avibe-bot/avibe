@@ -131,8 +131,10 @@ describe('Workbench sidebar inbox counter', () => {
     // A zero badge is still a badge — an empty inbox draws no attention at all.
     // The entry is the brand row's icon (docs/plans/bots.md D5), so it holds no text.
     expect(link.textContent).toBe('');
-    // Cyan is the unread read; the resting row is plain foreground ink.
-    expect(inboxIcon().getAttribute('class')).toContain('text-foreground');
+    // Cyan is the unread read; at rest the icon is the capability rows' quiet
+    // colour, brought to the foreground only on hover.
+    expect(inboxIcon().getAttribute('class')).toMatch(/(^| )text-muted( |$)/);
+    expect(inboxIcon().getAttribute('class')).toContain('group-hover:text-foreground');
     expect(inboxIcon().getAttribute('class')).not.toContain('text-cyan-ink');
   });
 

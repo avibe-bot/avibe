@@ -337,6 +337,14 @@ for (const theme of ['light', 'dark'] as const) {
     // The empty conversation shows the Bot's role; the open Bot carries the ring.
     await expect(page.locator('main')).toContainText('依赖与权限的安全审计，每周汇报');
     await expect(page.getByRole('button', { name: '首席安全官, 2 unread', exact: true })).toHaveAttribute('aria-current', 'page');
+    // The open Bot's own edge lights up (the shared selected look), with no gap: the
+    // slot draws no ring of its own, and no other Bot is lit.
+    const strip = page.locator('aside [data-bot-handle]');
+    expect(await strip.evaluateAll((slots) => slots.map((slot) => [
+      slot.getAttribute('data-bot-handle'),
+      slot.querySelector('.bot-avatar')!.classList.contains('bot-avatar-selected'),
+      getComputedStyle(slot.querySelector('button')!).boxShadow,
+    ]))).toEqual([['main', false, 'none'], ['cso', true, 'none'], ['pm', false, 'none']]);
     // The composer's route is the model and effort alone: no Bot name, no Agent level.
     const route = page.locator('main').getByRole('button', { name: /^(gpt-6-astra|GPT-6 Astra)/ });
     await expect(route).not.toContainText('首席安全官');
@@ -717,6 +725,10 @@ test("a Bot's replies read as the Bot, and its route as its model", async ({ pag
   await expect(reply).toContainText('Vibey');
   await expect(reply).not.toContainText('main');
   await expect(reply.locator('.bot-avatar-mascot')).toHaveCount(1);
+  // The conversation's face stands alone: no well behind the mascot, in the reply and the header.
+  for (const face of [reply.locator('.bot-avatar'), page.locator('[data-chat-header] .bot-avatar')]) {
+    expect(await face.evaluate((node) => getComputedStyle(node).backgroundColor)).toBe('rgba(0, 0, 0, 0)');
+  }
   // The composer's route names the model, never the Bot's Agent.
   await expect(page.locator('main').getByRole('button', { name: /^(gpt-6-astra|GPT-6 Astra)/ })).toBeVisible();
   await expect(page.locator('main').getByRole('button', { name: /^main/ })).toHaveCount(0);
@@ -1084,6 +1096,26 @@ test('two open tabs follow a Bot removal and a switch change to the server\'s ba
   for (const denied of denials) expect(denied).toEqual([]);
 });
 
+// ui/design: inbox/inbox-page/phone: the Inbox opens with one plain search bar --
+// a 36px rounded field one shade off the page, with no border, no shadow and no
+// scope words -- and Refresh rides at the end of its toolbar, not in the header.
+test('on a phone the Inbox opens with one plain search bar', async ({ page }) => {
+  await serveBots(page, 'zh', [MAIN, CSO, PM]);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await open(page, '/inbox', { lang: 'zh', theme: 'light' });
+  const search = page.locator('main').getByRole('button', { name: '搜索全部会话' });
+  await expect(search).toBeVisible();
+  await expect(search).toHaveText('搜索全部会话');
+  expect(await search.evaluate((node) => {
+    const style = getComputedStyle(node);
+    return [node.getBoundingClientRect().height, style.borderTopWidth, style.boxShadow];
+  })).toEqual([36, '0px', 'none']);
+  await expect(page.locator('header').getByRole('button')).toHaveCount(0);
+  await expect(page.locator('main').getByRole('button', { name: '刷新' })).toBeVisible();
+  await search.click();
+  await expect(page).toHaveURL(/\/search/);
+});
+
 // ui/design: mobile/workbench-tab/team, mobile/bot-conversation/switch: on a phone the
 // Workbench tab carries the Bots strip and a ＋ on every project, the middle of the
 // bar is the main Bot, and a Bot's name in its conversation switches to another Bot.
@@ -1100,6 +1132,42 @@ for (const theme of ['light', 'dark'] as const) {
     await expect(page.locator('main').getByRole('button', { name: '首席安全官，2 条未读', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: '在 中文项目 里新建会话' })).toBeVisible();
     await page.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-phone-workbench-${theme}.png` });
+
+    // The brand header stays the brand (logo and name, as before), 56px tall, with no
+    // page action in it; the tab names the page for assistive tech only. New project
+    // sits on the Projects title row, and both sections are titled alike.
+    const brand = page.locator('header').filter({ has: page.getByRole('link', { name: /Avibe/ }) });
+    await expect(brand).toBeVisible();
+    expect((await brand.boundingBox())!.height).toBeCloseTo(56, 0);
+    await expect(brand.getByRole('heading', { name: '工作台', level: 1 })).toHaveClass(/sr-only/);
+    await expect(brand.getByRole('link', { name: /Avibe/ })).toHaveAttribute('href', '/');
+    await expect(brand.getByRole('button')).toHaveCount(0);
+    const titles = page.locator('main').getByRole('heading', { level: 2 });
+    await expect(titles).toHaveText(['伙伴', '项目']);
+    const looks = await titles.evaluateAll((nodes) => nodes.map((node) => {
+      const style = getComputedStyle(node);
+      return [style.fontSize, style.fontWeight, style.color, style.letterSpacing, node.getBoundingClientRect().left].join(' ');
+    }));
+    expect(new Set(looks).size).toBe(1);
+    const projectsRow = page.locator('main div').filter({ has: page.getByRole('heading', { name: '项目', level: 2 }) }).last();
+    await expect(projectsRow.getByRole('button', { name: '新建项目' })).toBeVisible();
+    // A project row has no chevron (the whole row opens it, and its folder opens with
+    // it), and its ＋ and the New project button are plain icons, the ⋯'s own color.
+    const projectToggle = page.locator('main').getByRole('button', { name: /^中文项目/ });
+    await expect(projectToggle).toHaveAttribute('aria-expanded', 'false');
+    await expect(projectToggle.locator('svg')).toHaveCount(1);
+    const tone = (name: string | RegExp) => page.locator('main').getByRole('button', { name }).first().evaluate((node) => getComputedStyle(node).color);
+    const plain = await tone('项目操作');
+    expect(await tone('在 中文项目 里新建会话')).toBe(plain);
+    expect(await tone('新建项目')).toBe(plain);
+    // The first section clears the header by the page's own top padding, no more.
+    const headerBottom = (await brand.boundingBox())!.y + (await brand.boundingBox())!.height;
+    const firstGap = (await titles.first().boundingBox())!.y - headerBottom;
+    expect(firstGap).toBeGreaterThanOrEqual(12);
+    expect(firstGap).toBeLessThanOrEqual(24);
+    // The bar's center is one circle: the mascot fills the ring without a well of its own.
+    const face = nav.getByRole('button', { name: /^歪比：/ }).locator('.bot-avatar');
+    expect(await face.evaluate((node) => [getComputedStyle(node).backgroundColor, getComputedStyle(node).boxShadow])).toEqual(['rgba(0, 0, 0, 0)', 'none']);
 
     // ui/design: mobile/main-bot-voice/m-unavailable: holding the center opens no conversation;
     // without the speech service it says so, and a tap still opens the conversation.
@@ -1122,6 +1190,10 @@ for (const theme of ['light', 'dark'] as const) {
     const sheet = page.getByRole('dialog', { name: '伙伴' });
     await expect(sheet.getByRole('listitem')).toHaveCount(3);
     await expect(sheet.locator('button[aria-current="page"]')).toContainText('歪比');
+    // The header's face has no well either; the selected Bot's own edge is lit mint.
+    expect(await header.locator('.bot-avatar').first().evaluate((node) => getComputedStyle(node).backgroundColor)).toBe('rgba(0, 0, 0, 0)');
+    const lit = sheet.locator('button[aria-current="page"] .bot-avatar');
+    expect(await lit.evaluate((node) => getComputedStyle(node).boxShadow)).toMatch(/0px 0px 0px 1.25px/);
     await page.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-phone-switch-${theme}.png` });
 
     await sheet.getByRole('button', { name: /首席安全官/ }).click();

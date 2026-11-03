@@ -257,6 +257,17 @@
      is what `wire` already does for the same reason, which is why this is a role
      named for its use rather than a fifth rung on the scale. */
   --shadow-glow-nav-mint: 0 0 16px -4px color-mix(in srgb, var(--mint) 44%, transparent);
+
+  /* The selected Bot's avatar (`.bot-avatar-selected`): its edge lit, with a halo
+     that has to read in both themes. Dark draws the sized scale's own `md`
+     (24/-6 at 0.44 of #5BFFA0); over white that neon barely registers, so Light
+     gets a wider, stronger halo of its own brand mint (owner, 2026-11-03). The
+     hue follows the palette through `var(--mint)`, and the parts that differ per
+     theme are named numbers re-anchored beside each palette, like the onboarding
+     halo's. */
+  --shadow-glow-selected-mint:
+    0 0 var(--selected-glow-blur) var(--selected-glow-spread)
+    color-mix(in srgb, var(--mint) var(--selected-glow-alpha), transparent);
 }
 
 :root,
@@ -316,13 +327,17 @@
      is #10B98114 against --mint-soft's #10B98124. They happen to coincide in Dark,
      which is exactly why collapsing them there would look correct and render wrong
      in the other theme. */
-  /* Bot avatars (docs/plans/bots.md D5). The main Bot's mascot sits on a well
-     that follows the theme: dark here, white with a hairline ring in Light. An
-     emoji avatar keeps one hue and takes its well's saturation and lightness
-     from the theme; the default (the name's first character) is a deeper fill. */
-  --bot-mascot-well: #16172b;
-  --bot-mascot-ring: rgba(255, 255, 255, 0.1);
+  /* Bot avatars (docs/plans/bots.md D5). An emoji avatar keeps one hue and takes
+     its well's saturation and lightness from the theme; the default (the name's
+     first character) is a deeper fill. The main Bot's mascot sits on the mint
+     member of that same family -- the emoji wells' saturation and lightness at
+     the picker's mint hue, with no ring -- so in a row of Bots it is one more
+     disc, in both themes. Declared once: the light blocks re-anchor the two
+     numbers, and this resolves on the same root element. */
+  --bot-mascot-well: hsl(150 var(--bot-emoji-well-saturation) var(--bot-emoji-well-lightness));
   --bot-mascot-shadow: none;
+  /* Without its well (a face standing alone), the mascot keeps an edge of its own. */
+  --bot-mascot-plain-shadow: none;
   --bot-emoji-well-saturation: 35%;
   --bot-emoji-well-lightness: 20%;
   --bot-initial-saturation: 45%;
@@ -379,6 +394,13 @@
   --onboarding-glow-blur: 12px;
   --onboarding-glow-spread: 0px;
   --onboarding-glow-alpha: 22%;
+  /* Per-theme geometry and alpha of the selected Bot's halo; see the token above.
+     Its edge is the theme's mint here; Light draws a brighter, fresher one, since
+     its own --mint is a deep brand green that reads heavy as a fine line. */
+  --bot-selected-edge: var(--mint);
+  --selected-glow-blur: 24px;
+  --selected-glow-spread: -6px;
+  --selected-glow-alpha: 44%;
   /* Colour of the card wash shadows (`--shadow-mint-card*`): each theme's own
      brand mint at 0.078, which is why it is the one part of those shadows that
      moves between themes. */
@@ -490,9 +512,8 @@
     /* Mirrors the dark block's note: the sidebar fill and the selected nav wash
        are the two that genuinely differ from --surface and --mint-soft here. */
     /* Bot avatar wells; see the dark block. */
-    --bot-mascot-well: #ffffff;
-    --bot-mascot-ring: rgba(8, 8, 18, 0.1);
     --bot-mascot-shadow: drop-shadow(0 1px 1.5px rgba(8, 8, 18, 0.28));
+    --bot-mascot-plain-shadow: drop-shadow(0 0.5px 0.5px rgba(8, 8, 18, 0.45)) drop-shadow(0 1px 2px rgba(8, 8, 18, 0.3));
     --bot-emoji-well-saturation: 85%;
     --bot-emoji-well-lightness: 92%;
     --bot-initial-saturation: 70%;
@@ -577,6 +598,12 @@
     --onboarding-glow-blur: 16px;
     --onboarding-glow-spread: -4px;
     --onboarding-glow-alpha: 14.1%;
+
+    /* Light's own selected-Bot halo: wider and stronger, so it reads over white. */
+    --selected-glow-blur: 20px;
+    --selected-glow-spread: 0px;
+    --selected-glow-alpha: 75%;
+    --bot-selected-edge: #2ee6a6;
   }
 }
 
@@ -622,9 +649,8 @@
   --ring: rgba(16, 185, 129, 0.5);
 
   /* Bot avatar wells; mirrors the @media light block above. */
-  --bot-mascot-well: #ffffff;
-  --bot-mascot-ring: rgba(8, 8, 18, 0.1);
   --bot-mascot-shadow: drop-shadow(0 1px 1.5px rgba(8, 8, 18, 0.28));
+  --bot-mascot-plain-shadow: drop-shadow(0 0.5px 0.5px rgba(8, 8, 18, 0.45)) drop-shadow(0 1px 2px rgba(8, 8, 18, 0.3));
   --bot-emoji-well-saturation: 85%;
   --bot-emoji-well-lightness: 92%;
   --bot-initial-saturation: 70%;
@@ -706,6 +732,12 @@
   --onboarding-glow-blur: 16px;
   --onboarding-glow-spread: -4px;
   --onboarding-glow-alpha: 14.1%;
+  /* Light's own selected-Bot halo - see the prefers-color-scheme block above.
+     Both light blocks must stay value-identical. */
+  --selected-glow-blur: 20px;
+  --selected-glow-spread: 0px;
+  --selected-glow-alpha: 75%;
+  --bot-selected-edge: #2ee6a6;
   --switch-onboarding-track-off: #d7dce5;
   --switch-onboarding-border-off: #00000000;
   --switch-onboarding-track-on: #10b981;
@@ -1185,12 +1217,42 @@ pre,
 }
 .bot-avatar-mascot {
   background: var(--bot-mascot-well);
-  box-shadow: inset 0 0 0 1px var(--bot-mascot-ring);
 }
 .bot-avatar-mascot > img {
   filter: var(--bot-mascot-shadow);
 }
+/* A face that stands alone (a conversation, the tab bar's center): the mascot is drawn
+   straight on the surface behind it, without its well and hairline. In lists of Bots
+   the well stays, so every Bot is the same disc. */
+.bot-avatar-mascot.bot-avatar-plain {
+  background: transparent;
+  box-shadow: none;
+}
+.bot-avatar-mascot.bot-avatar-plain > img {
+  filter: var(--bot-mascot-plain-shadow);
+}
+/* The one "selected Bot" look (the strip, the switch sheet): the avatar's own edge
+   lights up mint, a fine 1.25px line, with the theme's mint halo doing the glowing.
+   Restyle it here, nowhere else. */
+.bot-avatar-selected {
+  box-shadow: 0 0 0 1.25px var(--bot-selected-edge), var(--shadow-glow-selected-mint);
+}
+/* A control holding a Bot avatar (`.bot-avatar-hover`): hovering it shows a quiet
+   edge where the selected one would light up. */
+.bot-avatar-hover:hover .bot-avatar:not(.bot-avatar-selected) {
+  box-shadow: 0 0 0 1.25px var(--border-strong);
+}
+/* The strip's scroll box clips whatever it holds, the selected avatar's halo
+   included, so it reaches past its place by the halo's room on the top and the
+   left (where nothing else is drawn) and pads the avatars back to where they sat:
+   2px aside and below, 6px above. The room it borrows on the left fades in, so a
+   scrolled avatar does not show past the strip's edge. */
+.bot-strip-scroller {
+  margin: -14px 0 0 -12px;
+  padding: 20px 2px 2px 14px;
+  mask-image: linear-gradient(to right, transparent, #000 12px);
+}
 /* The strip scrolls sideways once it overflows; its right edge fades out. */
-.bot-strip-fade {
-  mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+.bot-strip-scroller.bot-strip-fade {
+  mask-image: linear-gradient(to right, transparent, #000 12px, #000 calc(100% - 28px), transparent);
 }

@@ -425,6 +425,10 @@ for (const width of [1366, 390]) {
     const query = palette.getByRole('textbox');
     await query.fill('星河 🌱');
     await palette.getByRole('switch').click();
+    // The switch drops the plain search's hits and asks again with archived ones; only
+    // the second answer's hits are the selection under test (the first can still be on
+    // screen when the click returns, and an arrow then lands on the emptied list).
+    await expect.poll(() => searches.some((url) => url.includes('include_archived=1'))).toBe(true);
     await expect(palette.locator('[aria-current="true"]')).toContainText('星河结果1');
     await query.focus();
     await page.keyboard.press('ArrowDown');

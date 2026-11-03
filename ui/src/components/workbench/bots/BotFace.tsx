@@ -16,6 +16,8 @@ export function BotFace({
   unread = 0,
   running = false,
   dotWell = 'bg-surface',
+  plain = false,
+  selected = false,
   className,
 }: {
   avatar: BotAvatarSpec | null;
@@ -25,11 +27,14 @@ export function BotFace({
   running?: boolean;
   /** The surface the dot is cut out of, so it reads as sitting on the avatar's edge. */
   dotWell?: string;
+  /** See `BotAvatar`: a face standing alone, and the selected Bot. */
+  plain?: boolean;
+  selected?: boolean;
   className?: string;
 }) {
   return (
     <span className={clsx('relative inline-grid shrink-0', className)}>
-      <BotAvatar avatar={avatar} name={name} size={size} />
+      <BotAvatar avatar={avatar} name={name} size={size} plain={plain} selected={selected} />
       {unread > 0 && (
         <span className="absolute -right-1.5 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-cyan px-1 font-mono text-3xs font-bold text-accent-foreground shadow-glow-xs-cyan">
           {unreadLabel(unread)}

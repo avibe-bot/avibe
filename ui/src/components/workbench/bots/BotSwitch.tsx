@@ -31,7 +31,7 @@ export function BotConversationTitle({ bot }: { bot: Bot }) {
   if (isDesktop) {
     return (
       <div className="flex min-w-0 items-center gap-2">
-        <BotAvatar avatar={bot.avatar} name={name} size={26} />
+        <BotAvatar avatar={bot.avatar} name={name} size={26} plain />
         <span className="min-w-0 truncate text-base font-bold text-foreground">{name}</span>
       </div>
     );
@@ -52,7 +52,7 @@ export function BotConversationTitle({ bot }: { bot: Bot }) {
           open ? 'bg-mint-soft ring-1 ring-mint/40' : 'hover:bg-foreground/4',
         )}
       >
-        <BotFace avatar={bot.avatar} name={name} size={26} running={statusBySession[bot.session_id] === 'running'} />
+        <BotFace avatar={bot.avatar} name={name} size={26} running={statusBySession[bot.session_id] === 'running'} plain />
         <span className="min-w-0 truncate text-base font-bold text-foreground">{name}</span>
         <span className="relative shrink-0">
           <ChevronDown className={clsx('size-4 text-muted transition', open && 'rotate-180 text-mint-ink')} />
@@ -124,10 +124,11 @@ function BotSwitchList({ current, onDone }: { current: string; onDone: () => voi
                 }}
                 className={clsx(
                   'flex w-full items-center gap-3 rounded-2xl px-2.5 py-2.5 text-left transition',
-                  selected ? 'bg-mint-soft ring-1 ring-mint/40' : 'hover:bg-foreground/3',
+                  // The open Bot: its avatar's edge lit (the shared selected look) on a soft row.
+                  selected ? 'bg-mint-soft' : 'hover:bg-foreground/3',
                 )}
               >
-                <BotFace avatar={bot.avatar} name={name} size={44} unread={unread} running={running} dotWell={selected ? 'bg-mint-soft' : 'bg-surface'} />
+                <BotFace avatar={bot.avatar} name={name} size={44} unread={unread} running={running} selected={selected} dotWell={selected ? 'bg-mint-soft' : 'bg-surface'} />
                 <span className="flex min-w-0 flex-1 flex-col gap-0.5">
                   <span className="flex items-center gap-1.5">
                     <span className="truncate text-base font-semibold text-foreground">{name}</span>

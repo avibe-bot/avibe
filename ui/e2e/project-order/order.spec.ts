@@ -10,16 +10,19 @@ test.beforeEach(async ({ page }) => {
   await expect(rows(page)).toHaveCount(8);
 });
 
-test('only the folder and disclosure icons advertise dragging; the title remains a click target', async ({ page, isMobile }, testInfo) => {
+test('only the folder icon advertises dragging; the title remains a click target', async ({ page, isMobile }, testInfo) => {
   const first = header(page, 0);
   const title = first.getByText('Avibe', { exact: true });
+  // The folder is the row's one icon: there is no disclosure chevron, the folder
+  // opens with the project (ui/design: mobile/workbench-tab/team).
   const icons = first.locator('.project-drag-icon');
   for (const expanded of [false, true]) {
     if (expanded) await title.click();
     await expect(first).toHaveCSS('cursor', 'pointer');
     await title.hover();
     await expect(title).toHaveCSS('cursor', 'pointer');
-    await expect(icons).toHaveCount(2);
+    await expect(icons).toHaveCount(1);
+    await expect(first).toHaveAttribute('aria-expanded', String(expanded));
     for (const icon of await icons.all()) {
       await icon.hover();
       await expect(icon).toHaveCSS('cursor', 'grab');
@@ -31,7 +34,7 @@ test('only the folder and disclosure icons advertise dragging; the title remains
   await expect(rows(page).first().getByText('Conversation 1', { exact: true })).toBeVisible();
   await icons.first().click();
   await expect(rows(page).first().getByText('Conversation 1', { exact: true })).not.toBeVisible();
-  await icons.nth(1).click();
+  await icons.first().click();
   await expect(rows(page).first().getByText('Conversation 1', { exact: true })).toBeVisible();
   await title.hover();
   await page.screenshot({ path: testInfo.outputPath('project-cursor-targets.png'), scale: 'css' });

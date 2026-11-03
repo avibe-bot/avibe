@@ -269,16 +269,15 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
   const showEmpty = visible.length === 0 && (filter === 'unread' ? unreadSessions === 0 : !hasMore);
 
   return (
-    <div ref={listRef} className="mx-auto flex w-full max-w-4xl flex-col gap-6 py-2">
-      {/* Header */}
-      <div className="flex flex-wrap items-center gap-4">
+    <div ref={listRef} className="mx-auto flex w-full max-w-4xl flex-col gap-6 pb-2 md:pt-2">
+      {/* Header. A phone's tab page has none: the brand header and the tab bar say
+          where you are, and Refresh rides at the end of the toolbar below. */}
+      <div className="hidden flex-wrap items-center gap-4 md:flex">
         <div className="flex size-12 shrink-0 items-center justify-center rounded-2xl border border-mint/30 bg-mint/[0.08] text-mint-ink shadow-glow-md-mint">
           <Inbox className="size-5" />
         </div>
+        {/* No eyebrow: it only repeated the title. */}
         <div className="flex flex-1 flex-col">
-          <div className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-mint-ink">
-            {t('workbench.inbox.eyebrow')}
-          </div>
           <h1 className="text-2xl font-bold text-foreground">{t('workbench.inbox.title')}</h1>
           <p className="text-[13px] text-muted">
             {t('workbench.inbox.headerCount', { unread: unreadSessions, total: inboxSessions.length })}
@@ -302,21 +301,22 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
         </div>
       </div>
 
-      {/* Mobile search entry — a full-width field-style button that opens the
-          full-screen search page (ui/design: inbox/inbox-page/phone;
-          SearchField). Mobile-only: desktop searches via the sidebar field + ⌘K
-          (md:hidden). */}
+      {/* Mobile search entry: the search bar a phone app keeps at the top of a list
+          (iOS, WeChat, Telegram, Lark) -- a 36px rounded field one shade off the page,
+          no border or shadow, that opens the full-screen search page (ui/design:
+          inbox/inbox-page/phone). It scrolls away with the list: search is an
+          occasional act, and the list keeps the screen. Desktop searches via the
+          sidebar field and ⌘K (md:hidden). */}
       <Button
         type="button"
         variant="ghost"
         onClick={onOpenSearch}
-        className="h-auto w-full justify-start gap-2.5 rounded-xl border border-border-strong bg-foreground/[0.04] px-3.5 py-2.5 text-left font-normal transition hover:bg-foreground/[0.06] md:hidden"
+        className="h-9 w-full justify-start gap-2 rounded-[10px] bg-foreground/[0.06] px-3 text-left font-normal hover:bg-foreground/[0.09] md:hidden"
       >
         <Search className="size-4 shrink-0 text-muted" />
         <span className="flex-1 truncate text-[14px] text-muted">
-          {t('workbench.search.entry')}
+          {t('workbench.search.entryAll')}
         </span>
-        <span className="shrink-0 text-[11px] text-muted">{t('workbench.search.scopeAll')}</span>
       </Button>
 
       {/* Toolbar */}
@@ -374,6 +374,19 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
               {t('workbench.inbox.markAllRead')}
             </button>
           )}
+          {/* A phone's Refresh: the feed stays live on its own, so this is the quiet fallback. */}
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            onClick={() => refresh()}
+            disabled={loading}
+            aria-label={t('workbench.inbox.refresh')}
+            title={t('workbench.inbox.refresh')}
+            className="ml-auto size-8 text-muted hover:text-foreground md:hidden"
+          >
+            <RefreshCw className={clsx('size-4', loading && 'animate-spin')} />
+          </Button>
         </div>
       </div>
 

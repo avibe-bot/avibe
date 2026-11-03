@@ -237,3 +237,13 @@ describe('ProjectsPage new session from a project row', () => {
     view.unmount();
   });
 });
+
+// New project sits at the end of the Projects title's row, beside the title it adds to.
+describe('ProjectsPage New project', () => {
+  it('sits on the Projects title row', () => {
+    const view = renderPage();
+    const button = screen.getByRole('button', { name: 'projects.newProject' });
+    expect(button.parentElement?.querySelector('h2')?.textContent).toBe('projects.title');
+    view.unmount();
+  });
+});

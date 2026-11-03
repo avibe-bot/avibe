@@ -400,6 +400,9 @@ export const AppShell: React.FC = () => {
   const isWorkbenchHome = surfaceLocation.pathname === '/';
 
   const showBottomNav = !isFullScreenMobile && !chromeless && location.pathname !== '/setup';
+  // The open tab names the page for assistive tech in the phone's brand header.
+  const activeTab = workbenchTabs.find((item) => item.to
+    && (item.match ? item.match(location.pathname) : location.pathname === item.to));
 
   return (
     // Mobile: a LOCKED, full-viewport flex column (overflow-hidden) so the
@@ -541,7 +544,7 @@ export const AppShell: React.FC = () => {
           behind them). A chromeless single-app tab hides it for the same
           reason: the app owns the viewport. */}
       {!isFullScreenMobile && !chromeless && (
-        <MobileBrandHeader />
+        <MobileBrandHeader title={activeTab?.label ?? null} />
       )}
 
       {!chromeless && !isFullScreenMobile && !isSettings && (
@@ -586,7 +589,7 @@ export const AppShell: React.FC = () => {
               ? 'h-full p-0 md:h-auto md:min-h-screen'
               : isFullScreenMobile
                 ? 'h-full p-0 md:mx-auto md:h-auto md:px-10 md:py-8'
-            : 'mx-auto px-4 py-5 md:px-10 md:py-8',
+            : 'mx-auto px-4 pt-4 pb-5 md:px-10 md:py-8',
         )}>
           {/* A crashing page only replaces the content area — the sidebar + chrome stay usable, and
               navigating elsewhere clears the error without a manual retry. Key on location.key (not

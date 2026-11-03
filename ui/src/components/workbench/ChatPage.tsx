@@ -3763,7 +3763,8 @@ const BotConversationEmpty: React.FC<{ name: string; avatar: BotAvatarSpec | nul
   const { t } = useTranslation();
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
-      <BotAvatar avatar={avatar} name={name} size={64} />
+      {/* The conversation's own face: the mascot stands on the page, without a well. */}
+      <BotAvatar avatar={avatar} name={name} size={64} plain />
       <div className="max-w-[420px] text-[15px] font-semibold text-foreground">{t('bots.conversation.emptyTitle', { name })}</div>
       {role && <div className="max-w-[440px] text-[13px] leading-relaxed text-foreground/80">{role}</div>}
       <div className="max-w-[440px] text-balance text-[13px] leading-relaxed text-muted">{t('bots.conversation.emptyBody', { name })}</div>
@@ -5071,7 +5072,7 @@ export const ThinkingBubble: React.FC<{
       <div className="group/message flex max-w-[min(92%,860px)] flex-col items-start gap-1">
         <div className="flex items-center gap-2 px-0.5">
           {replyBot ? (
-            <BotAvatar avatar={replyBot.avatar} name={botDisplayName(replyBot)} size={24} />
+            <BotAvatar avatar={replyBot.avatar} name={botDisplayName(replyBot)} size={24} plain />
           ) : (
             <RoleAvatar tone="mint"><BackendAvatar backend={agentBackend ?? session.agent_backend ?? ''} /></RoleAvatar>
           )}
@@ -5499,7 +5500,7 @@ export const MessageRow = memo(function MessageRow({
       <div className="group/message flex max-w-[min(92%,860px)] flex-col items-start gap-1">
         <div className="flex items-center gap-2 px-0.5">
           {agentIdentity && replyBot ? (
-            <BotAvatar avatar={replyBot.avatar} name={botDisplayName(replyBot)} size={24} />
+            <BotAvatar avatar={replyBot.avatar} name={botDisplayName(replyBot)} size={24} plain />
           ) : (
             <RoleAvatar tone={isAgent ? 'mint' : 'muted'}>{agentIdentity ? <BackendAvatar backend={agentBackend ?? session.agent_backend ?? ''} /> : <Info />}</RoleAvatar>
           )}

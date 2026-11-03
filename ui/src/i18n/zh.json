@@ -3518,6 +3518,7 @@
       "roleAgent": "助手",
       "title": "搜索",
       "entry": "搜索",
+      "entryAll": "搜索全部会话",
       "placeholder": "搜索应用与消息",
       "hint": "搜索应用与消息",
       "empty": "未找到应用或消息",
@@ -3528,11 +3529,9 @@
       "kbdOpen": "打开",
       "kbdNewTab": "新标签页",
       "kbdClose": "关闭",
-      "footerNote": "应用与消息内容 · 全部会话",
-      "scopeAll": "全部会话"
+      "footerNote": "应用与消息内容 · 全部会话"
     },
     "inbox": {
-      "eyebrow": "收件箱",
       "title": "收件箱",
       "headerCount": "{{unread}} 条未读 · {{total}} 条全部",
       "markAllRead": "全部已读",

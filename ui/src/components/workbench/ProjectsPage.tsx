@@ -4,7 +4,6 @@ import { useTranslation } from 'react-i18next';
 import {
   Archive,
   ChevronDown,
-  ChevronRight,
   Ellipsis,
   FileText,
   Folder,
@@ -46,6 +45,7 @@ import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { BotStrip } from './bots/BotStrip';
+import { PageSectionTitle } from './PageSectionTitle';
 import { NewProjectDialog } from './NewProjectDialog';
 import { ProjectAgentsMdDialog } from './ProjectAgentsMdDialog';
 import { ProjectSettingsDialog } from './ProjectSettingsDialog';
@@ -187,8 +187,10 @@ const MobileProjectRow: React.FC<{
           {...dragHandle}
           type="button"
           onClick={onToggle}
+          aria-expanded={open}
           className="project-drag-header flex min-w-0 flex-1 items-center gap-2.5 px-4 py-3.5 text-left"
         >
+          {/* The whole row opens the project, and the folder opens with it: no chevron. */}
           {open ? <FolderOpen className="project-drag-icon size-4 shrink-0 text-cyan-ink" /> : <Folder className="project-drag-icon size-4 shrink-0 text-muted" />}
           <span className="min-w-0 flex-1 truncate text-sm font-semibold">{project.display_name}</span>
           {state.sessions !== null && !state.error && (
@@ -197,7 +199,6 @@ const MobileProjectRow: React.FC<{
               {state.cursor ? '+' : ''}
             </Badge>
           )}
-          {open ? <ChevronDown className="project-drag-icon size-4 shrink-0 text-muted" /> : <ChevronRight className="project-drag-icon size-4 shrink-0 text-muted" />}
         </button>
         {(canChat || canManageProjects) && <Popover open={menuOpen} onOpenChange={setMenuOpen}>
           <PopoverTrigger asChild>
@@ -278,7 +279,7 @@ const MobileProjectRow: React.FC<{
             size="icon"
             onClick={() => void startSession()}
             aria-label={t('projects.newSessionIn', { name: project.display_name })}
-            className="size-8 shrink-0 text-mint-ink"
+            className="size-8 shrink-0 text-muted hover:text-foreground"
           >
             <Plus className="size-4" />
           </Button>
@@ -501,25 +502,28 @@ export const ProjectsPage: React.FC = () => {
   };
 
   const list = projects ?? [];
+  // New project sits at the end of the Projects title's row, the same height as the title.
+  const newProjectButton = canCreateProject ? (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon"
+      onClick={() => setShowNewProject(true)}
+      aria-label={t('projects.newProject')}
+      title={t('projects.newProject')}
+      className="size-8 text-muted hover:text-foreground"
+    >
+      <FolderPlus className="size-[18px]" />
+    </Button>
+  ) : null;
 
   return (
-    <div className="mx-auto flex max-w-xl flex-col gap-5">
-    {/* The strip draws nothing for a reader without Bots. */}
-    <BotStrip unreadBySession={unreadBySession} />
-    <div className="flex flex-col gap-3">
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-bold">{t('projects.title')}</h1>
-        {canCreateProject && <Button
-          type="button"
-          variant="outline"
-          size="icon"
-          onClick={() => setShowNewProject(true)}
-          aria-label={t('projects.newProject')}
-          className="border-mint/35 bg-mint/[0.08] text-mint-ink hover:bg-mint/[0.14]"
-        >
-          <FolderPlus className="size-4" />
-        </Button>}
-      </div>
+    <div className="mx-auto flex max-w-xl flex-col gap-6">
+    {/* The strip draws nothing for a reader without Bots. Both sections are titled
+        alike (PageSectionTitle). */}
+    <BotStrip unreadBySession={unreadBySession} placement="page" />
+    <div className="flex flex-col gap-2">
+      <PageSectionTitle title={t('projects.title')} action={newProjectButton} />
 
       {/* The provider often has projects cached already (it's mounted app-wide),
           so this loading flash only shows on a genuine cold start. */}
