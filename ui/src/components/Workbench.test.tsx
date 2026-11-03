@@ -8,7 +8,7 @@ import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const api = vi.hoisted(() => ({
-  getSession: vi.fn(),
+  getMainSession: vi.fn(),
   listVibeAgents: vi.fn(),
   getBackendConnection: vi.fn(),
   updateSession: vi.fn(),
@@ -154,7 +154,10 @@ beforeEach(() => {
   authorization.capabilities.can_manage_instance = true;
   posts.calls = [];
   posts.answer = () => Promise.resolve(new Response(JSON.stringify({ id: 'msg_1' }), { status: 200 }));
-  api.getSession.mockResolvedValue({ id: 'ses_main', agent_name: 'main', agent_backend: 'vibey', model: 'gpt-6-astra', reasoning_effort: 'high' });
+  api.getMainSession.mockResolvedValue({
+    status: 200,
+    session: { id: 'ses_main', agent_name: 'main', agent_backend: 'vibey', model: 'gpt-6-astra', reasoning_effort: 'high' },
+  });
   api.listVibeAgents.mockResolvedValue({ ok: true, agents: [{ name: 'main', backend: 'vibey', model: 'gpt-6-astra' }], default_agent_name: 'vibey' });
   api.getBackendConnection.mockResolvedValue(connection('api_key'));
   api.updateSession.mockResolvedValue({});

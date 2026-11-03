@@ -57,10 +57,13 @@ export function useMainBotRoute(enabled: boolean): MainBotRoute {
 
   const read = useCallback(async () => {
     const isCurrent = await gate.begin();
-    const [row, list] = await Promise.all([
-      api.getSession(MAIN_BOT_SESSION_ID, { cache: false, handleError: false }).catch(() => null),
+    const [main, list] = await Promise.all([
+      // The main Bot's own read, which creates the Bot and its conversation on first use: on a
+      // fresh instance the home can ask before anything else has.
+      api.getMainSession().catch(() => null),
       api.listVibeAgents({ includeDisabled: false }).catch(() => null),
     ]);
+    const row = main?.session ?? null;
     if (row) installFromServer((prev) => (isCurrent() ? row : prev));
     if (list) setAgents(list.agents);
   }, [api, gate, installFromServer]);

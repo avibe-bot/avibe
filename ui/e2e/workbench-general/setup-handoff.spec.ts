@@ -226,6 +226,8 @@ const withSetupApi = async (page: Page) => {
     return route.fulfill({ json: { ...config('en'), setup_completed: completed } });
   });
 
+  // The home reads the main Bot's conversation through `/api/sessions/main` and writes a pick to it.
+  await page.route('**/api/sessions/main', (route) => route.fulfill({ json: { session: mainSession } }));
   await page.route('**/api/sessions/ses_main', async (route) => {
     const request = route.request();
     if (request.method() === 'PATCH') {

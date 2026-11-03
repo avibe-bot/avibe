@@ -267,6 +267,8 @@ test.describe('workbench home geometry', () => {
         // The sidebar's Bots strip reads the Owner's Bots and each Bot Session's
         // running state (docs/plans/bots.md D5); the fixture's one Bot is the main Bot.
         '/api/bots', '/api/sessions/ses_main',
+        // The Owner's home reads the main Bot's conversation, created on first use.
+        '/api/sessions/main',
       ]);
       await page.route('**/api/**', (route) => {
         const request = route.request();
