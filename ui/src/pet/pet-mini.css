@@ -18,6 +18,11 @@
   --pet-dismiss:#3a3a3e;
   --pet-dismiss-hover:#4a4a50}
 
+.pet-mini-input-backdrop {
+  position:absolute;
+  inset:0;
+  pointer-events:auto}
+
 .pet-mini-column {
   /* Between Vibey's bubble and the input below it: room for the bubble's tail. */
   --pet-input-gap:14px;

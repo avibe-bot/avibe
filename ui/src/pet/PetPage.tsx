@@ -1087,6 +1087,12 @@ const PetSurface: React.FC = () => {
 
   return (
     <div ref={rootRef} className="pet-mini-stage" data-pet-root data-busy={busy} data-state={state} data-edge={layout.panel_edge} data-layout-pending={awaitingLayout || undefined}>
+      {composing && canChat && !uncertain && !voice.busy && (
+        // Capture blank-space clicks only while typing. Keep this outside the
+        // avatar's hover zone and below every control; the existing document
+        // click handler dismisses after pointer-up, so the first click is ours.
+        <div className="pet-mini-input-backdrop" data-pet-hit aria-hidden />
+      )}
       <div className={clsx('pet-mini-column', voice.busy && 'is-voice-active')} style={{ '--pet-collapsed-height': `${collapsedHeight}px`, '--pet-input-space': bubbleDrawn && inputShown ? `calc(${inputHeight}px + var(--pet-input-gap))` : '0px' } as CSSProperties}>
         <div className={clsx('pet-mini-cards', voice.busy && 'is-hidden')} inert={voice.busy || undefined} aria-label={cardsExpanded ? t('pet.panel') : undefined} style={{ height: cardsListed ? (visibleCards.length > 0 ? STACK_HEIGHT : 'auto') : collapsedHeight }}>
           <div ref={collapsedRef} key={singleCard ? 'single' : cardsExpanded ? 'expanded' : 'collapsed'} className="pet-mini-swap is-switching" onAnimationEnd={(event) => { if (event.target === event.currentTarget) event.currentTarget.classList.remove('is-switching'); }}>

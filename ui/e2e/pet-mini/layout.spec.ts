@@ -1206,6 +1206,63 @@ for (const dismiss of ['outside', 'keyboard']) {
   });
 }
 
+test('typing captures the window background without hover, then restores click-through', async ({ page }) => {
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long&activities=0');
+  const fullWindowRegions = () => page.evaluate(() => window.petLayoutHitRegions.filter((rect) =>
+    rect.x === 0 && rect.y === 0 && rect.width === innerWidth && rect.height === innerHeight));
+  const avatar = page.locator('.pet-mini-avatar-button');
+  await expect(avatar).toBeVisible();
+  await expect.poll(fullWindowRegions).toEqual([]);
+  await avatar.click();
+  await page.getByRole('textbox').fill('保留空白点击前的草稿');
+  await expect.poll(fullWindowRegions).toEqual([{ x: 0, y: 0, width: 460, height: 600 }]);
+  // The native shell uses the same rect.hover flag. The capture region must
+  // not make blank space count as hovering Vibey or its dock.
+  expect(await page.evaluate(() => window.petLayoutHitRegions.some((rect) =>
+    rect.hover && rect.x <= 2 && rect.y <= 2))).toBe(false);
+  expect(await page.evaluate(() => document.elementFromPoint(2, 2)?.closest('[data-pet-root]') !== null)).toBe(true);
+  await page.mouse.click(2, 2);
+  await expect(page.getByRole('textbox')).toHaveCount(0);
+  await expect.poll(fullWindowRegions).toEqual([]);
+  expect(await page.evaluate(() => window.petLayoutHitRegions.some((rect) =>
+    rect.x <= 2 && rect.y <= 2 && rect.x + rect.width > 2 && rect.y + rect.height > 2))).toBe(false);
+  await avatar.hover();
+  await page.getByRole('button', { name: '输入消息', exact: true }).click();
+  await expect(page.getByRole('textbox')).toHaveValue('保留空白点击前的草稿');
+  await expect.poll(fullWindowRegions).toHaveLength(1);
+  await page.getByRole('textbox').click();
+  await expect.poll(fullWindowRegions).toHaveLength(1);
+  await page.waitForTimeout(DOUBLE_CLICK_GAP);
+  await avatar.click();
+  await expect(page.getByRole('textbox')).toHaveValue('保留空白点击前的草稿');
+  await page.getByRole('button', { name: '关闭输入', exact: true }).click();
+  await expect.poll(fullWindowRegions).toEqual([]);
+  expect(await page.evaluate(() => window.petFixtureSends)).toEqual([]);
+});
+
+test('voice capture releases the typing background and blank clicks do not cancel voice', async ({ page }) => {
+  // Keep microphone acquisition pending: exercises real voice.busy without
+  // accessing a physical microphone or a transcription service.
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'mediaDevices', {
+      configurable: true, value: { getUserMedia: () => new Promise(() => {}) },
+    });
+  });
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long&activities=0&asr=1');
+  await page.locator('.pet-mini-avatar-button').click();
+  await page.getByRole('textbox').fill('draft before voice');
+  const fullWindowRegions = () => page.evaluate(() => window.petLayoutHitRegions.filter((rect) =>
+    rect.x === 0 && rect.y === 0 && rect.width === innerWidth && rect.height === innerHeight));
+  await expect.poll(fullWindowRegions).toHaveLength(1);
+  await page.locator('.pet-mini-dock').getByRole('button', { name: '语音输入', exact: true }).click();
+  await expect(page.locator('.pet-mini-marquee')).toBeVisible();
+  await expect.poll(fullWindowRegions).toEqual([]);
+  await page.mouse.click(2, 2);
+  await expect(page.locator('.pet-mini-marquee')).toBeVisible();
+  await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+  await expect(page.locator('.pet-mini-marquee')).toBeVisible();
+});
+
 test('clicking and selecting in the Mini input or blurring the window keeps it open', async ({ page }) => {
   await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long&activities=0');
   await page.locator('.pet-mini-avatar-button').click();
