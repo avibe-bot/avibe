@@ -5457,7 +5457,7 @@ export const MessageRow = memo(function MessageRow({
             size="xs"
             onClick={() => onHarnessOpenChange?.(message.id, !expanded)}
             aria-expanded={expanded}
-            className="h-auto max-w-[360px] justify-start gap-2 rounded-xl rounded-tl-md border border-dashed border-cyan/40 bg-cyan/[0.05] px-3 py-1.5 hover:bg-cyan/[0.10]"
+            className="h-auto max-w-[min(100%,360px)] justify-start gap-2 rounded-xl rounded-tl-md border border-dashed border-cyan/40 bg-cyan/[0.05] px-3 py-1.5 hover:bg-cyan/[0.10]"
           >
             <span className="min-w-0 truncate text-[12px] text-muted">
               {expanded ? t('chat.collapse') : message.text?.trim() || '—'}

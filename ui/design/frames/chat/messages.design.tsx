@@ -54,6 +54,22 @@ const system = [
   failureNotice('turn_8c1d', 86),
 ];
 
+// Callbacks from one delegated Session, with the long one-line previews Agent
+// reports usually have: on a phone, each chip truncates inside the rail.
+const callback = (id: string, text: string, minutesAgo: number) =>
+  harness('agent_run', id, text, minutesAgo, {
+    source_session_id: 'sesv7t2q9m4kd',
+    source_session_title: 'Vault sandbox Taproot 签名',
+    source_session_agent_name: 'codex',
+  });
+
+const callbacks = [
+  agentSays('签名边界和 sandbox 构建交给子任务，完成后我来验收。', 50),
+  callback('run_v1', 'Implementation incorporates shared packaged JSON schema validation for every signing path.', 45),
+  callback('run_v2', 'Progress: both source boundaries implemented; 27 focused tests pass and the browser suite is next.', 25),
+  callback('run_v3', 'Spot-check of the 15:42 snapshot: one P1, three P2 findings, all with failing tests attached.', 5),
+];
+
 const claude = { title: '周报与图表', agent_name: 'claude', agent_backend: 'claude', agent_variant: 'claude', model: 'claude-opus-5-5' };
 
 const designFrames = frames([
@@ -91,6 +107,17 @@ const designFrames = frames([
       'role=button[name="{t:chat.failureDetails.show}"]',
     ],
     render: chatDesktop,
+  },
+  {
+    name: 'phone-harness-expanded',
+    title: '会话 · 展开的 Harness 消息组 · 手机',
+    width: 390,
+    height: 844,
+    status: 'shipped',
+    route: chatRoute(),
+    fixtures: chatFixtures({ session: { title: '修复 Vault Taproot 签名' }, messages: callbacks }),
+    click: ['button:has-text("{t:chat.harnessGroup.expand}")'],
+    render: chatPhone,
   },
   {
     name: 'phone-media',

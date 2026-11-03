@@ -39,6 +39,27 @@ for (const lang of ['en', 'zh'] as const) {
       }
     });
 
+    test('Harness rows and groups stay inside their row at phone widths', async ({ page }) => {
+      for (const width of [320, 390]) {
+        await page.setViewportSize({ width, height: 844 });
+        await page.goto('/e2e/chat-interactions/fixture.html?harness');
+        const rows = page.locator('[data-message-id], [data-harness-group]');
+        await expect(rows).toHaveCount(5);
+        for (const row of await rows.all()) {
+          // Every drawn box against the row's column (its first child, the
+          // bubble-width cap): a chip sized to its text spills past the column
+          // while the column keeps its width.
+          const spill = await row.evaluate((node) => {
+            const column = node.firstElementChild!;
+            const edge = column.getBoundingClientRect().right;
+            return Math.max(...[...column.querySelectorAll('*')].map((child) => child.getBoundingClientRect().right - edge));
+          });
+          expect(spill).toBeLessThanOrEqual(0.5);
+        }
+        expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+      }
+    });
+
     test('select all survives the complete native tap and can still be dismissed', async ({ page }, testInfo) => {
       await page.goto('/e2e/chat-interactions/fixture.html');
       await page.locator('strong').evaluate((node) => {
