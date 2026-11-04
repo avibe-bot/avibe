@@ -70,6 +70,52 @@ runner availability and the unchanged non-UI critical paths.
 - Run focused Python/Vitest checks, changed Python Ruff, and `npm run build`.
   Then use the real PR CI logs for wall time and complete coverage evidence.
 
+## CI-discovered test synchronization correction
+
+The first two CI attempts completed in 9:48 and 8:59, but failed in existing
+Computer Use tests; neither is a green full-CI benchmark. All UI checks passed
+both times. The shared `_run_python_deadline_script` helper assumed Node could
+initialize and produce the asserted runtime state inside a 250 ms total budget.
+Attempt 1 lacked diagnostics; attempt 2 lacked runtime state in all three
+running-context cases. A test-owned delayed Node launcher reproduced both
+failure shapes without changing production code.
+
+The correction is confined to `tests/test_computer_script_sdk.py`. It separates
+startup-budget enforcement from tests that require an already-running state:
+
+| Helper consumer | Required evidence / treatment |
+| --- | --- |
+| Continuous console diagnostics | Child's actual persisted diagnostic tail before timing termination |
+| Detached descendant stdout | Marker the fixture child writes after spawning its descendant |
+| Busy loop / unresolved Promise | Marker the fixture child writes on entering the tested body |
+| In-flight clipboard | Actual request received by the fake loopback controller |
+| Last screenshot at deadline | Actual screenshot context plus the in-flight click request |
+| Oversized result | Existing 5 s result/protocol path, unchanged |
+| Finalize recovery (three cases) | Existing 5 s outcome path and exact step/screenshot assertions, unchanged |
+| Referenced-screenshot retention | Existing 5 s outcome path and artifact assertions, unchanged |
+
+For the running-state cases only, a test wrapper around the real `Popen.wait`
+waits for that evidence under a bounded readiness watchdog, then calls the real
+wait with the **unchanged timeout argument supplied by the parent**. It never
+manufactures state, diagnostics, screenshots or failure envelopes. Existing
+elapsed/cleanup assertions measure termination after the required state is
+established, rather than accidental Node startup speed. An early exit or missing
+readiness fails clearly; a dedicated negative case proves a non-starting child
+cannot turn into a pass.
+
+A separate blocked-launcher case retains the real 250 ms total deadline,
+asserts the exact missing-runtime-state timeout envelope and prompt child reap,
+and requires no startup-speed assumption. The existing clock-controlled
+single-budget test still proves open work reduces the budget passed to Node and
+close. No production seam, global deadline increase, relaxed failure payload,
+removed assertion or extra CI retry was introduced.
+
+Local validation of this correction: full SDK file **77 passed**; the nine
+focused deadline/cleanup cases passed three consecutive runs. A diagnostic-only
+300 ms delayed-launch reproducer that failed the pre-fix running-state cases
+passed all four affected cases in three consecutive runs after the correction.
+The delay is not part of the committed test harness.
+
 ## Delivery status
 
 Local validation passed: 63 CI-pipeline tests, 56 docs-classification/guidance
@@ -80,5 +126,14 @@ capture, and preserved ordinary manifest replacement/retention/pruning.
 
 The PR delivery record must include real CI wall time and the complete multiset
 of frame/theme pairs compared with base `734485c8` (run `41814595510`), not only
-summed capture counts. Exact-head Codex review and passing full CI remain
-required before Merge-ready.
+summed capture counts. Both initial PR attempts also include newer master
+`9d4bc717`: all 1,084 old pairs were retained exactly once, plus exactly 14 pairs
+from its seven added frames. A fresh Chromium read of the exact synthetic merge's
+registry independently confirmed all 549 frames / 1,098 declared pairs, matching
+both runs with no duplicate, missing or errored capture. Browser results were
+583 passed and 27 intentional skips; the newer base added five cases to the
+original 578 passed / 27 skipped inventory.
+
+Exact-head Codex review and passing full CI remain required before Merge-ready;
+the startup-assumption failures and their test-only correction must remain
+visible in that evidence, not be hidden behind a rerun.
