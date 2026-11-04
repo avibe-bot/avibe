@@ -1,7 +1,7 @@
 # Web UI Local Cache · Plan
 
-> **Status**: Proposed 2026-11-04 at the owner's request; implementation starts
-> with Phase 1. Phase 3 needs an owner decision (section 7).
+> **Status**: Approved 2026-11-04, including Phase 3 (section 7). Implementation
+> started with Phase 1 (#3225).
 > **Owner**: cyhhao
 
 ## 1. Background
@@ -152,8 +152,8 @@ from it while the same checks run in the background:
   cold start waits again.
 
 This is the biggest single saving on a cold start. It also changes what renders
-before authentication is re-checked, so it waits for an owner decision
-(section 7).
+before authentication is re-checked; the owner approved it on 2026-11-04
+(section 7), and its PR gets a security review.
 
 ## 5. Phases
 
@@ -176,7 +176,7 @@ before authentication is re-checked, so it waits for an owner decision
 - [ ] Tests: a cached row deleted on the server disappears after the bootstrap;
   a streamed row that arrived during the load survives
 
-### Phase 3: boot without waiting (about 0.5-1 week, after decision)
+### Phase 3: boot without waiting (about 0.5-1 week)
 
 - [ ] Stored guard outcome, background re-check, and tear-down path
 - [ ] Security review of the pre-check render window
@@ -200,8 +200,7 @@ before authentication is re-checked, so it waits for an owner decision
 
 ## 7. Decisions for the owner
 
-1. Phase 3 (render the shell before `/api/session` re-validates, within the
-   24-hour session window). This is proposed; the alternative is to keep the
-   boot gate and accept one or two round trips on cold start.
+1. **Approved 2026-11-04:** Phase 3, rendering the shell before `/api/session`
+   re-validates, within the 24-hour session window.
 2. Whether a sign-in on a shared device should be able to opt out of local
    caching. Not proposed for now: logout already clears the cache.
