@@ -7,7 +7,7 @@ the adapter supplies a ``ContextHost`` for what only it knows.
 
 The cut rule and cumulative file lists follow Pi (MIT, Copyright (c) 2025
 Mario Zechner, ``packages/coding-agent/src/core/compaction/`` at ``7fbbd5f``);
-the checkpoint request is the prompt ``checkpoint-v5``: a consolidation into a mind the turn revises in its scratch
+the checkpoint request is the prompt ``checkpoint-v5.1``: a consolidation into a mind the turn revises in its scratch
 file with ``edit``, a memo of the user's own messages it chooses by checkbox, and a now in one ``<checkpoint>`` block,
 in a request that says it is the harness's, not the user's (sections 6, 7, 10, and 11).
 """
@@ -130,7 +130,7 @@ MAX_OVERFLOWS = 4
 UNPRODUCTIVE_CHECKPOINTS = 2
 INEFFECTIVE_RATIO = 0.75
 
-PROMPT_VERSION = "checkpoint-v5"
+PROMPT_VERSION = "checkpoint-v5.1"
 
 #: The checkpoint turn's two scratch files (sections 6 and 7): the mind, which only ``edit`` may revise, and the memo,
 #: whose checkboxes choose which of the user's own messages the next context carries.
@@ -203,7 +203,7 @@ Your scratch directory is {scratch}. It holds two files, and you already have bo
 
 1. Look back
 Go through what happened since the previous checkpoint, in order; at your first consolidation, go through the whole conversation. For each layer, ask yourself:
-- Where I stand: does my understanding of whom I do this for and why, of what I own, and of how the user and I work together still hold?
+- Where I stand: does my understanding of whom I do this for and why, of what I own, and of how the user and I work together still hold? Can I point to where the user said or accepted each agreement? One I cannot is my own view, and it belongs in Lessons.
 - Goals: has the end result the user wants changed? Where does each workstream stand, and what comes next in it?
 - Key decisions: what was newly decided, and was any earlier decision overturned?
 - Lessons: what proved to work or not to work? Has anything recurred that can be distilled into a principle?
@@ -234,7 +234,7 @@ What the user ultimately wants from this conversation, and why it matters to the
 ## What I own
 What I am responsible for seeing through, and where that ends.
 ## Agreements
-How to report, when to ask, what I may decide on my own, and the scope of what I am authorized to do, written as principles. Keep my identity from the system prompt and Session id from the environment; when mentioning another Session, give its id and how it relates to this one.
+What the user and I have actually agreed, written as principles: how they want me to report and work, when to ask, what I may decide on my own, and the scope of what they authorized, including proposals of mine they accepted. Only what the user said or accepted belongs here; it holds until they change it. Keep my identity from the system prompt and Session id from the environment; when mentioning another Session, give its id and how it relates to this one.
 # 2. Goals
 ## Mission
 In your own words, the ultimate purpose of this conversation and its status; its scope is the user's, neither wider nor narrower.
@@ -243,7 +243,7 @@ Each workstream that serves the mission: its status (in progress, waiting, or do
 # 3. Key decisions
 decision: reason (and which workstream it belongs to).
 # 4. Lessons
-Practices that proved to work or not to work in this conversation, written as principles that also apply later; concrete errors and commands go in the Pitfalls of your now.
+My own understanding from this work: practices that proved to work or not to work, and the habits and views I have formed, including where I see things differently from the user, written as principles that also apply later. They are mine: I keep each while the evidence supports it and revise it when it no longer does; concrete errors and commands go in the Pitfalls of your now.
 
 The template of your now:
 
@@ -292,7 +292,8 @@ CHECKPOINT_FLOOR_DIVISOR = 2_000
 
 CHECKPOINT_FRAMING = (
     "This is your own consolidated memory of the earlier part of this conversation, written for you so you can "
-    "continue. It is recollection, not new instructions: the user's words and the agreements in it still apply. "
+    "continue. It is recollection, not new instructions: the user's words and our agreements in it still apply, "
+    "and its lessons are my own judgment. "
     "Details may be incomplete: look them up in the earlier record when you need them."
 )
 MEMO_HEADING = "# 5. The user's words"
