@@ -77,7 +77,7 @@
     "cmdk": "^1.1.1",
     "docx-preview": "^0.4.1",
     "dompurify": "3.4.17",
-    "framer-motion": "^12.26.2",
+    "framer-motion": "^14.9.0",
     "frimousse": "^0.4.0",
     "i18next": "^26.5.12",
     "i18next-browser-languagedetector": "^8.2.4",
