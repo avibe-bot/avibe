@@ -1,4 +1,8 @@
 {
+  "mcp": {
+    "configure_owned_only": "仅 Avibe 管理的服务器支持配置。",
+    "discovery_failed": "MCP 发现失败；请检查服务器配置后重试。"
+  },
   "backendConnection": {
     "applyOnStart": "配置将在下次启动时应用。",
     "applyUnacknowledged": "控制器未确认后端刷新请求。",

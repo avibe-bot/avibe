@@ -194,3 +194,43 @@ def test_released_normalized_global_files_load_without_rewrite(tmp_path, transpo
     assert row['state'] == 'not_generated'
     assert 'legacy-private' not in json.dumps(row)
     assert path.read_bytes() == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('owned', ['global'], indirect=True)
+@pytest.mark.parametrize('entry', [
+    {'url': 'https://example.invalid/mcp', 'headers': {'Authorization': 'Bearer ${TOKEN}', 'X-Mode': 'readonly'}},
+    {'command': 'fixture-server', 'env': {'AUTH': 'Bearer ${TOKEN}', 'MODE': 'readonly'}},
+])
+async def test_identical_mixed_global_import_is_unchanged(owned, entry):
+    """Mixed templates/private values must compare at the same boundary that writes them."""
+    runtime, _ = owned
+    key = await add(owned, entry)
+    assert (await run(runtime, 'configure', name=key.name, secrets={'env': {'TOKEN': 'configured-secret', **({'MODE': 'readonly'} if 'command' in entry else {})}}))['ok']
+    before = repository.read_published(key)['revision']
+    result = await run(runtime, 'add', servers=[{'name': key.name, 'server': entry}])
+    assert result['ok'], result
+    assert result['unchanged'] == [{'name': key.name, 'status': 'unchanged'}]
+    assert repository.read_published(key)['revision'] == before
+
+    literal = json.loads(json.dumps(entry).replace('${TOKEN}', 'configured-secret'))
+    changed = await run(runtime, 'add', servers=[{'name': key.name, 'server': literal}])
+    assert changed['failed'][0]['type'] == 'exists'
+    assert repository.read_published(key)['revision'] == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('owned', ['global'], indirect=True)
+async def test_repeated_released_global_import_keeps_publication(owned):
+    """A released file's inline private values are equivalent to the new partition."""
+    from core.mcp_hub.definition import definition_from_provider
+
+    runtime, selected = owned
+    entry = {'url': 'https://example.invalid/mcp', 'headers': {'X-Mode': 'readonly'}}
+    key = scope.ScopedName(selected, 'legacy')
+    repository.write_avibe_definition(definition_from_provider(key.name, entry))
+    assert (await run(runtime, 'refresh', name=key.name))['ok']
+    before = repository.read_published(key)['revision']
+    result = await run(runtime, 'add', servers=[{'name': key.name, 'server': entry}])
+    assert result['unchanged'] == [{'name': key.name, 'status': 'unchanged'}]
+    assert repository.read_published(key)['revision'] == before

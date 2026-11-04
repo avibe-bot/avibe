@@ -29,6 +29,8 @@ from core.mcp_hub.scope import Scope, ScopedName
 from core.mcp_hub import oauth as mcp_oauth
 from core.mcp_hub.definition import HTTP, STDIO, definition_from_provider, normalize_description
 from core.mcp_hub.errors import McpHubError
+from core.mcp_hub.definition import provider_entry
+from vibe.i18n import t
 
 logger = logging.getLogger(__name__)
 
@@ -621,7 +623,7 @@ class McpRuntime:
     async def _configure(self, payload: dict[str, Any]) -> bytes:
         name = payload["name"]
         if not repository.is_project(name) and await asyncio.to_thread(repository.read_avibe_definition, str(name)) is None:
-            raise McpHubError("usage", "Configure applies only to Avibe-owned servers.")
+            raise McpHubError("usage", t("mcp.configure_owned_only", "en"), message_key="mcp.configure_owned_only")
         async with self._lock(name):
             await asyncio.to_thread(mcp_scope.configure, name, payload.get("secrets", {}))
             await asyncio.to_thread(repository.unlist, name)
@@ -675,7 +677,7 @@ class McpRuntime:
                 body = json.loads(await self._refresh_locked(name, wait_stdio=True))
                 return {"name": name.name, "status": "added", **{k: body[k] for k in ("revision", "toolCount", "auth") if k in body}}
         except McpHubError as exc:
-            return {"name": name.name, "status": "failed", "error": exc.message, "type": exc.type}
+            return {"name": name.name, "status": "failed", "error": exc.message, "type": exc.type, **({"messageKey": exc.message_key} if exc.message_key else {})}
 
     @staticmethod
     def _comparable_definition(definition: dict[str, Any]) -> dict[str, Any]:
@@ -711,8 +713,9 @@ class McpRuntime:
             return None
         published = repository.read_published(name)
         requested = McpRuntime._comparable_definition(definition)
-        same_input = requested == McpRuntime._comparable_definition(existing) or (
-            stored is not None and requested == McpRuntime._comparable_definition(stored)
+        same_input = (
+            mcp_scope.matches_input(name, provider_entry(definition)) if stored is not None
+            else requested == McpRuntime._comparable_definition(existing)
         )
         same_publication = published is not None and (
             mcp_scope.publication_matches(name, existing, published) if stored is not None
@@ -746,7 +749,7 @@ class McpRuntime:
             # Transport errors can echo the resolved URL or headers. Owned
             # configuration stays private; native diagnostic behavior is unchanged.
             if owned:
-                return McpHubError(error.type, "MCP discovery failed; check the server configuration and retry.")
+                return McpHubError(error.type, t("mcp.discovery_failed", "en"), message_key="mcp.discovery_failed")
             return error
 
         if snapshot["transport"]["type"] == STDIO and not snapshot["transport"].get("cwd"):
@@ -826,7 +829,7 @@ class McpRuntime:
                 await self._refresh({"name": server.key, "waitStdio": True})
                 results.append({"name": server.key.name, "status": "registered"})
             except McpHubError as exc:
-                results.append({"name": server.key.name, "status": "failed", "error": exc.message})
+                results.append({"name": server.key.name, "status": "failed", "error": exc.message, **({"messageKey": exc.message_key} if exc.message_key else {})})
         return _dumps({"ok": True, "results": results})
 
     async def _discover_all(self, payload: dict[str, Any]) -> bytes:
@@ -865,7 +868,7 @@ class McpRuntime:
                 except McpHubError as cop:
                     logger.warning("MCP discover %s failed: %s", name, cop.message)
                     await asyncio.to_thread(repository.unlist, name)
-                    return {"name": name, "status": "failed", "error": cop.message}
+                    return {"name": name, "status": "failed", "error": cop.message, **({"messageKey": cop.message_key} if cop.message_key else {})}
                 except Exception as cop:  # noqa: BLE001
                     logger.warning("MCP discover %s failed: %s", name, cop)
                     await asyncio.to_thread(repository.unlist, name)

@@ -104,3 +104,13 @@ One forever combined Watch (`9084a6861000`, both timeouts zero) was armed before
 first push. Its branch bootstrap records an empty pre-push baseline, waits for
 the new PR, then catches up once into the bundled PR/CI waiter's durable cursor;
 it never reseeds between heads. The installed runtime was not changed.
+
+Review follow-up: discovery errors now carry a backend catalog key over IPC;
+Web translates single and batch failures, while CLI retains explicit English.
+Repeated global imports compare the prospective partition via the shared scope
+rules, preserving template intent and treating released inline literals as the
+same effective values. The matching published revision is still required.
+The three review regressions fail on the reviewed head; 44 configuration/API
+cases pass after the fixes, alongside 170 shared runtime/project/scenario cases
+and a released-inline-value replay regression. Template-to-literal edits remain
+explicit replacements even if they would resolve to the same value.

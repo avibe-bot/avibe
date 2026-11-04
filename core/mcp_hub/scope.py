@@ -621,6 +621,26 @@ def _partition_values(key: ScopedName, written: dict[str, Any], entry: dict[str,
     return cache
 
 
+def matches_input(key: ScopedName, entry: dict[str, Any]) -> bool:
+    """Compare the same prospective template/private pair that write_server writes."""
+    raw = _raw_entry(key)
+    previous = _secrets(key)
+    servers = {key.name: raw}
+    _apply_entry(servers, key, entry, replace=True)
+    written = servers[key.name]
+    private = _partition_values(key, written, entry, previous)
+    def templates(value: dict[str, Any]) -> dict[str, dict[str, str]]:
+        return {field: {k: v for k, v in value.get(field, {}).items() if _TOKEN.search(v)} for field in ("env", "headers")}
+
+    # Released global files may keep literal values inline. Their location does
+    # not change the configuration, but replacing a template with a literal does.
+    return (
+        raw.get("url") == written.get("url")
+        and templates(raw) == templates(written)
+        and _effective(key, raw, previous) == _effective(key, written, private)
+    )
+
+
 def write_server(key: ScopedName, entry: Optional[dict[str, Any]], *, replace: bool = True) -> None:
     """Validate the prospective document and private maps before publishing either.
 

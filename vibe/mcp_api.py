@@ -6,6 +6,7 @@ over control IPC. Env/header values never leave the owner files.
 
 from __future__ import annotations
 
+import asyncio
 from contextvars import ContextVar
 from typing import Any
 
@@ -50,13 +51,36 @@ def _servers_payload(definitions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+def _localize_errors(body: dict[str, Any]) -> dict[str, Any]:
+    """Render shared error keys at the Web boundary; IPC/CLI keep English."""
+    from core.services import settings
+    from vibe.i18n import t
+
+    error = body.get("error")
+    rows = [*(body.get("failed") or []), *(body.get("results") or [])]
+    keyed = [row for row in rows if row.get("messageKey")]
+    if not keyed and not (isinstance(error, dict) and error.get("messageKey")):
+        return body
+    language = settings.load_config_or_default().language
+    for row in keyed:
+        row["error"] = t(row["messageKey"], language)
+    if isinstance(error, dict):
+        if error.get("messageKey"):
+            error["message"] = t(error["messageKey"], language)
+        elif body.get("failed"):
+            error["failed"] = body["failed"]
+            error["message"] = "; ".join(f"{row['name']}: {row['error']}" for row in body["failed"])
+    return body
+
+
 async def run(handler, *args) -> tuple[dict[str, Any], int]:
     try:
-        return await handler(*args), 200
+        body, status = await handler(*args), 200
     except McpHubError as cop:
-        return _error(cop)
+        body, status = _error(cop)
     except Exception as exc:  # noqa: BLE001 - Web MCP must not leak a string envelope
-        return _error(McpHubError("internal", str(exc) or "Unexpected MCP Hub error."))
+        body, status = _error(McpHubError("internal", str(exc) or "Unexpected MCP Hub error."))
+    return await asyncio.to_thread(_localize_errors, body), status
 
 
 async def list_servers(origin: str | None = None, port: int | None = None) -> dict[str, Any]:
