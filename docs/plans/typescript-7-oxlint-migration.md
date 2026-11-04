@@ -129,6 +129,13 @@ On macOS arm64, Node 22.23.4 / npm 11.6.2, in independent task-owned worktrees:
   preserving their exact original lock records fixes clean installation. Other
   surviving lock entries change only peer/libc metadata, not package versions or
   tarball identities, except the intended TypeScript upgrade.
+- The measured integration run uses merged master `3a499d9d6`, not an unmerged branch.
+  Its six additional TS/TSX files bring the domain to **1387**, still with the
+  same 766/46 file/rule ledger and zero coverage gaps. Build, both test typecheck
+  configurations, design types, import/theme guards and 104 focused checks pass.
+  Read-only review's fatal-line and Windows argv findings are fixed; their
+  regressions fail under the corresponding mutations and pass on Node20/22.
+  The new large-domain case takes the lint-contract set from 198 to 199.
 - Final diagnostic replay: **1381 TS/TSX files, 766 errors, 46 suppressed
   messages**, identical in every file/rule/severity pair to the frozen old run.
   `eslint-baseline.json` is byte-for-byte unchanged. The new `.d.mts` helper type
@@ -137,25 +144,30 @@ On macOS arm64, Node 22.23.4 / npm 11.6.2, in independent task-owned worktrees:
 
 ### Observed stage costs, not an end-to-end CI speedup
 
-Three sequential rounds per toolchain on the same loaded machine and frozen
-base, installed dependencies, existing filesystem caches, no claim of idle-host
-or cold-cache control. `tsc -b --force` forces each compile. Raw lint exits 1 for
-existing debt by design; the complete gate passes. Values are wall-clock seconds.
+Three sequential rounds per toolchain on the same loaded machine, installed
+dependencies and existing filesystem caches; no claim of idle-host or cold-cache
+control. Raw-lint/compiler measurements use the frozen migration base. The final
+complete gate was remeasured after bounded Windows batching and integration of
+six already-merged TS/TSX files (1387 versus 1381). `tsc -b --force` forces each
+compile. Raw lint exits 1 for existing debt by design; the complete gate passes.
+Values are wall-clock seconds.
 
 | Stage | Old runs | Candidate runs | Old median | Candidate median |
 | --- | --- | --- | ---: | ---: |
-| Complete lint gate | 30.00 / 33.43 / 25.49 | 28.23 / 28.46 / 28.52 | 30.00 | 28.46 |
+| Complete lint gate, final bounded batches | 30.00 / 33.43 / 25.49 | 33.46 / 33.60 / 38.26 | 30.00 | 33.60 |
 | Raw lint, all configured React/custom rules | 18.00 / 21.98 / 16.90 | 22.37 / 23.68 / 22.38 | 18.00 | 22.38 |
 | Forced compiler build | 29.40 / 27.01 / 33.25 | 5.28 / 4.75 / 5.46 | 29.40 | 5.28 |
 
-The clear gain is the compiler stage (about **5.6×** in these runs). The complete
-lint gate is roughly unchanged relative to old-run variability, and raw lint is
-slower here; native-only marketing benchmarks do not describe this React/JS-plugin
-workload. Keeping detection takes priority over removing compatibility rules for
-a more attractive speed number. This does not accelerate the running UI itself.
+The clear gain is the compiler stage (about **5.6×** in these runs). The final
+complete lint gate is about **12% slower** by median, and raw lint is slower too;
+native-only marketing benchmarks do not describe this React/JS-plugin workload.
+Before Windows-safe batching, the gate median was 28.46s; that is not the final
+implementation's cost. Keeping detection and portability takes priority over
+removing compatibility checks for a more attractive speed number. This does not
+accelerate the running UI itself.
 
 For completeness, `/usr/bin/time -l` median reported max RSS (MiB) was
-2817→767 for the gate, 2997→783 for raw lint and 2866→2331 for compilation.
+2817→718 for the final gate, 2997→783 for raw lint and 2866→2331 for compilation.
 These are OS-reported process/child high-water marks, **not sampled simultaneous
 whole-process-tree memory**. Different native/JS process architectures prevent a
 claim that total machine memory fell by those ratios.
@@ -167,5 +179,5 @@ claim that total machine memory fell by those ratios.
 - [x] Oxlint and compiler migration.
 - [x] Contract, build and dependency verification; measured performance.
 - [x] Minimum-supported Node 20 verification.
-- [ ] Final base integration.
+- [x] Final base integration.
 - [ ] PR review/CI and merge-ready handoff.
