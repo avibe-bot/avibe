@@ -1,3 +1,4 @@
+import { clearLocalSnapshots, forgetLocalSnapshots } from './localSnapshots';
 import { isIosDevice, isStandalonePwa } from './platform';
 
 export const REMOTE_AUTH_REQUIRED_EVENT = 'avibe.remote-auth-required';
@@ -147,6 +148,10 @@ export function reportRemoteAuthorizationState(state: RemoteAuthorizationState):
     beginRemoteAuthRecovery();
     return;
   }
+  // What this reader may see is no longer what the snapshots were taken under. A
+  // revoked reader also stops storing until it is authorized again.
+  if (state === 'revoked') void forgetLocalSnapshots();
+  if (state === 'changed') void clearLocalSnapshots();
   if (state === 'revoked') {
     clearAuthorizationRetry();
     dispatchRemoteAuthorizationState(state);

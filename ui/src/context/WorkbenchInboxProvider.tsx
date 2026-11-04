@@ -15,8 +15,34 @@ import {
   createWorkbenchSessionReadOwnership,
   type WorkbenchSessionReadStamp,
 } from '../lib/workbenchSessionReadOwnership';
+import {
+  getLocalSnapshotPrincipal,
+  readLocalSnapshot,
+  subscribeLocalSnapshotPrincipal,
+  writeLocalSnapshot,
+} from '../lib/localSnapshots';
 
 const PAGE_SIZE = 30;
+
+// The first page and the unread map as last read, so a cold start paints the
+// feed before ``listInbox`` answers (docs/plans/web-ui-local-cache.md).
+const INBOX_SNAPSHOT_KEY = 'inbox:first-page';
+const INBOX_SNAPSHOT_SCHEMA = 1;
+const INBOX_SNAPSHOT_WRITE_DELAY_MS = 1000;
+
+type InboxSnapshot = { sessions: InboxSession[]; unread: Record<string, number> };
+
+const parseInboxSnapshot = (value: unknown): InboxSnapshot | null => {
+  if (!value || typeof value !== 'object') return null;
+  const { sessions, unread } = value as Partial<InboxSnapshot>;
+  if (!Array.isArray(sessions) || !unread || typeof unread !== 'object') return null;
+  const rowsValid = sessions.every((row) =>
+    row && typeof row === 'object'
+    && typeof row.session_id === 'string'
+    && typeof row.last_activity_at === 'string');
+  const countsValid = Object.values(unread).every((count) => typeof count === 'number');
+  return rowsValid && countsValid ? { sessions: sessions.slice(0, PAGE_SIZE), unread } : null;
+};
 
 // Sort matches the backend keyset order: last activity (any author) desc, then
 // session_id desc as the stable tie-break, so client upserts stay consistent
@@ -95,6 +121,19 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // window without depending on (and re-identifying with) ``inboxSessions``.
   const inboxSessionsRef = useRef<InboxSession[]>([]);
   inboxSessionsRef.current = inboxSessions;
+  // Local snapshot state. ``seededIdsRef`` holds the rows painted from the
+  // snapshot and not yet confirmed by a live read; ``authoritativePrincipalRef``
+  // is the reader the live feed was read for, set by the first whole-window
+  // commit. Once it is set the snapshot is never applied again in this document.
+  const seededIdsRef = useRef<Set<string>>(new Set());
+  const authoritativePrincipalRef = useRef<string | null>(null);
+  const feedCommittedRef = useRef(false);
+  const wholeUnreadAppliedRef = useRef(false);
+  const markFeedAuthoritative = useCallback(() => {
+    feedCommittedRef.current = true;
+    seededIdsRef.current.clear();
+    authoritativePrincipalRef.current ??= getLocalSnapshotPrincipal();
+  }, []);
   // Only the very first mount does the destructive first-page refresh; every
   // later effect rerun — such as an ``api`` identity change after a locale switch
   // — reconciles the loaded window instead, so a non-resume
@@ -290,6 +329,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // ``wholeUnreadOwedRef`` debt belongs here for the same reason: this is the only
   // place a whole map is adopted, so no producer has to remember to clear it.
   const applyUnreadMap = useCallback((map: Record<string, number>) => {
+    wholeUnreadAppliedRef.current = true;
     setUnreadBySession(map);
     setUnreadLoaded(true);
     wholeUnreadOwedRef.current = false;
@@ -390,6 +430,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       } else {
         const snapshotsToRevalidate = acceptFeedRows(read, result.sessions, true);
         setInboxSessions(() => mergeTargetedSnapshots(result.sessions));
+        markFeedAuthoritative();
         applyNextCursor(result.next_cursor);
         for (const sessionId of snapshotsToRevalidate) reconcileSessionRef.current(sessionId);
       }
@@ -404,7 +445,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       broadReadInFlightRef.current = false;
       flushFeedReadIntent();
     }
-  }, [acceptFeedRows, api, applyNextCursor, applyWholeUnreadRead, flushFeedReadIntent, mergeTargetedSnapshots, queueRefreshIntent]);
+  }, [acceptFeedRows, api, applyNextCursor, applyWholeUnreadRead, flushFeedReadIntent, markFeedAuthoritative, mergeTargetedSnapshots, queueRefreshIntent]);
 
   const loadMore = useCallback(async function loadMore() {
     if (
@@ -565,10 +606,17 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         const edge = result.sessions.at(-1);
         const reread = (row: InboxSession) =>
           result.next_cursor === null || (edge !== undefined && byActivityDesc(row, edge) < 0);
+        // Rows painted from the local snapshot were never confirmed by the server,
+        // so one this answer leaves out goes wherever it sorts.
+        const seededIds = new Set(seededIdsRef.current);
+        // A window that only ever held snapshot rows has no cursor of its own (the
+        // snapshot does not carry one), so its first live answer supplies it.
+        const hadLiveWindow = feedCommittedRef.current;
+        markFeedAuthoritative();
         setInboxSessions((prev) => {
           const incoming = new Map(result.sessions.map((s) => [s.session_id, s]));
           const merged = prev
-            .filter((s) => incoming.has(s.session_id) || !reread(s))
+            .filter((s) => incoming.has(s.session_id) || (!reread(s) && !seededIds.has(s.session_id)))
             .map((s) => incoming.get(s.session_id) ?? s);
           const have = new Set(prev.map((s) => s.session_id));
           for (const s of result.sessions) if (!have.has(s.session_id)) merged.push(s);
@@ -586,7 +634,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         // between this read and the old feed — adopt result.next_cursor so "Load
         // more" can page through them (loadMore dedupes the overlap).
         const overlap = result.sessions.some((s) => loadedIds.has(s.session_id));
-        if (!overlap) applyNextCursor(result.next_cursor);
+        if (!overlap || !hadLiveWindow) applyNextCursor(result.next_cursor);
       }
       if (readOwnershipRef.current.isCurrent(read, 'inbox-unread')) {
         applyWholeUnreadRead(read, result.unread_by_session ?? {});
@@ -598,7 +646,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       broadReadInFlightRef.current = false;
       flushFeedReadIntent();
     }
-  }, [acceptFeedRows, api, applyNextCursor, applyWholeUnreadRead, flushFeedReadIntent, mergeTargetedSnapshots, queueReconcileIntent]);
+  }, [acceptFeedRows, api, applyNextCursor, applyWholeUnreadRead, flushFeedReadIntent, markFeedAuthoritative, mergeTargetedSnapshots, queueReconcileIntent]);
 
   // Counts-only read for routes that render no feed. Same endpoint and the same
   // pagination-independent unread map as refresh()/reconcile(), with the row
@@ -681,6 +729,9 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     ]);
     initialFetched.current = false;
     inboxSessionsRef.current = [];
+    // The snapshot was taken under the old scope: never paint it after this.
+    seededIdsRef.current.clear();
+    feedCommittedRef.current = true;
     targetedSnapshotsRef.current.clear();
     targetedReadPendingRef.current.clear();
     setInboxSessions([]);
@@ -954,6 +1005,60 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     reconcileSession,
     refreshUnread,
   ]);
+
+  // Paint the last known first page and unread map while the live read is in
+  // flight. Applied once, only before anything authoritative landed, and only
+  // onto an empty feed and map, so it can never overwrite live data. The map is
+  // painted without ``unreadLoaded``: the app-icon badge still waits for the
+  // server (see ``badgeKnown``).
+  useEffect(() => {
+    let cancelled = false;
+    const seed = async (principal: string | null) => {
+      if (!principal || feedCommittedRef.current) return;
+      const snapshot = await readLocalSnapshot(INBOX_SNAPSHOT_KEY, INBOX_SNAPSHOT_SCHEMA, parseInboxSnapshot);
+      if (cancelled || !snapshot || feedCommittedRef.current) return;
+      if (getLocalSnapshotPrincipal() !== principal) return;
+      if (inboxSessionsRef.current.length === 0 && snapshot.sessions.length > 0) {
+        seededIdsRef.current = new Set(snapshot.sessions.map((row) => row.session_id));
+        inboxSessionsRef.current = snapshot.sessions;
+        setInboxSessions(snapshot.sessions);
+      }
+      if (!wholeUnreadAppliedRef.current) {
+        setUnreadBySession((prev) => (Object.keys(prev).length > 0 ? prev : snapshot.unread));
+      }
+    };
+    void seed(getLocalSnapshotPrincipal());
+    const unsubscribe = subscribeLocalSnapshotPrincipal((principal) => void seed(principal));
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, []);
+
+  // Keep the snapshot current: write the first page and the whole unread map a
+  // moment after they settle, and right away when the page is hidden (a mobile
+  // web app is often frozen or reloaded from there). Only state the server has
+  // answered for is written, and only for the reader it was read for.
+  useEffect(() => {
+    const write = () => {
+      if (!feedCommittedRef.current || !unreadLoaded || wholeUnreadOwedRef.current) return;
+      const principal = authoritativePrincipalRef.current;
+      if (!principal || principal !== getLocalSnapshotPrincipal()) return;
+      void writeLocalSnapshot(INBOX_SNAPSHOT_KEY, INBOX_SNAPSHOT_SCHEMA, {
+        sessions: inboxSessions.slice(0, PAGE_SIZE),
+        unread: unreadBySession,
+      } satisfies InboxSnapshot);
+    };
+    const timer = window.setTimeout(write, INBOX_SNAPSHOT_WRITE_DELAY_MS);
+    const onHidden = () => {
+      if (document.visibilityState === 'hidden') write();
+    };
+    document.addEventListener('visibilitychange', onHidden);
+    return () => {
+      window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onHidden);
+    };
+  }, [inboxSessions, unreadBySession, unreadLoaded]);
 
   const totalUnread = useMemo(
     () => Object.values(unreadBySession).reduce((sum, n) => sum + (n || 0), 0),
