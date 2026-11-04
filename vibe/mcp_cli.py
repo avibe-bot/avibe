@@ -272,7 +272,12 @@ def _add(args: list[str]) -> int:
     if "--json-stdin" in args[:split]:
         position = args.index("--json-stdin")
         args = args[: position + 1] + [sys.stdin.read()] + args[position + 1 :]
-    definitions, replace = parse_add_argv(args)
+    from core.mcp_hub import scope
+    from core.mcp_hub.definition import definition_from_provider
+
+    target = scope.request_scopes(_scope_payload())[-1]
+    validator = scope.project_add_definition if target.project_root is not None else definition_from_provider
+    definitions, replace = parse_add_argv(args, validator=validator)
     payload = {
         "replace": replace,
         "servers": [

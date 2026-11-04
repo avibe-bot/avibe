@@ -637,7 +637,7 @@ class McpRuntime:
         for item in servers:
             name = ScopedName(target, item.get("name"))
             try:
-                definition_from_provider(name.name, item.get("server"))
+                mcp_scope.project_add_definition(name.name, item.get("server"))
                 async with self._lock(name):
                     await asyncio.to_thread(mcp_scope.write_server, name, item["server"], replace=replace)
                     await self._cancel_login(name)

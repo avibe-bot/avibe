@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import Any, Optional
+from typing import Any, Optional, Callable
 from urllib.parse import urlsplit
 
 from core.mcp_hub.errors import McpHubError
@@ -165,7 +165,7 @@ def _validate_url(value: object) -> str:
     return url
 
 
-def parse_provider_json(text: str) -> list[dict[str, Any]]:
+def parse_provider_json(text: str, *, validator: Callable = definition_from_provider) -> list[dict[str, Any]]:
     """Parse a pasted ``{"mcpServers": {...}}`` block into definitions (sorted by name)."""
 
     try:
@@ -182,7 +182,7 @@ def parse_provider_json(text: str) -> list[dict[str, Any]]:
     first_error: McpHubError | None = None
     for name in sorted(servers):
         try:
-            parsed.append(definition_from_provider(name, servers[name]))
+            parsed.append(validator(name, servers[name]))
         except McpHubError as cop:
             if first_error is None:
                 first_error = cop
@@ -213,7 +213,7 @@ class ProviderBatch(list):
 _UNSUPPORTED_ADD_OPTIONS = {"--scope", "-s", "--callback-port", "--client-id", "--client-secret"}
 
 
-def parse_add_argv(argv: list[str]) -> tuple[list[dict[str, Any]], bool]:
+def parse_add_argv(argv: list[str], *, validator: Callable = definition_from_provider) -> tuple[list[dict[str, Any]], bool]:
     """Return ``(definitions, replace)`` for ``vibe mcp-add`` arguments.
 
     ``--json-stdin`` is resolved by the caller, which passes the stdin text as
@@ -282,7 +282,7 @@ def parse_add_argv(argv: list[str]) -> tuple[list[dict[str, Any]], bool]:
     if json_text is not None:
         if positionals or command is not None or env or headers or cwd:
             raise McpHubError("usage", "--json-stdin takes no other server arguments.", usage=True)
-        return parse_provider_json(json_text), replace
+        return parse_provider_json(json_text, validator=validator), replace
     if not positionals:
         raise McpHubError("usage", "Missing server name.", usage=True)
     name, rest = positionals[0], positionals[1:]
@@ -313,7 +313,7 @@ def parse_add_argv(argv: list[str]) -> tuple[list[dict[str, Any]], bool]:
             server["env"] = env
         if cwd is not None:
             server["cwd"] = cwd
-    return [definition_from_provider(name, server)], replace
+    return [validator(name, server)], replace
 
 
 def provider_entry(definition: dict[str, Any]) -> dict[str, Any]:

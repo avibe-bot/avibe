@@ -322,8 +322,10 @@ def _merge_headers(declared: dict[str, str], cached: dict[str, str]) -> dict[str
     return dict(combined.values())
 
 
-def _effective(key: ScopedName, raw: dict[str, Any], secrets: dict[str, Any]) -> tuple[Optional[dict[str, Any]], list[str], list[str]]:
-    """The merged definition (``None`` while variables are missing), missing names, placeholders.
+def _effective(key: ScopedName, raw: dict[str, Any], secrets: dict[str, Any]) -> tuple[dict[str, Any], list[str], list[str]]:
+    """The structurally validated definition, missing names, and placeholders.
+
+    Callers must not execute the definition while variables are missing.
 
     The single structural check of a project entry: the parser always runs, with a stand-in for
     each missing variable, so ``needs_config`` never hides a malformed entry.
@@ -363,12 +365,35 @@ def _effective(key: ScopedName, raw: dict[str, Any], secrets: dict[str, Any]) ->
     else:
         merged["headers"] = _merge_headers(merged.get("headers", {}), headers)
     definition = definition_from_provider(key.name, merged)
-    return (None if missing else definition), sorted(missing), sorted(placeholders)
+    return definition, sorted(missing), sorted(placeholders)
+
+
+def project_add_definition(name: str, raw: object) -> dict[str, Any]:
+    """Validate with the loader's stand-ins, then restore unresolved input values.
+
+    This is parsing only: approval and the real project's scope are owned by the
+    controller. The temporary scope supplies a cwd for structural validation.
+    """
+
+    validate_name(name)
+    if not isinstance(raw, dict):
+        return definition_from_provider(name, raw)
+    key = ScopedName(Scope("project:validation", Path.cwd()), name)
+    definition, _, _ = _effective(key, raw, {})
+    transport = definition["transport"]
+    for field in ("url", "env", "headers", "cwd"):
+        if field in raw:
+            transport[field] = copy.deepcopy(raw[field])
+    if "cwd" not in raw:
+        transport.pop("cwd", None)
+    return definition
 
 
 def load_server(key: ScopedName) -> ScopedServer:
     raw = _raw_entry(key)
     definition, missing, placeholders = _effective(key, raw, _secrets(key))
+    if missing:
+        definition = None
     approved = _cached(key, "approval.json").get("fingerprint") == fingerprint(raw)
     if not approved:
         state = "pending_approval"
