@@ -1,8 +1,8 @@
-// A counter every tab of this origin shares through localStorage, bumped when
-// any tab signs out. Work that started before a sign-out (a guard check, a
-// pending snapshot write) captures the value when it begins and refuses to
-// persist anything if it has moved: a document-local flag cannot fence another
-// tab, and another tab's write would restore what the sign-out removed.
+// A counter every tab of this origin shares through localStorage, bumped when a
+// reader's local snapshots are forgotten (sign-out, revocation). A tab captures
+// it when it learns its reader and refuses to write snapshots once it has
+// moved: a document-local flag cannot fence another tab, and another tab's
+// pending write would restore what the sign-out removed.
 
 const SIGN_OUT_GENERATION_KEY = 'avibe.sign-out-generation.v1';
 

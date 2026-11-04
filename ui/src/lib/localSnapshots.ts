@@ -15,7 +15,7 @@
 // IndexedDB is per origin, and every Avibe instance has its own origin, so
 // records of different instances never meet.
 
-import { readSignOutGeneration } from './signOutGeneration';
+import { bumpSignOutGeneration, readSignOutGeneration } from './signOutGeneration';
 
 const DB_NAME = 'avibe-local-snapshots';
 const DB_VERSION = 1;
@@ -205,6 +205,8 @@ export async function writeLocalSnapshot(key: string, schema: number, value: unk
  *  revocation use this: a write still scheduled for the reader (a debounce timer,
  *  a page being hidden) must not put back what was just removed. */
 export async function forgetLocalSnapshots(): Promise<void> {
+  // Every tab's pending writes were captured under the old generation.
+  bumpSignOutGeneration();
   setLocalSnapshotPrincipal(null);
   await clearLocalSnapshots();
 }

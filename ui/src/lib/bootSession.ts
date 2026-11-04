@@ -1,5 +1,4 @@
 import { normalizeSessionInfo, type SessionInfo } from './sessionInfo';
-import { bumpSignOutGeneration, readSignOutGeneration } from './signOutGeneration';
 
 // The route guard's last successful outcome, so a cold start can render the
 // shell at once and re-validate in the background instead of waiting on
@@ -17,6 +16,11 @@ import { bumpSignOutGeneration, readSignOutGeneration } from './signOutGeneratio
 // read must be synchronous. It is per origin, so per instance.
 
 const BOOT_SESSION_KEY = 'avibe.boot-session.v1';
+// Shared by every tab of the origin and advanced by every forget. A guard check
+// captures it when it starts; if anything voided the record meanwhile, in this
+// tab or another (sign-out, revocation, login required, any gate outcome), the
+// check's answer predates that and is not recorded.
+const BOOT_SESSION_GENERATION_KEY = 'avibe.boot-session.generation.v1';
 
 /** How long an outcome is trusted when the server did not say when the session
  *  expires (local loopback, or an instance from before ``session_expires_at``):
@@ -70,20 +74,28 @@ export function readBootSession(now = Date.now()): SessionInfo | null {
   }
 }
 
-/** The sign-out generation a guard check captures when it starts, so its
- *  answer can be refused if any tab signed out meanwhile. */
-export const bootSessionGeneration = readSignOutGeneration;
+/** The generation a guard check captures when it starts, so its answer can be
+ *  refused if the record was voided anywhere meanwhile. */
+export function bootSessionGeneration(): number {
+  try {
+    const raw = storage()?.getItem(BOOT_SESSION_GENERATION_KEY) ?? null;
+    const value = raw === null ? 0 : Number(raw);
+    return Number.isFinite(value) ? value : 0;
+  } catch {
+    return 0;
+  }
+}
 
 /** Remember an outcome the server just confirmed. ``generation`` is the value
  *  of ``bootSessionGeneration()`` when the check that produced it started. */
 export function recordBootSession(
   session: SessionInfo,
   now = Date.now(),
-  generation = readSignOutGeneration(),
+  generation = bootSessionGeneration(),
 ): void {
   const store = storage();
   if (!store || recordingBlocked || !isReadyOutcome(session)) return;
-  if (generation !== readSignOutGeneration()) return;
+  if (generation !== bootSessionGeneration()) return;
   try {
     const record: BootSessionRecord = { version: 1, savedAt: now, session };
     store.setItem(BOOT_SESSION_KEY, JSON.stringify(record));
@@ -96,23 +108,25 @@ export function recordBootSession(
  *  document, whatever a check already in flight answers. */
 export function blockBootSessionRecording(): void {
   recordingBlocked = true;
-  bumpSignOutGeneration();
   forgetBootSession();
 }
 
-/** Sign-out has settled (whether or not the request succeeded): advance the
- *  shared fence again and forget the record. A check another tab started after
- *  the first bump but before the server dropped the cookie captured that
- *  generation, and must not record the leaving reader once it answers. */
+/** Sign-out has settled (whether or not the request succeeded): forget again.
+ *  A check another tab started after the first forget but before the server
+ *  dropped the cookie captured that generation, and must not record the
+ *  leaving reader once it answers. */
 export function settleSignOutBootSession(): void {
-  bumpSignOutGeneration();
   forgetBootSession();
 }
 
-/** Forget it: the next cold start waits for the server again. */
+/** Forget it, and void every check in flight in any tab: the next cold start
+ *  waits for the server again. */
 export function forgetBootSession(): void {
+  const store = storage();
+  if (!store) return;
   try {
-    storage()?.removeItem(BOOT_SESSION_KEY);
+    store.setItem(BOOT_SESSION_GENERATION_KEY, String(bootSessionGeneration() + 1));
+    store.removeItem(BOOT_SESSION_KEY);
   } catch {
     // Nothing more to do.
   }

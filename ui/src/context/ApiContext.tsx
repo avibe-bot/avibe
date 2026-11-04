@@ -4787,7 +4787,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // Again once the request settles: anything another tab started while it
         // was out may have answered meanwhile (see settleSignOutBootSession).
         settleSignOutBootSession();
-        await clearLocalSnapshots();
+        await forgetLocalSnapshots();
       }
     },
     // eslint-disable-next-line react-hooks-js/exhaustive-deps
