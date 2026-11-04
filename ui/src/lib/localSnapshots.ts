@@ -166,11 +166,14 @@ export async function readLocalSnapshot<T>(
 ): Promise<T | null> {
   const owner = principal;
   if (!owner) return null;
+  const epoch = clearEpoch;
   const record = await withStore('readonly', (store) =>
     settle(store.get(recordId(owner, key)) as IDBRequest<StoredRecord | undefined>),
   );
-  // The principal may have changed while the read was in flight.
-  if (!record || owner !== principal || record.principal !== owner || record.schema !== schema) return null;
+  // The principal may have changed while the read was in flight, and a clear
+  // that began meanwhile voids what the read found.
+  if (!record || owner !== principal || epoch !== clearEpoch) return null;
+  if (record.principal !== owner || record.schema !== schema) return null;
   try {
     return parse(record.value);
   } catch {

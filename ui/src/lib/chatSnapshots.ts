@@ -68,6 +68,9 @@ export type ChatSnapshot = {
 
 type StoredChatSnapshot = ChatSnapshot & { build: string };
 
+// Advanced by ``forgetChatSnapshot`` so a read or an owner from before it is void.
+const forgotten = new Map<string, number>();
+
 /** A row the server stored: a transcript Message, not a Delivery still being
  *  sent and not the projection of a claimed input. */
 export const isStoredTranscriptRow = (row: WorkbenchMessage): boolean =>
@@ -102,11 +105,14 @@ function parseChatSnapshot(sessionId: string, value: unknown, build: string): Ch
   };
 }
 
-/** The stored conversation for the current reader, or null. */
-export function readChatSnapshot(sessionId: string, build = UI_BUILD): Promise<ChatSnapshot | null> {
-  return readLocalSnapshot(chatSnapshotKey(sessionId), CHAT_SNAPSHOT_SCHEMA, (value) =>
+/** The stored conversation for the current reader, or null. A forget that
+ *  begins while the read is out voids what it found, as a clear does. */
+export async function readChatSnapshot(sessionId: string, build = UI_BUILD): Promise<ChatSnapshot | null> {
+  const generation = forgotten.get(sessionId) ?? 0;
+  const snapshot = await readLocalSnapshot(chatSnapshotKey(sessionId), CHAT_SNAPSHOT_SCHEMA, (value) =>
     parseChatSnapshot(sessionId, value, build),
   );
+  return generation === (forgotten.get(sessionId) ?? 0) ? snapshot : null;
 }
 
 /** The newest rows of a live transcript window, capped to what a bootstrap
@@ -132,9 +138,6 @@ export function chatSnapshotFromBootstrap(bootstrap: WorkbenchSessionBootstrap):
     can_chat: Boolean(bootstrap.capabilities?.can_chat),
   };
 }
-
-// Advanced by ``forgetChatSnapshot`` so an owner taken before it is void.
-const forgotten = new Map<string, number>();
 
 export type ChatSnapshotOwner = {
   readonly sessionId: string;

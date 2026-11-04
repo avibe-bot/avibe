@@ -61,6 +61,18 @@ describe('local snapshot eviction', () => {
     expect(await read('inbox:first-page')).toBe('inbox');
   });
 
+  it('returns nothing from a read that a clear overtook', async () => {
+    setLocalSnapshotPrincipal('local');
+    await writeLocalSnapshot('chat:a', 1, 'rows of a');
+    expect(await read('chat:a')).toBe('rows of a');
+
+    // The read's transaction is queued before the clear's, so it still finds the
+    // record; the clear began while it was out, so the caller must not use it.
+    const overtaken = read('chat:a');
+    void clearLocalSnapshots();
+    expect(await overtaken).toBeNull();
+  });
+
   it('advances its epoch on every clear', async () => {
     const before = getLocalSnapshotEpoch();
     await clearLocalSnapshots();

@@ -136,6 +136,16 @@ describe('conversation snapshots', () => {
     expect(await readChatSnapshot('ses_a')).not.toBeNull();
   });
 
+  it('returns nothing from a read that a forget overtook', async () => {
+    setLocalSnapshotPrincipal('local');
+    await write('ses_a');
+    expect(await readChatSnapshot('ses_a')).not.toBeNull();
+
+    const overtaken = readChatSnapshot('ses_a');
+    void forgetChatSnapshot('ses_a');
+    expect(await overtaken).toBeNull();
+  });
+
   it(`keeps the ${CHAT_SNAPSHOT_SESSIONS} most recently written conversations`, async () => {
     let now = 1_000;
     vi.spyOn(Date, 'now').mockImplementation(() => now);
