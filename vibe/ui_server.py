@@ -10353,7 +10353,7 @@ def bots_update(handle):
     from core.bots import BotService
 
     payload = request.json or {}
-    editable = ("display_name", "avatar", "position", "hide_details")
+    editable = ("display_name", "avatar", "hide_details")
     fields = {key: payload[key] for key in editable if key in payload}
     unknown = sorted(set(payload) - set(editable))
     try:
@@ -10362,7 +10362,7 @@ def bots_update(handle):
             from core.bots import BotError
 
             raise BotError(
-                "bot_update_invalid", "Change the display name, the emoji avatar, the position, or Hide details"
+                "bot_update_invalid", "Change the display name, the emoji avatar, or Hide details"
             )
         with BotService() as service:
             bot = service.update_bot(handle, authorization_context=context, **fields)

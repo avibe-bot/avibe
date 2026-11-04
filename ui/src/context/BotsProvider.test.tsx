@@ -30,11 +30,11 @@ vi.mock('./ApiContext', async () => {
 
 const MAIN: Bot = {
   handle: 'main', display_name: '', avatar: { kind: 'mascot' }, role: 'First point of contact',
-  agent_name: 'main', session_id: 'ses_main', position: 0, builtin: true, hide_details: true,
+  agent_name: 'main', session_id: 'ses_main', builtin: true, hide_details: true,
 };
 const CSO: Bot = {
   handle: 'cso', display_name: 'Security Lead', avatar: null, role: 'Audits',
-  agent_name: 'cso', session_id: 'ses_cso', position: 1, builtin: false, hide_details: true,
+  agent_name: 'cso', session_id: 'ses_cso', builtin: false, hide_details: true,
 };
 
 function fakeApi() {
@@ -280,5 +280,63 @@ describe('publishing the Bot list to the Inbox', () => {
     expect(published.at(-1)).toMatchObject({ known: true });
     expect(published.at(-1)?.sessionIds.size).toBe(0);
     expect(api.listBots).not.toHaveBeenCalled();
+  });
+});
+
+// docs/plans/bots.md D13: the server orders the Bots by recent use and says so with
+// `bots.changed`. A list under the user's hand holds the order it shows, with every
+// Bot's latest details, and takes the server's once the last hold is released.
+describe('holding the order of the Bots', () => {
+  const PM: Bot = { ...CSO, handle: 'pm', display_name: 'Product', agent_name: 'pm', session_id: 'ses_pm' };
+  const OPS: Bot = { ...CSO, handle: 'writer', display_name: 'Writer', agent_name: 'writer', session_id: 'ses_writer' };
+
+  it('keeps the order shown while any hold is open, and moves once the last is released', async () => {
+    const { api, stream } = fakeApi();
+    apiRef.current = api;
+    api.listBots.mockResolvedValue({ bots: [MAIN, CSO, PM], limit: { count: 2, max: 5 } });
+    const latestRef: { current: ReturnType<typeof useBots> | null } = { current: null };
+    const Probe = ({ onState }: { onState: (state: ReturnType<typeof useBots>) => void }) => {
+      const state = useBots();
+      useEffect(() => onState(state));
+      return null;
+    };
+    render(
+      <InstanceAuthorizationContext.Provider
+        value={{
+          remote: false,
+          instanceKind: null,
+          instanceRole: null,
+          capabilities: { ...DENIED_INSTANCE_CAPABILITIES, is_instance_owner: true },
+        }}
+      >
+        <BotsProvider>
+          <Probe onState={(state) => { latestRef.current = state; }} />
+        </BotsProvider>
+      </InstanceAuthorizationContext.Provider>,
+    );
+    await flush();
+    const shown = () => latestRef.current!.bots.map((bot) => `${bot.handle}:${bot.display_name}`);
+    expect(shown()).toEqual(['main:', 'cso:Security Lead', 'pm:Product']);
+
+    let releaseCard = () => {};
+    let releaseStrip = () => {};
+    act(() => {
+      releaseStrip = latestRef.current!.holdOrder();
+      releaseCard = latestRef.current!.holdOrder();
+    });
+    // The user writes to PM elsewhere, renames it, and adds a Bot: the details and the new Bot show, in place.
+    api.listBots.mockResolvedValue({
+      bots: [MAIN, { ...PM, display_name: 'Product Lead' }, OPS, CSO],
+      limit: { count: 3, max: 5 },
+    });
+    act(() => stream.handlers?.onBotsChanged?.({ handle: 'pm' }));
+    await flush();
+    expect(shown()).toEqual(['main:', 'cso:Security Lead', 'pm:Product Lead', 'writer:Writer']);
+
+    act(() => releaseCard());
+    act(() => releaseCard());
+    expect(shown()).toEqual(['main:', 'cso:Security Lead', 'pm:Product Lead', 'writer:Writer']);
+    act(() => releaseStrip());
+    expect(shown()).toEqual(['main:', 'pm:Product Lead', 'writer:Writer', 'cso:Security Lead']);
   });
 });

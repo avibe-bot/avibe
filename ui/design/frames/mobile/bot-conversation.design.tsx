@@ -27,6 +27,7 @@ const designFrames = frames([
   { name: 'switch', title: '伙伴对话 · 点名字：切到另一位伙伴', width: 390, height: 844, status: 'shipped', fixtures: inCso, route: '/chat/ses_cso', click: openSwitch, render: () => <PhoneConversation /> },
   { name: 'switch-at-limit', title: '伙伴对话 · 切换 · 刚好 5 位伙伴：没有「添加」', width: 390, height: 844, status: 'shipped', fixtures: inCsoFull, route: '/chat/ses_cso', click: openSwitch, render: () => <PhoneConversation /> },
   { name: 'main-running', title: '伙伴对话 · 歪比正在工作', width: 390, height: 844, status: 'shipped', fixtures: inMainRunning, route: '/chat/ses_main', render: () => <PhoneConversation /> },
+  { name: 'switch-main', title: '伙伴对话 · 在歪比的对话里切换：歪比选中，细圈画在它的圆周上', width: 390, height: 844, status: 'shipped', fixtures: inMainRunning, route: '/chat/ses_main', click: openSwitch, render: () => <PhoneConversation /> },
   { name: 'switch-small', title: '伙伴对话 · 切换 · 小屏 375×667', width: 375, height: 667, status: 'shipped', fixtures: inCso, route: '/chat/ses_cso', click: openSwitch, render: () => <PhoneConversation /> },
 ]);
 

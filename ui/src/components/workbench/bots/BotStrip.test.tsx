@@ -36,7 +36,6 @@ const bot = (handle: string, displayName: string, builtin = false): Bot => ({
   role: '',
   agent_name: handle,
   session_id: `ses_${handle}`,
-  position: builtin ? 0 : 1,
   builtin,
 });
 
@@ -56,7 +55,7 @@ const state = (extra: Partial<BotsState> = {}): BotsState => ({
   botForHandle: (handle) => bots.find((each) => each.handle === handle),
   displayName: (each) => each.display_name || 'Vibey',
   afterWrite: vi.fn().mockResolvedValue(undefined),
-  moveBot: vi.fn().mockResolvedValue(true),
+  holdOrder: () => () => undefined,
   openProfile: vi.fn(),
   profileRequest: null,
   closeProfile: vi.fn(),

@@ -27,7 +27,7 @@ _ROSTER = [
     {"name": "main", "backend": "vibey", "description": "The user's main Bot and first point of contact.",
      "bot": {"handle": "main", "display_name": "", "builtin": True}},
     {"name": "cso", "backend": "vibey", "description": "Reviews security risks.",
-     "bot": {"handle": "cso", "display_name": "首席安全官", "position": 1}},
+     "bot": {"handle": "cso", "display_name": "首席安全官"}},
     {"name": "vibey", "backend": "vibey", "description": "Vibey, the official agent of Avibe."},
     {"name": "reviewer", "backend": "codex", "description": "Reviews code."},
 ]

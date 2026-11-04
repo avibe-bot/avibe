@@ -430,8 +430,6 @@
       "bot_agent_default": "这个 Agent 是默认 Agent。请先选择其他默认 Agent，再把它设为伙伴。",
       "bot_main_not_removable": "主伙伴不能移出。",
       "bot_main_avatar": "主伙伴始终使用 Vibey 吉祥物头像，不能更换。",
-      "bot_main_position": "主伙伴始终排在第一位。",
-      "bot_position_invalid": "伙伴的位置是从 1 开始的整数。",
       "bot_hide_details_invalid": "「隐藏细节」只能是开或关。",
       "bot_main_unavailable": "主伙伴暂时不可用。"
     },

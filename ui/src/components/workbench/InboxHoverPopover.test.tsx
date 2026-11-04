@@ -139,8 +139,8 @@ it('stays quiet when the peek is already full of unread sessions', () => {
 
 describe('with Bots', () => {
   const bots: Bot[] = [
-    { handle: 'main', display_name: 'Vibey', avatar: { kind: 'mascot' }, role: '', agent_name: 'main', session_id: 'ses_main', position: 0, builtin: true, hide_details: true },
-    { handle: 'cso', display_name: 'CSO', avatar: null, role: '', agent_name: 'cso', session_id: 'ses_cso', position: 1, builtin: false, hide_details: true },
+    { handle: 'main', display_name: 'Vibey', avatar: { kind: 'mascot' }, role: '', agent_name: 'main', session_id: 'ses_main', builtin: true, hide_details: true },
+    { handle: 'cso', display_name: 'CSO', avatar: null, role: '', agent_name: 'cso', session_id: 'ses_cso', builtin: false, hide_details: true },
   ];
   const botsState = {
     enabled: true,

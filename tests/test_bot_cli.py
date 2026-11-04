@@ -124,7 +124,7 @@ def test_cli_reference_bot_examples_parse(doc):
 
     text = (Path(__file__).resolve().parents[1] / doc).read_text(encoding="utf-8")
     examples = [line for line in text.splitlines() if line.startswith("vibe bot ") or line.startswith("vibe agent run") and "--bot" in line]
-    assert len(examples) >= 8
+    assert len(examples) >= 7
     parser = cli.build_parser()
     for example in examples:
         parser.parse_args(shlex.split(example)[1:])

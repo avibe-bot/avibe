@@ -26,7 +26,7 @@ export function HomeGreeting({ bot, name, introduce }: { bot: Bot | null; name: 
   const part = timeOfDay(new Date());
   return (
     <div className={clsx('flex flex-col items-center text-center', desktop ? 'gap-3' : 'gap-2')}>
-      {bot && desktop && <BotAvatar avatar={bot.avatar} name={name} size={64} plain />}
+      {bot && desktop && <BotAvatar avatar={bot.avatar} name={name} size={64} />}
       <h1 className={clsx('font-bold text-foreground', desktop ? 'text-3xl' : 'text-2xl')}>
         {introduce
           ? t(`workbench.home.greeting.${part}Intro`, { name })

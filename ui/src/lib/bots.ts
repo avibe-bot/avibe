@@ -20,7 +20,6 @@ export type Bot = {
   agent_name: string;
   /** Always `ses_<handle>`. */
   session_id: string;
-  position: number;
   /** The main Bot: always first, never removed. */
   builtin: boolean;
   /** "Hide details" in the Bot's conversation (`conversationDetails`); on unless turned off. */
@@ -179,14 +178,12 @@ export function nameInitial(name: string): string {
   return (first ?? '?').toLocaleUpperCase();
 }
 
-/** Display order: the main Bot first, then by position (the server's order, restated
- *  so a local reorder renders without waiting for the refetch). */
-export function orderBots(bots: Bot[]): Bot[] {
-  return [...bots].sort((a, b) => {
-    if (a.builtin !== b.builtin) return a.builtin ? -1 : 1;
-    if (a.position !== b.position) return a.position - b.position;
-    return a.handle.localeCompare(b.handle);
-  });
+/** `bots` in the order `held` names them (handles), for a list the user's hand is on:
+ *  each Bot shows its latest details in the place it had, and a Bot `held` does not name
+ *  follows, in its order in `bots` (docs/plans/bots.md D13). */
+export function keepBotOrder(bots: readonly Bot[], held: readonly string[]): Bot[] {
+  const place = new Map(held.map((handle, index) => [handle, index]));
+  return [...bots].sort((a, b) => (place.get(a.handle) ?? held.length) - (place.get(b.handle) ?? held.length));
 }
 
 export function parseBot(value: unknown): Bot | null {
@@ -200,7 +197,6 @@ export function parseBot(value: unknown): Bot | null {
     role: typeof raw.role === 'string' ? raw.role : '',
     agent_name: typeof raw.agent_name === 'string' ? raw.agent_name : raw.handle,
     session_id: typeof raw.session_id === 'string' ? raw.session_id : `${BOT_SESSION_ID_PREFIX}${raw.handle}`,
-    position: typeof raw.position === 'number' ? raw.position : 0,
     builtin: raw.builtin === true,
     // A server from before the switch sends none: details stay hidden, as there.
     hide_details: raw.hide_details !== false,

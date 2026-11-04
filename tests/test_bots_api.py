@@ -52,9 +52,9 @@ def test_the_bot_lifecycle_over_http(client, tmp_path):
         "role": "The user's main Bot and first point of contact.",
         "agent_name": "main",
         "session_id": "ses_main",
-        "position": 0,
         "builtin": True,
         "hide_details": True,
+        "last_user_message_at": None,
     }
     assert client.get("/api/sessions/ses_main").status_code == 200
 
@@ -65,7 +65,7 @@ def test_the_bot_lifecycle_over_http(client, tmp_path):
     )
     assert created.status_code == 201, created.get_json()
     bot = created.get_json()["bot"]
-    assert (bot["handle"], bot["session_id"], bot["agent_name"], bot["position"]) == ("cso", "ses_cso", "cso", 1)
+    assert (bot["handle"], bot["session_id"], bot["agent_name"]) == ("cso", "ses_cso", "cso")
 
     taken = client.post("/api/bots", json={"display_name": "Again", "handle": "cso"}, headers=csrf_headers(client))
     assert (taken.status_code, taken.get_json()["error"]["code"]) == (409, "bot_handle_taken")

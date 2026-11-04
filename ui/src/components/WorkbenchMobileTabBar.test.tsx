@@ -43,7 +43,6 @@ const main: Bot = {
   role: '',
   agent_name: 'vibey-main',
   session_id: 'ses_main',
-  position: 0,
   builtin: true,
   hide_details: true,
 };
@@ -60,7 +59,7 @@ const bots = (overrides: Partial<BotsState>): BotsState => ({
   botForHandle: () => undefined,
   displayName: (bot) => bot.display_name,
   afterWrite: async () => undefined,
-  moveBot: async () => true,
+  holdOrder: () => () => undefined,
   setHideDetails: async () => true,
   openProfile: () => undefined,
   profileRequest: null,

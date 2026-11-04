@@ -299,7 +299,7 @@ describe('AgentsPage contextual selection', () => {
         ],
       },
     ] as AgentSupply[]);
-    const cso: Bot = { handle: 'cso', display_name: 'Security lead', avatar: null, role: 'audits', agent_name: 'cso', session_id: 'ses_cso', position: 1, builtin: false };
+    const cso: Bot = { handle: 'cso', display_name: 'Security lead', avatar: null, role: 'audits', agent_name: 'cso', session_id: 'ses_cso', builtin: false };
     const api = makeApi(vi.fn().mockResolvedValue(listResult([
       { ...brief('vibey', 'Default Agent'), backend: 'vibey' },
       { ...brief('cso', 'audits'), backend: 'vibey', bot: { handle: 'cso', display_name: 'Security lead', builtin: false } },
@@ -3298,7 +3298,6 @@ const bot = (handle: string, displayName: string, role: string, builtin = false)
   role,
   agent_name: handle,
   session_id: `ses_${handle}`,
-  position: builtin ? 0 : 1,
   builtin,
 });
 
@@ -3316,7 +3315,7 @@ const botsState = (bots: Bot[], extra: Partial<BotsState> = {}): BotsState => ({
   botForHandle: (handle) => bots.find((each) => each.handle === handle),
   displayName: (each) => each.display_name || (each.builtin ? 'bots.mainDefaultName' : each.handle),
   afterWrite: vi.fn().mockResolvedValue(undefined),
-  moveBot: vi.fn().mockResolvedValue(true),
+  holdOrder: () => () => undefined,
   openProfile: vi.fn(),
   profileRequest: null,
   closeProfile: vi.fn(),

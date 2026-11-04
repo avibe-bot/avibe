@@ -150,8 +150,8 @@ async def test_bot_mutations_reach_a_connected_browser_once(home, monkeypatch, e
         operations = [
             (("bot", "create", "--name", "Researcher", "--handle", "researcher"),
              "post", "/api/bots", {"display_name": "Researcher", "handle": "researcher"}),
-            (("bot", "update", "researcher", "--name", "Scholar", "--position", "1"),
-             "patch", "/api/bots/researcher", {"display_name": "Scholar", "position": 1}),
+            (("bot", "update", "researcher", "--name", "Scholar"),
+             "patch", "/api/bots/researcher", {"display_name": "Scholar"}),
             (("bot", "update", "researcher", "--emoji", "R", "--hue", "210"),
              "patch", "/api/bots/researcher", {"avatar": {"emoji": "R", "hue": 210}}),
             (("bot", "remove", "researcher"), "delete", "/api/bots/researcher", None),
@@ -187,7 +187,7 @@ async def test_bot_mutations_reach_a_connected_browser_once(home, monkeypatch, e
 
         # A failed transaction, an unchanged role, and a list read are not changes.
         refused = await asyncio.to_thread(
-            client.patch, "/api/bots/researcher", json={"display_name": "Rolled back", "position": -1},
+            client.patch, "/api/bots/researcher", json={"display_name": "Rolled back", "hide_details": "maybe"},
             headers=csrf_headers(client),
         )
         assert refused.status_code == 400

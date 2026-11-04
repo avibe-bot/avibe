@@ -4,7 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { Check, ChevronDown, UserPlus } from 'lucide-react';
 import clsx from 'clsx';
 
-import { useBots } from '../../../context/BotsContext';
+import { useBotOrderHold, useBots } from '../../../context/BotsContext';
 import { useWorkbenchInbox } from '../../../context/WorkbenchInboxContext';
 import { botRole, botSessionPath, type Bot } from '@/lib/bots';
 import { formatRelativeTime } from '@/lib/relativeTime';
@@ -31,7 +31,7 @@ export function BotConversationTitle({ bot }: { bot: Bot }) {
   if (isDesktop) {
     return (
       <div className="flex min-w-0 items-center gap-2">
-        <BotAvatar avatar={bot.avatar} name={name} size={26} plain />
+        <BotAvatar avatar={bot.avatar} name={name} size={26} />
         <span className="min-w-0 truncate text-base font-bold text-foreground">{name}</span>
       </div>
     );
@@ -52,7 +52,7 @@ export function BotConversationTitle({ bot }: { bot: Bot }) {
           open ? 'bg-mint-soft ring-1 ring-mint/40' : 'hover:bg-foreground/4',
         )}
       >
-        <BotFace avatar={bot.avatar} name={name} size={26} running={statusBySession[bot.session_id] === 'running'} plain />
+        <BotFace avatar={bot.avatar} name={name} size={26} running={statusBySession[bot.session_id] === 'running'} />
         <span className="min-w-0 truncate text-base font-bold text-foreground">{name}</span>
         <span className="relative shrink-0">
           <ChevronDown className={clsx('size-4 text-muted transition', open && 'rotate-180 text-mint-ink')} />
@@ -78,13 +78,16 @@ export function BotConversationTitle({ bot }: { bot: Bot }) {
 /** Every Bot, the main Bot first: what each is doing or last said, unread, and running.
  *  Picking one opens its conversation; Add opens the shared add dialog, and is not there
  *  once every place for a custom Bot is taken (D12), as on the sidebar strip. Mounted
- *  only while the sheet is open, so only then does it follow the Inbox feed for the previews. */
+ *  only while the sheet is open, so only then does it follow the Inbox feed for the
+ *  previews, and hold the order the user is picking from (D13). */
 function BotSwitchList({ current, onDone }: { current: string; onDone: () => void }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { bots, atLimit, openProfile } = useBots();
   // The rows' previews follow the Inbox feed while the sheet is open.
   useWorkbenchInbox();
+  // No Bot moves under the finger picking one.
+  useBotOrderHold(true);
   return (
     <>
       <div className="flex items-center justify-between gap-3 px-1 pr-8">

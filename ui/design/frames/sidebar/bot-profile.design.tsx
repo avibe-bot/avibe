@@ -22,7 +22,7 @@ const fixtures: WorkbenchFixtures = {
 const foxFixtures: WorkbenchFixtures = {
   ...fixtures,
   bots: team.map((each) => (each.handle === 'cso'
-    ? bot('cso', '首席安全官', '依赖与权限的安全审计，每周汇报', { kind: 'emoji', emoji: '🦊', hue: 12 }, 1)
+    ? bot('cso', '首席安全官', '依赖与权限的安全审计，每周汇报', { kind: 'emoji', emoji: '🦊', hue: 12 })
     : each)),
 };
 

@@ -430,8 +430,6 @@
       "bot_agent_default": "This Agent is the default Agent. Choose another default before setting it as a Bot.",
       "bot_main_not_removable": "The main Bot cannot be removed.",
       "bot_main_avatar": "The main Bot always shows the Vibey mascot; its avatar cannot be changed.",
-      "bot_main_position": "The main Bot always comes first.",
-      "bot_position_invalid": "A Bot's position is a whole number from 1.",
       "bot_hide_details_invalid": "Hide details is either on or off.",
       "bot_main_unavailable": "The main Bot is not available right now."
     },

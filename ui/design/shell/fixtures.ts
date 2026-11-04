@@ -141,28 +141,28 @@ export const demoSessions: Record<string, WorkbenchSession[]> = {
   ],
 };
 
-export const bot = (handle: string, displayName: string, role: string, avatar: BotAvatar | null, position: number): Bot => ({
+/** A Bot as `GET /api/bots` lists it; a list of them is in the server's order (the main Bot first, then by recent use). */
+export const bot = (handle: string, displayName: string, role: string, avatar: BotAvatar | null): Bot => ({
   handle,
   display_name: displayName,
   avatar,
   role,
   agent_name: handle,
   session_id: `ses_${handle}`,
-  position,
   builtin: handle === 'main',
   hide_details: true,
 });
 
 /** The main Bot as a new install has it: the mascot, and the localized default name. */
-export const mainBot = bot('main', '', "The user's main Bot and first point of contact.", { kind: 'mascot' }, 0);
+export const mainBot = bot('main', '', "The user's main Bot and first point of contact.", { kind: 'mascot' });
 export const demoBots = [
   mainBot,
-  bot('cso', '首席安全官', '依赖与权限的安全审计，每周汇报', { kind: 'emoji', emoji: '🛡️', hue: 200 }, 1),
-  bot('pm', '产品经理', '需求池整理与优先级', { kind: 'emoji', emoji: '🧭', hue: 42 }, 2),
+  bot('cso', '首席安全官', '依赖与权限的安全审计，每周汇报', { kind: 'emoji', emoji: '🛡️', hue: 200 }),
+  bot('pm', '产品经理', '需求池整理与优先级', { kind: 'emoji', emoji: '🧭', hue: 42 }),
 ];
 
 /** A fourth Bot, for a team that no longer fits at a glance. */
-export const researchBot = bot('research', '市场研究员', '竞品与市场动态，每周五一份简报', { kind: 'emoji', emoji: '🔭', hue: 265 }, 3);
+export const researchBot = bot('research', '市场研究员', '竞品与市场动态，每周五一份简报', { kind: 'emoji', emoji: '🔭', hue: 265 });
 
 /** One transcript row of a Session, as `GET /api/sessions/<id>/bootstrap` returns it. */
 export const message = (sessionId: string, id: string, author: 'user' | 'agent', text: string, minutesAgo: number): WorkbenchMessage => ({

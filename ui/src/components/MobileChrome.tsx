@@ -111,7 +111,7 @@ export const MobileBotCenter: React.FC<BotCenter> = ({ avatar, name, label, unre
         )}
       >
         {phase === 'recording' && <span className="absolute -inset-2 animate-ping rounded-full border-2 border-mint/50 motion-reduce:animate-none" aria-hidden="true" />}
-        <BotFace avatar={avatar} name={name} size={54} unread={voice ? 0 : unread} running={phase === 'idle' && running} plain />
+        <BotFace avatar={avatar} name={name} size={54} unread={voice ? 0 : unread} running={phase === 'idle' && running} />
         {(phase === 'recording' || phase === 'armed') && (
           <span className={clsx('absolute -bottom-1 -right-1 grid size-5 place-items-center rounded-full text-primary-foreground', phase === 'armed' ? 'bg-destructive' : 'bg-mint')}>
             <Mic className="size-3" />

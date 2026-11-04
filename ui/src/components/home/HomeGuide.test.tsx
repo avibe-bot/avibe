@@ -52,7 +52,7 @@ void i18n.use(initReactI18next).init({
 
 const bot = (handle: string, builtin = false): Bot => ({
   handle, display_name: handle, avatar: null, role: '', agent_name: handle, session_id: `ses_${handle}`,
-  position: builtin ? 0 : 1, builtin, hide_details: true,
+  builtin, hide_details: true,
 });
 const openProfile = vi.fn();
 const botsState = (bots: Bot[]) => ({

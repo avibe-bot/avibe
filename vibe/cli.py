@@ -6800,13 +6800,11 @@ def cmd_bot_update(args):
         avatar = _bot_avatar_arg(args, help_command=help_command)
         if avatar is not ...:
             fields["avatar"] = avatar
-        if args.position is not None:
-            fields["position"] = args.position
         if not fields:
             raise TaskCliError(
                 "no Bot fields were changed",
                 code="no_bot_changes",
-                hint="Pass --name, --emoji with --hue, --clear-avatar, or --position. The handle never changes.",
+                hint="Pass --name, --emoji with --hue, or --clear-avatar. The handle never changes.",
                 help_command=help_command,
             )
         with BotService() as service:
@@ -18066,17 +18064,16 @@ def build_parser():
 
     bot_update_parser = bot_subparsers.add_parser(
         "update",
-        help="Change a Bot's display name, avatar, or position",
+        help="Change a Bot's display name or avatar",
         description=(
-            "Change a Bot's display name, emoji avatar, or position among the other Bots. Change its role, model, "
-            "or instructions with `vibe agent update`."
+            "Change a Bot's display name or emoji avatar. Change its role, model, or instructions with "
+            "`vibe agent update`. Bots are listed by recent use, so there is no position to set."
         ),
         error_help_command="vibe bot update --help",
     )
     bot_update_parser.add_argument("handle", help="Bot handle")
     bot_update_parser.add_argument("--name", help="New display name")
     add_avatar_args(bot_update_parser, clear=True)
-    bot_update_parser.add_argument("--position", type=int, metavar="N", help="Position among the other Bots, from 1")
     _add_json_noop(bot_update_parser)
 
     bot_remove_parser = bot_subparsers.add_parser(

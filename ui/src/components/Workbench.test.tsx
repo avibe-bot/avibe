@@ -100,7 +100,7 @@ void i18n.use(initReactI18next).init({
 
 const bot = (handle: string, display_name: string, builtin = false): Bot => ({
   handle, display_name, avatar: { kind: 'mascot' }, role: '', agent_name: handle, session_id: `ses_${handle}`,
-  position: builtin ? 0 : 1, builtin, hide_details: true,
+  builtin, hide_details: true,
 });
 const main = bot('main', 'Vibey', true);
 const pm = bot('pm', 'PM');
@@ -110,7 +110,7 @@ const botsState = (overrides: Partial<BotsState> = {}): BotsState => ({
   statusBySession: {},
   botForSession: () => undefined, botForAgent: () => undefined, botForHandle: () => undefined,
   displayName: (each) => each.display_name,
-  afterWrite: async () => undefined, moveBot: async () => true, setHideDetails: async () => true,
+  afterWrite: async () => undefined, holdOrder: () => () => undefined, setHideDetails: async () => true,
   openProfile: () => undefined, profileRequest: null, closeProfile: () => undefined,
   ...overrides,
 });
