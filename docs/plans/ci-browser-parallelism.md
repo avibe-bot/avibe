@@ -1,6 +1,26 @@
 # Browser and design CI parallelism
 
-## Change contract
+## Current policy (2026-11-04)
+
+PR #3232 delivered the parallelism change below. Its successful full CI run
+`41829479607` completed in 10:08, with every original browser command and
+all 1,098 frame/theme pairs on its tested source preserved.
+
+The owner subsequently chose to **remove full design captures from routine
+PR and master CI**. The three screenshot jobs and their required-aggregate
+references are removed, not converted to skipped or advisory checks. The four
+browser lanes, every existing browser command, design type checking and all
+other required gates remain. `design:shot` and `design:export` remain manual
+tools, including the existing optional shard selector; there is no new nightly
+job. The rationale and accepted loss of whole-catalog render-smoke coverage are
+in [Design frames](design-frames.md#ci-boundary).
+
+The sections below record the original PR #3232 contract and measurements, not
+a requirement to restore its screenshot gate. Removing parallel captures reduces
+runner work; it does not promise to subtract their duration from the browser
+critical path.
+
+## Original change contract
 
 Reduce the critical path without reducing the checks run on a pull request.
 The existing browser commands, selected specs, Playwright configurations,

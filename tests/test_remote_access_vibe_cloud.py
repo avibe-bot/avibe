@@ -22,6 +22,19 @@ from vibe.ui_compat import g, jsonify
 
 
 @pytest.fixture(autouse=True)
+def _finish_status_reports_before_restoring_test_mocks(monkeypatch):
+    """Keep lifecycle workers inside the lifetime of their per-test report mocks."""
+    yield
+    # Depending on monkeypatch makes this teardown run before its undo. A pair
+    # can otherwise leave a queued worker that reaches real egress in the next
+    # test after report_runtime_status/_json_request have been restored.
+    remote_access.drain_runtime_status_reports(timeout_seconds=5.0)
+    with remote_access._STATUS_REPORT_LOCK:
+        assert not any(thread.is_alive() for thread in remote_access._STATUS_REPORT_THREADS)
+        assert remote_access._STATUS_REPORT_PENDING is None
+
+
+@pytest.fixture(autouse=True)
 def _resolve_backend_test_to_public_address(monkeypatch):
     for name in (
         "HTTPS_PROXY",

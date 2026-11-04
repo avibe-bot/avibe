@@ -408,14 +408,17 @@ def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
     build = jobs["build-linux-artifacts"]
     assert checks.get("needs") == "changes"
     assert build.get("needs") == "changes"
-    assert "ui-checks" in jobs["unit-tests"]["needs"]
-    assert "ui-browser-checks" in jobs["unit-tests"]["needs"]
-    assert "ui-design-checks" in jobs["unit-tests"]["needs"]
-    assert "unit-test-shards" in jobs["unit-tests"]["needs"]
+    assert set(jobs["unit-tests"]["needs"]) == {
+        "changes", "unit-test-shards", "scenario-evidence", "ui-checks",
+        "ui-browser-checks", "model-hub-hosted-wire",
+    }
+    # Captures are an explicit design-review command, not routine CI work.
+    # Inspect commands in both steps and matrices, not just the old job name.
+    scheduled = yaml.safe_dump(jobs)
+    for capture in ("design:shot", "design:export", "design-shot.mjs", "design-export.mjs"):
+        assert capture not in scheduled
     browsers = jobs["ui-browser-checks"]
-    design = jobs["ui-design-checks"]
     assert browsers.get("needs") == "changes"
-    assert design.get("needs") == "changes"
 
     check_steps = [step for step in checks["steps"] if "run" in step]
     build_steps = [step for step in build["steps"] if step.get("working-directory") == "ui"]
@@ -429,12 +432,15 @@ def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
     assert "npm ci" in shared
     check_commands = [line.strip() for part in parts for line in part["commands"].splitlines()]
     build_commands = "\n".join(step["run"] for step in build_steps).splitlines()
-    for command in ("npm run validate:theme", "npm run lint", "npm run typecheck:tests", "npm test"):
+    for command in (
+        "npm run validate:theme", "npm run lint", "npm run typecheck:tests",
+        "npm run typecheck:design", "npm test",
+    ):
         assert check_commands.count(command) == 1
         assert command not in build_commands
     assert build_commands.count("npm run build") == 1
     assert "npm ci" in build_commands
-    for job in (checks, browsers, design, build):
+    for job in (checks, browsers, build):
         assert job["if"] == "needs.changes.outputs.docs_only == 'false'"
         assert not job.get("continue-on-error")
         assert all(not step.get("if") and not step.get("continue-on-error") for step in job["steps"])
@@ -463,30 +469,19 @@ _BROWSER_COMMANDS = (
 )
 
 
-@pytest.mark.parametrize("kind", ["browser", "design"])
-def test_ui_matrices_run_complete_disjoint_commands_and_propagate_each_failure(tmp_path: Path, kind: str) -> None:
+def test_browser_matrix_runs_complete_disjoint_commands_and_propagates_each_failure(tmp_path: Path) -> None:
     """Execute actual workflow commands: scheduling must not drop/duplicate work or swallow an exit code.
 
     Structural scheduling tests do not cover the selections or the timing
     wrapper. A recording npm replaces only the expensive external suites.
     """
-    job = _jobs()[f"ui-{kind}-checks"]
+    job = _jobs()["ui-browser-checks"]
     assert job["strategy"]["fail-fast"] is False
-    if kind == "browser":
-        legs = job["strategy"]["matrix"]["include"]
-        assert len({leg["lane"] for leg in legs}) == len(legs) == 4
-        step, = [step for step in job["steps"] if "${{ matrix.suites }}" in step.get("run", "")]
-        scripts = [step["run"].replace("${{ matrix.suites }}", leg["suites"]) for leg in legs]
-        expected = [tuple(shlex.split(command)) for command in _BROWSER_COMMANDS]
-    else:
-        matrix = job["strategy"]["matrix"]
-        assert matrix == {"shard": [1, 2, 3], "shard-total": [3]}
-        step, = [step for step in job["steps"] if "npm run design:shot" in step.get("run", "")]
-        scripts = [
-            step["run"].replace("${{ matrix.shard }}", str(shard)).replace("${{ matrix.shard-total }}", str(total))
-            for shard in matrix["shard"] for total in matrix["shard-total"]
-        ]
-        expected = [("run", "design:shot", "--", "--shard", shard) for shard in ("1/3", "2/3", "3/3")]
+    legs = job["strategy"]["matrix"]["include"]
+    assert len({leg["lane"] for leg in legs}) == len(legs) == 4
+    step, = [step for step in job["steps"] if "${{ matrix.suites }}" in step.get("run", "")]
+    scripts = [step["run"].replace("${{ matrix.suites }}", leg["suites"]) for leg in legs]
+    expected = [tuple(shlex.split(command)) for command in _BROWSER_COMMANDS]
     assert step["working-directory"] == "ui"
     assert not step.get("if") and not step.get("continue-on-error")
     binary = tmp_path / "bin"
@@ -520,8 +515,7 @@ def test_ui_matrices_run_complete_disjoint_commands_and_propagate_each_failure(t
         for command in commands:
             failed, _ = run(script, command)
             assert failed.returncode == 17, (command, failed.stdout, failed.stderr)
-            if kind == "browser":
-                assert "exit=17 command=npm " + " ".join(command) in failed.stdout
+            assert "exit=17 command=npm " + " ".join(command) in failed.stdout
     assert Counter(observed) == Counter(expected)
 
 

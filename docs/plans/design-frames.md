@@ -34,8 +34,10 @@ Status: adopted (2026-11-02). Avibe's UI designs live in `ui/design/` as frames;
   frames. Every product stylesheet is loaded in every frame, as the app build makes them global.
 - `npm run design:shot` renders frames with Playwright (2x PNG, animations off, portals included, optional
   clicks and a hover, for states only an interaction opens) once fonts are loaded and the network is quiet (after the frame's `wait`, for a read that starts on a
-  timer, and again after each click, for a transition it starts on a timer), and fails on any console error. CI runs it with the browser checks, and `typecheck:design` with the
-  static checks, so a product change that breaks a frame fails its PR. Each frame is shot in a fresh page,
+  timer, and again after each click, for a transition it starts on a timer), and fails on any console error.
+  Captures are run explicitly for design work and review, not by routine PR or master CI.
+  `typecheck:design` remains in the static CI checks, so incompatible component props still fail the PR.
+  Each frame is shot in a fresh page,
   several at once (`--jobs`), since most of a frame's time is waiting; a frame that never gets ready is
   reported with the step it stalled in, and the run goes on.
 - `npm run design:export` copies the canvas, the screenshots, and `frames.json` into the current Session's Show
@@ -44,6 +46,20 @@ Status: adopted (2026-11-02). Avibe's UI designs live in `ui/design/` as frames;
   screenshot, since the live frame opens before the interaction. While the Show Page's annotation is on, `<DesignFrame>` draws
   each frame as its screenshot through the overlay's public window API, so annotations reach it and name the
   frame.
+
+## CI boundary
+
+Design captures are manual by owner decision (2026-11-04). The capture script
+checks runtime errors and readiness but does not compare against approved
+images; routine CI did not publish its PNGs for review. Rendering the whole
+catalog on every change is therefore not a required merge gate.
+
+This deliberately removes whole-catalog runtime smoke coverage from routine CI;
+it does not claim that type checking replaces that coverage. Design type checks,
+existing unit tests and assertion-based browser suites remain required. Manual
+`design:shot` (including optional sharding) and `design:export` remain available
+for targeted design verification and Show Pages. No replacement nightly job or
+optional GitHub workflow is introduced.
 
 ## Known by design
 
