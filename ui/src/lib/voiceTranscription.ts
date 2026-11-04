@@ -85,6 +85,8 @@ export type VoiceTranscriptionDependencies = {
 // `user_previous`. The local relay forwards them as given: the same release built this page and
 // the relay, and avibe.bot reads a segment's form by field name, so an older one ignores them.
 const DICTATION_CONTEXT_CAPABILITY = 'dictation_context';
+// And this when they accept `vocabulary` (the names to hear exactly), repeated.
+const DICTATION_VOCABULARY_CAPABILITY = 'dictation_vocabulary';
 
 export type VoiceCleanupOutcome = 'success' | 'fallback';
 
@@ -284,6 +286,7 @@ const transcribeLocally = async (
               after: metadata.after,
               ...(metadata.context?.reply ? { reply: metadata.context.reply } : {}),
               ...(metadata.context?.userPrevious ? { user_previous: metadata.context.userPrevious } : {}),
+              ...(metadata.context?.vocabulary?.length ? { vocabulary: metadata.context.vocabulary } : {}),
             }
           : {}),
       }),
@@ -382,6 +385,9 @@ const requestVoiceServer = async (
       if (capabilities.includes(DICTATION_CONTEXT_CAPABILITY)) {
         if (metadata.context?.reply) form.set('reply', metadata.context.reply);
         if (metadata.context?.userPrevious) form.set('user_previous', metadata.context.userPrevious);
+      }
+      if (capabilities.includes(DICTATION_VOCABULARY_CAPABILITY)) {
+        for (const word of metadata.context?.vocabulary ?? []) form.append('vocabulary', word);
       }
     }
     return form;

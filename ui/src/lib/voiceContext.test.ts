@@ -8,6 +8,7 @@ import {
   VOICE_CONTEXT_WAIT_MS,
   voiceContextFromMessages,
 } from './voiceContext';
+import { setVoiceVocabulary } from './voiceVocabulary';
 
 const row = (author: string, type: string, text: string, content: Record<string, unknown> = {}) => (
   { author, type, text, content }
@@ -15,6 +16,7 @@ const row = (author: string, type: string, text: string, content: Record<string,
 
 afterEach(() => {
   vi.useRealTimers();
+  setVoiceVocabulary([]);
 });
 
 describe('voiceContextFromMessages', () => {
@@ -89,5 +91,23 @@ describe('loadVoiceContext', () => {
     await expect(loadVoiceContext(list, 'ses_pm')).resolves.toEqual({ reply: 'hello', userPrevious: 'hi' });
     expect(list).toHaveBeenCalledWith('ses_pm', { tail: true, limit: 20, cache: false });
     await expect(loadVoiceContext(list, 'ses_pm')).resolves.toEqual({});
+  });
+});
+
+describe('the names a dictation hears exactly', () => {
+  it('are the ones published when it starts, with or without a conversation', async () => {
+    setVoiceVocabulary(['歪比', 'Product']);
+    let finish: (context: { reply: string }) => void = () => undefined;
+    const loading = resolveVoiceContext(new Promise((resolve) => { finish = resolve; }));
+    const none = resolveVoiceContext(undefined);
+    // Renamed after the dictation started: that dictation keeps the names it started with.
+    setVoiceVocabulary(['歪比 2']);
+    finish({ reply: 'Done.' });
+    await expect(loading).resolves.toEqual({ reply: 'Done.', vocabulary: ['歪比', 'Product'] });
+    await expect(none).resolves.toEqual({ vocabulary: ['歪比', 'Product'] });
+    await expect(resolveVoiceContext(undefined)).resolves.toEqual({ vocabulary: ['歪比 2'] });
+
+    setVoiceVocabulary([]);
+    await expect(resolveVoiceContext({ reply: 'Done.' })).resolves.toEqual({ reply: 'Done.' });
   });
 });

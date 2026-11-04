@@ -15,6 +15,8 @@ const MAX_PENDING_AUDIO_FRAMES = 128;
 // accepts `reply` and `user_previous`; any older backend would close the socket
 // on an undeclared field.
 const REPLY_CONTEXT_CAPABILITY = 'realtime_reply_context';
+// `start.vocabulary` (the names to hear exactly) predates `realtime_reply_context` on avibe.bot, so
+// a backend declaring that accepts it.
 const USER_PREVIOUS_CONTEXT_CAPABILITY = 'realtime_user_previous_context';
 
 export type VoiceRealtimePreview = { text: string; stash: string };
@@ -201,12 +203,13 @@ export class VoiceRealtimeSession {
     void readyPromise.catch(() => undefined);
     try {
       await waitWithTimeout(openPromise, VOICE_REALTIME_HANDSHAKE_TIMEOUT_MS);
-      const { reply, userPrevious } = await contextPromise;
+      const { reply, userPrevious, vocabulary } = await contextPromise;
       socket.send(JSON.stringify({
         type: 'start',
         before: this.options.before,
         after: this.options.after,
         ...(this.options.language ? { language: this.options.language } : {}),
+        ...(vocabulary?.length && capabilities.includes(REPLY_CONTEXT_CAPABILITY) ? { vocabulary } : {}),
         ...(reply && capabilities.includes(REPLY_CONTEXT_CAPABILITY) ? { reply } : {}),
         ...(userPrevious && capabilities.includes(USER_PREVIOUS_CONTEXT_CAPABILITY)
           ? { user_previous: userPrevious }

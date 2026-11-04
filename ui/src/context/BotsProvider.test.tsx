@@ -13,6 +13,7 @@ import { InstanceAuthorizationContext } from './InstanceAuthorizationContext';
 import { ToastContext } from './ToastContext';
 import { BotProfileDialogHost } from '../components/workbench/bots/BotProfileDialog';
 import type { Bot } from '../lib/bots';
+import { voiceVocabulary } from '../lib/voiceVocabulary';
 import { DENIED_INSTANCE_CAPABILITIES } from '../lib/sessionInfo';
 import type { WorkbenchEventConnectionState } from '../lib/workbenchEventConnection';
 
@@ -258,6 +259,31 @@ describe('publishing the Bot list to the Inbox', () => {
     view.unmount();
     expect(published.at(-1)).toMatchObject({ known: false });
     expect(published.at(-1)?.sessionIds.size).toBe(0);
+  });
+
+  it('gives dictation every Bot by its shown name, the main Bot first, renamed from the next one on', async () => {
+    const { api, stream, view } = mountRoster(true);
+    await flush();
+    // The main Bot has no name of its own: the default it is shown by.
+    expect(voiceVocabulary()).toEqual(['bots.mainDefaultName', 'Security Lead']);
+
+    api.listBots.mockResolvedValueOnce({
+      bots: [{ ...CSO, display_name: 'Security Chief' }, { ...MAIN, display_name: '歪比' }],
+      limit: { count: 1, max: 5 },
+    });
+    act(() => stream.handlers?.onBotsChanged?.({ handle: 'cso' }));
+    await flush();
+    expect(voiceVocabulary()).toEqual(['歪比', 'Security Chief']);
+
+    // Signed out: no reader's names linger.
+    view.unmount();
+    expect(voiceVocabulary()).toEqual([]);
+  });
+
+  it('gives dictation no names for a reader who is not the Owner', async () => {
+    mountRoster(false);
+    await flush();
+    expect(voiceVocabulary()).toEqual([]);
   });
 
   it("keeps the Owner's list unknown while it cannot be read", async () => {

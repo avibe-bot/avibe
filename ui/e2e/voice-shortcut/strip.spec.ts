@@ -44,6 +44,7 @@ test.describe('with a mouse', () => {
     expect(await page.evaluate(() => window.voiceShortcutTest.transcribed.at(-1))).toEqual({
       reply: 'Answer from ses_pm',
       user_previous: 'Question for ses_pm',
+      vocabulary: ['Vibey', 'Product'],
     });
     // The reader stays where they are; the toast's View opens the conversation.
     const toast = page.getByRole('status').filter({ hasText: 'Sent to Product' });

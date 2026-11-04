@@ -38,6 +38,26 @@ AUDIO_SIGNATURE_SAMPLE_BYTES = 64
 MAX_DICTATION_CONTEXT_UTF16_UNITS = 8_000
 
 
+# Names a dictation segment may carry to be heard exactly (avibe.bot's `dictation_vocabulary`): at
+# most this many, each 1-64 UTF-16 units on one line. An older avibe.bot ignores the field.
+MAX_DICTATION_VOCABULARY_WORDS = 20
+MAX_DICTATION_VOCABULARY_WORD_UTF16_UNITS = 64
+
+
+def dictation_vocabulary(words: list[str]) -> list[str]:
+    """The words avibe.bot accepts, in order: trimmed, within bounds, each once (case-insensitive)."""
+    kept: dict[str, str] = {}
+    for word in words:
+        text = word.strip()
+        units = len(text.encode("utf-16-le", "surrogatepass")) // 2
+        if not text or units > MAX_DICTATION_VOCABULARY_WORD_UTF16_UNITS or "\n" in text or "\r" in text:
+            continue
+        kept.setdefault(text.lower(), text)
+        if len(kept) >= MAX_DICTATION_VOCABULARY_WORDS:
+            break
+    return list(kept.values())
+
+
 def newest_utf16_units(text: str, limit: int = MAX_DICTATION_CONTEXT_UTF16_UNITS) -> str:
     """Keep the newest ``limit`` UTF-16 code units of ``text``, never half a surrogate pair."""
     encoded = text.encode("utf-16-le", "surrogatepass")
@@ -253,11 +273,13 @@ class AudioAsrService:
         after: str,
         reply: str = "",
         user_previous: str = "",
+        vocabulary: list[str] | None = None,
         timeout_seconds: float = 120.0,
     ) -> dict[str, Any]:
         """Forward one composer segment using the server-owned dictation contract.
 
-        ``reply`` and ``user_previous`` are recognition context only: never log them.
+        ``reply`` and ``user_previous`` are recognition context only: never log them. ``vocabulary``
+        holds names to hear exactly (the reader's Bots' display names).
         """
         runtime = self._runtime_config()
         if not self._get_audio_asr_config().enabled or not runtime:
@@ -282,6 +304,8 @@ class AudioAsrService:
             form.add_field("reply", newest_utf16_units(reply))
         if user_previous.strip():
             form.add_field("user_previous", newest_utf16_units(user_previous))
+        for word in dictation_vocabulary(vocabulary or []):
+            form.add_field("vocabulary", word)
 
         path: Path | None = None
         handle = None

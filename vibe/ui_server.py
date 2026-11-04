@@ -12628,6 +12628,8 @@ async def asr_transcribe():
     # Recognition context (the Agent's last reply, the user's previous message); never logged.
     reply = payload.get("reply", "")
     user_previous = payload.get("user_previous", "")
+    # Names to hear exactly (the reader's Bots' display names).
+    vocabulary = payload.get("vocabulary", [])
     if (
         not isinstance(sequence, int)
         or isinstance(sequence, bool)
@@ -12640,6 +12642,8 @@ async def asr_transcribe():
         or not isinstance(after, str)
         or not isinstance(reply, str)
         or not isinstance(user_previous, str)
+        or not isinstance(vocabulary, list)
+        or not all(isinstance(word, str) for word in vocabulary)
     ):
         return jsonify({"error": "invalid_dictation"}), 422
 
@@ -12664,6 +12668,7 @@ async def asr_transcribe():
                 after=after,
                 reply=reply,
                 user_previous=user_previous,
+                vocabulary=vocabulary,
                 timeout_seconds=155.0,
             )
         except AudioAsrEmptyTranscriptError:
