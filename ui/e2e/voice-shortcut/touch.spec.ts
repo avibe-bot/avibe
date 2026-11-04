@@ -7,7 +7,10 @@ import en from '../../src/i18n/en.json' with { type: 'json' };
 
 test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
-/** A finger held on `at`, then slid `slideUp` px up, then lifted: real touch input. */
+/** A finger held on `at`, then slid `slideUp` px up, then lifted: real touch input. The slide is
+ *  a finger's drag to the cancel target (about 400 px/s) that rests there before lifting, as the
+ *  target turns red. A flick would leave a fling behind, and Chromium swallows the tap that
+ *  stops a fling (on Linux), which no tap a reader makes on the toast afterwards would meet. */
 async function holdWithFinger(page: Page, at: { x: number; y: number }, holdMs: number, slideUp = 0) {
   const cdp = await page.context().newCDPSession(page);
   const touch = (type: 'touchStart' | 'touchMove' | 'touchEnd', y: number) => cdp.send('Input.dispatchTouchEvent', {
@@ -18,8 +21,9 @@ async function holdWithFinger(page: Page, at: { x: number; y: number }, holdMs: 
   await page.waitForTimeout(holdMs);
   for (let step = 1; step <= 6 && slideUp; step += 1) {
     await touch('touchMove', at.y - (slideUp * step) / 6);
-    await page.waitForTimeout(16);
+    await page.waitForTimeout(50);
   }
+  if (slideUp) await page.waitForTimeout(300);
   await touch('touchEnd', at.y - slideUp);
   await cdp.detach();
 }
