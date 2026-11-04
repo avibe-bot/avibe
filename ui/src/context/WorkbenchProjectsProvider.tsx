@@ -46,7 +46,8 @@ const PROJECTS_SNAPSHOT_SCHEMA = 1;
 
 type ProjectsSnapshot = { projects: WorkbenchProject[] };
 
-// Only rows every consumer can render: an unreadable record means no paint.
+// Only rows every consumer can render and sort (``sortProjectsByRecent`` compares
+// ``last_active_at || created_at`` as strings): an unreadable record means no paint.
 const parseProjectsSnapshot = (value: unknown): ProjectsSnapshot | null => {
   if (!value || typeof value !== 'object') return null;
   const { projects } = value as Partial<ProjectsSnapshot>;
@@ -57,6 +58,8 @@ const parseProjectsSnapshot = (value: unknown): ProjectsSnapshot | null => {
     && typeof project.scope_id === 'string'
     && typeof project.display_name === 'string'
     && typeof project.folder_path === 'string'
+    && typeof project.created_at === 'string'
+    && (project.last_active_at == null || typeof project.last_active_at === 'string')
     && !!project.capabilities && typeof project.capabilities === 'object'
     && typeof project.capabilities.can_chat === 'boolean');
   return rowsValid ? { projects } : null;

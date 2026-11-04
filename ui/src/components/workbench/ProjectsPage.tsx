@@ -434,6 +434,7 @@ export const ProjectsPage: React.FC = () => {
   const { unreadBySession } = useWorkbenchInbox({ feed: false });
   const {
     projects,
+    projectsLoaded,
     projectsError,
     refreshProjects,
     sessionsOf,
@@ -533,7 +534,9 @@ export const ProjectsPage: React.FC = () => {
           {t('common.loading')}
         </div>
       )}
-      {projectsError && list.length === 0 && (
+      {/* Also over the last known list painted from the local snapshot: those
+          rows are not a load, so a failed one still offers its retry. */}
+      {projectsError && (list.length === 0 || !projectsLoaded) && (
         <button
           type="button"
           onClick={() => void refreshProjects()}

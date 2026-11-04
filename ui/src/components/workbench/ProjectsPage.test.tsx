@@ -19,6 +19,9 @@ import { ProjectsPage } from './ProjectsPage';
 
 const tree = vi.hoisted(() => ({
   projects: [] as WorkbenchProject[],
+  projectsLoaded: true,
+  projectsError: null as string | null,
+  refreshProjects: vi.fn(),
   sessions: [] as WorkbenchSession[],
   loadMore: vi.fn(),
   toggleExpanded: vi.fn(),
@@ -47,8 +50,9 @@ vi.mock('../../context/WorkbenchProjectsContext', () => ({
     };
     return {
       projects: tree.projects,
-      projectsError: null,
-      refreshProjects: vi.fn(),
+      projectsLoaded: tree.projectsLoaded,
+      projectsError: tree.projectsError,
+      refreshProjects: tree.refreshProjects,
       sessionsOf: () => state,
       isExpanded: (id: string) => expanded.has(id),
       toggleExpanded: (id: string) => {
@@ -137,6 +141,9 @@ beforeEach(() => {
   tree.loadMore.mockReset();
   tree.toggleExpanded.mockReset();
   tree.createSessionForProject.mockReset();
+  tree.projectsLoaded = true;
+  tree.projectsError = null;
+  tree.refreshProjects.mockReset();
   clearMobileProjectsListSnapshot();
 });
 
@@ -244,6 +251,20 @@ describe('ProjectsPage New project', () => {
     const view = renderPage();
     const button = screen.getByRole('button', { name: 'projects.newProject' });
     expect(button.parentElement?.querySelector('h2')?.textContent).toBe('projects.title');
+    view.unmount();
+  });
+});
+
+describe('ProjectsPage load failure', () => {
+  it('keeps its retry when the live load failed under the last known list', async () => {
+    const user = userEvent.setup();
+    // The rows were painted from the local snapshot and the bootstrap failed.
+    tree.projectsLoaded = false;
+    tree.projectsError = 'offline';
+    const view = renderPage();
+    expect(screen.getByText('Alpha')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'projects.loadFailed' }));
+    expect(tree.refreshProjects).toHaveBeenCalledTimes(1);
     view.unmount();
   });
 });

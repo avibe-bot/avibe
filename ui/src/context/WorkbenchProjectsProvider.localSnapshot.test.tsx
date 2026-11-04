@@ -208,6 +208,9 @@ describe('the projects local snapshot', () => {
   it.each([
     ['from an older schema', { projects: [project('old')] }, 0],
     ['whose rows are unreadable', { projects: [{ id: 'broken' }] }, 1],
+    ['whose rows cannot be sorted by recency', {
+      projects: [project('a', { created_at: null as unknown as string }), project('b', { created_at: null as unknown as string })],
+    }, 1],
     ['without a list', { projects: 'none' }, 1],
     ['with an empty list', { projects: [] }, 1],
   ])('paints nothing from a record %s, and stores the live answer over it', async (_case, value, schema) => {
