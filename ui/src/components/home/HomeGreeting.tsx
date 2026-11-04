@@ -77,7 +77,7 @@ function BusyBots({ running }: { running: Bot[] }) {
     <>
       <span className="flex -space-x-1.5">
         {running.map((bot) => (
-          <BotFace key={bot.handle} avatar={bot.avatar} name={displayName(bot)} size={20} dotWell="bg-surface" />
+          <BotFace key={bot.handle} avatar={bot.avatar} name={displayName(bot)} size={20} dotWell="bg-surface" inList />
         ))}
       </span>
       <span className="text-mint-ink">{label}</span>

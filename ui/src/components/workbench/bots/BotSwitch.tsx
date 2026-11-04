@@ -150,7 +150,7 @@ export function BotSwitchRow({ bot, selected = false, onPick }: { bot: Bot; sele
         selected ? 'bg-mint-soft' : 'hover:bg-foreground/3',
       )}
     >
-      <BotFace avatar={bot.avatar} name={name} size={44} unread={unread} running={running} selected={selected} dotWell={selected ? 'bg-mint-soft' : 'bg-surface'} />
+      <BotFace avatar={bot.avatar} name={name} size={44} unread={unread} running={running} inList selected={selected} dotWell={selected ? 'bg-mint-soft' : 'bg-surface'} />
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="flex items-center gap-1.5">
           <span className="truncate text-base font-semibold text-foreground">{name}</span>

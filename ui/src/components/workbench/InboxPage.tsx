@@ -170,7 +170,7 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
         <div className="flex items-center gap-2 text-[11px]">
           {bot ? (
             <>
-              <BotAvatar avatar={bot.avatar} name={botName(bot)} size={24} />
+              <BotAvatar avatar={bot.avatar} name={botName(bot)} size={24} inList />
               <span className="min-w-0 truncate text-[13px] font-semibold text-foreground">{botName(bot)}</span>
               {!inBotSection && <BotTag />}
               <span className="flex-1" />

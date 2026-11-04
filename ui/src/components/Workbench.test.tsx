@@ -189,7 +189,8 @@ describe('the Owner home (ui/design: home/home/c-ready-desktop)', () => {
     const user = userEvent.setup();
     renderHome();
     expect(await screen.findByTestId('route')).toHaveProperty('textContent', 'locked:gpt-6-astra');
-    expect(api.getBackendConnection).toHaveBeenCalledWith('vibey');
+    // The model read starts once the home has its route and its Agent, which may land after the route shows.
+    await waitFor(() => expect(api.getBackendConnection).toHaveBeenCalledWith('vibey'));
     expect(screen.getByRole('heading', { level: 1 }).textContent).toMatch(/What’s next\?$/);
     await user.type(textbox(), 'Plan my week');
     await user.click(sendButton());

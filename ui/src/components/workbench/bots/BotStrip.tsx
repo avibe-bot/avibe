@@ -372,7 +372,7 @@ const BotSlot: React.FC<BotSlotProps> = ({ bot, index, name, unread, status, scr
           >
             {/* The open Bot's own edge lights up (the shared selected look); a hovered
                 one shows a quiet edge in the same place. */}
-            <BotAvatar avatar={bot.avatar} name={name} size={40} selected={selected} className="transition-shadow" />
+            <BotAvatar avatar={bot.avatar} name={name} size={40} inList selected={selected} className="transition-shadow" />
             {unread > 0 && (
               <span className="absolute -right-1.5 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-cyan px-1 font-mono text-[9px] font-bold text-accent-foreground shadow-glow-xs-cyan">
                 {unreadLabel(unread)}
@@ -449,7 +449,7 @@ const BotSlot: React.FC<BotSlotProps> = ({ bot, index, name, unread, status, scr
             className="flex w-full flex-col gap-3 rounded-2xl p-3.5 text-left"
           >
             <span className="flex items-center gap-3">
-              <BotAvatar avatar={bot.avatar} name={name} size={44} />
+              <BotAvatar avatar={bot.avatar} name={name} size={44} inList />
               <span className="min-w-0 flex-1 leading-tight">
                 <span className="block truncate text-[14px] font-bold text-foreground">{name}</span>
                 <span className="mt-0.5 block font-mono text-[11px] text-muted">{t('bots.handle', { handle: bot.handle })}</span>

@@ -883,7 +883,7 @@ const MentionMenuItem = forwardRef<HTMLLIElement, BeautifulMentionsMenuItemProps
         {...props}
       >
         {isBot ? (
-          <MentionBotAvatar handle={String(data.handle ?? '')} name={item.value} />
+          <MentionBotAvatar handle={String(data.handle ?? '')} name={item.value} inList />
         ) : item.trigger === '@' && data.backend != null ? (
           <BackendAvatar backend={String(data.backend) as BackendId} size={16} className="size-4 shrink-0 text-muted" />
         ) : (
@@ -901,10 +901,10 @@ const MentionMenuItem = forwardRef<HTMLLIElement, BeautifulMentionsMenuItemProps
 );
 MentionMenuItem.displayName = 'MentionMenuItem';
 
-/** A Bot's avatar in the `@` list or a chip, read live so it follows edits. */
-const MentionBotAvatar: React.FC<{ handle: string; name: string; size?: number }> = ({ handle, name, size = 18 }) => {
+/** A Bot's avatar in the `@` list (among the others) or a chip, read live so it follows edits. */
+const MentionBotAvatar: React.FC<{ handle: string; name: string; size?: number; inList?: boolean }> = ({ handle, name, size = 18, inList }) => {
   const { botForHandle } = useBots();
-  return <BotAvatar avatar={botForHandle(handle)?.avatar ?? null} name={name} size={size} />;
+  return <BotAvatar avatar={botForHandle(handle)?.avatar ?? null} name={name} size={size} inList={inList} />;
 };
 
 // The chip a picked mention becomes. A Bot's chip carries its avatar beside the

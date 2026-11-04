@@ -102,12 +102,14 @@ export const MobileBotCenter: React.FC<BotCenter> = ({ avatar, name, label, unre
           The avatar fills the button to its ring: one circle, the Bot's face in it. */}
       <span
         className={clsx(
-          'relative -mt-5 rounded-full bg-surface ring-2 transition',
-          phase === 'idle' && (running ? 'shadow-glow-lg-mint ring-mint' : 'shadow-glow-md-mint ring-mint/45'),
-          phase === 'pressed' && 'scale-95 shadow-glow-md-mint ring-mint',
+          'relative -mt-5 rounded-full bg-surface transition',
+          // At rest it is lit the way a selected Bot is (`.bot-avatar-selected`): a bright fine
+          // edge and the theme's halo; the running dot says it is working.
+          phase === 'idle' && 'bot-avatar-selected',
+          phase === 'pressed' && 'scale-95 shadow-glow-md-mint ring-2 ring-mint',
           phase === 'recording' && 'scale-110 shadow-glow-xl-mint ring-4 ring-mint',
           phase === 'armed' && 'scale-105 opacity-70 ring-4 ring-destructive/70',
-          phase === 'settling' && 'shadow-glow-lg-mint ring-mint',
+          phase === 'settling' && 'shadow-glow-lg-mint ring-2 ring-mint',
         )}
       >
         {phase === 'recording' && <span className="absolute -inset-2 animate-ping rounded-full border-2 border-mint/50 motion-reduce:animate-none" aria-hidden="true" />}

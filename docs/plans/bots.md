@@ -198,8 +198,18 @@ Owner decisions 2026-11-01, from the mockups in this Session's Show Page
   straight on the surface, never on a colored disc. It takes the same round box
   as every other avatar, so names line up and the selected edge is the same
   circle; in Light it keeps a soft shadow of its own
-  (`--bot-mascot-shadow`) so its white reads on a white surface. Custom Bots'
-  emoji discs are unchanged.
+  (`--bot-mascot-shadow`) so its white reads on a white surface. Among other
+  Bots (`inList`: the strips, the hover card, the switch sheet, the Inbox, the
+  `@` list, the Agents page's cards, and the rows of faces on the home and in
+  the notification menu) it is drawn larger and unclipped, so it reads as big as
+  their discs while its outline stays inside the circle, clear of the selected
+  edge; standing alone (a conversation's header, its replies and empty state,
+  the phone tab bar's center, the Agents page's detail) it keeps its size.
+  Custom Bots' emoji discs are unchanged.
+- **The phone tab bar's center (owner decision, 2026-11-04).** At rest the main
+  Bot there is lit the way a selected Bot is (`.bot-avatar-selected`: the bright
+  fine mint edge and the theme's halo), whether or not it is running; its
+  running dot says it is working. The hold-to-talk phases keep their own looks.
 - **Hover card.** Hovering an avatar shows its full name, handle, role, and
   latest message or running step; clicking opens the conversation. This makes
   up for the strip having no message preview.

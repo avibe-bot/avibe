@@ -1214,6 +1214,15 @@ pre,
 .bot-avatar-mascot > img {
   filter: var(--bot-mascot-shadow);
 }
+/* Among other Bots the mascot is drawn larger, and not clipped to its box, so it reads as
+   big as their discs; at this scale its outline stays inside the box, clear of the
+   selected edge drawn just outside it. */
+.bot-avatar-mascot.bot-avatar-in-list {
+  overflow: visible;
+}
+.bot-avatar-mascot.bot-avatar-in-list > img {
+  scale: 1.28;
+}
 /* The one "selected Bot" look (the strip, the switch sheet): the avatar's own edge
    lights up mint, a fine 1.25px line, with the theme's mint halo doing the glowing.
    Restyle it here, nowhere else. */
