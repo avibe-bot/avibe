@@ -254,6 +254,10 @@ def _owner(operation: str, payload: dict[str, Any]) -> int:
             names = ", ".join(response.get("saved") or [response.get("name") or ""])
             print(f"Registered {names} ({response.get('toolCount', 0)} tools).")
         return 0 if added or unchanged or response.get("ok") else 1
+    elif operation == "approve":
+        state = response.get("state") or "ok"
+        suffix = "" if state == "ok" else f" ({state})"
+        print(f"Approved {response['name']}{suffix}.")
     elif operation == "refresh":
         print(f"Refreshed {response['name']} ({response.get('toolCount', 0)} tools).")
     elif operation == "remove":

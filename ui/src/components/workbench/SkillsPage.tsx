@@ -16,7 +16,7 @@ import { SkillDetailPanel } from './skills/SkillDetailPanel';
 import { ProjectPicker } from './skills/ProjectPicker';
 import { AddSkillDialog } from './skills/AddSkillDialog';
 import { BrowseRegistryDialog } from './skills/BrowseRegistryDialog';
-import { McpHubSection } from './skills/McpHubSection';
+import { McpHubSection, sectionLabel } from './skills/McpHubSection';
 import { skillsLinkFromParams, type SkillsLink, type SkillsTab } from './skills/skillsLink';
 import { errorMessage } from '@/lib/errorMessage';
 import { Badge } from '../ui/badge';
@@ -246,14 +246,6 @@ export const SkillsPage: React.FC = () => {
         onSelect={() => select(skillKey(skill))}
       />
     ));
-
-  const sectionLabel = (icon: React.ReactNode, label: string, hint?: string) => (
-    <div className="flex items-center gap-2 px-1">
-      {icon}
-      <span className="font-mono text-[10.5px] font-bold uppercase tracking-[0.1em] text-muted">{label}</span>
-      {hint ? <span className="font-mono text-[10px] text-muted">· {hint}</span> : null}
-    </div>
-  );
 
   return (
     <div className="mx-auto flex w-full max-w-[1200px] flex-col gap-5 py-2">

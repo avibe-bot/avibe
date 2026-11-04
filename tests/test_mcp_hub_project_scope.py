@@ -660,3 +660,68 @@ def test_cli_sends_skill_scope_inputs(monkeypatch, tmp_path):
     assert mcp_cli.main(["--global", "--list"]) == 0
     scope_inputs = {"workingDirectory": str(tmp_path), "projectBase": str(tmp_path), "sessionId": "session"}
     assert sent == [("list", {**scope_inputs, "global": True})]
+
+
+# ---------------------------------------------------------------------------
+# Owner-found polish: formatting, CLI confirmations, empty-dir cleanup
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("original", "expected"),
+    [
+        pytest.param(
+            '{"mcpServers":{"echo":{"command":"x"}}}',
+            '{"mcpServers":{"echo":{"command":"x"}, "liner": {"command": "y"}}}',
+            id="compact-file-stays-compact",
+        ),
+        pytest.param(
+            '{\n    "mcpServers": {\n        "echo": {\n            "command": "x"\n        }\n    }\n}\n',
+            '{\n    "mcpServers": {\n        "echo": {\n            "command": "x"\n        },\n        "liner": {\n            "command": "y"\n        }\n    }\n}\n',
+            id="four-space-indent-kept",
+        ),
+        pytest.param(
+            '{\n\t"mcpServers": {\n\t\t"echo": {\n\t\t\t"command": "x"\n\t\t}\n\t}\n}\n',
+            '{\n\t"mcpServers": {\n\t\t"echo": {\n\t\t\t"command": "x"\n\t\t},\n\t\t"liner": {\n\t\t\t"command": "y"\n\t\t}\n\t}\n}\n',
+            id="tab-indent-kept",
+        ),
+    ],
+)
+def test_write_server_preserves_the_projects_json_formatting(tmp_path, original, expected):
+    from core.mcp_hub import scope
+
+    root = _project(tmp_path / "repo", {})
+    (root / ".mcp.json").write_text(original)
+    key = scope.ScopedName(scope.project_scope(root), "liner")
+    scope.write_server(key, {"command": "y"})
+    assert (root / ".mcp.json").read_text() == expected
+
+
+def test_write_server_replaces_only_the_one_entry(tmp_path):
+    from core.mcp_hub import scope
+
+    root = _project(tmp_path / "repo", {"echo": {"command": "old"}})
+    scope.write_server(scope.ScopedName(scope.project_scope(root), "echo"), {"command": "new"}, replace=True)
+    text = (root / ".mcp.json").read_text()
+    assert json.loads(text)["mcpServers"] == {"echo": {"command": "new"}}
+    assert text == '{"mcpServers": {"echo": {"command": "new"}}}'
+
+
+def test_remove_server_deletes_the_empty_project_cache_dir(tmp_path):
+    from core.mcp_hub import scope
+
+    root = _project(tmp_path / "repo", {"echo": ECHO})
+    key = scope.ScopedName(scope.project_scope(root), "echo")
+    scope.approve(key)
+    scope.remove_server(key)
+    assert not key.scope.root.exists()
+
+
+def test_cli_approve_prints_a_confirmation(tmp_path, monkeypatch, capsys, runtime):
+    from vibe import mcp_cli
+
+    root = _project(tmp_path / "repo", {"remote": {"url": "https://${HOST}/mcp"}})
+    monkeypatch.setenv("AVIBE_SKILL_WORKING_DIR", str(root))
+    capsys.readouterr()
+    assert mcp_cli.main(["remote", "--approve"]) == 0
+    assert "Approved remote" in capsys.readouterr().out

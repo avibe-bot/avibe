@@ -68,10 +68,10 @@ vibe mcp docs --remove
 
 A project can keep MCP servers in `<project root>/.mcp.json`, in Claude Code's `mcpServers` format. The project root is the one project Skills use: the run target's project base, else the nearest `.git` ancestor, else the working directory.
 
-- **Scope.** A Session, `vibe mcp` and the prompt see global servers plus the servers of their own project's `.mcp.json`; never another project's. A project server shadows a global one with the same name. `vibe mcp --global ...` uses only global servers. The Web MCP page lists global servers only; a Project view is coming in a later release.
+- **Scope.** A Session, `vibe mcp` and the prompt see global servers plus the servers of their own project's `.mcp.json`; never another project's. A project server shadows a global one with the same name. `vibe mcp --global ...` uses only global servers. In the Web MCP page's Project view, the project's own servers are listed first under "Project MCP", then the inherited global servers under "Also available · inherited from global" (view-only there; manage them in the Global tab). A global server shadowed by a same-name project server is not listed in the inherited group.
 - **Approval.** Every project server, stdio or HTTP, is **pending approval** until the instance Owner approves it: it does not start, connect, appear in the prompt, or accept calls. Approval binds to the raw `.mcp.json` entry, so any edit to that entry needs approval again; changing a secret does not.
 - **Secrets.** Write `${VAR}` in `url`, env values or header values (not in `command` or `args`). All placeholders of a server share one set of variables, supplied with `--configure` and stored outside the project. Until every variable is set, the server shows **needs config** and the missing names.
-- **Add.** Without `--global`, `vibe mcp-add` writes to the project's `.mcp.json` when the file exists. Avibe writes only `type`, `command`, `args`, `url` and `cwd`; env and header values given to `vibe mcp-add` go to the private cache, not to the file. Replacing an entry keeps the file's own env/headers (including placeholders), `cwd`, `type` and other keys. If the file changed while Avibe was writing it, the command fails with `config_changed`, keeps your edit, and can be retried.
+- **Add.** Without `--global`, `vibe mcp-add` writes to the project's `.mcp.json` when the file exists. Avibe writes only `type`, `command`, `args`, `url` and `cwd`; env and header values given to `vibe mcp-add` go to the private cache, not to the file. Replacing an entry keeps the file's own env/headers (including placeholders), `cwd`, `type` and other keys, and preserves the file's existing formatting and indentation (compact files stay compact; a file whose layout Avibe cannot edit in place falls back to a 2-space rewrite). If the file changed while Avibe was writing it, the command fails with `config_changed`, keeps your edit, and can be retried.
 
 ```bash
 vibe mcp github --approve
@@ -83,7 +83,7 @@ vibe mcp github --configure '{"headers": {"Authorization": "Bearer <token>"}}'
 
 `vibe mcp --list` shows blocked servers with the command that unblocks them, for example `- github: pending approval — run vibe mcp github --approve`.
 
-Secrets, approval, OAuth tokens and published tools live in `<avibe-home>/project_mcp/<key>/<name>/` (owner-only `0700` directories, `0600` files). `<key>` is the Avibe Project id, or `dir-<hash>` for a folder that is not a Project.
+Removing the last project server of a project also removes its now-empty `<key>` directory. Secrets, approval, OAuth tokens and published tools live in `<avibe-home>/project_mcp/<key>/<name>/` (owner-only `0700` directories, `0600` files). `<key>` is the Avibe Project id, or `dir-<hash>` for a folder that is not a Project.
 
 Limitations:
 

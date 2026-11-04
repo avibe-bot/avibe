@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ChevronDown, ChevronRight, Eraser, Globe, KeyRound, Loader2, Plus, RefreshCw, Search, ShieldCheck, Terminal, Trash2, X } from 'lucide-react';
+import { ChevronDown, ChevronRight, Eraser, Globe, Info, KeyRound, Loader2, Plus, RefreshCw, Search, ShieldCheck, Terminal, Trash2, X } from 'lucide-react';
 import clsx from 'clsx';
 import { useSearchParams } from 'react-router-dom';
 
@@ -65,6 +65,17 @@ const STATE_BADGE: Record<string, 'success' | 'warning' | 'info' | 'destructive'
   pending_approval: 'warning',
   needs_config: 'warning',
 };
+
+/** The same section header the Skills project view uses (icon · LABEL · hint). */
+export function sectionLabel(icon: ReactNode, label: string, hint?: string) {
+  return (
+    <div className="flex items-center gap-2 px-1">
+      {icon}
+      <span className="font-mono text-[10.5px] font-bold uppercase tracking-[0.1em] text-muted">{label}</span>
+      {hint ? <span className="font-mono text-[10px] text-muted">· {hint}</span> : null}
+    </div>
+  );
+}
 
 /** A project row's state, as the API reports it; global rows keep their existing look. */
 function McpStateBadge({ server }: { server: McpServerSummary }) {
@@ -538,6 +549,76 @@ export interface McpHubSectionProps {
   project?: { id: string; name: string } | null;
 }
 
+interface McpRowProps {
+  server: McpServerSummary;
+  /** Dim + tag a row inherited from global into a project view (view-only there). */
+  inherited?: boolean;
+  selected?: boolean;
+  /** Show the OAuth login link in the row. */
+  loginLink?: boolean;
+  onSelect: () => void;
+  onActivateLogin: (name: string) => void;
+  projectId?: string | null;
+}
+
+/** One MCP server row, in the same shape as the Skills rows (SkillRow + its inherited look). */
+function McpRow({ server, inherited, selected, loginLink, onSelect, onActivateLogin, projectId }: McpRowProps) {
+  const { t } = useTranslation();
+  const transportLabel = server.transport === 'stdio' ? t('mcpHub.transportStdio') : t('mcpHub.transportHttp');
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      className={clsx(
+        'group flex w-full items-center gap-3 rounded-lg border px-[14px] py-3 text-left transition',
+        selected
+          ? 'border-mint/40 bg-mint-soft shadow-glow-sm-mint'
+          : 'border-border bg-surface hover:border-border-strong hover:bg-surface-2',
+        inherited && 'opacity-[0.66]',
+      )}
+    >
+      <span className="flex size-9 shrink-0 items-center justify-center rounded-[9px] border border-border bg-surface-3 text-muted">
+        {server.transport === 'stdio' ? <Terminal className="size-4" /> : <Globe className="size-4" />}
+      </span>
+      <span className="flex min-w-0 flex-1 flex-col gap-1">
+        <span className="flex items-center gap-2">
+          <span className="truncate font-mono text-[13px] font-semibold text-foreground">{server.name}</span>
+          {inherited ? (
+            <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-border-strong px-1.5 font-mono text-[9px] font-bold uppercase text-muted">
+              <Globe className="size-2.5" />
+              {t('mcpHub.globalBadge')}
+            </span>
+          ) : (
+            <Badge className={clsx('font-mono text-[9px] uppercase', SOURCE_CHIP[server.source ?? 'avibe'])}>
+              {t(`mcpHub.source.${server.source ?? 'avibe'}`)}
+            </Badge>
+          )}
+          <McpStateBadge server={server} />
+        </span>
+        <span className="truncate font-mono text-[11px] text-muted" title={server.command || server.url || server.description || undefined}>
+          {server.command || server.url || server.description}
+        </span>
+        <span className="font-mono text-[10px] text-muted">
+          {t('mcpHub.toolMeta', { count: server.toolCount ?? 0, transport: transportLabel })}
+        </span>
+      </span>
+      {loginLink && server.auth === 'needs_login' ? (
+        <span onClick={(event) => event.stopPropagation()}>
+          <LoginLink
+            name={server.name}
+            project={projectId}
+            className="inline-flex h-6 items-center rounded-md border border-border bg-surface px-2 font-mono text-[10px] font-semibold uppercase text-foreground hover:bg-surface-2"
+            onActivate={onActivateLogin}
+          >
+            {t('mcpHub.login')}
+          </LoginLink>
+        </span>
+      ) : null}
+      <ChevronRight className="size-3.5 text-muted" />
+    </button>
+  );
+}
+
 export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null }) => {
   const { t } = useTranslation();
   const api = useApi();
@@ -632,6 +713,11 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null }) 
     if (!q) return servers;
     return servers.filter((item) => item.name.toLowerCase().includes(q) || (item.description || '').toLowerCase().includes(q));
   }, [search, servers]);
+  // Project view grouping mirrors Skills: this project's `.mcp.json` rows first,
+  // then the inherited global rows (the backend already drops globals shadowed
+  // by a same-named project server).
+  const projectRows = useMemo(() => filtered.filter((server) => server.scope !== 'global'), [filtered]);
+  const inheritedRows = useMemo(() => filtered.filter((server) => server.scope === 'global'), [filtered]);
 
   const current = servers.find((item) => item.name === selected) ?? null;
 
@@ -830,9 +916,6 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null }) 
     }
   };
 
-  const transportLabel = (server: McpServerSummary) =>
-    server.transport === 'stdio' ? t('mcpHub.transportStdio') : t('mcpHub.transportHttp');
-
   return (
     <div className="flex flex-col gap-3">
       <div className="flex flex-wrap items-center gap-2.5">
@@ -841,7 +924,7 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null }) 
           <input
             value={search}
             onChange={(event) => setSearch(event.target.value)}
-            placeholder={t('mcpHub.searchPlaceholder')}
+            placeholder={t(projectId ? 'mcpHub.searchProjectPlaceholder' : 'mcpHub.searchPlaceholder')}
             className="flex-1 bg-transparent text-[12px] text-foreground outline-none placeholder:text-muted"
           />
         </div>
@@ -861,7 +944,55 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null }) 
 
       <div className={clsx('grid gap-5', 'grid-cols-1', current && 'lg:grid-cols-[minmax(0,1fr)_400px]')}>
         <div className="flex min-w-0 flex-col gap-2">
-          {filtered.length === 0 ? (
+          {projectId ? (
+            <>
+              <div className="flex flex-col gap-2">
+                {sectionLabel(
+                  <ShieldCheck className="size-3.5 text-mint-ink" />,
+                  t('mcpHub.projectSectionLocal'),
+                  t('mcpHub.projectSectionLocalHint'),
+                )}
+                {projectRows.length > 0 ? (
+                  <div className="flex flex-col gap-2">{projectRows.map((server) => (
+                    <McpRow
+                      key={server.name}
+                      server={server}
+                      selected={selected === server.name}
+                      onSelect={() => setSelected(server.name)}
+                      loginLink={server.auth === 'needs_login'}
+                      onActivateLogin={onActivateLogin}
+                      projectId={projectId}
+                    />
+                  ))}</div>
+                ) : (
+                  <div className="rounded-xl border border-dashed border-border bg-surface px-4 py-6 text-center text-[12px] text-muted">
+                    {t('mcpHub.projectEmpty')}
+                  </div>
+                )}
+              </div>
+              {inheritedRows.length > 0 ? (
+                <div className="flex flex-col gap-2">
+                  {sectionLabel(
+                    <Info className="size-3.5 text-muted" />,
+                    t('mcpHub.projectSectionGlobal'),
+                    t('mcpHub.projectSectionGlobalHint'),
+                  )}
+                  <div className="flex flex-col gap-2">{inheritedRows.map((server) => (
+                    <McpRow
+                      key={server.name}
+                      server={server}
+                      inherited
+                      selected={selected === server.name}
+                      onSelect={() => setSelected(server.name)}
+                      loginLink={server.auth === 'needs_login'}
+                      onActivateLogin={onActivateLogin}
+                      projectId={projectId}
+                    />
+                  ))}</div>
+                </div>
+              ) : null}
+            </>
+          ) : filtered.length === 0 ? (
             <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-border bg-surface px-6 py-12 text-center">
               <p className="text-[13px] text-muted">{servers.length === 0 ? t('mcpHub.empty') : t('mcpHub.noSearchMatch')}</p>
               {canManage && servers.length === 0 ? (
@@ -873,49 +1004,14 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null }) 
             </div>
           ) : (
             filtered.map((server) => (
-              <button
+              <McpRow
                 key={server.name}
-                type="button"
-                onClick={() => setSelected(server.name)}
-                className={clsx(
-                  'group flex w-full items-center gap-3 rounded-lg border px-[14px] py-3 text-left transition',
-                  selected === server.name
-                    ? 'border-mint/40 bg-mint-soft shadow-glow-sm-mint'
-                    : 'border-border bg-surface hover:border-border-strong hover:bg-surface-2',
-                )}
-              >
-                <span className="flex size-9 shrink-0 items-center justify-center rounded-[9px] border border-border bg-surface-3 text-muted">
-                  {server.transport === 'stdio' ? <Terminal className="size-4" /> : <Globe className="size-4" />}
-                </span>
-                <span className="flex min-w-0 flex-1 flex-col gap-1">
-                  <span className="flex items-center gap-2">
-                    <span className="truncate font-mono text-[13px] font-semibold text-foreground">{server.name}</span>
-                    <Badge className={clsx('font-mono text-[9px] uppercase', SOURCE_CHIP[server.source ?? 'avibe'])}>
-                      {t(`mcpHub.source.${server.source ?? 'avibe'}`)}
-                    </Badge>
-                    <McpStateBadge server={server} />
-                  </span>
-                  <span className="truncate font-mono text-[11px] text-muted" title={server.command || server.url || server.description || undefined}>
-                    {server.command || server.url || server.description}
-                  </span>
-                  <span className="font-mono text-[10px] text-muted">
-                    {t('mcpHub.toolMeta', { count: server.toolCount ?? 0, transport: transportLabel(server) })}
-                  </span>
-                </span>
-                    {server.auth === 'needs_login' ? (
-                      <span onClick={(event) => event.stopPropagation()}>
-                      <LoginLink
-                        name={server.name}
-                        project={projectId}
-                        className="inline-flex h-6 items-center rounded-md border border-border bg-surface px-2 font-mono text-[10px] font-semibold uppercase text-foreground hover:bg-surface-2"
-                        onActivate={onActivateLogin}
-                      >
-                        {t('mcpHub.login')}
-                      </LoginLink>
-                      </span>
-                    ) : null}
-                    <ChevronRight className="size-3.5 text-muted" />
-              </button>
+                server={server}
+                selected={selected === server.name}
+                onSelect={() => setSelected(server.name)}
+                loginLink={server.auth === 'needs_login'}
+                onActivateLogin={onActivateLogin}
+              />
             ))
           )}
         </div>
@@ -924,7 +1020,7 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null }) 
           <McpServerDetail
             server={current}
             project={projectId}
-            canManage={canManage}
+            canManage={canManage && !(projectId && current.scope === 'global')}
             expandedTools={expandedTools}
             busy={busy !== null}
             refreshing={busy === `refresh:${current.name}`}

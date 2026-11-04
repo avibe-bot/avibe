@@ -497,7 +497,7 @@ def _apply_entry(servers: dict[str, Any], key: ScopedName, entry: dict[str, Any]
     servers[key.name] = kept
 
 
-def _write_document(path: Path, data: dict[str, Any], expected: Optional[str]) -> None:
+def _write_document(path: Path, text: str, expected: Optional[str]) -> None:
     def unchanged() -> None:
         current = path.read_text(encoding="utf-8") if path.exists() else None
         if current != expected:
@@ -505,8 +505,35 @@ def _write_document(path: Path, data: dict[str, Any], expected: Optional[str]) -
             raise McpHubError("config_changed", message)
 
     mode = path.stat().st_mode & 0o777 if path.exists() else 0o644
-    text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
     write_atomic(path, text, follow_symlinks=True, mode=mode, before_replace=unchanged)
+
+
+def _render_document(data: dict[str, Any]) -> str:
+    return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+
+
+def _edit_document_text(text: Optional[str], key: ScopedName, entry: Optional[dict[str, Any]], data: dict[str, Any]) -> Optional[str]:
+    """The project file's next text: a member edit that keeps the file's formatting.
+
+    The edit's parse must equal ``data`` (the document's expected next state);
+    ``None`` otherwise (missing file or an unusual layout), and the caller
+    falls back to a full rewrite.
+    """
+
+    if text is None:
+        return None
+    from vibe.opencode_config import parse_jsonc_object, remove_jsonc_member, upsert_jsonc_object_member
+
+    try:
+        if entry is None:
+            next_text = remove_jsonc_member(text, "mcpServers", key.name)
+        else:
+            next_text = upsert_jsonc_object_member(text, "mcpServers", key.name, entry)
+        if parse_jsonc_object(next_text) != data:
+            return None
+        return next_text
+    except (KeyError, ValueError):
+        return None
 
 
 def write_server(key: ScopedName, entry: Optional[dict[str, Any]], *, replace: bool = True) -> None:
@@ -521,7 +548,11 @@ def write_server(key: ScopedName, entry: Optional[dict[str, Any]], *, replace: b
         else:
             _apply_entry(servers, key, entry, replace)
         if text is None or data != before:
-            _write_document(_project_file(key.scope), data, text)
+            written = None if entry is None else servers.get(key.name)
+            next_text = _edit_document_text(text, key, written, data)
+            if next_text is None:
+                next_text = _render_document(data)
+            _write_document(_project_file(key.scope), next_text, text)
     if entry is None:
         return
     update = {field: entry[field] for field in ("env", "headers") if entry.get(field)}
@@ -534,3 +565,6 @@ def remove_server(key: ScopedName) -> None:
     directory = repository.package_dir(key)
     if directory.exists():
         shutil.rmtree(directory)
+    project_dir = key.scope.root
+    if project_dir != directory and project_dir.exists() and next(project_dir.iterdir(), None) is None:
+        project_dir.rmdir()

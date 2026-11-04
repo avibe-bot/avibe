@@ -110,8 +110,9 @@ describe('McpHubSection project view', () => {
     expect(within(rowButton('docs')).getByText(en.mcpHub.state.needs_login)).toBeTruthy();
     expect(within(rowButton('ready')).getByText(en.mcpHub.state.ok)).toBeTruthy();
     expect(within(rowButton('stale')).getByText(en.mcpHub.state.not_generated)).toBeTruthy();
-    // A visible global row keeps its own source and no project state.
-    expect(within(rowButton('echo')).getByText(en.mcpHub.source.avibe)).toBeTruthy();
+    // An inherited global row carries the Skills-style Global chip, no source chip, no project state.
+    expect(within(rowButton('echo')).getByText(en.mcpHub.globalBadge)).toBeTruthy();
+    expect(within(rowButton('echo')).queryByText(en.mcpHub.source.avibe)).toBeNull();
     expect(within(rowButton('echo')).queryByText(en.mcpHub.state.ok)).toBeNull();
 
     const actions = (name: string) => {
@@ -124,7 +125,8 @@ describe('McpHubSection project view', () => {
     expect(within(detail()).getByText(en.mcpHub.needsConfigHint.replace('{{names}}', 'API_TOKEN'))).toBeTruthy();
     expect(actions('stale')).toEqual([en.mcpHub.configure, en.mcpHub.refresh, en.mcpHub.remove]);
     expect(actions('ready')).toEqual([en.mcpHub.configure, en.mcpHub.refresh, en.mcpHub.remove]);
-    expect(actions('echo')).toEqual([en.mcpHub.refresh, en.mcpHub.remove]);
+    // The inherited global row is view-only here; manage it in the Global tab.
+    expect(actions('echo')).toEqual([]);
   });
 
   it('configures only the maps the user changed or cleared, and never shows a stored value', async () => {
@@ -225,5 +227,27 @@ describe('McpHubSection project view', () => {
       const buttons = within(detail()).getAllByRole('button').map((node) => node.textContent);
       expect(buttons.filter((text) => text)).toEqual([]);
     }
+  });
+
+  it('groups project rows first, then inherited globals under the Skills-style divider', async () => {
+    renderHub();
+    await screen.findByText('pending');
+    expect(screen.getByPlaceholderText(en.mcpHub.searchProjectPlaceholder)).toBeTruthy();
+    const divider = screen.getByText(en.mcpHub.projectSectionGlobal);
+    expect(divider.parentElement?.textContent).toContain(en.mcpHub.projectSectionGlobalHint);
+    expect(screen.getByText(en.mcpHub.projectSectionLocal).parentElement?.textContent).toContain(en.mcpHub.projectSectionLocalHint);
+    // Project rows come before the inherited group; `echo` is the only global row.
+    const positions = ['pending', 'tokened', 'docs', 'ready', 'stale'].map((name) =>
+      rowButton(name).compareDocumentPosition(divider));
+    expect(positions.every((position) => position & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
+    expect(rowButton('echo').compareDocumentPosition(divider) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+  });
+
+  it('shows the empty project group with the inherited globals still listed', async () => {
+    api.listMcpServers.mockResolvedValue({ ok: true, oauthMode: 'direct', servers: [servers[servers.length - 1]] });
+    renderHub();
+    await screen.findByText(en.mcpHub.projectEmpty);
+    expect(screen.getByText(en.mcpHub.projectSectionGlobal)).toBeTruthy();
+    expect(screen.getByText(en.mcpHub.globalBadge)).toBeTruthy();
   });
 });
