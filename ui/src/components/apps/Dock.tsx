@@ -11,6 +11,7 @@ import { ShowPageAvatarContent } from '../../apps/showPageAvatarTile';
 import { useDock } from '../../context/DockContext';
 import { dockIdToSession } from '../../context/dockDoc';
 import { useWindowManager } from '../../context/WindowManagerContext';
+import { tryOpenDesktopAppWindow } from '../../lib/desktopShell';
 import { openLinkInNewContext } from '../../lib/pwaNavigation';
 import { ContextMenu, ContextMenuItem } from '../ui/context-menu';
 import { useShowPageInventory } from '../useShowPages';
@@ -106,16 +107,28 @@ export const Dock: React.FC = () => {
   const focusWindowDom = (id: string) =>
     (document.querySelector(`[data-window-id="${id}"]`) as HTMLElement | null)?.focus?.({ preventScroll: true });
 
-  const openNew = (item: ResidentItem) => {
+  const nativeTargetFor = (item: ResidentItem, newWindow: boolean) => {
+    const target = item.kind === 'builtin'
+      ? { appId: item.id, sessionId: null, title: t(item.def.titleKey) }
+      : { appId: 'showpage', sessionId: item.sessionId, title: item.title };
+    if (!appTabHref({ appId: target.appId, sessionId: target.sessionId })) return null;
+    return { ...target, newWindow };
+  };
+
+  const openNew = async (item: ResidentItem) => {
+    setMenu(null);
+    const nativeTarget = nativeTargetFor(item, true);
+    if (nativeTarget && await tryOpenDesktopAppWindow(nativeTarget)) return;
     if (item.kind === 'builtin') wm.openApp(item.id as AppId);
     else wm.openApp('showpage', { title: item.title, params: { sessionId: item.sessionId, title: item.title } });
-    setMenu(null);
   };
 
   // Click a tile: focus its front window, else un-minimize its top window, else
   // launch one — matched per Show Page by session id (multi-window like built-ins).
-  const activate = (item: ResidentItem) => {
+  const activate = async (item: ResidentItem) => {
     setMenu(null);
+    const nativeTarget = nativeTargetFor(item, false);
+    if (nativeTarget && await tryOpenDesktopAppWindow(nativeTarget)) return;
     const own = windowsFor(item);
     const visible = own.filter((w) => !w.minimized);
     if (visible.length > 0) {
@@ -125,7 +138,8 @@ export const Dock: React.FC = () => {
     } else if (own.length > 0) {
       wm.restore(own.reduce((a, b) => (b.z > a.z ? b : a)).id);
     } else {
-      openNew(item);
+      if (item.kind === 'builtin') wm.openApp(item.id as AppId);
+      else wm.openApp('showpage', { title: item.title, params: { sessionId: item.sessionId, title: item.title } });
     }
   };
 
@@ -236,8 +250,8 @@ export const Dock: React.FC = () => {
                       if (isAppleContextClick(e)) return;
                       const intent = appLaunchIntent(e);
                       if (intent === 'newTab' && openInTab(item)) return;
-                      if (intent === 'activate') activate(item);
-                      else openNew(item);
+                      if (intent === 'activate') void activate(item);
+                      else void openNew(item);
                     }}
                     onContextMenu={(e) => {
                       e.preventDefault();
@@ -290,7 +304,7 @@ export const Dock: React.FC = () => {
                     aria-label={t('apps.dock.newWindow')}
                     onClick={(e) => {
                       e.stopPropagation();
-                      openNew(item);
+                      void openNew(item);
                     }}
                     // Don't let a press on ＋ start a tile drag.
                     onPointerDown={(e) => e.stopPropagation()}
@@ -400,7 +414,7 @@ export const Dock: React.FC = () => {
               <ContextMenuItem
                 icon={<SquarePlus className="size-[15px] text-cyan-ink" />}
                 label={t('apps.dock.newWindow')}
-                onClick={() => openNew(item)}
+                onClick={() => void openNew(item)}
               />
               {windowsFor(item).length > 0 && (
                 <ContextMenuItem

@@ -481,6 +481,10 @@
         "title": "桌面迷你窗",
         "description": "在桌面上显示桌宠迷你窗。",
         "saveFailed": "桌面迷你窗设置未能保存。"
+      },
+      "homeTips": {
+        "title": "首页小技巧",
+        "description": "每天在首页介绍一个你还没用过的能力。"
       }
     },
     "shortcuts": {
@@ -2956,6 +2960,9 @@
   "errors": {
     "sandbox_integrity_failed": "无法验证受保护保险库的安全代码，已阻止打开。请检查网络并更新 Avibe 后重试，不要绕过验证或重新创建通行密钥。",
     "sandbox_build_mismatch": "受保护保险库沙箱与当前 Avibe 版本不匹配。请更新 Avibe 或联系支持；现有密钥和通行密钥未改变。",
+    "sandbox_entry_unavailable": "当前地址或浏览器环境无法使用受保护的 Vault。请使用兼容的浏览器，通过「设置 → 远程访问」提供的 HTTPS avibe.bot 地址打开，或在运行 Avibe 的电脑上使用 localhost / 127.0.0.1。",
+    "sandbox_browser_unavailable": "受保护的 Vault 需要具备 Web Crypto 的安全浏览器环境。请在最新的兼容浏览器中直接打开 Avibe，而不是在其他网页或内嵌浏览器中打开。",
+    "sandbox_browser_required": "请在浏览器中继续此受保护的 Vault 操作，而不是在桌面应用中。",
     "sandbox_reset": "本次受保护保险库操作已取消或重置。请从 Avibe 重试，以重新验证沙箱。",
     "sandbox_ready_timeout": "已验证的保险库沙箱未能启动。请检查网络、更新 Avibe 后重试。",
     "avault_authorization_required": "avault 需要在运行 Avibe 的 Mac 上完成一次性的 macOS 钥匙串授权。请选择「授权 avault」，然后在那台 Mac 上回应对话框。",
@@ -3387,26 +3394,109 @@
     "placeholderTitle": "你的 AI 工作台正在搭建",
     "placeholderBody": "Agents、Skills、Harness、Vaults 将会汇聚到这里。现在先进控制面板配置平台和 backend。",
     "home": {
-      "heroTitle": "今天想搭点什么？",
-      "heroBody": "在下面输入想做的事，Agent 会按你的描述执行。你也可以从下面的建议开始。",
-      "suggestions": {
-        "exploreTitle": "探索项目",
-        "exploreBody": "了解工作区中的文件",
-        "exploreDraft": "请帮我梳理这个项目的结构和主要模块",
-        "researchTitle": "研究一个问题",
-        "researchBody": "把一个主题整理成实用简报",
-        "researchDraft": "帮我研究这个主题，整理成一份简短实用的简报",
-        "planTitle": "制定计划",
-        "planBody": "把目标拆成可执行的下一步",
-        "planDraft": "帮我把这个目标拆成具体、可执行的步骤"
+      "greeting": {
+        "morning": "早上好，今天做什么？",
+        "afternoon": "下午好，今天做什么？",
+        "evening": "晚上好，今天做什么？",
+        "morningIntro": "早上好，我是{{name}}",
+        "afternoonIntro": "下午好，我是{{name}}",
+        "eveningIntro": "晚上好，我是{{name}}"
       },
+      "status": {
+        "working": "{{count}} 位在忙",
+        "unread": "{{count}} 条未读"
+      },
+      "setup": {
+        "title": "开始使用",
+        "more": "还有 {{count}} 项",
+        "later": "稍后",
+        "notNeeded": "不需要",
+        "model": {
+          "title": "给{{name}}接上模型",
+          "why": "用已有的订阅或 API key",
+          "action": "去添加"
+        },
+        "notifications": {
+          "title": "打开通知",
+          "why": "做完事、需要你决定时第一时间告诉你。",
+          "action": "打开"
+        },
+        "computer_use": {
+          "title": "允许操作电脑",
+          "why": "授予辅助功能和屏幕录制权限。",
+          "action": "去授权"
+        },
+        "chat_apps": {
+          "title": "连接聊天应用",
+          "why": "在 Slack、飞书、微信里也能找{{name}}。",
+          "action": "去连接"
+        },
+        "phone": {
+          "title": "在手机上继续",
+          "why": "配对 Avibe Cloud。",
+          "action": "去配对"
+        }
+      },
+      "tips": {
+        "label": "每日小技巧",
+        "try": "试试",
+        "previous": "上一条",
+        "next": "下一条",
+        "hide": "今天不再显示",
+        "bots": {
+          "title": "伙伴",
+          "why": "给长期的事配一个有名字、有记忆的伙伴。"
+        },
+        "showPages": {
+          "title": "可视化页面",
+          "why": "让对话把结果画成一个页面。",
+          "ask": "把本周的项目进展画成一个页面"
+        },
+        "tasks": {
+          "title": "定时任务和监听",
+          "why": "到点自动做，或等某件事发生再做。",
+          "ask": "每天早上 9 点把昨天各项目的进展总结给我"
+        },
+        "vault": {
+          "title": "保险库",
+          "why": "密钥给 Agent 用，但它看不到原文。"
+        },
+        "skills": {
+          "title": "技能和 MCP",
+          "why": "装一个，所有 Agent 都多一项本事。"
+        },
+        "chatApps": {
+          "title": "聊天应用",
+          "why": "在 Slack、飞书、微信里找{{name}}。"
+        },
+        "desktopPet": {
+          "title": "桌面小窗",
+          "why": "在任何应用里按住语音快捷键，和{{name}}说话。",
+          "whyShortcut": "在任何应用里按住 {{shortcut}}，和{{name}}说话。"
+        },
+        "voice": {
+          "title": "语音",
+          "why": "手机上按住底栏中间的{{name}}说话。"
+        }
+      },
+      "asks": {
+        "addBot": "加一个伙伴",
+        "addBotAsk": "帮我加一个负责安全的伙伴",
+        "remember": "记住一件事",
+        "rememberAsk": "记住：周一上午不排会",
+        "projectStatus": "项目进展如何",
+        "projectStatusAsk": "各个项目进展怎么样？",
+        "startInProject": "在项目里开工",
+        "startInProjectAsk": "在 {{project}} 里，",
+        "startNewProjectAsk": "帮我新建一个项目：",
+        "weeklyReport": "每周一发周报",
+        "weeklyReportAsk": "每周一早上发我一份周报"
+      },
+      "placeholder": "和{{name}}说…",
+      "noModelPlaceholder": "接上模型后就能说话",
+      "addModel": "去接模型",
       "inputPlaceholder": "和 Agent 聊点什么…",
-      "openProject": "打开项目",
-      "manageAgents": "管理 Agents",
-      "createTask": "建后台任务",
       "noProjectForChat": "还没有项目 — 先添加一个，再开始对话",
-      "ready": "{{backend}} 已连接，可以开始工作",
-      "readyDismiss": "关闭",
       "computerUse": {
         "off": "电脑操作未开启",
         "offDetail": "需要使用时，请从 Avibe 原生控制中开启。",
@@ -3442,11 +3532,8 @@
         "shellNotRunningDetail": "请打开或重新打开 Avibe 桌面应用，以使用电脑操作。",
         "daemonUnreachableDetail": "桌面驱动当前无法连接。请关闭并重新开启电脑操作；如果问题重复出现，请重新打开 Avibe。",
         "controllerUnavailableDetail": "当前无法连接 Avibe Controller。请等待服务恢复后再使用电脑操作 CLI。",
-        "socketPathTooLongDetail": "macOS 无法创建受管理的驱动端点。请更新或重新安装 Avibe 桌面应用。",
-        "finishInSettings": "在设置中完成"
-      },
-      "continueOnPhone": "在手机 APP 上继续",
-      "connectChatApps": "聊天应用可在<settings>设置</settings>中连接"
+        "socketPathTooLongDetail": "macOS 无法创建受管理的驱动端点。请更新或重新安装 Avibe 桌面应用。"
+      }
     },
     "openControlPanel": "进入控制面板",
     "projectsLabel": "项目",
@@ -5954,6 +6041,15 @@
       "singleFile": "文件上传仅支持单值。添加字段前请先切换到文本模式。",
       "editHelp": "改完一行点保存 · 留空的保持原值"
     },
+    "entry": {
+      "addressTitle": "当前地址无法使用受保护的 Vault",
+      "browserTitle": "当前浏览器环境无法使用受保护的 Vault",
+      "browserHelp": "此地址受支持，但当前浏览器环境缺少安全访问条件或 Web Crypto。请在最新的兼容浏览器中直接打开 Avibe，而不是在其他网页或内嵌浏览器中打开。",
+      "ownerHelp": "前往「设置 → 远程访问」，按需启用远程访问，再通过其中的 HTTPS 地址重新打开 Vaults。不会自动更改任何设置。",
+      "memberHelp": "请联系实例所有者启用远程访问，并提供对应的 HTTPS 地址，然后通过该地址重新打开 Vaults。",
+      "draftWarning": "打开设置会清除此对话框中尚未保存的输入。",
+      "remoteAccess": "打开远程访问设置"
+    },
     "protectedUnlock": {
       "checking": "正在检查你的保护层…",
       "unlocked": "保护层已在本会话解锁",
@@ -5974,7 +6070,7 @@
       "cancel": "取消",
       "passkeyUnrecoverableWarning": "这个 passkey 就是唯一的钥匙,丢了它,保护档里的密钥就再也找不回来了(没有备用恢复方式)。",
       "passkeyAck": "我明白:一旦丢失 passkey,这些密钥无法找回。",
-      "unlockUnavailableHere": "保护层保险库需要 passkey。请从 localhost 或你的 avibe.bot 地址打开 Vaults；127.0.0.1 这类原始 IP 无法使用 WebAuthn。",
+      "unlockUnavailableHere": "请使用兼容的浏览器。在运行 Avibe 的电脑上，通过 localhost 或 127.0.0.1 打开 Vaults；在其他设备上，使用你的 HTTPS avibe.bot 地址。不支持局域网 HTTP 地址（如 192.168.x.x）。",
       "browserNote": "桌面端无法使用 passkey。请在浏览器中继续（同一个 Avibe），在那里填写这个密钥。",
       "openInBrowser": "在浏览器中打开",
       "errors": {

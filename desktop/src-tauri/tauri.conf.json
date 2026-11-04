@@ -37,7 +37,8 @@
         "main-pet-bind",
         "main-pet-settings",
         "main-computer-use",
-        "main-desktop-update"
+        "main-desktop-update",
+        "main-app-windows"
       ],
       "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost"
     }

@@ -1,4 +1,4 @@
-# Offline Vault integrity fixture (AUTH-SETUP-136)
+# Offline Vault integrity and entry fixtures (AUTH-SETUP-136 / 137)
 
 `release/` is an exact copy of vault-sandbox's reviewed candidate
 `retained/v/eef0b4fe30cfb1cf35507b4aae5144dabfc0bfff66b49ef1d26b5016a52546c8/`.
@@ -19,6 +19,17 @@ non-fixture external network is denied; browser credential APIs are denied.
 confirmation details but never approve, sign, decrypt, create passkeys or call a
 real Vault. Changing served bytes without changing the local pin exercises
 preflight rejection and, after good preflight, native browser SRI rejection.
+
+`entry-fixture.html` mounts the actual Vaults page, API provider and Settings
+navigation surfaces. `entry.spec.ts` intercepts synthetic HTTP LAN/custom HTTPS/
+non-default-port Avibe addresses and serves only local Vite modules and inert
+API replies: the IP/hosts are never contacted. It records and rejects protected
+preparation, sandbox loads, unexpected writes and credentials. Deny, metadata
+rename and standard signing exercise only synthetic API endpoints. The Settings
+CTA must navigate without a document request, restore the approval/dialog, and
+never enable Remote Access or put a draft in a URL. Existing modal suspension
+clears typed inputs; the form warns before that navigation. These tests claim
+only early entry UX, not passkey or secret-operation acceptance.
 
 Run `npm run test:vault-integrity` from `ui/` (Chromium and WebKit, then typecheck).
 The suite is part of browser CI. It does not establish live publication, physical

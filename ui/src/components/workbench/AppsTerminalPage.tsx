@@ -5,6 +5,7 @@ import { SquareTerminal } from 'lucide-react';
 
 import { useStandaloneAppTab } from '../../context/StandaloneAppTabContext';
 import { useIsDesktop } from '../../lib/useIsDesktop';
+import { isNativeAppWindow } from '../../lib/desktopShell';
 import { MobileAppHeader } from '../apps/MobileAppHeader';
 import { TerminalTabs } from './TerminalTabs';
 
@@ -31,9 +32,10 @@ export const AppsTerminalPage: React.FC<{ windowed?: boolean; windowId?: string;
   const launchCwd = useMemo(() => readCwd(location.state), [location.state]);
   // A single-app browser tab (`/apps/terminal?standalone=1`): the shell drops its chrome, so the
   // terminal fills the whole web area — no page header, no card border, no padding around it.
-  // Still the ROUTE mount, so the first tab keeps its persistent reattachable session (unlike
-  // `windowed`, whose tabs are ephemeral).
+  // Native window identity survives app-to-app navigation and reload. Ordinary browser
+  // tabs keep a persistent first session; native routes reuse the windowed lifecycle.
   const standalone = useStandaloneAppTab();
+  const native = isNativeAppWindow();
   const isDesktop = useIsDesktop();
   const mobileRoute = !windowed && !standalone && !isDesktop;
 
@@ -45,10 +47,19 @@ export const AppsTerminalPage: React.FC<{ windowed?: boolean; windowId?: string;
     );
   }
 
+  const terminal = (
+    <TerminalTabs
+      windowed={native}
+      params={native && launchCwd ? { cwd: launchCwd } : undefined}
+      launchCwd={native ? undefined : launchCwd}
+      launchKey={!native && launchCwd ? location.key : undefined}
+    />
+  );
+
   if (standalone) {
     return (
       <div className="flex h-full w-full overflow-hidden bg-surface">
-        <TerminalTabs launchCwd={launchCwd} launchKey={launchCwd ? location.key : undefined} />
+        {terminal}
       </div>
     );
   }
@@ -58,7 +69,7 @@ export const AppsTerminalPage: React.FC<{ windowed?: boolean; windowId?: string;
       <div className="flex h-full min-h-0 w-full flex-col overflow-hidden bg-surface pb-[env(safe-area-inset-bottom)]">
         <MobileAppHeader title={t('apps.terminal.label')} icon={SquareTerminal} />
         <div className="flex min-h-0 flex-1 overflow-hidden">
-          <TerminalTabs launchCwd={launchCwd} launchKey={launchCwd ? location.key : undefined} />
+          {terminal}
         </div>
       </div>
     );
@@ -71,7 +82,7 @@ export const AppsTerminalPage: React.FC<{ windowed?: boolean; windowId?: string;
         <p className="text-[12px] text-muted">{t('apps.terminal.tagline')}</p>
       </div>
       <div className="flex min-h-0 flex-1 overflow-hidden rounded-xl border border-border bg-surface">
-        <TerminalTabs launchCwd={launchCwd} launchKey={launchCwd ? location.key : undefined} />
+        {terminal}
       </div>
     </div>
   );

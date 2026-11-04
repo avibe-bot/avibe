@@ -10,9 +10,10 @@ const base = `/v/${pin.buildHash}/`;
 const documentUrl = `${pin.sandboxOrigin}${base}index.html`;
 const runtimeHeaders = Object.fromEntries(hosting.headers[0].headers.map(({ key, value }) => [key, value]));
 const fixtureDir = fileURLToPath(new URL('./', import.meta.url));
-type Behavior = { legacy?: boolean; tamper?: 'js' | 'css' | 'manifest'; delayCss?: number; holdManifest?: Promise<void>; holdCss?: Promise<void> };
+type Behavior = { parentOrigin?: string; legacy?: boolean; tamper?: 'js' | 'css' | 'manifest'; delayCss?: number; holdManifest?: Promise<void>; holdCss?: Promise<void> };
 
 async function harness(context: BrowserContext, page: Page, behavior: Behavior = {}) {
+  const parentOrigin = behavior.parentOrigin ?? parent;
   const requests: Array<{ url: string; type: string }> = [];
   const unexpected: string[] = [];
   // Browser credentials are denied in every fresh, disposable context. Setup
@@ -54,18 +55,22 @@ async function harness(context: BrowserContext, page: Page, behavior: Behavior =
       return route.fulfill({ status: 200, headers: runtimeHeaders, body,
         contentType: relative.endsWith('.js') ? 'text/javascript' : relative.endsWith('.css') ? 'text/css' : relative.endsWith('.json') ? 'application/json' : 'text/html' });
     }
-    if (url.origin === parent) {
+    if (url.origin === parentOrigin) {
       if (url.pathname === '/e2e/vault-integrity/fixture.html') return route.fulfill({
         contentType: 'text/html', body: await readFile(`${fixtureDir}fixture.html`),
         headers: { 'Content-Security-Policy': `frame-src 'self' ${pin.sandboxOrigin}${behavior.legacy ? '/' : base}` },
       });
       if (url.pathname.startsWith('/api/')) return route.fulfill({ json: { ok: true, policy: { windowSeconds: 300, strictApprovals: true, parentValueSealAllowed: true } } });
+      if (parentOrigin !== parent) {
+        const response = await route.fetch({ url: `${parent}${url.pathname}${url.search}`, maxRedirects: 0 });
+        return route.fulfill({ response });
+      }
       return route.continue();
     }
     unexpected.push(req.url());
     return route.abort('blockedbyclient');
   });
-  await page.goto('/e2e/vault-integrity/fixture.html');
+  await page.goto(`${parentOrigin}/e2e/vault-integrity/fixture.html`);
   await expect(page.locator('#load')).toBeVisible();
   return { requests, unexpected };
 }
@@ -100,6 +105,16 @@ async function loaded(page: Page) {
   await expect(page.locator('#result')).toHaveText('ready');
   await expect(page.locator('iframe')).toHaveAttribute('src', documentUrl);
 }
+
+// The published frame-ancestors policy, not just RPC, must accept a default-port
+// HTTPS Avibe parent. Resources for this synthetic origin come only from Vite.
+test('HTTPS Avibe default-port parent passes the actual CSP and sandbox handshake', async ({ context, page }) => {
+  await context.routeWebSocket('**', (socket) => socket.close());
+  const { unexpected } = await harness(context, page, { parentOrigin: 'https://fixture.avibe.bot' });
+  await loaded(page);
+  expect(await page.evaluate(() => isSecureContext)).toBe(true);
+  expect(unexpected).toEqual([]);
+});
 
 test('actual client verifies exact source bytes, loads sandbox, and blocks retained-version iframe downgrade', async ({ context, page }) => {
   const { requests, unexpected } = await harness(context, page);

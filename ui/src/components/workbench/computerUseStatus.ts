@@ -2,8 +2,6 @@ import { apiFetch } from '../../lib/apiFetch';
 import type { ComputerUseStatus, StatusTone } from './computerUseStatusCopy';
 
 export const COMPUTER_USE_STATUS_PATH = '/api/desktop/computer-use/status';
-export const COMPUTER_USE_SETTINGS_PATH = '/settings/computer-use';
-export const COMPUTER_USE_REFRESH_INTERVAL_MS = 5_000;
 /** The setup guide polls faster: a grant should show up as soon as macOS records it. */
 export const COMPUTER_USE_GUIDE_REFRESH_INTERVAL_MS = 1_500;
 

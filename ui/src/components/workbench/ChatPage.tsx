@@ -123,12 +123,13 @@ import {
   bySessionWriteGroup,
   commitSessionRowWrite,
   createSessionRowRefreshGate,
+  mergeSessionPatchWrites,
   recordSessionRowWrite,
   releaseSessionRowWrite,
+  sessionPatchWriteStandsAlone,
   sessionRowWithBootstrapFallback,
-  sessionWriteStandsAlone,
   useChatSessionRow,
-  type SessionRowRefreshGate,
+  type SessionPatchWrite as SharedSessionPatchWrite,
   type SessionWriteGroup,
 } from './sessionRowRefresh';
 import { chatSessionViewState } from './chatSessionViewState';
@@ -227,18 +228,9 @@ const PAGING_WHEEL_IDLE_MS = 200;
 // row's hint so the shortcut is discoverable instead of folklore.
 const ARCHIVE_SHORTCUT_LABEL = archiveSessionShortcutLabel();
 
-// One session write. The header applies an edit optimistically, so the request
-// that follows carries the chat it was made for: it is recorded under that
-// session's id (the URL may already be on another chat by the time it flushes)
-// and carries that chat's read-ordering gate, which is replaced on navigation.
-// It also carries which of the row's field groups it belongs to, because the
-// optimistic record it commits against is per group — the writer key alone says
-// that to the writer, not to the sender it hands the payload to.
-type SessionPatchWrite = {
-  changes: Partial<WorkbenchSession>;
-  gate: SessionRowRefreshGate;
-  group: SessionWriteGroup;
-};
+// One session write (see `SessionPatchWrite` in sessionRowRefresh): the chat's
+// gate is replaced on navigation, so the write carries the one it was made under.
+type SessionPatchWrite = SharedSessionPatchWrite<WorkbenchSession>;
 
 // ui/design: chat/conversation/default — the inline header replaces the old "Session
 // settings" dialog. Title is click-to-edit; the cyan-bordered pill on the
@@ -1102,24 +1094,11 @@ export const ChatPage: React.FC = () => {
     [api, t],
   );
 
-  // Within ONE group the clicks made while a request is in flight are transit
-  // rather than intent, so they fold into a single follow-up PATCH: an effort
-  // clicked behind an Agent switch was composed against that switch, so if the
-  // request fails the follow-up goes with it and the re-read below shows what the
-  // server actually holds — a half-applied route is worse than a visible
-  // rollback. A merged payload that ends up carrying the whole route depended on
-  // nothing, and ``sessionWriteStandsAlone`` is what keeps it from being dropped
-  // for a failure that says nothing about it. Across groups nothing folds, because
-  // they no longer share a writer at all. The newest gate wins: it belongs to the
-  // mount that is on screen now and whose reads the reconcile below has to fence.
-  const mergeSessionPatch = useCallback(
-    (prev: SessionPatchWrite, next: SessionPatchWrite): SessionPatchWrite => ({
-      changes: { ...prev.changes, ...next.changes },
-      gate: next.gate,
-      group: next.group,
-    }),
-    [],
-  );
+  // How the clicks made while a request is in flight fold into one follow-up
+  // PATCH: ``mergeSessionPatchWrites``. A merged payload that ends up carrying the
+  // whole route depended on nothing, and ``sessionWriteStandsAlone`` is what keeps
+  // it from being dropped for a failure that says nothing about it.
+  const mergeSessionPatch = mergeSessionPatchWrites<WorkbenchSession>;
 
   // Once per burst, not once per write. On success the read is what makes the
   // optimistic row authoritative again, and it is returned rather than fired and
@@ -1166,11 +1145,7 @@ export const ChatPage: React.FC = () => {
   // the group that owns those fields, from the two payloads' relation — never
   // assumed for the key as a whole (a model click behind a refused model click
   // overwrites the very field that failed).
-  const patchStandsAlone = useCallback(
-    (pending: SessionPatchWrite, refused: SessionPatchWrite) =>
-      sessionWriteStandsAlone(pending.group, pending.changes, refused.changes),
-    [],
-  );
+  const patchStandsAlone = sessionPatchWriteStandsAlone<WorkbenchSession>;
 
   const { write: writeRoutePatch, isSaving: isRoutePatchSaving } = useCoalescedWrite<SessionPatchWrite>(
     'session-route',

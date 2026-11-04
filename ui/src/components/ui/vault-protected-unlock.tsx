@@ -3,9 +3,9 @@ import { ExternalLink, Loader2, Lock, RefreshCw, ScanFace, ShieldCheck, Sparkles
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 
-import { webauthnAvailable } from '@/lib/useProtectedVault';
+import { vaultEntryIssue } from '@/lib/vaultEntry';
+import { VaultEntryNotice } from './vault-entry-notice';
 import { vaultErrorMessage } from '@/lib/vaultErrors';
-import { vaultPasskeyNeedsBrowser } from '@/lib/vaultBrowserHandoff';
 import type { useProtectedVault } from '@/lib/useProtectedVault';
 import { Badge } from './badge';
 import { Button } from './button';
@@ -46,7 +46,9 @@ export const VaultProtectedUnlock: React.FC<{
   secretName?: string;
   onContinueInBrowser?: () => void;
   onDismiss?: () => void;
-}> = ({ vault, secretName, onContinueInBrowser, onDismiss }) => {
+  /** Settings suspends the dialog and clears its unsaved form inputs. */
+  warnDraftDiscard?: boolean;
+}> = ({ vault, secretName, onContinueInBrowser, onDismiss, warnDraftDiscard }) => {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
   // Passkey-only setup has no recovery fallback yet, so a lost passkey is
@@ -64,6 +66,15 @@ export const VaultProtectedUnlock: React.FC<{
       setBusy(false);
     }
   };
+
+  const issue = vaultEntryIssue();
+  const inBrowser = issue === 'desktop';
+  if (issue && !inBrowser) {
+    return <div className="flex flex-col gap-3">
+      <VaultEntryNotice issue={issue} warnDraftDiscard={warnDraftDiscard} />
+      {onDismiss && <Button type="button" variant="ghost" onClick={onDismiss}>{t('vaults.protectedUnlock.cancel')}</Button>}
+    </div>;
+  }
 
   if (vault.status === 'checking') {
     return (
@@ -100,8 +111,6 @@ export const VaultProtectedUnlock: React.FC<{
     );
   }
 
-  const canUsePasskey = webauthnAvailable();
-  const inBrowser = vaultPasskeyNeedsBrowser();
   const browserHandoff = (
     <div className="flex flex-col items-center gap-2.5">
       <span className="text-center text-[12px] leading-snug text-muted-foreground">{t('vaults.protectedUnlock.browserNote')}</span>
@@ -130,7 +139,7 @@ export const VaultProtectedUnlock: React.FC<{
 
         {/* Ack sits ABOVE the button: the natural order is read-the-risk → check → the
             (now-enabled) Add-Passkey button right below it. The button gates on `ackLoss`. */}
-        {canUsePasskey && !inBrowser && (
+        {!inBrowser && (
           <div className="flex flex-col gap-2 rounded-xl border border-gold/40 bg-gold/10 p-3">
             <span className="text-[11.5px] leading-snug text-gold-ink">{t('vaults.protectedUnlock.passkeyUnrecoverableWarning')}</span>
             <label className="flex items-start gap-2 text-[11.5px] leading-snug text-muted-foreground">
@@ -142,7 +151,7 @@ export const VaultProtectedUnlock: React.FC<{
 
         {inBrowser ? (
           browserHandoff
-        ) : canUsePasskey ? (
+        ) : (
           <div className="flex flex-col items-center gap-2.5 rounded-xl border-[1.5px] border-mint bg-mint-soft p-4">
             <Badge variant="success" className="border-transparent bg-mint uppercase tracking-wide text-primary-foreground">
               <Sparkles className="size-3" />
@@ -153,10 +162,6 @@ export const VaultProtectedUnlock: React.FC<{
               {t('vaults.protectedUnlock.addPasskey')}
             </Button>
             <span className="text-center text-[11.5px] text-muted-foreground">{t('vaults.protectedUnlock.passkeyCaption')}</span>
-          </div>
-        ) : (
-          <div className="rounded-md border border-gold/40 bg-gold/10 px-3 py-2 text-xs leading-snug text-gold-ink">
-            {t('vaults.protectedUnlock.unlockUnavailableHere')}
           </div>
         )}
 
@@ -176,7 +181,7 @@ export const VaultProtectedUnlock: React.FC<{
   }
 
   // ---- Unlock (locked): ui/design: vault/protected-unlock/unlock ----------------------
-  const showUnlockPasskey = !inBrowser && vault.hasPasskey() && canUsePasskey && vault.passkeyUsableHere();
+  const showUnlockPasskey = !inBrowser && vault.hasPasskey() && vault.passkeyUsableHere();
   return (
     <div className={PANEL}>
       <div className="flex flex-col items-center gap-4">

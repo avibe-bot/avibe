@@ -114,6 +114,17 @@ export async function serveProduct(page: Page, lang: Lang = 'en') {
   await page.route('**/api/notifications/preferences', (route) => route.fulfill({
     json: { ok: true, preferences: { enabled: true, bots: true, sessions: true } },
   }));
+  // What the home's Getting started and tip read: the account's home preferences as a new
+  // account has them, Avibe Cloud paired, and push not set up on this server (nothing to turn on).
+  await page.route('**/api/home/preferences', (route) => route.fulfill({
+    json: { ok: true, preferences: { setup_later_on: null, setup_not_needed: [], tip_hidden_on: null, tips_enabled: true } },
+  }));
+  await page.route('**/api/remote-access/status', (route) => route.fulfill({
+    json: { ok: true, enabled: true, paired: true, running: true },
+  }));
+  await page.route('**/api/web-push/status', (route) => route.fulfill({
+    json: { ok: true, configured: false, public_key: '', subscription_count: 0 },
+  }));
   // The service badge polls the bare `/status`, not an `/api` path.
   await page.route('**/status', (route) => route.fulfill({ json: { state: 'running' } }));
   await page.route('**/api/version**', (route) => route.fulfill({

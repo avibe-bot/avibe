@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page } from '@playwright/test';
+import { expect, test, type Locator } from '@playwright/test';
 
 import { DESKTOP, NARROW, ORIGIN, WIDE, config, open, serveProduct } from './support';
 
@@ -20,16 +20,11 @@ const SETTINGS_CONTENT = 'nav[aria-label="Settings sections"] + section > div';
 // geometry claims are about by the selector it owns.
 const APPEARANCE_CARD = 'section.bg-background:has([role="radiogroup"][aria-label="Appearance"])';
 const PLACEMENT_CARD = 'section.bg-background:has([role="radiogroup"][aria-label="Settings menu"])';
-// The home's own project row, not the sidebar tree row: it is the selection the
-// overlay has to hand back, and the fixture names it in non-ASCII on purpose.
-const PROJECT_CHIP = '中文项目';
-const projectChip = (page: Page) =>
-  page.locator(SHELL_SCROLL).getByRole('button', { name: PROJECT_CHIP, exact: true });
 const MOBILE_NAV = 'nav.fixed.bottom-0';
 const ULTRA = { width: 1920, height: 1000 };
-// A short phone that still requires scrolling after the composer spacing was
-// tightened. The composer must clear the tab bar even when the home cannot fit.
-const NARROW_SHORT = { width: 390, height: 568 };
+// A phone too short for the home's group, which therefore scrolls. The composer,
+// its last block, must still clear the tab bar.
+const NARROW_SHORT = { width: 390, height: 380 };
 
 const MODEL_HUB_AGENT = {
   backend: 'codex',
@@ -242,20 +237,21 @@ test.describe('workbench home geometry', () => {
   });
 
   /**
-   * The phone home flows from the top: nothing is pinned above the tab bar, so
-   * a crowded screen is reached by scrolling. That makes the defect a primary
-   * button you cannot press once you get to it — the end of the page left
-   * sitting under the fixed bar — rather than a cropped screenshot. Checked on
-   * a normal phone, where it fits without scrolling, and on a short one, where
-   * it does not. Both languages, because the controls sit beside translated
-   * text whose width moves.
+   * The phone home centers one group whose last block is the composer
+   * (ui/design: home/home/z-layout-spec-phone): nothing is pinned above the tab
+   * bar, so a screen too short for the group is reached by scrolling. That makes
+   * the defect a primary button you cannot press once you get to it — the end
+   * of the page left sitting under the fixed bar — rather than a cropped
+   * screenshot. Checked on a normal phone, where it fits without scrolling, and
+   * on a short one, where it does not. Both languages, because the controls sit
+   * beside translated text whose width moves.
    */
-  const PHONE_COMPOSER: { lang: 'en' | 'zh'; placeholder: string; send: string; lastRow: string }[] = [
-    { lang: 'en', placeholder: 'Tell the agent what you want…', send: 'Send', lastRow: 'Continue on your phone' },
-    { lang: 'zh', placeholder: '和 Agent 聊点什么…', send: '发送', lastRow: '在手机 APP 上继续' },
+  const PHONE_COMPOSER: { lang: 'en' | 'zh'; placeholder: string; send: string }[] = [
+    { lang: 'en', placeholder: 'Message Vibey…', send: 'Send' },
+    { lang: 'zh', placeholder: '和歪比说…', send: '发送' },
   ];
 
-  for (const { lang, placeholder, send, lastRow } of PHONE_COMPOSER) {
+  for (const { lang, placeholder, send } of PHONE_COMPOSER) {
     test(`keeps the composer's controls off the tab bar on a phone (${lang})`, async ({ page }, info) => {
       const pageErrors: string[] = [];
       const unknown: string[] = [];
@@ -268,11 +264,13 @@ test.describe('workbench home geometry', () => {
         '/api/session', '/api/config', '/api/csrf-token', '/api/projects',
         '/api/workbench/projects-bootstrap', '/api/sessions', '/api/agents',
         '/api/inbox', '/api/notifications/preferences', '/api/version', '/api/events',
-        // The home's Computer Use status line reads this on every mount.
-        '/api/desktop/computer-use/status',
         // The sidebar's Bots strip reads the Owner's Bots and each Bot Session's
         // running state (docs/plans/bots.md D5); the fixture's one Bot is the main Bot.
         '/api/bots', '/api/sessions/ses_main',
+        // The Owner's home reads the main Bot's conversation, created on first use.
+        '/api/sessions/main',
+        // The home's Getting started and tip, answered by the shared harness.
+        '/api/home/preferences', '/api/remote-access/status', '/api/web-push/status',
       ]);
       await page.route('**/api/**', (route) => {
         const request = route.request();
@@ -287,10 +285,6 @@ test.describe('workbench home geometry', () => {
           dock: { order: ['files', 'terminal', 'editor', 'library'], pins: [] },
         } });
         if (url.pathname === '/api/macos/login-session') return route.fulfill({ json: { ok: true, state: 'healthy' } });
-        // The home composer starts a new Session at the remembered fast-mode default.
-        if (url.pathname === '/api/workbench/prefs') return route.fulfill({ json: {
-          ok: true, background_work_banner_enabled: true, fast_mode_default: false,
-        } });
         if (inheritedReads.has(url.pathname)) return route.fallback();
         unknown.push(`${request.method()} ${request.url()}`);
         return route.abort();
@@ -309,7 +303,7 @@ test.describe('workbench home geometry', () => {
         // actual hit targets are the invariant, not overflow at this height.
         expect(await page.locator(SHELL_SCROLL).evaluate((node) => node.scrollTop)).toBe(0);
         const navTop = (await nav.boundingBox())!.y;
-        expect(await bottomOf(page.getByRole('link', { name: lastRow }))).toBeLessThanOrEqual(navTop);
+        expect(await bottomOf(sendButton)).toBeLessThanOrEqual(navTop);
         expect(await topmostOver(page, sendButton)).toBe(send);
 
         const draft = '给手机上的我写一句话';
@@ -322,9 +316,8 @@ test.describe('workbench home geometry', () => {
         await sendButton.click({ trial: true });
 
         // Continue the typed draft on the existing short phone. Here overflow
-        // must be real, and it must be vertical only: the column wraps and the
-        // project chips scroll inside their own row, so the page itself never
-        // goes sideways.
+        // must be real, and it must be vertical only: the group wraps, so the
+        // page itself never goes sideways.
         await page.setViewportSize(NARROW_SHORT);
         await page.waitForFunction((height) => window.innerHeight === height, NARROW_SHORT.height);
         const overflow = await page.locator(SHELL_SCROLL).evaluate((node) => ({
@@ -344,8 +337,7 @@ test.describe('workbench home geometry', () => {
         await page.locator(SHELL_SCROLL).evaluate((node) => { node.scrollTop = node.scrollHeight; });
         await expect(composer).toHaveValue(draft);
         expect(await topmostOver(page, sendButton)).toBe(send);
-        expect(await bottomOf(page.getByRole('link', { name: lastRow })))
-          .toBeLessThanOrEqual((await nav.boundingBox())!.y);
+        expect(await bottomOf(sendButton)).toBeLessThanOrEqual((await nav.boundingBox())!.y);
         await sendButton.click({ trial: true });
       } finally {
         const evidence = info.outputPath('phone-traffic-and-page-errors.json');
@@ -367,13 +359,12 @@ test.describe('settings overlay geometry', () => {
     await page.setViewportSize(DESKTOP);
     await open(page, '/');
 
-    // A draft and a project selection are what the overlay exists to preserve,
-    // so the assertion starts by creating both. Non-ASCII on purpose.
+    // A draft is what the overlay exists to preserve, so the assertion starts by
+    // writing one. Non-ASCII on purpose.
     const draft = '给中文项目写一份说明';
-    const composer = page.getByPlaceholder('Tell the agent what you want…');
+    const composer = page.getByPlaceholder('Message Vibey…');
     await composer.fill(draft);
     await expect(composer).toHaveValue(draft);
-    await expect(projectChip(page)).toBeVisible();
 
     await page.locator('aside [data-settings-toggle="true"]').click();
     await expect(page).toHaveURL(/\/settings\/general$/);
@@ -392,8 +383,7 @@ test.describe('settings overlay geometry', () => {
     await page.getByRole('button', { name: 'Close Settings' }).click();
     await expect(page).toHaveURL(`${ORIGIN}/`);
     await expect(overlay).toHaveCount(0);
-    await expect(page.getByPlaceholder('Tell the agent what you want…')).toHaveValue(draft);
-    await expect(projectChip(page)).toBeVisible();
+    await expect(page.getByPlaceholder('Message Vibey…')).toHaveValue(draft);
 
     expect(denied).toEqual([]);
   });

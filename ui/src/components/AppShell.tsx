@@ -1,6 +1,6 @@
 import { DesktopDragRegion } from './DesktopDragRegion';
 import { DesktopWindowChrome } from './DesktopWindowChrome';
-import { desktopDragRegion } from '../lib/desktopShell';
+import { desktopDragRegion, isNativeAppWindow } from '../lib/desktopShell';
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Link, Navigate, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { AlertTriangle, FolderTree, Grid2x2, Inbox, LayoutGrid, Settings } from 'lucide-react';
@@ -177,8 +177,9 @@ export const AppShell: React.FC = () => {
   // §7.1m). Frozen at mount from the landing URL rather than tracked off `location`, so
   // navigating deeper inside the tab can't suddenly restore the workbench window layout
   // this tab exists to stay out of — nor re-enable the save that would clobber it.
+  // Native identity also covers a hard navigation from a Show Page without query flags.
   const [standaloneAppTab] = useState(() =>
-    typeof window === 'undefined' ? false : isStandaloneAppTab(window.location.search),
+    typeof window === 'undefined' ? false : isNativeAppWindow() || isStandaloneAppTab(window.location.search),
   );
   // A single-app tab sitting on the app's own route (⌘/Ctrl-clicked Terminal / Files /
   // Editor, or that URL bookmarked): the tab exists to show ONE app, so it drops EVERY
@@ -589,6 +590,10 @@ export const AppShell: React.FC = () => {
               ? 'h-full p-0 md:h-auto md:min-h-screen'
               : isFullScreenMobile
                 ? 'h-full p-0 md:mx-auto md:h-auto md:px-10 md:py-8'
+              // The home lays its one group out in a column that fills the page: the
+              // scroll area on a phone, the window on a desktop (ui/design: home/home/*; the rules are in HomeLayout).
+              : isWorkbenchHome
+                ? 'flex min-h-full flex-col px-4 md:min-h-screen md:px-10 md:py-8'
             : 'mx-auto px-4 pt-4 pb-5 md:px-10 md:py-8',
         )}>
           {/* A crashing page only replaces the content area — the sidebar + chrome stay usable, and

@@ -796,7 +796,6 @@ def test_apple_secrets_reach_only_the_identity_import_and_never_tauri():
             if names:
                 by_step[item["name"]] = names
     assert by_step.pop("Import Apple signing identity") == apple
-    assert by_step.pop("Submit installer to SignPath test signing") == {"SIGNPATH_TEST_API_TOKEN"}
     assert set().union(*by_step.values()) == updater
     # Exported names stay outside what tauri-bundler reads, so the bundler can
     # never sign or notarize with an identity on its own.
@@ -811,14 +810,19 @@ def test_signpath_test_signing_is_a_dispatch_only_isolated_lane():
     import signpath_test_signing as verifier
 
     package = workflow("desktop-package.yml")
-    triggers = package.get("on", package.get(True))
+    package_triggers = package.get("on", package.get(True))
+    assert "signpath_test" not in package_triggers["workflow_dispatch"]["inputs"]
+    assert "signpath_test" not in package_triggers["workflow_call"]["inputs"]
+    assert set(package["jobs"]) == {"package"}
+    assert "if" not in package["jobs"]["package"]
+
+    test_workflow = workflow("desktop-signpath-test.yml")
+    triggers = test_workflow.get("on", test_workflow.get(True))
+    assert set(triggers) == {"workflow_dispatch"}
     test_input = triggers["workflow_dispatch"]["inputs"]["signpath_test"]
     assert (test_input["type"], test_input["default"], test_input.get("required", False)) == ("boolean", False, False)
-    # A release reaches this file only through workflow_call, which cannot pass the input.
-    assert "signpath_test" not in triggers["workflow_call"]["inputs"]
-    jobs = package["jobs"]
-    assert jobs["package"]["if"] == "${{ !inputs.signpath_test }}"
-    lane = {name: job for name, job in jobs.items() if name != "package"}
+    assert secret_references({key: value for key, value in test_workflow.items() if key != "jobs"}) == set()
+    lane = test_workflow["jobs"]
     assert set(lane) == {"signpath-test-build", "signpath-test-sign", "signpath-test-verify"}
     for name, job in lane.items():
         assert job["if"] == "inputs.signpath_test == true", name
@@ -833,6 +837,8 @@ def test_signpath_test_signing_is_a_dispatch_only_isolated_lane():
     # The token job binds only the test environment and never checks out or runs repository code.
     sign = lane["signpath-test-sign"]
     assert sign["environment"] == "signpath-test"
+    assert secret_references(sign) == {"SIGNPATH_TEST_API_TOKEN"}
+    assert secret_references({key: value for key, value in sign.items() if key != "steps"}) == set()
     submit, upload = sign["steps"]
     assert all("run" not in item for item in sign["steps"])
     assert submit["uses"] == (

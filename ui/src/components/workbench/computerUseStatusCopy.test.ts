@@ -1,28 +1,8 @@
-/* @vitest-environment jsdom */
-
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import en from '../../i18n/en.json';
 import zh from '../../i18n/zh.json';
-import { ComputerUseStatusLine } from './ComputerUseStatusLine';
 import { computerUseStatusCopy } from './computerUseStatusCopy';
-
-const apiFetch = vi.hoisted(() => vi.fn());
-
-vi.mock('../../lib/apiFetch', () => ({ apiFetch }));
-vi.mock('react-i18next', () => ({
-  useTranslation: () => ({ t: (key: string) => key }),
-}));
-
-afterEach(() => {
-  cleanup();
-  apiFetch.mockReset();
-  Reflect.deleteProperty(window, '__AVIBE_DESKTOP_SHELL__');
-});
-
-const renderLine = () => render(<MemoryRouter><ComputerUseStatusLine /></MemoryRouter>);
 
 describe('computerUseStatusCopy', () => {
   it('maps permission reasons to localized copy without exposing raw reason codes', () => {
@@ -112,95 +92,5 @@ describe('computerUseStatusCopy', () => {
   it('keeps Controller-unavailable remediation aligned in both locales', () => {
     expect(en.workbench.home.computerUse.controllerUnavailableDetail).toContain('Controller');
     expect(zh.workbench.home.computerUse.controllerUnavailableDetail).toContain('Controller');
-  });
-});
-
-describe('ComputerUseStatusLine', () => {
-  it('renders one read-only line per observed status and refreshes without cache', async () => {
-    apiFetch.mockResolvedValue({
-      ok: true,
-      json: async () => ({ status: 'needs_permission', reason: 'screen_recording' }),
-    });
-
-    renderLine();
-
-    await waitFor(() => {
-      expect(screen.getByTestId('computer-use-status')).toBeTruthy();
-    });
-    expect(screen.getAllByTestId('computer-use-status')).toHaveLength(1);
-    expect(screen.getByTestId('computer-use-status').getAttribute('data-computer-use-status')).toBe(
-      'needs_permission',
-    );
-    expect(screen.getByText('workbench.home.computerUse.screenRecordingDetail')).toBeTruthy();
-    expect(screen.queryByText('screen_recording')).toBeNull();
-    expect(apiFetch).toHaveBeenCalledWith(
-      '/api/desktop/computer-use/status',
-      { cache: 'no-store' },
-    );
-  });
-
-  it('does not render the macOS line on an unsupported host', async () => {
-    apiFetch.mockResolvedValue({
-      ok: true,
-      json: async () => ({ supported: false, status: 'unavailable', reason: 'unsupported_host' }),
-    });
-
-    renderLine();
-
-    await waitFor(() => {
-      expect(apiFetch).toHaveBeenCalled();
-    });
-    expect(screen.queryByTestId('computer-use-status')).toBeNull();
-  });
-
-  it('renders Controller IPC failure as unavailable instead of ready', async () => {
-    apiFetch.mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        supported: true,
-        status: 'unavailable',
-        reason: 'controller_unavailable',
-      }),
-    });
-
-    renderLine();
-
-    await waitFor(() => {
-      expect(screen.getByTestId('computer-use-status')).toBeTruthy();
-    });
-    expect(screen.getByTestId('computer-use-status').getAttribute('data-computer-use-status')).toBe(
-      'unavailable',
-    );
-    expect(screen.getByText('workbench.home.computerUse.controllerUnavailableDetail')).toBeTruthy();
-    expect(screen.queryByText('workbench.home.computerUse.readyDetail')).toBeNull();
-  });
-
-  it('links to the Settings guide only inside the desktop shell and only until ready', async () => {
-    const link = () => screen.queryByRole('link', { name: 'workbench.home.computerUse.finishInSettings' });
-    apiFetch.mockResolvedValue({
-      ok: true,
-      json: async () => ({ supported: true, status: 'needs_permission', reason: 'accessibility' }),
-    });
-
-    renderLine();
-    await waitFor(() => expect(screen.getByTestId('computer-use-status')).toBeTruthy());
-    expect(link()).toBeNull();
-    cleanup();
-
-    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
-    renderLine();
-    await waitFor(() => expect(link()).toBeTruthy());
-    expect(link()?.getAttribute('href')).toBe('/settings/computer-use');
-    cleanup();
-
-    apiFetch.mockResolvedValue({
-      ok: true,
-      json: async () => ({ supported: true, status: 'ready', reason: null }),
-    });
-    renderLine();
-    await waitFor(() => {
-      expect(screen.getByTestId('computer-use-status').getAttribute('data-computer-use-status')).toBe('ready');
-    });
-    expect(link()).toBeNull();
   });
 });

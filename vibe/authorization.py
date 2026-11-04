@@ -461,6 +461,7 @@ _VIEWER_HTTP_RULES = tuple(
         r"^/api/events$",
         r"^/api/inbox$",
         r"^/api/notifications/preferences$",
+        r"^/api/home/preferences$",
         r"^/api/media/[^/]+(?:/meta)?$",
         r"^/api/permissions$",
         r"^/api/permissions/resources/[^/]+/[^/]+/access$",
@@ -488,6 +489,7 @@ _VIEWER_HTTP_NAMESPACES = (
 )
 _VIEWER_HTTP_MUTATION_RULES = (
     ("PUT", re.compile(r"^/api/notifications/preferences$")),
+    ("PUT", re.compile(r"^/api/home/preferences$")),
     ("POST", re.compile(r"^/api/sessions/[^/]+/mark-read$")),
     ("DELETE", re.compile(r"^/api/terminal/[^/]+$")),
 )

@@ -1,14 +1,15 @@
 // @vitest-environment jsdom
 
+import { webcrypto } from 'node:crypto';
 import { createInstance } from 'i18next';
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactElement } from 'react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { VaultRequest, VaultSecret } from '@/context/ApiContext';
+import type { VaultAgentBindingsBatchResult, VaultRequest, VaultRevealContextResult, VaultSecret, VaultSignedOperationContext } from '@/context/ApiContext';
 import { InstanceAuthorizationContext } from '@/context/InstanceAuthorizationContext';
 import { capabilitiesFor } from '@/lib/testing/instanceRoleCapabilities';
 import { VaultApprovalCard } from '@/components/ui/vault-approval-card';
@@ -43,6 +44,7 @@ const vault = vi.hoisted(() => ({
   passkeyUsableHere: vi.fn(),
   setupPasskey: vi.fn(),
   unlockPasskey: vi.fn(),
+  sealValue: vi.fn(),
   approveProtectedRelease: vi.fn(),
   signProtectedRequest: vi.fn(),
   revealProtectedValue: vi.fn(),
@@ -53,7 +55,6 @@ vi.mock('@/context/ToastContext', () => ({ useToast: () => ({ showToast: vi.fn()
 vi.mock('@/lib/useProtectedVault', () => ({
   useProtectedVault: () => vault,
   useVaultLock: () => ({ unlocked: false, remainingMs: 0, lockNow: vi.fn() }),
-  webauthnAvailable: () => true,
   useVaultSandboxWarm,
 }));
 // Workbench navigation, not part of the Vaults step (and it scrolls, which jsdom lacks).
@@ -146,12 +147,38 @@ const openInBrowser: Click = { role: 'button', name: /add a passkey|unlock with 
 
 const resumedDialog = () => screen.findByRole('dialog');
 const expectApprovalButton = async (name: RegExp) => {
-  expect(within(await resumedDialog()).getByRole('button', { name })).toBeTruthy();
+  const button = within(await resumedDialog()).getByRole('button', { name }) as HTMLButtonElement;
+  await waitFor(() => expect(button.disabled).toBe(false));
+  expect(useVaultSandboxWarm).toHaveBeenCalledWith(true);
+  expect(vault.refresh).toHaveBeenCalled();
+  if (name.test('approve')) {
+    expect(api.createVaultAgentBindingsBatch).toHaveBeenCalledWith({ request_id: 'vrq_access', grant_duration: 300 });
+  }
+};
+const expectPasskeyReady = async () => {
+  const dialog = within(await resumedDialog());
+  if (vault.status === 'needs-setup') {
+    const add = dialog.getByRole('button', { name: /^add a passkey$/i }) as HTMLButtonElement;
+    expect(add.disabled).toBe(true);
+    // Acknowledging loss risk enables setup, but is not the ceremony gesture.
+    fireEvent.click(dialog.getByRole('checkbox'));
+    expect(add.disabled).toBe(false);
+  } else {
+    expect((dialog.getByRole('button', { name: /^unlock with passkey$/i }) as HTMLButtonElement).disabled).toBe(false);
+  }
+  expect(vault.refresh).toHaveBeenCalled();
 };
 const expectProtectedForm = async (fixedName?: string) => {
   const dialog = within(await resumedDialog());
   expect(dialog.getByRole('button', { name: protectedTier.name }).getAttribute('aria-pressed')).toBe('true');
   if (fixedName) expect(dialog.getAllByText(fixedName).length).toBeGreaterThan(0);
+  await expectPasskeyReady();
+};
+const expectRevealReady = async (field = 'value') => {
+  const button = await screen.findByRole('menuitem', { name: /^show value$/i }) as HTMLButtonElement;
+  await waitFor(() => expect(button.disabled).toBe(false));
+  expect(api.createVaultRevealContext).toHaveBeenCalledWith('SEED_PHRASE', { session_label: 'Vaults', field });
+  expect(useVaultSandboxWarm).toHaveBeenCalledWith(true);
 };
 
 const cases: Array<{
@@ -223,9 +250,7 @@ const cases: Array<{
       { role: 'menuitem', name: /^show in browser$/i },
     ],
     secrets: [protectedSecret],
-    resumed: async () => {
-      expect(await screen.findByRole('menuitem', { name: /^show value$/i })).toBeTruthy();
-    },
+    resumed: () => expectRevealReady(),
   },
   {
     surface: 'protected field edit',
@@ -236,11 +261,27 @@ const cases: Array<{
     vaultStatus: 'locked',
     resumed: async () => {
       expect(within(await resumedDialog()).getByLabelText('Value for value')).toBeTruthy();
+      await expectPasskeyReady();
     },
   },
 ];
 
-const ceremonies = [vault.setupPasskey, vault.unlockPasskey, vault.approveProtectedRelease, vault.signProtectedRequest, vault.revealProtectedValue];
+const ceremonies = [vault.setupPasskey, vault.unlockPasskey, vault.sealValue, vault.approveProtectedRelease, vault.signProtectedRequest, vault.revealProtectedValue];
+const expectNoProtectedOperations = () => {
+  for (const ceremony of ceremonies) expect(ceremony).not.toHaveBeenCalled();
+  expect(api.fulfillVaultAccessRequest).not.toHaveBeenCalled();
+  expect(api.signVaultDigest).not.toHaveBeenCalled();
+  expect(fetch).not.toHaveBeenCalled();
+};
+
+// Shape-correct public fixtures, deliberately unsigned and never sent to a sandbox.
+// Preparation must succeed so an enabled action, not a blocked entry, proves the wait for a click.
+const fixtureContext = (purpose: 'agent-deliver' | 'reveal', name: string): VaultSignedOperationContext => ({
+  v: 2, purpose, requestId: purpose === 'agent-deliver' ? protectedAccess.id : 'fixture-reveal',
+  display: { secrets: [{ name, kind: 'static' }] },
+  expiresAt: '2099-01-01T00:00:00Z',
+  signature: { alg: 'ed25519', keyId: 'inert-fixture', value: 'not-a-signature' },
+});
 
 function renderAt(path: string, ui: ReactElement, role: 'editor' | 'member' = 'editor') {
   return render(
@@ -255,17 +296,34 @@ function renderAt(path: string, ui: ReactElement, role: 'editor' | 'member' = 'e
 }
 
 beforeEach(() => {
+  // Real entry assessment, supported loopback browser: never stub its verdict.
+  vi.stubGlobal('location', new URL('http://127.0.0.1:5123'));
+  vi.stubGlobal('isSecureContext', true);
+  vi.stubGlobal('crypto', webcrypto);
+  vi.stubGlobal('fetch', vi.fn(() => { throw new Error('No network in a browser handoff test'); }));
+  vault.status = 'needs-setup';
   vault.hasPasskey.mockReturnValue(true);
   vault.passkeyUsableHere.mockReturnValue(true);
   for (const call of Object.values(api)) call.mockResolvedValue({ ok: true, items: [], secrets: [], deps: [], skills: [] });
   api.connectWorkbenchEvents.mockReturnValue(() => undefined);
   api.getVaultGrants.mockResolvedValue({ grants: [] });
+  api.getVaultSettings.mockResolvedValue({ ok: true, settings: { last_grant_ttl: 300 } });
+  api.createVaultAgentBindingsBatch.mockResolvedValue({
+    ok: true, request_id: protectedAccess.id, grant_id: 'grant_1', grant_duration: 300,
+    agent_pubkey: { public_key: 'inert-public-key', fingerprint: 'inert-fingerprint' },
+    items: [{ name: 'OPENAI_API_KEY', context: fixtureContext('agent-deliver', 'OPENAI_API_KEY'),
+      approval: { nonce: 'inert-nonce', expires_at_unix: 4070908800 } }],
+  } satisfies VaultAgentBindingsBatchResult);
+  api.createVaultRevealContext.mockImplementation(async (name: string, { field }: { field: string }): Promise<VaultRevealContextResult> => ({
+    ok: true, context: fixtureContext('reveal', `${name}.${field}`), envelope,
+  }));
 });
 
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   delete (window as { __AVIBE_DESKTOP_SHELL__?: true }).__AVIBE_DESKTOP_SHELL__;
 });
 
@@ -278,6 +336,8 @@ afterEach(() => {
 // them all, so a step the page can't resume, or resumes with a lost part (a provision answer back
 // on the request's Standard default, a reveal on a bare list, an agent's name dropped from Add),
 // strands the user in the browser; only a round trip through both ends catches that.
+// Positive controls must reach enabled setup/unlock/approval/reveal and its permitted preparation.
+// Presence plus no ceremony used to pass even when the real entry assessment blocked every resume.
 describe('desktop shell protected-vault browser handoff', () => {
   // Field labels must survive the same round trip as the secret name; reopening just the
   // secret silently changes an extra-field reveal into a default-field reveal.
@@ -295,11 +355,16 @@ describe('desktop shell protected-vault browser handoff', () => {
     await user.click(screen.getByRole('menuitem', { name: /^show in browser$/i }));
     const target = new URL(String(open.mock.calls[0][0]));
     expect(target.searchParams.get('field')).toBe('username');
+    expect(api.createVaultRevealContext).not.toHaveBeenCalled();
+    expect(useVaultSandboxWarm).not.toHaveBeenCalledWith(true);
+    expectNoProtectedOperations();
     cleanup();
     delete (window as { __AVIBE_DESKTOP_SHELL__?: true }).__AVIBE_DESKTOP_SHELL__;
     renderAt(`${target.pathname}${target.search}`, <VaultsPage />);
     expect((await screen.findByRole('combobox', { name: 'Field to reveal' }) as HTMLSelectElement).value).toBe('username');
-    expect(vault.revealProtectedValue).not.toHaveBeenCalled();
+    await expectRevealReady('username');
+    expect(open).toHaveBeenCalledTimes(1);
+    expectNoProtectedOperations();
   });
 
   it.each(cases)('$surface resumes in the browser without starting a passkey step', async (c) => {
@@ -331,8 +396,6 @@ describe('desktop shell protected-vault browser handoff', () => {
     await c.resumed();
 
     expect(open).toHaveBeenCalledTimes(1);
-    for (const ceremony of ceremonies) expect(ceremony).not.toHaveBeenCalled();
-    expect(api.fulfillVaultAccessRequest).not.toHaveBeenCalled();
-    expect(api.signVaultDigest).not.toHaveBeenCalled();
+    expectNoProtectedOperations();
   });
 });
