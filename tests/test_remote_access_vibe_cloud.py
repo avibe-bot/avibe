@@ -278,6 +278,31 @@ def test_background_push_inbox_read_does_not_renew_remote_cookie(monkeypatch):
             assert (remote_access.SESSION_COOKIE_NAME in response.headers.get("Set-Cookie", "")) is should_renew
 
 
+def test_conversation_prefetch_does_not_renew_remote_cookie(monkeypatch):
+    config = _config()
+    monkeypatch.setattr(ui_server, "_load_remote_access_config", lambda: config)
+    renewed_cookie = remote_access._encode_session_cookie(
+        config.remote_access.vibe_cloud.session_secret,
+        {"exp": int(time.time()) + 60},
+    )
+    monkeypatch.setattr(remote_access, "renew_session_cookie", lambda *_: renewed_cookie)
+
+    for method, path, headers, should_renew in (
+        ("GET", "/api/sessions/ses_a/bootstrap", {"X-Avibe-Prefetch": "1"}, False),
+        # Opening the chat makes the same read without the header, and renews.
+        ("GET", "/api/sessions/ses_a/bootstrap", {}, True),
+        # The declaration covers that one read only.
+        ("GET", "/api/sessions/ses_a/messages", {"X-Avibe-Prefetch": "1"}, True),
+        ("GET", "/api/sessions/ses_a/bootstrap/extra", {"X-Avibe-Prefetch": "1"}, True),
+        ("POST", "/api/sessions/ses_a/bootstrap", {"X-Avibe-Prefetch": "1"}, True),
+    ):
+        with ui_server.app.test_request_context(path, method=method, headers=headers):
+            g.remote_session_renew = {"sub": "user-1"}
+            response = ui_server.renew_remote_access_cookie(jsonify({"ok": True}))
+            renewed = remote_access.SESSION_COOKIE_NAME in response.headers.get("Set-Cookie", "")
+            assert renewed is should_renew, (method, path, headers)
+
+
 def test_session_cookie_rejects_empty_session_secret() -> None:
     config = _config()
     config.remote_access.vibe_cloud.session_secret = ""

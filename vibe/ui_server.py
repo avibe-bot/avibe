@@ -3214,6 +3214,23 @@ class _RejectInvalidHostMiddleware:
 app.add_middleware(_RejectInvalidHostMiddleware)
 
 
+_CONVERSATION_PREFETCH_PATH_RE = re.compile(r"/api/sessions/[^/]+/bootstrap")
+
+
+def _is_conversation_prefetch_request() -> bool:
+    """Whether the Web UI declared this conversation read an idle-time prefetch.
+
+    The header is client-controlled, which is fine: declaring it only spares the
+    request from renewing the session, so a client can shorten nothing but its
+    own session with it.
+    """
+    return (
+        request.method == "GET"
+        and request.headers.get("X-Avibe-Prefetch") == "1"
+        and _CONVERSATION_PREFETCH_PATH_RE.fullmatch(request.path) is not None
+    )
+
+
 @app.after_request
 def renew_remote_access_cookie(response: Response) -> Response:
     # Logout handler explicitly clears the session cookie; never re-issue it.
@@ -3223,6 +3240,10 @@ def renew_remote_access_cookie(response: Response) -> Response:
     # arrive regularly while the app is closed and must not keep a remote
     # browser session alive merely by refreshing its icon badge.
     if request.path == "/api/inbox" and request.headers.get("X-Avibe-Background-Push") == "1":
+        return response
+    # Nor is the Web UI prefetching a conversation in idle time: an open tab
+    # left alone must not keep the session alive by warming its chat cache.
+    if _is_conversation_prefetch_request():
         return response
     if _is_current_immutable_static_asset_request():
         return response

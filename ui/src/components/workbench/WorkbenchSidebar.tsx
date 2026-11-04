@@ -53,6 +53,7 @@ import { ProjectSettingsDialog } from './ProjectSettingsDialog';
 import { SortableProjectList, type ProjectDragHandle } from './SortableProjectList';
 import { BotStrip } from './bots/BotStrip';
 import { InboxHoverPopover } from './InboxHoverPopover';
+import { useChatPrefetch } from './useChatPrefetch';
 import logoImg from '../../assets/logo.png';
 
 interface CapabilityNavItem {
@@ -614,9 +615,19 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
     if (to === '/vaults') return capabilities.can_use_vault_secrets;
     return false;
   });
-  const { totalUnread, badgeTotal, unreadSessions, inboxSessions, markRead, unreadBySession } = useWorkbenchInbox({
+  const {
+    totalUnread,
+    badgeTotal,
+    unreadSessions,
+    inboxSessions,
+    loading: inboxLoading,
+    markRead,
+    unreadBySession,
+  } = useWorkbenchInbox({
     feed: surfaceActive,
   });
+  // Warm the conversations the reader is most likely to open next.
+  useChatPrefetch(inboxSessions, surfaceActive && !inboxLoading);
   // Projects/sessions tree — shared with the mobile ProjectsPage via the provider
   // (one EventSource + one cache, not a per-component reimplementation). The
   // sidebar owns only its inbox popover + the New Project dialog trigger.
