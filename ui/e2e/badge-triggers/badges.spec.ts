@@ -14,6 +14,8 @@ for (const locale of ['en', 'zh'] as const) {
       await page.route('**/api/config', (route) => route.fulfill({ json: { update: { auto_update: false } } }));
       await page.route('**/api/version', (route) => route.fulfill({ json: {
         current: '3.1.4', latest: '3.1.5', has_update: true,
+        ...(new URL(page.url()).searchParams.get('state')?.endsWith('-managed-update')
+          ? { current: '3.2.5rc3', latest: '3.2.5rc6', managed_by: 'desktop' } : {}),
       } }));
       await page.route('**/api/backend/codex/runtime?cli_path=*', (route) => route.fulfill({ json: {
         installed: true, status: 'ok', cli_path: 'codex', resolved_path: 'codex',
@@ -37,6 +39,51 @@ for (const locale of ['en', 'zh'] as const) {
         }
         if (state === 'ready' || state === 'update') {
           await page.screenshot({ path: testInfo.outputPath(`${state}-${locale}.png`), scale: 'css' });
+        }
+      }
+    });
+
+    test(`desktop-managed update popover copy (${locale})`, async ({ page }, testInfo) => {
+      const expectedStatus = locale === 'zh' ? '发现新版本' : 'Update available';
+      expect(copy('dashboard.desktopManagedUpdateAvailable', undefined, locale)).toBe(expectedStatus);
+      await page.addInitScript(() => {
+        if (new URLSearchParams(location.search).get('state') !== 'native-managed-update') return;
+        Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true });
+        Object.defineProperty(window, '__AVIBE_DESKTOP_VERSION__', { value: '3.2.5-rc.3' });
+        Object.defineProperty(window, '__TAURI_INTERNALS__', { value: {
+          transformCallback: () => 1,
+          invoke: async (command: string) => {
+            if (command === 'desktop_update_state') return {
+              phase: 'available', latest: '3.2.5-rc.6', channel: 'prerelease',
+              skippedVersion: null, interactive: true,
+            };
+            if (command === 'plugin:event|listen') return 1;
+            if (command === 'plugin:event|unlisten') return;
+            throw new Error(`Unexpected fixture command: ${command}`);
+          },
+        } });
+      });
+      for (const mode of ['native', 'web'] as const) {
+        for (const theme of ['light', 'dark'] as const) {
+          await page.goto(`/e2e/badge-triggers/fixture.html?state=${mode}-managed-update`);
+          await page.evaluate((value) => document.documentElement.setAttribute('data-theme', value), theme);
+
+          const version = page.getByTitle(mode === 'native' ? 'v3.2.5-rc.3' : 'v3.2.5rc3', { exact: true });
+          await expect(version).toBeVisible();
+          await version.click();
+          const dialog = page.getByRole('dialog');
+          await expect(dialog).toBeVisible();
+          await expect(page.getByText(expectedStatus, { exact: true })).toBeVisible();
+          await expect(page.getByText('3.2.5rc6', { exact: true })).toBeVisible();
+          if (mode === 'native') {
+            await expect(page.getByRole('button', { name: copy('dashboard.skipUpdate', undefined, locale), exact: true })).toBeVisible();
+            await expect(page.getByRole('button', { name: copy('dashboard.upgradeNow', undefined, locale), exact: true })).toBeVisible();
+            await expect(page.getByText(copy('dashboard.desktopManagedUpdateMemberHint', undefined, locale), { exact: true })).toHaveCount(0);
+          } else {
+            await expect(page.getByText(copy('dashboard.desktopManagedUpdateMemberHint', undefined, locale), { exact: true })).toBeVisible();
+            await expect(page.getByRole('button', { name: copy('dashboard.upgradeNow', undefined, locale), exact: true })).toHaveCount(0);
+          }
+          await dialog.screenshot({ path: testInfo.outputPath(`${mode}-update-${locale}-${theme}.png`), scale: 'css', animations: 'disabled' });
         }
       }
     });

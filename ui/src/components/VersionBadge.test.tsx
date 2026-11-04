@@ -125,7 +125,7 @@ describe('desktop version ownership', () => {
     });
     fireEvent.click(await screen.findByTitle('v3.2.2-rc.13'));
     expect(await screen.findByText(
-      i18n.t('dashboard.desktopManagedUpdateAvailable', { to: '10.0.0' }),
+      i18n.t('dashboard.desktopManagedUpdateAvailable'),
     )).toBeTruthy();
     expect(screen.queryByText(i18n.t('dashboard.checkFailed'))).toBeNull();
   });
@@ -233,7 +233,7 @@ describe('desktop version ownership', () => {
 
     fireEvent.click(entry);
     fireEvent.click(await screen.findByRole('button', { name: i18n.t('dashboard.checkUpdate') }));
-    expect(await screen.findByText(i18n.t('dashboard.desktopManagedUpdateAvailable', { to: '3.2.3' }))).toBeTruthy();
+    expect(await screen.findByText(i18n.t('dashboard.desktopManagedUpdateAvailable'))).toBeTruthy();
     expect(entry.className).toContain('text-gold-ink');
   });
 
@@ -320,7 +320,7 @@ describe('desktop version ownership', () => {
   it('points a browser on a desktop Runtime to the update the desktop app found', async () => {
     api.getVersion.mockResolvedValueOnce({ current: '3.2.2rc13', latest: '3.2.3-rc.1', has_update: true, managed_by: 'desktop' });
     const entry = await openBrowserPopup('v3.2.2rc13');
-    expect(await screen.findByText(i18n.t('dashboard.desktopManagedUpdateAvailable', { to: '3.2.3rc1' }))).toBeTruthy();
+    expect(await screen.findByText(i18n.t('dashboard.desktopManagedUpdateAvailable'))).toBeTruthy();
     expect(screen.getByText('3.2.3rc1')).toBeTruthy();
     expect(screen.queryByText(i18n.t('dashboard.desktopManagedUpdate'))).toBeNull();
     expectNoUpdateControls();
@@ -344,7 +344,7 @@ describe('desktop version ownership', () => {
     await openBrowserPopup('v3.2.2rc13');
     expect(api.getVersion).toHaveBeenLastCalledWith(undefined);
     fireEvent.click(screen.getByRole('button', { name: i18n.t('dashboard.checkUpdate') }));
-    expect(await screen.findByText(i18n.t('dashboard.desktopManagedUpdateAvailable', { to: '3.2.3' }))).toBeTruthy();
+    expect(await screen.findByText(i18n.t('dashboard.desktopManagedUpdateAvailable'))).toBeTruthy();
     expect(api.getVersion).toHaveBeenLastCalledWith({ cache: false });
   });
 

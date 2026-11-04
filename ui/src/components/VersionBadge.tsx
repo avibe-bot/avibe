@@ -687,7 +687,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
               ) : isDesktopManaged && hasUpdate ? (
                 <div className="flex items-center gap-2 rounded-md border border-gold/30 bg-gold/10 px-3 py-2 text-sm text-gold-ink">
                   <AlertCircle size={16} className="shrink-0" />
-                  <span>{t('dashboard.desktopManagedUpdateAvailable', { to: latestVersion })}</span>
+                  <span>{t('dashboard.desktopManagedUpdateAvailable')}</span>
                 </div>
               ) : isDesktopManaged && !latestVersion ? (
                 // The desktop app has not published a conclusion this Runtime can relay.
