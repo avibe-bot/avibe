@@ -18,9 +18,14 @@ ship alone.
   capture from the main frame.
 - Authentication origins (`avibe.bot`, its production Supabase Auth origin,
   and GitHub) stay in the WebView without microphone access.
+- The pinned Protected Vault origin may load only in an embedded frame or an
+  app-created popup. Direct main-frame navigation still leaves the shell, and
+  the Vault origin receives neither microphone access nor a native bridge.
 - Google authorization is intercepted with an email-code explanation.
 - Other HTTP(S) origins open in `SFSafariViewController`; other schemes are
   rejected.
+- JavaScript confirmation dialogs use a native alert, and same-origin WebKit
+  downloads open the system share sheet so the user can save them to Files.
 - Cookies and website data use `WKWebsiteDataStore.default()` and survive app
   launches.
 - The WebView is pinned to `keyboardLayoutGuide`, has automatic content insets

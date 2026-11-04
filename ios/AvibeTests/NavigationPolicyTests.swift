@@ -35,6 +35,30 @@ final class NavigationPolicyTests: XCTestCase {
         XCTAssertEqual(policy.destination(for: URL(string: "https://evil.avibe.bot/login")!), .external)
     }
 
+    func testProtectedVaultOriginIsLimitedToEmbeddedAndPopupContexts() {
+        let policy = NavigationPolicy(instanceOrigins: [instance])
+        let sandbox = URL(string: "https://sandbox.avibe.bot/v/pinned/index.html")!
+
+        XCTAssertEqual(policy.destination(for: sandbox), .protectedVault)
+        XCTAssertEqual(policy.disposition(for: sandbox, context: .embeddedFrame), .allow)
+        XCTAssertEqual(policy.disposition(for: sandbox, context: .popupMainFrame), .allow)
+        XCTAssertEqual(policy.disposition(for: sandbox, context: .primaryMainFrame), .external)
+        XCTAssertEqual(
+            policy.destination(for: URL(string: "https://evil.sandbox.avibe.bot/")!),
+            .external
+        )
+    }
+
+    func testPopupBootstrapAllowsOnlyAboutBlankInThePopupMainFrame() {
+        let policy = NavigationPolicy(instanceOrigins: [instance])
+        let aboutBlank = URL(string: "about:blank")!
+
+        XCTAssertTrue(policy.isPopupBootstrap(aboutBlank))
+        XCTAssertEqual(policy.disposition(for: aboutBlank, context: .popupMainFrame), .allow)
+        XCTAssertEqual(policy.disposition(for: aboutBlank, context: .primaryMainFrame), .blocked)
+        XCTAssertFalse(policy.isPopupBootstrap(URL(string: "about:srcdoc")!))
+    }
+
     func testGoogleAuthorizationOriginIsIntercepted() {
         let policy = NavigationPolicy(instanceOrigins: [instance])
 
@@ -50,5 +74,25 @@ final class NavigationPolicyTests: XCTestCase {
         XCTAssertEqual(policy.destination(for: URL(string: "https://example.com/docs")!), .external)
         XCTAssertEqual(policy.destination(for: URL(string: "http://example.com/docs")!), .external)
         XCTAssertEqual(policy.destination(for: URL(string: "avibe://settings")!), .blocked)
+    }
+
+    func testDownloadsAreLimitedToTheConfiguredInstanceOrigin() {
+        let policy = NavigationPolicy(instanceOrigins: [instance])
+
+        XCTAssertTrue(
+            policy.permitsDownload(
+                from: URL(string: "https://alice-app.avibe.bot/api/files/content?download=1")!
+            )
+        )
+        XCTAssertFalse(
+            policy.permitsDownload(
+                from: URL(string: "https://sandbox.avibe.bot/v/pinned/index.html")!
+            )
+        )
+        XCTAssertFalse(
+            policy.permitsDownload(
+                from: URL(string: "https://example.com/archive.zip")!
+            )
+        )
     }
 }

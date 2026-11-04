@@ -312,6 +312,15 @@ later), so that a bridge change and its Web UI consumer land in one PR.
   The bridge checks the sender's `WKScriptMessage.frameInfo.securityOrigin`
   and the media-capture delegate checks the requesting origin against class 1
   on every call, so a page in class 2 or 3 never reaches either.
+- Protected Vault is a narrow browsing-context exception, not another bridge
+  trust class. The exact `https://sandbox.avibe.bot` origin may load in its
+  pinned iframe and in an app-created popup that preserves `window.opener` for
+  passkey authorization. A direct main-frame navigation still leaves the
+  shell. The sandbox receives neither the native bridge nor microphone access.
+- The shell implements WebKit's JavaScript confirmation delegate and download
+  delegates because the Web UI uses `window.confirm` for guarded actions and
+  attachment responses for Files and Editor downloads. Downloads from the
+  configured instance open the system share sheet, including Save to Files.
 - The microphone grant follows the instance origin, the trust boundary the Web
   UI already uses. Show Pages are same-origin-trusted by product decision: the
   Workbench frames them with `allow-same-origin` and they can reach the parent
