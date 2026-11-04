@@ -9,13 +9,14 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
 
 import pytest
 
-from scripts.ci_docs_only import Scope, classify
+from scripts.ci_docs_only import Scope, classify, platform_independent
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/ci_docs_only.py"
 
@@ -46,6 +47,7 @@ def make_repo(root: Path) -> Path:
     write(root, "core.py", "print('runtime')\n")
     write(root, "core/existing.py", "print('runtime')\n")
     write(root, "ui/src/Existing.tsx", "export const existing = 1;\n")
+    write(root, "ui/scripts/emojiCatalog.ts", "export function emojiCatalog() { return { name: 'catalog' }; }\n")
     commit(root)
     return root
 
@@ -212,8 +214,7 @@ def test_pr_compares_actual_merge_tree_with_verified_parents_at_depth_two(repo: 
 
 UI_SOURCES = (
     "ui/src/App.tsx", "ui/src/i18n/en.json", "ui/e2e/pet-mini/mini.spec.ts",
-    "ui/design/frames/home.design.tsx", "ui/scripts/lint-baseline.mjs",
-    "ui/playwright.pet-mini.config.ts", "ui/playwright.config.ts", "ui/tsconfig.tests.json",
+    "ui/design/frames/home.design.tsx", "ui/playwright.pet-mini.config.ts", "ui/playwright.config.ts", "ui/tsconfig.tests.json",
     "ui/eslint-baseline.json", "ui/.oxlintrc.json", "ui/README.md", "ui/design.html",
     "ui/agentation.d.ts",
 )
@@ -247,6 +248,10 @@ BACKEND = (
     (("ui/postcss.config.js",), FULL),
     (("ui/public/icon.png",), FULL),
     (("ui/.gitignore",), FULL),
+    # Build code: a Vite plugin can emit a file under any name and path.
+    (("ui/scripts/emojiCatalog.ts",), FULL),
+    (("ui/scripts/validate-out-of-tree-imports.mjs",), FULL),
+    (("ui/scripts/e2e-suite.mjs", "ui/src/App.tsx"), FULL),
     # CI, dependency, packaging and installer definitions.
     ((".github/workflows/lint.yml",), FULL),
     (("scripts/ci_docs_only.py",), FULL),
@@ -283,6 +288,38 @@ def test_portable_added_ui_name_and_modified_existing_name_skip_platform(repo: P
     assert routes(classify("pull_request", event, sha, repo)) == ("run", "skip")
 
 
+def test_modifying_an_existing_build_plugin_keeps_platform_checks(repo: Path) -> None:
+    """A plugin edit can add a generateBundle emit whose fixed names collide on Windows/macOS."""
+    def edit(repo: Path) -> None:
+        plugin = repo / "ui/scripts/emojiCatalog.ts"
+        plugin.write_text(plugin.read_text() + "// generateBundle() { this.emitFile({ fileName: 'assets/EMOJI/en.json' }) }\n")
+    event, sha = synthetic_pr(repo, edit)
+    scope = classify("pull_request", event, sha, repo)
+    assert routes(scope) == FULL and "ui/scripts/emojiCatalog.ts" in scope.platform_reason
+
+
+def test_platform_allowlist_excludes_every_local_module_the_production_build_loads() -> None:
+    """Build code, not UI source: everything vite.config.ts loads, transitively, must keep platform checks."""
+    root = SCRIPT.parents[1]
+    specifier = re.compile(r"""(?:\bfrom|\bimport)\s*\(?\s*['"](\.{1,2}/[^'"]+)['"]""")
+    pending, loaded = [root / "ui/vite.config.ts"], set()
+    while pending:
+        module = pending.pop()
+        if module in loaded:
+            continue
+        loaded.add(module)
+        for relative in specifier.findall(module.read_text(encoding="utf-8")):
+            target = (module.parent / relative).resolve()
+            found = next((candidate for candidate in (
+                target, *(target.with_name(target.name + suffix) for suffix in (".ts", ".mts", ".mjs", ".js")),
+            ) if candidate.is_file()), None)
+            assert found is not None, (module, relative)
+            pending.append(found)
+    local = sorted(module.relative_to(root).as_posix() for module in loaded)
+    assert "ui/scripts/emojiCatalog.ts" in local  # The scan still sees the plugin it exists for.
+    assert [module for module in local if platform_independent(module)] == []
+
+
 def moves(source: str, target: str):
     def change(repo: Path) -> None:
         (repo / target).parent.mkdir(parents=True, exist_ok=True)
@@ -297,6 +334,7 @@ def moves(source: str, target: str):
     ("ui/src/Existing.tsx", "ui/src/Renamed.tsx", ("run", "skip")),
     ("core/existing.py", "core/renamed.py", ("skip", "run")),
     ("ui/src/Existing.tsx", "ui/src/aux.tsx", FULL),
+    ("ui/src/Existing.tsx", "ui/scripts/existing.ts", FULL),
 ])
 def test_pull_request_rename_routes_by_both_paths(repo: Path, source: str, target: str, expected: tuple) -> None:
     event, sha = synthetic_pr(repo, moves(source, target))

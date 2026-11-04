@@ -50,10 +50,12 @@ BACKEND_FILES = frozenset({"main.py"})
 # installer smoke) read the wheel, uv.lock, install.ps1 and Python sources and
 # tests, never Web UI content. These paths reach them only as the bytes of
 # vibe/ui/dist inside the wheel, which the Linux build, distribution contracts
-# and install regressions still verify. Build inputs that shape that output
-# (package manifests, Vite/TypeScript build config, index.html, public/) are
-# deliberately absent.
-UI_SOURCE_DIRS = ("ui/src/", "ui/e2e/", "ui/design/", "ui/scripts/")
+# and install regressions still verify; the build names every module and asset
+# it takes from them after its source plus a content hash. Build code and
+# inputs that choose output names or paths themselves are deliberately absent:
+# ui/scripts/ (Vite plugins can emit files under any name), package manifests,
+# Vite/TypeScript build config, index.html and public/.
+UI_SOURCE_DIRS = ("ui/src/", "ui/e2e/", "ui/design/")
 UI_SOURCE_FILES = frozenset({
     "ui/.oxlintrc.json", "ui/README.md", "ui/agentation.d.ts", "ui/design.html",
     "ui/eslint-baseline.json", "ui/tsconfig.tests.json",
@@ -80,7 +82,7 @@ class Scope(NamedTuple):
 
 
 def full(reason: str, windows_control_ipc: bool) -> Scope:
-    return Scope(False, reason, windows_control_ipc, RUN, f"run: {reason}", RUN, f"run: {reason}")
+    return Scope(False, reason, windows_control_ipc, RUN, reason, RUN, reason)
 
 
 def well_formed(path: str) -> bool:
@@ -141,8 +143,8 @@ def revision(value: object) -> str:
 def route(paths: list[str], independent: Callable[[str], bool], family: str) -> tuple[str, str]:
     for path in paths:
         if not (narrative_path(path) or independent(path)):
-            return RUN, f"run: {family} may read {json.dumps(path, ensure_ascii=True)}"
-    return SKIP, f"skip: no changed path can reach the {family}"
+            return RUN, f"{json.dumps(path, ensure_ascii=True)} is not proven outside the {family}' inputs"
+    return SKIP, f"no changed path can reach the {family}"
 
 
 def scope_of(entries: list[tuple[str, str, str, str]], routable: bool) -> Scope:
@@ -161,7 +163,7 @@ def scope_of(entries: list[tuple[str, str, str, str]], routable: bool) -> Scope:
     code = next((path for path in paths if not narrative_path(path)), None)
     if code is None:
         reason = f"all {len(paths)} changed paths are narrative documentation"
-        return Scope(True, reason, False, SKIP, f"skip: {reason}", SKIP, f"skip: {reason}")
+        return Scope(True, reason, False, SKIP, reason, SKIP, reason)
     reason = f"not documentation only: {json.dumps(code, ensure_ascii=True)}"
     if not routable:
         return full(reason, windows_control_ipc)
@@ -171,7 +173,7 @@ def scope_of(entries: list[tuple[str, str, str, str]], routable: bool) -> Scope:
         # No rename detection: a rename is a deletion plus this added path.
         added = next((path for status, _, _, path in entries if status == "A" and not portable_path(path)), None)
         if added is not None:
-            platform, platform_reason = RUN, f"run: added name {json.dumps(added, ensure_ascii=True)} is not portable"
+            platform, platform_reason = RUN, f"added name {json.dumps(added, ensure_ascii=True)} is not portable"
     return Scope(False, reason, windows_control_ipc, browser, browser_reason, platform, platform_reason)
 
 
@@ -275,8 +277,8 @@ def main() -> None:
         with Path(summary).open("a", encoding="utf-8") as stream:
             stream.write(
                 f"## CI scope: {title}\n\n{scope.reason}\n\n"
-                f"- Browser lanes: {scope.browser_reason}\n"
-                f"- Installed-package platform checks: {scope.platform_reason}\n"
+                f"- Browser lanes: **{scope.browser}**, {scope.browser_reason}\n"
+                f"- Installed-package platform checks: **{scope.platform}**, {scope.platform_reason}\n"
             )
 
 

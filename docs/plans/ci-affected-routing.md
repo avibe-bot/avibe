@@ -31,7 +31,7 @@ Rename detection is off, so a move counts both its deleted and its added path.
 | Route | Jobs that may skip | Changed paths that allow it |
 | --- | --- | --- |
 | `browser` | `ui-browser-checks` (4 lanes, 14 commands) | narrative docs, or a path under `core/`, `modules/`, `vibe/`, `storage/`, `config/`, `tests/`, `skills/`, `desktop/`, `docs/`, `assets/`, `standards/`, `examples/`, `.agents/`, or `main.py`, and none inside the browser checkout |
-| `platform` | `web-fetch-runtime` (5 legs) and `windows-install-smoke-runners` | narrative docs; `docs/**`; `tests/scenarios/<area>/catalog.yaml`; `ui/src/**`, `ui/e2e/**`, `ui/design/**`, `ui/scripts/**`; `ui/playwright*.config.ts`, `ui/tsconfig.tests.json`, `ui/eslint-baseline.json`, `ui/.oxlintrc.json`, `ui/README.md`, `ui/agentation.d.ts`, `ui/design.html`; and every added path must be a portable name (`[A-Za-z0-9._@+-]{1,64}` per segment, no trailing dot, no Windows device name) |
+| `platform` | `web-fetch-runtime` (5 legs) and `windows-install-smoke-runners` | narrative docs; `docs/**`; `tests/scenarios/<area>/catalog.yaml`; `ui/src/**`, `ui/e2e/**`, `ui/design/**`; `ui/playwright*.config.ts`, `ui/tsconfig.tests.json`, `ui/eslint-baseline.json`, `ui/.oxlintrc.json`, `ui/README.md`, `ui/agentation.d.ts`, `ui/design.html`; and every added path must be a portable name (`[A-Za-z0-9._@+-]{1,64}` per segment, no trailing dot, no Windows device name) |
 
 Nothing else is routed. The Python unit shards, Vitest and static UI checks,
 `build-linux-artifacts`, the install/upgrade regressions and distribution
@@ -80,10 +80,25 @@ Neither reads Web UI content. The allowlisted paths reach them only as the
 bytes of `vibe/ui/dist` inside the wheel. That output is still built by
 `build-linux-artifacts`, and its member names are still checked by the
 distribution contracts in `install-upgrade-shards`. What remains is
-filesystem portability on Windows and macOS: Vite names output files after
-their sources and copies `public/` verbatim. So added names must be portable,
-and `ui/public/**`, the package manifests, `vite.config.ts`, `index.html` and
-the build `tsconfig` files are not in the allowlist.
+filesystem portability on Windows and macOS: whether the installed file
+names can exist on those filesystems.
+
+- **Hashed output names.** The production build names everything it takes from
+  the allowlisted sources `assets/<source name>-<content hash>.<ext>`, in one
+  flat directory. The other outputs are `index.html` and verbatim copies of
+  `public/`. A build of `9ea2dd696` confirms this: 266 hashed assets plus
+  `index.html` and the `public/` files.
+- **Build code is excluded.** A Vite plugin can emit files under any name and
+  path. For example, a `generateBundle` emit of both `assets/emoji` and
+  `assets/EMOJI/en.json` builds and passes the Linux distribution contracts,
+  but collides as a file and a directory on a case-insensitive filesystem. So
+  `ui/scripts/**`, which holds the build's plugins and scripts, is not UI
+  source. Neither are `ui/public/**`, the package manifests, `vite.config.ts`,
+  `index.html` and the build `tsconfig` files. A test follows every local
+  module `vite.config.ts` loads, transitively, and requires each to be outside
+  the allowlist.
+- **Added names must be portable.** Every added path in a routed change must
+  be a portable name.
 
 **Why the larger candidates stay unrouted.**
 
@@ -144,16 +159,16 @@ merge-base..head.
 
 | Sample | browser skip | platform skip | both | full | docs |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Last 400 squash merges | 128 | 100 | 10 | 161 | 1 |
-| 300 merged PRs (Oct 19–Nov 4), weighted by their 755 PR runs | 176 | 156 | 25 | 397 | 1 |
+| Last 400 squash merges | 128 | 91 | 10 | 170 | 1 |
+| 300 merged PRs (Oct 19–Nov 4), weighted by their 755 PR runs | 176 | 139 | 25 | 414 | 1 |
 
 On the PR runs, the browser route would have skipped 4 lane jobs on about 27%
 of them, and the platform route 6 jobs (two macOS, one Windows web-fetch leg,
-one ARM, one ubuntu, plus the Windows smoke) on about 24%.
+one ARM, one ubuntu, plus the Windows smoke) on about 22%.
 
 **300 failed PR runs (Sep 27–Nov 4).** In 6 of them, a job that the route would
-have skipped failed or was cancelled. Each was read from its job log or
-annotations:
+have skipped failed or was cancelled; in 5 of those 6, nothing else failed.
+Each was read from its job log or annotations:
 
 | Run | Change | Would-skip failure | Cause |
 | --- | --- | --- | --- |
@@ -163,10 +178,9 @@ annotations:
 | 41495159770, 41853843794 | UI | macOS web-fetch cancelled | "The job was not acquired by Runner of type hosted" |
 | 41861194599 | `ui/e2e` only | Windows web-fetch float-boundary assertion and two unacquired macOS legs | The transport-test clock fixed in #3238 |
 
-None of these failures came from a file the routed job reads. Five of the runs
-failed in nothing else. Separately, 11 failed runs failed only in
-web-fetch-runtime, 8 of them on routes where it still runs: under the new gate,
-those are required-context failures.
+None of these failures came from a file the routed job reads. Separately, 11
+failed runs failed only in web-fetch-runtime, 8 of them on routes where it still
+runs: under the new gate, those are required-context failures.
 
 **Limits.** The replay approximates synthetic merges with squash or merge-base
 diffs, and it only exposes couplings that produced a failure. It is evidence for
