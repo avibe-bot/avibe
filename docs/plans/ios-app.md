@@ -702,7 +702,8 @@ Push to APNs (section 8).
 
 ### Signing, identifiers, privacy
 
-- **Identifiers** (recommended; the Account Holder registers them). Existing
+- **Identifiers** (confirmed by the owner 2026-11-04; the Account Holder
+  registers them). Existing
   identifiers on the same team: `bot.avibe.desktop` (plus
   `bot.avibe.desktop.runtime.*` and `bot.avibe.desktop.cua-driver`) and
   `bot.avibe.avault`. The mobile apps follow the same `bot.avibe.<surface>`
@@ -780,8 +781,8 @@ An Organization membership removes these limits: team members can get
 Certificates, Identifiers & Profiles access, cloud-managed signing, and Xcode
 Cloud, and the company shows as the seller. It needs a legal entity and a
 D-U-N-S number ([Apple: enrollment](https://developer.apple.com/help/account/membership/program-enrollment)).
-There are two paths, and both stay open until before App Store submission
-(decision 9):
+There is no company entity today, so the owner chose to stay Individual
+(decision 9). For reference, should that change, the two paths are:
 
 - **Convert the Individual membership** by request to Apple. Apple's pages do
   not say whether the Team ID survives; third-party guides say it does. The
@@ -909,11 +910,11 @@ every item with the native composer.
    transcript, a native composer, and one `avibeNative` contract, with code in
    `ios/` of this repository (and `android/` later). Whether and when the
    native composer is built is still decision 4.
-2. **Account settled 2026-11-04:** the owner's existing Individual
-   membership, the same team as the desktop app and avault (section 13). Still
-   to confirm: the identifier scheme in section 13 (`bot.avibe.ios`, before
-   the Account Holder registers it), the app name, and the minimum iOS version
-   (17 proposed; the media-capture delegate and `keyboardLayoutGuide` need 15).
+2. **Settled 2026-11-04:** the owner's existing Individual membership, the
+   same team as the desktop app and avault, and the identifier scheme in
+   section 13 (`bot.avibe.ios`). Still open: the app name, and the minimum iOS
+   version (17 proposed; the media-capture delegate and `keyboardLayoutGuide`
+   need 15).
 3. Build machine: GitHub Actions macOS runners with signing secrets, as for the
    desktop app, are proposed. On an Individual membership this is also how the
    iOS owner ships without holding the signing key (section 13).
@@ -927,9 +928,10 @@ every item with the native composer.
    Store, not for TestFlight).
 8. TestFlight only, or the App Store after Phase 2. For the App Store, a review
    demo instance and reviewer account are needed.
-9. Before App Store submission: keep the Individual membership, convert it to
-   an Organization, or enroll the company separately for the mobile apps
-   (section 13).
+9. **Settled 2026-11-04:** stay on the Individual membership. There is no
+   company entity, so neither Organization path applies for now. The owner
+   performs the Account Holder steps in section 13 when the iOS owner needs
+   them. Revisit only if a legal entity is created.
 
 ## 18. Ownership and handoff
 
