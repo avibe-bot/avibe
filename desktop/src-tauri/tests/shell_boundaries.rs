@@ -163,9 +163,78 @@ fn the_shell_enables_only_its_declared_capabilities() {
             "main-pet-bind",
             "main-pet-settings",
             "main-computer-use",
-            "main-desktop-update"
+            "main-desktop-update",
+            "main-app-windows"
         ])
     );
+}
+
+#[test]
+fn native_app_windows_are_main_only_and_loopback_scoped() {
+    let grant = read_json(crate_dir().join("capabilities/main-app-windows.json"));
+    assert_eq!(grant["windows"], serde_json::json!([MAIN_WINDOW]));
+    assert_eq!(grant["local"], false);
+    assert_eq!(grant["permissions"], serde_json::json!(["allow-open-app-window"]));
+    let patterns = loopback_patterns(&grant);
+    for allowed in [
+        "http://127.0.0.1:5123/apps/files?standalone=1",
+        "http://[::1]:6174/show/session-1/",
+    ] {
+        let url = url::Url::parse(allowed).unwrap();
+        assert!(patterns.iter().any(|pattern| pattern.test(&url)), "{url}");
+    }
+    for rejected in ["https://example.com/apps/files", "http://192.168.1.2:5123/apps/files"] {
+        let url = url::Url::parse(rejected).unwrap();
+        assert!(!patterns.iter().any(|pattern| pattern.test(&url)), "{url}");
+    }
+}
+
+#[test]
+fn no_capability_grants_ipc_to_native_app_windows() {
+    use std::collections::BTreeMap;
+    use tauri::utils::acl::{capability::Capability, manifest::Manifest, resolved::Resolved};
+    use tauri::utils::platform::Target;
+
+    let manifests: BTreeMap<String, Manifest> =
+        serde_json::from_str(include_str!(concat!(env!("OUT_DIR"), "/acl-manifests.json")))
+            .expect("the build's permission manifests");
+    let capabilities: BTreeMap<String, Capability> = std::fs::read_dir(crate_dir().join("capabilities"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "json"))
+        .map(|path| {
+            let capability: Capability = serde_json::from_value(read_json(path)).expect("valid capability");
+            (capability.identifier.clone(), capability)
+        })
+        .collect();
+    assert!(!capabilities.is_empty());
+    for target in [Target::MacOS, Target::Windows] {
+        let resolved = Resolved::resolve(&manifests, capabilities.clone(), target).expect("valid permissions");
+        assert!(!resolved.allowed_commands.is_empty());
+        for (command, grants) in resolved.allowed_commands {
+            for grant in grants {
+                for label in [
+                    "avibe-app-files",
+                    "avibe-app-files--new-1",
+                    "avibe-app-terminal",
+                    "avibe-app-terminal--new-2",
+                    "avibe-app-editor",
+                    "avibe-app-editor--new-3",
+                    "avibe-app-show-73657373696f6e2d31",
+                    "avibe-app-show-73657373696f6e2d31--new-4",
+                ] {
+                    assert!(
+                        !grant
+                            .windows
+                            .iter()
+                            .chain(&grant.webviews)
+                            .any(|pattern| pattern.matches(label)),
+                        "{command} must not grant IPC to {label}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -512,6 +581,7 @@ fn every_shell_command_is_declared_so_its_permission_exists() {
         "bootstrap_status",
         "bootstrap_retry",
         "open_install_docs",
+        "open_app_window",
         "computer_use_enable",
         "computer_use_open_permission",
         "desktop_update_state",
@@ -831,6 +901,12 @@ fn the_workbench_learns_it_runs_in_the_shell_from_one_top_level_marker() {
         builder.contains(".initialization_script(DESKTOP_SHELL_MARKER)"),
         "every main window must define the marker before Workbench scripts run"
     );
+    // This JS key is a cross-language contract, independent of Rust identifiers.
+    // Actual main/child injection is covered by isolated native acceptance.
+    assert!(
+        source.contains("if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_APP_WINDOWS__', { value: true })"),
+        "the shell must define the shared app-window capability key at the top level"
+    );
     assert!(!source.contains("initialization_script_for_all_frames"));
     let marker = source
         .split("const DESKTOP_SHELL_MARKER: &str =")
@@ -860,6 +936,18 @@ fn the_workbench_learns_it_runs_in_the_shell_from_one_top_level_marker() {
     assert!(
         reader.contains("window.__AVIBE_DESKTOP_PET_SETTINGS__ === true"),
         "Settings must probe the Desktop Mini settings marker"
+    );
+    assert!(
+        reader.contains("window.__AVIBE_DESKTOP_APP_WINDOWS__ === true"),
+        "the Workbench must probe the native app window marker"
+    );
+    assert!(
+        shipping_source("src/app_windows.rs").contains("if (window.self === window.top) Object.defineProperty(window, '__AVIBE_NATIVE_APP_WINDOW__', { value: true })"),
+        "native children must define the shared identity key at the top level"
+    );
+    assert!(
+        reader.contains("window.__AVIBE_NATIVE_APP_WINDOW__ === true"),
+        "app pages must read the same child identity key"
     );
 }
 
@@ -941,8 +1029,9 @@ fn native_lifecycle_controls_never_add_a_webview_permission() {
     ] {
         assert!(source.contains(required), "native lifecycle wiring missing {required}");
     }
-    // The three bootstrap commands and the two Computer Use guide actions.
-    assert_eq!(source.matches("#[tauri::command]").count(), 5);
+    // The three bootstrap commands, the native app window command, and the
+    // two Computer Use guide actions.
+    assert_eq!(source.matches("#[tauri::command]").count(), 6);
     for permission in capability()["permissions"].as_array().expect("capability permissions") {
         let permission = permission.as_str().expect("string permission");
         assert!(!permission.contains("autostart") && !permission.contains("tray") && !permission.contains("dialog"));

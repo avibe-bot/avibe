@@ -8,6 +8,7 @@ import { showAppRoutePath } from '../../apps/mobileDock';
 import { useShowPageInventory } from '../../useShowPages';
 import { useWindowManager } from '../../../context/WindowManagerContext';
 import { openLinkInNewContext } from '../../../lib/pwaNavigation';
+import { tryOpenDesktopAppWindow } from '../../../lib/desktopShell';
 import { isDesktopViewport } from '../../../lib/useIsDesktop';
 import { filterAppSearchResults, type AppSearchResult } from './appSearch';
 
@@ -52,10 +53,11 @@ export function useOpenSearchApp() {
   const location = useLocation();
 
   return useCallback(
-    (result: AppSearchResult, launch?: LaunchModifiers | null) => {
+    async (result: AppSearchResult, launch?: LaunchModifiers | null) => {
+      const intent = launch ? appLaunchIntent(launch) : 'activate';
       // Tab modifier held (click OR Enter) → hand the app to the browser as a real
       // tab, the same rule the Dock and the App Library rows follow (§7.1m).
-      if (launch && appLaunchIntent(launch) === 'newTab') {
+      if (intent === 'newTab') {
         const href = appTabHref({ appId: result.appId, sessionId: result.kind === 'showpage' ? result.sessionId : null });
         if (href) {
           openLinkInNewContext(href, 'noopener,noreferrer');
@@ -64,6 +66,20 @@ export function useOpenSearchApp() {
       }
       const desktop = isDesktopViewport();
       if (desktop) {
+        const sessionId = result.kind === 'showpage' ? result.sessionId : null;
+        const href = appTabHref({ appId: result.appId, sessionId });
+        if (href && await tryOpenDesktopAppWindow({
+          appId: result.appId,
+          sessionId,
+          title: result.title,
+          newWindow: intent === 'newWindow',
+        })) {
+          if (location.pathname === '/search') {
+            if (location.key === 'default') navigate('/inbox', { replace: true });
+            else navigate(-1);
+          }
+          return;
+        }
         wm.openApp(result.appId, {
           title: result.kind === 'showpage' ? result.title : undefined,
           params:

@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+mod app_windows;
 mod native_frame;
 mod notifications;
 mod pet;
@@ -896,6 +897,7 @@ fn claim_exit_cleanup_flag(started: &AtomicBool) -> bool {
 /// Everything the shell does before it ends, however the end is carried out.
 fn authorize_exit(app: &AppHandle) {
     notifications::stop(app);
+    app_windows::close_all(app);
     app.state::<Shell>().exit_authorized.store(true, Ordering::SeqCst);
 }
 
@@ -1261,6 +1263,32 @@ fn navigation_is_allowed(url: &Url, active_origin: Option<&LoopbackOrigin>) -> b
     is_shell_ui_url(url) || active_origin.is_some_and(|origin| origin.matches_url_origin(url))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenAppWindowRequest {
+    app_id: String,
+    session_id: Option<String>,
+    title: Option<String>,
+    new_window: bool,
+}
+
+#[tauri::command]
+async fn open_app_window(window: WebviewWindow, app: AppHandle, request: OpenAppWindowRequest) -> Result<(), String> {
+    let _launch = app_windows::LAUNCH_LOCK.lock().await;
+    if !pet::is_workbench(&window) {
+        return Err("This command is only available to the Avibe Workbench.".to_owned());
+    }
+    let target = app_windows::parse_target(&request.app_id, request.session_id.as_deref())?;
+    let origin = app
+        .state::<Shell>()
+        .active_origin
+        .lock()
+        .map_err(|_| "The desktop Runtime origin is unavailable.".to_owned())?
+        .clone()
+        .ok_or_else(|| "The desktop Runtime origin is unavailable.".to_owned())?;
+    app_windows::open(&app, &origin, &target, request.title.as_deref(), request.new_window)
+}
+
 /// The Console settings page expresses a UI rebind as a navigation to a bare
 /// HTTP origin. The desktop shell must rediscover the Python-owned companion
 /// listener instead of following that configured LAN address.
@@ -1278,14 +1306,19 @@ fn is_runtime_rebind_target(url: &Url) -> bool {
 /// Records the Runtime the Workbench shows, or that it shows none. This is the
 /// only writer, so the pet, which follows it, is reconciled here.
 fn set_active_origin(app: &AppHandle, origin: Option<LoopbackOrigin>) -> bool {
-    let recorded = app
-        .state::<Shell>()
-        .active_origin
-        .lock()
-        .map(|mut active| *active = origin)
-        .is_ok();
+    let changed = match app.state::<Shell>().active_origin.lock() {
+        Ok(mut active) => {
+            let changed = *active != origin;
+            *active = origin;
+            changed
+        }
+        Err(_) => return false,
+    };
+    if changed {
+        app_windows::close_all(app);
+    }
     pet::reconcile(app);
-    recorded
+    true
 }
 
 /// The current bootstrap status, or `null` before the first one is published.
@@ -1695,6 +1728,7 @@ fn ensure_main_window(app: &AppHandle) -> Option<WebviewWindow> {
     let builder = WebviewWindowBuilder::from_config(app, &config)
         .ok()?
         .initialization_script(DESKTOP_SHELL_MARKER)
+        .initialization_script(DESKTOP_APP_WINDOWS_MARKER)
         .initialization_script(pet::DESKTOP_PET_MARKER)
         .initialization_script(pet::DESKTOP_PET_SETTINGS_MARKER)
         .initialization_script(format!(
@@ -1748,6 +1782,12 @@ fn start_bootstrap_when_shell_url_ready(
 /// WebView2 runs initialization scripts in subframes too, hence the frame check.
 const DESKTOP_SHELL_MARKER: &str =
     "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true });";
+
+/// Tells the Workbench that this shell can create standalone native app windows.
+/// App windows deliberately do not receive this marker or any shell command
+/// capability; only the main Workbench may start another native window.
+const DESKTOP_APP_WINDOWS_MARKER: &str =
+    "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_APP_WINDOWS__', { value: true });";
 
 /// Tells the Workbench that this shell answers the Computer Use guide's
 /// actions (`computer_use_enable`, `computer_use_open_permission`). Read by
@@ -2343,6 +2383,9 @@ pub fn run() {
                     let active_origin = webview
                         .try_state::<Shell>()
                         .and_then(|shell| shell.active_origin.lock().ok().and_then(|active| active.clone()));
+                    if app_windows::is_app_window(webview.label()) {
+                        return active_origin.is_some_and(|origin| origin.matches_url_origin(url));
+                    }
                     if navigation_is_allowed(url, active_origin.as_ref()) {
                         return true;
                     }
@@ -2408,6 +2451,7 @@ pub fn run() {
             bootstrap_status,
             bootstrap_retry,
             open_install_docs,
+            open_app_window,
             computer_use_enable,
             computer_use_open_permission,
             updater::desktop_update_state,

@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-app-windows",
+  "description": "Allows the main Workbench window to open validated standalone app pages in native windows. App windows receive no shell IPC capability.",
+  "local": false,
+  "windows": ["main"],
+  "remote": {
+    "urls": ["http://127.0.0.1:*/*", "http://[\\:\\:1]:*/*"]
+  },
+  "permissions": ["allow-open-app-window"]
+}

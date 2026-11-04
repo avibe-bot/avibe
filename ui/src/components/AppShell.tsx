@@ -1,6 +1,6 @@
 import { DesktopDragRegion } from './DesktopDragRegion';
 import { DesktopWindowChrome } from './DesktopWindowChrome';
-import { desktopDragRegion } from '../lib/desktopShell';
+import { desktopDragRegion, isNativeAppWindow } from '../lib/desktopShell';
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Link, Navigate, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { AlertTriangle, FolderTree, Grid2x2, Inbox, LayoutGrid, Settings } from 'lucide-react';
@@ -177,8 +177,9 @@ export const AppShell: React.FC = () => {
   // §7.1m). Frozen at mount from the landing URL rather than tracked off `location`, so
   // navigating deeper inside the tab can't suddenly restore the workbench window layout
   // this tab exists to stay out of — nor re-enable the save that would clobber it.
+  // Native identity also covers a hard navigation from a Show Page without query flags.
   const [standaloneAppTab] = useState(() =>
-    typeof window === 'undefined' ? false : isStandaloneAppTab(window.location.search),
+    typeof window === 'undefined' ? false : isNativeAppWindow() || isStandaloneAppTab(window.location.search),
   );
   // A single-app tab sitting on the app's own route (⌘/Ctrl-clicked Terminal / Files /
   // Editor, or that URL bookmarked): the tab exists to show ONE app, so it drops EVERY

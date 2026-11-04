@@ -12,6 +12,7 @@ fn main() {
         "bootstrap_status",
         "bootstrap_retry",
         "open_install_docs",
+        "open_app_window",
         "computer_use_enable",
         "computer_use_open_permission",
         "desktop_update_state",
