@@ -11,6 +11,7 @@ import zlib
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 
 import httpcore
 import pytest
@@ -414,6 +415,9 @@ def test_wire_budget_aborts_compressed_stream_with_tiny_decoded_body(stub, monke
 
 
 def test_backend_reserves_connect_budget_for_both_families_and_checks_peer(monkeypatch):
+    # Keep deadline subtraction exact without replacing the process-wide clock.
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(transport, "time", SimpleNamespace(monotonic=lambda: clock.now))
     target = CheckedTarget(FetchURL("https://example.com/", "example.com", 443, "https", False),
                            ("2001:4860::1", "8.8.8.8"))
     calls = []
@@ -425,6 +429,7 @@ def test_backend_reserves_connect_budget_for_both_families_and_checks_peer(monke
     def connect(self, host, port, timeout=None, **kwargs):
         calls.append((host, timeout))
         if ":" in host:
+            clock.now += 1.0  # The failed IPv6 attempt consumes the shared budget.
             raise httpcore.ConnectTimeout()
         return Stream()
     monkeypatch.setattr(httpcore.SyncBackend, "connect_tcp", connect)
@@ -432,6 +437,7 @@ def test_backend_reserves_connect_budget_for_both_families_and_checks_peer(monke
     stream = backend.connect_tcp("example.com", 443, timeout=5)
     assert [host for host, _ in calls] == ["2001:4860::1", "8.8.8.8"]
     assert 0 < calls[0][1] <= 2.5 and calls[0][1] < calls[1][1] <= 5
+    assert [timeout for _, timeout in calls] == [2.5, 4.0]
     with pytest.raises(FetchFailure, match="fetch_url_blocked"):
         stream.start_tls(None, "wrong.example", timeout=5)
     for host, port in (("other.example", 443), ("example.com", 80)):

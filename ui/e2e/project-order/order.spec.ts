@@ -4,6 +4,10 @@ const tree = (page: Page) => page.getByTestId('desktop-tree').or(page.getByTestI
 const rows = (page: Page) => tree(page).locator('[data-project-id]');
 const header = (page: Page, index: number) => rows(page).nth(index).locator('.project-drag-header');
 const ids = (page: Page) => rows(page).evaluateAll((elements) => elements.map((el) => el.getAttribute('data-project-id')));
+// A preview or a transform left over from cancellation does not establish the
+// current collision target. The product announces it after updating drag state.
+const expectDragPosition = (page: Page, position: number) =>
+  expect(tree(page).getByRole('status')).toHaveText(`Avibe, position ${position} of 8.`);
 
 test.beforeEach(async ({ page }) => {
   await page.goto('/e2e/project-order/fixture.html');
@@ -102,15 +106,20 @@ test('keyboard movement and cancellation use the existing header', async ({ page
   // The sensor installs document listeners on the next task after pickup.
   await page.keyboard.press('Space', { delay: 80 });
   await expect(page.locator('[data-project-drag-preview]')).toBeVisible();
+  await expectDragPosition(page, 1);
   await page.keyboard.press('ArrowDown');
+  await expectDragPosition(page, 2);
   await page.keyboard.press('Escape');
+  await expect(tree(page).getByRole('status')).toHaveText('Project move cancelled.');
   await expect(page.locator('[data-project-drag-preview]')).toHaveCount(0);
   expect(await ids(page)).toEqual(original);
   await header(page, 0).focus();
   await page.keyboard.press('Space', { delay: 80 });
   await expect(page.locator('[data-project-drag-preview]')).toBeVisible();
+  await expectDragPosition(page, 1);
   await page.keyboard.press('ArrowDown');
-  await expect.poll(() => rows(page).nth(1).evaluate((el) => getComputedStyle(el).transform)).not.toBe('matrix(1, 0, 0, 1, 0, 0)');
+  await expectDragPosition(page, 2);
+  await expect.poll(() => rows(page).nth(1).evaluate((el) => getComputedStyle(el).transform)).toMatch(/-\d/);
   await page.keyboard.press('Space');
   await expect.poll(() => ids(page)).toEqual([original[1], original[0], ...original.slice(2)]);
 });
@@ -195,7 +204,9 @@ test('reduced motion disables pickup, keyboard movement, and neighbor animations
   await page.keyboard.press('Space', { delay: 80 });
   const preview = page.locator('[data-project-drag-preview]');
   await expect(preview).toBeVisible();
+  await expectDragPosition(page, 1);
   await page.keyboard.press('ArrowDown');
+  await expectDragPosition(page, 2);
   await expect.poll(() => rows(page).nth(1).evaluate((el) => getComputedStyle(el).transform)).toMatch(/-\d/);
   expect(await rows(page).nth(1).evaluate((el) => getComputedStyle(el).transitionDuration)).toBe('0s');
   expect(await preview.evaluate((el) => getComputedStyle(el).animationName)).toBe('none');
@@ -211,7 +222,9 @@ test('another open page receives the saved order without reloading', async ({ pa
   await header(page, 0).focus();
   await page.keyboard.press('Space', { delay: 80 });
   await expect(page.locator('[data-project-drag-preview]')).toBeVisible();
+  await expectDragPosition(page, 1);
   await page.keyboard.press('ArrowDown');
+  await expectDragPosition(page, 2);
   await expect.poll(() => rows(page).nth(1).evaluate((el) => getComputedStyle(el).transform)).toMatch(/-\d/);
   await page.keyboard.press('Space');
   await expect.poll(() => ids(other)).toEqual(['project-1', 'project-0', 'project-2', 'project-3', 'project-4', 'project-5', 'project-6', 'project-7']);
