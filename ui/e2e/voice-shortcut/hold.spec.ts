@@ -12,7 +12,7 @@ declare global {
       spoken: { text: string; metadata: Record<string, unknown> }[];
       opened: number;
       posted: { session: string; text: string; metadata: Record<string, unknown> }[];
-      transcribed: { reply?: string; user_previous?: string }[];
+      transcribed: { reply?: string; user_previous?: string; vocabulary?: string[] }[];
       contextReads: string[];
     };
   }
@@ -46,6 +46,7 @@ test('a mouse hold on the empty composer records, and the release sends the word
   expect(await page.evaluate(() => window.voiceShortcutTest.transcribed.at(-1))).toEqual({
     reply: 'The cache is fixed on prod-7.',
     user_previous: 'Is the cache fixed?',
+    vocabulary: ['Vibey', 'Product'],
   });
 });
 

@@ -583,6 +583,34 @@ describe('voice transcription', () => {
     }
   });
 
+  it('sends the names to hear exactly with every segment only to a backend that declares dictation vocabulary', async () => {
+    const forms: Array<{ declared: FormData; contextOnly: FormData }> = [];
+    const cloudFetch = vi.fn(async (_path: string, init?: AvibeFetchRequestInit) => {
+      const declared = formOf(init, ['dictation_context', 'dictation_vocabulary']);
+      forms.push({ declared, contextOnly: formOf(init, ['dictation_context']) });
+      return declared.get('final') === 'false'
+        ? Response.json({ receipt: 'receipt-0', sequence: 0 })
+        : Response.json({ text: '结果', cleanup: 'success' });
+    });
+    const segments: VoiceTranscriptionSegment[] = [
+      { blob: audioBlob(), sequence: 0, final: false },
+      { blob: audioBlob(), sequence: 1, final: true },
+    ];
+    const context = Promise.resolve({ reply: '先跑 make release', vocabulary: ['歪比', 'Product'] });
+
+    await transcribeVoiceSegments(segments, { cloudFetch, dictationId: 'dictation-names', context });
+    await finalizeVoiceDictation(segments, { dictationId: 'dictation-names', before: '', after: '' }, { cloudFetch, context });
+
+    expect(forms).toHaveLength(2);
+    for (const { declared, contextOnly } of forms) {
+      expect(declared.getAll('vocabulary')).toEqual(['歪比', 'Product']);
+      expect(declared.get('reply')).toBe('先跑 make release');
+      // An avibe.bot that does not declare it gets the form it reads today.
+      expect(contextOnly.getAll('vocabulary')).toEqual([]);
+      expect(contextOnly.get('reply')).toBe('先跑 make release');
+    }
+  });
+
   it('cuts the conversation to its newest 8,000 characters on the HTTP path', async () => {
     let form: FormData | undefined;
     const cloudFetch = vi.fn(async (_path: string, init?: AvibeFetchRequestInit) => {
@@ -658,6 +686,7 @@ describe('voice transcription', () => {
         after: '后文',
         reply: '上一条回复',
         user_previous: '上一条消息',
+        vocabulary: ['歪比'],
       });
       expect(body.data).toBeUndefined();
       return Response.json({ text: '本地代理结果', cleanup: 'success' });
@@ -676,7 +705,7 @@ describe('voice transcription', () => {
       dictationId: 'dictation-local',
       before: '前文',
       after: '后文',
-    }, { cloudFetch, localFetch, context: { reply: '上一条回复', userPrevious: '上一条消息' } })).resolves.toEqual({
+    }, { cloudFetch, localFetch, context: { reply: '上一条回复', userPrevious: '上一条消息', vocabulary: ['歪比'] } })).resolves.toEqual({
       text: '本地代理结果',
       cleanup: 'success',
     });

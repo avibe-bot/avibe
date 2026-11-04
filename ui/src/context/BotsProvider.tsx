@@ -7,6 +7,7 @@ import { BotsContext, type BotProfileRequest, type BotRuntimeStatus, type BotsSt
 import { UNKNOWN_BOT_ROSTER, useBotRoster } from './BotRosterContext';
 import { useInstanceAuthorization } from './InstanceAuthorizationContext';
 import { botDisplayName, botLimitReached, keepBotOrder, type Bot, type BotLimit } from '../lib/bots';
+import { setVoiceVocabulary } from '../lib/voiceVocabulary';
 
 /** Owns the Owner's Bot list (`GET /api/bots`) and each Bot Session's running state.
  *
@@ -197,6 +198,14 @@ export const BotsProvider = ({ children }: { children: ReactNode }) => {
   }, [publish, rosterKnown, value.bots]);
   // Signing out unmounts this provider; the next reader's list is not known yet.
   useEffect(() => () => publish(UNKNOWN_BOT_ROSTER), [publish]);
+
+  // Every dictation hears the Bots by the names the reader sees, the main Bot's first; a rename
+  // lands here with the list, so the next dictation uses it.
+  useEffect(() => {
+    const names = [...value.bots].sort((a, b) => Number(b.builtin) - Number(a.builtin)).map(value.displayName);
+    setVoiceVocabulary(names);
+  }, [value]);
+  useEffect(() => () => setVoiceVocabulary([]), []);
 
   return <BotsContext.Provider value={value}>{children}</BotsContext.Provider>;
 };

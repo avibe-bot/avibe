@@ -1,12 +1,14 @@
 import type { WorkbenchMessage } from '@/context/ApiContext';
 import { resultFooterParts } from './resultFooter';
+import { cleanVoiceVocabulary, voiceVocabulary } from './voiceVocabulary';
 
 /**
  * The conversation a dictation is spoken into, sent to recognition so it hears the names and
  * terms already in play: the Agent's latest reply there and the user's previous message there.
- * Recognition context only: never log, store, or show it.
+ * Recognition context only: never log, store, or show it. A resolved context also carries
+ * `vocabulary`, the names to hear exactly (`voiceVocabulary`), read when the dictation starts.
  */
-export type VoiceContext = { reply?: string; userPrevious?: string };
+export type VoiceContext = { reply?: string; userPrevious?: string; vocabulary?: readonly string[] };
 
 /** A context in hand, or one still loading (a Bot's avatar reads its conversation when held). */
 export type VoiceContextSource = VoiceContext | Promise<VoiceContext | undefined> | undefined;
@@ -32,14 +34,16 @@ const clipText = (text: string | undefined): string | undefined => {
   return tail.trimStart() || undefined;
 };
 
-/** The context with each text trimmed and cut to its newest `MAX_VOICE_CONTEXT_CHARS`; empty
- *  texts are dropped. */
+/** The context with each text trimmed and cut to its newest `MAX_VOICE_CONTEXT_CHARS`, and the
+ *  names it was given kept within avibe.bot's bounds; empty parts are dropped. */
 export const clipVoiceContext = (context: VoiceContext | undefined): VoiceContext => {
   const reply = clipText(context?.reply);
   const userPrevious = clipText(context?.userPrevious);
+  const vocabulary = cleanVoiceVocabulary(context?.vocabulary ?? []);
   return {
     ...(reply ? { reply } : {}),
     ...(userPrevious ? { userPrevious } : {}),
+    ...(vocabulary.length ? { vocabulary } : {}),
   };
 };
 
@@ -76,12 +80,21 @@ export const loadVoiceContext = async (
   }
 };
 
-/** The context a take sends, clipped; one still loading is waited for at most `waitMs`, then
+/** The context a take sends, clipped, with the names to hear exactly as they are when it is
+ *  called (a dictation's start); a conversation still loading is waited for at most `waitMs`, then
  *  recognition goes without it. Never rejects. */
-export const resolveVoiceContext = async (
+export const resolveVoiceContext = (
   source: VoiceContextSource,
   waitMs: number = VOICE_CONTEXT_WAIT_MS,
 ): Promise<VoiceContext> => {
+  const vocabulary = voiceVocabulary();
+  const withNames = (context: VoiceContext): VoiceContext => (
+    vocabulary.length && !context.vocabulary ? { ...context, vocabulary } : context
+  );
+  return resolveConversation(source, waitMs).then(withNames);
+};
+
+const resolveConversation = async (source: VoiceContextSource, waitMs: number): Promise<VoiceContext> => {
   if (!source) return {};
   if (!(source instanceof Promise)) return clipVoiceContext(source);
   let timer: ReturnType<typeof setTimeout> | undefined;

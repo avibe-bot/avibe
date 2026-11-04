@@ -52,6 +52,20 @@ texts as form fields, sent directly to avibe.bot only when that request's token
 declares `dictation_context`. The local relay (`/api/asr/transcribe`, used when
 no cloud token can be minted) forwards them as given, cut to the same 8,000
 units: avibe.bot reads a segment's form by field name, so a release that
-predates them ignores them. avibe.bot returns `capabilities` with `user-token`
+predates them ignores them.
+
+Every dictation also sends the names it should hear exactly: the reader's
+Bots' display names, the main Bot's first, as `BotsProvider` publishes them
+(`voiceVocabulary`), read when the dictation starts, so a renamed Bot is heard
+by its new name from the next dictation on. Each name is trimmed and kept only
+within avibe.bot's bounds (1–64 UTF-16 units on one line, at most 20, each once);
+it is never cut. They are not conversation text and never go into
+`user_previous`. Realtime sends them as `start.vocabulary` when the token
+declares `realtime_reply_context` (avibe.bot has accepted the field since before
+that capability existed); avibe.bot weighs them above conversation terms. HTTP
+segments send them as repeated `vocabulary` fields when the token declares
+`dictation_vocabulary`, and the local relay forwards them as given.
+
+avibe.bot returns `capabilities` with `user-token`
 and `device-token`. `GET /api/cloud/token` relays it as a bounded list of
 strings. A backend that predates the field declares none.

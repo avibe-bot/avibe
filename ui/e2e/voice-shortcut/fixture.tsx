@@ -12,6 +12,7 @@ import { BotsContext, type BotsState } from '../../src/context/BotsContext';
 import { ToastProvider } from '../../src/context/ToastProvider';
 import { UnsavedChangesContext } from '../../src/context/unsavedChangesContext';
 import type { Bot } from '../../src/lib/bots';
+import { setVoiceVocabulary } from '../../src/lib/voiceVocabulary';
 import i18n from '../../src/i18n';
 import '../../src/index.css';
 
@@ -28,7 +29,7 @@ declare global {
       /** Messages a Bot's avatar sent, by its Session (`?surface=strip`). */
       posted: { session: string; text: string; metadata: Record<string, unknown> }[];
       /** The conversation each transcription request carried (the local relay's JSON). */
-      transcribed: { reply?: string; user_previous?: string }[];
+      transcribed: { reply?: string; user_previous?: string; vocabulary?: string[] }[];
       /** Conversations a hold read its context from, by Session. */
       contextReads: string[];
     };
@@ -36,6 +37,8 @@ declare global {
 }
 
 window.voiceShortcutTest = { sent: [], spoken: [], opened: 0, posted: [], transcribed: [], contextReads: [] };
+// The Bots' shown names, as BotsProvider publishes them: every dictation is to hear them exactly.
+setVoiceVocabulary(['Vibey', 'Product']);
 
 /** Each fixture conversation's last two rows: the user's message, then the Agent's reply. */
 const conversationTail = (session: string) => [
@@ -57,8 +60,8 @@ window.fetch = async (input, init) => {
     return new Response(JSON.stringify({ error: 'fixture local ASR only' }), { status: 503 });
   }
   if (url.pathname === '/api/asr/transcribe') {
-    const body = JSON.parse(String(init?.body ?? '{}')) as { reply?: string; user_previous?: string };
-    window.voiceShortcutTest.transcribed.push({ reply: body.reply, user_previous: body.user_previous });
+    const body = JSON.parse(String(init?.body ?? '{}')) as { reply?: string; user_previous?: string; vocabulary?: string[] };
+    window.voiceShortcutTest.transcribed.push({ reply: body.reply, user_previous: body.user_previous, vocabulary: body.vocabulary });
     return new Response(JSON.stringify({ text: 'Send this transcript', cleanup: 'success' }), {
       headers: { 'Content-Type': 'application/json' },
     });

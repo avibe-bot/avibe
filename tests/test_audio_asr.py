@@ -438,13 +438,22 @@ class AudioAsrServiceTests(unittest.TestCase):
                 return None
 
             def post(self, *_args, data, **_kwargs):
-                posted.append({options["name"]: value for options, _headers, value in data._fields})
+                fields: dict = {}
+                for options, _headers, value in data._fields:
+                    if options["name"] == "vocabulary":
+                        fields.setdefault("vocabulary", []).append(value)
+                    else:
+                        fields[options["name"]] = value
+                posted.append(fields)
                 return ReceiptResponse()
 
         # 7,999 BMP characters after a pair: the cut lands between the pair's halves.
         long_reply = "旧" * 10 + "😀" + "x" * 7_999
         with patch("core.audio_asr.aiohttp.ClientSession", return_value=CapturingSession()):
-            for reply, user_previous in ((long_reply, "部署前要做什么"), ("", "  ")):
+            for reply, user_previous, vocabulary in (
+                (long_reply, "部署前要做什么", ["歪比", " 产品经理 ", "歪比", "", "a" * 65, "Pull\nRequest", "😀" * 32]),
+                ("", "  ", []),
+            ):
                 asyncio.run(
                     service.transcribe_voice_segment(
                         None,
@@ -458,14 +467,18 @@ class AudioAsrServiceTests(unittest.TestCase):
                         after="",
                         reply=reply,
                         user_previous=user_previous,
+                        vocabulary=vocabulary,
                     )
                 )
 
         self.assertEqual(posted[0]["reply"], "x" * 7_999)
+        # Names within avibe.bot's bounds, in order, once each; 32 emoji are 64 UTF-16 units.
+        self.assertEqual(posted[0]["vocabulary"], ["歪比", "产品经理", "😀" * 32])
         self.assertEqual(posted[0]["user_previous"], "部署前要做什么")
         # Nothing to say: the form is the one every avibe.bot release has always read.
         self.assertNotIn("reply", posted[1])
         self.assertNotIn("user_previous", posted[1])
+        self.assertNotIn("vocabulary", posted[1])
         self.assertEqual(newest_utf16_units("a" + "😀" * 4_000), "😀" * 4_000)
 
     def test_http_callers_can_override_the_request_deadline(self):

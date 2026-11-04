@@ -76,5 +76,6 @@ test('the main Bot: the cancelled toast closes on a tap, and the sent toast open
   expect(await page.evaluate(() => window.voiceShortcutTest.transcribed.at(-1))).toEqual({
     reply: 'Answer from ses_main',
     user_previous: 'Question for ses_main',
+    vocabulary: ['Vibey', 'Product'],
   });
 });

@@ -218,6 +218,25 @@ describe('voice realtime client protocol', () => {
     expect(startFrame(socket)).toEqual({ type: 'start', before: '前文', after: '后文', ...expected });
   });
 
+  it.each([
+    ['a backend that declares reply context (it has accepted `vocabulary` since before)', ['realtime_reply_context'], true],
+    ['a backend that declares nothing', [], false],
+  ])('sends the names to hear exactly in start only for %s', async (_case, capabilities, included) => {
+    vi.stubGlobal('WebSocket', { OPEN: 1 });
+    const socket = new FakeSocket();
+    const session = new VoiceRealtimeSession({
+      before: '',
+      after: '',
+      context: { vocabulary: ['歪比', 'Product'] },
+      openSocket: connect(socket, capabilities),
+    });
+    const start = session.start();
+    socket.open();
+    await start;
+
+    expect(startFrame(socket)).toEqual({ type: 'start', before: '', after: '', ...(included ? { vocabulary: ['歪比', 'Product'] } : {}) });
+  });
+
   it('sends empty context texts as nothing', async () => {
     vi.stubGlobal('WebSocket', { OPEN: 1 });
     const socket = new FakeSocket();
