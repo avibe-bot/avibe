@@ -44,6 +44,8 @@ for (const locale of ['en', 'zh'] as const) {
     });
 
     test(`desktop-managed update popover copy (${locale})`, async ({ page }, testInfo) => {
+      const expectedStatus = locale === 'zh' ? '发现新版本' : 'Update available';
+      expect(copy('dashboard.desktopManagedUpdateAvailable', undefined, locale)).toBe(expectedStatus);
       await page.addInitScript(() => {
         if (new URLSearchParams(location.search).get('state') !== 'native-managed-update') return;
         Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true });
@@ -71,7 +73,7 @@ for (const locale of ['en', 'zh'] as const) {
           await version.click();
           const dialog = page.getByRole('dialog');
           await expect(dialog).toBeVisible();
-          await expect(page.getByText(copy('dashboard.desktopManagedUpdateAvailable', undefined, locale), { exact: true })).toBeVisible();
+          await expect(page.getByText(expectedStatus, { exact: true })).toBeVisible();
           await expect(page.getByText('3.2.5rc6', { exact: true })).toBeVisible();
           if (mode === 'native') {
             await expect(page.getByRole('button', { name: copy('dashboard.skipUpdate', undefined, locale), exact: true })).toBeVisible();
