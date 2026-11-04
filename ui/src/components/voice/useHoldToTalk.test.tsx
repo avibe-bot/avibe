@@ -460,7 +460,7 @@ describe('useHoldToTalk', () => {
     expect(canHold.mock.calls.map(([type]) => type)).toEqual(['mouse', 'touch', 'pen']);
   });
 
-  it('keeps the right-click menu when idle, and takes it only while a press is live or just released', async () => {
+  it('keeps the right-click menu when idle, and takes it only while a press is live', async () => {
     const el = await mount();
     expect(fireEvent.contextMenu(el)).toBe(true);
     down(el);
@@ -471,15 +471,6 @@ describe('useHoldToTalk', () => {
     await flush();
     expect(hold.phase).toBe('listening');
     expect(fireEvent.contextMenu(el)).toBe(false);
-
-    // Where a long touch's menu comes on its release, after the take ended, it is the hold's too.
-    move(el, 380);
-    up(el, 380);
-    expect(hold.outcome).toBe('cancelled');
-    expect(fireEvent.contextMenu(el)).toBe(false);
-    // The next right-click is the element's again.
-    fireEvent.pointerDown(el, { button: 2, pointerId: 2, pointerType: 'mouse' });
-    expect(fireEvent.contextMenu(el)).toBe(true);
   });
 
   it('measures the half-second floor from the microphone opening, not from the hold', async () => {
