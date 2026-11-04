@@ -73,4 +73,20 @@ describe('chatSessionViewState', () => {
       failedBootstrapSessionId: 'session-new',
     })).toBe('failed');
   });
+
+  it('renders a painted snapshot while the bootstrap is out, but never in place of a failed one', () => {
+    const base = {
+      routeSessionId: 'session-new',
+      loadedSessionId: null,
+      hydratedTranscriptSessionId: null,
+      failedBootstrapSessionId: null,
+    };
+    expect(chatSessionViewState({ ...base, snapshotSessionId: 'session-new' })).toBe('ready');
+    expect(chatSessionViewState({ ...base, snapshotSessionId: 'session-old' })).toBe('loading');
+    expect(chatSessionViewState({
+      ...base,
+      snapshotSessionId: 'session-new',
+      failedBootstrapSessionId: 'session-new',
+    })).toBe('failed');
+  });
 });
