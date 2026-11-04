@@ -8,6 +8,8 @@ declare global {
       spoken: { text: string; metadata: Record<string, unknown> }[];
       opened: number;
       posted: { session: string; text: string; metadata: Record<string, unknown> }[];
+      transcribed: { reply?: string; user_previous?: string }[];
+      contextReads: string[];
     };
   }
 }
@@ -43,4 +45,9 @@ test('shortcut completion restores the transcript caret and Enter sends', async 
   await expect.poll(() => page.evaluate(() => window.voiceShortcutTest.sent)).toEqual([
     'Send this transcript',
   ]);
+  // ⌥Z dictation is heard in this conversation, on the HTTP path too.
+  expect(await page.evaluate(() => window.voiceShortcutTest.transcribed.at(-1))).toEqual({
+    reply: 'The cache is fixed on prod-7.',
+    user_previous: 'Is the cache fixed?',
+  });
 });

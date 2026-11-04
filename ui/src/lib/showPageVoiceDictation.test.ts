@@ -236,6 +236,52 @@ describe('ShowPageVoiceDictation', () => {
     expect(finalize).toHaveBeenCalledOnce();
   });
 
+  it('hands one conversation context to realtime recognition and to its HTTP fallback', async () => {
+    const { stream } = fakeStream();
+    let realtimeContext: unknown;
+    let queueContext: unknown;
+    const finalize = vi.fn(async () => ({ text: 'HTTP words', cleanup: 'success' as const }));
+    const context = deferred<{ reply: string; userPrevious: string }>();
+    const dictation = new ShowPageVoiceDictation({ before: '', after: '', context: context.promise }, {
+      getUserMedia: async () => stream,
+      createRealtime: (options) => {
+        realtimeContext = options.context;
+        return {
+          start: async () => {
+            options.onError?.(new Error('realtime unavailable'));
+            throw new Error('realtime unavailable');
+          },
+          sendPcm: vi.fn(() => false),
+          finish: async () => { throw new Error('realtime unavailable'); },
+          abort: vi.fn(),
+        };
+      },
+      createQueue: (options) => {
+        queueContext = options.context;
+        return { enqueue: async () => undefined };
+      },
+      createPipeline: (options) => ({
+        start: async () => true,
+        abort: vi.fn(),
+        finish: () => {
+          options.onSegment(new Blob(['tail'], { type: 'audio/wav' }), { durationMs: 4_000, final: true });
+          options.onStopped('finish', { pendingSegmentCount: 1 });
+        },
+      }),
+      finalize,
+    });
+    context.resolve({ reply: '  先跑 make release ', userPrevious: '部署前要做什么' });
+
+    await dictation.start();
+    dictation.finish();
+    await expect(dictation.done).resolves.toBe('HTTP words');
+
+    const expected = { reply: '先跑 make release', userPrevious: '部署前要做什么' };
+    await expect(realtimeContext).resolves.toEqual(expected);
+    expect(queueContext).toBe(realtimeContext);
+    expect((finalize.mock.calls[0] as unknown[])[2]).toMatchObject({ context: realtimeContext });
+  });
+
   it('uses the latest draft context when retrying retained audio', async () => {
     const { stream } = fakeStream();
     const finalize = vi.fn()

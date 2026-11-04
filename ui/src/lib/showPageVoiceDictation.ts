@@ -13,6 +13,7 @@ import {
   type VoiceCaptureClaim,
   type VoiceRecordingPipelineOptions,
 } from './voiceRecording';
+import { resolveVoiceContext, type VoiceContext, type VoiceContextSource } from './voiceContext';
 import {
   VoiceRealtimeSession,
   type VoiceRealtimeOptions,
@@ -36,6 +37,11 @@ export type ShowPageVoiceDictationInput = {
   onPreview?: (text: string) => void;
   /** The same preview, with the settled text and the tail the recognizer may still revise apart. */
   onPreviewParts?: (preview: VoiceRealtimePreview) => void;
+  /** The conversation this dictation is spoken into, for realtime recognition and its HTTP
+   *  fallback alike; one still loading is waited for briefly (`resolveVoiceContext`). */
+  context?: VoiceContextSource;
+  /** The microphone's loudness (RMS, 0–1) as it records, for a meter. */
+  onLevel?: (rms: number) => void;
 };
 
 export type ShowPageVoiceDictationDependencies = {
@@ -46,6 +52,7 @@ export type ShowPageVoiceDictationDependencies = {
     concurrency: number;
     signal: AbortSignal;
     dictationId: string;
+    context: Promise<VoiceContext>;
   }) => VoiceQueue;
   finalize?: typeof finalizeVoiceDictation;
   transcribeSegments?: typeof transcribeVoiceSegments;
@@ -71,6 +78,8 @@ export class ShowPageVoiceDictation {
   private readonly dictationId: string;
   private readonly segments: PendingVoiceSegment[] = [];
   private readonly queue: VoiceQueue;
+  /** Settles once per dictation; every request reads the same context. */
+  private readonly context: Promise<VoiceContext>;
   private cleanupContext: { before: string; after: string };
   private captureClaim: VoiceCaptureClaim | null = null;
   private pipeline: VoicePipeline | null = null;
@@ -104,10 +113,12 @@ export class ShowPageVoiceDictation {
       newDictationId: dependencies.newDictationId ?? newDictationId,
     };
     this.dictationId = this.dependencies.newDictationId();
+    this.context = resolveVoiceContext(input.context);
     this.queue = this.dependencies.createQueue({
       concurrency: VOICE_TRANSCRIPTION_CONCURRENCY,
       signal: this.abortController.signal,
       dictationId: this.dictationId,
+      context: this.context,
     });
     this.done = new Promise<string>((resolve, reject) => {
       this.resolveDone = resolve;
@@ -140,6 +151,7 @@ export class ShowPageVoiceDictation {
       const realtime = this.dependencies.createRealtime({
         before: this.input.before,
         after: this.input.after,
+        context: this.context,
         signal: this.abortController.signal,
         onPreview: (preview) => {
           this.input.onPreview?.(`${preview.text}${preview.stash}`.trim());
@@ -173,6 +185,7 @@ export class ShowPageVoiceDictation {
         onPcm: (samples) => {
           if (this.realtimeState !== 'failed') realtime.sendPcm(samples);
         },
+        ...(this.input.onLevel ? { onLevel: this.input.onLevel } : {}),
         onError: (error) => {
           this.captureError = error;
           this.realtimeState = 'failed';
@@ -237,6 +250,7 @@ export class ShowPageVoiceDictation {
       concurrency: VOICE_TRANSCRIPTION_CONCURRENCY,
       signal: this.abortController.signal,
       dictationId: this.dictationId,
+      context: this.context,
     });
     return this.finalizeHttp();
   }
@@ -310,6 +324,7 @@ export class ShowPageVoiceDictation {
       after: this.cleanupContext.after,
     }, {
       signal: this.abortController.signal,
+      context: this.context,
     });
     return result.text;
   }

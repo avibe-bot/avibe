@@ -9,10 +9,12 @@ import type { ReactNode } from 'react';
 
 import type { BotCenterPhase } from '@/components/MobileChrome';
 import type { HoldView } from '@/components/voice/MainBotVoice';
+import { stillVoiceLevel } from '@/lib/voiceLevel';
 import { ProjectsPage } from '@/components/workbench/ProjectsPage';
 
 import { frames } from '../../frame';
 import { botConversationApi } from '../../shell/fixtures';
+import { speakingMeter } from '../../shell/meter';
 import { BotCenterTabBar, MainBotVoiceLayer, PhoneConversation, PhoneScreen } from '../../shell/PhoneScreen';
 import { afterVoiceTranscript, agentsApi, mainRunningFixtures, spoken, team, teamFixtures } from '../../shell/teamFixtures';
 
@@ -48,12 +50,13 @@ const recording = { phase: 'recording', text: spoken.text, stash: spoken.stash, 
 const designFrames = frames([
   frame('a-idle', '1 · 静止：歪比有 1 条未读', () => screen('idle')),
   frame('a-idle-running', '1b · 静止：歪比在工作', () => screen('idle', undefined, 5), mainRunningFixtures),
-  frame('b-pressed', '2 · 按下（未到 300ms：松开 = 点一下，打开对话）', () => screen('pressed')),
-  frame('c-listening', '3 · 按住满 300ms：开始录音，还没听到字', () => screen('recording', { phase: 'listening', seconds: 1 })),
-  frame('d-recording', '4 · 录音中：实时转写，上滑取消 · 松开发送', () => screen('recording', recording)),
-  frame('e-armed', '5 · 手指滑进取消区：松开取消', () => screen('armed', { ...recording, phase: 'armed', seconds: 7 })),
+  frame('b-pressed', '2 · 按下 100ms 后歪比按下去（未到 200ms：松开 = 点一下，打开对话）', () => screen('pressed')),
+  frame('c-listening', '3 · 按住满 200ms：开始录音，还没听到字；波形只有很轻的呼吸', () => screen('recording', { phase: 'listening', seconds: 1 })),
+  frame('d-recording', '4 · 录音中：实时转写，波形是麦克风的真实音量（最新在右）；上滑取消 · 松开发送', () => screen('recording', recording)),
+  frame('d-recording-reduced', '4c · 系统开了「减少动态效果」：只有一条静态音量条', () => screen('recording', { ...recording, level: stillVoiceLevel(speakingMeter, { reducedMotion: true }) })),
+  frame('e-armed', '5 · 手指滑进取消区：波形压平变红，松开取消', () => screen('armed', { ...recording, phase: 'armed', seconds: 7 })),
   frame('f-long', '5b · 说得很长：不限时长，转写在卡片里滚动，停在最新一行', () => screen('recording', { phase: 'recording', text: spoken.long, stash: '顺便提醒产品经理更新一下对外的发布说明', seconds: 95 })),
-  frame('g-settling', '6 · 松开：最终文字整理中（最长 20 秒）', () => screen('settling', { phase: 'settling', text: spoken.final, seconds: 8 })),
+  frame('g-settling', '6 · 松开：最终文字整理中（最长 20 秒），一道浅薄荷色的波从左扫到右', () => screen('settling', { phase: 'settling', text: spoken.final, seconds: 8 })),
   frame('h-sent', '7 · 已发给歪比：留在原页面，歪比开始工作', () => screen('idle', { outcome: 'sent', text: spoken.final }, 5), sentFixtures),
   frame('i-conversation', '8 · 点「查看」或点歪比：消息在对话里，标着「语音」，歪比在回', () => <PhoneConversation />, conversationFixtures, [390, 844], '/chat/ses_main'),
   frame('j-cancelled', '× · 在取消区松开：没有发送', () => screen('idle', { outcome: 'cancelled' })),

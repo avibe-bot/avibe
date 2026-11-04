@@ -6,6 +6,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { VoiceContextSource } from '../../lib/voiceContext';
 
 type VoiceStopped = (
   reason: 'finish' | 'abort' | 'error',
@@ -23,7 +24,7 @@ const voiceMocks = vi.hoisted(() => ({
   realtimeAbort: vi.fn(),
   realtimeFinish: vi.fn(),
   realtimeStart: vi.fn(),
-  realtimeOptions: [] as Array<{ reply?: string }>,
+  realtimeOptions: [] as Array<{ context?: VoiceContextSource }>,
 }));
 vi.hoisted(() => {
   Range.prototype.getBoundingClientRect = () => new DOMRect();
@@ -88,7 +89,7 @@ type ComposerTestState = {
   initialDraft?: string;
   mentions?: boolean;
   onSend?: (text: string) => void;
-  readLatestAgentReply?: () => string | undefined;
+  readVoiceContext?: () => VoiceContextSource;
   shortcutStartEnabled?: boolean;
 };
 
@@ -124,7 +125,7 @@ const ComposerShortcutHarness = ({
         initialDraft={state.initialDraft}
         onSearchAgents={state.mentions ? async () => [] : undefined}
         onSearchSessions={state.mentions ? async () => [] : undefined}
-        readLatestAgentReply={state.readLatestAgentReply}
+        readVoiceContext={state.readVoiceContext}
       />
     </>
   );
@@ -425,16 +426,35 @@ describe('Composer voice shortcut', () => {
     expect(voiceMocks.abort).toHaveBeenCalledOnce();
   });
 
-  it('gives realtime recognition the chat reply present when dictation starts', async () => {
-    let latestReply = 'Run make release on prod-7.';
-    renderComposer('reply-context-session', { readLatestAgentReply: () => latestReply });
+  it('gives realtime recognition the conversation present when dictation starts', async () => {
+    let latest = { reply: 'Run make release on prod-7.', userPrevious: 'How do I deploy?' };
+    renderComposer('reply-context-session', { readVoiceContext: () => latest });
     const mic = await screen.findByRole('button', { name: en.chat.compose.voice });
     await act(async () => undefined);
 
     fireEvent.click(mic);
-    latestReply = 'A reply that arrived after dictation started';
+    latest = { reply: 'A reply that arrived after dictation started', userPrevious: 'later' };
     await waitFor(() => expect(voiceMocks.realtimeOptions).toHaveLength(1));
 
-    expect(voiceMocks.realtimeOptions[0].reply).toBe('Run make release on prod-7.');
+    await expect(voiceMocks.realtimeOptions[0].context).resolves.toEqual({
+      reply: 'Run make release on prod-7.',
+      userPrevious: 'How do I deploy?',
+    });
+  });
+
+  it('gives ⌥Z dictation the same conversation', async () => {
+    renderComposer('shortcut-context-session', {
+      readVoiceContext: () => ({ reply: 'Ship it on Thursday.', userPrevious: 'When do we ship?' }),
+    });
+    await screen.findByRole('button', { name: en.chat.compose.voice });
+    await act(async () => undefined);
+
+    fireEvent.keyDown(screen.getByRole('textbox'), { code: 'KeyZ', altKey: true });
+    await waitFor(() => expect(voiceMocks.realtimeOptions).toHaveLength(1));
+
+    await expect(voiceMocks.realtimeOptions[0].context).resolves.toEqual({
+      reply: 'Ship it on Thursday.',
+      userPrevious: 'When do we ship?',
+    });
   });
 });

@@ -56,6 +56,7 @@ import {
   VoiceRealtimeSession,
   type VoiceRealtimeFinal,
 } from '../../lib/voiceRealtime';
+import { resolveVoiceContext, type VoiceContext, type VoiceContextSource } from '../../lib/voiceContext';
 import type { VoiceMessageMetadata } from '../../lib/voiceMessage';
 import {
   ComposerHoldCard,
@@ -198,6 +199,9 @@ type VoiceRecordingSession = {
   realtimeState?: 'connecting' | 'active' | 'failed' | 'finalized';
   realtimeFirstPreviewAt?: number;
   realtimeFinalAt?: number;
+  /** The conversation this dictation is spoken into, read once when it starts: realtime
+   *  recognition, its HTTP fallback, and a retry all send the same. */
+  context: Promise<VoiceContext>;
 };
 
 // Composer remounts when the user switches chats. Keep pending or retryable
@@ -225,6 +229,7 @@ const settleVoiceSession = async (session: VoiceRecordingSession): Promise<void>
           after: session.insertion.after,
         }, {
           signal: session.abortController.signal,
+          context: session.context,
         });
       } finally {
         session.finalizedFailedSegmentCount = session.segments.filter(
@@ -282,6 +287,7 @@ const retryStoredVoiceSession = (session: VoiceRecordingSession): Promise<void> 
       concurrency: VOICE_TRANSCRIPTION_CONCURRENCY,
       signal: session.abortController.signal,
       dictationId: session.dictationId,
+      context: session.context,
     });
     if (session.abortController.signal.aborted) {
       deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
@@ -446,9 +452,10 @@ export interface ComposerProps {
    *  unset keeps the plain textarea (e.g. the Workbench home). */
   onSearchAgents?: (query: string) => Promise<MentionSearchResult[]>;
   onSearchSessions?: (query: string) => Promise<SessionSearchResult[]>;
-  /** The chat's latest Agent reply, read once when dictation starts and sent to
-   *  realtime recognition as context. Surfaces without one leave it unset. */
-  readLatestAgentReply?: () => string | undefined;
+  /** The conversation this composer writes into (its Agent's latest reply, the user's previous
+   *  message), read when a dictation starts (a tap, ⌥Z, or a hold) and sent to recognition.
+   *  Surfaces without a conversation leave it unset. */
+  readVoiceContext?: () => VoiceContextSource;
 }
 
 export interface ComposerHandle {
@@ -508,7 +515,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   autoFocus = false,
   onSearchAgents,
   onSearchSessions,
-  readLatestAgentReply,
+  readVoiceContext,
 }, ref) {
   const { t } = useTranslation();
   const { voiceInput: voiceInputShortcut } = useActionShortcuts();
@@ -1126,7 +1133,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         end: insertion.end,
       };
     }
-    const reply = readLatestAgentReply?.();
+    const context = resolveVoiceContext(readVoiceContext?.());
     // Start compiling the capture graph in parallel with the permission and
     // lock steps. The microphone is still requested only by getUserMedia below.
     void prewarmVoiceCapture().catch(() => undefined);
@@ -1163,17 +1170,19 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         status: 'recording',
         retryCount: 0,
         insertion,
+        context,
         transcriptionQueue: new VoiceTranscriptionQueue({
           concurrency: VOICE_TRANSCRIPTION_CONCURRENCY,
           signal: abortController.signal,
           dictationId,
+          context,
         }),
       };
       session.realtimeState = 'connecting';
       session.realtime = new VoiceRealtimeSession({
         before: insertion.before,
         after: insertion.after,
-        reply,
+        context,
         signal: abortController.signal,
         onPreview: (preview) => {
           if (recordingSessionRef.current !== session || unmountedRef.current) return;
@@ -1508,6 +1517,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     gesture: (pointerType) => (pointerType === 'mouse' ? MOUSE_HOLD_GESTURE : {}),
     bounds: () => boxRef.current?.getBoundingClientRect() ?? null,
     onSystemInterrupt: 'interrupt',
+    context: () => readVoiceContext?.(),
   });
   const holdBusy = hold.phase !== 'idle';
   // A take owns the box from the press to its end: Enter and Send wait, so its staged files go

@@ -10,6 +10,7 @@ import { WorkbenchMobileTabBar } from '@/components/WorkbenchMobileTabBar';
 import { useBots } from '@/context/BotsContext';
 import { useWorkbenchInbox } from '@/context/WorkbenchInboxContext';
 import { ChatPage } from '@/components/workbench/ChatPage';
+import { meterFor } from './meter';
 
 /** A tabbed page as AppShell draws it below md: the brand header, the page in the
  *  scrolling main (clear of the tab bar), and the tab bar. `header`, `tabBar`, and
@@ -118,6 +119,7 @@ export function MainBotVoiceLayer({ hold }: { hold: Partial<HoldView> }) {
     discard: () => {},
     dismiss: () => {},
     ...hold,
+    level: hold.level ?? meterFor(hold.phase ?? 'idle'),
   };
   const bot = { name: displayName(mainBot), avatar: mainBot.avatar };
   return (

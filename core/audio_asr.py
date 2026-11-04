@@ -31,6 +31,22 @@ _SUPPORTED_AUDIO_EXTENSIONS = {
 }
 
 AUDIO_SIGNATURE_SAMPLE_BYTES = 64
+# Conversation context a dictation segment may carry (avibe.bot's `dictation_context`): the
+# Agent's last reply and the user's previous message, each at most this many UTF-16 code units,
+# the unit avibe.bot measures in. Older avibe.bot releases read a segment's form by field name and
+# ignore both fields.
+MAX_DICTATION_CONTEXT_UTF16_UNITS = 8_000
+
+
+def newest_utf16_units(text: str, limit: int = MAX_DICTATION_CONTEXT_UTF16_UNITS) -> str:
+    """Keep the newest ``limit`` UTF-16 code units of ``text``, never half a surrogate pair."""
+    encoded = text.encode("utf-16-le", "surrogatepass")
+    if len(encoded) <= limit * 2:
+        return text
+    tail = encoded[-limit * 2 :]
+    if 0xDC00 <= int.from_bytes(tail[:2], "little") <= 0xDFFF:
+        tail = tail[2:]
+    return tail.decode("utf-16-le", "surrogatepass")
 
 
 def detect_audio_mime_from_sample(data: bytes) -> tuple[str, str] | None:
@@ -235,9 +251,14 @@ class AudioAsrService:
         receipts: list[str],
         before: str,
         after: str,
+        reply: str = "",
+        user_previous: str = "",
         timeout_seconds: float = 120.0,
     ) -> dict[str, Any]:
-        """Forward one composer segment using the server-owned dictation contract."""
+        """Forward one composer segment using the server-owned dictation contract.
+
+        ``reply`` and ``user_previous`` are recognition context only: never log them.
+        """
         runtime = self._runtime_config()
         if not self._get_audio_asr_config().enabled or not runtime:
             raise AudioAsrUnavailableError("audio ASR upstream unavailable")
@@ -257,6 +278,10 @@ class AudioAsrService:
             form.add_field("before", before)
         if after:
             form.add_field("after", after)
+        if reply.strip():
+            form.add_field("reply", newest_utf16_units(reply))
+        if user_previous.strip():
+            form.add_field("user_previous", newest_utf16_units(user_previous))
 
         path: Path | None = None
         handle = None

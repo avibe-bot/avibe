@@ -250,12 +250,13 @@ export const BotStrip: React.FC<{
   );
 };
 
-/** The avatar while it is held, as the tab bar's center is: pressed (a finger), recording, about to
- *  cancel, or sending (ui/design: sidebar/bots/hold-*). */
+/** The avatar while it is held, as the tab bar's center is: pressed (a finger, from the gesture's
+ *  ring delay, so a tap does not flash), recording, about to cancel, or sending (ui/design:
+ *  sidebar/bots/hold-*). */
 const holdFaceClass = (held: HeldBot) => {
   switch (held.phase) {
     case 'pressing':
-      return held.pointer === 'touch' ? 'scale-95' : undefined;
+      return held.pointer === 'touch' && held.progress > 0 ? 'scale-95' : undefined;
     case 'listening':
     case 'recording':
       return 'shadow-glow-md-mint ring-2 ring-mint';

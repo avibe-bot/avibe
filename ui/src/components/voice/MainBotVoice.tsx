@@ -4,6 +4,7 @@ import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 
 import type { BotAvatar as BotAvatarSpec } from '@/lib/bots';
+import type { VoiceLevelSource } from '@/lib/voiceLevel';
 import { BotAvatar } from '../ui/bot-avatar';
 import type { useHoldToTalk } from './useHoldToTalk';
 import { VoiceCancelTarget, VoiceCard, VoiceInterruptedActions, VoiceToastClose } from './VoiceCard';
@@ -17,7 +18,10 @@ import { VoiceMark } from './VoiceMark';
 export type HoldView = Pick<
   ReturnType<typeof useHoldToTalk>,
   'phase' | 'interruptReason' | 'text' | 'stash' | 'seconds' | 'outcome' | 'canRetry' | 'sendInterrupted' | 'retry' | 'discard' | 'dismiss'
->;
+> & {
+  /** The microphone's loudness for the card's meter. */
+  level?: VoiceLevelSource | null;
+};
 type Hold = HoldView;
 type MainBot = { name: string; avatar: BotAvatarSpec | null };
 
@@ -40,6 +44,7 @@ export function MainBotHoldOverlay({ hold, bot }: { hold: Hold; bot: MainBot }) 
           stash={hold.stash}
           seconds={hold.seconds}
           reason={hold.interruptReason ?? 'dropped'}
+          level={hold.level}
           actions={
             <VoiceInterruptedActions
               canRetry={hold.canRetry}

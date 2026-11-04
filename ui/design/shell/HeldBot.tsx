@@ -9,6 +9,7 @@ import { MainBotVoiceToast, type HoldView } from '@/components/voice/MainBotVoic
 import { BotHoldLayer } from '@/components/workbench/bots/BotHold';
 import { BotHoldContext } from '@/components/workbench/bots/BotHoldContext';
 import { useBots } from '@/context/BotsContext';
+import { meterFor } from './meter';
 
 const noop = () => {};
 
@@ -39,6 +40,7 @@ export function HeldBot({
     discard: noop,
     dismiss: noop,
     ...hold,
+    level: hold.level ?? meterFor(hold.phase ?? 'idle'),
   };
   const held = view.phase === 'idle' ? null : { handle, phase: view.phase, progress: hold.progress ?? 0, pointer };
   const face = bot ? { name: displayName(bot), avatar: bot.avatar } : null;

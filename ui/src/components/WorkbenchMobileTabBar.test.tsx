@@ -10,9 +10,13 @@ import { WorkbenchInboxContext, type InboxState } from '../context/WorkbenchInbo
 import type { Bot } from '../lib/bots';
 import { WorkbenchMobileTabBar } from './WorkbenchMobileTabBar';
 
-const api = vi.hoisted(() => ({ sendSessionMessage: vi.fn() }));
+const api = vi.hoisted(() => ({ sendSessionMessage: vi.fn(), listSessionMessages: vi.fn() }));
 // The hold's own path is useHoldToTalk's test; here the bar hands it what to send and where a tap goes.
-const hold = vi.hoisted(() => ({ options: null as null | { send: (text: string, metadata: object) => Promise<boolean>; onTap?: () => void } }));
+const hold = vi.hoisted(() => ({
+  options: null as null | { send: (text: string, metadata: object) => Promise<boolean>; onTap?: () => void; context?: () => unknown },
+  phase: 'idle',
+  progress: 0,
+}));
 vi.mock('../context/ApiContext', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../context/ApiContext')>()),
   useApi: () => api,
@@ -21,7 +25,7 @@ vi.mock('./voice/useHoldToTalk', () => ({
   useHoldToTalk: (options: NonNullable<typeof hold.options>) => {
     hold.options = options;
     return {
-      phase: 'idle', interruptReason: null, text: '', stash: '', seconds: 0, progress: 0, outcome: null,
+      phase: hold.phase, interruptReason: null, text: '', stash: '', seconds: 0, progress: hold.progress, outcome: null,
       // The hold has answered every pointer press here: it spends the click that follows.
       available: true, holdable: true, canRetry: false,
       bind: { onClick: (event: { detail: number; preventDefault: () => void }) => { if (event.detail !== 0) event.preventDefault(); } },
@@ -71,8 +75,8 @@ const inbox = (unreadBySession: Record<string, number>) => ({ unreadBySession })
 
 const ChatProbe = () => <div data-testid="chat">{useParams().sessionId}</div>;
 
-function renderBar(state: BotsState, unread: Record<string, number> = {}, onNewSession?: () => void) {
-  return render(
+function barView(state: BotsState, unread: Record<string, number> = {}, onNewSession?: () => void) {
+  return (
     <BotsContext.Provider value={state}>
       <WorkbenchInboxContext.Provider value={inbox(unread)}>
         <MemoryRouter initialEntries={['/projects']}>
@@ -82,14 +86,20 @@ function renderBar(state: BotsState, unread: Record<string, number> = {}, onNewS
           </Routes>
         </MemoryRouter>
       </WorkbenchInboxContext.Provider>
-    </BotsContext.Provider>,
+    </BotsContext.Provider>
   );
+}
+
+function renderBar(state: BotsState, unread: Record<string, number> = {}, onNewSession?: () => void) {
+  return render(barView(state, unread, onNewSession));
 }
 
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
   hold.options = null;
+  hold.phase = 'idle';
+  hold.progress = 0;
 });
 
 // ui/design: mobile/workbench-tab/team: for the Owner the middle of the bar is the main
@@ -127,6 +137,30 @@ describe('WorkbenchMobileTabBar', () => {
     await expect(hold.options!.send('Check the release', { input: 'voice' })).resolves.toBe(true);
     expect(api.sendSessionMessage).toHaveBeenCalledWith('ses_main', { text: 'Check the release', metadata: { input: 'voice' } });
     expect(screen.queryByTestId('chat')).toBeNull();
+  });
+
+  it("hears a held take in the main Bot's conversation", async () => {
+    api.listSessionMessages.mockResolvedValue({
+      messages: [
+        { author: 'user', type: 'user', text: '帮我订周五的会议室', content: {} },
+        { author: 'agent', type: 'result', text: '已订 3 楼 Atlas', content: {} },
+      ],
+      next_after_id: null,
+    });
+    renderBar(bots({}), {}, vi.fn());
+
+    await expect(hold.options?.context?.()).resolves.toEqual({ reply: '已订 3 楼 Atlas', userPrevious: '帮我订周五的会议室' });
+    expect(api.listSessionMessages).toHaveBeenCalledWith('ses_main', expect.objectContaining({ tail: true, cache: false }));
+  });
+
+  it('presses the center in only once a press outlasts the ring delay, so a tap does not flash', () => {
+    hold.phase = 'pressing';
+    const { rerender } = renderBar(bots({}), {}, vi.fn());
+    const center = () => screen.getByRole('button', { name: 'appShell.openMainBot:{"name":"Vibey"}' });
+    expect(center().innerHTML).not.toContain('scale-95');
+    hold.progress = 0.2;
+    rerender(barView(bots({}), {}, vi.fn()));
+    expect(center().innerHTML).toContain('scale-95');
   });
 
   it('ignores a pointer click on the center, which the hold already answered', () => {

@@ -8,7 +8,7 @@ import en from '../../src/i18n/en.json' with { type: 'json' };
 // click and after one just short of the hold.
 
 // The composer's mouse hold (MOUSE_HOLD_GESTURE.holdMs).
-const HOLD_MS = 500;
+const HOLD_MS = 350;
 
 declare global {
   interface Window {

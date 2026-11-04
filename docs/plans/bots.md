@@ -218,8 +218,8 @@ Owner decisions 2026-11-01, from the mockups in this Session's Show Page
   (D13).
 - **Hold an avatar to talk (owner decision, 2026-11-04).** Every avatar in the
   strip, desktop and phone, the main Bot included, takes the composer's
-  hold-to-talk exactly: a mouse holds 500 ms with the ring and cancels by
-  leaving the avatar, a finger holds 300 ms and slides up to cancel, Esc
+  hold-to-talk exactly: a mouse holds 350 ms with the ring (from 100 ms) and
+  cancels by leaving the avatar, a finger holds 200 ms and slides up to cancel, Esc
   cancels, there is no time limit, and a take cut off keeps its words with the
   same choices. A tap still opens the conversation, a right-click still opens
   the menu (only the primary button holds), and a scroll of the strip never
@@ -228,7 +228,10 @@ Owner decisions 2026-11-01, from the mockups in this Session's Show Page
   a desktop beside it, its top at the avatar's, with the hint under it; on a
   phone under the strip, with the cancel target right above the finger. The
   hover card closes when a hold starts, and the order holds while a take is on
-  (D13). After sending, the reader stays where they are: the toast says
+  (D13). Recognition hears the take in the held Bot's own conversation: its
+  last reply and what the user last said there
+  (`docs/voice-realtime-prototype.md`). After sending, the reader stays where
+  they are: the toast says
   「已发给{name}」 with View, above the tab bar on a phone and where the app's
   toasts go on a desktop; the message carries the voice mark. One hold serves
   every avatar (`BotHoldProvider`), so two avatars never record at once. The

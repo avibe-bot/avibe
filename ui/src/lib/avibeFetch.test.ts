@@ -154,6 +154,34 @@ describe('avibeFetch', () => {
     ]);
   });
 
+  it('builds each attempt\'s body for the capabilities of the token it carries', async () => {
+    const { apiFetch, avibeFetch } = await loadModules();
+    apiFetch.mockReset();
+    apiFetch
+      .mockResolvedValueOnce(Response.json({
+        token: 'initial',
+        base_url: 'https://example.test',
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+      }))
+      .mockResolvedValueOnce(Response.json({
+        token: 'refreshed',
+        base_url: 'https://example.test',
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+        capabilities: ['dictation_context'],
+      }));
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(null, { status: 401 }))
+      .mockResolvedValueOnce(Response.json({ text: 'ok' }));
+    vi.stubGlobal('fetch', fetch);
+
+    await expect(avibeFetch('/api/cloud/voice/dictations', {
+      method: 'POST',
+      bodyFor: (capabilities) => capabilities.join(',') || 'none',
+    })).resolves.toMatchObject({ status: 200 });
+
+    expect(fetch.mock.calls.map(([, init]) => (init as RequestInit).body)).toEqual(['none', 'dictation_context']);
+  });
+
   it.each([
     ['keeps only string capabilities', ['realtime_reply_context', 7, null], ['realtime_reply_context']],
     ['treats a missing field as no capabilities', undefined, []],

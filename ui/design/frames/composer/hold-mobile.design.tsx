@@ -1,5 +1,5 @@
 // Hold the composer to talk, on a phone (owner direction, 2026-11-02), as on the center of the
-// tab bar: hold 300 ms (moving 10 px first lets the page scroll), slide up 80 px to arm cancel
+// tab bar: the box lights from 100 ms, hold 200 ms (moving 10 px first lets the page scroll), slide up 80 px to arm cancel
 // (back under 60 px disarms), release to send to this conversation. It records only while the
 // composer is empty and the keyboard is down; a tap raises the keyboard, and once it is up, or
 // there is text, a long press is the system's (caret, selection, Paste).
@@ -53,8 +53,8 @@ const recording = { phase: 'recording', text: said.text, stash: said.stash, seco
 
 const designFrames = frames([
   frame('a-idle', '1 · 静止：输入框为空、键盘没弹起，占位提示「给首席安全官发消息，或按住说话」', () => <PhoneConversation />),
-  frame('b-pressed', '2 · 按下（未到 300ms：松开 = 点一下，弹出键盘）', hold({ phase: 'pressing' })),
-  frame('c-listening', '3 · 按满 300ms：开始录音，还没出字', hold({ phase: 'listening', seconds: 1 })),
+  frame('b-pressed', '2 · 按下 100ms 后输入框亮起（未到 200ms：松开 = 点一下，弹出键盘）', hold({ phase: 'pressing', progress: 0.5 })),
+  frame('c-listening', '3 · 按满 200ms：开始录音，还没出字', hold({ phase: 'listening', seconds: 1 })),
   frame('d-recording', '4 · 录音中：实时转写，上滑取消 · 松开发送', hold(recording)),
   frame('d-recording-long', '4b · 说得很长：转写区滚动，停在最新一行，不限时长', hold({ phase: 'recording', text: saidLong.text, stash: saidLong.stash, seconds: 48 })),
   frame('d-recording-attachment', '4c · 只放了附件、没有文字：照样按住录音，附件和语音一起发', hold(recording, { attachments: [staged] })),

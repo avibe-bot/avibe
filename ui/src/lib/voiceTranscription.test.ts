@@ -16,6 +16,13 @@ import {
 } from './voiceTranscription';
 
 const audioBlob = () => new Blob(['audio'], { type: 'audio/mp4; codecs=mp4a.40.2' });
+/** The form an attempt sends, built for a token with these capabilities. */
+const formOf = (init: AvibeFetchRequestInit | undefined, capabilities: readonly string[] = []): FormData => {
+  const body = init?.bodyFor?.(capabilities) ?? init?.body;
+  expect(body).toBeInstanceOf(FormData);
+  if (!(body instanceof FormData)) throw new Error('Expected a multipart transcription request');
+  return body;
+};
 
 describe('voice transcription', () => {
   it('reserves the complete upstream budget on the compatibility path', () => {
@@ -29,11 +36,9 @@ describe('voice transcription', () => {
 
   it('uses the real container extension and normalized MIME type', async () => {
     const telemetry = vi.fn();
-    const cloudFetch = vi.fn().mockImplementation(async (path: string, init?: RequestInit) => {
+    const cloudFetch = vi.fn().mockImplementation(async (path: string, init?: AvibeFetchRequestInit) => {
       expect(path).toBe('/api/cloud/audio/transcriptions');
-      expect(init?.body).toBeInstanceOf(FormData);
-      if (!(init?.body instanceof FormData)) throw new Error('Expected a multipart transcription request');
-      const file = init.body.get('file') as File;
+      const file = formOf(init).get('file') as File;
       expect(file.name).toBe('voice.mp4');
       expect(file.type).toBe('audio/mp4; codecs=mp4a.40.2');
       return Response.json({ text: 'hello' });
@@ -515,9 +520,9 @@ describe('voice transcription', () => {
   });
 
   it('submits ordered receipts and cursor context with the final audio segment', async () => {
-    const cloudFetch = vi.fn(async (path: string, init?: RequestInit) => {
+    const cloudFetch = vi.fn(async (path: string, init?: AvibeFetchRequestInit) => {
       expect(path).toBe('/api/cloud/voice/dictations');
-      const form = init?.body as FormData;
+      const form = formOf(init);
       if (form.get('final') === 'false') {
         expect(form.get('sequence')).toBe('0');
         expect(form.getAll('receipt')).toEqual([]);
@@ -550,9 +555,55 @@ describe('voice transcription', () => {
     expect(segments[0]?.receipt).toBe('receipt-0');
   });
 
+  it('sends the conversation with every segment only to a backend that declares dictation context', async () => {
+    const forms: Array<{ declared: FormData; undeclared: FormData }> = [];
+    const cloudFetch = vi.fn(async (_path: string, init?: AvibeFetchRequestInit) => {
+      const declared = formOf(init, ['dictation_context']);
+      forms.push({ declared, undeclared: formOf(init, []) });
+      return declared.get('final') === 'false'
+        ? Response.json({ receipt: 'receipt-0', sequence: 0 })
+        : Response.json({ text: '结果', cleanup: 'success' });
+    });
+    const segments: VoiceTranscriptionSegment[] = [
+      { blob: audioBlob(), sequence: 0, final: false },
+      { blob: audioBlob(), sequence: 1, final: true },
+    ];
+    const context = Promise.resolve({ reply: '先跑 make release', userPrevious: '部署前要做什么' });
+
+    await transcribeVoiceSegments(segments, { cloudFetch, dictationId: 'dictation-context', context });
+    await finalizeVoiceDictation(segments, { dictationId: 'dictation-context', before: '', after: '' }, { cloudFetch, context });
+
+    expect(forms).toHaveLength(2);
+    for (const { declared, undeclared } of forms) {
+      expect(declared.get('reply')).toBe('先跑 make release');
+      expect(declared.get('user_previous')).toBe('部署前要做什么');
+      // An older avibe.bot gets exactly the form it always did.
+      expect([...undeclared.keys()]).not.toContain('reply');
+      expect([...undeclared.keys()]).not.toContain('user_previous');
+    }
+  });
+
+  it('cuts the conversation to its newest 8,000 characters on the HTTP path', async () => {
+    let form: FormData | undefined;
+    const cloudFetch = vi.fn(async (_path: string, init?: AvibeFetchRequestInit) => {
+      form = formOf(init, ['dictation_context']);
+      return Response.json({ receipt: 'receipt-0', sequence: 0 });
+    });
+    const segments: VoiceTranscriptionSegment[] = [{ blob: audioBlob(), sequence: 0, final: false }];
+
+    await transcribeVoiceSegments(segments, {
+      cloudFetch,
+      dictationId: 'dictation-long',
+      context: { reply: `开头${'x'.repeat(8_000)}`, userPrevious: '  ' },
+    });
+
+    expect(form?.get('reply')).toBe('x'.repeat(8_000));
+    expect(form?.get('user_previous')).toBeNull();
+  });
+
   it('uses a finalize-only request when capture stops exactly at a segment boundary', async () => {
-    const cloudFetch = vi.fn(async (_path: string, init?: RequestInit) => {
-      const form = init?.body as FormData;
+    const cloudFetch = vi.fn(async (_path: string, init?: AvibeFetchRequestInit) => {
+      const form = formOf(init);
       expect(form.get('file')).toBeNull();
       expect(form.get('finalize_only')).toBe('true');
       expect(form.getAll('receipt')).toEqual(['receipt-0']);
@@ -605,6 +656,8 @@ describe('voice transcription', () => {
         receipts: ['local-receipt'],
         before: '前文',
         after: '后文',
+        reply: '上一条回复',
+        user_previous: '上一条消息',
       });
       expect(body.data).toBeUndefined();
       return Response.json({ text: '本地代理结果', cleanup: 'success' });
@@ -623,7 +676,7 @@ describe('voice transcription', () => {
       dictationId: 'dictation-local',
       before: '前文',
       after: '后文',
-    }, { cloudFetch, localFetch })).resolves.toEqual({
+    }, { cloudFetch, localFetch, context: { reply: '上一条回复', userPrevious: '上一条消息' } })).resolves.toEqual({
       text: '本地代理结果',
       cleanup: 'success',
     });
