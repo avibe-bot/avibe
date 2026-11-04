@@ -13,7 +13,7 @@ import { useHoldToTalk, type HoldToTalkOptions } from './useHoldToTalk';
 // is cut off. The pipeline itself is ShowPageVoiceDictation's own test.
 
 type Fake = {
-  input: { onPreviewParts?: (preview: { text: string; stash: string }) => void };
+  input: { onPreviewParts?: (preview: { text: string; stash: string }) => void; context?: unknown; onLevel?: (rms: number) => void };
   done: Promise<string>;
   resolve: (text: string) => void;
   reject: (error: unknown) => void;
@@ -111,7 +111,7 @@ const flush = () => act(async () => {
 const down = (el: HTMLElement, y = 500, pointerType = 'touch') => fireEvent.pointerDown(el, { button: 0, pointerId: 1, clientX: 100, clientY: y, pointerType });
 const move = (el: HTMLElement, y: number, x = 100) => fireEvent.pointerMove(el, { pointerId: 1, clientX: x, clientY: y });
 const up = (el: HTMLElement, y = 500) => fireEvent.pointerUp(el, { pointerId: 1, clientX: 100, clientY: y });
-async function holdFor(el: HTMLElement, ms = 300) {
+async function holdFor(el: HTMLElement, ms = 200) {
   down(el);
   await act(async () => {
     vi.advanceTimersByTime(ms);
@@ -155,11 +155,41 @@ describe('useHoldToTalk', () => {
   it('treats a short press as a tap, inside the release, and opens no microphone', async () => {
     const el = await mount();
     down(el);
-    await elapse(200);
+    // A finger holds 200 ms (owner decision, 2026-11-04): released before it, the press is a tap.
+    await elapse(150);
     up(el);
     expect(onTap).toHaveBeenCalledTimes(1);
     expect(pipeline.takes).toHaveLength(0);
     expect(hold.phase).toBe('idle');
+  });
+
+  it('reads the conversation when the microphone opens, not on a tap', async () => {
+    const context = vi.fn(() => ({ reply: '上一条回复', userPrevious: '上一条消息' }));
+    const el = await mount({ context });
+    down(el);
+    await elapse(150);
+    up(el);
+    expect(context).not.toHaveBeenCalled();
+
+    await holdFor(el);
+    expect(context).toHaveBeenCalledOnce();
+    expect(pipeline.takes[0].input.context).toEqual({ reply: '上一条回复', userPrevious: '上一条消息' });
+  });
+
+  it("hands the card the microphone's level while the take records, and quiet once it ends", async () => {
+    const el = await mount();
+    await holdFor(el);
+    act(() => pipeline.takes[0].input.onLevel?.(0.3));
+    expect(hold.level.read()).toBe(0.3);
+
+    await speak('好');
+    await elapse(1_000);
+    act(() => pipeline.takes[0].input.onLevel?.(0.2));
+    up(el);
+    await act(async () => pipeline.takes[0].resolve('好'));
+    await flush();
+    expect(hold.phase).toBe('idle');
+    expect(hold.level.read()).toBe(0);
   });
 
   it('gives a press that moves before the hold back to the page: no tap, no take', async () => {
@@ -191,7 +221,7 @@ describe('useHoldToTalk', () => {
     expect(hold.phase).toBe('idle');
   });
 
-  it('records from 300 ms, shows the live words, and sends the final text as a voice message on release', async () => {
+  it('records from 200 ms, shows the live words, and sends the final text as a voice message on release', async () => {
     const el = await mount();
     await holdFor(el);
     expect(hold.phase).toBe('listening');

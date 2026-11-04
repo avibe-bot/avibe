@@ -262,6 +262,8 @@ def test_asr_transcribe_forwards_segment_receipts_and_context(monkeypatch):
             "receipts": [],
             "before": "",
             "after": "",
+            "reply": "先跑 make release",
+            "user_previous": "部署前要做什么",
         },
         headers=csrf_headers(client),
     )
@@ -278,6 +280,8 @@ def test_asr_transcribe_forwards_segment_receipts_and_context(monkeypatch):
             "receipts": [],
             "before": "",
             "after": "",
+            "reply": "先跑 make release",
+            "user_previous": "部署前要做什么",
             "timeout_seconds": 155.0,
         }
     ]
@@ -295,6 +299,8 @@ def test_asr_transcribe_supports_finalize_only_without_audio(monkeypatch):
             "receipts": ["receipt-0"],
             "before": "前文",
             "after": "后文",
+            "reply": "",
+            "user_previous": "",
             "timeout_seconds": 155.0,
         }
         return {"text": "整理结果", "cleanup": "success"}

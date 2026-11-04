@@ -177,9 +177,16 @@ describe('the gesture', () => {
     renderComposer();
     await asrAvailable();
     const gesture = hookMock.options!.gesture as (pointerType: string) => object;
-    expect(gesture('mouse')).toEqual({ holdMs: 500, ringDelayMs: 150, slopPx: 6, cancel: 'leave', cancelPx: 16, uncancelPx: 0 });
+    expect(gesture('mouse')).toEqual({ holdMs: 350, ringDelayMs: 100, slopPx: 6, cancel: 'leave', cancelPx: 16, uncancelPx: 0 });
     expect(gesture('touch')).toEqual({});
     expect(hookMock.options!.onSystemInterrupt).toBe('interrupt');
+  });
+
+  it("hears a take in the composer's own conversation", async () => {
+    const context = { reply: 'Ship it Thursday.', userPrevious: 'When do we ship?' };
+    renderComposer({ readVoiceContext: () => context });
+    await asrAvailable();
+    expect(hookMock.options!.context!()).toBe(context);
   });
 
   it('measures leave-to-cancel against the whole box', async () => {
@@ -367,6 +374,18 @@ describe('the system’s touch gestures', () => {
     expect(touchStart(textarea()).defaultPrevented).toBe(true);
     // And the touch styles stay on through the press (jsdom keeps only the standard one).
     expect(box().style.touchAction).toBe('none');
+  });
+
+  it('lights the box for a finger only once the press outlasts the ring delay, so a tap does not flash', async () => {
+    const { rerender } = renderComposer();
+    await asrAvailable();
+    fireEvent.pointerDown(textarea(), { button: 0, pointerType: 'touch' });
+    hookMock.state = { phase: 'pressing', progress: 0 };
+    rerender(view());
+    expect(document.querySelector('.bg-mint\\/10')).toBeNull();
+    hookMock.state = { phase: 'pressing', progress: 0.3 };
+    rerender(view());
+    expect(document.querySelector('.bg-mint\\/10')).not.toBeNull();
   });
 
   it('leaves a touch the hold refused to the system', async () => {

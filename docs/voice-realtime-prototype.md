@@ -27,20 +27,31 @@ requests without same-origin evidence, an unpaired instance, and a refused or
 unavailable mint get `503 cloud_unavailable`, and the browser keeps the local
 HTTP relay.
 
-## Reply context
+## Conversation context
 
-When dictation starts in an existing chat, `start` may also carry `reply`: the
-full body of the chat's latest Agent `result`, without Avibe's generated
-footer. The cloud extracts recognition hotwords from it; the browser neither
-extracts nor truncates it, and never logs it. The reply is read once, when
-dictation starts and before the microphone opens. A result row arrives whole, so during a running
-Turn the previous reply is used. The field is omitted when the reply is empty
-or longer than 200,000 characters. It is also omitted when the transcript
-window does not reach the live tail. The Workbench home, the new-session sheet,
-and Show Page dictation have no latest reply and never send it.
+Dictation into a conversation sends recognition two texts from it: `reply`, the
+body of its latest Agent `result` without Avibe's generated footer, and
+`user_previous`, the newest message the user sent there. The cloud extracts
+recognition hotwords from them; the browser never logs them. Every entry sends
+the conversation it writes into: a tap on the microphone, ⌥Z, and a hold on the
+composer read the chat's transcript; a hold on a Bot's avatar, or on the phone
+tab bar's main Bot, reads that Bot's conversation (its newest 20 rows, waited
+for at most 1.5 s while the socket opens). A chat window detached from the live
+tail reads the newest rows the same way. The context is read once, when the
+dictation starts; a result row arrives whole, so during a running Turn the
+previous reply is used. Each text is trimmed and cut to its newest 8,000
+UTF-16 code units; an empty text is not sent. The Workbench home, the
+new-session sheet, and Show Page dictation have no conversation and send none.
 
 The `start` schema is strict, so an unknown field closes the socket. The
 browser therefore sends `reply` only when the cloud token that opened the
-socket declares `realtime_reply_context`. avibe.bot returns `capabilities` with
-`user-token` and `device-token`. `GET /api/cloud/token` relays it as a
-bounded list of strings. A backend that predates the field declares none.
+socket declares `realtime_reply_context`, and `user_previous` only when it
+declares `realtime_user_previous_context`. When realtime recognition fails and
+the dictation falls back to HTTP segments, every segment carries the same two
+texts as form fields, sent directly to avibe.bot only when that request's token
+declares `dictation_context`. The local relay (`/api/asr/transcribe`, used when
+no cloud token can be minted) forwards them as given, cut to the same 8,000
+units: avibe.bot reads a segment's form by field name, so a release that
+predates them ignores them. avibe.bot returns `capabilities` with `user-token`
+and `device-token`. `GET /api/cloud/token` relays it as a bounded list of
+strings. A backend that predates the field declares none.

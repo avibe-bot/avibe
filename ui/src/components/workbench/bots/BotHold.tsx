@@ -6,6 +6,7 @@ import { useApi } from '../../../context/ApiContext';
 import { useBotOrderHold, useBots } from '../../../context/BotsContext';
 import { botSessionPath, type BotAvatar as BotAvatarSpec } from '@/lib/bots';
 import { useIsDesktop } from '@/lib/useIsDesktop';
+import { loadVoiceContext } from '@/lib/voiceContext';
 import { MouseHint, type HoldPointer } from '../../voice/ComposerHold';
 import { MainBotVoiceToast, type HoldView } from '../../voice/MainBotVoice';
 import { MOUSE_HOLD_GESTURE, useHoldToTalk } from '../../voice/useHoldToTalk';
@@ -15,8 +16,8 @@ import { BotHoldContext, type BotAvatarHold, type BotHoldValue } from './BotHold
 // Hold a Bot's avatar to talk to it (docs/plans/bots.md D5): the composer's hold-to-talk on the
 // Bots strip, desktop and phone, the main Bot included. One hold serves every avatar, so the
 // strip asks once whether voice is available and two avatars can never record at once. The
-// gesture is `useHoldToTalk`'s, with the composer's numbers: a mouse holds 500 ms with the ring
-// and cancels by leaving the avatar, a finger holds 300 ms and slides up to cancel, Esc cancels,
+// gesture is `useHoldToTalk`'s, with the composer's numbers: a mouse holds 350 ms with the ring
+// and cancels by leaving the avatar, a finger holds 200 ms and slides up to cancel, Esc cancels,
 // there is no time limit, and a take cut off keeps its words. A tap still opens the
 // conversation and a right-click still opens the menu. After sending, the reader stays where
 // they are; the toast's View opens the conversation.
@@ -44,6 +45,11 @@ export function BotHoldProvider({ children }: { children: ReactNode }) {
       return true;
     },
     onTap: () => tapRef.current?.(),
+    // The held Bot's own conversation: its last reply and what the user last said to it.
+    context: () => {
+      const bot = botForHandle(targetRef.current?.handle);
+      return bot ? loadVoiceContext(api.listSessionMessages, bot.session_id) : undefined;
+    },
     gesture: (pointerType) => (pointerType === 'mouse' ? MOUSE_HOLD_GESTURE : {}),
     // The system taking the press (blur, background, a lost pointer) keeps what was heard, as the
     // composer's hold does: the card offers to send, retry, or discard it.
@@ -158,6 +164,7 @@ export function BotHoldLayer({
       stash={hold.stash}
       seconds={hold.seconds}
       reason={hold.interruptReason ?? 'dropped'}
+      level={hold.level}
       actions={
         <VoiceInterruptedActions
           canRetry={hold.canRetry}

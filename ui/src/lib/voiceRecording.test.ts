@@ -131,6 +131,31 @@ describe('VoiceRecordingPipeline', () => {
     expect(onSegment).not.toHaveBeenCalled();
   });
 
+  it('passes the microphone level on only while it records', async () => {
+    const onLevel = vi.fn();
+    let handlers: CaptureHandlers & { onLevel?: (rms: number) => void } = null!;
+    const stream = { getTracks: () => [{ stop: vi.fn() }] } as unknown as MediaStream;
+    const pipeline = new VoiceRecordingPipeline({
+      stream,
+      sampleRate: 4,
+      segmentMs: 1000,
+      onSegment: vi.fn(),
+      onStopped: vi.fn(),
+      onLevel,
+      createCapture: (_stream, _rate, _samples, next) => {
+        handlers = next;
+        return { start: async () => undefined, stop: vi.fn() };
+      },
+    });
+    await pipeline.start();
+    handlers.onLevel?.(0.2);
+    pipeline.finish();
+    // Flushing after the release: what was heard still lands, the meter goes quiet.
+    handlers.onLevel?.(0.3);
+
+    expect(onLevel.mock.calls).toEqual([[0.2]]);
+  });
+
   it('frames delayed PCM delivery into provider-safe segments by sample count', async () => {
     const { capture, onSegment, pipeline } = setup();
     await pipeline.start();
@@ -773,6 +798,38 @@ describe('voice PCM worklet', () => {
 
     processor.port.onmessage?.({ data: { type: 'stop' } });
     expect(postMessage.mock.calls.at(-1)?.[0]).toEqual({ type: 'stopped' });
+  });
+
+  it('reports the input level every levelMs, apart from the PCM, when asked', () => {
+    const postMessage = vi.fn();
+    class FakeAudioWorkletProcessor {
+      readonly port = {
+        onmessage: null as ((event: { data: { type?: string } }) => void) | null,
+        postMessage,
+      };
+    }
+    let Processor: (new (options: {
+      processorOptions: { targetSampleRate: number; chunkSamples: number; levelMs?: number };
+    }) => { process: (inputs: Float32Array[][]) => boolean }) | null = null;
+    new Function('AudioWorkletProcessor', 'registerProcessor', 'sampleRate', voicePcmWorkletSource)(
+      FakeAudioWorkletProcessor,
+      (_name: string, constructor: typeof Processor) => {
+        Processor = constructor;
+      },
+      1000,
+    );
+
+    // 1 kHz input, a level every 4 ms: four samples each.
+    const processor = new Processor!({ processorOptions: { targetSampleRate: 1000, chunkSamples: 1000, levelMs: 4 } });
+    processor.process([[Float32Array.from([0.5, -0.5, 0.5, -0.5, 0, 0, 0, 0, 0.1])]]);
+    const levels = postMessage.mock.calls.map(([message]) => message).filter((message) => message.type === 'level');
+    expect(levels).toEqual([{ type: 'level', rms: 0.5 }, { type: 'level', rms: 0 }]);
+
+    // Off unless asked for: the PCM alone.
+    postMessage.mockClear();
+    new Processor!({ processorOptions: { targetSampleRate: 1000, chunkSamples: 2 } })
+      .process([[Float32Array.from([0.5, -0.5, 0.5, -0.5])]]);
+    expect(postMessage.mock.calls.every(([message]) => message.type === 'samples')).toBe(true);
   });
 
   it('upsamples low-rate input before emitting target-rate PCM', () => {

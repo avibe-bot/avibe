@@ -73,4 +73,8 @@ test('the main Bot: the cancelled toast closes on a tap, and the sent toast open
   await tap(page, sent.getByRole('button', { name: en.voice.view }));
   await expect(sent).toBeHidden({ timeout: 1_000 });
   expect(await page.evaluate(() => window.voiceShortcutTest)).toMatchObject({ sent: ['Send this transcript'], opened: 1 });
+  expect(await page.evaluate(() => window.voiceShortcutTest.transcribed.at(-1))).toEqual({
+    reply: 'Answer from ses_main',
+    user_previous: 'Question for ses_main',
+  });
 });

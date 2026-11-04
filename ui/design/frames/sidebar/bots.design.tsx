@@ -117,7 +117,7 @@ const designFrames = frames([
     route: '/chat/ses_main',
     render: sidebar,
   },
-  holdFrame('hold-pressing', '按住伙伴说话 · 按下 150ms 后出现圆环，到 500ms 填满（期间移动 >6px = 普通点击）', held({ phase: 'pressing', progress: 0.55 })),
+  holdFrame('hold-pressing', '按住伙伴说话 · 按下 100ms 后出现圆环，到 350ms 填满（期间移动 >6px = 普通点击）', held({ phase: 'pressing', progress: 0.55 })),
   holdFrame('hold-recording', '按住伙伴说话 · 录音中：卡片在头像右边，松开发送 · 移开头像或 Esc 取消', held(recording)),
   holdFrame('hold-armed', '按住伙伴说话 · 指针移开头像：松开取消', held({ ...recording, phase: 'armed', seconds: 7 })),
   holdFrame(

@@ -27,11 +27,21 @@ declare global {
       opened: number;
       /** Messages a Bot's avatar sent, by its Session (`?surface=strip`). */
       posted: { session: string; text: string; metadata: Record<string, unknown> }[];
+      /** The conversation each transcription request carried (the local relay's JSON). */
+      transcribed: { reply?: string; user_previous?: string }[];
+      /** Conversations a hold read its context from, by Session. */
+      contextReads: string[];
     };
   }
 }
 
-window.voiceShortcutTest = { sent: [], spoken: [], opened: 0, posted: [] };
+window.voiceShortcutTest = { sent: [], spoken: [], opened: 0, posted: [], transcribed: [], contextReads: [] };
+
+/** Each fixture conversation's last two rows: the user's message, then the Agent's reply. */
+const conversationTail = (session: string) => [
+  { id: `${session}-ask`, author: 'user', type: 'user', text: `Question for ${session}`, content: {}, metadata: {} },
+  { id: `${session}-reply`, author: 'agent', type: 'result', text: `Answer from ${session}`, content: {}, metadata: {} },
+];
 
 window.fetch = async (input, init) => {
   const url = new URL(
@@ -47,11 +57,20 @@ window.fetch = async (input, init) => {
     return new Response(JSON.stringify({ error: 'fixture local ASR only' }), { status: 503 });
   }
   if (url.pathname === '/api/asr/transcribe') {
+    const body = JSON.parse(String(init?.body ?? '{}')) as { reply?: string; user_previous?: string };
+    window.voiceShortcutTest.transcribed.push({ reply: body.reply, user_previous: body.user_previous });
     return new Response(JSON.stringify({ text: 'Send this transcript', cleanup: 'success' }), {
       headers: { 'Content-Type': 'application/json' },
     });
   }
   const posted = url.pathname.match(/^\/api\/sessions\/([^/]+)\/messages$/);
+  if (posted && (init?.method ?? 'GET') === 'GET') {
+    const session = decodeURIComponent(posted[1]);
+    window.voiceShortcutTest.contextReads.push(session);
+    return new Response(JSON.stringify({ messages: conversationTail(session), next_after_id: null }), {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
   if (posted && init?.method === 'POST') {
     const body = JSON.parse(String(init.body)) as { text: string; metadata: Record<string, unknown> };
     window.voiceShortcutTest.posted.push({ session: decodeURIComponent(posted[1]), text: body.text, metadata: body.metadata });
@@ -94,6 +113,7 @@ export function VoiceShortcutHarness() {
           return true;
         }}
         voiceTarget={{ name: 'Fix the cache', title: 'To “Fix the cache”' }}
+        readVoiceContext={() => ({ reply: 'The cache is fixed on prod-7.', userPrevious: 'Is the cache fixed?' })}
         onSearchAgents={async () => []}
         onSearchSessions={async () => []}
       />
@@ -114,6 +134,7 @@ export function MainBotCenterHarness() {
       return true;
     },
     onTap: open,
+    context: () => ({ reply: 'Answer from ses_main', userPrevious: 'Question for ses_main' }),
   });
   const phase = { idle: 'idle', pressing: 'pressed', listening: 'recording', recording: 'recording', armed: 'armed', settling: 'settling', interrupted: 'idle' } as const;
   return (

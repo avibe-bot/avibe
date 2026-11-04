@@ -6,6 +6,7 @@ import {
   type AvibeFetchAttemptEvent,
   type AvibeFetchRequestInit,
 } from './avibeFetch';
+import { resolveVoiceContext, type VoiceContext, type VoiceContextSource } from './voiceContext';
 import {
   emitVoiceTelemetry,
   type VoiceTelemetryEvent,
@@ -75,7 +76,15 @@ export type VoiceTranscriptionDependencies = {
   attemptCount?: number;
   dictationId?: string;
   telemetry?: (event: VoiceTelemetryEvent) => void;
+  /** The conversation this dictation is spoken into, sent with every segment (each is recognized
+   *  on its own). Pass one `resolveVoiceContext` promise per dictation, so it settles once. */
+  context?: VoiceContextSource;
 };
+
+// avibe.bot declares this on the user token when its dictation segments accept `reply` and
+// `user_previous`. The local relay forwards them as given: the same release built this page and
+// the relay, and avibe.bot reads a segment's form by field name, so an older one ignores them.
+const DICTATION_CONTEXT_CAPABILITY = 'dictation_context';
 
 export type VoiceCleanupOutcome = 'success' | 'fallback';
 
@@ -116,6 +125,7 @@ type VoiceRequestMetadata = {
   receipts: string[];
   before: string;
   after: string;
+  context?: VoiceContext;
 };
 
 type VoiceServerResponse =
@@ -272,6 +282,8 @@ const transcribeLocally = async (
               receipts: metadata.receipts,
               before: metadata.before,
               after: metadata.after,
+              ...(metadata.context?.reply ? { reply: metadata.context.reply } : {}),
+              ...(metadata.context?.userPrevious ? { user_previous: metadata.context.userPrevious } : {}),
             }
           : {}),
       }),
@@ -353,7 +365,9 @@ const requestVoiceServer = async (
     // replace this timestamp when the second HTTP attempt starts.
     cloudStageStartedAt = Date.now();
   };
-  try {
+  // Built for the token each attempt carries: only one whose avibe.bot declares
+  // `dictation_context` gets the conversation.
+  const formFor = (capabilities: readonly string[]): FormData => {
     const form = new FormData();
     if (blob) form.set('file', blob, voiceRecordingFileName(blob));
     if (metadata) {
@@ -365,12 +379,19 @@ const requestVoiceServer = async (
       for (const receipt of metadata.receipts) form.append('receipt', receipt);
       if (metadata.before) form.set('before', metadata.before);
       if (metadata.after) form.set('after', metadata.after);
+      if (capabilities.includes(DICTATION_CONTEXT_CAPABILITY)) {
+        if (metadata.context?.reply) form.set('reply', metadata.context.reply);
+        if (metadata.context?.userPrevious) form.set('user_previous', metadata.context.userPrevious);
+      }
     }
+    return form;
+  };
+  try {
     const response = await cloudFetch(
       metadata ? '/api/cloud/voice/dictations' : '/api/cloud/audio/transcriptions',
       {
         method: 'POST',
-        body: form,
+        bodyFor: formFor,
         signal: timeout.signal,
         onAttempt: handleCloudAttempt,
       },
@@ -469,6 +490,7 @@ const transcribeVoiceSegment = async (
         receipts: [],
         before: '',
         after: '',
+        context: await resolveVoiceContext(transcriptionDependencies.context),
       },
     );
     if (response.kind !== 'receipt' || response.sequence !== segment.sequence) {
@@ -628,6 +650,7 @@ export const finalizeVoiceDictation = async (
               receipts,
               before: input.before,
               after: input.after,
+              context: await resolveVoiceContext(dependencies.context),
             },
           );
           if (response.kind !== 'text' || !response.cleanup) {

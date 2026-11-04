@@ -4,18 +4,18 @@ import {
   type AvibeWebSocket,
   type AvibeWebSocketConnection,
 } from './avibeFetch';
+import { resolveVoiceContext, type VoiceContextSource } from './voiceContext';
 
 export const VOICE_REALTIME_PATH = '/api/cloud/voice/realtime';
 export const VOICE_REALTIME_PROTOCOL = 'avibe-asr-v1';
 export const VOICE_REALTIME_HANDSHAKE_TIMEOUT_MS = 8_000;
 export const VOICE_REALTIME_FINISH_TIMEOUT_MS = 20_000;
 const MAX_PENDING_AUDIO_FRAMES = 128;
-// avibe.bot declares this on the user token when its strict `start` schema
-// accepts `reply`; any older backend would close the socket on the field.
+// avibe.bot declares these on the user token when its strict `start` schema
+// accepts `reply` and `user_previous`; any older backend would close the socket
+// on an undeclared field.
 const REPLY_CONTEXT_CAPABILITY = 'realtime_reply_context';
-// Upper bound for the reply sent with `start`. Longer replies are omitted, not
-// truncated: the backend extracts hotwords from the whole text.
-const MAX_REPLY_CHARS = 200_000;
+const USER_PREVIOUS_CONTEXT_CAPABILITY = 'realtime_user_previous_context';
 
 export type VoiceRealtimePreview = { text: string; stash: string };
 export type VoiceRealtimeFinal = { text: string; cleanup: 'success' | 'fallback' };
@@ -24,8 +24,9 @@ export type VoiceRealtimeOptions = {
   before: string;
   after: string;
   language?: string;
-  /** Full text of the latest Agent reply; recognition context only. Never log it. */
-  reply?: string;
+  /** The conversation this dictation is spoken into; recognition context only. Never log it.
+   *  One still loading is waited for briefly while the socket opens (`resolveVoiceContext`). */
+  context?: VoiceContextSource;
   signal?: AbortSignal;
   openSocket?: (
     path: string,
@@ -138,16 +139,14 @@ export class VoiceRealtimeSession {
   }
 
   private async connect(): Promise<void> {
+    // Read alongside the socket opening, so a context still loading costs no extra wait.
+    const contextPromise = resolveVoiceContext(this.options.context);
     const { socket, capabilities } = await this.openSocket(
       VOICE_REALTIME_PATH,
       VOICE_REALTIME_PROTOCOL,
       this.options.signal,
     );
     this.socket = socket;
-    const reply = this.options.reply;
-    const sendReply = capabilities.includes(REPLY_CONTEXT_CAPABILITY)
-      && !!reply?.trim()
-      && reply.length <= MAX_REPLY_CHARS;
     let openReject: ((error: unknown) => void) | null = null;
     let readyReject: ((error: unknown) => void) | null = null;
     let openListener: ((event: unknown) => void) | null = null;
@@ -202,12 +201,16 @@ export class VoiceRealtimeSession {
     void readyPromise.catch(() => undefined);
     try {
       await waitWithTimeout(openPromise, VOICE_REALTIME_HANDSHAKE_TIMEOUT_MS);
+      const { reply, userPrevious } = await contextPromise;
       socket.send(JSON.stringify({
         type: 'start',
         before: this.options.before,
         after: this.options.after,
         ...(this.options.language ? { language: this.options.language } : {}),
-        ...(sendReply ? { reply } : {}),
+        ...(reply && capabilities.includes(REPLY_CONTEXT_CAPABILITY) ? { reply } : {}),
+        ...(userPrevious && capabilities.includes(USER_PREVIOUS_CONTEXT_CAPABILITY)
+          ? { user_previous: userPrevious }
+          : {}),
       }));
       await waitWithTimeout(readyPromise, VOICE_REALTIME_HANDSHAKE_TIMEOUT_MS);
       while (this.pendingAudio.length > 0 && this.socket?.readyState === WebSocket.OPEN) {

@@ -198,45 +198,91 @@ describe('voice realtime client protocol', () => {
   });
 
   it.each([
-    ['a backend that declares reply context', ['realtime_reply_context'], 'Deploy notes: run make release.', true],
-    ['a backend without the capability', [], 'Deploy notes: run make release.', false],
-    ['an empty reply', ['realtime_reply_context'], '  ', false],
-    ['a reply over the client cap', ['realtime_reply_context'], 'x'.repeat(200_001), false],
-  ])('sends the latest Agent reply in start only for %s', async (_case, capabilities, reply, included) => {
+    ['a backend that declares both', ['realtime_reply_context', 'realtime_user_previous_context'], { reply: '先跑 make release', user_previous: '部署前要做什么' }],
+    ['a backend that declares reply context only', ['realtime_reply_context'], { reply: '先跑 make release' }],
+    ['a backend that declares the user\'s previous message only', ['realtime_user_previous_context'], { user_previous: '部署前要做什么' }],
+    ['a backend without either capability', [], {}],
+  ])('sends each context text in start only for %s', async (_case, capabilities, expected) => {
     vi.stubGlobal('WebSocket', { OPEN: 1 });
     const socket = new FakeSocket();
     const session = new VoiceRealtimeSession({
       before: '前文',
       after: '后文',
-      reply,
+      context: { reply: '先跑 make release', userPrevious: '部署前要做什么' },
       openSocket: connect(socket, capabilities),
     });
     const start = session.start();
     socket.open();
     await start;
 
-    expect(startFrame(socket)).toEqual({
-      type: 'start',
-      before: '前文',
-      after: '后文',
-      ...(included ? { reply } : {}),
-    });
+    expect(startFrame(socket)).toEqual({ type: 'start', before: '前文', after: '后文', ...expected });
   });
 
-  it('sends a reply at the client cap in full', async () => {
+  it('sends empty context texts as nothing', async () => {
     vi.stubGlobal('WebSocket', { OPEN: 1 });
     const socket = new FakeSocket();
-    const reply = 'x'.repeat(200_000);
     const session = new VoiceRealtimeSession({
       before: '',
       after: '',
-      reply,
-      openSocket: connect(socket, ['realtime_reply_context']),
+      context: { reply: '  ', userPrevious: '' },
+      openSocket: connect(socket, ['realtime_reply_context', 'realtime_user_previous_context']),
     });
     const start = session.start();
     socket.open();
     await start;
 
-    expect(startFrame(socket).reply).toBe(reply);
+    expect(startFrame(socket)).toEqual({ type: 'start', before: '', after: '' });
+  });
+
+  it('cuts each context text to its newest 8,000 characters', async () => {
+    vi.stubGlobal('WebSocket', { OPEN: 1 });
+    const socket = new FakeSocket();
+    const reply = `${'旧'.repeat(10)}${'x'.repeat(8_000)}`;
+    const userPrevious = `${'早'.repeat(5)}${'y'.repeat(7_999)}末`;
+    const session = new VoiceRealtimeSession({
+      before: '',
+      after: '',
+      context: { reply, userPrevious },
+      openSocket: connect(socket, ['realtime_reply_context', 'realtime_user_previous_context']),
+    });
+    const start = session.start();
+    socket.open();
+    await start;
+
+    expect(startFrame(socket).reply).toBe('x'.repeat(8_000));
+    expect(startFrame(socket).user_previous).toBe(`${'y'.repeat(7_999)}末`);
+  });
+
+  it('waits for a context still loading, and starts without one that does not come', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('WebSocket', { OPEN: 1 });
+    const loaded = new FakeSocket();
+    let resolveContext: (context: { reply: string }) => void = () => undefined;
+    const loading = new VoiceRealtimeSession({
+      before: '',
+      after: '',
+      context: new Promise((resolve) => { resolveContext = resolve; }),
+      openSocket: connect(loaded, ['realtime_reply_context']),
+    });
+    const first = loading.start();
+    loaded.open();
+    await vi.advanceTimersByTimeAsync(200);
+    expect(loaded.sent).toHaveLength(0);
+    resolveContext({ reply: '刚到的回复' });
+    await first;
+    expect(startFrame(loaded).reply).toBe('刚到的回复');
+
+    const stalled = new FakeSocket();
+    const late = new VoiceRealtimeSession({
+      before: '',
+      after: '',
+      context: new Promise(() => undefined),
+      openSocket: connect(stalled, ['realtime_reply_context']),
+    });
+    const second = late.start();
+    stalled.open();
+    await vi.advanceTimersByTimeAsync(1_500);
+    await second;
+    expect(startFrame(stalled)).toEqual({ type: 'start', before: '', after: '' });
   });
 });
