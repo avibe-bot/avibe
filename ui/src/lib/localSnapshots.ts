@@ -206,6 +206,8 @@ export async function forgetLocalSnapshots(): Promise<void> {
 /** Delete every snapshot. Used when an authorization change voids what was
  *  cached, and when storage runs out of quota. */
 export async function clearLocalSnapshots(): Promise<void> {
+  clearEpoch += 1;
+  for (const listener of epochListeners) listener();
   const db = await openDb();
   if (!db) return;
   try {
@@ -215,4 +217,49 @@ export async function clearLocalSnapshots(): Promise<void> {
   } catch {
     // Nothing more can be done; a later write overwrites what is left.
   }
+}
+
+// Advanced by every whole-store clear (an authorization change, sign-out,
+// revocation, a quota failure). A writer that holds data read before a clear
+// compares the value it noted then with the current one, so a write it still
+// has scheduled cannot put back what the clear removed.
+let clearEpoch = 0;
+const epochListeners = new Set<() => void>();
+
+/** The number of whole-store clears so far in this document. */
+export function getLocalSnapshotEpoch(): number {
+  return clearEpoch;
+}
+
+/** Called on every whole-store clear: what was painted from the store is void
+ *  too, whoever still shows it. */
+export function subscribeLocalSnapshotEpoch(listener: () => void): () => void {
+  epochListeners.add(listener);
+  return () => {
+    epochListeners.delete(listener);
+  };
+}
+
+/** Delete ``key`` for every reader. Used when the server says the record's
+ *  subject is gone or no longer visible, which holds whoever stored it. */
+export async function deleteLocalSnapshot(key: string): Promise<void> {
+  await withStore('readwrite', async (store) => {
+    const ids = await settle(store.getAllKeys());
+    for (const id of ids) {
+      if (typeof id === 'string' && id.endsWith(`\n${key}`)) store.delete(id);
+    }
+  });
+}
+
+/** Keep the ``keep`` most recently saved records whose key starts with
+ *  ``prefix`` and delete the rest. This reads every such record, so call it when
+ *  a write may have added one, not on every write. */
+export async function pruneLocalSnapshots(prefix: string, keep: number): Promise<void> {
+  await withStore('readwrite', async (store) => {
+    const records = await settle(store.getAll() as IDBRequest<StoredRecord[]>);
+    const matching = records
+      .filter((record) => typeof record.key === 'string' && record.key.startsWith(prefix))
+      .sort((a, b) => (b.savedAt ?? 0) - (a.savedAt ?? 0));
+    for (const record of matching.slice(Math.max(0, keep))) store.delete(record.id);
+  });
 }

@@ -16,6 +16,7 @@ import { onPageReactivated, type PageReactivationListener } from '../lib/pageAct
 import type { ScopeKind, ScopeSettingsChange } from '../lib/scopeSettingsPatch';
 import type { ShowPagePayload } from '../lib/showPageLinks';
 import { visibilityActivityEvents } from '../lib/sessionVisibilityEvents';
+import { forgetChatSnapshot, forgetChatSnapshotOnActivity } from '../lib/chatSnapshots';
 import { normalizeSessionInfo, type InstanceCapabilities, type SessionInfo } from '../lib/sessionInfo';
 import type { VaultSessionPolicy } from '../lib/vaultSandboxPolicy';
 import {
@@ -2712,6 +2713,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const convergeSessionArchived = (sessionId: string) => {
     sessionDraftPersistence.clearSession(sessionId);
+    void forgetChatSnapshot(sessionId);
     for (const handler of Array.from(sessionArchivedHandlersRef.current)) {
       try {
         handler(sessionId);
@@ -2885,6 +2887,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // later real SSE event carrying the same change.
   const emitLocalSessionActivity = (data: Parameters<NonNullable<WorkbenchEventHandlers['onSessionActivity']>>[0]) => {
     if (data.session_id) clearSessionReadCache(data.session_id);
+    forgetChatSnapshotOnActivity(data);
     dispatchToWorkbenchHandlers((handlers) => handlers.onSessionActivity?.(data));
   };
 
@@ -3227,6 +3230,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (envelope.data.event === 'archived') {
           sessionDraftPersistence.clearSession(envelope.data.session_id);
         }
+        // A Session that leaves the reader's Inbox takes its stored conversation
+        // with it (docs/plans/web-ui-local-cache.md section 4.4).
+        forgetChatSnapshotOnActivity(envelope.data);
       } else {
         clearReadCacheMatching((path) => path.startsWith('/api/inbox') || path.startsWith('/api/sessions'));
       }
