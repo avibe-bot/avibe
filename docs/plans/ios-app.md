@@ -935,8 +935,8 @@ every item with the native composer.
 
 One engineer owns the iOS track end to end: design details, implementation,
 TestFlight, and later App Store submission. They report to cyhhao, who keeps
-the decisions in section 17 and the Account Holder steps in section 13. The
-tracking issue links back here.
+the decisions in section 17 and the Account Holder steps in section 13.
+Tracking issue: avibe-bot/avibe#3222.
 
 - **Read first**: sections 1, 3 to 5, 7, and 13 to 15. Section 4 is the
   contract with the Web UI; change it there first, then implement it.
