@@ -971,3 +971,28 @@ def test_global_replace_keeps_unsupplied_keys_and_moves_supplied_ones(runtime):
 def test_only_avibe_owned_global_servers_are_configurable(runtime):
     configure = _run(runtime, "configure", {"name": "native-only", "global": True, "secrets": {"env": {"A": "b"}}})
     assert configure["error"]["type"] == "usage"
+
+
+@pytest.mark.parametrize("name", ["needs_config", "unchanged", "exists"])
+def test_global_server_names_do_not_control_add_outcome(runtime, name):
+    result = _run(runtime, "add", {"global": True, "servers": [{"name": name, "server": ECHO}]})
+    assert result["ok"]
+    assert result["added"][0]["toolCount"] == 7
+    assert repository.read_published(name) is not None
+
+
+def test_failed_global_configuration_cannot_call_old_catalog(runtime, monkeypatch):
+    from core.mcp_hub.errors import McpHubError
+
+    assert _run(runtime, "add", {"global": True, "servers": [{"name": "echo", "server": ECHO}]})["ok"]
+    assert repository.read_published("echo") is not None
+
+    async def fail_discovery(*args, **kwargs):
+        raise McpHubError("unavailable", "Test target cannot be reached.")
+
+    monkeypatch.setattr(runtime, "_discover", fail_discovery)
+    configured = _run(runtime, "configure", {"name": "echo", "global": True, "secrets": {"env": {"TOKEN": "new-private-value"}}})
+    assert not configured["ok"]
+    assert repository.read_published("echo") is None
+    result = _run(runtime, "call", {"name": "echo", "global": True, "tool": "echo", "arguments": {"text": "test"}})
+    assert result["error"]["type"] == "not_generated"

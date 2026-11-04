@@ -640,6 +640,8 @@ class McpRuntime:
         name = payload["name"]
         async with self._lock(name):
             await asyncio.to_thread(mcp_scope.configure, name, payload.get("secrets") or {})
+            # The old catalog must never execute against newly configured credentials.
+            await asyncio.to_thread(repository.unlist, name)
             await self._cancel_login(name)
             await self._retire_package(name)
             state, missing = await asyncio.to_thread(self._config_state, name)
@@ -791,7 +793,7 @@ class McpRuntime:
                 return "exists", []
         repository.write_definition(definition)
         mcp_scope.write_global_secrets(name, secrets)
-        return ("needs_config" if missing else name), missing
+        return ("needs_config" if missing else "saved"), missing
 
     async def _refresh(self, payload: dict[str, Any]) -> bytes:
         name = payload.get("name")
