@@ -4,11 +4,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { WorkbenchMessage, WorkbenchSession } from '../context/ApiContext';
 import {
+  beginChatSnapshotRequest,
   CHAT_SNAPSHOT_ROWS,
   CHAT_SNAPSHOT_SCHEMA,
   CHAT_SNAPSHOT_SESSIONS,
   chatSnapshotKey,
   chatSnapshotOwner,
+  chatSnapshotOwnerForAnswer,
   chatSnapshotWindow,
   forgetChatSnapshot,
   forgetChatSnapshotOnActivity,
@@ -144,6 +146,30 @@ describe('conversation snapshots', () => {
     const overtaken = readChatSnapshot('ses_a');
     void forgetChatSnapshot('ses_a');
     expect(await overtaken).toBeNull();
+  });
+
+  it('gives an answer to the reader named after its request started, unless the store moved meanwhile', async () => {
+    // A cold start sends the bootstrap before the reader is named.
+    const coldStart = beginChatSnapshotRequest('ses_a');
+    expect(coldStart.principal).toBeNull();
+    setLocalSnapshotPrincipal('local');
+    expect(chatSnapshotOwnerForAnswer(coldStart)?.principal).toBe('local');
+
+    const beforeClear = beginChatSnapshotRequest('ses_a');
+    await clearLocalSnapshots();
+    expect(chatSnapshotOwnerForAnswer(beforeClear)).toBeNull();
+
+    const beforeForget = beginChatSnapshotRequest('ses_a');
+    await forgetChatSnapshot('ses_a');
+    expect(chatSnapshotOwnerForAnswer(beforeForget)).toBeNull();
+
+    const beforeSwitch = beginChatSnapshotRequest('ses_a');
+    setLocalSnapshotPrincipal('remote:bob');
+    expect(chatSnapshotOwnerForAnswer(beforeSwitch)).toBeNull();
+
+    // Nobody named at either end: nothing to store under.
+    setLocalSnapshotPrincipal(null);
+    expect(chatSnapshotOwnerForAnswer(beginChatSnapshotRequest('ses_a'))).toBeNull();
   });
 
   it(`keeps the ${CHAT_SNAPSHOT_SESSIONS} most recently written conversations`, async () => {

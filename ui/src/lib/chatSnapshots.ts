@@ -155,6 +155,36 @@ export function chatSnapshotOwner(sessionId: string): ChatSnapshotOwner | null {
   return { sessionId, principal, epoch: getLocalSnapshotEpoch(), generation: forgotten.get(sessionId) ?? 0 };
 }
 
+/** What the store looked like when a request for ``sessionId`` started. Unlike
+ *  an owner it may have no reader yet: a cold start names the reader only once
+ *  the page's first effects have run, after the chat has sent its bootstrap. */
+export type ChatSnapshotRequest = {
+  readonly sessionId: string;
+  readonly principal: string | null;
+  readonly epoch: number;
+  readonly generation: number;
+};
+
+export function beginChatSnapshotRequest(sessionId: string): ChatSnapshotRequest {
+  return {
+    sessionId,
+    principal: getLocalSnapshotPrincipal(),
+    epoch: getLocalSnapshotEpoch(),
+    generation: forgotten.get(sessionId) ?? 0,
+  };
+}
+
+/** The owner for a request's answer, or null when it may not be stored: the
+ *  reader changed, the store was cleared, or the conversation was forgotten
+ *  while it was out. A request that started before any reader was named belongs
+ *  to the reader named since, unless one of those happened meanwhile. */
+export function chatSnapshotOwnerForAnswer(request: ChatSnapshotRequest): ChatSnapshotOwner | null {
+  const principal = request.principal ?? getLocalSnapshotPrincipal();
+  if (!principal) return null;
+  const owner: ChatSnapshotOwner = { ...request, principal };
+  return isChatSnapshotOwnerCurrent(owner) ? owner : null;
+}
+
 /** Whether data read under ``owner`` may still be stored. */
 export function isChatSnapshotOwnerCurrent(owner: ChatSnapshotOwner): boolean {
   return owner.principal === getLocalSnapshotPrincipal()

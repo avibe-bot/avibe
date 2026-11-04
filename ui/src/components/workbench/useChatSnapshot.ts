@@ -7,11 +7,11 @@ import type {
   WorkbenchSessionBootstrap,
 } from '../../context/ApiContext';
 import {
+  beginChatSnapshotRequest,
   chatSnapshotFromBootstrap,
-  chatSnapshotOwner,
+  chatSnapshotOwnerForAnswer,
   chatSnapshotWindow,
   forgetChatSnapshot,
-  isChatSnapshotOwnerCurrent,
   readChatSnapshot,
   writeChatSnapshot,
   type ChatSnapshot,
@@ -172,17 +172,16 @@ export function useChatSnapshot({ sessionId, paint, unpaint, messages, olderCurs
   }, [sessionId, principal]);
 
   const beginBootstrap = useCallback((requestSessionId: string): ChatSnapshotBootstrapRead => {
-    // Taken before the request: a reader change or a store clear while it is
-    // out means its answer is not this reader's to store.
-    const owner = chatSnapshotOwner(requestSessionId);
+    // Noted before the request: a reader change, a store clear, or a forget
+    // while it is out means its answer is not this reader's to store.
+    const request = beginChatSnapshotRequest(requestSessionId);
     return {
       commit: (bootstrap) => {
         if (routeRef.current !== requestSessionId) return;
         liveRef.current = true;
         setView(null);
-        setOwned(owner && isChatSnapshotOwnerCurrent(owner)
-          ? { owner, snapshot: chatSnapshotFromBootstrap(bootstrap), added: missingRef.current }
-          : null);
+        const owner = chatSnapshotOwnerForAnswer(request);
+        setOwned(owner ? { owner, snapshot: chatSnapshotFromBootstrap(bootstrap), added: missingRef.current } : null);
       },
       fail: (error) => {
         if (routeRef.current !== requestSessionId) return;

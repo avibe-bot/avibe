@@ -434,6 +434,19 @@ describe('ChatPage conversation snapshot', () => {
     expect((await readChatSnapshot(SESSION))?.messages.map((m) => m.id)).toEqual(['m2']);
   });
 
+  it('stores a chat opened on a cold start, whose bootstrap went out before the reader was named', async () => {
+    // The authorization boundary names the reader in an effect that runs after
+    // the chat page's own, so the bootstrap is already out.
+    mount();
+    await waitFor(() => expect(mocks.api.getSessionBootstrap).toHaveBeenCalled());
+    act(() => setLocalSnapshotPrincipal('local'));
+
+    await act(async () => live.resolve(bootstrap([message('m1', 'live answer')])));
+    await screen.findByText('live answer');
+    await waitForWriteBack();
+    expect((await readChatSnapshot(SESSION))?.messages.map((m) => m.id)).toEqual(['m1']);
+  });
+
   it('stores nothing after a reader change until that reader\'s own bootstrap, even once the first reader is back', async () => {
     setLocalSnapshotPrincipal('local');
     mount();
