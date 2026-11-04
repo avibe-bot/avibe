@@ -46,6 +46,7 @@ import { ApiProvider, useApi, ApiError } from './context/ApiContext';
 import type { SessionInfo } from './context/ApiContext';
 import { InstanceAuthorizationProvider } from './context/InstanceAuthorizationProvider';
 import { BotsProvider } from './context/BotsProvider';
+import { BotHoldProvider } from './components/workbench/bots/BotHold';
 import { useWindowManager } from './context/WindowManagerContext';
 import { ToastProvider } from './context/ToastProvider';
 import { ThemeProvider } from './context/ThemeProvider';
@@ -859,7 +860,7 @@ const router = createBrowserRouter(
       )}
     />
     <Route element={<ErrorBoundary variant="page"><RouterRoot /></ErrorBoundary>}>
-      <Route element={<AuthGuard><BotsProvider><AppShell /></BotsProvider></AuthGuard>}>
+      <Route element={<AuthGuard><BotsProvider><BotHoldProvider><AppShell /></BotHoldProvider></BotsProvider></AuthGuard>}>
         <Route path="*" element={<WorkbenchRouteSurface />} />
       </Route>
     </Route>

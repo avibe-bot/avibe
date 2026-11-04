@@ -6819,6 +6819,10 @@
       "toSession": "To “{{title}}”",
       "toNewSession": "A new session in “{{project}}”",
       "toHere": "To this conversation"
+    },
+    "avatar": {
+      "mouseHint": "Release to send · move off the avatar or press <key>Esc</key> to cancel",
+      "mouseArmed": "Release to cancel · move back to keep talking"
     }
   },
   "mcpHub": {

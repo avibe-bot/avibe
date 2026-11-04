@@ -127,12 +127,6 @@ enum Phase {
     Error,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CheckPresentation {
-    Native,
-    Workbench,
-}
-
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DesktopRemoteRequestState {
@@ -959,15 +953,7 @@ async fn find_update(app: &AppHandle, channel: Channel) -> Result<Option<(Manife
     Ok(Some((manifest, release.silent)))
 }
 
-fn should_show_current_dialog(interactive: bool, presentation: CheckPresentation, workbench_ready: bool) -> bool {
-    interactive && (presentation != CheckPresentation::Workbench || !workbench_ready)
-}
-
 pub fn check(app: AppHandle, interactive: bool) {
-    check_with_presentation(app, interactive, CheckPresentation::Native);
-}
-
-fn check_with_presentation(app: AppHandle, interactive: bool, presentation: CheckPresentation) {
     // Install progress and outcomes stay in memory: a failed install keeps
     // the last `Available`, and the new app's startup check publishes
     // `Current` after a successful hand-over.
@@ -1053,7 +1039,7 @@ fn check_with_presentation(app: AppHandle, interactive: bool, presentation: Chec
                 set_state(&app, Phase::Current, None);
                 publish_check(&app);
                 settle_update(&app, None, Settlement::Completed);
-                if should_show_current_dialog(interactive, presentation, workbench_ready(&app)) {
+                if interactive {
                     let latest = app
                         .state::<Updater>()
                         .state
@@ -1086,7 +1072,7 @@ pub fn desktop_update_state(window: WebviewWindow, app: AppHandle) -> Result<Des
 #[tauri::command]
 pub fn desktop_update_check(window: WebviewWindow, app: AppHandle) -> Result<(), String> {
     ensure_workbench(&window)?;
-    check_with_presentation(app, true, CheckPresentation::Workbench);
+    check(app, true);
     Ok(())
 }
 
@@ -1637,40 +1623,6 @@ mod tests {
         assert!(!should_prompt(false, true, Some("1.2.3"), "1.2.4"));
         assert!(should_prompt(true, true, None, "1.2.4"));
         assert!(should_prompt(true, true, Some("1.2.4"), "1.2.4"));
-    }
-
-    #[test]
-    fn current_result_uses_native_feedback_only_without_a_usable_workbench_owner() {
-        let mut state = State {
-            active_request: None,
-            phase: Phase::Current,
-            latest: None,
-            channel: Channel::Stable,
-            manifest: None,
-            availability_interactive: false,
-            remote_install_allowed: false,
-            remote_request: None,
-        };
-        let busy = AtomicBool::new(true);
-
-        assert_eq!(
-            check_record(&state, "3.2.5", SystemTime::UNIX_EPOCH)
-                .expect("Current must publish")
-                .phase,
-            UpdateStatusPhase::Current
-        );
-        assert!(settle(
-            &mut state,
-            &busy,
-            None,
-            Settlement::Completed,
-            SystemTime::UNIX_EPOCH
-        ));
-        assert!(!busy.load(Ordering::SeqCst));
-        assert!(!should_show_current_dialog(true, CheckPresentation::Workbench, true));
-        assert!(should_show_current_dialog(true, CheckPresentation::Workbench, false));
-        assert!(should_show_current_dialog(true, CheckPresentation::Native, true));
-        assert!(!should_show_current_dialog(false, CheckPresentation::Native, false));
     }
 
     #[test]

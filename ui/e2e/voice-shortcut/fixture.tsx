@@ -1,10 +1,17 @@
 import { StrictMode, useEffect, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { MobileBotCenter } from '../../src/components/MobileChrome';
 import { MainBotHoldOverlay, MainBotVoiceToast } from '../../src/components/voice/MainBotVoice';
 import { useHoldToTalk } from '../../src/components/voice/useHoldToTalk';
+import { BotHoldProvider } from '../../src/components/workbench/bots/BotHold';
+import { BotStrip } from '../../src/components/workbench/bots/BotStrip';
 import { Composer, type ComposerHandle } from '../../src/components/workbench/Composer';
+import { ApiProvider } from '../../src/context/ApiContext';
+import { BotsContext, type BotsState } from '../../src/context/BotsContext';
 import { ToastProvider } from '../../src/context/ToastProvider';
+import { UnsavedChangesContext } from '../../src/context/unsavedChangesContext';
+import type { Bot } from '../../src/lib/bots';
 import i18n from '../../src/i18n';
 import '../../src/index.css';
 
@@ -18,11 +25,13 @@ declare global {
       spoken: { text: string; metadata: Record<string, unknown> }[];
       /** Times the main Bot's conversation was opened (a tap, or the sent toast's View). */
       opened: number;
+      /** Messages a Bot's avatar sent, by its Session (`?surface=strip`). */
+      posted: { session: string; text: string; metadata: Record<string, unknown> }[];
     };
   }
 }
 
-window.voiceShortcutTest = { sent: [], spoken: [], opened: 0 };
+window.voiceShortcutTest = { sent: [], spoken: [], opened: 0, posted: [] };
 
 window.fetch = async (input, init) => {
   const url = new URL(
@@ -39,6 +48,20 @@ window.fetch = async (input, init) => {
   }
   if (url.pathname === '/api/asr/transcribe') {
     return new Response(JSON.stringify({ text: 'Send this transcript', cleanup: 'success' }), {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+  const posted = url.pathname.match(/^\/api\/sessions\/([^/]+)\/messages$/);
+  if (posted && init?.method === 'POST') {
+    const body = JSON.parse(String(init.body)) as { text: string; metadata: Record<string, unknown> };
+    window.voiceShortcutTest.posted.push({ session: decodeURIComponent(posted[1]), text: body.text, metadata: body.metadata });
+    return new Response(JSON.stringify({ id: `msg_${window.voiceShortcutTest.posted.length}`, session_id: posted[1], text: body.text }), {
+      status: 201,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+  if (url.pathname === '/api/inbox') {
+    return new Response(JSON.stringify({ sessions: [], next_cursor: null, unread_by_session: {}, unread_total: 0, unread_sessions: 0 }), {
       headers: { 'Content-Type': 'application/json' },
     });
   }
@@ -104,11 +127,78 @@ export function MainBotCenterHarness() {
   );
 }
 
+const fixtureBot = (handle: string, name: string, emoji: string, hue: number): Bot => ({
+  handle,
+  display_name: name,
+  avatar: handle === 'main' ? { kind: 'mascot' } : { kind: 'emoji', emoji, hue },
+  role: '',
+  agent_name: handle,
+  session_id: `ses_${handle}`,
+  builtin: handle === 'main',
+  hide_details: true,
+});
+const STRIP_BOTS = [
+  fixtureBot('main', 'Vibey', '', 0),
+  fixtureBot('pm', 'Product', '🧭', 42),
+  fixtureBot('cso', 'Security', '🛡️', 200),
+  fixtureBot('research', 'Research', '🔭', 265),
+  fixtureBot('writer', 'Writer', '✍️', 150),
+  fixtureBot('legal', 'Legal', '⚖️', 12),
+];
+const stripBots: BotsState = {
+  enabled: true,
+  bots: STRIP_BOTS,
+  loaded: true,
+  listed: true,
+  mainBot: STRIP_BOTS[0],
+  limit: { count: 5, max: 5 },
+  atLimit: true,
+  statusBySession: {},
+  botForSession: (sessionId) => STRIP_BOTS.find((bot) => bot.session_id === sessionId),
+  botForAgent: (name) => STRIP_BOTS.find((bot) => bot.agent_name === name),
+  botForHandle: (handle) => STRIP_BOTS.find((bot) => bot.handle === handle),
+  displayName: (bot) => bot.display_name,
+  afterWrite: async () => undefined,
+  holdOrder: () => () => undefined,
+  setHideDetails: async () => true,
+  openProfile: () => undefined,
+  profileRequest: null,
+  closeProfile: () => undefined,
+};
+
+/** Where a tap or the sent toast's View took the reader. */
+function Opened() {
+  return <output data-opened={useLocation().pathname} className="sr-only" />;
+}
+
+/** The Bots strip (`?surface=strip`): hold any Bot's avatar to speak to it, as BotHoldProvider wires
+ *  it over the shell. More Bots than fit, so the strip also scrolls sideways. */
+export function BotStripHarness() {
+  return (
+    <MemoryRouter>
+      <ApiProvider>
+        <UnsavedChangesContext.Provider value={{ setRegistration: () => {}, authorizeRouteAction: () => ({ runNavigation: (navigation) => navigation() }) }}>
+          <BotsContext.Provider value={stripBots}>
+            <BotHoldProvider>
+              <div className="w-[248px] p-4 pt-24">
+                <BotStrip unreadBySession={{ ses_cso: 2 }} />
+              </div>
+              <Routes>
+                <Route path="*" element={<Opened />} />
+              </Routes>
+            </BotHoldProvider>
+          </BotsContext.Provider>
+        </UnsavedChangesContext.Provider>
+      </ApiProvider>
+    </MemoryRouter>
+  );
+}
+
 const surface = new URLSearchParams(location.search).get('surface');
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <ToastProvider>
-      {surface === 'center' ? <MainBotCenterHarness /> : <VoiceShortcutHarness />}
+      {surface === 'center' ? <MainBotCenterHarness /> : surface === 'strip' ? <BotStripHarness /> : <VoiceShortcutHarness />}
     </ToastProvider>
   </StrictMode>,
 );
