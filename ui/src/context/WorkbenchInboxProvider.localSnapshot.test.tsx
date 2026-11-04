@@ -121,4 +121,44 @@ describe('the Inbox local snapshot', () => {
     expect(stored?.sessions.map((s) => s.session_id)).toEqual(['ses_new', 'ses_kept']);
     expect(stored?.unread).toEqual({ ses_new: 1 });
   });
+
+  it('takes the cursor from the first live answer when the snapshot is all the window held', async () => {
+    setLocalSnapshotPrincipal('local');
+    await writeLocalSnapshot('inbox:first-page', 1, { sessions: [row('ses_a', 1), row('ses_b', 2)], unread: {} });
+    setLocalSnapshotPrincipal(null);
+
+    let failFirstRead: (error: Error) => void = () => {};
+    const listInbox = vi.fn()
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { failFirstRead = reject; }))
+      .mockResolvedValue({
+        sessions: [row('ses_a', 1), row('ses_b', 2)],
+        next_cursor: 'cursor-after-b',
+        unread_by_session: {},
+      });
+    const handlers: WorkbenchEventHandlers[] = [];
+    apiRef.current = {
+      listInbox,
+      markSessionRead: vi.fn(async () => ({ updated: 0 })),
+      connectWorkbenchEvents: (next: WorkbenchEventHandlers) => {
+        handlers.push(next);
+        return () => undefined;
+      },
+    };
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const state = mount();
+    await settle();
+    expect(state.current!.inboxSessions.map((s) => s.session_id)).toEqual(['ses_a', 'ses_b']);
+    expect(listInbox).toHaveBeenCalledTimes(1);
+
+    // The page-one read fails with only the snapshot on screen. When the stream
+    // comes back the window is reconciled; its rows overlap the snapshot, but the
+    // snapshot never had a cursor to keep.
+    await act(async () => { failFirstRead(new Error('offline')); });
+    await settle();
+    await act(async () => { for (const handler of handlers) handler.onConnected?.(); });
+    await settle();
+    expect(listInbox).toHaveBeenCalledTimes(2);
+    expect(state.current!.nextCursor).toBe('cursor-after-b');
+    consoleError.mockRestore();
+  });
 });

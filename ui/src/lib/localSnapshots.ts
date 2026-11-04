@@ -195,8 +195,16 @@ export async function writeLocalSnapshot(key: string, schema: number, value: unk
   });
 }
 
-/** Delete every snapshot. Used on sign-out, when an authorization change voids
- *  what was cached, and when storage runs out of quota. */
+/** Stop storing for the current reader, then delete every snapshot. Sign-out and
+ *  revocation use this: a write still scheduled for the reader (a debounce timer,
+ *  a page being hidden) must not put back what was just removed. */
+export async function forgetLocalSnapshots(): Promise<void> {
+  setLocalSnapshotPrincipal(null);
+  await clearLocalSnapshots();
+}
+
+/** Delete every snapshot. Used when an authorization change voids what was
+ *  cached, and when storage runs out of quota. */
 export async function clearLocalSnapshots(): Promise<void> {
   const db = await openDb();
   if (!db) return;

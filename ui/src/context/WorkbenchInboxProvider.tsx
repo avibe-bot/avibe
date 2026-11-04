@@ -609,6 +609,9 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         // Rows painted from the local snapshot were never confirmed by the server,
         // so one this answer leaves out goes wherever it sorts.
         const seededIds = new Set(seededIdsRef.current);
+        // A window that only ever held snapshot rows has no cursor of its own (the
+        // snapshot does not carry one), so its first live answer supplies it.
+        const hadLiveWindow = feedCommittedRef.current;
         markFeedAuthoritative();
         setInboxSessions((prev) => {
           const incoming = new Map(result.sessions.map((s) => [s.session_id, s]));
@@ -631,7 +634,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         // between this read and the old feed — adopt result.next_cursor so "Load
         // more" can page through them (loadMore dedupes the overlap).
         const overlap = result.sessions.some((s) => loadedIds.has(s.session_id));
-        if (!overlap) applyNextCursor(result.next_cursor);
+        if (!overlap || !hadLiveWindow) applyNextCursor(result.next_cursor);
       }
       if (readOwnershipRef.current.isCurrent(read, 'inbox-unread')) {
         applyWholeUnreadRead(read, result.unread_by_session ?? {});
