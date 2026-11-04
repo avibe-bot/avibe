@@ -25,7 +25,7 @@ describe('the UI build of a conversation snapshot', () => {
   it('is the page entry module: the next build ignores what the last one stored', async () => {
     const [before, beforeStore] = await loadBuild('/assets/index-BUILD1.js');
     beforeStore.setLocalSnapshotPrincipal('local');
-    await before.writeChatSnapshot(before.chatSnapshotOwner('ses_a')!, {
+    await before.writeChatSnapshot(before.chatSnapshotOwnerForAnswer(before.beginChatSnapshotRequest('ses_a'))!, {
       session: { id: 'ses_a', title: 'stored by build 1' } as WorkbenchSession,
       messages: [],
       next_before_id: null,

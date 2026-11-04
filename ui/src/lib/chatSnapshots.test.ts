@@ -5,11 +5,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { WorkbenchMessage, WorkbenchSession } from '../context/ApiContext';
 import {
   beginChatSnapshotRequest,
-  CHAT_SNAPSHOT_ROWS,
-  CHAT_SNAPSHOT_SCHEMA,
-  CHAT_SNAPSHOT_SESSIONS,
-  chatSnapshotKey,
-  chatSnapshotOwner,
   chatSnapshotOwnerForAnswer,
   chatSnapshotWindow,
   forgetChatSnapshot,
@@ -22,8 +17,17 @@ import { clearLocalSnapshots, setLocalSnapshotPrincipal, writeLocalSnapshot } fr
 
 // A stored conversation is shown before the server answers, so what it may hold
 // and when it may be written decide what a reader can see that the server did
-// not just say: rows of a send still pending, rows of another build, or a write
-// that lands after the store was voided.
+// not just say: rows of a send still pending, a corrupt or misfiled record, or a
+// write that lands after the store was voided. (Another build's record is
+// covered in chatSnapshots.build.test.ts.)
+
+// The plan's caps (docs/plans/web-ui-local-cache.md section 4.1).
+const WINDOW_ROWS = 50;
+const KEPT_CONVERSATIONS = 40;
+
+// Ownership as production takes it: when the request starts, settled when the
+// answer lands.
+const ownerFor = (sessionId: string) => chatSnapshotOwnerForAnswer(beginChatSnapshotRequest(sessionId))!;
 
 const row = (id: string, extra: Partial<WorkbenchMessage> = {}): WorkbenchMessage => ({
   id,
@@ -57,9 +61,7 @@ const snapshot = (sessionId: string, rows: WorkbenchMessage[] = [row('m1')]): Ch
 });
 
 const write = async (sessionId: string, value = snapshot(sessionId), added = false) => {
-  const owner = chatSnapshotOwner(sessionId);
-  expect(owner).not.toBeNull();
-  await writeChatSnapshot(owner!, value, { added });
+  await writeChatSnapshot(ownerFor(sessionId), value, { added });
 };
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
@@ -79,14 +81,11 @@ describe('conversation snapshots', () => {
     expect(stored?.messages.map((m) => m.id)).toEqual(['m1']);
   });
 
-  it('ignores a record of another build, a corrupt record, and one filed under another session', async () => {
+  it('ignores a corrupt record and one filed under another session', async () => {
     setLocalSnapshotPrincipal('local');
-    const owner = chatSnapshotOwner('ses_a')!;
-    await writeChatSnapshot(owner, snapshot('ses_a'), { build: 'https://host/assets/index-OLD.js' });
-    expect(await readChatSnapshot('ses_a', 'https://host/assets/index-OLD.js')).not.toBeNull();
-    expect(await readChatSnapshot('ses_a')).toBeNull();
-
-    await writeLocalSnapshot(chatSnapshotKey('ses_b'), CHAT_SNAPSHOT_SCHEMA, { messages: 'not rows' });
+    await write('ses_b');
+    expect(await readChatSnapshot('ses_b')).not.toBeNull();
+    await writeLocalSnapshot('chat:ses_b', 1, { messages: 'not rows' });
     expect(await readChatSnapshot('ses_b')).toBeNull();
 
     await write('ses_c', snapshot('ses_other'));
@@ -94,9 +93,9 @@ describe('conversation snapshots', () => {
   });
 
   it('keeps only the newest stored rows, and the cursor that pages older than them', () => {
-    const rows = Array.from({ length: CHAT_SNAPSHOT_ROWS + 10 }, (_, i) => row(`m${i}`));
+    const rows = Array.from({ length: WINDOW_ROWS + 10 }, (_, i) => row(`m${i}`));
     const window = chatSnapshotWindow(rows, 'cursor-older-than-m0');
-    expect(window.messages).toHaveLength(CHAT_SNAPSHOT_ROWS);
+    expect(window.messages).toHaveLength(WINDOW_ROWS);
     expect(window.messages[0].id).toBe('m10');
     expect(window.next_before_id).toBe('m10');
 
@@ -117,17 +116,17 @@ describe('conversation snapshots', () => {
     setLocalSnapshotPrincipal('local');
     await write('ses_a');
 
-    const forgottenOwner = chatSnapshotOwner('ses_a')!;
+    const forgottenOwner = ownerFor('ses_a');
     await forgetChatSnapshot('ses_a');
     await writeChatSnapshot(forgottenOwner, snapshot('ses_a'));
     expect(await readChatSnapshot('ses_a')).toBeNull();
 
-    const clearedOwner = chatSnapshotOwner('ses_a')!;
+    const clearedOwner = ownerFor('ses_a');
     await clearLocalSnapshots();
     await writeChatSnapshot(clearedOwner, snapshot('ses_a'));
     expect(await readChatSnapshot('ses_a')).toBeNull();
 
-    const aliceOwner = chatSnapshotOwner('ses_a')!;
+    const aliceOwner = ownerFor('ses_a');
     setLocalSnapshotPrincipal('remote:bob');
     await writeChatSnapshot(aliceOwner, snapshot('ses_a'));
     await settle();
@@ -172,17 +171,17 @@ describe('conversation snapshots', () => {
     expect(chatSnapshotOwnerForAnswer(beginChatSnapshotRequest('ses_a'))).toBeNull();
   });
 
-  it(`keeps the ${CHAT_SNAPSHOT_SESSIONS} most recently written conversations`, async () => {
+  it(`keeps the ${KEPT_CONVERSATIONS} most recently written conversations`, async () => {
     let now = 1_000;
     vi.spyOn(Date, 'now').mockImplementation(() => now);
     setLocalSnapshotPrincipal('local');
-    for (let i = 0; i <= CHAT_SNAPSHOT_SESSIONS; i += 1) {
+    for (let i = 0; i <= KEPT_CONVERSATIONS; i += 1) {
       now += 10;
       await write(`ses_${i}`, snapshot(`ses_${i}`), true);
     }
     expect(await readChatSnapshot('ses_0')).toBeNull();
     expect(await readChatSnapshot('ses_1')).not.toBeNull();
-    expect(await readChatSnapshot(`ses_${CHAT_SNAPSHOT_SESSIONS}`)).not.toBeNull();
+    expect(await readChatSnapshot(`ses_${KEPT_CONVERSATIONS}`)).not.toBeNull();
   });
 
   it('deletes the conversation of a Session that leaves the Inbox, and only then', async () => {

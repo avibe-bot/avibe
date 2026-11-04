@@ -15,7 +15,12 @@ vi.mock('react-i18next', () => ({
 
 import type { WorkbenchSession } from './ApiContext';
 import { ApiProvider, useApi } from './ApiContext';
-import { chatSnapshotOwner, readChatSnapshot, writeChatSnapshot } from '../lib/chatSnapshots';
+import {
+  beginChatSnapshotRequest,
+  chatSnapshotOwnerForAnswer,
+  readChatSnapshot,
+  writeChatSnapshot,
+} from '../lib/chatSnapshots';
 import { clearLocalSnapshots, setLocalSnapshotPrincipal } from '../lib/localSnapshots';
 
 // A stored conversation goes when its Session leaves the reader's Inbox
@@ -63,7 +68,7 @@ const Subscriber = () => {
 };
 
 const store = async (sessionId: string) => {
-  await writeChatSnapshot(chatSnapshotOwner(sessionId)!, {
+  await writeChatSnapshot(chatSnapshotOwnerForAnswer(beginChatSnapshotRequest(sessionId))!, {
     session: { id: sessionId, title: sessionId } as WorkbenchSession,
     messages: [],
     next_before_id: null,

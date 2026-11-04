@@ -30,14 +30,14 @@ import {
   writeLocalSnapshot,
 } from './localSnapshots';
 
-export const CHAT_SNAPSHOT_SCHEMA = 1;
+const CHAT_SNAPSHOT_SCHEMA = 1;
 /** Conversations kept, least recently written evicted first. */
-export const CHAT_SNAPSHOT_SESSIONS = 40;
+const CHAT_SNAPSHOT_SESSIONS = 40;
 /** Rows kept per conversation: the bootstrap's tail window. */
-export const CHAT_SNAPSHOT_ROWS = 50;
+const CHAT_SNAPSHOT_ROWS = 50;
 const KEY_PREFIX = 'chat:';
 
-export const chatSnapshotKey = (sessionId: string): string => `${KEY_PREFIX}${sessionId}`;
+const chatSnapshotKey = (sessionId: string): string => `${KEY_PREFIX}${sessionId}`;
 
 // The UI build this document runs. There is no build constant, but the page
 // loads one entry module whose file name carries a content hash, and that hash
@@ -73,7 +73,7 @@ const forgotten = new Map<string, number>();
 
 /** A row the server stored: a transcript Message, not a Delivery still being
  *  sent and not the projection of a claimed input. */
-export const isStoredTranscriptRow = (row: WorkbenchMessage): boolean =>
+const isStoredTranscriptRow = (row: WorkbenchMessage): boolean =>
   isTranscriptMessage(row)
   && !row.projection
   && row.state == null
@@ -87,8 +87,8 @@ const isRow = (value: unknown): value is WorkbenchMessage =>
 
 const nullableString = (value: unknown): value is string | null => value === null || typeof value === 'string';
 
-function parseChatSnapshot(sessionId: string, value: unknown, build: string): ChatSnapshot | null {
-  if (!isRecord(value) || value.build !== build) return null;
+function parseChatSnapshot(sessionId: string, value: unknown): ChatSnapshot | null {
+  if (!isRecord(value) || value.build !== UI_BUILD) return null;
   const { session, messages, next_before_id, agents, default_agent_name, can_chat } = value;
   if (!isRecord(session) || session.id !== sessionId) return null;
   if (!Array.isArray(messages) || !messages.every(isRow)) return null;
@@ -107,10 +107,10 @@ function parseChatSnapshot(sessionId: string, value: unknown, build: string): Ch
 
 /** The stored conversation for the current reader, or null. A forget that
  *  begins while the read is out voids what it found, as a clear does. */
-export async function readChatSnapshot(sessionId: string, build = UI_BUILD): Promise<ChatSnapshot | null> {
+export async function readChatSnapshot(sessionId: string): Promise<ChatSnapshot | null> {
   const generation = forgotten.get(sessionId) ?? 0;
   const snapshot = await readLocalSnapshot(chatSnapshotKey(sessionId), CHAT_SNAPSHOT_SCHEMA, (value) =>
-    parseChatSnapshot(sessionId, value, build),
+    parseChatSnapshot(sessionId, value),
   );
   return generation === (forgotten.get(sessionId) ?? 0) ? snapshot : null;
 }
@@ -146,15 +146,6 @@ export type ChatSnapshotOwner = {
   readonly generation: number;
 };
 
-/** Take an owner for data the server is about to answer for ``sessionId``, or
- *  null while the reader is unknown. Take it when the request starts: anything
- *  that voids the store while the request is out voids its answer too. */
-export function chatSnapshotOwner(sessionId: string): ChatSnapshotOwner | null {
-  const principal = getLocalSnapshotPrincipal();
-  if (!principal) return null;
-  return { sessionId, principal, epoch: getLocalSnapshotEpoch(), generation: forgotten.get(sessionId) ?? 0 };
-}
-
 /** What the store looked like when a request for ``sessionId`` started. Unlike
  *  an owner it may have no reader yet: a cold start names the reader only once
  *  the page's first effects have run, after the chat has sent its bootstrap. */
@@ -186,7 +177,7 @@ export function chatSnapshotOwnerForAnswer(request: ChatSnapshotRequest): ChatSn
 }
 
 /** Whether data read under ``owner`` may still be stored. */
-export function isChatSnapshotOwnerCurrent(owner: ChatSnapshotOwner): boolean {
+function isChatSnapshotOwnerCurrent(owner: ChatSnapshotOwner): boolean {
   return owner.principal === getLocalSnapshotPrincipal()
     && owner.epoch === getLocalSnapshotEpoch()
     && owner.generation === (forgotten.get(owner.sessionId) ?? 0);
@@ -197,10 +188,10 @@ export function isChatSnapshotOwnerCurrent(owner: ChatSnapshotOwner): boolean {
 export async function writeChatSnapshot(
   owner: ChatSnapshotOwner,
   snapshot: ChatSnapshot,
-  { added = false, build = UI_BUILD }: { added?: boolean; build?: string } = {},
+  { added = false }: { added?: boolean } = {},
 ): Promise<void> {
   if (!isChatSnapshotOwnerCurrent(owner)) return;
-  const value: StoredChatSnapshot = { ...snapshot, build };
+  const value: StoredChatSnapshot = { ...snapshot, build: UI_BUILD };
   await writeLocalSnapshot(chatSnapshotKey(owner.sessionId), CHAT_SNAPSHOT_SCHEMA, value);
   if (added) await pruneLocalSnapshots(KEY_PREFIX, CHAT_SNAPSHOT_SESSIONS);
 }

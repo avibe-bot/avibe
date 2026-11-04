@@ -8,14 +8,14 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import type { SessionRuntimeState, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import type { ComposerProps } from './Composer';
 import {
-  chatSnapshotOwner,
+  beginChatSnapshotRequest,
+  chatSnapshotOwnerForAnswer,
   readChatSnapshot,
   writeChatSnapshot,
   type ChatSnapshot,
 } from '../../lib/chatSnapshots';
 import { clearLocalSnapshots, setLocalSnapshotPrincipal } from '../../lib/localSnapshots';
 import { writeChatViewMode } from '../../lib/chatViewMemory';
-import { CHAT_SNAPSHOT_WRITE_DELAY_MS } from './useChatSnapshot';
 
 // Opening a chat paints its last known window before the bootstrap answers
 // (docs/plans/web-ui-local-cache.md, Phase 2). The hand-over is where it can go
@@ -201,7 +201,7 @@ const seed = async (messages: WorkbenchMessage[], { canChat = true } = {}) => {
     default_agent_name: null,
     can_chat: canChat,
   };
-  await writeChatSnapshot(chatSnapshotOwner(SESSION)!, value);
+  await writeChatSnapshot(chatSnapshotOwnerForAnswer(beginChatSnapshotRequest(SESSION))!, value);
 };
 
 const mount = () => render(
@@ -232,7 +232,8 @@ const copyRecordToReader = async (from: string, to: string, edit: (value: ChatSn
 };
 
 const composerState = () => screen.queryByTestId('composer')?.getAttribute('data-disabled') ?? 'absent';
-const waitForWriteBack = () => act(() => new Promise((resolve) => setTimeout(resolve, CHAT_SNAPSHOT_WRITE_DELAY_MS + 150)));
+// The write-back settles a second after the window does (plan section 4.3).
+const waitForWriteBack = () => act(() => new Promise((resolve) => setTimeout(resolve, 1000 + 150)));
 
 let live: Deferred<ReturnType<typeof bootstrap>>;
 

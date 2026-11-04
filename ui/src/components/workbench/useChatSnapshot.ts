@@ -46,10 +46,10 @@ import {
 //    transcript window, a second after it settles, when leaving the chat, and
 //    when the page is hidden.
 
-export const CHAT_SNAPSHOT_WRITE_DELAY_MS = 1000;
+const CHAT_SNAPSHOT_WRITE_DELAY_MS = 1000;
 
 /** What a painted snapshot renders until the bootstrap answers. */
-export type ChatSnapshotView = {
+type ChatSnapshotView = {
   sessionId: string;
   principal: string;
   session: WorkbenchSession;
@@ -58,7 +58,7 @@ export type ChatSnapshotView = {
   defaultAgentName: string | null;
 };
 
-export type ChatSnapshotBootstrapRead = {
+type ChatSnapshotBootstrapRead = {
   /** The bootstrap answered for the open chat and its state is installed. */
   commit: (bootstrap: WorkbenchSessionBootstrap) => void;
   /** The bootstrap failed for the open chat. */
