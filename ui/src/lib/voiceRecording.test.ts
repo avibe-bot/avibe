@@ -6,12 +6,14 @@ import {
   isVoiceControlDisabled,
   prewarmVoiceCapture,
   VOICE_AUDIO_START_TIMEOUT_MS,
+  VOICE_RENDER_WINDOW_MS,
   VOICE_CAPTURE_STOP_TIMEOUT_MS,
   VOICE_MIN_SEGMENT_MS,
   voicePcmDeliverySamples,
   voicePcmWorkletSource,
   voiceWavMaxSamples,
   VoiceRecordingPipeline,
+  type VoiceRecordingPipelineOptions,
 } from './voiceRecording';
 
 const initialNavigatorLocks = Object.getOwnPropertyDescriptor(navigator, 'locks');
@@ -665,31 +667,53 @@ describe('voice capture audio context', () => {
       contexts.push(this);
     }
   }
+  const nodes: FakeAudioWorkletNode[] = [];
   class FakeAudioWorkletNode {
-    readonly port = { onmessage: null, postMessage: vi.fn(), close: vi.fn() };
+    readonly port = {
+      onmessage: null as ((event: { data: { type?: string; samples?: ArrayBuffer } }) => void) | null,
+      postMessage: vi.fn(),
+      close: vi.fn(),
+    };
     onprocessorerror = null;
     readonly connect = vi.fn();
     readonly disconnect = vi.fn();
+    constructor(readonly context: FakeAudioContext) {
+      nodes.push(this);
+    }
+    /** The rendering thread delivering a chunk of frames. */
+    deliver(...samples: number[]): void {
+      this.port.onmessage?.({ data: { type: 'samples', samples: Int16Array.from(samples).buffer } });
+    }
   }
   const microphone = () => {
-    const track = Object.assign(new EventTarget(), { readyState: 'live', stop: vi.fn() });
-    return { track, stream: { getTracks: () => [track] } as unknown as MediaStream };
+    const track = Object.assign(new EventTarget(), { readyState: 'live', muted: false, enabled: true, stop: vi.fn() });
+    return { track, stream: { getTracks: () => [track], getAudioTracks: () => [track] } as unknown as MediaStream };
   };
-  const pipelineOn = (stream: MediaStream) => new VoiceRecordingPipeline({
-    stream,
-    segmentMs: 1000,
-    onSegment: vi.fn(),
-    onStopped: vi.fn(),
-  });
+  const pipelines: { abort: () => void }[] = [];
+  const pipelineOn = (stream: MediaStream, options: Partial<VoiceRecordingPipelineOptions> = {}) => {
+    const pipeline = new VoiceRecordingPipeline({
+      stream,
+      segmentMs: 1000,
+      onSegment: vi.fn(),
+      onStopped: vi.fn(),
+      ...options,
+    });
+    pipelines.push(pipeline);
+    return pipeline;
+  };
 
   beforeEach(() => {
     contexts.length = 0;
+    nodes.length = 0;
+    pipelines.length = 0;
     nextResume = [];
     vi.stubGlobal('AudioContext', FakeAudioContext);
     vi.stubGlobal('AudioWorkletNode', FakeAudioWorkletNode);
-    vi.stubGlobal('URL', { createObjectURL: vi.fn(() => 'blob:voice-worklet'), revokeObjectURL: vi.fn() });
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:voice-worklet');
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
   });
   afterEach(async () => {
+    pipelines.forEach((pipeline) => pipeline.abort());
     // The prewarmed context is page-wide: close it so the next test builds its own.
     await Promise.all(contexts.map((context) => context.close()));
   });
@@ -737,6 +761,106 @@ describe('voice capture audio context', () => {
     await failed;
     expect(track.stop).toHaveBeenCalled();
     expect(contexts.every((context) => context.state === 'closed')).toBe(true);
+  });
+
+  it('rebuilds a prewarmed context that lived through a hidden page, though it reports running', async () => {
+    // On iOS the app's audio stops in the background; the context comes back `running` and
+    // renders nothing (owner's iPhone, 2026-11-04: zero frames on every take after a trip away).
+    const page = Object.assign(new EventTarget(), { visibilityState: 'visible' as DocumentVisibilityState });
+    vi.stubGlobal('document', page);
+    vi.stubGlobal('window', new EventTarget());
+    vi.resetModules();
+    const voice = await import('./voiceRecording');
+    await voice.prewarmVoiceCapture();
+    const before = contexts.at(-1)!;
+    expect(before.state).toBe('running');
+    page.visibilityState = 'hidden';
+    page.dispatchEvent(new Event('visibilitychange'));
+    page.visibilityState = 'visible';
+    page.dispatchEvent(new Event('visibilitychange'));
+
+    await voice.prewarmVoiceCapture(); // the next press
+    const { stream } = microphone();
+    const pipeline = new voice.VoiceRecordingPipeline({ stream, segmentMs: 1000, onSegment: vi.fn(), onStopped: vi.fn() });
+    pipelines.push(pipeline);
+    await expect(pipeline.start()).resolves.toBe(true);
+
+    expect(before.close).toHaveBeenCalled();
+    expect(before.createMediaStreamSource).not.toHaveBeenCalled();
+    expect(contexts.at(-1)).not.toBe(before);
+    expect(contexts.at(-1)!.createMediaStreamSource).toHaveBeenCalledWith(stream);
+  });
+
+  it('rebuilds a take whose graph delivers no frames on its microphone, within the take', async () => {
+    vi.useFakeTimers();
+    await prewarmVoiceCapture();
+    const { stream, track } = microphone();
+    const onPcm = vi.fn();
+    await pipelineOn(stream, { onPcm }).start();
+    const [silent] = nodes;
+
+    await vi.advanceTimersByTimeAsync(VOICE_RENDER_WINDOW_MS);
+    expect(silent.context.close).toHaveBeenCalled();
+    expect(nodes).toHaveLength(2);
+    expect(nodes[1].context.createMediaStreamSource).toHaveBeenCalledWith(stream);
+    expect(track.stop).not.toHaveBeenCalled();
+
+    // Frames, even exact zeros (a quiet room behind noise suppression), are a rendering graph.
+    nodes[1].deliver(0, 0, 0);
+    await vi.advanceTimersByTimeAsync(3 * VOICE_RENDER_WINDOW_MS);
+    expect(nodes).toHaveLength(2);
+    expect(onPcm).toHaveBeenCalledOnce();
+  });
+
+  it('then opens a fresh microphone, and fails visibly when that delivers nothing too', async () => {
+    vi.useFakeTimers();
+    const fresh = microphone();
+    const getUserMedia = vi.fn(async () => fresh.stream);
+    vi.stubGlobal('navigator', { mediaDevices: { getUserMedia } });
+    const { stream, track } = microphone();
+    const onError = vi.fn();
+    const onStopped = vi.fn();
+    await pipelineOn(stream, { onError, onStopped }).start();
+
+    await vi.advanceTimersByTimeAsync(VOICE_RENDER_WINDOW_MS); // rebuilt on the same microphone
+    await vi.advanceTimersByTimeAsync(VOICE_RENDER_WINDOW_MS); // then a fresh one
+    expect(getUserMedia).toHaveBeenCalledWith({ audio: true });
+    expect(track.stop).toHaveBeenCalled();
+    expect(nodes).toHaveLength(3);
+    expect(nodes[2].context.createMediaStreamSource).toHaveBeenCalledWith(fresh.stream);
+
+    await vi.advanceTimersByTimeAsync(VOICE_RENDER_WINDOW_MS);
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({ name: 'VoiceTranscriptionError', code: 'empty' }));
+    expect(fresh.track.stop).toHaveBeenCalled();
+    nodes[2].port.onmessage?.({ data: { type: 'stopped' } });
+    expect(onStopped).toHaveBeenCalledWith('error', expect.anything());
+  });
+
+  it('opens no microphone for a take released while it is being rebuilt', async () => {
+    vi.useFakeTimers();
+    const getUserMedia = vi.fn(async () => microphone().stream);
+    vi.stubGlobal('navigator', { mediaDevices: { getUserMedia } });
+    const { stream } = microphone();
+    const onStopped = vi.fn();
+    const pipeline = pipelineOn(stream, { onStopped });
+    await pipeline.start();
+    await vi.advanceTimersByTimeAsync(VOICE_RENDER_WINDOW_MS); // rebuilt on the same microphone
+
+    vi.advanceTimersByTime(VOICE_RENDER_WINDOW_MS); // the second rebuild starts...
+    pipeline.finish(); // ...and the hold is released before it asks for a microphone
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(getUserMedia).not.toHaveBeenCalled();
+    expect(onStopped).toHaveBeenCalledWith('finish', expect.anything());
+  });
+
+  it('leaves a muted microphone to the system', async () => {
+    vi.useFakeTimers();
+    const { stream, track } = microphone();
+    track.muted = true;
+    await pipelineOn(stream).start();
+    await vi.advanceTimersByTimeAsync(3 * VOICE_RENDER_WINDOW_MS);
+    expect(nodes).toHaveLength(1);
   });
 });
 
