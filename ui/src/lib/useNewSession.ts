@@ -143,6 +143,7 @@ export function useNewSession({ active = true, loadErrorText, createFailedText, 
   // the tree bootstrap on every route again — exactly what activation prevents.
   const {
     projects: rawProjects,
+    projectsLoaded,
     projectsError,
     createSessionForProject,
   } = useWorkbenchProjectsTree({ active });
@@ -206,7 +207,8 @@ export function useNewSession({ active = true, loadErrorText, createFailedText, 
     () => (rawProjects ? sortProjectsByRecent(rawProjects.filter((project) => project.capabilities.can_chat)) : []),
     [rawProjects],
   );
-  const projectsLoaded = rawProjects !== null;
+  // The live list, not the last known one painted meanwhile: a create resolves
+  // its project and pins that project's default route, so it waits for the server.
   const loaded = projectsLoaded && agentProjectionLoaded;
 
   // Keep the authorized Agent projection live. Authorization changes clear the

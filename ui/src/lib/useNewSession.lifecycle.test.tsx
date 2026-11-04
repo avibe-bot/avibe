@@ -4,7 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { ComposerAttachment } from '../components/workbench/Composer';
 const mocks = vi.hoisted(() => ({
   create: vi.fn(), upload: vi.fn(), fetch: vi.fn(), events: undefined as undefined | (() => void),
-  fastDefault: false, setFastDefault: vi.fn(),
+  fastDefault: false, setFastDefault: vi.fn(), projectsLoaded: true,
   projects: [
     { id: '中文项目', capabilities: { can_chat: true }, created_at: '2026-09-19T00:00:00Z' },
     { id: '其他项目', capabilities: { can_chat: true }, created_at: '2026-09-18T00:00:00Z' },
@@ -20,7 +20,7 @@ const api = {
   setFastModeDefault: mocks.setFastDefault,
 };
 vi.mock('../context/ApiContext', () => ({ useApi: () => api }));
-vi.mock('../context/WorkbenchProjectsContext', () => ({ useWorkbenchProjectsTree: () => ({ projects: mocks.projects, projectsError: null, createSessionForProject: mocks.create }) }));
+vi.mock('../context/WorkbenchProjectsContext', () => ({ useWorkbenchProjectsTree: () => ({ projects: mocks.projects, projectsLoaded: mocks.projectsLoaded, projectsError: null, createSessionForProject: mocks.create }) }));
 vi.mock('./apiFetch', () => ({ apiFetch: mocks.fetch }));
 vi.mock('./workbenchUpload', async (original) => ({ ...await original<typeof import('./workbenchUpload')>(), uploadWorkbenchAttachment: mocks.upload }));
 import { useNewSession } from './useNewSession';
@@ -33,6 +33,7 @@ beforeEach(() => {
   mocks.fetch.mockReset().mockResolvedValue(new Response('{}', { status: 201 }));
   mocks.fastDefault = false;
   mocks.setFastDefault.mockReset().mockResolvedValue({});
+  mocks.projectsLoaded = true;
 });
 afterEach(cleanup);
 it('creates and submits once from a same-tick double send, only after explicit input', async () => {
@@ -43,6 +44,20 @@ it('creates and submits once from a same-tick double send, only after explicit i
   expect(mocks.create).toHaveBeenCalledTimes(1);
   expect(mocks.fetch).toHaveBeenCalledTimes(1);
   expect(mocks.upload).toHaveBeenCalledWith('session-1', attachment.file, attachment.localId);
+});
+it('waits for the live project list before creating, with the last known list already on screen', async () => {
+  // The list is the local snapshot painted while the bootstrap is in flight: it
+  // resolves a target to show, but a create pins that project's default route.
+  mocks.projectsLoaded = false;
+  const { result, rerender } = mount();
+  await waitFor(() => expect(result.current.defaultAgentName).toBe('codex'));
+  expect(result.current.target?.id).toBe('中文项目');
+  expect(result.current.loaded).toBe(false);
+  await act(async () => { expect(await result.current.send('太早了')).toBeNull(); });
+  expect(mocks.create).not.toHaveBeenCalled();
+  mocks.projectsLoaded = true;
+  rerender();
+  expect(result.current.loaded).toBe(true);
 });
 it('preserves successful uploads for retry but creates a fresh media scope when the selection changes', async () => {
   const { result } = mount();
