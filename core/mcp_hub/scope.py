@@ -562,27 +562,55 @@ def _edit_document_text(text: Optional[str], key: ScopedName, entry: Optional[di
 
 
 def write_server(key: ScopedName, entry: Optional[dict[str, Any]], *, replace: bool = True) -> None:
-    """One compare-and-replace of ``.mcp.json``; supplied env/headers go to the cache only."""
+    """Validate the prospective document and private maps before publishing either.
+
+    Supplied template values belong in the project file; concrete values belong
+    in the private cache. Each supplied key replaces its previous destination.
+    """
 
     with _DOCUMENT_LOCK:
         text, data = _document(key.scope)
         before = copy.deepcopy(data)
         servers = data.setdefault("mcpServers", {})
+        cache = None
+        previous_cache = None
         if entry is None:
             servers.pop(key.name, None)
         else:
+            project_add_definition(key.name, entry)
             _apply_entry(servers, key, entry, replace)
+            written = servers[key.name]
+            previous_cache = _secrets(key)
+            cache = copy.deepcopy(previous_cache)
+            for field in ("env", "headers"):
+                if field not in entry:
+                    continue
+                declared = dict(written.get(field, {}))
+                private = dict(cache.get(field, {}))
+                for name, value in entry[field].items():
+                    # HTTP header names have case-insensitive identity.
+                    for mapping in (declared, private):
+                        for old_name in list(mapping):
+                            if old_name == name or (field == "headers" and old_name.lower() == name.lower()):
+                                mapping.pop(old_name)
+                    destination = declared if _TOKEN.search(value) else private
+                    destination[name] = value
+                if declared:
+                    written[field] = declared
+                else:
+                    written.pop(field, None)
+                if private or field in cache:
+                    cache[field] = private
+            cache = _check_secrets(cache)
+            _effective(key, written, cache)
         if text is None or data != before:
             written = None if entry is None else servers.get(key.name)
             next_text = _edit_document_text(text, key, written, data)
             if next_text is None:
                 next_text = _render_document(data)
             _write_document(_project_file(key.scope), next_text, text)
-    if entry is None:
-        return
-    update = {field: entry[field] for field in ("env", "headers") if entry.get(field)}
-    if update:
-        _write_cache(key, "secrets.json", _merged_secrets(key, _check_secrets(update)))
+        if cache is not None and cache != previous_cache:
+            _write_cache(key, "secrets.json", cache)
 
 
 def remove_server(key: ScopedName) -> None:

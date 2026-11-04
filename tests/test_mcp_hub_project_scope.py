@@ -770,3 +770,33 @@ def test_project_add_preserves_unconfigured_url(tmp_path, monkeypatch, runtime, 
     scope.approve(key)
     assert scope.load_server(key).state == "needs_config"
     assert scope.load_server(key).missing == ["HOST"]
+
+
+@pytest.mark.parametrize("field,transport,initial,supplied,expected_file,expected_private", [
+    ("headers", {"url": "https://example.invalid/mcp"}, {}, {"Authorization": "Bearer ${TOKEN}"}, {"Authorization": "Bearer ${TOKEN}"}, {}),
+    ("env", {"command": "unused"}, {}, {"TOKEN": "private"}, {}, {"TOKEN": "private"}),
+    ("headers", {"url": "https://example.invalid/mcp"}, {}, {"Authorization": "${TOKEN}", "X-Key": "private"}, {"Authorization": "${TOKEN}"}, {"X-Key": "private"}),
+    ("env", {"command": "unused"}, {"KEY": "${TOKEN}", "KEEP": "untouched"}, {"KEY": "private"}, {}, {"KEY": "private", "KEEP": "untouched"}),
+    ("env", {"command": "unused"}, {"KEY": "private", "KEEP": "${OTHER}"}, {"KEY": "${TOKEN}"}, {"KEY": "${TOKEN}", "KEEP": "${OTHER}"}, {}),
+])
+def test_project_add_splits_templates_from_concrete_values(tmp_path, runtime, field, transport, initial, supplied, expected_file, expected_private):
+    from core.mcp_hub import scope
+
+    root = _project(tmp_path / "repo", {})
+    key = _key(root, "remote")
+    if initial:
+        scope.write_server(key, {**transport, field: initial})
+    scope.write_server(key, {**transport, field: supplied})
+    document = json.loads((root / ".mcp.json").read_text())["mcpServers"]["remote"]
+    assert document.get(field, {}) == expected_file
+    cache_path = repository.package_dir(key) / "secrets.json"
+    cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}
+    assert cache.get(field, {}) == expected_private
+    old_document = (root / ".mcp.json").read_bytes()
+    old_cache = cache_path.read_bytes() if cache_path.exists() else None
+    from core.mcp_hub.errors import McpHubError
+
+    with pytest.raises(McpHubError):
+        scope.write_server(key, {**transport, field: {"BAD\nKEY": "invalid"}})
+    assert (root / ".mcp.json").read_bytes() == old_document
+    assert (cache_path.read_bytes() if cache_path.exists() else None) == old_cache
