@@ -136,12 +136,28 @@ describe('AuthGuard boot from the last confirmed outcome', () => {
     expect(readBootSession()).toBeNull();
   });
 
-  it('AUTH-SETUP-142 does not boot from an outcome older than a personal session', () => {
+  it('AUTH-SETUP-142 boots only until the session expires: its reported expiry, else 24 hours', () => {
+    const day = 24 * 60 * 60 * 1000;
+    const nowSeconds = () => Math.floor(Date.now() / 1000);
+    const startsWithShell = () => {
+      api.getAuthSession.mockReturnValueOnce(new Promise(() => {}));
+      const view = mountGuard();
+      const shown = screen.queryByText('protected shell') !== null;
+      view.unmount();
+      return shown;
+    };
+
+    // An instance that does not report the expiry: the 24-hour fallback.
     recordBootSession(member, Date.now() - BOOT_SESSION_MAX_AGE_MS - 1);
-    api.getAuthSession.mockReturnValueOnce(new Promise(() => {}));
-    mountGuard();
-    expect(screen.queryByText('protected shell')).toBeNull();
-    expect(screen.getByText('common.loading')).toBeTruthy();
+    expect(startsWithShell()).toBe(false);
+
+    // A 30-day session recorded three days ago is still live.
+    recordBootSession({ ...member, session_expires_at: nowSeconds() + 27 * 24 * 3600 }, Date.now() - 3 * day);
+    expect(startsWithShell()).toBe(true);
+
+    // Its reported expiry has passed.
+    recordBootSession({ ...member, session_expires_at: nowSeconds() - 1 }, Date.now() - 3 * day);
+    expect(startsWithShell()).toBe(false);
   });
 });
 

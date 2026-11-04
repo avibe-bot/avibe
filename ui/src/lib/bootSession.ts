@@ -7,18 +7,24 @@ import { normalizeSessionInfo, type SessionInfo } from './sessionInfo';
 //
 // It is only ever an outcome the server confirmed in full: a signed-in reader
 // whose authorization was current and, when setup applies, an instance whose
-// setup is complete. It is used for at most a personal session's lifetime, and
-// any other answer from the server deletes it, as do sign-out, revocation, and
-// a login-required signal.
+// setup is complete. It is used only until the session itself expires (the
+// server reports ``session_expires_at``; without it, 24 hours), and any other
+// answer from the server deletes it, as do sign-out, revocation, and a
+// login-required signal.
 //
 // localStorage, not IndexedDB: the guard reads it in its first render, so the
 // read must be synchronous. It is per origin, so per instance.
 
 const BOOT_SESSION_KEY = 'avibe.boot-session.v1';
 
-/** The personal remote session lasts 24 hours (``PERSONAL_SESSION_TTL_SECONDS``
- *  in ``vibe/remote_access.py``); an outcome older than that proves nothing. */
+/** How long an outcome is trusted when the server did not say when the session
+ *  expires (local loopback, or an instance from before ``session_expires_at``):
+ *  the 24 hours remote sessions used to last. */
 export const BOOT_SESSION_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+/** Never trust an outcome longer than the longest a remote session can live
+ *  (docs/plans/remote-session-lifetime.md: a 90-day absolute cap), whatever an
+ *  old record claims. */
+export const BOOT_SESSION_HARD_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
 
 type BootSessionRecord = { version: 1; savedAt: number; session: unknown };
 
@@ -49,9 +55,15 @@ export function readBootSession(now = Date.now()): SessionInfo | null {
     const record = JSON.parse(raw) as Partial<BootSessionRecord>;
     if (record.version !== 1 || typeof record.savedAt !== 'number') return null;
     const age = now - record.savedAt;
-    if (!(age >= 0 && age < BOOT_SESSION_MAX_AGE_MS)) return null;
+    if (!(age >= 0 && age < BOOT_SESSION_HARD_MAX_AGE_MS)) return null;
     const session = normalizeSessionInfo(record.session);
-    return isReadyOutcome(session) ? session : null;
+    if (!isReadyOutcome(session)) return null;
+    // The session's own expiry when the server reported one, else the fallback.
+    const expiresAt = session.remote && session.authenticated && session.authorization_state === 'current'
+      && session.session_expires_at !== undefined
+      ? session.session_expires_at * 1000
+      : record.savedAt + BOOT_SESSION_MAX_AGE_MS;
+    return now < expiresAt ? session : null;
   } catch {
     return null;
   }
