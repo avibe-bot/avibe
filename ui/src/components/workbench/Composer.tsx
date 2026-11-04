@@ -59,11 +59,10 @@ import {
 import type { VoiceMessageMetadata } from '../../lib/voiceMessage';
 import {
   ComposerHoldCard,
-  ComposerHoldDim,
   ComposerHoldSurface,
   type HoldPointer,
 } from '../voice/ComposerHold';
-import { useHoldToTalk, type HoldGesture } from '../voice/useHoldToTalk';
+import { MOUSE_HOLD_GESTURE, useHoldToTalk } from '../voice/useHoldToTalk';
 import type { VoiceTarget } from '../voice/VoiceCard';
 import {
   MAX_WORKBENCH_ATTACHMENT_BYTES,
@@ -472,18 +471,6 @@ export interface ComposerHandle {
    *  the page, while an active recording can always be completed. */
   handleVoiceShortcut: (event: KeyboardEvent, allowStart: boolean) => boolean;
 }
-
-// A mouse holds longer than a finger, so a slow click or a trackpad press never opens the
-// microphone; the ring shows from 150 ms, and leaving the box (or Esc) cancels
-// (ui/design: composer/hold-desktop/b-pressing, owner decision 2026-11-02).
-const MOUSE_HOLD_GESTURE: Partial<HoldGesture> = {
-  holdMs: 500,
-  ringDelayMs: 150,
-  slopPx: 6,
-  cancel: 'leave',
-  cancelPx: 16,
-  uncancelPx: 0,
-};
 
 /** A press on one of the box's controls is that control's, never a hold. */
 const isInteractiveTarget = (target: EventTarget | null): boolean => (
@@ -2152,24 +2139,22 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     </>
   );
 
-  // The page behind dims while the microphone is open and while the take settles.
-  const holdDims = hold.phase === 'listening' || hold.phase === 'recording' || hold.phase === 'armed' || hold.phase === 'settling';
+  // While the microphone is open and while the take settles, the box stays above the card's halo,
+  // which reaches down over it.
+  const holdRaised = hold.phase === 'listening' || hold.phase === 'recording' || hold.phase === 'armed' || hold.phase === 'settling';
   const holdLayer = mediaEnabled && (
-    <>
-      {holdDims && <ComposerHoldDim />}
-      <ComposerHoldCard
-        hold={hold}
-        pointer={holdPointer}
-        to={holdTarget}
-        attachments={readyAttachments.map((attachment) => attachment.name)}
-        onEditFirst={putHeardInDraft}
-      />
-    </>
+    <ComposerHoldCard
+      hold={hold}
+      pointer={holdPointer}
+      to={holdTarget}
+      attachments={readyAttachments.map((attachment) => attachment.name)}
+      onEditFirst={putHeardInDraft}
+    />
   );
   const holdSurface = mediaEnabled && (
     <ComposerHoldSurface phase={hold.phase} pointer={holdPointer} progress={hold.progress} point={holdPoint} />
   );
-  // The box a hold is pressed on, measured for leave-to-cancel; raised above the dim while held.
+  // The box a hold is pressed on, measured for leave-to-cancel; raised above the card's halo while held.
   const boxHoldProps = {
     ref: boxRef,
     ...holdHandlers,
@@ -2234,7 +2219,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           {...boxHoldProps}
           className={cn(
             'relative flex w-full flex-col gap-1 rounded-2xl border border-border-strong bg-surface-2 p-2 shadow-[0_-4px_24px_-12px_rgba(0,0,0,0.5)]',
-            holdDims && 'z-50',
+            holdRaised && 'z-50',
           )}
         >
           {holdSurface}
@@ -2257,7 +2242,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           className={cn(
             'relative flex w-full items-end gap-1.5 rounded-2xl border border-border-strong bg-surface-2 py-2 pr-2 shadow-[0_-4px_24px_-12px_rgba(0,0,0,0.5)]',
             mediaEnabled ? 'pl-1.5' : 'pl-3.5',
-            holdDims && 'z-50',
+            holdRaised && 'z-50',
           )}
         >
           {holdSurface}

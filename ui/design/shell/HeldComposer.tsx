@@ -10,7 +10,6 @@ import { useTranslation } from 'react-i18next';
 
 import {
   ComposerHoldCard,
-  ComposerHoldDim,
   ComposerHoldSurface,
   type ComposerHoldView,
   type HoldPointer,
@@ -78,14 +77,14 @@ export function HeldComposer({
     ...hold,
   };
   const { phase } = view;
-  const dims = phase === 'listening' || phase === 'recording' || phase === 'armed' || phase === 'settling';
+  // Held, the box stays above the card's halo, as the composer raises its own.
+  const raised = phase === 'listening' || phase === 'recording' || phase === 'armed' || phase === 'settling';
   const mouseOn = pointer === 'mouse' && (phase === 'pressing' || phase === 'listening' || phase === 'recording' || phase === 'armed');
   return (
     <div className="pointer-events-none absolute inset-0 z-50 flex flex-col justify-end">
       <ComposerSlot>
-        {dims && <ComposerHoldDim />}
         <ComposerHoldCard hold={view} pointer={pointer} to={target} attachments={attachments} onEditFirst={noop} />
-        <div className={clsx('absolute inset-0', dims && 'z-50')}>
+        <div className={clsx('absolute inset-0', raised && 'z-50')}>
           <ComposerHoldSurface phase={phase} pointer={pointer} progress={view.progress} point={point} />
           {/* The mouse is on the box while it holds, and outside it once cancel is armed. */}
           {mouseOn && <SystemPointer at={phase === 'armed' ? { x: point.x, y: -36 } : point} />}

@@ -2,12 +2,19 @@
 // drawn by the shipped sidebar from fixtures. The main Bot's mascot has no well, here as
 // anywhere (owner, 2026-11-04); the other Bots follow it in the server's order (D13). With
 // every place for a custom Bot taken (D12) the strip has no Add: its room goes to the Bots,
-// and the Agents page says why adding waits.
+// and the Agents page says why adding waits. Holding an avatar with the mouse speaks to that
+// Bot (owner decision, 2026-11-04): the composer's ring, then the card beside the avatar; after
+// sending the reader stays where they are, and the toast's View opens the conversation.
+import type { ReactNode } from 'react';
+
 import { WorkbenchSidebar } from '@/components/workbench/WorkbenchSidebar';
 
 import { frames } from '../../frame';
+import { DesktopScreen } from '../../shell/DesktopScreen';
+import { HeldBot } from '../../shell/HeldBot';
+import { csoFixtures } from '../composer/fixtures';
 import { demoBots, demoProjects, inboxRow, mainBot, type WorkbenchFixtures } from '../../shell/fixtures';
-import { fullTeam } from '../../shell/teamFixtures';
+import { fullTeam, spoken, team as teamBots } from '../../shell/teamFixtures';
 import { SidebarColumn } from '../../shell/SidebarColumn';
 
 const sidebar = () => (
@@ -59,6 +66,19 @@ const longLatest: WorkbenchFixtures = {
   },
 };
 
+// In the security lead's conversation, holding the PM's avatar.
+const recording = { phase: 'recording', text: spoken.text, stash: spoken.stash, seconds: 6 } as const;
+const held = (hold: Parameters<typeof HeldBot>[0]['hold']) => () => (
+  <HeldBot handle="pm" pointer="mouse" hold={hold}>
+    <DesktopScreen />
+  </HeldBot>
+);
+/** After a take to the PM: the PM is the Bot the user last wrote to, right after the main Bot (bots.md D13). */
+const [mainOfTeam, csoOfTeam, pmOfTeam, researchOfTeam] = teamBots;
+const holdFrame = (name: string, title: string, render: () => ReactNode, fixtures = csoFixtures()) => (
+  { name, title, width: 1440, height: 900, status: 'shipped' as const, fixtures, route: '/chat/ses_cso', render }
+);
+
 const designFrames = frames([
   {
     name: 'new-user',
@@ -97,6 +117,15 @@ const designFrames = frames([
     route: '/chat/ses_main',
     render: sidebar,
   },
+  holdFrame('hold-pressing', '按住伙伴说话 · 按下 150ms 后出现圆环，到 500ms 填满（期间移动 >6px = 普通点击）', held({ phase: 'pressing', progress: 0.55 })),
+  holdFrame('hold-recording', '按住伙伴说话 · 录音中：卡片在头像右边，松开发送 · 移开头像或 Esc 取消', held(recording)),
+  holdFrame('hold-armed', '按住伙伴说话 · 指针移开头像：松开取消', held({ ...recording, phase: 'armed', seconds: 7 })),
+  holdFrame(
+    'hold-sent',
+    '按住伙伴说话 · 已发给产品经理：留在原页面，它排到歪比后面',
+    held({ outcome: 'sent', text: spoken.final }),
+    { ...csoFixtures(), bots: [mainOfTeam, pmOfTeam, csoOfTeam, researchOfTeam] },
+  ),
   {
     name: 'hover-card',
     title: '伙伴 · 悬停卡片',

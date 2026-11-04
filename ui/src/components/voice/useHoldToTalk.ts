@@ -44,6 +44,18 @@ export type HoldGesture = {
 };
 
 export const HOLD_GESTURE: HoldGesture = { holdMs: 300, ringDelayMs: 0, slopPx: 10, cancel: 'slide-up', cancelPx: 80, uncancelPx: 60 };
+/** A mouse holds longer than a finger, so a slow click or a trackpad press never opens the
+ *  microphone; the ring shows from 150 ms, and leaving the held box (or Esc) cancels
+ *  (ui/design: composer/hold-desktop/b-pressing, owner decision 2026-11-02). Every surface a
+ *  mouse can hold uses these numbers: a composer and a Bot's avatar alike. */
+export const MOUSE_HOLD_GESTURE: Partial<HoldGesture> = {
+  holdMs: 500,
+  ringDelayMs: 150,
+  slopPx: 6,
+  cancel: 'leave',
+  cancelPx: 16,
+  uncancelPx: 0,
+};
 /** A take shorter than this is a slip, not a message. */
 export const HOLD_MIN_TAKE_MS = 500;
 

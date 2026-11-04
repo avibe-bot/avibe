@@ -6819,6 +6819,10 @@
       "toSession": "发到「{{title}}」",
       "toNewSession": "在「{{project}}」开一个新会话",
       "toHere": "发到这个对话"
+    },
+    "avatar": {
+      "mouseHint": "松开发送 · 移开头像或按 <key>Esc</key> 取消",
+      "mouseArmed": "松开取消 · 移回头像继续说"
     }
   },
   "mcpHub": {

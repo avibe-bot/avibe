@@ -216,6 +216,31 @@ Owner decisions 2026-11-01, from the mockups in this Session's Show Page
 - **Context menu.** Edit profile, and remove from Bots (its conversation and
   memory are kept). The main Bot cannot be removed. There is no manual order
   (D13).
+- **Hold an avatar to talk (owner decision, 2026-11-04).** Every avatar in the
+  strip, desktop and phone, the main Bot included, takes the composer's
+  hold-to-talk exactly: a mouse holds 500 ms with the ring and cancels by
+  leaving the avatar, a finger holds 300 ms and slides up to cancel, Esc
+  cancels, there is no time limit, and a take cut off keeps its words with the
+  same choices. A tap still opens the conversation, a right-click still opens
+  the menu (only the primary button holds), and a scroll of the strip never
+  starts a hold: until the microphone opens, a move is the page's. The card
+  says 「说给{name}」 with the Bot's avatar and sits next to the held avatar: on
+  a desktop beside it, its top at the avatar's, with the hint under it; on a
+  phone under the strip, with the cancel target right above the finger. The
+  hover card closes when a hold starts, and the order holds while a take is on
+  (D13). After sending, the reader stays where they are: the toast says
+  「已发给{name}」 with View, above the tab bar on a phone and where the app's
+  toasts go on a desktop; the message carries the voice mark. One hold serves
+  every avatar (`BotHoldProvider`), so two avatars never record at once. The
+  phone's switch sheet does not hold: it is reached from a conversation whose
+  composer already does, and its list scrolls the way a slide-up cancels.
+- **The hold-to-talk card's halo (owner decision, 2026-11-04).** No hold dims
+  or blurs the whole page any more: the composer (desktop and phone), the tab
+  bar's main Bot, and a Bot's avatar alike draw the page dimmed and blurred only
+  right around the card, strongest at its edge and clear a short way out (56 px
+  on a desktop, 28 px on a phone), so the user can read the screen while
+  talking. The halo belongs to the shared card (`VoiceCard`), under it and under
+  the cancel hint.
 - **Inbox.** The Inbox stays the one total of everything unread, Bot
   conversations included; the icon's count is that total. A Bot row shows the
   Bot's avatar and name with a small Bot tag; other Sessions keep their

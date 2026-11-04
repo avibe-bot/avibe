@@ -87,6 +87,20 @@ async function shoot(frame, t) {
       await page.waitForTimeout(800);
       await page.evaluate(() => window.__DESIGN__.quiet());
     }
+    // Images load outside the fixture network (assets the page serves itself), so readiness does
+    // not cover them: wait until each image on the page has loaded and decoded, or a shot can catch
+    // an avatar or a mascot still blank.
+    await page.evaluate(() => Promise.race([
+      Promise.all([...document.images].map((image) => (
+        image.complete
+          ? image.decode().catch(() => undefined)
+          : new Promise((resolve) => {
+            image.addEventListener('load', () => image.decode().then(resolve, resolve), { once: true });
+            image.addEventListener('error', resolve, { once: true });
+          })
+      ))),
+      new Promise((resolve) => setTimeout(resolve, 5_000)),
+    ]));
     const file = join(out, `${frame.id}.${t}.png`);
     await mkdir(dirname(file), { recursive: true });
     // The viewport is the frame, so popovers and dialogs portaled to <body> are captured too.
