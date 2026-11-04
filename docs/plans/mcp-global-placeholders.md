@@ -41,3 +41,19 @@ Native definitions and existing legacy literal-secret behavior remain compatible
 Project publication behavior is not redesigned here; the global implementation
 must reuse shared mechanisms without claiming to remediate all prior project
 artifact handling.
+
+## Publication lifecycle and accepted concurrency window
+
+Persisted Avibe definitions own management visibility, independently of a
+published catalog. A configured server whose discovery fails remains visible as
+`not_generated`, with Configure, Refresh and Remove available, but no callable
+tools. Missing variables instead produce `needs_config`.
+
+All secret-changing owner mutations invalidate/retire the current publication
+through one shared path before activating new sidecar values. Until refresh
+publishes again, new admissions cannot use the previous tools.
+
+Known by design: an agent call that already read the old publication when the
+owner reconfigures the same server may continue with whatever secret it already
+resolved. This narrow concurrent-start window is explicitly accepted by the PM;
+there is no revision-secret snapshot binding or admission-counter mechanism.

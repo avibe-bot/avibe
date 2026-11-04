@@ -80,7 +80,11 @@ concrete supplied values are stored in the private `secrets.json` beside it.
 Maps split per key: a supplied key replaces its previous destination, while
 unspecified keys are kept. Both prospective states are validated before writing.
 Configuration updates replace only the supplied private maps, then refresh the
-server. Directories are `0700` and files `0600`. Stored secret values are never
+server. Secret-changing mutations retire the previous published tools before
+activating new values. If discovery fails, the persisted server remains visible
+as **not generated** so it can be configured, refreshed or removed; it is not
+callable until refresh succeeds. A call already starting during owner
+reconfiguration may finish using the secret it already resolved. Directories are `0700` and files `0600`. Stored secret values are never
 returned by the UI/CLI/API or copied into published definitions: those retain
 templates or redacted values. Existing global definitions continue to load;
 native Claude/Codex/OpenCode imports do not gain placeholder expansion.

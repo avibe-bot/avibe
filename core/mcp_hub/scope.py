@@ -515,26 +515,28 @@ def write_global_secrets(name: object, value: Union[dict[str, Any], bytes, None]
 
 
 def global_pending_row(name: str) -> Optional[dict[str, Any]]:
-    """A listed row for an unpublished Avibe server that waits on ``--configure``; never resolved values."""
+    """The management row of an unpublished Avibe server; never resolved values.
+
+    ``needs_config`` while variables are missing, otherwise ``not_generated``
+    (configured but not discovered yet): manageable, never callable.
+    """
 
     try:
         definition = repository.read_avibe_definition(name)
     except McpHubError:
         return None
-    if definition is None or not uses_placeholders(definition):
+    if definition is None:
         return None
     try:
         _, missing, placeholders = global_state(name, definition)
     except McpHubError as exc:
         logger.warning("Skipping invalid MCP server %s: %s", name, exc)
         return None
-    if not missing:
-        return None
     transport = definition["transport"]
     return {
         "name": name,
         "scope": GLOBAL,
-        "state": "needs_config",
+        "state": "needs_config" if missing else "not_generated",
         "source": repository.AVIBE,
         "sourcePath": str(repository.package_dir(name) / "definition.json"),
         "missingVariables": missing,
@@ -681,13 +683,17 @@ def _merged_secrets(key: ScopedName, update: dict[str, Any]) -> dict[str, Any]:
     return {**previous, **update}
 
 
-def configure(key: ScopedName, secrets: Any) -> None:
-    """Validate the prospective effective definition before ``secrets.json`` changes."""
+def prepare_configure(key: ScopedName, secrets: Any) -> dict[str, Any]:
+    """The validated prospective ``secrets.json``; nothing is written."""
 
     raw = _raw_entry(key)
     prospective = _merged_secrets(key, _check_secrets(secrets))
     _effective(key, raw, prospective)
-    _write_cache(key, "secrets.json", prospective)
+    return prospective
+
+
+def configure(key: ScopedName, secrets: Any) -> None:
+    _write_cache(key, "secrets.json", prepare_configure(key, secrets))
 
 
 def _apply_entry(servers: dict[str, Any], key: ScopedName, entry: dict[str, Any], replace: bool) -> None:

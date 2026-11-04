@@ -71,7 +71,7 @@ const STATE_BADGE: Record<string, 'success' | 'warning' | 'info' | 'destructive'
 /** Show project state and blocked Avibe-owned global configuration. */
 function McpStateBadge({ server }: { server: McpServerSummary }) {
   const { t } = useTranslation();
-  if (!server.state || (server.source !== 'project' && server.state !== 'needs_config')) return null;
+  if (!server.state || (server.source !== 'project' && !['needs_config', 'not_generated'].includes(server.state))) return null;
   const missing = server.state === 'needs_config' ? server.missingVariables ?? [] : [];
   return (
     <Badge variant={STATE_BADGE[server.state] ?? 'destructive'} className="text-[10px]">
@@ -209,7 +209,7 @@ export function McpServerDetail({
             : t('mcpHub.needsConfigHint', { names: (current.missingVariables ?? []).join(', ') })}
         </div>
       ) : null}
-      {projectRow && state === 'not_generated' ? (
+      {state === 'not_generated' ? (
         <div className="rounded-[10px] border border-destructive/40 bg-destructive/10 px-3 py-2.5 text-[12px] text-foreground">
           {t('mcpHub.notGeneratedHint')}
         </div>

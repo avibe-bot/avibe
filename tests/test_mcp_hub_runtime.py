@@ -109,13 +109,16 @@ def test_refresh_keeps_one_published_snapshot(generated):
 
 
 def test_failed_replace_add_restores_previous_avibe_definition(generated):
-    before = repository.read_published("echo")["revision"]
+    """The definition rolls back; the old catalog was retired before the write and stays unpublished."""
+
     previous = repository.read_avibe_definition("echo")
     result = _run(generated, "add", {"servers": [_server("/nonexistent/mcp-server")], "replace": True})
     assert result["ok"] is False
     assert result["failed"][0]["name"] == "echo"
-    assert repository.read_published("echo")["revision"] == before
+    assert repository.read_published("echo") is None
     assert repository.read_avibe_definition("echo") == previous
+    row = next(item for item in _run(generated, "list", {})["servers"] if item["name"] == "echo")
+    assert row["state"] == "not_generated"
 
 
 def test_malformed_existing_definition_does_not_abort_batch_add(runtime):

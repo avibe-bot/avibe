@@ -499,6 +499,8 @@ class McpRuntime:
     async def _retire_package(self, name: str, *, keep_revision: Optional[str] = None) -> None:
         """Close idle superseded connections now; busy ones close when their call settles."""
 
+        name = _scoped(name)  # connections are keyed by ScopedName; add paths pass the plain name
+
         for connection in list(self._connections.values()):
             if connection.key[0] != name or connection.key[1] == keep_revision:
                 continue
@@ -639,15 +641,23 @@ class McpRuntime:
     async def _configure(self, payload: dict[str, Any]) -> bytes:
         name = payload["name"]
         async with self._lock(name):
-            await asyncio.to_thread(mcp_scope.configure, name, payload.get("secrets") or {})
-            # The old catalog must never execute against newly configured credentials.
-            await asyncio.to_thread(repository.unlist, name)
-            await self._cancel_login(name)
-            await self._retire_package(name)
+            prospective = await asyncio.to_thread(mcp_scope.prepare_configure, name, payload.get("secrets") or {})
+            await self._invalidate(name)
+            await asyncio.to_thread(mcp_scope._write_cache, name, "secrets.json", prospective)
             state, missing = await asyncio.to_thread(self._config_state, name)
             if state == "ok":
                 return await self._refresh_locked(name, wait_stdio=True)
         return _dumps({"ok": True, "name": name, "state": state, "missingVariables": missing})
+
+    async def _invalidate(self, name) -> None:
+        """Before any secret-changing write: the old catalog stops being callable and its connections retire.
+
+        Callers hold the package lock and have already validated their input.
+        """
+
+        await asyncio.to_thread(repository.unlist, name)
+        await self._cancel_login(name)
+        await self._retire_package(name)
 
     async def _add_project(self, target: Scope, servers: list, replace: bool) -> bytes:
         """D1: a project with ``.mcp.json`` (or a Web project) receives the entry, pending approval."""
@@ -704,12 +714,13 @@ class McpRuntime:
                 previous = await asyncio.to_thread(repository.read_avibe_definition, name)
                 previous_secrets = await asyncio.to_thread(mcp_scope.read_global_secrets, name)
                 was_hidden = name in await asyncio.to_thread(repository.hidden_names)
-                outcome, missing = await asyncio.to_thread(self._save_one, definition, replace)
+                outcome, prepared = await asyncio.to_thread(self._prepare_one, definition, replace)
+                if outcome == "save":
+                    await self._invalidate(name)
+                    saved = True
+                    outcome, missing = await asyncio.to_thread(self._persist_one, name, *prepared)
                 if outcome == "needs_config":
                     # Saved without connecting: nothing runs until the Owner configures it.
-                    await self._cancel_login(name)
-                    await asyncio.to_thread(repository.unlist, name)
-                    await self._retire_package(name)
                     return {"name": name, "status": "added", "state": "needs_config", "missingVariables": missing, "toolCount": 0}
                 if outcome == "unchanged":
                     return {"name": name, "status": "unchanged"}
@@ -720,7 +731,6 @@ class McpRuntime:
                         "error": f"{name} already exists with a different definition.",
                         "type": "exists",
                     }
-                saved = True
                 body = json.loads(await self._refresh({"name": name, "waitStdio": True, "locked": True}))
                 if body.get("ok"):
                     result = {
@@ -757,8 +767,11 @@ class McpRuntime:
         return comparable
 
     @staticmethod
-    def _save_one(definition: dict[str, Any], replace: bool) -> tuple[str, list[str]]:
-        """Store a validated global add; templates and concrete values split per ``scope.split_global``."""
+    def _prepare_one(definition: dict[str, Any], replace: bool) -> tuple[str, tuple]:
+        """Decide a validated global add without writing: ``unchanged``, ``exists`` or ``save``.
+
+        Templates and concrete values split per ``scope.split_global``.
+        """
 
         name = definition["name"]
         definition, secrets, missing = mcp_scope.split_global(definition)
@@ -773,9 +786,10 @@ class McpRuntime:
         except McpHubError:
             existing = repository.read_avibe_definition(name)
         published = repository.read_published(name)
-        pending = mcp_scope.global_pending_row(name) is not None
+        row = mcp_scope.global_pending_row(name)
+        pending = row is not None and row["state"] == "needs_config"
         exists = existing is not None or published is not None
-        listed = name not in repository.hidden_names() and (published is not None or pending)
+        listed = name not in repository.hidden_names() and (published is not None or row is not None)
         if exists and not replace:
             published_definition = published["definition"] if published is not None else None
             same = (
@@ -788,9 +802,13 @@ class McpRuntime:
                 or published_definition is not None
                 and McpRuntime._comparable_definition(published_definition) == McpRuntime._comparable_definition(definition)
             ):
-                return "unchanged", []
+                return "unchanged", ()
             if listed:
-                return "exists", []
+                return "exists", ()
+        return "save", (definition, secrets, missing)
+
+    @staticmethod
+    def _persist_one(name: str, definition: dict[str, Any], secrets: dict[str, Any], missing: list[str]) -> tuple[str, list[str]]:
         repository.write_definition(definition)
         mcp_scope.write_global_secrets(name, secrets)
         return ("needs_config" if missing else "saved"), missing
@@ -1164,9 +1182,8 @@ class McpRuntime:
     async def _remove(self, payload: dict[str, Any]) -> bytes:
         name = payload.get("name")
         async with self._lock(name):
-            await self._cancel_login(name)
+            await self._invalidate(name)
             kind = await asyncio.to_thread(repository.remove_package, name)
-            await self._retire_package(name)
             for connection in list(self._connections.values()):
                 if connection.key[0] == name:
                     connection.retired = True
@@ -1186,7 +1203,7 @@ class McpRuntime:
         if published is None:
             repository.read_definition(name)
             pending = None if repository.is_project(name) else mcp_scope.global_pending_row(str(name))
-            if pending is not None:
+            if pending is not None and pending["state"] == "needs_config":
                 raise mcp_scope.state_error(str(name), "needs_config", pending["missingVariables"])
             raise McpHubError("not_generated", f"MCP server {name!r} has not been generated.", hint="vibe mcp --list")
         if published["manifest"].get("auth") == "needs_login":

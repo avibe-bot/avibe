@@ -996,3 +996,39 @@ def test_failed_global_configuration_cannot_call_old_catalog(runtime, monkeypatc
     assert repository.read_published("echo") is None
     result = _run(runtime, "call", {"name": "echo", "global": True, "tool": "echo", "arguments": {"text": "test"}})
     assert result["error"]["type"] == "not_generated"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "state"),
+    [
+        pytest.param({"op": "configure", "secrets": {"env": {"T": "rotated"}}}, "not_generated", id="configure"),
+        pytest.param({"op": "add", "env": {"API": "${T}", "X": CONCRETE}}, "not_generated", id="replace"),
+        pytest.param({"op": "configure", "secrets": {"env": {}}}, "needs_config", id="clear"),
+    ],
+)
+def test_secret_changes_retire_the_old_catalog_until_refresh(monkeypatch, runtime, mutation, state):
+    add = {"global": True, "servers": [{"name": "echo", "server": {**ECHO, "env": {"API": "${T}"}}}]}
+    _run(runtime, "add", add)
+    _run(runtime, "configure", {"name": "echo", "global": True, "secrets": {"env": {"T": SECRET}}})
+    call = {"name": "echo", "global": True, "sessionId": "s", "tool": "echo", "arguments": {"text": "hi"}}
+    assert _run(runtime, "call", call)["status"] == "ok"
+
+    async def failing(*_args, **_kwargs):
+        # The old catalog is already inadmissible while discovery is in progress.
+        assert repository.read_published("echo") is None
+        assert json.loads(await runtime._call(call))["error"]["type"] == "not_generated"
+        raise RuntimeError("Test discovery failure after the secret change.")
+
+    monkeypatch.setattr(runtime, "_discover", failing)
+    if mutation["op"] == "configure":
+        _run(runtime, "configure", {"name": "echo", "global": True, "secrets": mutation["secrets"]})
+    else:
+        server = {"name": "echo", "server": {**ECHO, "env": mutation["env"]}}
+        result = _run(runtime, "add", {"global": True, "replace": True, "servers": [server]})
+        assert result["failed"], result
+
+    row = next(item for item in _run(runtime, "list", {"global": True})["servers"] if item["name"] == "echo")
+    assert row["state"] == state  # still listed and manageable
+    assert _run(runtime, "detail", {"name": "echo", "global": True})["server"]["state"] == state
+    assert _run(runtime, "call", call)["error"]["type"] == state
+    assert runtime._connections == {}
