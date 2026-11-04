@@ -22,6 +22,11 @@ export const BOOT_SESSION_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 type BootSessionRecord = { version: 1; savedAt: number; session: unknown };
 
+// Set when sign-out begins. A guard check that started before it may still
+// answer ``ready`` while the logout request is out; it must not re-record the
+// reader who is leaving. Sign-out ends in a reload, which resets this.
+let recordingBlocked = false;
+
 function storage(): Storage | null {
   try {
     return typeof window === 'undefined' ? null : window.localStorage;
@@ -55,13 +60,20 @@ export function readBootSession(now = Date.now()): SessionInfo | null {
 /** Remember an outcome the server just confirmed. */
 export function recordBootSession(session: SessionInfo, now = Date.now()): void {
   const store = storage();
-  if (!store || !isReadyOutcome(session)) return;
+  if (!store || recordingBlocked || !isReadyOutcome(session)) return;
   try {
     const record: BootSessionRecord = { version: 1, savedAt: now, session };
     store.setItem(BOOT_SESSION_KEY, JSON.stringify(record));
   } catch {
     // Best-effort: without it the next cold start simply waits for the server.
   }
+}
+
+/** Sign-out: forget the outcome and refuse to record another one in this
+ *  document, whatever a check already in flight answers. */
+export function blockBootSessionRecording(): void {
+  recordingBlocked = true;
+  forgetBootSession();
 }
 
 /** Forget it: the next cold start waits for the server again. */

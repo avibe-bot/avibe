@@ -10,8 +10,9 @@ import { MemberHome } from './home/MemberHome';
  * The Owner talks to the main Bot there; a member, who has no Bots, starts a Session in a project.
  */
 export const Workbench: React.FC = () => {
-  const { capabilities } = useInstanceAuthorization();
+  const { capabilities, provisional } = useInstanceAuthorization();
   const { enabled: hasBots } = useBots();
-  if (!capabilities.can_chat) return <Navigate to="/projects" replace />;
+  // Replayed capabilities may predate a grant; confirm before leaving `/`.
+  if (!capabilities.can_chat) return provisional ? null : <Navigate to="/projects" replace />;
   return hasBots ? <MainBotHome /> : <MemberHome />;
 };

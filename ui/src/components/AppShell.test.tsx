@@ -80,6 +80,7 @@ const copyOf = (instance: ReturnType<typeof makeI18n>) => Object.assign(
 let i18n = makeI18n();
 const instanceAuth = vi.hoisted(() => ({
   remote: true,
+  provisional: false,
   instanceKind: null as 'personal' | 'organization' | null,
   capabilities: {
     can_manage_instance: true,
@@ -201,6 +202,7 @@ beforeEach(() => {
   window.localStorage.clear();
   clearMobileProjectsListSnapshot();
   instanceAuth.remote = true;
+  instanceAuth.provisional = false;
   instanceAuth.instanceKind = null;
   instanceAuth.capabilities.can_manage_instance = true;
   instanceAuth.capabilities.can_chat = true;
@@ -1072,6 +1074,32 @@ describe('AppShell remote Apps access', () => {
     expect(screen.queryByTestId('mobile-dock-drawer')).toBeNull();
     expect(screen.queryByTestId('window-layer')).toBeNull();
     expect(screen.getByTestId('dock-provider').getAttribute('data-enabled')).toBe('false');
+  });
+
+  it('keeps the requested App route while replayed capabilities still deny it, until the check confirms', async () => {
+    // A cold start replays the last session (App.tsx AuthGuard). The reader has
+    // been granted Apps since then; the replayed capabilities do not know yet.
+    instanceAuth.provisional = true;
+    instanceAuth.capabilities.can_chat = false;
+    const tree = () => (
+      <MemoryRouter initialEntries={['/apps/library']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="apps/library" element={<div data-testid="library-surface" />} />
+            <Route index element={<div data-testid="redirected-workbench" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>
+    );
+    const view = render(tree());
+    await act(async () => undefined);
+    expect(screen.queryByTestId('redirected-workbench')).toBeNull();
+
+    // The check answers with the grant.
+    instanceAuth.provisional = false;
+    instanceAuth.capabilities.can_chat = true;
+    view.rerender(tree());
+    expect(await screen.findByTestId('library-surface')).toBeTruthy();
   });
 
   it.each([

@@ -311,6 +311,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
     // waits for the server as it always has.
     const [bootSession] = useState(() => readBootSession());
     const provisionalRef = useRef(bootSession !== null);
+    const [provisional, setProvisional] = useState(bootSession !== null);
     const [guardStatus, setGuardStatus] = useState<GuardStatus>(() => (bootSession ? 'ready' : 'loading'));
     const [blockedCode, setBlockedCode] = useState<string | null>(null);
     const [authCheckVersion, setAuthCheckVersion] = useState(0);
@@ -403,6 +404,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
         checkRemoteAuthForPath(location.pathname, getAuthSession).then(({ session, loginRequired, checkSetup }) => {
             if (cancelled) return;
             provisionalRef.current = false;
+            setProvisional(false);
             setAuthorizationSession(session);
             if (loginRequired) {
                 forgetBootSession();
@@ -459,6 +461,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
         }).catch(async (error) => {
             if (cancelled) return;
             provisionalRef.current = false;
+            setProvisional(false);
             const authCheck = await checkRemoteAuthForPath(location.pathname, getAuthSession).catch(() => null);
             if (cancelled) return;
             if (authCheck?.session) setAuthorizationSession(authCheck.session);
@@ -591,7 +594,9 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
     }
     return (
         <>
-            <InstanceAuthorizationProvider session={authorizationSession}>{children}</InstanceAuthorizationProvider>
+            <InstanceAuthorizationProvider session={authorizationSession} provisional={provisional}>
+                {children}
+            </InstanceAuthorizationProvider>
             {authorizationUnavailable ? (
                 <div
                     role="status"
