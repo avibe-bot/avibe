@@ -57,4 +57,28 @@ describe('signing out', () => {
     setLocalSnapshotPrincipal('remote:alice');
     expect(await readLocalSnapshot('inbox:first-page', 1, (value) => value)).toBeNull();
   });
+
+  it('removes the reader\'s snapshots when /api/session reports the reader revoked', async () => {
+    let api: ReturnType<typeof useApi> | null = null;
+    const Capture = () => {
+      const value = useApi();
+      useEffect(() => { api = value; }, [value]);
+      return null;
+    };
+    apiFetch.mockImplementation(async (path: string) => (
+      path === '/api/session'
+        ? Response.json({ remote: true, authenticated: true, email: 'a@example.com', authorization_state: 'revoked' })
+        : Response.json({})
+    ));
+    render(<ApiProvider><Capture /></ApiProvider>);
+    await waitFor(() => expect(api).not.toBeNull());
+
+    setLocalSnapshotPrincipal('remote:alice');
+    await writeLocalSnapshot('inbox:first-page', 1, ['alice row']);
+    await api!.getAuthSession();
+    await waitFor(async () => {
+      setLocalSnapshotPrincipal('remote:alice');
+      expect(await readLocalSnapshot('inbox:first-page', 1, (value) => value)).toBeNull();
+    });
+  });
 });

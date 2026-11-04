@@ -4755,7 +4755,15 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getRemoteAccessNetworkInterfaces: () => getJson('/api/remote-access/network-interfaces'),
     saveRemoteAccessSettings: (settings) => postJson('/api/remote-access/settings', settings),
     diagnoseRemoteAccess: () => postJson('/api/remote-access/diagnostics', {}),
-    getAuthSession: () => getJson('/api/session').then(normalizeSessionInfo),
+    getAuthSession: () => getJson('/api/session').then((payload) => {
+      const session = normalizeSessionInfo(payload);
+      // Revocation reaches the guard through this read too, not only through
+      // ``reportRemoteAuthorizationState``; either way the reader's snapshots go.
+      if (session.remote && session.authenticated && session.authorization_state === 'revoked') {
+        void forgetLocalSnapshots();
+      }
+      return session;
+    }),
     signOut: async () => {
       // Before the request: a failed logout must not leave this reader's
       // snapshots behind for whoever uses the device next, and a write the Inbox
