@@ -108,7 +108,7 @@ import { MODEL_HUB_SETTINGS_PATH } from './components/settings/models/modelHubRo
 import { settingsOverlayOriginFromState, SETUP_VISIT_SETTINGS_PATHS } from './lib/settingsOverlay';
 import { isSetupComplete } from './lib/setupState';
 import { isIosDevice, isStandalonePwa } from './lib/platform';
-import { forgetBootSession, readBootSession, recordBootSession } from './lib/bootSession';
+import { bootSessionGeneration, forgetBootSession, readBootSession, recordBootSession } from './lib/bootSession';
 import {
   readLastPwaPath,
   resolvePwaLaunchPath,
@@ -405,6 +405,8 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
     useEffect(() => {
         let cancelled = false;
         const signalAtStart = terminalSignalRef.current;
+        // A sign-out in any tab while this check is out voids what it answers.
+        const bootGeneration = bootSessionGeneration();
         const superseded = () => cancelled || terminalSignalRef.current !== signalAtStart;
 
         // Reset to loading while (re)validating. On the setup-boundary
@@ -452,7 +454,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
                 && session.authorization_state === 'current'
                 && !session.capabilities.can_manage_instance
             ) {
-                recordBootSession(session);
+                recordBootSession(session, Date.now(), bootGeneration);
                 setGuardStatus('ready');
                 return null;
             }
@@ -471,7 +473,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
                     setGuardStatus('needs-setup');
                     return;
                 }
-                recordBootSession(session);
+                recordBootSession(session, Date.now(), bootGeneration);
                 setGuardStatus('ready');
             });
         }).catch(async (error) => {

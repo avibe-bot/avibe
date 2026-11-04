@@ -1011,20 +1011,46 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // onto an empty feed and map, so it can never overwrite live data. The map is
   // painted without ``unreadLoaded``: the app-icon badge still waits for the
   // server (see ``badgeKnown``).
+  //
+  // The reader can change under a painted snapshot: a cold start replays the
+  // last confirmed session (AuthGuard), and its check may confirm someone else.
+  // The painted rows and counts are then another reader's, so they go the
+  // moment a different reader is named, before any live read answers.
   useEffect(() => {
     let cancelled = false;
+    let seededPrincipal: string | null = null;
+    let seededUnread = false;
+    const dropSeed = () => {
+      const seeded = seededIdsRef.current;
+      seededPrincipal = null;
+      if (seeded.size > 0) {
+        seededIdsRef.current = new Set();
+        const kept = inboxSessionsRef.current.filter((row) => !seeded.has(row.session_id));
+        inboxSessionsRef.current = kept;
+        setInboxSessions(kept);
+      }
+      if (seededUnread && !wholeUnreadAppliedRef.current) setUnreadBySession({});
+      seededUnread = false;
+    };
     const seed = async (principal: string | null) => {
+      if (principal && seededPrincipal && principal !== seededPrincipal) dropSeed();
       if (!principal || feedCommittedRef.current) return;
       const snapshot = await readLocalSnapshot(INBOX_SNAPSHOT_KEY, INBOX_SNAPSHOT_SCHEMA, parseInboxSnapshot);
       if (cancelled || !snapshot || feedCommittedRef.current) return;
       if (getLocalSnapshotPrincipal() !== principal) return;
       if (inboxSessionsRef.current.length === 0 && snapshot.sessions.length > 0) {
         seededIdsRef.current = new Set(snapshot.sessions.map((row) => row.session_id));
+        seededPrincipal = principal;
         inboxSessionsRef.current = snapshot.sessions;
         setInboxSessions(snapshot.sessions);
       }
       if (!wholeUnreadAppliedRef.current) {
-        setUnreadBySession((prev) => (Object.keys(prev).length > 0 ? prev : snapshot.unread));
+        setUnreadBySession((prev) => {
+          if (Object.keys(prev).length > 0) return prev;
+          seededPrincipal = principal;
+          seededUnread = true;
+          return snapshot.unread;
+        });
       }
     };
     void seed(getLocalSnapshotPrincipal());

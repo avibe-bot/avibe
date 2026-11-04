@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import 'fake-indexeddb/auto';
 
 import { afterEach, describe, expect, it } from 'vitest';
@@ -23,6 +24,7 @@ const idle = () => new Promise((resolve) => setTimeout(resolve, 20));
 afterEach(async () => {
   setLocalSnapshotPrincipal(null);
   await clearLocalSnapshots();
+  window.localStorage.clear();
 });
 
 describe('local snapshots', () => {
@@ -64,6 +66,14 @@ describe('local snapshots', () => {
     setLocalSnapshotPrincipal('local');
     await writeLocalSnapshot('inbox', 1, 'rows');
     await clearLocalSnapshots();
+    expect(await read('inbox')).toBeNull();
+  });
+
+  it('refuses a write that lands after any tab of the origin signed out', async () => {
+    setLocalSnapshotPrincipal('remote:alice');
+    // Another tab signs out: it bumps the generation every tab shares.
+    window.localStorage.setItem('avibe.sign-out-generation.v1', String(Date.now()));
+    await writeLocalSnapshot('inbox', 1, 'alice rows after sign-out');
     expect(await read('inbox')).toBeNull();
   });
 });

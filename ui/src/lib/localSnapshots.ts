@@ -15,6 +15,8 @@
 // IndexedDB is per origin, and every Avibe instance has its own origin, so
 // records of different instances never meet.
 
+import { readSignOutGeneration } from './signOutGeneration';
+
 const DB_NAME = 'avibe-local-snapshots';
 const DB_VERSION = 1;
 const STORE = 'snapshots';
@@ -33,6 +35,9 @@ type StoredRecord = {
 };
 
 let principal: string | null = null;
+// The sign-out generation when ``principal`` was set. A write after any tab
+// signed out (it bumps the shared generation) belongs to a reader who left.
+let principalGeneration = 0;
 const principalListeners = new Set<(next: string | null) => void>();
 let dbPromise: Promise<IDBDatabase | null> | null = null;
 
@@ -137,6 +142,7 @@ export function setLocalSnapshotPrincipal(next: string | null): void {
   const normalized = next || null;
   if (normalized === principal) return;
   principal = normalized;
+  principalGeneration = readSignOutGeneration();
   if (normalized) void deleteOtherPrincipals(normalized);
   for (const listener of principalListeners) listener(normalized);
 }
@@ -182,10 +188,10 @@ export async function readLocalSnapshot<T>(
  *  large to be worth a cold-start read deletes the stale record instead. */
 export async function writeLocalSnapshot(key: string, schema: number, value: unknown): Promise<void> {
   const owner = principal;
-  if (!owner) return;
+  if (!owner || principalGeneration !== readSignOutGeneration()) return;
   const bytes = serializedBytes(value);
   await withStore('readwrite', (store) => {
-    if (owner !== principal) return;
+    if (owner !== principal || principalGeneration !== readSignOutGeneration()) return;
     if (bytes === null || bytes > LOCAL_SNAPSHOT_MAX_BYTES) {
       store.delete(recordId(owner, key));
       return;

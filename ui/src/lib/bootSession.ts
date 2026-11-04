@@ -1,4 +1,5 @@
 import { normalizeSessionInfo, type SessionInfo } from './sessionInfo';
+import { bumpSignOutGeneration, readSignOutGeneration } from './signOutGeneration';
 
 // The route guard's last successful outcome, so a cold start can render the
 // shell at once and re-validate in the background instead of waiting on
@@ -69,10 +70,20 @@ export function readBootSession(now = Date.now()): SessionInfo | null {
   }
 }
 
-/** Remember an outcome the server just confirmed. */
-export function recordBootSession(session: SessionInfo, now = Date.now()): void {
+/** The sign-out generation a guard check captures when it starts, so its
+ *  answer can be refused if any tab signed out meanwhile. */
+export const bootSessionGeneration = readSignOutGeneration;
+
+/** Remember an outcome the server just confirmed. ``generation`` is the value
+ *  of ``bootSessionGeneration()`` when the check that produced it started. */
+export function recordBootSession(
+  session: SessionInfo,
+  now = Date.now(),
+  generation = readSignOutGeneration(),
+): void {
   const store = storage();
   if (!store || recordingBlocked || !isReadyOutcome(session)) return;
+  if (generation !== readSignOutGeneration()) return;
   try {
     const record: BootSessionRecord = { version: 1, savedAt: now, session };
     store.setItem(BOOT_SESSION_KEY, JSON.stringify(record));
@@ -85,6 +96,7 @@ export function recordBootSession(session: SessionInfo, now = Date.now()): void 
  *  document, whatever a check already in flight answers. */
 export function blockBootSessionRecording(): void {
   recordingBlocked = true;
+  bumpSignOutGeneration();
   forgetBootSession();
 }
 

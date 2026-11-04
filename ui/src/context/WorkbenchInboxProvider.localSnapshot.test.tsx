@@ -38,25 +38,27 @@ const row = (sessionId: string, minutesAgo: number, unread = 0): InboxSession =>
   unread_count: unread, unread: unread > 0,
 });
 
-function mount() {
+function mount(authorId = 'local') {
   const state = { current: null as InboxState | null };
   const Probe = () => {
     const inbox = useWorkbenchInbox();
     useEffect(() => { state.current = inbox; });
     return null;
   };
-  render(
+  const tree = (reader: string) => (
     <BotRosterContext.Provider value={{ roster: { sessionIds: new Set(), known: true }, publish: () => {} }}>
       <NotificationPreferencesContext.Provider value={{ preferences, loaded: true, update: async () => true }}>
         <WorkbenchInboxProvider>
-          <InstanceAuthorizationProvider session={{ remote: false, instance_kind: null, author_id: 'local' }}>
+          <InstanceAuthorizationProvider session={{ remote: false, instance_kind: null, author_id: reader }}>
             <Probe />
           </InstanceAuthorizationProvider>
         </WorkbenchInboxProvider>
       </NotificationPreferencesContext.Provider>
-    </BotRosterContext.Provider>,
+    </BotRosterContext.Provider>
   );
-  return state;
+  const view = render(tree(authorId));
+  Object.assign(state, { switchReader: (reader: string) => view.rerender(tree(reader)) });
+  return state as typeof state & { switchReader: (reader: string) => void };
 }
 
 const settle = () => act(async () => {
@@ -160,5 +162,32 @@ describe('the Inbox local snapshot', () => {
     expect(listInbox).toHaveBeenCalledTimes(2);
     expect(state.current!.nextCursor).toBe('cursor-after-b');
     consoleError.mockRestore();
+  });
+
+  it('drops a painted snapshot the moment a different reader is confirmed, before any live answer', async () => {
+    setLocalSnapshotPrincipal('remote:alice');
+    await writeLocalSnapshot('inbox:first-page', 1, {
+      sessions: [row('ses_alice', 1, 2)],
+      unread: { ses_alice: 2 },
+    });
+    setLocalSnapshotPrincipal(null);
+
+    apiRef.current = {
+      // The live read never answers: whatever is on screen must not be Alice's.
+      listInbox: vi.fn(() => new Promise(() => {})),
+      markSessionRead: vi.fn(async () => ({ updated: 0 })),
+      connectWorkbenchEvents: () => () => undefined,
+    };
+    // A cold start replays Alice's session...
+    const state = mount('remote:alice');
+    await settle();
+    expect(state.current!.inboxSessions.map((s) => s.session_id)).toEqual(['ses_alice']);
+    expect(state.current!.totalUnread).toBe(2);
+
+    // ...and the guard's check confirms Bob.
+    state.switchReader('remote:bob');
+    await settle();
+    expect(state.current!.inboxSessions).toEqual([]);
+    expect(state.current!.unreadBySession).toEqual({});
   });
 });

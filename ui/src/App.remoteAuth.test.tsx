@@ -136,6 +136,21 @@ describe('AuthGuard boot from the last confirmed outcome', () => {
     expect(readBootSession()).toBeNull();
   });
 
+  it('does not record an answer from a check that started before another tab signed out', async () => {
+    await confirmOnce();
+    let answer: (value: typeof member) => void = () => {};
+    api.getAuthSession.mockReturnValueOnce(new Promise((resolve) => { answer = resolve; }));
+    mountGuard();
+
+    // Another tab signs out while this tab's check is out (sign-out bumps the
+    // generation every tab of the origin shares, and forgets the record).
+    window.localStorage.setItem('avibe.sign-out-generation.v1', '1');
+    window.localStorage.removeItem('avibe.boot-session.v1');
+
+    await act(async () => { answer(member); });
+    expect(readBootSession()).toBeNull();
+  });
+
   it('keeps the replay provisional while the guard retries a failed session read', async () => {
     await confirmOnce();
     const readsBefore = api.getAuthSession.mock.calls.length;
