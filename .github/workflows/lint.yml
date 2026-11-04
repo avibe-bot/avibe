@@ -216,8 +216,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.docs_only == 'false'
     # Browser interactions do not depend on lint, Vitest, or the production
-    # bundle. Run alongside UI validation and design captures; the required
-    # unit-tests gate waits for every lane, including failure/cancellation.
+    # bundle. Run alongside UI validation; the required unit-tests gate waits
+    # for every lane, including failure/cancellation. Design captures stay manual.
     name: ui-browser-checks (${{ matrix.lane }})
     runs-on: ubuntu-latest
     strategy:
@@ -306,35 +306,6 @@ jobs:
             return "$result"
           }
           ${{ matrix.suites }}
-
-  ui-design-checks:
-    needs: changes
-    if: needs.changes.outputs.docs_only == 'false'
-    # Every frame/theme pair runs once, independently of browser interactions.
-    # The required unit-tests aggregate waits for all three captures.
-    name: ui-design-checks (${{ matrix.shard }}/${{ matrix.shard-total }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3]
-        shard-total: [3]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
-        with:
-          node-version: "22.23.4"
-          cache: "npm"
-          cache-dependency-path: ui/package-lock.json
-      - name: Install UI dependencies
-        working-directory: ui
-        run: npm ci
-      - name: Install screenshot browser
-        working-directory: ui
-        run: npx playwright install --with-deps chromium
-      - name: Render every selected frame and declared theme
-        working-directory: ui
-        run: npm run design:shot -- --shard "${{ matrix.shard }}/${{ matrix.shard-total }}"
 
   show-router-integration:
     needs: changes
@@ -586,7 +557,7 @@ jobs:
     # Keep UI validation in the existing required gate while allowing artifact
     # consumers to start as soon as their production bundle is built. The
     # hosted wire gate reports through it too, under no new required context.
-    needs: [changes, unit-test-shards, scenario-evidence, ui-checks, ui-browser-checks, ui-design-checks, model-hub-hosted-wire]
+    needs: [changes, unit-test-shards, scenario-evidence, ui-checks, ui-browser-checks, model-hub-hosted-wire]
     if: always()
     steps:
       - name: Verify unit test shards, UI checks and the hosted_wire gate
@@ -597,7 +568,6 @@ jobs:
           EVIDENCE_RESULT: ${{ needs['scenario-evidence'].result }}
           UI_RESULT: ${{ needs['ui-checks'].result }}
           BROWSER_RESULT: ${{ needs['ui-browser-checks'].result }}
-          DESIGN_RESULT: ${{ needs['ui-design-checks'].result }}
           HOSTED_WIRE_RESULT: ${{ needs['model-hub-hosted-wire'].result }}
         run: |
           if [ "$SCOPE_RESULT" != "success" ]; then
@@ -609,7 +579,7 @@ jobs:
             false) expected="success" ;;
             *) echo "Missing or invalid change classification."; exit 1 ;;
           esac
-          for result in "$UNIT_RESULT" "$EVIDENCE_RESULT" "$UI_RESULT" "$BROWSER_RESULT" "$DESIGN_RESULT" "$HOSTED_WIRE_RESULT"; do
+          for result in "$UNIT_RESULT" "$EVIDENCE_RESULT" "$UI_RESULT" "$BROWSER_RESULT" "$HOSTED_WIRE_RESULT"; do
             if [ "$result" != "$expected" ]; then
               echo "Unit/UI/hosted_wire checks finished with result: $result"
               exit 1

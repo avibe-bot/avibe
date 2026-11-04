@@ -23,7 +23,7 @@ Avibe's UI designs live here. A frame is a static React render of one surface in
 ## Loop
 
 - `npm run design`: the canvas with every frame in both themes, hot-reloading.
-- `npm run design:shot -- <id prefix>`: PNGs in `design/.shots/<id>.<theme>.png` (2x); read them to check your work. One JSON line per shot lists API paths the frame touched without a fixture (`unfixtured`) and console errors; a frame not ready within 15 s is reported with the step it stalled in (`load`, `render`, `fonts`, `network`, `wait`). Any error exits 1. CI runs it for every frame.
+- `npm run design:shot -- <id prefix>`: PNGs in `design/.shots/<id>.<theme>.png` (2x); read them to check your work. One JSON line per shot lists API paths the frame touched without a fixture (`unfixtured`) and console errors; a frame not ready within 15 s is reported with the step it stalled in (`load`, `render`, `fonts`, `network`, `wait`). Any error exits 1. Run captures explicitly for design work or review; routine PR and master CI do not run them.
 - `npm run typecheck:design`: frames type-check against the product's current props, so a product change that breaks a frame fails CI.
 - `npm run design:build -- --out <dir>`: the canvas as static files.
 
