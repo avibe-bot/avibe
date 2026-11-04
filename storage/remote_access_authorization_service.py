@@ -8,7 +8,7 @@ import time
 from contextlib import contextmanager
 from typing import Any, Callable, Iterator, Mapping
 
-from sqlalchemy import and_, delete, or_, select, update
+from sqlalchemy import Integer, and_, cast, delete, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import OperationalError
 
@@ -26,6 +26,14 @@ INSTANCE_BINDING_STATE_PENDING_KIND = "pending_kind"
 INSTANCE_BINDING_STATE_INVALID = "invalid"
 INSTANCE_BINDING_GENERATION_KEY = "vibe_instance_binding_generation"
 INSTANCE_BINDING_LOCK_FILENAME = "remote-access-instance-binding.lock"
+# One state_meta row per signed-out browser session, keyed by its id. The value
+# is the Unix time after which no cookie of that session can still be valid, so
+# the row can be dropped.
+REVOKED_BROWSER_SESSION_KEY_PREFIX = "remote_access.revoked_browser_session.v1:"
+# The first key after every prefixed one, so the prefix is an index range.
+_REVOKED_BROWSER_SESSION_KEY_END = REVOKED_BROWSER_SESSION_KEY_PREFIX[:-1] + chr(
+    ord(REVOKED_BROWSER_SESSION_KEY_PREFIX[-1]) + 1
+)
 
 
 def store(
@@ -318,6 +326,60 @@ def mark_matching_revision_checked(
             .values(last_checked_at=checked_at, updated_at=checked_at)
         )
     return int(result.rowcount or 0)
+
+
+def revoke_browser_session(session_id: str, *, expires_at: int, now: int) -> None:
+    """Record a browser sign-out that outlives the process, and drop lapsed ones."""
+
+    _ensure_sqlite_state()
+    key = REVOKED_BROWSER_SESSION_KEY_PREFIX + session_id
+    value = str(int(expires_at))
+    updated_at = str(int(now))
+    engine = get_cached_sqlite_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            state_meta.delete()
+            .where(state_meta.c.key >= REVOKED_BROWSER_SESSION_KEY_PREFIX)
+            .where(state_meta.c.key < _REVOKED_BROWSER_SESSION_KEY_END)
+            .where(cast(state_meta.c.value_json, Integer) <= int(now))
+        )
+        statement = sqlite_insert(state_meta).values(
+            key=key,
+            value_json=value,
+            updated_at=updated_at,
+        )
+        conn.execute(
+            statement.on_conflict_do_update(
+                index_elements=[state_meta.c.key],
+                set_={"value_json": value, "updated_at": updated_at},
+                where=cast(state_meta.c.value_json, Integer) < int(expires_at),
+            )
+        )
+
+
+def browser_session_is_revoked(session_id: str, *, now: int) -> bool:
+    engine = get_cached_sqlite_engine()
+    try:
+        with engine.connect() as conn:
+            raw = conn.execute(
+                select(state_meta.c.value_json).where(
+                    state_meta.c.key == REVOKED_BROWSER_SESSION_KEY_PREFIX + session_id
+                )
+            ).scalar_one_or_none()
+    except OperationalError as exc:
+        # A database that predates state_meta has recorded no sign-out.
+        if "no such table" in str(exc).lower():
+            return False
+        raise
+    if raw is None:
+        return False
+    try:
+        expires_at = json.loads(raw)
+    except (TypeError, ValueError):
+        return True
+    if not isinstance(expires_at, int) or isinstance(expires_at, bool):
+        return True
+    return expires_at > now
 
 
 def delete_for_instance(instance_id: str) -> int:

@@ -6,6 +6,7 @@ import itertools
 import json
 import threading
 import time
+import urllib.parse
 from typing import Any
 
 import pytest
@@ -152,7 +153,7 @@ def test_personal_session_slides_past_claim_and_original_identity_deadlines(
     monkeypatch.setattr(
         remote_access.time,
         "time",
-        lambda: base + remote_access.PERSONAL_SESSION_RENEW_AFTER_SECONDS + 1,
+        lambda: base + remote_access.SESSION_RENEW_AFTER_SECONDS + 1,
     )
     identity = remote_access.parse_session_identity(config, cookie)
     assert identity is not None
@@ -174,6 +175,185 @@ def test_personal_session_slides_past_claim_and_original_identity_deadlines(
     assert result.current is True
     assert result.policy == "personal"
     assert result.payload["claims_issued_at"] == base
+
+
+_DAY = 24 * 60 * 60
+
+
+def _released_cookie(config: V2Config, cookie: str, *, claims_issued_at: int | None) -> str:
+    """Reshape a cookie as released versions issued it: 24 hours, no auth_time."""
+
+    payload = json.loads(urllib.parse.unquote(cookie.rsplit(".", 1)[0]))
+    payload.pop("auth_time", None)
+    payload["exp"] = payload["iat"] + _DAY
+    if claims_issued_at is None:
+        payload.pop("claims_issued_at")
+    else:
+        payload["claims_issued_at"] = claims_issued_at
+    return remote_access._encode_session_cookie(
+        config.remote_access.vibe_cloud.session_secret,
+        payload,
+    )
+
+
+def _cookie_payload(cookie: str) -> dict[str, Any]:
+    return json.loads(urllib.parse.unquote(cookie.rsplit(".", 1)[0]))
+
+
+def _session_set_cookie(response) -> tuple[str, int] | None:
+    from http.cookies import SimpleCookie
+
+    for header in response.headers.getlist("Set-Cookie"):
+        if header.startswith(f"{remote_access.SESSION_COOKIE_NAME}="):
+            jar = SimpleCookie()
+            jar.load(header)
+            morsel = jar[remote_access.SESSION_COOKIE_NAME]
+            return morsel.value, int(morsel["max-age"])
+    return None
+
+
+@pytest.mark.parametrize(
+    ("instance_kind", "signed_claims_age", "renewed_lifetime"),
+    [
+        ("personal", 3 * _DAY, 30 * _DAY),
+        ("personal", None, 30 * _DAY),
+        ("organization", 3 * _DAY, 7 * _DAY),
+        # Signed claims older than the cap: no renewal, and no shortening.
+        ("personal", 91 * _DAY, None),
+    ],
+    ids=["personal", "personal-without-claims-time", "organization", "personal-past-cap"],
+)
+def test_released_cookie_keeps_working_and_gains_auth_time_on_its_first_renewal(
+    monkeypatch,
+    tmp_path,
+    instance_kind,
+    signed_claims_age,
+    renewed_lifetime,
+):
+    config = _paired_config(tmp_path)
+    config.remote_access.vibe_cloud.instance_kind = instance_kind
+    config.save()
+    base = int(time.time())
+    clock = {"now": base}
+    monkeypatch.setattr(remote_access.time, "time", lambda: clock["now"])
+    signed_in = (
+        _organization_cookie(config)
+        if instance_kind == "organization"
+        else remote_access.make_session_cookie(
+            config,
+            "owner@example.com",
+            "personal-owner",
+            session_claims={
+                "vibe_instance_id": "inst_123",
+                "vibe_instance_role": "owner",
+                "vibe_instance_access_source": "owner",
+                "vibe_instance_authorization_revision": 41,
+            },
+        )
+    )
+    released = _released_cookie(
+        config,
+        signed_in,
+        claims_issued_at=None if signed_claims_age is None else base - signed_claims_age,
+    )
+
+    # The first request after the upgrade.
+    clock["now"] = base + 60
+    browser = app.test_client()
+    browser.set_cookie(remote_access.SESSION_COOKIE_NAME, released, domain="alex.avibe.bot")
+    response = browser.get("/api/config", base_url="https://alex.avibe.bot")
+    assert response.status_code == 200
+    renewed = _session_set_cookie(response)
+    if renewed_lifetime is None:
+        assert renewed is None
+    else:
+        assert renewed is not None
+        cookie, max_age = renewed
+        payload = _cookie_payload(cookie)
+        assert payload["auth_time"] == base - (signed_claims_age or 0)
+        assert payload["exp"] == clock["now"] + renewed_lifetime
+        assert max_age == renewed_lifetime
+
+    # A copy of the released cookie keeps its own expiry, as before the upgrade.
+    # By then an organization session is due its 12-hour claims refresh.
+    monkeypatch.setattr(
+        remote_access,
+        "_device_json_request",
+        lambda _config, _method, _suffix, payload=None, **_kwargs: (
+            _authorization_context_response(config, payload, revision=41)
+        ),
+    )
+    stale_copy = app.test_client()
+    stale_copy.set_cookie(remote_access.SESSION_COOKIE_NAME, released, domain="alex.avibe.bot")
+    clock["now"] = base + _DAY - 1
+    assert stale_copy.get(
+        "/api/session",
+        base_url="https://alex.avibe.bot",
+    ).get_json()["authenticated"] is True
+
+
+@pytest.mark.parametrize("state", ["current", "revoked", "unavailable"])
+def test_session_endpoint_only_adds_the_cookie_expiry_to_its_released_shape(
+    monkeypatch,
+    tmp_path,
+    state,
+):
+    config = _paired_config(tmp_path)
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.save()
+    base = int(time.time())
+    clock = {"now": base}
+    monkeypatch.setattr(remote_access.time, "time", lambda: clock["now"])
+    cookie = remote_access.make_session_cookie(
+        config,
+        "owner@example.com",
+        "personal-owner",
+        session_claims={
+            "vibe_instance_id": "inst_123",
+            "vibe_instance_role": "owner",
+            "vibe_instance_access_source": "owner",
+            "vibe_instance_authorization_revision": 41,
+        },
+    )
+    # The fields and values released versions return; frozen, not derived.
+    released = {
+        "remote": True,
+        "authenticated": True,
+        "email": "owner@example.com",
+        "sub": "personal-owner",
+        "author_id": "remote:personal-owner",
+        "instance_kind": "personal",
+        "authorization_state": state,
+    }
+    if state == "current":
+        released.update(instance_role="owner", authorization_policy="personal")
+    else:
+        monkeypatch.setattr(
+            remote_access,
+            "resolve_current_authorization",
+            lambda *args, **kwargs: remote_access.AuthorizationResolution(state),
+        )
+    browser = app.test_client()
+    browser.set_cookie(remote_access.SESSION_COOKIE_NAME, cookie, domain="alex.avibe.bot")
+
+    # Two days on, any other route would re-issue the cookie; this one never
+    # does, so what it reports is the exp of the cookie the browser still holds.
+    clock["now"] = base + 2 * _DAY
+    response = browser.get("/api/session", base_url="https://alex.avibe.bot")
+    body = response.get_json()
+
+    assert _session_set_cookie(response) is None
+    if state == "current":
+        assert body.pop("session_expires_at") == _cookie_payload(cookie)["exp"]
+        assert body.pop("capabilities")["is_instance_owner"] is True
+    assert body == released
+    # Local and signed-out readers get exactly the released shape.
+    assert app.test_client().get(
+        "/api/session",
+        base_url="https://alex.avibe.bot",
+    ).get_json() == {"remote": True, "authenticated": False}
+    local = app.test_client().get("/api/session", base_url="http://localhost").get_json()
+    assert set(local) == {"remote", "instance_kind", "instance_role", "capabilities", "author_id"}
 
 
 def test_validated_remote_payload_projects_paired_instance_kind(tmp_path):

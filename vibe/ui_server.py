@@ -2486,7 +2486,10 @@ def enforce_remote_access_cookie():
         g.remote_session_identity = identity
         g.remote_session_payload = payload
         g.remote_authorization_resolution = resolution
-        if remote_access.session_needs_renewal(payload):
+        if remote_access.session_needs_renewal(
+            payload,
+            instance_kind=config.remote_access.vibe_cloud.instance_kind,
+        ):
             g.remote_session_renew = payload
         return None
     # The SPA shell is non-sensitive and its APIs remain protected. Serving it
@@ -3253,7 +3256,7 @@ def renew_remote_access_cookie(response: Response) -> Response:
         secure=True,
         samesite="Lax",
         path="/",
-        max_age=remote_access.SESSION_TTL_SECONDS,
+        max_age=remote_access.session_cookie_max_age(session_cookie),
     )
     return response
 
@@ -4133,7 +4136,11 @@ async def _live_remote_authorization_resolution(
             "invalid_identity",
             reason="remote_access_host_mismatch",
         )
-    live_identity = remote_access.parse_session_identity(live_config, session_cookie)
+    live_identity = await asyncio.to_thread(
+        remote_access.parse_session_identity,
+        live_config,
+        session_cookie,
+    )
     if live_identity is None or live_identity != dict(identity):
         return remote_access.AuthorizationResolution(
             "invalid_identity",
@@ -4169,7 +4176,8 @@ async def _remote_access_websocket_authorization(
             ),
         )
     cookie_value = websocket.cookies.get(remote_access.SESSION_COOKIE_NAME)
-    identity = remote_access.parse_session_identity(
+    identity = await asyncio.to_thread(
+        remote_access.parse_session_identity,
         config,
         cookie_value,
     )
@@ -7994,7 +8002,7 @@ def remote_access_auth_callback():
         secure=True,
         samesite="Lax",
         path="/",
-        max_age=remote_access.SESSION_TTL_SECONDS,
+        max_age=remote_access.session_cookie_max_age(session_cookie),
     )
     response.delete_cookie(REMOTE_OAUTH_COOKIE_NAME, path="/", secure=True, samesite="Lax")
     return response
@@ -8085,6 +8093,10 @@ def api_session():
                         "capabilities": context.capability_projection(),
                         "authorization_state": "current",
                         "authorization_policy": resolution.policy,
+                        # Exactly the signed exp of the cookie this request
+                        # carried: this route is auth-exempt and never renews
+                        # it, so no later value can be reported.
+                        "session_expires_at": int(identity["exp"]),
                     }
                 )
     # Identity payload must never be cached by intermediaries (Cloudflare etc.).
@@ -8183,16 +8195,25 @@ def remote_access_logout():
     from vibe import remote_access
 
     config = _load_remote_access_config()
+    # Any validly signed, unexpired session cookie is signed out, even one the
+    # sign-out lookup reports as revoked: that lookup also answers "revoked"
+    # when it fails, and the sign-out must then be recorded or reported.
     identity = (
         remote_access.parse_session_identity(
             config,
             request.cookies.get(remote_access.SESSION_COOKIE_NAME),
+            allow_revoked=True,
         )
         if config is not None
         else None
     )
+    revocation_recorded = True
+    signed_in = False
     if identity is not None:
-        remote_access.revoke_browser_session(identity)
+        # Read before recording: a session already signed out keeps its Push.
+        signed_in = remote_access.session_identity_is_current(identity)
+        revocation_recorded = remote_access.revoke_browser_session(identity)
+    if signed_in:
         body = request.json if isinstance(request.json, dict) else {}
         device_id = body.get("device_id")
         endpoint = body.get("endpoint")
@@ -8213,7 +8234,13 @@ def remote_access_logout():
     # about to clear; flagged so future hook reorderings stay safe.
     g.remote_session_renew = None
     g.remote_session_logout = True
-    response = jsonify({"ok": True})
+    # The cookie is cleared either way; a sign-out that could not be recorded
+    # says so, because a copy of the cookie would still be accepted.
+    if revocation_recorded:
+        response = jsonify({"ok": True})
+    else:
+        response = jsonify({"ok": False, "error": "remote_logout_unavailable"})
+        response.status_code = 503
     response.delete_cookie(
         remote_access.SESSION_COOKIE_NAME,
         path="/",

@@ -42,9 +42,15 @@ from vibe import tunnel_quality
 logger = logging.getLogger(__name__)
 
 SESSION_COOKIE_NAME = "__Host-vibe_remote_session"
-PERSONAL_SESSION_TTL_SECONDS = 24 * 60 * 60
-PERSONAL_SESSION_RENEW_AFTER_SECONDS = PERSONAL_SESSION_TTL_SECONDS // 2
-ORGANIZATION_SESSION_TTL_SECONDS = 24 * 60 * 60
+# Idle expiry: a browser session lapses this long after the last cookie the
+# instance issued it. Organization instances, and pairings whose kind is not yet
+# known, use the shorter one.
+PERSONAL_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60
+ORGANIZATION_SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
+# Absolute cap: no renewal extends a session past this long after its sign-in.
+SESSION_ABSOLUTE_TTL_SECONDS = 90 * 24 * 60 * 60
+# A successful authenticated request re-issues the cookie once it is this old.
+SESSION_RENEW_AFTER_SECONDS = 24 * 60 * 60
 ORGANIZATION_AUTHORIZATION_REFRESH_SECONDS = 12 * 60 * 60
 ORGANIZATION_AUTHORIZATION_OUTAGE_GRACE_SECONDS = 6 * 60 * 60
 # Compatibility aliases for released callers and persisted metadata. Policy
@@ -106,8 +112,6 @@ _AUTHORIZATION_REFRESH_FLIGHTS: dict[
 _AUTHORIZATION_BACKGROUND_REFRESH_LOCK = threading.Lock()
 _AUTHORIZATION_BACKGROUND_REFRESHES: set[tuple[str, str, str, str, int]] = set()
 AUTHORIZATION_REFRESH_FAILURE_BACKOFF_SECONDS = 5.0
-_REVOKED_BROWSER_SESSIONS_LOCK = threading.Lock()
-_REVOKED_BROWSER_SESSIONS: dict[str, int] = {}
 STATUS_HEARTBEAT_SECONDS = 5 * 60
 RESOURCE_ACL_SYNC_INTERVAL_SECONDS = 30
 AUTHORIZATION_REVISION_SYNC_INTERVAL_SECONDS = 15
@@ -6263,7 +6267,12 @@ def make_session_cookie(
         "sub": subject,
         "instance_id": cloud.instance_id,
         "iat": issued_at,
-        "exp": issued_at + PERSONAL_SESSION_TTL_SECONDS,
+        "exp": _session_expiry(
+            issued_at,
+            now=issued_at,
+            instance_kind=cloud.instance_kind,
+        ),
+        "auth_time": issued_at,
         "claims_issued_at": issued_at,
         _SESSION_BROWSER_ID_KEY: secrets.token_urlsafe(24),
         _SESSION_AUTHORIZATION_REFERENCE_KEY: reference,
@@ -6271,13 +6280,49 @@ def make_session_cookie(
     return _encode_session_cookie(cloud.session_secret, payload)
 
 
-def _prune_revoked_browser_sessions(now: int) -> None:
-    for session_id in [
-        value
-        for value, expires_at in _REVOKED_BROWSER_SESSIONS.items()
-        if expires_at <= now
-    ]:
-        _REVOKED_BROWSER_SESSIONS.pop(session_id, None)
+def _session_idle_ttl_seconds(instance_kind: object) -> int:
+    """Return the idle lifetime of a browser session on this kind of instance."""
+
+    if _normalized_instance_kind(instance_kind) == "personal":
+        return PERSONAL_SESSION_TTL_SECONDS
+    return ORGANIZATION_SESSION_TTL_SECONDS
+
+
+def _positive_int(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return None
+
+
+def _session_auth_time(payload: Mapping[str, Any]) -> int | None:
+    """Return the sign-in time a session's absolute cap counts from.
+
+    A cookie issued before ``auth_time`` existed counts from its
+    ``claims_issued_at``, else its ``iat``, so the upgrade invalidates no
+    cookie; the cap then holds from its first renewal on.
+    """
+
+    for key in ("auth_time", "claims_issued_at", "iat"):
+        value = _positive_int(payload.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _session_expiry(auth_time: int, *, now: int, instance_kind: object) -> int:
+    return min(
+        now + _session_idle_ttl_seconds(instance_kind),
+        auth_time + SESSION_ABSOLUTE_TTL_SECONDS,
+    )
+
+
+def session_cookie_max_age(cookie_value: str, *, now: int | None = None) -> int:
+    """Return the seconds left before the ``exp`` of a cookie this module issued."""
+
+    current = int(time.time()) if now is None else now
+    payload_text = cookie_value.rsplit(".", 1)[0]
+    payload = json.loads(urllib.parse.unquote(payload_text))
+    return max(0, int(payload["exp"]) - current)
 
 
 def _legacy_browser_session_id(secret: str, cookie_value: str) -> str:
@@ -6289,6 +6334,15 @@ def _legacy_browser_session_id(secret: str, cookie_value: str) -> str:
 
 
 def revoke_browser_session(payload: Mapping[str, Any]) -> bool:
+    """Durably sign one browser session out; return whether it was recorded.
+
+    The revocation is kept until the session's absolute cap, the latest
+    ``exp`` any cookie of this browser session can carry, so a copy of an older
+    cookie, or one renewed by a request that raced the sign-out, stays revoked.
+    """
+
+    from storage import remote_access_authorization_service
+
     session_id = payload.get(_SESSION_BROWSER_ID_KEY)
     if not isinstance(session_id, str) or not _SESSION_BROWSER_ID_RE.fullmatch(session_id):
         return False
@@ -6296,9 +6350,18 @@ def revoke_browser_session(payload: Mapping[str, Any]) -> bool:
         expires_at = int(payload.get("exp", 0))
     except (TypeError, ValueError):
         return False
-    with _REVOKED_BROWSER_SESSIONS_LOCK:
-        _prune_revoked_browser_sessions(int(time.time()))
-        _REVOKED_BROWSER_SESSIONS[session_id] = expires_at
+    auth_time = _session_auth_time(payload)
+    if auth_time is not None:
+        expires_at = max(expires_at, auth_time + SESSION_ABSOLUTE_TTL_SECONDS)
+    try:
+        remote_access_authorization_service.revoke_browser_session(
+            session_id,
+            expires_at=expires_at,
+            now=int(time.time()),
+        )
+    except Exception:
+        logger.warning("browser session revocation persistence failed", exc_info=True)
+        return False
     try:
         from vibe.sse_broker import broker
 
@@ -6317,13 +6380,29 @@ def _browser_session_is_revoked(payload: Mapping[str, Any], *, now: int) -> bool
         return False
     if not isinstance(session_id, str) or not _SESSION_BROWSER_ID_RE.fullmatch(session_id):
         return True
-    with _REVOKED_BROWSER_SESSIONS_LOCK:
-        _prune_revoked_browser_sessions(now)
-        return session_id in _REVOKED_BROWSER_SESSIONS
+    from storage import remote_access_authorization_service
+
+    try:
+        return remote_access_authorization_service.browser_session_is_revoked(
+            session_id,
+            now=now,
+        )
+    except Exception:
+        # A sign-out that cannot be read is treated as present.
+        logger.warning("browser session revocation lookup failed", exc_info=True)
+        return True
 
 
-def parse_session_identity(config: V2Config, cookie_value: str | None) -> dict[str, Any] | None:
-    """Verify browser identity without evaluating current authorization."""
+def parse_session_identity(
+    config: V2Config,
+    cookie_value: str | None,
+    *,
+    allow_revoked: bool = False,
+) -> dict[str, Any] | None:
+    """Verify browser identity without evaluating current authorization.
+
+    ``allow_revoked`` skips the sign-out lookup, for the sign-out itself.
+    """
 
     if not cookie_value or "." not in cookie_value:
         return None
@@ -6357,6 +6436,22 @@ def parse_session_identity(config: V2Config, cookie_value: str | None) -> dict[s
     current = int(time.time())
     if issued_at <= 0 or expires_at <= current or expires_at <= issued_at:
         return None
+    # A cookie keeps the exp it was issued under. Once the instance is an
+    # organization, one idle past the organization limit (a Personal cookie
+    # from before a reclassification) is no longer accepted.
+    if (
+        _normalized_instance_kind(cloud.instance_kind) == "organization"
+        and current - issued_at >= ORGANIZATION_SESSION_TTL_SECONDS
+    ):
+        return None
+    if "auth_time" in payload:
+        auth_time = _positive_int(payload.get("auth_time"))
+        if auth_time is None or auth_time > issued_at:
+            return None
+    else:
+        # Fixed once here, from the cookie itself, so its renewal and its
+        # sign-out agree on the cap.
+        payload["auth_time"] = _session_auth_time(payload) or issued_at
     authorization_reference = payload.get(_SESSION_AUTHORIZATION_REFERENCE_KEY)
     if authorization_reference is not None:
         if not isinstance(authorization_reference, str) or not _SESSION_AUTHORIZATION_REFERENCE_RE.fullmatch(
@@ -6374,7 +6469,7 @@ def parse_session_identity(config: V2Config, cookie_value: str | None) -> dict[s
             cloud.session_secret,
             cookie_value,
         )
-    if _browser_session_is_revoked(payload, now=current):
+    if not allow_revoked and _browser_session_is_revoked(payload, now=current):
         return None
     return payload
 
@@ -7104,6 +7199,10 @@ def renew_session_cookie(
     if not cloud.session_secret:
         raise ValueError("Remote access session secret is not configured")
     current = int(time.time()) if now is None else now
+    auth_time = _session_auth_time(payload) or current
+    expires_at = _session_expiry(auth_time, now=current, instance_kind=cloud.instance_kind)
+    if expires_at <= current:
+        raise ValueError("session_absolute_lifetime_reached")
     reference = payload.get(_SESSION_AUTHORIZATION_REFERENCE_KEY)
     if not isinstance(reference, str):
         from storage import remote_access_authorization_service
@@ -7133,7 +7232,8 @@ def renew_session_cookie(
         "sub": str(payload.get("sub") or ""),
         "instance_id": str(payload.get("instance_id") or ""),
         "iat": current,
-        "exp": current + PERSONAL_SESSION_TTL_SECONDS,
+        "exp": expires_at,
+        "auth_time": auth_time,
         "claims_issued_at": int(payload.get("claims_issued_at", payload.get("iat", current))),
         _SESSION_BROWSER_ID_KEY: browser_session_id,
         _SESSION_AUTHORIZATION_REFERENCE_KEY: reference,
@@ -7155,15 +7255,34 @@ def validate_session_cookie(config: V2Config, cookie_value: str | None) -> bool:
     return parse_session_cookie(config, cookie_value) is not None
 
 
-def session_needs_renewal(payload: dict[str, Any], now: int | None = None) -> bool:
-    """Return True when the session has spent more than half of SESSION_TTL_SECONDS.
+def session_needs_renewal(
+    payload: Mapping[str, Any],
+    now: int | None = None,
+    *,
+    instance_kind: object = None,
+) -> bool:
+    """Return whether a successful request should re-issue the session cookie.
 
-    Mirrors the avibe-bot-backend control-plane sliding-session policy
-    (middleware.ts): re-sign the cookie once the remaining lifetime drops
-    below half so users don't get bounced through OAuth on every visit.
+    The cookie is re-issued once it is more than SESSION_RENEW_AFTER_SECONDS
+    old, or sooner when that would move its expiry later by more than that
+    (a cookie from before this policy), and never once it sits at the cap.
     """
     current = now if now is not None else int(time.time())
-    return int(payload.get("exp", 0)) - current < SESSION_TTL_SECONDS // 2
+    try:
+        issued_at = int(payload.get("iat", 0))
+        expires_at = int(payload.get("exp", 0))
+    except (TypeError, ValueError):
+        return False
+    auth_time = _session_auth_time(payload)
+    if auth_time is None:
+        return False
+    renewed_expires_at = _session_expiry(auth_time, now=current, instance_kind=instance_kind)
+    if renewed_expires_at <= current or renewed_expires_at == expires_at:
+        return False
+    return (
+        current - issued_at > SESSION_RENEW_AFTER_SECONDS
+        or renewed_expires_at - expires_at > SESSION_RENEW_AFTER_SECONDS
+    )
 
 
 def session_authorization_refresh_deadline(payload: Mapping[str, Any]) -> int | None:
