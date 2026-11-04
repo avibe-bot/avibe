@@ -8,6 +8,7 @@ import io
 import json
 import sys
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -530,7 +531,53 @@ print(json.dumps({"event":"result","result":{"content":"other host"}}),flush=Tru
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-async def test_parent_memory_limit_kills_worker_and_keeps_known_alternate_fallback(monkeypatch):
+def expire_after_worker_acks(monkeypatch, ack_count, *, spawn_delay=0, readiness_timeout=5):
+    """Start a phase's short timeout after real IPC, not interpreter startup.
+
+    The readiness watchdog still runs the parent's timeout cleanup. Call
+    assert_ready before inspecting the result so an earlier-phase timeout can
+    never masquerade as the requested case. Startup's total budget is tested
+    separately without this fixture.
+    """
+    ready, children, acknowledgments = asyncio.Event(), [], []
+    spawn, wait_for = asyncio.create_subprocess_exec, asyncio.wait_for
+
+    async def capture(*args, **kwargs):
+        if spawn_delay:
+            await asyncio.sleep(spawn_delay)
+        child = await spawn(*args, **kwargs)
+        children.append(child)
+        acknowledgments.append(0)
+        index, write = len(acknowledgments) - 1, child.stdin.write
+
+        def observe_write(data):
+            write(data)
+            if data == b"ok\n":
+                acknowledgments[index] += 1
+                if acknowledgments[index] == ack_count:
+                    ready.set()
+
+        monkeypatch.setattr(child.stdin, "write", observe_write)
+        return child
+
+    async def phase_wait_for(awaitable, *, timeout):
+        ready.clear()
+        await wait_for(ready.wait(), timeout=readiness_timeout)
+        return await wait_for(awaitable, timeout=timeout)
+
+    def assert_ready(workers=1):
+        assert acknowledgments == [ack_count] * workers, "worker did not acknowledge the required phase"
+
+    # Only this module's calls use the wrapper; the event loop and other tests
+    # retain real asyncio. The original phase budget still uses real wait_for.
+    monkeypatch.setattr(local_fetch, "asyncio", SimpleNamespace(**(vars(asyncio) | {
+        "wait_for": phase_wait_for, "create_subprocess_exec": capture,
+    })))
+    return children, assert_ready
+
+
+@pytest.mark.parametrize("spawn_delay", [0, .7], ids=["normal-start", "slow-start"])
+async def test_parent_memory_limit_kills_worker_and_keeps_known_alternate_fallback(monkeypatch, spawn_delay):
     script = '''import sys,time,json
 sys.stdin.readline()
 print(json.dumps({"event":"sent"}),flush=True); sys.stdin.readline()
@@ -539,8 +586,12 @@ time.sleep(60)
 '''
     monkeypatch.setattr(local_fetch, "_WORKER", script)
     engine = local_fetch.LocalFetchEngine()
-    result = await engine.fetch("https://example.com/", deadline=time.monotonic() + .5)
-    assert result["sent"] and result["content"] == "original HTML" and "error_code" not in result
+    with monkeypatch.context() as phase_patch:
+        children, assert_ready = expire_after_worker_acks(phase_patch, 2, spawn_delay=spawn_delay)
+        result = await engine.fetch("https://example.com/", deadline=time.monotonic() + .5)
+        assert_ready()
+        assert result["sent"] and result["content"] == "original HTML" and "error_code" not in result
+        assert children[0].returncode is not None
     # Separate actual RSS-supervision case: lower only this fixture's threshold.
     monkeypatch.setattr(local_fetch, "_MEMORY_LIMIT", 1)
     monkeypatch.setattr(local_fetch, "_WORKER", "import sys,time; sys.stdin.readline(); time.sleep(60)")
@@ -549,9 +600,10 @@ time.sleep(60)
     assert result["error_code"] == "fetch_unavailable" and time.monotonic() - started < 3
 
 
+@pytest.mark.parametrize("spawn_delay", [0, .4], ids=["normal-start", "slow-start"])
 @pytest.mark.parametrize("sent", [False, True])
 @pytest.mark.parametrize("phase", ["policy", "fetch"])
-async def test_attempt_expiry_during_revalidation_is_not_a_dns_refusal(monkeypatch, sent, phase):
+async def test_attempt_expiry_during_revalidation_is_not_a_dns_refusal(monkeypatch, sent, phase, spawn_delay):
     script = '''import sys,time,json
 sys.stdin.readline()
 for event in EVENTS:
@@ -560,8 +612,10 @@ time.sleep(60)
 '''.replace("EVENTS", repr([{"event": "host", "host": "example.com"}] +
                         ([{"event": "sent"}] if sent else []) + [{"event": "phase", "phase": phase}]))
     monkeypatch.setattr(local_fetch, "_WORKER", script)
+    children, assert_ready = expire_after_worker_acks(monkeypatch, 3 if sent else 2, spawn_delay=spawn_delay)
     engine = local_fetch.LocalFetchEngine()
     result = await engine.fetch("https://example.com/", deadline=time.monotonic() + .3)
+    assert_ready()
     code = "service_busy" if not sent and phase == "policy" else "fetch_timeout"
     assert result["error_code"] == code and not result["terminal"]
     assert result["sent"] == sent and not engine._cooldowns
@@ -569,6 +623,64 @@ time.sleep(60)
         assert result["skipped"] == "unavailable"
     with pytest.raises(FetchFailure, match="fetch_dns_unverified"):
         await engine.check("https://example.com/", deadline=time.monotonic() + .3)
+    assert_ready(workers=2)
+    assert all(child.returncode is not None for child in children)
+    assert not engine._hosts and engine._workers == {"gate": 0, "fetch": 0}
+
+
+async def test_phase_timeout_fixture_rejects_missing_final_ack(monkeypatch):
+    # The earlier sent event already yields fetch_timeout. That matching result
+    # must not hide a missing final phase event in the fixture above.
+    monkeypatch.setattr(local_fetch, "_WORKER", '''import sys,time,json
+sys.stdin.readline()
+for event in [{"event":"host","host":"example.com"}, {"event":"sent"}]:
+ print(json.dumps(event),flush=True); sys.stdin.readline()
+time.sleep(60)
+''')
+    children, assert_ready = expire_after_worker_acks(monkeypatch, 3)
+    engine = local_fetch.LocalFetchEngine()
+    result = await engine.fetch("https://example.com/", deadline=time.monotonic() + .3)
+    with pytest.raises(AssertionError, match="worker did not acknowledge the required phase"):
+        assert_ready()
+    assert result["error_code"] == "fetch_timeout" and result["sent"]
+    assert children and all(child.returncode is not None for child in children)
+    assert not engine._hosts and engine._workers["fetch"] == 0
+
+
+async def test_startup_consumes_attempt_budget_and_late_child_is_reaped(monkeypatch):
+    monkeypatch.setattr(local_fetch, "_WORKER", "import sys,time; sys.stdin.readline(); time.sleep(60)")
+    entered, release, expired = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    children, spawn, wait_for = [], asyncio.create_subprocess_exec, asyncio.wait_for
+
+    async def held_spawn(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        child = await spawn(*args, **kwargs)
+        children.append(child)
+        return child
+
+    async def observe_deadline(awaitable, *, timeout):
+        try:
+            return await wait_for(awaitable, timeout=timeout)
+        except asyncio.TimeoutError:
+            expired.set()
+            raise
+
+    monkeypatch.setattr(local_fetch, "asyncio", SimpleNamespace(**(vars(asyncio) | {
+        "wait_for": observe_deadline, "create_subprocess_exec": held_spawn,
+    })))
+    engine = local_fetch.LocalFetchEngine()
+    task = asyncio.create_task(engine.fetch("https://example.com/", deadline=time.monotonic() + .3))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        await asyncio.wait_for(expired.wait(), 5)
+        assert not children and not task.done()
+    finally:
+        release.set()
+        result = await asyncio.wait_for(task, 5)
+    assert result == {"error_code": "service_busy", "terminal": False, "skipped": "unavailable", "sent": False}
+    assert children and all(child.returncode is not None for child in children)
+    assert not engine._cooldowns and not engine._hosts and engine._workers["fetch"] == 0
 
 
 @pytest.mark.parametrize("remaining,elapsed,sent,timeout_type,suppressed", [
@@ -702,21 +814,17 @@ print(json.dumps([resource.getrlimit(resource.RLIMIT_CPU),resource.getrlimit(res
     assert json.loads(result.stdout) == [[20, 20], [65536, 65536]]
 
 
-async def test_timeout_and_stop_kill_and_reap_worker(monkeypatch):
+@pytest.mark.parametrize("spawn_delay", [0, .7], ids=["normal-start", "slow-start"])
+async def test_timeout_and_stop_kill_and_reap_worker(monkeypatch, spawn_delay):
     # A test-owned worker simulates a parser that cannot yield to cancellation.
     # The real parent must terminate it; no production network override exists.
     script = "import sys,time; sys.stdin.readline(); print('{\"event\":\"sent\"}',flush=True); sys.stdin.readline(); time.sleep(60)"
     monkeypatch.setattr(local_fetch, "_WORKER", script)
-    children = []
-    spawn = asyncio.create_subprocess_exec
-    async def capture(*args, **kwargs):
-        child = await spawn(*args, **kwargs)
-        children.append(child)
-        return child
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", capture)
+    children, assert_ready = expire_after_worker_acks(monkeypatch, 1, spawn_delay=spawn_delay)
     engine = local_fetch.LocalFetchEngine()
     sent = []
     result = await engine.fetch("https://example.com/", deadline=time.monotonic() + 0.5, on_sent=lambda: sent.append(1))
+    assert_ready()
     assert result["error_code"] == "fetch_timeout" and result["sent"]
     assert sent == [1] and children[0].returncode is not None
     called = asyncio.Event()

@@ -221,6 +221,14 @@ const pose = () => document.querySelector('.pet-avatar')?.getAttribute('data-pos
 // graph instead of resetting it.
 let PetPage: typeof import('./PetPage').PetPage;
 
+const renderSetupPending = async () => {
+  setupDone = false;
+  // Await the config-driven render and its effects before sending a wake event.
+  // Finding its DOM alone can beat installation of the focus listener.
+  await act(async () => { render(<PetPage />); });
+  expect(screen.getByText('pet.setupPending')).toBeTruthy();
+};
+
 beforeEach(async () => {
   vi.resetModules();
   ({ PetPage } = await import('./PetPage'));
@@ -258,16 +266,12 @@ afterEach(() => {
 
 describe('PetPage setup', () => {
   it('stays on its own setup-pending state instead of redirecting to setup', async () => {
-    setupDone = false;
-    render(<PetPage />);
-    expect(await screen.findByText('pet.setupPending')).toBeTruthy();
+    await renderSetupPending();
     expect(window.location.pathname).not.toBe('/setup');
   });
 
   it('leaves setup-pending on the next summon once setup finished elsewhere', async () => {
-    setupDone = false;
-    render(<PetPage />);
-    await screen.findByText('pet.setupPending');
+    await renderSetupPending();
     setupDone = true;
     await showDetail();
     await waitFor(() => expect(screen.queryByText('pet.setupPending')).toBeNull());
@@ -275,13 +279,14 @@ describe('PetPage setup', () => {
   });
 
   it('also re-reads setup when the window regains focus', async () => {
-    setupDone = false;
-    render(<PetPage />);
-    await screen.findByText('pet.setupPending');
+    await renderSetupPending();
+    const reads = api.getConfig.mock.calls.length;
     setupDone = true;
     act(() => {
       window.dispatchEvent(new Event('focus'));
     });
+    expect(api.getConfig).toHaveBeenCalledTimes(reads + 1);
+    expect(api.getConfig).toHaveBeenLastCalledWith({ cache: false });
     await waitFor(() => expect(screen.queryByText('pet.setupPending')).toBeNull());
   });
 });
@@ -1133,9 +1138,7 @@ describe('PetPage async closure', () => {
   });
 
   it('leaves setup-pending when one of two overlapping checks sees setup finished', async () => {
-    setupDone = false;
-    render(<PetPage />);
-    await screen.findByText('pet.setupPending');
+    await renderSetupPending();
     const seesDone = deferred<unknown>();
     api.getConfig
       .mockImplementationOnce(() => seesDone.promise as never)
