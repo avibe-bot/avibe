@@ -1414,11 +1414,11 @@ def test_personal_remote_session_slides_without_interactive_reauthorization(
             },
         )
 
-    def slide_after_half_life(current):
+    def renew_after_a_day(current):
         monkeypatch.setattr(
             remote_access.time,
             "time",
-            lambda: base + remote_access.PERSONAL_SESSION_RENEW_AFTER_SECONDS + 1,
+            lambda: base + remote_access.SESSION_RENEW_AFTER_SECONDS + 1,
         )
         identity = remote_access.parse_session_identity(current.config, current.cookie)
         assert identity is not None
@@ -1442,13 +1442,13 @@ def test_personal_remote_session_slides_without_interactive_reauthorization(
     asyncio.run(
         runner.run(
             ScenarioStep("sign_in_once", sign_in_once),
-            ScenarioStep("slide_after_half_life", slide_after_half_life),
+            ScenarioStep("renew_after_a_day", renew_after_a_day),
             ScenarioStep("continue_after_original_expiry", continue_after_original_expiry),
         )
     )
     ScenarioExpect.step_history(
         runner,
-        ["sign_in_once", "slide_after_half_life", "continue_after_original_expiry"],
+        ["sign_in_once", "renew_after_a_day", "continue_after_original_expiry"],
     )
 
 
@@ -1557,6 +1557,228 @@ def test_organization_remote_session_recovers_and_revokes_without_oauth(
     ScenarioExpect.step_history(
         runner,
         ["enter_control_plane_grace", "recover_silently", "enforce_confirmed_revocation"],
+    )
+
+
+_REMOTE_SESSION_OWNER_CLAIMS = {
+    "vibe_instance_id": "inst_123",
+    "vibe_instance_role": "owner",
+    "vibe_instance_access_source": "owner",
+    "vibe_instance_authorization_revision": 1,
+}
+
+
+def _remote_session_set_cookie(response) -> tuple[str, int] | None:
+    from http.cookies import SimpleCookie
+
+    for header in response.headers.getlist("Set-Cookie"):
+        if header.startswith(f"{remote_access.SESSION_COOKIE_NAME}="):
+            jar = SimpleCookie()
+            jar.load(header)
+            morsel = jar[remote_access.SESSION_COOKIE_NAME]
+            return morsel.value, int(morsel["max-age"])
+    return None
+
+
+@pytest.mark.parametrize(
+    ("instance_kind", "idle_seconds"),
+    [("personal", 30 * 24 * 60 * 60), ("organization", 7 * 24 * 60 * 60)],
+    ids=["personal", "organization"],
+)
+def test_remote_session_idles_out_renews_daily_and_ends_at_the_cap(
+    monkeypatch,
+    tmp_path,
+    instance_kind,
+    idle_seconds,
+):
+    """Scenario: AUTH-SETUP-144 (personal), AUTH-SETUP-145 (organization)."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_remote_session_authorization_config(instance_kind)
+    with ui_server._auth_ratelimit_lock:
+        ui_server._auth_ratelimit.clear()
+    base = int(time.time())
+    clock = {"now": base}
+    monkeypatch.setattr(remote_access.time, "time", lambda: clock["now"])
+
+    def authorization_context(_config, method, suffix, payload=None, *, timeout=8.0):
+        # The 12-hour organization claims refresh; the reader stays authorized.
+        assert (method, suffix) == ("POST", "authorization-context")
+        return {
+            "sub": payload["sub"],
+            "email": payload["email"],
+            "instance_kind": instance_kind,
+            **_REMOTE_SESSION_OWNER_CLAIMS,
+        }
+
+    monkeypatch.setattr(remote_access, "_device_json_request", authorization_context)
+    day = 24 * 60 * 60
+    cap = base + 90 * day
+    harness = SimpleNamespace(
+        config=config,
+        client=app.test_client(),
+        idle_copy=app.test_client(),
+        base_url="https://alex.avibe.bot",
+        expires_at=None,
+    )
+    runner = ScenarioRunner(harness)
+
+    def session(client):
+        return client.get("/api/session", base_url=harness.base_url).get_json()
+
+    def sign_in_through_oauth(current):
+        login = current.client.get("/auth/login?next=/inbox", base_url=current.base_url)
+        authorize = httpx.URL(login.headers["Location"])
+
+        def exchange(_config, _code, _verifier, redirect_uri=None):
+            return {
+                "claims": {
+                    "email": "owner@example.com",
+                    "sub": "owner-1",
+                    "nonce": authorize.params["nonce"],
+                },
+                "session_claims": dict(_REMOTE_SESSION_OWNER_CLAIMS),
+            }
+
+        monkeypatch.setattr(remote_access, "exchange_oauth_code", exchange)
+        callback = current.client.get(
+            f"/auth/callback?code=accepted&state={authorize.params['state']}",
+            base_url=current.base_url,
+        )
+        assert callback.status_code == 302
+        cookie, max_age = _remote_session_set_cookie(callback)
+        assert max_age == idle_seconds
+        current.expires_at = base + idle_seconds
+        assert session(current.client)["session_expires_at"] == current.expires_at
+        current.idle_copy.set_cookie(
+            remote_access.SESSION_COOKIE_NAME,
+            cookie,
+            domain="alex.avibe.bot",
+        )
+
+    def use_daily_while_an_idle_copy_lapses(current):
+        events = [(base + k * (day + 1), "use") for k in range(1, 90)]
+        events += [
+            (base + idle_seconds - 1, "idle_copy_still_valid"),
+            (base + idle_seconds, "idle_copy_lapsed"),
+        ]
+        for at, event in sorted(events):
+            clock["now"] = at
+            if event == "idle_copy_still_valid":
+                assert session(current.idle_copy)["authenticated"] is True
+                continue
+            if event == "idle_copy_lapsed":
+                assert session(current.idle_copy) == {"remote": True, "authenticated": False}
+                continue
+            response = current.client.get("/api/config", base_url=current.base_url)
+            assert response.status_code == 200
+            renewed = _remote_session_set_cookie(response)
+            expected = min(at + idle_seconds, cap)
+            if expected == current.expires_at:
+                assert renewed is None
+            else:
+                assert renewed is not None
+                assert renewed[1] == expected - at
+                current.expires_at = expected
+            assert session(current.client)["session_expires_at"] == current.expires_at
+        assert current.expires_at == cap
+
+    def reauthorize_at_the_cap(current):
+        clock["now"] = cap
+        response = current.client.get("/api/config", base_url=current.base_url)
+        assert response.status_code == 401
+        assert response.get_json()["error"] == "remote_access_login_required"
+        assert session(current.client) == {"remote": True, "authenticated": False}
+
+    asyncio.run(
+        runner.run(
+            ScenarioStep("sign_in_through_oauth", sign_in_through_oauth),
+            ScenarioStep("use_daily_while_an_idle_copy_lapses", use_daily_while_an_idle_copy_lapses),
+            ScenarioStep("reauthorize_at_the_cap", reauthorize_at_the_cap),
+        )
+    )
+    ScenarioExpect.step_history(
+        runner,
+        ["sign_in_through_oauth", "use_daily_while_an_idle_copy_lapses", "reauthorize_at_the_cap"],
+    )
+
+
+def test_remote_sign_out_survives_an_instance_restart(monkeypatch, tmp_path):
+    """Scenario: AUTH-SETUP-146."""
+
+    from storage.db import dispose_cached_sqlite_engines
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_remote_session_authorization_config("personal")
+    base_url = "https://alex.avibe.bot"
+
+    def browser(cookie):
+        client = app.test_client()
+        client.set_cookie(remote_access.SESSION_COOKIE_NAME, cookie, domain="alex.avibe.bot")
+        return client
+
+    def sign_in():
+        return remote_access.make_session_cookie(
+            config,
+            "owner@example.com",
+            "owner-1",
+            session_claims=dict(_REMOTE_SESSION_OWNER_CLAIMS),
+        )
+
+    laptop_cookie = sign_in()
+    harness = SimpleNamespace(
+        laptop=browser(laptop_cookie),
+        laptop_cookie=laptop_cookie,
+        phone=browser(sign_in()),
+    )
+    runner = ScenarioRunner(harness)
+
+    def sign_out_on_the_laptop(current):
+        response = current.laptop.post(
+            "/auth/logout",
+            base_url=base_url,
+            json={},
+            headers=csrf_headers(current.laptop, base_url),
+        )
+        assert response.status_code == 200
+        assert response.get_json() == {"ok": True}
+
+    def restart_the_instance(_current):
+        # Process state goes; tests/test_remote_access_vibe_cloud.py proves the
+        # same check from a separate process.
+        dispose_cached_sqlite_engines()
+        remote_access._clear_authorization_revision_cache()
+
+    def replay_the_old_laptop_cookie(current):
+        replay = browser(current.laptop_cookie)
+        response = replay.get("/api/config", base_url=base_url)
+        assert response.status_code == 401
+        assert response.get_json()["error"] == "remote_access_login_required"
+        assert replay.get("/api/session", base_url=base_url).get_json() == {
+            "remote": True,
+            "authenticated": False,
+        }
+
+    def phone_stays_signed_in(current):
+        assert current.phone.get("/api/config", base_url=base_url).status_code == 200
+        assert current.phone.get("/api/session", base_url=base_url).get_json()["authenticated"] is True
+
+    asyncio.run(
+        runner.run(
+            ScenarioStep("sign_out_on_the_laptop", sign_out_on_the_laptop),
+            ScenarioStep("restart_the_instance", restart_the_instance),
+            ScenarioStep("replay_the_old_laptop_cookie", replay_the_old_laptop_cookie),
+            ScenarioStep("phone_stays_signed_in", phone_stays_signed_in),
+        )
+    )
+    ScenarioExpect.step_history(
+        runner,
+        [
+            "sign_out_on_the_laptop",
+            "restart_the_instance",
+            "replay_the_old_laptop_cookie",
+            "phone_stays_signed_in",
+        ],
     )
 
 

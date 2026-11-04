@@ -15,7 +15,7 @@ from config import paths
 from config.v2_config import AgentsConfig, PlatformsConfig, RemoteAccessConfig, RuntimeConfig, SlackConfig, UiConfig, V2Config
 from storage.db import create_sqlite_engine
 from storage.models import remote_access_authorizations
-from tests.ui_server_test_helpers import remote_session_cookie
+from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
 from vibe import api, remote_access, ui_server
 from vibe import runtime
 from vibe.ui_compat import g, jsonify
@@ -259,7 +259,11 @@ def test_session_cookie_roundtrip() -> None:
 def test_background_push_inbox_read_does_not_renew_remote_cookie(monkeypatch):
     config = _config()
     monkeypatch.setattr(ui_server, "_load_remote_access_config", lambda: config)
-    monkeypatch.setattr(remote_access, "renew_session_cookie", lambda *_: "renewed-cookie")
+    renewed_cookie = remote_access._encode_session_cookie(
+        config.remote_access.vibe_cloud.session_secret,
+        {"exp": int(time.time()) + 60},
+    )
+    monkeypatch.setattr(remote_access, "renew_session_cookie", lambda *_: renewed_cookie)
 
     for path, headers, should_renew in (
         ("/api/inbox", {"X-Avibe-Background-Push": "1"}, False),
@@ -548,13 +552,178 @@ def test_parse_session_cookie_accepts_legacy_inline_organization_claims() -> Non
     assert payload["vibe_group_ids"] == ["grp_legacy"]
 
 
-def test_session_needs_renewal_only_after_half_ttl() -> None:
-    now = 1_700_000_000
-    fresh = {"exp": now + remote_access.SESSION_TTL_SECONDS}
-    half_minus_one = {"exp": now + remote_access.SESSION_TTL_SECONDS // 2 - 1}
+_DAY = 24 * 60 * 60
+_SIGN_IN_AT = 1_800_000_000
 
-    assert remote_access.session_needs_renewal(fresh, now=now) is False
-    assert remote_access.session_needs_renewal(half_minus_one, now=now) is True
+
+def _pin_clock(monkeypatch, now: int) -> dict[str, int]:
+    clock = {"now": now}
+    monkeypatch.setattr(remote_access.time, "time", lambda: clock["now"])
+    return clock
+
+
+@pytest.mark.parametrize(
+    ("instance_kind", "idle_seconds"),
+    [("personal", 30 * _DAY), ("organization", 7 * _DAY), ("", 7 * _DAY)],
+)
+def test_remote_session_idles_out_after_its_instance_kind_limit(
+    monkeypatch,
+    instance_kind,
+    idle_seconds,
+) -> None:
+    config = _config()
+    config.remote_access.vibe_cloud.instance_kind = instance_kind
+    clock = _pin_clock(monkeypatch, _SIGN_IN_AT)
+    cookie = _session_cookie(config)
+
+    clock["now"] = _SIGN_IN_AT + idle_seconds - 1
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+    assert identity["exp"] == _SIGN_IN_AT + idle_seconds
+    assert identity["auth_time"] == _SIGN_IN_AT
+
+    clock["now"] = _SIGN_IN_AT + idle_seconds + 1
+    assert remote_access.parse_session_identity(config, cookie) is None
+
+
+@pytest.mark.parametrize(
+    ("instance_kind", "idle_seconds"),
+    [("personal", 30 * _DAY), ("organization", 7 * _DAY)],
+)
+def test_remote_session_renews_daily_and_never_past_the_cap(
+    monkeypatch,
+    instance_kind,
+    idle_seconds,
+) -> None:
+    config = _config()
+    config.remote_access.vibe_cloud.instance_kind = instance_kind
+    clock = _pin_clock(monkeypatch, _SIGN_IN_AT)
+    cookie = _session_cookie(config)
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+
+    assert remote_access.session_needs_renewal(
+        identity, now=_SIGN_IN_AT + _DAY, instance_kind=instance_kind
+    ) is False
+    assert remote_access.session_needs_renewal(
+        identity, now=_SIGN_IN_AT + _DAY + 1, instance_kind=instance_kind
+    ) is True
+
+    cap = _SIGN_IN_AT + 90 * _DAY
+    renewals = 0
+    while clock["now"] + _DAY + 1 < cap:
+        clock["now"] += _DAY + 1
+        identity = remote_access.parse_session_identity(config, cookie)
+        assert identity is not None
+        expected_exp = min(clock["now"] + idle_seconds, cap)
+        if not remote_access.session_needs_renewal(
+            identity, now=clock["now"], instance_kind=instance_kind
+        ):
+            assert identity["exp"] == cap
+            continue
+        cookie = remote_access.renew_session_cookie(config, identity)
+        renewals += 1
+        renewed = remote_access.parse_session_identity(config, cookie)
+        assert renewed is not None
+        assert renewed["exp"] == expected_exp
+        assert renewed["auth_time"] == _SIGN_IN_AT
+        assert remote_access.session_cookie_max_age(cookie) == expected_exp - clock["now"]
+
+    assert renewals == (90 * _DAY - idle_seconds) // (_DAY + 1) + 1
+    clock["now"] = cap - 1
+    assert remote_access.parse_session_identity(config, cookie) is not None
+    clock["now"] = cap
+    assert remote_access.parse_session_identity(config, cookie) is None
+
+
+_RESTARTED_INSTANCE_ACCEPTS = """
+import json, sys
+from config.v2_config import V2Config
+from vibe import remote_access
+config = V2Config.load()
+print(json.dumps([
+    remote_access.parse_session_identity(config, cookie) is not None
+    for cookie in sys.argv[1:]
+]))
+"""
+
+
+def test_sign_out_survives_a_restart_and_outlasts_a_raced_renewal(monkeypatch) -> None:
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    from storage import remote_access_authorization_service
+    from storage.models import state_meta
+
+    config = _config()
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.save()
+    clock = _pin_clock(monkeypatch, _SIGN_IN_AT)
+    signed_out = _session_cookie(config)
+    other_browser = _session_cookie(config)
+    clock["now"] = _SIGN_IN_AT + 2 * _DAY
+    signed_out_identity = remote_access.parse_session_identity(config, signed_out)
+    # A request that was already authorized when the sign-out landed.
+    raced_renewal = remote_access.renew_session_cookie(config, signed_out_identity)
+    assert remote_access.revoke_browser_session(signed_out_identity) is True
+
+    # Restart: a new process that shares only the state directory.
+    restarted = subprocess.run(
+        [sys.executable, "-c", _RESTARTED_INSTANCE_ACCEPTS, signed_out, raced_renewal, other_browser],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    )
+    assert json.loads(restarted.stdout.splitlines()[-1]) == [False, False, True]
+    # The raced renewal outlives the signed-out cookie's own exp; its
+    # revocation outlives it too.
+    clock["now"] = _SIGN_IN_AT + 31 * _DAY
+    assert remote_access.parse_session_identity(config, raced_renewal) is None
+
+    # Past the session's cap the record is pruned by the next sign-out.
+    clock["now"] = _SIGN_IN_AT + 90 * _DAY
+    late_identity = remote_access.parse_session_identity(config, _session_cookie(config))
+    assert remote_access.revoke_browser_session(late_identity) is True
+    prefix = remote_access_authorization_service.REVOKED_BROWSER_SESSION_KEY_PREFIX
+    with create_sqlite_engine().connect() as conn:
+        revoked_keys = conn.execute(
+            select(state_meta.c.key).where(state_meta.c.key.like(f"{prefix}%"))
+        ).scalars().all()
+    assert revoked_keys == [prefix + late_identity["browser_session_id"]]
+
+
+def test_sign_out_that_cannot_be_recorded_reports_failure_and_clears_the_cookie(
+    monkeypatch,
+) -> None:
+    from storage import remote_access_authorization_service
+
+    config = _config()
+    monkeypatch.setattr(ui_server, "_load_remote_access_config", lambda: config)
+
+    def storage_unavailable(*_args, **_kwargs):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(
+        remote_access_authorization_service,
+        "revoke_browser_session",
+        storage_unavailable,
+    )
+    client = ui_server.app.test_client()
+    client.set_cookie(remote_access.SESSION_COOKIE_NAME, _session_cookie(config), domain="alex.avibe.bot")
+    response = client.post(
+        "/auth/logout",
+        base_url="https://alex.avibe.bot",
+        json={},
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+    )
+
+    assert response.status_code == 503
+    assert response.get_json() == {"ok": False, "error": "remote_logout_unavailable"}
+    assert f"{remote_access.SESSION_COOKIE_NAME}=" in response.headers.get("Set-Cookie", "")
+    assert "Max-Age=0" in response.headers.get("Set-Cookie", "")
 
 
 def test_make_session_cookie_requires_session_secret() -> None:

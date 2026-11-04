@@ -239,6 +239,38 @@ scenarios:
     layer: scenario
     backend: web
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_organization_remote_session_recovers_and_revokes_without_oauth
+  - id: AUTH-SETUP-144
+    name: Personal remote session lasts 30 days idle, renews daily, and re-authorizes at the 90-day cap
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: web
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_remote_session_idles_out_renews_daily_and_ends_at_the_cap[personal]
+    supporting_tests:
+      - tests/test_remote_access_vibe_cloud.py::test_remote_session_idles_out_after_its_instance_kind_limit
+      - tests/test_remote_access_vibe_cloud.py::test_remote_session_renews_daily_and_never_past_the_cap
+      - tests/test_remote_authorization_revision.py::test_pre_upgrade_cookie_stays_valid_and_gains_auth_time_on_renewal
+  - id: AUTH-SETUP-145
+    name: Organization remote session lasts 7 days idle, renews daily through claims refreshes, and re-authorizes at the 90-day cap
+    status: covered
+    kind: authorization
+    layer: scenario
+    backend: web
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_remote_session_idles_out_renews_daily_and_ends_at_the_cap[organization]
+    supporting_tests:
+      - tests/test_remote_access_vibe_cloud.py::test_remote_session_idles_out_after_its_instance_kind_limit
+      - tests/test_remote_access_vibe_cloud.py::test_remote_session_renews_daily_and_never_past_the_cap
+  - id: AUTH-SETUP-146
+    name: Remote sign-out on one browser survives an instance restart without signing out the reader's other browsers
+    status: covered
+    kind: historical_regression
+    layer: scenario
+    backend: web
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_remote_sign_out_survives_an_instance_restart
+    # The scenario restarts process state in place; the supporting test reads
+    # the signed-out cookie from a separate process sharing only the state dir.
+    supporting_tests:
+      - tests/test_remote_access_vibe_cloud.py::test_sign_out_survives_a_restart_and_outlasts_a_raced_renewal
   - id: AUTH-SETUP-404
     name: Verified limited Show Page identity admits and denies a revoked guest lease
     status: covered

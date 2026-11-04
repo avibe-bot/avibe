@@ -6,6 +6,7 @@ import itertools
 import json
 import threading
 import time
+import urllib.parse
 from typing import Any
 
 import pytest
@@ -152,7 +153,7 @@ def test_personal_session_slides_past_claim_and_original_identity_deadlines(
     monkeypatch.setattr(
         remote_access.time,
         "time",
-        lambda: base + remote_access.PERSONAL_SESSION_RENEW_AFTER_SECONDS + 1,
+        lambda: base + remote_access.SESSION_RENEW_AFTER_SECONDS + 1,
     )
     identity = remote_access.parse_session_identity(config, cookie)
     assert identity is not None
@@ -174,6 +175,103 @@ def test_personal_session_slides_past_claim_and_original_identity_deadlines(
     assert result.current is True
     assert result.policy == "personal"
     assert result.payload["claims_issued_at"] == base
+
+
+_DAY = 24 * 60 * 60
+
+
+def _pre_upgrade_personal_cookie(
+    config: V2Config,
+    *,
+    claims_issued_at: int | None,
+) -> str:
+    """A cookie shaped as released versions issued it: 24 hours, no auth_time."""
+
+    cookie = remote_access.make_session_cookie(
+        config,
+        "owner@example.com",
+        "personal-owner",
+        session_claims={
+            "vibe_instance_id": "inst_123",
+            "vibe_instance_role": "owner",
+            "vibe_instance_access_source": "owner",
+            "vibe_instance_authorization_revision": 41,
+        },
+    )
+    payload = json.loads(urllib.parse.unquote(cookie.rsplit(".", 1)[0]))
+    payload.pop("auth_time")
+    payload["exp"] = payload["iat"] + _DAY
+    if claims_issued_at is None:
+        payload.pop("claims_issued_at")
+    else:
+        payload["claims_issued_at"] = claims_issued_at
+    return remote_access._encode_session_cookie(
+        config.remote_access.vibe_cloud.session_secret,
+        payload,
+    )
+
+
+@pytest.mark.parametrize("signed_claims_age", [3 * _DAY, None])
+def test_pre_upgrade_cookie_stays_valid_and_gains_auth_time_on_renewal(
+    monkeypatch,
+    tmp_path,
+    signed_claims_age,
+):
+    config = _paired_config(tmp_path)
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.save()
+    base = int(time.time())
+    clock = {"now": base}
+    monkeypatch.setattr(remote_access.time, "time", lambda: clock["now"])
+    cookie = _pre_upgrade_personal_cookie(
+        config,
+        claims_issued_at=None if signed_claims_age is None else base - signed_claims_age,
+    )
+
+    clock["now"] = base + 60
+    resolution = remote_access.resolve_current_authorization(
+        config,
+        remote_access.parse_session_identity(config, cookie),
+    )
+    assert resolution.current is True
+    # The record's claims_issued_at (``base``) overlays the payload; the cap
+    # still counts from what the cookie itself carried.
+    assert resolution.payload["claims_issued_at"] == base
+    # Not a day old, but renewing moves its 24-hour expiry out to 30 days.
+    assert remote_access.session_needs_renewal(
+        resolution.payload,
+        instance_kind="personal",
+    ) is True
+    renewed = remote_access.parse_session_identity(
+        config,
+        remote_access.renew_session_cookie(config, resolution.payload),
+    )
+
+    assert renewed is not None
+    assert renewed["auth_time"] == base - (signed_claims_age or 0)
+    assert renewed["exp"] == base + 60 + remote_access.PERSONAL_SESSION_TTL_SECONDS
+
+
+def test_pre_upgrade_cookie_past_the_cap_keeps_its_expiry_and_stops_renewing(
+    monkeypatch,
+    tmp_path,
+):
+    config = _paired_config(tmp_path)
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.save()
+    base = int(time.time())
+    clock = {"now": base}
+    monkeypatch.setattr(remote_access.time, "time", lambda: clock["now"])
+    cookie = _pre_upgrade_personal_cookie(config, claims_issued_at=base - 91 * _DAY)
+
+    clock["now"] = base + _DAY - 1
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+    assert remote_access.session_needs_renewal(identity, instance_kind="personal") is False
+    with pytest.raises(ValueError, match="session_absolute_lifetime_reached"):
+        remote_access.renew_session_cookie(config, identity)
+    clock["now"] = base + _DAY
+    assert remote_access.parse_session_identity(config, cookie) is None
 
 
 def test_validated_remote_payload_projects_paired_instance_kind(tmp_path):
