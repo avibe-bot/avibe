@@ -38,25 +38,34 @@ Some setup lives outside this repository:
   `SIGNPATH_TEST_API_TOKEN`. It is the API token of a dedicated, test-only
   SignPath CI user that submits only to the `test-signing` policy. It is never a
   production submitter.
-- **Branch access.** The environment's deployment branches are `master` and,
-  while its PR is open, the task branch. The `test-signing` policy requires the
-  trusted GitHub build system and origin verification. It accepts builds of
-  `.github/workflows/desktop-package.yml` from the same branches.
+- **Branch and workflow access.** The environment's deployment branches are
+  `master` and, while an approved test PR is open, its task branch. The
+  `test-signing` policy requires the trusted GitHub build system and origin
+  verification. Before dispatching the standalone entry, an authorized operator
+  must migrate its build-definition allowlist from
+  `.github/workflows/desktop-package.yml` to
+  `.github/workflows/desktop-signpath-test.yml`, preserving branch restrictions
+  and all production policies. This external migration is not performed by the
+  workflow-isolation change; the new entry has not had a real signing acceptance
+  run. Ordinary releases do not depend on that test-policy migration.
 
 ## Goal and contract
 
-An explicit manual run of `desktop-self-contained-package` with
+An explicit manual run of `desktop-signpath-test` with
 `signpath_test=true` builds the self-contained Windows NSIS installer, has
 SignPath test-sign its outer PE, and independently verifies the signed result.
 
 - Only the outer installer PE is signed. NSIS is not a SignPath composite
   format, so the desktop and runtime executables embedded in the installer stay
   unsigned. This run is an integration test, not inside-out production signing.
-- Test mode exists only on `workflow_dispatch`. `workflow_call` does not declare
-  the input, so release invocations cannot opt in; push, schedule, release, and
-  default manual runs keep the existing `package` job unchanged.
-- Test mode never runs the `package` job, never touches the `desktop-updater`
-  environment, Apple or updater secrets, R2, releases, tags, updater feeds, or
+- The test workflow has only `workflow_dispatch`, not `workflow_call`, push,
+  schedule, or release triggers. It requires the default-false explicit opt-in.
+  `desktop-package.yml` contains only its ordinary `package` job and keeps its
+  manual, reusable, push and schedule triggers; release caller permissions do
+  not increase.
+- The standalone test workflow never runs the `package` job, never touches the
+  `desktop-updater` environment, Apple or updater secrets, R2, releases, tags,
+  updater feeds, or
   release manifests, and never records signing in the production manifest
   schema.
 - Every job runs on a GitHub-hosted runner with read-only permissions. No job
@@ -92,23 +101,40 @@ Two negative controls must fail for their intended reason, or the run fails:
   self-signed code-signing certificate passes the payload check and is rejected
   on certificate identity.
 
-## Why inline jobs instead of a reusable workflow
+## Why a standalone dispatch-only workflow
 
-A called workflow's environment secrets resolve empty unless the caller passes
-`secrets: inherit` (actions/runner#4453). Jobs inside `desktop-package.yml` bind
-`signpath-test` directly, without that plumbing. Because the workflow is already
-registered, they can also be dispatched from the task branch before merge.
-Repository-level secrets remain in the `secrets` context of every job either
-way. The guarantee is what each job references: the SignPath step references
-only `SIGNPATH_TEST_API_TOKEN`, and no other test job references any secret.
+The first implementation placed the test jobs in `desktop-package.yml`, guarded
+by a dispatch-only boolean. That isolated execution but not startup validation:
+GitHub checks every nested job's permissions before evaluating `if`. The test
+sign job's `actions: read` exceeded the release caller's implicit `actions: none`,
+so ordinary releases failed before any job ran.
+
+Move the three test jobs unchanged into `desktop-signpath-test.yml`, with no
+`workflow_call` trigger. Do not grant the release caller more permissions for an
+unrelated test. The ordinary packaging job no longer needs a test-mode guard.
+The standalone sign job binds `signpath-test` directly, without reusable-workflow
+secret inheritance. A new dispatch workflow must exist on the default branch
+before it can be dispatched, and its SignPath origin allowlist must match the
+new path; these are prerequisites for a later test run, not for a release.
+
+Repository-level secrets remain in the `secrets` context of every job. The
+guarantee is what each job references: the SignPath step references only
+`SIGNPATH_TEST_API_TOKEN`, and no other test job references any secret.
 
 ## Validation
 
 - Focused pytest: payload checker on synthetic PE32 and PE32+ fixtures, and the
   workflow contract (guards, permissions, pins, secret placement, literals).
-- Real evidence: the orchestrator dispatches
-  `gh workflow run desktop-package.yml --ref <branch> -f version=0.0.0-rc.1 -f signpath_test=true`
-  after review. End-to-end success is claimed only from that run's report.
+- Permission regression: parse every local reusable-workflow call edge and
+  resolve workflow/job defaults through the chain, treating unlisted scopes as
+  `none`. The actual release call graph fails before this fix with
+  `desktop-package.yml / signpath-test-sign: actions:read exceeds caller actions:none`.
+  Negative controls retain that failure for a disabled nested job and cover
+  explicit empty maps, inheritance, job overrides and nested permission reduction.
+- Real evidence: after the prerequisites above, an operator may dispatch
+  `gh workflow run desktop-signpath-test.yml --ref <branch> -f version=0.0.0-rc.1 -f signpath_test=true`.
+  The historical run below does not validate the new entry point. Its real
+  signing acceptance and the next ordinary release are separate runtime gates.
 
 ## Todo
 
@@ -133,7 +159,8 @@ The verification report showed:
 - The tampered copy was rejected as `payload`, and Authenticode reported
   `HashMismatch`. The foreign-certificate copy was rejected as `certificate`.
 
-This evidence covers commit `60d3c45` only; later documentation-only commits did
-not rebuild. It shows test signing, not production signing. Only the outer
-installer PE was signed, with the test certificate. The embedded executables
-were not signed.
+This evidence covers the original `desktop-package.yml` entry on commit
+`60d3c45` only; later documentation-only commits did not rebuild. The standalone
+workflow migration has not had a real signing run. It shows test signing, not
+production signing. Only the outer installer PE was signed, with the test
+certificate. The embedded executables were not signed.
