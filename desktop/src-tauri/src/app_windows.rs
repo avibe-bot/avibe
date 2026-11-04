@@ -95,7 +95,7 @@ pub(crate) fn open(
     let base_label = target.base_label();
     if !new_window {
         if let Some(window) = find_target_window(app, &base_label) {
-            return focus(&window);
+            return activate(&window, false);
         }
     }
 
@@ -129,10 +129,14 @@ pub(crate) fn open(
         .ok()
         .and_then(|active| active.clone());
     if current.as_ref() != Some(origin) {
-        let _ = window.destroy();
-        return Err("The desktop Runtime changed while the app window was opening.".to_owned());
+        return complete_launch(
+            Err("The desktop Runtime changed while the app window was opening.".to_owned()),
+            || Ok(()),
+            true,
+            || window.destroy().map_err(|error| error.to_string()),
+        );
     }
-    focus(&window)
+    activate(&window, true)
 }
 
 pub(crate) fn close_all(app: &AppHandle) {
@@ -177,12 +181,44 @@ fn is_target_label(label: &str, base_label: &str) -> bool {
         .is_some_and(|suffix| !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
-fn focus(window: &WebviewWindow) -> Result<(), String> {
-    window
-        .unminimize()
-        .and_then(|_| window.show())
-        .and_then(|_| window.set_focus())
-        .map_err(|error| format!("Failed to focus the native app window: {error}"))
+fn activate(window: &WebviewWindow, created: bool) -> Result<(), String> {
+    complete_launch(
+        window
+            .unminimize()
+            .and_then(|_| window.show())
+            .map_err(|error| format!("Failed to show the native app window: {error}")),
+        || window.set_focus().map_err(|error| error.to_string()),
+        created,
+        || window.destroy().map_err(|error| error.to_string()),
+    )
+}
+
+// This result crosses the bridge: Err asks the UI to create an internal fallback.
+fn complete_launch(
+    presentation: Result<(), String>,
+    focus: impl FnOnce() -> Result<(), String>,
+    created: bool,
+    discard_new: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    if let Err(error) = presentation {
+        if created {
+            match discard_new() {
+                Ok(()) => return Err(error),
+                Err(cleanup_error) => {
+                    eprintln!("Native app window cleanup failed: {cleanup_error}");
+                }
+            }
+        }
+        // Existing sessions/buffers must survive activation errors. A new
+        // window that could not be destroyed also precludes a second fallback.
+        eprintln!("Native app window launch retained: {error}");
+        return Ok(());
+    }
+    if let Err(error) = focus() {
+        // The window is already shown; OS focus refusal is not launch failure.
+        eprintln!("Native app window focus refused: {error}");
+    }
+    Ok(())
 }
 
 fn default_size(target: &AppWindowTarget) -> (f64, f64) {
@@ -211,6 +247,59 @@ mod tests {
 
     fn origin() -> LoopbackOrigin {
         LoopbackOrigin::parse("http://127.0.0.1:5123").unwrap()
+    }
+
+    // Faults represent OS IO only; complete_launch owns the fallback policy.
+    #[test]
+    fn fallback_requires_disposal_and_existing_windows_are_preserved() {
+        use std::cell::Cell;
+
+        for created in [false, true] {
+            for presentation_fails in [false, true] {
+                for focus_fails in [false, true] {
+                    for disposal_fails in [false, true] {
+                        let live = Cell::new(true);
+                        let discarded = Cell::new(false);
+                        let focus_attempted = Cell::new(false);
+                        let result = complete_launch(
+                            if presentation_fails {
+                                Err("show or origin failure".into())
+                            } else {
+                                Ok(())
+                            },
+                            || {
+                                focus_attempted.set(true);
+                                if focus_fails {
+                                    Err("OS refused focus".into())
+                                } else {
+                                    Ok(())
+                                }
+                            },
+                            created,
+                            || {
+                                discarded.set(true);
+                                if disposal_fails {
+                                    Err("OS refused destruction".into())
+                                } else {
+                                    live.set(false);
+                                    Ok(())
+                                }
+                            },
+                        );
+                        assert!(
+                            !(result.is_err() && live.get()),
+                            "fallback competes with a live native window"
+                        );
+                        assert_eq!(discarded.get(), created && presentation_fails);
+                        assert_eq!(focus_attempted.get(), !presentation_fails);
+                        assert_eq!(result.is_err(), created && presentation_fails && !disposal_fails);
+                        if !created {
+                            assert!(live.get(), "existing sessions must survive");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

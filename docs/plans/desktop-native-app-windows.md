@@ -31,7 +31,7 @@ The UI production build, focused app-launch/bridge unit tests, Rust target tests
 
 Lifecycle selection has a pure-function test proving that cleanup selects every App window while excluding main and pet. Actual destruction on origin changes, clearing, and exit is part of isolated native acceptance; source-text matching is not used to claim that behavior.
 
-Native acceptance is pending an unlocked console. An isolated preview uses bundle identifier `bot.avibe.desktop.nativewindows.acceptance` and port `15177`. On November 4, 2026, the preview reached the local Workbench, but macOS reported `CGSSessionScreenIsLocked=Yes`; blank captures and unverified focus are not acceptance evidence. A durable unlock Watch resumes the remaining native checks and cleanup.
+Native acceptance resumed after console unlock on November 4, 2026. The isolated preview uses bundle identifier `bot.avibe.desktop.nativewindows.acceptance` and port `15177`. Native window/marker evidence from `b025869` and real narrow Files-to-Terminal cwd/session evidence from `18af1a2` are retained with their build provenance. Final launch-path revalidation and cleanup follow the atomicity repair. Local same-origin access without a configured login challenge does not establish authenticated login continuity; browser reload coverage does not establish native reload behavior.
 
 Native marker acceptance must show that the main Workbench successfully opens a native App window, then assert `__AVIBE_NATIVE_APP_WINDOW__ === true` in the child while `__AVIBE_DESKTOP_SHELL__` and `__AVIBE_DESKTOP_APP_WINDOWS__` are both `undefined`. In a narrowed Files window, click Open Terminal Here and verify cwd and an independent session, then reload and verify isolation again while an ordinary browser terminal retains its persistent session.
 
@@ -63,4 +63,18 @@ Local repair evidence: all 21 native-launch browser cases passed, including the 
 
 ### Show target validation
 
-Review of `b025869bef` found a separate target-contract mismatch: the pet/deep-link validator rejects colon-containing Show IDs. Following the orchestrator decision, App windows now validate against `core/show_pages.py`'s existing 1–128-character Show ID alphabet and leading-alphanumeric rule, without changing pet or deep links. URL path segments match `showPagePrivatePath` / `encodeURIComponent`, including `%3A` for colons. The existing target regression failed before the fix and now covers colon IDs, same-origin encoded URLs, traversal/query/fragment rejection, invalid initial characters, and length limits. Final native acceptance includes the isolated `legacy:session.1` page.
+Review of `b025869bef` found a separate target-contract mismatch: the pet/deep-link validator rejects colon-containing Show IDs. Following the orchestrator decision, App windows now validate against `core/show_pages.py`'s existing 1–128-character Show ID alphabet and leading-alphanumeric rule, without changing pet or deep links. URL path segments match `showPagePrivatePath` / `encodeURIComponent`, including `%3A` for colons. The existing target regression failed before the fix and now covers colon IDs, same-origin encoded URLs, traversal/query/fragment rejection, invalid initial characters, and length limits. The legitimate CLI-created `legacy:session.1` fixture fails content loading in both native and Chromium on the isolated Show Runtime: `/show/legacy%3Asession.1/` resolves to the encoded directory instead of the CLI-created colon directory. This pre-existing/environment failure is retained separately from the passing URL contract. Copying diagnostic content into the encoded directory is only a marker/navigation probe, never a colon-page end-to-end pass. An ordinary CLI-created Show Page supplies the principal native launch evidence; this PR does not modify Show Runtime.
+
+### Launch-result atomicity inventory
+
+Review of `18af1a2` found a new class: a successful show followed by a focus error returned a rejected command while leaving the native window alive, so the UI opened an internal fallback too. The orchestrator verified all six threads across five findings-bearing heads and authorized the following narrow repair:
+
+- New creation/build failure: no native window exists; returning an error permits fallback.
+- Existing target: preserve the window and its sessions/buffers on any restore/show/focus error; report the activation as handled and log the OS failure, avoiding a competing fallback.
+- New target restore/show failure: attempt destruction. Return an error only after successful destruction; if destruction fails, retain the native result and log both errors rather than request another window.
+- Focus refusal after successful show: retain the visible native result and log the refusal.
+- Origin change during creation: destroy the stale child; use the same cleanup-confirmation policy before permitting fallback. Main/pet selection and navigation confinement remain unchanged.
+
+A regression at the Rust launch-result owner will inject only disposal success/failure, checking that fallback is never returned while the native result remains alive and that existing windows are never destroyed. The fake must not implement the decision policy. If another finding repeats this root class, stop for orchestrator diagnosis before editing again.
+
+The launch-result regression failed with the pre-fix return policy because fallback competed with a live native window. It exercises OS presentation, focus, and disposal failures for both existing and new windows, while the production coordinator owns the decision. No Runtime mock or source-identifier assertion is used.
