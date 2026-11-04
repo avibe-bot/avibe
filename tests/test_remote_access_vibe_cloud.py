@@ -716,6 +716,32 @@ def test_remote_session_renews_daily_and_never_past_the_cap(
     assert remote_access.parse_session_identity(config, cookie) is None
 
 
+
+def test_a_page_load_renews_an_hour_old_session_while_a_fetch_waits_a_day(monkeypatch) -> None:
+    config = _config()
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    _pin_clock(monkeypatch, _SIGN_IN_AT)
+    identity = remote_access.parse_session_identity(config, _session_cookie(config))
+    assert identity is not None
+    hour = 60 * 60
+
+    def renews(now: int, *, page_load: bool) -> bool:
+        return remote_access.session_needs_renewal(
+            identity,
+            now=now,
+            instance_kind="personal",
+            renew_after=(
+                remote_access.SESSION_NAVIGATION_RENEW_AFTER_SECONDS
+                if page_load
+                else remote_access.SESSION_RENEW_AFTER_SECONDS
+            ),
+        )
+
+    assert renews(_SIGN_IN_AT + hour, page_load=True) is False
+    assert renews(_SIGN_IN_AT + hour + 1, page_load=True) is True
+    assert renews(_SIGN_IN_AT + hour + 1, page_load=False) is False
+    assert renews(_SIGN_IN_AT + _DAY + 1, page_load=False) is True
+
 _RESTARTED_INSTANCE_ACCEPTS = """
 import json, sys
 from config.v2_config import V2Config

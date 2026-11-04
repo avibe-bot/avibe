@@ -1709,6 +1709,111 @@ def _remote_session_lifetime_scenario(monkeypatch, tmp_path, instance_kind, idle
     )
 
 
+
+def test_remote_page_load_renews_the_session_on_its_own_response(monkeypatch, tmp_path):
+    """Scenario: AUTH-SETUP-147."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_remote_session_authorization_config("personal")
+    ui_dist = tmp_path / "dist"
+    ui_dist.mkdir()
+    (ui_dist / "index.html").write_text("<!doctype html><title>Avibe</title>", encoding="utf-8")
+    monkeypatch.setattr(ui_server, "get_ui_dist_path", lambda: ui_dist)
+    with ui_server._auth_ratelimit_lock:
+        ui_server._auth_ratelimit.clear()
+    base = int(time.time())
+    clock = {"now": base}
+    monkeypatch.setattr(remote_access.time, "time", lambda: clock["now"])
+    day = 24 * 60 * 60
+    idle = 30 * day
+    cap = base + 90 * day
+    base_url = "https://alex.avibe.bot"
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_access.make_session_cookie(
+            config,
+            "owner@example.com",
+            "owner-1",
+            session_claims=dict(_REMOTE_SESSION_OWNER_CLAIMS),
+        ),
+        domain="alex.avibe.bot",
+    )
+    page_load = {"Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document", "Accept": "text/html"}
+    harness = SimpleNamespace(client=client, expires_at=base + idle)
+    runner = ScenarioRunner(harness)
+
+    def expiry(current):
+        return current.client.get("/api/session", base_url=base_url).get_json()["session_expires_at"]
+
+    def a_fetch_an_hour_later_keeps_the_daily_rule(current):
+        clock["now"] = base + 60 * 60 + 1
+        response = current.client.get(
+            "/api/config",
+            base_url=base_url,
+            headers={"Sec-Fetch-Mode": "cors", "Sec-Fetch-Dest": "empty"},
+        )
+        assert response.status_code == 200
+        assert _remote_session_set_cookie(response) is None
+
+    def an_iframe_load_is_not_a_page_load(current):
+        response = current.client.get(
+            "/inbox",
+            base_url=base_url,
+            headers={**page_load, "Sec-Fetch-Dest": "iframe"},
+        )
+        assert response.status_code == 200
+        assert _remote_session_set_cookie(response) is None
+        assert expiry(current) == current.expires_at
+
+    def the_page_load_renews_on_its_own_response(current):
+        response = current.client.get("/inbox", base_url=base_url, headers=page_load)
+        assert response.status_code == 200
+        assert response.headers["Content-Type"].startswith("text/html")
+        renewed = _remote_session_set_cookie(response)
+        assert renewed is not None
+        assert renewed[1] == idle
+        current.expires_at = clock["now"] + idle
+        assert expiry(current) == current.expires_at
+
+    def page_loads_never_carry_it_past_the_cap(current):
+        while clock["now"] + day < cap:
+            clock["now"] += day
+            response = current.client.get("/", base_url=base_url, headers=page_load)
+            assert response.status_code == 200
+            renewed = _remote_session_set_cookie(response)
+            expected = min(clock["now"] + idle, cap)
+            if expected == current.expires_at:
+                assert renewed is None
+            else:
+                assert renewed is not None
+                assert renewed[1] == expected - clock["now"]
+                current.expires_at = expected
+        assert current.expires_at == cap
+        clock["now"] = cap
+        assert current.client.get("/api/session", base_url=base_url).get_json() == {
+            "remote": True,
+            "authenticated": False,
+        }
+
+    asyncio.run(
+        runner.run(
+            ScenarioStep("a_fetch_an_hour_later_keeps_the_daily_rule", a_fetch_an_hour_later_keeps_the_daily_rule),
+            ScenarioStep("an_iframe_load_is_not_a_page_load", an_iframe_load_is_not_a_page_load),
+            ScenarioStep("the_page_load_renews_on_its_own_response", the_page_load_renews_on_its_own_response),
+            ScenarioStep("page_loads_never_carry_it_past_the_cap", page_loads_never_carry_it_past_the_cap),
+        )
+    )
+    ScenarioExpect.step_history(
+        runner,
+        [
+            "a_fetch_an_hour_later_keeps_the_daily_rule",
+            "an_iframe_load_is_not_a_page_load",
+            "the_page_load_renews_on_its_own_response",
+            "page_loads_never_carry_it_past_the_cap",
+        ],
+    )
+
 def test_remote_sign_out_survives_an_instance_restart(monkeypatch, tmp_path):
     """Scenario: AUTH-SETUP-146."""
 

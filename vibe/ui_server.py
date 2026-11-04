@@ -1732,6 +1732,20 @@ def _remote_auth_exempt_before_host_validation() -> bool:
     )
 
 
+def _is_top_level_page_load() -> bool:
+    """Whether the browser named this request a top-level page load.
+
+    Fetch Metadata says so; a fetch, an iframe, or a client without it does not
+    qualify. A cookie set on this response is one WebKit never caps (see
+    ``remote_access.SESSION_NAVIGATION_RENEW_AFTER_SECONDS``).
+    """
+    return (
+        request.method == "GET"
+        and request.headers.get("Sec-Fetch-Mode") == "navigate"
+        and request.headers.get("Sec-Fetch-Dest") == "document"
+    )
+
+
 def _is_ui_static_request() -> bool:
     endpoint = request._request.scope.get("endpoint")
     return getattr(endpoint, "__name__", "") == "serve_static_compat_endpoint"
@@ -2489,6 +2503,11 @@ def enforce_remote_access_cookie():
         if remote_access.session_needs_renewal(
             payload,
             instance_kind=config.remote_access.vibe_cloud.instance_kind,
+            renew_after=(
+                remote_access.SESSION_NAVIGATION_RENEW_AFTER_SECONDS
+                if _is_top_level_page_load()
+                else remote_access.SESSION_RENEW_AFTER_SECONDS
+            ),
         ):
             g.remote_session_renew = payload
         return None

@@ -273,6 +273,17 @@ scenarios:
     # the signed-out cookie from a separate process sharing only the state dir.
     supporting_tests:
       - tests/test_remote_access_vibe_cloud.py::test_sign_out_survives_a_restart_and_outlasts_a_raced_renewal
+  - id: AUTH-SETUP-147
+    name: A remote top-level page load renews an hour-old session on its own response, never past the cap
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: web
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_remote_page_load_renews_the_session_on_its_own_response
+    # WebKit never caps a cookie set on a top-level navigation; a fetch or an
+    # iframe keeps the daily rule.
+    supporting_tests:
+      - tests/test_remote_access_vibe_cloud.py::test_a_page_load_renews_an_hour_old_session_while_a_fetch_waits_a_day
   - id: AUTH-SETUP-404
     name: Verified limited Show Page identity admits and denies a revoked guest lease
     status: covered
