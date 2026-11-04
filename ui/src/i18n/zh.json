@@ -4386,7 +4386,7 @@
     "autoUpdate": "自动更新",
     "autoUpdateHint": "空闲时自动安装",
     "desktopManagedUpdate": "更新由运行 Avibe 的那台电脑上的桌面应用提供，请在那里检查更新。",
-    "desktopManagedUpdateAvailable": "有新版本 {{to}}，请在运行 Avibe 的那台电脑上通过 Avibe 桌面应用更新。",
+    "desktopManagedUpdateAvailable": "发现新版本",
     "desktopManagedUpdateOwnerHint": "请求主机更新。桌面应用会按本机设置在主机上提示确认，或直接无人值守安装。",
     "desktopManagedUpdateMemberHint": "请在运行 Avibe 的那台电脑上的桌面应用中更新此主机。",
     "desktopRemoteUpdateCheckWork": "提交时将检查活动工作。如果有工作正在运行或无法检查，将再次请你确认中断。",

@@ -4386,7 +4386,7 @@
     "autoUpdate": "Auto Update",
     "autoUpdateHint": "Auto-install when idle",
     "desktopManagedUpdate": "Updates come from the Avibe desktop app on the computer running Avibe. Check for updates there.",
-    "desktopManagedUpdateAvailable": "Version {{to}} is available. Update it with the Avibe desktop app on the computer running Avibe.",
+    "desktopManagedUpdateAvailable": "Update available",
     "desktopManagedUpdateOwnerHint": "Request the update on the host. The desktop app will prompt there or install unattended according to its local setting.",
     "desktopManagedUpdateMemberHint": "Update this host in the Avibe desktop app on the computer running Avibe.",
     "desktopRemoteUpdateCheckWork": "Active work will be checked when you submit. If any work is running or cannot be checked, you will be asked to confirm interruption.",
