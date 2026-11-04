@@ -1,4 +1,4 @@
-"""Skills-aligned MCP visibility and repository-owned project definitions.
+"""Skills-aligned MCP visibility and shared Avibe-owned configuration.
 
 A project's ``.mcp.json`` sits at the same root managed Skills use. Avibe keeps
 per-server secrets, approval, OAuth and published revisions in its own cache
@@ -163,6 +163,15 @@ def _document(scope: Scope) -> tuple[Optional[str], dict[str, Any]]:
 
 
 def _raw_entry(key: ScopedName) -> dict[str, Any]:
+    if not repository.is_project(key):
+        stored = repository.read_avibe_definition(key.name)
+        if stored is None:
+            raise repository._not_found(key.name)
+        # Released global files use the normalized shape. Keep that disk contract.
+        raw = dict(stored["transport"])
+        if "oauth" in stored:
+            raw["oauth"] = stored["oauth"]
+        return raw
     try:
         _, document = _document(key.scope)
     except (OSError, ValueError) as exc:
@@ -265,7 +274,7 @@ class ScopedServer:
     def _published_state(self, published: Optional[dict[str, Any]]) -> str:
         if self.state != "ok":
             return self.state
-        if published is None or published["definition"] != self.definition:
+        if published is None or not publication_matches(self.key, self.definition, published):
             return "not_generated"
         if published["manifest"].get("auth") == "needs_login":
             return "needs_login"
@@ -281,8 +290,8 @@ class ScopedServer:
             "name": str(self.key),
             "scope": self.key.scope.key,
             "state": state,
-            "source": "project",
-            "sourcePath": str(_project_file(self.key.scope)),
+            "source": "project" if repository.is_project(self.key) else "avibe",
+            "sourcePath": str(_project_file(self.key.scope) if repository.is_project(self.key) else repository._avibe_definition_path(self.key.name)),
             "missingVariables": self.missing,
             "placeholders": self.placeholders,
             "url": self.raw.get("url", ""),
@@ -296,8 +305,12 @@ class ScopedServer:
             "diagnostics": [],
         }
         if published and state in {"ok", "needs_login"}:
+            row["auth"] = published["manifest"].get("auth", "none")
             tools = [{"name": tool["name"], "description": tool.get("description", "")} for tool in published["tools"]]
             row["description"] = published["manifest"].get("description", "")
+            row["generatedAt"] = published["manifest"].get("generatedAt")
+            row["serverVersion"] = (published["manifest"].get("serverInfo") or {}).get("version")
+            row["diagnostics"] = published["manifest"].get("diagnostics", [])
             row["revision"] = published["revision"]
             row["toolCount"] = len(published["commands"])
             row["tools"] = tools
@@ -327,7 +340,7 @@ def _effective(key: ScopedName, raw: dict[str, Any], secrets: dict[str, Any]) ->
 
     Callers must not execute the definition while variables are missing.
 
-    The single structural check of a project entry: the parser always runs, with a stand-in for
+    The single structural check of an owned entry: the parser always runs, with a stand-in for
     each missing variable, so ``needs_config`` never hides a malformed entry.
     """
 
@@ -361,24 +374,27 @@ def _effective(key: ScopedName, raw: dict[str, Any], secrets: dict[str, Any]) ->
         if not isinstance(raw.get("cwd", ""), str):
             raise McpHubError("invalid_definition", f"{key.name}: cwd must be a string.", field="cwd")
         merged["env"] = {**merged.get("env", {}), **variables}
-        merged["cwd"] = native._resolve_cwd(_project_file(key.scope), raw.get("cwd") or str(key.project_root))
+        if repository.is_project(key):
+            merged["cwd"] = native._resolve_cwd(_project_file(key.scope), raw.get("cwd") or str(key.project_root))
+        else:
+            merged["cwd"] = raw.get("cwd") or repository.default_cwd()
     else:
         merged["headers"] = _merge_headers(merged.get("headers", {}), headers)
     definition = definition_from_provider(key.name, merged)
     return definition, sorted(missing), sorted(placeholders)
 
 
-def project_add_definition(name: str, raw: object) -> dict[str, Any]:
+def add_definition(name: str, raw: object, *, project: bool = False) -> dict[str, Any]:
     """Validate with the loader's stand-ins, then restore unresolved input values.
 
-    This is parsing only: approval and the real project's scope are owned by the
-    controller. The temporary scope supplies a cwd for structural validation.
+    This is parsing only: the controller owns approval and scope. A temporary
+    project scope allows relative cwd; global cwd must remain absolute.
     """
 
     validate_name(name)
     if not isinstance(raw, dict):
         return definition_from_provider(name, raw)
-    key = ScopedName(Scope("project:validation", Path.cwd()), name)
+    key = ScopedName(Scope("project:validation", Path.cwd()) if project else Scope(), name)
     definition, _, _ = _effective(key, raw, {})
     transport = definition["transport"]
     for field in ("url", "env", "headers", "cwd"):
@@ -389,12 +405,29 @@ def project_add_definition(name: str, raw: object) -> dict[str, Any]:
     return definition
 
 
+def publication_matches(key: ScopedName, definition: dict[str, Any], published: dict[str, Any]) -> bool:
+    snapshot = published["definition"]
+    if not repository.is_project(key):
+        # Older global snapshots may omit parser defaults or use the HTTP alias.
+        raw = dict(snapshot["transport"])
+        if "oauth" in snapshot:
+            raw["oauth"] = snapshot["oauth"]
+        snapshot, missing, _ = _effective(key, raw, {})
+        if missing:
+            return False
+    return snapshot == definition
+
+
+def project_add_definition(name: str, raw: object) -> dict[str, Any]:
+    return add_definition(name, raw, project=True)
+
+
 def load_server(key: ScopedName) -> ScopedServer:
     raw = _raw_entry(key)
     definition, missing, placeholders = _effective(key, raw, _secrets(key))
     if missing:
         definition = None
-    approved = _cached(key, "approval.json").get("fingerprint") == fingerprint(raw)
+    approved = not repository.is_project(key) or _cached(key, "approval.json").get("fingerprint") == fingerprint(raw)
     if not approved:
         state = "pending_approval"
     elif missing:
@@ -453,7 +486,7 @@ def project_servers(scope: Scope) -> dict[str, Optional[ScopedServer]]:
 
 
 def _global_row(row: dict[str, Any]) -> dict[str, Any]:
-    state = "needs_login" if row.get("auth") == "needs_login" else "ok"
+    state = row.get("state") or ("needs_login" if row.get("auth") == "needs_login" else "ok")
     return {**row, "scope": GLOBAL, "state": state}
 
 
@@ -561,6 +594,53 @@ def _edit_document_text(text: Optional[str], key: ScopedName, entry: Optional[di
         return None
 
 
+def _partition_values(key: ScopedName, written: dict[str, Any], entry: dict[str, Any], previous: dict[str, Any]) -> dict[str, Any]:
+    """Supplied keys move between template and private maps; omitted keys stay."""
+    cache = copy.deepcopy(previous)
+    for field in ("env", "headers"):
+        if field not in entry:
+            continue
+        declared = dict(written.get(field, {}))
+        private = dict(cache.get(field, {}))
+        for name, value in entry[field].items():
+            # HTTP header names have case-insensitive identity.
+            for mapping in (declared, private):
+                for old_name in list(mapping):
+                    if old_name == name or (field == "headers" and old_name.lower() == name.lower()):
+                        mapping.pop(old_name)
+            destination = declared if _TOKEN.search(value) else private
+            destination[name] = value
+        if declared:
+            written[field] = declared
+        else:
+            written.pop(field, None)
+        if private or field in cache:
+            cache[field] = private
+    cache = _check_secrets(cache)
+    _effective(key, written, cache)
+    return cache
+
+
+def matches_input(key: ScopedName, entry: dict[str, Any]) -> bool:
+    """Compare the same prospective template/private pair that write_server writes."""
+    raw = _raw_entry(key)
+    previous = _secrets(key)
+    servers = {key.name: raw}
+    _apply_entry(servers, key, entry, replace=True)
+    written = servers[key.name]
+    private = _partition_values(key, written, entry, previous)
+    def templates(value: dict[str, Any]) -> dict[str, dict[str, str]]:
+        return {field: {k: v for k, v in value.get(field, {}).items() if _TOKEN.search(v)} for field in ("env", "headers")}
+
+    # Released global files may keep literal values inline. Their location does
+    # not change the configuration, but replacing a template with a literal does.
+    return (
+        raw.get("url") == written.get("url")
+        and templates(raw) == templates(written)
+        and _effective(key, raw, previous) == _effective(key, written, private)
+    )
+
+
 def write_server(key: ScopedName, entry: Optional[dict[str, Any]], *, replace: bool = True) -> None:
     """Validate the prospective document and private maps before publishing either.
 
@@ -568,6 +648,24 @@ def write_server(key: ScopedName, entry: Optional[dict[str, Any]], *, replace: b
     in the private cache. Each supplied key replaces its previous destination.
     """
 
+    if not repository.is_project(key):
+        if entry is None:
+            repository.remove_package(key)
+            return
+        add_definition(key.name, entry)
+        old = _raw_entry(key) if repository.read_avibe_definition(key.name) is not None else {}
+        servers = {key.name: old} if old else {}
+        _apply_entry(servers, key, entry, replace)
+        written = servers[key.name]
+        previous = _secrets(key)
+        cache = _partition_values(key, written, entry, previous)
+        definition = add_definition(key.name, written)
+        if definition["transport"]["type"] == "stdio" and not definition["transport"].get("cwd"):
+            definition["transport"]["cwd"] = repository.default_cwd()
+        repository.write_avibe_definition(definition)
+        if cache != previous:
+            _write_cache(key, "secrets.json", cache)
+        return
     with _DOCUMENT_LOCK:
         text, data = _document(key.scope)
         before = copy.deepcopy(data)
@@ -581,28 +679,7 @@ def write_server(key: ScopedName, entry: Optional[dict[str, Any]], *, replace: b
             _apply_entry(servers, key, entry, replace)
             written = servers[key.name]
             previous_cache = _secrets(key)
-            cache = copy.deepcopy(previous_cache)
-            for field in ("env", "headers"):
-                if field not in entry:
-                    continue
-                declared = dict(written.get(field, {}))
-                private = dict(cache.get(field, {}))
-                for name, value in entry[field].items():
-                    # HTTP header names have case-insensitive identity.
-                    for mapping in (declared, private):
-                        for old_name in list(mapping):
-                            if old_name == name or (field == "headers" and old_name.lower() == name.lower()):
-                                mapping.pop(old_name)
-                    destination = declared if _TOKEN.search(value) else private
-                    destination[name] = value
-                if declared:
-                    written[field] = declared
-                else:
-                    written.pop(field, None)
-                if private or field in cache:
-                    cache[field] = private
-            cache = _check_secrets(cache)
-            _effective(key, written, cache)
+            cache = _partition_values(key, written, entry, previous_cache)
         if text is None or data != before:
             written = None if entry is None else servers.get(key.name)
             next_text = _edit_document_text(text, key, written, data)

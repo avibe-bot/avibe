@@ -70,12 +70,12 @@ const servers: McpServerSummary[] = [
   { name: 'echo', source: 'avibe', scope: 'global', state: 'needs_login', auth: 'needs_login', transport: 'stdio', command: 'echo-mcp', toolCount: 1 },
 ];
 
-function renderHub() {
+function renderHub(project: typeof PROJECT | null = PROJECT) {
   return render(
     <MemoryRouter initialEntries={['/skills?tab=mcp&scope=project&project=proj_a']}>
       <I18nextProvider i18n={i18n}>
         <ToastProvider>
-          <McpHubSection project={PROJECT} />
+          <McpHubSection project={project} />
         </ToastProvider>
       </I18nextProvider>
     </MemoryRouter>,
@@ -131,12 +131,14 @@ describe('McpHubSection project view', () => {
     expect(within(detail()).queryByRole('link')).toBeNull();
   });
 
-  it('configures only the maps the user changed or cleared, and never shows a stored value', async () => {
+  it.each(['project', 'global'])('configures changed or cleared maps in %s without showing stored values', async (scope) => {
+    const projectId = scope === 'project' ? 'proj_a' : null;
+    if (!projectId) api.listMcpServers.mockResolvedValue({ ok: true, servers: servers.slice(0, 5).map((item) => ({ ...item, source: 'avibe', scope: 'global' })) });
     api.configureMcp
       .mockResolvedValueOnce({ ok: false, error: { type: 'invalid_definition', message: 'env: bad key', field: 'env' } })
       .mockRejectedValueOnce(new Error('csrf'))
       .mockResolvedValueOnce({ ok: true, state: 'ok' });
-    renderHub();
+    renderHub(projectId ? PROJECT : null);
     await screen.findByText('tokened');
     fireEvent.click(rowButton('tokened'));
     fireEvent.click(within(detail()).getByRole('button', { name: en.mcpHub.configure }));
@@ -157,14 +159,14 @@ describe('McpHubSection project view', () => {
     expect(save.disabled).toBe(false);
     fireEvent.click(save);
     // Untouched headers are omitted; the typed error keeps the dialog and its input.
-    await waitFor(() => expect(api.configureMcp).toHaveBeenNthCalledWith(1, 'tokened', { env: { API_TOKEN: 'tok-1', REGION: '' } }, 'proj_a'));
+    await waitFor(() => expect(api.configureMcp).toHaveBeenNthCalledWith(1, 'tokened', { env: { API_TOKEN: 'tok-1', REGION: '' } }, projectId));
     expect(await within(dialog).findByText(en.mcpHub.errors.invalid_definition.replace('{{message}}', 'env: bad key'))).toBeTruthy();
 
     // Clearing a map is its own visible action and sends an empty map; a rejected request keeps the dialog.
     fireEvent.click(within(dialog).getAllByRole('button', { name: en.mcpHub.configureClear })[1]);
     expect(within(dialog).getByText(en.mcpHub.configureCleared)).toBeTruthy();
     fireEvent.click(save);
-    await waitFor(() => expect(api.configureMcp).toHaveBeenNthCalledWith(2, 'tokened', { env: { API_TOKEN: 'tok-1', REGION: '' }, headers: {} }, 'proj_a'));
+    await waitFor(() => expect(api.configureMcp).toHaveBeenNthCalledWith(2, 'tokened', { env: { API_TOKEN: 'tok-1', REGION: '' }, headers: {} }, projectId));
     expect(await within(dialog).findByText(en.mcpHub.failed)).toBeTruthy();
     expect(values()[0].value).toBe('tok-1');
 
@@ -175,7 +177,7 @@ describe('McpHubSection project view', () => {
     fireEvent.change(within(dialog).getByLabelText(`${headers} key`), { target: { value: 'X-Team' } });
     fireEvent.change(within(dialog).getByLabelText(`${headers} value`), { target: { value: 'core' } });
     fireEvent.click(save);
-    await waitFor(() => expect(api.configureMcp).toHaveBeenNthCalledWith(3, 'tokened', { env: { API_TOKEN: 'tok-1', REGION: '' }, headers: { 'X-Team': 'core' } }, 'proj_a'));
+    await waitFor(() => expect(api.configureMcp).toHaveBeenNthCalledWith(3, 'tokened', { env: { API_TOKEN: 'tok-1', REGION: '' }, headers: { 'X-Team': 'core' } }, projectId));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   });
 
