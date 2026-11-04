@@ -16,6 +16,7 @@ import { reportRemoteAuthorizationState, REMOTE_AUTH_STATE_EVENT } from './lib/r
 import { DESKTOP_OPEN_SETTINGS_EVENT } from './lib/desktopShell';
 import { DesktopSettingsCommand } from './components/DesktopSettingsCommand';
 import { SettingsOverlayNavigationBoundary } from './components/settings/SettingsOverlayNavigationBoundary';
+import { BOOT_SESSION_MAX_AGE_MS, recordBootSession } from './lib/bootSession';
 
 vi.hoisted(() => {
   vi.stubGlobal('matchMedia', vi.fn().mockImplementation((query: string) => ({
@@ -53,6 +54,76 @@ afterEach(() => {
   cleanup();
   vi.clearAllMocks();
   vi.useRealTimers();
+  // The guard remembers its last confirmed outcome here; no test may inherit one.
+  window.localStorage.clear();
+});
+
+// A cold start renders the shell from the last outcome the server confirmed
+// (docs/plans/web-ui-local-cache.md section 4.5). What must hold: the shell is
+// there before the check answers, it goes the moment the check disagrees, and a
+// contradicted or expired outcome is never used again.
+describe('AuthGuard boot from the last confirmed outcome', () => {
+  const member = {
+    remote: true as const,
+    authenticated: true as const,
+    email: 'member@example.com',
+    instance_kind: 'organization' as const,
+    instance_role: 'viewer' as const,
+    capabilities: { ...DENIED_INSTANCE_CAPABILITIES, can_read_instance: true },
+    authorization_state: 'current' as const,
+    author_id: 'remote:member',
+  };
+  const mountGuard = () => render(
+    <MemoryRouter initialEntries={['/']}>
+      <AuthGuard><div>protected shell</div></AuthGuard>
+    </MemoryRouter>,
+  );
+  const confirmOnce = async () => {
+    api.getAuthSession.mockResolvedValueOnce(member);
+    const view = mountGuard();
+    expect(await screen.findByText('protected shell')).toBeTruthy();
+    view.unmount();
+  };
+
+  it('renders the shell before the check answers, and keeps it when the check agrees', async () => {
+    await confirmOnce();
+
+    let answer: (value: typeof member) => void = () => {};
+    api.getAuthSession.mockReturnValueOnce(new Promise((resolve) => { answer = resolve; }));
+    mountGuard();
+    expect(screen.getByText('protected shell')).toBeTruthy();
+
+    await act(async () => { answer(member); });
+    expect(screen.getByText('protected shell')).toBeTruthy();
+  });
+
+  it('tears the shell down when the check disagrees, and waits for the server on the next start', async () => {
+    await confirmOnce();
+
+    let answer: (value: unknown) => void = () => {};
+    api.getAuthSession.mockReturnValueOnce(new Promise((resolve) => { answer = resolve; }));
+    const second = mountGuard();
+    expect(screen.getByText('protected shell')).toBeTruthy();
+    await act(async () => {
+      answer({ ...member, capabilities: undefined, instance_role: undefined, authorization_state: 'revoked' });
+    });
+    expect(screen.queryByText('protected shell')).toBeNull();
+    expect(screen.getByText('remoteAuthorization.revoked.title')).toBeTruthy();
+    second.unmount();
+
+    api.getAuthSession.mockReturnValueOnce(new Promise(() => {}));
+    mountGuard();
+    expect(screen.queryByText('protected shell')).toBeNull();
+    expect(screen.getByText('common.loading')).toBeTruthy();
+  });
+
+  it('does not boot from an outcome older than a personal session', () => {
+    recordBootSession(member, Date.now() - BOOT_SESSION_MAX_AGE_MS - 1);
+    api.getAuthSession.mockReturnValueOnce(new Promise(() => {}));
+    mountGuard();
+    expect(screen.queryByText('protected shell')).toBeNull();
+    expect(screen.getByText('common.loading')).toBeTruthy();
+  });
 });
 
 describe('AuthGuard remote authorization recovery', () => {

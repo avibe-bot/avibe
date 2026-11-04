@@ -6,6 +6,7 @@ import type { AgentBackendId, NativeCliBackend, WebOAuthBackend } from '../lib/a
 import { apiFetch, recoverRemoteAuthFromSessionProbe, withApiDeadline } from '../lib/apiFetch';
 import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
 import { clearLocalSnapshots, forgetLocalSnapshots } from '../lib/localSnapshots';
+import { forgetBootSession } from '../lib/bootSession';
 import { parseBot, parseBotLimit, type AgentBotSummary, type Bot, type BotEmojiAvatarInput, type BotLimit } from '../lib/bots';
 import { parseNotificationPreferences, type InboxCategory, type NotificationPreferences } from '../lib/notificationPreferences';
 import { mcpPath } from '../lib/mcpPath';
@@ -4769,6 +4770,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // snapshots behind for whoever uses the device next, and a write the Inbox
       // still has scheduled must not put them back.
       await forgetLocalSnapshots();
+      // Before the request: a failed logout must not leave the next cold start
+      // booting straight into this reader's shell.
+      forgetBootSession();
       let endpoint: string | undefined;
       try {
         endpoint = (await getExistingWebPushSubscription())?.endpoint;

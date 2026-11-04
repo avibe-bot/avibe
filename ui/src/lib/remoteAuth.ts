@@ -1,4 +1,5 @@
 import { clearLocalSnapshots, forgetLocalSnapshots } from './localSnapshots';
+import { forgetBootSession } from './bootSession';
 import { isIosDevice, isStandalonePwa } from './platform';
 
 export const REMOTE_AUTH_REQUIRED_EVENT = 'avibe.remote-auth-required';
@@ -142,6 +143,9 @@ async function probeRemoteAuthorization(): Promise<void> {
 }
 
 export function reportRemoteAuthorizationState(state: RemoteAuthorizationState): void {
+  // The next cold start must wait for the server instead of booting from an
+  // outcome the server has just contradicted.
+  if (state === 'login_required' || state === 'revoked') forgetBootSession();
   if (state === 'login_required') {
     clearAuthorizationRetry();
     dispatchRemoteAuthorizationState(state);

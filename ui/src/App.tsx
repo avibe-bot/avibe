@@ -108,6 +108,7 @@ import { MODEL_HUB_SETTINGS_PATH } from './components/settings/models/modelHubRo
 import { settingsOverlayOriginFromState, SETUP_VISIT_SETTINGS_PATHS } from './lib/settingsOverlay';
 import { isSetupComplete } from './lib/setupState';
 import { isIosDevice, isStandalonePwa } from './lib/platform';
+import { forgetBootSession, readBootSession, recordBootSession } from './lib/bootSession';
 import {
   readLastPwaPath,
   resolvePwaLaunchPath,
@@ -304,10 +305,16 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
     const { t } = useTranslation();
     const location = useLocation();
     const guardTarget = location.pathname + location.search;
-    const [guardStatus, setGuardStatus] = useState<GuardStatus>('loading');
+    // A cold start with a recent confirmed outcome renders the shell from it
+    // right away and lets the first check below confirm or tear it down
+    // (docs/plans/web-ui-local-cache.md section 4.5). Without one, the guard
+    // waits for the server as it always has.
+    const [bootSession] = useState(() => readBootSession());
+    const provisionalRef = useRef(bootSession !== null);
+    const [guardStatus, setGuardStatus] = useState<GuardStatus>(() => (bootSession ? 'ready' : 'loading'));
     const [blockedCode, setBlockedCode] = useState<string | null>(null);
     const [authCheckVersion, setAuthCheckVersion] = useState(0);
-    const [authorizationSession, setAuthorizationSession] = useState<SessionInfo | null>(null);
+    const [authorizationSession, setAuthorizationSession] = useState<SessionInfo | null>(bootSession);
     const [authorizationUnavailable, setAuthorizationUnavailable] = useState(false);
     const [setupModelHubAllowed, setSetupModelHubAllowed] = useState(false);
     const authorizationUnavailableRef = useRef(false);
@@ -388,13 +395,17 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
         // on a non-/setup route would otherwise redirect to /setup before
         // the fresh config resolves. Showing Loading for that single
         // transition is fine — it's the setup boundary, not every nav.
-        setGuardStatus('loading');
+        // The one exception is the first check behind a provisional shell:
+        // that check is what confirms the shell, so it runs behind it.
+        if (!provisionalRef.current) setGuardStatus('loading');
         setSetupModelHubAllowed(false);
 
         checkRemoteAuthForPath(location.pathname, getAuthSession).then(({ session, loginRequired, checkSetup }) => {
             if (cancelled) return;
+            provisionalRef.current = false;
             setAuthorizationSession(session);
             if (loginRequired) {
+                forgetBootSession();
                 setGuardStatus('remote-login-required');
                 return null;
             }
@@ -403,6 +414,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
                 && session.authenticated
                 && session.authorization_state === 'revoked'
             ) {
+                forgetBootSession();
                 setGuardStatus('authorization-revoked');
                 return null;
             }
@@ -411,6 +423,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
                 && session.authenticated
                 && session.authorization_state === 'unavailable'
             ) {
+                forgetBootSession();
                 setGuardStatus('authorization-unavailable');
                 reportRemoteAuthorizationState('unavailable');
                 return null;
@@ -421,6 +434,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
                 && session.authorization_state === 'current'
                 && !session.capabilities.can_manage_instance
             ) {
+                recordBootSession(session);
                 setGuardStatus('ready');
                 return null;
             }
@@ -435,17 +449,21 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
                 setSetupModelHubAllowed(Boolean(config?.mode
                     && 'capabilities' in session && session.capabilities?.can_manage_instance));
                 if (!isSetupComplete(config)) {
+                    forgetBootSession();
                     setGuardStatus('needs-setup');
                     return;
                 }
+                recordBootSession(session);
                 setGuardStatus('ready');
             });
         }).catch(async (error) => {
             if (cancelled) return;
+            provisionalRef.current = false;
             const authCheck = await checkRemoteAuthForPath(location.pathname, getAuthSession).catch(() => null);
             if (cancelled) return;
             if (authCheck?.session) setAuthorizationSession(authCheck.session);
             if (authCheck?.loginRequired) {
+                forgetBootSession();
                 setGuardStatus('remote-login-required');
                 return;
             }
@@ -454,6 +472,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
                 && authCheck.session.authenticated
                 && authCheck.session.authorization_state === 'revoked'
             ) {
+                forgetBootSession();
                 setGuardStatus('authorization-revoked');
                 return;
             }
@@ -462,6 +481,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
                 && authCheck.session.authenticated
                 && authCheck.session.authorization_state === 'unavailable'
             ) {
+                forgetBootSession();
                 setGuardStatus('authorization-unavailable');
                 reportRemoteAuthorizationState('unavailable');
                 return;
@@ -470,6 +490,8 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
                 setGuardStatus('ready');
                 return;
             }
+            // Blocked or needs setup: a gate either way.
+            forgetBootSession();
             const blocked = accessBlockedCode(error);
             if (blocked) {
                 // Server is up and the session probe was fine, but it refused
