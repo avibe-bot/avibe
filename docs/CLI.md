@@ -822,6 +822,12 @@ vibe bot remove cso
 - `remove` drops the Bot role and keeps the Agent, the Session, and the
   directory. The main Bot cannot be removed.
 
+A user can have at most five Bots besides the main Bot. `create` and `set` are
+refused with `bot_limit_reached` while five exist; `remove` one to free a place
+(its conversation and memory are kept, and setting it again reconnects them).
+An install that already has more keeps them all; only adding waits until fewer
+than five remain.
+
 The handle never changes once the Bot exists: the Bot's Session is
 `ses_<handle>` and its directory is `~/.avibe/bots/<handle>/`. The main Bot's
 Session is `ses_main`. While an Agent is a Bot it stays enabled and cannot be

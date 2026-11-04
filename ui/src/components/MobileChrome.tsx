@@ -98,10 +98,11 @@ export const MobileBotCenter: React.FC<BotCenter> = ({ avatar, name, label, unre
       aria-label={label}
       className="flex min-w-0 flex-1 flex-col items-center justify-end gap-1 px-1 pb-2 text-2xs"
     >
-      {/* Lifted out of the row, so the bar keeps its height and the avatar rises above its edge. */}
+      {/* Lifted out of the row, so the bar keeps its height and the avatar rises above its edge.
+          The avatar fills the button to its ring: one circle, the Bot's face in it. */}
       <span
         className={clsx(
-          'relative -mt-5 rounded-full bg-surface p-0.5 ring-2 transition',
+          'relative -mt-5 rounded-full bg-surface ring-2 transition',
           phase === 'idle' && (running ? 'shadow-glow-lg-mint ring-mint' : 'shadow-glow-md-mint ring-mint/45'),
           phase === 'pressed' && 'scale-95 shadow-glow-md-mint ring-mint',
           phase === 'recording' && 'scale-110 shadow-glow-xl-mint ring-4 ring-mint',
@@ -110,7 +111,7 @@ export const MobileBotCenter: React.FC<BotCenter> = ({ avatar, name, label, unre
         )}
       >
         {phase === 'recording' && <span className="absolute -inset-2 animate-ping rounded-full border-2 border-mint/50 motion-reduce:animate-none" aria-hidden="true" />}
-        <BotFace avatar={avatar} name={name} size={50} unread={voice ? 0 : unread} running={phase === 'idle' && running} />
+        <BotFace avatar={avatar} name={name} size={54} unread={voice ? 0 : unread} running={phase === 'idle' && running} plain />
         {(phase === 'recording' || phase === 'armed') && (
           <span className={clsx('absolute -bottom-1 -right-1 grid size-5 place-items-center rounded-full text-primary-foreground', phase === 'armed' ? 'bg-destructive' : 'bg-mint')}>
             <Mic className="size-3" />
@@ -186,11 +187,15 @@ const NewSessionCenter: React.FC<{ center: CenterButton }> = ({ center }) => {
 };
 
 // The mobile brand header above every tabbed page: the logo home link, and on
-// iOS Safari the Add-to-Home-Screen nudge.
-export const MobileBrandHeader: React.FC = () => {
+// iOS Safari the Add-to-Home-Screen nudge. 56px below the safe area, with the page's
+// 16px top inset below it, so the first section neither crowds the header nor floats
+// far below it. The open tab names the page for assistive tech only; the tab bar
+// shows it to everyone else.
+export const MobileBrandHeader: React.FC<{ title?: string | null }> = ({ title }) => {
   const { t } = useTranslation();
   return (
-    <header className="sticky top-0 z-40 flex h-[calc(4rem+env(safe-area-inset-top))] shrink-0 items-center justify-between gap-2 border-b border-border bg-background/92 px-4 pt-[env(safe-area-inset-top)] backdrop-blur md:hidden">
+    <header className="sticky top-0 z-40 flex h-[calc(3.5rem+env(safe-area-inset-top))] shrink-0 items-center justify-between gap-2 border-b border-border bg-background/92 px-4 pt-[env(safe-area-inset-top)] backdrop-blur md:hidden">
+      {title && <h1 className="sr-only">{title}</h1>}
       <Link
         to="/"
         className="flex min-w-0 items-center gap-2 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/60"

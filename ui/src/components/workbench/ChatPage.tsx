@@ -19,6 +19,7 @@ import { conversationDetails, isBotSessionId, isSelectableAgent, liveBotAgentNam
 import { BotAvatar } from '../ui/bot-avatar';
 import { BotConversationTitle } from './bots/BotSwitch';
 import { VoiceMark } from '../voice/VoiceMark';
+import type { VoiceTarget } from '../voice/VoiceCard';
 import { isVoiceMessage } from '../../lib/voiceMessage';
 import { useRegisterComposerTarget, type ComposerInsertTarget } from '../../context/ComposerBridgeContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
@@ -122,12 +123,13 @@ import {
   bySessionWriteGroup,
   commitSessionRowWrite,
   createSessionRowRefreshGate,
+  mergeSessionPatchWrites,
   recordSessionRowWrite,
   releaseSessionRowWrite,
+  sessionPatchWriteStandsAlone,
   sessionRowWithBootstrapFallback,
-  sessionWriteStandsAlone,
   useChatSessionRow,
-  type SessionRowRefreshGate,
+  type SessionPatchWrite as SharedSessionPatchWrite,
   type SessionWriteGroup,
 } from './sessionRowRefresh';
 import { chatSessionViewState } from './chatSessionViewState';
@@ -226,18 +228,9 @@ const PAGING_WHEEL_IDLE_MS = 200;
 // row's hint so the shortcut is discoverable instead of folklore.
 const ARCHIVE_SHORTCUT_LABEL = archiveSessionShortcutLabel();
 
-// One session write. The header applies an edit optimistically, so the request
-// that follows carries the chat it was made for: it is recorded under that
-// session's id (the URL may already be on another chat by the time it flushes)
-// and carries that chat's read-ordering gate, which is replaced on navigation.
-// It also carries which of the row's field groups it belongs to, because the
-// optimistic record it commits against is per group — the writer key alone says
-// that to the writer, not to the sender it hands the payload to.
-type SessionPatchWrite = {
-  changes: Partial<WorkbenchSession>;
-  gate: SessionRowRefreshGate;
-  group: SessionWriteGroup;
-};
+// One session write (see `SessionPatchWrite` in sessionRowRefresh): the chat's
+// gate is replaced on navigation, so the write carries the one it was made under.
+type SessionPatchWrite = SharedSessionPatchWrite<WorkbenchSession>;
 
 // ui/design: chat/conversation/default — the inline header replaces the old "Session
 // settings" dialog. Title is click-to-edit; the cyan-bordered pill on the
@@ -1101,24 +1094,11 @@ export const ChatPage: React.FC = () => {
     [api, t],
   );
 
-  // Within ONE group the clicks made while a request is in flight are transit
-  // rather than intent, so they fold into a single follow-up PATCH: an effort
-  // clicked behind an Agent switch was composed against that switch, so if the
-  // request fails the follow-up goes with it and the re-read below shows what the
-  // server actually holds — a half-applied route is worse than a visible
-  // rollback. A merged payload that ends up carrying the whole route depended on
-  // nothing, and ``sessionWriteStandsAlone`` is what keeps it from being dropped
-  // for a failure that says nothing about it. Across groups nothing folds, because
-  // they no longer share a writer at all. The newest gate wins: it belongs to the
-  // mount that is on screen now and whose reads the reconcile below has to fence.
-  const mergeSessionPatch = useCallback(
-    (prev: SessionPatchWrite, next: SessionPatchWrite): SessionPatchWrite => ({
-      changes: { ...prev.changes, ...next.changes },
-      gate: next.gate,
-      group: next.group,
-    }),
-    [],
-  );
+  // How the clicks made while a request is in flight fold into one follow-up
+  // PATCH: ``mergeSessionPatchWrites``. A merged payload that ends up carrying the
+  // whole route depended on nothing, and ``sessionWriteStandsAlone`` is what keeps
+  // it from being dropped for a failure that says nothing about it.
+  const mergeSessionPatch = mergeSessionPatchWrites<WorkbenchSession>;
 
   // Once per burst, not once per write. On success the read is what makes the
   // optimistic row authoritative again, and it is returned rather than fired and
@@ -1165,11 +1145,7 @@ export const ChatPage: React.FC = () => {
   // the group that owns those fields, from the two payloads' relation — never
   // assumed for the key as a whole (a model click behind a refused model click
   // overwrites the very field that failed).
-  const patchStandsAlone = useCallback(
-    (pending: SessionPatchWrite, refused: SessionPatchWrite) =>
-      sessionWriteStandsAlone(pending.group, pending.changes, refused.changes),
-    [],
-  );
+  const patchStandsAlone = sessionPatchWriteStandsAlone<WorkbenchSession>;
 
   const { write: writeRoutePatch, isSaving: isRoutePatchSaving } = useCoalescedWrite<SessionPatchWrite>(
     'session-route',
@@ -3130,7 +3106,7 @@ export const ChatPage: React.FC = () => {
           key={sessionId}
           composerRef={composerRef}
           readLatestAgentReply={readLatestAgentReply}
-          onSend={(text, attachments, references) => sendMessage(text, attachments, undefined, references)}
+          onSend={(text, attachments, references, metadata) => sendMessage(text, attachments, metadata, references)}
           onStop={stopMessage}
           busy={working}
           sessionId={sessionId ?? ''}
@@ -3140,6 +3116,9 @@ export const ChatPage: React.FC = () => {
           onSearchSessions={searchSessions}
           readOnlyReason={readOnlyReason}
           botName={conversationBotName}
+          voiceTarget={conversationBotName
+            ? { name: conversationBotName, avatar: conversationBot?.avatar ?? null }
+            : { name: session.title || t('chat.untitled'), title: t('voice.composer.toSession', { title: session.title || t('chat.untitled') }) }}
           // Hidden with the rest of the chat surface in Show Page mode, which is
           // also where the header used to withdraw the picker.
           actions={writable ? (
@@ -3670,7 +3649,7 @@ interface ComposeProps {
   /** The live route picker for the composer's action row; null when read-only. */
   actions: React.ReactNode;
   readLatestAgentReply: ComposerProps['readLatestAgentReply'];
-  onSend: (text: string, attachments?: ComposerAttachment[], references?: MentionReference[]) => void;
+  onSend: (text: string, attachments?: ComposerAttachment[], references?: MentionReference[], metadata?: Record<string, unknown>) => void;
   onStop: () => void;
   busy: boolean;
   sessionId: string;
@@ -3684,9 +3663,11 @@ interface ComposeProps {
   readOnlyReason: SessionReadOnlyReason | null;
   /** A Bot's conversation: the Bot's name, for the "working" placeholder. */
   botName?: string | null;
+  /** Who a message spoken by holding the composer goes to. */
+  voiceTarget: VoiceTarget;
 }
 
-const Compose: React.FC<ComposeProps> = ({ composerRef, actions, readLatestAgentReply, onSend, onStop, busy, sessionId, initialDraft, onDraftChange, onSearchAgents, onSearchSessions, readOnlyReason, botName }) => {
+const Compose: React.FC<ComposeProps> = ({ composerRef, actions, readLatestAgentReply, onSend, onStop, busy, sessionId, initialDraft, onDraftChange, onSearchAgents, onSearchSessions, readOnlyReason, botName, voiceTarget }) => {
   const { t } = useTranslation();
   const readOnly = readOnlyReason !== null;
   return (
@@ -3736,6 +3717,9 @@ const Compose: React.FC<ComposeProps> = ({ composerRef, actions, readLatestAgent
         // D4), so its conversation names who is working and promises no queue.
         busyPlaceholder={botName ? t('bots.conversation.working', { name: botName }) : undefined}
         busySendsNow={botName != null}
+        // Where a hold would record, the Bot's line also names the gesture.
+        holdPlaceholder={botName ? t('voice.composer.botPlaceholder', { name: botName }) : undefined}
+        voiceTarget={voiceTarget}
         autoFocus={!readOnly}
       />
     </div>
@@ -3754,7 +3738,8 @@ const BotConversationEmpty: React.FC<{ name: string; avatar: BotAvatarSpec | nul
   const { t } = useTranslation();
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
-      <BotAvatar avatar={avatar} name={name} size={64} />
+      {/* The conversation's own face: the mascot stands on the page, without a well. */}
+      <BotAvatar avatar={avatar} name={name} size={64} plain />
       <div className="max-w-[420px] text-[15px] font-semibold text-foreground">{t('bots.conversation.emptyTitle', { name })}</div>
       {role && <div className="max-w-[440px] text-[13px] leading-relaxed text-foreground/80">{role}</div>}
       <div className="max-w-[440px] text-balance text-[13px] leading-relaxed text-muted">{t('bots.conversation.emptyBody', { name })}</div>
@@ -5062,7 +5047,7 @@ export const ThinkingBubble: React.FC<{
       <div className="group/message flex max-w-[min(92%,860px)] flex-col items-start gap-1">
         <div className="flex items-center gap-2 px-0.5">
           {replyBot ? (
-            <BotAvatar avatar={replyBot.avatar} name={botDisplayName(replyBot)} size={24} />
+            <BotAvatar avatar={replyBot.avatar} name={botDisplayName(replyBot)} size={24} plain />
           ) : (
             <RoleAvatar tone="mint"><BackendAvatar backend={agentBackend ?? session.agent_backend ?? ''} /></RoleAvatar>
           )}
@@ -5490,7 +5475,7 @@ export const MessageRow = memo(function MessageRow({
       <div className="group/message flex max-w-[min(92%,860px)] flex-col items-start gap-1">
         <div className="flex items-center gap-2 px-0.5">
           {agentIdentity && replyBot ? (
-            <BotAvatar avatar={replyBot.avatar} name={botDisplayName(replyBot)} size={24} />
+            <BotAvatar avatar={replyBot.avatar} name={botDisplayName(replyBot)} size={24} plain />
           ) : (
             <RoleAvatar tone={isAgent ? 'mint' : 'muted'}>{agentIdentity ? <BackendAvatar backend={agentBackend ?? session.agent_backend ?? ''} /> : <Info />}</RoleAvatar>
           )}

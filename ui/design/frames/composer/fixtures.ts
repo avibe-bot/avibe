@@ -1,16 +1,18 @@
 // The conversations the hold-to-talk frames draw: the security lead's (a Bot) and the cache-fix
 // Session in avibe (an ordinary Session). Speech is available, so the composer shows its mic.
 import type { WorkbenchMessage } from '@/context/ApiContext';
+import { VOICE_MESSAGE_METADATA } from '@/lib/voiceMessage';
 
 import { botConversationApi, message, session, type WorkbenchFixtures } from '../../shell/fixtures';
 import { agentsApi, csoTranscript, team, teamFixtures } from '../../shell/teamFixtures';
 
 const cso = team.find((each) => each.handle === 'cso')!;
 
-/** The placeholder that teaches the gesture, wherever a hold would record. (While a Bot works, its
- *  conversation already reads "{name} 正在处理…", and a hold still records.) */
-const holdCopy = {
-  'chat.compose.placeholder': { zh: '输入消息，或按住说话', en: 'Message, or hold to talk' },
+/** Where a hold would not record (the keyboard is up, a take waits for a decision), the placeholder
+ *  is the plain one. A static frame has no focus and no live take, so it says so through the copy. */
+const noHint = {
+  'voice.composer.placeholder': { zh: '输入消息…', en: 'Type a message…' },
+  'voice.composer.botPlaceholder': { zh: '给{{name}}发消息…', en: 'Message {{name}}…' },
 };
 
 /** A file staged in the composer with no text: a hold still records, and it goes with the message. */
@@ -50,8 +52,8 @@ export function csoFixtures({
   messages = csoTranscript,
   running = false,
   draft = '',
-  copy = true,
-}: { messages?: WorkbenchMessage[]; running?: boolean; draft?: string; copy?: boolean } = {}): WorkbenchFixtures {
+  hint = true,
+}: { messages?: WorkbenchMessage[]; running?: boolean; draft?: string; hint?: boolean } = {}): WorkbenchFixtures {
   const api = botConversationApi(cso, team, messages, running);
   const bootstrap = api[`/api/sessions/${cso.session_id}/bootstrap`] as Record<string, unknown>;
   return {
@@ -64,12 +66,12 @@ export function csoFixtures({
       [`/api/sessions/${cso.session_id}/bootstrap`]: { ...bootstrap, draft: { text: draft, updated_at: null } },
       ...speech,
     },
-    copy: copy ? holdCopy : undefined,
+    copy: hint ? undefined : noHint,
   };
 }
 
 /** The conversation once the spoken message is in: the security lead is on it. */
-export const csoSentMessages = [...csoTranscript, message('ses_cso', 'c3', 'user', said.final, 0)];
+export const csoSentMessages = [...csoTranscript, { ...message('ses_cso', 'c3', 'user', said.final, 0), metadata: { ...VOICE_MESSAGE_METADATA } }];
 
 const turnState = { in_flight: false, foreground: 'idle', native_turn_started: false, pending_input_count: 0, background_activities: [], pending_activity_output_count: 0, connection: 'connected' };
 
@@ -108,6 +110,5 @@ export function sessionFixtures(): WorkbenchFixtures {
       '/api/vault/requests': { ok: true, requests: [] },
       ...speech,
     },
-    copy: holdCopy,
   };
 }

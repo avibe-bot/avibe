@@ -18,6 +18,7 @@ import {
   type VaultStateEvent,
 } from './vaultSandboxClient';
 import { type BlindBox, type ProtectedRecordEnvelope, type SignatureResult, type SignatureScheme } from './vaultCrypto';
+import { assertVaultEntryAvailable, vaultEntryIssue } from './vaultEntry';
 import { invalidateVaultSandboxPolicy } from './vaultSandboxPolicy';
 
 /**
@@ -212,10 +213,6 @@ function commitLocked(wrapMeta: string): void {
   notifyVaultLockChange();
 }
 
-export function webauthnAvailable(): boolean {
-  return typeof window !== 'undefined' && typeof crypto !== 'undefined' && Boolean(crypto.subtle);
-}
-
 function isSerializedCredential(value: unknown): value is VaultWebAuthnSerializedCredential {
   return typeof value === 'object' && value != null && 'rawId' in value && 'response' in value;
 }
@@ -246,6 +243,15 @@ export function useProtectedVault() {
   }, []);
 
   const refresh = useCallback(async () => {
+    // Even direct hook callers must stop before discovery/preparation, including
+    // a stale mirrored unlocked state left by another surface.
+    try {
+      assertVaultEntryAvailable();
+    } catch (error) {
+      setStatus('error');
+      setError(vaultErrorMessage(t, error, t('errors.sandbox_entry_unavailable')));
+      return;
+    }
     if (sessionVault.status === 'unlocked') {
       // Already unlocked and kept honest by the event stream — don't flash a "checking" state or
       // re-query (a `status` call is silent but pointless here).
@@ -313,6 +319,7 @@ export function useProtectedVault() {
   }, [api]);
 
   const unlockPasskey = useCallback(async () => {
+    assertVaultEntryAvailable();
     const wrapMeta = sessionVault.wrapMeta;
     if (!wrapMeta) throw new Error('vault-not-setup');
     const result = await (await getVaultSandboxClient()).unlock({ wrapMeta });
@@ -331,6 +338,7 @@ export function useProtectedVault() {
         authzFactorRegistration?: VaultWebAuthnRegistrationPayload;
       }
     > => {
+      assertVaultEntryAvailable();
       const wrapMeta = sessionVault.wrapMeta;
       if (!wrapMeta) throw new Error('vault-locked');
       const sandbox = await getVaultSandboxClient();
@@ -496,9 +504,10 @@ export function useProtectedVault() {
  * also reports ready, so the step itself surfaces the error.
  */
 export function useVaultSandboxWarm(enabled: boolean): boolean {
+  const allowed = enabled && !vaultEntryIssue();
   const [ready, setReady] = useState(false);
   useEffect(() => {
-    if (!enabled) return;
+    if (!allowed) return;
     let alive = true;
     const settle = () => {
       if (alive) setReady(true);
@@ -507,8 +516,8 @@ export function useVaultSandboxWarm(enabled: boolean): boolean {
     return () => {
       alive = false;
     };
-  }, [enabled]);
-  return !enabled || ready;
+  }, [allowed]);
+  return !allowed || ready;
 }
 
 export function useVaultLock(): { unlocked: boolean; remainingMs: number; lockNow: () => void } {

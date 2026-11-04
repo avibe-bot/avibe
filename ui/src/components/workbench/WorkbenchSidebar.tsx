@@ -7,7 +7,6 @@ import {
   Archive,
   Bot,
   ChevronDown,
-  ChevronRight,
   CodeXml,
   Ellipsis,
   FileText,
@@ -353,7 +352,6 @@ const ProjectRow: React.FC<{
 }) => {
   const { t } = useTranslation();
   const wm = useWindowManager();
-  const Chevron = expanded ? ChevronDown : ChevronRight;
   const [renaming, setRenaming] = useState(false);
   const [renameDraft, setRenameDraft] = useState(project.display_name);
   const surfaceActiveRef = useLatestRef(useRouteSurfaceActive());
@@ -383,7 +381,9 @@ const ProjectRow: React.FC<{
     <div className="flex flex-col gap-0.5">
       <div
         data-settings-interaction-owner="true"
-        className="group flex items-center gap-1.5 rounded-md py-1.5 pl-1 pr-2 transition hover:bg-foreground/[0.04]"
+        // The folder sits in the sidebar's icon column (the capability rows' icons);
+        // the sessions below line up under the project's name.
+        className="group flex items-center gap-1.5 rounded-md py-1.5 pl-[13px] pr-2 transition hover:bg-foreground/[0.04]"
         title={project.folder_path}
         onContextMenu={(e) => {
           // Right-click opens the same menu as the ⋯ button (anchored to it).
@@ -395,7 +395,7 @@ const ProjectRow: React.FC<{
         {renaming ? (
           <div className="flex flex-1 items-center gap-1.5">
             {expanded ? (
-              <FolderOpen className="size-3.5 shrink-0 text-muted" />
+              <FolderOpen className="size-3.5 shrink-0 text-cyan-ink" />
             ) : (
               <Folder className="size-3.5 shrink-0 text-muted" />
             )}
@@ -420,11 +420,13 @@ const ProjectRow: React.FC<{
             {...dragHandle}
             type="button"
             onClick={onToggle}
+            aria-expanded={expanded}
             className="project-drag-header flex min-w-0 flex-1 items-center gap-1.5 text-left"
           >
-            <Chevron className="project-drag-icon size-3 shrink-0 text-muted" />
+            {/* The whole row opens the project, and the folder opens with it (tinted like
+                the phone's): no chevron, the same row on both. */}
             {expanded ? (
-              <FolderOpen className="project-drag-icon size-3.5 shrink-0 text-muted" />
+              <FolderOpen className="project-drag-icon size-3.5 shrink-0 text-cyan-ink" />
             ) : (
               <Folder className="project-drag-icon size-3.5 shrink-0 text-muted" />
             )}
@@ -733,7 +735,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
                 title={t('workbench.nav.inbox')}
                 className={({ isActive }) =>
                   clsx(
-                    'relative grid size-8 place-items-center rounded-lg border transition-colors',
+                    'group relative grid size-8 place-items-center rounded-lg border transition-colors',
                     // Cyan active state — mint is reserved
                     // for sessions / projects so the two reads stay distinct.
                     isActive
@@ -745,8 +747,11 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
                 {({ isActive }) => (
                   <>
                     {/* Cyan is what unread means here, so the counter colours the
-                        icon on any route — not only while Inbox is the open one. */}
-                    <Inbox className={clsx('size-[18px]', badge || isActive ? 'text-cyan-ink' : 'text-foreground')} />
+                        icon on any route — not only while Inbox is the open one. With
+                        nothing unread it rests in the capability rows' quiet icon colour,
+                        and hovering brings it to the foreground as before; muted unread
+                        keeps the foreground ink beside its grey dot. */}
+                    <Inbox className={clsx('size-[18px]', badge || isActive ? 'text-cyan-ink' : quietUnread ? 'text-foreground' : 'text-muted group-hover:text-foreground')} />
                     {badge ? (
                       <span className="absolute -right-1 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-cyan px-1 font-mono text-[9px] font-bold text-accent-foreground shadow-glow-xs-cyan">
                         {badge}

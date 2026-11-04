@@ -11,11 +11,13 @@ declare global {
   interface Window {
     voiceShortcutTest: {
       sent: string[];
+      /** Messages spoken by holding the composer, with what they were sent with. */
+      spoken: { text: string; metadata: Record<string, unknown> }[];
     };
   }
 }
 
-window.voiceShortcutTest = { sent: [] };
+window.voiceShortcutTest = { sent: [], spoken: [] };
 
 window.fetch = async (input, init) => {
   const url = new URL(
@@ -56,10 +58,12 @@ export function VoiceShortcutHarness() {
     <Composer
       ref={composerRef}
       sessionId="voice-shortcut-session"
-      onSend={(text) => {
+      onSend={(text, _attachments, _references, metadata) => {
         window.voiceShortcutTest.sent.push(text);
+        if (metadata) window.voiceShortcutTest.spoken.push({ text, metadata });
         return true;
       }}
+      voiceTarget={{ name: 'Fix the cache', title: 'To “Fix the cache”' }}
       onSearchAgents={async () => []}
       onSearchSessions={async () => []}
     />

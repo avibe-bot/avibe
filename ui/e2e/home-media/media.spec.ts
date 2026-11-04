@@ -3,7 +3,12 @@ import en from '../../src/i18n/en.json' with { type: 'json' };
 import zh from '../../src/i18n/zh.json' with { type: 'json' };
 
 const file = { name: '发布说明 中文.txt', mimeType: 'text/plain', buffer: Buffer.from('版本内容 ✓') };
-const input = (page: Page) => page.getByPlaceholder(en.workbench.home.inputPlaceholder);
+const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+// The home composer: with speech available its idle placeholder names hold-to-talk, and while a
+// tap dictation owns the box it is the plain one.
+const input = (page: Page) => page.getByPlaceholder(
+  new RegExp(`^(${escape(en.voice.composer.homePlaceholder)}|${escape(en.workbench.home.inputPlaceholder)})$`),
+);
 const send = (page: Page) => page.getByRole('button', { name: en.chat.compose.send, exact: true });
 const writes = (page: Page, suffix: string) => page.evaluate((suffix) => window.homeMedia.writes.filter((write) => write.path.endsWith(suffix)), suffix);
 const attach = async (page: Page) => page.locator('input[type=file]').setInputFiles(file);
@@ -24,9 +29,9 @@ test('draft files follow final project and Agent selection through picker cancel
   await expect(page.getByText(file.name, { exact: true })).toBeVisible();
   expect(await writes(page, '/api/sessions')).toEqual([]);
   expect(await writes(page, '/attachments')).toEqual([]);
-  // Opening a folder is the card's own action; the project row below shows
-  // which one the draft is bound to, with the mint fill marking the target.
-  const openProject = () => page.getByRole('button', { name: en.workbench.home.openProject, exact: true });
+  // Opening a folder is the project row's own chip; the row shows which project
+  // the draft is bound to, with the mint fill marking the target.
+  const openProject = () => page.getByRole('button', { name: en.newSession.newProject, exact: true });
   const projectChip = (name: string) => page.getByRole('button', { name, exact: true });
   await openProject().click();
   await expect.poll(async () => (await writes(page, '/api/browse')).at(-1)?.body.path).toBe('/fixture/中文项目');
@@ -142,7 +147,8 @@ for (const width of [320, 375, 390, 1366, 1600]) {
       await page.route('**/*', (route) => new URL(route.request().url()).origin === 'http://127.0.0.1:5217' ? route.continue() : route.abort());
       await page.goto(`/e2e/home-media/fixture.html?lang=${lang}&theme=${theme}`);
       const copy = lang === 'zh' ? zh : en;
-      await expect(page.getByRole('heading', { name: copy.workbench.home.heroTitle })).toBeVisible();
+      await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+      await expect(page.getByRole('button', { name: copy.workbench.home.asks.remember })).toBeVisible();
       await expect(page.getByRole('button', { name: copy.chat.compose.voice, exact: true })).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)).toBe(false);
       // The home uses the composer's two-row box, the same one the chat page
@@ -179,7 +185,7 @@ test('voice failure retains the recording for explicit retry while preserving th
 test('directory picker remains keyboard-contained and its footer reachable on a short narrow viewport', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 440 });
   await open(page);
-  await page.getByRole('button', { name: en.workbench.home.openProject, exact: true }).click();
+  await page.getByRole('button', { name: en.newSession.newProject, exact: true }).click();
   const dialog = page.getByRole('dialog');
   const select = dialog.getByRole('button', { name: en.directoryBrowser.select, exact: true });
   await expect(select).toBeInViewport();

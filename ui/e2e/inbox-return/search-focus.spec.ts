@@ -10,7 +10,7 @@ test.beforeEach(async ({ page }) => {
 test('a search-entry tap focuses the input within the same gesture and accepts typing', async ({ page, isMobile }, testInfo) => {
   test.skip(!isMobile, 'The Inbox search entry is mobile-only.');
   await page.goto('/e2e/inbox-return/fixture.html#/inbox');
-  const entry = page.getByText(copy('workbench.search.entry'), { exact: true });
+  const entry = page.getByText(copy('workbench.search.entryAll'), { exact: true });
   const input = page.getByRole('textbox', { name: copy('workbench.search.placeholder') });
 
   for (let visit = 0; visit < 2; visit += 1) {

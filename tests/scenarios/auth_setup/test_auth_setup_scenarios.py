@@ -247,7 +247,7 @@ def test_mcp_hub_oauth_login_completes_through_owner_callback(monkeypatch, tmp_p
 
 
 def test_mcp_hub_same_name_oauth_logins_stay_in_their_scope(monkeypatch, tmp_path):
-    """Scenario: AUTH-SETUP-137 — global and project `github` logins keep separate pending grants, tokens and return views."""
+    """Scenario: AUTH-SETUP-138 — global and project `github` logins keep separate pending grants, tokens and return views."""
     from tests.scenario_harness.core import BaseScenarioHarness, ScenarioExpect, ScenarioRunner
     from tests.test_mcp_hub_oauth import _LoopbackOauth
     from core.mcp_hub import oauth as mcp_oauth

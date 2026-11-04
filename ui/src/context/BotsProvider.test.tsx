@@ -5,7 +5,7 @@ import { useEffect, useRef } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { WorkbenchEventHandlers } from './ApiContext';
+import { ApiError, type WorkbenchEventHandlers } from './ApiContext';
 import { BotsProvider } from './BotsProvider';
 import { BotRosterContext, type BotRoster } from './BotRosterContext';
 import { useBots } from './BotsContext';
@@ -16,7 +16,11 @@ import type { Bot } from '../lib/bots';
 import { DENIED_INSTANCE_CAPABILITIES } from '../lib/sessionInfo';
 import type { WorkbenchEventConnectionState } from '../lib/workbenchEventConnection';
 
-vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
+vi.mock('react-i18next', () => ({
+  useTranslation: () => ({
+    t: (key: string, values?: Record<string, unknown>) => (values ? `${key}:${JSON.stringify(values)}` : key),
+  }),
+}));
 
 const apiRef = { current: null as unknown };
 vi.mock('./ApiContext', async () => {
@@ -36,7 +40,7 @@ const CSO: Bot = {
 function fakeApi() {
   const stream: { handlers: WorkbenchEventHandlers | null } = { handlers: null };
   const api = {
-    listBots: vi.fn(async () => [MAIN, CSO]),
+    listBots: vi.fn(async () => ({ bots: [MAIN, CSO], limit: { count: 1, max: 5 } })),
     getSession: vi.fn(async () => ({ agent_status: 'idle' })),
     listVibeAgents: vi.fn(async () => ({ ok: true, agents: [], default_agent_name: null })),
     updateBot: vi.fn(async (_handle: string, patch: { display_name?: string }) => ({ ...CSO, ...patch })),
@@ -60,6 +64,41 @@ const OpenEdit = () => {
   }, [loaded, openProfile]);
   return null;
 };
+
+/** Opens the add dialog once the list has answered, as the strip's Add does. */
+const OpenCreate = () => {
+  const { loaded, openProfile } = useBots();
+  const opened = useRef(false);
+  useEffect(() => {
+    if (!loaded || opened.current) return;
+    opened.current = true;
+    openProfile({ kind: 'create' });
+  }, [loaded, openProfile]);
+  return null;
+};
+
+function renderDialog(api: ReturnType<typeof fakeApi>['api'], opener: React.ReactNode) {
+  apiRef.current = api;
+  return render(
+    <MemoryRouter>
+      <ToastContext.Provider value={{ showToast: () => undefined }}>
+        <InstanceAuthorizationContext.Provider
+          value={{
+            remote: false,
+            instanceKind: null,
+            instanceRole: null,
+            capabilities: { ...DENIED_INSTANCE_CAPABILITIES, is_instance_owner: true },
+          }}
+        >
+          <BotsProvider>
+            {opener}
+            <BotProfileDialogHost />
+          </BotsProvider>
+        </InstanceAuthorizationContext.Provider>
+      </ToastContext.Provider>
+    </MemoryRouter>,
+  );
+}
 
 async function flush() {
   await act(async () => {
@@ -121,6 +160,62 @@ describe('saving a Bot from the dialog reads the Bots once', () => {
   });
 });
 
+// docs/plans/bots.md D12; ui/design: sidebar/bot-profile/at-limit. The dialog knows the
+// limit from the same read as the list, and a refusal that still happens says the same.
+describe('the add dialog and the places for custom Bots', () => {
+  const create = () => screen.getByRole('button', { name: 'bots.dialog.create' }) as HTMLButtonElement;
+  // The main Bot does not count, so the reason names it.
+  const reason = 'bots.limit.reached:{"max":5,"main":"bots.mainDefaultName"}';
+
+  it('opened with every place taken, says why and adds nothing', async () => {
+    const { api } = fakeApi();
+    api.listBots.mockResolvedValue({ bots: [MAIN, CSO], limit: { count: 5, max: 5 } });
+    renderDialog(api, <OpenCreate />);
+    await flush();
+
+    expect(await screen.findByText(reason)).toBeTruthy();
+    expect(screen.getByText('bots.limit.places:{"taken":5,"max":5}')).toBeTruthy();
+    expect(create().disabled).toBe(true);
+    // Asking the main Bot instead would meet the same limit, so the dialog does not suggest it.
+    expect(screen.queryByText(/^bots\.dialog\.chatHint/)).toBeNull();
+  });
+
+  it('shows the same words when another add took the last place first, until the list frees a place', async () => {
+    const { api, stream } = fakeApi();
+    // Every read parses a fresh body, as `api.listBots` does.
+    api.listBots.mockImplementation(async () => ({ bots: [MAIN, CSO], limit: { count: 4, max: 5 } }));
+    const suggestBotHandle = vi.fn(async () => ({ handle: 'zeta', source: 'transliteration' }));
+    const createBot = vi.fn(async () => {
+      throw new ApiError('最多 5 位伙伴，移出一位后可以再添加。移出的伙伴会保留对话和记忆。', 409, 'bot_limit_reached');
+    });
+    Object.assign(api, { suggestBotHandle, createBot });
+    renderDialog(api, <OpenCreate />);
+    await flush();
+    // A live stream: the list is read again only when the server says it changed.
+    act(() => stream.handlers?.onConnectionState?.('connected'));
+    expect(screen.queryByText(reason)).toBeNull();
+    expect(screen.getByText(/^bots\.dialog\.chatHint/)).toBeTruthy();
+
+    fireEvent.change(await screen.findByPlaceholderText('bots.dialog.namePlaceholder'), { target: { value: 'Zeta' } });
+    fireEvent.click(create());
+    await flush();
+
+    expect(createBot).toHaveBeenCalledTimes(1);
+    // The list has not been read since; the refusal itself says every place is taken.
+    expect(await screen.findByText(reason)).toBeTruthy();
+    expect(screen.getByText('bots.limit.places:{"taken":5,"max":5}')).toBeTruthy();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(create().disabled).toBe(true);
+
+    // Then a Bot is removed elsewhere: the next read decides, and what was entered can be added.
+    act(() => stream.handlers?.onBotsChanged?.({ handle: 'pm' }));
+    await flush();
+    expect(screen.queryByText(reason)).toBeNull();
+    expect(create().disabled).toBe(false);
+    expect(screen.getByDisplayValue('Zeta')).toBeTruthy();
+  });
+});
+
 // The Inbox above the router splits its counts by this list (BotRosterContext),
 // the server's definition of a Bot conversation: a current Bot's Session.
 describe('publishing the Bot list to the Inbox', () => {
@@ -154,7 +249,7 @@ describe('publishing the Bot list to the Inbox', () => {
     expect(published.at(-1)?.known).toBe(true);
     expect(ids()).toEqual(['ses_cso', 'ses_main']);
 
-    api.listBots.mockResolvedValueOnce([MAIN]);
+    api.listBots.mockResolvedValueOnce({ bots: [MAIN], limit: { count: 0, max: 5 } });
     act(() => stream.handlers?.onBotsChanged?.({ handle: 'cso' }));
     await flush();
     expect(ids()).toEqual(['ses_main']);
@@ -168,7 +263,7 @@ describe('publishing the Bot list to the Inbox', () => {
   it("keeps the Owner's list unknown while it cannot be read", async () => {
     const { api, stream, published, ids } = mountRoster(true);
     api.listBots.mockReset();
-    api.listBots.mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce([MAIN, CSO]);
+    api.listBots.mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce({ bots: [MAIN, CSO], limit: { count: 1, max: 5 } });
     await flush();
     // A failed read is not "no Bots": counting every Bot reply as a Session's would be wrong.
     expect(published.at(-1)).toMatchObject({ known: false });

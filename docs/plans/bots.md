@@ -183,14 +183,24 @@ Owner decisions 2026-11-01, from the mockups in this Session's Show Page
   添加伙伴, 设为伙伴, 移出伙伴. Technical concepts (Agents, Harness, Vaults)
   stay in English, so the wording itself separates a role from a colleague.
 - **Avatar strip.** Bots appear as a row of 40px avatars with their names
-  below, the main Bot first. The current Bot has a mint ring; unread shows as
-  a cyan count; a running Turn shows as a pulsing mint dot. With few Bots an
-  "Add" slot (dashed circle) follows the avatars; with more, the avatars
-  scroll horizontally with a fading right edge and "Add" stays pinned at the
-  right.
-- **Theme.** The main Bot's avatar well follows the theme: white with a hairline
-  ring in light, dark in dark. Emoji avatars keep one hue with a light and a
-  dark well.
+  below, the main Bot first. The current Bot's own edge lights up mint with a
+  halo (the one shared selected look, `.bot-avatar-selected`, which the phone's
+  Bot switch sheet uses too; the halo is `--shadow-glow-selected-mint`, wider and
+  stronger in Light so it reads over white); unread shows as a cyan count; a running
+  Turn shows as a pulsing mint dot. With few Bots an "Add" slot (dashed circle)
+  follows the avatars; with more, the avatars scroll horizontally with a fading
+  right edge and "Add" stays pinned at the right.
+- **Theme.** Emoji avatars keep one hue with a light and a dark well. The main
+  Bot's mascot sits on the mint member of that family (the emoji wells'
+  saturation and lightness at the picker's mint hue), with no ring, so it is one
+  more disc beside them in both themes (owner, 2026-11-04).
+- **A face alone or in a list (owner decision, 2026-11-03).** Where a Bot
+  appears among other Bots (the strip, its hover card, the Inbox, the `@` list,
+  the Agents page, the switch sheet), the main Bot's mascot keeps its well, so
+  every Bot is the same disc. Where its face stands alone (a conversation's
+  header, its replies and empty state, and the phone tab bar's center), the
+  mascot is drawn without its well (`plain`); in Light it keeps a
+  soft shadow of its own so it still reads on a white surface.
 - **Hover card.** Hovering an avatar shows its full name, handle, role, and
   latest message or running step; clicking opens the conversation. This makes
   up for the strip having no message preview.
@@ -376,6 +386,41 @@ by tier. Owned by `docs/plans/system-prompt-cache-tiers.md`, which applies to
 every Vibey Session. It also moves the date out of the environment block (the
 `[Now: ...]` line has it) and adds the `instructions` pending field.
 
+### D12. At most five custom Bots
+
+Owner decision, 2026-11-03.
+
+- A user can have at most five custom Bots. The main Bot does not count, and
+  neither do the hidden system Bots (the reserved `memory` and `ops` handles,
+  D2). Why: attention is limited. A person talks with about five Bots a day,
+  and the limit keeps Bots distinct from Sessions, so users do not come to
+  treat Bots as conversations.
+- What counts is the current Bots: a removed Bot frees its place, and setting
+  it again takes one. `core/bots.py` owns the rule (`MAX_CUSTOM_BOTS`,
+  `counts_toward_limit`).
+- Every way to add a Bot (`POST /api/bots`, `POST /api/bots/set`,
+  `vibe bot create`, `vibe bot set`) is refused once five count, with
+  `bot_limit_reached`: it says the limit, that the main Bot does not count (by
+  its current display name on the Web), that removing a Bot frees a place, and
+  that a removed Bot keeps its conversation and memory. The check runs
+  under the write lock of the transaction that adds the Bot, so two adds racing
+  for the last place cannot both take it. This refusal is also what the main
+  Bot reads when it runs `vibe bot create`; no prompt text describes the limit.
+- An install already over the limit keeps every Bot; only adding is refused
+  until fewer than five count.
+- `GET /api/bots` returns the limit beside the list (`limit`: `count` and
+  `max`), so every Web surface knows it from the same read. With every place
+  taken:
+  - the sidebar's avatar strip (desktop and the phone's Workbench) and the
+    phone's Bot switch sheet have no Add at all: their room goes to the Bots;
+  - the Agents page keeps its Add card and 「设为伙伴」 in place, disabled, with
+    the reason and the count beside it (「最多 5 位伙伴（不含歪比），移出一位后可以再添加
+    5/5」). The reason names the main Bot by its current display name, because
+    the page lists it among the Bots while the count leaves it out;
+  - the add dialog shows the same notice and adds nothing, and shows it too
+    when the server refuses because another add took the last place first,
+    until the list is read again and says whether a place is free.
+
 ## Prompt drafts
 
 English, per the repository rule. Placeholders in braces.
@@ -487,9 +532,9 @@ API invalidates immediately.
 
 | Route | Purpose |
 | --- | --- |
-| `GET /api/bots` | Bots in display order: handle, display name (empty means the localized default for the main Bot), avatar (`emoji` with hue, `image` with URL, or the main Bot's mascot), role, Agent name, Session id, position, built-in flag, Hide details |
-| `POST /api/bots` | Create: display name, handle (optional), role, avatar (optional), model (optional). Makes the Vibey Agent, the Bot, its directory, and its Session |
-| `POST /api/bots/set` | Make an existing Vibey Agent a Bot: Agent name, display name, avatar |
+| `GET /api/bots` | Bots in display order: handle, display name (empty means the localized default for the main Bot), avatar (`emoji` with hue, `image` with URL, or the main Bot's mascot), role, Agent name, Session id, position, built-in flag, Hide details; beside them, `limit` (`count` custom Bots of `max`, D12) |
+| `POST /api/bots` | Create: display name, handle (optional), role, avatar (optional), model (optional). Makes the Vibey Agent, the Bot, its directory, and its Session. Refused with `bot_limit_reached` once five custom Bots count (D12) |
+| `POST /api/bots/set` | Make an existing Vibey Agent a Bot: Agent name, display name, avatar. Refused the same way (D12) |
 | `PATCH /api/bots/{handle}` | Display name, emoji avatar (custom Bots only), position, Hide details (`hide_details`) |
 | `DELETE /api/bots/{handle}` | Remove the Bot role (the main Bot refuses) |
 | `PUT /api/bots/{handle}/avatar` | Upload an image (custom Bots only); stored as `avatar.png` in the Bot's directory |

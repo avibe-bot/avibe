@@ -17,7 +17,7 @@ TOOLING = (
 
 def test_release_tooling_never_runs_from_an_unpinned_checkout():
     covered = set()
-    for file in ("desktop-package.yml", "release_ai.yml"):
+    for file in ("desktop-package.yml", "desktop-signpath-test.yml", "release_ai.yml"):
         jobs = workflow(file)["jobs"]
         for name, job in jobs.items():
             steps = job.get("steps", [])
@@ -38,4 +38,4 @@ def test_release_tooling_never_runs_from_an_unpinned_checkout():
                     # restores the unpinned default.
                     if re.search(r"\b(always|cancelled)\s*\(", str(job.get("if", ""))):
                         assert "||" in ref, (file, name, producer)
-    assert covered == {"package", "resolve-desktop-release", "build-assets", "release"}
+    assert covered == {"package", "signpath-test-build", "resolve-desktop-release", "build-assets", "release"}

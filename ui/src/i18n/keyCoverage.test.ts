@@ -905,6 +905,9 @@ const NON_KEY_LITERALS = [
   'agents.opencode.error_retry_limit',
   'platforms.enabled',
 
+  // The Vault entry allowlist compares this hostname; it is not displayed copy.
+  'avibe.bot',
+
   // Not keys in any sense: a package name, a host, a filename, a sample domain.
   'Thumbs.db',
   'opencode.ai',

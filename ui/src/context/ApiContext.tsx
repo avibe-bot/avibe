@@ -5,9 +5,10 @@ import type { PickerAgentCatalog } from '../components/settings/models/types';
 import type { AgentBackendId, NativeCliBackend, WebOAuthBackend } from '../lib/agentBackends';
 import { apiFetch, recoverRemoteAuthFromSessionProbe, withApiDeadline } from '../lib/apiFetch';
 import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
-import { parseBot, type AgentBotSummary, type Bot, type BotEmojiAvatarInput } from '../lib/bots';
+import { parseBot, parseBotLimit, type AgentBotSummary, type Bot, type BotEmojiAvatarInput, type BotLimit } from '../lib/bots';
 import { parseNotificationPreferences, type InboxCategory, type NotificationPreferences } from '../lib/notificationPreferences';
 import { mcpPath } from '../lib/mcpPath';
+import { parseHomePreferences, type HomePreferences } from '../lib/homePreferences';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
 import type { AgentGraphParams, AgentGraphResult, AgentGraphVisibility } from '../lib/agentGraph';
 import { onPageReactivated, type PageReactivationListener } from '../lib/pageActivity';
@@ -544,6 +545,8 @@ export type RemoteAccessStatus = {
   network_path?: TunnelNetworkPath;
   error?: string;
   optimization_started?: boolean;
+  retry_at?: string | null;
+  retry_after_seconds?: number;
   pending_pairing?: {
     phase: 'prepared' | 'redeemed' | 'applied' | 'revoked' | 'retirement_pending' | 'invalid';
     can_resume: boolean;
@@ -650,6 +653,9 @@ export type ApiContextType = {
   getNotificationPreferences: () => Promise<NotificationPreferences>;
   /** Writes only the switches named; the server merges them into the stored record. */
   updateNotificationPreferences: (changes: Partial<NotificationPreferences>) => Promise<NotificationPreferences>;
+  /** The account's home preferences; `setup_not_needed` in a change only adds items. */
+  getHomePreferences: () => Promise<HomePreferences>;
+  updateHomePreferences: (changes: Partial<HomePreferences>) => Promise<HomePreferences>;
   getWebPushStatus: (payload?: WebPushStatusPayload) => Promise<WebPushStatus>;
   getWebPushVapidPublicKey: () => Promise<{ ok: boolean; public_key: string }>;
   subscribeWebPush: (
@@ -913,7 +919,8 @@ export type ApiContextType = {
   // Bots (docs/plans/bots.md "Web API"): every route is the instance Owner's. The
   // writes reject with an ``ApiError`` carrying the server's localized message and
   // code, and raise no toast: the Bot dialogs show the refusal where it was made.
-  listBots: (params?: { cache?: boolean }) => Promise<Bot[]>;
+  /** The Bots in display order, and the places for custom Bots (`null` from a server without the limit). */
+  listBots: (params?: { cache?: boolean }) => Promise<{ bots: Bot[]; limit: BotLimit | null }>;
   createBot: (payload: {
     display_name: string;
     handle?: string | null;
@@ -3808,6 +3815,23 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (!saved) throw new ApiError(`Request failed: ${path} (${res.status})`, res.status, null);
       return saved;
     },
+    getHomePreferences: async () => {
+      const path = '/api/home/preferences';
+      const preferences = parseHomePreferences(await getJson(path, { handleError: false }));
+      if (!preferences) throw new ApiError(`Request failed: ${path}`, 0, null);
+      return preferences;
+    },
+    updateHomePreferences: async (changes) => {
+      const path = '/api/home/preferences';
+      const { res, payloadJson } = await requestJson(path, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(changes),
+      });
+      const saved = res.ok ? parseHomePreferences(payloadJson) : null;
+      if (!saved) throw new ApiError(`Request failed: ${path} (${res.status})`, res.status, null);
+      return saved;
+    },
     getWebPushStatus: (payload) =>
       payload ? postJson('/api/web-push/status', payload) : getJson('/api/web-push/status'),
     getWebPushVapidPublicKey: () => getJson('/api/web-push/vapid-public-key'),
@@ -4380,7 +4404,10 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const parsed = payload ? selectApiErrorFields(payload, 'Request failed: /api/bots') : null;
         throw new ApiError(parsed?.fallback ?? 'Request failed: /api/bots', 0, parsed?.code ?? null);
       }
-      return (payload.bots as unknown[]).map(parseBot).filter((bot): bot is Bot => bot !== null);
+      return {
+        bots: (payload.bots as unknown[]).map(parseBot).filter((bot): bot is Bot => bot !== null),
+        limit: parseBotLimit(payload.limit),
+      };
     },
     createBot: async (payload) => botFromResponse(await botRequest('/api/bots', {
       method: 'POST',
@@ -4719,7 +4746,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     pairVibeCloudRemoteAccess: (payload) => postJson('/api/remote-access/vibe-cloud/pair', payload),
     startRemoteAccess: () => postJson('/api/remote-access/start', {}),
     stopRemoteAccess: () => postJson('/api/remote-access/stop', {}),
-    optimizeRemoteAccessRoute: () => postJson('/api/remote-access/optimize-route', {}),
+    optimizeRemoteAccessRoute: () => postJson('/api/remote-access/optimize-route', {}, { handleError: false }),
     getRemoteAccessNetworkInterfaces: () => getJson('/api/remote-access/network-interfaces'),
     saveRemoteAccessSettings: (settings) => postJson('/api/remote-access/settings', settings),
     diagnoseRemoteAccess: () => postJson('/api/remote-access/diagnostics', {}),

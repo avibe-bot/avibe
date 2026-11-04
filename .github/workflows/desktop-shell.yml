@@ -14,6 +14,7 @@ on:
       - "scripts/desktop_release.py"
       - ".github/workflows/desktop-shell.yml"
       - ".github/workflows/desktop-package.yml"
+      - ".github/workflows/desktop-signpath-test.yml"
   push:
     branches:
       - master
@@ -24,6 +25,7 @@ on:
       - "scripts/desktop_release.py"
       - ".github/workflows/desktop-shell.yml"
       - ".github/workflows/desktop-package.yml"
+      - ".github/workflows/desktop-signpath-test.yml"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}

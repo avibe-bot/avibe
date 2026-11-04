@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { createHashRouter, RouterProvider, Route, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { ApiProvider } from '../../src/context/ApiContext';
 import { WorkbenchProjectsProvider } from '../../src/context/WorkbenchProjectsProvider';
+import { WorkbenchInboxContext, type InboxState } from '../../src/context/WorkbenchInboxContext';
 import { InstanceAuthorizationContext } from '../../src/context/InstanceAuthorizationContext';
 import { ToastProvider } from '../../src/context/ToastProvider';
 import { SettingsOverlayRouteSurface } from '../../src/components/settings/SettingsOverlayRouteSurface';
@@ -218,9 +219,11 @@ function SheetHarness() {
     <output data-testid="sheet-logical-open">{String(open)}</output>
   </>;
 }
+// The home's greeting reads the unread count; this fixture has none.
+const inbox = { unreadBySession: {}, totalUnread: 0, inboxSessions: [] } as unknown as InboxState;
 export function Fixture() {
   return <InstanceAuthorizationContext.Provider value={{ remote: false, instanceKind: 'personal', instanceRole: 'owner', capabilities: OWNER_INSTANCE_CAPABILITIES }}>
-    <ToastProvider><ApiProvider><UnsavedChangesProvider><WorkbenchProjectsProvider>
+    <ToastProvider><ApiProvider><UnsavedChangesProvider><WorkbenchProjectsProvider><WorkbenchInboxContext.Provider value={inbox}>
       <main className="mx-auto min-h-dvh max-w-6xl bg-background p-4 text-foreground md:p-8">
         {params.get('surface') === 'sheet' ? <SheetHarness /> : <SettingsOverlayRouteSurface fallbackElement={<div>Missing route</div>}>
           <Route path="/" element={<><SettingsEntry /><Workbench /></>} />
@@ -229,7 +232,7 @@ export function Fixture() {
           <Route path="/settings/general" element={<Settings />} />
         </SettingsOverlayRouteSurface>}
       </main>
-    </WorkbenchProjectsProvider></UnsavedChangesProvider></ApiProvider></ToastProvider>
+    </WorkbenchInboxContext.Provider></WorkbenchProjectsProvider></UnsavedChangesProvider></ApiProvider></ToastProvider>
   </InstanceAuthorizationContext.Provider>;
 }
 createRoot(document.getElementById('root')!).render(<StrictMode><RouterProvider router={createHashRouter([{ path: '*', element: <Fixture /> }])} /></StrictMode>);

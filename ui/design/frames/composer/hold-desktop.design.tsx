@@ -3,54 +3,56 @@
 // Moving the pointer more than 6 px first makes it an ordinary click. Releasing sends to this
 // conversation; leaving the composer arms cancel, Esc cancels at once. The mic button and ⌥Z
 // stay as they are: press to start, press again to finish, the text goes into the draft.
-import { frames } from '../../frame';
-import { VoiceMarkLayer } from '../../kit/MainBotVoice';
-import { ComposerHoldLayer, TextPressLayer, type HoldNote, type HoldPhase } from '../../kit/ComposerHold';
-import { DesktopScreen } from '../../shell/DesktopScreen';
-import type { WorkbenchFixtures } from '../../shell/fixtures';
-import { csoFixtures, csoSentMessages, said, saidLong, saidSession, sessionFixtures, staged, typed } from './fixtures';
+// Every part is shipped; a frame sets the hold's state the way `useHoldToTalk` reports it.
 import type { ReactNode } from 'react';
 
-const cso = { bot: 'cso' };
+import type { ComposerHoldView } from '@/components/voice/ComposerHold';
+
+import { frames } from '../../frame';
+import { DesktopScreen } from '../../shell/DesktopScreen';
+import type { WorkbenchFixtures } from '../../shell/fixtures';
+import { HeldComposer, TextPressLayer, type HeldTarget } from '../../shell/HeldComposer';
+import { csoFixtures, csoSentMessages, said, saidLong, saidSession, sessionFixtures, staged, typed } from './fixtures';
+
+const cso: HeldTarget = { bot: 'cso' };
 
 const frame = (name: string, title: string, render: () => ReactNode, fixtures: WorkbenchFixtures = csoFixtures(), route = '/chat/ses_cso') => ({
   name,
   title,
   width: 1440,
   height: 900,
-  status: 'approved' as const,
+  status: 'shipped' as const,
   fixtures,
   route,
   render,
 });
 
-const hold = (phase: HoldPhase, extra: Partial<Parameters<typeof ComposerHoldLayer>[0]> = {}) => () => (
-  <DesktopScreen overlay={<ComposerHoldLayer device="desktop" to={cso} phase={phase} {...extra} />} />
+const hold = (state: Partial<ComposerHoldView>, extra: { attachments?: string[]; to?: HeldTarget } = {}) => () => (
+  <DesktopScreen overlay={<HeldComposer pointer="mouse" to={extra.to ?? cso} hold={state} attachments={extra.attachments} />} />
 );
-const note = (which: HoldNote) => () => <DesktopScreen overlay={<ComposerHoldLayer device="desktop" to={cso} note={which} />} />;
+
+const recording = { phase: 'recording', text: said.text, stash: said.stash, seconds: 6 } as const;
 
 const designFrames = frames([
-  frame('a-idle', '1 · 静止：输入框为空，占位提示「输入消息，或按住说话」', () => <DesktopScreen />),
-  frame('b-pressing', '2 · 按下 150ms 后出现圆环，到 500ms 填满（期间移动 >6px = 普通点击）', hold('pressing', { progress: 0.55 })),
-  frame('b-pressing-1', '2a · 圆环刚出现', hold('pressing', { progress: 0.2 })),
-  frame('b-pressing-3', '2c · 圆环将满', hold('pressing', { progress: 0.9 })),
-  frame('c-listening', '3 · 满 500ms：麦克风打开，还没出字', hold('listening', { seconds: 1 })),
-  frame('d-recording', '4 · 录音中：实时转写在输入框上方，松开发送', hold('recording', { text: said.text, stash: said.stash, seconds: 6 })),
-  frame('d-recording-long', '4b · 说得很长：转写区滚动，停在最新一行，不限时长', hold('recording', { text: saidLong.text, stash: saidLong.stash, seconds: 48, long: true })),
-  frame('e-armed', '5 · 指针移出输入框：松开取消（移回来继续说；按 Esc 直接取消）', hold('armed', { text: said.text, stash: said.stash, seconds: 7 })),
-  frame('f-settling', '6 · 松开：整理最终文字（最长 20 秒），输入框暂时锁住', hold('settling', { text: said.final, seconds: 8 })),
-  frame('d-recording-attachment', '4c · 只放了附件、没有文字：照样按住录音，附件和语音一起发', hold('recording', { text: said.text, stash: said.stash, seconds: 6, attachment: staged })),
-  frame('g-sent', '7 · 已发送：消息直接进了对话，带「语音」标记（伙伴对话不排队），首席安全官开始工作；占位是「首席安全官 正在处理…」，照样可以按住说话', () => <DesktopScreen overlay={<VoiceMarkLayer className="right-15 top-76" />} />, csoFixtures({ messages: csoSentMessages, running: true })),
-  frame('h-cancelled', '× · 取消：没有发送', note('cancelled')),
-  frame('i-too-short', '× · 太短（不到 0.5 秒）或没听到说话：没有发送', note('too-short')),
-  frame('j-asking', '× · 第一次用：浏览器询问麦克风权限，这一次不录音', note('asking')),
-  frame('k-denied', '× · 麦克风被拒绝：说明去哪里打开，可以直接打字', note('denied')),
-  frame('l-unavailable', '× · 语音服务暂时不可用：可以直接打字', note('unavailable')),
-  frame('m-interrupted', '× · 录音中断（断网、语音服务断开、窗口失焦）：文字保留，发送或重试；处理前不能再按住录音', hold('interrupted', { text: said.text + said.stash, seconds: 9 }), csoFixtures({ copy: false })),
+  frame('a-idle', '1 · 静止：输入框为空，占位提示「给首席安全官发消息，或按住说话」（普通会话是「输入消息，或按住说话」）', () => <DesktopScreen />),
+  frame('b-pressing', '2 · 按下 150ms 后出现圆环，到 500ms 填满（期间移动 >6px = 普通点击）', hold({ phase: 'pressing', progress: 0.55 })),
+  frame('b-pressing-1', '2a · 圆环刚出现', hold({ phase: 'pressing', progress: 0.2 })),
+  frame('b-pressing-3', '2c · 圆环将满', hold({ phase: 'pressing', progress: 0.9 })),
+  frame('c-listening', '3 · 满 500ms：麦克风打开，还没出字', hold({ phase: 'listening', seconds: 1 })),
+  frame('d-recording', '4 · 录音中：实时转写在输入框上方，松开发送', hold(recording)),
+  frame('d-recording-long', '4b · 说得很长：转写区滚动，停在最新一行，不限时长', hold({ phase: 'recording', text: saidLong.text, stash: saidLong.stash, seconds: 48 })),
+  frame('d-recording-attachment', '4c · 只放了附件、没有文字：照样按住录音，附件和语音一起发', hold(recording, { attachments: [staged] })),
+  frame('e-armed', '5 · 指针移出输入框：松开取消（移回来继续说；按 Esc 直接取消）', hold({ ...recording, phase: 'armed', seconds: 7 })),
+  frame('f-settling', '6 · 松开：整理最终文字（最长 20 秒），输入框暂时锁住', hold({ phase: 'settling', text: said.final, seconds: 8 })),
+  frame('g-sent', '7 · 已发送：消息直接进了对话，带「语音」标记（伙伴对话不排队），首席安全官开始工作；占位是「首席安全官 正在处理…」，照样可以按住说话', () => <DesktopScreen />, csoFixtures({ messages: csoSentMessages, running: true })),
+  frame('h-cancelled', '× · 取消：没有发送', hold({ outcome: 'cancelled' })),
+  frame('i-too-short', '× · 太短（不到 0.5 秒）或没听到说话：没有发送', hold({ outcome: 'too-short' })),
+  frame('j-asking', '× · 第一次用：浏览器询问麦克风权限，这一次不录音', hold({ outcome: 'asking' })),
+  frame('k-denied', '× · 麦克风被拒绝：说明去哪里打开，可以直接打字', hold({ outcome: 'denied' })),
+  frame('l-unavailable', '× · 语音服务暂时不可用：可以直接打字', hold({ outcome: 'unavailable' })),
+  frame('m-interrupted', '× · 录音中断（断网、语音服务断开、窗口失焦）：文字保留，发送或重试；处理前不能再按住录音', hold({ phase: 'interrupted', interruptReason: 'dropped', text: said.text + said.stash, seconds: 9 }), csoFixtures({ hint: false })),
   frame('n-has-text', '规则 · 输入框里有字：按住就是选字，不录音（占位提示随文字消失）', () => <DesktopScreen overlay={<TextPressLayer />} />, csoFixtures({ draft: typed })),
-  frame('o-session', '普通会话也一样：发到这个会话', () => (
-    <DesktopScreen overlay={<ComposerHoldLayer device="desktop" to={{ session: '修复中途断缓存' }} phase="recording" text={saidSession.text} stash={saidSession.stash} seconds={4} />} />
-  ), sessionFixtures(), '/chat/ses_demo_cache'),
+  frame('o-session', '普通会话也一样：发到这个会话', hold({ phase: 'recording', text: saidSession.text, stash: saidSession.stash, seconds: 4 }, { to: { session: '修复中途断缓存' } }), sessionFixtures(), '/chat/ses_demo_cache'),
 ]);
 
 export default designFrames;

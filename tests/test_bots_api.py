@@ -122,6 +122,32 @@ def test_the_main_bots_avatar_is_refused_over_http_in_the_readers_language(clien
     assert client.get("/api/bots").get_json()["bots"][0]["avatar"] == {"kind": "mascot"}
 
 
+def test_the_limit_rides_with_the_list_and_refusals_speak_the_readers_language(client):
+    """bots.md D12: the Web knows the limit from the Bot list, and a refusal that still happens says it."""
+    from core.bots import BotService
+
+    assert client.get("/api/bots").get_json()["limit"] == {"count": 0, "max": 5}
+    with BotService() as service:
+        for name in ("Alpha", "Beta", "Gamma", "Delta", "Epsilon"):
+            service.create_bot(display_name=name)
+        service.store.create(name="zeta", backend="vibey")
+    assert client.get("/api/bots").get_json()["limit"] == {"count": 5, "max": 5}
+
+    zh = {**csrf_headers(client), "Accept-Language": "zh-CN"}
+    for path, body in (("/api/bots", {"display_name": "Zeta"}), ("/api/bots/set", {"agent_name": "zeta", "display_name": "Zeta"})):
+        refused = client.post(path, json=body, headers=zh)
+        payload = refused.get_json()
+        assert (refused.status_code, payload["error"]["code"]) == (409, "bot_limit_reached"), path
+        assert payload["error"]["message"] == "最多 5 位伙伴（不含歪比），移出一位后可以再添加。移出的伙伴会保留对话和记忆。"
+        assert (payload["details"]["limit"], payload["details"]["count"]) == (5, 5)
+    assert len(client.get("/api/bots").get_json()["bots"]) == 6
+
+    # The main Bot is named as the user named it.
+    client.patch("/api/bots/main", json={"display_name": "小管家"}, headers=csrf_headers(client))
+    renamed = client.post("/api/bots", json={"display_name": "Zeta"}, headers=csrf_headers(client)).get_json()
+    assert renamed["error"]["message"].startswith("You can have up to 5 Bots, not counting 小管家.")
+
+
 def test_bot_sessions_refuse_archive_and_title_edits(client):
     client.post("/api/bots", json={"display_name": "Researcher"}, headers=csrf_headers(client))
     archived = client.delete("/api/sessions/ses_researcher", headers=csrf_headers(client))

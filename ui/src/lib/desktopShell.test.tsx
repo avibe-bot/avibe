@@ -11,7 +11,7 @@ import { ToastProvider } from '../context/ToastProvider';
 import type { WorkbenchSession } from '../context/ApiContext';
 import en from '../i18n/en.json';
 import zh from '../i18n/zh.json';
-import { canConfigureDesktopPet, isDesktopShell } from './desktopShell';
+import { canConfigureDesktopPet, isDesktopShell, tryOpenDesktopAppWindow } from './desktopShell';
 
 vi.mock('../context/InstanceAuthorizationContext', async (original) => ({
   ...await original<typeof import('../context/InstanceAuthorizationContext')>(),
@@ -63,6 +63,8 @@ afterEach(() => {
   delete (window as { __AVIBE_DESKTOP_SHELL__?: true }).__AVIBE_DESKTOP_SHELL__;
   delete (window as { __AVIBE_DESKTOP_DRAG__?: true }).__AVIBE_DESKTOP_DRAG__;
   delete (window as { __AVIBE_DESKTOP_PET_SETTINGS__?: true }).__AVIBE_DESKTOP_PET_SETTINGS__;
+  delete (window as { __AVIBE_DESKTOP_APP_WINDOWS__?: true }).__AVIBE_DESKTOP_APP_WINDOWS__;
+  delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
 });
 
 describe('native desktop drag surfaces', () => {
@@ -109,5 +111,51 @@ describe('Desktop Mini settings capability', () => {
     }
     expect(isDesktopShell()).toBe(shell);
     expect(canConfigureDesktopPet()).toBe(settings);
+  });
+});
+
+describe('native app window capability', () => {
+  it.each([
+    ['web', false, false],
+    ['older shell', true, false],
+    ['current shell', true, true],
+  ] as const)('probes the dedicated marker for %s', async (_label, shell, appWindows) => {
+    if (shell) Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
+    if (appWindows) Object.defineProperty(window, '__AVIBE_DESKTOP_APP_WINDOWS__', { configurable: true, value: true });
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: { invoke } });
+
+    expect(await tryOpenDesktopAppWindow({
+      appId: 'files',
+      sessionId: null,
+      title: 'Files',
+      newWindow: false,
+    })).toBe(appWindows);
+    if (appWindows) {
+      expect(invoke).toHaveBeenCalledWith('open_app_window', {
+        request: {
+          appId: 'files',
+          sessionId: null,
+          title: 'Files',
+          newWindow: false,
+        },
+      });
+    } else {
+      expect(invoke).not.toHaveBeenCalled();
+    }
+  });
+
+  it('falls back when the native bridge rejects the request', async () => {
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_APP_WINDOWS__', { configurable: true, value: true });
+    const invoke = vi.fn().mockRejectedValue(new Error('denied'));
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: { invoke } });
+
+    await expect(tryOpenDesktopAppWindow({
+      appId: 'showpage',
+      sessionId: 'session-1',
+      title: 'Show Page',
+      newWindow: true,
+    })).resolves.toBe(false);
   });
 });

@@ -85,9 +85,9 @@ describe('fail-closed local release authority', () => {
     },
   );
 
-  it('refuses missing Web Crypto and does not fetch or create a frame', async () => {
+  it('refuses missing Web Crypto at the entry gate and does not fetch or create a frame', async () => {
     vi.stubGlobal('crypto', { getRandomValues: vi.fn() });
-    await expect(getVaultSandboxClient()).rejects.toMatchObject({ code: 'sandbox_integrity_failed' });
+    await expect(getVaultSandboxClient()).rejects.toMatchObject({ code: 'sandbox_browser_unavailable' });
     expect(fetch).not.toHaveBeenCalled();
     expect(document.querySelector('iframe')).toBeNull();
   });

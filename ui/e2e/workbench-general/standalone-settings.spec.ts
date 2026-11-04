@@ -23,7 +23,9 @@ const caps = {
 };
 const editor = { remote: true, authenticated: true, authorization_state: 'current',
   instance_kind: 'organization', instance_role: 'editor', capabilities: caps };
+// A member's home starts a Session in a project; the Owner's talks to the main Bot.
 const textarea = (page: Page) => page.getByPlaceholder('Tell the agent what you want…');
+const ownerTextarea = (page: Page) => page.getByPlaceholder('Message Vibey…');
 // The home's own project row, not the sidebar tree.
 const homeProject = (page: Page, name: string) =>
   page.locator('main#app-shell-scroll').getByRole('button', { name, exact: true });
@@ -60,14 +62,14 @@ for (const width of [1200, 1366, 1920]) {
     await page.setViewportSize({ width, height: 768 });
     await open(page, '/');
     const sidebarWidth = (await page.locator('aside.fixed').boundingBox())!.width;
-    await textarea(page).fill(draft);
+    await ownerTextarea(page).fill(draft);
     await toggle(page).click();
     await expect(settings(page)).toBeVisible();
     expect(await settings(page).boundingBox()).toMatchObject({ x: 0, y: 0, width, height: 768 });
     await expect(page.getByRole('button', { name: 'Apps', exact: true })).toHaveCount(0);
     await expect(page.getByRole('separator')).toHaveCount(0);
-    await expect(textarea(page)).toBeHidden();
-    expect(await textarea(page).evaluate((node) => Boolean(node.closest('[inert][aria-hidden="true"]')))).toBe(true);
+    await expect(ownerTextarea(page)).toBeHidden();
+    expect(await ownerTextarea(page).evaluate((node) => Boolean(node.closest('[inert][aria-hidden="true"]')))).toBe(true);
     const retained = await frame(page);
     // Standalone Settings stands in for the sidebar, so its rail is that
     // sidebar's width: the left column cannot move when Settings opens.
@@ -81,7 +83,7 @@ for (const width of [1200, 1366, 1920]) {
     }
     await page.keyboard.press('Control+k');
     await settings(page).getByRole('button', { name: 'Close Settings' }).click();
-    await expect(textarea(page)).toHaveValue(draft);
+    await expect(ownerTextarea(page)).toHaveValue(draft);
     await expect(toggle(page)).toBeFocused();
     await open(page, '/settings/general');
     await expect(rail(page)).toBeVisible();
@@ -163,7 +165,7 @@ for (const width of [320, 375, 390]) {
     await expect(page.getByRole('radiogroup', { name: 'Appearance' })).toBeVisible();
     await page.getByRole('link', { name: 'All settings' }).click();
     await page.getByRole('link', { name: 'Back to Workbench' }).click();
-    await expect(textarea(page)).toBeVisible();
+    await expect(ownerTextarea(page)).toBeVisible();
     expect(denied).toEqual([]);
   });
 }
@@ -425,6 +427,10 @@ for (const width of [1366, 390]) {
     const query = palette.getByRole('textbox');
     await query.fill('星河 🌱');
     await palette.getByRole('switch').click();
+    // The switch drops the plain search's hits and asks again with archived ones; only
+    // the second answer's hits are the selection under test (the first can still be on
+    // screen when the click returns, and an arrow then lands on the emptied list).
+    await expect.poll(() => searches.some((url) => url.includes('include_archived=1'))).toBe(true);
     await expect(palette.locator('[aria-current="true"]')).toContainText('星河结果1');
     await query.focus();
     await page.keyboard.press('ArrowDown');

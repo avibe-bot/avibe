@@ -18,6 +18,8 @@ import type { SettingsMenuPlacement } from '../../lib/settingsMenuPlacement';
 import type { TranslationKey } from '../../i18n/types';
 import { useDesktopPetSettings } from '../../lib/useDesktopPetSettings';
 import { DesktopRemoteUpdateSetting } from './DesktopRemoteUpdateSetting';
+import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
+import { useHomePreferences } from '../home/useHomePreferences';
 
 // The 88px miniature is a drawing OF a theme, not a preview rendered IN one:
 // the Light card has to look light while the app is dark. Source Q8zxF1 builds
@@ -236,6 +238,7 @@ export const SettingsGeneralPage: React.FC = () => {
   const { mode, setMode } = useTheme();
   const placement = useSettingsMenuPlacement();
   const pet = useDesktopPetSettings();
+  const { capabilities } = useInstanceAuthorization();
 
   return (
     <SettingsPageShell
@@ -298,6 +301,9 @@ export const SettingsGeneralPage: React.FC = () => {
           />
         </SettingsPanel>
 
+        {/* The home's tip of the day (ui/design: home/home/*), for whoever has the home. */}
+        {capabilities.can_chat && <HomeTipsSetting />}
+
         {pet.supported && (
           <SettingsPanel
             variant="preference"
@@ -333,3 +339,25 @@ export const SettingsGeneralPage: React.FC = () => {
     </SettingsPageShell>
   );
 };
+
+/** Tips on the home, on or off for the account. Read where it is shown, so only a reader who has
+ *  the home reads it. */
+function HomeTipsSetting() {
+  const { t } = useTranslation();
+  const { preferences, loaded, update } = useHomePreferences();
+  return (
+    <SettingsPanel
+      variant="preference"
+      title={t('settings.general.homeTips.title')}
+      description={t('settings.general.homeTips.description')}
+      actions={(
+        <ToggleSwitch
+          enabled={preferences.tips_enabled}
+          disabled={!loaded}
+          label={t('settings.general.homeTips.title')}
+          onClick={() => update({ tips_enabled: !preferences.tips_enabled })}
+        />
+      )}
+    />
+  );
+}

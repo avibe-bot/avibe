@@ -173,6 +173,22 @@ const approveWhenReady = async () => {
 // window, so a daemon round trip after the click (the regression) often leaves that window on its
 // placeholder, and a refresh during the release supersedes the contexts it is releasing. The
 // VaultsPage reveal tests cover only the reveal context, not these binding contexts.
+describe('VaultApprovalCard defensive entry rejection', () => {
+  it.each(['en', 'zh'] as const)('localizes a synchronous preopen failure in %s without fulfilling access', async (language) => {
+    await i18n.changeLanguage(language);
+    const copy = language === 'zh' ? zh : en;
+    render(card());
+    const approve = screen.getByRole('button', { name: copy.vaults.approval.approve }) as HTMLButtonElement;
+    await vi.waitFor(() => expect(approve.disabled).toBe(false));
+    vi.stubGlobal('isSecureContext', false);
+    const { open } = openWindow();
+    fireEvent.click(approve);
+    expect(await screen.findByText(copy.errors.sandbox_browser_unavailable)).toBeTruthy();
+    expect(open).not.toHaveBeenCalled();
+    expect(api.fulfillVaultAccessRequest).not.toHaveBeenCalled();
+  });
+});
+
 describe('VaultApprovalCard signing-address contract', () => {
   // An address is a statement about which public key authorizes the signature,
   // not just a list of every address derivable from the same secret.

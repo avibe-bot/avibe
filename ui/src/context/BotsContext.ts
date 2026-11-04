@@ -1,6 +1,6 @@
 import { createContext, useContext } from 'react';
 
-import type { Bot } from '../lib/bots';
+import type { Bot, BotLimit } from '../lib/bots';
 
 /** What the shared add/edit dialog opens on (see `BotProfileDialog`). */
 export type BotProfileRequest =
@@ -22,6 +22,13 @@ export interface BotsState {
   /** The server has returned a list: a failed read is not "no Bots". */
   listed: boolean;
   mainBot: Bot | null;
+  /** The places for custom Bots, from the same read as `bots` (docs/plans/bots.md D12): a new
+   *  object on every read, so a reader can tell a later read from the one it acted on. */
+  limit: BotLimit | null;
+  /** Every place is taken: the sidebar strip and the phone's Bot sheet drop Add, the
+   *  Agents page shows its add actions disabled with the reason, and the add dialog
+   *  says it instead of adding. */
+  atLimit: boolean;
   /** Each Bot Session's agent status; a Session not yet read is absent. */
   statusBySession: Record<string, BotRuntimeStatus>;
   botForSession: (sessionId: string | null | undefined) => Bot | undefined;
@@ -54,6 +61,8 @@ const EMPTY: BotsState = {
   loaded: false,
   listed: false,
   mainBot: null,
+  limit: null,
+  atLimit: false,
   statusBySession: {},
   botForSession: () => undefined,
   botForAgent: () => undefined,

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
@@ -31,6 +31,7 @@ import { useInstanceAuthorization } from '../../context/InstanceAuthorizationCon
 import { useBots } from '../../context/BotsContext';
 import { BotAvatar } from '../ui/bot-avatar';
 import { botRole, botSessionPath, eligibleForBot, liveBotAgentNames } from '../../lib/bots';
+import { BotLimitReason } from './bots/BotLimitReason';
 import { RemoveBotDialog } from './bots/RemoveBotDialog';
 import { AgentGlyph, AgentsPageView } from './AgentsPageView';
 import { AgentGraphTab } from './AgentGraphTab';
@@ -271,6 +272,8 @@ export const AgentsPage: React.FC = () => {
     enabled: botsEnabled,
     bots: liveBots,
     listed: botsListed,
+    limit: botLimit,
+    mainBot,
     displayName: botDisplayName,
     openProfile: openBotProfile,
   } = useBots();
@@ -1511,6 +1514,8 @@ export const AgentsPage: React.FC = () => {
         onBackendFilterChange={setBackendFilter}
         bots={botsEnabled ? filteredBots : null}
         botCount={liveBots.length}
+        botLimit={botsEnabled ? botLimit : null}
+        mainBot={mainBot}
         agentCount={listedAgents.length}
         onAddBot={() => openBotProfile({ kind: 'create' })}
         agents={filteredAgents}
@@ -1718,6 +1723,9 @@ export const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canE
   const canToggle = canEdit && !alwaysEnabled && !isBot;
   const canSetDefault = canEdit && !isBot && !isDefault && agent.enabled;
   const canSetBot = canEdit && bots.enabled && !isDefault && eligibleForBot(agent);
+  // Every place for a custom Bot is taken: "Set as Bot" stays, disabled, with the reason (D12).
+  const botLimit = canSetBot && bots.atLimit ? bots.limit : null;
+  const botLimitNoteId = useId();
   const [name, setName] = useState(agent.name);
   const [renaming, setRenaming] = useState(false);
   const [settingDefault, setSettingDefault] = useState(false);
@@ -2431,6 +2439,15 @@ export const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canE
       ) : (
         (canRun || canSetDefault || canSetBot || (canEdit && !system)) && (
           <div className="flex flex-wrap items-center gap-2 border-t border-border pt-4">
+            {/* Above the row, so it stays beside "Set as Bot" wherever the row wraps. */}
+            {botLimit && (
+              <p id={botLimitNoteId} className="basis-full text-xs leading-snug text-muted">
+                <BotLimitReason
+                  limit={botLimit}
+                  mainName={bots.mainBot ? bots.displayName(bots.mainBot) : t('bots.mainDefaultName')}
+                />
+              </p>
+            )}
             {canRun && (
               <Button type="button" variant="outline" size="xs" onClick={() => setRunning(true)} className={MINT_ACTION}>
                 <Play className="size-3" />
@@ -2448,6 +2465,8 @@ export const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canE
                 type="button"
                 variant="ghost"
                 size="xs"
+                disabled={botLimit !== null}
+                aria-describedby={botLimit ? botLimitNoteId : undefined}
                 onClick={() => bots.openProfile({ kind: 'create', tab: 'agent', agentName: agent.name })}
               >
                 <UserPlus className="size-3" />

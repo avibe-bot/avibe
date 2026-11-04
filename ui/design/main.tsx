@@ -49,6 +49,8 @@ async function boot() {
   for (const [key, text] of Object.entries(shown?.fixtures?.copy ?? {})) i18n.addResource(lang, 'translation', key, text[lang]);
   designNetwork.setSockets(shown?.fixtures?.sockets);
   designStorage.seed(shown?.fixtures?.storage);
+  // The desktop app marks its own window before any page script runs (`isDesktopShell()`).
+  if (shown?.fixtures?.desktopShell) Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
   window.__DESIGN__ = {
     frames: frames.map((f) => ({ id: f.id, file: f.file, title: f.title, status: f.status, width: f.width, height: f.height, themes: f.themes ?? ['light', 'dark'], hover: f.hover, click: f.click, wait: f.wait })),
     unfixtured: () => designNetwork.unfixtured(),

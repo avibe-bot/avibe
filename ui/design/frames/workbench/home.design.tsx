@@ -1,15 +1,17 @@
 // The Workbench home at `/` inside the shipped AppShell: on a desktop the sidebar, the home, and the
-// sidebar's bottom cluster; on a phone the header and tab bar around it.
+// sidebar's bottom cluster; on a phone the header and tab bar around it. Its states at every size
+// are `home/home/*`; these are the shell around it and two Bots at work, listed to pick from.
 import { Workbench } from '@/components/Workbench';
 
 import { frames } from '../../frame';
 import { demoSessions, inboxRow } from '../../shell/fixtures';
 import { agentsApi } from '../agents/fixtures';
-import { phoneShell, workbenchFixtures } from './fixtures';
+import { homeFactsApi, phoneShell, workbenchFixtures } from './fixtures';
 
 const home = phoneShell('/', <Workbench />);
 
-const fixtures = workbenchFixtures(agentsApi(), {
+// Everything set up, so the shell is what shows.
+const fixtures = workbenchFixtures({ ...agentsApi(), ...homeFactsApi({ model: true, push: false, computerUse: true, chatApps: true, paired: true }) }, {
   sessionsByProject: demoSessions,
   expandedProjects: ['proj_avibe'],
   unreadBySession: { ses_demo_cache: 3, ses_cso: 2 },
@@ -18,26 +20,9 @@ const fixtures = workbenchFixtures(agentsApi(), {
     inboxRow('ses_demo_cache', 'avibe', '修复中途断缓存', '定位到清理旧工具结果时前缀断开，PR 已开。', 12, 3),
   ],
 });
-
-// The setup wizard lands on the home with `{ onboardingCompleted: true }`; the banner shows once the
-// home's backend answers ready.
-const setupComplete = {
-  ...fixtures,
-  api: {
-    ...fixtures.api,
-    '/api/backend/vibey/connection': {
-      ok: true,
-      backend: 'vibey',
-      installed: true,
-      enabled: true,
-      auth: 'none',
-      application: 'applied',
-      ready: true,
-      entry_eligible: true,
-    },
-  },
-};
-const fromSetup = { pathname: '/', state: { onboardingCompleted: true } };
+// Two Bots at work: "2 working" lists them to pick from.
+const busy = { ...fixtures, botStatus: { ses_main: 'running' as const, ses_pm: 'running' as const } };
+const openBusy = ['main >> text=/^2 (位在忙|working)$/'];
 
 const designFrames = frames([
   {
@@ -51,23 +36,14 @@ const designFrames = frames([
     render: home,
   },
   {
-    name: 'setup-complete',
-    title: '工作台 · 刚完成设置（就绪横幅）',
+    name: 'desktop-busy',
+    title: '工作台 · 桌面 · 两位伙伴在忙：点「2 位在忙」列出它们',
     width: 1440,
     height: 900,
     status: 'shipped',
-    route: fromSetup,
-    fixtures: setupComplete,
-    render: home,
-  },
-  {
-    name: 'setup-complete-phone',
-    title: '工作台 · 刚完成设置 · 手机',
-    width: 390,
-    height: 844,
-    status: 'shipped',
-    route: fromSetup,
-    fixtures: setupComplete,
+    route: '/',
+    fixtures: busy,
+    click: openBusy,
     render: home,
   },
   {
@@ -78,6 +54,17 @@ const designFrames = frames([
     status: 'shipped',
     route: '/',
     fixtures,
+    render: home,
+  },
+  {
+    name: 'phone-busy',
+    title: '工作台 · 手机 · 两位伙伴在忙：底部列表',
+    width: 390,
+    height: 844,
+    status: 'shipped',
+    route: '/',
+    fixtures: busy,
+    click: openBusy,
     render: home,
   },
 ]);

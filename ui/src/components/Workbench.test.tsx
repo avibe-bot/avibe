@@ -1,12 +1,28 @@
 /* @vitest-environment jsdom */
 
 import { createInstance } from 'i18next';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
-import { MemoryRouter, Route, useLocation, useNavigate } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+const api = vi.hoisted(() => ({
+  getMainSession: vi.fn(),
+  listVibeAgents: vi.fn(),
+  getBackendConnection: vi.fn(),
+  updateSession: vi.fn(),
+  setFastModeDefault: vi.fn(),
+  // Getting started and the tip read these; their own tests (home/HomeGuide.test.tsx) own the answers.
+  getHomePreferences: vi.fn(),
+  updateHomePreferences: vi.fn(),
+  getConfig: vi.fn(),
+  remoteAccessStatus: vi.fn(),
+}));
+const posts = vi.hoisted(() => ({
+  calls: [] as Array<{ path: string; body: Record<string, unknown> }>,
+  answer: (() => Promise.resolve(new Response('{}', { status: 200 }))) as () => Promise<Response>,
+}));
 const newSession = vi.hoisted(() => ({
   projects: [] as { id: string; display_name: string; folder_path: string }[],
   target: undefined as { id: string; display_name: string; folder_path: string } | undefined,
@@ -14,23 +30,21 @@ const newSession = vi.hoisted(() => ({
   sending: false,
   loaded: true,
   uncertainSessionId: null,
-  agents: [{ name: 'codex', backend: 'codex' }],
-  agentRoute: { agent_name: 'codex', agent_backend: 'codex' } as Record<string, unknown>,
+  agents: [],
+  agentRoute: {},
   setAgentRoute: vi.fn(),
   effectiveDefaultAgentName: 'codex',
   needsProject: false,
   error: null as string | null,
   upsertSelectProject: vi.fn(),
   send: vi.fn(),
+  speed: null,
+  setSpeed: vi.fn(),
 }));
 const authorization = vi.hoisted(() => ({
-  capabilities: {
-    can_chat: true,
-    can_manage_projects: true,
-    can_manage_instance: true,
-    can_manage_agents: true,
-  },
+  capabilities: { can_chat: true, can_manage_projects: true, can_manage_instance: true, is_instance_owner: true },
 }));
+const viewport = vi.hoisted(() => ({ desktop: true }));
 vi.hoisted(() => {
   Object.defineProperty(window, 'matchMedia', {
     configurable: true,
@@ -38,51 +52,42 @@ vi.hoisted(() => {
   });
 });
 
-vi.mock('../lib/useNewSession', () => ({ useNewSession: () => newSession }));
-vi.mock('../context/InstanceAuthorizationContext', () => ({
-  useInstanceAuthorization: () => authorization,
+vi.mock('../context/ApiContext', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../context/ApiContext')>()),
+  useApi: () => api,
 }));
-vi.mock('../lib/sessionInfo', () => ({
-  canCreateLocalProject: (caps: { can_manage_projects?: boolean }) => Boolean(caps.can_manage_projects),
-}));
-// The real dialog opens the directory browser as its own first phase; here we
-// only need to see that the chip reaches it and that closing it changes nothing.
-vi.mock('./workbench/NewProjectDialog', () => ({
-  NewProjectDialog: ({ onClose, initialPath }: { onClose: () => void; initialPath?: string }) => (
-    <div role="dialog" aria-label="folder-browser" data-path={initialPath}>
-      <button type="button" onClick={onClose}>cancel-folder</button>
-    </div>
-  ),
-}));
-vi.mock('./workbench/CreateViaChatDialog', () => ({ CreateViaChatDialog: ({ onClose }: { onClose: () => void }) => <div role="dialog" aria-label="create-task"><button onClick={onClose}>cancel-task</button></div> }));
-vi.mock('./workbench/AgentRoutePicker', () => ({
-  AgentRoutePicker: ({ onChange }: { onChange: (patch: Record<string, unknown>) => void }) => (
-    <button type="button" onClick={() => onChange({ agent_name: 'claude', agent_backend: 'claude' })}>
-      agent-picker
-    </button>
-  ),
-}));
-vi.mock('../lib/apiFetch', () => ({ apiFetch: vi.fn().mockResolvedValue({ ok: true, json: async () => ({ available: false }) }) }));
-// Only the producer seam is stubbed; the predicate and the banner stay real, so
-// these tests exercise the lifecycle the home actually runs.
-const readiness = vi.hoisted(() => ({
-  value: null as { backend: 'claude' | 'codex' | 'opencode'; ready: boolean } | null,
-  /** What the home asked about, in order — the reader's own tests own the answering. */
-  questions: [] as Array<{ backend: string | null; asked: boolean }>,
-}));
-vi.mock('./workbench/backendReadiness', async (importOriginal) => ({
-  ...await importOriginal<typeof import('./workbench/backendReadiness')>(),
-  useBackendReadiness: (backend: string | null, asked: boolean) => {
-    readiness.questions.push({ backend, asked });
-    return readiness.value;
+vi.mock('../lib/apiFetch', () => ({
+  apiFetch: (path: string, init?: RequestInit) => {
+    if (init?.method !== 'POST') return Promise.resolve(new Response(JSON.stringify({ available: false })));
+    posts.calls.push({ path, body: JSON.parse(String(init.body)) });
+    return posts.answer();
   },
 }));
+vi.mock('../lib/useNewSession', () => ({ useNewSession: () => newSession }));
+vi.mock('../lib/useIsDesktop', () => ({ useIsDesktop: () => viewport.desktop }));
+vi.mock('../context/InstanceAuthorizationContext', () => ({ useInstanceAuthorization: () => authorization }));
+// The picker's own tests own its menu; here it only says which route it was handed.
+vi.mock('./workbench/AgentRoutePicker', () => ({
+  AgentRoutePicker: ({ value, agentLocked, onChange }: {
+    value: { model?: string | null }; agentLocked?: boolean; onChange: (patch: Record<string, unknown>) => void;
+  }) => (
+    <>
+      <span data-testid="route">{`${agentLocked ? 'locked' : 'open'}:${value.model ?? ''}`}</span>
+      <button type="button" onClick={() => onChange({ model: 'model-a' })}>pick-a</button>
+      <button type="button" onClick={() => onChange({ model: 'model-b' })}>pick-b</button>
+    </>
+  ),
+}));
+vi.mock('./workbench/NewProjectDialog', () => ({ NewProjectDialog: () => <div role="dialog" aria-label="new-project" /> }));
 
+import { BotsContext, type BotsState } from '../context/BotsContext';
 import { ToastProvider } from '../context/ToastProvider';
-import { SettingsOverlayRouteSurface } from './settings/SettingsOverlayRouteSurface';
-import { settingsOverlayNavigationState } from '../lib/settingsOverlay';
-import { forgetSetupHandoff } from './workbench/backendReadiness';
+import { WorkbenchInboxContext, type InboxState } from '../context/WorkbenchInboxContext';
+import { WorkbenchProjectsContext, type WorkbenchProjectsTree } from '../context/WorkbenchProjectsContext';
 import en from '../i18n/en.json';
+import { resetCoalescedWrites } from '../lib/useCoalescedWrite';
+import { resetOpenSessionRowWrites } from './workbench/sessionRowRefresh';
+import type { Bot } from '../lib/bots';
 import { Workbench } from './Workbench';
 
 const i18n = createInstance();
@@ -93,391 +98,269 @@ void i18n.use(initReactI18next).init({
   interpolation: { escapeValue: false },
 });
 
-const 项目 = { id: 'p1', display_name: '中文项目', folder_path: '/Users/max/工作区/中文项目' };
+const bot = (handle: string, display_name: string, builtin = false): Bot => ({
+  handle, display_name, avatar: { kind: 'mascot' }, role: '', agent_name: handle, session_id: `ses_${handle}`,
+  position: builtin ? 0 : 1, builtin, hide_details: true,
+});
+const main = bot('main', 'Vibey', true);
+const pm = bot('pm', 'PM');
 
-/** Reads back what the history entry actually holds after the home has run. */
-const LocationState: React.FC = () => (
-  <div data-testid="location-state">{JSON.stringify(useLocation().state ?? null)}</div>
-);
+const botsState = (overrides: Partial<BotsState> = {}): BotsState => ({
+  enabled: true, bots: [main, pm], loaded: true, listed: true, mainBot: main, limit: null, atLimit: false,
+  statusBySession: {},
+  botForSession: () => undefined, botForAgent: () => undefined, botForHandle: () => undefined,
+  displayName: (each) => each.display_name,
+  afterWrite: async () => undefined, moveBot: async () => true, setHideDetails: async () => true,
+  openProfile: () => undefined, profileRequest: null, closeProfile: () => undefined,
+  ...overrides,
+});
+const memberBots = (): BotsState => botsState({ enabled: false, bots: [], mainBot: null });
 
-/**
- * The ways out of the home, as buttons so they add no links for the
- * continuation-row cases to count: an ordinary departure and return, and
- * Settings opened over the home carrying the same origin the shell's navigation
- * boundary stamps on it.
- */
-const WaysOut: React.FC = () => {
-  const location = useLocation();
-  const navigate = useNavigate();
-  return (
-    <>
-      <button type="button" onClick={() => void navigate('/projects')}>leave-home</button>
-      <button type="button" onClick={() => void navigate('/')}>return-home</button>
-      <button type="button" onClick={() => void navigate(-1)}>go-back</button>
-      <button
-        type="button"
-        onClick={() => void navigate('/settings/general', {
-          state: settingsOverlayNavigationState({
-            destinationPathname: '/settings/general',
-            desktop: true,
-            source: location,
-            targetState: undefined,
-          }),
-        })}
-      >
-        open-settings
-      </button>
-    </>
+const inbox = { unreadBySession: {}, totalUnread: 0, inboxSessions: [] } as unknown as InboxState;
+const project = (id: string, name: string, lastActive: string) => ({
+  id, display_name: name, folder_path: `/work/${name}`, last_active_at: lastActive, created_at: '2026-01-01T00:00:00Z',
+});
+const projectsTree = (projects: unknown[]) => ({ projects, activate: () => () => undefined }) as unknown as WorkbenchProjectsTree;
+
+const Where = () => <div data-testid="where">{useLocation().pathname}</div>;
+
+function renderHome({ bots = botsState(), projects = [] as unknown[] } = {}) {
+  return render(
+    <I18nextProvider i18n={i18n}>
+      <ToastProvider>
+        <BotsContext.Provider value={bots}>
+          <WorkbenchInboxContext.Provider value={inbox}>
+            <WorkbenchProjectsContext.Provider value={projectsTree(projects)}>
+              <MemoryRouter initialEntries={['/']}>
+                <Routes>
+                  <Route path="*" element={<Where />} />
+                </Routes>
+                <Routes>
+                  <Route path="/" element={<Workbench />} />
+                </Routes>
+              </MemoryRouter>
+            </WorkbenchProjectsContext.Provider>
+          </WorkbenchInboxContext.Provider>
+        </BotsContext.Provider>
+      </ToastProvider>
+    </I18nextProvider>,
   );
-};
+}
 
-const homeTree = (state?: unknown) => (
-  <I18nextProvider i18n={i18n}>
-    <ToastProvider>
-      <MemoryRouter initialEntries={[{ pathname: '/', state }]}>
-        <WaysOut />
-        {/* The real route surface, because how long the setup handoff lives is a
-            fact about the route: it has to outlive the guard remounting this home
-            in place and end when the user actually leaves, and this is the
-            component that knows which route is being shown. */}
-        <SettingsOverlayRouteSurface fallbackElement={<div>no-such-route</div>}>
-          <Route path="/" element={<><Workbench /><LocationState /></>} />
-          <Route path="/agents" element={<div>agents-page</div>} />
-          <Route path="/projects" element={<div>projects-page</div>} />
-          <Route path="/chat/:sessionId" element={<div>chat-page</div>} />
-          <Route path="/settings/general" element={<div>settings-page</div>} />
-        </SettingsOverlayRouteSurface>
-      </MemoryRouter>
-    </ToastProvider>
-  </I18nextProvider>
-);
-
-const renderHome = (state?: unknown) => render(homeTree(state));
-
-const locationState = () => JSON.parse(screen.getByTestId('location-state').textContent || 'null');
-const banner = () => screen.queryByText(/is ready to go/);
-
-const input = () => screen.getByPlaceholderText(en.workbench.home.inputPlaceholder) as HTMLTextAreaElement;
+const connection = (auth: string) => ({
+  ok: true, backend: 'vibey', installed: true, enabled: true, auth, application: 'applied', ready: auth !== 'none', entry_eligible: auth !== 'none',
+});
+const where = () => screen.getByTestId('where').textContent;
+const textbox = () => screen.getByRole('textbox') as HTMLTextAreaElement;
+const sendButton = () => screen.getByRole('button', { name: en.chat.compose.send });
 
 beforeEach(() => {
-  window.localStorage.clear();
-  newSession.projects = [项目];
-  newSession.target = 项目;
-  newSession.sending = false;
-  newSession.needsProject = false;
-  newSession.error = null;
-  newSession.agentRoute = { agent_name: 'codex', agent_backend: 'codex' };
-  newSession.send.mockResolvedValue({ sessionId: 'ses_1', initialMessage: 'x' });
-  authorization.capabilities.can_chat = true;
-  authorization.capabilities.can_manage_projects = true;
+  viewport.desktop = true;
   authorization.capabilities.can_manage_instance = true;
-  readiness.value = null;
-  readiness.questions.length = 0;
-  // Each case is its own page load; the handoff a page holds is not shared.
-  forgetSetupHandoff();
+  posts.calls = [];
+  posts.answer = () => Promise.resolve(new Response(JSON.stringify({ id: 'msg_1' }), { status: 200 }));
+  api.getMainSession.mockResolvedValue({
+    status: 200,
+    session: { id: 'ses_main', agent_name: 'main', agent_backend: 'vibey', model: 'gpt-6-astra', reasoning_effort: 'high' },
+  });
+  api.listVibeAgents.mockResolvedValue({ ok: true, agents: [{ name: 'main', backend: 'vibey', model: 'gpt-6-astra' }], default_agent_name: 'vibey' });
+  api.getBackendConnection.mockResolvedValue(connection('api_key'));
+  api.updateSession.mockResolvedValue({});
+  api.setFastModeDefault.mockResolvedValue({});
+  api.getHomePreferences.mockResolvedValue({ setup_later_on: null, setup_not_needed: [], tip_hidden_on: null, tips_enabled: false });
+  api.updateHomePreferences.mockImplementation(async () => ({}));
+  api.getConfig.mockResolvedValue({ platforms: { enabled: ['slack'] } });
+  api.remoteAccessStatus.mockResolvedValue({ ok: true, paired: true });
+  newSession.projects = [];
+  newSession.target = undefined;
+  newSession.send.mockResolvedValue({ sessionId: 'ses_new' });
 });
 
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  // The Session writers are module state shared with the conversation; each case starts clean.
+  resetCoalescedWrites();
+  resetOpenSessionRowWrites();
 });
 
-describe('Workbench first-task home', () => {
-  it('opens real starting actions without sending or overwriting a draft', async () => {
+describe('the Owner home (ui/design: home/home/c-ready-desktop)', () => {
+  it('talks to the main Bot: the route is its own, and a message lands in its conversation, which opens', async () => {
     const user = userEvent.setup();
     renderHome();
-    await user.type(input(), '保留草稿');
-    await user.click(screen.getByText(en.workbench.home.openProject));
-    expect(screen.getByRole('dialog').getAttribute('data-path')).toBe(项目.folder_path);
-    await user.click(screen.getByText('cancel-folder'));
-    await user.click(screen.getByText(en.workbench.home.createTask));
-    expect(screen.getByRole('dialog', { name: 'create-task' })).toBeTruthy();
-    await user.click(screen.getByText('cancel-task'));
-    expect(input().value).toBe('保留草稿');
-    expect(newSession.send).not.toHaveBeenCalled();
-    await user.click(screen.getByText(en.workbench.home.manageAgents));
-    expect(await screen.findByText('agents-page')).toBeTruthy();
-  });
-
-  it('navigates only after submission, without passing a replayable initial message', async () => {
-    const user = userEvent.setup();
-    renderHome();
-    await user.type(input(), '先做中文文档');
-    await user.click(screen.getByRole('button', { name: en.chat.compose.send }));
-    expect(newSession.send).toHaveBeenCalledWith('先做中文文档', []);
-    expect(await screen.findByText('chat-page')).toBeTruthy();
-  });
-
-  it('shows the real project row and reaches the folder picker from it without a menu', async () => {
-    const user = userEvent.setup();
-    renderHome();
-
-    await user.type(input(), '帮我看看这个仓库');
-    // The row names the instance's own projects, so where the session lands is
-    // readable before anything is typed.
-    expect(screen.getByRole('button', { name: 项目.display_name })).toBeTruthy();
-
-    // No menu in between: the row reaches the folder picker itself.
-    await user.click(screen.getByRole('button', { name: en.newSession.newProject }));
-  expect(screen.getByRole('dialog', { name: 'folder-browser' })).toBeTruthy();
-
-    await user.click(screen.getByText('cancel-folder'));
-  expect(screen.queryByRole('dialog', { name: 'folder-browser' })).toBeNull();
-    expect(input().value).toBe('帮我看看这个仓库');
-    expect(newSession.setSelected).not.toHaveBeenCalled();
-    expect(newSession.upsertSelectProject).not.toHaveBeenCalled();
-
-    // Picking one is a real selection, not a decoration.
-    await user.click(screen.getByRole('button', { name: 项目.display_name }));
-    expect(newSession.setSelected).toHaveBeenCalledWith(项目.id);
-    expect(input().value).toBe('帮我看看这个仓库');
-  });
-
-  it('keeps the draft when the Agent route changes', async () => {
-    const user = userEvent.setup();
-    renderHome();
-
-    await user.type(input(), '写一份中文周报');
-    await user.click(screen.getByText('agent-picker'));
-
-    expect(newSession.setAgentRoute).toHaveBeenCalledWith({ agent_name: 'claude', agent_backend: 'claude' });
-    expect(input().value).toBe('写一份中文周报');
+    expect(await screen.findByTestId('route')).toHaveProperty('textContent', 'locked:gpt-6-astra');
+    expect(api.getBackendConnection).toHaveBeenCalledWith('vibey');
+    expect(screen.getByRole('heading', { level: 1 }).textContent).toMatch(/What’s next\?$/);
+    await user.type(textbox(), 'Plan my week');
+    await user.click(sendButton());
+    await waitFor(() => expect(where()).toBe('/chat/ses_main'));
+    expect(posts.calls).toEqual([{ path: '/api/sessions/ses_main/messages', body: { text: 'Plan my week' } }]);
     expect(newSession.send).not.toHaveBeenCalled();
   });
 
-  it('offers to add a workspace instead of sending into nowhere', async () => {
-    newSession.needsProject = true;
-    newSession.send.mockResolvedValue(null);
+  it('keeps the draft and the page when the main Bot refuses the message', async () => {
+    posts.answer = () => Promise.resolve(new Response(JSON.stringify({ error: 'Nope' }), { status: 400 }));
     const user = userEvent.setup();
     renderHome();
-
-    await user.type(input(), '开始一个新项目');
-    await user.click(screen.getByRole('button', { name: en.chat.compose.send }));
-
-  expect(await screen.findByRole('dialog', { name: 'folder-browser' })).toBeTruthy();
-    // The prompt survives the detour — the user retries it, not retypes it.
-    expect(input().value).toBe('开始一个新项目');
+    await user.type(textbox(), 'Plan my week');
+    await user.click(sendButton());
+    expect(await screen.findByText('Nope')).toBeTruthy();
+    expect(where()).toBe('/');
+    expect(textbox().value).toBe('Plan my week');
   });
 
-  it('shows no readiness banner on the wizard claim alone', () => {
-    renderHome({ onboardingCompleted: true });
-
-    // The backend has not corroborated anything yet, so there is nothing true
-    // to say about it — the claim is what makes the question worth asking, not
-    // an answer in itself.
-    expect(screen.queryByText(/is ready to go/)).toBeNull();
-    expect(screen.queryByRole('button', { name: en.workbench.home.readyDismiss })).toBeNull();
-  });
-
-  it('spells the chat-app continuation as one sentence with a real link', () => {
+  it.each([
+    ['the response is lost', () => Promise.reject(new TypeError('network'))],
+    ['the dispatch timed out after the controller took it', () => Promise.resolve(new Response(JSON.stringify({ dispatch_error: 'dispatch_pending' }), { status: 504 }))],
+    ['the gateway failed', () => Promise.resolve(new Response('bad gateway', { status: 502 }))],
+  ])('does not offer a second send when %s', async (_case, answer) => {
+    posts.answer = answer;
+    const user = userEvent.setup();
     renderHome();
-
-    expect(screen.getByRole('link', { name: en.workbench.home.continueOnPhone }).getAttribute('href'))
-      .toBe('/settings/remote-access');
-    const settingsLink = screen.getByRole('link', { name: 'Settings' });
-    expect(settingsLink.getAttribute('href')).toBe('/settings/platforms');
-    // Guards the source board's missing space: "…apps inSettings".
-    expect(settingsLink.parentElement?.textContent).toBe('Connect chat apps in Settings');
+    await user.type(textbox(), 'Plan my week');
+    await user.click(sendButton());
+    const inspect = await screen.findByRole('link', { name: en.newSession.inspectSession });
+    expect(inspect.getAttribute('href')).toBe('/chat/ses_main');
+    expect(textbox().value).toBe('Plan my week');
+    expect(sendButton()).toHaveProperty('disabled', true);
+    expect(posts.calls).toHaveLength(1);
+    expect(where()).toBe('/');
   });
 
-  it('sends someone who cannot chat to their projects instead of an unusable box', () => {
-    authorization.capabilities.can_chat = false;
+  it('saves route picks one at a time to the main Bot, folding the ones made meanwhile into the next', async () => {
+    let release: () => void = () => {};
+    api.updateSession.mockImplementationOnce(() => new Promise((resolve) => { release = () => resolve({}); }));
+    const user = userEvent.setup();
     renderHome();
+    await screen.findByTestId('route');
+    await user.click(screen.getByText('pick-a'));
+    await user.click(screen.getByText('pick-b'));
+    // The newest pick shows at once; its request waits behind the one in flight.
+    expect(screen.getByTestId('route').textContent).toBe('locked:model-b');
+    expect(api.updateSession.mock.calls).toEqual([['ses_main', { model: 'model-a' }]]);
+    act(() => release());
+    await waitFor(() => expect(api.updateSession).toHaveBeenCalledTimes(2));
+    expect(api.updateSession.mock.calls[1]).toEqual(['ses_main', { model: 'model-b' }]);
+  });
 
-    expect(screen.getByText('projects-page')).toBeTruthy();
+  it('puts each whole ask in the composer without sending, and starts the project ask in the latest project', async () => {
+    const user = userEvent.setup();
+    renderHome({ projects: [project('p1', 'older', '2026-10-01T00:00:00Z'), project('p2', 'avibe', '2026-11-01T00:00:00Z')] });
+    await user.click(screen.getByRole('button', { name: en.workbench.home.asks.weeklyReport }));
+    expect(textbox().value).toBe(en.workbench.home.asks.weeklyReportAsk);
+    await user.click(screen.getByRole('button', { name: en.workbench.home.asks.startInProject }));
+    expect(textbox().value).toBe('In avibe, ');
+    expect(posts.calls).toEqual([]);
+  });
+
+  it('asks for a new project when there is none to start in', async () => {
+    const user = userEvent.setup();
+    renderHome();
+    await user.click(screen.getByRole('button', { name: en.workbench.home.asks.startInProject }));
+    expect(textbox().value).toBe(en.workbench.home.asks.startNewProjectAsk);
   });
 });
 
-describe('Workbench onboarding-completion event', () => {
-  const ready = { backend: 'codex', ready: true };
-  const wizardArrival = { onboardingCompleted: true, settingsBackgroundLocation: { pathname: '/chat/会话' } };
-
-  it('takes the completion out of history and leaves the rest of the entry alone', async () => {
-    readiness.value = ready;
-    renderHome(wizardArrival);
-
-    expect(await screen.findByText('Codex is ready to go')).toBeTruthy();
-    // Consumed, not read: the key is gone from the entry, and the overlay origin
-    // the wizard was also carrying is still there for whoever needs it next.
-    await waitFor(() => expect(locationState()).toEqual({ settingsBackgroundLocation: { pathname: '/chat/会话' } }));
-  });
-
-  it('clears the entry entirely when the completion was all it carried', async () => {
-    readiness.value = ready;
-    renderHome({ onboardingCompleted: true });
-
-    await waitFor(() => expect(locationState()).toBeNull());
-    expect(banner()).toBeTruthy();
-  });
-
-  it('still announces a readiness answer that arrives after the entry was rewritten', async () => {
-    const view = renderHome({ onboardingCompleted: true });
-
-    // Nothing corroborated yet, and the history entry has already been rewritten.
-    await waitFor(() => expect(locationState()).toBeNull());
-    expect(banner()).toBeNull();
-
-    readiness.value = ready;
-    view.rerender(homeTree({ onboardingCompleted: true }));
-
-    // The event is latched for the visit, so the late answer is not wasted.
-    expect(await screen.findByText('Codex is ready to go')).toBeTruthy();
-  });
-
-  it('stays dismissed for the rest of the visit', async () => {
-    readiness.value = ready;
+describe('the Owner home without a model (ui/design: home/home/a-new-desktop)', () => {
+  it('disables the composer and the asks, introduces the Bot, and offers the way to add a model', async () => {
+    api.getBackendConnection.mockResolvedValue(connection('none'));
     const user = userEvent.setup();
-    const view = renderHome({ onboardingCompleted: true });
-
-    await user.click(await screen.findByRole('button', { name: en.workbench.home.readyDismiss }));
-    expect(banner()).toBeNull();
-
-    view.rerender(homeTree({ onboardingCompleted: true }));
-    expect(banner()).toBeNull();
-  });
-
-  it('asks the backend nothing on a visit where no completion can be announced', () => {
-    readiness.value = ready;
     renderHome();
-
-    // Not a claim about the banner — the home never even asks. A visit that
-    // could not announce anything costs the backend no read.
-    expect(readiness.questions.length).toBeGreaterThan(0);
-    expect(readiness.questions.some((question) => question.asked)).toBe(false);
-    expect(banner()).toBeNull();
+    const addModel = await screen.findByRole('button', { name: en.workbench.home.addModel });
+    expect(textbox()).toHaveProperty('disabled', true);
+    expect(textbox().placeholder).toBe(en.workbench.home.noModelPlaceholder);
+    expect(screen.getByRole('button', { name: en.workbench.home.asks.addBot })).toHaveProperty('disabled', true);
+    expect(screen.getByRole('heading', { level: 1 }).textContent).toMatch(/I’m Vibey\.$/);
+    expect(screen.queryByTestId('route')).toBeNull();
+    await user.click(addModel);
+    expect(where()).toBe('/settings/models');
   });
 
-  it('stops asking about the backend once the banner is dismissed', async () => {
-    readiness.value = ready;
-    const user = userEvent.setup();
-    renderHome({ onboardingCompleted: true });
-
-    await user.click(await screen.findByRole('button', { name: en.workbench.home.readyDismiss }));
-
-    expect(readiness.questions.some((question) => question.asked)).toBe(true);
-    expect(readiness.questions.at(-1)).toEqual({ backend: 'codex', asked: false });
+  it('unlocks once the backend reports a model, read again when the window comes back', async () => {
+    api.getBackendConnection.mockResolvedValue(connection('none'));
+    renderHome();
+    await screen.findByRole('button', { name: en.workbench.home.addModel });
+    api.getBackendConnection.mockResolvedValue(connection('subscription'));
+    act(() => { window.dispatchEvent(new Event('focus')); });
+    await waitFor(() => expect(textbox()).toHaveProperty('disabled', false));
+    expect(screen.queryByRole('button', { name: en.workbench.home.addModel })).toBeNull();
   });
 
-  it('still announces after the route guard remounts the home mid-handoff', async () => {
-    readiness.value = ready;
-    const first = renderHome({ onboardingCompleted: true });
-    await waitFor(() => expect(locationState()).toBeNull());
-    first.unmount();
-
-    // Crossing the setup boundary is exactly what makes the route guard
-    // re-validate, and the home is unmounted and remounted underneath while it
-    // does — by which time the entry has already been consumed. Same page, same
-    // announcement still owed: losing it here is losing it for good.
-    renderHome(null);
-
-    expect(await screen.findByText('Codex is ready to go')).toBeTruthy();
+  it.each([
+    ['a failed read', () => api.getBackendConnection.mockRejectedValue(new Error('down'))],
+    ['an answer about another backend', () => api.getBackendConnection.mockResolvedValue({ ...connection('none'), backend: 'codex' })],
+  ])('is not "no model" on %s', async (_case, arrange) => {
+    arrange();
+    renderHome();
+    await screen.findByTestId('route');
+    await waitFor(() => expect(api.getBackendConnection).toHaveBeenCalled());
+    expect(textbox()).toHaveProperty('disabled', false);
   });
 
-  it('does not come back when that remount happens after a dismissal', async () => {
-    readiness.value = ready;
-    const user = userEvent.setup();
-    const first = renderHome({ onboardingCompleted: true });
-
-    await user.click(await screen.findByRole('button', { name: en.workbench.home.readyDismiss }));
-    first.unmount();
-    renderHome(null);
-
-    await waitFor(() => expect(screen.getByTestId('location-state')).toBeTruthy());
-    expect(banner()).toBeNull();
-    expect(readiness.questions.at(-1)).toEqual({ backend: 'codex', asked: false });
-  });
-
-  it('does not announce the consumed setup again after leaving the home and coming back', async () => {
-    readiness.value = ready;
-    const user = userEvent.setup();
-    renderHome(wizardArrival);
-    expect(await screen.findByText('Codex is ready to go')).toBeTruthy();
-    await waitFor(() => expect(locationState()).toEqual({ settingsBackgroundLocation: { pathname: '/chat/会话' } }));
-
-    // A real departure, unlike the guard's remount above: the home is gone
-    // because the user went somewhere else, and the visit the wizard handed off
-    // to is over with it.
-    await user.click(screen.getByText('leave-home'));
-    await waitFor(() => expect(screen.getByText('projects-page')).toBeTruthy());
-    expect(screen.queryByPlaceholderText(en.workbench.home.inputPlaceholder)).toBeNull();
-
-    await user.click(screen.getByText('return-home'));
-    await waitFor(() => expect(screen.getByPlaceholderText(en.workbench.home.inputPlaceholder)).toBeTruthy());
-    expect(banner()).toBeNull();
-    // Nothing left to announce, so the backend is not asked again either.
-    expect(readiness.questions.at(-1)).toEqual({ backend: 'codex', asked: false });
-  });
-
-  it('keeps the announcement through Settings opened over the home', async () => {
-    readiness.value = ready;
-    const user = userEvent.setup();
-    renderHome({ onboardingCompleted: true });
-    expect(await screen.findByText('Codex is ready to go')).toBeTruthy();
-
-    // Settings keeps this home mounted behind it — on a phone as much as on a
-    // desktop — so the user has not left, and the banner they have not answered
-    // yet is still theirs to answer when they come back out.
-    await user.click(screen.getByText('open-settings'));
-    expect(await screen.findByText('settings-page')).toBeTruthy();
-    expect(screen.getByPlaceholderText(en.workbench.home.inputPlaceholder)).toBeTruthy();
-
-    await user.click(screen.getByText('go-back'));
-    await waitFor(() => expect(screen.queryByText('settings-page')).toBeNull());
-    expect(banner()).toBeTruthy();
-  });
-
-  it('does not re-announce the same setup on a reload or a return visit', async () => {
-    readiness.value = ready;
-    const first = renderHome(wizardArrival);
-    await waitFor(() => expect(locationState()).toEqual({ settingsBackgroundLocation: { pathname: '/chat/会话' } }));
-    const afterConsuming = locationState();
-    first.unmount();
-    // A reload is a new page, which is what tells it apart from the remount
-    // above: nothing carries over but the history entry itself.
-    forgetSetupHandoff();
-
-    // And that entry, as it now stands, no longer claims a setup just finished,
-    // so the home says nothing about one.
-    renderHome(afterConsuming);
-    await waitFor(() => expect(screen.getByTestId('location-state')).toBeTruthy());
-    expect(banner()).toBeNull();
+  it('asks the backend of the main Bot’s own Agent', async () => {
+    api.listVibeAgents.mockResolvedValue({ ok: true, agents: [{ name: 'main', backend: 'claude' }], default_agent_name: 'vibey' });
+    renderHome();
+    await waitFor(() => expect(api.getBackendConnection).toHaveBeenCalledWith('claude'));
   });
 });
 
-// Both continuations point at OWNER_ONLY_ROUTES, so these cases are written as
-// the capability the route guard itself reads rather than as role labels the
-// test invents. The server projects `can_manage_instance` from member upward
-// and `can_chat` from editor upward (vibe/authorization.py), so the two states
-// below are the only ones this row can be in: an instance manager (owner or
-// member) sees it, an editor does not, and a viewer never reaches this page at
-// all — that redirect is covered above.
-describe('Workbench continuation row', () => {
-  const ownerOnlyLinks = () => screen
-    .queryAllByRole('link')
-    .map((link) => link.getAttribute('href') ?? '')
-    .filter((href) => href.startsWith('/settings/'));
-
-  it('offers both continuations to someone who can manage the instance', () => {
-    renderHome();
-
-    expect(screen.getByText(en.workbench.home.continueOnPhone)).toBeTruthy();
-    expect(screen.getByText('Connect chat apps in', { exact: false })).toBeTruthy();
-    expect(ownerOnlyLinks().sort()).toEqual(['/settings/platforms', '/settings/remote-access']);
+describe('who is working, beside the greeting', () => {
+  it('opens the one working Bot directly', async () => {
+    renderHome({ bots: botsState({ statusBySession: { ses_pm: 'running' } }) });
+    const chip = screen.getByRole('link', { name: /1 working/ });
+    expect(chip.getAttribute('href')).toBe('/chat/ses_pm');
   });
 
-  it('hides the whole row from someone who cannot, while chat stays usable', async () => {
+  it('lists several working Bots, and opens the one picked', async () => {
+    const user = userEvent.setup();
+    renderHome({ bots: botsState({ statusBySession: { ses_main: 'running', ses_pm: 'running' } }) });
+    await user.click(screen.getByRole('button', { name: /2 working/ }));
+    await user.click(await screen.findByRole('button', { name: /^PM/ }));
+    expect(where()).toBe('/chat/ses_pm');
+  });
+});
+
+describe('a member without Bots (ui/design: home/home/d-member-desktop)', () => {
+  it('keeps the project chips and starts a Session in the chosen project', async () => {
+    const chosen = project('p1', 'avibe', '2026-11-01T00:00:00Z');
+    newSession.projects = [chosen];
+    newSession.target = chosen;
     authorization.capabilities.can_manage_instance = false;
     const user = userEvent.setup();
-    renderHome();
+    renderHome({ bots: memberBots(), projects: [chosen] });
+    expect(screen.getByRole('button', { name: 'avibe' })).toBeTruthy();
+    expect(screen.getByTestId('route').textContent).toBe('open:');
+    expect(screen.getByRole('button', { name: en.workbench.home.asks.remember })).toBeTruthy();
+    await user.type(textbox(), 'Fix the build');
+    await user.click(sendButton());
+    await waitFor(() => expect(where()).toBe('/chat/ses_new'));
+    expect(newSession.send).toHaveBeenCalledWith('Fix the build', [], undefined);
+    expect(api.getBackendConnection).not.toHaveBeenCalled();
+    expect(posts.calls).toEqual([]);
+  });
+});
 
-    // No dead CTA: neither the links nor the sentence that only exists to
-    // introduce them survives.
-    expect(screen.queryByText(en.workbench.home.continueOnPhone)).toBeNull();
-    expect(screen.queryByText('Connect chat apps in', { exact: false })).toBeNull();
-    expect(ownerOnlyLinks()).toEqual([]);
-
-    await user.type(input(), '继续用聊天');
-    await user.click(screen.getByRole('button', { name: en.chat.compose.send }));
-    expect(newSession.send).toHaveBeenCalledWith('继续用聊天', []);
+describe('the soft keyboard (ui/design: home/home/z-keyboard-phone)', () => {
+  it('holds the page at its keyboard-free height while a field has focus on a touch device', async () => {
+    viewport.desktop = false;
+    Object.defineProperty(navigator, 'maxTouchPoints', { configurable: true, value: 5 });
+    vi.resetModules();
+    try {
+      const { HomeLayout } = await import('./home/HomeLayout');
+      const { container } = render(<HomeLayout><textarea aria-label="draft" /></HomeLayout>);
+      const page = container.firstElementChild as HTMLElement;
+      page.getBoundingClientRect = () => ({ height: 700 }) as DOMRect;
+      fireEvent.focusIn(screen.getByLabelText('draft'));
+      expect(page.style.minHeight).toBe('700px');
+      // The keyboard shrinks the shell; the page keeps its height, so the group does not re-center.
+      page.getBoundingClientRect = () => ({ height: 400 }) as DOMRect;
+      fireEvent.focusIn(screen.getByLabelText('draft'));
+      expect(page.style.minHeight).toBe('700px');
+      fireEvent.focusOut(screen.getByLabelText('draft'));
+      expect(page.style.minHeight).toBe('');
+    } finally {
+      Reflect.deleteProperty(navigator, 'maxTouchPoints');
+      vi.resetModules();
+    }
   });
 });

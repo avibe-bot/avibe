@@ -15,6 +15,7 @@ import {
   VAULT_SANDBOX_PINNED_MANIFEST,
   VAULT_SANDBOX_REQUIRED_RESOURCE_PATHS,
 } from './vaultSandboxManifest';
+import { assertVaultEntryAvailable } from './vaultEntry';
 import { openLinkInNewContext } from './pwaNavigation';
 import { getVaultSandboxAppearance, type VaultSandboxAppearance } from './vaultSandboxAppearance';
 import { getVaultSandboxPolicy, refreshVaultSandboxPolicy, type VaultSessionPolicy } from './vaultSandboxPolicy';
@@ -174,6 +175,7 @@ export type VaultAuthorizationWindow = {
  * until its own verification finishes. The RPC awaits that result by id, so a
  * failed/cancelled popup can never silently fall back to an unverified window. */
 export function openVaultAuthorizationWindow(): VaultAuthorizationWindow | null {
+  assertVaultEntryAvailable();
   const id = randomId();
   const generation = clientGeneration;
   const signal = generationController.signal;
@@ -376,6 +378,7 @@ export class VaultSandboxClient {
   }
 
   static async create(): Promise<VaultSandboxClient> {
+    assertVaultEntryAvailable();
     // Snapshot the reset generation so we can discard this client if a reset lands mid-creation.
     const generation = clientGeneration;
     await verifyVaultSandboxIntegrity(generationController.signal);
@@ -847,6 +850,7 @@ type ProtectedUnlockMaterialLike = {
 };
 
 export async function getVaultSandboxClient(): Promise<VaultSandboxClient> {
+  assertVaultEntryAvailable();
   if (!singleton) {
     const pending: Promise<VaultSandboxClient> = VaultSandboxClient.create().catch((err) => {
       // Only clear the globals if they still refer to THIS attempt. A reset may have already

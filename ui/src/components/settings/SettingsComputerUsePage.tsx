@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FC, ReactNode } from 'react';
-import { Check, ExternalLink, Info, LoaderCircle, Monitor, Power, RotateCw } from 'lucide-react';
+import { Check, CircleAlert, CircleCheck, ExternalLink, Info, LoaderCircle, Monitor, Power, RotateCw, ShieldAlert } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
@@ -8,7 +8,6 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { computerUseShellActions, isDesktopShell, type ComputerUsePermissionPane } from '@/lib/desktopShell';
 import type { TranslationKey } from '@/i18n/types';
-import { ComputerUseStatusIcon } from '../workbench/ComputerUseStatusLine';
 import {
   COMPUTER_USE_GUIDE_REFRESH_INTERVAL_MS,
   COMPUTER_USE_GUIDE_STEPS,
@@ -48,6 +47,18 @@ const STEP_STATE_LABEL: Record<ComputerUseGuideStepState, TranslationKey> = {
   complete: 'settings.computerUse.stepState.complete',
   current: 'settings.computerUse.stepState.current',
   pending: 'settings.computerUse.stepState.pending',
+};
+
+const ComputerUseStatusIcon: FC<{ status: string }> = ({ status }) => {
+  if (status === 'ready') return <CircleCheck className="size-4 shrink-0" aria-hidden="true" />;
+  if (status === 'needs_permission' || status === 'needs_runtime') {
+    return <ShieldAlert className="size-4 shrink-0" aria-hidden="true" />;
+  }
+  if (status === 'starting') return <LoaderCircle className="size-4 shrink-0 animate-spin" aria-hidden="true" />;
+  if (status === 'error' || status === 'unavailable') {
+    return <CircleAlert className="size-4 shrink-0" aria-hidden="true" />;
+  }
+  return <CircleCheck className="size-4 shrink-0" aria-hidden="true" />;
 };
 
 const StepMarker: FC<{ index: number; state: ComputerUseGuideStepState }> = ({ index, state }) => (

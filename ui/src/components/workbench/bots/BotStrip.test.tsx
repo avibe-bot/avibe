@@ -42,12 +42,14 @@ const bot = (handle: string, displayName: string, builtin = false): Bot => ({
 
 const bots = [bot('main', '', true), bot('cso', 'Security lead')];
 
-const state = (): BotsState => ({
+const state = (extra: Partial<BotsState> = {}): BotsState => ({
   enabled: true,
   bots,
   loaded: true,
   listed: true,
   mainBot: bots[0],
+  limit: { count: 1, max: 5 },
+  atLimit: false,
   statusBySession: {},
   botForSession: (sessionId) => bots.find((each) => each.session_id === sessionId),
   botForAgent: (name) => bots.find((each) => each.agent_name === name),
@@ -58,7 +60,18 @@ const state = (): BotsState => ({
   openProfile: vi.fn(),
   profileRequest: null,
   closeProfile: vi.fn(),
+  ...extra,
 });
+
+const renderStrip = (value: BotsState) => render(
+  <UnsavedChangesContext.Provider value={{ setRegistration: () => {}, authorizeRouteAction: () => null }}>
+    <BotsContext.Provider value={value}>
+      <MemoryRouter>
+        <BotStrip unreadBySession={{}} />
+      </MemoryRouter>
+    </BotsContext.Provider>
+  </UnsavedChangesContext.Provider>,
+);
 
 describe('BotStrip', () => {
   afterEach(() => {
@@ -93,6 +106,28 @@ describe('BotStrip', () => {
     expect(showToast).toHaveBeenCalledWith('bots.removed:{"name":"Security lead"}', 'success');
     expect(value.afterWrite).toHaveBeenCalled();
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  });
+
+  // docs/plans/bots.md D12; ui/design: sidebar/bots/at-limit. The strip's room goes to the
+  // Bots: with every place taken there is no Add at all, not a disabled one.
+  it('offers Add while a place is free and drops it once every place is taken', () => {
+    const free = state();
+    const view = renderStrip(free);
+    fireEvent.click(screen.getByRole('button', { name: 'bots.addLabel' }));
+    expect(free.openProfile).toHaveBeenCalledWith({ kind: 'create' });
+
+    view.rerender(
+      <UnsavedChangesContext.Provider value={{ setRegistration: () => {}, authorizeRouteAction: () => null }}>
+        <BotsContext.Provider value={state({ limit: { count: 5, max: 5 }, atLimit: true })}>
+          <MemoryRouter>
+            <BotStrip unreadBySession={{}} />
+          </MemoryRouter>
+        </BotsContext.Provider>
+      </UnsavedChangesContext.Provider>,
+    );
+    expect(screen.queryByRole('button', { name: 'bots.addLabel' })).toBeNull();
+    expect(screen.queryByText('bots.add')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Security lead' })).toBeTruthy();
   });
 
   it('leaves the Bot in place when the confirmation is cancelled', async () => {

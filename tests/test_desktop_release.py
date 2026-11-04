@@ -805,6 +805,78 @@ def test_apple_secrets_reach_only_the_identity_import_and_never_tauri():
     assert not any(key.startswith("APPLE_") for key in installer.get("env", {}))
 
 
+def test_signpath_test_signing_is_a_dispatch_only_isolated_lane():
+    sys.path.insert(0, str(ROOT / "desktop" / "scripts"))
+    import signpath_test_signing as verifier
+
+    package = workflow("desktop-package.yml")
+    package_triggers = package.get("on", package.get(True))
+    assert "signpath_test" not in package_triggers["workflow_dispatch"]["inputs"]
+    assert "signpath_test" not in package_triggers["workflow_call"]["inputs"]
+    assert set(package["jobs"]) == {"package"}
+    assert "if" not in package["jobs"]["package"]
+
+    test_workflow = workflow("desktop-signpath-test.yml")
+    triggers = test_workflow.get("on", test_workflow.get(True))
+    assert set(triggers) == {"workflow_dispatch"}
+    test_input = triggers["workflow_dispatch"]["inputs"]["signpath_test"]
+    assert (test_input["type"], test_input["default"], test_input.get("required", False)) == ("boolean", False, False)
+    assert secret_references({key: value for key, value in test_workflow.items() if key != "jobs"}) == set()
+    lane = test_workflow["jobs"]
+    assert set(lane) == {"signpath-test-build", "signpath-test-sign", "signpath-test-verify"}
+    for name, job in lane.items():
+        assert job["if"] == "inputs.signpath_test == true", name
+        assert job["runs-on"] in {"windows-latest", "ubuntu-latest"}, name
+        assert "secrets" not in job and "uses" not in job, name
+        assert job["permissions"] == ({"contents": "read", "actions": "read"} if name == "signpath-test-sign"
+                                      else {"contents": "read"}), name
+        if name != "signpath-test-sign":
+            assert "environment" not in job, name
+            assert secret_references(job) == set(), name
+
+    # The token job binds only the test environment and never checks out or runs repository code.
+    sign = lane["signpath-test-sign"]
+    assert sign["environment"] == "signpath-test"
+    assert secret_references(sign) == {"SIGNPATH_TEST_API_TOKEN"}
+    assert secret_references({key: value for key, value in sign.items() if key != "steps"}) == set()
+    submit, upload = sign["steps"]
+    assert all("run" not in item for item in sign["steps"])
+    assert submit["uses"] == (
+        "signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092"
+    )
+    assert submit["with"] == {
+        "api-token": "${{ secrets.SIGNPATH_TEST_API_TOKEN }}",
+        "organization-id": "cd712383-10e4-47d1-8267-d395bd8104b1",
+        "project-slug": "avibe",
+        "signing-policy-slug": "test-signing",
+        "artifact-configuration-slug": "windows-installer-test",
+        "github-artifact-id": "${{ needs.signpath-test-build.outputs.artifact-id }}",
+        "wait-for-completion": True,
+        "output-artifact-directory": "signpath-test/signed",
+    }
+    assert upload["uses"].startswith("actions/upload-artifact@")
+
+    # SignPath's artifact configuration signs exactly this ZIP-root file, and the
+    # verifier requires the same name on both sides.
+    build = lane["signpath-test-build"]["steps"]
+    unsigned = next(item for item in build if item.get("id") == "unsigned")
+    assert unsigned["with"]["path"] == f"signpath-test/unsigned/{verifier.INSTALLER}"
+    assert verifier.INSTALLER == "Avibe-test-setup.exe"
+    assert f"-Destination signpath-test/unsigned/{verifier.INSTALLER}" in next(
+        item for item in build if item.get("name") == "Stage unsigned installer for SignPath")["run"]
+    assert "NotSigned" in next(
+        item for item in build if item.get("name") == "Stage unsigned installer for SignPath")["run"]
+    names = {item["with"]["name"]: item["with"]["retention-days"]
+             for job in lane.values() for item in job["steps"]
+             if str(item.get("uses", "")).startswith("actions/upload-artifact@")}
+    assert names == {"avibe-signpath-test-unsigned": 3, "avibe-signpath-test-signed": 3,
+                     "avibe-signpath-test-report": 14}
+    verify = next(item for item in lane["signpath-test-verify"]["steps"]
+                  if item.get("name") == "Verify test signature independently")
+    assert "desktop/scripts/signpath_test_signing.py verify" in verify["run"]
+    assert verifier.CERTIFICATE_SHA256 == "38f8d097ed29ecd73394e347a401c0d099379e89e1c47a3843f442041829bc0a"
+
+
 @pytest.mark.parametrize("state", ["new", "draft-partial", "published-identical", "published-legacy",
                                   "changed-desktop", "changed-package", "upload-corrupt", "missing-local"])
 def test_real_publication_shell_checks_assets_before_finalize(tmp_path, state):

@@ -224,3 +224,39 @@ scenarios:
     kind: lifecycle
     layer: contract
     test: tests/test_tunnel_recovery.py::test_ra_tq_035_connector_readiness_counts_edge_registered_connections
+  - id: RA-TQ-036
+    name: Repeated manual evaluation ignores automatic debt and compares fresh current-path evidence
+    status: covered
+    kind: resilience
+    layer: scenario
+    test: tests/test_tunnel_recovery.py::test_ra_tq_036_manual_retries_ignore_auto_debt_and_debounce_does_not_slide
+  - id: RA-TQ-037
+    name: Consecutive unsuccessful performance retries expire at one two and at most five minutes and reset on improvement
+    status: covered
+    kind: lifecycle
+    layer: scenario
+    test: tests/test_tunnel_recovery.py::test_ra_tq_037_performance_retry_streak_cap_expiry_and_success
+  - id: RA-TQ-038
+    name: Released histories rebase obsolete cooldown once without retaining one-time manual bypass lockout
+    status: covered
+    kind: migration
+    layer: scenario
+    test: tests/test_tunnel_recovery.py::test_ra_tq_038_legacy_history_rebases_once_and_discards_bypass
+  - id: RA-TQ-039
+    name: External observed context changes reset debt but optimizer-owned rollback retains its completion schedule
+    status: covered
+    kind: lifecycle
+    layer: scenario
+    test: tests/test_tunnel_recovery.py::test_ra_tq_039_completion_records_rollback_context_missed_by_monitor
+  - id: RA-TQ-040
+    name: Automatic waiting and manual debounce are distinct and optimization refusals are actionable
+    status: covered
+    kind: user_experience
+    layer: component
+    test: ui/src/components/RemoteAccess.test.tsx::RA-TQ-040 explains automatic waiting without disabling a manual retry
+  - id: RA-TQ-041
+    name: Stop and disable win the race between candidate evaluation and promotion
+    status: covered
+    kind: lifecycle
+    layer: scenario
+    test: tests/test_tunnel_recovery.py::test_ra_tq_041_stop_or_disable_wins_candidate_promotion_race
