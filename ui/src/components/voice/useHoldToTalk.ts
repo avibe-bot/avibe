@@ -150,6 +150,9 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
   // The last pointer press was the gesture's (a tap it answered, a hold, a press given back, or a
   // press while a take is pending).
   const handled = useRef(false);
+  // The last press reached the hold. Where touch drag-and-drop is on (Windows, ChromeOS, Linux),
+  // a long touch brings its context menu on the release, after the hold has ended.
+  const held = useRef(false);
   const mounted = useRef(true);
 
   const toPhase = useCallback((next: HoldPhase) => {
@@ -334,6 +337,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
   const holdReached = useCallback(async () => {
     const current = press.current;
     if (!current) return;
+    held.current = true;
     cancelAnimationFrame(current.frame);
     setProgress(1);
     if (availableRef.current === false) {
@@ -446,6 +450,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
   const onPointerDown = useCallback((event: ReactPointerEvent<HTMLElement>) => {
     if (press.current) return;
     handled.current = false;
+    held.current = false;
     if (event.button !== 0 || (IS_APPLE && event.ctrlKey)) return;
     // A take still settling or waiting after a cut-off owns the element: its click must not
     // navigate away and drop it.
@@ -546,10 +551,17 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
   // at times (an editable field with text) sets those styles itself instead of spreading it.
   const holdable = phase !== 'interrupted';
   const onContextMenu = useCallback((event: ReactMouseEvent<HTMLElement>) => {
-    // A live press is the hold, not the system's menu (Android fires one on a long press).
-    // Otherwise the menu is the element's: a right-click on an idle composer still pastes.
+    // A live press is the hold, not the system's menu (Android fires one on a long press), and
+    // so is the menu a held press's release brings (Windows, ChromeOS, Linux): left open, it
+    // takes the next tap. Otherwise the menu is the element's: a right-click on an idle
+    // composer still pastes.
     const at = phaseRef.current;
-    if (at === 'pressing' || at === 'listening' || at === 'recording' || at === 'armed') event.preventDefault();
+    if (at === 'pressing' || at === 'listening' || at === 'recording' || at === 'armed') {
+      event.preventDefault();
+    } else if (held.current) {
+      held.current = false;
+      event.preventDefault();
+    }
   }, []);
 
   const sendInterrupted = useCallback(() => {
