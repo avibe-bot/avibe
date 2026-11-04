@@ -1490,11 +1490,8 @@ describe('ChatPage transcript hydration', () => {
         ...projectedMessage('phase-output', 'phase result'),
         author: 'agent', type: 'output', source: 'agent', created_at: '2026-09-05T00:00:01Z',
       };
-      mocks.api.getSessionBootstrap.mockResolvedValue({
-        ...bootstrapPayload('session-new'),
-        messages: transcript,
-        config: { ui: { show_agent_activity: true } }, turn_state: running,
-      });
+      const opened = deferred<unknown>();
+      mocks.api.getSessionBootstrap.mockReturnValue(opened.promise);
       mocks.api.getTurnState.mockResolvedValue(running);
       mocks.api.listSessionMessages.mockImplementation((_sid: string, options?: { aroundId?: string }) => (
         Promise.resolve(options?.aroundId ? {
@@ -1519,7 +1516,16 @@ describe('ChatPage transcript hydration', () => {
           </Routes>
         </MemoryRouter>,
       );
-      await waitFor(() => expect(mocks.api.getSessionActivity).toHaveBeenCalled());
+      // The Transcript pins a newly opened chat to the live tail in an effect of
+      // the commit that first renders it. Deliver the open inside act so that
+      // commit and its effects settle before the reader scrolls; the summary
+      // read starts in the same continuation and stays in flight.
+      await act(async () => opened.resolve({
+        ...bootstrapPayload('session-new'),
+        messages: transcript,
+        config: { ui: { show_agent_activity: true } }, turn_state: running,
+      }));
+      expect(mocks.api.getSessionActivity).toHaveBeenCalledWith('session-new');
       if (arrival !== 'before summary') {
         await act(async () => oldSummary.resolve({ groups: [previous] }));
         await waitFor(() => expect(mocks.api.getSessionActivityGroup).toHaveBeenCalledWith('session-new', previous.id));
