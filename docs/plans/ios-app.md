@@ -1,7 +1,8 @@
 # Avibe iOS App · Plan
 
-> **Status**: Proposed, revised 2026-11-03 with owner feedback; awaiting owner
-> decisions (section 17). Plan and spike only; nothing here is built yet.
+> **Status**: Direction approved by the owner on 2026-11-04 (decision 1);
+> decisions 2-8 are open (section 17). Plan and spike only; nothing here is
+> built yet.
 > **Owner**: cyhhao
 > **Date**: 2026-11-02
 
@@ -184,7 +185,7 @@ compares a plain `textarea`, a bare `contenteditable`, bare Lexical, and
 | Symptom | Device result | Consequence |
 | --- | --- | --- |
 | Pinyin candidates sometimes missing | Not reproduced; candidates and composition are normal in every input, `MentionEditor` included | Recheck on the checklist; no dedicated fix |
-| Keyboard pushing the composer | Keyboard open and close are normal in every input. On the first candidate pick in an empty editor, Lexical calls `window.scrollBy` and moves the page; a plain `textarea` does not | Shell: resize the web view to `keyboardLayoutGuide`. Native composer: removes Lexical from the path. The web-only fix avibe-bot/avibe#3166 has no device evidence and is recommended for closing. |
+| Keyboard pushing the composer | Keyboard open and close are normal in every input. On the first candidate pick in an empty editor, Lexical calls `window.scrollBy` and moves the page; a plain `textarea` does not | Shell: resize the web view to `keyboardLayoutGuide`. Native composer: removes Lexical from the path. The web-only fix avibe-bot/avibe#3166 had no device evidence and was closed. |
 | Typing stops after quick Paste (letters go straight in, Pinyin no longer composes) | iOS system behavior: the same in a plain `textarea` | Probably the same in `UITextView`; verify once, no app-side handling |
 | Typeless blank | Intermittent, not reproduced. Lead: the Home Screen web app reloads the whole page after a few seconds away | A shell app keeps its page across brief app switches; recheck on the checklist |
 | Accessory bar | WebKit; a page cannot remove it | Shell flag or the native composer |
@@ -787,6 +788,17 @@ every item with the native composer.
 
 ## 16. Risks and open questions
 
+- **Perceived loading (raised by the owner 2026-11-04).** The Web UI is already
+  a single-page app with immutable `/assets/` caching, but every page fetches
+  its data live: `ApiContext` keeps only a 1.5-second in-memory request cache,
+  and the Home Screen web app reloads after a brief switch away. A local-first
+  data cache in the Web UI, rendering the session list, Inbox, and recent
+  messages from IndexedDB and then merging fresh data and SSE updates, would
+  help the PWA, the desktop app, and this shell alike. It belongs in its own
+  plan. Partition the cache by instance and user, and clear it on sign-out,
+  authorization changes, and hidden Sessions. Bundling the Web UI into the app
+  is not proposed: it would drift from weekly instance updates and saves only
+  the HTML request.
 - **iPhone behavior is unverified.** It is cited, or inferred from shared
   WebKit code, and has not been observed on a device (section 15).
 - **The case for the native composer is narrower than first thought.** The
@@ -809,9 +821,10 @@ every item with the native composer.
 
 ## 17. Owner decisions
 
-1. Approve the shape and technology: a Swift shell, the web transcript, a
-   native composer, and one `avibeNative` contract, with code in `ios/` of this
-   repository (and `android/` later).
+1. **Approved 2026-11-04.** The shape and technology: a Swift shell, the web
+   transcript, a native composer, and one `avibeNative` contract, with code in
+   `ios/` of this repository (and `android/` later). Whether and when the
+   native composer is built is still decision 4.
 2. Apple Developer account and team, app name, bundle id prefix (`bot.avibe.ios`
    proposed), and minimum iOS version (17 proposed; the media-capture delegate
    and `keyboardLayoutGuide` need 15).
