@@ -1,11 +1,11 @@
 import { useEffect } from 'react';
-import { CloudOff, Loader2, Mic, MicOff, Paperclip, PenLine, RotateCcw, Send, Trash2, X } from 'lucide-react';
+import { CloudOff, Loader2, Mic, MicOff, Paperclip, PenLine, RotateCcw, Send, Trash2, Undo2, X } from 'lucide-react';
 import clsx from 'clsx';
 import { Trans, useTranslation } from 'react-i18next';
 
 import { Button } from '../ui/button';
 import type { HoldOutcome, useHoldToTalk } from './useHoldToTalk';
-import { VoiceCancelTarget, VoiceCard, type VoiceTarget } from './VoiceCard';
+import { VoiceCancelTarget, VoiceCard, VoiceToastClose, type VoiceTarget } from './VoiceCard';
 
 // Holding an empty composer to talk (ui/design: composer/hold-desktop/*, composer/hold-mobile/*):
 // the take's card above the composer, what the composer itself shows while it is held, and the
@@ -143,7 +143,6 @@ function MouseHint({ armed }: { armed: boolean }) {
 /** What a press that sent nothing leaves: one line where the card was; typing is always the way on. */
 function HoldNote({ note, pointer, onDismiss }: { note: Exclude<HoldOutcome, 'sent'>; pointer: HoldPointer; onDismiss: () => void }) {
   const { t } = useTranslation();
-  const sticky = note === 'denied' || note === 'unavailable';
   return (
     <div
       role="status"
@@ -153,7 +152,7 @@ function HoldNote({ note, pointer, onDismiss }: { note: Exclude<HoldOutcome, 'se
       )}
     >
       {note === 'asking' && <Mic className="mt-0.5 size-4 shrink-0 text-mint-ink" />}
-      {note === 'cancelled' && <X className="mt-0.5 size-4 shrink-0 text-muted" />}
+      {note === 'cancelled' && <Undo2 className="mt-0.5 size-4 shrink-0 text-muted" />}
       {note === 'too-short' && <MicOff className="mt-0.5 size-4 shrink-0 text-muted" />}
       {note === 'denied' && <MicOff className="mt-0.5 size-4 shrink-0 text-destructive-ink" />}
       {note === 'unavailable' && <CloudOff className="mt-0.5 size-4 shrink-0 text-muted" />}
@@ -169,11 +168,7 @@ function HoldNote({ note, pointer, onDismiss }: { note: Exclude<HoldOutcome, 'se
         )}
         {note === 'unavailable' && <span className="text-foreground">{t('pet.voice.cloudRequired')}</span>}
       </div>
-      {sticky && (
-        <button type="button" onClick={onDismiss} aria-label={t('voice.dismiss')} className="grid size-5 shrink-0 place-items-center rounded-md text-muted hover:text-foreground">
-          <X className="size-3.5" />
-        </button>
-      )}
+      <VoiceToastClose label={t('voice.dismiss')} onClick={onDismiss} />
     </div>
   );
 }

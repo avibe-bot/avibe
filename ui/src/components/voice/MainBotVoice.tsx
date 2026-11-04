@@ -1,12 +1,12 @@
 import { useEffect } from 'react';
-import { ArrowUpRight, CloudOff, MicOff, RotateCcw, X } from 'lucide-react';
+import { ArrowUpRight, CloudOff, MicOff, RotateCcw, Undo2 } from 'lucide-react';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 
 import type { BotAvatar as BotAvatarSpec } from '@/lib/bots';
 import { BotAvatar } from '../ui/bot-avatar';
 import type { useHoldToTalk } from './useHoldToTalk';
-import { VoiceCancelTarget, VoiceCard, VoiceInterruptedActions } from './VoiceCard';
+import { VoiceCancelTarget, VoiceCard, VoiceInterruptedActions, VoiceToastClose } from './VoiceCard';
 import { VoiceMark } from './VoiceMark';
 
 // Holding the main Bot in the middle of the phone's tab bar (ui/design: mobile/main-bot-voice/*):
@@ -77,7 +77,7 @@ export function MainBotVoiceToast({ hold, bot, onView }: { hold: Hold; bot: Main
     <div className="pointer-events-none fixed inset-x-0 bottom-(--mobile-nav-height) z-50 flex justify-center px-4 pb-9 md:hidden" role="status">
       <div className={clsx('pointer-events-auto flex w-full max-w-sm items-start gap-3 rounded-2xl border bg-surface-2 px-3.5 py-3 shadow-xl', tone)}>
         {outcome === 'sent' && <BotAvatar avatar={bot.avatar} name={bot.name} size={28} />}
-        {outcome === 'cancelled' && <X className="mt-0.5 size-4 shrink-0 text-muted" />}
+        {outcome === 'cancelled' && <Undo2 className="mt-0.5 size-4 shrink-0 text-muted" />}
         {(outcome === 'too-short' || outcome === 'asking') && <MicOff className="mt-0.5 size-4 shrink-0 text-muted" />}
         {(outcome === 'denied' || failed) && <MicOff className="mt-0.5 size-4 shrink-0 text-destructive-ink" />}
         {outcome === 'unavailable' && <CloudOff className="mt-0.5 size-4 shrink-0 text-muted" />}
@@ -117,24 +117,18 @@ export function MainBotVoiceToast({ hold, bot, onView }: { hold: Hold; bot: Main
           )}
         </div>
         {outcome === 'sent' && !failed && (
-          <button type="button" onClick={() => { dismiss(); onView(); }} className="flex shrink-0 items-center gap-0.5 self-center text-xs font-semibold text-mint-ink">
+          <button type="button" onClick={() => { dismiss(); onView(); }} className="-my-3 flex min-h-11 shrink-0 items-center gap-0.5 self-center px-1.5 text-xs font-semibold text-mint-ink">
             {t('voice.view')}
             <ArrowUpRight className="size-3.5" />
           </button>
         )}
-        {failed && (
-          <span className="flex shrink-0 items-center gap-1 self-center">
-            {hold.canRetry && (
-              <button type="button" onClick={hold.retry} className="flex items-center gap-1 text-xs font-semibold text-mint-ink">
-                <RotateCcw className="size-3.5" />
-                {t('voice.retry')}
-              </button>
-            )}
-            <button type="button" onClick={hold.discard} aria-label={t('voice.discard')} className="grid size-6 place-items-center rounded-md text-muted hover:text-foreground">
-              <X className="size-3.5" />
-            </button>
-          </span>
+        {failed && hold.canRetry && (
+          <button type="button" onClick={hold.retry} className="-my-3 flex min-h-11 shrink-0 items-center gap-1 self-center px-1.5 text-xs font-semibold text-mint-ink">
+            <RotateCcw className="size-3.5" />
+            {t('voice.retry')}
+          </button>
         )}
+        {failed ? <VoiceToastClose label={t('voice.discard')} onClick={hold.discard} /> : <VoiceToastClose label={t('voice.dismiss')} onClick={dismiss} />}
       </div>
     </div>
   );

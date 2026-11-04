@@ -6,6 +6,8 @@ const WAV_HEADER_BYTES = 44;
 const DEFAULT_SEGMENT_OVERLAP_MS = 500;
 export const VOICE_MIN_SEGMENT_MS = 5_000;
 export const VOICE_CAPTURE_STOP_TIMEOUT_MS = 5_000;
+/** How long a take waits for a suspended audio context to start rendering before it rebuilds. */
+export const VOICE_AUDIO_START_TIMEOUT_MS = 2_000;
 
 export const voiceWavMaxSamples = (maxFileBytes?: number | null): number | null => {
   if (maxFileBytes == null || !Number.isFinite(maxFileBytes)) return null;
@@ -154,6 +156,35 @@ const audioContextConstructor = (): AudioContextConstructor | null => {
   return typeof constructor === 'function' ? constructor : null;
 };
 
+/**
+ * Whether a prewarmed context can still carry a take. WebKit moves a context to its own
+ * `interrupted` state when the system takes the audio session (the microphone permission
+ * alert, a call, Siri, the app leaving); such a context renders nothing, and its `resume()`
+ * waits for an interruption that may never end. Reusing it would leave every later take
+ * silent for the life of the page, so it is replaced instead.
+ */
+const canReuseAudioContext = (context: AudioContext): boolean => (
+  context.state === 'running' || context.state === 'suspended'
+);
+
+/** Asks the context to render and reports whether it does within `timeoutMs`. */
+const startAudioContext = async (context: AudioContext, timeoutMs: number): Promise<boolean> => {
+  if (context.state === 'running') return true;
+  if (!canReuseAudioContext(context)) return false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      context.resume().catch(() => undefined),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+  return (context.state as AudioContextState) === 'running';
+};
+
 const clearPrewarmedAudioContext = (context: AudioContext): void => {
   if (prewarmedAudioContext !== context) return;
   prewarmedAudioContext = null;
@@ -203,9 +234,10 @@ export const prewarmVoiceCapture = (): Promise<void> => {
     prewarmedAudioContext
     && (
       prewarmedAudioContextConstructor !== constructor
-      || prewarmedAudioContext.state === 'closed'
+      || !canReuseAudioContext(prewarmedAudioContext)
     )
   ) {
+    // Rebuilt here, inside the press, where a new context may start.
     closePrewarmedAudioContext(prewarmedAudioContext);
   }
   if (prewarmPromise) {
@@ -247,10 +279,12 @@ const acquireAudioContext = async (): Promise<{
     closePrewarmedAudioContext(prewarmedAudioContext);
   }
   if (prewarmPromise) await prewarmPromise.catch(() => undefined);
+  if (prewarmedAudioContext && !canReuseAudioContext(prewarmedAudioContext)) {
+    closePrewarmedAudioContext(prewarmedAudioContext);
+  }
   if (
     prewarmedAudioContext
     && prewarmedAudioContextConstructor === constructor
-    && prewarmedAudioContext.state !== 'closed'
   ) {
     return { context: prewarmedAudioContext, prewarmed: true };
   }
@@ -306,11 +340,9 @@ class AudioWorkletPcmCapture implements VoicePcmCapture {
   }
 
   async start(): Promise<void> {
-    let context: AudioContext | null = null;
     try {
       const acquired = await acquireAudioContext();
-      context = acquired.context;
-      this.context = context;
+      this.context = acquired.context;
       this.sharedContext = acquired.prewarmed;
       this.stream.getTracks().forEach((track) => {
         track.addEventListener('ended', this.handleTrackEnded, { once: true });
@@ -318,64 +350,92 @@ class AudioWorkletPcmCapture implements VoicePcmCapture {
       if (this.stream.getTracks().some((track) => track.readyState === 'ended')) {
         this.stop();
       }
-      let moduleUrl: string | null = null;
-      try {
-        if (!acquired.prewarmed) {
-          moduleUrl = URL.createObjectURL(
-            new Blob([PCM_WORKLET_SOURCE], { type: 'text/javascript' }),
-          );
-          await context.audioWorklet.addModule(moduleUrl);
-        }
-        if (this.stopping) {
-          this.finish();
-          return;
-        }
-
-        const node = new AudioWorkletNode(context, PCM_WORKLET_NAME, {
-          numberOfInputs: 1,
-          numberOfOutputs: 1,
-          outputChannelCount: [1],
-          processorOptions: {
-            targetSampleRate: this.sampleRate,
-            // File-sized segments are assembled on the main thread. Deliver
-            // smaller chunks so a processor failure cannot erase a whole segment.
-            chunkSamples: voicePcmDeliverySamples(this.sampleRate, this.segmentSamples),
-          },
-        });
-        node.port.onmessage = (event: MessageEvent<{
-          type?: string;
-          samples?: ArrayBuffer;
-        }>) => {
-          if (event.data.type === 'samples' && event.data.samples) {
-            this.handlers.onSamples(new Int16Array(event.data.samples));
-          } else if (event.data.type === 'stopped') {
-            this.finish();
-          }
-        };
-        node.onprocessorerror = () => {
-          this.reportFailure(new Error('voice PCM processor stopped unexpectedly'));
-          this.finish();
-        };
-        this.node = node;
-        this.source = context.createMediaStreamSource(this.stream);
-        this.source.connect(node);
-        node.connect(context.destination);
-        await context.resume();
-      } finally {
-        if (moduleUrl) URL.revokeObjectURL(moduleUrl);
-      }
+      if (await this.connect(acquired.context, acquired.prewarmed)) return;
+      // The context does not render. A prewarmed one may have been taken by the system since
+      // it was made (on iOS, the permission alert of the first press does this), and it would
+      // keep this take and every later one silent. Rebuild once on a context made now: the
+      // microphone is open, so the browser lets it start without a fresh gesture.
+      const constructor = audioContextConstructor();
+      if (!constructor) throw new Error('AudioContext unavailable');
+      await this.closeContext();
+      const context = new constructor();
+      this.context = context;
+      this.sharedContext = false;
+      if (await this.connect(context, false)) return;
+      throw new Error('voice audio context did not start');
     } catch (error) {
       this.detachNodes();
-      this.context = null;
-      const failedContext = context;
-      const sharedContext = this.sharedContext;
-      this.sharedContext = false;
-      if (failedContext) {
-        if (sharedContext) closePrewarmedAudioContext(failedContext);
-        else if (failedContext.state !== 'closed') await failedContext.close().catch(() => undefined);
-      }
+      await this.closeContext();
       throw error;
     }
+  }
+
+  /** Builds the graph on `context`; true once it renders, or once the capture stopped meanwhile. */
+  private async connect(context: AudioContext, prewarmed: boolean): Promise<boolean> {
+    let moduleUrl: string | null = null;
+    try {
+      if (!prewarmed) {
+        moduleUrl = URL.createObjectURL(
+          new Blob([PCM_WORKLET_SOURCE], { type: 'text/javascript' }),
+        );
+        await context.audioWorklet.addModule(moduleUrl);
+      }
+      if (this.stopping) {
+        this.finish();
+        return true;
+      }
+
+      const node = new AudioWorkletNode(context, PCM_WORKLET_NAME, {
+        numberOfInputs: 1,
+        numberOfOutputs: 1,
+        outputChannelCount: [1],
+        processorOptions: {
+          targetSampleRate: this.sampleRate,
+          // File-sized segments are assembled on the main thread. Deliver
+          // smaller chunks so a processor failure cannot erase a whole segment.
+          chunkSamples: voicePcmDeliverySamples(this.sampleRate, this.segmentSamples),
+        },
+      });
+      node.port.onmessage = (event: MessageEvent<{
+        type?: string;
+        samples?: ArrayBuffer;
+      }>) => {
+        if (event.data.type === 'samples' && event.data.samples) {
+          this.handlers.onSamples(new Int16Array(event.data.samples));
+        } else if (event.data.type === 'stopped') {
+          this.finish();
+        }
+      };
+      node.onprocessorerror = () => {
+        this.reportFailure(new Error('voice PCM processor stopped unexpectedly'));
+        this.finish();
+      };
+      this.node = node;
+      this.source = context.createMediaStreamSource(this.stream);
+      this.source.connect(node);
+      node.connect(context.destination);
+      if (await startAudioContext(context, VOICE_AUDIO_START_TIMEOUT_MS)) return true;
+      this.disconnectNodes();
+      if (this.stopping) {
+        // Stopped while waiting: a context that never rendered has no PCM to flush.
+        await this.closeContext();
+        this.finish();
+        return true;
+      }
+      return false;
+    } finally {
+      if (moduleUrl) URL.revokeObjectURL(moduleUrl);
+    }
+  }
+
+  private async closeContext(): Promise<void> {
+    const context = this.context;
+    const sharedContext = this.sharedContext;
+    this.context = null;
+    this.sharedContext = false;
+    if (!context) return;
+    if (sharedContext) closePrewarmedAudioContext(context);
+    else if (context.state !== 'closed') await context.close().catch(() => undefined);
   }
 
   stop(): void {
@@ -422,6 +482,10 @@ class AudioWorkletPcmCapture implements VoicePcmCapture {
     this.stream.getTracks().forEach((track) => {
       track.removeEventListener('ended', this.handleTrackEnded);
     });
+    this.disconnectNodes();
+  }
+
+  private disconnectNodes(): void {
     this.source?.disconnect();
     this.node?.disconnect();
     this.node?.port.close();
@@ -827,20 +891,29 @@ export class VoiceRecordingPipeline {
     );
   }
 
+  // The microphone is never held for a page the user cannot see: hidden (another app, a locked
+  // screen, a background tab) or leaving (pagehide, which also covers the back/forward cache)
+  // finishes the recording, and the tracks stop at once; what was heard still flushes.
   private bindVisibilityStop(): void {
     if (typeof document === 'undefined') return;
     this.visibilityDocument = document;
     document.addEventListener('visibilitychange', this.handleVisibilityChange);
+    if (typeof window !== 'undefined') window.addEventListener('pagehide', this.handlePageHide);
     if (document.visibilityState === 'hidden') this.finish();
   }
 
   private unbindVisibilityStop(): void {
     this.visibilityDocument?.removeEventListener('visibilitychange', this.handleVisibilityChange);
     this.visibilityDocument = null;
+    if (typeof window !== 'undefined') window.removeEventListener('pagehide', this.handlePageHide);
   }
 
   private readonly handleVisibilityChange = (): void => {
     if (this.visibilityDocument?.visibilityState === 'hidden') this.finish();
+  };
+
+  private readonly handlePageHide = (): void => {
+    this.finish();
   };
 
   private stopStream(): void {
