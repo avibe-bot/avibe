@@ -16,6 +16,14 @@ declare global {
   }
 }
 
+// No microphone here. The composer loads its audio worklet as it mounts, and that load can hang
+// Linux WebKit's page (CI's stand-in for Safari's engine); the click under test needs no audio.
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => {
+    if (typeof AudioWorklet !== 'undefined') AudioWorklet.prototype.addModule = async () => undefined;
+  });
+});
+
 for (const [name, pressMs] of [['A click', 40], ['A slow click', HOLD_MS - 100]] as const) {
   test(`${name} on the empty composer leaves a visible caret in its input`, async ({ page }) => {
     await page.goto('/e2e/voice-shortcut/fixture.html');
