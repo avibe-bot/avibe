@@ -820,17 +820,36 @@ async def test_timeout_and_stop_kill_and_reap_worker(monkeypatch, spawn_delay):
     # The real parent must terminate it; no production network override exists.
     script = "import sys,time; sys.stdin.readline(); print('{\"event\":\"sent\"}',flush=True); sys.stdin.readline(); time.sleep(60)"
     monkeypatch.setattr(local_fetch, "_WORKER", script)
-    children, assert_ready = expire_after_worker_acks(monkeypatch, 1, spawn_delay=spawn_delay)
     engine = local_fetch.LocalFetchEngine()
     sent = []
-    result = await engine.fetch("https://example.com/", deadline=time.monotonic() + 0.5, on_sent=lambda: sent.append(1))
-    assert_ready()
-    assert result["error_code"] == "fetch_timeout" and result["sent"]
-    assert sent == [1] and children[0].returncode is not None
+    with monkeypatch.context() as phase_patch:
+        children, assert_ready = expire_after_worker_acks(phase_patch, 1, spawn_delay=spawn_delay)
+        result = await engine.fetch("https://example.com/", deadline=time.monotonic() + 0.5, on_sent=lambda: sent.append(1))
+        assert_ready()
+        assert result["error_code"] == "fetch_timeout" and result["sent"]
+        assert sent == [1] and children[0].returncode is not None
+
+    # Stop must exercise the unwrapped owner wait, not the phase-readiness wait.
+    # On Python <=3.11 a completed readiness waiter can consume cancellation.
+    spawn = asyncio.create_subprocess_exec
+    async def capture(*args, **kwargs):
+        if spawn_delay:
+            await asyncio.sleep(spawn_delay)
+        child = await spawn(*args, **kwargs)
+        children.append(child)
+        return child
+    monkeypatch.setattr(local_fetch, "asyncio", SimpleNamespace(**(vars(asyncio) | {
+        "create_subprocess_exec": capture,
+    })))
     called = asyncio.Event()
     task = asyncio.create_task(engine.fetch("https://example.com/", deadline=time.monotonic() + 30, on_sent=called.set))
-    await asyncio.wait_for(called.wait(), 5)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    try:
+        await asyncio.wait_for(called.wait(), 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
     assert children[1].returncode is not None
+    assert not engine._hosts and engine._workers["fetch"] == 0
