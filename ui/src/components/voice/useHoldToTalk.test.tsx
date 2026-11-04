@@ -172,6 +172,25 @@ describe('useHoldToTalk', () => {
     expect(pipeline.takes).toHaveLength(0);
   });
 
+  // Before the hold a mouse press is not captured (its mouseup and click stay the element's), so
+  // the window follows it: off the element, a move still gives it back and a release still ends it.
+  it('follows a mouse press off the element until the hold, so the microphone never opens after the button is up', async () => {
+    const el = await mount();
+    down(el, 500, 'mouse');
+    fireEvent.pointerMove(document.body, { pointerId: 1, clientX: 100, clientY: 460 });
+    expect(hold.phase).toBe('idle');
+    fireEvent.pointerUp(document.body, { pointerId: 1, clientX: 100, clientY: 460 });
+
+    down(el, 500, 'mouse');
+    fireEvent.pointerUp(document.body, { pointerId: 1, clientX: 100, clientY: 503 });
+    expect(hold.phase).toBe('idle');
+    await elapse(600);
+    await flush();
+    expect(onTap).toHaveBeenCalledTimes(1);
+    expect(pipeline.takes).toHaveLength(0);
+    expect(hold.phase).toBe('idle');
+  });
+
   it('records from 300 ms, shows the live words, and sends the final text as a voice message on release', async () => {
     const el = await mount();
     await holdFor(el);

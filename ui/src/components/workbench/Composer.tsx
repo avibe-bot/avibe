@@ -1447,7 +1447,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [holdPoint, setHoldPoint] = useState<{ x: number; y: number } | null>(null);
   // A tap that should raise the keyboard: focused again in touchend, where iOS allows it.
   const tapFocusRef = useRef(false);
-  // A mouse press on a focused, empty box takes focus from it; it comes back when the take ends.
+  // A mouse hold on a focused, empty box: if the take moves focus away, it comes back when the take ends.
   const holdRefocusRef = useRef(false);
   const holdOpen = (
     mediaEnabled
@@ -1512,6 +1512,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     },
     canHold: canHoldNow,
     onTap: () => {
+      // A click on the input has already placed the caret where it landed; focusing again would
+      // rewrite that selection while the button is still down.
+      if (editorFocused()) return;
       tapFocusRef.current = true;
       focusInput();
     },
@@ -1533,8 +1536,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   useEffect(() => {
     if (hold.phase !== 'idle' || !holdRefocusRef.current) return;
     holdRefocusRef.current = false;
-    if (!unmountedRef.current && !disabledRef.current) focusInput();
-  }, [focusInput, hold.phase]);
+    if (!unmountedRef.current && !disabledRef.current && !editorFocused()) focusInput();
+  }, [editorFocused, focusInput, hold.phase]);
   // Where a hold would record, the placeholder says so; while busy the caller's line still wins.
   const holdHint = holdOpen && hold.phase !== 'interrupted' && (!coarsePointer || !inputFocused);
   const idlePlaceholder = holdHint

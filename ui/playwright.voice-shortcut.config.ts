@@ -17,5 +17,14 @@ export default defineConfig({
     env: { VIBE_UI_BACKEND: 'http://127.0.0.1:9' },
     url: 'http://127.0.0.1:5218/e2e/voice-shortcut/fixture.html',
   },
-  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+  projects: [
+    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+    // A click on the composer is Safari's as much as Chrome's; the microphone suites need
+    // Chromium's fake media device.
+    {
+      name: 'webkit',
+      testMatch: /caret\.spec\.ts/,
+      use: { ...devices['Desktop Safari'], permissions: [], launchOptions: {} },
+    },
+  ],
 });
