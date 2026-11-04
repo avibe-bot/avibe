@@ -75,7 +75,6 @@ vi.mock('../../context/ToastContext', () => ({
 
 vi.mock('../../lib/useProtectedVault', () => ({
   useProtectedVault: () => ({ revealProtectedValue, status: 'locked', refresh: vi.fn(), hasPasskey: () => false }),
-  webauthnAvailable: () => false,
   useVaultSandboxWarm,
   useVaultLock: () => ({ unlocked: false, remainingMs: 0, lockNow: vi.fn() }),
 }));
@@ -581,6 +580,37 @@ describe('VaultsPage protected reveal', () => {
     const [button] = (await screen.findAllByRole('button', { name: 'More actions' })).slice(index);
     await user.click(button);
   };
+
+  it('shows the unsupported-entry notice before preparing reveal and keeps metadata edit available', async () => {
+    vi.stubGlobal('location', new URL('http://192.0.2.1:5123'));
+    vi.stubGlobal('isSecureContext', false);
+    const open = vi.spyOn(window, 'open');
+    await openMenu();
+    expect(screen.getByText(en.vaults.entry.addressTitle)).toBeTruthy();
+    expect(showValue().disabled).toBe(true);
+    expect(showValue().querySelector('.animate-spin')).toBeNull();
+    expect((screen.getByRole('menuitem', { name: en.vaults.editSecret }) as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(showValue());
+    expect(api.createVaultRevealContext).not.toHaveBeenCalled();
+    expect(useVaultSandboxWarm).not.toHaveBeenCalledWith(true);
+    expect(revealProtectedValue).not.toHaveBeenCalled();
+    expect(open).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('catches and localizes a synchronous defensive preopen rejection', async () => {
+    api.createVaultRevealContext.mockResolvedValue({ ok: true, context: {}, envelope });
+    await openMenu();
+    await vi.waitFor(() => expect(showValue().disabled).toBe(false));
+    // Change only the browser capability after rendering; the real shared guard
+    // throws before the API claim. A throw outside reveal's try used to escape.
+    vi.stubGlobal('isSecureContext', false);
+    const open = vi.spyOn(window, 'open');
+    fireEvent.click(showValue());
+    await vi.waitFor(() => expect(showToast).toHaveBeenCalledWith(en.errors.sandbox_browser_unavailable, 'warning'));
+    expect(revealProtectedValue).not.toHaveBeenCalled();
+    expect(open).not.toHaveBeenCalled();
+  });
 
   const clickShowValue = async () => {
     // Keep the public hook operation pending while the REAL opener verifies source-fixture bytes.

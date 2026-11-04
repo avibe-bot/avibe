@@ -48,7 +48,9 @@ import {
 } from '../../lib/vaultBrowserHandoff';
 import { vaultApprovalNeedsPasskey } from '../../lib/vaultRequestPlacement';
 import { usePreparedRequest } from '../../lib/usePreparedRequest';
-import { openVaultAuthorizationWindow } from '../../lib/vaultSandboxClient';
+import { vaultEntryIssue } from '../../lib/vaultEntry';
+import { VaultEntryNotice } from '../ui/vault-entry-notice';
+import { openVaultAuthorizationWindow, type VaultAuthorizationWindow } from '../../lib/vaultSandboxClient';
 import { useVaultRequestRefresh } from '../../lib/useVaultRequestRefresh';
 import {
   useInstanceAuthorization,
@@ -107,7 +109,9 @@ const SecretRow: React.FC<{
     : fields.includes(revealField) ? revealField : null;
   const staleRevealField = canReveal && selectedField === null;
   // The sandbox reveal needs its authorization window, which only a browser can pair with.
-  const revealInBrowser = canReveal && vaultPasskeyNeedsBrowser();
+  const entryIssue = canReveal ? vaultEntryIssue() : null;
+  const revealInBrowser = entryIssue === 'desktop';
+  const revealBlocked = !!entryIssue && !revealInBrowser;
   const hasMenu = canManage || canReveal;
   return (
     <li className="flex flex-wrap items-center gap-x-3.5 gap-y-2 rounded-xl border border-border bg-surface px-4 py-3 md:flex-nowrap">
@@ -171,7 +175,8 @@ const SecretRow: React.FC<{
               <MoreHorizontal className="size-4" />
             </Button>
           </PopoverTrigger>
-          <PopoverContent align="end" className="w-52 p-1" role="menu">
+          <PopoverContent align="end" className={cn(revealBlocked ? 'w-80 max-w-[calc(100vw-2rem)]' : 'w-52', 'max-h-[var(--radix-popover-content-available-height)] overflow-y-auto p-1')} role="menu">
+            {revealBlocked && <VaultEntryNotice issue={entryIssue} />}
             {canReveal && fields.length > 1 ? (
               <label className="flex flex-col gap-1 px-2.5 py-2 text-xs text-muted">
                 {t('vaults.fields.revealField')}
@@ -212,7 +217,7 @@ const SecretRow: React.FC<{
                 <button
                   type="button"
                   role="menuitem"
-                  disabled={revealPreparing}
+                  disabled={revealPreparing || revealBlocked}
                   onClick={() => {
                     if (!selectedField) return;
                     setMenuOpen(false);
@@ -226,7 +231,7 @@ const SecretRow: React.FC<{
                 <button
                   type="button"
                   role="menuitem"
-                  disabled={revealPreparing}
+                  disabled={revealPreparing || revealBlocked}
                   onClick={() => {
                     if (!selectedField) return;
                     setMenuOpen(false);
@@ -855,9 +860,9 @@ export const VaultsPage: React.FC = () => {
     [api, t],
   );
   const menuRevealKey = useMemo(() => {
-    if (!canUseVaultSecrets) return null;
+    if (!canUseVaultSecrets || vaultEntryIssue()) return null;
     const secret = secrets.find((entry) => entry.name === menuSecret);
-    if (secret?.protection !== 'protected' || secret.kind === 'keypair' || vaultPasskeyNeedsBrowser()) return null;
+    if (secret?.protection !== 'protected' || secret.kind === 'keypair') return null;
     if (menuField !== null && !vaultFieldNames(secret).includes(menuField)) return null;
     return {
       name: secret.name,
@@ -871,8 +876,9 @@ export const VaultsPage: React.FC = () => {
   const revealPreparing = !revealSandboxReady || revealContext.pending;
   const revealSecret = useCallback(
     async (secret: VaultSecret, field: string) => {
-      const authorizationWindow = openVaultAuthorizationWindow();
+      let authorizationWindow: VaultAuthorizationWindow | null = null;
       try {
+        authorizationWindow = openVaultAuthorizationWindow();
         const res = await revealContext.claim({ name: secret.name, field, version: vaultFieldFingerprint(secret) });
         if (!res?.ok || !res.context) {
           const message = vaultErrorMessage(t, res, t('vaults.reveal.errors.contextFailed'));

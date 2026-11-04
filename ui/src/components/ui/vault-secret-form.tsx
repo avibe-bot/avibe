@@ -43,7 +43,8 @@ import {
 import { vaultErrorMessage } from '@/lib/vaultErrors';
 import { useProtectedVault } from '@/lib/useProtectedVault';
 import { MAX_VAULT_FIELDS, VAULT_FIELD_PATTERN, vaultFieldNameIssue, vaultRecordName } from '@/lib/vaultFields';
-import { openVaultsInBrowser, vaultPasskeyNeedsBrowser } from '@/lib/vaultBrowserHandoff';
+import { vaultEntryIssue } from '@/lib/vaultEntry';
+import { openVaultsInBrowser } from '@/lib/vaultBrowserHandoff';
 import { isAvaultAuthorizationRequired } from '@/lib/useAvaultAuthorization';
 import { AvaultAuthorizationNotice } from './avault-authorization-notice';
 import { Badge } from './badge';
@@ -286,16 +287,16 @@ export const VaultSecretForm: React.FC<{
   }, [api]);
 
   const protectedVault = useProtectedVault();
-  const passkeyNeedsBrowser = vaultPasskeyNeedsBrowser();
+  const entryIssue = vaultEntryIssue();
   // The vault status the current protected keypair was generated under. A transition away from
   // 'unlocked' (manual/auto lock, or an abandoned fresh setup that discards the VMK) means the
   // held envelope is sealed to a VMK that's no longer active — see the render-phase reset below.
   const [keypairSessionStatus, setKeypairSessionStatus] = useState(protectedVault.status);
   useEffect(() => {
-    if (protection === 'protected' && !passkeyNeedsBrowser) void protectedVault.refresh();
+    if (!editSecret && protection === 'protected' && !entryIssue) void protectedVault.refresh();
     // protectedVault.refresh is stable (useCallback); only re-check when the tier changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [protection, passkeyNeedsBrowser]);
+  }, [editSecret, protection, entryIssue]);
 
   // Seed editable fields from an agent's request spec ONCE per distinct request. The chat
   // page rebuilds the request object on every poll/re-render, so keying this on the
@@ -350,7 +351,7 @@ export const VaultSecretForm: React.FC<{
   const p2Ready = useMemo(() => avaultP2Ready(avaultDep), [avaultDep]);
   const secretName = (fixedName ?? name).trim();
   const secretNameValid = /^[A-Za-z_][A-Za-z0-9_]*$/.test(secretName);
-  const protectedCreateReady = protectedVault.status === 'unlocked';
+  const protectedCreateReady = !entryIssue && protectedVault.status === 'unlocked';
   const isKeypair = kind === 'keypair';
   const isProvision = Boolean(fixedName);
   const isEdit = Boolean(editSecret);
@@ -1127,9 +1128,9 @@ export const VaultSecretForm: React.FC<{
   const gatingNotices = (
     <>
       {protection === 'protected' && !protectedCreateReady && (
-        <VaultProtectedUnlock vault={protectedVault} secretName={secretName || undefined} onContinueInBrowser={continueInBrowser} />
+        <VaultProtectedUnlock warnDraftDiscard vault={protectedVault} secretName={secretName || undefined} onContinueInBrowser={continueInBrowser} />
       )}
-      {protection === 'protected' && protectedCreateReady && <VaultProtectedUnlock vault={protectedVault} />}
+      {protection === 'protected' && protectedCreateReady && <VaultProtectedUnlock warnDraftDiscard vault={protectedVault} />}
       {protection === 'standard' && checkingAvault && (
         <div className="flex items-center gap-2 rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-muted">
           <Loader2 className="size-4 animate-spin" />

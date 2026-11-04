@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { vaultFreshSetup, vaultUnlocked, vaultUnlockExpiresAt, webauthnAvailable } from './useProtectedVault';
+import { vaultFreshSetup, vaultUnlocked, vaultUnlockExpiresAt } from './useProtectedVault';
+import { vaultEntryIssue } from './vaultEntry';
 import {
   VAULT_SANDBOX_EXPECTED_BUILD_HASH,
   VAULT_SANDBOX_IFRAME_URL,
@@ -22,7 +23,7 @@ describe('protected vault sandbox cutover', () => {
   });
 
   it('fails closed outside a browser context', () => {
-    expect(webauthnAvailable()).toBe(false);
+    expect(vaultEntryIssue()).toBe('browser');
   });
 });
 

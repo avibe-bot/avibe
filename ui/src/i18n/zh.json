@@ -2960,6 +2960,9 @@
   "errors": {
     "sandbox_integrity_failed": "无法验证受保护保险库的安全代码，已阻止打开。请检查网络并更新 Avibe 后重试，不要绕过验证或重新创建通行密钥。",
     "sandbox_build_mismatch": "受保护保险库沙箱与当前 Avibe 版本不匹配。请更新 Avibe 或联系支持；现有密钥和通行密钥未改变。",
+    "sandbox_entry_unavailable": "当前地址或浏览器环境无法使用受保护的 Vault。请使用兼容的浏览器，通过「设置 → 远程访问」提供的 HTTPS avibe.bot 地址打开，或在运行 Avibe 的电脑上使用 localhost / 127.0.0.1。",
+    "sandbox_browser_unavailable": "受保护的 Vault 需要具备 Web Crypto 的安全浏览器环境。请在最新的兼容浏览器中直接打开 Avibe，而不是在其他网页或内嵌浏览器中打开。",
+    "sandbox_browser_required": "请在浏览器中继续此受保护的 Vault 操作，而不是在桌面应用中。",
     "sandbox_reset": "本次受保护保险库操作已取消或重置。请从 Avibe 重试，以重新验证沙箱。",
     "sandbox_ready_timeout": "已验证的保险库沙箱未能启动。请检查网络、更新 Avibe 后重试。",
     "avault_authorization_required": "avault 需要在运行 Avibe 的 Mac 上完成一次性的 macOS 钥匙串授权。请选择「授权 avault」，然后在那台 Mac 上回应对话框。",
@@ -6038,6 +6041,15 @@
       "singleFile": "文件上传仅支持单值。添加字段前请先切换到文本模式。",
       "editHelp": "改完一行点保存 · 留空的保持原值"
     },
+    "entry": {
+      "addressTitle": "当前地址无法使用受保护的 Vault",
+      "browserTitle": "当前浏览器环境无法使用受保护的 Vault",
+      "browserHelp": "此地址受支持，但当前浏览器环境缺少安全访问条件或 Web Crypto。请在最新的兼容浏览器中直接打开 Avibe，而不是在其他网页或内嵌浏览器中打开。",
+      "ownerHelp": "前往「设置 → 远程访问」，按需启用远程访问，再通过其中的 HTTPS 地址重新打开 Vaults。不会自动更改任何设置。",
+      "memberHelp": "请联系实例所有者启用远程访问，并提供对应的 HTTPS 地址，然后通过该地址重新打开 Vaults。",
+      "draftWarning": "打开设置会清除此对话框中尚未保存的输入。",
+      "remoteAccess": "打开远程访问设置"
+    },
     "protectedUnlock": {
       "checking": "正在检查你的保护层…",
       "unlocked": "保护层已在本会话解锁",
@@ -6058,7 +6070,7 @@
       "cancel": "取消",
       "passkeyUnrecoverableWarning": "这个 passkey 就是唯一的钥匙,丢了它,保护档里的密钥就再也找不回来了(没有备用恢复方式)。",
       "passkeyAck": "我明白:一旦丢失 passkey,这些密钥无法找回。",
-      "unlockUnavailableHere": "保护层保险库需要 passkey。请从 localhost 或你的 avibe.bot 地址打开 Vaults；127.0.0.1 这类原始 IP 无法使用 WebAuthn。",
+      "unlockUnavailableHere": "请使用兼容的浏览器。在运行 Avibe 的电脑上，通过 localhost 或 127.0.0.1 打开 Vaults；在其他设备上，使用你的 HTTPS avibe.bot 地址。不支持局域网 HTTP 地址（如 192.168.x.x）。",
       "browserNote": "桌面端无法使用 passkey。请在浏览器中继续（同一个 Avibe），在那里填写这个密钥。",
       "openInBrowser": "在浏览器中打开",
       "errors": {
