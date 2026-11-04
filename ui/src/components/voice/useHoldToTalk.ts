@@ -82,7 +82,12 @@ type Press = {
   startedAt: number;
   timer: ReturnType<typeof setTimeout>;
   frame: number;
+  /** Stops the window following a press the element has not captured (a mouse before `holdMs`). */
+  unfollow: (() => void) | null;
 };
+
+/** What the gesture reads from a pointer event, React's or the window's. */
+type PointerAt = { pointerId: number; clientX: number; clientY: number };
 
 type Take = {
   dictation: ShowPageVoiceDictation;
@@ -193,6 +198,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     if (!current) return;
     clearTimeout(current.timer);
     cancelAnimationFrame(current.frame);
+    current.unfollow?.();
     releasing.current = true;
     try {
       if (current.element.hasPointerCapture?.(current.pointerId)) current.element.releasePointerCapture(current.pointerId);
@@ -335,6 +341,17 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     const current = press.current;
     if (!current) return;
     cancelAnimationFrame(current.frame);
+    if (current.unfollow) {
+      // A hold now: the pointer is the element's until the press ends, wherever it goes. If the
+      // capture is refused, the window goes on following it.
+      try {
+        current.element.setPointerCapture?.(current.pointerId);
+        current.unfollow();
+        current.unfollow = null;
+      } catch {
+        // Followed by the window instead.
+      }
+    }
     setProgress(1);
     if (availableRef.current === false) {
       end('unavailable');
@@ -440,8 +457,47 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     if (press.current) {
       clearTimeout(press.current.timer);
       cancelAnimationFrame(press.current.frame);
+      press.current.unfollow?.();
     }
   }, []);
+
+  const onPointerMove = useCallback((event: PointerAt) => {
+    const current = press.current;
+    if (!current || event.pointerId !== current.pointerId) return;
+    const { slopPx, cancel, cancelPx, uncancelPx } = current.gesture;
+    if (!take.current) {
+      // Before the hold: moving gives the press back to the page.
+      if (phaseRef.current === 'pressing' && Math.hypot(event.clientX - current.x, event.clientY - current.y) > slopPx) end(null);
+      return;
+    }
+    if (take.current.ending !== 'none') return;
+    const distance = cancel === 'slide-up'
+      ? current.y - event.clientY
+      : outside(latest.current.bounds?.() ?? current.element.getBoundingClientRect(), event.clientX, event.clientY);
+    const next = armed.current ? distance > uncancelPx : distance > cancelPx;
+    if (next === armed.current) return;
+    armed.current = next;
+    if (next) vibrate();
+    const heard = `${take.current.heard.text}${take.current.heard.stash}`.trim();
+    toPhase(next ? 'armed' : heard ? 'recording' : 'listening');
+  }, [end, toPhase]);
+
+  const onPointerUp = useCallback((event: PointerAt) => {
+    const current = press.current;
+    if (!current || event.pointerId !== current.pointerId) return;
+    if (!take.current) {
+      if (phaseRef.current !== 'pressing') return;
+      // Released before the hold: a tap, handled inside the gesture so it may focus.
+      end(null);
+      latest.current.onTap?.();
+      return;
+    }
+    finishTake(armed.current ? 'cancel' : 'send');
+  }, [end, finishTake]);
+
+  const onPointerCancel = useCallback((event: Pick<PointerAt, 'pointerId'>) => {
+    if (press.current && event.pointerId === press.current.pointerId) systemTook();
+  }, [systemTook]);
 
   const onPointerDown = useCallback((event: ReactPointerEvent<HTMLElement>) => {
     if (press.current) return;
@@ -458,10 +514,25 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     if (isVoiceCaptureActive()) return;
     handled.current = true;
     const element = event.currentTarget;
-    try {
-      element.setPointerCapture?.(event.pointerId);
-    } catch {
-      // Without capture the hold still works while the pointer stays on the element.
+    let unfollow: (() => void) | null = null;
+    if (event.pointerType === 'mouse') {
+      // A mouse press stays the browser's until it becomes a hold: its mouseup and click reach
+      // what was pressed, so an editor places and shows its caret as on any click. The element
+      // captures the pointer at `holdMs`; until then the window follows it off the element.
+      window.addEventListener('pointermove', onPointerMove);
+      window.addEventListener('pointerup', onPointerUp);
+      window.addEventListener('pointercancel', onPointerCancel);
+      unfollow = () => {
+        window.removeEventListener('pointermove', onPointerMove);
+        window.removeEventListener('pointerup', onPointerUp);
+        window.removeEventListener('pointercancel', onPointerCancel);
+      };
+    } else {
+      try {
+        element.setPointerCapture?.(event.pointerId);
+      } catch {
+        // Without capture the hold still works while the pointer stays on the element.
+      }
     }
     void prewarmVoiceCapture().catch(() => undefined);
     const startedAt = Date.now();
@@ -484,49 +555,12 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       startedAt,
       timer: setTimeout(() => void holdReached(), holdMs),
       frame: requestAnimationFrame(tick),
+      unfollow,
     };
     setOutcome(null);
     setProgress(0);
     toPhase('pressing');
-  }, [holdReached, toPhase]);
-
-  const onPointerMove = useCallback((event: ReactPointerEvent<HTMLElement>) => {
-    const current = press.current;
-    if (!current || event.pointerId !== current.pointerId) return;
-    const { slopPx, cancel, cancelPx, uncancelPx } = current.gesture;
-    if (!take.current) {
-      // Before the hold: moving gives the press back to the page.
-      if (phaseRef.current === 'pressing' && Math.hypot(event.clientX - current.x, event.clientY - current.y) > slopPx) end(null);
-      return;
-    }
-    if (take.current.ending !== 'none') return;
-    const distance = cancel === 'slide-up'
-      ? current.y - event.clientY
-      : outside(latest.current.bounds?.() ?? current.element.getBoundingClientRect(), event.clientX, event.clientY);
-    const next = armed.current ? distance > uncancelPx : distance > cancelPx;
-    if (next === armed.current) return;
-    armed.current = next;
-    if (next) vibrate();
-    const heard = `${take.current.heard.text}${take.current.heard.stash}`.trim();
-    toPhase(next ? 'armed' : heard ? 'recording' : 'listening');
-  }, [end, toPhase]);
-
-  const onPointerUp = useCallback((event: ReactPointerEvent<HTMLElement>) => {
-    const current = press.current;
-    if (!current || event.pointerId !== current.pointerId) return;
-    if (!take.current) {
-      if (phaseRef.current !== 'pressing') return;
-      // Released before the hold: a tap, handled inside the gesture so it may focus.
-      end(null);
-      latest.current.onTap?.();
-      return;
-    }
-    finishTake(armed.current ? 'cancel' : 'send');
-  }, [end, finishTake]);
-
-  const onPointerCancel = useCallback((event: ReactPointerEvent<HTMLElement>) => {
-    if (press.current && event.pointerId === press.current.pointerId) systemTook();
-  }, [systemTook]);
+  }, [holdReached, onPointerCancel, onPointerMove, onPointerUp, toPhase]);
 
   const onLostPointerCapture = useCallback((event: ReactPointerEvent<HTMLElement>) => {
     if (releasing.current) return;
