@@ -12,6 +12,8 @@ declare global {
       spoken: { text: string; metadata: Record<string, unknown> }[];
       opened: number;
       posted: { session: string; text: string; metadata: Record<string, unknown> }[];
+      transcribed: { reply?: string; user_previous?: string }[];
+      contextReads: string[];
     };
   }
 }
@@ -40,6 +42,11 @@ test('a mouse hold on the empty composer records, and the release sends the word
     { text: 'Send this transcript', metadata: { input: 'voice' } },
   ]);
   await expect(page.getByRole('textbox')).toHaveText('');
+  // Heard in this conversation: its Agent's last reply and the user's previous message.
+  expect(await page.evaluate(() => window.voiceShortcutTest.transcribed.at(-1))).toEqual({
+    reply: 'The cache is fixed on prod-7.',
+    user_previous: 'Is the cache fixed?',
+  });
 });
 
 test('a click only focuses, and a right-click keeps the system menu', async ({ page }) => {

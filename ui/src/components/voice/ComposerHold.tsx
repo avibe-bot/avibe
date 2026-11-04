@@ -3,6 +3,7 @@ import { CloudOff, Loader2, Mic, MicOff, Paperclip, PenLine, RotateCcw, Send, Tr
 import clsx from 'clsx';
 import { Trans, useTranslation } from 'react-i18next';
 
+import type { VoiceLevelSource } from '@/lib/voiceLevel';
 import { Button } from '../ui/button';
 import type { HoldOutcome, useHoldToTalk } from './useHoldToTalk';
 import { VoiceCancelTarget, VoiceCard, VoiceToastClose, type VoiceTarget } from './VoiceCard';
@@ -16,7 +17,10 @@ import { VoiceCancelTarget, VoiceCard, VoiceToastClose, type VoiceTarget } from 
 export type ComposerHoldView = Pick<
   ReturnType<typeof useHoldToTalk>,
   'phase' | 'interruptReason' | 'text' | 'stash' | 'seconds' | 'progress' | 'outcome' | 'canRetry' | 'sendInterrupted' | 'retry' | 'discard' | 'dismiss'
->;
+> & {
+  /** The microphone's loudness for the card's meter. */
+  level?: VoiceLevelSource | null;
+};
 
 /** What pressed: a mouse (the ring, leave-to-cancel, Esc) or a finger or pen (slide up). */
 export type HoldPointer = 'mouse' | 'touch';
@@ -71,6 +75,7 @@ export function ComposerHoldCard({
             stash={hold.stash}
             seconds={hold.seconds}
             reason={hold.interruptReason ?? 'dropped'}
+            level={hold.level}
             actions={
               <>
                 <Button type="button" variant="ghost" size="icon" className="mr-auto size-8 text-muted" aria-label={t('voice.discard')} onClick={hold.discard}>
@@ -169,8 +174,8 @@ function HoldNote({ note, pointer, onDismiss }: { note: Exclude<HoldOutcome, 'se
   );
 }
 
-/** In the composer's box while it is held. Pressing: a mouse sees a ring fill at the pointer
- *  (from the gesture's ring delay); a finger sees the box light up. Then the whole box is the
+/** In the composer's box while it is held. Pressing, from the gesture's ring delay (100 ms; a tap
+ *  shows nothing): a mouse sees a ring fill at the pointer; a finger sees the box light up. Then the whole box is the
  *  button the finger is on, "Release to send", red once a release would cancel; settling, it
  *  waits for the message to go. */
 export function ComposerHoldSurface({
@@ -188,8 +193,8 @@ export function ComposerHoldSurface({
   const { t } = useTranslation();
   if (phase === 'idle' || phase === 'interrupted') return null;
   if (phase === 'pressing') {
-    if (pointer === 'touch') return <div className="pointer-events-none absolute inset-0 rounded-2xl bg-mint/10 ring-2 ring-mint/45" aria-hidden="true" />;
     if (progress <= 0) return null;
+    if (pointer === 'touch') return <div className="pointer-events-none absolute inset-0 rounded-2xl bg-mint/10 ring-2 ring-mint/45" aria-hidden="true" />;
     return (
       <div className="pointer-events-none absolute inset-0 rounded-2xl ring-2 ring-mint/45" aria-hidden="true">
         <span

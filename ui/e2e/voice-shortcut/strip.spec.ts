@@ -38,6 +38,13 @@ test.describe('with a mouse', () => {
     await expect.poll(() => posted(page)).toEqual([
       { session: 'ses_pm', text: 'Send this transcript', metadata: { input: 'voice' } },
     ]);
+    // Recognition heard it in the Product Bot's own conversation: its last reply, and what the
+    // user last said there.
+    expect(await page.evaluate(() => window.voiceShortcutTest.contextReads)).toEqual(['ses_pm']);
+    expect(await page.evaluate(() => window.voiceShortcutTest.transcribed.at(-1))).toEqual({
+      reply: 'Answer from ses_pm',
+      user_previous: 'Question for ses_pm',
+    });
     // The reader stays where they are; the toast's View opens the conversation.
     const toast = page.getByRole('status').filter({ hasText: 'Sent to Product' });
     await expect(toast).toBeVisible();

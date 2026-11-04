@@ -601,7 +601,7 @@ describe('ChatPage transcript hydration', () => {
   });
 
   it.each(['live tail', 'search history'])(
-    'offers the latest Agent reply body as dictation context from the %s',
+    'offers the latest Agent reply body and the previous user message as dictation context from the %s',
     async (view) => {
       const prompt = { ...projectedMessage('prompt', 'deploy it'), projection: undefined };
       const olderReply = {
@@ -620,14 +620,19 @@ describe('ChatPage transcript hydration', () => {
         ...bootstrapPayload('session-new'),
         messages: [prompt, olderReply, reply],
       });
-      // The searched window holds an old reply, not the chat's latest one.
-      mocks.api.listSessionMessages.mockResolvedValue({
-        messages: [
-          { ...projectedMessage('historical-prompt', 'historical prompt'), projection: undefined },
-          { ...olderReply, id: 'historical-reply', text: 'historical reply' },
-        ],
-        next_after_id: 'historical-reply',
-      });
+      // The searched window holds an old reply, not the chat's latest one; the conversation's
+      // newest rows (a tail read) hold it.
+      mocks.api.listSessionMessages.mockImplementation(async (_id: string, params?: { tail?: boolean }) => (
+        params?.tail
+          ? { messages: [prompt, olderReply, reply], next_after_id: null }
+          : {
+              messages: [
+                { ...projectedMessage('historical-prompt', 'historical prompt'), projection: undefined },
+                { ...olderReply, id: 'historical-reply', text: 'historical reply' },
+              ],
+              next_after_id: 'historical-reply',
+            }
+      ));
       render(
         <MemoryRouter initialEntries={['/chat/session-new']}>
           <SessionSwitcher sessionId="session-new" search="?msg=historical-prompt" label="read history" />
@@ -646,9 +651,16 @@ describe('ChatPage transcript hydration', () => {
         await screen.findByText('and then?');
       }
 
-      expect(mocks.composer?.readLatestAgentReply?.()).toBe(
-        view === 'live tail' ? 'Run make release on prod-7.' : undefined,
-      );
+      await expect(Promise.resolve(mocks.composer?.readVoiceContext?.())).resolves.toEqual({
+        reply: 'Run make release on prod-7.',
+        userPrevious: view === 'live tail' ? 'and then?' : 'deploy it',
+      });
+      if (view === 'search history') {
+        expect(mocks.api.listSessionMessages).toHaveBeenCalledWith(
+          'session-new',
+          { tail: true, limit: 20, cache: false },
+        );
+      }
     },
   );
 

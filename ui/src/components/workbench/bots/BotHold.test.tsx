@@ -12,10 +12,16 @@ import { useBotHold } from './BotHoldContext';
 // The hold's own path is useHoldToTalk's test, and the gesture on the strip is the browser's
 // (e2e/voice-shortcut/strip.spec.ts). Here: the one hold every avatar shares stays usable when the
 // Bot a take was for goes away.
-const hold = vi.hoisted(() => ({ phase: 'idle' as string, discard: vi.fn() }));
+const hold = vi.hoisted(() => ({
+  phase: 'idle' as string,
+  discard: vi.fn(),
+  options: null as null | { context?: () => unknown },
+  listSessionMessages: vi.fn(),
+}));
 vi.mock('../../voice/useHoldToTalk', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../voice/useHoldToTalk')>()),
-  useHoldToTalk: () => ({
+  useHoldToTalk: (options: { context?: () => unknown }) => ({
+    ...((hold.options = options), {}),
     phase: hold.phase, interruptReason: 'send-failed', text: 'heard', stash: '', seconds: 3, progress: 0, outcome: null,
     available: true, holdable: hold.phase !== 'interrupted', canRetry: false,
     bind: {
@@ -27,7 +33,7 @@ vi.mock('../../voice/useHoldToTalk', async (importOriginal) => ({
 }));
 vi.mock('../../../context/ApiContext', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../context/ApiContext')>()),
-  useApi: () => ({ sendSessionMessage: vi.fn() }),
+  useApi: () => ({ sendSessionMessage: vi.fn(), listSessionMessages: hold.listSessionMessages }),
 }));
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
@@ -82,6 +88,22 @@ describe('the hold every Bot avatar shares', () => {
     cleanup();
     hold.phase = 'idle';
     hold.discard.mockReset();
+    hold.listSessionMessages.mockReset();
+  });
+
+  it("hears a take in the held Bot's own conversation", async () => {
+    hold.listSessionMessages.mockResolvedValue({
+      messages: [
+        { author: 'user', type: 'user', text: '下周的发布排期呢', content: {} },
+        { author: 'agent', type: 'result', text: '周四发 v2.3', content: {} },
+      ],
+      next_after_id: null,
+    });
+    const { getByText } = render(view([pm, cso]));
+    fireEvent.pointerDown(getByText('pm'), { button: 0, pointerType: 'mouse' });
+
+    await expect(hold.options?.context?.()).resolves.toEqual({ reply: '周四发 v2.3', userPrevious: '下周的发布排期呢' });
+    expect(hold.listSessionMessages).toHaveBeenCalledWith('ses_pm', expect.objectContaining({ tail: true, cache: false }));
   });
 
   it("discards a take whose Bot is removed while it waits, so the other avatars can hold again", () => {

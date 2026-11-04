@@ -17,6 +17,7 @@ import {
 import type { VoiceTarget } from '@/components/voice/VoiceCard';
 import { Composer } from '@/components/workbench/Composer';
 import { useBots } from '@/context/BotsContext';
+import { meterFor } from './meter';
 
 /** Who a frame's composer talks to: a Bot by handle, or a Session by its title. */
 export type HeldTarget = { bot: string } | { session: string };
@@ -75,6 +76,7 @@ export function HeldComposer({
     discard: noop,
     dismiss: noop,
     ...hold,
+    level: hold.level ?? meterFor(hold.phase ?? 'idle'),
   };
   const { phase } = view;
   // Held, the box stays above the card's halo, as the composer raises its own.

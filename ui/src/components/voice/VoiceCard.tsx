@@ -1,12 +1,14 @@
 import { useLayoutEffect, useRef, type ReactNode } from 'react';
-import { AlertTriangle, ChevronUp, Loader2, MessagesSquare, RotateCcw, Send, X } from 'lucide-react';
+import { AlertTriangle, ChevronUp, MessagesSquare, RotateCcw, Send, X } from 'lucide-react';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 
 import type { BotAvatar as BotAvatarSpec } from '@/lib/bots';
+import type { VoiceLevelSource } from '@/lib/voiceLevel';
 import { BotAvatar } from '../ui/bot-avatar';
 import { Button } from '../ui/button';
 import type { HoldInterruptReason } from './useHoldToTalk';
+import { VoiceMeter } from './VoiceMeter';
 
 // The parts every hold-to-talk shares (ui/design: mobile/main-bot-voice/d-recording,
 // composer/hold-mobile/d-recording): the card the take is heard in, and the target the
@@ -19,14 +21,12 @@ export type VoiceCardPhase = 'listening' | 'recording' | 'armed' | 'settling' | 
  *  the card shows a neutral conversation icon. */
 export type VoiceTarget = { name: string; avatar?: BotAvatarSpec | null; title?: string };
 
-// The meter's resting shape: it moves while the microphone is open.
-const LEVELS = ['h-1', 'h-1.5', 'h-2.5', 'h-2', 'h-3', 'h-2', 'h-3.5', 'h-3', 'h-1.5', 'h-2.5', 'h-3.5', 'h-2', 'h-1.5', 'h-2', 'h-3', 'h-1.5', 'h-1'];
-
 const clock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 
 /** The take as it is heard: who it goes to, the clock, the live transcript (the settled part dark,
- *  the tail the recognizer may still revise light), and the meter, "Finishing…", or — once the take
- *  was cut off — why, and what can be done (`actions`, default Retry / Send). A long transcript
+ *  the tail the recognizer may still revise light), and the meter (the microphone's real level;
+ *  flat and red while a release would cancel; a sweep beside "Finishing…"), or — once the take was
+ *  cut off — why, and what can be done (`actions`, default Retry / Send). A long transcript
  *  scrolls inside the card and stays on its newest line while the take runs, with the top edge
  *  fading to say there is more above. */
 export function VoiceCard({
@@ -38,6 +38,7 @@ export function VoiceCard({
   reason = 'dropped',
   long = false,
   actions,
+  level,
 }: {
   to: VoiceTarget;
   phase: VoiceCardPhase;
@@ -48,6 +49,8 @@ export function VoiceCard({
   /** Fade the top edge whatever the measured height (a static frame of a long take). */
   long?: boolean;
   actions?: ReactNode;
+  /** The microphone's loudness, for the meter (`useHoldToTalk().level`). */
+  level?: VoiceLevelSource | null;
 }) {
   const { t } = useTranslation();
   const scroller = useRef<HTMLDivElement | null>(null);
@@ -115,8 +118,8 @@ export function VoiceCard({
           <div ref={fade} hidden className="pointer-events-none absolute inset-x-0 top-0 h-10 bg-linear-to-b from-surface to-transparent" aria-hidden="true" />
         </div>
         {phase === 'settling' && (
-          <div className="flex items-center gap-2 text-xs text-mint-ink">
-            <Loader2 className="size-3.5 animate-spin" />
+          <div className="flex items-center gap-3 text-xs text-mint-ink">
+            <VoiceMeter level={level} mode="settling" />
             {t('pet.voice.finishing')}
           </div>
         )}
@@ -129,17 +132,7 @@ export function VoiceCard({
             {actions && <div className="flex justify-end gap-2">{actions}</div>}
           </div>
         )}
-        {running && (
-          <div className="flex h-4 items-center gap-1" aria-hidden="true">
-            {LEVELS.map((level, index) => (
-              <span
-                key={index}
-                className={clsx('w-1 rounded-full', level, armed ? 'bg-muted' : 'bg-mint motion-safe:animate-pulse')}
-                style={armed ? undefined : { animationDelay: `${(index % 5) * 120}ms` }}
-              />
-            ))}
-          </div>
-        )}
+        {running && <VoiceMeter level={level} mode={armed ? 'armed' : 'live'} />}
       </div>
     </div>
   );

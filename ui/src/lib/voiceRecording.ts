@@ -1,6 +1,9 @@
 const PCM_SAMPLE_RATE = 16_000;
 const PCM_WORKLET_NAME = 'avibe-voice-pcm-capture';
 const PCM_DELIVERY_MS = 250;
+// The microphone's loudness reaches the page this often, apart from the PCM: a meter draws it
+// as it is spoken, not a quarter second late.
+export const VOICE_LEVEL_INTERVAL_MS = 32;
 const PCM_BYTES_PER_SAMPLE = 2;
 const WAV_HEADER_BYTES = 44;
 const DEFAULT_SEGMENT_OVERLAP_MS = 500;
@@ -32,6 +35,12 @@ class AvibeVoicePcmCapture extends AudioWorkletProcessor {
     const processorOptions = options.processorOptions || {};
     this.targetSampleRate = processorOptions.targetSampleRate || 16000;
     this.chunkSamples = processorOptions.chunkSamples || this.targetSampleRate;
+    // Loudness (RMS of the input) every levelMs; off unless asked for.
+    this.levelSamples = processorOptions.levelMs
+      ? Math.max(1, Math.round(sampleRate * processorOptions.levelMs / 1000))
+      : 0;
+    this.levelSum = 0;
+    this.levelCount = 0;
     this.output = new Int16Array(this.chunkSamples);
     this.outputOffset = 0;
     this.phase = 0;
@@ -135,6 +144,15 @@ class AvibeVoicePcmCapture extends AudioWorkletProcessor {
       const monoSample = sample / channels.length;
       if (this.targetSampleRate <= sampleRate) this.processDownsample(monoSample);
       else this.processUpsample(monoSample);
+      if (this.levelSamples) {
+        this.levelSum += monoSample * monoSample;
+        this.levelCount += 1;
+        if (this.levelCount >= this.levelSamples) {
+          this.port.postMessage({ type: 'level', rms: Math.sqrt(this.levelSum / this.levelCount) });
+          this.levelSum = 0;
+          this.levelCount = 0;
+        }
+      }
     }
     return true;
   }
@@ -293,6 +311,8 @@ const acquireAudioContext = async (): Promise<{
 
 type VoicePcmCaptureHandlers = {
   onSamples: (samples: Int16Array<ArrayBuffer>) => void;
+  /** The input's loudness (RMS, 0–1) every `VOICE_LEVEL_INTERVAL_MS`. */
+  onLevel?: (rms: number) => void;
   onStopped: () => void;
   onError: (error: unknown) => void;
 };
@@ -394,14 +414,18 @@ class AudioWorkletPcmCapture implements VoicePcmCapture {
           // File-sized segments are assembled on the main thread. Deliver
           // smaller chunks so a processor failure cannot erase a whole segment.
           chunkSamples: voicePcmDeliverySamples(this.sampleRate, this.segmentSamples),
+          ...(this.handlers.onLevel ? { levelMs: VOICE_LEVEL_INTERVAL_MS } : {}),
         },
       });
       node.port.onmessage = (event: MessageEvent<{
         type?: string;
         samples?: ArrayBuffer;
+        rms?: number;
       }>) => {
         if (event.data.type === 'samples' && event.data.samples) {
           this.handlers.onSamples(new Int16Array(event.data.samples));
+        } else if (event.data.type === 'level' && typeof event.data.rms === 'number') {
+          this.handlers.onLevel?.(event.data.rms);
         } else if (event.data.type === 'stopped') {
           this.finish();
         }
@@ -640,6 +664,9 @@ export type VoiceRecordingPipelineOptions = {
   segmentMs: number;
   onSegment: (blob: Blob, metadata: VoiceRecordingSegmentMetadata) => void;
   onPcm?: (samples: Int16Array<ArrayBuffer>) => void;
+  /** The microphone's loudness (RMS, 0–1) every `VOICE_LEVEL_INTERVAL_MS` while it records;
+   *  a meter's, never stored. */
+  onLevel?: (rms: number) => void;
   onStopRequested?: (
     reason: VoiceRecordingStopReason,
     metadata: VoiceRecordingStopMetadata,
@@ -760,6 +787,14 @@ export class VoiceRecordingPipeline {
     const createCapture = options.createCapture ?? defaultCaptureFactory;
     this.capture = createCapture(options.stream, this.sampleRate, this.segmentSamples, {
       onSamples: (samples) => this.handleSamples(samples),
+      ...(options.onLevel
+        ? {
+            onLevel: (rms: number) => {
+              // A stopping capture is flushing what was heard: the microphone is closed.
+              if (!this.stopped && !this.stopping) options.onLevel?.(rms);
+            },
+          }
+        : {}),
       onStopped: () => this.handleCaptureStopped(),
       onError: (error) => this.handleCaptureError(error),
     }, options.stopTimeoutMs);

@@ -38,6 +38,9 @@ export type AvibeFetchAttemptEvent =
 
 export type AvibeFetchRequestInit = RequestInit & {
   onAttempt?: (event: AvibeFetchAttemptEvent) => void;
+  /** Builds the body for the token an attempt carries (in place of `body`), so optional fields
+   *  follow the capabilities of the backend that will parse them, a re-minted token's included. */
+  bodyFor?: (capabilities: readonly string[]) => BodyInit;
 };
 
 export class CloudUnavailableError extends Error {
@@ -213,7 +216,7 @@ export const avibeFetch = async (
   path: string,
   init: AvibeFetchRequestInit = {},
 ): Promise<Response> => {
-  const { onAttempt, ...requestInit } = init;
+  const { onAttempt, bodyFor, ...requestInit } = init;
   let token: CloudToken | null;
   try {
     token = await waitForSignal(
@@ -240,7 +243,7 @@ export const avibeFetch = async (
     const startedAt = Date.now();
     const response = await fetch(
       `${active.baseUrl}${path}`,
-      { ...requestInit, headers },
+      { ...requestInit, ...(bodyFor ? { body: bodyFor(active.capabilities) } : {}), headers },
     );
     notifyAttempt({
       phase: 'response',

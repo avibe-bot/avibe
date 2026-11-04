@@ -56,6 +56,7 @@ import { canMarkConversationRead, usePageActive } from '../../lib/pageActivity';
 import { useRouteSurfaceActive, useRouteSurfaceWindowEvent } from '../../lib/routeSurfaceActivity';
 import { isDesktopViewport, useIsDesktop } from '../../lib/useIsDesktop';
 import { resultFooterParts } from '../../lib/resultFooter';
+import { loadVoiceContext, voiceContextFromMessages, type VoiceContextSource } from '../../lib/voiceContext';
 import {
   activityItemKind,
   activityKindI18nKey,
@@ -618,21 +619,13 @@ export const ChatPage: React.FC = () => {
     );
     return vaultRequests.filter((request) => isVaultApprovalRequest(request) || waiting.has(request.id));
   }, [historicalWindow, provisionPlacement, vaultRequests]);
-  // Realtime dictation context: the body of the latest Agent reply in this chat,
-  // without Avibe's generated footer. A result row is persisted whole, so a
-  // running Turn still reads the previous reply. A window detached from the live
-  // tail may not hold the latest reply, so it offers none.
-  const readLatestAgentReply = useCallback((): string | undefined => {
-    if (historicalWindowRef.current) return undefined;
-    const rows = messagesRef.current;
-    for (let index = rows.length - 1; index >= 0; index -= 1) {
-      const row = rows[index];
-      if (row.author === 'agent' && row.type === 'result') {
-        return resultFooterParts(row).body || undefined;
-      }
-    }
-    return undefined;
-  }, []);
+  // Dictation context: this chat's latest Agent reply and the user's previous message, read
+  // when a dictation starts. A window detached from the live tail may not hold either, so it
+  // reads the conversation's newest rows instead.
+  const readVoiceContext = useCallback((): VoiceContextSource => {
+    if (!historicalWindowRef.current) return voiceContextFromMessages(messagesRef.current);
+    return sessionId ? loadVoiceContext(api.listSessionMessages, sessionId) : undefined;
+  }, [api, sessionId]);
   const oldestLoadedIdRef = useRef<string | null>(null);
   const newestLoadedIdRef = useRef<string | null>(null);
   // Owned here but driven by the Transcript scroller (which reads/writes it in
@@ -3105,7 +3098,7 @@ export const ChatPage: React.FC = () => {
         {(writable || readOnlyReason !== null) && <Compose
           key={sessionId}
           composerRef={composerRef}
-          readLatestAgentReply={readLatestAgentReply}
+          readVoiceContext={readVoiceContext}
           onSend={(text, attachments, references, metadata) => sendMessage(text, attachments, metadata, references)}
           onStop={stopMessage}
           busy={working}
@@ -3648,7 +3641,7 @@ interface ComposeProps {
   composerRef: React.Ref<ComposerHandle>;
   /** The live route picker for the composer's action row; null when read-only. */
   actions: React.ReactNode;
-  readLatestAgentReply: ComposerProps['readLatestAgentReply'];
+  readVoiceContext: ComposerProps['readVoiceContext'];
   onSend: (text: string, attachments?: ComposerAttachment[], references?: MentionReference[], metadata?: Record<string, unknown>) => void;
   onStop: () => void;
   busy: boolean;
@@ -3667,7 +3660,7 @@ interface ComposeProps {
   voiceTarget: VoiceTarget;
 }
 
-const Compose: React.FC<ComposeProps> = ({ composerRef, actions, readLatestAgentReply, onSend, onStop, busy, sessionId, initialDraft, onDraftChange, onSearchAgents, onSearchSessions, readOnlyReason, botName, voiceTarget }) => {
+const Compose: React.FC<ComposeProps> = ({ composerRef, actions, readVoiceContext, onSend, onStop, busy, sessionId, initialDraft, onDraftChange, onSearchAgents, onSearchSessions, readOnlyReason, botName, voiceTarget }) => {
   const { t } = useTranslation();
   const readOnly = readOnlyReason !== null;
   return (
@@ -3689,7 +3682,7 @@ const Compose: React.FC<ComposeProps> = ({ composerRef, actions, readLatestAgent
         onDraftChange={onDraftChange}
         onSearchAgents={onSearchAgents}
         onSearchSessions={onSearchSessions}
-        readLatestAgentReply={readLatestAgentReply}
+        readVoiceContext={readVoiceContext}
         layout="stacked"
         actions={actions}
         // Read-only archived session: reuse the composer's own disabled +

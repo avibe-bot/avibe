@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 from config.v2_config import AudioAsrConfig, RemoteAccessConfig, VibeCloudRemoteAccessConfig
 from core.audio_asr import (
+    newest_utf16_units,
     AudioAsrEmptyTranscriptError,
     AudioAsrProtocolError,
     AudioAsrService,
@@ -400,6 +401,72 @@ class AudioAsrServiceTests(unittest.TestCase):
                                 after="",
                             )
                         )
+
+    def test_dictation_forwards_conversation_context_cut_to_the_newest_utf16_units(self):
+        service = AudioAsrService(
+            SimpleNamespace(
+                audio_asr=AudioAsrConfig(enabled=True),
+                remote_access=RemoteAccessConfig(
+                    vibe_cloud=VibeCloudRemoteAccessConfig(
+                        enabled=True,
+                        backend_url="https://avibe.bot",
+                        instance_id="instance",
+                        instance_secret="secret",
+                    )
+                ),
+            )
+        )
+        posted = []
+
+        class ReceiptResponse:
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def json(self, **_kwargs):
+                return {"receipt": "receipt-0", "sequence": 0}
+
+        class CapturingSession:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            def post(self, *_args, data, **_kwargs):
+                posted.append({options["name"]: value for options, _headers, value in data._fields})
+                return ReceiptResponse()
+
+        # 7,999 BMP characters after a pair: the cut lands between the pair's halves.
+        long_reply = "旧" * 10 + "😀" + "x" * 7_999
+        with patch("core.audio_asr.aiohttp.ClientSession", return_value=CapturingSession()):
+            for reply, user_previous in ((long_reply, "部署前要做什么"), ("", "  ")):
+                asyncio.run(
+                    service.transcribe_voice_segment(
+                        None,
+                        dictation_id="dictation-1",
+                        sequence=0,
+                        overlap_ms=0,
+                        final=True,
+                        finalize_only=True,
+                        receipts=[],
+                        before="",
+                        after="",
+                        reply=reply,
+                        user_previous=user_previous,
+                    )
+                )
+
+        self.assertEqual(posted[0]["reply"], "x" * 7_999)
+        self.assertEqual(posted[0]["user_previous"], "部署前要做什么")
+        # Nothing to say: the form is the one every avibe.bot release has always read.
+        self.assertNotIn("reply", posted[1])
+        self.assertNotIn("user_previous", posted[1])
+        self.assertEqual(newest_utf16_units("a" + "😀" * 4_000), "😀" * 4_000)
 
     def test_http_callers_can_override_the_request_deadline(self):
         service = AudioAsrService(

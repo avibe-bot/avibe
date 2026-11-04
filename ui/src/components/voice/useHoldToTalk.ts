@@ -4,6 +4,8 @@ import { apiFetch } from '../../lib/apiFetch';
 import { primeCloudToken } from '../../lib/avibeFetch';
 import { IS_APPLE } from '../../lib/platform';
 import { ShowPageVoiceDictation } from '../../lib/showPageVoiceDictation';
+import type { VoiceContextSource } from '../../lib/voiceContext';
+import { createVoiceLevel } from '../../lib/voiceLevel';
 import { VOICE_MESSAGE_METADATA, type VoiceMessageMetadata } from '../../lib/voiceMessage';
 import { isVoiceCaptureActive, prewarmVoiceCapture } from '../../lib/voiceRecording';
 import { VoiceTranscriptionError } from '../../lib/voiceTranscription';
@@ -43,14 +45,16 @@ export type HoldGesture = {
   uncancelPx: number;
 };
 
-export const HOLD_GESTURE: HoldGesture = { holdMs: 300, ringDelayMs: 0, slopPx: 10, cancel: 'slide-up', cancelPx: 80, uncancelPx: 60 };
+/** A finger (owner decision, 2026-11-04): the microphone opens at 200 ms; a surface that draws the
+ *  press's progress shows it from 100 ms. */
+export const HOLD_GESTURE: HoldGesture = { holdMs: 200, ringDelayMs: 100, slopPx: 10, cancel: 'slide-up', cancelPx: 80, uncancelPx: 60 };
 /** A mouse holds longer than a finger, so a slow click or a trackpad press never opens the
- *  microphone; the ring shows from 150 ms, and leaving the held box (or Esc) cancels
- *  (ui/design: composer/hold-desktop/b-pressing, owner decision 2026-11-02). Every surface a
- *  mouse can hold uses these numbers: a composer and a Bot's avatar alike. */
+ *  microphone: 350 ms, with the ring from 100 ms (owner decision, 2026-11-04); leaving the held
+ *  box (or Esc) cancels (ui/design: composer/hold-desktop/b-pressing). Every surface a mouse can
+ *  hold uses these numbers: a composer and a Bot's avatar alike. */
 export const MOUSE_HOLD_GESTURE: Partial<HoldGesture> = {
-  holdMs: 500,
-  ringDelayMs: 150,
+  holdMs: 350,
+  ringDelayMs: 100,
   slopPx: 6,
   cancel: 'leave',
   cancelPx: 16,
@@ -75,6 +79,9 @@ export type HoldToTalkOptions = {
   /** The system taking the press (background, window blur, a lost or cancelled pointer):
    *  cancel the take, or keep what was heard as an interrupted take. */
   onSystemInterrupt?: 'cancel' | 'interrupt';
+  /** The conversation the take is spoken into (its Agent's last reply, the user's previous
+   *  message), read when the microphone opens and sent to recognition; it may still be loading. */
+  context?: () => VoiceContextSource;
 };
 
 const HOLD_STYLE: CSSProperties = {
@@ -154,6 +161,8 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
   const [outcome, setOutcome] = useState<HoldOutcome | null>(null);
   const [available, setAvailable] = useState<boolean | null>(null);
   const [canRetry, setCanRetry] = useState(false);
+  // The microphone's loudness for the card's meter: written as the take records, read each frame.
+  const [level] = useState(createVoiceLevel);
   const maxFileBytes = useRef<number | null>(null);
   const availableRef = useRef<boolean | null>(null);
 
@@ -223,6 +232,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
 
   const reset = useCallback(() => {
     stopClock();
+    level.reset();
     armed.current = false;
     if (!mounted.current) return;
     setText('');
@@ -231,7 +241,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     setProgress(0);
     setInterruptReason(null);
     setCanRetry(false);
-  }, [stopClock]);
+  }, [level, stopClock]);
 
   /** The press is over with nothing to keep: back to rest, saying how it ended. */
   const end = useCallback((how: HoldOutcome | null) => {
@@ -245,6 +255,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
   /** The take ended without a send: keep what was heard until the user decides. */
   const interrupt = useCallback((reason: HoldInterruptReason, heard: string) => {
     stopClock();
+    level.reset();
     releasePointer();
     armed.current = false;
     if (!mounted.current) return;
@@ -253,7 +264,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     setStash('');
     setCanRetry(Boolean(take.current?.dictation.canRetry()));
     toPhase('interrupted');
-  }, [releasePointer, stopClock, toPhase]);
+  }, [level, releasePointer, stopClock, toPhase]);
 
   const deliver = useCallback(async (words: string) => {
     toPhase('settling');
@@ -311,7 +322,11 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     const dictation = new ShowPageVoiceDictation({
       before: '',
       after: '',
+      context: latest.current.context?.(),
       maxFileBytes: maxFileBytes.current,
+      onLevel: (rms) => {
+        if (take.current === current) level.set(rms);
+      },
       onPreviewParts: (preview) => {
         if (take.current !== current) return;
         current.heard = preview;
@@ -347,7 +362,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       fail(current, error);
       dictation.abort();
     });
-  }, [fail, settle, toPhase]);
+  }, [fail, level, settle, toPhase]);
 
   const holdReached = useCallback(async () => {
     const current = press.current;
@@ -644,6 +659,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     available,
     holdable,
     canRetry,
+    level,
     bind: {
       onPointerDown,
       onPointerMove,

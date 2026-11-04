@@ -7,6 +7,7 @@ import { useApi } from '../context/ApiContext';
 import { useBots } from '../context/BotsContext';
 import { useWorkbenchInbox } from '../context/WorkbenchInboxContext';
 import { MAIN_BOT_SESSION_ID, botSessionPath, type BotAvatar as BotAvatarSpec } from '../lib/bots';
+import { loadVoiceContext } from '../lib/voiceContext';
 import { MobileTabBar, type BotCenterPhase, type ShellNavItem } from './MobileChrome';
 import { MainBotHoldOverlay, MainBotVoiceToast } from './voice/MainBotVoice';
 import { useHoldToTalk, type HoldPhase } from './voice/useHoldToTalk';
@@ -60,6 +61,7 @@ const MainBotTabBar: React.FC<{ items: ShellNavItem[] }> = ({ items }) => {
       return true;
     },
     onTap: open,
+    context: () => loadVoiceContext(api.listSessionMessages, MAIN_BOT_SESSION_ID),
   });
   return (
     <>
@@ -72,7 +74,8 @@ const MainBotTabBar: React.FC<{ items: ShellNavItem[] }> = ({ items }) => {
           unread: unreadBySession[MAIN_BOT_SESSION_ID] ?? 0,
           running: statusBySession[MAIN_BOT_SESSION_ID] === 'running',
           onClick: open,
-          phase: CENTER_PHASE[hold.phase],
+          // Pressed from the gesture's ring delay (100 ms), as every hold surface is: a tap does not flash.
+          phase: hold.phase === 'pressing' && hold.progress <= 0 ? 'idle' : CENTER_PHASE[hold.phase],
           hold: hold.bind,
         }}
       />
