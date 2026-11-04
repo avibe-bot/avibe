@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from collections import Counter
 import io
 import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import sys
 
@@ -408,9 +410,12 @@ def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
     assert build.get("needs") == "changes"
     assert "ui-checks" in jobs["unit-tests"]["needs"]
     assert "ui-browser-checks" in jobs["unit-tests"]["needs"]
+    assert "ui-design-checks" in jobs["unit-tests"]["needs"]
     assert "unit-test-shards" in jobs["unit-tests"]["needs"]
     browsers = jobs["ui-browser-checks"]
+    design = jobs["ui-design-checks"]
     assert browsers.get("needs") == "changes"
+    assert design.get("needs") == "changes"
 
     check_steps = [step for step in checks["steps"] if "run" in step]
     build_steps = [step for step in build["steps"] if step.get("working-directory") == "ui"]
@@ -429,12 +434,95 @@ def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
         assert command not in build_commands
     assert build_commands.count("npm run build") == 1
     assert "npm ci" in build_commands
-    for job in (checks, browsers, build):
+    for job in (checks, browsers, design, build):
         assert job["if"] == "needs.changes.outputs.docs_only == 'false'"
         assert not job.get("continue-on-error")
         assert all(not step.get("if") and not step.get("continue-on-error") for step in job["steps"])
     for name in ("install-upgrade-shards", "windows-install-smoke-runners"):
         assert jobs[name]["needs"] == "build-linux-artifacts"
+
+
+# The PR browser selection before parallelization: preserve these exact callers,
+# including spec filters, rather than deriving expected coverage from the matrix.
+_BROWSER_COMMANDS = (
+    "run test:onboarding-fidelity -- hub-ownership.spec.ts provider-gate.spec.ts lineup.spec.ts",
+    "run test:home-media",
+    "run test:voice-shortcut",
+    "run test:vault-integrity",
+    "run test:chat-selection",
+    "run test:badge-triggers",
+    "run test:workbench-general-build -- composer-mention-picker.spec.ts",
+    "run test:workbench-general -- geometry.spec.ts",
+    "run test:pet-mini",
+    "run test:project-order",
+    "run test:inbox-return",
+    "run test:workbench-general -- sidebar-floating.spec.ts desktop-window-chrome.spec.ts "
+    "composer-route-trigger.spec.ts skills-dialog.spec.ts bots.spec.ts",
+    "run test:chat-interactions",
+    "run test:pdf-preview",
+)
+
+
+@pytest.mark.parametrize("kind", ["browser", "design"])
+def test_ui_matrices_run_complete_disjoint_commands_and_propagate_each_failure(tmp_path: Path, kind: str) -> None:
+    """Execute actual workflow commands: scheduling must not drop/duplicate work or swallow an exit code.
+
+    Structural scheduling tests do not cover the selections or the timing
+    wrapper. A recording npm replaces only the expensive external suites.
+    """
+    job = _jobs()[f"ui-{kind}-checks"]
+    assert job["strategy"]["fail-fast"] is False
+    if kind == "browser":
+        legs = job["strategy"]["matrix"]["include"]
+        assert len({leg["lane"] for leg in legs}) == len(legs) == 4
+        step, = [step for step in job["steps"] if "${{ matrix.suites }}" in step.get("run", "")]
+        scripts = [step["run"].replace("${{ matrix.suites }}", leg["suites"]) for leg in legs]
+        expected = [tuple(shlex.split(command)) for command in _BROWSER_COMMANDS]
+    else:
+        matrix = job["strategy"]["matrix"]
+        assert matrix == {"shard": [1, 2, 3], "shard-total": [3]}
+        step, = [step for step in job["steps"] if "npm run design:shot" in step.get("run", "")]
+        scripts = [
+            step["run"].replace("${{ matrix.shard }}", str(shard)).replace("${{ matrix.shard-total }}", str(total))
+            for shard in matrix["shard"] for total in matrix["shard-total"]
+        ]
+        expected = [("run", "design:shot", "--", "--shard", shard) for shard in ("1/3", "2/3", "3/3")]
+    assert step["working-directory"] == "ui"
+    assert not step.get("if") and not step.get("continue-on-error")
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    calls = tmp_path / "calls.jsonl"
+    npm = binary / "npm"
+    npm.write_text(
+        f"#!{sys.executable}\nimport json, os, sys\n"
+        "with open(os.environ['NPM_CALLS'], 'a') as stream: stream.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        "sys.exit(17 if sys.argv[1:] == json.loads(os.environ['FAIL_COMMAND']) else 0)\n",
+        encoding="utf-8",
+    )
+    npm.chmod(0o755)
+
+    def run(script: str, failing: tuple = ()):
+        calls.write_text("", encoding="utf-8")
+        result = subprocess.run(
+            ["bash", "-e", "-c", script], cwd=tmp_path,
+            env={**os.environ, "PATH": f"{binary}{os.pathsep}{os.environ['PATH']}",
+                 "NPM_CALLS": str(calls), "FAIL_COMMAND": json.dumps(failing)},
+            capture_output=True, text=True, timeout=10,
+        )
+        return result, [tuple(json.loads(line)) for line in calls.read_text().splitlines()]
+
+    observed = []
+    for script in scripts:
+        result, commands = run(script)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert commands, "No applicable matrix lane may silently do no work"
+        observed.extend(commands)
+        for command in commands:
+            failed, _ = run(script, command)
+            assert failed.returncode == 17, (command, failed.stdout, failed.stderr)
+            if kind == "browser":
+                assert "exit=17 command=npm " + " ".join(command) in failed.stdout
+    assert Counter(observed) == Counter(expected)
 
 
 def test_windows_platform_checks_leave_only_latest_installer_smoke_on_prs() -> None:

@@ -216,43 +216,42 @@ jobs:
     needs: changes
     if: needs.changes.outputs.docs_only == 'false'
     # Browser interactions do not depend on lint, Vitest, or the production
-    # bundle. Run alongside UI validation; the required unit-tests gate waits
-    # for both lanes, including failure/cancellation of either one.
+    # bundle. Run alongside UI validation and design captures; the required
+    # unit-tests gate waits for every lane, including failure/cancellation.
     name: ui-browser-checks (${{ matrix.lane }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        # Each suite runs serially with one worker and its own dev server; the
-        # serial job had become the workflow's longest. Two lanes balanced from
-        # measured suite times (about 6.5 minutes each) run every suite once.
-        # Rebalance from both lanes' times across several runs: one run's two
-        # lanes land on runners of different speeds.
+        # Keep each suite's workers, server and type check unchanged. Four
+        # independent runners balance the measured command wall times at about
+        # eight minutes each (run 41810827956); see docs/plans/ci-browser-parallelism.md.
         include:
           - lane: 1
             suites: |
-              npm run test:onboarding-fidelity -- hub-ownership.spec.ts provider-gate.spec.ts lineup.spec.ts
-              npm run test:home-media
-              npm run test:voice-shortcut
-              npm run test:vault-integrity
-              npm run test:chat-selection
-              npm run test:badge-triggers
-              # Against the built app: StrictMode's dev double-mount drops the picker's first open.
-              npm run test:workbench-general-build -- composer-mention-picker.spec.ts
-              # The Workbench shell measured in a browser (sidebar, Settings frame, phone home).
-              # Its own line here: on lane 2's workbench-general line it would lengthen the longer lane.
-              npm run test:workbench-general -- geometry.spec.ts
-              # The desktop pet's mini window, in Chromium and in WebKit (the macOS shell's engine).
+              # Chromium and WebKit (the macOS shell's engine).
               npm run test:pet-mini
+              npm run test:chat-interactions
+              npm run test:inbox-return
           - lane: 2
             suites: |
-              npm run test:project-order
-              npm run test:inbox-return
               npm run test:workbench-general -- sidebar-floating.spec.ts desktop-window-chrome.spec.ts composer-route-trigger.spec.ts skills-dialog.spec.ts bots.spec.ts
-              npm run test:chat-interactions
+              # Against the built app: StrictMode's dev double-mount drops the picker's first open.
+              npm run test:workbench-general-build -- composer-mention-picker.spec.ts
+              npm run test:project-order
+          - lane: 3
+            suites: |
+              npm run test:onboarding-fidelity -- hub-ownership.spec.ts provider-gate.spec.ts lineup.spec.ts
+              npm run test:home-media
               npm run test:pdf-preview
-              # Renders every design frame in both themes; fails on any console error.
-              npm run design:shot
+          - lane: 4
+            suites: |
+              npm run test:vault-integrity
+              # The Workbench shell measured in a browser (sidebar, Settings frame, phone home).
+              npm run test:workbench-general -- geometry.spec.ts
+              npm run test:badge-triggers
+              npm run test:chat-selection
+              npm run test:voice-shortcut
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
@@ -298,7 +297,44 @@ jobs:
         # model-hub-ui-regression workflow instead of blocking every PR.
         working-directory: ui
         run: |
+          # Time the entire npm command (including built-app preparation), not
+          # just Playwright. Preserve its exit status under GitHub's bash -e.
+          npm() {
+            local started=$SECONDS result=0
+            command npm "$@" || result=$?
+            echo "CI_BROWSER_SUITE seconds=$((SECONDS - started)) exit=$result command=npm $*"
+            return "$result"
+          }
           ${{ matrix.suites }}
+
+  ui-design-checks:
+    needs: changes
+    if: needs.changes.outputs.docs_only == 'false'
+    # Every frame/theme pair runs once, independently of browser interactions.
+    # The required unit-tests aggregate waits for all three captures.
+    name: ui-design-checks (${{ matrix.shard }}/${{ matrix.shard-total }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+        shard-total: [3]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: "22.23.4"
+          cache: "npm"
+          cache-dependency-path: ui/package-lock.json
+      - name: Install UI dependencies
+        working-directory: ui
+        run: npm ci
+      - name: Install screenshot browser
+        working-directory: ui
+        run: npx playwright install --with-deps chromium
+      - name: Render every selected frame and declared theme
+        working-directory: ui
+        run: npm run design:shot -- --shard "${{ matrix.shard }}/${{ matrix.shard-total }}"
 
   show-router-integration:
     needs: changes
@@ -550,7 +586,7 @@ jobs:
     # Keep UI validation in the existing required gate while allowing artifact
     # consumers to start as soon as their production bundle is built. The
     # hosted wire gate reports through it too, under no new required context.
-    needs: [changes, unit-test-shards, scenario-evidence, ui-checks, ui-browser-checks, model-hub-hosted-wire]
+    needs: [changes, unit-test-shards, scenario-evidence, ui-checks, ui-browser-checks, ui-design-checks, model-hub-hosted-wire]
     if: always()
     steps:
       - name: Verify unit test shards, UI checks and the hosted_wire gate
@@ -561,6 +597,7 @@ jobs:
           EVIDENCE_RESULT: ${{ needs['scenario-evidence'].result }}
           UI_RESULT: ${{ needs['ui-checks'].result }}
           BROWSER_RESULT: ${{ needs['ui-browser-checks'].result }}
+          DESIGN_RESULT: ${{ needs['ui-design-checks'].result }}
           HOSTED_WIRE_RESULT: ${{ needs['model-hub-hosted-wire'].result }}
         run: |
           if [ "$SCOPE_RESULT" != "success" ]; then
@@ -572,7 +609,7 @@ jobs:
             false) expected="success" ;;
             *) echo "Missing or invalid change classification."; exit 1 ;;
           esac
-          for result in "$UNIT_RESULT" "$EVIDENCE_RESULT" "$UI_RESULT" "$BROWSER_RESULT" "$HOSTED_WIRE_RESULT"; do
+          for result in "$UNIT_RESULT" "$EVIDENCE_RESULT" "$UI_RESULT" "$BROWSER_RESULT" "$DESIGN_RESULT" "$HOSTED_WIRE_RESULT"; do
             if [ "$result" != "$expected" ]; then
               echo "Unit/UI/hosted_wire checks finished with result: $result"
               exit 1
