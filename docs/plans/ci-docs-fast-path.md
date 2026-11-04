@@ -4,7 +4,9 @@ Current scheduling policy: the fast path applies to PRs. Latest-wins master
 cancellation requires every replacement master run to validate the full tree,
 including code from an older cancelled run; even a docs-only push uses full CI.
 See `ci-under-10m.md` for that follow-up contract. The original diff-classifier
-and failure-closed gate design below remain unchanged.
+and failure-closed gate design below remain unchanged. The same classifier now
+also routes two job families on pull requests; `ci-affected-routing.md` owns
+that contract and its gates.
 
 ## Contract
 
