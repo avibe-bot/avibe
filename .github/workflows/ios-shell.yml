@@ -1,0 +1,88 @@
+name: ios-shell
+
+on:
+  pull_request:
+    paths:
+      - "ios/**"
+      - ".github/workflows/ios-shell.yml"
+  push:
+    branches:
+      - master
+    paths:
+      - "ios/**"
+      - ".github/workflows/ios-shell.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+
+jobs:
+  simulator:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825a76410c181273ba90b1 # v7.0.1
+
+      - name: Report pinned Apple toolchain
+        run: |
+          set -euo pipefail
+          [ -d "$DEVELOPER_DIR" ] || {
+            echo "Pinned Xcode is missing: $DEVELOPER_DIR" >&2
+            exit 1
+          }
+          xcodebuild -version
+          [ "$(xcodebuild -version | sed -n '1p')" = "Xcode 26.6" ] || {
+            echo "Expected Xcode 26.6 from $DEVELOPER_DIR" >&2
+            exit 1
+          }
+          xcrun --sdk iphonesimulator --show-sdk-version
+
+      - name: Build for the iOS Simulator SDK
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project ios/Avibe.xcodeproj \
+            -scheme Avibe \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Select an available iPhone simulator
+        run: |
+          set -euo pipefail
+          xcrun simctl list devices available --json > "$RUNNER_TEMP/ios-simulators.json"
+          simulator_id="$(
+            /usr/bin/python3 - "$RUNNER_TEMP/ios-simulators.json" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as source:
+              devices = json.load(source)["devices"]
+          for runtime_devices in devices.values():
+              for device in runtime_devices:
+                  if device.get("isAvailable") and device.get("name", "").startswith("iPhone"):
+                      print(device["udid"])
+                      raise SystemExit(0)
+          raise SystemExit("No available iPhone simulator is installed")
+          PY
+          )"
+          echo "SIMULATOR_ID=$simulator_id" >> "$GITHUB_ENV"
+
+      - name: Run XCTest on iPhone Simulator
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project ios/Avibe.xcodeproj \
+            -scheme Avibe \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+            -resultBundlePath "$RUNNER_TEMP/AvibeTests.xcresult" \
+            CODE_SIGNING_ALLOWED=NO \
+            test

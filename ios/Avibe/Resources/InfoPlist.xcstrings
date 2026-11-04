@@ -1,0 +1,23 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "NSMicrophoneUsageDescription" : {
+      "comment" : "Explains the system microphone permission prompt.",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Avibe uses the microphone for hold-to-talk and voice transcription."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Avibe 使用麦克风进行按住说话和语音转写。"
+          }
+        }
+      }
+    }
+  },
+  "version" : "1.0"
+}
