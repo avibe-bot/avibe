@@ -1,8 +1,8 @@
 # Avibe iOS App · Plan
 
 > **Status**: Direction approved by the owner on 2026-11-04 (decision 1);
-> decisions 2-8 are open (section 17). Plan and spike only; nothing here is
-> built yet.
+> other decisions are open (section 17). Handed off to a dedicated owner of the
+> iOS track (section 18). Plan and spike only; nothing here is built yet.
 > **Owner**: cyhhao
 > **Date**: 2026-11-02
 
@@ -651,6 +651,16 @@ build pipeline is needed from the start.
 - **3.3.1(A)**: apps must not call private APIs. This rule covers the
   accessory-bar technique in section 5.
 
+The common belief that Apple forbids apps that load remote code comes from
+March 2017. Apple then warned and rejected apps that used hot-patching SDKs
+such as Rollout and JSPatch. Its notice targeted code that "passes arbitrary
+parameters to dynamic methods" such as `dlopen()` and `performSelector:` to
+change app behavior or call private API based on a downloaded script
+([Michael Tsai](https://mjtsai.com/blog/2017/03/08/apple-rejecting-apps-that-use-rollout/),
+[react-native#13011](https://github.com/facebook/react-native/issues/13011)).
+Loading a user's own server page in WebKit is not that. The rule is about what
+downloaded code can reach, and this shell gives it only the fixed bridge.
+
 ### Precedents
 
 Home Assistant's iOS Companion app is distributed through the App Store. It
@@ -692,10 +702,28 @@ Push to APNs (section 8).
 
 ### Signing, identifiers, privacy
 
-- **Bundle ids**: `bot.avibe.ios` for the app and
-  `bot.avibe.ios.notification-service` for the extension (the desktop app is
-  `bot.avibe.desktop`). Add an app group shared by the app and its extensions,
-  and the Push Notifications capability.
+- **Identifiers** (recommended; the Account Holder registers them). Existing
+  identifiers on the same team: `bot.avibe.desktop` (plus
+  `bot.avibe.desktop.runtime.*` and `bot.avibe.desktop.cua-driver`) and
+  `bot.avibe.avault`. The mobile apps follow the same `bot.avibe.<surface>`
+  pattern:
+
+  | Item | Identifier | When |
+  | --- | --- | --- |
+  | iOS app | `bot.avibe.ios` | Phase 0a |
+  | Notification Service Extension | `bot.avibe.ios.notification-service` | Phase 1 |
+  | Share extension | `bot.avibe.ios.share` | Phase 2 |
+  | Widgets extension | `bot.avibe.ios.widgets` | Phase 2 |
+  | App group (app and extensions) | `group.bot.avibe.ios` | Phase 1 |
+  | Android package (later) | `bot.avibe.android` | Section 11 |
+
+  A bundle id cannot change after the first build is uploaded; the App Store
+  name can. Extensions must be prefixed by the app's id. App Intents live in
+  the app target unless they need an extension. The Phase 1 handoff uses an
+  `ASWebAuthenticationSession` custom-scheme callback, which the session
+  matches itself without registering the scheme. Turn off "iPhone and iPad
+  apps on Apple silicon Mac" availability, so the iOS app never competes with
+  the desktop app's `avibe://` scheme on a Mac.
 - **`Info.plist`**: `NSMicrophoneUsageDescription`. Phase 0 must also check
   whether file inputs and the native camera picker need
   `NSCameraUsageDescription` and `NSPhotoLibraryAddUsageDescription`.
@@ -704,16 +732,72 @@ Push to APNs (section 8).
   through avibe.bot.
 - **Export compliance**: standard HTTPS and CryptoKit only.
 
-### What the owner provides
+### Apple account and team access
 
-- Apple Developer Program membership (organization enrollment shows the company
-  as seller) and the team.
-- An App Store Connect API key for CI uploads.
-- An APNs authentication key (`.p8`, key id, team id), stored as an avibe.bot
-  secret.
-- A build machine: a Mac with Xcode, or a macOS CI runner.
-- Later: the review demo instance, the reviewer account, and a privacy policy
-  URL.
+The app ships from the owner's existing Apple Developer Program membership,
+the same team that signs the desktop app and avault. That membership is
+**Individual**, which limits delegation
+([Apple: roles](https://developer.apple.com/help/account/access/roles)):
+
+- Users invited in App Store Connect get App Store Connect access only and "are
+  not considered part of your team". With the App Manager or Admin role they
+  can create app versions, manage TestFlight groups, submit for review, and
+  answer App Review.
+- Certificates, Identifiers & Profiles is "only available to Account Holders
+  and members of an organization's team". Only the owner can register
+  identifiers, enable capabilities, create certificates, profiles, and keys
+  (including the APNs key), or add device UDIDs. Xcode's automatic signing
+  cannot sign for this team on the iOS owner's own Mac.
+
+How the iOS owner works within that:
+
+1. **One-time Account Holder setup** (cyhhao):
+   - register the identifiers above and enable Push Notifications and App
+     Groups;
+   - create an Apple Distribution certificate and App Store provisioning
+     profiles for each target;
+   - create an App Store Connect API key for iOS CI, separate from the desktop
+     notarization key so either can be revoked alone;
+   - invite the iOS owner to App Store Connect as App Manager, limited to the
+     iOS app;
+   - create the app record.
+2. **Signing in CI only.** A macOS GitHub Actions job builds, signs with the
+   distribution certificate and profiles stored as repository secrets, and
+   uploads to TestFlight with the API key. `desktop-package.yml` already signs
+   the desktop app on macOS runners the same way. The iOS owner never needs the
+   private key locally.
+3. **Device testing.** The Simulator, and a free personal team with a
+   throwaway bundle id, cover most work. For push, app groups, and extensions,
+   CI uploads a TestFlight build for internal testers. Attaching Xcode's
+   debugger to those capabilities on a device would require the owner to share
+   a development certificate's private key. That friction is the main thing an
+   Organization membership removes.
+4. **Renewals.** Certificates and profiles expire yearly, and new capabilities
+   or targets need the owner again. Phase 1 and Phase 2 each need one owner
+   session.
+
+An Organization membership removes these limits: team members can get
+Certificates, Identifiers & Profiles access, cloud-managed signing, and Xcode
+Cloud, and the company shows as the seller. It needs a legal entity and a
+D-U-N-S number ([Apple: enrollment](https://developer.apple.com/help/account/membership/program-enrollment)).
+There are two paths, and both stay open until before App Store submission
+(decision 9):
+
+- **Convert the Individual membership** by request to Apple. Apple's pages do
+  not say whether the Team ID survives; third-party guides say it does. The
+  desktop app's notarization identity and avault's Keychain approvals are
+  bound to this Team ID (`avault/.github/workflows/release.yml`), so get that
+  in writing from Apple Developer Support first. Developers also report the
+  migration taking weeks with membership benefits paused, which would block
+  desktop releases ([Apple forums](https://developer.apple.com/forums/thread/818921)).
+- **Enroll the company as a separate Organization** for the mobile apps, and
+  leave the desktop app and avault on the current team. This adds a second
+  membership fee and a second Team ID, but it does not touch existing
+  signatures.
+
+Later, also needed: the APNs `.p8` key (Phase 1, stored as an avibe.bot
+secret), and before App Store submission, the review demo instance, a reviewer
+account, and a privacy policy URL.
 
 ## 14. Phases and effort
 
@@ -825,10 +909,14 @@ every item with the native composer.
    transcript, a native composer, and one `avibeNative` contract, with code in
    `ios/` of this repository (and `android/` later). Whether and when the
    native composer is built is still decision 4.
-2. Apple Developer account and team, app name, bundle id prefix (`bot.avibe.ios`
-   proposed), and minimum iOS version (17 proposed; the media-capture delegate
-   and `keyboardLayoutGuide` need 15).
-3. Build machine or macOS CI runner.
+2. **Account settled 2026-11-04:** the owner's existing Individual
+   membership, the same team as the desktop app and avault (section 13). Still
+   to confirm: the identifier scheme in section 13 (`bot.avibe.ios`, before
+   the Account Holder registers it), the app name, and the minimum iOS version
+   (17 proposed; the media-capture delegate and `keyboardLayoutGuide` need 15).
+3. Build machine: GitHub Actions macOS runners with signing secrets, as for the
+   desktop app, are proposed. On an Individual membership this is also how the
+   iOS owner ships without holding the signing key (section 13).
 4. Phase 0 scope: put Phase 0a (shell and keyboard fixes) on TestFlight
    internal as soon as it is ready and decide 0b (native composer) from its
    checklist results, or commit to 0b now. Push follows in Phase 1 either way.
@@ -839,6 +927,31 @@ every item with the native composer.
    Store, not for TestFlight).
 8. TestFlight only, or the App Store after Phase 2. For the App Store, a review
    demo instance and reviewer account are needed.
+9. Before App Store submission: keep the Individual membership, convert it to
+   an Organization, or enroll the company separately for the mobile apps
+   (section 13).
+
+## 18. Ownership and handoff
+
+One engineer owns the iOS track end to end: design details, implementation,
+TestFlight, and later App Store submission. They report to cyhhao, who keeps
+the decisions in section 17 and the Account Holder steps in section 13. The
+tracking issue links back here.
+
+- **Read first**: sections 1, 3 to 5, 7, and 13 to 15. Section 4 is the
+  contract with the Web UI; change it there first, then implement it.
+- **Where code goes**: `ios/` in this repository, next to `desktop/`. Web UI
+  changes go in `ui/`, in the same PR as the bridge change that needs them.
+  PRs follow the repository rules in `AGENTS.md`.
+- **First milestone**: Phase 0a (section 14), ending with the section 15
+  checklist on a real iPhone. The microphone items must pass. The input items
+  are measured and decide 0b.
+- **Prerequisites from cyhhao**: the one-time Account Holder setup in
+  section 13, and decisions 2 to 4 before the first TestFlight build. The other
+  decisions are needed before Phase 1 or before App Store submission.
+- **Known starting points**: the media-capture delegate in the appendix, the
+  2026-11-03 device results in section 5, and the voice pipeline already in
+  `ui/src/lib/voiceRecording.ts` and `voiceRealtime.ts`.
 
 ## Appendix: spike method
 
@@ -851,3 +964,21 @@ occlusion detection so the off-screen page stayed visible. Mock devices bypass
 TCC, so the run touched no real microphone or user state. A Python server served
 the bundled page and an echo WebSocket. The control run used a second web view
 whose delegate answered deny.
+
+The production delegate needs only an origin check on top of what the spike
+did:
+
+```swift
+func webView(
+    _ webView: WKWebView,
+    requestMediaCapturePermissionFor origin: WKSecurityOrigin,
+    initiatedByFrame frame: WKFrameInfo,
+    type: WKMediaCaptureType,
+    decisionHandler: @escaping @MainActor @Sendable (WKPermissionDecision) -> Void
+) {
+    // Configured instance origins only (section 7); anything else gets the
+    // normal WebKit prompt.
+    let allowed = type == .microphone && instances.contains(origin)
+    decisionHandler(allowed ? .grant : .prompt)
+}
+```
