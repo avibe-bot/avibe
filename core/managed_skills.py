@@ -740,6 +740,17 @@ def _project_directories(
     return [current]
 
 
+def managed_skill_project_root(cwd: str | Path, project_base: str | Path | None = None) -> Path:
+    """Expose the existing Skills walk's outermost directory for shared capabilities."""
+
+    working = _working_directory(cwd)
+    try:
+        directories = _project_directories(working, project_base=project_base)
+    except (OSError, RuntimeError):
+        directories = []
+    return directories[-1] if directories else working
+
+
 def _project_base_for_working_directory(
     working_directory: Path,
     project_base: str | Path | None,

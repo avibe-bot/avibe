@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom';
@@ -142,6 +142,64 @@ describe('SkillsPage links', () => {
     await screen.findByText('suno');
     fireEvent.click(screen.getByRole('button', { name: 'bare link' }));
     await waitFor(() => expect(tab(en.skills.tabSkills).getAttribute('aria-checked')).toBe('true'));
+  });
+});
+
+describe('SkillsPage MCP project view', () => {
+  it('lists the selected project, follows the picker, and goes back to the global hub', async () => {
+    const listed = api.listMcpServers.getMockImplementation()!;
+    let releaseAlpha: () => void = () => undefined;
+    const projectRow = (name: string, project: string) => ({ name, source: 'project', scope: `project:${project}`, state: 'ok', auth: 'none', transport: 'http', url: `https://${name}.example/mcp`, toolCount: 0 });
+    api.listMcpServers.mockImplementation((project: string | null) => {
+      if (project === 'proj_a') {
+        // Alpha's list arrives only after the user has moved on to beta.
+        return new Promise((resolve) => { releaseAlpha = () => resolve({ ok: true, oauthMode: 'direct', servers: [projectRow('alpha-only', 'proj_a')] }); });
+      }
+      if (project === 'proj_b') return Promise.resolve({ ok: true, oauthMode: 'direct', servers: [projectRow('beta-only', 'proj_b')] });
+      return listed(project);
+    });
+    renderPage('/skills?tab=mcp');
+    await screen.findByText('suno');
+    expect(api.listMcpServers).toHaveBeenLastCalledWith(null);
+    fireEvent.click(tab(en.skills.scopeProject));
+    await waitFor(() => expect(api.listMcpServers).toHaveBeenLastCalledWith('proj_a'));
+    fireEvent.click(screen.getByRole('button', { name: 'alpha' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'beta' }));
+    await waitFor(() => expect(api.listMcpServers).toHaveBeenLastCalledWith('proj_b'));
+    await screen.findByText('beta-only');
+    await act(async () => releaseAlpha());
+    expect(screen.queryByText('alpha-only')).toBeNull();
+    expect(screen.getByText('beta-only')).toBeTruthy();
+    fireEvent.click(tab(en.skills.scopeGlobal));
+    await waitFor(() => expect(api.listMcpServers).toHaveBeenLastCalledWith(null));
+  });
+
+  it('shows the global hub for a project without a folder and never asks for its project servers', async () => {
+    api.listProjects.mockResolvedValue({
+      projects: [{ ...project('proj_c', 'gamma'), folder_path: '', capabilities: { can_chat: true, has_folder: false } }],
+    });
+    renderPage('/skills?tab=mcp&scope=project&project=proj_c');
+    expect(await screen.findByText(en.mcpHub.projectNoFolder)).toBeTruthy();
+    await screen.findByText('suno');
+    expect(api.listMcpServers.mock.calls.every(([project]) => project === null)).toBe(true);
+  });
+
+  it('returns a project OAuth login to that project and its own same-named row', async () => {
+    api.listMcpServers.mockImplementation(async (project: string | null) => ({
+      ok: true,
+      oauthMode: 'direct',
+      servers: [
+        project
+          ? { name: 'suno', source: 'project', scope: 'project:proj_b', state: 'ok', auth: 'none', transport: 'http', url: 'https://project.example/mcp', toolCount: 1 }
+          : { name: 'suno', source: 'avibe', scope: 'global', state: 'ok', auth: 'ok', transport: 'http', url: 'https://global.example/mcp', toolCount: 1 },
+      ],
+    }));
+    renderPage('/skills?mcp=suno&scope=project&project=proj_b&oauth=success');
+    expect(await screen.findByText(en.mcpHub.loginComplete)).toBeTruthy();
+    expect(api.listMcpServers.mock.calls).toEqual([['proj_b']]);
+    expect(await screen.findByText(en.mcpHub.callHint.replace('{{name}}', 'suno'))).toBeTruthy();
+    expect(screen.getAllByText('https://project.example/mcp').length).toBeGreaterThan(0);
+    expect(screen.queryByText('https://global.example/mcp')).toBeNull();
   });
 });
 

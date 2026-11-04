@@ -5056,7 +5056,8 @@
     },
     "pageTitle": "Skills",
     "tabSkills": "技能",
-    "tabMcp": "MCP"
+    "tabMcp": "MCP",
+    "sectionHint": "· {{hint}}"
   },
   "harness": {
     "title": "Harness",
@@ -6833,6 +6834,13 @@
     "removeNativeHint": "将从 {{agent}} 的配置文件 {{path}} 中删除 {{name}}，{{agent}} 也将不再拥有这个服务器。",
     "empty": "还没有已注册的 MCP 服务器。添加一个，或等待自动发现。",
     "noSearchMatch": "没有匹配的 MCP 服务器。",
+    "searchProjectPlaceholder": "搜索本项目的 MCP…",
+    "projectSectionLocal": "项目 MCP",
+    "projectSectionLocalHint": "仅在本项目可用",
+    "projectSectionGlobal": "也可用 · 继承自全局",
+    "projectSectionGlobalHint": "请在「全局」标签页管理",
+    "projectEmpty": "此项目还没有项目 MCP",
+    "globalBadge": "全局",
     "failed": "MCP 操作失败。",
     "pasteHint": "粘贴 mcpServers JSON。环境变量和请求头的值会以明文保存在本机。",
     "pastePlaceholder": "{\n  \"mcpServers\": {\n    \"docs\": { \"type\": \"http\", \"url\": \"https://example.invalid/mcp\" }\n  }\n}",
@@ -6840,7 +6848,8 @@
       "avibe": "Avibe",
       "claude": "Claude",
       "codex": "Codex",
-      "opencode": "OpenCode"
+      "opencode": "OpenCode",
+      "project": "项目"
     },
     "transportStdio": "stdio",
     "transportHttp": "http",
@@ -6866,7 +6875,12 @@
       "usage": "{{message}}",
       "add_failed": "{{message}}",
       "add_partial": "{{message}}",
-      "internal": "MCP 操作失败。"
+      "internal": "MCP 操作失败。",
+      "pending_approval": "该服务器正在等待批准。",
+      "needs_config": "请先为该服务器设置变量。",
+      "not_generated": "工具尚未生成，请刷新该服务器。",
+      "config_changed": "Avibe 写入时 .mcp.json 被修改了，请重试。",
+      "invalid_package": "该服务器的已保存数据无法读取：{{message}}"
     },
     "addedCount": "已添加 {{count}} 个。",
     "addedPartial": "已添加 {{count}} 个；失败：{{failed}}",
@@ -6914,6 +6928,35 @@
       "headerKeyPlaceholder": "Authorization",
       "envKeyPlaceholder": "API_KEY",
       "rowsToggle": "{{label}}（{{count}}）"
-    }
+    },
+    "state": {
+      "ok": "可用",
+      "needs_login": "需要登录",
+      "pending_approval": "待批准",
+      "needs_config": "需要配置",
+      "not_generated": "未生成"
+    },
+    "stateMissing": "{{state}}：{{names}}",
+    "pendingApprovalHint": "该服务器定义在项目仓库中。Owner 批准前，它的工具不可用。",
+    "needsConfigHint": "设置这些变量以完成配置：{{names}}",
+    "notGeneratedHint": "当前定义尚未生成工具。点击刷新以连接并生成。",
+    "approve": "批准",
+    "approveConfirm": "批准 {{name}}？",
+    "approveCommandHint": "该命令来自项目仓库中的 {{path}}。批准后，Avibe 会在这台机器上为此项目运行它。条目变更后需要重新批准。",
+    "approveUrlHint": "该地址来自项目仓库中的 {{path}}。批准后，Avibe 会为此项目连接它。条目变更后需要重新批准。",
+    "configure": "配置",
+    "configureTitle": "配置 {{name}}",
+    "configureHint": "已保存的值不会显示。编辑过的列表会替换已保存的那一份；未改动的列表保持不变。值以明文保存在这台机器上，不在仓库中。",
+    "configureClear": "清除已保存",
+    "configureCleared": "保存时会删除这个列表中所有已保存的值。",
+    "configureUndoClear": "撤销",
+    "configureEmptyValue": "空值",
+    "configureMissing": "缺少：{{names}}",
+    "configureVariables": "变量",
+    "configureSave": "保存",
+    "addProjectSubtitle": "添加到 {{project}} 的 .mcp.json。每个服务器需要批准后工具才可用。",
+    "removeProjectHint": "将从 {{path}} 中删除 {{name}}，并清除它在这台机器上的批准、已保存的值和登录。",
+    "globalAlsoAvailable": "全局 MCP 服务器在这里也可用",
+    "projectNoFolder": "此项目未配置文件夹，没有项目级 MCP 服务器——仅显示全局服务器。"
   }
 }

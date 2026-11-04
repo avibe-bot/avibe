@@ -9611,12 +9611,33 @@ def _mcp_body() -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
+async def _mcp_project_readable(project: str) -> bool:
+    """``?project=`` selects a Project's MCP scope only for callers who can read it."""
+
+    from storage import project_access_service
+
+    context = _request_authorization_context()
+
+    def allowed() -> bool:
+        with _projects_engine().connect() as conn:
+            return project_access_service.can_read_project(conn, context, project)
+
+    return await asyncio.to_thread(allowed)
+
+
 async def _mcp_route(starlette_request: FastAPIRequest, handler, *args):
     async def run():
         from vibe import mcp_api
 
-        body, status = await mcp_api.run(handler, *args)
-        return jsonify(body), status
+        project = starlette_request.query_params.get("project")
+        if project and not await _mcp_project_readable(project):
+            return jsonify({"ok": False, "error": {"type": "not_found", "message": "Project not found."}}), 404
+        token = mcp_api.project_context.set(project)
+        try:
+            body, status = await mcp_api.run(handler, *args)
+            return jsonify(body), status
+        finally:
+            mcp_api.project_context.reset(token)
 
     return await _dispatch_native_ui_request(starlette_request, run)
 
@@ -9660,6 +9681,20 @@ async def mcp_refresh(name: str, starlette_request: FastAPIRequest):
 async def mcp_remove(name: str, starlette_request: FastAPIRequest):
     from vibe import mcp_api
     return await _mcp_route(starlette_request, mcp_api.remove, name)
+
+
+@app.post("/api/mcp/{name}/approve", include_in_schema=False)
+async def mcp_approve(name: str, starlette_request: FastAPIRequest):
+    from vibe import mcp_api
+
+    return await _mcp_route(starlette_request, mcp_api.approve, name)
+
+
+@app.post("/api/mcp/{name}/configure", include_in_schema=False)
+async def mcp_configure(name: str, starlette_request: FastAPIRequest):
+    from vibe import mcp_api
+
+    return await _mcp_route(starlette_request, lambda: mcp_api.configure(name, _mcp_body()))
 
 
 def _mcp_setup_port() -> int:
@@ -9707,7 +9742,14 @@ async def mcp_oauth_start(name: str, starlette_request: FastAPIRequest):
 
         if not _mcp_oauth_start_allowed(starlette_request):
             return _mcp_oauth_page("mcp_oauth_start_rejected", 403)
-        body, _status = await mcp_api.run(mcp_api.oauth_start, name, {"port": _mcp_setup_port()}, _current_origin())
+        project = starlette_request.query_params.get("project")
+        if project and not await _mcp_project_readable(project):
+            return _mcp_oauth_page("mcp_oauth_start_rejected", 404)
+        token = mcp_api.project_context.set(project)
+        try:
+            body, _status = await mcp_api.run(mcp_api.oauth_start, name, {"port": _mcp_setup_port()}, _current_origin())
+        finally:
+            mcp_api.project_context.reset(token)
         if body.get("ok") and body.get("authorizeUrl"):
             return RedirectResponse(body["authorizeUrl"], status_code=302)
         return _mcp_oauth_page("mcp_oauth_start_failure", 400)

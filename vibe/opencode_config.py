@@ -433,6 +433,103 @@ def _scan_jsonc_top_level_properties(
     return root_start, root_end, properties
 
 
+def upsert_jsonc_object_member(source: str, parent_key: str, key: str, value: object) -> str:
+    """Set ``parent_key.key`` to ``value`` (or insert it), leaving every other byte in place.
+
+    Preserves the file's existing formatting, indentation, comments and member
+    order. Falls back to a plain ``ValueError`` when the parent is missing or
+    not an object; callers decide how to degrade.
+    """
+
+    root_start, _root_end, properties = _scan_jsonc_top_level_properties(source)
+    parent = next((prop for prop in reversed(properties) if prop.key == parent_key), None)
+    if parent is None or source[parent.value_start] != "{":
+        raise ValueError(f"{parent_key} is not an object")
+
+    start, end, members = _scan_jsonc_top_level_properties(source, parent.value_start)
+    has_multiline_layout = "\n" in source[start:end]
+
+    def serialize_at(child_indent: str) -> str:
+        """``value`` as this file lays it out: one unit per depth under ``child_indent``."""
+
+        if not has_multiline_layout:
+            return json.dumps(value, ensure_ascii=False)
+        unit = _indent_unit(source, start, end) or "  "
+        text = json.dumps(value, indent=unit, ensure_ascii=False)
+        return _reindent_json(text, child_indent, unit)
+
+    matching = next((member for member in reversed(members) if member.key == key), None)
+    if matching is not None:
+        member_indent = _indent_slice(source, _line_start(source, matching.key_start), matching.key_start)
+        if member_indent.strip() == "" and has_multiline_layout:
+            return source[: matching.value_start] + serialize_at(member_indent) + source[matching.value_end :]
+        serialized_value = json.dumps(value, indent=2 if has_multiline_layout else None, ensure_ascii=False)
+        return source[: matching.value_start] + serialized_value + source[matching.value_end :]
+
+    newline = _detect_newline(source)
+    parent_line_start = _line_start(source, start)
+    parent_indent = source[parent_line_start:parent.key_start]
+    first_member_indent = None
+    if members:
+        candidate = _indent_slice(source, _line_start(source, members[0].key_start), members[0].key_start)
+        if candidate.strip() == "":
+            first_member_indent = candidate
+    child_indent = first_member_indent or (parent_indent + (_indent_unit(source, start, end) or "  "))
+    property_text = f"{json.dumps(key)}: {serialize_at(child_indent)}"
+
+    closing_line_start = _line_start(source, end)
+    closing_brace_on_own_line = source[closing_line_start:end].strip() == ""
+    trailing_comma = members[-1].delimiter == "," if members else False
+
+    if not members:
+        if has_multiline_layout and closing_brace_on_own_line:
+            insertion = f"{child_indent}{property_text}{newline}"
+            return source[:closing_line_start] + insertion + source[closing_line_start:]
+        return source[: start + 1] + property_text + source[end:]
+
+    updated_source = source
+    if not trailing_comma:
+        last_member = members[-1]
+        updated_source = updated_source[: last_member.value_end] + "," + updated_source[last_member.value_end :]
+
+    if not has_multiline_layout:
+        insertion_point = end + (0 if trailing_comma else 1)
+        prefix = " " if updated_source[insertion_point - 1] not in "{[ \t\r\n" else ""
+        suffix = "," if trailing_comma else ""
+        return (
+            updated_source[:insertion_point]
+            + f"{prefix}{property_text}{suffix}"
+            + updated_source[insertion_point:]
+        )
+
+    insertion_point = closing_line_start + (0 if trailing_comma else 1)
+    if closing_brace_on_own_line:
+        suffix = "," if trailing_comma else ""
+        insertion = f"{child_indent}{property_text}{suffix}{newline}"
+        return updated_source[:insertion_point] + insertion + updated_source[insertion_point:]
+    insertion_point = end + (0 if trailing_comma else 1)
+    suffix = "," if trailing_comma else ""
+    insertion = f"{newline}{child_indent}{property_text}{suffix}{newline}{parent_indent}"
+    return updated_source[:insertion_point] + insertion + updated_source[insertion_point:]
+
+
+def _reindent_json(serialized: str, indent: str, unit: str) -> str:
+    """Offset every continuation line of a serialized value by its member indent."""
+
+    return serialized.replace("\n", "\n" + indent)
+
+
+def _indent_unit(source: str, start: int, end: int) -> str | None:
+    """The file's nesting unit: the first root-level property's indent, else ``None``."""
+
+    _rs, _re, properties = _scan_jsonc_top_level_properties(source)
+    for prop in properties:
+        indent = _indent_slice(source, _line_start(source, prop.key_start), prop.key_start)
+        if indent.strip() == "" and indent:
+            return indent
+    return None
+
+
 def set_jsonc_top_level_string_property(source: str, key: str, value: str) -> str:
     parse_jsonc_object(source)
 

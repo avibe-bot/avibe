@@ -38,11 +38,14 @@ def _server(command: str = sys.executable) -> dict:
 
 
 @pytest.fixture
-def runtime(tmp_path):
+def runtime(tmp_path, monkeypatch):
+    from vibe import internal_client
+
     config = save_config(tmp_path)
     config.runtime.default_cwd = str(tmp_path)
     config.save()
     owner = McpRuntime()
+    monkeypatch.setattr(internal_client, "mcp_request_sync", lambda operation, payload, **_: _run(owner, operation, payload))
     yield owner
     owner.stop()
 
@@ -316,27 +319,22 @@ def test_future_format_revision_is_not_listed(generated):
     assert _prompt() == ""
 
 
-def test_cli_list_and_help_work_with_the_owner_down(generated, capsys):
-    from vibe import mcp_cli
+def test_cli_reads_are_unavailable_with_the_owner_down(generated, capsys, monkeypatch):
+    from vibe import internal_client, mcp_cli
 
-    generated.stop()
-    assert mcp_cli.main(["--list"]) == 0
-    assert "- echo: Echo tools" in capsys.readouterr().out
-    assert mcp_cli.main(["echo", "--list"]) == 0
-    assert "echo  Echo text back" in capsys.readouterr().out
-    assert mcp_cli.main(["echo", "echo", "--help"]) == 0
-    assert "--text <string> (required)" in capsys.readouterr().out
-    assert mcp_cli.main(["echo", "echo", "--text", "x"]) == 1
-    assert "not running" in capsys.readouterr().err
-    assert mcp_cli.main(["echo", "echo", "--bogus", "x"]) == 2
+    def down(*_args, **_kwargs):
+        raise internal_client.InternalServerUnavailable("down")
 
+    monkeypatch.setattr(internal_client, "mcp_request_sync", down)
+    for argv in (["--list"], ["echo", "--list"], ["echo", "echo", "--help"]):
+        assert mcp_cli.main(argv) == 1
+        assert "not running" in capsys.readouterr().err
 
 def test_cli_treats_help_as_a_server_name(generated, capsys):
     from vibe import mcp_cli
 
     added = _run(generated, "add", {"servers": [{**_server(), "name": "help"}]})
     assert added["ok"] is True
-    generated.stop()
     assert mcp_cli.main(["help", "--list"]) == 0
     assert "echo  Echo text back" in capsys.readouterr().out
     assert mcp_cli.main(["-h"]) == 0

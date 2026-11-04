@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import Any, Optional
+from typing import Any, Optional, Callable
 from urllib.parse import urlsplit
 
 from core.mcp_hub.errors import McpHubError
@@ -71,7 +71,7 @@ def _string_map(value: object, field: str, key_pattern: re.Pattern[str]) -> dict
         raise _invalid(field, f"{field} must be an object of string values.")
     result: dict[str, str] = {}
     for key, item in value.items():
-        if not isinstance(key, str) or not key_pattern.match(key):
+        if not isinstance(key, str) or not key_pattern.fullmatch(key):
             raise _invalid(f"{field}.{key}", f"{field} has an invalid name: {key!r}.")
         result[key] = _text(item, f"{field}.{key}", allow_empty=True)
     return result
@@ -95,6 +95,8 @@ def definition_from_provider(name: str, server: object) -> dict[str, Any]:
         raise _invalid("server", f"mcpServers.{name} must be an object.")
     # Backend-owned extras (env_vars, timeouts, …) are ignored, not rejected.
     kind = server.get("type")
+    if kind is not None and not isinstance(kind, str):
+        raise _invalid("type", "type must be a string.")
     if kind == "sse":
         raise McpHubError(
             "unsupported_transport_sse",
@@ -151,15 +153,19 @@ def definition_from_provider(name: str, server: object) -> dict[str, Any]:
 
 def _validate_url(value: object) -> str:
     url = _text(value, "url")
-    parts = urlsplit(url)
-    if parts.scheme not in {"http", "https"} or not parts.hostname:
+    try:
+        parts = urlsplit(url)
+        hostname = parts.hostname
+    except ValueError:
+        raise _invalid("url", "url must be an http(s) URL.") from None
+    if parts.scheme not in {"http", "https"} or not hostname:
         raise _invalid("url", "url must be an http(s) URL.")
     if parts.username is not None or parts.password is not None:
         raise _invalid("url", "url must not embed credentials; put them in an Authorization header.")
     return url
 
 
-def parse_provider_json(text: str) -> list[dict[str, Any]]:
+def parse_provider_json(text: str, *, validator: Callable = definition_from_provider) -> list[dict[str, Any]]:
     """Parse a pasted ``{"mcpServers": {...}}`` block into definitions (sorted by name)."""
 
     try:
@@ -176,7 +182,7 @@ def parse_provider_json(text: str) -> list[dict[str, Any]]:
     first_error: McpHubError | None = None
     for name in sorted(servers):
         try:
-            parsed.append(definition_from_provider(name, servers[name]))
+            parsed.append(validator(name, servers[name]))
         except McpHubError as cop:
             if first_error is None:
                 first_error = cop
@@ -207,7 +213,7 @@ class ProviderBatch(list):
 _UNSUPPORTED_ADD_OPTIONS = {"--scope", "-s", "--callback-port", "--client-id", "--client-secret"}
 
 
-def parse_add_argv(argv: list[str]) -> tuple[list[dict[str, Any]], bool]:
+def parse_add_argv(argv: list[str], *, validator: Callable = definition_from_provider) -> tuple[list[dict[str, Any]], bool]:
     """Return ``(definitions, replace)`` for ``vibe mcp-add`` arguments.
 
     ``--json-stdin`` is resolved by the caller, which passes the stdin text as
@@ -276,7 +282,7 @@ def parse_add_argv(argv: list[str]) -> tuple[list[dict[str, Any]], bool]:
     if json_text is not None:
         if positionals or command is not None or env or headers or cwd:
             raise McpHubError("usage", "--json-stdin takes no other server arguments.", usage=True)
-        return parse_provider_json(json_text), replace
+        return parse_provider_json(json_text, validator=validator), replace
     if not positionals:
         raise McpHubError("usage", "Missing server name.", usage=True)
     name, rest = positionals[0], positionals[1:]
@@ -307,7 +313,7 @@ def parse_add_argv(argv: list[str]) -> tuple[list[dict[str, Any]], bool]:
             server["env"] = env
         if cwd is not None:
             server["cwd"] = cwd
-    return [definition_from_provider(name, server)], replace
+    return [validator(name, server)], replace
 
 
 def provider_entry(definition: dict[str, Any]) -> dict[str, Any]:

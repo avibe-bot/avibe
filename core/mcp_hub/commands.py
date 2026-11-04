@@ -14,7 +14,7 @@ from core.mcp_hub.errors import McpHubError
 
 _FLAG_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 _RESERVED_KEYS = {"args-json", "args-file", "args-stdin", "help"}
-_FLAG_KINDS = {"string", "number", "integer", "boolean", "array", "object"}
+FLAG_KINDS = {"string", "number", "integer", "boolean", "array", "object"}
 INPUT_MODES = ("--args-json", "--args-file", "--args-stdin")
 
 
@@ -72,7 +72,7 @@ def build_command(tool: dict[str, Any]) -> dict[str, Any]:
             kind = prop.get("type")
             if (
                 isinstance(kind, str)
-                and kind in _FLAG_KINDS
+                and kind in FLAG_KINDS
                 and _FLAG_KEY.match(key)
                 and key not in _RESERVED_KEYS
                 and not any(word in prop for word in ("anyOf", "oneOf", "allOf", "$ref"))

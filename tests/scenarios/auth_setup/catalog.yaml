@@ -703,4 +703,11 @@ scenarios:
       - ui/src/components/ui/vault-secret-form.test.tsx
       - ui/src/components/ui/vault-secret-fields-editor.test.tsx
       - ui/src/components/workbench/VaultsPage.test.tsx
+  - id: AUTH-SETUP-138
+    name: MCP Hub global and project servers with the same name keep separate OAuth pending grants, tokens and return views
+    status: covered
+    kind: concurrency
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_mcp_hub_same_name_oauth_logins_stay_in_their_scope
 next_priority: []

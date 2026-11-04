@@ -185,3 +185,54 @@ export const mcpServers: McpServerSummary[] = [
 export const mcpApi = (servers: McpServerSummary[]): Record<string, unknown> => ({
   '/api/mcp': { ok: true, servers, oauthMode: 'direct' },
 });
+
+const PROJECT_MCP_FILE = '/Users/demo/avibe/.mcp.json';
+
+/** A row from the avibe project's `.mcp.json`, in the state `/api/mcp?project=proj_avibe` reports. */
+export const projectMcpServer = (name: string, state: string, extra: Partial<McpServerSummary>): McpServerSummary => ({
+  name,
+  source: 'project',
+  scope: 'project:proj_avibe',
+  sourcePath: PROJECT_MCP_FILE,
+  state,
+  auth: state === 'needs_login' ? 'needs_login' : 'none',
+  transport: 'http',
+  missingVariables: [],
+  placeholders: [],
+  toolCount: extra.tools?.length ?? 0,
+  tools: [],
+  ...extra,
+});
+
+/** The avibe project's view: its own servers (one per state) shadowing and beside the visible global ones. */
+export const projectMcpServers: McpServerSummary[] = [
+  projectMcpServer('repo-tools', 'pending_approval', { transport: 'stdio', command: 'node ./scripts/mcp/repo-tools.js', placeholders: [] }),
+  projectMcpServer('sentry', 'needs_config', {
+    url: 'https://mcp.sentry.dev/mcp?org=${SENTRY_ORG}',
+    missingVariables: ['SENTRY_ORG', 'SENTRY_TOKEN'],
+    placeholders: ['SENTRY_ORG', 'SENTRY_TOKEN'],
+  }),
+  projectMcpServer('linear', 'needs_login', { url: 'https://mcp.linear.app/mcp' }),
+  projectMcpServer('github', 'ok', {
+    transport: 'stdio',
+    command: 'npx -y @modelcontextprotocol/server-github',
+    placeholders: ['GITHUB_TOKEN'],
+    description: '本仓库的 issue、PR 与代码搜索。',
+    revision: 'r3',
+    tools: [
+      { name: 'search_issues', description: '按关键词在本仓库搜索 issue。' },
+      { name: 'get_pull_request', description: '读取一个 PR 的描述、评审与检查状态。' },
+    ],
+  }),
+  projectMcpServer('staging-db', 'not_generated', { transport: 'stdio', command: 'uvx postgres-mcp --read-only' }),
+  ...mcpServers.filter((server) => !['github', 'linear'].includes(server.name)).map((server) => ({ ...server, scope: 'global', state: server.auth === 'needs_login' ? 'needs_login' : 'ok' })),
+].sort((a, b) => a.name.localeCompare(b.name));
+
+/** The Skills & MCP reads of the avibe project's MCP view (`?tab=mcp&scope=project&project=proj_avibe`). */
+export function projectMcpApi(servers: McpServerSummary[] = projectMcpServers): Record<string, unknown> {
+  return {
+    ...projectSkillsApi(),
+    ...mcpApi(mcpServers),
+    '/api/mcp?project=proj_avibe': { ok: true, servers, oauthMode: 'direct' },
+  };
+}

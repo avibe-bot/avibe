@@ -1,4 +1,5 @@
-import { ArrowUp, Ellipsis, Github, Globe, WandSparkles } from 'lucide-react';
+import { GlobalScopeChip } from './GlobalScopeChip';
+import { ArrowUp, Ellipsis, Github, WandSparkles } from 'lucide-react';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 import type { SkillBrief } from '../../../context/ApiContext';
@@ -41,10 +42,7 @@ export function SkillRow({ skill, selected, inherited, updateAvailable, onSelect
             </span>
           ) : null}
           {inherited ? (
-            <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-border-strong px-1.5 font-mono text-[9px] font-bold uppercase text-muted">
-              <Globe className="size-2.5" />
-              {t('skills.globalBadge')}
-            </span>
+            <GlobalScopeChip />
           ) : null}
         </span>
         {skill.description ? <span className="truncate text-[11.5px] text-muted">{skill.description}</span> : null}

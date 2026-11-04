@@ -16,7 +16,8 @@ export type McpTarget =
 
 export type McpAddTab = 'json' | 'form';
 
-export type McpKeyValueRow = { key: string; value: string };
+/** `empty` marks a value the user explicitly chose to leave empty (Configure dialog only). */
+export type McpKeyValueRow = { key: string; value: string; empty?: boolean };
 
 export type McpAddFormState = {
   name: string;
@@ -96,12 +97,46 @@ export function parseMcpTarget(input: string): McpTarget {
   return { kind: 'stdio', command, args };
 }
 
+/** The map a key/value editor holds: rows with a key, keys trimmed, values exactly as typed. */
+export function mcpKeyValueMap(rows: McpKeyValueRow[]): Record<string, string> {
+  return Object.fromEntries(rows.filter((row) => row.key.trim()).map((row) => [row.key.trim(), row.value]));
+}
+
+/** One map of the Configure dialog: untouched until the user edits its rows or explicitly clears it. */
+export type McpConfigureMap = { rows: McpKeyValueRow[]; edited: boolean; cleared: boolean };
+
+export const mcpConfigureMap = (rows: McpKeyValueRow[] = []): McpConfigureMap => ({ rows, edited: false, cleared: false });
+
+type ConfigureMapPayload = Record<string, string> | undefined | null;
+
+function configureMapPayload(map: McpConfigureMap): ConfigureMapPayload {
+  if (map.cleared) return {};
+  const keyed = map.rows.filter((row) => row.key.trim());
+  // Removing every row is not a clear; only the explicit Clear action sends an empty map.
+  if (!map.edited || keyed.length === 0) return undefined;
+  // Stored values are never shown, so a blank value counts only when the user chose "empty value".
+  if (keyed.some((row) => row.value === '' && !row.empty)) return null;
+  return mcpKeyValueMap(keyed.map((row) => (row.empty ? { ...row, value: '' } : row)));
+}
+
+/**
+ * What the Configure dialog sends: an edited map replaces the stored one, a cleared map is sent
+ * as `{}`, and an untouched map is omitted so its stored values stay. Null while nothing would be
+ * sent or an edited row has a blank value the user did not explicitly choose.
+ */
+export function mcpConfigurePayload(env: McpConfigureMap, headers: McpConfigureMap): { env?: Record<string, string>; headers?: Record<string, string> } | null {
+  const envMap = configureMapPayload(env);
+  const headerMap = configureMapPayload(headers);
+  if (envMap === null || headerMap === null || (envMap === undefined && headerMap === undefined)) return null;
+  return { ...(envMap ? { env: envMap } : {}), ...(headerMap ? { headers: headerMap } : {}) };
+}
+
 export function buildMcpFormJson({
   name, target, envRows, headerRows, cwd,
 }: Omit<McpAddFormState, 'target'> & { target: Extract<McpTarget, { kind: 'http' | 'stdio' }> }): string {
   // Only the detected kind's rows are sent: stdio env often holds secrets that must never become remote headers.
   const rows = target.kind === 'http' ? headerRows : envRows;
-  const pairs = Object.fromEntries(rows.filter((row) => row.key.trim()).map((row) => [row.key.trim(), row.value]));
+  const pairs = mcpKeyValueMap(rows);
   const hasPairs = Object.keys(pairs).length > 0;
   const server: Record<string, unknown> = target.kind === 'http'
     ? { type: 'http', url: target.url, ...(hasPairs ? { headers: pairs } : {}) }

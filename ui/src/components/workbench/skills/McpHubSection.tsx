@@ -1,6 +1,7 @@
+import { GlobalScopeChip } from './GlobalScopeChip';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ChevronDown, ChevronRight, Globe, Loader2, Plus, RefreshCw, Search, Terminal, Trash2, X } from 'lucide-react';
+import { ChevronDown, ChevronRight, Eraser, Globe, Info, KeyRound, Loader2, Plus, RefreshCw, Search, ShieldCheck, Terminal, Trash2, X } from 'lucide-react';
 import clsx from 'clsx';
 import { useSearchParams } from 'react-router-dom';
 
@@ -10,33 +11,38 @@ import { useToast } from '../../../context/ToastContext';
 import { useInstanceAuthorization } from '../../../context/InstanceAuthorizationContext';
 import { isDesktopShell } from '../../../lib/desktopShell';
 import { mcpAddOauthAction } from '../../../lib/mcpAddOauth';
-import { EMPTY_MCP_ADD_FORM, mcpAddPayload, type McpAddFormState, type McpAddTab } from '../../../lib/mcpAddForm';
+import { EMPTY_MCP_ADD_FORM, mcpAddPayload, mcpConfigureMap, mcpConfigurePayload, type McpAddFormState, type McpAddTab, type McpConfigureMap } from '../../../lib/mcpAddForm';
+import { mcpPath } from '../../../lib/mcpPath';
 import { Badge } from '../../ui/badge';
 import { Button } from '../../ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from '../../ui/dialog';
 import { SegmentedRadio } from '../../ui/segmented';
 import { Textarea } from '../../ui/textarea';
-import { McpAddForm } from './McpAddForm';
+import { McpAddForm, McpKeyValueRows } from './McpAddForm';
+import { SectionLabel } from './sectionLabel';
 import { buttonVariants } from '../../ui/button-variants';
 
-function oauthStartHref(name: string): string {
-  return `${window.location.origin}/api/mcp/${encodeURIComponent(name)}/oauth/start`;
+// A project view's login starts, and (via the callback's return URL) ends, in that project.
+function oauthStartHref(name: string, project?: string | null): string {
+  return `${window.location.origin}${mcpPath(`/${encodeURIComponent(name)}/oauth/start`, project)}`;
 }
 
 function LoginLink({
   name,
+  project,
   className,
   children,
   onActivate,
 }: {
   name: string;
+  project?: string | null;
   className?: string;
   children: ReactNode;
   onActivate: (name: string) => void;
 }) {
   return (
     <a
-      href={oauthStartHref(name)}
+      href={oauthStartHref(name, project)}
       target="_blank"
       rel="noopener"
       className={className}
@@ -52,7 +58,30 @@ const SOURCE_CHIP: Record<string, string> = {
   claude: 'border-mint/40 bg-mint-soft text-mint-ink',
   codex: 'border-violet/40 bg-violet/10 text-violet',
   opencode: 'border-cyan/40 bg-cyan/10 text-cyan-ink',
+  project: 'border-border-strong bg-surface-3 text-foreground',
 };
+
+const STATE_BADGE: Record<string, 'success' | 'warning' | 'info' | 'destructive'> = {
+  ok: 'success',
+  needs_login: 'info',
+  pending_approval: 'warning',
+  needs_config: 'warning',
+};
+
+/** The same section header the Skills project view uses (icon · LABEL · hint). */
+/** A project row's state, as the API reports it; global rows keep their existing look. */
+function McpStateBadge({ server }: { server: McpServerSummary }) {
+  const { t } = useTranslation();
+  if (server.source !== 'project' || !server.state) return null;
+  const missing = server.state === 'needs_config' ? server.missingVariables ?? [] : [];
+  return (
+    <Badge variant={STATE_BADGE[server.state] ?? 'destructive'} className="text-[10px]">
+      {missing.length
+        ? t('mcpHub.stateMissing', { state: t('mcpHub.state.needs_config'), names: missing.join(', ') })
+        : t(`mcpHub.state.${server.state}`, { defaultValue: server.state })}
+    </Badge>
+  );
+}
 
 function McpToolCard({
   name,
@@ -111,6 +140,8 @@ function McpToolCard({
 
 export interface McpServerDetailProps {
   server: McpServerSummary;
+  /** The Avibe project of the view, kept on its login link. */
+  project?: string | null;
   canManage: boolean;
   /** Tool cards the user opened, by tool name. */
   expandedTools: Record<string, boolean>;
@@ -121,12 +152,15 @@ export interface McpServerDetailProps {
   onClose: () => void;
   onRefresh: () => void;
   onRemove: () => void;
+  onApprove?: () => void;
+  onConfigure?: () => void;
   onActivateLogin: (name: string) => void;
 }
 
 /** The detail panel of the selected server (ui/design: skills/mcp-detail/refreshing). */
 export function McpServerDetail({
   server: current,
+  project,
   canManage,
   expandedTools,
   busy,
@@ -135,9 +169,15 @@ export function McpServerDetail({
   onClose,
   onRefresh,
   onRemove,
+  onApprove,
+  onConfigure,
   onActivateLogin,
 }: McpServerDetailProps) {
   const { t } = useTranslation();
+  const projectRow = current.source === 'project';
+  const state = current.state ?? 'ok';
+  // A project server has tools (and can be refreshed) once approved and configured.
+  const usable = !projectRow || !['pending_approval', 'needs_config'].includes(state);
   return (
     <div className="flex min-w-0 flex-col gap-3.5 self-start rounded-2xl border border-border-strong bg-surface p-5">
       <div className="flex items-start gap-3">
@@ -150,15 +190,33 @@ export function McpServerDetail({
             <Badge className={clsx('font-mono text-[9px] uppercase', SOURCE_CHIP[current.source ?? 'avibe'])}>
               {t(`mcpHub.source.${current.source ?? 'avibe'}`)}
             </Badge>
+            <McpStateBadge server={current} />
           </div>
           <div className="truncate font-mono text-[11px] text-muted" title={current.command || current.url || undefined}>
             {current.command || current.url}
           </div>
+          {projectRow && current.sourcePath ? (
+            <div className="truncate font-mono text-[10px] text-muted" title={current.sourcePath}>{current.sourcePath}</div>
+          ) : null}
         </div>
         <Button type="button" variant="ghost" size="icon" className="size-6" onClick={onClose} aria-label={t('common.close')}>
           <X className="size-3.5" />
         </Button>
       </div>
+      {projectRow && (state === 'pending_approval' || state === 'needs_config') ? (
+        <div className="rounded-[10px] border border-gold/40 bg-gold/10 px-3 py-2.5 text-[12px] text-foreground">
+          {state === 'pending_approval'
+            ? t('mcpHub.pendingApprovalHint')
+            : t('mcpHub.needsConfigHint', { names: (current.missingVariables ?? []).join(', ') })}
+        </div>
+      ) : null}
+      {projectRow && state === 'not_generated' ? (
+        <div className="rounded-[10px] border border-destructive/40 bg-destructive/10 px-3 py-2.5 text-[12px] text-foreground">
+          {t('mcpHub.notGeneratedHint')}
+        </div>
+      ) : null}
+      {usable ? (
+      <>
       <div className="flex flex-col gap-1.5">
         <span className="font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted">{t('mcpHub.tools')}</span>
         {(current.tools ?? []).map((tool) => (
@@ -183,13 +241,29 @@ export function McpServerDetail({
               ? t('mcpHub.serverVersion', { version: current.serverVersion })
               : null}
       </div>
-      {current.auth === 'needs_login' ? <LoginLink name={current.name} className={buttonVariants({ variant: 'brand', size: 'sm' })} onActivate={onActivateLogin}>{t('mcpHub.login')}</LoginLink> : null}
+      </>
+      ) : null}
+      {!(project && current.source !== 'project') && current.auth === 'needs_login' ? <LoginLink name={current.name} project={project} className={buttonVariants({ variant: 'brand', size: 'sm' })} onActivate={onActivateLogin}>{t('mcpHub.login')}</LoginLink> : null}
       {canManage ? (
-        <div className="flex items-center gap-2 pt-1">
+        <div className="flex flex-wrap items-center gap-2 pt-1">
+          {projectRow && state === 'pending_approval' && onApprove ? (
+            <Button type="button" variant="brand" size="xs" disabled={busy} onClick={onApprove}>
+              <ShieldCheck className="size-3.5" />
+              {t('mcpHub.approve')}
+            </Button>
+          ) : null}
+          {projectRow && onConfigure ? (
+            <Button type="button" variant={state === 'needs_config' ? 'brand' : 'outline'} size="xs" disabled={busy} onClick={onConfigure}>
+              <KeyRound className="size-3.5" />
+              {t('mcpHub.configure')}
+            </Button>
+          ) : null}
+          {usable ? (
           <Button type="button" variant="outline" size="xs" disabled={busy} onClick={onRefresh}>
             {refreshing ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
             {t('mcpHub.refresh')}
           </Button>
+          ) : null}
           <Button type="button" variant="ghost" size="xs" onClick={onRemove}>
             <Trash2 className="size-3.5" />
             {t('mcpHub.remove')}
@@ -203,6 +277,7 @@ export function McpServerDetail({
 export interface McpLoginDialogProps {
   /** The server being logged in to in paste mode; null keeps the dialog closed. */
   name: string | null;
+  project?: string | null;
   callbackText: string;
   busy: boolean;
   onCallbackTextChange: (text: string) => void;
@@ -212,14 +287,14 @@ export interface McpLoginDialogProps {
 }
 
 /** Paste-mode OAuth: authorize in a new tab, then paste the callback URL (ui/design: skills/mcp/login-paste). */
-export function McpLoginDialog({ name, callbackText, busy, onCallbackTextChange, onComplete, onClose, onActivateLogin }: McpLoginDialogProps) {
+export function McpLoginDialog({ name, project, callbackText, busy, onCallbackTextChange, onComplete, onClose, onActivateLogin }: McpLoginDialogProps) {
   const { t } = useTranslation();
   return (
     <Dialog open={name !== null} onOpenChange={(open) => (!open ? onClose() : undefined)}>
       <DialogContent className="max-w-lg" closeLabel={t('common.close')}>
         <DialogTitle>{t('mcpHub.loginTitle')}</DialogTitle>
         <DialogDescription>{t('mcpHub.loginHint')}</DialogDescription>
-        {name ? <LoginLink name={name} className={buttonVariants({ variant: 'outline' })} onActivate={onActivateLogin}>{t('mcpHub.openAuthorize')}</LoginLink> : null}
+        {name ? <LoginLink name={name} project={project} className={buttonVariants({ variant: 'outline' })} onActivate={onActivateLogin}>{t('mcpHub.openAuthorize')}</LoginLink> : null}
         <Textarea value={callbackText} onChange={(event) => onCallbackTextChange(event.target.value)} className="min-h-20 font-mono text-[12px]" placeholder={t('mcpHub.callbackPlaceholder')} />
         <DialogFooter><Button type="button" variant="outline" onClick={onClose}>{t('common.cancel')}</Button><Button type="button" disabled={!callbackText.trim() || busy} onClick={onComplete}>{t('mcpHub.completeLogin')}</Button></DialogFooter>
       </DialogContent>
@@ -229,6 +304,8 @@ export function McpLoginDialog({ name, callbackText, busy, onCallbackTextChange,
 
 export interface McpAddDialogProps {
   open: boolean;
+  /** The Avibe project the servers are added to (its `.mcp.json`, pending approval); null adds to the global hub. */
+  project?: { id: string; name: string } | null;
   text: string;
   error: string | null;
   /** After an add whose servers need login: their start links, and the lines that failed. */
@@ -249,19 +326,21 @@ export interface McpAddDialogProps {
 }
 
 /** Paste `mcpServers` JSON or fill a form to add servers (ui/design: skills/mcp/add, skills/mcp/add-form*). */
-export function McpAddDialog({ open, text, error, result, busy, adding, onTextChange, tab, onTabChange, form, onFormChange, onAdd, onClose, onDone, onActivateLogin }: McpAddDialogProps) {
+export function McpAddDialog({ open, project, text, error, result, busy, adding, onTextChange, tab, onTabChange, form, onFormChange, onAdd, onClose, onDone, onActivateLogin }: McpAddDialogProps) {
   const { t } = useTranslation();
   return (
     <Dialog open={open} onOpenChange={(next) => (!next ? onClose() : undefined)}>
       <DialogContent className="max-w-lg" closeLabel={t('common.close')}>
         <DialogTitle>{t('mcpHub.addTitle')}</DialogTitle>
-        <DialogDescription>{result ? t('mcpHub.addResultHint') : t('mcpHub.addSubtitle')}</DialogDescription>
+        <DialogDescription>
+          {result ? t('mcpHub.addResultHint') : project ? t('mcpHub.addProjectSubtitle', { project: project.name }) : t('mcpHub.addSubtitle')}
+        </DialogDescription>
         {result ? (
           <div className="flex flex-col gap-2">
             {result.names.map((name) => (
               <p key={name} className="flex items-center gap-2 text-[12px] text-foreground">
                 <span>{t('mcpHub.needsLoginAfterAdd', { name })}</span>
-                <LoginLink name={name} className={buttonVariants({ variant: 'brand', size: 'xs' })} onActivate={onActivateLogin}>
+                <LoginLink name={name} project={project?.id} className={buttonVariants({ variant: 'brand', size: 'xs' })} onActivate={onActivateLogin}>
                   {t('mcpHub.goAuthorize')}
                 </LoginLink>
               </p>
@@ -326,7 +405,10 @@ export function McpRemoveDialog({ server, busy, onConfirm, onCancel }: McpRemove
       <DialogContent className="max-w-md" closeLabel={t('common.close')}>
         <DialogTitle>{t('mcpHub.removeConfirm', { name: server?.name ?? '' })}</DialogTitle>
         <DialogDescription>
-          {server?.source === 'avibe' ? t('mcpHub.removeAvibeHint') : t('mcpHub.removeNativeHint', {
+          {server?.source === 'avibe' ? t('mcpHub.removeAvibeHint') : server?.source === 'project' ? t('mcpHub.removeProjectHint', {
+                name: server.name,
+                path: server.sourcePath ?? '',
+              }) : t('mcpHub.removeNativeHint', {
                 name: server?.name ?? '',
                 path: server?.sourcePath ?? '',
                 agent: t(`mcpHub.source.${server?.source ?? 'avibe'}`),
@@ -343,12 +425,198 @@ export function McpRemoveDialog({ server, busy, onConfirm, onCancel }: McpRemove
   );
 }
 
-export const McpHubSection: React.FC = () => {
+export interface McpApproveDialogProps {
+  /** The project server to approve; null keeps the dialog closed. */
+  server: McpServerSummary | null;
+  busy: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}
+
+/** Confirms trusting a repository-defined command or URL (ui/design: skills/mcp/approve). */
+export function McpApproveDialog({ server, busy, onConfirm, onCancel }: McpApproveDialogProps) {
+  const { t } = useTranslation();
+  const stdio = server?.transport === 'stdio';
+  return (
+    <Dialog open={server !== null} onOpenChange={(open) => (!open ? onCancel() : undefined)}>
+      <DialogContent className="max-w-md" closeLabel={t('common.close')}>
+        <DialogTitle>{t('mcpHub.approveConfirm', { name: server?.name ?? '' })}</DialogTitle>
+        <DialogDescription>
+          {t(stdio ? 'mcpHub.approveCommandHint' : 'mcpHub.approveUrlHint', { path: server?.sourcePath ?? '' })}
+        </DialogDescription>
+        <div className="break-all rounded-[10px] border border-border bg-surface-3 px-3 py-2 font-mono text-[12px] text-foreground">
+          {server?.command || server?.url}
+        </div>
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={onCancel}>{t('common.cancel')}</Button>
+          <Button type="button" variant="brand" disabled={busy} onClick={onConfirm}>
+            {t('mcpHub.approve')}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+export interface McpConfigureDialogProps {
+  /** The project server to configure; null keeps the dialog closed. */
+  server: McpServerSummary | null;
+  env: McpConfigureMap;
+  headers: McpConfigureMap;
+  error: string | null;
+  busy: boolean;
+  onEnvChange: (map: McpConfigureMap) => void;
+  onHeadersChange: (map: McpConfigureMap) => void;
+  onSave: () => void;
+  onCancel: () => void;
+}
+
+/** Sets a project server's `${VAR}` values and headers; stored values are never shown (ui/design: skills/mcp/configure). */
+export function McpConfigureDialog({ server, env, headers, error, busy, onEnvChange, onHeadersChange, onSave, onCancel }: McpConfigureDialogProps) {
+  const { t } = useTranslation();
+  const missing = server?.missingVariables ?? [];
+  // Editing rows marks the map for replacement; Clear is the one explicit way to send an empty map.
+  const section = (label: string, map: McpConfigureMap, onChange: (map: McpConfigureMap) => void, keyPlaceholder: string) => (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-center justify-between gap-1.5 text-[12px] text-foreground">
+        <span className="flex-1">{label}</span>
+        {map.cleared ? (
+          <Button type="button" variant="outline" size="xs" onClick={() => onChange({ ...map, cleared: false })}>
+            {t('mcpHub.configureUndoClear')}
+          </Button>
+        ) : (
+          <>
+            <Button type="button" variant="ghost" size="xs" onClick={() => onChange({ ...map, cleared: true })}>
+              <Eraser className="size-3" />
+              {t('mcpHub.configureClear')}
+            </Button>
+            <Button type="button" variant="outline" size="xs" onClick={() => onChange({ ...map, edited: true, rows: [...map.rows, { key: '', value: '' }] })}>
+              <Plus className="size-3" />
+              {t('mcpHub.form.addRow')}
+            </Button>
+          </>
+        )}
+      </div>
+      {map.cleared ? (
+        <p className="text-[12px] text-muted">{t('mcpHub.configureCleared')}</p>
+      ) : (
+        <McpKeyValueRows
+          label={label}
+          rows={map.rows}
+          onChange={(rows) => onChange({ ...map, edited: true, rows })}
+          keyPlaceholder={keyPlaceholder}
+          secret
+          allowEmpty
+        />
+      )}
+    </div>
+  );
+  return (
+    <Dialog open={server !== null} onOpenChange={(open) => (!open ? onCancel() : undefined)}>
+      <DialogContent className="max-w-lg" closeLabel={t('common.close')}>
+        <DialogTitle>{t('mcpHub.configureTitle', { name: server?.name ?? '' })}</DialogTitle>
+        <DialogDescription>{t('mcpHub.configureHint')}</DialogDescription>
+        {missing.length ? (
+          <p className="text-[12px] text-foreground">{t('mcpHub.configureMissing', { names: missing.join(', ') })}</p>
+        ) : null}
+        {section(t('mcpHub.configureVariables'), env, onEnvChange, t('mcpHub.form.envKeyPlaceholder'))}
+        {server?.transport !== 'stdio'
+          ? section(t('mcpHub.form.headers'), headers, onHeadersChange, t('mcpHub.form.headerKeyPlaceholder'))
+          : null}
+        {error ? <div className="whitespace-pre-wrap text-[12px] text-destructive-ink">{error}</div> : null}
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={onCancel}>{t('common.cancel')}</Button>
+          <Button type="button" variant="brand" disabled={busy || mcpConfigurePayload(env, headers) === null} onClick={onSave}>
+            {busy ? <Loader2 className="size-3.5 animate-spin" /> : null}
+            {t('mcpHub.configureSave')}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+export interface McpHubSectionProps {
+  /** The parent toolbar owns search when the hub is embedded in SkillsPage. */
+  searchQuery?: string;
+  /** The Avibe project whose view this is (its rows plus the visible global ones); null is the global hub. */
+  project?: { id: string; name: string } | null;
+}
+
+interface McpRowProps {
+  server: McpServerSummary;
+  /** Dim + tag a row inherited from global into a project view (view-only there). */
+  inherited?: boolean;
+  selected?: boolean;
+  /** Show the OAuth login link in the row. */
+  loginLink?: boolean;
+  onSelect: () => void;
+  onActivateLogin: (name: string) => void;
+  projectId?: string | null;
+}
+
+/** One MCP server row, in the same shape as the Skills rows (SkillRow + its inherited look). */
+function McpRow({ server, inherited, selected, loginLink, onSelect, onActivateLogin, projectId }: McpRowProps) {
+  const { t } = useTranslation();
+  const transportLabel = server.transport === 'stdio' ? t('mcpHub.transportStdio') : t('mcpHub.transportHttp');
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      className={clsx(
+        'group flex w-full items-center gap-3 rounded-lg border px-[14px] py-3 text-left transition',
+        selected
+          ? 'border-mint/40 bg-mint-soft shadow-glow-sm-mint'
+          : 'border-border bg-surface hover:border-border-strong hover:bg-surface-2',
+        inherited && 'opacity-[0.66]',
+      )}
+    >
+      <span className="flex size-9 shrink-0 items-center justify-center rounded-[9px] border border-border bg-surface-3 text-muted">
+        {server.transport === 'stdio' ? <Terminal className="size-4" /> : <Globe className="size-4" />}
+      </span>
+      <span className="flex min-w-0 flex-1 flex-col gap-1">
+        <span className="flex flex-wrap items-center gap-2">
+          <span className="truncate font-mono text-[13px] font-semibold text-foreground">{server.name}</span>
+          {inherited ? (
+            <GlobalScopeChip />
+          ) : (
+            <Badge className={clsx('font-mono text-[9px] uppercase', SOURCE_CHIP[server.source ?? 'avibe'])}>
+              {t(`mcpHub.source.${server.source ?? 'avibe'}`)}
+            </Badge>
+          )}
+          <McpStateBadge server={server} />
+        </span>
+        <span className="truncate font-mono text-[11px] text-muted" title={server.command || server.url || server.description || undefined}>
+          {server.command || server.url || server.description}
+        </span>
+        <span className="font-mono text-[10px] text-muted">
+          {t('mcpHub.toolMeta', { count: server.toolCount ?? 0, transport: transportLabel })}
+        </span>
+      </span>
+      {!inherited && loginLink && server.auth === 'needs_login' ? (
+        <span onClick={(event) => event.stopPropagation()}>
+          <LoginLink
+            name={server.name}
+            project={projectId}
+            className="inline-flex h-6 items-center rounded-md border border-border bg-surface px-2 font-mono text-[10px] font-semibold uppercase text-foreground hover:bg-surface-2"
+            onActivate={onActivateLogin}
+          >
+            {t('mcpHub.login')}
+          </LoginLink>
+        </span>
+      ) : null}
+      <ChevronRight className="size-3.5 text-muted" />
+    </button>
+  );
+}
+
+export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null, searchQuery }) => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
   const { capabilities } = useInstanceAuthorization();
   const canManage = capabilities.is_instance_owner;
+  const projectId = project?.id ?? null;
   const [servers, setServers] = useState<McpServerSummary[]>([]);
   const [oauthMode, setOauthMode] = useState<'direct' | 'paste'>('direct');
   const [addResult, setAddResult] = useState<{ names: string[]; failedLines: string[] } | null>(null);
@@ -373,6 +641,11 @@ export const McpHubSection: React.FC = () => {
   const [loginFor, setLoginFor] = useState<{ name: string } | null>(null);
   const [callbackText, setCallbackText] = useState('');
   const [confirmDelete, setConfirmDelete] = useState<McpServerSummary | null>(null);
+  const [confirmApprove, setConfirmApprove] = useState<McpServerSummary | null>(null);
+  const [configureFor, setConfigureFor] = useState<McpServerSummary | null>(null);
+  const [configureEnv, setConfigureEnv] = useState<McpConfigureMap>(mcpConfigureMap);
+  const [configureHeaders, setConfigureHeaders] = useState<McpConfigureMap>(mcpConfigureMap);
+  const [configureError, setConfigureError] = useState<string | null>(null);
   const loginInFlight = useRef(false);
 
   if (expandedFor !== selected) {
@@ -396,7 +669,7 @@ export const McpHubSection: React.FC = () => {
 
   const load = useCallback(async () => {
     try {
-      const res = await api.listMcpServers();
+      const res = await api.listMcpServers(projectId);
       if (res.ok) {
         setServers(res.servers ?? []);
         if (res.oauthMode === 'direct' || res.oauthMode === 'paste') setOauthMode(res.oauthMode);
@@ -405,7 +678,7 @@ export const McpHubSection: React.FC = () => {
     } catch {
       showToast(t('mcpHub.failed'), 'error');
     }
-  }, [api, describe, showToast, t]);
+  }, [api, describe, projectId, showToast, t]);
 
   // The OAuth login returns with `?oauth=success`: say so once, and drop it so a reload does not.
   const oauthReturn = searchParams.get('oauth') === 'success';
@@ -427,10 +700,15 @@ export const McpHubSection: React.FC = () => {
   }
 
   const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
+    const q = (searchQuery ?? search).trim().toLowerCase();
     if (!q) return servers;
     return servers.filter((item) => item.name.toLowerCase().includes(q) || (item.description || '').toLowerCase().includes(q));
-  }, [search, servers]);
+  }, [searchQuery, search, servers]);
+  // Project view grouping mirrors Skills: this project's `.mcp.json` rows first,
+  // then the inherited global rows (the backend already drops globals shadowed
+  // by a same-named project server).
+  const projectRows = useMemo(() => filtered.filter((server) => server.source === 'project'), [filtered]);
+  const inheritedRows = useMemo(() => filtered.filter((server) => server.source !== 'project'), [filtered]);
 
   const current = servers.find((item) => item.name === selected) ?? null;
 
@@ -438,7 +716,7 @@ export const McpHubSection: React.FC = () => {
     if (!canManage) return;
     setBusy('discover');
     try {
-      const res = await api.discoverMcp();
+      const res = await api.discoverMcp(projectId);
       if (!res.ok) showToast(describe(res.error), 'error');
       await load();
     } finally {
@@ -449,7 +727,7 @@ export const McpHubSection: React.FC = () => {
   const onRefreshOne = async (name: string) => {
     setBusy(`refresh:${name}`);
     try {
-      const res = await api.refreshMcp(name);
+      const res = await api.refreshMcp(name, projectId);
       if (!res.ok) {
         showToast(describe(res.error), 'error');
         return;
@@ -484,7 +762,7 @@ export const McpHubSection: React.FC = () => {
     if (!loginFor) return;
     setBusy(`login:${loginFor.name}`);
     try {
-      const res = await api.completeMcpLogin(loginFor.name, callbackText);
+      const res = await api.completeMcpLogin(loginFor.name, callbackText, projectId);
       if (!res.ok) { showToast(describe(res.error), 'error'); return; }
       setLoginFor(null); setCallbackText(''); await load();
       showToast(t('mcpHub.loginComplete'), 'success');
@@ -507,7 +785,7 @@ export const McpHubSection: React.FC = () => {
     setAddError(null);
     setAddResult(null);
     try {
-      const res = await api.addMcp(addPayload);
+      const res = await api.addMcp(addPayload, projectId);
       const added = res.added ?? [];
       const unchanged = res.unchanged ?? [];
       const failed = res.failed ?? [];
@@ -539,7 +817,7 @@ export const McpHubSection: React.FC = () => {
       });
       if (action.kind === 'assign') {
         closeAdd();
-        window.location.assign(oauthStartHref(action.name));
+        window.location.assign(oauthStartHref(action.name, projectId));
         return;
       }
       if (failed.length) {
@@ -566,7 +844,7 @@ export const McpHubSection: React.FC = () => {
     const name = confirmDelete.name;
     setBusy(`remove:${name}`);
     try {
-      const res = await api.removeMcp(name);
+      const res = await api.removeMcp(name, projectId);
       if (!res.ok) {
         showToast(describe(res.error), 'error');
         return;
@@ -579,21 +857,69 @@ export const McpHubSection: React.FC = () => {
     }
   };
 
-  const transportLabel = (server: McpServerSummary) =>
-    server.transport === 'stdio' ? t('mcpHub.transportStdio') : t('mcpHub.transportHttp');
+  const onApprove = async () => {
+    if (!confirmApprove || !projectId) return;
+    const name = confirmApprove.name;
+    setBusy(`approve:${name}`);
+    try {
+      const res = await api.approveMcp(name, projectId);
+      if (!res.ok) {
+        showToast(describe(res.error), 'error');
+        return;
+      }
+      setConfirmApprove(null);
+      await load();
+    } catch {
+      showToast(t('mcpHub.failed'), 'error');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  // Stored values are never shown: the editor starts with each `${VAR}` name and an empty value.
+  const openConfigure = (server: McpServerSummary) => {
+    setConfigureFor(server);
+    setConfigureEnv(mcpConfigureMap((server.placeholders?.length ? server.placeholders : server.missingVariables ?? []).map((key) => ({ key, value: '' }))));
+    setConfigureHeaders(mcpConfigureMap());
+    setConfigureError(null);
+  };
+
+  const onConfigure = async () => {
+    const secrets = mcpConfigurePayload(configureEnv, configureHeaders);
+    if (!configureFor || !projectId || secrets === null) return;
+    const name = configureFor.name;
+    setBusy(`configure:${name}`);
+    setConfigureError(null);
+    try {
+      const res = await api.configureMcp(name, secrets, projectId);
+      if (!res.ok) {
+        setConfigureError(describe(res.error));
+        return;
+      }
+      setConfigureFor(null);
+      setConfigureEnv(mcpConfigureMap());
+      setConfigureHeaders(mcpConfigureMap());
+      await load();
+    } catch {
+      setConfigureError(t('mcpHub.failed'));
+    } finally {
+      setBusy(null);
+    }
+  };
 
   return (
     <div className="flex flex-col gap-3">
       <div className="flex flex-wrap items-center gap-2.5">
-        <div className="flex min-w-[220px] flex-1 items-center gap-2 rounded-md border border-border-strong bg-surface px-3 py-2">
+        {searchQuery === undefined ? (<div className="flex min-w-[220px] flex-1 items-center gap-2 rounded-md border border-border-strong bg-surface px-3 py-2">
           <Search className="size-3.5 shrink-0 text-muted" />
           <input
             value={search}
             onChange={(event) => setSearch(event.target.value)}
-            placeholder={t('mcpHub.searchPlaceholder')}
+            placeholder={t(projectId ? 'mcpHub.searchProjectPlaceholder' : 'mcpHub.searchPlaceholder')}
             className="flex-1 bg-transparent text-[12px] text-foreground outline-none placeholder:text-muted"
           />
         </div>
+        ) : null}
         {canManage ? (
           <>
             <Button type="button" variant="outline" size="xs" disabled={busy !== null} onClick={() => void onDiscover()}>
@@ -610,7 +936,55 @@ export const McpHubSection: React.FC = () => {
 
       <div className={clsx('grid gap-5', 'grid-cols-1', current && 'lg:grid-cols-[minmax(0,1fr)_400px]')}>
         <div className="flex min-w-0 flex-col gap-2">
-          {filtered.length === 0 ? (
+          {projectId ? (
+            <>
+              <div className="flex flex-col gap-2">
+                <SectionLabel
+                  icon={<ShieldCheck className="size-3.5 text-mint-ink" />}
+                  label={t('mcpHub.projectSectionLocal')}
+                  hint={t('mcpHub.projectSectionLocalHint')}
+                />
+                {projectRows.length > 0 ? (
+                  <div className="flex flex-col gap-2">{projectRows.map((server) => (
+                    <McpRow
+                      key={server.name}
+                      server={server}
+                      selected={selected === server.name}
+                      onSelect={() => setSelected(server.name)}
+                      loginLink={server.auth === 'needs_login'}
+                      onActivateLogin={onActivateLogin}
+                      projectId={projectId}
+                    />
+                  ))}</div>
+                ) : (
+                  <div className="rounded-xl border border-dashed border-border bg-surface px-4 py-6 text-center text-[12px] text-muted">
+                    {t('mcpHub.projectEmpty')}
+                  </div>
+                )}
+              </div>
+              {inheritedRows.length > 0 ? (
+                <div className="flex flex-col gap-2">
+                  <SectionLabel
+                    icon={<Info className="size-3.5 text-muted" />}
+                    label={t('mcpHub.projectSectionGlobal')}
+                    hint={t('mcpHub.projectSectionGlobalHint')}
+                  />
+                  <div className="flex flex-col gap-2">{inheritedRows.map((server) => (
+                    <McpRow
+                      key={server.name}
+                      server={server}
+                      inherited
+                      selected={selected === server.name}
+                      onSelect={() => setSelected(server.name)}
+                      loginLink={server.auth === 'needs_login'}
+                      onActivateLogin={onActivateLogin}
+                      projectId={projectId}
+                    />
+                  ))}</div>
+                </div>
+              ) : null}
+            </>
+          ) : filtered.length === 0 ? (
             <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-border bg-surface px-6 py-12 text-center">
               <p className="text-[13px] text-muted">{servers.length === 0 ? t('mcpHub.empty') : t('mcpHub.noSearchMatch')}</p>
               {canManage && servers.length === 0 ? (
@@ -622,47 +996,14 @@ export const McpHubSection: React.FC = () => {
             </div>
           ) : (
             filtered.map((server) => (
-              <button
+              <McpRow
                 key={server.name}
-                type="button"
-                onClick={() => setSelected(server.name)}
-                className={clsx(
-                  'group flex w-full items-center gap-3 rounded-lg border px-[14px] py-3 text-left transition',
-                  selected === server.name
-                    ? 'border-mint/40 bg-mint-soft shadow-glow-sm-mint'
-                    : 'border-border bg-surface hover:border-border-strong hover:bg-surface-2',
-                )}
-              >
-                <span className="flex size-9 shrink-0 items-center justify-center rounded-[9px] border border-border bg-surface-3 text-muted">
-                  {server.transport === 'stdio' ? <Terminal className="size-4" /> : <Globe className="size-4" />}
-                </span>
-                <span className="flex min-w-0 flex-1 flex-col gap-1">
-                  <span className="flex items-center gap-2">
-                    <span className="truncate font-mono text-[13px] font-semibold text-foreground">{server.name}</span>
-                    <Badge className={clsx('font-mono text-[9px] uppercase', SOURCE_CHIP[server.source ?? 'avibe'])}>
-                      {t(`mcpHub.source.${server.source ?? 'avibe'}`)}
-                    </Badge>
-                  </span>
-                  <span className="truncate font-mono text-[11px] text-muted" title={server.command || server.url || server.description || undefined}>
-                    {server.command || server.url || server.description}
-                  </span>
-                  <span className="font-mono text-[10px] text-muted">
-                    {t('mcpHub.toolMeta', { count: server.toolCount ?? 0, transport: transportLabel(server) })}
-                  </span>
-                </span>
-                    {server.auth === 'needs_login' ? (
-                      <span onClick={(event) => event.stopPropagation()}>
-                      <LoginLink
-                        name={server.name}
-                        className="inline-flex h-6 items-center rounded-md border border-border bg-surface px-2 font-mono text-[10px] font-semibold uppercase text-foreground hover:bg-surface-2"
-                        onActivate={onActivateLogin}
-                      >
-                        {t('mcpHub.login')}
-                      </LoginLink>
-                      </span>
-                    ) : null}
-                    <ChevronRight className="size-3.5 text-muted" />
-              </button>
+                server={server}
+                selected={selected === server.name}
+                onSelect={() => setSelected(server.name)}
+                loginLink={server.auth === 'needs_login'}
+                onActivateLogin={onActivateLogin}
+              />
             ))
           )}
         </div>
@@ -670,7 +1011,8 @@ export const McpHubSection: React.FC = () => {
         {current ? (
           <McpServerDetail
             server={current}
-            canManage={canManage}
+            project={projectId}
+            canManage={canManage && !(projectId && current.source !== 'project')}
             expandedTools={expandedTools}
             busy={busy !== null}
             refreshing={busy === `refresh:${current.name}`}
@@ -678,6 +1020,8 @@ export const McpHubSection: React.FC = () => {
             onClose={() => setSelected(null)}
             onRefresh={() => void onRefreshOne(current.name)}
             onRemove={() => setConfirmDelete(current)}
+            onApprove={projectId ? () => setConfirmApprove(current) : undefined}
+            onConfigure={projectId ? () => openConfigure(current) : undefined}
             onActivateLogin={onActivateLogin}
           />
         ) : null}
@@ -685,6 +1029,7 @@ export const McpHubSection: React.FC = () => {
 
       <McpLoginDialog
         name={loginFor?.name ?? null}
+        project={projectId}
         callbackText={callbackText}
         busy={busy !== null}
         onCallbackTextChange={setCallbackText}
@@ -695,6 +1040,7 @@ export const McpHubSection: React.FC = () => {
 
       <McpAddDialog
         open={showAdd}
+        project={project}
         text={addText}
         error={addError}
         result={addResult}
@@ -716,6 +1062,25 @@ export const McpHubSection: React.FC = () => {
         busy={busy !== null}
         onConfirm={() => void onDelete()}
         onCancel={() => setConfirmDelete(null)}
+      />
+
+      <McpApproveDialog
+        server={confirmApprove}
+        busy={busy !== null}
+        onConfirm={() => void onApprove()}
+        onCancel={() => setConfirmApprove(null)}
+      />
+
+      <McpConfigureDialog
+        server={configureFor}
+        env={configureEnv}
+        headers={configureHeaders}
+        error={configureError}
+        busy={busy !== null}
+        onEnvChange={setConfigureEnv}
+        onHeadersChange={setConfigureHeaders}
+        onSave={() => void onConfigure()}
+        onCancel={() => { setConfigureFor(null); setConfigureEnv(mcpConfigureMap()); setConfigureHeaders(mcpConfigureMap()); }}
       />
     </div>
   );

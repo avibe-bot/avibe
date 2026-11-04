@@ -379,7 +379,7 @@ def build_system_prompt_blocks(
         blocks.append(render_prompt_block("project-context-prompt"))
     from core.mcp_hub.prompt import build_mcp_prompt_blocks
 
-    blocks.extend(build_mcp_prompt_blocks())
+    blocks.extend(build_mcp_prompt_blocks(skills_cwd, skills_project_base))
     if skills is not None:
         from core.managed_skills import render_skill_catalog_blocks
 
