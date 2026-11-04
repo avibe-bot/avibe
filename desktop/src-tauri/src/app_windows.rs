@@ -4,7 +4,6 @@
 //! the allowlist, URL construction, deterministic labels, and native window
 //! lifecycle so the page can never choose an arbitrary destination.
 
-use avibe_runtime_host::pet::valid_session_id;
 use avibe_runtime_host::LoopbackOrigin;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use url::Url;
@@ -45,12 +44,27 @@ pub(crate) fn parse_target(app_id: &str, session_id: Option<&str>) -> Result<App
         "editor" if session_id.is_none() => Ok(AppWindowTarget::Builtin("editor")),
         "files" | "terminal" | "editor" => Err("Built-in app windows do not accept a session id.".to_owned()),
         "showpage" => match session_id {
-            Some(session_id) if valid_session_id(session_id) => Ok(AppWindowTarget::ShowPage(session_id.to_owned())),
+            Some(session_id) if valid_show_session_id(session_id.trim()) => {
+                Ok(AppWindowTarget::ShowPage(session_id.trim().to_owned()))
+            }
             Some(_) => Err("The Show Page session id is invalid.".to_owned()),
             None => Err("A Show Page session id is required.".to_owned()),
         },
         _ => Err("This app does not have a standalone native window.".to_owned()),
     }
+}
+
+// Keep in sync with core/show_pages.py's _SESSION_ID_PATTERN:
+// ^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$. Pet/deep-link identifiers are a different contract.
+fn valid_show_session_id(session_id: &str) -> bool {
+    session_id.len() <= 128
+        && session_id
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        && session_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b':' | b'-'))
 }
 
 /// Constructs a same-origin standalone page from a validated target.
@@ -62,7 +76,9 @@ pub(crate) fn target_url(origin: &LoopbackOrigin, target: &AppWindowTarget) -> U
             url.set_query(Some("standalone=1"));
         }
         AppWindowTarget::ShowPage(session_id) => {
-            url.set_path(&format!("/show/{session_id}/"));
+            // Match UI showPagePrivatePath / encodeURIComponent. Of the validated
+            // Show alphabet, only ':' needs percent-encoding as a path segment.
+            url.set_path(&format!("/show/{}/", session_id.replace(':', "%3A")));
             url.set_query(None);
         }
     }
@@ -214,9 +230,25 @@ mod tests {
 
     #[test]
     fn session_validation_rejects_path_injection() {
-        assert!(parse_target("showpage", Some("session/other")).is_err());
-        assert!(parse_target("showpage", Some("session?query")).is_err());
+        for invalid in [
+            "",
+            "session/other",
+            "..",
+            "session?query",
+            "session#fragment",
+            ".session",
+            ":session",
+        ] {
+            assert!(parse_target("showpage", Some(invalid)).is_err(), "{invalid}");
+        }
         assert!(parse_target("showpage", Some("session-1")).is_ok());
+        assert_eq!(
+            parse_target("showpage", Some(" legacy:session.1 ")),
+            Ok(AppWindowTarget::ShowPage("legacy:session.1".into()))
+        );
+        assert!(parse_target("showpage", Some("_session")).is_err());
+        assert!(parse_target("showpage", Some(&"a".repeat(129))).is_err());
+        assert!(parse_target("showpage", Some(&"a".repeat(128))).is_ok());
     }
 
     #[test]
@@ -230,6 +262,9 @@ mod tests {
             target_url(&origin, &AppWindowTarget::ShowPage("session-1".into())).as_str(),
             "http://127.0.0.1:5123/show/session-1/"
         );
+        let colon_url = target_url(&origin, &parse_target("showpage", Some("legacy:session.1")).unwrap());
+        assert_eq!(colon_url.as_str(), "http://127.0.0.1:5123/show/legacy%3Asession.1/");
+        assert_eq!(colon_url.origin(), origin.navigation_url().origin());
         assert_eq!(
             target_url(&origin, &AppWindowTarget::Builtin("terminal")).as_str(),
             "http://127.0.0.1:5123/apps/terminal?standalone=1"
