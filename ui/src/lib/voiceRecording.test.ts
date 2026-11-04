@@ -836,6 +836,24 @@ describe('voice capture audio context', () => {
     expect(onStopped).toHaveBeenCalledWith('error', expect.anything());
   });
 
+  it('opens no microphone for a take released while it is being rebuilt', async () => {
+    vi.useFakeTimers();
+    const getUserMedia = vi.fn(async () => microphone().stream);
+    vi.stubGlobal('navigator', { mediaDevices: { getUserMedia } });
+    const { stream } = microphone();
+    const onStopped = vi.fn();
+    const pipeline = pipelineOn(stream, { onStopped });
+    await pipeline.start();
+    await vi.advanceTimersByTimeAsync(VOICE_RENDER_WINDOW_MS); // rebuilt on the same microphone
+
+    vi.advanceTimersByTime(VOICE_RENDER_WINDOW_MS); // the second rebuild starts...
+    pipeline.finish(); // ...and the hold is released before it asks for a microphone
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(getUserMedia).not.toHaveBeenCalled();
+    expect(onStopped).toHaveBeenCalledWith('finish', expect.anything());
+  });
+
   it('leaves a muted microphone to the system', async () => {
     vi.useFakeTimers();
     const { stream, track } = microphone();

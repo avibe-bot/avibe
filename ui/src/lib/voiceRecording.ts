@@ -559,6 +559,11 @@ class AudioWorkletPcmCapture implements VoicePcmCapture {
     try {
       this.disconnectNodes();
       await this.closeContext();
+      // Released, cancelled, or hidden meanwhile: the take is over, and opens no microphone.
+      if (this.stopping) {
+        this.finish();
+        return;
+      }
       if (reacquire) this.replaceStream(await navigator.mediaDevices.getUserMedia({ audio: true }));
       if (this.stopping) {
         this.finish();
