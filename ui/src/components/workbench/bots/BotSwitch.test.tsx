@@ -67,7 +67,7 @@ const state: BotsState = {
 const inbox = {
   unreadBySession: { ses_main: 1, ses_cso: 4, ses_pm: 2, ses_other: 9 },
   inboxSessions: [
-    { session_id: 'ses_pm', preview_text: 'The backlog is ranked.', last_activity_at: new Date().toISOString() },
+    { session_id: 'ses_pm', preview_text: '**The backlog** is ranked:\n\n- `auth` first\n- docs next', last_activity_at: new Date().toISOString() },
   ],
 } as unknown as InboxState;
 
@@ -125,7 +125,8 @@ describe('BotConversationTitle', () => {
     // the Agent-facing description it stores.
     expect(rows[0]).toContain('bots.mainRole');
     expect(rows[0]).not.toContain('Vibey role');
-    expect(rows[2]).toContain('bots.runningPreview:{"preview":"The backlog is ranked."}');
+    // A Markdown reply reads as one line of plain text, the same excerpt the strip's card shows.
+    expect(rows[2]).toContain('bots.runningPreview:{"preview":"The backlog is ranked: auth first docs next"}');
     expect(rows[1]).toContain('Security lead role');
     expect(within(sheet).getByRole('button', { current: 'page' }).textContent).toContain('Security lead');
 

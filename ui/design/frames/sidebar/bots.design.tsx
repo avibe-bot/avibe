@@ -30,6 +30,35 @@ const team: WorkbenchFixtures = {
   },
 };
 
+// A latest message written in Markdown, long enough to fill a window if the card drew it whole.
+const longReply = [
+  '## 本周进度',
+  '',
+  '已经完成了以下工作：',
+  '',
+  '1. **登录流程**重构，合并了 `auth/session.ts` 里的三处重复逻辑',
+  '2. 修复了 [#3195](https://github.com/avibe-bot/avibe/pull/3195) 引入的输入框光标问题',
+  '3. 补齐了 WebKit 的浏览器检查，慢点击也覆盖了',
+  '',
+  '```ts',
+  'export const excerpt = (text: string) => text.slice(0, 160);',
+  '```',
+  '',
+  '> 下一步：等你确认发布窗口，我再把变更说明发到群里。',
+  '',
+  '- 风险：CI 偶发超时，已加重试',
+  '- 待办：更新中英文文档',
+].join('\n');
+const longLatest: WorkbenchFixtures = {
+  ...team,
+  botStatus: {},
+  api: {
+    '/api/inbox?limit=1&session=ses_pm': {
+      sessions: [inboxRow('ses_pm', null, '产品经理', longReply, 2)],
+    },
+  },
+};
+
 const designFrames = frames([
   {
     name: 'new-user',
@@ -75,6 +104,20 @@ const designFrames = frames([
     height: 360,
     status: 'shipped',
     fixtures: team,
+    hover: '[data-bot-handle="pm"]',
+    render: () => (
+      <div className="h-full w-[248px]">
+        {sidebar()}
+      </div>
+    ),
+  },
+  {
+    name: 'hover-card-long',
+    title: '伙伴 · 悬停卡片 · 最近一条是长 Markdown：纯文本摘要，最多两行',
+    width: 520,
+    height: 360,
+    status: 'shipped',
+    fixtures: longLatest,
     hover: '[data-bot-handle="pm"]',
     render: () => (
       <div className="h-full w-[248px]">

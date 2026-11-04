@@ -7,6 +7,7 @@ import clsx from 'clsx';
 import { useBotOrderHold, useBots } from '../../../context/BotsContext';
 import { useWorkbenchInbox } from '../../../context/WorkbenchInboxContext';
 import { botRole, botSessionPath, type Bot } from '@/lib/bots';
+import { messageExcerpt } from '@/lib/messageExcerpt';
 import { formatRelativeTime } from '@/lib/relativeTime';
 import { useIsDesktop } from '@/lib/useIsDesktop';
 import { BotAvatar } from '../../ui/bot-avatar';
@@ -139,6 +140,7 @@ export function BotSwitchRow({ bot, selected = false, onPick }: { bot: Bot; sele
   const row = inboxSessions.find((session) => session.session_id === bot.session_id);
   const running = statusBySession[bot.session_id] === 'running';
   const unread = unreadBySession[bot.session_id] ?? 0;
+  const said = messageExcerpt(row?.preview_text) || role;
   return (
     <button
       type="button"
@@ -164,10 +166,10 @@ export function BotSwitchRow({ bot, selected = false, onPick }: { bot: Bot; sele
           {running ? (
             <Trans
               i18nKey="bots.runningPreview"
-              values={{ preview: row?.preview_text || role }}
+              values={{ preview: said }}
               components={{ running: <span className="font-semibold text-mint-ink" /> }}
             />
-          ) : (row?.preview_text || role)}
+          ) : said}
         </span>
       </span>
       <span className="flex shrink-0 flex-col items-end gap-1">

@@ -15,6 +15,7 @@ import { isComposingKey } from '@/lib/imeComposition';
 import { useDocumentVisible, usePageActive } from '@/lib/pageActivity';
 import { isDetachedCompletionMessage } from '@/lib/chatMessageTypes';
 import { readMessageAttachments } from '@/lib/messageAttachments';
+import { markdownToPlainText } from '@/lib/messageExcerpt';
 import { usePendingVaultRequests } from '@/lib/usePendingVaultRequests';
 import { useVaultRequestRefresh } from '@/lib/useVaultRequestRefresh';
 import { vaultRequestType } from '@/lib/vaultRequestPlacement';
@@ -82,37 +83,6 @@ type CardPresentation = { phase?: StopPhase; leaving?: boolean; retained?: PetCa
 
 const isRunning = (agent: RunningAgent) => agent.state === 'active';
 
-/** Make an agent reply readable when it is shown inside a compact card. */
-const collapseMarkdownToPlainText = (text: string): string => {
-  const code: string[] = [];
-  let nextCode = 0;
-  const protectCode = (): string => `@@PETCODE${nextCode++}@@`;
-  const plain = text
-    .replace(/```[^\n]*\n([\s\S]*?)\n?```|~~~[^\n]*\n([\s\S]*?)\n?~~~/g, (_match, fencedBacktick: string, fencedTilde: string) => {
-      const value = fencedBacktick ?? fencedTilde ?? '';
-      code.push(value);
-      return protectCode();
-    })
-    .replace(/`([^`\n]+)`/g, (_match, value: string) => {
-      code.push(value);
-      return protectCode();
-    })
-    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
-    .replace(/(^|\n)\s{0,3}(?:#{1,6}|>|[-*+]|\d+\.)[ \t]+/g, '$1')
-    .replace(/~~([^~\n]+)~~/g, '$1')
-    .replace(/\*\*\*([^*\n]+)\*\*\*/g, '$1')
-    .replace(/___([^_\n]+)___/g, '$1')
-    .replace(/\*\*([^*\n]+)\*\*/g, '$1')
-    .replace(/__([^_\n]+)__/g, '$1')
-    .replace(/(?<!\w)\*([^*\n]+)\*(?!\w)/g, '$1')
-    .replace(/(?<!\w)_([^_\n]+)_(?!\w)/g, '$1')
-    .replace(/<!--[\s\S]*?-->|<\/?[a-z][a-z0-9-]*(?:\s+[^<>]*?)?\/?>/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return plain.replace(/@@PETCODE(\d+)@@/g, (_match, index: string) => code[Number(index)] ?? '');
-};
-
 function agentCard(
   agent: RunningAgent,
   unreadBySession: Record<string, number>,
@@ -130,7 +100,7 @@ function agentCard(
   const needsInput = vaultRequests.some((request) => request.session?.id === agent.session_id);
   const hasUnread = (unreadBySession[agent.session_id] ?? 0) > 0;
   const running = isRunning(agent);
-  const preview = collapseMarkdownToPlainText(previewBySession[agent.session_id] ?? '');
+  const preview = markdownToPlainText(previewBySession[agent.session_id] ?? '');
   const status = needsInput
     ? t('pet.needsAuthorization')
     : running
@@ -1662,7 +1632,7 @@ const MainReplyBubble: React.FC<Omit<MainDetailProps, 'visible'> & { open: boole
   const reply = last?.text?.trim() ?? '';
   const summary = props.running ? t('pet.thinking')
     : props.failure ? `${t('pet.failedPrefix')} ${props.failure.text.trim()}`
-        : reply ? collapseMarkdownToPlainText(reply)
+        : reply ? markdownToPlainText(reply)
           : t('pet.waiting');
   // A status word alone ("thinking", "waiting") sizes the bubble to its
   // content (§4.2); a reply, a failure or the open history take the column.
