@@ -4,12 +4,12 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { MessageCircle, Pencil, Plus, UserMinus } from 'lucide-react';
 import clsx from 'clsx';
 
-import { useApi, type InboxSession } from '../../../context/ApiContext';
+import { useApi } from '../../../context/ApiContext';
 import { useBotOrderHold, useBots, type BotRuntimeStatus } from '../../../context/BotsContext';
 import { useUnsavedChangesActionGuard } from '../../../context/useUnsavedChangesActionGuard';
 import { botRole, botSessionPath, type Bot } from '@/lib/bots';
+import { messageExcerpt } from '@/lib/messageExcerpt';
 import { formatRelativeTime } from '@/lib/relativeTime';
-import { Markdown } from '../../ui/markdown';
 import { Popover, PopoverAnchor, PopoverContent } from '../../ui/popover';
 import { BotAvatar } from '../../ui/bot-avatar';
 import { PageSectionTitle } from '../PageSectionTitle';
@@ -271,7 +271,8 @@ const BotSlot: React.FC<BotSlotProps> = ({ bot, index, name, unread, status, scr
   const hoverOpen = hoverEpoch === scrollEpoch;
   const setHoverOpen = (open: boolean) => setHoverEpoch(open ? scrollEpoch : null);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [latest, setLatest] = useState<InboxSession | null | undefined>(undefined);
+  // The latest message as the card shows it: when, and a short plain-text excerpt.
+  const [latest, setLatest] = useState<{ at: string; excerpt: string } | null | undefined>(undefined);
   const openTimer = useRef<number | null>(null);
   const closeTimer = useRef<number | null>(null);
   const slotRef = useRef<HTMLDivElement | null>(null);
@@ -317,7 +318,9 @@ const BotSlot: React.FC<BotSlotProps> = ({ bot, index, name, unread, status, scr
     api
       .listInbox({ onlySession: bot.session_id, limit: 1, handleError: false })
       .then((feed) => {
-        if (live) setLatest(feed.sessions.find((row) => row.session_id === bot.session_id) ?? null);
+        if (!live) return;
+        const row = feed.sessions.find((session) => session.session_id === bot.session_id);
+        setLatest(row ? { at: row.last_activity_at, excerpt: messageExcerpt(row.preview_text) } : null);
       })
       .catch(() => {
         if (live) setLatest(null);
@@ -462,15 +465,11 @@ const BotSlot: React.FC<BotSlotProps> = ({ bot, index, name, unread, status, scr
                   {latest
                     ? t('bots.statusAt', {
                       status: running ? t('bots.running') : t('bots.latest'),
-                      time: formatRelativeTime(latest.last_activity_at, t),
+                      time: formatRelativeTime(latest.at, t),
                     })
                     : running ? t('bots.running') : t('bots.latest')}
                 </span>
-                {latest?.preview_text && (
-                  <span className="line-clamp-2 block">
-                    <Markdown content={latest.preview_text} interactive={false} className="vr-markdown--preview" />
-                  </span>
-                )}
+                {latest?.excerpt && <span className="line-clamp-2 break-words">{latest.excerpt}</span>}
               </span>
             )}
             <span className="flex items-center gap-1.5 text-[12px] font-semibold text-cyan-ink">

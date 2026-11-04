@@ -129,6 +129,22 @@ describe('BotStrip', () => {
     expect(screen.getByRole('button', { name: 'Security lead' })).toBeTruthy();
   });
 
+  // A Bot's latest message in its hover card is a short plain-text excerpt (the card clamps it to
+  // two lines), never the message rendered whole: a Markdown reply would run the window's height.
+  it('shows the latest message in the hover card as a plain-text excerpt', async () => {
+    api.listInbox.mockResolvedValue({ sessions: [{
+      session_id: 'ses_cso',
+      preview_text: '## Found 2 issues\n\n- **avault** pins an old `ring`\n- see [the advisory](https://example.com)\n\n```sh\ncargo update\n```',
+      last_activity_at: new Date().toISOString(),
+    }] });
+    renderStrip(state());
+    fireEvent.mouseEnter(document.querySelector('[data-bot-handle="cso"]')!);
+
+    const excerpt = await screen.findByText('Found 2 issues avault pins an old ring see the advisory cargo update', undefined, { timeout: 2_000 });
+    expect(excerpt.closest('button')!.querySelector('h2, ul, li, pre, code, strong, a')).toBeNull();
+    expect(api.listInbox).toHaveBeenCalledWith(expect.objectContaining({ onlySession: 'ses_cso', limit: 1 }));
+  });
+
   it('leaves the Bot in place when the confirmation is cancelled', async () => {
     render(
       <UnsavedChangesContext.Provider value={{ setRegistration: () => {}, authorizeRouteAction: () => null }}>
