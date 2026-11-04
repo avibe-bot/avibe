@@ -20,6 +20,12 @@ import {
   createWorkbenchSessionReadOwnership,
   type WorkbenchSessionReadStamp,
 } from '../lib/workbenchSessionReadOwnership';
+import {
+  getLocalSnapshotPrincipal,
+  readLocalSnapshot,
+  subscribeLocalSnapshotPrincipal,
+  writeLocalSnapshot,
+} from '../lib/localSnapshots';
 
 // How many sessions to load per page under a project. The server clamps the
 // /api/sessions limit (to 200) and returns a cursor (next_before_id); both the
@@ -30,6 +36,35 @@ import {
 // size has to be one shared value (it can't differ per surface).
 const SESSIONS_PAGE_SIZE = 8;
 const RECONNECT_SESSIONS_PAGE_SIZE = 200;
+
+// The project list as the last live bootstrap returned it, so opening the
+// sidebar or the Projects page paints it before the bootstrap answers
+// (docs/plans/web-ui-local-cache.md). Only the list: the bootstrap a cold start
+// takes asks for no project's sessions, and no project starts expanded.
+const PROJECTS_SNAPSHOT_KEY = 'projects:bootstrap';
+const PROJECTS_SNAPSHOT_SCHEMA = 1;
+
+type ProjectsSnapshot = { projects: WorkbenchProject[] };
+
+// Only rows every consumer can render: an unreadable record means no paint.
+const parseProjectsSnapshot = (value: unknown): ProjectsSnapshot | null => {
+  if (!value || typeof value !== 'object') return null;
+  const { projects } = value as Partial<ProjectsSnapshot>;
+  if (!Array.isArray(projects)) return null;
+  const rowsValid = projects.every((project) =>
+    project && typeof project === 'object'
+    && typeof project.id === 'string'
+    && typeof project.scope_id === 'string'
+    && typeof project.display_name === 'string'
+    && typeof project.folder_path === 'string'
+    && !!project.capabilities && typeof project.capabilities === 'object'
+    && typeof project.capabilities.can_chat === 'boolean');
+  return rowsValid ? { projects } : null;
+};
+
+// The rows on screen that came from the snapshot rather than from the server,
+// and the reader they were stored for.
+type PaintedProjectsSnapshot = { principal: string; ids: Set<string> };
 
 const EMPTY_SESSIONS: ProjectSessionsState = {
   sessions: null,
@@ -226,6 +261,18 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   const contradictedProjectRouteRef = useRef(new Set<string>());
   const fetchProjectsRunnerRef = useRef<(options?: { cache?: boolean }) => void>(() => {});
   const projectTreeRunnerRef = useRef<() => void>(() => {});
+  // Local snapshot state. ``paintedSnapshotRef`` names the rows painted from the
+  // snapshot that no live bootstrap has replaced yet; the state mirror is what
+  // keeps ``projectsLoaded`` false while they are on screen. ``snapshotRetiredRef``
+  // is set by the first live bootstrap, or by an authorization change dropping the
+  // tree; after either, this document never paints the snapshot again.
+  const paintedSnapshotRef = useRef<PaintedProjectsSnapshot | null>(null);
+  const [snapshotOnScreen, setSnapshotOnScreen] = useState(false);
+  const snapshotRetiredRef = useRef(false);
+  const setPaintedSnapshot = useCallback((next: PaintedProjectsSnapshot | null) => {
+    paintedSnapshotRef.current = next;
+    setSnapshotOnScreen(next !== null);
+  }, []);
 
   // The list and its mirror move together. The mirror used to be written on render,
   // so after a write that added a project it stayed one render behind — which is why
@@ -421,7 +468,20 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
 
   const applyProjectsSnapshot = useCallback((nextProjects: WorkbenchProject[]) => {
     const accessibleIds = new Set(nextProjects.map((project) => project.id));
+    // A live answer replaces the whole list, painted rows included, and ends the
+    // local snapshot's part in this document.
+    snapshotRetiredRef.current = true;
+    setPaintedSnapshot(null);
     commitProjects(nextProjects, { confirmed: nextProjects });
+    // Stored as the server sent it, not as the list now reads: ``commitProjects``
+    // lays in-flight route picks and a pending reorder over these rows, and those
+    // are not the server's answer. The store tags the record with the reader
+    // current now, the one this answer is committed for, and drops the write if
+    // the reader changes before it lands. Nothing else writes the snapshot, so no
+    // later edit can be stored under a reader that never received it.
+    void writeLocalSnapshot(PROJECTS_SNAPSHOT_KEY, PROJECTS_SNAPSHOT_SCHEMA, {
+      projects: nextProjects,
+    } satisfies ProjectsSnapshot);
     setSessions((prev) =>
       Object.fromEntries(
         Object.entries(prev).filter(([projectId]) => accessibleIds.has(projectId)),
@@ -432,7 +492,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     for (const projectId of [...pendingReconcileRef.current.keys()]) {
       if (!accessibleIds.has(projectId)) pendingReconcileRef.current.delete(projectId);
     }
-  }, [commitProjects]);
+  }, [commitProjects, setPaintedSnapshot]);
 
   // A reconnect and an authorization change are not the same kind of signal. A
   // reconnect says "you may have missed events", so deferring it while nothing
@@ -463,6 +523,9 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       ...[...sessionProjectRef.current.keys()].map((sessionId) => `project-session:${sessionId}`),
     ]);
     commitProjects(null, { confirmed: null });
+    // The snapshot was stored under the old authorization: never paint it again.
+    snapshotRetiredRef.current = true;
+    setPaintedSnapshot(null);
     sessionsRef.current = {};
     expandedRef.current = new Set();
     sessionProjectRef.current.clear();
@@ -475,7 +538,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     setSessions({});
     setExpanded(new Set());
     setCreating(new Set());
-  }, [commitProjects]);
+  }, [commitProjects, setPaintedSnapshot]);
 
   // ── An outstanding window width is a DEBT, not a queued read ────────────────
   // A foreground restore asks for one row more than is loaded, because the row it
@@ -840,6 +903,57 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     if (!active) return;
     readTreeForActiveConsumer();
   }, [active, readTreeForActiveConsumer]);
+
+  // Paint the last known list while the first live bootstrap is in flight. Only
+  // for a document that reads the tree (the same demand that starts the
+  // bootstrap), only onto an empty list, and only until a live answer lands, so
+  // it never overwrites live data. A route pick made on a painted row still
+  // derives its compare-and-set token from server confirmations alone: the paint
+  // records none.
+  //
+  // The reader can change under a painted list: a cold start can replay one
+  // reader's session and its check confirm another. The painted rows are then
+  // the other reader's, so they go the moment a different reader is named,
+  // before any live answer.
+  const seedSnapshotRef = useRef<(principal: string | null) => void>(() => {});
+  useEffect(() => {
+    let cancelled = false;
+    const dropPainted = () => {
+      const painted = paintedSnapshotRef.current;
+      if (!painted) return;
+      setPaintedSnapshot(null);
+      // Back to the empty, still-loading list unless a live write added rows.
+      commitProjects((prev) => {
+        const kept = prev?.filter((project) => !painted.ids.has(project.id)) ?? [];
+        return kept.length > 0 ? kept : null;
+      });
+    };
+    const seed = async (principal: string | null) => {
+      if (!principal || !isActive() || snapshotRetiredRef.current) return;
+      const snapshot = await readLocalSnapshot(PROJECTS_SNAPSHOT_KEY, PROJECTS_SNAPSHOT_SCHEMA, parseProjectsSnapshot);
+      if (cancelled || !snapshot || snapshotRetiredRef.current) return;
+      if (getLocalSnapshotPrincipal() !== principal || projectsRef.current !== null) return;
+      // An empty list stays unpainted: the empty state is the live answer's to show.
+      if (snapshot.projects.length === 0) return;
+      setPaintedSnapshot({ principal, ids: new Set(snapshot.projects.map((project) => project.id)) });
+      commitProjects(snapshot.projects);
+    };
+    seedSnapshotRef.current = (principal) => void seed(principal);
+    const unsubscribe = subscribeLocalSnapshotPrincipal((principal) => {
+      const painted = paintedSnapshotRef.current;
+      if (principal && painted && principal !== painted.principal) dropPainted();
+      void seed(principal);
+    });
+    return () => {
+      cancelled = true;
+      seedSnapshotRef.current = () => {};
+      unsubscribe();
+    };
+  }, [commitProjects, isActive, setPaintedSnapshot]);
+
+  useEffect(() => {
+    if (active) seedSnapshotRef.current(getLocalSnapshotPrincipal());
+  }, [active]);
 
   const refreshCachedSessionRow = useCallback(async function refreshCachedSessionRow(sessionId: string) {
     // Revalidation: dropped while nothing reads the tree (see ``reconcileSessions``).
@@ -1527,9 +1641,14 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   const loadMore = useCallback((projectId: string) => void fetchSessions(projectId, { append: true }), [fetchSessions]);
   const reloadSessions = useCallback((projectId: string) => void fetchSessions(projectId), [fetchSessions]);
 
+  // Rows painted from the snapshot are not the server's answer: anything that
+  // treats the list as loaded waits for a live one.
+  const projectsLoaded = projects !== null && !snapshotOnScreen;
+
   const value = useMemo<WorkbenchProjectsTree>(
     () => ({
       projects,
+      projectsLoaded,
       projectsError,
       refreshProjects: fetchProjects,
       activate,
@@ -1555,6 +1674,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     }),
     [
       projects,
+      projectsLoaded,
       projectsError,
       fetchProjects,
       activate,

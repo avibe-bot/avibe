@@ -84,7 +84,14 @@ export interface WorkbenchProjectsActions {
 }
 
 export interface WorkbenchProjectsTree extends WorkbenchProjectsActions {
+  /** null = nothing to show yet. Before the first live bootstrap answers this can
+   *  hold the last known list from the local snapshot (see ``projectsLoaded``). */
   projects: WorkbenchProject[] | null;
+  /** Whether ``projects`` is the server's answer rather than the local snapshot
+   *  painted while the bootstrap is in flight. A surface that ACTS on the list as
+   *  the server's (enabling a create, say) keys off this. The snapshot never
+   *  paints an empty list, so an empty ``projects`` is always a live answer. */
+  projectsLoaded: boolean;
   projectsError: string | null;
   refreshProjects: () => Promise<void>;
   /** Refcounted activation (see ``useConsumerActivation``). The provider is
