@@ -249,7 +249,9 @@ scenarios:
     supporting_tests:
       - tests/test_remote_access_vibe_cloud.py::test_remote_session_idles_out_after_its_instance_kind_limit
       - tests/test_remote_access_vibe_cloud.py::test_remote_session_renews_daily_and_never_past_the_cap
-      - tests/test_remote_authorization_revision.py::test_pre_upgrade_cookie_stays_valid_and_gains_auth_time_on_renewal
+      - tests/test_remote_authorization_revision.py::test_released_cookie_keeps_working_and_gains_auth_time_on_its_first_renewal
+      - tests/test_remote_authorization_revision.py::test_session_endpoint_only_adds_the_cookie_expiry_to_its_released_shape
+      - tests/test_remote_access_vibe_cloud.py::test_downgraded_instance_keeps_new_cookies_valid_for_their_whole_lifetime
   - id: AUTH-SETUP-145
     name: Organization remote session lasts 7 days idle, renews daily through claims refreshes, and re-authorizes at the 90-day cap
     status: covered

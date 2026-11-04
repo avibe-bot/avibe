@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hmac
 import ipaddress
 import json
+import re
 import threading
 import time
 import urllib.parse
@@ -584,6 +586,67 @@ def test_remote_session_idles_out_after_its_instance_kind_limit(
 
     clock["now"] = _SIGN_IN_AT + idle_seconds + 1
     assert remote_access.parse_session_identity(config, cookie) is None
+
+
+def _released_identity(config: V2Config, cookie: str, *, now: int) -> dict | None:
+    """The cookie checks of ``parse_session_identity`` as released before auth_time.
+
+    A downgrade runs that code against cookies this version issued. Its
+    revocation lookup is left out: it was in memory, so a downgrade starts
+    with none.
+    """
+
+    payload_text, signature = cookie.rsplit(".", 1)
+    secret = config.remote_access.vibe_cloud.session_secret
+    if not hmac.compare_digest(signature, remote_access._session_signature(secret, payload_text)):
+        return None
+    payload = json.loads(urllib.parse.unquote(payload_text))
+    if payload.get("instance_id") != config.remote_access.vibe_cloud.instance_id:
+        return None
+    if not isinstance(payload.get("sub"), str) or not payload["sub"]:
+        return None
+    if not isinstance(payload.get("email"), str) or not payload["email"].strip():
+        return None
+    issued_at = int(payload.get("iat", 0))
+    expires_at = int(payload.get("exp", 0))
+    if issued_at <= 0 or expires_at <= now or expires_at <= issued_at:
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9_-]{24,64}", payload["authorization_ref"]):
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9_-]{24,64}", payload["browser_session_id"]):
+        return None
+    return payload
+
+
+def _released_needs_renewal(payload: dict, *, now: int) -> bool:
+    # Released rule: renew once less than half of the 24-hour lifetime remains.
+    return int(payload["exp"]) - now < 12 * 60 * 60
+
+
+@pytest.mark.parametrize("instance_kind", ["personal", "organization"])
+def test_downgraded_instance_keeps_new_cookies_valid_for_their_whole_lifetime(
+    monkeypatch,
+    instance_kind,
+) -> None:
+    config = _config()
+    config.remote_access.vibe_cloud.instance_kind = instance_kind
+    clock = _pin_clock(monkeypatch, _SIGN_IN_AT)
+    signed_in = _session_cookie(config)
+    clock["now"] = _SIGN_IN_AT + _DAY + 1
+    renewed = remote_access.renew_session_cookie(
+        config,
+        remote_access.parse_session_identity(config, signed_in),
+    )
+
+    for cookie in (signed_in, renewed):
+        exp = _released_identity(config, cookie, now=clock["now"])["exp"]
+        # Accepted until its own exp, with auth_time ignored.
+        assert _released_identity(config, cookie, now=exp - 1) is not None
+        assert _released_identity(config, cookie, now=exp) is None
+        # Re-issued as a 24-hour cookie only in its last 12 hours, so a
+        # downgrade signs no one out and renews no one early.
+        assert _released_needs_renewal({"exp": exp}, now=exp - 12 * 60 * 60) is False
+        assert _released_needs_renewal({"exp": exp}, now=exp - 12 * 60 * 60 + 1) is True
 
 
 @pytest.mark.parametrize(
