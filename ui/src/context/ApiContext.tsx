@@ -1018,7 +1018,7 @@ export type ApiContextType = {
   removeMcp: (name: string, project?: string | null) => Promise<McpResult>;
   approveMcp: (name: string, project: string) => Promise<McpResult & { state?: string }>;
   /** A supplied map replaces that stored map; an omitted one is kept. */
-  configureMcp: (name: string, secrets: { env?: Record<string, string>; headers?: Record<string, string> }, project: string) => Promise<McpResult & { state?: string }>;
+  configureMcp: (name: string, secrets: { env?: Record<string, string>; headers?: Record<string, string> }, project?: string | null) => Promise<McpResult & { state?: string }>;
   completeMcpLogin: (name: string, callbackUrl: string, project?: string | null) => Promise<McpOAuthMutationResult>;
   getMcpServer: (name: string, project?: string | null) => Promise<McpResult & { server?: McpServerSummary; tools?: McpTool[] }>;
   previewSkillSource: (source: string, params?: { projectId?: string }) => Promise<SkillsPreviewResult>;

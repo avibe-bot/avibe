@@ -243,6 +243,12 @@ def _owner(operation: str, payload: dict[str, Any]) -> int:
         failed = response.get("failed") or []
         unchanged = response.get("unchanged") or []
         for item in added:
+            if item.get("state") == "needs_config":
+                from core.mcp_hub.scope import state_note
+
+                note, hint = state_note(item["name"], "needs_config", item.get("missingVariables") or [])
+                print(f"{item['name']}: added ({note}; {hint})")
+                continue
             print(f"{item['name']}: added ({item.get('toolCount', 0)} tools)")
         for item in unchanged:
             print(f"{item['name']}: unchanged")
@@ -273,10 +279,9 @@ def _add(args: list[str]) -> int:
         position = args.index("--json-stdin")
         args = args[: position + 1] + [sys.stdin.read()] + args[position + 1 :]
     from core.mcp_hub import scope
-    from core.mcp_hub.definition import definition_from_provider
 
     target = scope.request_scopes(_scope_payload())[-1]
-    validator = scope.project_add_definition if target.project_root is not None else definition_from_provider
+    validator = scope.project_add_definition if target.project_root is not None else scope.global_add_definition
     definitions, replace = parse_add_argv(args, validator=validator)
     payload = {
         "replace": replace,

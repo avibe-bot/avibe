@@ -25,7 +25,14 @@ from config import paths
 from config.atomic_io import write_atomic
 from core.managed_skills import managed_skill_project_root
 from core.mcp_hub import native, repository
-from core.mcp_hub.definition import _ENV_KEY, _HEADER_NAME, _string_map, definition_from_provider, validate_name
+from core.mcp_hub.definition import (
+    _ENV_KEY,
+    _HEADER_NAME,
+    _string_map,
+    definition_from_provider,
+    provider_entry,
+    validate_name,
+)
 from core.mcp_hub.errors import McpHubError
 from core.private_fs import ensure_private_directory
 
@@ -163,6 +170,11 @@ def _document(scope: Scope) -> tuple[Optional[str], dict[str, Any]]:
 
 
 def _raw_entry(key: ScopedName) -> dict[str, Any]:
+    if key.project_root is None:  # a global server's template is its Avibe definition.json
+        definition = repository.read_avibe_definition(key.name)
+        if definition is None:
+            raise McpHubError("usage", "Configure applies only to project servers and Avibe-added servers.")
+        return provider_entry(definition)
     try:
         _, document = _document(key.scope)
     except (OSError, ValueError) as exc:
@@ -188,7 +200,8 @@ def _cached(key: ScopedName, file: str) -> dict[str, Any]:
 
 def _write_cache(key: ScopedName, file: str, value: dict[str, Any]) -> None:
     directory = repository.package_dir(key)
-    ensure_private_directory(key.root.parent)
+    if key.project_root is not None:
+        ensure_private_directory(key.root.parent)
     ensure_private_directory(key.root)
     ensure_private_directory(directory)
     repository._write_json(directory / file, value)
@@ -361,25 +374,26 @@ def _effective(key: ScopedName, raw: dict[str, Any], secrets: dict[str, Any]) ->
         if not isinstance(raw.get("cwd", ""), str):
             raise McpHubError("invalid_definition", f"{key.name}: cwd must be a string.", field="cwd")
         merged["env"] = {**merged.get("env", {}), **variables}
-        merged["cwd"] = native._resolve_cwd(_project_file(key.scope), raw.get("cwd") or str(key.project_root))
+        if key.project_root is not None:  # a global cwd stays as written and must be absolute
+            merged["cwd"] = native._resolve_cwd(_project_file(key.scope), raw.get("cwd") or str(key.project_root))
     else:
         merged["headers"] = _merge_headers(merged.get("headers", {}), headers)
     definition = definition_from_provider(key.name, merged)
     return definition, sorted(missing), sorted(placeholders)
 
 
-def project_add_definition(name: str, raw: object) -> dict[str, Any]:
-    """Validate with the loader's stand-ins, then restore unresolved input values.
+def add_definition(name: str, raw: object, *, project: bool) -> dict[str, Any]:
+    """The one add validator: check with the loader's stand-ins, then restore unresolved input values.
 
     This is parsing only: approval and the real project's scope are owned by the
-    controller. The temporary scope supplies a cwd for structural validation.
+    controller. A project's temporary scope supplies a cwd for structural validation.
     """
 
     validate_name(name)
     if not isinstance(raw, dict):
         return definition_from_provider(name, raw)
-    key = ScopedName(Scope("project:validation", Path.cwd()), name)
-    definition, _, _ = _effective(key, raw, {})
+    validation = Scope("project:validation", Path.cwd()) if project else Scope()
+    definition, _, _ = _effective(ScopedName(validation, name), raw, {})
     transport = definition["transport"]
     for field in ("url", "env", "headers", "cwd"):
         if field in raw:
@@ -387,6 +401,154 @@ def project_add_definition(name: str, raw: object) -> dict[str, Any]:
     if "cwd" not in raw:
         transport.pop("cwd", None)
     return definition
+
+
+def project_add_definition(name: str, raw: object) -> dict[str, Any]:
+    return add_definition(name, raw, project=True)
+
+
+def global_add_definition(name: str, raw: object) -> dict[str, Any]:
+    return add_definition(name, raw, project=False)
+
+
+# ---------------------------------------------------------------------------
+# Global (Avibe-owned) placeholder servers
+# ---------------------------------------------------------------------------
+
+
+def global_key(name: object) -> ScopedName:
+    return ScopedName(Scope(), str(name))
+
+
+def _template_values(definition: dict[str, Any]) -> list[str]:
+    transport = definition.get("transport") or {}
+    values = [transport.get("url")]
+    for field in ("env", "headers"):
+        mapping = transport.get(field)
+        if isinstance(mapping, dict):
+            values.extend(mapping.values())
+    return [value for value in values if isinstance(value, str)]
+
+
+def uses_placeholders(definition: dict[str, Any]) -> bool:
+    """Whether a definition carries ``${VAR}`` templates."""
+
+    return any(_TOKEN.search(value) for value in _template_values(definition))
+
+
+def global_state(name: object, definition: dict[str, Any]) -> tuple[Optional[dict[str, Any]], list[str], list[str]]:
+    """The privately resolved definition (``None`` while variables are missing), missing names, placeholders."""
+
+    key = global_key(name)
+    resolved, missing, placeholders = _effective(key, provider_entry(definition), _secrets(key))
+    return (None if missing else resolved), missing, placeholders
+
+
+def resolve_global(name: object, definition: dict[str, Any]) -> dict[str, Any]:
+    """The definition execution uses. Templates resolve in memory only; nothing resolved is stored."""
+
+    if not uses_placeholders(definition) and read_global_secrets(name) is None:
+        return definition  # released and native definitions run exactly as stored
+    resolved, missing, _ = global_state(name, definition)
+    if resolved is None:
+        raise state_error(str(name), "needs_config", missing)
+    return resolved
+
+
+def split_global(definition: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
+    """``(template, private maps, missing)`` for a validated Avibe-owned global add.
+
+    The project contract of :func:`write_server`, per key: supplied templates go to
+    ``definition.json``, supplied concrete values to ``secrets.json``; unsupplied keys
+    of the stored definition (same transport kind) and of the sidecar are kept.
+    """
+
+    key = global_key(definition["name"])
+    template = copy.deepcopy(definition)
+    transport = template["transport"]
+    try:
+        previous = repository.read_avibe_definition(key.name)
+    except McpHubError:
+        previous = None
+    try:
+        cache = _secrets(key)
+    except McpHubError:
+        cache = {}
+    old = (previous or {}).get("transport") or {}
+    written = {}
+    if old.get("type") == transport["type"]:
+        written = {field: dict(old[field]) for field in ("env", "headers") if old.get(field)}
+    _split_values(written, cache, {field: transport[field] for field in ("env", "headers") if field in transport})
+    for field in ("env", "headers"):
+        if field in transport:
+            transport[field] = written.get(field, {})
+    cache = _check_secrets(cache)
+    _, missing, _ = _effective(key, provider_entry(template), cache)
+    return template, cache, missing
+
+
+def read_global_secrets(name: object) -> Optional[bytes]:
+    path = repository.package_dir(global_key(name)) / "secrets.json"
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def write_global_secrets(name: object, value: Union[dict[str, Any], bytes, None]) -> None:
+    """Store (or, for ``None``, delete) a global server's private ``secrets.json`` sidecar.
+
+    An empty map with no sidecar yet writes nothing.
+    """
+
+    key = global_key(name)
+    path = repository.package_dir(key) / "secrets.json"
+    if isinstance(value, dict) and not any(value.values()) and not path.exists():
+        return
+    if value is None:
+        path.unlink(missing_ok=True)
+    elif isinstance(value, bytes):
+        ensure_private_directory(path.parent)
+        write_atomic(path, value)
+    else:
+        _write_cache(key, "secrets.json", value)
+
+
+def global_pending_row(name: str) -> Optional[dict[str, Any]]:
+    """A listed row for an unpublished Avibe server that waits on ``--configure``; never resolved values."""
+
+    try:
+        definition = repository.read_avibe_definition(name)
+    except McpHubError:
+        return None
+    if definition is None or not uses_placeholders(definition):
+        return None
+    try:
+        _, missing, placeholders = global_state(name, definition)
+    except McpHubError as exc:
+        logger.warning("Skipping invalid MCP server %s: %s", name, exc)
+        return None
+    if not missing:
+        return None
+    transport = definition["transport"]
+    return {
+        "name": name,
+        "scope": GLOBAL,
+        "state": "needs_config",
+        "source": repository.AVIBE,
+        "sourcePath": str(repository.package_dir(name) / "definition.json"),
+        "missingVariables": missing,
+        "placeholders": placeholders,
+        "url": transport.get("url", ""),
+        "command": " ".join([transport.get("command") or "", *(transport.get("args") or [])]).strip(),
+        "transport": transport.get("type"),
+        "description": "",
+        "auth": "none",
+        "toolCount": 0,
+        "tools": [],
+        "revision": None,
+        "diagnostics": [],
+    }
 
 
 def load_server(key: ScopedName) -> ScopedServer:
@@ -452,16 +614,40 @@ def project_servers(scope: Scope) -> dict[str, Optional[ScopedServer]]:
     return result
 
 
-def _global_row(row: dict[str, Any]) -> dict[str, Any]:
+def global_row(row: dict[str, Any]) -> dict[str, Any]:
+    """A published global row; a placeholder server whose variables went missing is ``needs_config``."""
+
     state = "needs_login" if row.get("auth") == "needs_login" else "ok"
-    return {**row, "scope": GLOBAL, "state": state}
+    row = {**row, "scope": GLOBAL, "state": state}
+    if row.get("source") != repository.AVIBE:
+        return row
+    try:
+        definition = repository.read_avibe_definition(row["name"])
+        if definition is not None and uses_placeholders(definition):
+            _, missing, placeholders = global_state(row["name"], definition)
+            row.update(missingVariables=missing, placeholders=placeholders)
+            if missing:
+                row["state"] = "needs_config"
+    except McpHubError as exc:
+        logger.warning("MCP server %s has an unreadable configuration: %s", row["name"], exc)
+    return row
+
+
+def _global_rows() -> dict[str, dict[str, Any]]:
+    rows = {row["name"]: global_row(row) for row in repository.list_packages()}
+    for name in repository._candidate_names({}):
+        if name not in rows:
+            pending = global_pending_row(name)
+            if pending is not None:
+                rows[name] = pending
+    return rows
 
 
 def summaries(selected: list[Scope]) -> list[dict[str, Any]]:
     rows: dict[str, dict[str, Any]] = {}
     for scope in selected:
         if scope.key == GLOBAL:
-            rows.update({row["name"]: _global_row(row) for row in repository.list_packages()})
+            rows.update(_global_rows())
             continue
         for name, server in project_servers(scope).items():
             rows.pop(name, None)
@@ -561,6 +747,33 @@ def _edit_document_text(text: Optional[str], key: ScopedName, entry: Optional[di
         return None
 
 
+def _split_values(written: dict[str, Any], cache: dict[str, Any], entry: dict[str, Any]) -> None:
+    """Route each supplied env/header value: a ``${VAR}`` template to ``written``, a concrete value to ``cache``.
+
+    Each supplied key replaces its previous destination.
+    """
+
+    for field in ("env", "headers"):
+        if field not in entry:
+            continue
+        declared = dict(written.get(field, {}))
+        private = dict(cache.get(field, {}))
+        for name, value in entry[field].items():
+            # HTTP header names have case-insensitive identity.
+            for mapping in (declared, private):
+                for old_name in list(mapping):
+                    if old_name == name or (field == "headers" and old_name.lower() == name.lower()):
+                        mapping.pop(old_name)
+            destination = declared if _TOKEN.search(value) else private
+            destination[name] = value
+        if declared:
+            written[field] = declared
+        else:
+            written.pop(field, None)
+        if private or field in cache:
+            cache[field] = private
+
+
 def write_server(key: ScopedName, entry: Optional[dict[str, Any]], *, replace: bool = True) -> None:
     """Validate the prospective document and private maps before publishing either.
 
@@ -582,25 +795,7 @@ def write_server(key: ScopedName, entry: Optional[dict[str, Any]], *, replace: b
             written = servers[key.name]
             previous_cache = _secrets(key)
             cache = copy.deepcopy(previous_cache)
-            for field in ("env", "headers"):
-                if field not in entry:
-                    continue
-                declared = dict(written.get(field, {}))
-                private = dict(cache.get(field, {}))
-                for name, value in entry[field].items():
-                    # HTTP header names have case-insensitive identity.
-                    for mapping in (declared, private):
-                        for old_name in list(mapping):
-                            if old_name == name or (field == "headers" and old_name.lower() == name.lower()):
-                                mapping.pop(old_name)
-                    destination = declared if _TOKEN.search(value) else private
-                    destination[name] = value
-                if declared:
-                    written[field] = declared
-                else:
-                    written.pop(field, None)
-                if private or field in cache:
-                    cache[field] = private
+            _split_values(written, cache, entry)
             cache = _check_secrets(cache)
             _effective(key, written, cache)
         if text is None or data != before:

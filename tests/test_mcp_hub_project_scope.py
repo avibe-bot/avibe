@@ -800,3 +800,174 @@ def test_project_add_splits_templates_from_concrete_values(tmp_path, runtime, fi
         scope.write_server(key, {**transport, field: {"BAD\nKEY": "invalid"}})
     assert (root / ".mcp.json").read_bytes() == old_document
     assert (cache_path.read_bytes() if cache_path.exists() else None) == old_cache
+
+
+# ---------------------------------------------------------------------------
+# Global (Avibe-owned) servers share the placeholder model
+# ---------------------------------------------------------------------------
+
+SECRET = "tok-secret-9f3"
+CONCRETE = "plain-secret-51a"
+
+
+def _recording_clients(monkeypatch) -> list:
+    opened = []
+    enter_client = mcp_runtime._enter_client
+
+    async def recording(definition, *args, **kwargs):
+        opened.append(definition)
+        return await enter_client(definition, *args, **kwargs)
+
+    monkeypatch.setattr(mcp_runtime, "_enter_client", recording)
+    return opened
+
+
+def _stored_text(name: str) -> str:
+    """Everything an MCP package publishes or exposes, except the private secrets sidecar."""
+
+    directory = repository.package_dir(name)
+    return "".join(path.read_text() for path in sorted(directory.rglob("*.json")) if path.name != "secrets.json")
+
+
+@pytest.mark.parametrize(
+    ("env", "missing", "file_env", "private_env"),
+    [
+        pytest.param({"TOKEN": "${TOKEN}"}, ["TOKEN"], {"TOKEN": "${TOKEN}"}, None, id="template"),
+        pytest.param({"TOKEN": SECRET}, [], {}, {"TOKEN": SECRET}, id="concrete"),
+        pytest.param(
+            {"TOKEN": "${TOKEN}", "PLAIN": CONCRETE}, ["TOKEN"], {"TOKEN": "${TOKEN}"}, {"PLAIN": CONCRETE}, id="mixed"
+        ),
+    ],
+)
+@pytest.mark.parametrize("surface", ["runtime", "cli"])
+def test_global_add_configure_call(tmp_path, monkeypatch, capsys, runtime, surface, env, missing, file_env, private_env):
+    from vibe import mcp_cli
+
+    opened = _recording_clients(monkeypatch)
+    if surface == "cli":
+        argv = ["--global", "echo"] + [f"--env={k}={v}" for k, v in env.items()] + ["--", ECHO["command"], *ECHO["args"]]
+        assert mcp_cli.add_main(argv) == 0
+        out = capsys.readouterr().out
+        assert ("needs config: TOKEN" in out) == bool(missing)
+    else:
+        added = _run(runtime, "add", {"global": True, "servers": [{"name": "echo", "server": {**ECHO, "env": env}}]})
+        assert added["ok"] and added["added"][0].get("state", "ok") == ("needs_config" if missing else "ok")
+
+    directory = repository.package_dir("echo")
+    assert json.loads((directory / "definition.json").read_text())["transport"]["env"] == file_env
+    secrets_file = directory / "secrets.json"
+    assert (json.loads(secrets_file.read_text()).get("env") if secrets_file.exists() else None) == private_env
+    if secrets_file.exists():
+        assert oct(secrets_file.stat().st_mode & 0o777) == "0o600"
+        assert oct(directory.stat().st_mode & 0o777) == "0o700"
+
+    row = next(item for item in _run(runtime, "list", {"global": True})["servers"] if item["name"] == "echo")
+    call = {"name": "echo", "global": True, "tool": "echo", "arguments": {"text": "hi"}}
+    if missing:
+        assert row["state"] == "needs_config" and row["missingVariables"] == missing
+        assert _run(runtime, "call", call)["error"]["type"] == "needs_config"
+        assert opened == []  # an unresolved add never connects
+        configured = _run(runtime, "configure", {"name": "echo", "global": True, "secrets": {"env": {**(private_env or {}), "TOKEN": SECRET}}})
+        assert configured["toolCount"] == 7  # a supplied map replaces that map, as for project servers
+    else:
+        assert row["state"] == "ok" and "missingVariables" not in row
+    assert _run(runtime, "call", call)["status"] == "ok"
+    assert opened[-1]["transport"]["env"] == {**env, "TOKEN": SECRET}  # execution resolves privately
+
+    published = repository.read_published("echo")["definition"]["transport"]["env"]
+    assert published == file_env  # publication keeps templates
+    exposed = json.dumps(_run(runtime, "list", {"global": True})) + json.dumps(_run(runtime, "detail", {"name": "echo"}))
+    for secret in (SECRET, CONCRETE):
+        assert secret not in exposed + _stored_text("echo")
+
+
+@pytest.mark.parametrize(
+    "server",
+    [
+        pytest.param({"command": "${BIN}"}, id="command"),
+        pytest.param({**ECHO, "args": ["${ARG}"]}, id="args"),
+        pytest.param({"url": "https://${HOST}/mcp", "headers": {"X-Bad": "${1BAD}"}}, id="bad-name"),
+        pytest.param({"url": "https://${HOST}/mcp", "args": ["a"]}, id="bad-structure"),
+    ],
+)
+def test_invalid_global_placeholders_write_nothing(runtime, server):
+    from core.mcp_hub import scope
+
+    with pytest.raises(Exception):
+        scope.global_add_definition("bad", server)
+    result = _run(runtime, "add", {"global": True, "servers": [{"name": "bad", "server": server}]})
+    assert result.get("ok") is not True
+    assert not repository.package_dir("bad").exists()
+
+
+@pytest.mark.parametrize(
+    ("raw", "secrets", "expected"),
+    [
+        pytest.param(
+            {"url": "https://${HOST}/mcp", "headers": {"Authorization": "Bearer ${TOKEN}", "X-Team": CONCRETE}},
+            {"env": {"HOST": "h.example", "TOKEN": SECRET}},
+            {"url": "https://h.example/mcp", "headers": {"Authorization": f"Bearer {SECRET}", "X-Team": CONCRETE}},
+            id="http-url-and-header",
+        ),
+        pytest.param({"url": "https://${HOST}/mcp"}, {}, None, id="http-missing"),
+    ],
+)
+def test_global_http_templates_resolve_only_in_memory(runtime, raw, secrets, expected):
+    from core.mcp_hub import scope
+
+    definition = scope.global_add_definition("remote", raw)
+    template, private, missing = scope.split_global(definition)
+    assert template["transport"]["url"] == raw["url"]
+    assert all("${" in value for value in template["transport"]["headers"].values())
+    repository.write_definition(template)
+    scope.write_global_secrets("remote", private)
+    if secrets:
+        scope.configure(scope.global_key("remote"), secrets)
+    if expected is None:
+        assert missing == ["HOST"]
+        with pytest.raises(Exception, match="needs config: HOST"):
+            scope.resolve_global("remote", template)
+        return
+    resolved = scope.resolve_global("remote", template)["transport"]
+    assert {"url": resolved["url"], "headers": resolved["headers"]} == expected
+    assert SECRET not in (repository.package_dir("remote") / "definition.json").read_text()
+
+
+def test_released_global_definition_runs_unchanged(monkeypatch, runtime):
+    """A definition.json written by a released Avibe (concrete values, no sidecar) is read as is."""
+
+    released = {
+        "schemaVersion": 1, "name": "echo",
+        "transport": {"type": "stdio", "command": ECHO["command"], "args": ECHO["args"],
+                      "env": {"TOKEN": SECRET}, "cwd": repository.default_cwd()},
+    }
+    directory = repository.package_dir("echo")
+    directory.mkdir(parents=True)
+    (directory / "definition.json").write_text(json.dumps(released))
+    opened = _recording_clients(monkeypatch)
+
+    assert _run(runtime, "refresh", {"name": "echo"})["toolCount"] == 7
+    assert _run(runtime, "call", {"name": "echo", "tool": "echo", "arguments": {"text": "x"}})["status"] == "ok"
+    assert repository.read_published("echo")["definition"] == released
+    assert all(item["transport"] == released["transport"] for item in opened)
+    assert not (directory / "secrets.json").exists()
+
+
+def test_global_replace_keeps_unsupplied_keys_and_moves_supplied_ones(runtime):
+    def add(env, replace=False):
+        server = {"name": "echo", "server": {**ECHO, "env": env}}
+        return _run(runtime, "add", {"global": True, "replace": replace, "servers": [server]})
+
+    add({"A": "${A}", "B": CONCRETE, "C": "${C}"})
+    _run(runtime, "configure", {"name": "echo", "global": True, "secrets": {"env": {"A": SECRET, "B": CONCRETE, "C": "c"}}})
+    replaced = add({"B": "${B}", "A": "a-plain"}, replace=True)
+
+    assert replaced["added"][0]["missingVariables"] == ["B"]
+    directory = repository.package_dir("echo")
+    assert json.loads((directory / "definition.json").read_text())["transport"]["env"] == {"B": "${B}", "C": "${C}"}
+    assert json.loads((directory / "secrets.json").read_text())["env"] == {"A": "a-plain", "C": "c"}
+
+
+def test_only_avibe_owned_global_servers_are_configurable(runtime):
+    configure = _run(runtime, "configure", {"name": "native-only", "global": True, "secrets": {"env": {"A": "b"}}})
+    assert configure["error"]["type"] == "usage"

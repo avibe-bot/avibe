@@ -74,7 +74,26 @@ const addFormFrame = (name: string, title: string, form: McpAddFormState) => ({
   render: addDialog('form', form),
 });
 
+const globalNeedsConfig = {
+  name: 'private-api', source: 'avibe' as const, scope: 'global', state: 'needs_config',
+  transport: 'http', url: 'https://${HOST}/mcp', missingVariables: ['HOST', 'TOKEN'],
+  placeholders: ['HOST', 'TOKEN'], auth: 'none' as const, toolCount: 0,
+};
+
 const designFrames = frames([
+  {
+    name: 'global-needs-config', title: 'MCP · Global configuration required',
+    width: 1192, height: 900, status: 'shipped',
+    route: '/skills?tab=mcp&mcp=private-api',
+    fixtures: hubFixtures([globalNeedsConfig]), render: skillsPage,
+  },
+  {
+    name: 'global-configure', title: 'MCP · Configure global variables',
+    width: 1192, height: 900, status: 'shipped',
+    route: '/skills?tab=mcp&mcp=private-api',
+    fixtures: hubFixtures([globalNeedsConfig]), render: skillsPage,
+    click: ['{t:mcpHub.configure}'],
+  },
   {
     name: 'list',
     title: 'MCP · 服务器列表',

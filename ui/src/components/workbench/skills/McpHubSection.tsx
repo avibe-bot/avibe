@@ -68,11 +68,10 @@ const STATE_BADGE: Record<string, 'success' | 'warning' | 'info' | 'destructive'
   needs_config: 'warning',
 };
 
-/** The same section header the Skills project view uses (icon · LABEL · hint). */
-/** A project row's state, as the API reports it; global rows keep their existing look. */
+/** Show project state and blocked Avibe-owned global configuration. */
 function McpStateBadge({ server }: { server: McpServerSummary }) {
   const { t } = useTranslation();
-  if (server.source !== 'project' || !server.state) return null;
+  if (!server.state || (server.source !== 'project' && server.state !== 'needs_config')) return null;
   const missing = server.state === 'needs_config' ? server.missingVariables ?? [] : [];
   return (
     <Badge variant={STATE_BADGE[server.state] ?? 'destructive'} className="text-[10px]">
@@ -177,7 +176,7 @@ export function McpServerDetail({
   const projectRow = current.source === 'project';
   const state = current.state ?? 'ok';
   // A project server has tools (and can be refreshed) once approved and configured.
-  const usable = !projectRow || !['pending_approval', 'needs_config'].includes(state);
+  const usable = !['pending_approval', 'needs_config'].includes(state);
   return (
     <div className="flex min-w-0 flex-col gap-3.5 self-start rounded-2xl border border-border-strong bg-surface p-5">
       <div className="flex items-start gap-3">
@@ -185,7 +184,7 @@ export function McpServerDetail({
           {current.transport === 'stdio' ? <Terminal className="size-5" /> : <Globe className="size-5" />}
         </span>
         <div className="flex min-w-0 flex-1 flex-col">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <span className="truncate font-mono text-[16px] font-bold text-foreground">{current.name}</span>
             <Badge className={clsx('font-mono text-[9px] uppercase', SOURCE_CHIP[current.source ?? 'avibe'])}>
               {t(`mcpHub.source.${current.source ?? 'avibe'}`)}
@@ -203,7 +202,7 @@ export function McpServerDetail({
           <X className="size-3.5" />
         </Button>
       </div>
-      {projectRow && (state === 'pending_approval' || state === 'needs_config') ? (
+      {(state === 'pending_approval' || state === 'needs_config') ? (
         <div className="rounded-[10px] border border-gold/40 bg-gold/10 px-3 py-2.5 text-[12px] text-foreground">
           {state === 'pending_approval'
             ? t('mcpHub.pendingApprovalHint')
@@ -252,7 +251,7 @@ export function McpServerDetail({
               {t('mcpHub.approve')}
             </Button>
           ) : null}
-          {projectRow && onConfigure ? (
+          {onConfigure ? (
             <Button type="button" variant={state === 'needs_config' ? 'brand' : 'outline'} size="xs" disabled={busy} onClick={onConfigure}>
               <KeyRound className="size-3.5" />
               {t('mcpHub.configure')}
@@ -886,7 +885,7 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null, se
 
   const onConfigure = async () => {
     const secrets = mcpConfigurePayload(configureEnv, configureHeaders);
-    if (!configureFor || !projectId || secrets === null) return;
+    if (!configureFor || secrets === null) return;
     const name = configureFor.name;
     setBusy(`configure:${name}`);
     setConfigureError(null);
@@ -1021,7 +1020,7 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null, se
             onRefresh={() => void onRefreshOne(current.name)}
             onRemove={() => setConfirmDelete(current)}
             onApprove={projectId ? () => setConfirmApprove(current) : undefined}
-            onConfigure={projectId ? () => openConfigure(current) : undefined}
+            onConfigure={current.source === 'project' || current.source === 'avibe' ? () => openConfigure(current) : undefined}
             onActivateLogin={onActivateLogin}
           />
         ) : null}

@@ -85,7 +85,8 @@ Non-goals:
   `secrets.json`, never `.mcp.json`. Non-secret values a team wants in the
   repository are written into `.mcp.json` by hand; Avibe does not inspect or
   sanitize values a user writes there. Committing the file is the user's choice.
-- **D6 Global unchanged.**
+- **D6 Global lifecycle (follow-up).** Avibe-owned globals now reuse the project placeholder validator, template/private-value split and configuration resolver. Global templates remain in the existing `mcp/<name>/definition.json`; private maps use `secrets.json` in that directory. Missing variables persist as `needs_config` without connecting or prompt/call availability. Owner configuration refreshes the server. Published/output definitions retain templates or redaction, never configured secret values. Legacy definitions remain readable; native imports keep their existing behavior. No new directory layout or database migration.
+
 
 ## 4. Files
 

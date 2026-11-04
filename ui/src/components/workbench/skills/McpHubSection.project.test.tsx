@@ -70,12 +70,12 @@ const servers: McpServerSummary[] = [
   { name: 'echo', source: 'avibe', scope: 'global', state: 'needs_login', auth: 'needs_login', transport: 'stdio', command: 'echo-mcp', toolCount: 1 },
 ];
 
-function renderHub() {
+function renderHub(project: typeof PROJECT | null = PROJECT) {
   return render(
     <MemoryRouter initialEntries={['/skills?tab=mcp&scope=project&project=proj_a']}>
       <I18nextProvider i18n={i18n}>
         <ToastProvider>
-          <McpHubSection project={PROJECT} />
+          <McpHubSection project={project} />
         </ToastProvider>
       </I18nextProvider>
     </MemoryRouter>,
@@ -101,6 +101,24 @@ afterEach(() => {
 });
 
 describe('McpHubSection project view', () => {
+  it('configures an Avibe global server without a project and hides refresh until configured', async () => {
+    api.listMcpServers.mockResolvedValue({ ok: true, servers: [row('global-api', 'needs_config', {
+      source: 'avibe', scope: 'global', missingVariables: ['HOST'], placeholders: ['HOST'], url: 'https://${HOST}/mcp',
+    })] });
+    api.configureMcp.mockResolvedValue({ ok: true, state: 'ok' });
+    renderHub(null);
+    await screen.findByText('global-api');
+    fireEvent.click(rowButton('global-api'));
+    expect(within(detail()).queryByRole('button', { name: en.mcpHub.refresh })).toBeNull();
+    fireEvent.click(within(detail()).getByRole('button', { name: en.mcpHub.configure }));
+    const dialog = screen.getByRole('dialog');
+    const value = within(dialog).getByLabelText(`${en.mcpHub.configureVariables} value`) as HTMLInputElement;
+    expect(value.value).toBe('');
+    fireEvent.change(value, { target: { value: 'api.example.invalid' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: en.mcpHub.configureSave }));
+    await waitFor(() => expect(api.configureMcp).toHaveBeenCalledWith('global-api', { env: { HOST: 'api.example.invalid' } }, null));
+  });
+
   it('renders each row state and its actions from the API row', async () => {
     renderHub();
     await screen.findByText('pending');
