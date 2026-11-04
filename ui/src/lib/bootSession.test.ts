@@ -32,4 +32,15 @@ describe('forgetting the boot session', () => {
     forgetBootSession();
     expect(readBootSession()).toBeNull();
   });
+
+  it('ignores a record written after another tab forgot it, by the generation it carries', () => {
+    recordBootSession(reader);
+    const lateWrite = window.localStorage.getItem('avibe.boot-session.v1');
+    expect(lateWrite).not.toBeNull();
+    // Another tab forgets between this tab's generation check and its write...
+    forgetBootSession();
+    // ...and the write lands afterwards.
+    window.localStorage.setItem('avibe.boot-session.v1', lateWrite!);
+    expect(readBootSession()).toBeNull();
+  });
 });

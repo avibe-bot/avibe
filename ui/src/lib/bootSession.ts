@@ -31,7 +31,10 @@ export const BOOT_SESSION_MAX_AGE_MS = 24 * 60 * 60 * 1000;
  *  old record claims. */
 export const BOOT_SESSION_HARD_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
 
-type BootSessionRecord = { version: 1; savedAt: number; session: unknown };
+// ``generation`` is the one the producing check captured. A record whose
+// generation is no longer current was voided after (or while) it was written:
+// another tab can forget between this tab's generation check and its write.
+type BootSessionRecord = { version: 2; savedAt: number; generation: number; session: unknown };
 
 // Set when sign-out begins. A guard check that started before it may still
 // answer ``ready`` while the logout request is out; it must not re-record the
@@ -58,7 +61,8 @@ export function readBootSession(now = Date.now()): SessionInfo | null {
     const raw = store.getItem(BOOT_SESSION_KEY);
     if (!raw) return null;
     const record = JSON.parse(raw) as Partial<BootSessionRecord>;
-    if (record.version !== 1 || typeof record.savedAt !== 'number') return null;
+    if (record.version !== 2 || typeof record.savedAt !== 'number') return null;
+    if (record.generation !== bootSessionGeneration()) return null;
     const age = now - record.savedAt;
     if (!(age >= 0 && age < BOOT_SESSION_HARD_MAX_AGE_MS)) return null;
     const session = normalizeSessionInfo(record.session);
@@ -97,7 +101,7 @@ export function recordBootSession(
   if (!store || recordingBlocked || !isReadyOutcome(session)) return;
   if (generation !== bootSessionGeneration()) return;
   try {
-    const record: BootSessionRecord = { version: 1, savedAt: now, session };
+    const record: BootSessionRecord = { version: 2, savedAt: now, generation, session };
     store.setItem(BOOT_SESSION_KEY, JSON.stringify(record));
   } catch {
     // Best-effort: without it the next cold start simply waits for the server.
