@@ -488,8 +488,15 @@ Known data limitations for P1:
   automatic opening path restores them. Input controls and text selection
   remain inside the input; the dock keeps its own keyboard and voice actions.
   Vibey's click, double-click, hold and drag semantics do not change.
-  Window blur does not dismiss the input. Transparent desktop pass-through
-  areas continue to deliver clicks to the underlying app, not to Mini.
+  Window blur does not dismiss the input.
+  **Follow-up decision, 2026-11-03 20:33:** while the text input is open
+  (and voice is not busy), blank space inside the Mini window also takes
+  clicks and dismisses the input. The first click belongs entirely to Mini;
+  it is not forwarded to the app underneath. Dismissal removes this capture
+  area and restores normal click-through for subsequent clicks. A transparent
+  full-window element reports a hit rectangle without a hover flag, below
+  the existing controls. It is not part of Vibey's hover or drag area.
+  Voice mode and closed-input blank space retain ordinary click-through.
   No change to automatic keyboard opening, voice capture, reply linger timing,
   hover/input holds, unread dots, right-click hiding, or session-switch draft
   ownership. Escape retains its explicit discard behavior below.
@@ -773,17 +780,27 @@ already communicate activity. Keep the upper-right red unread badge.
 
 ### 9.2 Click-through (verified in a spike)
 
-- Only the cards, the speech slot, the dock and Vibey take the mouse.
-  Everything else passes clicks to whatever is below.
+- Normally only the cards, the speech slot, the dock and Vibey take the mouse.
+  While the text input is shown without active voice capture, a transparent
+  full-window hit area also takes the mouse (owner decision, 2026-11-03 20:33).
+  A blank-space click dismisses the input after pointer-up and is consumed
+  entirely by Mini; the next click can pass to the app underneath. Removing
+  the input removes the extra hit area through the existing region reporter.
+  The full-window rectangle has no hover flag, so native `hovering()` still
+  considers only Vibey and its dock. No Rust changes or new event channel.
 - **One mechanism on every platform:**
   - The page reports its hit rects (window-local logical px) to the shell
     whenever layout changes: ResizeObserver, plus after state changes.
   - The shell polls the cursor (`AppHandle::cursor_position`), converts it to
     window-local logical px, and toggles `set_ignore_cursor_events(!inside)`
     on the main thread, only when the value changes.
-- **Why not native:** on macOS, fully transparent pixels pass clicks through,
-  but semi-transparent pixels (card shadows) catch them; this was verified.
-  Windows and Linux have no native pass-through.
+- **Why explicit regions:** pixel transparency is not the input contract.
+  A native macOS transparent WKWebView probe (2026-11-03) received a click
+  with mouse events enabled, removed its transparent capture element after
+  that click, and enabled `ignoresMouseEvents`: the first click reached only
+  the WebView, and the next reached only the test window underneath.
+  Browser tests verify the real Mini's full-window region lifecycle and
+  hover exclusion; the existing shell consumes those regions on every platform.
 - **Cost:**
   - poll every 16ms only while the cursor is inside the window bounds;
   - back off to about 100ms when the cursor is outside them;
