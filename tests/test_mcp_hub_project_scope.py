@@ -725,3 +725,17 @@ def test_cli_approve_prints_a_confirmation(tmp_path, monkeypatch, capsys, runtim
     capsys.readouterr()
     assert mcp_cli.main(["remote", "--approve"]) == 0
     assert "Approved remote" in capsys.readouterr().out
+
+
+def test_project_add_and_replace_preserve_oauth_options(tmp_path, runtime):
+    root = _project(tmp_path / "repo", {})
+    for client_id, scopes in [("first-client", "read"), ("replacement-client", "read write")]:
+        oauth = {"clientId": client_id, "scopes": scopes}
+        result = _run(runtime, "add", {
+            "workingDirectory": str(root),
+            "replace": True,
+            "servers": [{"name": "remote", "server": {"url": "https://example.invalid/mcp", "oauth": oauth}}],
+        })
+        assert result["ok"]
+        written = json.loads((root / ".mcp.json").read_text())
+        assert written["mcpServers"]["remote"]["oauth"] == oauth
