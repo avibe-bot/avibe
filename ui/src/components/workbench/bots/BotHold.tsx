@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 
@@ -45,6 +45,9 @@ export function BotHoldProvider({ children }: { children: ReactNode }) {
     },
     onTap: () => tapRef.current?.(),
     gesture: (pointerType) => (pointerType === 'mouse' ? MOUSE_HOLD_GESTURE : {}),
+    // The system taking the press (blur, background, a lost pointer) keeps what was heard, as the
+    // composer's hold does: the card offers to send, retry, or discard it.
+    onSystemInterrupt: 'interrupt',
   });
   // A Bot does not move under the avatar being held (D13), nor while its take waits on the reader.
   useBotOrderHold(hold.phase !== 'idle');
@@ -80,6 +83,13 @@ export function BotHoldProvider({ children }: { children: ReactNode }) {
 
   const heldBot = target ? botForHandle(target.handle) : undefined;
   const face = heldBot ? { name: displayName(heldBot), avatar: heldBot.avatar } : null;
+  // A take whose Bot is gone (removed while its take waited) has nowhere to go: it is discarded, so
+  // the one hold every avatar shares is free again rather than waiting on a card nobody can see.
+  const { discard } = hold;
+  const orphaned = Boolean(target) && !heldBot && phase !== 'idle';
+  useEffect(() => {
+    if (orphaned) discard();
+  }, [orphaned, discard]);
   return (
     <BotHoldContext.Provider value={value}>
       {children}
@@ -103,7 +113,8 @@ export function BotHoldProvider({ children }: { children: ReactNode }) {
 /** The held avatar and its strip's row of avatars as they stand now: a strip's avatar carries
  *  `data-bot-hold-anchor`, its row `data-bot-strip-row`. */
 function findAnchor(handle: string): { avatar: DOMRect; strip: DOMRect } | null {
-  const avatar = [...document.querySelectorAll<HTMLElement>(`[data-bot-hold-anchor="${CSS.escape(handle)}"]`)]
+  // A handle is lowercase ASCII letters, digits, and hyphens (bots.md D2): safe in the selector as is.
+  const avatar = [...document.querySelectorAll<HTMLElement>(`[data-bot-hold-anchor="${handle}"]`)]
     .find((element) => element.getClientRects().length > 0);
   const strip = avatar?.closest('[data-bot-strip-row]');
   return avatar && strip ? { avatar: avatar.getBoundingClientRect(), strip: strip.getBoundingClientRect() } : null;

@@ -80,6 +80,26 @@ test.describe('with a mouse', () => {
   });
 });
 
+test('a take the system interrupts keeps its words, and Send posts them to that Bot', async ({ page }) => {
+  const region = await strip(page);
+  const at = await centerOf(region.getByRole('button', { name: 'Product' }));
+
+  await page.mouse.move(at.x, at.y);
+  await page.mouse.down();
+  await expect(page.getByRole('dialog', { name: 'To Product' })).toBeVisible();
+  await page.waitForTimeout(1_000);
+  // The window loses focus mid-take (another app, a notification): nothing is sent or lost.
+  await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+  const card = page.getByRole('dialog', { name: 'To Product' });
+  await expect(card).toContainText('Send this transcript');
+  await page.mouse.up();
+  expect(await posted(page)).toEqual([]);
+  await card.getByRole('button', { name: en.voice.send }).click();
+  await expect.poll(() => posted(page)).toEqual([
+    { session: 'ses_pm', text: 'Send this transcript', metadata: { input: 'voice' } },
+  ]);
+});
+
 test.describe('with a finger', () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
