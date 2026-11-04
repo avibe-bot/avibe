@@ -247,7 +247,7 @@ def test_mcp_hub_oauth_login_completes_through_owner_callback(monkeypatch, tmp_p
 
 
 def test_mcp_hub_same_name_oauth_logins_stay_in_their_scope(monkeypatch, tmp_path):
-    """Scenario: AUTH-SETUP-138 — global and project `github` logins keep separate pending grants, tokens and return views."""
+    """Scenario: AUTH-SETUP-138 — global and project `github` configure templates, then keep separate grants, tokens and return views."""
     from tests.scenario_harness.core import BaseScenarioHarness, ScenarioExpect, ScenarioRunner
     from tests.test_mcp_hub_oauth import _LoopbackOauth
     from core.mcp_hub import oauth as mcp_oauth
@@ -266,7 +266,7 @@ def test_mcp_hub_same_name_oauth_logins_stay_in_their_scope(monkeypatch, tmp_pat
         server.start()
     root = tmp_path / "repo"
     root.mkdir()
-    (root / ".mcp.json").write_text(json.dumps({"mcpServers": {"github": {"url": f"{servers['project'].origin}/mcp"}}}))
+    (root / ".mcp.json").write_text(json.dumps({"mcpServers": {"github": {"url": "${MCP_URL}"}}}))
     ensure_sqlite_state()
     with create_sqlite_engine().begin() as conn:
         project_id = projects_service.create_project(conn, str(root))["id"]
@@ -295,11 +295,18 @@ def test_mcp_hub_same_name_oauth_logins_stay_in_their_scope(monkeypatch, tmp_pat
         }
 
     def start(_h):
-        text = json.dumps({"mcpServers": {"github": {"url": f"{servers['global'].origin}/mcp"}}})
+        text = json.dumps({"mcpServers": {"github": {"url": "${MCP_URL}"}}})
         assert client.post("/api/mcp", json={"text": text}, headers=headers).get_json()["ok"]
         approved = client.post(f"/api/mcp/github/approve{query['project']}", headers=headers).get_json()
         assert approved["ok"], approved
+        assert states() == {"global": "needs_config", "project": "needs_config"}
         for scope in ("global", "project"):
+            configured = client.post(f"/api/mcp/github/configure{query[scope]}", json={
+                "env": {"MCP_URL": f"{servers[scope].origin}/mcp"},
+            }, headers=headers).get_json()
+            assert configured["ok"], configured
+            detail = client.get(f"/api/mcp/github{query[scope]}").get_json()
+            assert detail["server"]["url"] == "${MCP_URL}"
             response = client.get(f"/api/mcp/github/oauth/start{query[scope]}", headers={"Sec-Fetch-Site": "same-origin"})
             assert response.status_code == 302
             assert response.headers["Location"].startswith(f"{servers[scope].origin}/authorize?")

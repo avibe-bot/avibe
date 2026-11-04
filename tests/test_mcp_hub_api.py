@@ -109,7 +109,7 @@ def test_needs_login_package_lists_and_details_without_500(owner):
         "name": "suno",
         "transport": {"type": "http", "url": "https://api.example/mcp"},
     }
-    repository.write_definition(definition)
+    repository.write_avibe_definition(definition)
     repository.publish(
         "suno",
         definition=definition,
@@ -284,3 +284,54 @@ def test_oauth_start_unknown_server_renders_html_error(owner):
     assert response.status_code == 400
     assert response.headers["Content-Type"].startswith("text/html")
     assert owner._pending_logins == {}
+
+
+def test_global_template_add_and_configure_use_the_owner_api(owner):
+    """The Web parser must accept the same templates as the shared runtime loader."""
+    client = app.test_client()
+    headers = csrf_headers(client)
+    text = json.dumps({'mcpServers': {'templated': {
+        'command': sys.executable, 'args': [FIXTURE], 'env': {'ECHO_TOKEN': '${TOKEN}'},
+    }}})
+    added = client.post('/api/mcp', json={'text': text}, headers=headers).get_json()
+    assert added['ok'] and added['added'][0]['state'] == 'needs_config'
+    detail = client.get('/api/mcp/templated').get_json()
+    assert detail['server']['missingVariables'] == ['TOKEN']
+    configured = client.post('/api/mcp/templated/configure', json={'env': {'TOKEN': 'private-fixture'}}, headers=headers)
+    assert configured.get_json()['ok']
+    detail = client.get('/api/mcp/templated').get_json()
+    assert detail['server']['state'] == 'ok' and detail['server']['toolCount'] == 7
+    assert 'private-fixture' not in json.dumps(detail)
+
+
+def test_owned_discovery_error_is_localized_for_web_but_cli_stays_english(owner, monkeypatch, tmp_path, capsys):
+    """Web renders the shared message key; the CLI must not adopt the UI language."""
+    import asyncio
+    from vibe import mcp_cli
+    from core.mcp_hub.errors import McpHubError
+
+    config = save_config(tmp_path)
+    config.language = 'zh'
+    config.save()
+
+    async def fail(*_):
+        raise McpHubError('connection', 'https://example.invalid/private-token')
+    monkeypatch.setattr(owner, '_discover', fail)
+    client = app.test_client()
+    headers = csrf_headers(client)
+    text = json.dumps({'mcpServers': {'broken': {'url': 'https://example.invalid/mcp'}}})
+    added = client.post('/api/mcp', json={'text': text}, headers=headers).get_json()
+    expected = 'MCP 发现失败；请检查服务器配置后重试。'
+    assert added['failed'][0]['error'] == expected
+    assert added['error']['message'] == f'broken: {expected}'
+    refreshed = client.post('/api/mcp/broken/refresh', headers=headers).get_json()
+    assert refreshed['error']['message'] == expected
+    assert 'private-token' not in json.dumps(added) + json.dumps(refreshed)
+
+    def forward(operation, payload, **_):
+        _, body = asyncio.run(owner.submit(operation, payload))
+        return json.loads(body)
+    monkeypatch.setattr(internal_client, 'mcp_request_sync', forward)
+    monkeypatch.setattr(mcp_cli, '_admit', lambda _: None)
+    assert mcp_cli.main(['broken', '--refresh']) == 1
+    assert 'MCP discovery failed; check the server configuration and retry.' in capsys.readouterr().err

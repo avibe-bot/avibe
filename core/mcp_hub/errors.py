@@ -16,10 +16,12 @@ class McpHubError(Exception):
         field: Optional[str] = None,
         hint: Optional[str] = None,
         usage: bool = False,
+        message_key: Optional[str] = None,
     ) -> None:
         super().__init__(message)
         self.type = type
         self.message = message
+        self.message_key = message_key
         self.field = field
         self.hint = hint
         # Usage errors exit 2 at the CLI; everything else exits 1.
@@ -27,6 +29,8 @@ class McpHubError(Exception):
 
     def payload(self) -> dict[str, Any]:
         data: dict[str, Any] = {"type": self.type, "message": self.message}
+        if self.message_key:
+            data["messageKey"] = self.message_key
         if self.field:
             data["field"] = self.field
         if self.hint:
@@ -45,4 +49,5 @@ class McpHubError(Exception):
             field=data.get("field"),
             hint=data.get("hint"),
             usage=data.get("usage") is True,
+            message_key=data.get("messageKey"),
         )

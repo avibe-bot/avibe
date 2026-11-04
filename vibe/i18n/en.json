@@ -1,4 +1,8 @@
 {
+  "mcp": {
+    "configure_owned_only": "Configure applies only to Avibe-owned servers.",
+    "discovery_failed": "MCP discovery failed; check the server configuration and retry."
+  },
   "backendConnection": {
     "applyOnStart": "Configuration will apply on next start.",
     "applyUnacknowledged": "Backend refresh was not acknowledged by the controller.",

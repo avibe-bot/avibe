@@ -31,8 +31,7 @@ export function MainBotHoldOverlay({ hold, bot }: { hold: Hold; bot: MainBot }) 
   if (phase === 'idle' || phase === 'pressing' || failedQuietly(hold)) return null;
   const holding = phase === 'listening' || phase === 'recording' || phase === 'armed';
   return (
-    <div className="md:hidden" role="dialog" aria-modal="true" aria-label={t('voice.to', { name: bot.name })}>
-      <div className="fixed inset-x-0 top-0 bottom-(--mobile-nav-height) z-40 bg-background/80 backdrop-blur-sm" />
+    <div className="md:hidden" role="dialog" aria-label={t('voice.to', { name: bot.name })}>
       <div className="fixed inset-x-0 bottom-(--mobile-nav-height) z-50 flex flex-col items-center gap-5 px-5 pb-10">
         <VoiceCard
           to={{ name: bot.name, avatar: bot.avatar }}
@@ -61,8 +60,10 @@ export function MainBotHoldOverlay({ hold, bot }: { hold: Hold; bot: MainBot }) 
 const TOAST_MS = 4_000;
 
 /** What the last press led to, as one toast above the bar. Errors leave typing as the way on:
- *  a tap on the main Bot opens its conversation. */
-export function MainBotVoiceToast({ hold, bot, onView }: { hold: Hold; bot: MainBot; onView: () => void }) {
+ *  a tap on the main Bot opens its conversation. `bar`: the phone tab bar's center, which only a
+ *  phone has. `shell`: a Bot's avatar anywhere, so a desktop shows it too, where the app's toasts
+ *  go (bottom right). */
+export function MainBotVoiceToast({ hold, bot, onView, placement = 'bar' }: { hold: Hold; bot: MainBot; onView: () => void; placement?: 'bar' | 'shell' }) {
   const { t } = useTranslation();
   const { outcome, dismiss } = hold;
   const failed = failedQuietly(hold);
@@ -74,7 +75,13 @@ export function MainBotVoiceToast({ hold, bot, onView }: { hold: Hold; bot: Main
   if (!outcome && !failed) return null;
   const tone = outcome === 'denied' || failed ? 'border-destructive/35' : outcome === 'sent' ? 'border-mint/40 shadow-glow-md-mint' : 'border-border-strong';
   return (
-    <div className="pointer-events-none fixed inset-x-0 bottom-(--mobile-nav-height) z-50 flex justify-center px-4 pb-9 md:hidden" role="status">
+    <div
+      className={clsx(
+        'pointer-events-none fixed inset-x-0 bottom-(--mobile-nav-height) z-50 flex justify-center px-4 pb-9',
+        placement === 'bar' ? 'md:hidden' : 'md:inset-x-auto md:right-4 md:bottom-4 md:w-sm md:px-0 md:pb-0',
+      )}
+      role="status"
+    >
       <div className={clsx('pointer-events-auto flex w-full max-w-sm items-start gap-3 rounded-2xl border bg-surface-2 px-3.5 py-3 shadow-xl', tone)}>
         {outcome === 'sent' && <BotAvatar avatar={bot.avatar} name={bot.name} size={28} />}
         {outcome === 'cancelled' && <Undo2 className="mt-0.5 size-4 shrink-0 text-muted" />}

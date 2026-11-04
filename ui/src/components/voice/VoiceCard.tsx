@@ -70,71 +70,77 @@ export function VoiceCard({
     'send-failed': t('voice.interrupted.sendFailed'),
   };
   return (
-    <div
-      className={clsx(
-        'flex w-full flex-col gap-3 rounded-3xl border bg-surface p-4 shadow-xl transition',
-        armed && 'border-destructive/40 opacity-60',
-        interrupted && 'border-gold/45',
-        !armed && !interrupted && 'border-mint/35 shadow-glow-md-mint',
-      )}
-    >
-      <div className="flex items-center gap-2 text-xs">
-        {to.avatar !== undefined ? (
-          <BotAvatar avatar={to.avatar} name={to.name} size={22} />
-        ) : (
-          <span className="grid size-5.5 place-items-center rounded-full bg-surface-2 text-muted">
-            <MessagesSquare className="size-3" />
-          </span>
+    // The page right around the card is dimmed and blurred, strongest at its edge and clear a short
+    // way out (`.voice-card-halo`), so the rest of the screen stays readable while the user talks
+    // (owner decision, 2026-11-04). Every hold-to-talk draws this card, so they all share it.
+    <div className="relative w-full">
+      <div className="voice-card-halo" aria-hidden="true" />
+      <div
+        className={clsx(
+          'flex w-full flex-col gap-3 rounded-3xl border bg-surface p-4 shadow-xl transition',
+          armed && 'border-destructive/40 opacity-60',
+          interrupted && 'border-gold/45',
+          !armed && !interrupted && 'border-mint/35 shadow-glow-md-mint',
         )}
-        <span className="min-w-0 truncate font-semibold text-foreground">{to.title ?? t('voice.to', { name: to.name })}</span>
-        <span className="flex-1" />
-        {interrupted ? (
-          <span className="rounded-full bg-gold-soft px-2 py-0.5 font-semibold text-gold-ink">{t('voice.cutOff')}</span>
-        ) : (
-          <span className={clsx('font-mono', armed ? 'text-destructive-ink' : 'text-muted')}>{clock(seconds)}</span>
-        )}
-      </div>
-      <div className="relative">
-        <div ref={scroller} className={clsx('max-h-40', running ? 'overflow-hidden' : 'overflow-y-auto')} aria-live="polite">
-          <p className={clsx('min-h-14 text-lg leading-relaxed', armed && 'line-through decoration-destructive/60')}>
-            {text || stash ? (
-              <>
-                <span className="text-foreground">{text}</span>
-                <span className="text-muted">{stash}</span>
-              </>
-            ) : (
-              <span className="text-muted">{t('pet.voice.listening')}</span>
-            )}
-          </p>
+      >
+        <div className="flex items-center gap-2 text-xs">
+          {to.avatar !== undefined ? (
+            <BotAvatar avatar={to.avatar} name={to.name} size={22} />
+          ) : (
+            <span className="grid size-5.5 place-items-center rounded-full bg-surface-2 text-muted">
+              <MessagesSquare className="size-3" />
+            </span>
+          )}
+          <span className="min-w-0 truncate font-semibold text-foreground">{to.title ?? t('voice.to', { name: to.name })}</span>
+          <span className="flex-1" />
+          {interrupted ? (
+            <span className="rounded-full bg-gold-soft px-2 py-0.5 font-semibold text-gold-ink">{t('voice.cutOff')}</span>
+          ) : (
+            <span className={clsx('font-mono', armed ? 'text-destructive-ink' : 'text-muted')}>{clock(seconds)}</span>
+          )}
         </div>
-        <div ref={fade} hidden className="pointer-events-none absolute inset-x-0 top-0 h-10 bg-linear-to-b from-surface to-transparent" aria-hidden="true" />
-      </div>
-      {phase === 'settling' && (
-        <div className="flex items-center gap-2 text-xs text-mint-ink">
-          <Loader2 className="size-3.5 animate-spin" />
-          {t('pet.voice.finishing')}
-        </div>
-      )}
-      {interrupted && (
-        <div className="flex flex-col gap-3">
-          <div className="flex items-start gap-2 text-xs leading-relaxed text-foreground">
-            <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-gold-ink" />
-            {reasonCopy[reason]}
+        <div className="relative">
+          <div ref={scroller} className={clsx('max-h-40', running ? 'overflow-hidden' : 'overflow-y-auto')} aria-live="polite">
+            <p className={clsx('min-h-14 text-lg leading-relaxed', armed && 'line-through decoration-destructive/60')}>
+              {text || stash ? (
+                <>
+                  <span className="text-foreground">{text}</span>
+                  <span className="text-muted">{stash}</span>
+                </>
+              ) : (
+                <span className="text-muted">{t('pet.voice.listening')}</span>
+              )}
+            </p>
           </div>
-          {actions && <div className="flex justify-end gap-2">{actions}</div>}
+          <div ref={fade} hidden className="pointer-events-none absolute inset-x-0 top-0 h-10 bg-linear-to-b from-surface to-transparent" aria-hidden="true" />
         </div>
-      )}
-      {running && (
-        <div className="flex h-4 items-center gap-1" aria-hidden="true">
-          {LEVELS.map((level, index) => (
-            <span
-              key={index}
-              className={clsx('w-1 rounded-full', level, armed ? 'bg-muted' : 'bg-mint motion-safe:animate-pulse')}
-              style={armed ? undefined : { animationDelay: `${(index % 5) * 120}ms` }}
-            />
-          ))}
-        </div>
-      )}
+        {phase === 'settling' && (
+          <div className="flex items-center gap-2 text-xs text-mint-ink">
+            <Loader2 className="size-3.5 animate-spin" />
+            {t('pet.voice.finishing')}
+          </div>
+        )}
+        {interrupted && (
+          <div className="flex flex-col gap-3">
+            <div className="flex items-start gap-2 text-xs leading-relaxed text-foreground">
+              <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-gold-ink" />
+              {reasonCopy[reason]}
+            </div>
+            {actions && <div className="flex justify-end gap-2">{actions}</div>}
+          </div>
+        )}
+        {running && (
+          <div className="flex h-4 items-center gap-1" aria-hidden="true">
+            {LEVELS.map((level, index) => (
+              <span
+                key={index}
+                className={clsx('w-1 rounded-full', level, armed ? 'bg-muted' : 'bg-mint motion-safe:animate-pulse')}
+                style={armed ? undefined : { animationDelay: `${(index % 5) * 120}ms` }}
+              />
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

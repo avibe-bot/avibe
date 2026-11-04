@@ -11,6 +11,7 @@ declare global {
       sent: string[];
       spoken: { text: string; metadata: Record<string, unknown> }[];
       opened: number;
+      posted: { session: string; text: string; metadata: Record<string, unknown> }[];
     };
   }
 }

@@ -23,11 +23,6 @@ export type HoldPointer = 'mouse' | 'touch';
 
 const live = (phase: ComposerHoldView['phase']) => phase === 'listening' || phase === 'recording' || phase === 'armed';
 
-/** The page behind a held composer, dimmed (the desktop sidebar stays as it is). */
-export function ComposerHoldDim() {
-  return <div className="fixed inset-0 z-40 bg-background/80 backdrop-blur-sm md:left-(--app-sidebar-w)" aria-hidden="true" />;
-}
-
 // How long a note that needs nothing stays up.
 const NOTE_MS = 3_000;
 
@@ -118,8 +113,9 @@ export function ComposerHoldCard({
   );
 }
 
-/** With a mouse there is nothing to slide to: release sends, leaving the box or Esc cancels. */
-function MouseHint({ armed }: { armed: boolean }) {
+/** With a mouse there is nothing to slide to: release sends, leaving the box or Esc cancels.
+ *  `box` is what is held, which the hint names: the composer, or a Bot's avatar. */
+export function MouseHint({ armed, box = 'composer' }: { armed: boolean; box?: 'composer' | 'avatar' }) {
   const { t } = useTranslation();
   return (
     <span
@@ -129,10 +125,10 @@ function MouseHint({ armed }: { armed: boolean }) {
       )}
     >
       {armed ? (
-        t('voice.composer.mouseArmed')
+        t(box === 'avatar' ? 'voice.avatar.mouseArmed' : 'voice.composer.mouseArmed')
       ) : (
         <Trans
-          i18nKey="voice.composer.mouseHint"
+          i18nKey={box === 'avatar' ? 'voice.avatar.mouseHint' : 'voice.composer.mouseHint'}
           components={{ key: <kbd className="rounded border border-border-strong bg-surface-2 px-1 font-mono text-2xs text-foreground" /> }}
         />
       )}
@@ -230,7 +226,8 @@ export function ComposerHoldSurface({
   );
 }
 
-function PressRing({ progress }: { progress: number }) {
+/** The ring a mouse press fills, from the gesture's ring delay to its hold. */
+export function PressRing({ progress }: { progress: number }) {
   const circumference = 2 * Math.PI * 15;
   return (
     <span className="relative grid size-9 place-items-center rounded-full bg-surface shadow-glow-sm-mint">

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { MessageCircle, Pencil, Plus, UserMinus } from 'lucide-react';
+import { Loader2, MessageCircle, Mic, Pencil, Plus, UserMinus } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useApi } from '../../../context/ApiContext';
@@ -13,6 +13,8 @@ import { formatRelativeTime } from '@/lib/relativeTime';
 import { Popover, PopoverAnchor, PopoverContent } from '../../ui/popover';
 import { BotAvatar } from '../../ui/bot-avatar';
 import { PageSectionTitle } from '../PageSectionTitle';
+import { PressRing } from '../../voice/ComposerHold';
+import { holdIsLive, useBotHold, type HeldBot } from './BotHoldContext';
 import { RemoveBotDialog } from './RemoveBotDialog';
 
 // A slot is 50px wide (the 40px avatar, its 2px ring, and room for the name) with
@@ -93,6 +95,24 @@ export const BotStrip: React.FC<{
   // The pointer on the strip holds the order (D13): nothing moves under it.
   const [pointerInside, setPointerInside] = useState(false);
   useBotOrderHold(pointerInside);
+  // Once a hold has the microphone, the finger moving is the hold's (slide up to cancel), not a
+  // scroll of the strip or the page. Before that, a move is the page's: it scrolls, and the hold
+  // gives the press back. React's touch listeners are passive, so this one is attached here.
+  const { held } = useBotHold();
+  const sectionRef = useRef<HTMLElement | null>(null);
+  const recordingRef = useRef(false);
+  useEffect(() => {
+    recordingRef.current = held !== null && held.phase !== 'pressing' && holdIsLive(held.phase);
+  }, [held]);
+  useEffect(() => {
+    const section = sectionRef.current;
+    if (!section) return;
+    const onTouchMove = (event: TouchEvent) => {
+      if (recordingRef.current && event.cancelable) event.preventDefault();
+    };
+    section.addEventListener('touchmove', onTouchMove, { passive: false });
+    return () => section.removeEventListener('touchmove', onTouchMove);
+  }, [enabled]);
   useSlideOnReorder(scrollerRef, bots.map((bot) => bot.handle).join(' '));
   // Scrolling takes the hover card away at once, and no card opens again until
   // the pointer itself moves onto an avatar: a scroll slides avatars under a
@@ -177,6 +197,7 @@ export const BotStrip: React.FC<{
 
   return (
     <section
+      ref={sectionRef}
       aria-label={t('bots.sectionLabel')}
       className={clsx('flex shrink-0 flex-col', placement === 'sidebar' ? 'mb-2.5 gap-1' : 'gap-0')}
       onPointerEnter={() => setPointerInside(true)}
@@ -196,7 +217,7 @@ export const BotStrip: React.FC<{
       ) : (
         <PageSectionTitle title={t('bots.sectionLabel')} />
       )}
-      <div ref={rowRef} className="flex min-w-0 items-start">
+      <div ref={rowRef} data-bot-strip-row="" className="flex min-w-0 items-start">
         <div
           ref={scrollerRef}
           onScroll={onStripScroll}
@@ -229,6 +250,61 @@ export const BotStrip: React.FC<{
   );
 };
 
+/** The avatar while it is held, as the tab bar's center is: pressed (a finger), recording, about to
+ *  cancel, or sending (ui/design: sidebar/bots/hold-*). */
+const holdFaceClass = (held: HeldBot) => {
+  switch (held.phase) {
+    case 'pressing':
+      return held.pointer === 'touch' ? 'scale-95' : undefined;
+    case 'listening':
+    case 'recording':
+      return 'shadow-glow-md-mint ring-2 ring-mint';
+    case 'armed':
+      return 'opacity-70 ring-2 ring-destructive/70';
+    case 'settling':
+      return 'ring-2 ring-mint';
+    default:
+      return undefined;
+  }
+};
+
+/** What sits on the held avatar: a mouse's press ring while it fills, then the microphone, red when
+ *  a release would cancel, and the spinner while the take is sent. */
+function HoldMark({ held }: { held: HeldBot }) {
+  if (held.phase === 'pressing') {
+    if (held.pointer !== 'mouse' || held.progress <= 0) return null;
+    return (
+      <span className="pointer-events-none absolute inset-0 grid place-items-center" aria-hidden="true">
+        <PressRing progress={held.progress} />
+      </span>
+    );
+  }
+  if (held.phase === 'settling') {
+    return (
+      <span className="absolute -bottom-0.5 -right-0.5 grid size-4 place-items-center rounded-full bg-surface text-mint-ink" aria-hidden="true">
+        <Loader2 className="size-3 animate-spin" />
+      </span>
+    );
+  }
+  if (!holdIsLive(held.phase)) return null;
+  return (
+    <>
+      {held.phase !== 'armed' && (
+        <span className="pointer-events-none absolute inset-0.5 animate-ping rounded-full border-2 border-mint/50 motion-reduce:animate-none" aria-hidden="true" />
+      )}
+      <span
+        className={clsx(
+          'absolute -bottom-0.5 -right-0.5 grid size-4 place-items-center rounded-full text-primary-foreground',
+          held.phase === 'armed' ? 'bg-destructive' : 'bg-mint',
+        )}
+        aria-hidden="true"
+      >
+        <Mic className="size-2.5" />
+      </span>
+    </>
+  );
+}
+
 const RUNNING_DOT = (
   <span className="absolute -bottom-0.5 -right-0.5 grid size-3.5 place-items-center rounded-full bg-[var(--sidebar-background)]">
     <span className="relative size-2">
@@ -255,6 +331,8 @@ type BotSlotProps = {
 
 const BotSlot: React.FC<BotSlotProps> = ({ bot, index, name, unread, status, scrollEpoch, admitsHover, onRemove }) => {
   const { t } = useTranslation();
+  const { held, bind } = useBotHold();
+  const heldHere = held?.handle === bot.handle ? held : null;
   const api = useApi();
   const navigate = useNavigate();
   const location = useLocation();
@@ -290,7 +368,7 @@ const BotSlot: React.FC<BotSlotProps> = ({ bot, index, name, unread, status, scr
   useEffect(() => clearTimers, []);
 
   const queueOpen = (event: React.MouseEvent) => {
-    if (menuOpen || !admitsHover(event)) return;
+    if (menuOpen || held || !admitsHover(event)) return;
     if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
     closeTimer.current = null;
     if (hoverOpen || openTimer.current !== null) return;
@@ -339,7 +417,10 @@ const BotSlot: React.FC<BotSlotProps> = ({ bot, index, name, unread, status, scr
   };
 
   const label = unread > 0 ? t('bots.slotLabelUnread', { name, count: unread }) : name;
-  const showCard = hoverOpen && !menuOpen;
+  const showCard = hoverOpen && !menuOpen && !held;
+  // Hold to talk (BotHold): the press is the hold's until it is a tap, a scroll, or a right-click.
+  const hold = bind?.(bot);
+  const voice = heldHere !== null && heldHere.phase !== 'pressing' && heldHere.phase !== 'interrupted';
   // A card or menu open over the strip holds the order, also once the pointer is on it (D13).
   useBotOrderHold(showCard || menuOpen);
   return (
@@ -362,8 +443,28 @@ const BotSlot: React.FC<BotSlotProps> = ({ bot, index, name, unread, status, scr
         >
           <button
             type="button"
-            onClick={open}
+            data-bot-hold-anchor={bot.handle}
+            onPointerMove={hold?.onPointerMove}
+            onPointerUp={hold?.onPointerUp}
+            onPointerCancel={hold?.onPointerCancel}
+            onLostPointerCapture={hold?.onLostPointerCapture}
+            style={hold?.style}
+            onPointerDown={(event) => {
+              // A hold starting takes the card away.
+              if (event.button === 0) {
+                clearTimers();
+                setHoverOpen(false);
+              }
+              hold?.onPointerDown(event, open);
+            }}
+            onClick={(event) => {
+              hold?.onClick(event);
+              if (!event.defaultPrevented) open();
+            }}
             onContextMenu={(event) => {
+              // A long press the hold has (a phone's menu gesture) is not the menu.
+              hold?.onContextMenu(event);
+              if (event.defaultPrevented) return;
               event.preventDefault();
               clearTimers();
               setHoverOpen(false);
@@ -375,13 +476,21 @@ const BotSlot: React.FC<BotSlotProps> = ({ bot, index, name, unread, status, scr
           >
             {/* The open Bot's own edge lights up (the shared selected look); a hovered
                 one shows a quiet edge in the same place. */}
-            <BotAvatar avatar={bot.avatar} name={name} size={40} inList selected={selected} className="transition-shadow" />
-            {unread > 0 && (
+            <BotAvatar
+              avatar={bot.avatar}
+              name={name}
+              size={40}
+              inList
+              selected={selected && !voice}
+              className={clsx('transition', heldHere && holdFaceClass(heldHere))}
+            />
+            {unread > 0 && !voice && (
               <span className="absolute -right-1.5 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-cyan px-1 font-mono text-[9px] font-bold text-accent-foreground shadow-glow-xs-cyan">
                 {unreadLabel(unread)}
               </span>
             )}
-            {running && RUNNING_DOT}
+            {running && !voice && RUNNING_DOT}
+            {heldHere && <HoldMark held={heldHere} />}
           </button>
           <span
             className={clsx(

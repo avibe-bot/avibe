@@ -37,6 +37,14 @@
   --mobile-nav-height: calc(4.75rem + env(safe-area-inset-bottom));
   /* The home-indicator inset alone, for padding a bottom edge clear of it. */
   --safe-area-bottom: env(safe-area-inset-bottom);
+  /* How far the hold-to-talk card's halo reaches past its edge (`.voice-card-halo`): a phone's
+     screen is small, so its halo is half a desktop's. */
+  --voice-card-halo: 28px;
+}
+@media (min-width: 768px) {
+  :root {
+    --voice-card-halo: 56px;
+  }
 }
 
 /* Height of the desktop shell's overlay title bar. On macOS the shell draws the
@@ -1239,6 +1247,27 @@ pre,
    left (where nothing else is drawn) and pads the avatars back to where they sat:
    2px aside and below, 6px above. The room it borrows on the left fades in, so a
    scrolled avatar does not show past the strip's edge. */
+/* The hold-to-talk card's halo (VoiceCard, owner decision 2026-11-04): instead of the whole page,
+   only the page right around the card is dimmed and blurred, strongest at the card's edge and
+   clear `--voice-card-halo` away, so the rest of the screen stays readable while the user talks.
+   It sits under the card and under the cancel hint beside it (a negative z-index in the card
+   layer's stacking context), so both stay sharp. */
+.voice-card-halo {
+  /* Opaque at the card's edge, falling off fast, gone at the halo's own edge; on both axes. */
+  --voice-card-halo-x: linear-gradient(to right, transparent, rgb(0 0 0 / 0.12) calc(var(--voice-card-halo) * 0.45), rgb(0 0 0 / 0.5) calc(var(--voice-card-halo) * 0.78), #000 var(--voice-card-halo), #000 calc(100% - var(--voice-card-halo)), rgb(0 0 0 / 0.5) calc(100% - var(--voice-card-halo) * 0.78), rgb(0 0 0 / 0.12) calc(100% - var(--voice-card-halo) * 0.45), transparent);
+  --voice-card-halo-y: linear-gradient(to bottom, transparent, rgb(0 0 0 / 0.12) calc(var(--voice-card-halo) * 0.45), rgb(0 0 0 / 0.5) calc(var(--voice-card-halo) * 0.78), #000 var(--voice-card-halo), #000 calc(100% - var(--voice-card-halo)), rgb(0 0 0 / 0.5) calc(100% - var(--voice-card-halo) * 0.78), rgb(0 0 0 / 0.12) calc(100% - var(--voice-card-halo) * 0.45), transparent);
+  position: absolute;
+  inset: calc(var(--voice-card-halo) * -1);
+  z-index: -1;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--background) 72%, transparent);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  -webkit-mask-image: var(--voice-card-halo-x), var(--voice-card-halo-y);
+  -webkit-mask-composite: source-in;
+  mask-image: var(--voice-card-halo-x), var(--voice-card-halo-y);
+  mask-composite: intersect;
+}
 .bot-strip-scroller {
   margin: -14px 0 0 -12px;
   padding: 20px 2px 2px 14px;
