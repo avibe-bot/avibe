@@ -82,6 +82,8 @@ Base: master `a5c6cbf17` (#2542). Session `sesp2bd67rp9c` owns the task branch
   may still couple both sides. They appear only in stdout/Actions summary,
   never `GITHUB_OUTPUT`; the sole output remains `docs_only` and no new skip
   condition exists. Incomplete/invalid mode/event evidence yields unknown/full.
+  Superseded: `ci-affected-routing.md` replaced these labels with two
+  input-based routes, each checked by a required gate.
 - Independent read-only design review on contract `c4c014684` found the
   docs-push cancellation hole above; no artifact consumer or isolation issue.
   All assertions, installers, branch protection and release workflows remain.

@@ -20,7 +20,10 @@ env:
 jobs:
   changes:
     # Always report a workflow result; workflow-level paths-ignore would leave
-    # required contexts pending. Only proven narrative-only diffs skip work.
+    # required contexts pending. Only proven narrative-only diffs skip work,
+    # and on a pull request two job families skip when no changed path can
+    # reach their inputs (docs/plans/ci-affected-routing.md). Each routed job
+    # reports through a required gate that checks it against its route.
     runs-on: ubuntu-latest
     timeout-minutes: 3
     permissions:
@@ -28,6 +31,8 @@ jobs:
     outputs:
       docs_only: ${{ steps.scope.outputs.docs_only }}
       windows_control_ipc: ${{ steps.scope.outputs.windows_control_ipc }}
+      browser: ${{ steps.scope.outputs.browser }}
+      platform: ${{ steps.scope.outputs.platform }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -113,7 +118,9 @@ jobs:
   web-fetch-runtime:
     name: web-fetch-runtime (${{ matrix.os }}, ${{ matrix.label }})
     needs: [changes, build-linux-artifacts]
-    if: needs.changes.outputs.docs_only == 'false'
+    # Routed with the Windows installer smoke; both report through the
+    # required windows-install-smoke gate.
+    if: needs.changes.outputs.docs_only == 'false' && needs.changes.outputs.platform != 'skip'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
@@ -214,7 +221,7 @@ jobs:
 
   ui-browser-checks:
     needs: changes
-    if: needs.changes.outputs.docs_only == 'false'
+    if: needs.changes.outputs.docs_only == 'false' && needs.changes.outputs.browser != 'skip'
     # Browser interactions do not depend on lint, Vitest, or the production
     # bundle. Run alongside UI validation; the required unit-tests gate waits
     # for every lane, including failure/cancellation. Design captures stay manual.
@@ -254,6 +261,18 @@ jobs:
               npm run test:voice-shortcut
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # The lanes' complete repository input, on every run: the Web UI and
+          # the files Vite serves to it and the build's out-of-tree import check
+          # reads. A suite that reads anything else fails here, which is what
+          # lets a pull request outside this set skip the lanes. Keep it equal
+          # to BROWSER_CHECKOUT in scripts/ci_docs_only.py.
+          sparse-checkout: |
+            /ui/
+            /vibe/message_types.json
+            /vibe/data/
+            /Dockerfile
+          sparse-checkout-cone-mode: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: "22.23.4"
@@ -571,6 +590,8 @@ jobs:
     # Keep UI validation in the existing required gate while allowing artifact
     # consumers to start as soon as their production bundle is built. The
     # hosted wire gate reports through it too, under no new required context.
+    # It is also the browser route's gate: lanes skipped by route must report
+    # skipped, and lanes that should run must succeed.
     needs: [changes, unit-test-shards, scenario-evidence, ui-checks, ui-browser-checks, model-hub-hosted-wire]
     if: always()
     steps:
@@ -578,6 +599,7 @@ jobs:
         env:
           SCOPE_RESULT: ${{ needs.changes.result }}
           DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+          BROWSER_ROUTE: ${{ needs.changes.outputs.browser }}
           UNIT_RESULT: ${{ needs['unit-test-shards'].result }}
           EVIDENCE_RESULT: ${{ needs['scenario-evidence'].result }}
           UI_RESULT: ${{ needs['ui-checks'].result }}
@@ -593,13 +615,22 @@ jobs:
             false) expected="success" ;;
             *) echo "Missing or invalid change classification."; exit 1 ;;
           esac
-          for result in "$UNIT_RESULT" "$EVIDENCE_RESULT" "$UI_RESULT" "$BROWSER_RESULT" "$HOSTED_WIRE_RESULT"; do
+          case "$BROWSER_ROUTE" in
+            run) browser_expected="$expected" ;;
+            skip) browser_expected="skipped" ;;
+            *) echo "Missing or invalid browser route."; exit 1 ;;
+          esac
+          if [ "$BROWSER_RESULT" != "$browser_expected" ]; then
+            echo "Browser lanes finished with result: $BROWSER_RESULT (expected $browser_expected)"
+            exit 1
+          fi
+          for result in "$UNIT_RESULT" "$EVIDENCE_RESULT" "$UI_RESULT" "$HOSTED_WIRE_RESULT"; do
             if [ "$result" != "$expected" ]; then
               echo "Unit/UI/hosted_wire checks finished with result: $result"
               exit 1
             fi
           done
-          echo "Unit/UI/hosted_wire results match the classified scope (docs_only=$DOCS_ONLY)."
+          echo "Unit/UI/hosted_wire results match the classified scope (docs_only=$DOCS_ONLY, browser=$BROWSER_ROUTE)."
 
   # Every case a covered scenario row cites as evidence ran and passed in some
   # job, or a release workflow runs it (scripts/ci_scenario_evidence.py). It
@@ -851,7 +882,8 @@ jobs:
   windows-install-smoke-runners:
     name: windows-install-smoke (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
-    needs: build-linux-artifacts
+    needs: [changes, build-linux-artifacts]
+    if: needs.changes.outputs.docs_only == 'false' && needs.changes.outputs.platform != 'skip'
     # Pull requests allocate only Windows latest; master pushes run the full
     # Windows latest plus Windows on Arm matrix.
     strategy:
@@ -1027,14 +1059,22 @@ jobs:
 
   windows-install-smoke:
     runs-on: ubuntu-latest
-    needs: [changes, windows-install-smoke-runners]
+    # The required gate of the installed-package platform route: the Windows
+    # installer smoke and web-fetch-runtime on all five platforms. Skipped by
+    # route, both must report skipped; otherwise both must succeed. Any
+    # web-fetch-runtime leg that fails, is cancelled, times out or never gets a
+    # runner therefore fails this required context too; the context keeps its
+    # historical name because branch protection requires it.
+    needs: [changes, windows-install-smoke-runners, web-fetch-runtime]
     if: always()
     steps:
-      - name: Verify the installer on every PR-required runner
+      - name: Verify the Windows installer and web-fetch-runtime on every platform
         env:
           SCOPE_RESULT: ${{ needs.changes.result }}
           DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+          PLATFORM_ROUTE: ${{ needs.changes.outputs.platform }}
           SMOKE_RESULT: ${{ needs['windows-install-smoke-runners'].result }}
+          WEB_FETCH_RESULT: ${{ needs['web-fetch-runtime'].result }}
         run: |
           if [ "$SCOPE_RESULT" != "success" ]; then
             echo "Change classification did not succeed."
@@ -1045,11 +1085,20 @@ jobs:
             false) expected="success" ;;
             *) echo "Missing or invalid change classification."; exit 1 ;;
           esac
+          case "$PLATFORM_ROUTE" in
+            run) ;;
+            skip) expected="skipped" ;;
+            *) echo "Missing or invalid platform route."; exit 1 ;;
+          esac
           if [ "$SMOKE_RESULT" != "$expected" ]; then
-            echo "Windows installer smoke finished with result: $SMOKE_RESULT"
+            echo "Windows installer smoke finished with result: $SMOKE_RESULT (expected $expected)"
             exit 1
           fi
-          echo "Windows installer results match the classified scope (docs_only=$DOCS_ONLY)."
+          if [ "$WEB_FETCH_RESULT" != "$expected" ]; then
+            echo "web-fetch-runtime finished with result: $WEB_FETCH_RESULT (expected $expected)"
+            exit 1
+          fi
+          echo "Installer and runtime results match the classified scope (docs_only=$DOCS_ONLY, platform=$PLATFORM_ROUTE)."
 
   # The only job that starts the real service on Windows. A fresh install
   # installs the Model Hub engine from the packaged manifest, saves API-key

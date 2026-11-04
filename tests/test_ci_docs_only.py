@@ -1,7 +1,8 @@
 """CI skip authority: real Git/event boundaries, never filename mocks.
 
-A false docs verdict hides runtime regressions. Existing pipeline tests cover
-job selection and real gate shell behavior; this file owns the Git evidence.
+A false docs verdict or route hides runtime regressions. Existing pipeline
+tests cover job selection and real gate shell behavior; this file owns the Git
+evidence: which complete synthetic-merge diffs may skip what.
 """
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ import sys
 
 import pytest
 
-from scripts.ci_docs_only import classify
+from scripts.ci_docs_only import Scope, classify
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/ci_docs_only.py"
 
@@ -38,22 +39,34 @@ def commit(repo: Path) -> str:
     return git(repo, "rev-parse", "HEAD")
 
 
-@pytest.fixture
-def repo(tmp_path: Path) -> Path:
-    root = tmp_path / "repo"
+def make_repo(root: Path) -> Path:
     root.mkdir()
     git(root, "init", "-q", "--initial-branch=main")
     write(root, "AGENTS.md", "Initial guidance\n")
     write(root, "core.py", "print('runtime')\n")
+    write(root, "core/existing.py", "print('runtime')\n")
+    write(root, "ui/src/Existing.tsx", "export const existing = 1;\n")
     commit(root)
     return root
 
 
-def push(repo: Path, base: str, **overrides) -> tuple[bool, str, str, bool]:
+@pytest.fixture
+def repo(tmp_path: Path) -> Path:
+    return make_repo(tmp_path / "repo")
+
+
+def push(repo: Path, base: str, **overrides) -> Scope:
     after = git(repo, "rev-parse", "HEAD")
     event = {"before": base, "after": after, "created": False, "deleted": False, "forced": False}
     event.update(overrides)
     return classify("push", event, after, repo)
+
+
+def routes(scope: Scope) -> tuple[str, str]:
+    return scope.browser, scope.platform
+
+
+FULL = ("run", "run")
 
 
 @pytest.mark.parametrize(("path", "docs"), [
@@ -84,7 +97,7 @@ def test_only_narrative_paths_can_skip(repo: Path, path: str, docs: bool) -> Non
     before = git(repo, "rev-parse", "HEAD")
     write(repo, path)
     commit(repo)
-    assert push(repo, before)[0] is docs
+    assert push(repo, before).docs_only is docs
 
 
 def test_complete_diff_not_last_commit_or_truncated_event(repo: Path) -> None:
@@ -97,7 +110,7 @@ def test_complete_diff_not_last_commit_or_truncated_event(repo: Path) -> None:
     commit(repo)
     # Neither a 300-file list limit nor an event listing only the last doc
     # commit may hide the earlier runtime change.
-    assert not push(repo, before, commits=[{"modified": ["AGENTS.md"]}])[0]
+    assert not push(repo, before, commits=[{"modified": ["AGENTS.md"]}]).docs_only
 
 
 @pytest.mark.parametrize(("source", "target", "docs"), [
@@ -110,28 +123,38 @@ def test_rename_checks_both_paths(repo: Path, source: str, target: str, docs: bo
     (repo / target).parent.mkdir(parents=True, exist_ok=True)
     git(repo, "mv", source, target)
     commit(repo)
-    assert push(repo, before)[0] is docs
+    assert push(repo, before).docs_only is docs
 
 
-@pytest.mark.parametrize("kind", ["executable", "symlink", "submodule", "type-change"])
-def test_doc_suffix_never_hides_non_document_modes(repo: Path, kind: str) -> None:
-    before = git(repo, "rev-parse", "HEAD")
+def irregular_change(repo: Path, kind: str, path: str) -> None:
+    head = git(repo, "rev-parse", "HEAD")
+    target = repo / path
+    target.parent.mkdir(parents=True, exist_ok=True)
     if kind == "submodule":
-        git(repo, "update-index", "--add", "--cacheinfo", f"160000,{before},docs/module.md")
+        git(repo, "update-index", "--add", "--cacheinfo", f"160000,{head},{path}")
         git(repo, "-c", "user.name=CI Fixture", "-c", "user.email=ci@example.invalid", "commit", "-qm", "gitlink")
-    else:
-        path = repo / "AGENTS.md"
-        if kind == "executable":
-            path.chmod(0o755)
-        elif kind == "symlink":
-            (repo / "docs").mkdir()
-            (repo / "docs/link.md").symlink_to("../core.py")
-        else:
-            path.unlink()
-            path.symlink_to("core.py")
-        commit(repo)
+        return
+    if kind == "executable":
+        if not target.exists():
+            target.write_text("export {};\n", encoding="utf-8")
+        target.chmod(0o755)
+    elif kind == "symlink":
+        target.symlink_to("../../core.py" if "/" in path else "core.py")
+    else:  # type-change: an existing regular file becomes a symlink
+        target.unlink()
+        target.symlink_to("../../core.py" if "/" in path else "core.py")
+    commit(repo)
+
+
+@pytest.mark.parametrize(("kind", "path"), [
+    ("executable", "AGENTS.md"), ("symlink", "docs/link.md"), ("submodule", "docs/module.md"),
+    ("type-change", "AGENTS.md"),
+])
+def test_doc_suffix_never_hides_non_document_modes(repo: Path, kind: str, path: str) -> None:
+    before = git(repo, "rev-parse", "HEAD")
+    irregular_change(repo, kind, path)
     result = push(repo, before)
-    assert result[0] is False and result[3] is False
+    assert result.docs_only is False and result.windows_control_ipc is False
 
 
 def test_windows_control_ipc_survives_an_irregular_sibling_diff(repo: Path) -> None:
@@ -141,32 +164,181 @@ def test_windows_control_ipc_survives_an_irregular_sibling_diff(repo: Path) -> N
     (repo / "docs/link.md").symlink_to("../core.py")
     commit(repo)
     result = push(repo, before)
-    assert result[0] is False and result[3] is True
+    assert result.docs_only is False and result.windows_control_ipc is True
 
 
-def synthetic_pr(repo: Path) -> tuple[dict, str]:
-    git(repo, "checkout", "-qb", "docs-change")
-    write(repo, "AGENTS.md")
-    head = commit(repo)
+def synthetic_pr(repo: Path, change=None, **pull_request) -> tuple[dict, str]:
+    """A pull request merged onto a base that moved independently, as GitHub checks it out."""
+    git(repo, "checkout", "-qb", "change")
+    if change is None:
+        write(repo, "AGENTS.md")
+    else:
+        change(repo)
+    # A change may commit itself (a gitlink has no working-tree file to add).
+    head = commit(repo) if git(repo, "status", "--porcelain") else git(repo, "rev-parse", "HEAD")
     git(repo, "checkout", "-q", "main")
-    # Base advanced independently. Its code change is not this doc PR's change.
+    # Base advanced independently. Its code change is not this PR's change.
     write(repo, "core.py", "print('new base')\n")
     base = commit(repo)
     git(repo, "-c", "user.name=CI Fixture", "-c", "user.email=ci@example.invalid",
-        "merge", "--no-ff", "-qm", "PR merge", "docs-change")
-    return {"pull_request": {"base": {"sha": base}, "head": {"sha": head}}}, git(repo, "rev-parse", "HEAD")
+        "merge", "--no-ff", "-qm", "PR merge", "change")
+    event = {
+        "pull_request": {"base": {"sha": base, "ref": "main"}, "head": {"sha": head}},
+        "repository": {"default_branch": "main"},
+    }
+    event["pull_request"].update(pull_request)
+    return event, git(repo, "rev-parse", "HEAD")
+
+
+def writes(*paths: str):
+    def change(repo: Path) -> None:
+        for path in paths:
+            write(repo, path, f"changed {path}\n")
+    return change
 
 
 def test_pr_compares_actual_merge_tree_with_verified_parents_at_depth_two(repo: Path, tmp_path: Path) -> None:
-    event, sha = synthetic_pr(repo)
+    event, sha = synthetic_pr(repo, writes("core/feature.py", "docs/plans/feature.md"))
     shallow = tmp_path / "shallow"
     subprocess.run(["git", "clone", "-q", "--depth=2", repo.as_uri(), str(shallow)], check=True)
     assert git(shallow, "rev-parse", "--is-shallow-repository") == "true"
-    assert classify("pull_request", event, sha, shallow)[0]
+    # The base's own core.py change is not the PR's: only its backend paths count.
+    assert routes(classify("pull_request", event, sha, shallow)) == ("skip", "run")
     wrong = json.loads(json.dumps(event))
     wrong["pull_request"]["head"]["sha"] = event["pull_request"]["base"]["sha"]
-    assert not classify("pull_request", wrong, sha, shallow)[0]
-    assert not classify("pull_request", event, event["pull_request"]["head"]["sha"], shallow)[0]
+    assert classify("pull_request", wrong, sha, shallow) == classify("workflow_dispatch", {}, sha, shallow)
+    assert routes(classify("pull_request", event, event["pull_request"]["head"]["sha"], shallow)) == FULL
+
+
+UI_SOURCES = (
+    "ui/src/App.tsx", "ui/src/i18n/en.json", "ui/e2e/pet-mini/mini.spec.ts",
+    "ui/design/frames/home.design.tsx", "ui/scripts/lint-baseline.mjs",
+    "ui/playwright.pet-mini.config.ts", "ui/playwright.config.ts", "ui/tsconfig.tests.json",
+    "ui/eslint-baseline.json", "ui/.oxlintrc.json", "ui/README.md", "ui/design.html",
+    "ui/agentation.d.ts",
+)
+BACKEND = (
+    "core/feature.py", "modules/im/slack.py", "vibe/api.py", "vibe/git_runtime_manifest.json",
+    "storage/store.py", "config/v2_config.py", "tests/test_feature.py", "tests/fixtures/case.json",
+    "skills/use-avibe/SKILL.md", "desktop/src/main.rs", "assets/logo.svg", "standards/AGENTS.md",
+    "examples/demo/README.md", ".agents/skills/local/SKILL.md", "main.py",
+)
+
+
+@pytest.mark.parametrize(("paths", "expected"), [
+    # UI sources reach the installed package only as vibe/ui/dist bytes.
+    (UI_SOURCES, ("run", "skip")),
+    (("ui/src/App.tsx", "docs/plans/ui.md", "tests/scenarios/model_hub/catalog.yaml"), ("run", "skip")),
+    # Backend changes cannot reach the browser lanes' checkout.
+    (BACKEND, ("skip", "run")),
+    (("core/feature.py", "tests/scenarios/model_hub/test_rows.py", "AGENTS.md"), ("skip", "run")),
+    # Read by both families' consumers, all of which still run.
+    (("docs/plans/feature.md",), ("skip", "skip")),
+    (("tests/scenarios/auth_setup/catalog.yaml", "docs/plans/model-hub-contracts/a.json"), ("skip", "skip")),
+    # Inside the browser checkout, or shapes the package.
+    (("vibe/data/api_key_vendors.json",), FULL),
+    (("vibe/message_types.json",), FULL),
+    (("Dockerfile",), FULL),
+    (("ui/package.json",), FULL),
+    (("ui/package-lock.json",), FULL),
+    (("ui/vite.config.ts",), FULL),
+    (("ui/index.html",), FULL),
+    (("ui/tsconfig.app.json",), FULL),
+    (("ui/postcss.config.js",), FULL),
+    (("ui/public/icon.png",), FULL),
+    (("ui/.gitignore",), FULL),
+    # CI, dependency, packaging and installer definitions.
+    ((".github/workflows/lint.yml",), FULL),
+    (("scripts/ci_docs_only.py",), FULL),
+    (("scripts/incus_regression.py",), FULL),
+    (("pyproject.toml",), FULL),
+    (("uv.lock",), FULL),
+    (("install.ps1",), FULL),
+    (("npm/avibe/package.json",), FULL),
+    (("patches/model-hub-cpa-1/a.patch",), FULL),
+    # Mixed families and unrecognised paths.
+    (("ui/src/App.tsx", "core/feature.py"), FULL),
+    (("README.md",), FULL),
+    (("newtop/module.py",), FULL),
+    (("ui/new-root-config.ts",), FULL),
+    (("tests/scenarios/model_hub/notes.yaml", "ui/src/App.tsx"), FULL),
+])
+def test_pull_request_routes_only_paths_outside_each_family_inputs(repo: Path, paths: tuple, expected: tuple) -> None:
+    event, sha = synthetic_pr(repo, writes(*paths))
+    scope = classify("pull_request", event, sha, repo)
+    assert scope.docs_only is False and scope.windows_control_ipc is False
+    assert routes(scope) == expected, (scope.browser_reason, scope.platform_reason)
+
+
+@pytest.mark.parametrize("name", [
+    "aux.ts", "LPT1.tsx", "con.test.tsx", "a b.tsx", "a:b.ts", "ünï.json", "trailing.", f"{'x' * 62}.tsx",
+])
+def test_added_ui_names_the_package_cannot_install_keep_platform_checks(repo: Path, name: str) -> None:
+    event, sha = synthetic_pr(repo, writes(f"ui/src/lib/{name}"))
+    assert routes(classify("pull_request", event, sha, repo)) == FULL
+
+
+def test_portable_added_ui_name_and_modified_existing_name_skip_platform(repo: Path) -> None:
+    event, sha = synthetic_pr(repo, writes(f"ui/src/lib/{'x' * 61}.ts", "ui/src/Existing.tsx"))
+    assert routes(classify("pull_request", event, sha, repo)) == ("run", "skip")
+
+
+def moves(source: str, target: str):
+    def change(repo: Path) -> None:
+        (repo / target).parent.mkdir(parents=True, exist_ok=True)
+        git(repo, "mv", source, target)
+    return change
+
+
+@pytest.mark.parametrize(("source", "target", "expected"), [
+    # No rename detection: both sides of a move count.
+    ("core/existing.py", "ui/src/existing.ts", FULL),
+    ("ui/src/Existing.tsx", "core/existing_ui.py", FULL),
+    ("ui/src/Existing.tsx", "ui/src/Renamed.tsx", ("run", "skip")),
+    ("core/existing.py", "core/renamed.py", ("skip", "run")),
+    ("ui/src/Existing.tsx", "ui/src/aux.tsx", FULL),
+])
+def test_pull_request_rename_routes_by_both_paths(repo: Path, source: str, target: str, expected: tuple) -> None:
+    event, sha = synthetic_pr(repo, moves(source, target))
+    assert routes(classify("pull_request", event, sha, repo)) == expected
+
+
+@pytest.mark.parametrize(("extra", "expected"), [(None, ("run", "skip")), ("core/feature.py", FULL)])
+def test_pull_request_routes_from_the_complete_diff_beyond_300_paths(repo: Path, extra, expected) -> None:
+    paths = [f"ui/src/generated/c{i:03}.ts" for i in range(305)]
+    if extra:
+        paths.append(extra)
+    event, sha = synthetic_pr(repo, writes(*paths))
+    assert routes(classify("pull_request", event, sha, repo)) == expected
+
+
+@pytest.mark.parametrize(("kind", "path"), [
+    ("executable", "ui/scripts/run.mjs"), ("executable", "core/existing.py"), ("symlink", "ui/src/link.ts"),
+    ("symlink", "core/link.py"), ("submodule", "ui/src/module"), ("type-change", "ui/src/Existing.tsx"),
+])
+def test_pull_request_irregular_modes_route_nothing(repo: Path, kind: str, path: str) -> None:
+    event, sha = synthetic_pr(repo, lambda repo: irregular_change(repo, kind, path))
+    scope = classify("pull_request", event, sha, repo)
+    assert scope.docs_only is False and routes(scope) == FULL
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda event: event["pull_request"]["base"].update(ref="release"),
+    lambda event: event["pull_request"]["base"].pop("ref"),
+    lambda event: event.pop("repository"),
+    lambda event: event.update(repository="main"),
+    lambda event: event["repository"].update(default_branch=None),
+    lambda event: event["repository"].update(default_branch=""),
+])
+def test_routes_require_a_pull_request_into_the_default_branch(repo: Path, tmp_path: Path, mutate) -> None:
+    event, sha = synthetic_pr(repo, writes("core/feature.py"))
+    mutate(event)
+    assert routes(classify("pull_request", event, sha, repo)) == FULL
+    # The documentation fast path keeps its own, unchanged evidence.
+    docs_repo = make_repo(tmp_path / "docs-repo")
+    docs_event, docs_sha = synthetic_pr(docs_repo)
+    mutate(docs_event)
+    assert classify("pull_request", docs_event, docs_sha, docs_repo).docs_only is True
 
 
 def test_multi_commit_push_fetches_missing_before_not_all_history(repo: Path, tmp_path: Path) -> None:
@@ -176,7 +348,7 @@ def test_multi_commit_push_fetches_missing_before_not_all_history(repo: Path, tm
         commit(repo)
     shallow = tmp_path / "push-checkout"
     subprocess.run(["git", "clone", "-q", "--depth=2", repo.as_uri(), str(shallow)], check=True)
-    assert push(shallow, before)[0]
+    assert push(shallow, before).docs_only
 
 
 @pytest.mark.parametrize("change", [
@@ -189,19 +361,49 @@ def test_unknown_push_evidence_falls_back_to_full(repo: Path, change: dict) -> N
     write(repo, "AGENTS.md")
     commit(repo)
     result = push(repo, before, **change)
-    assert result[0] is False and result[3] is True
+    assert result.docs_only is False and result.windows_control_ipc is True and routes(result) == FULL
 
 
-def test_empty_diff_and_unsupported_or_broken_events_are_not_docs(repo: Path) -> None:
+def test_push_never_routes_even_when_a_pull_request_would(repo: Path) -> None:
+    before = git(repo, "rev-parse", "HEAD")
+    write(repo, "ui/src/App.tsx", "export {};\n")
+    commit(repo)
+    assert routes(push(repo, before)) == FULL
+
+
+@pytest.mark.parametrize(("name", "payload"), [
+    ("workflow_dispatch", {}), ("merge_group", {}), ("pull_request_target", {}), ("pull_request", {}),
+    ("push", []), ("pull_request", {"pull_request": None}), ("pull_request", {"pull_request": {"base": {}}}),
+    ("pull_request", {"pull_request": {"base": {"sha": 7}, "head": {"sha": "x"}}}), ("", {}),
+])
+def test_empty_diff_and_unsupported_or_broken_events_route_nothing(repo: Path, name: str, payload) -> None:
     sha = git(repo, "rev-parse", "HEAD")
     result = push(repo, sha)
-    assert result[0] is False and result[3] is True
-    for name, payload in (("workflow_dispatch", {}), ("pull_request", {}), ("push", [])):
-        classified = classify(name, payload, sha, repo)
-        assert classified[0] is False and classified[3] is True
+    assert result.docs_only is False and result.windows_control_ipc is True and routes(result) == FULL
+    classified = classify(name, payload, sha, repo)
+    assert classified.docs_only is False and classified.windows_control_ipc is True and routes(classified) == FULL
 
 
-@pytest.mark.parametrize("event_name,expected", [("pull_request", "true"), ("push", "false")])
+def run_cli(repo: Path, tmp_path: Path, event_name: str, payload, sha: str, *, event_file: bool = True):
+    event = tmp_path / "event.json"
+    output = tmp_path / "output"
+    summary = tmp_path / "summary"
+    for path in (event, output, summary):
+        path.unlink(missing_ok=True)
+    if event_file:
+        event.write_text(json.dumps(payload))
+    env = {**os.environ, "GITHUB_EVENT_NAME": event_name, "GITHUB_SHA": sha,
+           "GITHUB_EVENT_PATH": str(event), "GITHUB_OUTPUT": str(output),
+           "GITHUB_STEP_SUMMARY": str(summary)}
+    result = subprocess.run([sys.executable, str(SCRIPT)], cwd=repo, env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    return result.stdout, output.read_text(), summary.read_text()
+
+
+@pytest.mark.parametrize("event_name,expected", [
+    ("pull_request", "docs_only=true\nwindows_control_ipc=false\nbrowser=skip\nplatform=skip\n"),
+    ("push", "docs_only=false\nwindows_control_ipc=false\nbrowser=run\nplatform=run\n"),
+])
 def test_cli_keeps_docs_pr_fast_but_master_replaces_full_coverage(
     repo: Path, tmp_path: Path, event_name: str, expected: str,
 ) -> None:
@@ -214,62 +416,37 @@ def test_cli_keeps_docs_pr_fast_but_master_replaces_full_coverage(
         write(repo, "AGENTS.md")
         sha = commit(repo)
         payload = {"before": before, "after": sha, "created": False, "deleted": False, "forced": False}
-    event = tmp_path / "event.json"
-    output = tmp_path / "output"
-    summary = tmp_path / "summary"
-    event.write_text(json.dumps(payload))
-    env = {**os.environ, "GITHUB_EVENT_NAME": event_name, "GITHUB_SHA": sha,
-           "GITHUB_EVENT_PATH": str(event), "GITHUB_OUTPUT": str(output),
-           "GITHUB_STEP_SUMMARY": str(summary)}
-    result = subprocess.run([sys.executable, str(SCRIPT)], cwd=repo, env=env, capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
-    assert output.read_text() == (
-        f"docs_only={expected}\nwindows_control_ipc=false\n"
-    )
-    assert "Impact shadow: **docs-only**" in summary.read_text()
+    stdout, output, summary = run_cli(repo, tmp_path, event_name, payload, sha)
+    assert output == expected
     if event_name == "push":
-        assert "superseded code changes" in result.stdout
-    event.unlink()
-    result = subprocess.run([sys.executable, str(SCRIPT)], cwd=repo, env=env, capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
-    assert output.read_text().splitlines() == [
-        f"docs_only={expected}",
-        "windows_control_ipc=false",
-        "docs_only=false",
-        "windows_control_ipc=true",
-    ]
-    assert "Impact shadow: **unknown**" in summary.read_text()
-    assert "full" in summary.read_text()
+        assert "superseded code changes" in stdout and "## CI scope: full" in summary
+    else:
+        assert "## CI scope: documentation only" in summary
+    stdout, output, summary = run_cli(repo, tmp_path, event_name, payload, sha, event_file=False)
+    assert output == "docs_only=false\nwindows_control_ipc=true\nbrowser=run\nplatform=run\n"
+    assert "## CI scope: full" in summary and "classification unavailable" in summary
 
 
-@pytest.mark.parametrize("paths,category", [
-    (["ui/src/pages/Page.tsx", "docs/guide.md"], "ui-source-only"),
-    (["ui/src/App.tsx", "ui/src/lib/ApiContext.tsx"], "ui-source-only"),
-    (["vibe/api.py", "storage/alembic/versions/new.py"], "python-source-only"),
-    (["ui/src/Page.tsx", "ui/package-lock.json"], "shared-or-mixed"),
-    (["core/controller.py", "ui/src/Page.tsx"], "shared-or-mixed"),
-    (["docs/plans/contract.md"], "shared-or-mixed"),
+@pytest.mark.parametrize(("paths", "expected", "title"), [
+    (("ui/src/App.tsx",), "browser=run\nplatform=skip\n", "routed"),
+    (("core/feature.py",), "browser=skip\nplatform=run\n", "routed"),
+    (("ui/src/App.tsx", "core/feature.py"), "browser=run\nplatform=run\n", "full"),
 ])
-def test_impact_shadow_never_authorizes_skipping_code_tests(repo: Path, tmp_path: Path, paths, category) -> None:
-    before = git(repo, "rev-parse", "HEAD")
-    for path in paths:
-        write(repo, path)
-    sha = commit(repo)
-    result = push(repo, before)
-    assert result[0] is False and result[2] == category
-    event = tmp_path / "event.json"
-    output = tmp_path / "output"
-    summary = tmp_path / "summary"
-    event.write_text(json.dumps({"before": before, "after": sha,
-                                 "created": False, "deleted": False, "forced": False}))
-    result = subprocess.run([sys.executable, str(SCRIPT)], cwd=repo, capture_output=True, text=True,
-                            env={**os.environ, "GITHUB_EVENT_NAME": "push", "GITHUB_SHA": sha,
-                                 "GITHUB_EVENT_PATH": str(event), "GITHUB_OUTPUT": str(output),
-                                 "GITHUB_STEP_SUMMARY": str(summary)})
-    assert result.returncode == 0, result.stderr
-    # Impact stays observational; windows_control_ipc is an explicit extra job, not a skip.
-    assert output.read_text() == "docs_only=false\nwindows_control_ipc=false\n"
-    assert f"Impact shadow: **{category}**" in summary.read_text()
+def test_cli_writes_literal_routes_for_a_pull_request_and_full_for_its_push(
+    repo: Path, tmp_path: Path, paths: tuple, expected: str, title: str,
+) -> None:
+    payload, sha = synthetic_pr(repo, writes(*paths))
+    _, output, summary = run_cli(repo, tmp_path, "pull_request", payload, sha)
+    assert output == "docs_only=false\nwindows_control_ipc=false\n" + expected
+    assert f"## CI scope: {title}" in summary
+    assert "- Browser lanes: " in summary and "- Installed-package platform checks: " in summary
+    # The same tree pushed to master runs everything.
+    before = git(repo, "rev-parse", "HEAD~1")
+    _, output, summary = run_cli(repo, tmp_path, "push", {
+        "before": before, "after": sha, "created": False, "deleted": False, "forced": False,
+    }, sha)
+    assert output == "docs_only=false\nwindows_control_ipc=false\nbrowser=run\nplatform=run\n"
+    assert "## CI scope: full" in summary
 
 
 @pytest.mark.parametrize(("path", "selected"), [
@@ -285,20 +462,16 @@ def test_windows_control_ipc_selects_builtin_skill_publication_paths(
     write(repo, path, "print('runtime')\n")
     sha = commit(repo)
     result = push(repo, before)
-    assert result[0] is False and result[3] is selected
-    event = tmp_path / "event.json"
-    output = tmp_path / "output"
-    event.write_text(json.dumps({"before": before, "after": sha,
-                                 "created": False, "deleted": False, "forced": False}))
-    ran = subprocess.run(
-        [sys.executable, str(SCRIPT)], cwd=repo, capture_output=True, text=True,
-        env={**os.environ, "GITHUB_EVENT_NAME": "push", "GITHUB_SHA": sha,
-             "GITHUB_EVENT_PATH": str(event), "GITHUB_OUTPUT": str(output)},
-    )
-    assert ran.returncode == 0, ran.stderr
-    assert output.read_text() == (
-        f"docs_only=false\nwindows_control_ipc={str(selected).lower()}\n"
-    )
+    assert result.docs_only is False and result.windows_control_ipc is selected
+    _, output, _ = run_cli(repo, tmp_path, "push", {
+        "before": before, "after": sha, "created": False, "deleted": False, "forced": False,
+    }, sha)
+    assert output == f"docs_only=false\nwindows_control_ipc={str(selected).lower()}\nbrowser=run\nplatform=run\n"
+    # A pull request keeps the selection while its backend route skips the browser lanes.
+    pr_repo = make_repo(tmp_path / "pr-repo")
+    event, merge = synthetic_pr(pr_repo, writes(path))
+    scope = classify("pull_request", event, merge, pr_repo)
+    assert scope.windows_control_ipc is selected and routes(scope) == ("skip", "run")
 
 
 def test_guidance_remains_enforced_when_an_agents_only_diff_skips_application_tests(repo: Path) -> None:
@@ -320,7 +493,7 @@ def test_guidance_remains_enforced_when_an_agents_only_diff_skips_application_te
     agents = repo / "AGENTS.md"
     agents.write_text(agents.read_text().replace("use the `background-watch-hook` skill", "use unmanaged polling"))
     commit(repo)
-    assert push(repo, before)[0]  # Scope remains docs; the independent check must reject its content.
+    assert push(repo, before).docs_only  # Scope remains docs; the independent check must reject its content.
     invalid = subprocess.run(command, cwd=repo, env=env, capture_output=True, text=True)
     assert invalid.returncode == 1, invalid.stdout + invalid.stderr
     assert "test_pr_delivery_loop_delegates_waiters_to_background_watch_skill" in invalid.stdout
