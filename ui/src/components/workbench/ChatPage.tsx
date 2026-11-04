@@ -970,8 +970,8 @@ export const ChatPage: React.FC = () => {
     setOlderCursor((prev) => prev ?? snapshot.next_before_id);
     return true;
   }, [showChatSignal]);
-  const unpaintChatSnapshot = useCallback((ids: ReadonlySet<string>) => {
-    setMessages((prev) => prev.filter((row) => !ids.has(row.id)));
+  const unpaintChatSnapshot = useCallback((rows: ReadonlySet<WorkbenchMessage>) => {
+    setMessages((prev) => prev.filter((row) => !rows.has(row)));
     setOlderCursor(null);
     oldestLoadedIdRef.current = null;
     newestLoadedIdRef.current = null;

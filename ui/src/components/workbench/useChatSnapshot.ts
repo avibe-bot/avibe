@@ -34,8 +34,9 @@ import {
 //  * Paint once per opened chat, onto empty state, before anything live landed
 //    for it, and for the reader whose record it is.
 //  * The first live transcript window (the bootstrap, or a recovery read that
-//    commits first) removes every painted row before it lands. Rows that came
-//    over the stream meanwhile were never painted, so they stay.
+//    commits first) removes every painted row before it lands. Rows are
+//    tracked by version, not id: a row the stream delivered or updated
+//    meanwhile is live, so it stays, and the live window merges onto it.
 //  * The painted Session row, ``can_chat``, and Agents only decide what renders
 //    until the bootstrap answers. Nothing here enables an action.
 //  * A different reader, or anything that clears the store (an authorization
@@ -73,8 +74,9 @@ type Options = {
   /** Put the cached rows and cursor on screen, onto empty state only. Returns
    *  false to leave this chat unpainted. */
   paint: (snapshot: ChatSnapshot) => boolean;
-  /** Remove the painted rows and the painted older-page cursor. */
-  unpaint: (ids: ReadonlySet<string>) => void;
+  /** Remove the painted rows (these exact row objects; a row the stream has
+   *  since replaced is live and stays) and the painted older-page cursor. */
+  unpaint: (rows: ReadonlySet<WorkbenchMessage>) => void;
   /** The live transcript window and its cursor, for write-back. */
   messages: WorkbenchMessage[];
   olderCursor: string | null;
@@ -111,7 +113,7 @@ export function useChatSnapshot({ sessionId, paint, unpaint, messages, olderCurs
   // Per opened chat: something live landed for it, so nothing is painted now.
   const liveRef = useRef(false);
   // Rows on screen from the snapshot that no live window has replaced yet.
-  const paintedRef = useRef<{ principal: string; ids: Set<string> } | null>(null);
+  const paintedRef = useRef<{ principal: string; rows: Set<WorkbenchMessage> } | null>(null);
   // The chat had no usable record when it opened, so its first write adds one.
   const missingRef = useRef(true);
 
@@ -125,7 +127,7 @@ export function useChatSnapshot({ sessionId, paint, unpaint, messages, olderCurs
     liveRef.current = true;
     const painted = paintedRef.current;
     paintedRef.current = null;
-    if (painted) unpaintRef.current(painted.ids);
+    if (painted) unpaintRef.current(painted.rows);
   }, []);
 
   useEffect(() => (
@@ -133,7 +135,7 @@ export function useChatSnapshot({ sessionId, paint, unpaint, messages, olderCurs
       const painted = paintedRef.current;
       if (painted && painted.principal !== next) {
         paintedRef.current = null;
-        unpaintRef.current(painted.ids);
+        unpaintRef.current(painted.rows);
       }
       setView((current) => (current && current.principal !== next ? null : current));
       setOwned((current) => (current && current.owner.principal !== next ? null : current));
@@ -143,7 +145,7 @@ export function useChatSnapshot({ sessionId, paint, unpaint, messages, olderCurs
   useEffect(() => subscribeLocalSnapshotEpoch(() => {
     const painted = paintedRef.current;
     paintedRef.current = null;
-    if (painted) unpaintRef.current(painted.ids);
+    if (painted) unpaintRef.current(painted.rows);
     setView(null);
     setOwned(null);
   }), []);
@@ -156,7 +158,7 @@ export function useChatSnapshot({ sessionId, paint, unpaint, messages, olderCurs
       if (snapshot) missingRef.current = false;
       if (!snapshot || liveRef.current || getLocalSnapshotPrincipal() !== principal) return;
       if (!paintRef.current(snapshot)) return;
-      paintedRef.current = { principal, ids: new Set(snapshot.messages.map((row) => row.id)) };
+      paintedRef.current = { principal, rows: new Set(snapshot.messages) };
       setView({
         sessionId,
         principal,

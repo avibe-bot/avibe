@@ -44,6 +44,7 @@ const mocks = vi.hoisted(() => ({
   events: null as null | {
     onConnected: () => void;
     onMessageNew: (message: WorkbenchMessage) => void;
+    onMessageUpdated: (message: WorkbenchMessage) => void;
   },
   composer: null as ComposerProps | null,
 }));
@@ -313,6 +314,24 @@ describe('ChatPage conversation snapshot', () => {
 
     await screen.findByText('live answer');
     expect(screen.getByText('streamed during the load')).toBeTruthy();
+    expect(screen.queryByText('cached question')).toBeNull();
+  });
+
+  it('keeps a cached row the stream updated while the bootstrap was out, over the older bootstrap copy', async () => {
+    await seed([message('m1', 'cached question'), message('m2', 'cached notice')]);
+    mount();
+    await screen.findByText('cached notice');
+
+    // A retry admitted from another tab updates the notice in place.
+    act(() => mocks.events!.onMessageUpdated(message('m2', 'notice after the retry')));
+    await screen.findByText('notice after the retry');
+
+    // The bootstrap was read before that update.
+    await act(async () => live.resolve(bootstrap([message('m2', 'notice before the retry')])));
+
+    await waitFor(() => expect(composerState()).toBe('false'));
+    expect(screen.getByText('notice after the retry')).toBeTruthy();
+    expect(screen.queryByText('notice before the retry')).toBeNull();
     expect(screen.queryByText('cached question')).toBeNull();
   });
 
