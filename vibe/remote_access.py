@@ -6393,8 +6393,16 @@ def _browser_session_is_revoked(payload: Mapping[str, Any], *, now: int) -> bool
         return True
 
 
-def parse_session_identity(config: V2Config, cookie_value: str | None) -> dict[str, Any] | None:
-    """Verify browser identity without evaluating current authorization."""
+def parse_session_identity(
+    config: V2Config,
+    cookie_value: str | None,
+    *,
+    allow_revoked: bool = False,
+) -> dict[str, Any] | None:
+    """Verify browser identity without evaluating current authorization.
+
+    ``allow_revoked`` skips the sign-out lookup, for the sign-out itself.
+    """
 
     if not cookie_value or "." not in cookie_value:
         return None
@@ -6453,7 +6461,7 @@ def parse_session_identity(config: V2Config, cookie_value: str | None) -> dict[s
             cloud.session_secret,
             cookie_value,
         )
-    if _browser_session_is_revoked(payload, now=current):
+    if not allow_revoked and _browser_session_is_revoked(payload, now=current):
         return None
     return payload
 

@@ -8196,17 +8196,25 @@ def remote_access_logout():
     from vibe import remote_access
 
     config = _load_remote_access_config()
+    # Any validly signed, unexpired session cookie is signed out, even one the
+    # sign-out lookup reports as revoked: that lookup also answers "revoked"
+    # when it fails, and the sign-out must then be recorded or reported.
     identity = (
         remote_access.parse_session_identity(
             config,
             request.cookies.get(remote_access.SESSION_COOKIE_NAME),
+            allow_revoked=True,
         )
         if config is not None
         else None
     )
     revocation_recorded = True
+    signed_in = False
     if identity is not None:
+        # Read before recording: a session already signed out keeps its Push.
+        signed_in = remote_access.session_identity_is_current(identity)
         revocation_recorded = remote_access.revoke_browser_session(identity)
+    if signed_in:
         body = request.json if isinstance(request.json, dict) else {}
         device_id = body.get("device_id")
         endpoint = body.get("endpoint")

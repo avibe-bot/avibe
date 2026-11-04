@@ -758,24 +758,28 @@ def test_sign_out_survives_a_restart_and_outlasts_a_raced_renewal(monkeypatch) -
     assert revoked_keys == [prefix + late_identity["browser_session_id"]]
 
 
+@pytest.mark.parametrize(
+    "unavailable",
+    [("revoke_browser_session",), ("browser_session_is_revoked", "revoke_browser_session")],
+    ids=["write", "lookup-and-write"],
+)
 def test_sign_out_that_cannot_be_recorded_reports_failure_and_clears_the_cookie(
     monkeypatch,
+    unavailable,
 ) -> None:
     from storage import remote_access_authorization_service
 
     config = _config()
     monkeypatch.setattr(ui_server, "_load_remote_access_config", lambda: config)
+    cookie = _session_cookie(config)
 
     def storage_unavailable(*_args, **_kwargs):
         raise RuntimeError("database is locked")
 
-    monkeypatch.setattr(
-        remote_access_authorization_service,
-        "revoke_browser_session",
-        storage_unavailable,
-    )
+    for name in unavailable:
+        monkeypatch.setattr(remote_access_authorization_service, name, storage_unavailable)
     client = ui_server.app.test_client()
-    client.set_cookie(remote_access.SESSION_COOKIE_NAME, _session_cookie(config), domain="alex.avibe.bot")
+    client.set_cookie(remote_access.SESSION_COOKIE_NAME, cookie, domain="alex.avibe.bot")
     response = client.post(
         "/auth/logout",
         base_url="https://alex.avibe.bot",
