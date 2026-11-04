@@ -182,7 +182,7 @@ describe('AuthGuard boot from the last confirmed outcome', () => {
     consoleError.mockRestore();
   });
 
-  it('AUTH-SETUP-142 boots only until the session expires: its reported expiry, else 24 hours', () => {
+  it('AUTH-SETUP-142 boots only until the session expires: its reported expiry, else 12 hours', () => {
     const day = 24 * 60 * 60 * 1000;
     const nowSeconds = () => Math.floor(Date.now() / 1000);
     const startsWithShell = () => {
@@ -193,9 +193,15 @@ describe('AuthGuard boot from the last confirmed outcome', () => {
       return shown;
     };
 
-    // An instance that does not report the expiry: the 24-hour fallback.
+    // An instance that does not report the expiry: the 12-hour fallback. Its
+    // cookie renews only past half of 24 hours, so a check guarantees 12 more
+    // hours of credential, not 24.
     recordBootSession(member, Date.now() - BOOT_SESSION_MAX_AGE_MS - 1);
     expect(startsWithShell()).toBe(false);
+    recordBootSession(member, Date.now() - 13 * 60 * 60 * 1000);
+    expect(startsWithShell()).toBe(false);
+    recordBootSession(member, Date.now() - 11 * 60 * 60 * 1000);
+    expect(startsWithShell()).toBe(true);
 
     // A 30-day session recorded three days ago is still live.
     recordBootSession({ ...member, session_expires_at: nowSeconds() + 27 * 24 * 3600 }, Date.now() - 3 * day);

@@ -8,7 +8,7 @@ import { normalizeSessionInfo, type SessionInfo } from './sessionInfo';
 // It is only ever an outcome the server confirmed in full: a signed-in reader
 // whose authorization was current and, when setup applies, an instance whose
 // setup is complete. It is used only until the session itself expires (the
-// server reports ``session_expires_at``; without it, 24 hours), and any other
+// server reports ``session_expires_at``; without it, 12 hours), and any other
 // answer from the server deletes it, as do sign-out, revocation, and a
 // login-required signal.
 //
@@ -23,9 +23,11 @@ const BOOT_SESSION_KEY = 'avibe.boot-session.v1';
 const BOOT_SESSION_GENERATION_KEY = 'avibe.boot-session.generation.v1';
 
 /** How long an outcome is trusted when the server did not say when the session
- *  expires (local loopback, or an instance from before ``session_expires_at``):
- *  the 24 hours remote sessions used to last. */
-export const BOOT_SESSION_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+ *  expires (local loopback, or an instance from before ``session_expires_at``).
+ *  Such an instance issues 24-hour cookies and renews one only past its
+ *  half-life, so at the moment of a successful check the cookie has at least
+ *  12 hours left; trusting the record any longer could outlive the credential. */
+export const BOOT_SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 /** Never trust an outcome longer than the longest a remote session can live
  *  (docs/plans/remote-session-lifetime.md: a 90-day absolute cap), whatever an
  *  old record claims. */

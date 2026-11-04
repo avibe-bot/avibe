@@ -194,12 +194,12 @@ scenarios:
     backend: web
     test: ui/src/App.remoteAuth.test.tsx::AUTH-SETUP-141 keeps the gate a revocation put up when the check started before it answers ready
   - id: AUTH-SETUP-142
-    name: A recorded session is replayed only until it expires, by the server-reported expiry or else 24 hours
+    name: A recorded session is replayed only until it expires, by the server-reported expiry or else 12 hours
     status: covered
     kind: negative_path
     layer: contract
     backend: web
-    test: "ui/src/App.remoteAuth.test.tsx::AUTH-SETUP-142 boots only until the session expires: its reported expiry, else 24 hours"
+    test: "ui/src/App.remoteAuth.test.tsx::AUTH-SETUP-142 boots only until the session expires: its reported expiry, else 12 hours"
   - id: AUTH-SETUP-143
     name: Sign-out forgets the recorded session even when a guard check answers ready while logout is in flight
     status: covered
