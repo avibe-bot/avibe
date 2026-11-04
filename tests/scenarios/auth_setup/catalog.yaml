@@ -245,7 +245,7 @@ scenarios:
     kind: happy_path
     layer: scenario
     backend: web
-    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_remote_session_idles_out_renews_daily_and_ends_at_the_cap[personal]
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_personal_remote_session_idles_out_renews_daily_and_ends_at_the_cap
     supporting_tests:
       - tests/test_remote_access_vibe_cloud.py::test_remote_session_idles_out_after_its_instance_kind_limit
       - tests/test_remote_access_vibe_cloud.py::test_remote_session_renews_daily_and_never_past_the_cap
@@ -256,7 +256,7 @@ scenarios:
     kind: authorization
     layer: scenario
     backend: web
-    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_remote_session_idles_out_renews_daily_and_ends_at_the_cap[organization]
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_organization_remote_session_idles_out_renews_daily_and_ends_at_the_cap
     supporting_tests:
       - tests/test_remote_access_vibe_cloud.py::test_remote_session_idles_out_after_its_instance_kind_limit
       - tests/test_remote_access_vibe_cloud.py::test_remote_session_renews_daily_and_never_past_the_cap

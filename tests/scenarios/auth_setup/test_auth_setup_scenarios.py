@@ -1580,19 +1580,25 @@ def _remote_session_set_cookie(response) -> tuple[str, int] | None:
     return None
 
 
-@pytest.mark.parametrize(
-    ("instance_kind", "idle_seconds"),
-    [("personal", 30 * 24 * 60 * 60), ("organization", 7 * 24 * 60 * 60)],
-    ids=["personal", "organization"],
-)
-def test_remote_session_idles_out_renews_daily_and_ends_at_the_cap(
+def test_personal_remote_session_idles_out_renews_daily_and_ends_at_the_cap(
     monkeypatch,
     tmp_path,
-    instance_kind,
-    idle_seconds,
 ):
-    """Scenario: AUTH-SETUP-144 (personal), AUTH-SETUP-145 (organization)."""
+    """Scenario: AUTH-SETUP-144."""
 
+    _remote_session_lifetime_scenario(monkeypatch, tmp_path, "personal", 30 * 24 * 60 * 60)
+
+
+def test_organization_remote_session_idles_out_renews_daily_and_ends_at_the_cap(
+    monkeypatch,
+    tmp_path,
+):
+    """Scenario: AUTH-SETUP-145."""
+
+    _remote_session_lifetime_scenario(monkeypatch, tmp_path, "organization", 7 * 24 * 60 * 60)
+
+
+def _remote_session_lifetime_scenario(monkeypatch, tmp_path, instance_kind, idle_seconds):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_remote_session_authorization_config(instance_kind)
     with ui_server._auth_ratelimit_lock:
