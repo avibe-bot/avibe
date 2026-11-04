@@ -2,7 +2,7 @@
 
 Avibe-added servers store ``definition.json`` here. Native Claude/Codex/OpenCode
 entries are read-only sources. A published revision (``current.json``) is what
-makes a server registered and listable. Leftover ``state.json`` ``enabled``
+makes tools callable; Avibe-owned definitions remain manageable without it. Leftover ``state.json`` ``enabled``
 flags from the MVP lifecycle are ignored. Writers are serialized per package by
 the owner (``core/mcp_hub/runtime.py``).
 """
@@ -147,25 +147,6 @@ def write_avibe_definition(definition: dict[str, Any]) -> None:
     _write_json(directory / "definition.json", definition)
 
 
-def rollback_avibe_definition(name: str, previous: Optional[dict[str, Any]], *, hidden: bool = False) -> None:
-    """Undo an add that failed to refresh: restore the prior Avibe file or delete it."""
-
-    validate_name(str(name))
-    path = _avibe_definition_path(name)
-    if previous is not None:
-        write_avibe_definition(previous)
-        if hidden:
-            hide_name(name)
-        return
-    if path.is_file():
-        path.unlink()
-    directory = package_dir(name)
-    if directory.is_dir() and not any(directory.iterdir()):
-        directory.rmdir()
-    if hidden:
-        hide_name(name)
-
-
 def unlist(name: str) -> None:
     """Drop ``current.json`` so a failed refresh is not listed, keeping revision files."""
 
@@ -192,20 +173,15 @@ def read_definition(name: str, servers: Optional[dict[str, native.NativeServer]]
     name = str(name)
     avibe = read_avibe_definition(name)
     if avibe is not None:
-        return avibe
+        from core.mcp_hub.scope import Scope, ScopedName, load_server
+
+        return load_server(ScopedName(Scope(), name)).require_definition()
     server = (native.read_all() if servers is None else servers).get(name)
     if server is None:
         raise _not_found(name)
     if server.error is not None:
         raise server.error
     return server.definition
-
-
-def write_definition(definition: dict[str, Any]) -> str:
-    """Persist an Avibe-owned definition; never writes native files."""
-
-    write_avibe_definition(definition)
-    return AVIBE
 
 
 def remove_package(name: str) -> str:
@@ -403,8 +379,12 @@ def publish(name: str, *, definition: dict[str, Any], manifest: dict[str, Any], 
 
 
 def summarize(name: str, servers: Optional[dict[str, native.NativeServer]] = None) -> dict[str, Any]:
-    """Registered package only. Missing or unpublished names raise ``not_found``."""
+    """Owned definitions stay manageable; native imports require publication."""
 
+    if read_avibe_definition(name) is not None:
+        from core.mcp_hub.scope import Scope, ScopedName, load_server
+
+        return load_server(ScopedName(Scope(), str(name))).summary()
     published = read_published(name)
     if published is None:
         raise _not_found(name)
@@ -482,7 +462,7 @@ def _candidate_names(servers: dict[str, native.NativeServer]) -> set[str]:
 
 
 def list_packages() -> list[dict[str, Any]]:
-    """Registered servers only (published revision present)."""
+    """Avibe-owned definitions plus successfully published native imports."""
 
     servers = native.read_all()
     listed: list[dict[str, Any]] = []

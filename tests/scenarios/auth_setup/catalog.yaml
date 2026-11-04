@@ -704,7 +704,7 @@ scenarios:
       - ui/src/components/ui/vault-secret-fields-editor.test.tsx
       - ui/src/components/workbench/VaultsPage.test.tsx
   - id: AUTH-SETUP-138
-    name: MCP Hub global and project servers with the same name keep separate OAuth pending grants, tokens and return views
+    name: MCP Hub same-name global and project templates configure privately before separate OAuth grants, tokens and return views
     status: covered
     kind: concurrency
     layer: scenario

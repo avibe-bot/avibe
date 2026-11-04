@@ -71,10 +71,9 @@ async def list_servers(origin: str | None = None, port: int | None = None) -> di
 
 
 async def add(body: dict[str, Any]) -> dict[str, Any]:
-    from core.mcp_hub.scope import project_add_definition
-    from core.mcp_hub.definition import definition_from_provider
+    from core.mcp_hub.scope import add_definition, project_add_definition
 
-    validator = project_add_definition if project_context.get() else definition_from_provider
+    validator = project_add_definition if project_context.get() else add_definition
     definitions = parse_provider_json(str(body.get("text") or ""), validator=validator)
     payload = {"replace": body.get("replace") is True, "servers": _servers_payload(definitions)}
     response = await _owner("add", payload)

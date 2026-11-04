@@ -583,7 +583,7 @@ class McpRuntime:
             return mcp_scope.load_server(name).summary()
         summary = repository.summarize(str(name))
         summary["scope"] = "global"
-        summary["state"] = "needs_login" if summary.get("auth") == "needs_login" else "ok"
+        summary.setdefault("state", "needs_login" if summary.get("auth") == "needs_login" else "ok")
         return summary
 
     async def _detail(self, payload: dict[str, Any]) -> bytes:
@@ -620,9 +620,11 @@ class McpRuntime:
 
     async def _configure(self, payload: dict[str, Any]) -> bytes:
         name = payload["name"]
-        self._require_project(name, "Configure")
+        if not repository.is_project(name) and await asyncio.to_thread(repository.read_avibe_definition, str(name)) is None:
+            raise McpHubError("usage", "Configure applies only to Avibe-owned servers.")
         async with self._lock(name):
-            await asyncio.to_thread(mcp_scope.configure, name, payload.get("secrets") or {})
+            await asyncio.to_thread(mcp_scope.configure, name, payload.get("secrets", {}))
+            await asyncio.to_thread(repository.unlist, name)
             await self._cancel_login(name)
             await self._retire_package(name)
             server = await asyncio.to_thread(mcp_scope.load_server, name)
@@ -630,89 +632,50 @@ class McpRuntime:
                 return await self._refresh_locked(name, wait_stdio=True)
         return _dumps({"ok": True, "name": name, "state": server.state})
 
-    async def _add_project(self, target: Scope, servers: list, replace: bool) -> bytes:
-        """D1: a project with ``.mcp.json`` (or a Web project) receives the entry, pending approval."""
-
-        added, failed = [], []
-        for item in servers:
-            name = ScopedName(target, item.get("name"))
-            try:
-                mcp_scope.project_add_definition(name.name, item.get("server"))
-                async with self._lock(name):
-                    await asyncio.to_thread(mcp_scope.write_server, name, item["server"], replace=replace)
-                    await self._cancel_login(name)
-                    await self._retire_package(name)
-                added.append({"name": name.name, "status": "added", "state": "pending_approval"})
-            except McpHubError as exc:
-                failed.append({"name": name.name, "error": exc.message, "type": exc.type})
-        return _dumps({"ok": bool(added), "added": added, "unchanged": [], "failed": failed})
-
     async def _add(self, payload: dict[str, Any]) -> bytes:
-        replace = payload.get("replace") is True
         target = payload.get("_scopes", [Scope()])[-1]
-        if target.project_root is not None:
-            return await self._add_project(target, payload.get("servers") or [], replace)
-        definitions = [
-            definition_from_provider(item.get("name"), item.get("server"))
-            for item in payload.get("servers") or []
-        ]
-        if not definitions:
+        servers = payload.get("servers") or []
+        if not servers:
             raise McpHubError("usage", "No servers to save.", usage=True)
-        results = await asyncio.gather(*(self._add_one(item, replace) for item in definitions))
-        added = [item for item in results if item.get("status") == "added"]
-        unchanged = [item for item in results if item.get("status") == "unchanged"]
-        failed = [item for item in results if item.get("status") == "failed"]
-        ok = bool(added or unchanged)
-        body: dict[str, Any] = {"ok": ok, "added": added, "unchanged": unchanged, "failed": failed}
+        results = await asyncio.gather(*(self._add_one(target, item, payload.get("replace") is True) for item in servers))
+        added = [item for item in results if item["status"] == "added"]
+        unchanged = [item for item in results if item["status"] == "unchanged"]
+        failed = [item for item in results if item["status"] == "failed"]
+        body = {"ok": bool(added or unchanged), "added": added, "unchanged": unchanged, "failed": failed}
         if len(added) == 1:
             body.update({k: added[0][k] for k in ("name", "revision", "toolCount") if k in added[0]})
-        if failed and not added:
-            summary = "; ".join(f"{item['name']}: {item.get('error') or 'failed'}" for item in failed)
-            body["error"] = {"type": "add_failed", "message": summary, "failed": failed}
-        elif failed:
-            summary = "; ".join(f"{item['name']}: {item.get('error') or 'failed'}" for item in failed)
-            body["error"] = {"type": "add_partial", "message": summary, "failed": failed}
+        if failed:
+            body["error"] = {
+                "type": "add_partial" if added or unchanged else "add_failed",
+                "message": "; ".join(f"{item['name']}: {item['error']}" for item in failed),
+                "failed": failed,
+            }
         return _dumps(body)
 
-    async def _add_one(self, definition: dict[str, Any], replace: bool) -> dict[str, Any]:
-        name = definition["name"]
-        async with self._lock(name):
-            previous = None
-            was_hidden = False
-            saved = False
-            try:
-                previous = await asyncio.to_thread(repository.read_avibe_definition, name)
-                was_hidden = name in await asyncio.to_thread(repository.hidden_names)
-                outcome = await asyncio.to_thread(self._save_one, definition, replace)
-                if outcome == "unchanged":
-                    return {"name": name, "status": "unchanged"}
-                if outcome == "exists":
-                    return {
-                        "name": name,
-                        "status": "failed",
-                        "error": f"{name} already exists with a different definition.",
-                        "type": "exists",
-                    }
-                saved = True
-                body = json.loads(await self._refresh({"name": name, "waitStdio": True, "locked": True}))
-                if body.get("ok"):
-                    result = {
-                        "name": name,
-                        "status": "added",
-                        "revision": body.get("revision"),
-                        "toolCount": body.get("toolCount"),
-                    }
-                    if body.get("auth") == "needs_login":
-                        result["auth"] = "needs_login"
-                    return result
-                error = (body.get("error") or {}).get("message") or "failed"
-            except McpHubError as cop:
-                error = cop.message
-            except Exception as cop:  # noqa: BLE001
-                error = str(cop)
-            if saved:
-                await asyncio.to_thread(repository.rollback_avibe_definition, name, previous, hidden=was_hidden)
-            return {"name": name, "status": "failed", "error": error}
+    async def _add_one(self, target: Scope, item: dict[str, Any], replace: bool) -> dict[str, Any]:
+        name = ScopedName(target, item.get("name"))
+        try:
+            definition = await asyncio.to_thread(mcp_scope.add_definition, name.name, item.get("server"), project=repository.is_project(name))
+            async with self._lock(name):
+                if not repository.is_project(name) and not replace:
+                    outcome = await asyncio.to_thread(self._existing_add, name, definition)
+                    if outcome == "unchanged":
+                        return {"name": name.name, "status": "unchanged"}
+                    if outcome == "exists":
+                        raise McpHubError("exists", f"{name} already exists with a different definition.")
+                # Calls take this same lock only for admission. Already admitted calls
+                # may finish; no revision-bound OAuth/secret snapshot is promised.
+                await asyncio.to_thread(mcp_scope.write_server, name, item["server"], replace=replace or not repository.is_project(name))
+                await asyncio.to_thread(repository.unlist, name)
+                await self._cancel_login(name)
+                await self._retire_package(name)
+                server = await asyncio.to_thread(mcp_scope.load_server, name)
+                if server.state != "ok":
+                    return {"name": name.name, "status": "added", "state": server.state}
+                body = json.loads(await self._refresh_locked(name, wait_stdio=True))
+                return {"name": name.name, "status": "added", **{k: body[k] for k in ("revision", "toolCount", "auth") if k in body}}
+        except McpHubError as exc:
+            return {"name": name.name, "status": "failed", "error": exc.message, "type": exc.type}
 
     @staticmethod
     def _comparable_definition(definition: dict[str, Any]) -> dict[str, Any]:
@@ -729,33 +692,33 @@ class McpRuntime:
         return comparable
 
     @staticmethod
-    def _save_one(definition: dict[str, Any], replace: bool) -> str:
-        name = definition["name"]
-        if definition.get("transport", {}).get("type") == STDIO and not definition["transport"].get("cwd"):
-            definition = json.loads(json.dumps(definition))
-            definition["transport"]["cwd"] = repository.default_cwd()
-        existing = None
-        try:
-            existing = repository.read_definition(name)
-        except McpHubError:
-            existing = repository.read_avibe_definition(name)
+    def _existing_add(name: ScopedName, definition: dict[str, Any]) -> Optional[str]:
+        """A result tag never doubles as a server name; unchanged includes publication."""
+        if name.name in repository.hidden_names():
+            return None
+        stored = repository.read_avibe_definition(name.name)
+        if stored is not None:
+            try:
+                existing = repository.read_definition(name)
+            except McpHubError as exc:
+                if exc.type == "needs_config":
+                    return "exists"
+                raise
+        else:
+            native_server = native.read_all().get(name.name)
+            existing = native_server.definition if native_server and not native_server.error else None
+        if existing is None:
+            return None
         published = repository.read_published(name)
-        exists = existing is not None or published is not None
-        listed = name not in repository.hidden_names() and published is not None
-        if exists and not replace:
-            published_definition = published["definition"] if published is not None else None
-            if (
-                listed
-                and existing is not None
-                and published_definition is not None
-                and McpRuntime._comparable_definition(existing) == McpRuntime._comparable_definition(definition)
-                and McpRuntime._comparable_definition(published_definition) == McpRuntime._comparable_definition(definition)
-            ):
-                return "unchanged"
-            if listed:
-                return "exists"
-        repository.write_definition(definition)
-        return name
+        requested = McpRuntime._comparable_definition(definition)
+        same_input = requested == McpRuntime._comparable_definition(existing) or (
+            stored is not None and requested == McpRuntime._comparable_definition(stored)
+        )
+        same_publication = published is not None and (
+            mcp_scope.publication_matches(name, existing, published) if stored is not None
+            else McpRuntime._comparable_definition(published["definition"]) == McpRuntime._comparable_definition(existing)
+        )
+        return "unchanged" if same_input and same_publication else "exists"
 
     async def _refresh(self, payload: dict[str, Any]) -> bytes:
         name = payload.get("name")
@@ -777,6 +740,14 @@ class McpRuntime:
         name = _scoped(name)
         definition = await asyncio.to_thread(repository.read_definition, name)
         snapshot = json.loads(json.dumps(definition))
+        owned = repository.is_project(name) or await asyncio.to_thread(repository.read_avibe_definition, str(name)) is not None
+
+        def discovery_error(error: McpHubError) -> McpHubError:
+            # Transport errors can echo the resolved URL or headers. Owned
+            # configuration stays private; native diagnostic behavior is unchanged.
+            if owned:
+                return McpHubError(error.type, "MCP discovery failed; check the server configuration and retry.")
+            return error
 
         if snapshot["transport"]["type"] == STDIO and not snapshot["transport"].get("cwd"):
             snapshot["transport"]["cwd"] = await asyncio.to_thread(repository.default_cwd)
@@ -811,7 +782,7 @@ class McpRuntime:
                 return _dumps({"ok": True, "name": name, "revision": revision, "toolCount": 0, "auth": "needs_login"})
             if unlist_on_failure:
                 await asyncio.to_thread(repository.unlist, name)
-            raise
+            raise discovery_error(cop) from None
         except Exception as cop:
             hub = _hub_error(cop)
             if _oauth_eligible(definition) and name not in self._oauth_logins and (
@@ -822,8 +793,8 @@ class McpRuntime:
             if unlist_on_failure:
                 await asyncio.to_thread(repository.unlist, name)
             if hub is not None:
-                raise hub from None
-            raise McpHubError("connection", f"Refresh failed: {_describe(cop)}") from None
+                raise discovery_error(hub) from None
+            raise discovery_error(McpHubError("connection", f"Refresh failed: {_describe(cop)}")) from None
         finally:
             if acquired:
                 self.release_stdio_slot()
@@ -1118,8 +1089,8 @@ class McpRuntime:
     async def _remove(self, payload: dict[str, Any]) -> bytes:
         name = payload.get("name")
         async with self._lock(name):
-            await self._cancel_login(name)
             kind = await asyncio.to_thread(repository.remove_package, name)
+            await self._cancel_login(name)
             await self._retire_package(name)
             for connection in list(self._connections.values()):
                 if connection.key[0] == name:
@@ -1133,9 +1104,10 @@ class McpRuntime:
 
     @staticmethod
     def _admit(name: str, tool: str, arguments: Any) -> dict[str, Any]:
-        current = repository.read_definition(name) if repository.is_project(name) else None
+        owned = repository.is_project(name) or repository.read_avibe_definition(str(name)) is not None
+        current = repository.read_definition(name) if owned else None
         published = repository.read_published(name)
-        if current is not None and published is not None and current != published["definition"]:
+        if owned and published is not None and not mcp_scope.publication_matches(_scoped(name), current, published):
             raise McpHubError("not_generated", "MCP configuration changed; refresh the server.")
         if published is None:
             repository.read_definition(name)
@@ -1155,7 +1127,8 @@ class McpRuntime:
         arguments = payload.get("arguments") or {}
         session_id = payload.get("sessionId") or None
         try:
-            published = await asyncio.to_thread(self._admit, name, tool, arguments)
+            async with self._lock(name):
+                published = await asyncio.to_thread(self._admit, name, tool, arguments)
         except McpHubError as exc:
             return _dumps(self._envelope(name, None, tool, error=exc))
         revision = published["revision"]

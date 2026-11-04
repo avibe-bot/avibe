@@ -742,12 +742,15 @@ def test_project_add_and_replace_preserve_oauth_options(tmp_path, runtime):
 
 
 @pytest.mark.parametrize("entrypoint", ["runtime", "cli", "web"])
-def test_project_add_preserves_unconfigured_url(tmp_path, monkeypatch, runtime, entrypoint):
+@pytest.mark.parametrize("project", [True, False])
+def test_owned_add_preserves_unconfigured_url(tmp_path, monkeypatch, runtime, entrypoint, project):
     from core.mcp_hub import scope
     from vibe import internal_client, mcp_api, mcp_cli
 
     root = _project(tmp_path / "repo", {})
     monkeypatch.setenv("AVIBE_SKILL_WORKING_DIR", str(root))
+    if not project:
+        (root / ".mcp.json").unlink()
     url = "https://${HOST}/mcp"
     if entrypoint == "cli":
         assert mcp_cli.add_main(["--transport", "http", "remote", url]) == 0
@@ -758,16 +761,17 @@ def test_project_add_preserves_unconfigured_url(tmp_path, monkeypatch, runtime, 
             assert status == 200
             return json.loads(body)
         monkeypatch.setattr(internal_client, "mcp_request", request)
-        token = mcp_api.project_context.set("test-project")
+        token = mcp_api.project_context.set("test-project" if project else None)
         try:
             assert asyncio.run(mcp_api.add({"text": json.dumps({"mcpServers": {"remote": {"url": url}}})}))["ok"]
         finally:
             mcp_api.project_context.reset(token)
     else:
         assert _run(runtime, "add", {"workingDirectory": str(root), "servers": [{"name": "remote", "server": {"url": url}}]})["ok"]
-    assert json.loads((root / ".mcp.json").read_text())["mcpServers"]["remote"]["url"] == url
-    key = _key(root, "remote")
-    scope.approve(key)
+    key = _key(root, "remote") if project else scope.ScopedName(scope.Scope(), "remote")
+    assert scope._raw_entry(key)["url"] == url
+    if project:
+        scope.approve(key)
     assert scope.load_server(key).state == "needs_config"
     assert scope.load_server(key).missing == ["HOST"]
 

@@ -311,7 +311,7 @@ def test_oauth_storage_is_url_bound_and_private(tmp_path):
 def test_needs_login_is_listed_but_omitted_from_prompt(tmp_path):
     save_config(tmp_path).save()
     definition = definition_from_provider("suno", {"url": "https://api.example/mcp", "oauth": {"scopes": "offline_access"}})
-    repository.write_definition(definition)
+    repository.write_avibe_definition(definition)
     repository.publish("suno", definition=definition, manifest={"description": "", "auth": "needs_login"}, tools=[], commands=[])
     assert repository.list_packages()[0]["auth"] == "needs_login"
     assert "suno" not in "".join(block.text for block in build_mcp_prompt_blocks())
@@ -361,7 +361,7 @@ def test_authorization_header_skips_oauth(runtime, loopback):
 def test_expired_access_token_refreshes_once_on_real_token_endpoint(runtime, loopback):
     url = f"{loopback.origin}/mcp"
     definition = definition_from_provider("suno", {"url": url})
-    repository.write_definition(definition)
+    repository.write_avibe_definition(definition)
     _seed_tokens("suno", url, expires_at=time.time() - 10)
     refreshed = _run(runtime, "refresh", {"name": "suno"})
     assert refreshed["ok"] and refreshed["toolCount"] == 1
@@ -373,7 +373,7 @@ def test_expired_access_token_refreshes_once_on_real_token_endpoint(runtime, loo
 
 def test_restart_then_refresh_uses_stored_token_endpoint(runtime, loopback):
     url = f"{loopback.origin}/mcp"
-    repository.write_definition(definition_from_provider("suno", {"url": url}))
+    repository.write_avibe_definition(definition_from_provider("suno", {"url": url}))
     _seed_tokens("suno", url, expires_at=time.time() - 10)
     runtime.stop()
     again = McpRuntime()
@@ -387,7 +387,7 @@ def test_restart_then_refresh_uses_stored_token_endpoint(runtime, loopback):
 
 def test_rejected_refresh_deletes_tokens_and_call_is_auth_required(runtime, loopback):
     url = f"{loopback.origin}/mcp"
-    repository.write_definition(definition_from_provider("suno", {"url": url}))
+    repository.write_avibe_definition(definition_from_provider("suno", {"url": url}))
     _seed_tokens("suno", url, expires_at=time.time() - 10)
     loopback.refresh_status = 400
     refreshed = _run(runtime, "refresh", {"name": "suno"})
@@ -400,7 +400,7 @@ def test_rejected_refresh_deletes_tokens_and_call_is_auth_required(runtime, loop
 
 def test_call_time_resource_401_is_auth_required_without_replay(runtime, loopback):
     url = f"{loopback.origin}/mcp"
-    repository.write_definition(definition_from_provider("suno", {"url": url}))
+    repository.write_avibe_definition(definition_from_provider("suno", {"url": url}))
     _seed_tokens("suno", url, expires_at=time.time() + 3600)
     assert _run(runtime, "refresh", {"name": "suno"})["ok"]
     before = loopback.mcp_posts
@@ -413,7 +413,7 @@ def test_call_time_resource_401_is_auth_required_without_replay(runtime, loopbac
 
 def test_concurrent_call_time_auth_required_keeps_valid_package(runtime, loopback, monkeypatch):
     url = f"{loopback.origin}/mcp"
-    repository.write_definition(definition_from_provider("suno", {"url": url}))
+    repository.write_avibe_definition(definition_from_provider("suno", {"url": url}))
     _seed_tokens("suno", url, expires_at=time.time() + 3600)
     assert _run(runtime, "refresh", {"name": "suno"})["ok"]
     loopback.resource_status = 401
@@ -446,7 +446,7 @@ def test_concurrent_call_time_auth_required_keeps_valid_package(runtime, loopbac
 
 def test_concurrent_calls_share_one_token_refresh(runtime, loopback):
     url = f"{loopback.origin}/mcp"
-    repository.write_definition(definition_from_provider("suno", {"url": url}))
+    repository.write_avibe_definition(definition_from_provider("suno", {"url": url}))
     _seed_tokens("suno", url, expires_at=time.time() + 3600)
     assert _run(runtime, "refresh", {"name": "suno"})["ok"]
     _seed_tokens("suno", url, expires_at=time.time() - 10, access=loopback.access, refresh=loopback.refresh)
@@ -557,7 +557,7 @@ def test_login_completion_serializes_publish_with_refresh(runtime, loopback, mon
 
 def test_logout_republishes_needs_login_without_tokens(runtime, loopback):
     url = f"{loopback.origin}/mcp"
-    repository.write_definition(definition_from_provider("suno", {"url": url}))
+    repository.write_avibe_definition(definition_from_provider("suno", {"url": url}))
     _seed_tokens("suno", url, expires_at=time.time() + 3600)
     assert _run(runtime, "refresh", {"name": "suno"})["ok"]
     logged_out = _run(runtime, "oauth_logout", {"name": "suno"})
@@ -572,7 +572,7 @@ def test_logout_republishes_needs_login_without_tokens(runtime, loopback):
 
 def test_stdio_logout_is_rejected(runtime, tmp_path):
     definition = definition_from_provider("echo", {"command": sys.executable, "args": ["-c", "pass"]})
-    repository.write_definition(definition)
+    repository.write_avibe_definition(definition)
     logged_out = _run(runtime, "oauth_logout", {"name": "echo"})
     assert logged_out["ok"] is False
     assert logged_out["error"]["type"] == "usage"
@@ -607,7 +607,7 @@ def test_remove_cancels_pending_login(runtime, loopback):
 
 def test_tool_error_containing_auth_stays_tool_error(runtime, loopback):
     url = f"{loopback.origin}/mcp"
-    repository.write_definition(definition_from_provider("suno", {"url": url}))
+    repository.write_avibe_definition(definition_from_provider("suno", {"url": url}))
     _seed_tokens("suno", url, expires_at=time.time() + 3600)
     assert _run(runtime, "refresh", {"name": "suno"})["ok"]
     loopback.tool_error = "auth failed for user"

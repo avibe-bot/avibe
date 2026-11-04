@@ -109,7 +109,7 @@ def test_needs_login_package_lists_and_details_without_500(owner):
         "name": "suno",
         "transport": {"type": "http", "url": "https://api.example/mcp"},
     }
-    repository.write_definition(definition)
+    repository.write_avibe_definition(definition)
     repository.publish(
         "suno",
         definition=definition,
@@ -284,3 +284,21 @@ def test_oauth_start_unknown_server_renders_html_error(owner):
     assert response.status_code == 400
     assert response.headers["Content-Type"].startswith("text/html")
     assert owner._pending_logins == {}
+
+
+def test_global_template_add_and_configure_use_the_owner_api(owner):
+    """The Web parser must accept the same templates as the shared runtime loader."""
+    client = app.test_client()
+    headers = csrf_headers(client)
+    text = json.dumps({'mcpServers': {'templated': {
+        'command': sys.executable, 'args': [FIXTURE], 'env': {'ECHO_TOKEN': '${TOKEN}'},
+    }}})
+    added = client.post('/api/mcp', json={'text': text}, headers=headers).get_json()
+    assert added['ok'] and added['added'][0]['state'] == 'needs_config'
+    detail = client.get('/api/mcp/templated').get_json()
+    assert detail['server']['missingVariables'] == ['TOKEN']
+    configured = client.post('/api/mcp/templated/configure', json={'env': {'TOKEN': 'private-fixture'}}, headers=headers)
+    assert configured.get_json()['ok']
+    detail = client.get('/api/mcp/templated').get_json()
+    assert detail['server']['state'] == 'ok' and detail['server']['toolCount'] == 7
+    assert 'private-fixture' not in json.dumps(detail)

@@ -21,7 +21,7 @@ Controller startup runs one discovery pass in the background. To run it now:
 vibe mcp-discover
 ```
 
-Success is listed. Failure is omitted; `vibe mcp-discover` prints the reason. Concurrent passes join.
+Avibe-owned definitions remain listed if discovery fails, with no callable tools. Native discovery failures are omitted; `vibe mcp-discover` prints the reason. Concurrent passes join.
 
 Refresh one server:
 
@@ -53,7 +53,10 @@ vibe mcp-add --json-stdin < servers.json
 - Supported transports are stdio and Streamable HTTP. SSE is not supported. HTTP servers that advertise OAuth can be logged in from the Skills page or with `vibe mcp <name> --login`.
 - Add never writes Claude/Codex/OpenCode files.
 - A Hub-entered `cwd` must be absolute.
-- `${VAR}` placeholders are not expanded in global servers (project servers: see below).
+- Global Avibe and project servers accept `${VAR}` in URL, env values and header values, never command or args. Variables come only from that server's private configuration, not the process environment.
+- Unconfigured definitions are saved and show **needs config** with missing variable names. Use **Configure** or `vibe mcp <name> --configure '{"env": {"TOKEN": "<value>"}}'`. A supplied map replaces that map (an empty map clears it); omitted maps stay unchanged. Only the Owner can configure.
+- Templates stay in the definition. Concrete env/header values supplied through Avibe are stored in private `secrets.json`; add/replace moves each supplied key to the correct destination and preserves unspecified keys. Native imports retain their existing semantics.
+- After an accepted add/replace or configuration change, tools become callable only after successful discovery. If discovery fails, the saved definition remains visible for Configure, Refresh or Remove. Calls already admitted may finish; new admissions are serialized with the mutation. This is not a guarantee of an old OAuth-secret snapshot.
 
 ## Delete
 
@@ -71,7 +74,7 @@ A project can keep MCP servers in `<project root>/.mcp.json`, in Claude Code's `
 - **Scope.** A Session, `vibe mcp` and the prompt see global servers plus the servers of their own project's `.mcp.json`; never another project's. A project server shadows a global one with the same name. `vibe mcp --global ...` uses only global servers. In the Web MCP page's Project view, the project's own servers are listed first under "Project MCP", then the inherited global servers under "Also available · inherited from global" (view-only there; manage them in the Global tab). A global server shadowed by a same-name project server is not listed in the inherited group.
 - **Approval.** Every project server, stdio or HTTP, is **pending approval** until the instance Owner approves it: it does not start, connect, appear in the prompt, or accept calls. Approval binds to the raw `.mcp.json` entry, so any edit to that entry needs approval again; changing a secret does not.
 - **Secrets.** Write `${VAR}` in `url`, env values or header values (not in `command` or `args`). All placeholders of a server share one set of variables, supplied with `--configure` and stored outside the project. Until every variable is set, the server shows **needs config** and the missing names.
-- **Add.** Project additions through the CLI and Web use the same placeholder-aware structural validation as the project loader; unresolved URL variables remain verbatim in `.mcp.json` and require configuration after approval. Global additions still reject placeholders. Without `--global`, `vibe mcp-add` writes to the project's `.mcp.json` when the file exists. Avibe writes `type`, `command`, `args`, `url`, `cwd` and the supported `oauth` options (`clientId`, `scopes`); env and header values are classified per key: values containing `${VAR}` are templates written verbatim to the project file; concrete values go only to the private cache. Mixed maps are split accordingly. A supplied key replaces its previous value and is removed from the other destination; unspecified keys are preserved. The complete prospective document and cache are validated before either is written. Replacing an entry keeps the file's own env/headers (including placeholders), `cwd`, `type` and other keys, and preserves the file's existing formatting and indentation (compact files stay compact; a file whose layout Avibe cannot edit in place falls back to a 2-space rewrite). If the file changed while Avibe was writing it, the command fails with `config_changed`, keeps your edit, and can be retried.
+- **Add.** Project additions through the CLI and Web use the same placeholder-aware structural validation as the project loader; unresolved URL variables remain verbatim in `.mcp.json` and require configuration after approval. Global additions use the same validation and private-value partition. Without `--global`, `vibe mcp-add` writes to the project's `.mcp.json` when the file exists. Avibe writes `type`, `command`, `args`, `url`, `cwd` and the supported `oauth` options (`clientId`, `scopes`); env and header values are classified per key: values containing `${VAR}` are templates written verbatim to the project file; concrete values go only to the private cache. Mixed maps are split accordingly. A supplied key replaces its previous value and is removed from the other destination; unspecified keys are preserved. The complete prospective document and cache are validated before either is written. Replacing an entry keeps the file's own env/headers (including placeholders), `cwd`, `type` and other keys, and preserves the file's existing formatting and indentation (compact files stay compact; a file whose layout Avibe cannot edit in place falls back to a 2-space rewrite). If the file changed while Avibe was writing it, the command fails with `config_changed`, keeps your edit, and can be retried.
 
 ```bash
 vibe mcp github --approve
