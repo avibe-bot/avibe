@@ -1,8 +1,10 @@
 # Avibe iOS App · Plan
 
-> **Status**: Direction approved by the owner on 2026-11-04 (decision 1);
-> other decisions are open (section 17). Handed off to a dedicated owner of the
-> iOS track (section 18). Plan and spike only; nothing here is built yet.
+> **Status**: Direction approved by the owner on 2026-11-04 (decision 1).
+> Android now runs as a parallel APK-only track (decisions 10-12 and
+> [the Android plan](android-app.md)); other iOS decisions are open
+> (section 17). Handed off to a dedicated owner of the iOS track (section 18).
+> Plan and spike only; nothing here is built yet.
 > **Owner**: cyhhao
 > **Date**: 2026-11-02
 
@@ -15,9 +17,10 @@ a native view** above the keyboard. Native code owns what a Home Screen web app
 cannot do well: text entry, a microphone grant that does not re-ask, APNs push,
 haptics, sign-in through the system browser, an instance picker, and later App
 Intents, widgets, Share, and HealthKit. All of it sits behind **one versioned
-bridge contract**, `window.avibeNative`. iOS implements it first, a thin Kotlin
-shell implements the same contract for Android later, and the Web UI calls it
-from one module.
+bridge contract**, `window.avibeNative`. Thin Swift and Kotlin shells implement
+the same contract in parallel, while the Web UI calls it from one module.
+Their native composers and release dates remain independent; see
+[the Android plan](android-app.md).
 
 - **Text input**: the owner's main pain in the Home Screen app is typing. An
   iPhone device lab (section 5) narrowed it down: IME candidates and keyboard
@@ -579,32 +582,24 @@ same pattern, each with its own background rules. HealthKit gets its own plan
 (`docs/plans/health-data.md`) covering data types, the instance-side store,
 retention, and Agent access, before any code.
 
-## 11. Android (later)
+## 11. Android (parallel APK track)
 
-The Android PWA does not re-prompt for the microphone, so Android is not urgent.
-It comes after iOS Phase 1, once the contract and the push relay are stable.
+Android is a parallel China-first track, not an iOS follow-up. It uses a thin
+Kotlin and System WebView shell, implements the same `window.avibeNative` v1
+contract, and shares the Web UI, instance APIs, fixtures, and acceptance
+scenarios. The shell implementation and real-device results remain
+platform-specific.
 
-- **Shell**: Kotlin and the Android System WebView loading the same instance
-  origins. The microphone is granted in `WebChromeClient.onPermissionRequest`
-  together with the `RECORD_AUDIO` runtime permission. The bridge uses
-  `addWebMessageListener` and `addDocumentStartJavaScript`, both scoped to the
-  instance origins.
-- **Composer**: a native `EditText` behind the same `composer` capability, since
-  IME behavior in `contenteditable` is not reliable on Android WebView either.
-- **Push**: the same relay with an FCM sender next to APNs. The WebView has no
-  Push API, so this is the only path.
-- **Native counterparts**:
+The first and ongoing distribution channel is a signed APK. No app-store
+submission or production vendor-push integration is planned. Existing IM
+channels plus foreground realtime updates are the notification path. Android
+starts with the web composer and adds a native composer only if its own device
+matrix demonstrates a need. Native HarmonyOS, starting with HarmonyOS NEXT, is
+a separate future platform.
 
-  | iOS | Android |
-  | --- | --- |
-  | App Intents, Siri | App shortcuts and App Actions. The Assistant-to-Gemini transition makes the voice entry's future uncertain; re-check when the work starts. |
-  | Control Center control, Action Button | Quick Settings tile (`TileService`) "Talk to Vibey" ([Android](https://developer.android.com/develop/ui/views/quicksettings-tiles)) |
-  | Widgets | Home screen widgets |
-  | Share extension | Share target (`ACTION_SEND`) |
-  | HealthKit background delivery | Health Connect; background reads need `READ_HEALTH_DATA_IN_BACKGROUND`, scheduled with WorkManager ([Android](https://developer.android.com/health-and-fitness/guides/health-connect/develop/read-data)) |
-
-- **Effort**: about 3 to 4 weeks for one lane to reach iOS Phase 0 and 1
-  parity, plus about 0.5 week of backend work for FCM in the relay.
+See [the Android app plan](android-app.md) for device scope, WebView feature
+gates, APK signing and updates, process-death recovery, notifications, phases,
+and open decisions.
 
 ## 12. Web UI changes
 
@@ -845,9 +840,14 @@ notifications keep the Home Screen web app as well.
 | Backend and instance | App-facing instance list; device credential for extensions (security review) | 1 week |
 | Release | Demo instance, metadata, screenshots, privacy labels, submission | 0.5 week |
 
+### Parallel mobile track
+
+- **Android APK app**: proceeds independently of these iOS phases; see
+  [the Android plan](android-app.md). Android device or distribution work never
+  blocks an iOS TestFlight build.
+
 ### Later
 
-- **Android shell**: about 3-4 weeks (section 11).
 - **HealthKit**: its own plan first (section 10).
 
 ## 15. Phase 0 exit checklist (real iPhone, TestFlight build)
@@ -932,6 +932,17 @@ every item with the native composer.
    company entity, so neither Organization path applies for now. The owner
    performs the Account Holder steps in section 13 when the iOS owner needs
    them. Revisit only if a legal entity is created.
+10. **Settled 2026-11-05:** build the China-first Android app in parallel with
+    iOS. The two tracks do not need to release on the same day, and Android
+    device work never blocks TestFlight.
+11. **Settled 2026-11-05:** share the Web UI, business behavior, instance APIs,
+    `window.avibeNative` contract, fixtures, and acceptance scenarios. Keep the
+    Swift and Kotlin shells separate; Tauri and Capacitor remain out. Each
+    platform decides from its own real-device evidence whether it needs a
+    native composer.
+12. **Settled 2026-11-05:** Android ships as signed APKs only. App stores and
+    production vendor push are out of scope unless the owner reopens them.
+    Native HarmonyOS is a separate future platform.
 
 ## 18. Ownership and handoff
 
