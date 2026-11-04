@@ -78,7 +78,7 @@ export const DoctorPanel: React.FC<DoctorPanelProps> = ({
 
   useEffect(() => {
     runDoctor();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, []);
 
   const copyReport = async () => {

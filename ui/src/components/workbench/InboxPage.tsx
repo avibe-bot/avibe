@@ -114,7 +114,7 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
       window.removeEventListener('pagehide', markLeft);
     };
     // Mount/unmount only: listeners are stable and `filter` is read once on entry.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, []);
 
   // The unread map is the single source of truth (loaded pagination-independent
@@ -127,7 +127,7 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
   const visible = useMemo(() => {
     if (filter === 'all') return inboxSessions;
     return inboxSessions.filter((s) => unreadOf(s) > 0);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, [filter, inboxSessions, unreadBySession]);
 
   const capturePosition = useInboxScrollRestoration(listRef, location.key, filter, visible);

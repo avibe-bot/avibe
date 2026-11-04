@@ -70,7 +70,7 @@ export const EditorDialog: React.FC<EditorDialogProps> = ({
       setDraft(value);
       setSaving(false);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, [open]);
 
   const handleSave = () => {

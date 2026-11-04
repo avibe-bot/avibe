@@ -1,5 +1,10 @@
 # ESLint 10 companion migration
 
+> Historical migration evidence. The current lint engine and compiler are
+> documented in [TypeScript 7 and Oxlint migration](../plans/typescript-7-oxlint-migration.md).
+> That later change retains this migration's effective checks and debt ledger;
+> it does not repeat the one-time baseline expansion recorded below.
+
 ## Contract
 
 Upgrade the UI's lint tools together, without changing UI runtime code or weakening

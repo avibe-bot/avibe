@@ -1,24 +1,24 @@
-// The lint gate. Runs the same ESLint pass as ``eslint .``, then measures the
-// result against ``eslint-baseline.json`` — an explicit, per-file, per-rule
+// The lint gate. Runs Oxlint, then measures the result against
+// ``eslint-baseline.json`` — the existing per-file, per-rule
 // ledger of the violations that predate the cleanup and are not being fixed in
 // it (each rule's rationale lives in the ledger itself).
 //
 // The ledger tracks two things, because a rule can be silenced two ways:
-//   ``violations`` — errors ESLint reported.
-//   ``suppressions`` — messages an inline ``eslint-disable`` comment hid. Left
+//   ``violations`` — errors the lint engine reported.
+//   ``suppressions`` — messages inline disable directives hid. Left
 //     unfrozen, adding one of those comments would be a free way past the gate,
 //     and a suppressed rule also stops the React Compiler analysing that
 //     component, so the unmeasured area would grow silently.
 //
-// Counting both still only measures what ESLint was *asked* to look at, so the
+// Counting both still only measures what the engine was *asked* to look at, so the
 // run's own completeness is checked first, before any tally is trusted and
 // before ``--update`` may write anything (see ``scripts/lintPolicy.mjs``):
 //   - every repo-owned ``.ts``/``.tsx`` file under ``ui/`` appears in the run and
 //     resolves the pinned effective policy, rules and options and all;
 //   - the walk that produced that list sees everything the run did, so the
 //     invariant cannot pass by measuring less;
-//   - no source carries inline configuration outside the ``eslint-disable``
-//     family, which is the one way to change policy that neither tally records;
+//   - no source carries inline configuration outside the disable/enable
+//     directive family, which is the one way to change policy neither tally records;
 //   - nothing was reported that has no rule id to be ledgered under.
 //
 // What the gate rejects on top of that, exactly:
@@ -51,18 +51,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { ESLint, Linter } from 'eslint';
-
-import sharedConfig from '../eslint.config.js';
-import {
-  coverageGaps,
-  effectivePolicyOf,
-  forbiddenInlineConfig,
-  groupByDifferences,
-  intendedFiles,
-  policyDifferences,
-  withoutRules,
-} from './lintPolicy.mjs';
+import { measureLint } from './oxlintAdapter.mjs';
 
 const UI_ROOT = fileURLToPath(new URL('../', import.meta.url));
 const BASELINE_FILE = path.join(UI_ROOT, 'eslint-baseline.json');
@@ -132,7 +121,7 @@ export function missingRationales(ledgers, rationale) {
 export const pairKey = (file, rule) => `${file}\0${rule}`;
 
 /**
- * Problems ESLint reported with no rule id: a parse failure, an unresolvable
+ * Problems reported with no ledger rule id: a parse failure, an unresolvable
  * config, a plugin that threw.
  *
  * These can never be baselined, because there is no (file, rule) key to record
@@ -220,7 +209,7 @@ export function integrityLines({ fatals, coverage, policyGroups, inlineViolation
     for (const difference of differences) lines.push(`              ${difference}`);
   }
   for (const { file, line, column, text } of inlineViolations) {
-    lines.push(`  INLINE    ${file}:${line}:${column}  inline configuration outside the eslint-disable family: ${text}`);
+    lines.push(`  INLINE    ${file}:${line}:${column}  inline configuration outside the disable/enable family: ${text}`);
   }
 
   return lines;
@@ -246,45 +235,15 @@ const total = (byFile) =>
 
 const relative = (filePath) => path.relative(UI_ROOT, filePath).split(path.sep).join('/');
 
-/**
- * Measure the run's completeness: what the domain contains, whether ESLint
- * opened all of it under the pinned policy, and whether any source rewrote that
- * policy inline.
- */
-async function measureIntegrity(eslint, results) {
-  const intended = intendedFiles(UI_ROOT);
-
-  const perFile = [];
-  for (const file of intended) {
-    const config = await eslint.calculateConfigForFile(path.join(UI_ROOT, file));
-    perFile.push({ file, differences: policyDifferences(effectivePolicyOf(config)) });
-  }
-
-  return {
-    intended,
-    fatals: fatalProblems(results).map((problem) => ({ ...problem, filePath: relative(problem.filePath) })),
-    coverage: coverageGaps({ intended, lintedFiles: results.map((result) => relative(result.filePath)) }),
-    policyGroups: groupByDifferences(perFile),
-    inlineViolations: forbiddenInlineConfig({
-      root: UI_ROOT,
-      files: intended,
-      config: withoutRules(sharedConfig),
-      linter: new Linter(),
-    }),
-  };
+function formatDiagnostics(results) {
+  return results.flatMap((result) => result.messages.map((message) =>
+    `${relative(result.filePath)}:${message.line}:${message.column}  ${message.ruleId ?? 'fatal'}\n${message.message}`,
+  )).join('\n\n');
 }
 
 async function main() {
   const update = process.argv.includes('--update');
-  // `auto` lints in worker threads when there are enough files to pay for them
-  // (ESLint's own heuristic: about one worker per 50 files, at most half the
-  // cores). The results are the same as a single-threaded run's.
-  const eslint = new ESLint({ concurrency: 'auto' });
-  const results = await eslint.lintFiles(['.']);
-
-  // Unconditional, and first: an incomplete or bypassed measurement can neither
-  // pass nor be written to the baseline.
-  const measurement = await measureIntegrity(eslint, results);
+  const { results, measurement } = measureLint(UI_ROOT);
   const integrity = integrityLines(measurement);
   if (integrity.length > 0) {
     console.error('Lint gate integrity check failed:');
@@ -294,6 +253,12 @@ async function main() {
         '"npm run lint:baseline" means anything until this is fixed.',
     );
     process.exitCode = 1;
+    return;
+  }
+
+  if (process.argv.includes('--report')) {
+    console.log(formatDiagnostics(results));
+    process.exitCode = results.some((result) => result.messages.some((message) => message.severity === 2)) ? 1 : 0;
     return;
   }
 
@@ -336,8 +301,7 @@ async function main() {
       })
       .filter((result) => result.messages.length > 0);
     if (focused.length > 0) {
-      const formatter = await eslint.loadFormatter('stylish');
-      console.log(await formatter.format(focused));
+      console.log(formatDiagnostics(focused));
     }
 
     console.error('Lint baseline check failed:');

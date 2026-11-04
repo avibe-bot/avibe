@@ -448,7 +448,7 @@ export const EditorApp: React.FC<{
       setRoot(rootDir);
       rememberRecentFolder(rootDir);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, []);
 
   const anyDirty = Object.values(dirty).some(Boolean);
@@ -478,7 +478,7 @@ export const EditorApp: React.FC<{
   // when nothing is open. setTitle no-ops when unchanged, so this can run on every tab change.
   useEffect(() => {
     if (windowId) wm.setTitle(windowId, tabs.find((x) => x.id === active)?.name);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, [windowId, active, tabs]);
 
   const closeTab = (id: string) => {

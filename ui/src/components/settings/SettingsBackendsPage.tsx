@@ -126,7 +126,7 @@ export const SettingsBackendsPage: React.FC = () => {
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, [loaded]);
 
   // Patch-write shape: send only the edited backend's field. A whole

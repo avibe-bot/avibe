@@ -295,7 +295,7 @@ export const VaultSecretForm: React.FC<{
   useEffect(() => {
     if (!editSecret && protection === 'protected' && !entryIssue) void protectedVault.refresh();
     // protectedVault.refresh is stable (useCallback); only re-check when the tier changes.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, [editSecret, protection, entryIssue]);
 
   // Seed editable fields from an agent's request spec ONCE per distinct request. The chat

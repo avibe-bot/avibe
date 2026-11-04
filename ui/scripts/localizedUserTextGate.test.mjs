@@ -1,10 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-
-const UI_ROOT = fileURLToPath(new URL('../', import.meta.url));
+import { createLintTree } from './lintTestUtils.mjs';
 const RULE = 'avibe/localized-user-text';
 let root;
 
@@ -12,14 +10,8 @@ let root;
 // resolution reuses installed dependencies, but no source/config/build output
 // is shared or mutated. The outer gate excludes node_modules by contract.
 beforeEach(() => {
-  root = fs.mkdtempSync(path.join(UI_ROOT, 'node_modules/.localized-lint-'));
-  fs.mkdirSync(path.join(root, 'scripts'));
+  root = createLintTree();
   fs.mkdirSync(path.join(root, 'src'));
-  fs.copyFileSync(path.join(UI_ROOT, 'eslint.config.js'), path.join(root, 'eslint.config.js'));
-  for (const name of ['lint-baseline.mjs', 'lintPolicy.mjs', 'browserGlobals.mjs', 'localizedUserText.mjs']) {
-    fs.copyFileSync(path.join(UI_ROOT, 'scripts', name), path.join(root, 'scripts', name));
-  }
-  write('package.json', JSON.stringify({ type: 'module', scripts: { lint: 'node scripts/lint-baseline.mjs' } }));
   write('eslint-baseline.json', JSON.stringify({ rationale: { [RULE]: 'Test-owned legacy copy.' }, violations: {}, suppressions: {} }));
 });
 afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -84,13 +76,14 @@ describe('the real npm lint gate ratchets localized-copy debt without a second l
     expect(result.output).toContain('INLINE');
 
     write('src/New.tsx', LOCALIZED);
-    const config = fs.readFileSync(path.join(root, 'eslint.config.js'), 'utf8');
-    write('eslint.config.js', config.replace("'avibe/localized-user-text': 'error'", "'avibe/localized-user-text': 'warn'"));
+    const config = JSON.parse(fs.readFileSync(path.join(root, '.oxlintrc.json'), 'utf8'));
+    config.overrides[0].rules[RULE] = [1];
+    write('.oxlintrc.json', JSON.stringify(config));
     const before = fs.readFileSync(path.join(root, 'eslint-baseline.json'), 'utf8');
     result = gate('--update');
     expect(result.status).toBe(1);
     expect(result.output).toContain('POLICY');
-    expect(result.output).toContain('avibe/localized-user-text: expected [2], resolved [1]');
+    expect(result.output).toContain('avibe/localized-user-text.0: expected 2, resolved 1');
     expect(fs.readFileSync(path.join(root, 'eslint-baseline.json'), 'utf8')).toBe(before);
   }, 30000);
 });

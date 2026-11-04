@@ -197,7 +197,7 @@ export function useBackendRuntime({
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, [api, backend, defaultCli, defaultEnabled, supportsCli]);
 
   const install = useCallback(async () => {

@@ -1,8 +1,20 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-import * as ts from 'typescript';
+import {
+  SyntaxKind,
+  isBinaryExpression,
+  isCallExpression,
+  isIdentifier,
+  isPropertyAccessExpression,
+  isSignatureDeclaration,
+  isStringLiteral,
+  type Node,
+  type SourceFile,
+} from 'typescript/unstable/ast';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+
+import { parseSource } from '../../scripts/typescriptSource.mjs';
 
 import {
   internalPwaLinkTarget,
@@ -18,7 +30,7 @@ function sourceFiles(directory: URL): URL[] {
   });
 }
 
-type ParsedSource = { path: string; source: ts.SourceFile };
+type ParsedSource = { path: string; source: SourceFile };
 
 /**
  * Every non-test UI source that could hold a `window.open` call, each parsed
@@ -32,50 +44,44 @@ function parseSources(root: URL): ParsedSource[] {
     const text = readFileSync(url, 'utf8');
     if (!text.includes('window') || !text.includes('open')) return [];
     const path = fileURLToPath(url);
-    const source = ts.createSourceFile(
-      path,
-      text,
-      ts.ScriptTarget.Latest,
-      true,
-      path.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
-    );
+    const source = parseSource(text, path);
     return [{ path: path.slice(rootPath.length), source }];
   });
 }
 
-function directWindowOpenCount(source: ts.SourceFile): number {
+function directWindowOpenCount(source: SourceFile): number {
   let count = 0;
-  const visit = (node: ts.Node) => {
+  const visit = (node: Node) => {
     if (
-      ts.isCallExpression(node) &&
-      ts.isPropertyAccessExpression(node.expression) &&
-      ts.isIdentifier(node.expression.expression) &&
+      isCallExpression(node) &&
+      isPropertyAccessExpression(node.expression) &&
+      isIdentifier(node.expression.expression) &&
       node.expression.expression.text === 'window' &&
       node.expression.name.text === 'open'
     ) {
       count += 1;
     }
-    ts.forEachChild(node, visit);
+    node.forEachChild(visit);
   };
   visit(source);
   return count;
 }
 
-function seversOpener(node: ts.Node): boolean {
+function seversOpener(node: Node): boolean {
   let found = false;
-  const visit = (child: ts.Node) => {
+  const visit = (child: Node) => {
     if (
-      ts.isBinaryExpression(child) &&
-      child.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-      ts.isPropertyAccessExpression(child.left) &&
+      isBinaryExpression(child) &&
+      child.operatorToken.kind === SyntaxKind.EqualsToken &&
+      isPropertyAccessExpression(child.left) &&
       child.left.name.text === 'opener' &&
-      child.right.kind === ts.SyntaxKind.NullKeyword
+      child.right.kind === SyntaxKind.NullKeyword
     ) {
       found = true;
     }
-    ts.forEachChild(child, visit);
+    child.forEachChild(visit);
   };
-  ts.forEachChild(node, visit);
+  node.forEachChild(visit);
   return found;
 }
 
@@ -84,27 +90,28 @@ function seversOpener(node: ts.Node): boolean {
  * whatever is navigated into them later can drive this window. Report each
  * such tab with whether the function that opened it severs the reference.
  */
-function blankTabOpeners(source: ts.SourceFile): { line: number; severed: boolean }[] {
+function blankTabOpeners(source: SourceFile): { line: number; severed: boolean }[] {
   const found: { line: number; severed: boolean }[] = [];
-  const visit = (node: ts.Node) => {
+  const visit = (node: Node) => {
     if (
-      ts.isCallExpression(node) &&
-      ts.isPropertyAccessExpression(node.expression) &&
-      ts.isIdentifier(node.expression.expression) &&
+      isCallExpression(node) &&
+      isPropertyAccessExpression(node.expression) &&
+      isIdentifier(node.expression.expression) &&
       node.expression.expression.text === 'window' &&
       node.expression.name.text === 'open' &&
       node.arguments.length > 0 &&
-      ts.isStringLiteral(node.arguments[0]) &&
+      isStringLiteral(node.arguments[0]) &&
       node.arguments[0].text === 'about:blank'
     ) {
-      let scope: ts.Node = node;
-      while (scope.parent && !ts.isFunctionLike(scope)) scope = scope.parent;
+      // TS7 names TS5's `isFunctionLike` set `isSignatureDeclaration` (minus JSDoc-only kinds).
+      let scope: Node = node;
+      while (scope.parent && !isSignatureDeclaration(scope)) scope = scope.parent;
       found.push({
         line: source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1,
         severed: seversOpener(scope),
       });
     }
-    ts.forEachChild(node, visit);
+    node.forEachChild(visit);
   };
   visit(source);
   return found;

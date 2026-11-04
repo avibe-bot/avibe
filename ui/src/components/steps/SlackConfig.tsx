@@ -53,7 +53,7 @@ export const SlackConfig: React.FC<SlackConfigProps> = ({ data, onNext, onBack, 
 
   useEffect(() => {
     void loadManifest();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, []);
 
   // Auto-expand next step when token is entered
@@ -61,14 +61,14 @@ export const SlackConfig: React.FC<SlackConfigProps> = ({ data, onNext, onBack, 
     if ((botToken.startsWith('xoxb-') || (!botToken && hasUsableSecret(data.slack, 'bot_token'))) && !expandedSteps[3]) {
       setExpandedSteps((prev) => ({ ...prev, 2: false, 3: true }));
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, [botToken, data.slack]);
 
   useEffect(() => {
     if ((appToken.startsWith('xapp-') || (!appToken && hasUsableSecret(data.slack, 'app_token'))) && !expandedSteps[4]) {
       setExpandedSteps((prev) => ({ ...prev, 3: false, 4: true }));
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, [appToken, data.slack]);
 
   const loadManifest = async () => {

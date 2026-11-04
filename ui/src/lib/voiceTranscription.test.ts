@@ -17,9 +17,12 @@ import {
 
 const audioBlob = () => new Blob(['audio'], { type: 'audio/mp4; codecs=mp4a.40.2' });
 /** The form an attempt sends, built for a token with these capabilities. */
-const formOf = (init: AvibeFetchRequestInit | undefined, capabilities: readonly string[] = []): FormData => (
-  (init?.bodyFor?.(capabilities) ?? init?.body) as FormData
-);
+const formOf = (init: AvibeFetchRequestInit | undefined, capabilities: readonly string[] = []): FormData => {
+  const body = init?.bodyFor?.(capabilities) ?? init?.body;
+  expect(body).toBeInstanceOf(FormData);
+  if (!(body instanceof FormData)) throw new Error('Expected a multipart transcription request');
+  return body;
+};
 
 describe('voice transcription', () => {
   it('reserves the complete upstream budget on the compatibility path', () => {

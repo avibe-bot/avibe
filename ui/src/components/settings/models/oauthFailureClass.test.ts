@@ -1,16 +1,18 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-import * as ts from 'typescript';
+import { isBlock, isCallExpression, isIdentifier, isVariableDeclaration, type CallExpression, type Node } from 'typescript/unstable/ast';
 import { describe, expect, it } from 'vitest';
+
+import { parseSource } from '../../../../scripts/typescriptSource.mjs';
 
 type FailureConsumer = { site: string; classifies: boolean };
 
-function isCallTo(node: ts.Node | undefined, name: string): node is ts.CallExpression {
+function isCallTo(node: Node | undefined, name: string): node is CallExpression {
   return Boolean(
     node
-      && ts.isCallExpression(node)
-      && ts.isIdentifier(node.expression)
+      && isCallExpression(node)
+      && isIdentifier(node.expression)
       && node.expression.text === name,
   );
 }
@@ -18,42 +20,37 @@ function isCallTo(node: ts.Node | undefined, name: string): node is ts.CallExpre
 /** Every normalized API failure in the dialog, found rather than listed. */
 function failureConsumers(url: URL): FailureConsumer[] {
   const path = fileURLToPath(url);
-  const source = ts.createSourceFile(
-    path,
-    readFileSync(url, 'utf8'),
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TSX,
-  );
+  // The dialog is a `.tsx` file, so the extension already selects the TSX grammar.
+  const source = parseSource(readFileSync(url, 'utf8'), path);
   const found: FailureConsumer[] = [];
-  const visit = (node: ts.Node) => {
+  const visit = (node: Node) => {
     if (
-      ts.isVariableDeclaration(node)
-      && ts.isIdentifier(node.name)
+      isVariableDeclaration(node)
+      && isIdentifier(node.name)
       && isCallTo(node.initializer, 'apiFailure')
     ) {
       // Read out here, where the guard above still holds: a narrowing on
       // `node.name` does not survive into the nested closure below.
       const declared = node.name.text;
-      let scope: ts.Node | undefined = node.parent;
-      while (scope && !ts.isBlock(scope)) scope = scope.parent;
+      let scope: Node | undefined = node.parent;
+      while (scope && !isBlock(scope)) scope = scope.parent;
       let classifies = false;
-      const inspect = (child: ts.Node) => {
+      const inspect = (child: Node) => {
         if (
           isCallTo(child, 'classifyOAuthFailure')
           && child.arguments.some(
-            (argument) => ts.isIdentifier(argument) && argument.text === declared,
+            (argument) => isIdentifier(argument) && argument.text === declared,
           )
         ) {
           classifies = true;
         }
-        ts.forEachChild(child, inspect);
+        child.forEachChild(inspect);
       };
       if (scope) inspect(scope);
       const line = source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1;
       found.push({ site: `${path.slice(path.lastIndexOf('/') + 1)}:${line}`, classifies });
     }
-    ts.forEachChild(node, visit);
+    node.forEachChild(visit);
   };
   visit(source);
   return found;

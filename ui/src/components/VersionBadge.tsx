@@ -223,7 +223,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     window.addEventListener(DESKTOP_OPEN_UPDATES_EVENT, handleOpenUpdates);
     return () => window.removeEventListener(DESKTOP_OPEN_UPDATES_EVENT, handleOpenUpdates);
     // The updater actions and API are stable for the lifetime of the Workbench.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, [desktopUpdaterStatus, inDesktopShell]);
 
   React.useEffect(() => {
@@ -261,7 +261,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     // This runs once per mounted badge. The desktop path waits one task so the
     // shell's startup updater can publish its result.
     // The API and updater actions are stable for the lifetime of the Workbench.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, []);
 
   React.useEffect(() => {

@@ -118,14 +118,14 @@ export const LarkConfig: React.FC<LarkConfigProps> = ({ data, onNext, onBack, em
     if (appId && hasCredentialSecret && !expandedSteps[2]) {
       setExpandedSteps((prev) => ({ ...prev, 2: true }));
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, [appId, appSecret, hasCredentialSecret]);
 
   useEffect(() => {
     return () => {
       api.larkTempWsStop().catch(() => {});
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, []);
 
   const isValid = useMemo(() => {
@@ -175,7 +175,7 @@ export const LarkConfig: React.FC<LarkConfigProps> = ({ data, onNext, onBack, em
     if (authResult?.ok) {
       loadChats();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, [authResult?.ok]);
 
   const toggleStep = (step: number) => {

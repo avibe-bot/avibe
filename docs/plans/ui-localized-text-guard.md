@@ -8,8 +8,9 @@ composition. Locale templates, `Trans` component interpolation, and locale-aware
 formatters own composition. No UI copy or locale resource is changed in this
 rollout.
 
-Use one dependency-free custom ESLint rule with the installed TypeScript AST and
-ESLint lexical scopes. Follow immutable local bindings, TypeScript wrappers,
+Use one dependency-free custom ESLint-compatible rule, executed by Oxlint with
+its TypeScript-aware AST and lexical-scope compatibility layer. Follow immutable
+local bindings, TypeScript wrappers,
 conditional display branches, arrays, and inline map/filter result paths into
 these sinks. Calls to translation/formatting functions remain value boundaries;
 this is not whole-program taint analysis. In particular, the original accessible
@@ -56,8 +57,8 @@ policy, inline-override and suppression verification without exemptions there.
 
 ## Implemented policy and analysis limits
 
-`avibe/localized-user-text` is an error in `ui/eslint.config.js` and pinned in
-`lintPolicy.mjs`. Applicability is relative to the UI ESLint working directory:
+`avibe/localized-user-text` is an error in `ui/.oxlintrc.json` and pinned in
+`lintPolicy.mjs`. Applicability is relative to the UI lint working directory:
 `src/**/*.tsx`, excluding `*.test.tsx`, `*.spec.tsx`, and `__tests__` directories.
 The rule also treats the explicit `children` prop as a child sink. It reports
 one diagnostic per offending expression/attribute sink or literal JSX text node;
@@ -130,9 +131,14 @@ accepted residual is tested explicitly rather than obscured by a second ledger.
 
 - Before enabling the rule, all four historical fixture tests failed because the
   real config returned zero localized-text errors; afterward all four pass.
-- `localizedUserText.test.mjs` executes the real ESLint config for the historical
-  forms, all sinks, local indirection, valid locale/formatter/data paths and
-  narrow exception containment. Existing convention/policy/baseline tests remain.
+- `localizedUserText.test.mjs` executes the real Oxlint CLI configuration in
+  disposable trees for the historical forms, all sinks, local indirection,
+  valid locale/formatter/data paths and narrow exception containment. Each
+  Vitest case batches its fixtures into one invocation. The upstream RuleTester
+  needs Node >=22, so using the CLI uniformly preserves the existing Node20
+  support floor. Gate tests below additionally cover ledger transitions. The
+  [TS7/Oxlint migration](typescript-7-oxlint-migration.md) changes the engine
+  without changing the rule implementation or recording new debt.
 - `localizedUserTextGate.test.mjs` runs real `npm run lint` in test-owned miniature
   UI trees: new files/counts fail; localized replacements force shrink; re-recorded
   shrink passes; equal-count replacement retains the documented residual;

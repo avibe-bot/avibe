@@ -180,7 +180,7 @@ export default function MonacoEditor({ value, language, path, readOnly, dark = t
   // Already-open file: a new reveal (its nonce changes) jumps + selects the match in place.
   useEffect(() => {
     if (editorRef.current && reveal) applyReveal(editorRef.current, reveal);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, [reveal?.nonce]);
   const handleChange: OnChange = (next) => onChange?.(next ?? '');
 

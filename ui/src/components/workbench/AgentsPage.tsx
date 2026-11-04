@@ -1112,7 +1112,7 @@ export const AgentsPage: React.FC = () => {
   useEffect(() => {
     selectedMountedRef.current = true;
     refresh();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -1154,7 +1154,7 @@ export const AgentsPage: React.FC = () => {
     if (agentParam && available.some((agent) => agent.name === agentParam)) return;
     const target = (defaultName && available.find((a) => a.name === defaultName)) || available[0];
     if (target) void selectAgent(target.name, false, true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, [defaultName, agents, agentParam]);
 
 

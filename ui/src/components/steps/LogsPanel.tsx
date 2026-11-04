@@ -69,7 +69,7 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({
 
   useEffect(() => {
     void loadLogs();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -86,7 +86,7 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({
         clearInterval(autoRefreshRef.current);
       }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, [autoRefresh, selectedSource]);
 
   useEffect(() => {

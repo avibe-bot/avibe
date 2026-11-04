@@ -612,7 +612,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
       return;
     }
     void reloadCurrentView();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, [showUnavailable]);
 
   const handleRemoveChannel = async (rowPlatform: string, channelId: string, channelName?: string) => {
@@ -925,7 +925,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
     if (!isPage) return;
     if (pageTab !== 'all') return;
     void loadAllPlatformsData();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, [
     isPage,
     pageTab,
@@ -947,7 +947,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
     if (pageTab !== pagePlatform) {
       setPagePlatform(pageTab);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, [isPage, pageTab]);
 
   type AggregatedRow = {

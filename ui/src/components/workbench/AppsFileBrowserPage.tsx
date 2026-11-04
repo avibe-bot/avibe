@@ -280,12 +280,12 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
     if (projects === null) return;
     const initial = sortProjectsByRecent(projects)[0]?.folder_path || sysFavs.find((f) => f.key === 'home')?.path;
     if (initial) navigate(initial);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, [projects, sysFavs]);
 
   useEffect(() => {
     if (cwd) navigate(cwd);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, [showHidden]);
 
   // ---- Recursive search: file/folder NAME (default) or file CONTENT ------------------------------

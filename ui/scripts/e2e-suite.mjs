@@ -19,6 +19,7 @@
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import os from 'node:os';
+import path from 'node:path';
 
 const require = createRequire(import.meta.url);
 const [tsconfig, config, ...forwarded] = process.argv.slice(2);
@@ -64,7 +65,7 @@ function run(script, args, { capture, background = false }) {
 }
 
 const [typecheck, suite] = await Promise.all([
-  run(require.resolve('typescript/bin/tsc'), ['-p', tsconfig, '--noEmit'], { capture: true, background: true }),
+  run(path.join(path.dirname(require.resolve('typescript/package.json')), 'bin/tsc'), ['-p', tsconfig, '--noEmit'], { capture: true, background: true }),
   run(require.resolve('@playwright/test/cli'), ['test', '--config', config, ...forwarded], { capture: false }),
 ]);
 

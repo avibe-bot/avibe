@@ -1,25 +1,33 @@
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
-import ts from 'typescript';
+import { isCallExpression, isIdentifier, isStringLiteral, type Expression, type Node } from 'typescript/unstable/ast';
+import { transformWithOxc } from 'vite';
 
 import type { AgentChain, HubApi } from './support/api';
 import { HubApi as HubApiClient } from './support/api';
 import { ModelHubPage } from './support/hub';
 import { captureAgentChain, restoreAgentChain } from './support/restore';
+import { parseSource } from '../scripts/typescriptSource.mjs';
 
-const b7Title = 'B7 · removing the only source of a route is refused, explained, then reported';
-const guardSource = ts.createSourceFile('g-guards-copy.spec.ts',
-  readFileSync(new URL('./g-guards-copy.spec.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);
-const b7Callbacks: ts.Expression[] = [];
-function collectB7(node: ts.Node): void {
-  if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'test'
-    && node.arguments[0] && ts.isStringLiteral(node.arguments[0]) && node.arguments[0].text === b7Title) {
+const b7Title = 'B7 · removing the only source of a route asks once, then reports';
+const guardSource = parseSource(
+  readFileSync(new URL('./g-guards-copy.spec.ts', import.meta.url), 'utf8'), 'g-guards-copy.spec.ts');
+const b7Callbacks: Expression[] = [];
+function collectB7(node: Node): void {
+  if (isCallExpression(node) && isIdentifier(node.expression) && node.expression.text === 'test'
+    && node.arguments[0] && isStringLiteral(node.arguments[0]) && node.arguments[0].text === b7Title) {
     b7Callbacks.push(node.arguments[1]);
   }
-  ts.forEachChild(node, collectB7);
+  node.forEachChild(collectB7);
 }
 collectB7(guardSource);
+// TypeScript 7.0 publishes no transpileModule; type stripping is syntax-only, so Oxc
+// (already Vite's own transform) does it. Empty when the title no longer matches,
+// which b7Fixture reports as a length assertion.
+const b7Script = b7Callbacks.length === 1
+  ? (await transformWithOxc(`(${b7Callbacks[0].getText(guardSource)})`, 'b7-callback.ts', { lang: 'ts', target: 'es2022' })).code
+  : '';
 
 type B7Options = {
   defaultWrite?: 'rejected' | 'ambiguous' | 'false-success';
@@ -86,9 +94,7 @@ function b7Fixture(options: B7Options = {}) {
       return true;
     },
   } as unknown as HubApi;
-  const callback = new vm.Script(ts.transpileModule(`(${b7Callbacks[0].getText(guardSource)})`, {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
-  }).outputText).runInNewContext({ expect, captureAgentChain, restoreAgentChain, AggregateError }) as
+  const callback = new vm.Script(b7Script).runInNewContext({ expect, captureAgentChain, restoreAgentChain, AggregateError }) as
     (fixtures: unknown) => Promise<void>;
   return {
     calls, defaultWrites, originalDefaults, original, browserBoundary,

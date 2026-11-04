@@ -93,7 +93,7 @@ export function useOpencodePermission(options: UseOpencodePermissionOptions = {}
     // from opencode.json once so the affordance and the Continue gate reflect
     // reality. The setState lands after the network read inside refreshStatus —
     // a one-shot external-system sync, not a render loop.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+    // eslint-disable-next-line react-hooks-js/set-state-in-effect
     if (autoFetchStatus) void refreshStatus();
   }, [autoFetchStatus, refreshStatus]);
 

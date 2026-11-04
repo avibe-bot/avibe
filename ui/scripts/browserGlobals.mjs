@@ -1,21 +1,16 @@
 // The browser global catalog the lint policy expects, committed as a value.
 //
-// `eslint.config.js` builds `languageOptions.globals` from the `globals` package's
-// `browser` export, so the resolved policy moves whenever that dependency moves.
-// The expected side must not. An earlier revision of `EXPECTED_POLICY` read the
-// same live export, which made the comparison `X === X` on this one axis: a
-// catalog that gained a name, lost one, or flipped one from readonly to writable
-// would have moved *both* sides together and passed, and the only trace would
-// have been a version bump in the lockfile.
+// The Oxlint configuration carries the same explicit catalog independently of
+// this expected value. It does not inherit the engine's evolving browser preset
+// or read a live `globals` package. Catalog changes therefore remain deliberate,
+// reviewable policy changes instead of moving both sides of an X === X check.
 //
-// So the catalog is written down here instead. `no-global-assign` is enabled with
-// no exceptions, so every `false` below is an identifier the gate refuses to let
-// product code reassign; a name that quietly becomes `true` upstream stops being
-// protected, and a name that disappears stops being declared at all. Either way
-// enforcement narrows, and this file is where that has to become visible.
+// `no-global-assign` is enabled with no exceptions: each readonly name protects
+// against reassignment. Losing a name or silently making it writable narrows
+// enforcement. Both sides are committed values and the gate compares them.
 //
-// The encoding is ESLint's boolean form, which is what the resolved config
-// actually contains: `false` is readonly, `true` is writable.
+// false is readonly, true is writable; lintPolicy converts this historical
+// encoding to Oxlint's explicit "readonly"/"writable" form.
 //
 // Snapshot of the `browser` export of `globals` 16.5.0: 1169 names,
 // 125 of them writable. It is deliberately long — being long is what makes

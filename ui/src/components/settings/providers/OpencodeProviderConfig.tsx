@@ -304,7 +304,7 @@ export const OpencodeProviderConfig: React.FC<{
     return () => {
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, [runtime.enabled, runtime.loaded, runtime.configError]);
 
   // Auto-retry server-start failures — common when the user has just
