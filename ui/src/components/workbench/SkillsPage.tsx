@@ -16,7 +16,8 @@ import { SkillDetailPanel } from './skills/SkillDetailPanel';
 import { ProjectPicker } from './skills/ProjectPicker';
 import { AddSkillDialog } from './skills/AddSkillDialog';
 import { BrowseRegistryDialog } from './skills/BrowseRegistryDialog';
-import { McpHubSection, sectionLabel } from './skills/McpHubSection';
+import { McpHubSection } from './skills/McpHubSection';
+import { SectionLabel } from './skills/sectionLabel';
 import { skillsLinkFromParams, type SkillsLink, type SkillsTab } from './skills/skillsLink';
 import { errorMessage } from '@/lib/errorMessage';
 import { Badge } from '../ui/badge';
@@ -391,11 +392,11 @@ export const SkillsPage: React.FC = () => {
                   </div>
                 ) : null}
                 <div className="flex flex-col gap-2">
-                  {sectionLabel(
-                    <WandSparkles className="size-3.5 text-mint-ink" />,
-                    t('skills.projectSectionLocal'),
-                    t('skills.projectSectionLocalHint'),
-                  )}
+                  <SectionLabel
+                    icon={<WandSparkles className="size-3.5 text-mint-ink" />}
+                    label={t('skills.projectSectionLocal')}
+                    hint={t('skills.projectSectionLocalHint')}
+                  />
                   {projectLocal.length > 0 ? (
                     <div className="flex flex-col gap-2">{renderRows(projectLocal)}</div>
                   ) : (
@@ -406,11 +407,11 @@ export const SkillsPage: React.FC = () => {
                 </div>
                 {inheritedGlobal.length > 0 ? (
                   <div className="flex flex-col gap-2">
-                    {sectionLabel(
-                      <Info className="size-3.5 text-muted" />,
-                      t('skills.projectSectionGlobal'),
-                      t('skills.projectSectionGlobalHint'),
-                    )}
+                    <SectionLabel
+                      icon={<Info className="size-3.5 text-muted" />}
+                      label={t('skills.projectSectionGlobal')}
+                      hint={t('skills.projectSectionGlobalHint')}
+                    />
                     <div className="flex flex-col gap-2">{renderRows(inheritedGlobal, true)}</div>
                   </div>
                 ) : null}

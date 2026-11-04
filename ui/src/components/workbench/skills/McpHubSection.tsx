@@ -18,6 +18,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } f
 import { SegmentedRadio } from '../../ui/segmented';
 import { Textarea } from '../../ui/textarea';
 import { McpAddForm, McpKeyValueRows } from './McpAddForm';
+import { SectionLabel } from './sectionLabel';
 import { buttonVariants } from '../../ui/button-variants';
 
 // A project view's login starts, and (via the callback's return URL) ends, in that project.
@@ -67,16 +68,6 @@ const STATE_BADGE: Record<string, 'success' | 'warning' | 'info' | 'destructive'
 };
 
 /** The same section header the Skills project view uses (icon · LABEL · hint). */
-export function sectionLabel(icon: ReactNode, label: string, hint?: string) {
-  return (
-    <div className="flex items-center gap-2 px-1">
-      {icon}
-      <span className="font-mono text-[10.5px] font-bold uppercase tracking-[0.1em] text-muted">{label}</span>
-      {hint ? <span className="font-mono text-[10px] text-muted">· {hint}</span> : null}
-    </div>
-  );
-}
-
 /** A project row's state, as the API reports it; global rows keep their existing look. */
 function McpStateBadge({ server }: { server: McpServerSummary }) {
   const { t } = useTranslation();
@@ -947,11 +938,11 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null }) 
           {projectId ? (
             <>
               <div className="flex flex-col gap-2">
-                {sectionLabel(
-                  <ShieldCheck className="size-3.5 text-mint-ink" />,
-                  t('mcpHub.projectSectionLocal'),
-                  t('mcpHub.projectSectionLocalHint'),
-                )}
+                <SectionLabel
+                  icon={<ShieldCheck className="size-3.5 text-mint-ink" />}
+                  label={t('mcpHub.projectSectionLocal')}
+                  hint={t('mcpHub.projectSectionLocalHint')}
+                />
                 {projectRows.length > 0 ? (
                   <div className="flex flex-col gap-2">{projectRows.map((server) => (
                     <McpRow
@@ -972,11 +963,11 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null }) 
               </div>
               {inheritedRows.length > 0 ? (
                 <div className="flex flex-col gap-2">
-                  {sectionLabel(
-                    <Info className="size-3.5 text-muted" />,
-                    t('mcpHub.projectSectionGlobal'),
-                    t('mcpHub.projectSectionGlobalHint'),
-                  )}
+                  <SectionLabel
+                    icon={<Info className="size-3.5 text-muted" />}
+                    label={t('mcpHub.projectSectionGlobal')}
+                    hint={t('mcpHub.projectSectionGlobalHint')}
+                  />
                   <div className="flex flex-col gap-2">{inheritedRows.map((server) => (
                     <McpRow
                       key={server.name}

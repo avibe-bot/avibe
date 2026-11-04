@@ -5062,7 +5062,8 @@
     },
     "pageTitle": "Skills",
     "tabSkills": "Skills",
-    "tabMcp": "MCP"
+    "tabMcp": "MCP",
+    "sectionHint": "· {{hint}}"
   },
   "harness": {
     "title": "Harness",
