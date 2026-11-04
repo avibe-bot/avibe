@@ -650,6 +650,17 @@ def _wait_for_pid_exit(pid: int, *, timeout: float = 3.0) -> None:
     pytest.fail(f"process {pid} survived the script supervisor")
 
 
+def _wait_for_process_group_exit(pgid: int, *, timeout: float = 3.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.02)
+    pytest.fail(f"process group {pgid} survived the script supervisor")
+
+
 def _blocking_node_runner(tmp_path: Path) -> tuple[Path, Path]:
     pid_path = tmp_path / "node.pid"
     runner = tmp_path / "blocking-runner.mjs"
@@ -674,7 +685,12 @@ def _assert_supervisor_wait_failure_kills_node(
     if os.name != "posix":
         pytest.skip("process-group supervision is POSIX-only")
 
-    runner, pid_path = _blocking_node_runner(tmp_path)
+    # The supervisor owns cleanup from the moment Popen returns: the child has
+    # already exec'd Node in its own session, and an interrupt may arrive at
+    # any point of Node's startup. So the failure is injected on the first
+    # wait without waiting for Node to reach the runner, and the child must
+    # end by the supervisor's kill, not on its own.
+    runner, _pid_path = _blocking_node_runner(tmp_path)
     real_popen = subprocess.Popen
     captured: dict[str, subprocess.Popen] = {}
 
@@ -688,10 +704,6 @@ def _assert_supervisor_wait_failure_kills_node(
         def wait(self, timeout=None):
             if not self._failed:
                 self._failed = True
-                deadline = time.monotonic() + 3
-                while not pid_path.exists() and time.monotonic() < deadline:
-                    time.sleep(0.01)
-                assert pid_path.exists()
                 raise failure
             return self._process.wait(timeout=timeout)
 
@@ -708,17 +720,23 @@ def _assert_supervisor_wait_failure_kills_node(
     )
     request = {"result_path": str(tmp_path / "result.json")}
 
-    with pytest.raises(type(failure)):
-        computer_script_runner._run_node_process(
-            Path(NODE),
-            runner,
-            request,
-            30,
-        )
+    try:
+        with pytest.raises(type(failure)):
+            computer_script_runner._run_node_process(
+                Path(NODE),
+                runner,
+                request,
+                30,
+            )
 
-    node_pid = int(pid_path.read_text(encoding="utf-8"))
-    assert captured["process"].poll() is not None
-    _wait_for_pid_exit(node_pid)
+        child = captured["process"]
+        assert child.poll() == -signal.SIGKILL
+        _wait_for_process_group_exit(child.pid)
+    finally:
+        child = captured.get("process")
+        if child is not None and child.poll() is None:
+            child.kill()
+            child.wait(timeout=3)
 
 
 def test_keyboard_interrupt_during_wait_kills_the_node_process(
