@@ -1,10 +1,11 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   claimVoiceCapture,
   deleteMapValueIfCurrent,
   isVoiceControlDisabled,
   prewarmVoiceCapture,
+  VOICE_AUDIO_START_TIMEOUT_MS,
   VOICE_CAPTURE_STOP_TIMEOUT_MS,
   VOICE_MIN_SEGMENT_MS,
   voicePcmDeliverySamples,
@@ -359,7 +360,10 @@ describe('VoiceRecordingPipeline', () => {
       readonly close = vi.fn(async () => {
         this.state = 'closed';
       });
-      readonly resume = vi.fn(async () => undefined);
+      // The browser refuses a resume outside a gesture (the idle prewarm) and honours the press's.
+      readonly resume = vi.fn(async () => {
+        if (this.resume.mock.calls.length > 1) this.state = 'running';
+      });
       readonly createMediaStreamSource = vi.fn(() => ({
         connect: vi.fn(),
         disconnect: vi.fn(),
@@ -594,6 +598,109 @@ describe('VoiceRecordingPipeline', () => {
 
     expect(onSegment).toHaveBeenCalledTimes(2);
     expect(onStopped).toHaveBeenCalledWith('finish', { pendingSegmentCount: 2 });
+  });
+});
+
+// WebKit's audio context as a take meets it on iOS: `interrupted` when the system takes the
+// audio session (the microphone permission alert is one), and a resume that then waits for the
+// interruption to end. These drive the real capture against that boundary.
+describe('voice capture audio context', () => {
+  type Resume = 'starts' | 'hangs';
+  const contexts: FakeAudioContext[] = [];
+  let nextResume: Resume[] = [];
+  class FakeAudioContext {
+    state: string = 'suspended';
+    readonly resumeBehavior: Resume;
+    readonly audioWorklet = { addModule: vi.fn(async () => undefined) };
+    readonly destination = {};
+    readonly close = vi.fn(async () => {
+      this.state = 'closed';
+    });
+    readonly resume = vi.fn(() => {
+      // An interrupted context resolves only once the interruption ends, which it need not.
+      if (this.state === 'interrupted' || this.resumeBehavior === 'hangs') return new Promise<void>(() => undefined);
+      this.state = 'running';
+      return Promise.resolve();
+    });
+    readonly createMediaStreamSource = vi.fn(() => ({ connect: vi.fn(), disconnect: vi.fn() }));
+
+    constructor() {
+      this.resumeBehavior = nextResume.shift() ?? 'starts';
+      contexts.push(this);
+    }
+  }
+  class FakeAudioWorkletNode {
+    readonly port = { onmessage: null, postMessage: vi.fn(), close: vi.fn() };
+    onprocessorerror = null;
+    readonly connect = vi.fn();
+    readonly disconnect = vi.fn();
+  }
+  const microphone = () => {
+    const track = Object.assign(new EventTarget(), { readyState: 'live', stop: vi.fn() });
+    return { track, stream: { getTracks: () => [track] } as unknown as MediaStream };
+  };
+  const pipelineOn = (stream: MediaStream) => new VoiceRecordingPipeline({
+    stream,
+    segmentMs: 1000,
+    onSegment: vi.fn(),
+    onStopped: vi.fn(),
+  });
+
+  beforeEach(() => {
+    contexts.length = 0;
+    nextResume = [];
+    vi.stubGlobal('AudioContext', FakeAudioContext);
+    vi.stubGlobal('AudioWorkletNode', FakeAudioWorkletNode);
+    vi.stubGlobal('URL', { createObjectURL: vi.fn(() => 'blob:voice-worklet'), revokeObjectURL: vi.fn() });
+  });
+  afterEach(async () => {
+    // The prewarmed context is page-wide: close it so the next test builds its own.
+    await Promise.all(contexts.map((context) => context.close()));
+  });
+
+  it('records the take after a permission alert interrupted the prewarmed context', async () => {
+    await prewarmVoiceCapture(); // the first press, inside its gesture
+    const first = contexts[0];
+    expect(first.state).toBe('running');
+    first.state = 'interrupted'; // the system alert that asks for the microphone
+
+    await prewarmVoiceCapture(); // the next press
+    const { stream } = microphone();
+    await expect(pipelineOn(stream).start()).resolves.toBe(true);
+
+    expect(first.close).toHaveBeenCalled();
+    expect(first.createMediaStreamSource).not.toHaveBeenCalled();
+    expect(contexts).toHaveLength(2);
+    expect(contexts[1].state).toBe('running');
+    expect(contexts[1].createMediaStreamSource).toHaveBeenCalledWith(stream);
+  });
+
+  it('rebuilds on a fresh context when the prewarmed one does not start rendering', async () => {
+    vi.useFakeTimers();
+    nextResume = ['hangs'];
+    await prewarmVoiceCapture();
+    const { stream } = microphone();
+    const starting = pipelineOn(stream).start();
+    await vi.advanceTimersByTimeAsync(VOICE_AUDIO_START_TIMEOUT_MS);
+
+    await expect(starting).resolves.toBe(true);
+    expect(contexts[0].close).toHaveBeenCalled();
+    expect(contexts).toHaveLength(2);
+    expect(contexts[1].state).toBe('running');
+    expect(contexts[1].createMediaStreamSource).toHaveBeenCalledWith(stream);
+  });
+
+  it('fails a take whose audio never starts instead of recording silence', async () => {
+    vi.useFakeTimers();
+    nextResume = ['hangs', 'hangs'];
+    await prewarmVoiceCapture();
+    const { track, stream } = microphone();
+    const failed = expect(pipelineOn(stream).start()).rejects.toThrow('voice audio context did not start');
+    await vi.advanceTimersByTimeAsync(2 * VOICE_AUDIO_START_TIMEOUT_MS);
+
+    await failed;
+    expect(track.stop).toHaveBeenCalled();
+    expect(contexts.every((context) => context.state === 'closed')).toBe(true);
   });
 });
 

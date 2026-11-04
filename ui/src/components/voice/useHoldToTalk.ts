@@ -104,6 +104,11 @@ const vibrate = () => {
   }
 };
 
+// The user allowed the microphone when a hold asked, in this page. iOS Safari can go on
+// answering `prompt` to the permission query after that, which would turn every later press
+// into another ask that never records; the stream it handed over is the better answer.
+let allowedOnAsk = false;
+
 const permissionState = async (): Promise<PermissionState | null> => {
   try {
     const status = await navigator.permissions?.query({ name: 'microphone' as PermissionName });
@@ -341,11 +346,15 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       end('denied');
       return;
     }
-    if (permission === 'prompt') {
-      // The system's question takes this press; the next one records.
+    if (permission === 'prompt' && !allowedOnAsk) {
+      // The system's question takes this press; the next one records. The answer can come
+      // long after the press ended: the stream it brings is only proof, and is closed at once.
       end('asking');
       void navigator.mediaDevices?.getUserMedia({ audio: true }).then(
-        (stream) => stream.getTracks().forEach((track) => track.stop()),
+        (stream) => {
+          allowedOnAsk = true;
+          stream.getTracks().forEach((track) => track.stop());
+        },
         () => undefined,
       );
       return;
@@ -361,9 +370,11 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     releasePointer();
     if (!current.started && how !== 'cancel') {
       // Over before the microphone opened: a permission prompt took the press, or it was a slip.
+      // The system takes it for the prompt even when the query said granted: iOS asks again
+      // once the microphone has been idle for about a minute.
       current.ending = 'cancel';
       current.dictation.abort();
-      end(!current.granted ? 'asking' : how === 'send' ? 'too-short' : 'cancelled');
+      end(how === 'system' || !current.granted ? 'asking' : 'too-short');
       return;
     }
     if (how === 'cancel') {

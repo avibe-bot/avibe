@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { ShowPageVoiceDictation } from './showPageVoiceDictation';
-import { claimVoiceCapture, type VoiceRecordingPipelineOptions } from './voiceRecording';
+import { claimVoiceCapture, isVoiceCaptureActive, type VoiceRecordingPipelineOptions } from './voiceRecording';
 import type { VoiceRealtimeOptions } from './voiceRealtime';
 import { VoiceTranscriptionError, type VoiceTranscriptionSegment } from './voiceTranscription';
 
@@ -114,6 +114,30 @@ describe('ShowPageVoiceDictation', () => {
     nextSurface.release();
     dictation.abort();
     expect(abort).toHaveBeenCalledOnce();
+  });
+
+  it('closes a microphone granted after the take was cancelled, and frees the capture', async () => {
+    // A permission alert can answer after the press that asked has ended.
+    const { stream, stop } = fakeStream();
+    const granted = deferred<MediaStream>();
+    const createPipeline = vi.fn();
+    const dictation = new ShowPageVoiceDictation({ before: '', after: '' }, {
+      getUserMedia: () => granted.promise,
+      createPipeline,
+      createQueue: () => ({ enqueue: async () => undefined }),
+    });
+
+    const starting = dictation.start();
+    await Promise.resolve();
+    expect(isVoiceCaptureActive()).toBe(true);
+    dictation.abort();
+    expect(isVoiceCaptureActive()).toBe(false);
+    granted.resolve(stream);
+
+    await expect(starting).rejects.toMatchObject({ code: 'cancelled' });
+    expect(stop).toHaveBeenCalled();
+    expect(createPipeline).not.toHaveBeenCalled();
+    expect(isVoiceCaptureActive()).toBe(false);
   });
 
   it('preserves finalization when ownership changes during capture startup', async () => {

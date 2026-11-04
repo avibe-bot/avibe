@@ -198,3 +198,18 @@ export function VoiceCancelTarget({ armed, hint }: { armed: boolean; hint?: Reac
     </div>
   );
 }
+
+/** The close on a voice toast: a small × whose target is a fingertip (44 pt) without making the
+ *  toast taller, overlapping the toast's own padding at its top-right corner. */
+export function VoiceToastClose({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      className="-my-3 -mr-3.5 grid size-11 shrink-0 place-items-center rounded-2xl text-muted hover:text-foreground"
+    >
+      <X className="size-4" />
+    </button>
+  );
+}

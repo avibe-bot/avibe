@@ -10,6 +10,7 @@ declare global {
     voiceShortcutTest: {
       sent: string[];
       spoken: { text: string; metadata: Record<string, unknown> }[];
+      opened: number;
     };
   }
 }

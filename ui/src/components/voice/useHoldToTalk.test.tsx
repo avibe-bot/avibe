@@ -293,19 +293,54 @@ describe('useHoldToTalk', () => {
     expect(hold.outcome).toBe('sent');
   });
 
-  it('lets the permission prompt take the first hold, and says why a refused one does nothing', async () => {
+  it('lets the permission prompt take the first hold, records the next once allowed, and says why a refused one does nothing', async () => {
     pipeline.permission = 'prompt';
+    let allow!: (stream: MediaStream) => void;
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockImplementationOnce(() => new Promise((resolve) => {
+      allow = resolve;
+    }));
     const el = await mount();
     await holdFor(el);
     expect(hold.outcome).toBe('asking');
     expect(pipeline.takes).toHaveLength(0);
     expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalled();
 
+    // The system alert took the press; Allow comes after it ended, and its stream is closed at once.
+    fireEvent.pointerCancel(el, { pointerId: 1 });
+    const track = { stop: vi.fn() };
+    await act(async () => allow({ getTracks: () => [track] } as unknown as MediaStream));
+    expect(track.stop).toHaveBeenCalled();
+
+    // iOS Safari can go on answering `prompt` after Allow: the next press records.
+    await holdFor(el);
+    expect(pipeline.takes).toHaveLength(1);
+    expect(hold.phase).toBe('listening');
+    fireEvent.keyDown(window, { key: 'Escape' });
+
     pipeline.permission = 'denied';
-    up(el);
     await holdFor(el);
     expect(hold.outcome).toBe('denied');
-    expect(pipeline.takes).toHaveLength(0);
+    expect(pipeline.takes).toHaveLength(1);
+  });
+
+  it('says the system is asking when its alert takes the press before the microphone opens', async () => {
+    // iOS asks again once the microphone has been idle for about a minute, though the query said
+    // granted: the alert comes up while the take waits for the microphone, and takes the press.
+    pipeline.startMs = 5_000;
+    const el = await mount();
+    await holdFor(el);
+    expect(hold.phase).toBe('listening');
+    fireEvent.pointerCancel(el, { pointerId: 1 });
+    expect(pipeline.takes[0].abort).toHaveBeenCalled();
+    expect(hold.outcome).toBe('asking');
+    expect(hold.phase).toBe('idle');
+
+    // The answer arrives after the press ended: the next press is a new take.
+    await elapse(5_000);
+    pipeline.startMs = 0;
+    await holdFor(el);
+    expect(pipeline.takes).toHaveLength(2);
+    expect(hold.phase).toBe('listening');
   });
 
   it('says voice is unavailable when the server has no speech service', async () => {
