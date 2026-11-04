@@ -1,3 +1,4 @@
+import { GlobalScopeChip } from './GlobalScopeChip';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ChevronDown, ChevronRight, Eraser, Globe, Info, KeyRound, Loader2, Plus, RefreshCw, Search, ShieldCheck, Terminal, Trash2, X } from 'lucide-react';
@@ -242,7 +243,7 @@ export function McpServerDetail({
       </div>
       </>
       ) : null}
-      {current.auth === 'needs_login' ? <LoginLink name={current.name} project={project} className={buttonVariants({ variant: 'brand', size: 'sm' })} onActivate={onActivateLogin}>{t('mcpHub.login')}</LoginLink> : null}
+      {!(project && current.source !== 'project') && current.auth === 'needs_login' ? <LoginLink name={current.name} project={project} className={buttonVariants({ variant: 'brand', size: 'sm' })} onActivate={onActivateLogin}>{t('mcpHub.login')}</LoginLink> : null}
       {canManage ? (
         <div className="flex flex-wrap items-center gap-2 pt-1">
           {projectRow && state === 'pending_approval' && onApprove ? (
@@ -536,6 +537,8 @@ export function McpConfigureDialog({ server, env, headers, error, busy, onEnvCha
 }
 
 export interface McpHubSectionProps {
+  /** The parent toolbar owns search when the hub is embedded in SkillsPage. */
+  searchQuery?: string;
   /** The Avibe project whose view this is (its rows plus the visible global ones); null is the global hub. */
   project?: { id: string; name: string } | null;
 }
@@ -572,13 +575,10 @@ function McpRow({ server, inherited, selected, loginLink, onSelect, onActivateLo
         {server.transport === 'stdio' ? <Terminal className="size-4" /> : <Globe className="size-4" />}
       </span>
       <span className="flex min-w-0 flex-1 flex-col gap-1">
-        <span className="flex items-center gap-2">
+        <span className="flex flex-wrap items-center gap-2">
           <span className="truncate font-mono text-[13px] font-semibold text-foreground">{server.name}</span>
           {inherited ? (
-            <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-border-strong px-1.5 font-mono text-[9px] font-bold uppercase text-muted">
-              <Globe className="size-2.5" />
-              {t('mcpHub.globalBadge')}
-            </span>
+            <GlobalScopeChip />
           ) : (
             <Badge className={clsx('font-mono text-[9px] uppercase', SOURCE_CHIP[server.source ?? 'avibe'])}>
               {t(`mcpHub.source.${server.source ?? 'avibe'}`)}
@@ -593,7 +593,7 @@ function McpRow({ server, inherited, selected, loginLink, onSelect, onActivateLo
           {t('mcpHub.toolMeta', { count: server.toolCount ?? 0, transport: transportLabel })}
         </span>
       </span>
-      {loginLink && server.auth === 'needs_login' ? (
+      {!inherited && loginLink && server.auth === 'needs_login' ? (
         <span onClick={(event) => event.stopPropagation()}>
           <LoginLink
             name={server.name}
@@ -610,7 +610,7 @@ function McpRow({ server, inherited, selected, loginLink, onSelect, onActivateLo
   );
 }
 
-export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null }) => {
+export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null, searchQuery }) => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
@@ -700,15 +700,15 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null }) 
   }
 
   const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
+    const q = (searchQuery ?? search).trim().toLowerCase();
     if (!q) return servers;
     return servers.filter((item) => item.name.toLowerCase().includes(q) || (item.description || '').toLowerCase().includes(q));
-  }, [search, servers]);
+  }, [searchQuery, search, servers]);
   // Project view grouping mirrors Skills: this project's `.mcp.json` rows first,
   // then the inherited global rows (the backend already drops globals shadowed
   // by a same-named project server).
-  const projectRows = useMemo(() => filtered.filter((server) => server.scope !== 'global'), [filtered]);
-  const inheritedRows = useMemo(() => filtered.filter((server) => server.scope === 'global'), [filtered]);
+  const projectRows = useMemo(() => filtered.filter((server) => server.source === 'project'), [filtered]);
+  const inheritedRows = useMemo(() => filtered.filter((server) => server.source !== 'project'), [filtered]);
 
   const current = servers.find((item) => item.name === selected) ?? null;
 
@@ -910,7 +910,7 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null }) 
   return (
     <div className="flex flex-col gap-3">
       <div className="flex flex-wrap items-center gap-2.5">
-        <div className="flex min-w-[220px] flex-1 items-center gap-2 rounded-md border border-border-strong bg-surface px-3 py-2">
+        {searchQuery === undefined ? (<div className="flex min-w-[220px] flex-1 items-center gap-2 rounded-md border border-border-strong bg-surface px-3 py-2">
           <Search className="size-3.5 shrink-0 text-muted" />
           <input
             value={search}
@@ -919,6 +919,7 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null }) 
             className="flex-1 bg-transparent text-[12px] text-foreground outline-none placeholder:text-muted"
           />
         </div>
+        ) : null}
         {canManage ? (
           <>
             <Button type="button" variant="outline" size="xs" disabled={busy !== null} onClick={() => void onDiscover()}>
@@ -1011,7 +1012,7 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null }) 
           <McpServerDetail
             server={current}
             project={projectId}
-            canManage={canManage && !(projectId && current.scope === 'global')}
+            canManage={canManage && !(projectId && current.source !== 'project')}
             expandedTools={expandedTools}
             busy={busy !== null}
             refreshing={busy === `refresh:${current.name}`}

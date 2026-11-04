@@ -285,19 +285,18 @@ export const SkillsPage: React.FC = () => {
         {scope === 'project' && projects.length > 0 ? (
           <ProjectPicker projects={projects} value={projectId} onChange={setProjectId} />
         ) : null}
-        {showMcp ? null : (
-        <>
-
         <div className="flex min-w-[220px] flex-1 items-center gap-2 rounded-md border border-border-strong bg-surface px-3 py-2">
           <Search className="size-3.5 shrink-0 text-muted" />
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder={t(scope === 'project' ? 'skills.searchProjectPlaceholder' : 'skills.searchPlaceholder')}
+            placeholder={t(showMcp ? (scope === 'project' ? 'mcpHub.searchProjectPlaceholder' : 'mcpHub.searchPlaceholder') : (scope === 'project' ? 'skills.searchProjectPlaceholder' : 'skills.searchPlaceholder'))}
             className="flex-1 bg-transparent text-[12px] text-foreground outline-none placeholder:text-muted"
           />
         </div>
 
+        {showMcp ? null : (
+        <>
         {projectCanManage ? (
           <>
             <Button type="button" variant="outline" size="xs" onClick={() => setShowBrowse(true)}>
@@ -336,8 +335,8 @@ export const SkillsPage: React.FC = () => {
           {t('mcpHub.projectNoFolder')}
         </div>
       ) : null}
-      {showMcp ? (scope === 'global' || (activeProject && !projectHasFolder) ? <McpHubSection key="global" /> : activeProject ? (
-        <McpHubSection key={activeProject.id} project={{ id: activeProject.id, name: activeProject.display_name }} />
+      {showMcp ? (scope === 'global' || (activeProject && !projectHasFolder) ? <McpHubSection key="global" searchQuery={search} /> : activeProject ? (
+        <McpHubSection key={activeProject.id} searchQuery={search} project={{ id: activeProject.id, name: activeProject.display_name }} />
       ) : null) : (
       <>
       {error ? (

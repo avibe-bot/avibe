@@ -468,13 +468,13 @@ def upsert_jsonc_object_member(source: str, parent_key: str, key: str, value: ob
 
     newline = _detect_newline(source)
     parent_line_start = _line_start(source, start)
-    parent_indent = _indent_slice(source, parent_line_start, start)
+    parent_indent = source[parent_line_start:parent.key_start]
     first_member_indent = None
     if members:
         candidate = _indent_slice(source, _line_start(source, members[0].key_start), members[0].key_start)
         if candidate.strip() == "":
             first_member_indent = candidate
-    child_indent = first_member_indent or (parent_indent + "  ")
+    child_indent = first_member_indent or (parent_indent + (_indent_unit(source, start, end) or "  "))
     property_text = f"{json.dumps(key)}: {serialize_at(child_indent)}"
 
     closing_line_start = _line_start(source, end)
@@ -508,34 +508,15 @@ def upsert_jsonc_object_member(source: str, parent_key: str, key: str, value: ob
         insertion = f"{child_indent}{property_text}{suffix}{newline}"
         return updated_source[:insertion_point] + insertion + updated_source[insertion_point:]
     insertion_point = end + (0 if trailing_comma else 1)
-    insertion = f"{newline}{child_indent}{property_text},{newline}{parent_indent}"
+    suffix = "," if trailing_comma else ""
+    insertion = f"{newline}{child_indent}{property_text}{suffix}{newline}{parent_indent}"
     return updated_source[:insertion_point] + insertion + updated_source[insertion_point:]
 
 
 def _reindent_json(serialized: str, indent: str, unit: str) -> str:
-    """Shift a serialized value's lines from unit-based depth to this file's layout.
+    """Offset every continuation line of a serialized value by its member indent."""
 
-    Depth-1 lines move to ``indent``; each deeper line keeps its depth below it;
-    the depth-0 closing line moves one ``unit`` above ``indent``.
-    """
-
-    lines = serialized.splitlines()
-    out: list[str] = []
-    for index, line in enumerate(lines):
-        if index == 0:
-            out.append(line)
-            continue
-        content = line.lstrip(" \t")
-        prefix = line[: len(line) - len(content)]
-        depth = 0
-        while prefix.startswith(unit * (depth + 1)):
-            depth += 1
-        if prefix == unit * depth:
-            target = indent + unit * depth
-        else:
-            target = prefix
-        out.append(target + content)
-    return "\n".join(out) or serialized
+    return serialized.replace("\n", "\n" + indent)
 
 
 def _indent_unit(source: str, start: int, end: int) -> str | None:

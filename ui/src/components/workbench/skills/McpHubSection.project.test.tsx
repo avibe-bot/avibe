@@ -67,7 +67,7 @@ const servers: McpServerSummary[] = [
   row('docs', 'needs_login'),
   row('ready', 'ok', { toolCount: 1, tools: [{ name: 'search' }] }),
   row('stale', 'not_generated'),
-  { name: 'echo', source: 'avibe', scope: 'global', state: 'ok', auth: 'ok', transport: 'stdio', command: 'echo-mcp', toolCount: 1 },
+  { name: 'echo', source: 'avibe', scope: 'global', state: 'needs_login', auth: 'needs_login', transport: 'stdio', command: 'echo-mcp', toolCount: 1 },
 ];
 
 function renderHub() {
@@ -127,6 +127,8 @@ describe('McpHubSection project view', () => {
     expect(actions('ready')).toEqual([en.mcpHub.configure, en.mcpHub.refresh, en.mcpHub.remove]);
     // The inherited global row is view-only here; manage it in the Global tab.
     expect(actions('echo')).toEqual([]);
+    expect(within(rowButton('echo')).queryByRole('link')).toBeNull();
+    expect(within(detail()).queryByRole('link')).toBeNull();
   });
 
   it('configures only the maps the user changed or cleared, and never shows a stored value', async () => {
