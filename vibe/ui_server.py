@@ -8062,7 +8062,6 @@ def api_session():
                         "author_id": _remote_author_id(identity.get("sub")),
                         "instance_kind": instance_kind,
                         "authorization_state": "unavailable",
-                        "session_expires_at": int(identity["exp"]),
                     }
                 )
             elif resolution.state == "revoked":
@@ -8075,7 +8074,6 @@ def api_session():
                         "author_id": _remote_author_id(identity.get("sub")),
                         "instance_kind": instance_kind,
                         "authorization_state": "revoked",
-                        "session_expires_at": int(identity["exp"]),
                     }
                 )
             elif not resolution.current:
@@ -8095,8 +8093,9 @@ def api_session():
                         "capabilities": context.capability_projection(),
                         "authorization_state": "current",
                         "authorization_policy": resolution.policy,
-                        # The exp of the cookie this request carried. This
-                        # route never renews it.
+                        # Exactly the signed exp of the cookie this request
+                        # carried: this route is auth-exempt and never renews
+                        # it, so no later value can be reported.
                         "session_expires_at": int(identity["exp"]),
                     }
                 )

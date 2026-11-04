@@ -301,6 +301,9 @@ def test_session_endpoint_only_adds_the_cookie_expiry_to_its_released_shape(
     config = _paired_config(tmp_path)
     config.remote_access.vibe_cloud.instance_kind = "personal"
     config.save()
+    base = int(time.time())
+    clock = {"now": base}
+    monkeypatch.setattr(remote_access.time, "time", lambda: clock["now"])
     cookie = remote_access.make_session_cookie(
         config,
         "owner@example.com",
@@ -333,10 +336,15 @@ def test_session_endpoint_only_adds_the_cookie_expiry_to_its_released_shape(
     browser = app.test_client()
     browser.set_cookie(remote_access.SESSION_COOKIE_NAME, cookie, domain="alex.avibe.bot")
 
-    body = browser.get("/api/session", base_url="https://alex.avibe.bot").get_json()
+    # Two days on, any other route would re-issue the cookie; this one never
+    # does, so what it reports is the exp of the cookie the browser still holds.
+    clock["now"] = base + 2 * _DAY
+    response = browser.get("/api/session", base_url="https://alex.avibe.bot")
+    body = response.get_json()
 
-    assert body.pop("session_expires_at") == _cookie_payload(cookie)["exp"]
+    assert _session_set_cookie(response) is None
     if state == "current":
+        assert body.pop("session_expires_at") == _cookie_payload(cookie)["exp"]
         assert body.pop("capabilities")["is_instance_owner"] is True
     assert body == released
     # Local and signed-out readers get exactly the released shape.
