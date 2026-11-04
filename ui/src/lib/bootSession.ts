@@ -124,10 +124,16 @@ export function settleSignOutBootSession(): void {
 export function forgetBootSession(): void {
   const store = storage();
   if (!store) return;
+  // Independently, and the record first: a full storage can refuse the
+  // generation write, and that must not leave the record behind.
   try {
-    store.setItem(BOOT_SESSION_GENERATION_KEY, String(bootSessionGeneration() + 1));
     store.removeItem(BOOT_SESSION_KEY);
   } catch {
-    // Nothing more to do.
+    // Nothing more to do for the record.
+  }
+  try {
+    store.setItem(BOOT_SESSION_GENERATION_KEY, String(bootSessionGeneration() + 1));
+  } catch {
+    // Without the bump a check in flight could still record; the record is gone.
   }
 }
