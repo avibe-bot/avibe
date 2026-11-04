@@ -100,6 +100,15 @@ export function blockBootSessionRecording(): void {
   forgetBootSession();
 }
 
+/** Sign-out has settled (whether or not the request succeeded): advance the
+ *  shared fence again and forget the record. A check another tab started after
+ *  the first bump but before the server dropped the cookie captured that
+ *  generation, and must not record the leaving reader once it answers. */
+export function settleSignOutBootSession(): void {
+  bumpSignOutGeneration();
+  forgetBootSession();
+}
+
 /** Forget it: the next cold start waits for the server again. */
 export function forgetBootSession(): void {
   try {

@@ -6,7 +6,7 @@ import type { AgentBackendId, NativeCliBackend, WebOAuthBackend } from '../lib/a
 import { apiFetch, recoverRemoteAuthFromSessionProbe, withApiDeadline } from '../lib/apiFetch';
 import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
 import { clearLocalSnapshots, forgetLocalSnapshots } from '../lib/localSnapshots';
-import { blockBootSessionRecording, forgetBootSession } from '../lib/bootSession';
+import { blockBootSessionRecording, settleSignOutBootSession } from '../lib/bootSession';
 import { parseBot, parseBotLimit, type AgentBotSummary, type Bot, type BotEmojiAvatarInput, type BotLimit } from '../lib/bots';
 import { parseNotificationPreferences, type InboxCategory, type NotificationPreferences } from '../lib/notificationPreferences';
 import { mcpPath } from '../lib/mcpPath';
@@ -4784,7 +4784,10 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           ...(endpoint ? { endpoint } : {}),
         });
       } finally {
-        forgetBootSession();
+        // Again once the request settles: anything another tab started while it
+        // was out may have answered meanwhile (see settleSignOutBootSession).
+        settleSignOutBootSession();
+        await clearLocalSnapshots();
       }
     },
     // eslint-disable-next-line react-hooks-js/exhaustive-deps

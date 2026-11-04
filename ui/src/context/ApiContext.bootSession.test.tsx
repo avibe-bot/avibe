@@ -67,4 +67,35 @@ describe('signing out', () => {
     await signingOut;
     expect(readBootSession()).toBeNull();
   });
+
+  it('refuses an answer from another tab whose check started while the logout request was out', async () => {
+    let api: ReturnType<typeof useApi> | null = null;
+    const Capture = () => {
+      const value = useApi();
+      useEffect(() => { api = value; }, [value]);
+      return null;
+    };
+    let finishLogout: (response: Response) => void = () => {};
+    apiFetch.mockImplementation(async (path: string) => (
+      path === '/auth/logout'
+        ? new Promise<Response>((resolve) => { finishLogout = resolve; })
+        : Response.json({})
+    ));
+    render(<ApiProvider><Capture /></ApiProvider>);
+    await waitFor(() => expect(api).not.toBeNull());
+    // A second tab: same origin storage, its own module state.
+    vi.resetModules();
+    const otherTab = await import('../lib/bootSession');
+
+    const signingOut = api!.signOut();
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledWith('/auth/logout', expect.anything()));
+    // The other tab's guard check starts now, after this tab's first bump.
+    const generationAtStart = otherTab.bootSessionGeneration();
+
+    finishLogout(Response.json({ ok: true }));
+    await signingOut;
+    // Its check answers with the session the server still honored when it ran.
+    otherTab.recordBootSession(reader, Date.now(), generationAtStart);
+    expect(readBootSession()).toBeNull();
+  });
 });
