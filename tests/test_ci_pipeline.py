@@ -440,10 +440,31 @@ def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
         assert command not in build_commands
     assert build_commands.count("npm run build") == 1
     assert "npm ci" in build_commands
-    for job in (checks, browsers, build):
+    for job in (checks, build):
         assert job["if"] == "needs.changes.outputs.docs_only == 'false'"
         assert not job.get("continue-on-error")
         assert all(not step.get("if") and not step.get("continue-on-error") for step in job["steps"])
+    assert browsers["if"] == "needs.changes.outputs.docs_only == 'false'"
+    assert not browsers.get("continue-on-error")
+    assert all(not step.get("continue-on-error") for step in browsers["steps"])
+    browser_artifacts = [
+        step for step in browsers["steps"] if step.get("name") == "Upload browser failure artifacts"
+    ]
+    assert len(browser_artifacts) == 1
+    artifact = browser_artifacts[0]
+    assert artifact["if"] == "${{ failure() }}"
+    assert artifact["uses"] == (
+        "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9"
+    )
+    assert artifact["with"] == {
+        "name": "ui-browser-checks-${{ matrix.lane }}-failure",
+        "path": "ui/e2e/.artifacts",
+        "if-no-files-found": "ignore",
+        "retention-days": 7,
+        "include-hidden-files": True,
+    }
+    assert browsers["steps"][-1] is artifact
+    assert {leg["lane"] for leg in browsers["strategy"]["matrix"]["include"]} == {1, 2, 3, 4}
     for name in ("install-upgrade-shards", "windows-install-smoke-runners"):
         assert jobs[name]["needs"] == "build-linux-artifacts"
 

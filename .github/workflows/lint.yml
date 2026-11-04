@@ -307,6 +307,20 @@ jobs:
           }
           ${{ matrix.suites }}
 
+      - name: Upload browser failure artifacts
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: ui-browser-checks-${{ matrix.lane }}-failure
+          # Every browser suite writes Playwright results, screenshots and
+          # retain-on-failure traces below this ignored directory. Keep the
+          # upload scoped to the current lane's runner and only run it after a
+          # failure so successful runs do not produce routine artifacts.
+          path: ui/e2e/.artifacts
+          if-no-files-found: ignore
+          retention-days: 7
+          include-hidden-files: true
+
   show-router-integration:
     needs: changes
     if: needs.changes.outputs.docs_only == 'false'
