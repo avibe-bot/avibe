@@ -6436,6 +6436,14 @@ def parse_session_identity(
     current = int(time.time())
     if issued_at <= 0 or expires_at <= current or expires_at <= issued_at:
         return None
+    # A cookie keeps the exp it was issued under. Once the instance is an
+    # organization, one idle past the organization limit (a Personal cookie
+    # from before a reclassification) is no longer accepted.
+    if (
+        _normalized_instance_kind(cloud.instance_kind) == "organization"
+        and current - issued_at >= ORGANIZATION_SESSION_TTL_SECONDS
+    ):
+        return None
     if "auth_time" in payload:
         auth_time = _positive_int(payload.get("auth_time"))
         if auth_time is None or auth_time > issued_at:

@@ -588,6 +588,23 @@ def test_remote_session_idles_out_after_its_instance_kind_limit(
     assert remote_access.parse_session_identity(config, cookie) is None
 
 
+def test_reclassified_organization_enforces_its_idle_limit_on_personal_cookies(
+    monkeypatch,
+) -> None:
+    config = _config()
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    clock = _pin_clock(monkeypatch, _SIGN_IN_AT)
+    personal_cookie = _session_cookie(config)
+
+    config.remote_access.vibe_cloud.instance_kind = "organization"
+    clock["now"] = _SIGN_IN_AT + 7 * _DAY - 1
+    identity = remote_access.parse_session_identity(config, personal_cookie)
+    assert identity is not None
+    assert identity["exp"] == _SIGN_IN_AT + 30 * _DAY
+    clock["now"] = _SIGN_IN_AT + 7 * _DAY
+    assert remote_access.parse_session_identity(config, personal_cookie) is None
+
+
 def _released_identity(config: V2Config, cookie: str, *, now: int) -> dict | None:
     """The cookie checks of ``parse_session_identity`` as released before auth_time.
 
