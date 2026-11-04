@@ -16,10 +16,11 @@ pickers and downloads, back navigation, APK installation and updates, and later
 Android shortcuts, share targets, tiles, and widgets.
 
 The first and ongoing distribution channel is a signed APK for known users.
-There is no app-store milestone. The notification path is Avibe's existing
-WeChat and Feishu/Lark channels, through a new opt-in cross-surface notification
-binding, plus realtime updates while the app is open. Formal Xiaomi, OPPO,
-vivo, Honor, or Huawei push is not a product dependency.
+There is no app-store milestone. Foreground realtime and message catch-up are
+enough for internal alpha testing. Daily use additionally depends on a
+separately designed shared-core capability that can notify a user-authorized
+WeChat or Feishu/Lark private destination. Formal Xiaomi, OPPO, vivo, Honor, or
+Huawei push is not a product dependency.
 
 The iOS and Android shells share one versioned contract,
 `window.avibeNative`, but not a shell framework. Swift and Kotlin are small
@@ -75,7 +76,7 @@ media, and file behavior rather than from market-share estimates alone.
 | Data and behavior | Instance APIs, session and message models, drafts, message catch-up, authorization rules | Activity/process restoration and WebView recreation |
 | Native bridge | `window.avibeNative` methods, events, error codes, capability versions, origin rules, JSON fixtures | Swift transport with WebKit; Kotlin transport with AndroidX WebKit |
 | Composer | Web composer behavior, marker grammar, draft ownership, attachment and voice pipelines | Each platform decides independently whether native text input is needed |
-| Notifications | Committed message and Inbox state, per-owner authorization and suppression rules, opt-in IM notification producer and subscription | WeChat or Feishu/Lark destination confirmation; Android session routing after launch |
+| Notifications | A separately designed shared-core capability for Workbench-to-bound-private-IM alerts and shared eligibility rules | Destination-specific transport behavior; Android session routing after launch |
 | Acceptance | One scenario definition and expected behavior | A separate real-device result for every platform and device family |
 | Release | Version semantics and release provenance principles | TestFlight/App Store tooling on iOS; signed APK and package installation on Android |
 
@@ -309,42 +310,35 @@ path and Web Push, and is not fanned out to a WeChat or Feishu/Lark destination
 configuration is therefore necessary but not sufficient for Android background
 notifications.
 
-The first APK milestone includes a new shared-core **IM notification
-subscription**:
+Background alerts for Workbench and Android-started sessions require a new
+shared-core capability with its own design document. This Android plan records
+the dependency and requirements, not its mechanism. The separate design must
+answer:
 
-1. In authenticated Settings, the owner chooses an already configured WeChat
-   or Feishu/Lark private destination. A confirmation message in that private
-   chat proves control before the subscription becomes active.
-2. Persist the binding by authenticated owner, platform, recipient, instance,
-   enabled notification categories, and revocation state. Never infer a
-   recipient from the last active chat or keep the binding only in memory.
-3. Consume the same committed Workbench message and Inbox state that currently
-   triggers Web Push. Before each send, apply the existing owner authorization,
-   Project access, hidden Session, muted category, and already-read suppression
-   rules.
-4. Send a generic event type plus an opaque session locator, not the reply
-   body, prompt, attachment name, or other workspace content. The IM platform
-   is a return signal, not a second transcript.
-5. Deduplicate per event and destination. Revocation, failed authorization, or
-   a removed IM destination fails closed and records a diagnosable disposition.
-
-This is new shared core, storage, Settings/API, and transport-adapter work. It
-does not exist merely because WeChat or Feishu/Lark is configured, and it must
-receive its own product and security review before the APK notification exit
-check can pass.
+1. How a `platform=avibe` session event reaches an already bound WeChat or
+   Feishu/Lark private destination. This producer does not exist today.
+2. How the destination is bound to and authorized by the intended user.
+3. How delivery preserves the existing owner authorization, Project filtering,
+   muted-category, hidden-Session, already-read suppression, and badge rules.
+4. How duplicate IM alerts are suppressed while the user is active on any
+   foreground surface, accounting for the `ui_server` and controller process
+   boundary described in `AGENTS.md`.
+5. How the alert carries only the minimum session-location information and no
+   reply body, prompt, attachment name, or other workspace content.
+6. What product and security review must pass before the capability is enabled.
 
 The supported notification model is:
 
-1. After the explicit binding above, Avibe sends a minimal notification through
-   the selected existing WeChat or Feishu/Lark private destination when the
-   Android app is not open. Without a binding, there is no background alert.
-2. The Android app receives the existing instance realtime stream while it is
-   foregrounded and updates the current session immediately.
-3. An IM message may carry a session locator. The app can route that locator
+1. Internal APK alpha relies on the existing instance realtime stream while
+   foregrounded and fetches missed messages when opened; it makes no background
+   IM-alert guarantee.
+2. After the separate shared-core capability is delivered, an eligible
+   Workbench event may notify the user's bound WeChat or Feishu/Lark private
+   destination without duplicating an active foreground surface.
+3. An IM alert may carry a session locator. The app can route that locator
    after launch, but direct launch from every IM client is not a v1 guarantee;
    each client and OEM must be tested.
-4. Opening the app always fetches missed messages from the instance, so IM is
-   a prompt to return rather than a second message store.
+4. IM remains a prompt to return, not a second transcript or message store.
 
 A self-managed long connection in an Android foreground service is an open
 evaluation, not an assumed solution. Foreground services require an ongoing
@@ -366,33 +360,35 @@ but they are never presented as an end-user notification path.
 iOS and Android proceed independently. These estimates assume one Android lane
 with Web UI and release help available in parallel.
 
-### APK alpha, about 3-5 weeks
+### APK alpha, about 3-4 weeks
 
 | Track | Work | Effort |
 | --- | --- | --- |
 | Native | Kotlin project, System WebView, instance picker, three-class navigation, bridge feature gates, microphone, files, downloads, back behavior | 2.5 weeks |
-| Shared Web UI | Android shell detection, bridge fixtures, recovery hooks, diagnostics, IM session locator handling | 1 week, parallel |
-| Shared notifications | Persisted owner-to-private-IM binding, two-sided confirmation, notifiable-event producer, authorization and suppression gates, deduplication, Settings/API, focused tests | 1-1.5 weeks, parallel; product and security review |
+| Shared Web UI | Android shell detection, bridge fixtures, recovery hooks, diagnostics | 1 week, parallel |
 | Release | Package and signing decision, CI-signed APK, signed update manifest, install/update path | 1 week, parallel |
 | Devices | Bring-up on one reference phone and two mainland OEM phones | 0.5 week, overlapping |
 
 Exit: connection, login, chat, voice, attachments, draft restore, renderer
-recovery, message catch-up, signed update, explicit IM notification binding,
-and IM-to-session continuation pass on the three alpha devices.
+recovery, message catch-up, and signed update pass on the three alpha devices.
+Background IM alerts are not an internal-alpha exit condition.
 
-### APK daily use, about 2-3 additional weeks
+### APK daily use, about 2-3 additional Android weeks
 
 - complete all five OEM families;
 - close process-death, WebView-version, keyboard, file, installer, and network
   failures found by the matrix;
 - verify foreground realtime and reconnect behavior over long sessions;
+- deliver the separately designed shared-core Workbench-to-IM notification
+  capability after its product and security review;
 - write the installation and update runbook from observed device prompts;
 - make a go/no-go decision on a native composer and foreground-service
   connection.
 
 Exit: the section 10 checklist passes separately on every target family. No
 store account, software copyright registration, App filing, or vendor-push
-approval is an Android dependency.
+approval is an Android dependency. Shared-core notification effort is estimated
+in its own design rather than inside the Android shell estimate.
 
 ### Deep Android capabilities, about 2-4 weeks as selected
 
@@ -420,7 +416,7 @@ mode, and result for every run.
 | 10 | Short app switch | Session, scroll position, draft, and voice state recover without duplicate send |
 | 11 | Activity and process recreation | Active session and draft restore; messages missed while away are fetched once |
 | 12 | Renderer exit | Dead WebView is replaced; session and draft recover without reusing the old renderer |
-| 13 | IM notification path | Owner confirms one private destination; a background reply emits one content-free notification after all authorization and suppression gates; locator routes correctly where supported; revocation stops delivery |
+| 13 | IM notification path, after the shared capability is delivered | An eligible reply produces one minimal locator alert at the authorized private destination after existing delivery rules; an active foreground surface gets no duplicate; Android routes the locator where supported |
 | 14 | Foreground realtime | New messages appear, disconnects reconnect, and opening after a gap fills all missed messages |
 | 15 | Protected Vault passkey | Works in Android WebView, or a browser fallback is confirmed |
 | 16 | Mainland network | Login, Web UI assets, message stream, file transfer, and voice realtime meet recorded latency and reliability thresholds |
@@ -554,10 +550,11 @@ Settled:
 4. **Approved 2026-11-05:** distribute Android only as signed APKs until the
    owner explicitly reopens app stores.
 5. **Approved 2026-11-05:** use existing WeChat and Feishu/Lark channels plus
-   foreground realtime. Android-started sessions require a new explicit,
-   authenticated cross-surface IM notification subscription and producer;
-   configuration alone does not fan out messages. Formal vendor push is out,
-   and a long-connection foreground service is only an evaluation.
+   foreground realtime. Configuration alone does not fan out Workbench output;
+   daily use depends on a separately designed shared-core notification
+   capability, while internal APK alpha relies on foreground realtime and
+   message catch-up. Formal vendor push is out, and a long-connection foreground
+   service is only an evaluation.
 6. **Approved 2026-11-05:** native HarmonyOS is a separate future platform.
 
 Open:

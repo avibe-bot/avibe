@@ -592,11 +592,12 @@ platform-specific.
 
 The first and ongoing distribution channel is a signed APK. No app-store
 submission or production vendor-push integration is planned. Existing IM
-channels, through the explicit cross-surface subscription in the Android plan,
-plus foreground realtime updates are the notification path. Android starts
-with the web composer and adds a native composer only if its own device matrix
-demonstrates a need. Native HarmonyOS, starting with HarmonyOS NEXT, is a
-separate future platform.
+channels require the separately designed shared-core Workbench-to-IM
+notification capability in the Android plan; internal APK alpha instead relies
+on foreground realtime and message catch-up. Android starts with the web
+composer and adds a native composer only if its own device matrix demonstrates
+a need. Native HarmonyOS, starting with HarmonyOS NEXT, is a separate future
+platform.
 
 See [the Android app plan](android-app.md) for device scope, WebView feature
 gates, APK signing and updates, process-death recovery, notifications, phases,
