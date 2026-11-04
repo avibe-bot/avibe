@@ -476,10 +476,12 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
             });
         }).catch(async (error) => {
             if (superseded()) return;
-            provisionalRef.current = false;
-            setProvisional(false);
+            // The replay stays provisional through the retry: until it answers,
+            // nothing has confirmed or replaced the replayed capabilities.
             const authCheck = await checkRemoteAuthForPath(location.pathname, getAuthSession).catch(() => null);
             if (superseded()) return;
+            provisionalRef.current = false;
+            setProvisional(false);
             if (authCheck?.session) setAuthorizationSession(authCheck.session);
             if (authCheck?.loginRequired) {
                 forgetBootSession();

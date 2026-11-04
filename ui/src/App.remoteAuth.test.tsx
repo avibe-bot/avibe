@@ -136,6 +136,36 @@ describe('AuthGuard boot from the last confirmed outcome', () => {
     expect(readBootSession()).toBeNull();
   });
 
+  it('keeps the replay provisional while the guard retries a failed session read', async () => {
+    await confirmOnce();
+    const readsBefore = api.getAuthSession.mock.calls.length;
+    const seen: Array<boolean | undefined> = [];
+    const Probe = () => {
+      const { provisional } = useInstanceAuthorization();
+      useEffect(() => { seen.push(provisional); });
+      return <div>protected shell</div>;
+    };
+    let answerRetry: (value: typeof member) => void = () => {};
+    api.getAuthSession
+      .mockRejectedValueOnce(new Error('network'))
+      .mockReturnValueOnce(new Promise((resolve) => { answerRetry = resolve; }));
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <AuthGuard><Probe /></AuthGuard>
+      </MemoryRouter>,
+    );
+    // The first read has failed and the retry is out: still the replay.
+    await act(async () => undefined);
+    expect(api.getAuthSession.mock.calls.length - readsBefore).toBe(2);
+    expect(seen.at(-1)).toBe(true);
+
+    await act(async () => { answerRetry(member); });
+    await act(async () => undefined);
+    expect(seen.at(-1)).toBe(false);
+    consoleError.mockRestore();
+  });
+
   it('AUTH-SETUP-142 boots only until the session expires: its reported expiry, else 24 hours', () => {
     const day = 24 * 60 * 60 * 1000;
     const nowSeconds = () => Math.floor(Date.now() / 1000);
