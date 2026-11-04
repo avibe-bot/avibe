@@ -60,7 +60,7 @@ export const ProjectAgentsMdDialog: React.FC<{
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, [open, project.id]);
 
   if (!open) return null;

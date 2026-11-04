@@ -1,16 +1,41 @@
-import { beforeAll, describe, expect, it } from 'vitest';
-import { ESLint } from 'eslint';
+import fs from 'node:fs';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createLintTree, readConfig, writeSource } from './lintTestUtils.mjs';
+import { measureLint } from './oxlintAdapter.mjs';
 
 const RULE = 'avibe/localized-user-text';
 const FILE = 'src/__probe__/LocalizedText.tsx';
-let eslint;
-beforeAll(() => { eslint = new ESLint(); });
-
-async function errors(code, filePath = FILE) {
-  const [result] = await eslint.lintText(code, { filePath });
-  expect(result.fatalErrorCount).toBe(0);
-  return result.messages.filter((message) => message.ruleId === RULE && message.severity === 2);
+// The public RuleTester requires Node >=22 even though Oxlint's CLI supports
+// our Node20 floor. Batch each Vitest case's fixtures into one real CLI run on
+// every platform instead: same config, native AST/scope graph, no parser shim.
+let cases;
+beforeEach(() => { cases = []; });
+function check(code, count = 0, filename = FILE) {
+  const file = path.posix.join(path.posix.dirname(filename), `__case${cases.length}__`, path.posix.basename(filename));
+  cases.push({ code, count, file });
 }
+afterEach(() => {
+  if (!cases.length) return;
+  const root = createLintTree();
+  try {
+    for (const { code, file } of cases) writeSource(root, file, code);
+    const { results, measurement } = measureLint(root);
+    expect(measurement.fatals).toEqual([]);
+    expect(measurement.policyGroups).toEqual([]);
+    expect(measurement.inlineViolations).toEqual([]);
+    expect(measurement.coverage).toEqual({ empty: false, missing: [], unwalked: [] });
+    for (const { code, count, file } of cases) {
+      const result = results.find((item) => item.filePath === path.join(root, file));
+      expect(result, file).toBeDefined();
+      const messages = result.messages.filter((message) => message.ruleId === RULE);
+      expect(messages, `${file}: ${code}`).toHaveLength(count);
+      expect(messages.every((message) => message.severity === 2)).toBe(true);
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 // Reduced from the four actual review hunks in #2559, not just inline t() calls.
 // These fixtures protect the sink contract that existing lint presets never saw.
@@ -46,7 +71,7 @@ const originalRegressions = [
 
 describe('#2618: the original localized-copy regressions cannot return unnoticed', () => {
   it.each(originalRegressions)('errors on %s', async (_name, code) => {
-    expect((await errors(code)).length).toBeGreaterThan(0);
+    check(code, 1);
   });
 });
 
@@ -72,7 +97,7 @@ describe('all user-facing sinks enforce literal-copy and composition boundaries'
       `<Widget ${prop}={added} />`,
     ]) {
       const setup = "const reason = t('reason'); const sentence = `${reason} (${explanation})`; const joined = [reason, explanation].join('. '); const added = reason + ': ' + explanation;";
-      expect(await errors(component(jsx, setup))).toHaveLength(1);
+      check(component(jsx, setup), 1);
     }
   });
 
@@ -95,7 +120,7 @@ describe('all user-facing sinks enforce literal-copy and composition boundaries'
     ['map expression result', '<p>{values.map(value => `Hello ${value}`)}</p>'],
     ['map block return result', "<p>{values.map(value => { if (ready) return value; return 'Unknown'; })}</p>"],
   ])('rejects %s', async (_name, jsx) => {
-    expect((await errors(component(jsx))).length).toBeGreaterThan(0);
+    check(component(jsx), 1);
   });
 
   it.each([
@@ -105,16 +130,16 @@ describe('all user-facing sinks enforce literal-copy and composition boundaries'
     ["const text = [label, explanation].join('. '); const alias = text satisfies string;", '<button aria-label={alias} />'],
     ["const callback = (value) => { const text = `Hello ${value}`; return text; }; const text = values.map(callback);", '<p>{text}</p>'],
   ])('follows immutable lexical output bindings: %s', async (setup, jsx) => {
-    expect(await errors(component(jsx, setup))).toHaveLength(1);
+    check(component(jsx, setup), 1);
   });
 
   it('does not confuse a shadowed parameter with an outer literal binding', async () => {
     const code = "const text = 'not displayed'; export function Probe({ text }) { return <p>{text}</p>; }";
-    expect(await errors(code)).toEqual([]);
+    check(code);
   });
 
   it('terminates on cyclic bindings instead of crashing the gate', async () => {
-    expect(await errors(component('<p>{a}</p>', "const a = b; const b = a + 'Suffix';"))).toHaveLength(1);
+    check(component('<p>{a}</p>', "const a = b; const b = a + 'Suffix';"), 1);
   });
 });
 
@@ -137,12 +162,12 @@ describe('legitimate localization, dynamic data and non-copy values stay usable'
     ['map logging is not copy', "<p>{values.map(value => { console.log('Loaded item', value); return value; })}</p>"],
     ['empty strings', "<p>{ready ? label : ''}{values.join('')}</p>"],
   ])('allows %s', async (_name, jsx) => {
-    expect(await errors(component(jsx))).toEqual([]);
+    check(component(jsx));
   });
 
   it('does not inspect a composition used only for protocol data or logging', async () => {
     const setup = "const text = `${user.path}/${user.id}`; console.log('Loaded: ' + text);";
-    expect(await errors(component('<p data-path={text}>{user.name}</p>', setup))).toEqual([]);
+    check(component('<p data-path={text}>{user.name}</p>', setup));
   });
 });
 
@@ -156,7 +181,7 @@ describe('exemptions are narrow content contracts, not subtree escape hatches', 
     '<input placeholder="https://example.com/v1" />', '<span>~/.avibe/config.json</span>',
     '<pre>{\'{"scopes":["read"]}\'}</pre>',
   ])('allows explicit decorative/technical display: %s', async (jsx) => {
-    expect(await errors(component(jsx))).toEqual([]);
+    check(component(jsx));
   });
 
   it.each([
@@ -177,23 +202,23 @@ describe('exemptions are narrow content contracts, not subtree escape hatches', 
     "<LocaleText i18nKey=\"save\">{label + ' Save'}</LocaleText>",
     '<><LocaleText i18nKey="save" />Save changes</>',
   ])('does not exempt prose, labels, or neighbors: %s', async (jsx) => {
-    expect((await errors(component(jsx))).length).toBeGreaterThan(0);
+    check(component(jsx), 1);
   });
 
   it('does not trust a component named Trans from another package', async () => {
-    expect(await errors('import { Trans } from "other"; export const Probe = () => <Trans i18nKey="save">Save</Trans>;')).toHaveLength(1);
+    check('import { Trans } from "other"; export const Probe = () => <Trans i18nKey="save">Save</Trans>;', 1);
   });
 });
 
 describe('applicability is narrower than, but does not change, the globally pinned policy', () => {
   it.each(['src/Probe.test.tsx', 'src/Probe.spec.tsx', 'src/__tests__/Probe.tsx', 'e2e/Probe.tsx'])('does not lint test/non-source copy in %s', async (file) => {
-    expect(await errors('export const Probe = () => <button>Save</button>;', file)).toEqual([]);
-    expect((await eslint.calculateConfigForFile(file)).rules[RULE]).toEqual([2]);
+    check('export const Probe = () => <button>Save</button>;', 0, file);
+    expect(readConfig().overrides[0].rules[RULE]).toEqual([2]);
   });
 
   it('does not inspect literal values in non-TSX modules, while still resolving the policy', async () => {
-    expect(await errors('export const text = "Save";', 'src/copy.ts')).toEqual([]);
-    expect((await eslint.calculateConfigForFile('src/copy.ts')).rules[RULE]).toEqual([2]);
+    check('export const text = "Save";', 0, 'src/copy.ts');
+    expect(readConfig().overrides[0].rules[RULE]).toEqual([2]);
   });
 });
 

@@ -1,23 +1,17 @@
-import { beforeAll, describe, expect, it } from 'vitest';
-import { ESLint } from 'eslint';
+import fs from 'node:fs';
+import { describe, expect, it } from 'vitest';
+import { createLintTree, lintMessages, readConfig, writeSource } from './lintTestUtils.mjs';
+import { measureLint } from './oxlintAdapter.mjs';
+import { policyDifferences } from './lintPolicy.mjs';
 
-import { effectivePolicyOf, policyDifferences } from './lintPolicy.mjs';
-
-// Probes the real `eslint.config.js` rather than a stand-in, so an accidental
-// loosening of the shared config fails here instead of quietly widening what
-// the lint gate tolerates across the whole UI.
-let eslint;
-
-beforeAll(() => {
-  eslint = new ESLint();
-});
+// Exercise the configured Oxlint engine, not a stand-in for its native or JS
+// rules. The separate policy tests pin every configuration boundary.
 
 const TSX_PROBE = 'src/__probe__/Probe.tsx';
 const TS_PROBE = 'src/__probe__/probe.ts';
 
 async function messagesFor(code, filePath = TS_PROBE) {
-  const [result] = await eslint.lintText(code, { filePath });
-  return result.messages;
+  return lintMessages(code, filePath).messages;
 }
 
 // Presence is not the property these probes defend. `npm run lint` tallies
@@ -52,45 +46,30 @@ async function ruleIdsFor(code, filePath) {
 // the same as reporting on it, so these probes drive the real config end to end
 // and assert the messages the cleanup's conventions depend on.
 
-const rulesFor = async (filePath) => (await eslint.calculateConfigForFile(filePath))?.rules ?? {};
-
-const policyDriftFor = async (filePath) =>
-  policyDifferences(effectivePolicyOf(await eslint.calculateConfigForFile(filePath)));
-
-// The runtime invariant can only measure files that exist. These two paths do
-// not, which is the one thing it cannot cover: whoever adds the next module
-// inherits the policy without anyone re-running anything.
 describe('a source file nobody has written yet is already covered', () => {
-  it('resolves the pinned policy for an arbitrary new .ts file', async () => {
-    expect(await policyDriftFor('src/does/not/exist/yet/newModule.ts')).toEqual([]);
-  });
+  it.each(['src/does/not/exist/yet/newModule.ts', 'src/does/not/exist/yet/NewComponent.tsx', 'newRootConfig.ts'])(
+    'errors on new debt in %s under the pinned policy', async (file) => {
+      expect(policyDifferences(readConfig())).toEqual([]);
+      expect(await errorRuleIdsFor('export const f = (v: any) => v;\n', file)).toContain('@typescript-eslint/no-explicit-any');
+    },
+  );
 
-  it('resolves the pinned policy for an arbitrary new .tsx file', async () => {
-    expect(await policyDriftFor('src/does/not/exist/yet/NewComponent.tsx')).toEqual([]);
-  });
-
-  // Resolving rules for a path is not the same as reporting on it. This asserts
-  // the whole way through to a severity-2 message, which is what the gate counts.
-  it('errors on new debt in that unwritten file', async () => {
-    expect(
-      await errorRuleIdsFor('export const f = (v: any) => v;\n', 'src/does/not/exist/yet/newModule.ts'),
-    ).toContain('@typescript-eslint/no-explicit-any');
-  });
-
-  it('keeps the build output out of the gate', async () => {
-    expect(await eslint.isPathIgnored('dist/assets/index-abcdef12.js')).toBe(true);
-  });
-
-  // The documented boundary of the TypeScript-only policy. `npm run lint` opens
-  // the gate script and the config itself, but the rule map they resolve is
-  // exactly empty, so the only thing reportable for them is a fatal parse or
-  // config error. Broadening the scope to JS/MJS is a separate decision; this
-  // is where it would become visible.
-  it('parses the gate script and the config without applying the rule set', async () => {
-    expect(await rulesFor('scripts/lint-baseline.mjs')).toEqual({});
-    expect(await rulesFor('eslint.config.js')).toEqual({});
-    expect(await eslint.isPathIgnored('scripts/lint-baseline.mjs')).toBe(false);
-    expect(await eslint.isPathIgnored('eslint.config.js')).toBe(false);
+  it('keeps build output out and parses JS scripts without applying TS rules', () => {
+    const root = createLintTree();
+    try {
+      writeSource(root, 'src/clean.ts', 'export const x = 1;');
+      writeSource(root, 'dist/assets/bundle.ts', 'not valid TypeScript!');
+      writeSource(root, 'tool.mjs', 'debugger;');
+      let measured = measureLint(root);
+      expect(measured.measurement.fatals).toEqual([]);
+      expect(measured.measurement.intended).toEqual(['src/clean.ts']);
+      expect(measured.results.flatMap((result) => result.messages)).toEqual([]);
+      writeSource(root, 'tool.mjs', 'export const = ;');
+      measured = measureLint(root);
+      expect(measured.measurement.fatals).toEqual([expect.objectContaining({ filePath: 'tool.mjs' })]);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
@@ -140,6 +119,10 @@ describe('the upgraded lint presets enforce their behavioral contract', () => {
     ['react-hooks/purity', 'export function C() { return <div>{Date.now()}</div>; }'],
     ['no-unassigned-vars', 'export function f() { let value; return value; }'],
     ['no-useless-assignment', 'export function f() { let n=1; n=2; return n; }'],
+    // Native Oxlint misses these two existing try/finally patterns. The actual
+    // configured JS rule must retain them; a native-only switch fails here.
+    ['no-useless-assignment', 'export async function f(read) { let data = null; try { data = await read(); } finally { console.log("done"); } return data; }'],
+    ['no-useless-assignment', 'export async function f(read) { let access = null; try { access = await read(); } catch { return null; } finally { console.log("done"); } return access; }'],
     ['preserve-caught-error', 'export function f() { try { JSON.parse("x"); } catch (error) { throw new Error(String(error)); } }'],
     ['no-shadow-restricted-names', 'export function f(globalThis: string) { return globalThis; }'],
   ])('errors on %s violations', async (rule, source) => {

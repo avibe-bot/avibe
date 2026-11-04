@@ -105,17 +105,17 @@ export const FilePicker: React.FC<{
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, []);
   // Favorites for the rail (loaded above when there's no initialPath; fetch here otherwise).
   useEffect(() => {
     if (sysFavs.length === 0) systemFavorites().then(setSysFavs).catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, []);
   // Re-list the current folder when the hidden toggle flips.
   useEffect(() => {
     if (cwd) navigate(cwd);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, [showHidden]);
 
   const crumbs = cwd ? pathCrumbs(cwd) : [];

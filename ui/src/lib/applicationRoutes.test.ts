@@ -1,7 +1,18 @@
 import { readFileSync } from 'node:fs';
 
-import * as ts from 'typescript';
+import {
+  isJsxAttribute,
+  isJsxElement,
+  isJsxExpression,
+  isJsxSelfClosingElement,
+  isStringLiteral,
+  type JsxAttribute,
+  type JsxOpeningLikeElement,
+  type Node,
+} from 'typescript/unstable/ast';
 import { describe, expect, it } from 'vitest';
+
+import { parseSource } from '../../scripts/typescriptSource.mjs';
 
 import {
   APPLICATION_DYNAMIC_ROUTE_PATHS,
@@ -11,31 +22,31 @@ import {
 } from './applicationRoutes';
 import { LEGACY_SETTINGS_REDIRECTS } from './settingsRoutes';
 
-function routePath(element: ts.JsxOpeningLikeElement): string | null {
+function routePath(element: JsxOpeningLikeElement): string | null {
   if (element.tagName.getText() !== 'Route') return null;
   const path = jsxAttribute(element, 'path')?.initializer;
-  return path && ts.isStringLiteral(path) ? path.text : null;
+  return path && isStringLiteral(path) ? path.text : null;
 }
 
 function jsxAttribute(
-  element: ts.JsxOpeningLikeElement,
+  element: JsxOpeningLikeElement,
   name: string,
-): ts.JsxAttribute | undefined {
+): JsxAttribute | undefined {
   return element.attributes.properties.find(
-    (property): property is ts.JsxAttribute =>
-      ts.isJsxAttribute(property) && property.name.getText() === name,
+    (property): property is JsxAttribute =>
+      isJsxAttribute(property) && property.name.getText() === name,
   );
 }
 
 /** The `to` of a `<Route element={<Navigate to="…" />} />`, or null for a page route. */
-function redirectTarget(element: ts.JsxOpeningLikeElement): string | null {
+function redirectTarget(element: JsxOpeningLikeElement): string | null {
   const initializer = jsxAttribute(element, 'element')?.initializer;
-  if (!initializer || !ts.isJsxExpression(initializer)) return null;
+  if (!initializer || !isJsxExpression(initializer)) return null;
   const rendered = initializer.expression;
-  if (!rendered || !ts.isJsxSelfClosingElement(rendered)) return null;
+  if (!rendered || !isJsxSelfClosingElement(rendered)) return null;
   if (rendered.tagName.getText() !== 'Navigate') return null;
   const to = jsxAttribute(rendered, 'to')?.initializer;
-  return to && ts.isStringLiteral(to) ? to.text : null;
+  return to && isStringLiteral(to) ? to.text : null;
 }
 
 function resolveRoutePath(path: string, parentPath: string | null): string {
@@ -50,36 +61,32 @@ type DeclaredRoutes = {
 };
 
 function declaredRoutes(sourceText: string): DeclaredRoutes {
-  const source = ts.createSourceFile(
-    'App.tsx',
-    sourceText,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TSX,
-  );
+  const source = parseSource(sourceText, 'App.tsx');
   const paths: string[] = [];
   const redirects: Record<string, string> = {};
 
-  const record = (element: ts.JsxOpeningLikeElement, resolvedPath: string) => {
+  const record = (element: JsxOpeningLikeElement, resolvedPath: string) => {
     paths.push(resolvedPath);
     const target = redirectTarget(element);
     if (target !== null) redirects[resolvedPath] = target;
   };
 
-  const visit = (node: ts.Node, parentPath: string | null) => {
-    if (ts.isJsxElement(node)) {
+  const visit = (node: Node, parentPath: string | null) => {
+    if (isJsxElement(node)) {
       const path = routePath(node.openingElement);
       const resolvedPath = path === null ? parentPath : resolveRoutePath(path, parentPath);
       if (path !== null) record(node.openingElement, resolvedPath as string);
       node.children.forEach((child) => visit(child, resolvedPath));
       return;
     }
-    if (ts.isJsxSelfClosingElement(node)) {
+    if (isJsxSelfClosingElement(node)) {
       const path = routePath(node);
       if (path !== null) record(node, resolveRoutePath(path, parentPath));
       return;
     }
-    ts.forEachChild(node, (child) => visit(child, parentPath));
+    node.forEachChild((child) => {
+      visit(child, parentPath);
+    });
   };
 
   visit(source, null);

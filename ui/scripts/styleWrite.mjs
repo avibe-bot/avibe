@@ -1,4 +1,6 @@
-import ts from 'typescript';
+import { SyntaxKind, isBinaryExpression, isElementAccessExpression, isIdentifier, isPropertyAccessExpression, isPropertyAssignment, isStringLiteralLikeNode } from 'typescript/unstable/ast';
+
+import { childrenOf } from './typescriptSource.mjs';
 
 // Where a style write starts, whether it is one at all, and where its value
 // ends.
@@ -150,27 +152,27 @@ function isStyleWrite(index, tree) {
   const visit = (node) => {
     if (node.getStart(tree) > index || node.getEnd() <= index) return;
     key = node;
-    node.getChildren(tree).forEach(visit);
+    childrenOf(node, tree).forEach(visit);
   };
   visit(tree);
 
-  while (key && !ts.isIdentifier(key) && !ts.isStringLiteralLike(key)) key = key.parent;
+  while (key && !isIdentifier(key) && !isStringLiteralLikeNode(key)) key = key.parent;
   const parent = key?.parent;
   if (!parent) return false;
 
   // `{ boxShadow: value }` -- and the name position specifically, so a style
   // object held as the VALUE of some other key is not claimed by its own key.
-  if (ts.isPropertyAssignment(parent)) return parent.name === key;
+  if (isPropertyAssignment(parent)) return parent.name === key;
 
   // `el.style.boxShadow = value` and `el.style['box-shadow'] = value`. The
   // lookbehind in STYLE_ASSIGNMENT has already required the `.style` target;
   // this requires the assignment itself, so a READ of the same property is not a
   // write.
-  if (ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) {
+  if (isPropertyAccessExpression(parent) || isElementAccessExpression(parent)) {
     const assignment = parent.parent;
     return Boolean(assignment)
-      && ts.isBinaryExpression(assignment)
-      && assignment.operatorToken.kind === ts.SyntaxKind.EqualsToken
+      && isBinaryExpression(assignment)
+      && assignment.operatorToken.kind === SyntaxKind.EqualsToken
       && assignment.left === parent;
   }
 
@@ -262,11 +264,11 @@ function propertyExpression(source, start, tree) {
   const visit = (node) => {
     const nodeStart = node.getStart(tree);
     if (nodeStart > at || node.getEnd() <= at) {
-      if (nodeStart <= at) node.getChildren(tree).forEach(visit);
+      if (nodeStart <= at) childrenOf(node, tree).forEach(visit);
       return;
     }
     if (nodeStart === at) end = Math.max(end, node.getEnd());
-    node.getChildren(tree).forEach(visit);
+    childrenOf(node, tree).forEach(visit);
   };
   visit(tree);
 

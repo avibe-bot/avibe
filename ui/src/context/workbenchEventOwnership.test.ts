@@ -1,7 +1,18 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import ts from 'typescript';
+import {
+  isCallExpression,
+  isIdentifier,
+  isObjectLiteralExpression,
+  isPropertyAccessExpression,
+  isPropertyAssignment,
+  isStringLiteral,
+  type Expression,
+  type Node,
+} from 'typescript/unstable/ast';
 import { describe, expect, it } from 'vitest';
+
+import { parseSource } from '../../scripts/typescriptSource.mjs';
 
 /**
  * The catch-up edge has exactly one owner, stated as a property of every
@@ -29,38 +40,38 @@ const sourceFiles = () =>
     .filter((file) => /\.tsx?$/.test(file) && !/\.test\.tsx?$/.test(file))
     .map((file) => join(SRC, file));
 
-const rightmostName = (expression: ts.Expression): string | undefined => {
-  if (ts.isIdentifier(expression)) return expression.text;
-  if (ts.isPropertyAccessExpression(expression)) return expression.name.text;
+const rightmostName = (expression: Expression): string | undefined => {
+  if (isIdentifier(expression)) return expression.text;
+  if (isPropertyAccessExpression(expression)) return expression.name.text;
   return undefined;
 };
 
-type Subscription = { file: string; handlers: Map<string, ts.Expression> };
+type Subscription = { file: string; handlers: Map<string, Expression> };
 
 const subscriptions = (): Subscription[] => {
   const found: Subscription[] = [];
   for (const path of sourceFiles()) {
     const text = readFileSync(path, 'utf8');
     if (!text.includes('connectWorkbenchEvents')) continue;
-    const source = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true);
-    const visit = (node: ts.Node) => {
+    const source = parseSource(text, path);
+    const visit = (node: Node) => {
       if (
-        ts.isCallExpression(node) &&
+        isCallExpression(node) &&
         rightmostName(node.expression) === 'connectWorkbenchEvents' &&
         node.arguments.length > 0 &&
-        ts.isObjectLiteralExpression(node.arguments[0])
+        isObjectLiteralExpression(node.arguments[0])
       ) {
-        const handlers = new Map<string, ts.Expression>();
+        const handlers = new Map<string, Expression>();
         for (const property of node.arguments[0].properties) {
-          if (!ts.isPropertyAssignment(property) || !property.name) continue;
-          const name = ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)
+          if (!isPropertyAssignment(property) || !property.name) continue;
+          const name = isIdentifier(property.name) || isStringLiteral(property.name)
             ? property.name.text
             : undefined;
           if (name) handlers.set(name, property.initializer);
         }
         found.push({ file: path.slice(SRC.length + 1), handlers });
       }
-      ts.forEachChild(node, visit);
+      node.forEachChild(visit);
     };
     visit(source);
   }
@@ -94,12 +105,12 @@ describe('workbench event ownership', () => {
     for (const { file, handlers } of all) {
       const handler = handlers.get('onEventBridgeStatus');
       if (!handler) continue;
-      const visit = (node: ts.Node) => {
-        if (ts.isCallExpression(node)) {
+      const visit = (node: Node) => {
+        if (isCallExpression(node)) {
           const called = rightmostName(node.expression) ?? '<expression>';
           if (!/^set[A-Z]/.test(called)) offenders.push(`${file}: ${called}()`);
         }
-        ts.forEachChild(node, visit);
+        node.forEachChild(visit);
       };
       visit(handler);
     }

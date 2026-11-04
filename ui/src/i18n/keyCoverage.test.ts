@@ -220,13 +220,40 @@ import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { createInstance, type i18n as I18n } from 'i18next';
-import * as ts from 'typescript';
+import { API, type Checker, type Type } from 'typescript/unstable/sync';
+import {
+  SyntaxKind,
+  isAsExpression,
+  isBinaryExpression,
+  isCallExpression,
+  isConditionalExpression,
+  isIdentifier,
+  isJsxAttribute,
+  isJsxAttributes,
+  isJsxExpression,
+  isNonNullExpression,
+  isObjectLiteralExpression,
+  isParenthesizedExpression,
+  isPropertyAssignment,
+  isSatisfiesExpression,
+  isSpreadAssignment,
+  isStringLiteralLikeNode,
+  isTemplateExpression,
+  isTypeAssertion,
+  isTypeNode,
+  type Expression,
+  type Node,
+  type ObjectLiteralElementLike,
+  type SourceFile,
+} from 'typescript/unstable/ast';
 import { describe, expect, it } from 'vitest';
 
 import en from './en.json';
 import zh from './zh.json';
+import { parseSource } from '../../scripts/typescriptSource.mjs';
 
 const APP_SOURCE = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const APP_ROOT = resolve(APP_SOURCE, '..');
 const MODEL_HUB = join('components', 'settings', 'models');
 
 /**
@@ -274,13 +301,17 @@ const identity = (reference: Reference): string =>
   JSON.stringify(Object.entries(reference).sort(([left], [right]) => left.localeCompare(right)));
 
 /** The written name of an object-literal property or a JSX attribute. */
-const nameOf = (node: ts.Node | undefined): string | undefined =>
-  (node !== undefined && (ts.isIdentifier(node) || ts.isStringLiteralLike(node)) ? node.text : undefined);
+const nameOf = (node: Node | undefined): string | undefined =>
+  (node !== undefined && (isIdentifier(node) || isStringLiteralLikeNode(node)) ? node.text : undefined);
 
-const passesOption = (options: ts.Expression | undefined, name: string): boolean =>
+/** A spread names nothing; TS7 types it without the `name` TS5 gave every member. */
+const propertyName = (property: ObjectLiteralElementLike): Node | undefined =>
+  (isSpreadAssignment(property) ? undefined : property.name);
+
+const passesOption = (options: Expression | undefined, name: string): boolean =>
   options !== undefined
-  && ts.isObjectLiteralExpression(options)
-  && options.properties.some((property) => nameOf(property.name) === name);
+  && isObjectLiteralExpression(options)
+  && options.properties.some((property) => nameOf(propertyName(property)) === name);
 
 /**
  * How much copy the call DEMANDS of its key — the options axis as one question.
@@ -291,18 +322,18 @@ const passesOption = (options: ts.Expression | undefined, name: string): boolean
  * plural family. `defaultValue` is decided first because seeing it is enough —
  * whatever else the object hides, that call renders its own fallback.
  */
-const demandOf = (options: ts.Expression | undefined): Demand => {
+const demandOf = (options: Expression | undefined): Demand => {
   if (options === undefined) return 'exact';
-  if (!ts.isObjectLiteralExpression(options)) return 'any';
+  if (!isObjectLiteralExpression(options)) return 'any';
   if (passesOption(options, 'defaultValue')) return 'none';
-  return options.properties.every((property) => nameOf(property.name) !== undefined) ? 'exact' : 'any';
+  return options.properties.every((property) => nameOf(propertyName(property)) !== undefined) ? 'exact' : 'any';
 };
 
 /** The operators that pick one of their operands, so both can name a key. */
-const CHOICE_OPERATORS = new Set<ts.SyntaxKind>([
-  ts.SyntaxKind.AmpersandAmpersandToken,
-  ts.SyntaxKind.BarBarToken,
-  ts.SyntaxKind.QuestionQuestionToken,
+const CHOICE_OPERATORS = new Set<SyntaxKind>([
+  SyntaxKind.AmpersandAmpersandToken,
+  SyntaxKind.BarBarToken,
+  SyntaxKind.QuestionQuestionToken,
 ]);
 
 /**
@@ -312,11 +343,12 @@ const CHOICE_OPERATORS = new Set<ts.SyntaxKind>([
  * makes the whole set open, and an open set is not something this file may
  * expand. `undefined` therefore means "unknowable", never "empty".
  */
-const literalTypes = (type: ts.Type): string[] | undefined => {
-  const parts = type.isUnion() ? type.types : [type];
+const literalTypes = (type: Type | undefined): string[] | undefined => {
+  if (type === undefined) return undefined;
+  const parts = type.isUnionType() ? type.getTypes() : [type];
   const strings: string[] = [];
   for (const part of parts) {
-    if (!part.isStringLiteral()) return undefined;
+    if (!part.isStringLiteralType()) return undefined;
     strings.push(part.value);
   }
   return strings.length > 0 ? strings : undefined;
@@ -354,27 +386,27 @@ const literalTypes = (type: ts.Type): string[] | undefined => {
  * the point: a shape nobody enumerated was a key this guard silently stopped
  * protecting, and shapes were exactly what kept getting missed.
  */
-const staticKeys = (node: ts.Expression | undefined, checker?: ts.TypeChecker): string[] => {
+const staticKeys = (node: Expression | undefined, checker?: Checker): string[] => {
   if (node === undefined) return [];
-  if (ts.isStringLiteralLike(node)) return [node.text];
+  if (isStringLiteralLikeNode(node)) return [node.text];
   // Wrappers that preserve the value: `('k')`, `'k' as const`, `'k' satisfies T`,
   // `<T>'k'`, `k!`.
   if (
-    ts.isParenthesizedExpression(node)
-    || ts.isAsExpression(node)
-    || ts.isSatisfiesExpression(node)
-    || ts.isTypeAssertionExpression(node)
-    || ts.isNonNullExpression(node)
+    isParenthesizedExpression(node)
+    || isAsExpression(node)
+    || isSatisfiesExpression(node)
+    || isTypeAssertion(node)
+    || isNonNullExpression(node)
   ) {
     return staticKeys(node.expression, checker);
   }
-  if (ts.isConditionalExpression(node)) {
+  if (isConditionalExpression(node)) {
     return [...staticKeys(node.whenTrue, checker), ...staticKeys(node.whenFalse, checker)];
   }
-  if (ts.isBinaryExpression(node) && CHOICE_OPERATORS.has(node.operatorToken.kind)) {
+  if (isBinaryExpression(node) && CHOICE_OPERATORS.has(node.operatorToken.kind)) {
     return [...staticKeys(node.left, checker), ...staticKeys(node.right, checker)];
   }
-  if (ts.isTemplateExpression(node)) {
+  if (isTemplateExpression(node)) {
     // The product of the parts, in order. TypeScript itself types this
     // expression as plain `string` outside a const context, so the spans are
     // expanded here rather than asked of the whole template.
@@ -410,8 +442,8 @@ const staticKeys = (node: ts.Expression | undefined, checker?: ts.TypeChecker): 
  * `` t(`settings.models.shell.${key}`, allDirect ? { count } : undefined) ``
  * look like an uncounted call against a plural-only family.
  */
-const translationCall = (node: ts.Node, checker?: ts.TypeChecker): Reference[] => {
-  if (!ts.isCallExpression(node) || !ts.isIdentifier(node.expression) || node.expression.text !== 't') {
+const translationCall = (node: Node, checker?: Checker): Reference[] => {
+  if (!isCallExpression(node) || !isIdentifier(node.expression) || node.expression.text !== 't') {
     return [];
   }
   const [key, options] = node.arguments;
@@ -434,17 +466,17 @@ const translationCall = (node: ts.Node, checker?: ts.TypeChecker): Reference[] =
  * and so is not one of these; a value that is there but dynamic yields nothing,
  * exactly as it does at a `t()` call.
  */
-const i18nKeyReference = (node: ts.Node, checker?: ts.TypeChecker): Reference[] => {
-  if (ts.isJsxAttribute(node) && nameOf(node.name) === 'i18nKey') {
+const i18nKeyReference = (node: Node, checker?: Checker): Reference[] => {
+  if (isJsxAttribute(node) && nameOf(node.name) === 'i18nKey') {
     const value = node.initializer;
-    const counted = ts.isJsxAttributes(node.parent)
-      && node.parent.properties.some((property) => ts.isJsxAttribute(property) && nameOf(property.name) === 'count');
-    const keys = value !== undefined && ts.isJsxExpression(value)
+    const counted = isJsxAttributes(node.parent)
+      && node.parent.properties.some((property) => isJsxAttribute(property) && nameOf(property.name) === 'count');
+    const keys = value !== undefined && isJsxExpression(value)
       ? staticKeys(value.expression, checker)
       : staticKeys(value, checker);
     return keys.map((found) => ({ key: found, counted, listed: false, demand: 'exact' }));
   }
-  if (ts.isPropertyAssignment(node) && nameOf(node.name) === 'i18nKey') {
+  if (isPropertyAssignment(node) && nameOf(node.name) === 'i18nKey') {
     return staticKeys(node.initializer, checker).map((found) => ({ key: found, counted: false, listed: false, demand: 'exact' }));
   }
   return [];
@@ -476,9 +508,9 @@ const i18nKeyReference = (node: ts.Node, checker?: ts.TypeChecker): Reference[] 
  * substitution is a typed variable. Without one the sweep is narrower, never
  * wrong.
  */
-const referencesIn = (file: ts.SourceFile, checker?: ts.TypeChecker): Reference[] => {
+const referencesIn = (file: SourceFile, checker?: Checker): Reference[] => {
   const found = new Map<string, Reference>();
-  const visit = (node: ts.Node) => {
+  const visit = (node: Node) => {
     // Keyed by the whole shape, because one key named by a counted and by an
     // uncounted call site needs both kinds of copy to be there — and one named
     // by an exact call and by a call carrying its own fallback still has to
@@ -486,22 +518,14 @@ const referencesIn = (file: ts.SourceFile, checker?: ts.TypeChecker): Reference[
     for (const reference of [...translationCall(node, checker), ...i18nKeyReference(node, checker)]) {
       found.set(identity(reference), reference);
     }
-    ts.forEachChild(node, visit);
+    node.forEachChild(visit);
   };
   visit(file);
   return [...found.values()].sort((a, b) => label(a).localeCompare(label(b)));
 };
 
 export const collectReferences = (source: string, fileName = 'fixture.tsx'): Reference[] =>
-  referencesIn(
-    ts.createSourceFile(
-      fileName,
-      source,
-      ts.ScriptTarget.Latest,
-      true,
-      fileName.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
-    ),
-  );
+  referencesIn(parseSource(source, fileName));
 
 /** A string that READS like a key: dotted segments, nothing else assumed. */
 const DOTTED = /^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/;
@@ -525,18 +549,12 @@ const DOTTED = /^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/;
  * comment or a longer sentence is not mistaken for a literal the app writes.
  */
 export const collectDottedLiterals = (source: string, fileName = 'fixture.tsx'): string[] => {
-  const file = ts.createSourceFile(
-    fileName,
-    source,
-    ts.ScriptTarget.Latest,
-    true,
-    fileName.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
-  );
+  const file = parseSource(source, fileName);
   const found = new Set<string>();
-  const visit = (node: ts.Node) => {
-    if (ts.isTypeNode(node)) return;
-    if (ts.isStringLiteralLike(node) && DOTTED.test(node.text)) found.add(node.text);
-    ts.forEachChild(node, visit);
+  const visit = (node: Node) => {
+    if (isTypeNode(node)) return;
+    if (isStringLiteralLikeNode(node) && DOTTED.test(node.text)) found.add(node.text);
+    node.forEachChild(visit);
   };
   visit(file);
   return [...found].sort((a, b) => a.localeCompare(b));
@@ -569,35 +587,59 @@ const sourceFiles = (dir: string): string[] =>
  * the type checker and it is pinned here so a later blow-up — a 10s program —
  * is noticed as a regression rather than absorbed.
  */
-const typedApp = (files: string[]): ts.Program =>
-  ts.createProgram(files, {
-    target: ts.ScriptTarget.ES2022,
-    module: ts.ModuleKind.ESNext,
-    moduleResolution: ts.ModuleResolutionKind.Bundler,
-    jsx: ts.JsxEmit.ReactJSX,
-    strict: true,
-    noEmit: true,
-    skipLibCheck: true,
-    esModuleInterop: true,
-    resolveJsonModule: true,
-    baseUrl: resolve(APP_SOURCE, '..'),
-    paths: { '@/*': ['src/*'] },
+const typedApp = (files: string[]) => {
+  // Never written: the compiler reads this config through the API's filesystem
+  // callback, and every other path falls through to the real tree.
+  const config = join(APP_ROOT, 'keyCoverage.tsconfig.json');
+  const tsconfig = JSON.stringify({
+    compilerOptions: {
+      target: 'es2022',
+      module: 'esnext',
+      moduleResolution: 'bundler',
+      jsx: 'react-jsx',
+      strict: true,
+      noEmit: true,
+      skipLibCheck: true,
+      esModuleInterop: true,
+      resolveJsonModule: true,
+      paths: { '@/*': ['./src/*'] },
+    },
+    files,
   });
+  const api = new API({
+    cwd: APP_ROOT,
+    fs: {
+      readFile: (name) => (name === config ? tsconfig : undefined),
+      fileExists: (name) => (name === config ? true : undefined),
+    },
+  });
+  try {
+    const project = api.updateSnapshot({ openProjects: [config] }).getProject(config);
+    if (project === undefined) throw new Error('TypeScript did not open the key-coverage program');
+    return { api, program: project.program, checker: project.checker };
+  } catch (error) {
+    api.close();
+    throw error;
+  }
+};
 
 const referencedCallSites = (): Reference[] => {
   const files = sourceFiles(APP_SOURCE);
-  const program = typedApp(files);
-  const checker = program.getTypeChecker();
-  const found = new Map<string, Reference>();
-  for (const file of files) {
-    const source = program.getSourceFile(file);
-    // A file the program could not load would silently contribute no keys.
-    expect(source, `${relative(APP_SOURCE, file)} is missing from the program`).toBeDefined();
-    for (const reference of referencesIn(source as ts.SourceFile, checker)) {
-      found.set(identity(reference), reference);
+  const { api, program, checker } = typedApp(files);
+  try {
+    const found = new Map<string, Reference>();
+    for (const file of files) {
+      const source = program.getSourceFile(file);
+      // A file the program could not load would silently contribute no keys.
+      expect(source, `${relative(APP_SOURCE, file)} is missing from the program`).toBeDefined();
+      for (const reference of referencesIn(source as SourceFile, checker)) {
+        found.set(identity(reference), reference);
+      }
     }
+    return [...found.values()].sort((a, b) => label(a).localeCompare(label(b)));
+  } finally {
+    api.close();
   }
-  return [...found.values()].sort((a, b) => label(a).localeCompare(label(b)));
 };
 
 /** The app's locales, and the bundle each one resolves against. */

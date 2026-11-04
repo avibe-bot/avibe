@@ -112,7 +112,7 @@ export const AppWindow: React.FC<{
     if (win.minimized || win.maximized || layerWidth === 0 || layerHeight === 0) return;
     const c = clampToLayer(win.bounds, layerWidth, layerHeight);
     if (c.x !== win.bounds.x || c.y !== win.bounds.y) wm.setBounds(win.id, c);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, [win.minimized, win.maximized, layerWidth, layerHeight]);
 
   // Pull DOM focus to this window when it BECOMES the focused (top) window without a
@@ -125,7 +125,7 @@ export const AppWindow: React.FC<{
     if (!active || win.minimized || wm.focusedId !== win.id) return;
     if (rootRef.current?.contains(document.activeElement)) return;
     rootRef.current?.focus({ preventScroll: true });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, [active, wm.focusedId, win.minimized]);
 
   // One pointer gesture (move or resize). Capturing `win.bounds` at gesture start

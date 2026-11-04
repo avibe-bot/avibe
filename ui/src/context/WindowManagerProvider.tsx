@@ -90,7 +90,7 @@ export const WindowManagerProvider: React.FC<{
   // during render. It runs exactly once, before anything is mounted, and is the same bootstrap the
   // after-widen path performs from an effect; moving it out would put the first debounced save back
   // in a position to wipe the stored layout.
-  // eslint-disable-next-line react-hooks/refs -- Mount-time bootstrap; see above.
+  // eslint-disable-next-line react-hooks-js/refs -- Mount-time bootstrap; see above.
   const [windows, setWindows] = useState<WindowInstance[]>(() => {
     if (!sharesWorkbenchLayout(standalone, isDesktopViewport())) {
       // A standalone tab marks itself restored so the after-widen path below stays inert

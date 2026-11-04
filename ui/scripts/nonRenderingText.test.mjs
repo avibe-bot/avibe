@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import postcss from 'postcss';
 import { describe, expect, it } from 'vitest';
 
@@ -31,6 +32,10 @@ const GLOW = '0 0 93px red';
 const NON_RENDERING = [
   ['a TypeScript line comment', 'probe.ts', `const a = 1; // box-shadow: ${GLOW}\n`],
   ['a TypeScript block comment', 'probe.ts', `/* box-shadow: ${GLOW} */\nconst a = 1;\n`],
+  // The AST omits punctuation. A child-only walk loses comments whose leading
+  // token is a closing delimiter, so the syntax adapter must recover tokens.
+  ['a comment before a closing parenthesis', 'probe.ts', `foo(a,\n/* box-shadow: ${GLOW} */\n);\n`],
+  ['a comment before a closing brace', 'probe.ts', `const a = { value: 1,\n// box-shadow: ${GLOW}\n};\n`],
   ['a JSX comment', 'probe.tsx', `const a = <div>{/* box-shadow: ${GLOW} */}</div>;\n`],
   ['JSX text', 'probe.tsx', `const a = <div>box-shadow: ${GLOW}</div>;\n`],
   // Page copy, spelled as an expression. What makes a span copy is its POSITION
@@ -112,6 +117,23 @@ const RENDERING = [
 describe('withoutNonRenderingText', () => {
   it.each(NON_RENDERING)('blanks %s', (_label, file, source) => {
     expect(withoutNonRenderingText(source, file)).not.toContain('93px');
+  });
+
+  // A gap scanner can see `#` as a zero-width private identifier beside a JSX
+  // expression. Run in a bounded child so a regression fails rather than hangs
+  // this test worker; ordinary JSX text fixtures do not exercise that token.
+  it('finishes JSX token recovery and preserves the neighboring style', () => {
+    const source = `const a = <span># {value}</span>;\nconst style = { boxShadow: '${GLOW}' };\n`;
+    const module = new URL('./nonRenderingText.mjs', import.meta.url).href;
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e',
+      `import { withoutNonRenderingText } from ${JSON.stringify(module)};\n`
+      + `process.stdout.write(withoutNonRenderingText(${JSON.stringify(source)}, 'probe.tsx'));`,
+    ], { encoding: 'utf8', timeout: 8000 });
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).not.toContain('#');
+    expect(result.stdout).toContain(`boxShadow: '${GLOW}'`);
+    expect(result.stdout.length).toBe(source.length);
   });
 
   it.each(RENDERING)('leaves %s intact', (_label, file, source, rendered) => {

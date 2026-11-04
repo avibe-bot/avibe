@@ -19,7 +19,9 @@
 // caller still point where they did.
 
 import postcss from 'postcss';
-import ts from 'typescript';
+import { SyntaxKind, getLeadingCommentRanges, getTrailingCommentRanges } from 'typescript/unstable/ast';
+
+import { childrenOf, parseSource as parseTypeScript } from './typescriptSource.mjs';
 
 // A comment renders nothing, so a shadow spelled inside one is prose ABOUT a
 // glow, not a glow. Blanking comment bodies -- preserving length and line breaks
@@ -200,8 +202,6 @@ function blankCssComments(source) {
 // Only `.ts` is narrowed: it is the one extension where the TSX grammar changes
 // what the bytes mean, and leaving everything else on TSX keeps JSX readable in
 // the files that may contain it.
-const scriptKind = (file) =>
-  /\.(m|c)?ts$/.test(file) ? ts.ScriptKind.TS : ts.ScriptKind.TSX;
 
 // A regular expression describes a shadow, it never draws one. `/box-shadow:
 // 0 0 8px red/` is a PATTERN: the only thing a browser can do with it is test a
@@ -215,7 +215,7 @@ const scriptKind = (file) =>
 // the tree has already classified has to be re-classified by hand to keep the
 // regexes off it.
 const NON_RENDERING_KINDS = new Set([
-  ts.SyntaxKind.RegularExpressionLiteral,
+  SyntaxKind.RegularExpressionLiteral,
 ]);
 
 // Page copy, whichever of the two ways it is written. `<code>box-shadow: 0 0
@@ -242,21 +242,21 @@ const NON_RENDERING_KINDS = new Set([
 // because that chain is exactly how the literal becomes the element's text.
 const HANDS_VALUE_ONWARD = (node, parent) => {
   switch (parent.kind) {
-    case ts.SyntaxKind.ParenthesizedExpression:
+    case SyntaxKind.ParenthesizedExpression:
       return true;
     // The branches render; the condition is read.
-    case ts.SyntaxKind.ConditionalExpression:
+    case SyntaxKind.ConditionalExpression:
       return node === parent.whenTrue || node === parent.whenFalse;
-    case ts.SyntaxKind.BinaryExpression:
+    case SyntaxKind.BinaryExpression:
       switch (parent.operatorToken.kind) {
         // Either side of a concatenation ends up in the output, and either side
         // of `||` / `??` can be the value that survives.
-        case ts.SyntaxKind.PlusToken:
-        case ts.SyntaxKind.BarBarToken:
-        case ts.SyntaxKind.QuestionQuestionToken:
+        case SyntaxKind.PlusToken:
+        case SyntaxKind.BarBarToken:
+        case SyntaxKind.QuestionQuestionToken:
           return true;
         // `cond && 'text'` renders its right side only; the left is a test.
-        case ts.SyntaxKind.AmpersandAmpersandToken:
+        case SyntaxKind.AmpersandAmpersandToken:
           return node === parent.right;
         default:
           return false;
@@ -273,9 +273,9 @@ const HANDS_VALUE_ONWARD = (node, parent) => {
 // `{items.map((i) => <span style={{ boxShadow: '0 0 93px red' }} />)}` because
 // it is somewhere under a JSX child.
 const isJsxChild = (node) => {
-  if (node.kind === ts.SyntaxKind.JsxText) return true;
-  const isLiteral = node.kind === ts.SyntaxKind.StringLiteral
-    || node.kind === ts.SyntaxKind.NoSubstitutionTemplateLiteral;
+  if (node.kind === SyntaxKind.JsxText) return true;
+  const isLiteral = node.kind === SyntaxKind.StringLiteral
+    || node.kind === SyntaxKind.NoSubstitutionTemplateLiteral;
   if (!isLiteral) return false;
 
   let child = node;
@@ -285,9 +285,9 @@ const isJsxChild = (node) => {
     parent = parent.parent;
   }
 
-  return parent?.kind === ts.SyntaxKind.JsxExpression
-    && (parent.parent?.kind === ts.SyntaxKind.JsxElement
-      || parent.parent?.kind === ts.SyntaxKind.JsxFragment);
+  return parent?.kind === SyntaxKind.JsxExpression
+    && (parent.parent?.kind === SyntaxKind.JsxElement
+      || parent.parent?.kind === SyntaxKind.JsxFragment);
 };
 
 // Except in the one element where JSX children are not copy. `<style>` hands
@@ -302,7 +302,7 @@ const isJsxChild = (node) => {
 // sits one level deeper than the bare text it used to be written for.
 const isStyleElementChild = (node, tree) => {
   for (let up = node.parent; up; up = up.parent) {
-    if (up.kind === ts.SyntaxKind.JsxElement) {
+    if (up.kind === SyntaxKind.JsxElement) {
       return up.openingElement?.tagName?.getText(tree) === 'style';
     }
   }
@@ -361,13 +361,13 @@ const HANDS_TEXT_TO_CSS = (node, tree) => {
   const parent = node.parent;
   if (!parent) return false;
 
-  if (parent.kind === ts.SyntaxKind.BinaryExpression) {
-    if (parent.operatorToken.kind !== ts.SyntaxKind.EqualsToken || node !== parent.right) return false;
+  if (parent.kind === SyntaxKind.BinaryExpression) {
+    if (parent.operatorToken.kind !== SyntaxKind.EqualsToken || node !== parent.right) return false;
     const target = parent.left.getText(tree);
     return CSS_TEXT_SINKS.some(({ assignedTo }) => assignedTo?.test(target));
   }
 
-  if (parent.kind === ts.SyntaxKind.CallExpression) {
+  if (parent.kind === SyntaxKind.CallExpression) {
     const callee = parent.expression.getText(tree);
     return CSS_TEXT_SINKS.some(({ called, at, guardedBy, arity }) => {
       if (!called?.test(callee)) return false;
@@ -390,9 +390,9 @@ const HANDS_TEXT_TO_CSS = (node, tree) => {
 const cssTextRange = (node, tree) => [node.getStart(tree) + 1, node.getEnd() - 1];
 
 const CSS_TEXT_KINDS = new Set([
-  ts.SyntaxKind.StringLiteral,
-  ts.SyntaxKind.NoSubstitutionTemplateLiteral,
-  ts.SyntaxKind.TemplateExpression,
+  SyntaxKind.StringLiteral,
+  SyntaxKind.NoSubstitutionTemplateLiteral,
+  SyntaxKind.TemplateExpression,
 ]);
 
 // The children of a `<style>`, as text rather than as JavaScript.
@@ -410,7 +410,7 @@ const CSS_TEXT_KINDS = new Set([
 // is in the span either way and a regex simply steps over the rest.
 const styleChildRanges = (element, tree, into) => {
   const visit = (node) => {
-    if (node.kind === ts.SyntaxKind.JsxText) {
+    if (node.kind === SyntaxKind.JsxText) {
       if (node.getText(tree).trim()) into.push([node.getStart(tree), node.getEnd()]);
       return;
     }
@@ -418,7 +418,7 @@ const styleChildRanges = (element, tree, into) => {
       into.push(cssTextRange(node, tree));
       return;
     }
-    node.getChildren(tree).forEach(visit);
+    childrenOf(node, tree).forEach(visit);
   };
 
   element.children.forEach(visit);
@@ -441,13 +441,13 @@ function cssRangesIn(source, file) {
   const ranges = [];
 
   const visit = (node) => {
-    if (node.kind === ts.SyntaxKind.JsxElement
+    if (node.kind === SyntaxKind.JsxElement
       && node.openingElement?.tagName?.getText(tree) === 'style') {
       styleChildRanges(node, tree, ranges);
     } else if (CSS_TEXT_KINDS.has(node.kind) && HANDS_TEXT_TO_CSS(node, tree)) {
       ranges.push(cssTextRange(node, tree));
     }
-    node.getChildren(tree).forEach(visit);
+    childrenOf(node, tree).forEach(visit);
   };
   visit(tree);
 
@@ -458,10 +458,10 @@ function cssRangesIn(source, file) {
 // log('drop-shadow(…)')}` sits inside an attribute and hands that attribute
 // nothing; walking through it would call every string in every handler CSS.
 const DEFERS_ITS_BODY = new Set([
-  ts.SyntaxKind.ArrowFunction,
-  ts.SyntaxKind.FunctionExpression,
-  ts.SyntaxKind.FunctionDeclaration,
-  ts.SyntaxKind.MethodDeclaration,
+  SyntaxKind.ArrowFunction,
+  SyntaxKind.FunctionExpression,
+  SyntaxKind.FunctionDeclaration,
+  SyntaxKind.MethodDeclaration,
 ]);
 
 // `el.style.filter = '…'` -- the CSSOM half, where the property is named at the
@@ -502,9 +502,9 @@ const REACHES_A_RENDERER = (node, tree) => {
   for (let current = node; current.parent; current = current.parent) {
     const parent = current.parent;
     if (DEFERS_ITS_BODY.has(parent.kind)) return false;
-    if (parent.kind === ts.SyntaxKind.JsxAttribute) return NAMES_A_STYLE_SINK(parent, tree);
-    if (parent.kind === ts.SyntaxKind.BinaryExpression
-      && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken
+    if (parent.kind === SyntaxKind.JsxAttribute) return NAMES_A_STYLE_SINK(parent, tree);
+    if (parent.kind === SyntaxKind.BinaryExpression
+      && parent.operatorToken.kind === SyntaxKind.EqualsToken
       && current === parent.right
       && STYLE_TARGET.test(parent.left.getText(tree))) return true;
   }
@@ -545,7 +545,7 @@ function cssBearingRangesIn(source, file) {
     if (CSS_TEXT_KINDS.has(node.kind) && REACHES_A_RENDERER(node, tree)) {
       ranges.push(cssTextRange(node, tree));
     }
-    node.getChildren(tree).forEach(visit);
+    childrenOf(node, tree).forEach(visit);
   };
   visit(tree);
 
@@ -563,7 +563,7 @@ function parseSource(source, file) {
     lastParse = {
       file,
       source,
-      tree: ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, scriptKind(file)),
+      tree: parseTypeScript(source, file),
     };
   }
   return lastParse.tree;
@@ -578,12 +578,12 @@ function nonRenderingRanges(source, file) {
   };
 
   const visit = (node) => {
-    collect(ts.getLeadingCommentRanges(source, node.getFullStart()));
-    collect(ts.getTrailingCommentRanges(source, node.getEnd()));
+    collect(getLeadingCommentRanges(source, node.getFullStart()));
+    collect(getTrailingCommentRanges(source, node.getEnd()));
     if ((NON_RENDERING_KINDS.has(node.kind) || isJsxChild(node)) && !isStyleElementChild(node, tree)) {
       literals.push([node.getStart(tree), node.getEnd()]);
     }
-    node.getChildren(tree).forEach(visit);
+    childrenOf(node, tree).forEach(visit);
   };
   visit(tree);
 

@@ -401,7 +401,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       setAgents((previous) => Object.fromEntries(Object.entries(previous).map(([name, agent]) => [name, { ...agent, cli_path: source[name].cli_path }])));
     }
     void Promise.all(Object.entries(source).map(([name, agent]) => detect(name, agent.cli_path)));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, [active]);
 
   const detect = async (name: string, binary?: string) => {

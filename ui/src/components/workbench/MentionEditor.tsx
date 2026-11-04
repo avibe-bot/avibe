@@ -695,7 +695,7 @@ function BootstrapPlugin({
     );
     if (autoFocus && !isTouchCapableDevice()) editor.focus();
     // Only on mount.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, []);
 
   return null;

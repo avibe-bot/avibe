@@ -38,7 +38,7 @@ import { useRef, type RefObject } from 'react';
  */
 export function useLatestRef<T>(value: T): RefObject<T> {
   const ref = useRef(value);
-  // eslint-disable-next-line react-hooks/refs -- The point of the helper; see above.
+  // eslint-disable-next-line react-hooks-js/refs -- The point of the helper; see above.
   ref.current = value;
   return ref;
 }

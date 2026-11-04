@@ -4780,7 +4780,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         ...(endpoint ? { endpoint } : {}),
       });
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }), [sessionDraftPersistence, showToast, t]);
 
   return <ApiContext.Provider value={value}>{children}</ApiContext.Provider>;

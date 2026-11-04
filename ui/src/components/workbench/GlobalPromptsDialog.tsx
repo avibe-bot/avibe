@@ -76,7 +76,7 @@ export const GlobalPromptsDialog: React.FC<{ open: boolean; onClose: () => void 
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, [open]);
 
   if (!open) return null;

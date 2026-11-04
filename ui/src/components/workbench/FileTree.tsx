@@ -283,7 +283,7 @@ export const FileTree: React.FC<{
   // External refresh (editor save-as created a file in `path`).
   useEffect(() => {
     if (refreshSignal?.path) bump(refreshSignal.path);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, [refreshSignal?.nonce]);
 
   const startEdit = useCallback((s: EditSession) => {

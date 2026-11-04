@@ -643,7 +643,6 @@ export function definitionStateSince(
         row.last_finished_at ??
         row.last_run_at ??
         row.retired_at ??
-        (row.schedule_type === 'at' ? (row.run_at ?? null) : null) ??
         definitionActivityAt(row)
       );
     default:

@@ -96,7 +96,7 @@ export const WebPushControl: React.FC = () => {
   useEffect(() => {
     if (!canRegister) return;
     void refresh();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, [canRegister]);
 
   const onEnable = async () => {

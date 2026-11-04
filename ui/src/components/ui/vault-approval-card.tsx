@@ -311,7 +311,7 @@ export const VaultApprovalCard: React.FC<{
   useEffect(() => {
     if (canApprove && needsProtectedApproval && !entryIssue) void vault.refresh();
     // vault.refresh is stable (useCallback); only re-check when protected handling becomes required.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, [canApprove, needsProtectedApproval, entryIssue]);
 
   const finish = useCallback(

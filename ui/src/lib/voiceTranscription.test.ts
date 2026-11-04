@@ -31,7 +31,9 @@ describe('voice transcription', () => {
     const telemetry = vi.fn();
     const cloudFetch = vi.fn().mockImplementation(async (path: string, init?: RequestInit) => {
       expect(path).toBe('/api/cloud/audio/transcriptions');
-      const file = (init?.body as FormData).get('file') as File;
+      expect(init?.body).toBeInstanceOf(FormData);
+      if (!(init?.body instanceof FormData)) throw new Error('Expected a multipart transcription request');
+      const file = init.body.get('file') as File;
       expect(file.name).toBe('voice.mp4');
       expect(file.type).toBe('audio/mp4; codecs=mp4a.40.2');
       return Response.json({ text: 'hello' });
