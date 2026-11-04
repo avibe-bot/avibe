@@ -379,14 +379,15 @@ for (const theme of ['light', 'dark']) {
       expect(await history.evaluate((node) => Math.abs(node.scrollHeight - node.clientHeight - node.scrollTop))).toBeLessThanOrEqual(1);
       expect((await page.locator('.pet-mini-collapsed').boundingBox())!.y).toBeGreaterThanOrEqual(0);
       expect(await avatar.boundingBox()).toEqual(anchor);
-      // The stack expands the list and closes the history. The input the
-      // history opened with stays and takes the slot (#3057), so the way back
-      // is Vibey: it opens its history again, folding the list; then it closes
+      // The stack expands the list and closes the history. This outside click
+      // also dismisses the input, so the way back is Vibey: it opens its
+      // history and input again, folding the list; then it closes
       // it, and opens it once more. Clicks are a double-click apart, which
       // would open Avibe instead.
       await page.locator('.pet-mini-collapsed').click();
       await expect(page.locator('.pet-mini-scroll')).toBeVisible();
       await expect(page.locator('.pet-mini-detail.is-open')).toHaveCount(0);
+      await expect(page.getByRole('textbox')).toHaveCount(0);
       await avatar.click();
       await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
       await expect(page.locator('.pet-mini-scroll')).toHaveCount(0);
@@ -574,10 +575,10 @@ for (const theme of ['light', 'dark']) {
     await expect(toggle.locator('svg')).not.toHaveCSS('transform', 'none');
     await expect.poll(() => page.evaluate(() => window.petFixtureMarkReads)).toEqual(['ses_main']);
 
-    // Closing it leaves the input, which takes the slot alone.
+    // The history toggle is outside the input, so this click closes both.
     await toggle.click();
     await expect(page.locator('.pet-mini-detail.is-open')).toHaveCount(0);
-    await expect(page.getByRole('textbox')).toBeVisible();
+    await expect(page.getByRole('textbox')).toHaveCount(0);
   });
 }
 
@@ -1164,6 +1165,59 @@ test('a Vibey click with no conversation yet opens the input and no empty histor
   await expect(page.getByRole('textbox')).toBeVisible();
   await expect(page.locator('.pet-mini-reply-bubble')).toHaveCount(0);
   await expect(avatar).toHaveAttribute('aria-expanded', 'false');
+});
+
+for (const target of ['history', 'window background']) {
+  test(`an outside click in the ${target} dismisses the Mini input`, async ({ page }) => {
+    await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long&activities=0');
+    await page.locator('.pet-mini-avatar-button').click();
+    await expect(page.getByRole('textbox')).toBeVisible();
+    if (target === 'history') await page.locator('.pet-mini-bubble-history p').first().click();
+    else await page.mouse.click(2, 2);
+    await expect(page.getByRole('textbox')).toHaveCount(0);
+    await expect(page.locator('.pet-mini-detail.is-open')).toHaveCount(1);
+    expect(await page.evaluate(() => window.petFixtureSends)).toEqual([]);
+  });
+}
+
+for (const dismiss of ['outside', 'keyboard']) {
+  test(`the Mini draft survives ${dismiss} dismissal and reopening`, async ({ page }) => {
+    await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long&activities=0');
+    const avatar = page.locator('.pet-mini-avatar-button');
+    const input = page.getByRole('textbox');
+    await avatar.click();
+    await input.fill('保留这段草稿\nand its next line');
+    if (dismiss === 'outside') await page.locator('.pet-mini-bubble-history p').first().click();
+    else await page.getByRole('button', { name: '关闭输入', exact: true }).click();
+    await expect(input).toHaveCount(0);
+    await avatar.hover();
+    await page.getByRole('button', { name: '输入消息', exact: true }).click();
+    await expect(input).toHaveValue('保留这段草稿\nand its next line');
+    await expect(input).toBeFocused();
+    // The original automatic opening path also recovers the same draft.
+    await page.locator('.pet-mini-bubble-history p').first().click();
+    await expect(input).toHaveCount(0);
+    await page.waitForTimeout(DOUBLE_CLICK_GAP);
+    await avatar.click();
+    await page.waitForTimeout(DOUBLE_CLICK_GAP);
+    await avatar.click();
+    await expect(input).toHaveValue('保留这段草稿\nand its next line');
+    expect(await page.evaluate(() => window.petFixtureSends)).toEqual([]);
+  });
+}
+
+test('clicking and selecting in the Mini input or blurring the window keeps it open', async ({ page }) => {
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long&activities=0');
+  await page.locator('.pet-mini-avatar-button').click();
+  const input = page.getByRole('textbox');
+  await input.fill('keep this draft');
+  await input.click();
+  await expect(input).toBeFocused();
+  await input.dblclick();
+  expect(await input.evaluate((node: HTMLTextAreaElement) => node.selectionEnd - node.selectionStart)).toBeGreaterThan(0);
+  await expect(input).toHaveValue('keep this draft');
+  await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+  await expect(input).toHaveValue('keep this draft');
 });
 
 test('holding Vibey still starts input, not the history', async ({ page }) => {

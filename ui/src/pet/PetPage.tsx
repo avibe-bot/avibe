@@ -522,12 +522,11 @@ const PetSurface: React.FC = () => {
 
   const closeComposer = useCallback(() => {
     setComposing(false);
-    setDraft('');
-  }, [setComposing, setDraft]);
+  }, [setComposing]);
   // An open history stays open: the input takes its place below it (§5.2).
-  const openComposer = useCallback((text = '', selected?: SessionReference[]) => {
+  const openComposer = useCallback((text?: string, selected?: SessionReference[]) => {
     if (!epoch.isCurrent()) return;
-    setDraft(text, selected);
+    if (text !== undefined) setDraft(text, selected);
     setComposing(true);
     window.setTimeout(() => { if (epoch.isCurrent()) inputRef.current?.focus(); }, 0);
   }, [epoch, setComposing, setDraft]);
@@ -639,6 +638,20 @@ const PetSurface: React.FC = () => {
 
   const clearVoiceError = voice.clearError;
   useEffect(() => { if (!composing) clearVoiceError(); }, [composing, clearVoiceError]);
+  useEffect(() => {
+    if (!composing || voice.busy) return;
+    const onClick = (event: MouseEvent) => {
+      if (event.button !== 0 || event.detail === 0 || !(event.target instanceof Element)) return;
+      // Input controls and pet gestures own their clicks. The dock's buttons
+      // keep their own toggle/capture actions instead of toggling twice.
+      if (event.target.closest('.pet-mini-input, .pet-mini-avatar-button, .pet-mini-dock button')) return;
+      closeComposer();
+    };
+    // Capture the delivered click before a card action changes the surface.
+    // Native desktop pass-through and window blur do not reach this handler.
+    document.addEventListener('click', onClick, true);
+    return () => document.removeEventListener('click', onClick, true);
+  }, [composing, voice.busy, closeComposer]);
 
   const onSummon = useCallback(() => {
     const intent = petShell.takeSummon();
@@ -702,13 +715,13 @@ const PetSurface: React.FC = () => {
       // A history opened above the input closes before the input does.
       if (detailOpen && (voice.busy || composing)) { setDetailOpen(false); void setPanel(false); }
       else if (voice.busy) voice.cancel();
-      else if (composing) closeComposer();
+      else if (composing) { closeComposer(); setDraft(''); }
       else if (detailOpen) { setDetailOpen(false); void setPanel(false); }
       else void setPanel(false);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [closeComposer, composing, detailOpen, setPanel, voice, resetVoiceShortcut]);
+  }, [closeComposer, composing, detailOpen, setDraft, setPanel, voice, resetVoiceShortcut]);
 
   useEffect(() => {
     const node = inputRef.current;
