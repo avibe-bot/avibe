@@ -7,6 +7,7 @@
 //   --manifest <file>                        also merge a JSON index of the shots into <file>
 //   --canvas <dir>                           the canvas folder the manifest names, beside <file> (default: canvas)
 //   --jobs <n>                               frames shot at once (default: up to 4, one less than the CPUs)
+//   --shard <index/total>                    one-based CI partition after selection; no shared --manifest
 //
 // Exits 1 when a frame logs a console error or fails to render, so it doubles as `design:check`.
 import { createHash } from 'node:crypto';
@@ -17,6 +18,8 @@ import { fileURLToPath } from 'node:url';
 
 import { chromium } from '@playwright/test';
 import { createServer } from 'vite';
+
+import { parseShotShard, selectShotTasks } from './design-shot-selection.mjs';
 
 const uiRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
@@ -32,7 +35,10 @@ const out = resolve(option('out', join(uiRoot, 'design', '.shots')));
 const manifestPath = option('manifest', null);
 const canvas = option('canvas', 'canvas');
 const jobs = Math.max(1, Number(option('jobs', String(Math.min(4, Math.max(1, availableParallelism() - 1))))));
+const shard = parseShotShard(option('shard', null));
+if (shard && manifestPath) throw new Error('--shard cannot be combined with --manifest; use independent CI outputs');
 const prefixes = args;
+const started = Date.now();
 
 const server = await createServer({ root: uiRoot, logLevel: 'error', server: { port: 0, strictPort: false } });
 await server.listen();
@@ -118,6 +124,8 @@ async function shoot(frame, t) {
 let failed = false;
 const shots = [];
 let all = [];
+let selectedCount = 0;
+let completedCount = 0;
 try {
   // The frame list, without rendering the canvas (every frame in an iframe).
   const list = await context.newPage();
@@ -125,15 +133,15 @@ try {
   await list.waitForFunction(() => window.__DESIGN__);
   all = await list.evaluate(() => window.__DESIGN__.frames);
   await list.close();
-  const selected = all.filter((f) => prefixes.length === 0 || prefixes.some((p) => f.id.startsWith(p)));
-  if (selected.length === 0) throw new Error(`no frame matches ${prefixes.join(', ')}`);
-  const tasks = selected.flatMap((frame) => (theme ? [theme] : frame.themes).map((t) => [frame, t]));
+  const tasks = selectShotTasks(all, prefixes, theme, shard);
+  selectedCount = tasks.length;
   // Frames are shot side by side: most of a frame's time is waiting (reads, clicks, transitions).
   let next = 0;
   const worker = async () => {
     while (next < tasks.length) {
       const [frame, t] = tasks[next++];
       const { line, shot } = await shoot(frame, t);
+      completedCount += 1;
       if (!shot || line.errors.length) failed = true;
       if (shot) shots.push(shot);
       // A frame that fails is named and the run goes on, so one run reports every failing frame.
@@ -141,6 +149,7 @@ try {
     }
   };
   await Promise.all(Array.from({ length: Math.min(jobs, tasks.length) }, worker));
+  if (completedCount !== selectedCount) throw new Error(`completed ${completedCount} of ${selectedCount} selected shots`);
 } catch (error) {
   failed = true;
   console.error(String(error));
@@ -173,4 +182,9 @@ if (manifestPath && shots.length) {
   await mkdir(dirname(manifestPath), { recursive: true });
   await writeFile(manifestPath, JSON.stringify({ generatedAt: new Date().toISOString(), lang, shots: merged }, null, 2));
 }
+console.error(`DESIGN_SHOT_SUMMARY ${JSON.stringify({
+  shard: shard ? `${shard.index}/${shard.total}` : '1/1',
+  frames: all.length, selected: selectedCount, completed: completedCount,
+  ms: Date.now() - started, failed,
+})}`);
 process.exit(failed ? 1 : 0);

@@ -14,7 +14,7 @@ import sys
 import tempfile
 import threading
 import time
-from typing import Iterator
+from typing import Callable, Iterator
 from unittest.mock import patch
 
 import httpx
@@ -523,6 +523,8 @@ def _run_python_deadline_script(
     *,
     response_delay_by_tool: dict[str, float] | None = None,
     timeout_seconds: float = 0.25,
+    ready_when: Callable[[dict, list[dict]], bool] | None = None,
+    readiness_timeout: float = 5.0,
 ) -> tuple[ComputerScriptRunnerError, list[dict], float]:
     if NODE is None:
         pytest.skip("Node.js is unavailable")
@@ -572,15 +574,62 @@ def _run_python_deadline_script(
             "computer_script_close_sync",
             lambda **_kwargs: None,
         )
+        ready_at: float | None = None
+        if ready_when is not None:
+            # These cases need a running script, not a fast Node startup. Wait
+            # for evidence the child really produced, then exercise the real
+            # wait/timeout/kill path with the SAME budget the parent supplied.
+            # Startup's total deadline is tested separately below; this elapsed
+            # value measures the running-state termination/cleanup bound.
+            real_popen = subprocess.Popen
+
+            def popen_with_readiness(*args, **kwargs):
+                process = real_popen(*args, **kwargs)
+                real_wait = process.wait
+                state_path = Path(kwargs["env"]["AVIBE_COMPUTER_RESULT_PATH"]).with_name("runtime-state.json")
+                first_wait = True
+
+                def wait_after_readiness(timeout=None):
+                    nonlocal first_wait, ready_at
+                    if first_wait:
+                        first_wait = False
+                        if timeout is None or not 0 < timeout <= timeout_seconds:
+                            pytest.fail("parent did not pass the original deadline budget to the real wait")
+                        watchdog = time.monotonic() + readiness_timeout
+                        while True:
+                            try:
+                                state = json.loads(state_path.read_text(encoding="utf-8"))
+                            except (FileNotFoundError, json.JSONDecodeError):
+                                state = {}
+                            if ready_when(state, requests):
+                                ready_at = time.monotonic()
+                                break
+                            remaining = watchdog - time.monotonic()
+                            if remaining <= 0:
+                                pytest.fail("script did not reach its required running state before the readiness watchdog")
+                            try:
+                                real_wait(timeout=min(0.01, remaining))
+                            except subprocess.TimeoutExpired:
+                                continue
+                            pytest.fail("script exited before reaching its required running state")
+                    return real_wait(timeout=timeout)
+
+                monkeypatch.setattr(process, "wait", wait_after_readiness)
+                return process
+
+            monkeypatch.setattr(computer_script_runner.subprocess, "Popen", popen_with_readiness)
+
         started = time.monotonic()
         with pytest.raises(ComputerScriptRunnerError) as exc_info:
             computer_script_runner.run_computer_script(
                 caller_session_id="ses-script",
                 script_file=str(script),
-                arg_values=[],
+                arg_values=[f"ready={tmp_path / 'script-ready'}"],
                 timeout_seconds=timeout_seconds,
             )
-        elapsed = time.monotonic() - started
+        if ready_when is not None and ready_at is None:
+            pytest.fail("running-state case bypassed the readiness-controlled wait")
+        elapsed = time.monotonic() - (ready_at if ready_at is not None else started)
     return exc_info.value, requests, elapsed
 
 
@@ -2180,6 +2229,10 @@ export default function () {
   }
 };
 """,
+        ready_when=lambda state, _requests: (
+            len(state.get("diagnostics", "").encode("utf-8"))
+            >= computer_script_runner._SCRIPT_DIAGNOSTIC_TAIL_BYTES
+        ),
     )
 
     diagnostics = error.details["params"]["diagnostics"]
@@ -2249,8 +2302,9 @@ def test_python_deadline_is_not_held_by_a_detached_descendant_stdout(
         tmp_path,
         """
 import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
 
-export default async () => {
+export default async ({ ready }) => {
   const child = spawn(
     process.execPath,
     [
@@ -2261,9 +2315,11 @@ export default async () => {
     { detached: true, stdio: ["ignore", "inherit", "inherit"] },
   );
   child.unref();
+  writeFileSync(ready, "descendant spawned");
   await new Promise(() => {});
 };
 """,
+        ready_when=lambda _state, _requests: (tmp_path / "script-ready").is_file(),
     )
 
     assert error.details == {
@@ -2283,12 +2339,65 @@ export default async () => {
     assert list(temp_root.iterdir()) == []
 
 
+@pytest.mark.parametrize("await_readiness", [False, True], ids=["total-startup-deadline", "readiness-fails-closed"])
+def test_python_deadline_bounds_a_child_that_never_initializes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, await_readiness: bool,
+) -> None:
+    """Startup is inside the real 250ms budget; a running-state fixture cannot silently skip readiness.
+
+    The other deadline cases require state the child has already produced. A
+    launcher that never imports the SDK separates this startup contract from
+    their running-state/cleanup contracts, without depending on machine speed.
+    """
+    launcher = tmp_path / "blocked-launcher.mjs"
+    launcher.write_text("while (true) {}\n", encoding="utf-8")
+    real_popen = subprocess.Popen
+    children = []
+
+    def blocked_popen(command, *args, **kwargs):
+        process = real_popen([command[0], str(launcher)], *args, **kwargs)
+        children.append(process)
+        return process
+
+    monkeypatch.setattr(computer_script_runner.subprocess, "Popen", blocked_popen)
+
+    def run():
+        return _run_python_deadline_script(
+            monkeypatch, tmp_path, "export default () => null;\n",
+            timeout_seconds=0.25,
+            ready_when=(lambda state, _requests: bool(state.get("diagnostics"))) if await_readiness else None,
+            readiness_timeout=0.25,
+        )
+
+    if await_readiness:
+        with pytest.raises(pytest.fail.Exception, match="readiness watchdog"):
+            run()
+    else:
+        error, requests, elapsed = run()
+        assert error.details == {
+            "name": "Timeout",
+            "code": "script_timeout",
+            "message": "The script deadline expired.",
+            "params": {"runtime_state_error": "missing"},
+            "step": "script",
+            "last_completed_step": None,
+            "screenshot_path": None,
+            "ambiguous": True,
+        }
+        assert requests == []
+        assert elapsed < 1.0
+    assert len(children) == 1
+    assert children[0].poll() is not None
+
+
 @pytest.mark.parametrize(
     ("source", "response_delay_by_tool", "expected_step", "expected_tool"),
     [
         (
             """
-export default function () {
+import { writeFileSync } from "node:fs";
+export default function ({ ready }) {
+  writeFileSync(ready, "busy loop entered");
   while (true) {}
 };
 """,
@@ -2298,7 +2407,9 @@ export default function () {
         ),
         (
             """
-export default async () => {
+import { writeFileSync } from "node:fs";
+export default async ({ ready }) => {
+  writeFileSync(ready, "unresolved Promise entered");
   await new Promise(() => {});
 };
 """,
@@ -2320,7 +2431,7 @@ export default async () => {
         ),
     ],
 )
-def test_python_parent_owns_the_canonical_total_deadline(
+def test_python_deadline_preserves_running_script_context(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     source: str,
@@ -2333,6 +2444,10 @@ def test_python_parent_owns_the_canonical_total_deadline(
         tmp_path,
         source,
         response_delay_by_tool=response_delay_by_tool,
+        ready_when=lambda _state, requests: (
+            any(request["payload"].get("tool") == expected_tool for request in requests)
+            if expected_tool is not None else (tmp_path / "script-ready").is_file()
+        ),
     )
 
     assert error.details == {
@@ -2376,6 +2491,10 @@ export default async () => {
 """,
         response_delay_by_tool={"click": 2.0},
         timeout_seconds=0.75,
+        ready_when=lambda state, requests: (
+            bool(state.get("screenshot_path"))
+            and any(request["payload"].get("tool") == "click" for request in requests)
+        ),
     )
 
     screenshot_path = error.details["screenshot_path"]
