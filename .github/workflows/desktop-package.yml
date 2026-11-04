@@ -1,502 +1,225 @@
-name: desktop-self-contained-package
+name: RC7 Intel UI diagnostic
+run-name: "Intel UI diagnostic — rc6 versus pinned rc7 (no release)"
 
-# Release (tag) builds Developer ID sign and notarize every macOS layer and fail
-# without the complete Apple credential set; manual builds sign when the whole
-# set is configured and stay ad-hoc when none of it is. Apple and updater keys
-# come only from desktop-updater.
-#
-# Only reruns of the same tag can read a tag's caches, so release builds
-# restore caches but never save them. The unsigned cache warm-up (a master push
-# that changes a Rust cache input, and a daily run) builds every target without
-# signing or uploading anything; release builds restore its default-branch
-# caches.
+# Temporary branch only: reuse the registered workflow path, never master/tag.
 on:
-  push:
-    branches: [master]
-    paths:
-      - desktop/Cargo.lock
-      - desktop/cua-driver/**
-      - desktop/scripts/prepare-cua-driver.py
-      - .github/workflows/desktop-package.yml
-  schedule:
-    - cron: "41 18 * * *"
   workflow_dispatch:
-    inputs:
-      version:
-        description: SemVer version stamped into the desktop application and installer
-        required: true
-        type: string
-  workflow_call:
-    inputs:
-      version:
-        required: true
-        type: string
-      source_sha:
-        description: Exact peeled commit of the validated TEST tag
-        required: true
-        type: string
-      updater_enabled:
-        description: Require cryptographically signed updater artifacts
-        type: boolean
-        default: false
-      release_tag:
-        description: Canonical gh-vX.Y.ZrcN TEST or vX.Y.Z stable tag
-        required: true
-        type: string
 
 permissions:
   contents: read
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  CARGO_TERM_COLOR: always
-
 jobs:
-  package:
-    name: ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
-    environment: desktop-updater
-    env:
-      # Never a release: a release build always carries its tag.
-      DESKTOP_CACHE_WARMUP: ${{ !inputs.release_tag && (github.event_name == 'push' || github.event_name == 'schedule') }}
-      DESKTOP_VERSION: ${{ inputs.version || '0.0.0' }}
-      DEVELOPER_DIR: ${{ matrix.developer_dir }}
+  compare-ui:
+    name: Intel UI / ${{ matrix.source }}
+    runs-on: macos-26-intel
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: aarch64-apple-darwin
-            os: macos-26
-            developer_dir: /Applications/Xcode_26.6.app/Contents/Developer
-            cache_scope: default-target-
-            cache_separator: "-"
-            bundle: app
-            artifact_glob: desktop/target/release/bundle/dmg/*.dmg
-          - target: x86_64-apple-darwin
-            os: macos-26-intel
-            developer_dir: /Applications/Xcode_26.6.app/Contents/Developer
-            cache_scope: default-target-
-            cache_separator: "-"
-            bundle: app
-            artifact_glob: desktop/target/release/bundle/dmg/*.dmg
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            developer_dir: ""
-            cache_scope: ""
-            cache_separator: ""
-            bundle: nsis
-            artifact_glob: desktop/target/release/bundle/nsis/*setup.exe
+          - source: rc6
+            sha: 5a5ed033ceec348fb5ad11cdbc02a33dcdfb5067
+          - source: rc7
+            sha: 2609dc507da038a06069091d5d5a0efd6b231871
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Checkout exact comparison source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
-          ref: ${{ inputs.source_sha || github.sha }}
+          ref: ${{ matrix.sha }}
+          persist-credentials: false
 
-      - name: Report pinned Apple toolchain
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          set -euo pipefail
-          [ -d "$DEVELOPER_DIR" ] || {
-            echo "Pinned Xcode is missing: $DEVELOPER_DIR" >&2
-            exit 1
-          }
-          xcodebuild -version
-          [ "$(xcodebuild -version | sed -n '1p')" = "Xcode 26.6" ] || {
-            echo "Expected Xcode 26.6 from $DEVELOPER_DIR" >&2
-            exit 1
-          }
-          xcrun --sdk macosx --show-sdk-version
-          echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
-
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+      - name: Pin Node without dependency cache
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22.23.4"
-          cache: npm
-          cache-dependency-path: |
-            ui/package-lock.json
-            desktop/package-lock.json
+          package-manager-cache: false
 
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
-        with:
-          enable-cache: true
-          cache-dependency-glob: uv.lock
-          prune-cache: true
-
-      # Cargo artifacts and a prepared Cua Driver are reused only from the same
-      # compiler and Apple SDK; a toolchain change starts a new cache entry.
-      - name: Resolve build cache identity
-        id: toolchain
+      - name: Record identity and prepare bounded sampling
+        id: identity
+        env:
+          EXPECTED_SOURCE_SHA: ${{ matrix.sha }}
+          DIAGNOSTIC_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          NPM_CONFIG_CACHE: ${{ runner.temp }}/rc7-intel-npm-cache
         shell: bash
         run: |
           set -euo pipefail
-          fingerprint() {
-            python -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:16])'
-          }
-          echo "rustc=$(rustc -vV | fingerprint)" >> "$GITHUB_OUTPUT"
-          if [ "$RUNNER_OS" = macOS ]; then
-            echo "apple=$({ xcodebuild -version; xcrun --sdk macosx --show-sdk-build-version; } | fingerprint)" >> "$GITHUB_OUTPUT"
-          fi
-
-      # Dependencies only: bundles and final binaries are rebuilt every time.
-      # The warm-up restores its exact key only, so each entry starts clean.
-      - name: Restore Rust build cache
-        id: rust-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            desktop/target/release/.fingerprint
-            desktop/target/release/build
-            desktop/target/release/deps
-            desktop/target/cua-driver-patched
-          key: ${{ runner.os }}-${{ matrix.target }}-desktop-package-${{ steps.toolchain.outputs.rustc }}-${{ matrix.cache_scope }}${{ steps.toolchain.outputs.apple }}${{ matrix.cache_separator }}${{ hashFiles('desktop/Cargo.lock', 'desktop/cua-driver/sources.json') }}
-          restore-keys: ${{ env.DESKTOP_CACHE_WARMUP != 'true' && format('{0}-{1}-desktop-package-{2}-{3}{4}{5}', runner.os, matrix.target, steps.toolchain.outputs.rustc, matrix.cache_scope, steps.toolchain.outputs.apple, matrix.cache_separator) || '' }}
-
-      - name: Build Workbench
-        working-directory: ui
-        run: |
-          npm ci
-          npm run build
-
-      - name: Build bootstrap UI
-        working-directory: desktop
-        run: |
-          npm ci
-          npm run build
-
-      - name: Prepare package version
-        shell: bash
-        env:
-          AVIBE_DESKTOP_VERSION: ${{ env.DESKTOP_VERSION }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
-          SOURCE_SHA: ${{ inputs.source_sha }}
-        run: |
-          python scripts/desktop_release.py prepare \
-            --version "$AVIBE_DESKTOP_VERSION" --tag "$RELEASE_TAG" \
-            --source-sha "$SOURCE_SHA" --config desktop/tauri.release.conf.json \
-            --env-file "$GITHUB_ENV" --target "${{ matrix.target }}"
-
-      - name: Configure signed updater or explicitly disable it
-        shell: bash
-        env:
-          UPDATER_ENABLED: ${{ inputs.updater_enabled }}
-          AVIBE_DESKTOP_UPDATER_PUBLIC_KEY: ${{ vars.DESKTOP_UPDATER_PUBLIC_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-        run: |
-          args=()
-          if [ "$UPDATER_ENABLED" = "true" ]; then args+=(--enabled); fi
-          python scripts/desktop_updater.py configure \
-            --config desktop/tauri.release.conf.json --env-file "$GITHUB_ENV" ${args[@]+"${args[@]}"}
-
-      # Signing must exist before the Runtime is built: every Mach-O inside
-      # runtime.zip is signed before the archive and its hashes exist. A tag
-      # build fails here on a missing or partial credential set; a manual build
-      # accepts the complete set or none of it. Only identity, keychain, and
-      # notary key locations leave this step, under names Tauri never reads.
-      # The cache warm-up alone skips it and stays ad-hoc.
-      - name: Import Apple signing identity
-        if: runner.os == 'macOS' && env.DESKTOP_CACHE_WARMUP != 'true'
-        env:
-          RELEASE_TAG: ${{ inputs.release_tag }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
-        run: >
-          python desktop/scripts/macos_signing.py import-identity
-          --release-tag "$RELEASE_TAG" --env-file "$GITHUB_ENV"
-          --work-dir "$RUNNER_TEMP/apple-signing"
-
-      # Reads AVIBE_CODESIGN_IDENTITY/KEYCHAIN when the identity was imported.
-      - name: Build verified private Runtime
-        run: >
-          python desktop/scripts/build-runtime-bundle.py
-          --target "${{ matrix.target }}"
-
-      - name: Install pinned driver validation dependency
-        if: runner.os == 'macOS'
-        run: >-
-          python -m pip install --disable-pip-version-check
-          --only-binary=:all: "PyYAML==6.0.3"
-
-      # The pinned helper's inputs never change between releases. A restored
-      # helper is kept only when its provenance names exactly these inputs and
-      # it passes the checks a fresh build passes; otherwise it is rebuilt.
-      - name: Restore prepared Cua Driver
-        id: cua-driver-cache
-        if: runner.os == 'macOS'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: |
-            desktop/src-tauri/binaries/cua-driver-${{ matrix.target }}
-            desktop/src-tauri/binaries/cua-driver-${{ matrix.target }}.provenance.json
-          key: cua-driver-${{ matrix.target }}-${{ steps.toolchain.outputs.apple }}-default-target-${{ hashFiles('desktop/cua-driver/**', 'desktop/scripts/prepare-cua-driver.py') }}
-
-      - name: Prepare pinned Cua Driver sidecar
-        if: runner.os == 'macOS'
-        run: >
-          python desktop/scripts/prepare-cua-driver.py
-          --target "${{ matrix.target }}" --reuse-verified
-
-      - name: Save prepared Cua Driver
-        if: runner.os == 'macOS' && !inputs.release_tag && steps.cua-driver-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: |
-            desktop/src-tauri/binaries/cua-driver-${{ matrix.target }}
-            desktop/src-tauri/binaries/cua-driver-${{ matrix.target }}.provenance.json
-          key: ${{ steps.cua-driver-cache.outputs.cache-primary-key }}
-
-      - name: Clean prior bundle output
-        shell: bash
-        run: rm -rf desktop/target/release/bundle
-
-      - name: Verify prepared Cua Driver provenance
-        if: runner.os == 'macOS'
-        run: >
-          python scripts/desktop_release.py verify-driver-prepared
-          --target "${{ matrix.target }}"
-          --driver "desktop/src-tauri/binaries/cua-driver-${{ matrix.target }}"
-          --provenance-path "desktop/src-tauri/binaries/cua-driver-${{ matrix.target }}.provenance.json"
-
-      - name: Build self-contained installer
-        working-directory: desktop
-        run: >
-          npm run tauri --
-          build
-          --bundles "${{ matrix.bundle }}"
-          --features bundled-runtime
-          --config tauri.release.conf.json
-
-      - name: Verify macOS SDK and deployment target ceiling
-        if: runner.os == 'macOS'
-        working-directory: desktop
-        shell: bash
-        run: |
-          set -euo pipefail
-          app="target/release/bundle/macos/Avibe.app"
-          executable="$(plutil -extract CFBundleExecutable raw -o - "$app/Contents/Info.plist")"
-          # The app keeps Tauri's existing 10.13 floor; the Cua Driver requires macOS 13.
-          python ../scripts/desktop_release.py verify-macos-build-version \
-            --binary "$app/Contents/MacOS/$executable=11.0" \
-            --binary "$app/Contents/Helpers/cua-driver=13.0" \
-            --minimum-sdk 26.0
-
-      - name: Save Rust build cache
-        if: ${{ !inputs.release_tag && steps.rust-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            desktop/target/release/.fingerprint
-            desktop/target/release/build
-            desktop/target/release/deps
-            desktop/target/cua-driver-patched
-          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
-
-      # The .app inside the DMG. A signed build signs the Cua Driver helper and
-      # then the app with the Team's Developer ID, pins both code identities,
-      # and notarizes and staples the app. The smoke test, the DMG, and the
-      # updater archive all use this final app. Only a manual build without
-      # credentials reaches the ad-hoc branch.
-      - name: Sign macOS app
-        if: runner.os == 'macOS'
-        working-directory: desktop
-        shell: bash
-        env:
-          RELEASE_TAG: ${{ inputs.release_tag }}
-        run: |
-          set -eu
-          app="target/release/bundle/macos/Avibe.app"
-          driver="$app/Contents/Helpers/cua-driver"
-          [ -d "$app" ] || { echo "Avibe.app not found at $app" >&2; exit 1; }
-          [ -f "$driver" ] || { echo "Cua Driver helper not found at $driver" >&2; exit 1; }
-          [ ! -e "$app/Contents/MacOS/cua-driver" ] || {
-            echo "stale Cua Driver copy found in Contents/MacOS" >&2
-            exit 1
-          }
-          if [ "${apple_signing:-absent}" = "enabled" ]; then
-            python scripts/macos_signing.py sign-app "$app"
-            python scripts/macos_signing.py notarize "$app"
-          elif [ -n "$RELEASE_TAG" ]; then
-            echo "release builds must be Developer ID signed" >&2
-            exit 1
-          else
-            # Sign nested code from the inside out. `--deep` is deliberately a
-            # verification option only; it must not choose what gets signed.
-            codesign --force --sign - \
-              --preserve-metadata=identifier,entitlements,flags,runtime \
-              "$driver"
-            codesign --force --sign - \
-              --preserve-metadata=identifier,entitlements,flags,runtime \
-              "$app"
-            codesign --verify --strict "$driver"
-            codesign --verify --deep --strict "$app"
-            codesign -dv "$app" 2>&1 | grep -q '^Signature=adhoc$'
-            codesign -dv "$driver" 2>&1 | grep -q '^Signature=adhoc$'
-          fi
-          APP_PATH="$app" python - <<'PY'
-          import os
-          import plistlib
+          mkdir -p "$RUNNER_TEMP/rc7-intel-diag/initial"
+          # Fail instead of silently reusing a cache left by an earlier process.
+          test ! -e "$NPM_CONFIG_CACHE"
+          mkdir "$NPM_CONFIG_CACHE"
+          # Same fresh job-private npm cache policy for both sources.
+          printf 'NPM_CONFIG_CACHE=%s\n' "$NPM_CONFIG_CACHE" >> "$GITHUB_ENV"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_SHA"
+          test "$(node --version)" = v22.23.4
+          test "$(xcodebuild -version | sed -n '1p')" = 'Xcode 26.6'
+          {
+            date -u
+            git rev-parse HEAD
+            sw_vers
+            uname -m
+            xcodebuild -version
+            xcrun --sdk macosx --show-sdk-version
+            node --version
+            npm --version
+            python3 --version
+            sysctl hw.ncpu hw.memsize
+            df -k "$GITHUB_WORKSPACE"
+            vm_stat
+          } > "$RUNNER_TEMP/rc7-intel-diag/initial/identity.txt"
+          python3 - <<'PY'
+          import json, os
           from pathlib import Path
-
-          code_resources = Path(os.environ["APP_PATH"]) / "Contents/_CodeSignature/CodeResources"
-          files2 = plistlib.loads(code_resources.read_bytes()).get("files2", {})
-          helper = files2.get("Helpers/cua-driver")
-          if not isinstance(helper, dict) or not ({"cdhash", "requirement"} & helper.keys()):
-              raise SystemExit("Helpers/cua-driver is not sealed as nested code")
+          root = Path(os.environ['RUNNER_TEMP']) / 'rc7-intel-diag'
+          names = ('ImageOS', 'ImageVersion', 'RUNNER_OS', 'RUNNER_ARCH',
+                   'EXPECTED_SOURCE_SHA', 'DIAGNOSTIC_WORKFLOW_SHA')
+          (root / 'initial' / 'image.json').write_text(json.dumps(
+              {name: os.environ.get(name, 'unavailable') for name in names}, indent=2) + '\n')
           PY
-          echo "driver_packaged_path=$(pwd)/$driver" >> "$GITHUB_ENV"
-          echo "driver_provenance_path=$(pwd)/src-tauri/binaries/cua-driver-${{ matrix.target }}.provenance.json" >> "$GITHUB_ENV"
-          echo "driver_packaged_cdhash=$(codesign -dv --verbose=4 "$driver" 2>&1 | sed -n 's/^CDHash=//p' | head -1)" >> "$GITHUB_ENV"
+          cat > "$RUNNER_TEMP/rc7-intel-diag/run_phase.py" <<'PY'
+          """Bound one CI child process group; sample metrics without command arguments."""
+          import datetime
+          import json
+          import os
+          from pathlib import Path
+          import signal
+          import subprocess
+          import sys
+          import time
 
-      - name: Smoke-test macOS app launch
-        if: runner.os == 'macOS'
-        working-directory: desktop
-        shell: bash
-        run: |
-          set -euo pipefail
-          app="target/release/bundle/macos/Avibe.app"
-          executable="$(plutil -extract CFBundleExecutable raw -o - "$app/Contents/Info.plist")"
-          binary="$app/Contents/MacOS/$executable"
-          [ -x "$binary" ] || {
-            echo "Avibe executable not found at $binary" >&2
-            exit 1
-          }
-          launch_log="$RUNNER_TEMP/avibe-desktop-launch.log"
-          smoke_home="$(mktemp -d)"
-          mkdir -p "$smoke_home/tmp"
-          HOME="$smoke_home" TMPDIR="$smoke_home/tmp" "$binary" >"$launch_log" 2>&1 &
-          app_pid=$!
-          cleanup() {
-            if kill -0 "$app_pid" 2>/dev/null; then
-              kill "$app_pid" 2>/dev/null || true
-            fi
-            for _ in $(seq 1 5); do
-              if ! kill -0 "$app_pid" 2>/dev/null; then
-                break
-              fi
-              sleep 1
-            done
-            if kill -0 "$app_pid" 2>/dev/null; then
-              kill -KILL "$app_pid" 2>/dev/null || true
-            fi
-            wait "$app_pid" 2>/dev/null || true
-          }
-          trap cleanup EXIT
+          phase, budget, *command = sys.argv[1:]
+          budget = int(budget)
+          root = Path(os.environ['RUNNER_TEMP']) / 'rc7-intel-diag' / phase
+          root.mkdir()
+          started = time.monotonic()
 
-          for _ in $(seq 1 10); do
-            if ! kill -0 "$app_pid" 2>/dev/null; then
-              wait "$app_pid" || status=$?
-              cat "$launch_log"
-              echo "Avibe exited during the launch smoke test (status ${status:-0})" >&2
-              exit 1
-            fi
-            sleep 1
-          done
-          if grep -Eiq 'panicked at|there is no reactor running|fatal runtime error' "$launch_log"; then
-            cat "$launch_log"
-            echo "Avibe logged a panic during the launch smoke test" >&2
-            exit 1
-          fi
+          def capture(command):
+              try:
+                  result = subprocess.run(command, text=True, capture_output=True, timeout=3)
+                  return {'exit': result.returncode, 'stdout': result.stdout,
+                          'stderr': result.stderr[:1000]}
+              except subprocess.TimeoutExpired:
+                  return {'unavailable': 'sampling command exceeded 3 seconds'}
+              except OSError as error:
+                  return {'unavailable': str(error)}
 
-          cleanup
-          trap - EXIT
+          def sample(stream):
+              processes = capture(['ps', '-axo', 'pid=,ppid=,%cpu=,rss=,comm='])
+              rows = processes.get('stdout', '').splitlines()
+              def rss(row):
+                  fields = row.split(maxsplit=4)
+                  return int(fields[3]) if len(fields) >= 4 and fields[3].isdigit() else 0
+              processes['stdout'] = '\n'.join(sorted(rows, key=rss, reverse=True)[:15])
+              record = {'utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        'elapsed_seconds': round(time.monotonic() - started, 1),
+                        'memory_pages': capture(['vm_stat']),
+                        'disk_kib': capture(['df', '-k', '.']),
+                        'top_processes_by_sampled_rss_kib': processes}
+              stream.write(json.dumps(record) + '\n')
+              stream.flush()
+              print(json.dumps(record), flush=True)
 
-      - name: Create headless-safe DMG
-        if: runner.os == 'macOS'
-        working-directory: desktop
-        run: >
-          sh scripts/create-macos-dmg.sh
-          target/release/bundle/macos/Avibe.app
-          "target/release/bundle/dmg/Avibe_${{ env.DESKTOP_VERSION }}_${{ matrix.target }}.dmg"
+          # Only descendants of this CI step's own process group are stopped.
+          child = None
+          def stop_child():
+              if child is None or child.poll() is not None:
+                  return
+              try:
+                  os.killpg(child.pid, signal.SIGTERM)
+              except ProcessLookupError:
+                  return
+              try:
+                  child.wait(timeout=5)
+              except subprocess.TimeoutExpired:
+                  try:
+                      os.killpg(child.pid, signal.SIGKILL)
+                  except ProcessLookupError:
+                      pass
+                  child.wait(timeout=5)
 
-      # The DMG carries the stapled app; it is signed, notarized, and stapled
-      # itself, then the shipped shapes are checked the way Gatekeeper sees a
-      # download: staples, spctl verdicts, and both pinned code identities,
-      # including those of the app inside the mounted image.
-      - name: Sign and notarize macOS DMG
-        if: runner.os == 'macOS' && env.apple_signing == 'enabled'
-        working-directory: desktop
-        shell: bash
-        run: |
-          set -eu
-          dmg="target/release/bundle/dmg/Avibe_${{ env.DESKTOP_VERSION }}_${{ matrix.target }}.dmg"
-          python scripts/macos_signing.py sign-dmg "$dmg"
-          python scripts/macos_signing.py notarize "$dmg"
-          python scripts/macos_signing.py verify-release \
-            --app target/release/bundle/macos/Avibe.app --dmg "$dmg"
+          def interrupted(signum, _frame):
+              raise SystemExit(128 + signum)
 
-      - name: Verify unsigned Windows installer
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $installers = @(Get-ChildItem desktop/target/release/bundle/nsis/*setup.exe)
-          if ($installers.Count -ne 1) { throw "Expected exactly one NSIS installer" }
-          $signature = Get-AuthenticodeSignature $installers[0].FullName
-          if ($signature.Status -ne 'NotSigned') { throw "Expected an unsigned TEST installer" }
+          signal.signal(signal.SIGTERM, interrupted)
+          signal.signal(signal.SIGINT, interrupted)
+          code = 1
+          timed_out = False
+          try:
+              with (root / 'npm.log').open('w') as output, (root / 'samples.jsonl').open('w') as samples:
+                  sample(samples)
+                  child = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT,
+                                           start_new_session=True)
+                  deadline = time.monotonic() + budget
+                  while True:
+                      remaining = deadline - time.monotonic()
+                      if remaining <= 0:
+                          timed_out = True
+                          code = 124
+                          break
+                      try:
+                          code = child.wait(timeout=min(15, remaining))
+                          break
+                      except subprocess.TimeoutExpired:
+                          sample(samples)
+          except SystemExit as error:
+              code = error.code
+              raise
+          finally:
+              stop_child()
+              (root / 'result.json').write_text(json.dumps({
+                  'phase': phase, 'exit_code': code, 'timeout': timed_out,
+                  'budget_seconds': budget, 'elapsed_seconds': round(time.monotonic() - started, 1),
+                  'sampling_note': 'Point samples, not peak memory or proof of resource exhaustion.'
+              }, indent=2) + '\n')
+              log = root / 'npm.log'
+              if log.exists():
+                  # Keep checkpoint uploads small even if npm emitted a long log.
+                  with log.open('rb') as stream:
+                      stream.seek(max(0, log.stat().st_size - 65536))
+                      tail = stream.read()
+                  log.write_bytes(tail)
+                  print(tail.decode(errors='replace')[-16000:], flush=True)
+          sys.exit(code)
+          PY
+          cat "$RUNNER_TEMP/rc7-intel-diag/initial/identity.txt"
+          cat "$RUNNER_TEMP/rc7-intel-diag/initial/image.json"
 
-      - name: Record artifact hashes
-        shell: bash
-        env:
-          AVIBE_DESKTOP_VERSION: ${{ env.DESKTOP_VERSION }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
-          TARGET: ${{ matrix.target }}
-          RUNNER_OS: ${{ runner.os }}
-        run: |
-          set -euo pipefail
-          installers=(${{ matrix.artifact_glob }})
-          [ "${#installers[@]}" -eq 1 ] || { echo "Expected exactly one installer" >&2; exit 1; }
-          driver_args=()
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            # Every signing step fails the job, so `enabled` here means the
-            # Runtime, app, and DMG were all signed, notarized, and verified.
-            if [ "${apple_signing:-absent}" = "enabled" ]; then signing=developer-id; else signing=ad-hoc; fi
-            driver_args=(
-              --prepared-driver "desktop/src-tauri/binaries/cua-driver-${{ matrix.target }}"
-              --driver "$driver_packaged_path"
-              --driver-provenance-path "$driver_provenance_path"
-              --driver-cdhash "$driver_packaged_cdhash"
-            )
-          else
-            signing=unsigned
-          fi
-          python scripts/desktop_release.py record \
-            --version "$AVIBE_DESKTOP_VERSION" --target "$TARGET" --tag "$RELEASE_TAG" \
-            --source-sha "$(git rev-parse HEAD)" --installer "${installers[0]}" \
-            --runtime desktop/src-tauri/resources/runtime --output desktop-package \
-            --signing "$signing" ${driver_args[@]+"${driver_args[@]}"}
-
-      - name: Sign and verify final updater artifacts
-        if: inputs.updater_enabled
-        shell: bash
-        env:
-          RELEASE_TAG: ${{ inputs.release_tag }}
-          SOURCE_SHA: ${{ inputs.source_sha }}
-          TARGET: ${{ matrix.target }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: |
-          python scripts/desktop_updater.py produce \
-            --directory desktop-package --tag "$RELEASE_TAG" --source-sha "$SOURCE_SHA" \
-            --target "$TARGET" --app desktop/target/release/bundle/macos/Avibe.app
-
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
-        if: env.DESKTOP_CACHE_WARMUP != 'true'
+      - name: Upload initial checkpoint
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.0
         with:
-          name: avibe-desktop-${{ env.DESKTOP_VERSION }}-${{ matrix.target }}
-          path: desktop-package/
-          if-no-files-found: error
-          retention-days: 14
+          name: intel-ui-${{ matrix.source }}-initial-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rc7-intel-diag/initial/
+          retention-days: 3
 
-      - name: Remove Apple signing material
-        if: always() && runner.os == 'macOS'
-        run: python desktop/scripts/macos_signing.py cleanup --work-dir "$RUNNER_TEMP/apple-signing"
+      - name: Install UI dependencies (six minute diagnostic budget)
+        id: install
+        working-directory: ui
+        shell: bash
+        run: python3 "$RUNNER_TEMP/rc7-intel-diag/run_phase.py" install 360 npm ci
+
+      - name: Upload install checkpoint
+        if: ${{ always() && steps.install.outcome != 'skipped' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.0
+        with:
+          name: intel-ui-${{ matrix.source }}-install-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rc7-intel-diag/install/
+          retention-days: 3
+
+      - name: Build UI (six minute diagnostic budget)
+        id: build
+        working-directory: ui
+        shell: bash
+        run: python3 "$RUNNER_TEMP/rc7-intel-diag/run_phase.py" build 360 npm run build
+
+      - name: Upload build checkpoint
+        if: ${{ always() && steps.build.outcome != 'skipped' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.0
+        with:
+          name: intel-ui-${{ matrix.source }}-build-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rc7-intel-diag/build/
+          retention-days: 3
