@@ -72,6 +72,16 @@ const runIdle = async () => {
   await new Promise((resolve) => setTimeout(resolve, 30));
 };
 
+// Network Information: an EventTarget that announces changes to its fields.
+class FakeConnection extends EventTarget {
+  type?: string;
+  saveData?: boolean;
+  metered?: boolean;
+  set(fields: { type?: string; saveData?: boolean; metered?: boolean }) {
+    Object.assign(this, { type: undefined, saveData: undefined, metered: undefined }, fields);
+    this.dispatchEvent(new Event('change'));
+  }
+}
 const setConnection = (connection: object | undefined) => {
   Object.defineProperty(navigator, 'connection', { configurable: true, value: connection });
 };
@@ -182,15 +192,45 @@ describe('conversation prefetch', () => {
     expect(requested()).toEqual(['ses_a']);
   });
 
-  it('gives back a queued Session when the connection turns metered before the browser is idle', async () => {
+  it('gives back a queued Session when the connection turns metered before the browser is idle, and takes it when it recovers', async () => {
     apiFetch.mockImplementation(async (path: string) => bootstrapResponse(sessionOf(path)));
+    const connection = new FakeConnection();
+    connection.set({ type: 'wifi' });
+    setConnection(connection);
     prefetch.prefetchChatSnapshots(['ses_a']);
-    setConnection({ type: 'cellular' });
+    connection.set({ type: 'cellular' });
     await runIdle();
     expect(apiFetch).not.toHaveBeenCalled();
 
-    setConnection({ type: 'ethernet' });
+    // Nothing offers it again but the connection itself.
+    connection.set({ type: 'ethernet' });
+    await runIdle();
+    expect(requested()).toEqual(['ses_a']);
+  });
+
+  it('offers again when a page loaded in the background is shown', async () => {
+    apiFetch.mockImplementation(async (path: string) => bootstrapResponse(sessionOf(path)));
+    setVisibility('hidden');
+    prefetch.prefetchChatSnapshots(['ses_a', 'ses_b']);
+    await runIdle();
+    expect(apiFetch).not.toHaveBeenCalled();
+
+    setVisibility('visible');
+    document.dispatchEvent(new Event('visibilitychange'));
+    await runIdle();
+    expect(requested()).toEqual(['ses_a', 'ses_b']);
+  });
+
+  it('offers again when a data-saving connection stops saving data', async () => {
+    apiFetch.mockImplementation(async (path: string) => bootstrapResponse(sessionOf(path)));
+    const connection = new FakeConnection();
+    connection.set({ type: 'wifi', saveData: true });
+    setConnection(connection);
     prefetch.prefetchChatSnapshots(['ses_a']);
+    await runIdle();
+    expect(apiFetch).not.toHaveBeenCalled();
+
+    connection.set({ type: 'wifi' });
     await runIdle();
     expect(requested()).toEqual(['ses_a']);
   });

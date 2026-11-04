@@ -41,14 +41,16 @@ async function fetchBootstrapForPrefetch(sessionId: string): Promise<WorkbenchSe
   return response.json();
 }
 
-type NetworkInformationLike = { saveData?: boolean; metered?: boolean; type?: string };
+type NetworkInformationLike = Partial<EventTarget> & { saveData?: boolean; metered?: boolean; type?: string };
+
+const networkInformation = (): NetworkInformationLike | undefined =>
+  (globalThis.navigator as (Navigator & { connection?: NetworkInformationLike }) | undefined)?.connection;
 
 /** The connection may carry a prefetch: no data saver, and not one the Network
  *  Information API reports as metered (cellular). Without the API there is
  *  nothing to go on, and the prefetch proceeds. */
 function connectionAllowsPrefetch(): boolean {
-  const nav = globalThis.navigator as (Navigator & { connection?: NetworkInformationLike }) | undefined;
-  const connection = nav?.connection;
+  const connection = networkInformation();
   if (!connection) return true;
   if (connection.saveData === true || connection.metered === true) return false;
   return connection.type !== 'cellular';
@@ -74,12 +76,35 @@ const tried = new Set<string>();
 const queue: string[] = [];
 let active = 0;
 let idleScheduled = false;
+// The latest Sessions offered. An offer made while the page was hidden or the
+// connection metered, or given back before it ran, is offered again when the
+// page shows or the connection changes, so a moment in the background or on
+// cellular does not switch the prefetch off for the rest of the document.
+let latestOffer: readonly string[] = [];
+let watchingConditions = false;
+
+const conditionsAllowPrefetch = () =>
+  Boolean(getLocalSnapshotPrincipal()) && pageVisible() && connectionAllowsPrefetch();
+
+function watchConditions(): void {
+  if (watchingConditions) return;
+  watchingConditions = true;
+  const offerAgain = () => offer(latestOffer);
+  if (typeof document !== 'undefined') document.addEventListener('visibilitychange', offerAgain);
+  networkInformation()?.addEventListener?.('change', offerAgain);
+}
 
 /** Offer the Inbox's most recent Sessions, newest first. Those without a stored
  *  conversation are prefetched when the browser is idle. */
 export function prefetchChatSnapshots(sessionIds: readonly string[]): void {
-  if (!getLocalSnapshotPrincipal() || !pageVisible() || !connectionAllowsPrefetch()) return;
-  for (const sessionId of sessionIds.slice(0, CHAT_PREFETCH_CANDIDATES)) {
+  latestOffer = sessionIds.slice(0, CHAT_PREFETCH_CANDIDATES);
+  watchConditions();
+  offer(latestOffer);
+}
+
+function offer(sessionIds: readonly string[]): void {
+  if (!conditionsAllowPrefetch()) return;
+  for (const sessionId of sessionIds) {
     if (tried.has(sessionId)) continue;
     tried.add(sessionId);
     queue.push(sessionId);
@@ -98,8 +123,9 @@ function schedule(): void {
 
 function pump(): void {
   // Conditions may have changed since the Sessions were offered. What is left
-  // goes back to untried, so the next offer under good conditions takes it.
-  if (!getLocalSnapshotPrincipal() || !pageVisible() || !connectionAllowsPrefetch()) {
+  // goes back to untried, and the next page show or connection change offers it
+  // again.
+  if (!conditionsAllowPrefetch()) {
     for (const sessionId of queue.splice(0)) tried.delete(sessionId);
     return;
   }
