@@ -190,4 +190,43 @@ describe('the Inbox local snapshot', () => {
     expect(state.current!.inboxSessions).toEqual([]);
     expect(state.current!.unreadBySession).toEqual({});
   });
+
+  it('stores the next live read for a reader confirmed after the feed went live, and nothing before it', async () => {
+    const page = (id: string): InboxFeedResult => ({ sessions: [row(id, 0, 1)], next_cursor: null, unread_by_session: { [id]: 1 } });
+    const listInbox = vi.fn(async () => page('ses_first'));
+    apiRef.current = {
+      listInbox,
+      markSessionRead: vi.fn(async () => ({ updated: 0 })),
+      connectWorkbenchEvents: () => () => undefined,
+    };
+    const hide = async () => {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+      await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+      Reflect.deleteProperty(document, 'visibilityState');
+      await settle();
+    };
+    const stored = () => readLocalSnapshot('inbox:first-page', 1, (value) => value as { sessions: InboxSession[] });
+
+    // A cold start replays Alice's session, and the live read lands before the
+    // guard's check has answered.
+    const state = mount('remote:alice');
+    await settle();
+    expect(state.current!.inboxSessions.map((s) => s.session_id)).toEqual(['ses_first']);
+    await hide();
+    expect((await stored())?.sessions.map((s) => s.session_id)).toEqual(['ses_first']);
+
+    // The check confirms Bob. The feed on screen was committed for Alice, so it
+    // is not stored as Bob's...
+    state.switchReader('remote:bob');
+    await settle();
+    await hide();
+    expect(await stored()).toBeNull();
+
+    // ...and Bob's own next live read is.
+    listInbox.mockImplementation(async () => page('ses_bob'));
+    await act(async () => { await state.current!.refresh(); });
+    await settle();
+    await hide();
+    expect((await stored())?.sessions.map((s) => s.session_id)).toEqual(['ses_bob']);
+  });
 });

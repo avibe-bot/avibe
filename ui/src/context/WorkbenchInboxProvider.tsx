@@ -124,7 +124,8 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // Local snapshot state. ``seededIdsRef`` holds the rows painted from the
   // snapshot and not yet confirmed by a live read; ``authoritativePrincipalRef``
   // is the reader the live feed was read for, set by the first whole-window
-  // commit. Once it is set the snapshot is never applied again in this document.
+  // commit after it was last cleared (a change of reader clears it). Once the
+  // feed has committed, the snapshot is never applied again in this document.
   const seededIdsRef = useRef<Set<string>>(new Set());
   const authoritativePrincipalRef = useRef<string | null>(null);
   const feedCommittedRef = useRef(false);
@@ -1054,7 +1055,17 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       }
     };
     void seed(getLocalSnapshotPrincipal());
-    const unsubscribe = subscribeLocalSnapshotPrincipal((principal) => void seed(principal));
+    const unsubscribe = subscribeLocalSnapshotPrincipal((principal) => {
+      // A live read committed for one reader does not make the feed another's:
+      // when a different reader is named (a replayed session confirmed as someone
+      // else, say), the snapshot has no owner until the next whole-window read
+      // names one, so nothing on screen is stored under the wrong reader and the
+      // new reader's snapshot resumes with its first live read.
+      if (authoritativePrincipalRef.current !== null && authoritativePrincipalRef.current !== principal) {
+        authoritativePrincipalRef.current = null;
+      }
+      void seed(principal);
+    });
     return () => {
       cancelled = true;
       unsubscribe();
