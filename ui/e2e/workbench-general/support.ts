@@ -149,10 +149,12 @@ export async function serveProduct(page: Page, lang: Lang = 'en') {
       // the backend, so a deep link would fetch from the dead port instead of
       // the app. Serving index.html for a document request is what the shipped
       // server does for any unknown path, so this restores the product's own
-      // behaviour rather than inventing one for the harness.
+      // behaviour rather than inventing one for the harness. The browser itself
+      // loads `/`, keeping the deep link as the page URL. `route.fetch` would
+      // send it from Playwright's keep-alive pool, which has no idle timeout and
+      // can reuse a connection just as the dev server closes it.
       if (request.resourceType() === 'document' && url !== `${ORIGIN}/`) {
-        const index = await route.fetch({ url: `${ORIGIN}/` });
-        return route.fulfill({ response: index, headers: { 'content-type': 'text/html' } });
+        return route.continue({ url: `${ORIGIN}/` });
       }
       return route.fallback();
     }
