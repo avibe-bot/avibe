@@ -1,4 +1,4 @@
-import { useMemo, type ReactNode } from 'react';
+import { useEffect, useMemo, type ReactNode } from 'react';
 
 import type { SessionInfo } from './ApiContext';
 import {
@@ -9,6 +9,7 @@ import {
   DENIED_INSTANCE_CAPABILITIES,
   OWNER_INSTANCE_CAPABILITIES,
 } from '../lib/sessionInfo';
+import { setLocalSnapshotPrincipal } from '../lib/localSnapshots';
 
 export const InstanceAuthorizationProvider = ({
   session,
@@ -43,6 +44,14 @@ export const InstanceAuthorizationProvider = ({
       readerPrincipal: session.author_id ?? null,
     };
   }, [session]);
+
+  // Local snapshots are stored per reader, so they follow the same answer: known
+  // while this boundary is mounted with a principal, unknown otherwise.
+  const principal = value.readerPrincipal ?? null;
+  useEffect(() => {
+    setLocalSnapshotPrincipal(principal);
+    return () => setLocalSnapshotPrincipal(null);
+  }, [principal]);
 
   return (
     <InstanceAuthorizationContext.Provider value={value}>

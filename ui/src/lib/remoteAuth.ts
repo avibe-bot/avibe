@@ -1,3 +1,4 @@
+import { clearLocalSnapshots } from './localSnapshots';
 import { isIosDevice, isStandalonePwa } from './platform';
 
 export const REMOTE_AUTH_REQUIRED_EVENT = 'avibe.remote-auth-required';
@@ -146,6 +147,10 @@ export function reportRemoteAuthorizationState(state: RemoteAuthorizationState):
     dispatchRemoteAuthorizationState(state);
     beginRemoteAuthRecovery();
     return;
+  }
+  if (state === 'revoked' || state === 'changed') {
+    // What this reader may see is no longer what the snapshots were taken under.
+    void clearLocalSnapshots();
   }
   if (state === 'revoked') {
     clearAuthorizationRetry();

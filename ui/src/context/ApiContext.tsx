@@ -5,6 +5,7 @@ import type { PickerAgentCatalog } from '../components/settings/models/types';
 import type { AgentBackendId, NativeCliBackend, WebOAuthBackend } from '../lib/agentBackends';
 import { apiFetch, recoverRemoteAuthFromSessionProbe, withApiDeadline } from '../lib/apiFetch';
 import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
+import { clearLocalSnapshots } from '../lib/localSnapshots';
 import { parseBot, parseBotLimit, type AgentBotSummary, type Bot, type BotEmojiAvatarInput, type BotLimit } from '../lib/bots';
 import { parseNotificationPreferences, type InboxCategory, type NotificationPreferences } from '../lib/notificationPreferences';
 import { mcpPath } from '../lib/mcpPath';
@@ -3151,6 +3152,10 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }>(e.data);
       if (!envelope) return;
       clearReadCacheMatching(isAuthorizationSensitiveReadPath);
+      // Every local snapshot is an authorization-sensitive read too. Dropping them
+      // here, not only overwriting them on the next read, keeps a document that
+      // closes before that read from painting revoked rows on its next start.
+      void clearLocalSnapshots();
       dispatchToWorkbenchHandlers((handlers) => {
         handlers.onAny?.(envelope);
         handlers.onAuthorizationChanged?.(envelope.data);
@@ -4752,6 +4757,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     diagnoseRemoteAccess: () => postJson('/api/remote-access/diagnostics', {}),
     getAuthSession: () => getJson('/api/session').then(normalizeSessionInfo),
     signOut: async () => {
+      // Before the request: a failed logout must not leave this reader's
+      // snapshots behind for whoever uses the device next.
+      await clearLocalSnapshots();
       let endpoint: string | undefined;
       try {
         endpoint = (await getExistingWebPushSubscription())?.endpoint;
