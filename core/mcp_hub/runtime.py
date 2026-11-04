@@ -1182,8 +1182,13 @@ class McpRuntime:
     async def _remove(self, payload: dict[str, Any]) -> bytes:
         name = payload.get("name")
         async with self._lock(name):
-            await self._invalidate(name)
+            owned = repository.is_project(name) or await asyncio.to_thread(repository.read_avibe_definition, name) is not None
+            if owned:
+                await self._invalidate(name)
+            # A native edit can refuse removal: preserve its working publication until it succeeds.
             kind = await asyncio.to_thread(repository.remove_package, name)
+            if not owned:
+                await self._invalidate(name)
             for connection in list(self._connections.values()):
                 if connection.key[0] == name:
                     connection.retired = True

@@ -10,6 +10,8 @@ Runs under the hermetic homes ``tests/conftest.py`` provides.
 import asyncio
 import json
 import tomllib
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -349,9 +351,14 @@ def test_refused_native_remove_keeps_oauth_login(native_files, runtime):
     from core.mcp_hub import oauth as mcp_oauth
 
     _claude, codex, _opencode = native_files
-    codex.write_text('[mcp_servers]\ninline = { url = "https://i.invalid/mcp" }\n')
+    fixture = str(Path(__file__).parent / "fixtures" / "mcp_echo_server.py")
+    codex.write_text(f'[mcp_servers]\ninline = {{ command = {json.dumps(sys.executable)}, args = [{json.dumps(fixture)}] }}\n')
+    assert _run(runtime, "refresh", {"name": "inline"})["ok"]
+    publication = repository.read_published("inline")["revision"]
+    call = {"name": "inline", "tool": "echo", "arguments": {"text": "still callable"}}
+    assert _run(runtime, "call", call)["status"] == "ok"
     oauth_file = mcp_oauth.oauth_path("inline")
-    oauth_file.parent.mkdir(parents=True)
+    oauth_file.parent.mkdir(parents=True, exist_ok=True)
     oauth_file.write_text("{}")
 
     result = _run(runtime, "remove", {"name": "inline"})
@@ -359,3 +366,6 @@ def test_refused_native_remove_keeps_oauth_login(native_files, runtime):
     assert result["ok"] is False and result["error"]["type"] == "invalid_native_config"
     assert oauth_file.exists()
     assert "inline" in codex.read_text()
+    assert repository.read_published("inline")["revision"] == publication
+    assert any(row["name"] == "inline" for row in _run(runtime, "list", {})["servers"])
+    assert _run(runtime, "call", call)["status"] == "ok"
