@@ -8,7 +8,8 @@ import { normalizeSessionInfo, type SessionInfo } from './sessionInfo';
 // It is only ever an outcome the server confirmed in full: a signed-in reader
 // whose authorization was current and, when setup applies, an instance whose
 // setup is complete. It is used only until the session itself expires (the
-// server reports ``session_expires_at``; without it, 12 hours), and any other
+// server reports ``session_expires_at``; a remote session without it is not
+// replayed, a local one for 12 hours), and any other
 // answer from the server deletes it, as do sign-out, revocation, and a
 // login-required signal.
 //
@@ -22,11 +23,9 @@ const BOOT_SESSION_KEY = 'avibe.boot-session.v1';
 // check's answer predates that and is not recorded.
 const BOOT_SESSION_GENERATION_KEY = 'avibe.boot-session.generation.v1';
 
-/** How long an outcome is trusted when the server did not say when the session
- *  expires (local loopback, or an instance from before ``session_expires_at``).
- *  Such an instance issues 24-hour cookies and renews one only past its
- *  half-life, so at the moment of a successful check the cookie has at least
- *  12 hours left; trusting the record any longer could outlive the credential. */
+/** How long a local (loopback) outcome is trusted. It has no credential that
+ *  could expire first; this only bounds how stale its capabilities can be. A
+ *  remote outcome is bounded by its own ``session_expires_at`` instead. */
 export const BOOT_SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 /** Never trust an outcome longer than the longest a remote session can live
  *  (docs/plans/remote-session-lifetime.md: a 90-day absolute cap), whatever an
@@ -69,12 +68,18 @@ export function readBootSession(now = Date.now()): SessionInfo | null {
     if (!(age >= 0 && age < BOOT_SESSION_HARD_MAX_AGE_MS)) return null;
     const session = normalizeSessionInfo(record.session);
     if (!isReadyOutcome(session)) return null;
-    // The session's own expiry when the server reported one, else the fallback.
-    const expiresAt = session.remote && session.authenticated && session.authorization_state === 'current'
-      && session.session_expires_at !== undefined
-      ? session.session_expires_at * 1000
+    // A remote session is replayed only until its credential expires, and only
+    // the server knows that: without a reported ``session_expires_at`` (an
+    // instance from before it) nothing bounds the cookie's remaining life, so
+    // the record is not replayed at all. A local session has no credential to
+    // outlive; it gets the fixed window.
+    const expiresAt = session.remote
+      ? (session.authenticated && session.authorization_state === 'current'
+        && session.session_expires_at !== undefined
+        ? session.session_expires_at * 1000
+        : null)
       : record.savedAt + BOOT_SESSION_MAX_AGE_MS;
-    return now < expiresAt ? session : null;
+    return expiresAt !== null && now < expiresAt ? session : null;
   } catch {
     return null;
   }

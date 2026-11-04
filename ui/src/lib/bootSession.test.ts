@@ -15,6 +15,8 @@ const reader = {
   instance_role: 'owner' as const,
   capabilities: OWNER_INSTANCE_CAPABILITIES,
   authorization_state: 'current' as const,
+  // The instance reports when this browser's cookie expires (30 days out).
+  session_expires_at: Math.floor(Date.now() / 1000) + 30 * 24 * 3600,
 };
 
 afterEach(() => {

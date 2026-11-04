@@ -29,6 +29,8 @@ const reader = {
   instance_role: 'owner' as const,
   capabilities: OWNER_INSTANCE_CAPABILITIES,
   authorization_state: 'current' as const,
+  // The instance reports when this browser's cookie expires (30 days out).
+  session_expires_at: Math.floor(Date.now() / 1000) + 30 * 24 * 3600,
   author_id: 'remote:alice',
 };
 
@@ -54,6 +56,7 @@ describe('signing out', () => {
     render(<ApiProvider><Capture /></ApiProvider>);
     await waitFor(() => expect(api).not.toBeNull());
     recordBootSession(reader);
+    expect(readBootSession()).not.toBeNull();
 
     const signingOut = api!.signOut().catch(() => undefined);
     await waitFor(() => expect(apiFetch).toHaveBeenCalledWith('/auth/logout', expect.anything()));

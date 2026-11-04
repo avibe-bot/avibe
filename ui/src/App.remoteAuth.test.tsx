@@ -72,6 +72,8 @@ describe('AuthGuard boot from the last confirmed outcome', () => {
     capabilities: { ...DENIED_INSTANCE_CAPABILITIES, can_read_instance: true },
     authorization_state: 'current' as const,
     author_id: 'remote:member',
+    // The instance reports when this browser's cookie expires (30 days out).
+    session_expires_at: Math.floor(Date.now() / 1000) + 30 * 24 * 3600,
   };
   const mountGuard = () => render(
     <MemoryRouter initialEntries={['/']}>
@@ -182,7 +184,7 @@ describe('AuthGuard boot from the last confirmed outcome', () => {
     consoleError.mockRestore();
   });
 
-  it('AUTH-SETUP-142 boots only until the session expires: its reported expiry, else 12 hours', () => {
+  it('AUTH-SETUP-142 boots only until the session expires: its reported expiry, else not for a remote session', () => {
     const day = 24 * 60 * 60 * 1000;
     const nowSeconds = () => Math.floor(Date.now() / 1000);
     const startsWithShell = () => {
@@ -192,16 +194,7 @@ describe('AuthGuard boot from the last confirmed outcome', () => {
       view.unmount();
       return shown;
     };
-
-    // An instance that does not report the expiry: the 12-hour fallback. Its
-    // cookie renews only past half of 24 hours, so a check guarantees 12 more
-    // hours of credential, not 24.
-    recordBootSession(member, Date.now() - BOOT_SESSION_MAX_AGE_MS - 1);
-    expect(startsWithShell()).toBe(false);
-    recordBootSession(member, Date.now() - 13 * 60 * 60 * 1000);
-    expect(startsWithShell()).toBe(false);
-    recordBootSession(member, Date.now() - 11 * 60 * 60 * 1000);
-    expect(startsWithShell()).toBe(true);
+    const { session_expires_at: _expiry, ...withoutExpiry } = member;
 
     // A 30-day session recorded three days ago is still live.
     recordBootSession({ ...member, session_expires_at: nowSeconds() + 27 * 24 * 3600 }, Date.now() - 3 * day);
@@ -209,6 +202,18 @@ describe('AuthGuard boot from the last confirmed outcome', () => {
 
     // Its reported expiry has passed.
     recordBootSession({ ...member, session_expires_at: nowSeconds() - 1 }, Date.now() - 3 * day);
+    expect(startsWithShell()).toBe(false);
+
+    // An instance that does not report the expiry: nothing bounds the cookie,
+    // so a remote session is not replayed even a minute later.
+    recordBootSession(withoutExpiry, Date.now() - 60 * 1000);
+    expect(startsWithShell()).toBe(false);
+
+    // A local session has no credential to outlive: the fixed window applies.
+    const local = { remote: false as const, instance_kind: null, author_id: 'local' };
+    recordBootSession(local, Date.now() - 11 * 60 * 60 * 1000);
+    expect(startsWithShell()).toBe(true);
+    recordBootSession(local, Date.now() - BOOT_SESSION_MAX_AGE_MS - 1);
     expect(startsWithShell()).toBe(false);
   });
 });
