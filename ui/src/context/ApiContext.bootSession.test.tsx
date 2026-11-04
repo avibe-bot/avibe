@@ -38,7 +38,7 @@ afterEach(() => {
 });
 
 describe('signing out', () => {
-  it('forgets the boot session and refuses a late guard check that would record it again', async () => {
+  it('AUTH-SETUP-143 forgets the boot session and refuses a late guard check that would record it again', async () => {
     let api: ReturnType<typeof useApi> | null = null;
     const Capture = () => {
       const value = useApi();

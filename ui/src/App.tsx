@@ -312,6 +312,10 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
     const [bootSession] = useState(() => readBootSession());
     const provisionalRef = useRef(bootSession !== null);
     const [provisional, setProvisional] = useState(bootSession !== null);
+    // Bumped by every terminal authorization signal (revoked, login required).
+    // A check that started before one can still answer ``ready``; it must not
+    // replace the gate the signal put up, nor record the reader again.
+    const terminalSignalRef = useRef(0);
     const [guardStatus, setGuardStatus] = useState<GuardStatus>(() => (bootSession ? 'ready' : 'loading'));
     const [blockedCode, setBlockedCode] = useState<string | null>(null);
     const [authCheckVersion, setAuthCheckVersion] = useState(0);
@@ -339,10 +343,20 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
     }, [isSetupRoute]);
 
     useEffect(() => {
-        const onRemoteAuthRequired = () => setGuardStatus('remote-login-required');
+        // A terminal signal settles the guard as surely as a check does.
+        const settleOnTerminalSignal = () => {
+            terminalSignalRef.current += 1;
+            provisionalRef.current = false;
+            setProvisional(false);
+        };
+        const onRemoteAuthRequired = () => {
+            settleOnTerminalSignal();
+            setGuardStatus('remote-login-required');
+        };
         const onRemoteAuthorizationState = (event: Event) => {
             const state = (event as CustomEvent<{ state?: RemoteAuthorizationState }>).detail?.state;
             if (state === 'revoked') {
+                settleOnTerminalSignal();
                 authorizationUnavailableRef.current = false;
                 setAuthorizationUnavailable(false);
                 setGuardStatus('authorization-revoked');
@@ -390,6 +404,8 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
 
     useEffect(() => {
         let cancelled = false;
+        const signalAtStart = terminalSignalRef.current;
+        const superseded = () => cancelled || terminalSignalRef.current !== signalAtStart;
 
         // Reset to loading while (re)validating. On the setup-boundary
         // re-run this prevents a one-frame bounce: a stale `needs-setup`
@@ -402,7 +418,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
         setSetupModelHubAllowed(false);
 
         checkRemoteAuthForPath(location.pathname, getAuthSession).then(({ session, loginRequired, checkSetup }) => {
-            if (cancelled) return;
+            if (superseded()) return;
             provisionalRef.current = false;
             setProvisional(false);
             setAuthorizationSession(session);
@@ -445,7 +461,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
                 return null;
             }
             return getConfig().then(config => {
-                if (cancelled) return;
+                if (superseded()) return;
                 // Only successful config/session reads can grant this narrow
                 // setup repair route. Unlike Diagnostics it is not a bypass.
                 setSetupModelHubAllowed(Boolean(config?.mode
@@ -459,11 +475,11 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
                 setGuardStatus('ready');
             });
         }).catch(async (error) => {
-            if (cancelled) return;
+            if (superseded()) return;
             provisionalRef.current = false;
             setProvisional(false);
             const authCheck = await checkRemoteAuthForPath(location.pathname, getAuthSession).catch(() => null);
-            if (cancelled) return;
+            if (superseded()) return;
             if (authCheck?.session) setAuthorizationSession(authCheck.session);
             if (authCheck?.loginRequired) {
                 forgetBootSession();

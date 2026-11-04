@@ -16,7 +16,7 @@ import { reportRemoteAuthorizationState, REMOTE_AUTH_STATE_EVENT } from './lib/r
 import { DESKTOP_OPEN_SETTINGS_EVENT } from './lib/desktopShell';
 import { DesktopSettingsCommand } from './components/DesktopSettingsCommand';
 import { SettingsOverlayNavigationBoundary } from './components/settings/SettingsOverlayNavigationBoundary';
-import { BOOT_SESSION_MAX_AGE_MS, recordBootSession } from './lib/bootSession';
+import { BOOT_SESSION_MAX_AGE_MS, readBootSession, recordBootSession } from './lib/bootSession';
 
 vi.hoisted(() => {
   vi.stubGlobal('matchMedia', vi.fn().mockImplementation((query: string) => ({
@@ -85,7 +85,7 @@ describe('AuthGuard boot from the last confirmed outcome', () => {
     view.unmount();
   };
 
-  it('renders the shell before the check answers, and keeps it when the check agrees', async () => {
+  it('AUTH-SETUP-139 renders the shell before the check answers, and keeps it when the check agrees', async () => {
     await confirmOnce();
 
     let answer: (value: typeof member) => void = () => {};
@@ -97,7 +97,7 @@ describe('AuthGuard boot from the last confirmed outcome', () => {
     expect(screen.getByText('protected shell')).toBeTruthy();
   });
 
-  it('tears the shell down when the check disagrees, and waits for the server on the next start', async () => {
+  it('AUTH-SETUP-140 tears the shell down when the check disagrees, and waits for the server on the next start', async () => {
     await confirmOnce();
 
     let answer: (value: unknown) => void = () => {};
@@ -117,7 +117,26 @@ describe('AuthGuard boot from the last confirmed outcome', () => {
     expect(screen.getByText('common.loading')).toBeTruthy();
   });
 
-  it('does not boot from an outcome older than a personal session', () => {
+  it('AUTH-SETUP-141 keeps the gate a revocation put up when the check started before it answers ready', async () => {
+    await confirmOnce();
+
+    let answer: (value: typeof member) => void = () => {};
+    api.getAuthSession.mockReturnValueOnce(new Promise((resolve) => { answer = resolve; }));
+    mountGuard();
+    expect(screen.getByText('protected shell')).toBeTruthy();
+
+    // A request from the mounted shell learns the reader was revoked.
+    await act(async () => { reportRemoteAuthorizationState('revoked'); });
+    expect(screen.getByText('remoteAuthorization.revoked.title')).toBeTruthy();
+
+    // The check that left before the revocation answers with the old session.
+    await act(async () => { answer(member); });
+    expect(screen.queryByText('protected shell')).toBeNull();
+    expect(screen.getByText('remoteAuthorization.revoked.title')).toBeTruthy();
+    expect(readBootSession()).toBeNull();
+  });
+
+  it('AUTH-SETUP-142 does not boot from an outcome older than a personal session', () => {
     recordBootSession(member, Date.now() - BOOT_SESSION_MAX_AGE_MS - 1);
     api.getAuthSession.mockReturnValueOnce(new Promise(() => {}));
     mountGuard();
