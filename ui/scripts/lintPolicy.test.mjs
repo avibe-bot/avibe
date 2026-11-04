@@ -169,15 +169,30 @@ describe('only parsed suppression comments can hide a diagnostic', () => {
   });
 
   it.each(['eslint', 'oxlint'])('measures %s suppressed errors independently of visible errors', (prefix) => {
-    for (const code of [
-      `// ${prefix}-disable-next-line typescript/no-explicit-any\nexport const f = (v: any) => v;`,
-      `export const f = (v: any) => v; // ${prefix}-disable-line typescript/no-explicit-any`,
-      `/* ${prefix}-disable typescript/no-explicit-any */\nexport const f = (v: any) => v;\n/* ${prefix}-enable typescript/no-explicit-any */`,
-    ]) {
+    const cases = [
+      ['next-line', `// ${prefix}-disable-next-line typescript/no-explicit-any\nexport const f = (v: any) => v;`],
+      ['same-line', `export const f = (v: any) => v; // ${prefix}-disable-line typescript/no-explicit-any`],
+      ['block', `/* ${prefix}-disable typescript/no-explicit-any */\nexport const f = (v: any) => v;\n/* ${prefix}-enable typescript/no-explicit-any */`],
+    ];
+    for (const [name, code] of cases) {
       expect(inline(code)).toEqual([]);
-      const result = lintMessages(code);
+      writeSource(tree, `src/__probe__/${name}.ts`, code);
+    }
+    // One real discovery/lint/shadow cycle covers all forms. Repeating that
+    // cycle per file needlessly multiplies CLI startup under the 5s deadline.
+    const { results, measurement } = measureLint(tree);
+    expect(measurement).toMatchObject({
+      fatals: [], inlineViolations: [], policyGroups: [],
+      coverage: { empty: false, missing: [], unwalked: [] },
+    });
+    expect(results.map((result) => path.relative(tree, result.filePath)).sort()).toEqual(
+      cases.map(([name]) => path.join('src', '__probe__', `${name}.ts`)).sort(),
+    );
+    for (const result of results) {
       expect(result.messages.filter((message) => message.ruleId)).toEqual([]);
-      expect(result.suppressedMessages.map((message) => message.ruleId)).toEqual(['@typescript-eslint/no-explicit-any']);
+      expect(result.suppressedMessages).toEqual([
+        expect.objectContaining({ ruleId: '@typescript-eslint/no-explicit-any', severity: 2 }),
+      ]);
     }
   });
 
