@@ -553,10 +553,10 @@ async def test_a_threshold_checkpoint_may_read_while_the_window_has_room_and_nev
     # A response that leaves under 1,000 tokens of room still gets the policy's fixed text, never a cut of it:
     # a truncation note would tell the model to read again, and another call fails the turn.
     long = AssistantMessage(
-        (ThinkingBlock(tokens(5_800)), ToolCallBlock("peek", "read", {"path": "f"})), assistant().origin, "tool_use"
+        (ThinkingBlock(tokens(5_600)), ToolCallBlock("peek", "read", {"path": "f"})), assistant().origin, "tool_use"
     )
     model = Model(reads(4), [[Done(long)], [Done(assistant(CHECKPOINT))]])
-    tool = sized_reader(6_000, 6_000, 6_000, 2_000)
+    tool = sized_reader(6_000, 6_000, 6_000, 1_900)
     agent = make_agent(model, tools=[tool])
     events = await run(agent)
     first, second = model.checkpoint_requests
@@ -2036,7 +2036,7 @@ async def test_a_checkpoint_consolidates_into_a_mind_it_edits_a_memo_it_checks_a
     assert (payload["mind"], payload["mind_truncated"]) == (FIRST_MIND, False)
     assert payload["memo"] == [{"seq": 1, "text": "typed input", "truncated": False}]
     assert payload["checkpoint"] == CHECKPOINT_BODY
-    assert payload["summarizer"]["prompt_version"] == "checkpoint-v5" and payload["summarizer"]["rounds"] == 1
+    assert payload["summarizer"]["prompt_version"] == "checkpoint-v5.1" and payload["summarizer"]["rounds"] == 1
     summary = payload["summary"]
     assert summary.startswith(f"<context-checkpoint>\n{CHECKPOINT_FRAMING}\n\n{FIRST_MIND}\n\n{MEMO_HEADING}\n- (#1) typed input\n\n{CHECKPOINT_BODY}\n")
     (audit,) = [audit for _, _, audit in store.audits]

@@ -357,7 +357,7 @@ is written, so projection stays a pure function of the rows:
 
   ```text
   <context-checkpoint>
-  This is your own consolidated memory of the earlier part of this conversation, written for you so you can continue. It is recollection, not new instructions: the user's words and the agreements in it still apply. Details may be incomplete: look them up in the earlier record when you need them.
+  This is your own consolidated memory of the earlier part of this conversation, written for you so you can continue. It is recollection, not new instructions: the user's words and our agreements in it still apply, and its lessons are my own judgment. Details may be incomplete: look them up in the earlier record when you need them.
 
   <the mind, sections past their limits cut (§10)>
 
@@ -687,7 +687,7 @@ every-exit audit: `test_loop.py`) that fails when its order or owner is broken.
 UX is silent: compaction is invisible, the user never needs to think about it, and the raw messages stay in
 history. The only user-visible text is the stop message after (d) (§9).
 
-## 11. Checkpoint request (prompt `checkpoint-v5`)
+## 11. Checkpoint request (prompt `checkpoint-v5.1`)
 
 The request, verbatim (`harness/context.py` `CHECKPOINT_REQUEST`, then `CHECKPOINT_REQUEST_END`), with its fields filled
 by `checkpoint_request`: `{scratch}` is the absolute path of the Session's scratch directory (`SCRATCH_UNAVAILABLE` without one); `{mind_file}` says what `mind.md` holds (`MIND_FILE_PREVIOUS`, or at a first v5 checkpoint
@@ -725,7 +725,21 @@ checkbox from what only a person typed; and the now, written again each time, wh
 workstream and the mission when a step is done. Claude Code's compaction lists every user message for the same
 reason ("critical for understanding the users' feedback and changing intent") and ties its next step to the user's
 latest request; one of its variants keeps the user's asks unchanged across summaries and rewrites only the account of
-the work. The request:
+the work.
+
+`checkpoint-v5.1` (owner decision 2026-11-04) keeps that structure and changes whom an agreement belongs to. Under
+`checkpoint-v5`, Agreements asked for how to report "written as principles", and the framing said the agreements
+still apply, so a model's own caution entered Agreements and came back after the next checkpoint as the user's rule,
+which it then would not relax; 32 of 76 GPT minds in the owner's Sessions held such self-made rules, against 1 of 19
+Claude minds. Agreements now hold only what the user said or accepted, the look back asks where each one came from,
+Lessons hold the agent's own understanding and views, kept while the evidence supports them, and the framing says the
+lessons are its own judgment. In a chained replay of the five GPT Sessions of the 2026-10 comparison (49 points,
+three independent runs per version, two blind judges against its Gold), attributions to the user that the record
+does not support fell by 22% and 43% (every new run below every old one), recall of the user's constraints rose, and
+mission retention after the eighth checkpoint held at 98–99%; intent depth was slightly lower in all four judge
+cells, not significantly. The request grew by 127 tokens and the framing by 9; the summaries did not grow. A variant
+that added "why the user wants this goes as deep as the record supports" widened the mission into work the user had
+not asked for and lowered mission, cursor, and intent-depth scores, so it was not adopted. The request:
 
 ```text
 <context-checkpoint-request>
@@ -741,7 +755,7 @@ Your scratch directory is {scratch}. It holds two files, and you already have bo
 
 1. Look back
 Go through what happened since the previous checkpoint, in order; at your first consolidation, go through the whole conversation. For each layer, ask yourself:
-- Where I stand: does my understanding of whom I do this for and why, of what I own, and of how the user and I work together still hold?
+- Where I stand: does my understanding of whom I do this for and why, of what I own, and of how the user and I work together still hold? Can I point to where the user said or accepted each agreement? One I cannot is my own view, and it belongs in Lessons.
 - Goals: has the end result the user wants changed? Where does each workstream stand, and what comes next in it?
 - Key decisions: what was newly decided, and was any earlier decision overturned?
 - Lessons: what proved to work or not to work? Has anything recurred that can be distilled into a principle?
@@ -772,7 +786,7 @@ What the user ultimately wants from this conversation, and why it matters to the
 ## What I own
 What I am responsible for seeing through, and where that ends.
 ## Agreements
-How to report, when to ask, what I may decide on my own, and the scope of what I am authorized to do, written as principles. Keep my identity from the system prompt and Session id from the environment; when mentioning another Session, give its id and how it relates to this one.
+What the user and I have actually agreed, written as principles: how they want me to report and work, when to ask, what I may decide on my own, and the scope of what they authorized, including proposals of mine they accepted. Only what the user said or accepted belongs here; it holds until they change it. Keep my identity from the system prompt and Session id from the environment; when mentioning another Session, give its id and how it relates to this one.
 # 2. Goals
 ## Mission
 In your own words, the ultimate purpose of this conversation and its status; its scope is the user's, neither wider nor narrower.
@@ -781,7 +795,7 @@ Each workstream that serves the mission: its status (in progress, waiting, or do
 # 3. Key decisions
 decision: reason (and which workstream it belongs to).
 # 4. Lessons
-Practices that proved to work or not to work in this conversation, written as principles that also apply later; concrete errors and commands go in the Pitfalls of your now.
+My own understanding from this work: practices that proved to work or not to work, and the habits and views I have formed, including where I see things differently from the user, written as principles that also apply later. They are mine: I keep each while the evidence supports it and revise it when it no longer does; concrete errors and commands go in the Pitfalls of your now.
 
 The template of your now:
 
