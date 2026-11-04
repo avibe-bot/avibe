@@ -891,20 +891,29 @@ export class VoiceRecordingPipeline {
     );
   }
 
+  // The microphone is never held for a page the user cannot see: hidden (another app, a locked
+  // screen, a background tab) or leaving (pagehide, which also covers the back/forward cache)
+  // finishes the recording, and the tracks stop at once; what was heard still flushes.
   private bindVisibilityStop(): void {
     if (typeof document === 'undefined') return;
     this.visibilityDocument = document;
     document.addEventListener('visibilitychange', this.handleVisibilityChange);
+    if (typeof window !== 'undefined') window.addEventListener('pagehide', this.handlePageHide);
     if (document.visibilityState === 'hidden') this.finish();
   }
 
   private unbindVisibilityStop(): void {
     this.visibilityDocument?.removeEventListener('visibilitychange', this.handleVisibilityChange);
     this.visibilityDocument = null;
+    if (typeof window !== 'undefined') window.removeEventListener('pagehide', this.handlePageHide);
   }
 
   private readonly handleVisibilityChange = (): void => {
     if (this.visibilityDocument?.visibilityState === 'hidden') this.finish();
+  };
+
+  private readonly handlePageHide = (): void => {
+    this.finish();
   };
 
   private stopStream(): void {

@@ -248,18 +248,29 @@ describe('VoiceRecordingPipeline', () => {
     expect(onStopped).toHaveBeenCalledWith('abort', { pendingSegmentCount: 0 });
   });
 
-  it('finishes before a hidden page can suspend audio processing', async () => {
+  it.each([
+    ['the page is hidden', 'visibilitychange'],
+    ['the page is left', 'pagehide'],
+  ] as const)('releases the microphone at once when %s', async (_case, event) => {
     const visibilityDocument = new EventTarget() as EventTarget & {
       visibilityState: DocumentVisibilityState;
     };
     visibilityDocument.visibilityState = 'visible';
+    const pageWindow = new EventTarget();
     vi.stubGlobal('document', visibilityDocument);
-    const { capture, pipeline } = setup();
+    vi.stubGlobal('window', pageWindow);
+    const { capture, pipeline, track } = setup();
     await pipeline.start();
 
-    visibilityDocument.visibilityState = 'hidden';
-    visibilityDocument.dispatchEvent(new Event('visibilitychange'));
+    if (event === 'visibilitychange') {
+      visibilityDocument.visibilityState = 'hidden';
+      visibilityDocument.dispatchEvent(new Event('visibilitychange'));
+    } else {
+      pageWindow.dispatchEvent(new Event('pagehide'));
+    }
 
+    // The tracks stop now, not after the capture's flush; the heard audio still flushes.
+    expect(track.stop).toHaveBeenCalledTimes(1);
     expect(capture().stop).toHaveBeenCalledTimes(1);
   });
 
