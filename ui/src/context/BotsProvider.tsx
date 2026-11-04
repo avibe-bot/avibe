@@ -6,9 +6,14 @@ import { useApi } from './ApiContext';
 import { BotsContext, type BotProfileRequest, type BotRuntimeStatus, type BotsState } from './BotsContext';
 import { UNKNOWN_BOT_ROSTER, useBotRoster } from './BotRosterContext';
 import { useInstanceAuthorization } from './InstanceAuthorizationContext';
-import { botDisplayName, botLimitReached, orderBots, type Bot, type BotLimit } from '../lib/bots';
+import { botDisplayName, botLimitReached, keepBotOrder, type Bot, type BotLimit } from '../lib/bots';
 
 /** Owns the Owner's Bot list (`GET /api/bots`) and each Bot Session's running state.
+ *
+ *  The list is in the server's order (docs/plans/bots.md D13): the main Bot first,
+ *  then by when the user last wrote to each, so a message to a Bot, from any device,
+ *  moves it up through the same `bots.changed`. A list under the user's hand holds
+ *  its order (`holdOrder`) and moves once released.
  *
  *  The list is refetched on `bots.changed` and on every stream (re)connect, since
  *  the broker replays nothing. That event is also how this page's own writes
@@ -28,6 +33,11 @@ export const BotsProvider = ({ children }: { children: ReactNode }) => {
   const [listed, setListed] = useState(false);
   const [ownerStatuses, setStatusBySession] = useState<Record<string, BotRuntimeStatus>>({});
   const [profileRequest, setProfileRequest] = useState<BotProfileRequest | null>(null);
+  // The order a held list keeps (handles), while any hold is open.
+  const [heldOrder, setHeldOrder] = useState<string[] | null>(null);
+  const holdsRef = useRef(0);
+  // The list's own order, as the last read returned it.
+  const orderRef = useRef<string[]>([]);
   const readRef = useRef(0);
   const sessionIdsRef = useRef<Set<string>>(new Set());
   const streamLiveRef = useRef(false);
@@ -57,7 +67,8 @@ export const BotsProvider = ({ children }: { children: ReactNode }) => {
     try {
       const { bots: next, limit } = await api.listBots({ cache: false });
       if (read !== readRef.current) return;
-      setBots(orderBots(next));
+      setBots(next);
+      orderRef.current = next.map((bot) => bot.handle);
       setLimit(limit);
       setListed(true);
       const known = sessionIdsRef.current;
@@ -112,30 +123,18 @@ export const BotsProvider = ({ children }: { children: ReactNode }) => {
     };
   }, [api, enabled, refresh, readStatuses]);
 
-  const moveBot = useCallback(
-    async (handle: string, position: number) => {
-      const previous = ownerBots;
-      const others = previous.filter((bot) => !bot.builtin);
-      const moving = others.find((bot) => bot.handle === handle);
-      if (!moving) return false;
-      const reordered = others.filter((bot) => bot.handle !== handle);
-      reordered.splice(Math.max(0, Math.min(position - 1, reordered.length)), 0, moving);
-      setBots([
-        ...previous.filter((bot) => bot.builtin),
-        ...reordered.map((bot, index) => ({ ...bot, position: index + 1 })),
-      ]);
-      try {
-        await api.updateBot(handle, { position });
-        return true;
-      } catch {
-        setBots(previous);
-        return false;
-      } finally {
-        void afterWrite();
-      }
-    },
-    [api, ownerBots, afterWrite],
-  );
+  const holdOrder = useCallback(() => {
+    // The first hold keeps the order shown now, which is the list's own: none was held.
+    if (holdsRef.current === 0) setHeldOrder(orderRef.current);
+    holdsRef.current += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      holdsRef.current -= 1;
+      if (holdsRef.current === 0) setHeldOrder(null);
+    };
+  }, []);
 
   const setHideDetails = useCallback(
     async (handle: string, hideDetails: boolean) => {
@@ -158,7 +157,7 @@ export const BotsProvider = ({ children }: { children: ReactNode }) => {
 
   const mainDefault = t('bots.mainDefaultName');
   const value = useMemo<BotsState>(() => {
-    const bots = enabled ? ownerBots : [];
+    const bots = !enabled ? [] : heldOrder ? keepBotOrder(ownerBots, heldOrder) : ownerBots;
     const statusBySession = enabled ? ownerStatuses : {};
     const limit = enabled ? ownerLimit : null;
     const bySession = new Map(bots.map((bot) => [bot.session_id, bot]));
@@ -178,7 +177,7 @@ export const BotsProvider = ({ children }: { children: ReactNode }) => {
       botForHandle: (handle) => (handle ? byHandle.get(handle) : undefined),
       displayName: (bot) => botDisplayName(bot, mainDefault),
       afterWrite,
-      moveBot,
+      holdOrder,
       setHideDetails,
       openProfile: (request) => {
         if (enabled) setProfileRequest(request);
@@ -186,7 +185,7 @@ export const BotsProvider = ({ children }: { children: ReactNode }) => {
       profileRequest: enabled ? profileRequest : null,
       closeProfile: () => setProfileRequest(null),
     };
-  }, [enabled, ownerBots, ownerLimit, loaded, listed, ownerStatuses, mainDefault, afterWrite, moveBot, setHideDetails, profileRequest]);
+  }, [enabled, ownerBots, heldOrder, ownerLimit, loaded, listed, ownerStatuses, mainDefault, afterWrite, holdOrder, setHideDetails, profileRequest]);
 
   // The Inbox above the router splits its counts by this list (BotRosterContext).
   // A reader who is not the Owner has none to wait for; the Owner's is known once

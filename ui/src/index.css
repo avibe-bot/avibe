@@ -329,15 +329,10 @@
      in the other theme. */
   /* Bot avatars (docs/plans/bots.md D5). An emoji avatar keeps one hue and takes
      its well's saturation and lightness from the theme; the default (the name's
-     first character) is a deeper fill. The main Bot's mascot sits on the mint
-     member of that same family -- the emoji wells' saturation and lightness at
-     the picker's mint hue, with no ring -- so in a row of Bots it is one more
-     disc, in both themes. Declared once: the light blocks re-anchor the two
-     numbers, and this resolves on the same root element. */
-  --bot-mascot-well: hsl(150 var(--bot-emoji-well-saturation) var(--bot-emoji-well-lightness));
+     first character) is a deeper fill. The main Bot's mascot has no well
+     anywhere (owner, 2026-11-04): it is drawn straight on the surface, and in
+     Light it keeps a soft shadow of its own so its white still reads. */
   --bot-mascot-shadow: none;
-  /* Without its well (a face standing alone), the mascot keeps an edge of its own. */
-  --bot-mascot-plain-shadow: none;
   --bot-emoji-well-saturation: 35%;
   --bot-emoji-well-lightness: 20%;
   --bot-initial-saturation: 45%;
@@ -512,8 +507,7 @@
     /* Mirrors the dark block's note: the sidebar fill and the selected nav wash
        are the two that genuinely differ from --surface and --mint-soft here. */
     /* Bot avatar wells; see the dark block. */
-    --bot-mascot-shadow: drop-shadow(0 1px 1.5px rgba(8, 8, 18, 0.28));
-    --bot-mascot-plain-shadow: drop-shadow(0 0.5px 0.5px rgba(8, 8, 18, 0.45)) drop-shadow(0 1px 2px rgba(8, 8, 18, 0.3));
+    --bot-mascot-shadow: drop-shadow(0 0.5px 0.5px rgba(8, 8, 18, 0.45)) drop-shadow(0 1px 2px rgba(8, 8, 18, 0.3));
     --bot-emoji-well-saturation: 85%;
     --bot-emoji-well-lightness: 92%;
     --bot-initial-saturation: 70%;
@@ -649,8 +643,7 @@
   --ring: rgba(16, 185, 129, 0.5);
 
   /* Bot avatar wells; mirrors the @media light block above. */
-  --bot-mascot-shadow: drop-shadow(0 1px 1.5px rgba(8, 8, 18, 0.28));
-  --bot-mascot-plain-shadow: drop-shadow(0 0.5px 0.5px rgba(8, 8, 18, 0.45)) drop-shadow(0 1px 2px rgba(8, 8, 18, 0.3));
+  --bot-mascot-shadow: drop-shadow(0 0.5px 0.5px rgba(8, 8, 18, 0.45)) drop-shadow(0 1px 2px rgba(8, 8, 18, 0.3));
   --bot-emoji-well-saturation: 85%;
   --bot-emoji-well-lightness: 92%;
   --bot-initial-saturation: 70%;
@@ -1215,21 +1208,20 @@ pre,
   background: hsl(var(--bot-hue) var(--bot-initial-saturation) var(--bot-initial-lightness));
   color: #ffffff;
 }
-.bot-avatar-mascot {
-  background: var(--bot-mascot-well);
-}
+/* The main Bot's mascot, alone or among other Bots: no well, straight on the surface,
+   in the same round box as every other avatar, so names line up and the selected
+   edge is the same circle. */
 .bot-avatar-mascot > img {
   filter: var(--bot-mascot-shadow);
 }
-/* A face that stands alone (a conversation, the tab bar's center): the mascot is drawn
-   straight on the surface behind it, without its well and hairline. In lists of Bots
-   the well stays, so every Bot is the same disc. */
-.bot-avatar-mascot.bot-avatar-plain {
-  background: transparent;
-  box-shadow: none;
+/* Among other Bots the mascot is drawn larger, and not clipped to its box, so it reads as
+   big as their discs; at this scale its outline stays inside the box, clear of the
+   selected edge drawn just outside it. */
+.bot-avatar-mascot.bot-avatar-in-list {
+  overflow: visible;
 }
-.bot-avatar-mascot.bot-avatar-plain > img {
-  filter: var(--bot-mascot-plain-shadow);
+.bot-avatar-mascot.bot-avatar-in-list > img {
+  scale: 1.28;
 }
 /* The one "selected Bot" look (the strip, the switch sheet): the avatar's own edge
    lights up mint, a fine 1.25px line, with the theme's mint halo doing the glowing.

@@ -37,7 +37,6 @@ const bot = (handle: string, name: string, builtin = false): Bot => ({
   role: `${name} role`,
   agent_name: handle,
   session_id: `ses_${handle}`,
-  position: builtin ? 0 : 1,
   builtin,
   hide_details: true,
 });
@@ -58,7 +57,7 @@ const state: BotsState = {
   botForHandle: (handle) => team.find((each) => each.handle === handle),
   displayName: (each) => each.display_name,
   afterWrite: async () => undefined,
-  moveBot: async () => true,
+  holdOrder: () => () => undefined,
   setHideDetails: async () => true,
   openProfile,
   profileRequest: null,

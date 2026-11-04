@@ -378,7 +378,7 @@ function BotCard({
   const role = botRole(bot, t('bots.mainRole'));
   return (
     <button type="button" aria-current={selected ? 'true' : undefined} onClick={onSelect} className={clsx(rowClass(selected), 'py-3')}>
-      <BotAvatar avatar={bot.avatar} name={name} size={40} />
+      <BotAvatar avatar={bot.avatar} name={name} size={40} inList />
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="flex items-center gap-1.5">
           <span className="truncate text-sm font-semibold text-foreground">{name}</span>

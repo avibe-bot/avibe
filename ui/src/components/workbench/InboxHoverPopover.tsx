@@ -143,7 +143,7 @@ export const InboxHoverPopover: React.FC<{
       const name = botName(bot);
       return (
         <button key={s.session_id} type="button" onClick={() => onItemClick(s)} className={clsx('flex gap-2.5', shell)}>
-          <BotAvatar avatar={bot.avatar} name={name} size={28} className="mt-0.5" />
+          <BotAvatar avatar={bot.avatar} name={name} size={28} inList className="mt-0.5" />
           <div className="flex min-w-0 flex-1 flex-col gap-1">
             <div className="flex items-center gap-1.5 text-[11px]">
               <span className="truncate font-bold text-foreground">{name}</span>

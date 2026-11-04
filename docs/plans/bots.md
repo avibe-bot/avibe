@@ -29,8 +29,8 @@ own. A Session has none of these; a Bot has all three.
 
 ### D1. A Bot is Agent metadata plus a reserved Session
 
-- No new table. Bot fields (handle, display name, avatar, position) live in
-  the Agent record's metadata. The Bot's role is the Agent's description (the
+- No new table. Bot fields (handle, display name, avatar, Hide details) live
+  in the Agent record's metadata. The Bot's role is the Agent's description (the
   Bots roster shows it); a richer persona goes in the Agent's system prompt.
 - One Agent is at most one Bot.
 - A Bot's Agent is internal to the Bot (owner decision, 2026-11-02): users and
@@ -183,29 +183,39 @@ Owner decisions 2026-11-01, from the mockups in this Session's Show Page
   添加伙伴, 设为伙伴, 移出伙伴. Technical concepts (Agents, Harness, Vaults)
   stay in English, so the wording itself separates a role from a colleague.
 - **Avatar strip.** Bots appear as a row of 40px avatars with their names
-  below, the main Bot first. The current Bot's own edge lights up mint with a
-  halo (the one shared selected look, `.bot-avatar-selected`, which the phone's
-  Bot switch sheet uses too; the halo is `--shadow-glow-selected-mint`, wider and
-  stronger in Light so it reads over white); unread shows as a cyan count; a running
-  Turn shows as a pulsing mint dot. With few Bots an "Add" slot (dashed circle)
+  below, the main Bot first, then by recent use (D13). The current Bot's own
+  edge lights up mint with a halo (the one shared selected look,
+  `.bot-avatar-selected`, which the phone's Bot switch sheet uses too; the halo
+  is `--shadow-glow-selected-mint`, wider and stronger in Light so it reads
+  over white); unread shows as a cyan count; a running Turn shows as a pulsing
+  mint dot. With few Bots an "Add" slot (dashed circle)
   follows the avatars; with more, the avatars scroll horizontally with a fading
   right edge and "Add" stays pinned at the right.
-- **Theme.** Emoji avatars keep one hue with a light and a dark well. The main
-  Bot's mascot sits on the mint member of that family (the emoji wells'
-  saturation and lightness at the picker's mint hue), with no ring, so it is one
-  more disc beside them in both themes (owner, 2026-11-04).
-- **A face alone or in a list (owner decision, 2026-11-03).** Where a Bot
-  appears among other Bots (the strip, its hover card, the Inbox, the `@` list,
-  the Agents page, the switch sheet), the main Bot's mascot keeps its well, so
-  every Bot is the same disc. Where its face stands alone (a conversation's
-  header, its replies and empty state, and the phone tab bar's center), the
-  mascot is drawn without its well (`plain`); in Light it keeps a
-  soft shadow of its own so it still reads on a white surface.
+- **Theme.** Emoji avatars keep one hue with a light and a dark well.
+- **The main Bot's mascot has no well (owner decision, 2026-11-04, superseding
+  2026-11-03).** Alone or among other Bots (the strip, its hover card, the
+  Inbox, the `@` list, the Agents page, the switch sheet), the mascot is drawn
+  straight on the surface, never on a colored disc. It takes the same round box
+  as every other avatar, so names line up and the selected edge is the same
+  circle; in Light it keeps a soft shadow of its own
+  (`--bot-mascot-shadow`) so its white reads on a white surface. Among other
+  Bots (`inList`: the strips, the hover card, the switch sheet, the Inbox, the
+  `@` list, the Agents page's cards, and the rows of faces on the home and in
+  the notification menu) it is drawn larger and unclipped, so it reads as big as
+  their discs while its outline stays inside the circle, clear of the selected
+  edge; standing alone (a conversation's header, its replies and empty state,
+  the phone tab bar's center, the Agents page's detail) it keeps its size.
+  Custom Bots' emoji discs are unchanged.
+- **The phone tab bar's center (owner decision, 2026-11-04).** At rest the main
+  Bot there is lit the way a selected Bot is (`.bot-avatar-selected`: the bright
+  fine mint edge and the theme's halo), whether or not it is running; its
+  running dot says it is working. The hold-to-talk phases keep their own looks.
 - **Hover card.** Hovering an avatar shows its full name, handle, role, and
   latest message or running step; clicking opens the conversation. This makes
   up for the strip having no message preview.
-- **Context menu.** Edit profile, drag to reorder, and remove from Bots (its
-  conversation and memory are kept). The main Bot cannot be removed.
+- **Context menu.** Edit profile, and remove from Bots (its conversation and
+  memory are kept). The main Bot cannot be removed. There is no manual order
+  (D13).
 - **Inbox.** The Inbox stays the one total of everything unread, Bot
   conversations included; the icon's count is that total. A Bot row shows the
   Bot's avatar and name with a small Bot tag; other Sessions keep their
@@ -421,6 +431,45 @@ Owner decision, 2026-11-03.
     when the server refuses because another add took the last place first,
     until the list is read again and says whether a place is free.
 
+### D13. Bots are ordered by recent use
+
+Owner decision, 2026-11-04, replacing manual drag reorder.
+
+- The main Bot is always first. Every other Bot follows by the time the user
+  last sent it a message, newest first; Bots never messaged come after, in
+  creation order (their Agent's).
+- "The user sent it a message" means a `user` message in the Bot's permanent
+  Session, from any device or entry: the Web, the phone, the desktop pet,
+  hold-to-talk, and an IM direct message once one can be bound (D6). Bot
+  replies, Harness inputs, other Bots' `--bot` messages, and Agent runs are not
+  `user` messages and do not count. A message still waiting for the Bot's Turn
+  (a definitive steer refusal, D4) counts once it reaches the conversation, at
+  the time it was sent.
+- The server owns the order. Nothing is stored for it: `GET /api/bots` reads
+  the newest `user` message of each Bot's Session in one statement, one index
+  lookup per Bot (`ix_messages_session_type_created_id`), and returns the Bots
+  in this order with `last_user_message_at` on each. Time ties break by the
+  time-sortable message id, as the transcript's order does. `vibe bot list`
+  prints the same order.
+- When a `user` message is accepted into a Bot's Session, the controller
+  publishes `bots.changed` for that Bot, so every open client reads the order
+  again. An IM binding (D6) inherits this, since its messages are accepted the
+  same way.
+- One order everywhere Bots are listed on the Web: the desktop strip, the
+  phone's Workbench strip, the switch sheet, the `@` list, the Agents page, and
+  the home's count of working Bots.
+- Nothing moves under the user's hand: while the pointer is on the strip, a
+  hover card or menu is open over it, or the switch sheet is open (and, with
+  hold-to-talk, while a hold is in progress), the list keeps the order it shows,
+  with every Bot's latest details, and moves when that ends. Each avatar slides
+  to its new place in about 0.2 s, or moves at once for reduced motion.
+- The system prompt's Bots table does not follow this order: it lists the main
+  Bot first, then by handle, because a system prompt must not change when the
+  user talks to a Bot (D11).
+- Bot records written before this keep their `position`; nothing reads or
+  writes it any more, and no migration removes it. `PATCH /api/bots/{handle}`
+  and `vibe bot update` no longer take a position.
+
 ## Prompt drafts
 
 English, per the repository rule. Placeholders in braces.
@@ -532,10 +581,10 @@ API invalidates immediately.
 
 | Route | Purpose |
 | --- | --- |
-| `GET /api/bots` | Bots in display order: handle, display name (empty means the localized default for the main Bot), avatar (`emoji` with hue, `image` with URL, or the main Bot's mascot), role, Agent name, Session id, position, built-in flag, Hide details; beside them, `limit` (`count` custom Bots of `max`, D12) |
+| `GET /api/bots` | Bots in display order (D13): handle, display name (empty means the localized default for the main Bot), avatar (`emoji` with hue, `image` with URL, or the main Bot's mascot), role, Agent name, Session id, built-in flag, Hide details, `last_user_message_at`; beside them, `limit` (`count` custom Bots of `max`, D12) |
 | `POST /api/bots` | Create: display name, handle (optional), role, avatar (optional), model (optional). Makes the Vibey Agent, the Bot, its directory, and its Session. Refused with `bot_limit_reached` once five custom Bots count (D12) |
 | `POST /api/bots/set` | Make an existing Vibey Agent a Bot: Agent name, display name, avatar. Refused the same way (D12) |
-| `PATCH /api/bots/{handle}` | Display name, emoji avatar (custom Bots only), position, Hide details (`hide_details`) |
+| `PATCH /api/bots/{handle}` | Display name, emoji avatar (custom Bots only), Hide details (`hide_details`) |
 | `DELETE /api/bots/{handle}` | Remove the Bot role (the main Bot refuses) |
 | `PUT /api/bots/{handle}/avatar` | Upload an image (custom Bots only); stored as `avatar.png` in the Bot's directory |
 | `GET /api/bots/{handle}/avatar` | Serve that image |

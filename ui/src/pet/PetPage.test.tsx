@@ -468,13 +468,13 @@ describe('PetPage Vibey conversation', () => {
     const { BotsContext } = await import('@/context/BotsContext');
     const mainBot = {
       handle: 'main', display_name: 'Vibey', avatar: { kind: 'mascot' as const }, role: '', agent_name: 'main',
-      session_id: 'ses_main', position: 0, builtin: true, hide_details: true,
+      session_id: 'ses_main', builtin: true, hide_details: true,
     };
     const bots = {
       enabled: true, bots: [mainBot], loaded: true, listed: true, mainBot, statusBySession: {},
       botForSession: (id: string | null | undefined) => (id === 'ses_main' ? mainBot : undefined),
       botForAgent: () => undefined, botForHandle: () => undefined, displayName: () => 'Vibey',
-      afterWrite: async () => undefined, moveBot: async () => false, setHideDetails: async () => false,
+      afterWrite: async () => undefined, holdOrder: () => () => undefined, setHideDetails: async () => false,
       openProfile: () => undefined, profileRequest: null, closeProfile: () => undefined,
     };
     tails[binding] = [message('u', binding, { author: 'user', type: 'user', text: 'hello' })];

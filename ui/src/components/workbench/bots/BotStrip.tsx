@@ -1,23 +1,11 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
-import {
-  DndContext,
-  KeyboardSensor,
-  MouseSensor,
-  TouchSensor,
-  closestCenter,
-  useSensor,
-  useSensors,
-  type Modifier,
-} from '@dnd-kit/core';
-import { SortableContext, horizontalListSortingStrategy, sortableKeyboardCoordinates, useSortable } from '@dnd-kit/sortable';
-import { CSS } from '@dnd-kit/utilities';
-import { GripVertical, MessageCircle, Pencil, Plus, UserMinus } from 'lucide-react';
+import { MessageCircle, Pencil, Plus, UserMinus } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useApi, type InboxSession } from '../../../context/ApiContext';
-import { useBots, type BotRuntimeStatus } from '../../../context/BotsContext';
+import { useBotOrderHold, useBots, type BotRuntimeStatus } from '../../../context/BotsContext';
 import { useUnsavedChangesActionGuard } from '../../../context/useUnsavedChangesActionGuard';
 import { botRole, botSessionPath, type Bot } from '@/lib/bots';
 import { formatRelativeTime } from '@/lib/relativeTime';
@@ -33,8 +21,8 @@ import { RemoveBotDialog } from './RemoveBotDialog';
 const SLOT_WIDTH = 50;
 const SLOT_GAP = 4;
 const STRIP_PADDING = 4;
-
-const horizontalOnly: Modifier = ({ transform }) => ({ ...transform, y: 0 });
+// How long an avatar takes to slide to its new place when the order changes.
+const REORDER_MS = 220;
 
 const unreadLabel = (count: number) => (count > 99 ? '99+' : String(count));
 
@@ -46,8 +34,39 @@ const STILL_PX = 1;
 const samePoint = (a: PointerPoint, b: PointerPoint) =>
   Math.abs(a.x - b.x) <= STILL_PX && Math.abs(a.y - b.y) <= STILL_PX;
 
+// Slides each avatar from its old place to its new one when the order changes
+// (docs/plans/bots.md D13), and moves it at once for a user who asks for reduced
+// motion. Slots are measured within the strip, so a scroll is not a move.
+function useSlideOnReorder(scroller: RefObject<HTMLDivElement | null>, order: string) {
+  const placed = useRef<{ order: string; lefts: Map<string, number> } | null>(null);
+  useLayoutEffect(() => {
+    const root = scroller.current;
+    if (!root) return;
+    const lefts = new Map<string, number>();
+    root.querySelectorAll<HTMLElement>('[data-bot-handle]').forEach((slot) => {
+      lefts.set(slot.dataset.botHandle ?? '', slot.offsetLeft);
+    });
+    const before = placed.current;
+    placed.current = { order, lefts };
+    if (!before || before.order === order) return;
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+    root.querySelectorAll<HTMLElement>('[data-bot-handle]').forEach((slot) => {
+      const from = before.lefts.get(slot.dataset.botHandle ?? '');
+      const to = lefts.get(slot.dataset.botHandle ?? '');
+      if (from === undefined || to === undefined || from === to || typeof slot.animate !== 'function') return;
+      slot.animate([{ transform: `translateX(${from - to}px)` }, { transform: 'none' }], {
+        duration: REORDER_MS,
+        easing: 'ease-out',
+      });
+    });
+  }, [scroller, order]);
+}
+
 // The Bots strip (docs/plans/bots.md D5): the Owner's standing members as a row
-// of 40px avatars in the Inbox's old place, the main Bot first. The open Bot has
+// of 40px avatars in the Inbox's old place, the main Bot first, then by when the
+// user last wrote to each (D13). A Bot does not move while the pointer is on the
+// strip or a card or menu is open over it; it slides there once they are gone.
+// The open Bot has
 // a mint ring, unread is a cyan count, a running Turn a pulsing mint dot. With
 // room to spare "Add" follows the avatars; once they overflow they scroll
 // sideways with a fading right edge and "Add" stays pinned at the right. With
@@ -62,7 +81,7 @@ export const BotStrip: React.FC<{
   placement?: 'sidebar' | 'page';
 }> = ({ unreadBySession, placement = 'sidebar' }) => {
   const { t } = useTranslation();
-  const { enabled, bots, atLimit, statusBySession, displayName, openProfile, moveBot } = useBots();
+  const { enabled, bots, atLimit, statusBySession, displayName, openProfile } = useBots();
   const navigate = useNavigate();
   const location = useLocation();
   // The Bot whose removal waits on the confirmation; the strip has one dialog for all its slots.
@@ -71,7 +90,10 @@ export const BotStrip: React.FC<{
   const [fade, setFade] = useState(false);
   const rowRef = useRef<HTMLDivElement | null>(null);
   const scrollerRef = useRef<HTMLDivElement | null>(null);
-  const [draggingHandle, setDraggingHandle] = useState<string | null>(null);
+  // The pointer on the strip holds the order (D13): nothing moves under it.
+  const [pointerInside, setPointerInside] = useState(false);
+  useBotOrderHold(pointerInside);
+  useSlideOnReorder(scrollerRef, bots.map((bot) => bot.handle).join(' '));
   // Scrolling takes the hover card away at once, and no card opens again until
   // the pointer itself moves onto an avatar: a scroll slides avatars under a
   // still pointer, and the enter the browser reports for that is not the user
@@ -124,31 +146,14 @@ export const BotStrip: React.FC<{
     updateFade();
   }, [updateFade, bots.length, inline, rowWidth]);
 
-  const sensors = useSensors(
-    useSensor(MouseSensor, { activationConstraint: { distance: 6 } }),
-    useSensor(TouchSensor, { activationConstraint: { delay: 300, tolerance: 8 } }),
-    useSensor(KeyboardSensor, {
-      coordinateGetter: sortableKeyboardCoordinates,
-      keyboardCodes: { start: ['Space'], cancel: ['Escape'], end: ['Space'] },
-    }),
-  );
-
   if (!enabled) return null;
 
-  const main = bots.filter((bot) => bot.builtin);
-  const others = bots.filter((bot) => !bot.builtin);
-  const ids = others.map((bot) => bot.handle);
-  const nameOf = (handle: string | number) => {
-    const bot = others.find((item) => item.handle === handle);
-    return bot ? displayName(bot) : '';
-  };
-
-  const slotProps = (bot: Bot) => ({
+  const slotProps = (bot: Bot, index: number) => ({
     bot,
+    index,
     name: displayName(bot),
     unread: unreadBySession[bot.session_id] ?? 0,
     status: statusBySession[bot.session_id],
-    suppressHover: draggingHandle !== null,
     scrollEpoch,
     admitsHover,
     onRemove: setRemoving,
@@ -174,9 +179,11 @@ export const BotStrip: React.FC<{
     <section
       aria-label={t('bots.sectionLabel')}
       className={clsx('flex shrink-0 flex-col', placement === 'sidebar' ? 'mb-2.5 gap-1' : 'gap-0')}
+      onPointerEnter={() => setPointerInside(true)}
       onPointerMove={notePointer}
       onPointerLeave={() => {
         scrollHold.current = null;
+        setPointerInside(false);
       }}
       onWheel={notePointer}
     >
@@ -201,37 +208,7 @@ export const BotStrip: React.FC<{
             !inline && fade && 'bot-strip-fade',
           )}
         >
-          {main.map((bot) => <BotSlot key={bot.handle} {...slotProps(bot)} />)}
-          <DndContext
-            sensors={sensors}
-            collisionDetection={closestCenter}
-            modifiers={[horizontalOnly]}
-            accessibility={{
-              screenReaderInstructions: { draggable: t('bots.reorderInstructions') },
-              announcements: {
-                onDragStart: ({ active }) => t('bots.reorderPickedUp', { name: nameOf(active.id) }),
-                onDragOver: ({ active, over }) => over
-                  ? t('bots.reorderPosition', { name: nameOf(active.id), position: ids.indexOf(String(over.id)) + 1, count: ids.length })
-                  : undefined,
-                onDragEnd: ({ active }) => t('bots.reorderDropped', { name: nameOf(active.id) }),
-                onDragCancel: () => t('bots.reorderCancelled'),
-              },
-            }}
-            onDragStart={({ active }) => setDraggingHandle(String(active.id))}
-            onDragCancel={() => setDraggingHandle(null)}
-            onDragEnd={({ active, over }) => {
-              setDraggingHandle(null);
-              const from = ids.indexOf(String(active.id));
-              const to = ids.indexOf(String(over?.id));
-              if (from >= 0 && to >= 0 && from !== to) void moveBot(String(active.id), to + 1);
-            }}
-          >
-            <SortableContext items={ids} strategy={horizontalListSortingStrategy}>
-              {others.map((bot) => (
-                <SortableBotSlot key={bot.handle} sortable={others.length > 1} {...slotProps(bot)} />
-              ))}
-            </SortableContext>
-          </DndContext>
+          {bots.map((bot, index) => <BotSlot key={bot.handle} {...slotProps(bot, index)} />)}
           {inline && addSlot}
         </div>
         {!inline && addSlot && <div className="shrink-0 pt-1.5">{addSlot}</div>}
@@ -263,10 +240,11 @@ const RUNNING_DOT = (
 
 type BotSlotProps = {
   bot: Bot;
+  /** Its place in the strip: the open Bot stays in view when its place changes. */
+  index: number;
   name: string;
   unread: number;
   status: BotRuntimeStatus | undefined;
-  suppressHover: boolean;
   /** Bumped when the strip starts to scroll: an open or pending card closes at once. */
   scrollEpoch: number;
   /** False for an enter that only a scroll caused, with the pointer still where it was. */
@@ -275,15 +253,7 @@ type BotSlotProps = {
   onRemove: (bot: Bot) => void;
 };
 
-type SlotDrag = Pick<ReturnType<typeof useSortable>, 'attributes' | 'listeners' | 'setNodeRef' | 'transform' | 'transition' | 'isDragging'>;
-
-/** A Bot other than the main one: draggable along the strip once there are two. */
-const SortableBotSlot: React.FC<BotSlotProps & { sortable: boolean }> = ({ sortable, ...props }) => {
-  const drag = useSortable({ id: props.bot.handle, disabled: !sortable });
-  return <BotSlot {...props} drag={sortable ? drag : undefined} />;
-};
-
-const BotSlot: React.FC<BotSlotProps & { drag?: SlotDrag }> = ({ bot, name, unread, status, suppressHover, scrollEpoch, admitsHover, onRemove, drag }) => {
+const BotSlot: React.FC<BotSlotProps> = ({ bot, index, name, unread, status, scrollEpoch, admitsHover, onRemove }) => {
   const { t } = useTranslation();
   const api = useApi();
   const navigate = useNavigate();
@@ -304,17 +274,11 @@ const BotSlot: React.FC<BotSlotProps & { drag?: SlotDrag }> = ({ bot, name, unre
   const [latest, setLatest] = useState<InboxSession | null | undefined>(undefined);
   const openTimer = useRef<number | null>(null);
   const closeTimer = useRef<number | null>(null);
-  const isDragging = drag?.isDragging ?? false;
   const slotRef = useRef<HTMLDivElement | null>(null);
-  const setDragNode = drag?.setNodeRef;
-  const setSlotNode = useCallback((node: HTMLDivElement | null) => {
-    slotRef.current = node;
-    setDragNode?.(node);
-  }, [setDragNode]);
-  // The open Bot stays in view on a strip that scrolls sideways.
+  // The open Bot stays in view on a strip that scrolls sideways, also when it moves.
   useEffect(() => {
     if (selected) slotRef.current?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
-  }, [selected]);
+  }, [selected, index]);
 
   const clearTimers = () => {
     if (openTimer.current !== null) window.clearTimeout(openTimer.current);
@@ -323,13 +287,9 @@ const BotSlot: React.FC<BotSlotProps & { drag?: SlotDrag }> = ({ bot, name, unre
     closeTimer.current = null;
   };
   useEffect(() => clearTimers, []);
-  // A drag anywhere on the strip takes the card away; its timers stop with it.
-  useEffect(() => {
-    if (suppressHover || isDragging) clearTimers();
-  }, [suppressHover, isDragging]);
 
   const queueOpen = (event: React.MouseEvent) => {
-    if (suppressHover || menuOpen || !admitsHover(event)) return;
+    if (menuOpen || !admitsHover(event)) return;
     if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
     closeTimer.current = null;
     if (hoverOpen || openTimer.current !== null) return;
@@ -376,7 +336,9 @@ const BotSlot: React.FC<BotSlotProps & { drag?: SlotDrag }> = ({ bot, name, unre
   };
 
   const label = unread > 0 ? t('bots.slotLabelUnread', { name, count: unread }) : name;
-  const showCard = hoverOpen && !menuOpen && !isDragging && !suppressHover;
+  const showCard = hoverOpen && !menuOpen;
+  // A card or menu open over the strip holds the order, also once the pointer is on it (D13).
+  useBotOrderHold(showCard || menuOpen);
   return (
     <Popover
       open={showCard || menuOpen}
@@ -389,17 +351,14 @@ const BotSlot: React.FC<BotSlotProps & { drag?: SlotDrag }> = ({ bot, name, unre
     >
       <PopoverAnchor asChild>
         <div
-          ref={setSlotNode}
+          ref={slotRef}
           data-bot-handle={bot.handle}
-          className={clsx('flex w-[50px] shrink-0 flex-col items-center gap-1', isDragging && 'z-10 opacity-80')}
-          style={drag ? { transform: CSS.Translate.toString(drag.transform), transition: drag.transition } : undefined}
+          className="flex w-[50px] shrink-0 flex-col items-center gap-1"
           onMouseEnter={queueOpen}
           onMouseLeave={queueClose}
         >
           <button
             type="button"
-            {...(drag?.attributes ?? {})}
-            {...(drag?.listeners ?? {})}
             onClick={open}
             onContextMenu={(event) => {
               event.preventDefault();
@@ -409,14 +368,11 @@ const BotSlot: React.FC<BotSlotProps & { drag?: SlotDrag }> = ({ bot, name, unre
             }}
             aria-label={label}
             aria-current={selected ? 'page' : undefined}
-            className={clsx(
-              'bot-avatar-hover relative rounded-full p-[2px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/60',
-              drag && 'touch-none',
-            )}
+            className="bot-avatar-hover relative rounded-full p-[2px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/60"
           >
             {/* The open Bot's own edge lights up (the shared selected look); a hovered
                 one shows a quiet edge in the same place. */}
-            <BotAvatar avatar={bot.avatar} name={name} size={40} selected={selected} className="transition-shadow" />
+            <BotAvatar avatar={bot.avatar} name={name} size={40} inList selected={selected} className="transition-shadow" />
             {unread > 0 && (
               <span className="absolute -right-1.5 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-cyan px-1 font-mono text-[9px] font-bold text-accent-foreground shadow-glow-xs-cyan">
                 {unreadLabel(unread)}
@@ -460,11 +416,6 @@ const BotSlot: React.FC<BotSlotProps & { drag?: SlotDrag }> = ({ bot, name, unre
           </button>
           {!bot.builtin && (
             <>
-              {/* Reordering is the drag itself; this row says how. */}
-              <div className="flex items-center gap-2.5 px-2.5 py-2 text-[13px] text-muted">
-                <GripVertical className="size-4" />
-                {t('bots.menu.dragToReorder')}
-              </div>
               <div className="my-1 h-px bg-border" />
               <button
                 type="button"
@@ -498,7 +449,7 @@ const BotSlot: React.FC<BotSlotProps & { drag?: SlotDrag }> = ({ bot, name, unre
             className="flex w-full flex-col gap-3 rounded-2xl p-3.5 text-left"
           >
             <span className="flex items-center gap-3">
-              <BotAvatar avatar={bot.avatar} name={name} size={44} />
+              <BotAvatar avatar={bot.avatar} name={name} size={44} inList />
               <span className="min-w-0 flex-1 leading-tight">
                 <span className="block truncate text-[14px] font-bold text-foreground">{name}</span>
                 <span className="mt-0.5 block font-mono text-[11px] text-muted">{t('bots.handle', { handle: bot.handle })}</span>

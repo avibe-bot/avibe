@@ -50,7 +50,6 @@ class AgentPromptInfo:
     #: Set when the Agent is a Bot: the Bots table lists it, and the Agents table leaves it out.
     bot_handle: str = ""
     bot_display_name: str = ""
-    bot_position: int = 0
     bot_builtin: bool = False
 
 
@@ -127,7 +126,6 @@ def _agent_bot_fields(agent: Any) -> dict[str, Any]:
         return {
             "bot_handle": agent.bot_handle,
             "bot_display_name": agent.bot_display_name,
-            "bot_position": agent.bot_position,
             "bot_builtin": agent.bot_builtin,
         }
     if isinstance(agent, dict):
@@ -143,14 +141,9 @@ def _agent_bot_fields(agent: Any) -> dict[str, Any]:
             bot, builtin = None, False
     if not isinstance(bot, dict) or not str(bot.get("handle") or "").strip():
         return {}
-    try:
-        position = int(bot.get("position") or 0)
-    except (TypeError, ValueError):
-        position = 0
     return {
         "bot_handle": str(bot["handle"]).strip(),
         "bot_display_name": str(bot.get("display_name") or "").strip(),
-        "bot_position": position,
         "bot_builtin": builtin,
     }
 
@@ -200,10 +193,14 @@ def _bot_display_name(name: str, *, builtin: bool) -> str:
 
 
 def _format_bots_rows(rows: list[AgentPromptInfo]) -> str:
-    """The Bots table: the main Bot first, then by position, as the Web strip orders them."""
+    """The Bots table: the main Bot first, then by handle.
+
+    Not the Web's order by recent use (``bots.md`` D13): this table is in every system prompt, which must not change
+    when the user talks to a Bot (D11).
+    """
     bots = sorted(
         (row for row in rows if row.bot_handle),
-        key=lambda row: (0 if row.bot_builtin else 1, row.bot_position, row.bot_handle),
+        key=lambda row: (0 if row.bot_builtin else 1, row.bot_handle),
     )
     return "\n".join(
         f"| {_escape_markdown_table_cell(bot.bot_handle)} | "

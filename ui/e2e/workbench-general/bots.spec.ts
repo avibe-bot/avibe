@@ -28,14 +28,14 @@ const EXTRA: FixtureBot[] = [
   { handle: 'research', display_name: '市场研究员', avatar: { kind: 'emoji', emoji: '🔭', hue: 265 }, role: '竞品与市场动态' },
 ];
 
-const payload = (bot: FixtureBot, position: number) => ({
+// A list of these is in the server's order: the main Bot first, then by recent use (D13).
+const payload = (bot: FixtureBot) => ({
   handle: bot.handle,
   display_name: bot.display_name,
   avatar: bot.avatar,
   role: bot.role,
   agent_name: bot.handle,
   session_id: `ses_${bot.handle}`,
-  position,
   builtin: bot.handle === 'main',
 });
 
@@ -65,7 +65,7 @@ const INBOX = {
 async function serveBots(page: Page, lang: Lang, bots: FixtureBot[]) {
   const denied = await serveProduct(page, lang);
   await page.clock.setFixedTime(NOW);
-  await page.route('**/api/bots', (route) => route.fulfill({ json: { ok: true, bots: bots.map(payload) } }));
+  await page.route('**/api/bots', (route) => route.fulfill({ json: { ok: true, bots: bots.map((bot) => payload(bot)) } }));
   await page.route('**/api/agents**', (route) => route.fulfill({ json: { ok: true, agents: AGENTS, default_agent_name: 'vibey' } }));
   await page.route('**/api/inbox**', (route) => {
     const only = new URL(route.request().url()).searchParams.get('session');
@@ -560,14 +560,14 @@ for (const theme of ['light', 'dark'] as const) {
     }] } }));
     let hideDetails = true;
     const patches: unknown[] = [];
-    await page.route('**/api/bots', (route) => route.fulfill({ json: { ok: true, bots: [MAIN, CSO, PM].map((bot, index) => ({
-      ...payload(bot, index), ...(bot.handle === 'cso' ? { hide_details: hideDetails } : {}),
+    await page.route('**/api/bots', (route) => route.fulfill({ json: { ok: true, bots: [MAIN, CSO, PM].map((bot) => ({
+      ...payload(bot), ...(bot.handle === 'cso' ? { hide_details: hideDetails } : {}),
     })) } }));
     await page.route('**/api/bots/cso', (route) => {
       const body = route.request().postDataJSON() as { hide_details: boolean };
       patches.push(body);
       hideDetails = body.hide_details;
-      return route.fulfill({ json: { ok: true, bot: { ...payload(CSO, 1), hide_details: hideDetails } } });
+      return route.fulfill({ json: { ok: true, bot: { ...payload(CSO), hide_details: hideDetails } } });
     });
     await page.setViewportSize(DESKTOP);
     await open(page, `/chat/${sessionId}`, { lang: 'zh', theme });
@@ -618,7 +618,7 @@ test('adding a Bot sends the generated handle, its role, and the emoji avatar, t
     if (route.request().method() !== 'POST') return route.fallback();
     const body = route.request().postDataJSON() as { display_name: string; handle: string };
     created.push(body);
-    return route.fulfill({ status: 201, json: { ok: true, bot: payload({ handle: body.handle, display_name: body.display_name, avatar: null, role: '' }, 3) } });
+    return route.fulfill({ status: 201, json: { ok: true, bot: payload({ handle: body.handle, display_name: body.display_name, avatar: null, role: '' }) } });
   });
   await page.setViewportSize(DESKTOP);
   await open(page, '/', { lang: 'en' });
@@ -646,7 +646,7 @@ test('adding before the handle arrives waits for it and creates with it', async 
     if (route.request().method() !== 'POST') return route.fallback();
     const body = route.request().postDataJSON() as { display_name: string; handle: string };
     created.push(body);
-    return route.fulfill({ status: 201, json: { ok: true, bot: payload({ handle: body.handle, display_name: body.display_name, avatar: null, role: '' }, 3) } });
+    return route.fulfill({ status: 201, json: { ok: true, bot: payload({ handle: body.handle, display_name: body.display_name, avatar: null, role: '' }) } });
   });
   await page.setViewportSize(DESKTOP);
   await open(page, '/', { lang: 'en' });
@@ -665,7 +665,7 @@ test('closing the dialog while a create waits for its handle sends nothing', asy
   await page.route('**/api/bots', (route) => {
     if (route.request().method() !== 'POST') return route.fallback();
     created.push(route.request().postDataJSON());
-    return route.fulfill({ status: 201, json: { ok: true, bot: payload(CSO, 3) } });
+    return route.fulfill({ status: 201, json: { ok: true, bot: payload(CSO) } });
   });
   await page.setViewportSize(DESKTOP);
   await open(page, '/', { lang: 'en' });
@@ -812,29 +812,108 @@ test('only the Owner sees the Bots strip', async ({ page }) => {
   expect(denied.filter((request) => request.includes('/api/bots'))).toEqual([]);
 });
 
-test('dragging a Bot along the strip moves it, and the main Bot stays first', async ({ page }) => {
-  const { denied } = await serveBots(page, 'en', [MAIN, CSO, PM]);
-  const moves: unknown[] = [];
-  await page.route('**/api/bots/pm', async (route) => {
-    moves.push(route.request().postDataJSON());
-    // The server now holds the new order, and the refetch reads it back.
-    await page.route('**/api/bots', (list) => list.fulfill({ json: { ok: true, bots: [payload(MAIN, 0), payload(PM, 1), payload(CSO, 2)] } }));
-    return route.fulfill({ json: { ok: true, bot: payload(PM, 1) } });
+// docs/plans/bots.md D13: the server orders the Bots by when the user last wrote to
+// each, and says so with `bots.changed`. The strip follows, but never under the
+// user's hand: not while the pointer is on it, nor while a card or menu is open over
+// it. Then each avatar slides to its place, or moves at once for reduced motion.
+async function serveLiveOrder(page: Page) {
+  const server = { bots: [MAIN, CSO, PM] };
+  const { denied } = await serveBots(page, 'en', server.bots);
+  await page.addInitScript(() => {
+    const streams = new Set<EventTarget>();
+    class FixtureEvents extends EventTarget {
+      readyState = 1;
+      constructor() { super(); streams.add(this); }
+      close() { streams.delete(this); this.readyState = 2; }
+    }
+    Object.defineProperty(window, 'EventSource', { value: FixtureEvents });
+    (window as unknown as { __serverEvent: (type: string, data: object) => void }).__serverEvent = (type, data) => {
+      streams.forEach((stream) => stream.dispatchEvent(new MessageEvent(type, { data: JSON.stringify({ type, data }) })));
+    };
   });
+  await page.route('**/api/bots', (route) => route.fulfill({ json: { ok: true, bots: server.bots.map((bot) => payload(bot)) } }));
+  // The user writes to a Bot, from this device or another: the server's order changes and it says so.
+  const writeTo = async (bot: FixtureBot) => {
+    server.bots = [MAIN, bot, ...server.bots.filter((each) => each !== MAIN && each !== bot)];
+    await page.evaluate(([handle]) => (window as unknown as { __serverEvent: (type: string, data: object) => void })
+      .__serverEvent('bots.changed', { handle }), [bot.handle] as const);
+  };
+  return { denied, writeTo };
+}
+
+const stripOrder = (page: Page) => sidebarOf(page).getByRole('region', { name: 'Bots' }).locator('[data-bot-handle]')
+  .evaluateAll((nodes) => nodes.map((node) => node.getAttribute('data-bot-handle')));
+
+for (const theme of ['light', 'dark'] as const) {
+  test(`a Bot the user writes to moves up the strip, but not under the user's hand (${theme})`, async ({ page }) => {
+    const { denied, writeTo } = await serveLiveOrder(page);
+    await page.setViewportSize(DESKTOP);
+    await open(page, '/', { lang: 'en', theme });
+    const sidebar = sidebarOf(page);
+    const strip = sidebar.getByRole('region', { name: 'Bots' });
+    await expect(strip.locator('[data-bot-handle]')).toHaveCount(3);
+    expect(await stripOrder(page)).toEqual(['main', 'cso', 'pm']);
+    await page.mouse.move(900, 600);
+    await sidebar.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-order-before-${theme}.png` });
+
+    // Unheld, the move is immediate and slides.
+    await writeTo(PM);
+    await expect.poll(() => stripOrder(page)).toEqual(['main', 'pm', 'cso']);
+    expect(await strip.evaluate((node) => node.getAnimations({ subtree: true }).length)).toBeGreaterThan(0);
+    await page.waitForTimeout(300);
+    await sidebar.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-order-after-${theme}.png` });
+
+    // The pointer on the strip holds the order until it leaves.
+    const pm = (await strip.locator('[data-bot-handle="pm"] button').boundingBox())!;
+    await page.mouse.move(pm.x + pm.width / 2, pm.y + pm.height + 10);
+    await writeTo(CSO);
+    await page.waitForTimeout(400);
+    expect(await stripOrder(page)).toEqual(['main', 'pm', 'cso']);
+    await page.mouse.move(900, 600);
+    await expect.poll(() => stripOrder(page)).toEqual(['main', 'cso', 'pm']);
+
+    // A menu open over the strip holds it too, with the pointer gone.
+    await strip.locator('[data-bot-handle="pm"] button').click({ button: 'right' });
+    await expect(page.getByRole('menu')).toBeVisible();
+    await page.mouse.move(900, 600);
+    await writeTo(PM);
+    await page.waitForTimeout(400);
+    expect(await stripOrder(page)).toEqual(['main', 'cso', 'pm']);
+    await page.keyboard.press('Escape');
+    await expect.poll(() => stripOrder(page)).toEqual(['main', 'pm', 'cso']);
+    expect(denied).toEqual([]);
+  });
+}
+
+for (const theme of ['light', 'dark'] as const) {
+  test(`on a phone the Workbench strip follows the same order (${theme})`, async ({ page }) => {
+    const { denied, writeTo } = await serveLiveOrder(page);
+    await page.setViewportSize(NARROW);
+    await open(page, '/projects', { lang: 'en', theme });
+    const strip = page.locator('main').getByRole('region', { name: 'Bots' });
+    const order = () => strip.locator('[data-bot-handle]').evaluateAll((nodes) => nodes.map((node) => node.getAttribute('data-bot-handle')));
+    await expect(strip.locator('[data-bot-handle]')).toHaveCount(3);
+    expect(await order()).toEqual(['main', 'cso', 'pm']);
+    await page.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-order-phone-before-${theme}.png`, clip: { x: 0, y: 0, width: 390, height: 260 } });
+    await writeTo(PM);
+    await expect.poll(order).toEqual(['main', 'pm', 'cso']);
+    await page.waitForTimeout(300);
+    await page.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-order-phone-after-${theme}.png`, clip: { x: 0, y: 0, width: 390, height: 260 } });
+    expect(denied).toEqual([]);
+  });
+}
+
+test('with reduced motion a Bot takes its new place without sliding', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  const { denied, writeTo } = await serveLiveOrder(page);
   await page.setViewportSize(DESKTOP);
   await open(page, '/', { lang: 'en' });
   const strip = sidebarOf(page).getByRole('region', { name: 'Bots' });
-  const from = (await strip.locator('[data-bot-handle="pm"] button').boundingBox())!;
-  const to = (await strip.locator('[data-bot-handle="cso"] button').boundingBox())!;
-  await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
-  await page.mouse.down();
-  await page.mouse.move(from.x + from.width / 2 - 10, from.y + from.height / 2, { steps: 4 });
-  await page.mouse.move(to.x + to.width / 2 - 8, to.y + to.height / 2, { steps: 8 });
-  await page.mouse.up();
-  await expect.poll(() => moves).toEqual([{ position: 1 }]);
   await expect(strip.locator('[data-bot-handle]')).toHaveCount(3);
-  expect(await strip.locator('[data-bot-handle]').evaluateAll((nodes) => nodes.map((node) => node.getAttribute('data-bot-handle'))))
-    .toEqual(['main', 'pm', 'cso']);
+  await page.mouse.move(900, 600);
+  await writeTo(PM);
+  await expect.poll(() => stripOrder(page)).toEqual(['main', 'pm', 'cso']);
+  expect(await strip.evaluate((node) => node.getAnimations({ subtree: true }).length)).toBe(0);
   expect(denied).toEqual([]);
 });
 
@@ -1031,7 +1110,7 @@ test('two open tabs follow a Bot removal and a switch change to the server\'s ba
       Object.defineProperty(navigator, 'clearAppBadge', { configurable: true, value: async () => { target.__appBadges.push(0); } });
     });
     await tab.route('**/api/bots', (route) => (route.request().method() === 'GET'
-      ? route.fulfill({ json: { ok: true, bots: server.bots.map(payload) } })
+      ? route.fulfill({ json: { ok: true, bots: server.bots.map((bot) => payload(bot)) } })
       : route.fallback()));
     await tab.route('**/api/inbox**', (route) => {
       const only = new URL(route.request().url()).searchParams.get('session');
@@ -1057,7 +1136,7 @@ test('two open tabs follow a Bot removal and a switch change to the server\'s ba
       // Removing the Bot hides its Session everywhere the server answers.
       server.bots = server.bots.filter((bot) => bot.handle !== 'cso');
       server.sessions = server.sessions.filter((row) => row.session_id !== 'ses_cso');
-      await route.fulfill({ json: { ok: true, bot: payload(CSO, 1) } });
+      await route.fulfill({ json: { ok: true, bot: payload(CSO) } });
       await publish('bots.changed', { handle: 'cso' });
     });
     await tab.setViewportSize(DESKTOP);

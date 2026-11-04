@@ -2122,7 +2122,7 @@ MAIN_BOT_USER_FIELDS = ("display_name", "avatar", "hide_details")
 
 
 def _main_bot_record() -> dict[str, Any]:
-    return {"handle": MAIN_BOT_HANDLE, "display_name": "", "avatar": None, "position": 0}
+    return {"handle": MAIN_BOT_HANDLE, "display_name": "", "avatar": None}
 
 
 def _agent_metadata(agent: Any) -> Mapping[str, Any]:

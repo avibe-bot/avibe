@@ -306,17 +306,82 @@ def test_only_enabled_vibey_agents_can_be_set(service):
     assert twice.value.code == "bot_agent_is_bot"
 
 
-def test_positions_order_bots_after_the_main_bot(service):
-    from core.bots import BotError
+def _message(session_id: str, at: str, *, author: str = "user", platform: str = "avibe", **fields) -> None:
+    """A message in ``session_id`` written at ``at``, as its writer stores it."""
+    from sqlalchemy import update
 
-    for name in ("Alpha", "Beta", "Gamma"):
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.models import messages
+
+    with create_sqlite_engine().begin() as conn:
+        row = messages_service.append(
+            conn, scope_id=None, session_id=session_id, platform=platform, author=author, text="hi", **fields
+        )
+        conn.execute(update(messages).where(messages.c.id == row["id"]).values(created_at=at))
+
+
+def test_bots_are_ordered_by_when_the_user_last_wrote_to_them(service):
+    """D13: the main Bot first, then by the user's newest message, newest first, then never messaged, as created."""
+    for name in ("Alpha", "Beta", "Gamma", "Delta", "Epsilon"):
         service.create_bot(display_name=name)
-    service.update_bot("gamma", position=1)
-    assert [bot.handle for bot in service.list_bots()] == ["main", "gamma", "alpha", "beta"]
-    service.remove_bot("alpha")
-    assert [bot.position for bot in service.list_bots()] == [0, 1, 2]
-    with pytest.raises(BotError):
-        service.update_bot("main", position=2)
+    service.ensure_main_bot()
+    assert [bot.handle for bot in service.list_bots()] == ["main", "alpha", "beta", "gamma", "delta", "epsilon"]
+
+    _message("ses_delta", "2026-11-04T01:00:00.000000Z", platform="lark")  # any platform the user writes from
+    _message("ses_gamma", "2026-11-04T02:00:00.000000Z")
+    _message("ses_alpha", "2026-11-04T03:00:00.000000Z")
+    _message("ses_main", "2026-11-04T04:00:00.000000Z")
+    # Only the user's own messages count: not the Bot's replies, nor what a Harness, another Bot, or a run sent it,
+    # even written in the user's shape.
+    _message("ses_beta", "2026-11-04T05:00:00.000000Z", author="agent", message_type="result")
+    _message("ses_beta", "2026-11-04T05:00:01.000000Z", author="harness", message_type="harness", source="harness")
+    _message("ses_beta", "2026-11-04T05:00:02.000000Z", source="harness")
+    # The same user writes to Gamma again later on: its newest message decides.
+    _message("ses_gamma", "2026-11-04T06:00:00.000000Z")
+
+    listed = service.list_bots()
+    assert [bot.handle for bot in listed] == ["main", "gamma", "alpha", "delta", "beta", "epsilon"]
+    assert {bot.handle: bot.last_user_message_at for bot in listed} == {
+        "main": "2026-11-04T04:00:00.000000Z",
+        "gamma": "2026-11-04T06:00:00.000000Z",
+        "alpha": "2026-11-04T03:00:00.000000Z",
+        "delta": "2026-11-04T01:00:00.000000Z",
+        "beta": None,
+        "epsilon": None,
+    }
+    assert service.get_bot("alpha").to_payload()["last_user_message_at"] == "2026-11-04T03:00:00.000000Z"
+
+    # A removed Bot set again comes back where its conversation left it.
+    service.remove_bot("gamma")
+    assert service.set_bot("gamma", display_name="Gamma").last_user_message_at == "2026-11-04T06:00:00.000000Z"
+    assert [bot.handle for bot in service.list_bots()][:2] == ["main", "gamma"]
+
+
+def test_the_recent_use_order_reads_one_index_entry_per_bot(service):
+    """D13 keeps the list's cost flat: the newest user message is an index lookup, not a scan of the history."""
+    from sqlalchemy import event
+
+    service.create_bot(display_name="Alpha")
+    for minute in range(30):
+        _message("ses_alpha", f"2026-11-04T01:{minute:02d}:00.000000Z")
+    captured: list[tuple[str, object]] = []
+
+    def capture(_conn, _cursor, statement, parameters, _context, _executemany):
+        if "FROM messages" in statement:
+            captured.append((statement, parameters))
+
+    event.listen(service.engine, "before_cursor_execute", capture)
+    try:
+        service.list_bots()
+    finally:
+        event.remove(service.engine, "before_cursor_execute", capture)
+
+    assert len(captured) == 1
+    with service.engine.connect() as conn:
+        plan = [str(row[-1]) for row in conn.exec_driver_sql("EXPLAIN QUERY PLAN " + captured[0][0], captured[0][1])]
+    assert any("SEARCH messages USING COVERING INDEX ix_messages_session_type_created_id" in step for step in plan), plan
+    assert not any("SCAN" in step or "TEMP B-TREE" in step for step in plan), plan
 
 
 def test_hide_details_is_on_until_turned_off_for_that_bot_alone(service):
@@ -370,7 +435,7 @@ def test_five_current_custom_bots_fill_the_places(service):
     # A system Bot (the reserved handles, D2) as a built-in one would be recorded: it takes no place.
     memory = service.store.create(name="memory", backend="vibey")
     with service.engine.begin() as conn:
-        service._write_record(conn, memory, {"handle": "memory", "display_name": "", "position": 0})
+        service._write_record(conn, memory, {"handle": "memory", "display_name": ""})
     assert "memory" in [bot.handle for bot in service.list_bots()]
     assert _limit(service) == {"count": 0, "max": 5}
 
@@ -409,8 +474,8 @@ def test_an_install_over_the_limit_keeps_every_bot_and_only_waits_to_add(service
     assert _limit(service) == {"count": 7, "max": 5}
     assert len(service.list_bots()) == 8
     # Every Bot stays usable as it was.
-    service.update_bot("eta", position=1, display_name="Eta Prime", hide_details=False)
-    assert [bot.handle for bot in service.list_bots()][:2] == ["main", "eta"]
+    eta = service.update_bot("eta", display_name="Eta Prime", hide_details=False)
+    assert (eta.display_name, eta.hide_details) == ("Eta Prime", False)
     _refused_for_room(lambda: service.create_bot(display_name="Theta"))
     for handle in ("alpha", "beta"):
         service.remove_bot(handle)

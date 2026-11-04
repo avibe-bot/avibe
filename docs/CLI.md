@@ -800,11 +800,12 @@ vibe bot show main
 vibe bot create --name 'Chief Security Officer' --handle cso --role 'Reviews security risks.'
 vibe bot set reviewer --name 'Reviewer'
 vibe bot update cso --name 'Security' --emoji '🛡️' --hue 210
-vibe bot update cso --position 1
 vibe bot remove cso
 ```
 
-- `list` prints every Bot, the main Bot first. `show` prints one by handle.
+- `list` prints every Bot in the order the Web shows them: the main Bot first,
+  then the Bots you last sent a message, newest first, then those never
+  messaged, in creation order. `show` prints one by handle.
 - `create` makes a Vibey Agent named after the handle and makes it a Bot.
   `--handle` is lowercase ASCII, 2 to 24 letters, digits, or hyphens, starting
   with a letter and not ending with a hyphen; `main`, `memory`, and `ops` are
@@ -816,9 +817,9 @@ vibe bot remove cso
   name; an Agent that was a Bot before gets its old handle, Session, and
   directory back. The built-in `vibey` Agent and the default Agent cannot be
   set; a Bot's Agent cannot become the default Agent either.
-- `update` changes the display name, the emoji avatar (`--emoji` with `--hue`,
-  or `--clear-avatar`), or the position among the other Bots. Change the role,
-  model, or instructions with `vibe agent update`.
+- `update` changes the display name or the emoji avatar (`--emoji` with
+  `--hue`, or `--clear-avatar`). Change the role, model, or instructions with
+  `vibe agent update`.
 - `remove` drops the Bot role and keeps the Agent, the Session, and the
   directory. The main Bot cannot be removed.
 
@@ -836,8 +837,9 @@ commits it before each Turn of the Bot's Session (changes by others) and after
 it (the Bot's own changes), and never squashes its history.
 
 Each command prints a `bot` object with `handle`, `display_name`, `avatar`,
-`role`, `agent_name`, `session_id`, `position`, `builtin`, and `directory`
-(`list` prints `bots`; `remove` prints `bot_removed`).
+`role`, `agent_name`, `session_id`, `builtin`, `hide_details`,
+`last_user_message_at` (when you last sent the Bot a message, or `null`), and
+`directory` (`list` prints `bots`; `remove` prints `bot_removed`).
 
 ### `vibe watch`
 

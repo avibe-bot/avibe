@@ -24,6 +24,7 @@ from storage import message_deliveries, messages_service
 from storage.db import create_sqlite_engine
 from tests.test_internal_server import _build_controller_double, _reserve_submission
 from tests.test_ui_session_stream import _make_session, isolated_state  # noqa: F401
+from core.bots import BotService
 from tests.ui_server_test_helpers import csrf_headers
 
 ORIGIN = "http://127.0.0.1:15131"
@@ -107,6 +108,26 @@ def _send(session_id: str, text: str, *, steer_outcome: SteerOutcome | None = No
     return response, steers, started
 
 
+@pytest.fixture()
+def bot_events():
+    """``bots.changed`` as the controller bus publishes it, in order."""
+    from core.inbox_events import BOTS_CHANGED_EVENT, bus
+
+    events: list[dict] = []
+    sub_id = bus.subscribe_callback(
+        lambda event_type, data: events.append(dict(data)) if event_type == BOTS_CHANGED_EVENT else None
+    )
+    yield events
+    bus.unsubscribe(sub_id)
+
+
+def _bot_order() -> list[str]:
+    from core.bots import BotService
+
+    with BotService() as service:
+        return [bot.handle for bot in service.list_bots()]
+
+
 def _delivery(engine, delivery_id: str) -> dict:
     with engine.connect() as conn:
         return message_deliveries.get_delivery(conn, delivery_id)
@@ -118,11 +139,15 @@ def _transcript(engine, session_id: str) -> list[str]:
     return [row["text"] for row in rows]
 
 
-def test_an_idle_bot_starts_on_the_users_message_at_once(isolated_state):
+def test_an_idle_bot_starts_on_the_users_message_at_once(isolated_state, bot_events):
     """MESSAGE-DELIVERY-339: an idle Bot starts a Turn on the user's message at once."""
 
     session_id = _make_bot()
+    with BotService() as service:
+        service.create_bot(display_name="Product", handle="pm")
+    assert _bot_order() == ["main", "cso", "pm"]
     engine = create_sqlite_engine()
+    bot_events.clear()
 
     response, steers, started = _send(session_id, "帮我看看这周的依赖告警")
 
@@ -133,6 +158,14 @@ def test_an_idle_bot_starts_on_the_users_message_at_once(isolated_state):
     delivery = _delivery(engine, body.get("delivery_id") or body["id"])
     assert delivery["priority"] == "p1"
     assert "帮我看看这周的依赖告警" in _transcript(engine, session_id)
+    # bots.md D13: the Bot the user just wrote to moves up, and every open list is told to read the order again.
+    assert _bot_order() == ["main", "cso", "pm"]
+    assert bot_events == [{"handle": "cso"}]
+
+    bot_events.clear()
+    _send("ses_pm", "排一下下周的需求")
+    assert _bot_order() == ["main", "pm", "cso"]
+    assert bot_events == [{"handle": "pm"}]
 
 
 @pytest.mark.parametrize(
@@ -140,12 +173,13 @@ def test_an_idle_bot_starts_on_the_users_message_at_once(isolated_state):
     [(SteerOutcome.ACCEPTED, "accepted", True), (SteerOutcome.REFUSED, "queued", False)],
     ids=["steered", "refused"],
 )
-def test_a_working_bot_takes_the_users_message_into_its_turn(isolated_state, outcome, state, delivered):
+def test_a_working_bot_takes_the_users_message_into_its_turn(isolated_state, bot_events, outcome, state, delivered):
     """MESSAGE-DELIVERY-339: a working Bot has it steered in; a definitive refusal leaves it undelivered."""
 
     session_id = _make_bot()
     engine = create_sqlite_engine()
     turn_id = _start_active_turn(engine, session_id, backend="vibey")
+    bot_events.clear()
 
     response, steers, started = _send(session_id, "先停一下，换成看 avault", steer_outcome=outcome)
 
@@ -160,8 +194,10 @@ def test_a_working_bot_takes_the_users_message_into_its_turn(isolated_state, out
     if delivered:
         assert response.status_code == 201
         assert "先停一下，换成看 avault" in _transcript(engine, session_id)
+        assert bot_events == [{"handle": "cso"}]
     else:
-        # Refused: it waits for the Turn to end, and nothing claims it arrived.
+        # Refused: it waits for the Turn to end, and nothing claims it arrived, the Bot's place included (D13).
+        assert bot_events == []
         assert (response.status_code, body["queued"]) == (202, True)
         assert delivery["priority"] == "p3"
         assert "先停一下，换成看 avault" not in _transcript(engine, session_id)

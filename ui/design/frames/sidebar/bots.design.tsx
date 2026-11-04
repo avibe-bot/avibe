@@ -1,6 +1,8 @@
 // Bots in the sidebar (docs/plans/bots.md D5): the shipped strip, hover card, and Inbox icon,
-// drawn by the shipped sidebar from fixtures. With every place for a custom Bot taken (D12) the
-// strip has no Add: its room goes to the Bots, and the Agents page says why adding waits.
+// drawn by the shipped sidebar from fixtures. The main Bot's mascot has no well, here as
+// anywhere (owner, 2026-11-04); the other Bots follow it in the server's order (D13). With
+// every place for a custom Bot taken (D12) the strip has no Add: its room goes to the Bots,
+// and the Agents page says why adding waits.
 import { WorkbenchSidebar } from '@/components/workbench/WorkbenchSidebar';
 
 import { frames } from '../../frame';
@@ -54,6 +56,16 @@ const designFrames = frames([
     height: 360,
     status: 'shipped',
     fixtures: { ...team, bots: fullTeam },
+    render: sidebar,
+  },
+  {
+    name: 'main-open',
+    title: '伙伴 · 在歪比的对话里：歪比没有底色，选中的细圈画在同样大小的圆周上',
+    width: 248,
+    height: 360,
+    status: 'shipped',
+    fixtures: team,
+    route: '/chat/ses_main',
     render: sidebar,
   },
   {

@@ -1,4 +1,4 @@
-import { createContext, useContext } from 'react';
+import { createContext, useContext, useEffect } from 'react';
 
 import type { Bot, BotLimit } from '../lib/bots';
 
@@ -15,7 +15,9 @@ export type BotRuntimeStatus = 'idle' | 'running' | 'failed';
 export interface BotsState {
   /** Bots are the instance Owner's: everyone else gets an empty, inert state. */
   enabled: boolean;
-  /** In display order: the main Bot first. */
+  /** In display order, the server's (docs/plans/bots.md D13): the main Bot first, then by
+   *  when the user last wrote to each. While a list is held (`holdOrder`) it keeps the order
+   *  it had, with every Bot's latest details. */
   bots: Bot[];
   /** The first read has answered (successfully or not). */
   loaded: boolean;
@@ -40,9 +42,11 @@ export interface BotsState {
    *  publishes `bots.changed` once it commits, and that event is the one refetch;
    *  only while the event stream is not live does this read the list itself. */
   afterWrite: () => Promise<void>;
-  /** Move a Bot (not the main one) to `position` (1-based among the others),
-   *  optimistically; resolves false when the server refused it. */
-  moveBot: (handle: string, position: number) => Promise<boolean>;
+  /** Keep the current order until the returned release is called, for a list under the
+   *  user's hand: a Bot does not move while the pointer is on the strip, a card or menu is
+   *  open over it, or a pick is in progress. Holds nest; the order moves once the last is
+   *  released. */
+  holdOrder: () => () => void;
   /** Turn a Bot's "Hide details" on or off, optimistically; resolves false when
    *  the server refused it. Every device follows through `bots.changed`. */
   setHideDetails: (handle: string, hideDetails: boolean) => Promise<boolean>;
@@ -69,7 +73,7 @@ const EMPTY: BotsState = {
   botForHandle: () => undefined,
   displayName: (bot) => bot.display_name || bot.handle,
   afterWrite: async () => undefined,
-  moveBot: async () => false,
+  holdOrder: () => () => undefined,
   setHideDetails: async () => false,
   openProfile: () => undefined,
   profileRequest: null,
@@ -82,3 +86,9 @@ export const BotsContext = createContext<BotsState>(EMPTY);
  *  the empty state, so a surface that merely decorates with Bot identity — a
  *  mention chip, an Inbox row — degrades to its plain rendering. */
 export const useBots = (): BotsState => useContext(BotsContext);
+
+/** Keep the Bots' order while `active` is true (`BotsState.holdOrder`). */
+export function useBotOrderHold(active: boolean): void {
+  const { holdOrder } = useBots();
+  useEffect(() => (active ? holdOrder() : undefined), [active, holdOrder]);
+}

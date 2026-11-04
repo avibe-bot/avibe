@@ -4816,16 +4816,10 @@
       "title": "Remove {{name}} from Bots?",
       "body": "Its conversation and memory are kept, and it returns to the Agents list. Make it a Bot again to pick up where you left off."
     },
-    "reorderInstructions": "Press Space to pick up a Bot, use arrow keys to move it, Space to drop, or Escape to cancel.",
-    "reorderPickedUp": "Picked up {{name}}.",
-    "reorderPosition": "{{name}}, position {{position}} of {{count}}.",
-    "reorderDropped": "Dropped {{name}}.",
-    "reorderCancelled": "Reordering cancelled.",
     "notForDefaultAgent": "It is the default Agent. Make another Agent the default first, then set it as a Bot.",
     "menu": {
       "label": "{{name}} actions",
       "editProfile": "Edit profile",
-      "dragToReorder": "Drag to reorder",
       "remove": "Remove from Bots"
     },
     "dialog": {

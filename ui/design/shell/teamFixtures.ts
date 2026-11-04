@@ -82,8 +82,8 @@ export const csoTranscript = [
 /** Every place for a custom Bot taken (docs/plans/bots.md D12): the main Bot and five more. */
 export const fullTeam = [
   ...team,
-  bot('finance', '财务助理', '账单、报销与预算', null, 4),
-  bot('designer', 'Designer', 'Interface and visual design', { kind: 'emoji', emoji: '🎨', hue: 330 }, 5),
+  bot('finance', '财务助理', '账单、报销与预算', null),
+  bot('designer', 'Designer', 'Interface and visual design', { kind: 'emoji', emoji: '🎨', hue: 330 }),
 ];
 
 export const fullFixtures: WorkbenchFixtures = {
@@ -96,8 +96,8 @@ export const fullFixtures: WorkbenchFixtures = {
 /** An install from before the limit, over it: it keeps every Bot, and the strip scrolls sideways. */
 export const manyBots = [
   ...fullTeam,
-  bot('writer', '文案', '发布说明与对外文案', { kind: 'emoji', emoji: '✍️', hue: 150 }, 6),
-  bot('legal', '法务', '合同与开源许可审查', { kind: 'emoji', emoji: '⚖️', hue: 12 }, 7),
+  bot('writer', '文案', '发布说明与对外文案', { kind: 'emoji', emoji: '✍️', hue: 150 }),
+  bot('legal', '法务', '合同与开源许可审查', { kind: 'emoji', emoji: '⚖️', hue: 12 }),
 ];
 
 export const manyFixtures: WorkbenchFixtures = {

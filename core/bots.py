@@ -17,6 +17,9 @@ update can neither set nor clear (``core.vibe_agents.STORE_OWNED_METADATA_KEYS``
   that is ignored, not cleared, so no migration rewrites the record.
 - **At most five custom Bots** (D12): ``create`` and ``set`` are refused while ``MAX_CUSTOM_BOTS`` current Bots count
   (``counts_toward_limit``). An install already over it keeps every Bot; only adding waits until one is removed.
+- **Order by recent use** (D13): the main Bot first, then the Bots the user last sent a message, newest first, then
+  those never messaged, in creation order. Nothing is stored for it: the newest ``user`` message in each Bot's
+  Session decides, one indexed lookup per Bot. Records written before this keep a ``position`` nothing reads.
 """
 
 from __future__ import annotations
@@ -26,7 +29,7 @@ import json
 import logging
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
@@ -48,7 +51,8 @@ from core.vibe_agents import (
 from core.inbox_events import publish_bots_changed
 from storage.agent_session_rows import BOT_SESSION_ID_PREFIX, is_bot_session_id, reserve_write_lock
 from storage.agent_session_rows import hidden_bot_session_ids as stored_hidden_bot_session_ids
-from storage.models import agent_sessions, agents
+from storage.messages_service import canonical_message_timestamp
+from storage.models import agent_sessions, agents, messages
 from vibe.authorization import AuthorizationContext, require_instance_role
 
 logger = logging.getLogger(__name__)
@@ -235,9 +239,10 @@ class Bot:
     handle: str
     display_name: str
     avatar: Optional[dict[str, Any]]
-    position: int
     agent: VibeAgent
     hide_details: bool = True
+    #: When the user last sent this Bot a message (D13), read only for the display order (``list_bots_by_recent_use``).
+    last_user_message_at: Optional[str] = None
 
     @property
     def builtin(self) -> bool:
@@ -281,9 +286,9 @@ class Bot:
             "role": self.role,
             "agent_name": self.agent.name,
             "session_id": self.session_id,
-            "position": self.position,
             "builtin": self.builtin,
             "hide_details": self.hide_details,
+            "last_user_message_at": self.last_user_message_at,
         }
 
 
@@ -294,24 +299,19 @@ def bot_from_agent(agent: VibeAgent) -> Optional[Bot]:
     record = agent_bot_record(agent)
     if record is None:
         return None
-    try:
-        position = int(record.get("position") or 0)
-    except (TypeError, ValueError):
-        position = 0
     avatar = record.get("avatar")
     return Bot(
         handle=str(record["handle"]),
         display_name=str(record.get("display_name") or ""),
         avatar=dict(avatar) if isinstance(avatar, dict) else None,
-        position=0 if is_main_bot_agent(agent) else position,
         agent=agent,
         # Records written before the switch existed have no value: details stay hidden.
         hide_details=record.get("hide_details") is not False,
     )
 
 
-def _display_order(bot: Bot) -> tuple[int, int, str]:
-    return (0 if bot.builtin else 1, bot.position, bot.handle)
+def _creation_order(bot: Bot) -> tuple[int, str, str]:
+    return (0 if bot.builtin else 1, canonical_message_timestamp(bot.agent.created_at) or "", bot.handle)
 
 
 def _agent_rows(conn: Connection) -> list[VibeAgent]:
@@ -324,9 +324,56 @@ def _agent_rows(conn: Connection) -> list[VibeAgent]:
 
 
 def list_bots_in(conn: Connection) -> list[Bot]:
-    """Every Bot in display order: the main Bot first, then by position."""
+    """Every Bot, the main Bot first, then in creation order: its Agent's."""
     bots = [bot for bot in map(bot_from_agent, _agent_rows(conn)) if bot is not None]
-    return sorted(bots, key=_display_order)
+    return sorted(bots, key=_creation_order)
+
+
+def last_user_messages(conn: Connection, session_ids: Iterable[str]) -> dict[str, tuple[str, str]]:
+    """The newest message the user sent into each of these Sessions, as ``(created_at, id)`` by Session id; a Session
+    without one is absent.
+
+    Only the user's own messages are ``user``-typed, whatever device or platform sent them: Harness inputs, other Bots'
+    ``--bot`` messages, and Agent runs are ``harness``, and replies are the Agent's. Message times may be whole seconds,
+    so the time-sortable id breaks ties, as the transcript's order does. One statement, and one index lookup per
+    Session (``ix_messages_session_type_created_id``): its cost does not grow with history.
+    """
+    ids = sorted({str(session_id) for session_id in session_ids if session_id})
+    if not ids:
+        return {}
+    newest = (
+        select(messages.c.id)
+        .where(messages.c.session_id == agent_sessions.c.id, messages.c.type == "user")
+        .order_by(messages.c.created_at.desc(), messages.c.id.desc())
+        .limit(1)
+        .correlate(agent_sessions)
+        .scalar_subquery()
+    )
+    rows = conn.execute(
+        select(agent_sessions.c.id, messages.c.created_at, messages.c.id)
+        .select_from(agent_sessions.join(messages, messages.c.id == newest))
+        .where(agent_sessions.c.id.in_(ids))
+    ).all()
+    return {session_id: (str(at), str(message_id)) for session_id, at, message_id in rows}
+
+
+def list_bots_by_recent_use(conn: Connection) -> list[Bot]:
+    """Every Bot in display order (D13): the main Bot first; then the Bots the user last sent a message, newest first;
+    then those never messaged, in creation order. Every Web surface that lists Bots shows this order."""
+    bots = list_bots_in(conn)
+    latest = last_user_messages(conn, (bot.session_id for bot in bots))
+    bots = [
+        replace(bot, last_user_message_at=latest[bot.session_id][0]) if bot.session_id in latest else bot
+        for bot in bots
+    ]
+    main = [bot for bot in bots if bot.builtin]
+    messaged = sorted(
+        (bot for bot in bots if not bot.builtin and bot.session_id in latest),
+        key=lambda bot: latest[bot.session_id],
+        reverse=True,
+    )
+    never = [bot for bot in bots if not bot.builtin and bot.session_id not in latest]
+    return main + messaged + never
 
 
 def counts_toward_limit(bot: Bot) -> bool:
@@ -476,7 +523,7 @@ class BotService:
     def list_bots(self, *, authorization_context: Any = None) -> list[Bot]:
         require_instance_role(authorization_context, "owner")
         with self.engine.connect() as conn:
-            return list_bots_in(conn)
+            return list_bots_by_recent_use(conn)
 
     def get_bot(self, handle: str, *, authorization_context: Any = None) -> Bot:
         require_instance_role(authorization_context, "owner")
@@ -486,7 +533,7 @@ class BotService:
     @staticmethod
     def _require_bot(conn: Connection, handle: str) -> Bot:
         handle = str(handle or "").strip()
-        for bot in list_bots_in(conn):
+        for bot in list_bots_by_recent_use(conn):
             if bot.handle == handle:
                 return bot
         raise _not_found(handle)
@@ -579,7 +626,6 @@ class BotService:
                             "handle": candidate,
                             "display_name": name,
                             "avatar": avatar_record,
-                            "position": self._next_position(),
                         }
                     },
                     user_context=context,
@@ -650,16 +696,14 @@ class BotService:
                 "handle": handle,
                 "display_name": name,
                 "avatar": avatar_record if avatar is not None else previous.get("avatar"),
-                "position": self._next_position(conn),
             }
             # Setting a removed Bot again reconnects its conversation as the user left it.
             if isinstance(previous.get("hide_details"), bool):
                 record["hide_details"] = previous["hide_details"]
             self._write_record(conn, agent, record)
-            agent = self._reload(conn, agent.id)
             self._sync_session_title(conn, bot_session_id(handle), name)
-        bot = bot_from_agent(agent)
-        assert bot is not None
+            # A Bot set again reconnects its conversation, and with it when the user last wrote there.
+            bot = self._require_bot(conn, handle)
         self.ensure_home(bot, authorization_context=context)
         publish_bots_changed(bot.handle)
         return bot
@@ -670,11 +714,10 @@ class BotService:
         *,
         display_name: Any = ...,
         avatar: Any = ...,
-        position: Any = ...,
         hide_details: Any = ...,
         authorization_context: Any = None,
     ) -> Bot:
-        """Change a Bot's display name, emoji avatar, position among the other Bots, or Hide details (D5 ``PATCH``)."""
+        """Change a Bot's display name, emoji avatar, or Hide details (D5 ``PATCH``). Its place follows use (D13)."""
         context = require_instance_role(authorization_context, "owner")
         with self.engine.begin() as conn:
             reserve_write_lock(conn)
@@ -692,12 +735,6 @@ class BotService:
                     raise BotError("bot_hide_details_invalid", "Hide details is on or off")
                 record["hide_details"] = hide_details
             self._write_record(conn, bot.agent, record)
-            if position is not ...:
-                if bot.builtin:
-                    raise BotError("bot_main_position", "The main Bot is always first")
-                if isinstance(position, bool) or not isinstance(position, int) or position < 1:
-                    raise BotError("bot_position_invalid", "A Bot's position is a whole number from 1")
-                self._move(conn, bot.agent.id, position)
             if display_name is not ...:
                 self._sync_session_title(conn, bot.session_id, record["display_name"])
             updated = self._require_bot(conn, handle)
@@ -716,7 +753,6 @@ class BotService:
             record = dict(agent_bot_record(bot.agent) or {})
             record["removed_at"] = _now()
             self._write_record(conn, bot.agent, record)
-            self._compact_positions(conn)
         publish_bots_changed(handle)
         return bot
 
@@ -752,10 +788,6 @@ class BotService:
     # internals
 
     @staticmethod
-    def _reload(conn: Connection, agent_id: str) -> VibeAgent:
-        return VibeAgentStore._from_row(conn.execute(select(agents).where(agents.c.id == agent_id)).mappings().one())
-
-    @staticmethod
     def _write_record(conn: Connection, agent: VibeAgent, record: dict[str, Any]) -> None:
         current = conn.execute(select(agents.c.metadata_json).where(agents.c.id == agent.id)).scalar_one()
         try:
@@ -770,30 +802,6 @@ class BotService:
             .where(agents.c.id == agent.id)
             .values(metadata_json=json.dumps(metadata, ensure_ascii=False, separators=(",", ":")), updated_at=_now())
         )
-
-    def _next_position(self, conn: Optional[Connection] = None) -> int:
-        if conn is None:
-            with self.engine.connect() as fresh:
-                return self._next_position(fresh)
-        others = [bot.position for bot in list_bots_in(conn) if not bot.builtin]
-        return max(others, default=0) + 1
-
-    def _move(self, conn: Connection, agent_id: str, position: int) -> None:
-        ordered = [bot for bot in list_bots_in(conn) if not bot.builtin]
-        moving = next(bot for bot in ordered if bot.agent.id == agent_id)
-        ordered.remove(moving)
-        ordered.insert(min(position, len(ordered) + 1) - 1, moving)
-        self._renumber(conn, ordered)
-
-    def _compact_positions(self, conn: Connection) -> None:
-        self._renumber(conn, [bot for bot in list_bots_in(conn) if not bot.builtin])
-
-    def _renumber(self, conn: Connection, ordered: Iterable[Bot]) -> None:
-        for index, bot in enumerate(ordered, start=1):
-            if bot.position != index:
-                record = dict(agent_bot_record(self._reload(conn, bot.agent.id)) or {})
-                record["position"] = index
-                self._write_record(conn, bot.agent, record)
 
     @staticmethod
     def _sync_session_title(conn: Connection, session_id: str, display_name: str) -> None:

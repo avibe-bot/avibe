@@ -645,11 +645,11 @@ vibe bot show main
 vibe bot create --name 'Chief Security Officer' --handle cso --role 'Reviews security risks.'
 vibe bot set reviewer --name 'Reviewer'
 vibe bot update cso --name 'Security' --emoji '🛡️' --hue 210
-vibe bot update cso --position 1
 vibe bot remove cso
 ```
 
-- `list` 列出所有伙伴，主伙伴在最前；`show` 按代号显示一个伙伴。
+- `list` 按 Web 上的顺序列出所有伙伴：主伙伴在最前，然后是你最近发过消息的伙伴，越近越靠前，
+  从没发过消息的按创建顺序排在最后；`show` 按代号显示一个伙伴。
 - `create` 新建一个以代号（handle）命名的 Vibey Agent，并把它设为伙伴。`--handle` 是小写
   ASCII，2 到 24 个字母、数字或连字符，以字母开头、不以连字符结尾；`main`、`memory`、`ops` 已保留。
   不传 `--handle` 时，代号由名字生成：ASCII 名字会被规范化，其他名字会被转写，
@@ -657,8 +657,8 @@ vibe bot remove cso
 - `set` 把一个已启用的现有 Vibey Agent 设为伙伴。它的代号就是 Agent 名称；
   以前当过伙伴的 Agent 会拿回原来的代号、Session 和目录。内置的 `vibey` Agent
   和默认 Agent 不能设为伙伴；伙伴的 Agent 也不能设为默认 Agent。
-- `update` 修改显示名称、emoji 头像（`--emoji` 配合 `--hue`，或 `--clear-avatar`），
-  或在其他伙伴中的位置。角色、模型或指令用 `vibe agent update` 修改。
+- `update` 修改显示名称或 emoji 头像（`--emoji` 配合 `--hue`，或 `--clear-avatar`）。
+  角色、模型或指令用 `vibe agent update` 修改。
 - `remove` 移出伙伴，保留 Agent、Session 和目录。主伙伴不能移出。
 
 除主伙伴外，最多 5 位伙伴。已有 5 位时，`create` 和 `set` 会以 `bot_limit_reached`
@@ -671,8 +671,9 @@ vibe bot remove cso
 Turn 之前（他人的修改）和之后（伙伴自己的修改）自动提交，从不压缩历史。
 
 每个命令输出一个 `bot` 对象，包含 `handle`、`display_name`、`avatar`、`role`、
-`agent_name`、`session_id`、`position`、`builtin` 和 `directory`（`list` 输出
-`bots`，`remove` 输出 `bot_removed`）。
+`agent_name`、`session_id`、`builtin`、`hide_details`、`last_user_message_at`（你最近
+一次给它发消息的时间，没有则为 `null`）和 `directory`（`list` 输出 `bots`，`remove`
+输出 `bot_removed`）。
 
 ### `vibe watch`
 

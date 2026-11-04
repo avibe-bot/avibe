@@ -68,7 +68,7 @@ const BOTS = {
   ok: true,
   bots: [{
     handle: 'main', display_name: '', avatar: { kind: 'mascot' }, role: "The user's main Bot and first point of contact.",
-    agent_name: 'main', session_id: 'ses_main', position: 0, builtin: true,
+    agent_name: 'main', session_id: 'ses_main', builtin: true,
   }],
 };
 

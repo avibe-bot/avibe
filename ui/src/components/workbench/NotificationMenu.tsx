@@ -72,7 +72,7 @@ export function NotificationMenu({ onNavigate }: { onNavigate?: () => void }) {
             icon={(
               <span className="flex shrink-0 -space-x-1.5">
                 {bots.slice(0, 3).map((bot) => (
-                  <BotAvatar key={bot.handle} avatar={bot.avatar} name={displayName(bot)} size={18} className="ring-2 ring-surface-2" />
+                  <BotAvatar key={bot.handle} avatar={bot.avatar} name={displayName(bot)} size={18} inList className="ring-2 ring-surface-2" />
                 ))}
               </span>
             )}

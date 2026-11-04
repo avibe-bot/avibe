@@ -6267,6 +6267,14 @@ class SessionTurnManager:
             )
             if inbox_row is not None:
                 bus.publish("inbox.session.updated", inbox_row)
+            if row.get("type") == "user":
+                from core.bots import bot_handle_for_session_id
+                from core.inbox_events import BOTS_CHANGED_EVENT
+
+                handle = bot_handle_for_session_id(row.get("session_id"))
+                if handle:
+                    # The user's own message moves its Bot up every list of Bots (bots.md D13).
+                    bus.publish(BOTS_CHANGED_EVENT, {"handle": handle})
         except Exception:
             logger.exception("accepted Delivery publish failed for %s", delivery_id)
 
