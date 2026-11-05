@@ -342,8 +342,11 @@ beforeEach(() => {
   });
 });
 
+const originalScrollIntoView = Element.prototype.scrollIntoView;
+
 afterEach(async () => {
   cleanup();
+  Element.prototype.scrollIntoView = originalScrollIntoView;
   vi.unstubAllGlobals();
   window.localStorage.clear();
   setLocalSnapshotPrincipal(null);
@@ -513,8 +516,10 @@ describe('ChatPage optimistic send', () => {
   });
 
   it('moves a historical window to the live tail at once, and lands the sent row under it', async () => {
-    // The jump into the window looks its row up by id (jsdom has no CSS.escape).
+    // The jump into the window looks its row up by id and centers it; jsdom has
+    // neither CSS.escape nor scrollIntoView.
     vi.stubGlobal('CSS', { escape: (value: string) => value });
+    Element.prototype.scrollIntoView = vi.fn();
     const around = deferred<unknown>();
     const tail = deferred<unknown>();
     mocks.api.listSessionMessages.mockImplementation((_id: string, options: { aroundId?: string; tail?: boolean }) => (
