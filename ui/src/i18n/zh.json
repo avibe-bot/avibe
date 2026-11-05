@@ -983,7 +983,8 @@
       "persistenceDenied": "未授予：空间不足时浏览器可能清除",
       "persistenceNotRequested": "仅在已安装的 App 中申请",
       "persistenceUnknown": "未知",
-      "stored": "本机已存储"
+      "stored": "本机已存储",
+      "storedNone": "暂无"
     },
     "logsTitle": "实时日志",
     "logsSubtitle": "按来源、级别和搜索条件查看运行日志流。",

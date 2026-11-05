@@ -168,6 +168,44 @@ describe('budget', () => {
   });
 });
 
+describe('the hot set under the budget', () => {
+  it('drops an evicted conversation from the memory of the document that evicted it', async () => {
+    // No quota stub: the budget is 1 GB, so no timed budget check evicts anything here.
+    const tab = await openDocument();
+    const chrome = { agents: [], default_agent_name: null, can_chat: true, chat_message_font_size: null };
+    await tab.tail('ses_main', [row(1, 'ses_main'), row(2, 'ses_main')], session('ses_main', 1));
+    await tab.store.recordLocalStorePage(
+      tab.store.beginLocalStoreRead('ses_old'),
+      { kind: 'tail' },
+      { messages: [row(1, 'ses_old'), row(2, 'ses_old')], next_before_id: null },
+      session('ses_old', 2),
+      chrome,
+    );
+    await tab.tail('ses_new', [row(1, 'ses_new'), row(2, 'ses_new')], session('ses_new', 3));
+    // Another document holds the oldest conversation in memory; its next write
+    // runs out of space, which evicts the least recently active session at once.
+    const next = await openDocument();
+    expect((await next.store.readLocalStoreChat('ses_old'))?.messages).toHaveLength(2);
+    expect(next.store.knownLocalStoreChat('ses_old')).not.toBeNull();
+    const put = IDBObjectStore.prototype.put;
+    let failed = false;
+    const full = vi.spyOn(IDBObjectStore.prototype, 'put').mockImplementation(function (this: IDBObjectStore, ...args) {
+      if (this.name === 'messages' && !failed) {
+        failed = true;
+        throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+      }
+      return put.apply(this, args);
+    });
+    try {
+      await next.tail('ses_check', [row(1, 'ses_check', 'check')], session('ses_check', 59));
+    } finally {
+      full.mockRestore();
+    }
+    expect(await next.held('ses_old'), await onDisk()).toBe(0);
+    expect(next.store.knownLocalStoreChat('ses_old')).toBeNull();
+  });
+});
+
 describe('persistence', () => {
   it('asks for persistent storage silently in an installed app and not in a browser tab', async () => {
     const persist = vi.fn(async () => true);

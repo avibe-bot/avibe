@@ -5,13 +5,12 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { formatBytes } from '@/lib/filePreview';
 import { readLocalStoreDiagnostics, type LocalStoreDiagnostics as Diagnostics } from '@/lib/localStore';
 import { isStandalonePwa } from '@/lib/platform';
+import { offlineHistoryPersistence, type OfflineHistoryPersistence } from './offlineHistoryPersistence';
 
 // Settings · Diagnostics: the local message store's line (docs/plans/
 // local-sync-store.md, Phase 1): whether the browser keeps it under storage
 // pressure, and how much it holds. The Home Screen app asks for persistent
 // storage silently; a plain browser tab is not asked (decision D5).
-
-export type OfflineHistoryPersistence = 'granted' | 'denied' | 'not-requested' | 'unknown';
 
 const PERSISTENCE_KEY = {
   granted: 'settings.offlineHistory.persistenceGranted',
@@ -19,12 +18,6 @@ const PERSISTENCE_KEY = {
   'not-requested': 'settings.offlineHistory.persistenceNotRequested',
   unknown: 'settings.offlineHistory.persistenceUnknown',
 } as const satisfies Record<OfflineHistoryPersistence, string>;
-
-export function offlineHistoryPersistence(persisted: boolean | null, standalone: boolean): OfflineHistoryPersistence {
-  if (persisted === true) return 'granted';
-  if (persisted === false) return 'denied';
-  return standalone ? 'unknown' : 'not-requested';
-}
 
 export const LocalStoreDiagnosticsView: React.FC<{ persistence: OfflineHistoryPersistence; bytes: number }> = ({
   persistence,
@@ -44,7 +37,7 @@ export const LocalStoreDiagnosticsView: React.FC<{ persistence: OfflineHistoryPe
         </div>
         <div className="flex items-baseline justify-between gap-4">
           <span className="text-muted">{t('settings.offlineHistory.stored')}</span>
-          <span className="font-mono">{formatBytes(bytes) || '0 B'}</span>
+          <span className="font-mono">{formatBytes(bytes) || t('settings.offlineHistory.storedNone')}</span>
         </div>
       </CardContent>
     </Card>

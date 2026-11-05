@@ -1,208 +1,149 @@
+// @vitest-environment jsdom
 import 'fake-indexeddb/auto';
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { WorkbenchMessage, WorkbenchSession } from '../context/ApiContext';
+import { knownChatSnapshot, readChatSnapshot } from './chatSnapshots';
+import { clearLocalSnapshots, setLocalSnapshotPrincipal } from './localSnapshots';
 import {
-  beginChatSnapshotRequest,
-  chatSnapshotOwnerForAnswer,
-  chatSnapshotWindow,
-  forgetChatSnapshot,
-  forgetChatSnapshotOnActivity,
-  readChatSnapshot,
-  writeChatSnapshot,
-  type ChatSnapshot,
-} from './chatSnapshots';
-import { clearLocalSnapshots, setLocalSnapshotPrincipal, writeLocalSnapshot } from './localSnapshots';
+  beginLocalStoreRead,
+  forgetLocalStoreSession,
+  noteLocalStoreStreamGap,
+  noteLocalStoreStreamState,
+  recordLocalStorePage,
+  type LocalStoreChatChrome,
+} from './localStore';
 
-// A stored conversation is shown before the server answers, so what it may hold
-// and when it may be written decide what a reader can see that the server did
-// not just say: rows of a send still pending, a corrupt or misfiled record, or a
-// write that lands after the store was voided. (Another build's record is
-// covered in chatSnapshots.build.test.ts.)
+// The conversation a chat paints before its bootstrap answers, from the local
+// message store (docs/plans/local-sync-store.md section 4.3): only once a
+// bootstrap of it was stored, only its newest rows with no gap among them, and
+// held in memory (the hot set) for the reader whose it is, so a chat opened
+// again paints in its first frame.
 
-// The plan's caps (docs/plans/web-ui-local-cache.md section 4.1).
-const WINDOW_ROWS = 50;
-const KEPT_CONVERSATIONS = 40;
-const EVICTED_AT_ONCE = 8;
-
-// Ownership as production takes it: when the request starts, settled when the
-// answer lands.
-const ownerFor = (sessionId: string) => chatSnapshotOwnerForAnswer(beginChatSnapshotRequest(sessionId))!;
-
-const row = (id: string, extra: Partial<WorkbenchMessage> = {}): WorkbenchMessage => ({
-  id,
-  scope_id: null,
-  session_id: 'ses_a',
-  platform: 'avibe',
-  author: 'agent',
+const at = (n: number) => `2026-11-05T00:${String(Math.floor(n / 60)).padStart(2, '0')}:${String(n % 60).padStart(2, '0')}.000000Z`;
+const row = (n: number, sessionId = 'ses_a'): WorkbenchMessage => ({
+  id: `msg_${sessionId}_${String(n).padStart(3, '0')}`,
+  session_id: sessionId,
   type: 'result',
-  source: 'agent',
-  author_id: null,
-  author_name: null,
-  native_message_id: null,
-  parent_native_message_id: null,
-  text: `text of ${id}`,
+  author: 'agent',
+  text: `row ${n}`,
   content: {},
   metadata: {},
-  created_at: '2026-11-01T08:00:00Z',
-  updated_at: '2026-11-01T08:00:00Z',
-  delivered_at: '2026-11-01T08:00:00Z',
-  read_at: null,
-  ...extra,
+  created_at: at(n),
+  updated_at: at(n),
 } as WorkbenchMessage);
-
-const snapshot = (sessionId: string, rows: WorkbenchMessage[] = [row('m1')]): ChatSnapshot => ({
-  session: { id: sessionId, title: `title of ${sessionId}` } as WorkbenchSession,
-  messages: rows,
-  next_before_id: null,
-  agents: [],
-  default_agent_name: null,
+const rows = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => row(from + i));
+const session = { id: 'ses_a', title: 'A', status: 'active', last_active_at: at(1) } as WorkbenchSession;
+const chrome: LocalStoreChatChrome = {
+  agents: [{ id: 'agent-vibey', name: 'vibey' }, { broken: true }],
+  default_agent_name: 'vibey',
   can_chat: true,
-  chat_message_font_size: null,
-});
-
-const write = async (sessionId: string, value = snapshot(sessionId), added = false) => {
-  await writeChatSnapshot(ownerFor(sessionId), value, { added });
+  chat_message_font_size: 16,
 };
+const ids = (messages: WorkbenchMessage[] | undefined) => (messages ?? []).map((message) => Number(message.id.slice(-3)));
 
-const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+// A bootstrap answer as the API layer stores it.
+const bootstrap = (messages: WorkbenchMessage[], nextBeforeId: string | null = null, observedAt = Date.now()) =>
+  recordLocalStorePage(beginLocalStoreRead('ses_a', observedAt), { kind: 'tail' }, { messages, next_before_id: nextBeforeId }, session, chrome);
+// A page read without the bootstrap's chrome (a tail read, a recovery read).
+const page = (messages: WorkbenchMessage[], nextBeforeId: string | null = null) =>
+  recordLocalStorePage(beginLocalStoreRead('ses_a'), { kind: 'tail' }, { messages, next_before_id: nextBeforeId }, session);
+const SETTLE = { timeout: 10_000, interval: 25 };
+const eventually = (assertion: () => void | Promise<void>) => vi.waitFor(assertion, SETTLE);
+
+beforeEach(() => {
+  setLocalSnapshotPrincipal('remote:alice');
+  noteLocalStoreStreamState(true);
+});
 
 afterEach(async () => {
-  vi.restoreAllMocks();
   setLocalSnapshotPrincipal(null);
   await clearLocalSnapshots();
+  window.localStorage.clear();
 });
 
-describe('conversation snapshots', () => {
-  it('reads back what was written for the session it names', async () => {
-    setLocalSnapshotPrincipal('local');
-    await write('ses_a');
-    const stored = await readChatSnapshot('ses_a');
-    expect(stored?.session.title).toBe('title of ses_a');
-    expect(stored?.messages.map((m) => m.id)).toEqual(['m1']);
-  });
-
-  it('ignores a corrupt record and one filed under another session', async () => {
-    setLocalSnapshotPrincipal('local');
-    await write('ses_b');
-    expect(await readChatSnapshot('ses_b')).not.toBeNull();
-    await writeLocalSnapshot('chat:ses_b', 1, { messages: 'not rows' });
-    expect(await readChatSnapshot('ses_b')).toBeNull();
-
-    await write('ses_c', snapshot('ses_other'));
-    expect(await readChatSnapshot('ses_c')).toBeNull();
-  });
-
-  it('keeps only the newest stored rows, and the cursor that pages older than them', () => {
-    const rows = Array.from({ length: WINDOW_ROWS + 10 }, (_, i) => row(`m${i}`));
-    const window = chatSnapshotWindow(rows, 'cursor-older-than-m0');
-    expect(window.messages).toHaveLength(WINDOW_ROWS);
-    expect(window.messages[0].id).toBe('m10');
-    expect(window.next_before_id).toBe('m10');
-
-    const short = chatSnapshotWindow(rows.slice(0, 3), 'cursor-older-than-m0');
-    expect(short.next_before_id).toBe('cursor-older-than-m0');
-  });
-
-  it('stores no row of a send still pending: not a Delivery and not the claimed-input projection', () => {
-    const window = chatSnapshotWindow([
-      row('durable'),
-      row('delivery', { type: 'user', state: 'claimed', delivery_id: 'delivery' } as Partial<WorkbenchMessage>),
-      row('projection', { type: 'user', projection: 'claimed_delivery' }),
-    ], null);
-    expect(window.messages.map((m) => m.id)).toEqual(['durable']);
-  });
-
-  it('refuses a write whose owner was voided: a forget, a clear, or another reader', async () => {
-    setLocalSnapshotPrincipal('local');
-    await write('ses_a');
-
-    const forgottenOwner = ownerFor('ses_a');
-    await forgetChatSnapshot('ses_a');
-    await writeChatSnapshot(forgottenOwner, snapshot('ses_a'));
+describe('the conversation a chat paints', () => {
+  it('is there once a bootstrap of it was stored, with what the bootstrap said around it', async () => {
+    await page(rows(1, 3));
     expect(await readChatSnapshot('ses_a')).toBeNull();
 
-    const clearedOwner = ownerFor('ses_a');
+    await bootstrap(rows(1, 3));
+    const snapshot = await readChatSnapshot('ses_a');
+    expect(snapshot?.session.title).toBe('A');
+    expect(ids(snapshot?.messages)).toEqual([1, 2, 3]);
+    expect(snapshot?.next_before_id).toBeNull();
+    // An Agent the page could not render is left out.
+    expect(snapshot?.agents.map((agent) => agent.name)).toEqual(['vibey']);
+    expect([snapshot?.default_agent_name, snapshot?.can_chat, snapshot?.chat_message_font_size]).toEqual(['vibey', true, 16]);
+  });
+
+  it('keeps the newest rows a bootstrap returns, and the cursor the server would give for the older ones', async () => {
+    await bootstrap(rows(1, 60));
+    const whole = await readChatSnapshot('ses_a');
+    expect(ids(whole?.messages)).toEqual(rows(11, 60).map((_, i) => 11 + i));
+    expect(whole?.next_before_id).toBe(row(11).id);
+
+    // A tail that does not reach the start of history pages older than its first row.
     await clearLocalSnapshots();
-    await writeChatSnapshot(clearedOwner, snapshot('ses_a'));
-    expect(await readChatSnapshot('ses_a')).toBeNull();
-
-    const aliceOwner = ownerFor('ses_a');
-    setLocalSnapshotPrincipal('remote:bob');
-    await writeChatSnapshot(aliceOwner, snapshot('ses_a'));
-    await settle();
-    expect(await readChatSnapshot('ses_a')).toBeNull();
-
-    // A fresh owner after all of that writes again.
-    await write('ses_a');
-    expect(await readChatSnapshot('ses_a')).not.toBeNull();
+    await bootstrap(rows(51, 60), row(51).id);
+    const tail = await readChatSnapshot('ses_a');
+    expect(ids(tail?.messages)).toEqual(rows(51, 60).map((_, i) => 51 + i));
+    expect(tail?.next_before_id).toBe(row(51).id);
   });
 
-  it('returns nothing from a read that a forget overtook', async () => {
-    setLocalSnapshotPrincipal('local');
-    await write('ses_a');
-    expect(await readChatSnapshot('ses_a')).not.toBeNull();
-
-    const overtaken = readChatSnapshot('ses_a');
-    void forgetChatSnapshot('ses_a');
-    expect(await overtaken).toBeNull();
+  it('is not painted across a gap the store cannot account for', async () => {
+    await bootstrap(rows(1, 5));
+    // The stream broke; a later tail does not reach back to row 5.
+    noteLocalStoreStreamGap();
+    await bootstrap(rows(9, 10), row(9).id);
+    expect(await readChatSnapshot('ses_a')).toBeNull();
   });
+});
 
-  it('gives an answer to the reader named after its request started, unless the store moved meanwhile', async () => {
-    // A cold start sends the bootstrap before the reader is named.
-    const coldStart = beginChatSnapshotRequest('ses_a');
-    expect(coldStart.principal).toBeNull();
-    setLocalSnapshotPrincipal('local');
-    expect(chatSnapshotOwnerForAnswer(coldStart)?.principal).toBe('local');
+describe('the hot set', () => {
+  it('holds a conversation once it is stored, and again at the next open of the store for the same reader', async () => {
+    await bootstrap(rows(1, 3));
+    await eventually(() => expect(ids(knownChatSnapshot('ses_a')?.messages)).toEqual([1, 2, 3]));
 
-    const beforeClear = beginChatSnapshotRequest('ses_a');
-    await clearLocalSnapshots();
-    expect(chatSnapshotOwnerForAnswer(beforeClear)).toBeNull();
-
-    const beforeForget = beginChatSnapshotRequest('ses_a');
-    await forgetChatSnapshot('ses_a');
-    expect(chatSnapshotOwnerForAnswer(beforeForget)).toBeNull();
-
-    const beforeSwitch = beginChatSnapshotRequest('ses_a');
-    setLocalSnapshotPrincipal('remote:bob');
-    expect(chatSnapshotOwnerForAnswer(beforeSwitch)).toBeNull();
-
-    // Nobody named at either end: nothing to store under.
+    // A later load of the page: the reader is named again, and the store refills memory.
     setLocalSnapshotPrincipal(null);
-    expect(chatSnapshotOwnerForAnswer(beginChatSnapshotRequest('ses_a'))).toBeNull();
+    expect(knownChatSnapshot('ses_a')).toBeNull();
+    setLocalSnapshotPrincipal('remote:alice');
+    await eventually(() => expect(ids(knownChatSnapshot('ses_a')?.messages)).toEqual([1, 2, 3]));
   });
 
-  it(`keeps at most ${KEPT_CONVERSATIONS} conversations, evicting the least recently written ${EVICTED_AT_ONCE} at a time`, async () => {
-    let now = 1_000;
-    vi.spyOn(Date, 'now').mockImplementation(() => now);
-    setLocalSnapshotPrincipal('local');
-    for (let i = 0; i < KEPT_CONVERSATIONS; i += 1) {
-      now += 10;
-      await write(`ses_${i}`, snapshot(`ses_${i}`), true);
-    }
-    expect(await readChatSnapshot('ses_0')).not.toBeNull();
-
-    now += 10;
-    await write(`ses_${KEPT_CONVERSATIONS}`, snapshot(`ses_${KEPT_CONVERSATIONS}`), true);
-    // One past the cap: the oldest go, down to the slack below it.
-    const firstKept = KEPT_CONVERSATIONS + 1 - (KEPT_CONVERSATIONS - EVICTED_AT_ONCE);
-    expect(await readChatSnapshot(`ses_${firstKept - 1}`)).toBeNull();
-    expect(await readChatSnapshot(`ses_${firstKept}`)).not.toBeNull();
-    expect(await readChatSnapshot(`ses_${KEPT_CONVERSATIONS}`)).not.toBeNull();
+  it('follows every write: a newer row is in memory as soon as it is stored', async () => {
+    await bootstrap(rows(1, 3));
+    await eventually(() => expect(ids(knownChatSnapshot('ses_a')?.messages)).toEqual([1, 2, 3]));
+    await page(rows(1, 4));
+    await eventually(() => expect(ids(knownChatSnapshot('ses_a')?.messages)).toEqual([1, 2, 3, 4]));
   });
 
-  it('deletes the conversation of a Session that leaves the Inbox, and only then', async () => {
-    setLocalSnapshotPrincipal('local');
-    for (const id of ['ses_archived', 'ses_hidden', 'ses_renamed']) await write(id);
+  it('LSYNC-019 is emptied at once when the store is cleared, and LSYNC-008 when another reader is named', async () => {
+    await bootstrap(rows(1, 3));
+    await eventually(() => expect(knownChatSnapshot('ses_a')).not.toBeNull());
+    const clearing = clearLocalSnapshots();
+    expect(knownChatSnapshot('ses_a')).toBeNull();
+    await clearing;
 
-    forgetChatSnapshotOnActivity({ session_id: 'ses_archived', event: 'archived' });
-    forgetChatSnapshotOnActivity({ session_id: 'ses_hidden', event: 'updated', visibility: 'background' });
-    forgetChatSnapshotOnActivity({ session_id: 'ses_renamed', event: 'updated' });
-    await settle();
+    await bootstrap(rows(1, 3));
+    await eventually(() => expect(knownChatSnapshot('ses_a')).not.toBeNull());
+    setLocalSnapshotPrincipal('remote:bob');
+    expect(knownChatSnapshot('ses_a')).toBeNull();
+  });
 
-    expect(await readChatSnapshot('ses_archived')).toBeNull();
-    expect(await readChatSnapshot('ses_hidden')).toBeNull();
-    expect(await readChatSnapshot('ses_renamed')).not.toBeNull();
+  it('LSYNC-020 drops a forgotten conversation at once, and a read already out does not put it back', async () => {
+    await bootstrap(rows(1, 3));
+    await eventually(() => expect(knownChatSnapshot('ses_a')).not.toBeNull());
+    const reading = readChatSnapshot('ses_a');
+    // Let the read reach IndexedDB first, so it reads the conversation before the
+    // forget removes it (requests only complete on a later task).
+    for (let tick = 0; tick < 20; tick += 1) await Promise.resolve();
+    const forgetting = forgetLocalStoreSession('ses_a');
+    expect(knownChatSnapshot('ses_a')).toBeNull();
+    await Promise.all([reading, forgetting]);
+    expect(knownChatSnapshot('ses_a')).toBeNull();
+    expect(await readChatSnapshot('ses_a')).toBeNull();
   });
 });

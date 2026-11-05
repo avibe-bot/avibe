@@ -4,7 +4,6 @@ import 'fake-indexeddb/auto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { WorkbenchSession } from '../context/ApiContext';
-import type { ChatSnapshot } from './chatSnapshots';
 
 // The prefetch fills in conversations the reader has not opened yet, in idle
 // time. What it must never do is more than that: send anything but the declared
@@ -42,15 +41,6 @@ const bootstrapResponse = (sessionId: string, title = `live ${sessionId}`) => Re
   turn_state: {},
 });
 
-const stored = (sessionId: string, title: string): ChatSnapshot => ({
-  session: { id: sessionId, title } as WorkbenchSession,
-  messages: [],
-  next_before_id: null,
-  agents: [],
-  default_agent_name: null,
-  can_chat: true,
-  chat_message_font_size: null,
-});
 
 const sessionOf = (path: string) => decodeURIComponent(path.split('/')[3]);
 
@@ -58,9 +48,16 @@ const sessionOf = (path: string) => decodeURIComponent(path.split('/')[3]);
 let prefetch: typeof import('./chatPrefetch');
 let snapshots: typeof import('./chatSnapshots');
 let store: typeof import('./localSnapshots');
+let messageStore: typeof import('./localStore');
+// The reader opens the chat: its bootstrap is stored, as the API layer stores it.
 const storeAs = async (sessionId: string, title: string) => {
-  const owner = snapshots.chatSnapshotOwnerForAnswer(snapshots.beginChatSnapshotRequest(sessionId))!;
-  await snapshots.writeChatSnapshot(owner, stored(sessionId, title));
+  await messageStore.recordLocalStorePage(
+    messageStore.beginLocalStoreRead(sessionId),
+    { kind: 'tail' },
+    { messages: [], next_before_id: null },
+    { id: sessionId, title } as WorkbenchSession,
+    { agents: [], default_agent_name: null, can_chat: true, chat_message_font_size: null },
+  );
 };
 const titleOf = async (sessionId: string) => (await snapshots.readChatSnapshot(sessionId))?.session.title ?? null;
 const requested = () => apiFetch.mock.calls.map(([path]) => sessionOf(path as string));
@@ -98,12 +95,16 @@ beforeEach(async () => {
   });
   apiFetch.mockReset();
   vi.resetModules();
-  [prefetch, snapshots, store] = await Promise.all([
+  [prefetch, snapshots, store, messageStore] = await Promise.all([
     import('./chatPrefetch'),
     import('./chatSnapshots'),
     import('./localSnapshots'),
+    import('./localStore'),
   ]);
   store.setLocalSnapshotPrincipal('local');
+  // The first read in a fresh document opens and claims the message store; do
+  // it here, so a case times the prefetch rather than that.
+  await messageStore.readLocalStoreWindow('ses_warm_up');
 });
 
 afterEach(async () => {
@@ -244,6 +245,7 @@ describe('conversation prefetch', () => {
     apiFetch.mockResolvedValue(Response.json({ error: 'unavailable' }, { status: 503 }));
     prefetch.prefetchChatSnapshots(['ses_a']);
     await runIdle();
+    await vi.waitFor(() => expect(requested()).toEqual(['ses_a']));
     prefetch.prefetchChatSnapshots(['ses_a']);
     await runIdle();
     expect(requested()).toEqual(['ses_a']);

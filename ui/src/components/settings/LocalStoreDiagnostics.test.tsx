@@ -10,7 +10,8 @@ vi.mock('@/lib/platform', () => ({ isStandalonePwa: () => false, isIosDevice: ()
 import type { WorkbenchMessage } from '@/context/ApiContext';
 import { clearLocalSnapshots, setLocalSnapshotPrincipal } from '@/lib/localSnapshots';
 import { beginLocalStoreRead, recordLocalStorePage } from '@/lib/localStore';
-import { LocalStoreDiagnostics, offlineHistoryPersistence } from './LocalStoreDiagnostics';
+import { LocalStoreDiagnostics } from './LocalStoreDiagnostics';
+import { offlineHistoryPersistence } from './offlineHistoryPersistence';
 
 // The local message store's line on the diagnostics page (docs/plans/
 // local-sync-store.md, Phase 1): whether the browser keeps it, and its size.

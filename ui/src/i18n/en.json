@@ -983,7 +983,8 @@
       "persistenceDenied": "Not granted: the browser may clear it when space runs low",
       "persistenceNotRequested": "Requested only in the installed app",
       "persistenceUnknown": "Unknown",
-      "stored": "Stored on this device"
+      "stored": "Stored on this device",
+      "storedNone": "Nothing yet"
     },
     "logsTitle": "Live logs",
     "logsSubtitle": "Inspect the runtime log stream with filters, search, and source selection.",

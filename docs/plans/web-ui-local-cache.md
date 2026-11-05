@@ -2,6 +2,12 @@
 
 > **Status**: Approved 2026-11-04, including Phase 3 (section 7). Implementation
 > started with Phase 1 (#3225).
+> **Superseded in part**: conversations (the `ChatPage` row of section 4.2, its
+> memory copy, and Phase 2's write-back and prefetch) now come from the local
+> message store, `docs/plans/local-sync-store.md`. The chat paints from that
+> store's hot set and IndexedDB, and nothing writes `chat:*` snapshot records
+> any more. The Inbox and project lists stay on their snapshots as described
+> here.
 > **Owner**: cyhhao
 
 ## 1. Background

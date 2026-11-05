@@ -7,26 +7,22 @@ import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 
 import type { InboxSession, SessionRuntimeState, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import type { ComposerProps } from './Composer';
-import {
-  beginChatSnapshotRequest,
-  chatSnapshotOwnerForAnswer,
-  readChatSnapshot,
-  writeChatSnapshot,
-  type ChatSnapshot,
-} from '../../lib/chatSnapshots';
+import { readChatSnapshot, type ChatSnapshot } from '../../lib/chatSnapshots';
 import { clearLocalSnapshots, setLocalSnapshotPrincipal } from '../../lib/localSnapshots';
+import { beginLocalStoreRead, recordLocalStorePage } from '../../lib/localStore';
 import { writeChatViewMode } from '../../lib/chatViewMemory';
 import { WorkbenchProjectsContext, type WorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
 
 // Opening a chat paints its last known window before the bootstrap answers
-// (docs/plans/web-ui-local-cache.md, Phase 2), fully formed: the composer, its
+// (docs/plans/local-sync-store.md section 4.3), fully formed: the composer, its
 // route picker, the actions under messages and in the header all render from
 // the cache, usable, and the live answer may only narrow them. The hand-over is
 // where it can go wrong: a cached row the server deleted surviving the live
 // answer, a row the stream delivered or the reader sent meanwhile being thrown
-// away with the cache, the composer remounting (and losing what was typed), or
-// the cache being written from something other than what the server answered
-// for this reader.
+// away with the cache, or the composer remounting (and losing what was typed).
+// What is painted comes from the local message store, which the API layer keeps
+// current (its write rules are tested there, in ApiContext.localStore.test.tsx);
+// here the store is filled directly.
 
 const mocks = vi.hoisted(() => ({
   api: {
@@ -271,22 +267,37 @@ const bootstrap = (
   draft: { text: draft, updated_at: null },
 });
 
-const seed = async (
+// Store a conversation as a bootstrap of it would have, and let this document
+// hold it in memory, as it would once it wrote or read it.
+const storeChat = async (snapshot: ChatSnapshot) => {
+  setLocalSnapshotPrincipal('local');
+  await recordLocalStorePage(
+    beginLocalStoreRead(snapshot.session.id),
+    { kind: 'tail' },
+    { messages: snapshot.messages, next_before_id: snapshot.next_before_id },
+    snapshot.session,
+    {
+      agents: snapshot.agents,
+      default_agent_name: snapshot.default_agent_name,
+      can_chat: snapshot.can_chat,
+      chat_message_font_size: snapshot.chat_message_font_size,
+    },
+  );
+  await readChatSnapshot(snapshot.session.id);
+};
+
+const seed = (
   messages: WorkbenchMessage[],
   { canChat = true, fontSize = null as number | null, row = {} as Partial<WorkbenchSession> } = {},
-) => {
-  setLocalSnapshotPrincipal('local');
-  const value: ChatSnapshot = {
-    session: sessionRow('Cached title', row),
-    messages,
-    next_before_id: null,
-    agents: [agent],
-    default_agent_name: 'vibey',
-    can_chat: canChat,
-    chat_message_font_size: fontSize,
-  };
-  await writeChatSnapshot(chatSnapshotOwnerForAnswer(beginChatSnapshotRequest(SESSION))!, value);
-};
+) => storeChat({
+  session: sessionRow('Cached title', row),
+  messages,
+  next_before_id: null,
+  agents: [agent],
+  default_agent_name: 'vibey',
+  can_chat: canChat,
+  chat_message_font_size: fontSize,
+});
 
 const PROJECT = 'proj_1';
 
@@ -328,25 +339,6 @@ const SwitchTo = ({ sessionId }: { sessionId: string }) => {
 const busy = () => screen.queryByTestId('composer')?.getAttribute('data-busy') ?? 'absent';
 const dots = () => document.querySelectorAll('.vr-typing-dot').length > 0;
 
-// File a copy of one reader's record under another reader, as another tab of the
-// same origin could have, without going through the current reader's store.
-const copyRecordToReader = async (from: string, to: string, edit: (value: ChatSnapshot) => ChatSnapshot) => {
-  const db = await new Promise<IDBDatabase>((resolve, reject) => {
-    const request = indexedDB.open('avibe-local-snapshots', 1);
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-  const tx = db.transaction('snapshots', 'readwrite');
-  const store = tx.objectStore('snapshots');
-  const record = await new Promise<{ value: ChatSnapshot }>((resolve) => {
-    const request = store.get(`${from}\nchat:${SESSION}`);
-    request.onsuccess = () => resolve(request.result);
-  });
-  store.put({ ...record, id: `${to}\nchat:${SESSION}`, principal: to, value: edit(record.value) });
-  await new Promise((resolve) => { tx.oncomplete = resolve; });
-  db.close();
-};
-
 // A later load of the page: the reader is named again, and only the store (not
 // this document's memory) holds what an earlier load wrote, so the chat paints
 // when IndexedDB answers.
@@ -356,8 +348,6 @@ const asALaterLoad = () => {
 };
 
 const composerState = () => screen.queryByTestId('composer')?.getAttribute('data-disabled') ?? 'absent';
-// The write-back settles a second after the window does (plan section 4.3).
-const waitForWriteBack = () => act(() => new Promise((resolve) => setTimeout(resolve, 1000 + 150)));
 
 let live: Deferred<ReturnType<typeof bootstrap>>;
 
@@ -424,8 +414,7 @@ describe('ChatPage conversation snapshot', () => {
   it('switches to another chat this document holds in the same render', async () => {
     mocks.api.getSessionBootstrap.mockImplementation((id: string) => (id === SESSION ? live.promise : new Promise(() => {})));
     await seed([message('m1', 'cached answer')]);
-    setLocalSnapshotPrincipal('local');
-    await writeChatSnapshot(chatSnapshotOwnerForAnswer(beginChatSnapshotRequest('ses_other'))!, {
+    await storeChat({
       session: sessionRow('Other chat', { id: 'ses_other' }),
       messages: [message('o1', 'the other chat', { session_id: 'ses_other' })],
       next_before_id: null,
@@ -666,32 +655,6 @@ describe('ChatPage conversation snapshot', () => {
     expect(composerState()).toBe('absent');
   });
 
-  it('stores the live window after it settles, without the painted rows or a send still pending', async () => {
-    await seed([message('m1', 'cached question')]);
-    mount();
-    await screen.findByText('cached question');
-
-    // Painting alone stores nothing.
-    await waitForWriteBack();
-    expect((await readChatSnapshot(SESSION))?.messages.map((m) => m.id)).toEqual(['m1']);
-
-    await act(async () => live.resolve(bootstrap([
-      message('m2', 'live answer'),
-      message('m3', 'claimed input', { type: 'user', author: 'user', projection: 'claimed_delivery' }),
-    ])));
-    await screen.findByText('live answer');
-    act(() => mocks.events!.onMessageNew(message('m5', 'streamed reply')));
-    act(() => mocks.events!.onMessageNew(
-      message('m6', 'pending send', { type: 'user', author: 'user', state: 'claimed' }),
-    ));
-    await screen.findByText('streamed reply');
-    await waitForWriteBack();
-
-    const stored = await readChatSnapshot(SESSION);
-    expect(stored?.session.title).toBe('Live title');
-    expect(stored?.messages.map((m) => m.id)).toEqual(['m2', 'm5']);
-  });
-
   it('drops painted rows the moment another reader is named', async () => {
     await seed([message('m1', 'alice cached row')]);
     mount();
@@ -716,69 +679,6 @@ describe('ChatPage conversation snapshot', () => {
 
     await act(async () => live.resolve(bootstrap([message('m2', 'live after the change')])));
     await screen.findByText('live after the change');
-  });
-
-  it("paints the next reader's own record, never under the last reader's rows, and stores nothing for a bootstrap requested before the switch", async () => {
-    await seed([message('m1', 'alice cached row')]);
-    await copyRecordToReader('local', 'remote:bob', (value) => ({
-      ...value,
-      messages: [message('m2', 'bob cached row')],
-    }));
-    mount();
-    await screen.findByText('alice cached row');
-
-    act(() => setLocalSnapshotPrincipal('remote:bob'));
-    await screen.findByText('bob cached row');
-    expect(screen.queryByText('alice cached row')).toBeNull();
-
-    // The bootstrap was requested for the last reader and answers after the switch.
-    await act(async () => live.resolve(bootstrap([message('m3', 'answered before the switch')])));
-    await screen.findByText('answered before the switch');
-    await waitForWriteBack();
-    expect((await readChatSnapshot(SESSION))?.messages.map((m) => m.id)).toEqual(['m2']);
-  });
-
-  it('stores a chat opened on a cold start, whose bootstrap went out before the reader was named', async () => {
-    // The authorization boundary names the reader in an effect that runs after
-    // the chat page's own, so the bootstrap is already out.
-    mount();
-    await waitFor(() => expect(mocks.api.getSessionBootstrap).toHaveBeenCalled());
-    act(() => setLocalSnapshotPrincipal('local'));
-
-    await act(async () => live.resolve(bootstrap([message('m1', 'live answer')])));
-    await screen.findByText('live answer');
-    await waitForWriteBack();
-    expect((await readChatSnapshot(SESSION))?.messages.map((m) => m.id)).toEqual(['m1']);
-  });
-
-  it('stores nothing after a reader change until that reader\'s own bootstrap, even once the first reader is back', async () => {
-    setLocalSnapshotPrincipal('local');
-    mount();
-    await act(async () => live.resolve(bootstrap([message('m1', 'live answer')])));
-    await screen.findByText('live answer');
-    await waitForWriteBack();
-    expect((await readChatSnapshot(SESSION))?.messages.map((m) => m.id)).toEqual(['m1']);
-
-    // Another reader is named and the first one comes back (each deletes the
-    // other's records). The rows on screen were never read for this naming.
-    act(() => setLocalSnapshotPrincipal('remote:bob'));
-    act(() => setLocalSnapshotPrincipal('local'));
-    act(() => mocks.events!.onMessageNew(message('m2', 'streamed after the switch')));
-    await screen.findByText('streamed after the switch');
-    await waitForWriteBack();
-    expect(await readChatSnapshot(SESSION)).toBeNull();
-  });
-
-  it('does not put back a conversation the store was cleared of while a write was owed', async () => {
-    setLocalSnapshotPrincipal('local');
-    mount();
-    await act(async () => live.resolve(bootstrap([message('m1', 'live answer')])));
-    await screen.findByText('live answer');
-
-    // An authorization change clears the store while the write-back is pending.
-    await act(async () => clearLocalSnapshots());
-    await waitForWriteBack();
-    expect(await readChatSnapshot(SESSION)).toBeNull();
   });
 
   // The cache may not hold the newest replies, so a painted chat is not a read
@@ -821,7 +721,7 @@ describe('ChatPage conversation snapshot', () => {
     },
   );
 
-  it('deletes the snapshot when the bootstrap answers 404, and shows the failure', async () => {
+  it('withdraws the painted chat when the bootstrap answers 404, and shows the failure', async () => {
     await seed([message('m1', 'cached answer')]);
     mount();
     await screen.findByText('cached answer');
@@ -830,7 +730,6 @@ describe('ChatPage conversation snapshot', () => {
 
     await screen.findByText('Session not found');
     expect(screen.queryByText('cached answer')).toBeNull();
-    await waitFor(async () => expect(await readChatSnapshot(SESSION)).toBeNull());
   });
 });
 
@@ -951,7 +850,7 @@ describe('ChatPage working state on entry', () => {
   it('does not carry a seeded run into the next chat', async () => {
     await seed([message('m1', 'question', { type: 'user', author: 'user' })], { row: running });
     // The next chat is painted from its own snapshot (idle) while its bootstrap is out.
-    await writeChatSnapshot(chatSnapshotOwnerForAnswer(beginChatSnapshotRequest('ses_other'))!, {
+    await storeChat({
       session: { ...sessionRow('Other title', idle), id: 'ses_other' },
       messages: [message('m9', 'other question', { type: 'user', author: 'user', session_id: 'ses_other' })],
       next_before_id: null,
@@ -974,18 +873,15 @@ describe('ChatPage working state on entry', () => {
 
   it('does not carry a seeded run over to the next reader', async () => {
     await seed([message('m1', 'alice question', { type: 'user', author: 'user' })], { row: running });
-    await copyRecordToReader('local', 'remote:bob', (value) => ({
-      ...value,
-      session: { ...value.session, agent_status: 'idle' },
-      messages: [message('m2', 'bob question', { type: 'user', author: 'user' })],
-    }));
     mount();
     await screen.findByText('alice question');
     expect(busy()).toBe('true');
 
+    // Another reader is named: the store holds nothing of the last one for them.
     act(() => setLocalSnapshotPrincipal('remote:bob'));
-    await screen.findByText('bob question');
-    expect(busy()).toBe('false');
+    await waitFor(() => expect(screen.queryByText('alice question')).toBeNull());
+    expect(busy()).not.toBe('true');
+    expect(dots()).toBe(false);
   });
 
   it('does not keep a seeded run after the bootstrap fails', async () => {

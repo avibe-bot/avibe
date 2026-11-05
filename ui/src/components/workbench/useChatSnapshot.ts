@@ -1,18 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 
-import type { WorkbenchMessage, WorkbenchSessionBootstrap } from '../../context/ApiContext';
-import {
-  beginChatSnapshotRequest,
-  chatSnapshotFromBootstrap,
-  chatSnapshotOwnerForAnswer,
-  chatSnapshotWindow,
-  forgetChatSnapshot,
-  knownChatSnapshot,
-  readChatSnapshot,
-  writeChatSnapshot,
-  type ChatSnapshot,
-  type ChatSnapshotOwner,
-} from '../../lib/chatSnapshots';
+import type { WorkbenchMessage } from '../../context/ApiContext';
+import { knownChatSnapshot, readChatSnapshot, type ChatSnapshot } from '../../lib/chatSnapshots';
 import {
   getLocalSnapshotPrincipal,
   subscribeLocalSnapshotEpoch,
@@ -21,10 +10,12 @@ import {
 import { loadKnownVoiceStatus } from '../../lib/voiceAvailability';
 import type { ChatListSeed } from './chatListSeed';
 
-// The conversation snapshot for ChatPage (docs/plans/web-ui-local-cache.md,
-// Phase 2): paint the last known window of the opened chat while its bootstrap
-// is out, hand the screen to the first live answer, and keep the record current
-// from what the server sends afterwards.
+// The conversation snapshot for ChatPage (docs/plans/local-sync-store.md
+// section 4.3): paint the last known window of the opened chat while its
+// bootstrap is out, and hand the screen to the first live answer. What it
+// paints comes from the local message store (lib/chatSnapshots), which the API
+// layer keeps current from every answer and streamed row, so this hook stores
+// nothing itself.
 //
 // ChatPage owns the transcript state; this hook owns when a snapshot may touch
 // it. The rules:
@@ -44,14 +35,7 @@ import type { ChatListSeed } from './chatListSeed';
 //    every action.
 //  * A different reader, anything that clears the store (an authorization
 //    change, sign-out), or a failed bootstrap drops what was painted and seeded
-//    at once; the first two also stop all storing until the next bootstrap
-//    answers.
-//  * Store only what the server answered for the reader it answered: the
-//    bootstrap's row, Agents and ``can_chat``, plus the stored rows of the live
-//    transcript window, a second after it settles, when leaving the chat, and
-//    when the page is hidden.
-
-const CHAT_SNAPSHOT_WRITE_DELAY_MS = 1000;
+//    at once.
 
 /** A chat painted from the snapshot, until its bootstrap answers. ``partial``:
  *  painted from what the lists say (its row, perhaps its newest message), so the
@@ -60,13 +44,10 @@ type ChatSnapshotView = { sessionId: string; principal: string; partial: boolean
 
 type ChatSnapshotBootstrapRead = {
   /** The bootstrap answered for the open chat and its state is installed. */
-  commit: (bootstrap: WorkbenchSessionBootstrap) => void;
+  commit: () => void;
   /** The bootstrap failed for the open chat. */
-  fail: (error: unknown) => void;
+  fail: () => void;
 };
-
-type Owned = { owner: ChatSnapshotOwner; snapshot: ChatSnapshot; added: boolean };
-type Pending = Owned;
 
 type Options = {
   sessionId: string | undefined;
@@ -85,16 +66,6 @@ type Options = {
   /** Withdraw everything seeded from the snapshot: the painted rows (if still
    *  on screen) and the chrome state. The cache no longer speaks for this page. */
   drop: (rows: ReadonlySet<WorkbenchMessage> | null) => void;
-  /** The live transcript window and its cursor, for write-back. */
-  messages: WorkbenchMessage[];
-  olderCursor: string | null;
-  /** True while the window does not reach the live tail; nothing is stored then. */
-  historicalWindow: boolean;
-};
-
-const errorStatus = (error: unknown): number | null => {
-  const status = (error as { status?: unknown } | null)?.status;
-  return typeof status === 'number' ? status : null;
 };
 
 const timeOf = (iso: string | null | undefined): number => {
@@ -118,7 +89,7 @@ const seedSnapshot = (seed: ChatListSeed): ChatSnapshot => ({
   chat_message_font_size: null,
 });
 
-export function useChatSnapshot({ sessionId, paint, knownFromLists, unpaint, drop, messages, olderCursor, historicalWindow }: Options) {
+export function useChatSnapshot({ sessionId, paint, knownFromLists, unpaint, drop }: Options) {
   const paintRef = useRef(paint);
   const knownFromListsRef = useRef(knownFromLists);
   const unpaintRef = useRef(unpaint);
@@ -134,14 +105,12 @@ export function useChatSnapshot({ sessionId, paint, knownFromLists, unpaint, dro
 
   const principal = useSyncExternalStore(subscribeLocalSnapshotPrincipal, getLocalSnapshotPrincipal);
   const [view, setView] = useState<ChatSnapshotView | null>(null);
-  const [owned, setOwned] = useState<Owned | null>(null);
-  // Another chat opened: what was painted or owned for the last one is not this
-  // one's (the reset React documents for state derived from a changed prop).
+  // Another chat opened: what was painted for the last one is not this one's
+  // (the reset React documents for state derived from a changed prop).
   const [route, setRoute] = useState(sessionId);
   if (route !== sessionId) {
     setRoute(sessionId);
     setView(null);
-    setOwned(null);
   }
   // Per opened chat: something live landed for it, so nothing is painted now.
   const liveRef = useRef(false);
@@ -149,8 +118,6 @@ export function useChatSnapshot({ sessionId, paint, knownFromLists, unpaint, dro
   const paintedRef = useRef<{ principal: string; rows: Set<WorkbenchMessage> } | null>(null);
   // The reader the open chat was seeded for, until its bootstrap answers.
   const seededRef = useRef<string | null>(null);
-  // The chat had no usable record when it opened, so its first write adds one.
-  const missingRef = useRef(true);
   // Painted from the lists: the time of the newest message they knew, if any. A
   // stored window as recent replaces it when IndexedDB answers.
   const partialRef = useRef<{ latestAt: string | null } | null>(null);
@@ -160,7 +127,6 @@ export function useChatSnapshot({ sessionId, paint, knownFromLists, unpaint, dro
     liveRef.current = false;
     paintedRef.current = null;
     seededRef.current = null;
-    missingRef.current = true;
     partialRef.current = null;
   }, [sessionId]);
 
@@ -184,7 +150,6 @@ export function useChatSnapshot({ sessionId, paint, knownFromLists, unpaint, dro
     if (!route || !reader) return;
     const snapshot = knownChatSnapshot(route);
     const seed = knownFromListsRef.current(route);
-    if (snapshot) missingRef.current = false;
     if (snapshot && coversSeed(snapshot, seed?.latest?.created_at ?? null)) paintSnapshot(snapshot, reader);
     else if (seed) paintSnapshot(seedSnapshot(seed), reader, true);
   }, [paintSnapshot]);
@@ -214,14 +179,10 @@ export function useChatSnapshot({ sessionId, paint, knownFromLists, unpaint, dro
       const painted = paintedRef.current;
       const seeded = seededRef.current;
       if ((seeded !== null && seeded !== next) || (painted && painted.principal !== next)) withdraw();
-      setOwned((current) => (current && current.owner.principal !== next ? null : current));
     })
   ), [withdraw]);
 
-  useEffect(() => subscribeLocalSnapshotEpoch(() => {
-    withdraw();
-    setOwned(null);
-  }), [withdraw]);
+  useEffect(() => subscribeLocalSnapshotEpoch(withdraw), [withdraw]);
 
   useEffect(() => {
     if (!sessionId || !principal) return undefined;
@@ -230,7 +191,6 @@ export function useChatSnapshot({ sessionId, paint, knownFromLists, unpaint, dro
     // that status is in memory before the chat paints (lib/voiceAvailability).
     void Promise.all([readChatSnapshot(sessionId), loadKnownVoiceStatus()]).then(([snapshot]) => {
       if (cancelled) return;
-      if (snapshot) missingRef.current = false;
       if (!snapshot || liveRef.current || getLocalSnapshotPrincipal() !== principal) return;
       // A full window already on screen stays. One painted from the lists gives
       // way to a stored window that holds what they knew.
@@ -250,69 +210,21 @@ export function useChatSnapshot({ sessionId, paint, knownFromLists, unpaint, dro
     };
   }, [sessionId, principal, paintSnapshot]);
 
-  const beginBootstrap = useCallback((requestSessionId: string): ChatSnapshotBootstrapRead => {
-    // Noted before the request: a reader change, a store clear, or a forget
-    // while it is out means its answer is not this reader's to store.
-    const request = beginChatSnapshotRequest(requestSessionId);
-    return {
-      commit: (bootstrap) => {
-        if (routeRef.current !== requestSessionId) return;
-        liveRef.current = true;
-        // The bootstrap's state replaced every seeded value; nothing is left
-        // for the cache to withdraw.
-        seededRef.current = null;
-        setView(null);
-        const owner = chatSnapshotOwnerForAnswer(request);
-        setOwned(owner ? { owner, snapshot: chatSnapshotFromBootstrap(bootstrap), added: missingRef.current } : null);
-      },
-      fail: (error) => {
-        if (routeRef.current !== requestSessionId) return;
-        liveRef.current = true;
-        withdraw();
-        const status = errorStatus(error);
-        if (status === 403 || status === 404) {
-          setOwned(null);
-          void forgetChatSnapshot(requestSessionId);
-        }
-      },
-    };
-  }, [withdraw]);
-
-  const pendingRef = useRef<Pending | null>(null);
-  const timerRef = useRef<number | null>(null);
-  const prunedForRef = useRef<ChatSnapshotOwner | null>(null);
-  const flush = useCallback(() => {
-    if (timerRef.current !== null) {
-      window.clearTimeout(timerRef.current);
-      timerRef.current = null;
-    }
-    const pending = pendingRef.current;
-    pendingRef.current = null;
-    if (!pending) return;
-    const added = pending.added && prunedForRef.current !== pending.owner;
-    if (added) prunedForRef.current = pending.owner;
-    void writeChatSnapshot(pending.owner, pending.snapshot, { added });
-  }, []);
-
-  useEffect(() => {
-    if (!owned || owned.owner.sessionId !== sessionId || historicalWindow || paintedRef.current) return;
-    pendingRef.current = {
-      ...owned,
-      snapshot: { ...owned.snapshot, ...chatSnapshotWindow(messages, olderCursor) },
-    };
-    if (timerRef.current !== null) window.clearTimeout(timerRef.current);
-    timerRef.current = window.setTimeout(flush, CHAT_SNAPSHOT_WRITE_DELAY_MS);
-  }, [owned, sessionId, messages, olderCursor, historicalWindow, flush]);
-
-  // Leaving the chat (or the page) writes what is owed at once.
-  useEffect(() => flush, [sessionId, flush]);
-  useEffect(() => {
-    const onHidden = () => {
-      if (document.visibilityState === 'hidden') flush();
-    };
-    document.addEventListener('visibilitychange', onHidden);
-    return () => document.removeEventListener('visibilitychange', onHidden);
-  }, [flush]);
+  const beginBootstrap = useCallback((requestSessionId: string): ChatSnapshotBootstrapRead => ({
+    commit: () => {
+      if (routeRef.current !== requestSessionId) return;
+      liveRef.current = true;
+      // The bootstrap's state replaced every seeded value; nothing is left
+      // for the cache to withdraw.
+      seededRef.current = null;
+      setView(null);
+    },
+    fail: () => {
+      if (routeRef.current !== requestSessionId) return;
+      liveRef.current = true;
+      withdraw();
+    },
+  }), [withdraw]);
 
   const isPainted = useCallback(() => paintedRef.current !== null, []);
 

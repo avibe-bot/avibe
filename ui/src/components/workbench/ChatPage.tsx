@@ -154,6 +154,7 @@ import { ChatImage } from '../ui/chat-image';
 import { FileCard } from '../ui/file-card';
 import { ImageViewerProvider } from '../ui/image-viewer';
 import { FileViewerProvider } from '../ui/file-viewer';
+import { MediaSessionContext } from '../ui/media-session-context';
 import { useFileViewer } from '../ui/file-viewer-context';
 import { Input } from '../ui/input';
 import { Markdown } from '../ui/markdown';
@@ -1081,9 +1082,6 @@ export const ChatPage: React.FC = () => {
     knownFromLists,
     unpaint: unpaintChatSnapshot,
     drop: dropChatSnapshot,
-    messages,
-    olderCursor,
-    historicalWindow,
   });
   // Same-route refreshes can overlap (for example, the initial load and an
   // authorization refresh). Only the latest bootstrap may commit state: a
@@ -1798,14 +1796,14 @@ export const ChatPage: React.FC = () => {
       } else {
         setActivityGroups([]);
       }
-      chatSnapshotRead.commit(bootstrap);
+      chatSnapshotRead.commit();
     } catch (err) {
       // A superseded failure must not stamp an error onto the newer request's
       // loading state, even when both requests belong to the same route.
       if (requestIsCurrent()) {
         setError(errorMessage(err) ?? String(err));
         setFailedBootstrapSessionId(sessionId);
-        chatSnapshotRead.fail(err);
+        chatSnapshotRead.fail();
       }
     } finally {
       // Same guard: a stale load finishing must not flip the latest request out
@@ -3206,6 +3204,8 @@ export const ChatPage: React.FC = () => {
     // ``h-16`` header occupies 4rem at the top, so subtract that instead.
     <ImageViewerProvider images={sessionImages}>
       <FileViewerProvider>
+      {/* Attachment cards keep their metadata with this conversation (lib/localStore). */}
+      <MediaSessionContext.Provider value={sessionId ?? null}>
       <VaultProvisionDialogProvider
         key={sessionId ?? 'no-session'}
         requests={vaultRequests}
@@ -3439,6 +3439,7 @@ export const ChatPage: React.FC = () => {
       {sessionArchiveDialog}
       </div>
       </VaultProvisionDialogProvider>
+      </MediaSessionContext.Provider>
       </FileViewerProvider>
     </ImageViewerProvider>
   );
