@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
 import { useApi } from './ApiContext';
@@ -75,6 +75,14 @@ type TargetedInboxSnapshot = {
   row: InboxSession | null;
 };
 
+// A mark-read the server has not answered yet. ``restore`` is the count a
+// failed write puts back: the one it cleared, or the newest the server reported
+// for the session while the write was out.
+type PendingRead = {
+  operation: WorkbenchSessionReadStamp;
+  restore: number;
+};
+
 /** Provider that owns the Inbox state shared across WorkbenchSidebar + InboxPage.
  *
  *  Connects to ``/api/events`` and updates the per-session feed in place:
@@ -95,6 +103,12 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     useConsumerActivation();
   const [inboxSessions, setInboxSessions] = useState<InboxSession[]>([]);
   const [unreadBySession, setUnreadBySession] = useState<Record<string, number>>({});
+  // What ``markRead`` clears, read where it is called. A layout effect, so the
+  // count a child's passive effect or a click sees is already the rendered one.
+  const unreadBySessionRef = useRef(unreadBySession);
+  useLayoutEffect(() => {
+    unreadBySessionRef.current = unreadBySession;
+  }, [unreadBySession]);
   // Becomes true the first time the server hands us an authoritative whole-account
   // unread map. Until then ``totalUnread`` is only the empty-map default of 0,
   // which must NOT drive the app-icon badge: the push service worker may have set
@@ -196,6 +210,34 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   const targetedReadInFlightRef = useRef<Set<string>>(new Set());
   const targetedReadPendingRef = useRef<Set<string>>(new Set());
   const committedWholeUnreadGenerationRef = useRef(0);
+  // Mark-read is optimistic: a session reads as read the moment the user reads
+  // it, and the write follows. One entry per session, the latest write still
+  // out. It owns the session's count only while its stamp is mutation-current
+  // for the session, so an event or a later write about the session takes over
+  // without telling it (see ``pendingReadOwns``).
+  const pendingReadsRef = useRef<Map<string, PendingRead>>(new Map());
+  const pendingReadOwns = useCallback(
+    (sessionId: string, pending: PendingRead) =>
+      readOwnershipRef.current.isMutationCurrent(pending.operation, [
+        `inbox-session:${sessionId}`,
+        `inbox-unread-session:${sessionId}`,
+      ]),
+    [],
+  );
+  // Whole maps adopted while a write is out were read, or published, without
+  // it, so the sessions it still owns stay read. The count each map reports for
+  // such a session becomes what a failed write restores.
+  const withPendingReads = useCallback((map: Record<string, number>) => {
+    let next = map;
+    for (const [sessionId, pending] of pendingReadsRef.current) {
+      if (!pendingReadOwns(sessionId, pending)) continue;
+      pending.restore = map[sessionId] ?? 0;
+      if (!(sessionId in next)) continue;
+      if (next === map) next = { ...map };
+      delete next[sessionId];
+    }
+    return next;
+  }, [pendingReadOwns]);
 
   const flushFeedReadIntent = useCallback(() => {
     if (broadReadInFlightRef.current || cursorReadsInFlightRef.current > 0) return;
@@ -331,10 +373,10 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // place a whole map is adopted, so no producer has to remember to clear it.
   const applyUnreadMap = useCallback((map: Record<string, number>) => {
     wholeUnreadAppliedRef.current = true;
-    setUnreadBySession(map);
+    setUnreadBySession(withPendingReads(map));
     setUnreadLoaded(true);
     wholeUnreadOwedRef.current = false;
-  }, []);
+  }, [withPendingReads]);
 
   const applyWholeUnreadRead = useCallback((
     read: WorkbenchSessionReadStamp,
@@ -349,6 +391,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
 
   const applySessionUnread = useCallback((sessionId: string, count: number) => {
     setUnreadBySession((prev) => {
+      if ((prev[sessionId] ?? 0) === count && (count > 0 || !(sessionId in prev))) return prev;
       const next = { ...prev };
       if (count > 0) next[sessionId] = count;
       else delete next[sessionId];
@@ -492,29 +535,45 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
 
   const markRead = useCallback(
     async (sessionId: string, untilMessageId?: string) => {
+      // Clear the count before the write, so the Inbox, the sidebar and the
+      // badges show the read in the same frame. The clear is a mutation that has
+      // started: a read of this session's count already in flight must not paint
+      // it back (targeted reads are fenced here, whole maps by
+      // ``withPendingReads``). A second write while one is out inherits the count
+      // the first one cleared.
+      const earlier = pendingReadsRef.current.get(sessionId);
+      const restore = earlier && pendingReadOwns(sessionId, earlier)
+        ? earlier.restore
+        : unreadBySessionRef.current[sessionId] ?? 0;
+      readOwnershipRef.current.acceptMutation(`inbox-unread-session:${sessionId}`);
+      const operation = readOwnershipRef.current.beginRead(`inbox-mark-read:${sessionId}`);
+      const pending: PendingRead = { operation, restore };
+      pendingReadsRef.current.set(sessionId, pending);
+      applySessionUnread(sessionId, 0);
       // Clearing unread is best-effort, so a failure must not raise an error
       // toast. Reading a permitted session and mutating its unread state are
       // independent capabilities.
-      const operation = readOwnershipRef.current.beginRead(`inbox-mark-read:${sessionId}`);
-      const result = await api.markSessionRead(sessionId, untilMessageId, { handleError: false });
+      const result = await api
+        .markSessionRead(sessionId, untilMessageId, { handleError: false })
+        .catch(() => null);
       // With handleError off, a 4xx/5xx resolves with the error body rather
       // than throwing; only the endpoint's success shape is an applied write.
       const applied = typeof result?.updated === 'number' || Boolean(result?.unread_by_session);
       // A later *started* write for this session (a second mark-read, or a
-      // read-changing event) supersedes this one. Completing an older write
-      // first must not fence a newer write that started after it: both share
-      // the same mutation epoch until one of them commits.
-      const laterMarkStarted = (readOwnershipRef.current.latestGeneration(`inbox-mark-read:${sessionId}`) ?? 0) > operation.generation;
-      if (
-        !applied
-        || laterMarkStarted
-        || !readOwnershipRef.current.isMutationCurrent(operation, [
-          `inbox-session:${sessionId}`,
-          `inbox-unread-session:${sessionId}`,
-        ])
-      ) {
-        return applied;
+      // read-changing event) took the count over when it started. This write
+      // then neither restores nor commits, so completing first cannot fence or
+      // overwrite the newer owner.
+      const latest = pendingReadsRef.current.get(sessionId) === pending;
+      if (latest) pendingReadsRef.current.delete(sessionId);
+      const owned = latest && pendingReadOwns(sessionId, pending);
+      if (!applied) {
+        // Nothing was written, so the count this write cleared is still the
+        // server's. Anything about the session since (an event, a later write)
+        // already owns the count and stays.
+        if (owned) applySessionUnread(sessionId, pending.restore);
+        return false;
       }
+      if (!owned || !result) return true;
       // The response carries the whole account map, but it describes the other
       // sessions only as of this write. It is adopted whole only if nothing has
       // changed or committed the whole map since this write began; otherwise
@@ -536,7 +595,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       else if (map) applySessionUnread(sessionId, map[sessionId] ?? 0);
       return true;
     },
-    [api, applySessionUnread, applyUnreadMap],
+    [api, applySessionUnread, applyUnreadMap, pendingReadOwns],
   );
 
   // Resume reconcile: re-read the feed WITHOUT collapsing pagination. A

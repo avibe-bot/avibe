@@ -3,7 +3,7 @@ import 'fake-indexeddb/auto';
 
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 
 import type { SessionRuntimeState, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import type { ComposerProps } from './Composer';
@@ -65,6 +65,7 @@ const mocks = vi.hoisted(() => ({
     onMessageUpdated: (message: WorkbenchMessage) => void;
   },
   composer: null as ComposerProps | null,
+  inbox: { unreadBySession: {} as Record<string, number>, markRead: vi.fn() },
 }));
 
 vi.mock('react-i18next', () => ({
@@ -84,7 +85,7 @@ vi.mock('../../context/ToastContext', () => ({
 }));
 
 vi.mock('../../context/WorkbenchInboxContext', () => ({
-  useWorkbenchInbox: () => ({ unreadBySession: {}, markRead: vi.fn() }),
+  useWorkbenchInbox: () => mocks.inbox,
 }));
 
 vi.mock('../../context/InstanceAuthorizationContext', () => ({
@@ -324,6 +325,7 @@ beforeEach(() => {
   mocks.composerMounts = 0;
   mocks.sessionActionsWritable = [];
   mocks.routePicker = null;
+  mocks.inbox = { unreadBySession: {}, markRead: vi.fn(async () => true) };
   Object.assign(mocks.capabilities, { can_chat: true, can_use_show_pages: true });
   vi.clearAllMocks();
   mocks.api.connectWorkbenchEvents.mockImplementation((events) => {
@@ -351,6 +353,7 @@ beforeEach(() => {
 afterEach(async () => {
   cleanup();
   vi.unstubAllGlobals();
+  Reflect.deleteProperty(document, 'hasFocus');
   window.localStorage.clear();
   setLocalSnapshotPrincipal(null);
   await clearLocalSnapshots();
@@ -684,6 +687,46 @@ describe('ChatPage conversation snapshot', () => {
     await waitForWriteBack();
     expect(await readChatSnapshot(SESSION)).toBeNull();
   });
+
+  // The cache may not hold the newest replies, so a painted chat is not a read
+  // one: only the live window marks it read, on first open and when the page
+  // switches to it from another chat alike.
+  it.each(['opened first', 'switched to from another chat'])(
+    'marks a chat read only once its bootstrap answers, never from the painted snapshot (%s)',
+    async (entry) => {
+      // jsdom never reports window focus, so no reading would count as presented.
+      document.hasFocus = () => true;
+      mocks.inbox.unreadBySession = { [SESSION]: 2 };
+      const other = { ...bootstrap([]), session: sessionRow('Other chat', { id: 'ses_b' }) };
+      mocks.api.getSessionBootstrap.mockImplementation((id: string) => (id === SESSION ? live.promise : Promise.resolve(other)));
+      await seed([message('m1', 'cached answer')]);
+      const Switch = () => {
+        const navigate = useNavigate();
+        return <button type="button" onClick={() => navigate(`/chat/${SESSION}`)}>switch chat</button>;
+      };
+      render(
+        <MemoryRouter initialEntries={[entry === 'opened first' ? `/chat/${SESSION}` : '/chat/ses_b']}>
+          <Switch />
+          <Routes>
+            <Route path="/chat/:sessionId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>,
+      );
+      if (entry !== 'opened first') {
+        await screen.findByTestId('composer');
+        await act(async () => screen.getByText('switch chat').click());
+      }
+
+      await screen.findByText('cached answer');
+      await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+      expect(mocks.inbox.markRead).not.toHaveBeenCalled();
+
+      await act(async () => live.resolve(bootstrap([message('m1', 'live answer')])));
+      await screen.findByText('live answer');
+      await waitFor(() => expect(mocks.inbox.markRead).toHaveBeenCalledWith(SESSION));
+      expect(mocks.inbox.markRead).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('deletes the snapshot when the bootstrap answers 404, and shows the failure', async () => {
     await seed([message('m1', 'cached answer')]);

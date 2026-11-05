@@ -13,14 +13,17 @@ import type { WorkbenchEventHandlers } from './ApiContext';
 type Deferred<T> = {
   promise: Promise<T>;
   resolve: (value: T) => void;
+  reject: (reason: unknown) => void;
 };
 
 function deferred<T>(): Deferred<T> {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((next) => {
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((next, fail) => {
     resolve = next;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 const session = {
@@ -1264,6 +1267,218 @@ describe('Workbench session read ownership', () => {
     await settle();
 
     expect(inbox?.unreadBySession).toEqual({ [sessionB.id]: 5 });
+  });
+
+  // Mark-read is optimistic: the count goes the moment the user reads, and the
+  // write follows. These hold the clear to the same ordering as every other
+  // mutation here.
+  const mountReadInbox = async (listInbox: ReturnType<typeof vi.fn>, markSessionRead: ReturnType<typeof vi.fn>) => {
+    const holder: {
+      inbox: ReturnType<typeof useWorkbenchInbox> | null;
+      handlers: WorkbenchEventHandlers | null;
+      renders: Array<Record<string, number>>;
+    } = { inbox: null, handlers: null, renders: [] };
+    apiRef.current = {
+      listInbox,
+      markSessionRead,
+      connectWorkbenchEvents: vi.fn((next) => {
+        holder.handlers = next;
+        return vi.fn();
+      }),
+    };
+    const Probe = () => {
+      const value = useWorkbenchInbox();
+      holder.renders.push(value.unreadBySession);
+      useEffect(() => {
+        holder.inbox = value;
+      }, [value]);
+      return null;
+    };
+    render(
+      <WorkbenchInboxProvider>
+        <Probe />
+      </WorkbenchInboxProvider>,
+    );
+    await settle();
+    return holder;
+  };
+  const twoUnread = { [session.id]: 3, [sessionB.id]: 5 };
+
+  it.each([
+    {
+      read: 'a page-one refresh',
+      start: (holder: Awaited<ReturnType<typeof mountReadInbox>>) => void holder.inbox?.refresh(),
+    },
+    {
+      read: 'a resume reconcile',
+      start: () => simulatePageResume(),
+    },
+    {
+      read: 'a targeted foreground restore',
+      start: (holder: Awaited<ReturnType<typeof mountReadInbox>>) => holder.handlers?.onSessionActivity?.({
+        session_id: session.id,
+        scope_id: session.scope_id,
+        event: 'updated',
+        visibility: 'foreground',
+      }),
+    },
+  ])('keeps a read session cleared when $read from before the read answers while the write is out', async ({ start }) => {
+    const staleRead = deferred<unknown>();
+    const mark = deferred<unknown>();
+    const listInbox = vi.fn()
+      .mockResolvedValueOnce({ sessions: [inboxRow], next_cursor: null, unread_by_session: twoUnread })
+      .mockReturnValueOnce(staleRead.promise);
+    const holder = await mountReadInbox(listInbox, vi.fn().mockReturnValue(mark.promise));
+
+    act(() => {
+      start(holder);
+    });
+    await settle();
+    expect(listInbox).toHaveBeenCalledTimes(2);
+    act(() => {
+      void holder.inbox?.markRead(session.id);
+    });
+    // The same render that handles the read shows it: nothing waits on the write.
+    expect(holder.inbox?.unreadBySession).toEqual({ [sessionB.id]: 5 });
+
+    await act(async () => {
+      staleRead.resolve({ sessions: [inboxRow], next_cursor: null, unread_by_session: twoUnread });
+      await staleRead.promise;
+    });
+    await settle();
+    expect(holder.inbox?.unreadBySession).toEqual({ [sessionB.id]: 5 });
+
+    await act(async () => {
+      mark.resolve({ updated: 3, unread_by_session: { [sessionB.id]: 5 } });
+      await mark.promise;
+    });
+    await settle();
+    expect(holder.inbox?.unreadBySession).toEqual({ [sessionB.id]: 5 });
+  });
+
+  it.each([
+    {
+      failure: 'answers with an error',
+      fail: (mark: Deferred<unknown>) => mark.resolve({ error: 'forbidden' }),
+      reportedWhileOut: null,
+      restored: 3,
+    },
+    {
+      failure: 'never reaches the server',
+      fail: (mark: Deferred<unknown>) => mark.reject(new TypeError('Failed to fetch')),
+      reportedWhileOut: null,
+      restored: 3,
+    },
+    {
+      failure: 'answers with an error after a newer map reported the session',
+      fail: (mark: Deferred<unknown>) => mark.resolve({ error: 'unavailable' }),
+      reportedWhileOut: 4,
+      restored: 4,
+    },
+  ])('puts the count back when the write $failure', async ({ fail, reportedWhileOut, restored }) => {
+    const mark = deferred<unknown>();
+    const listInbox = vi.fn()
+      .mockResolvedValueOnce({ sessions: [inboxRow], next_cursor: null, unread_by_session: twoUnread })
+      .mockResolvedValueOnce({
+        sessions: [inboxRow],
+        next_cursor: null,
+        unread_by_session: { [session.id]: reportedWhileOut ?? 3, [sessionB.id]: 5 },
+      });
+    const holder = await mountReadInbox(listInbox, vi.fn().mockReturnValue(mark.promise));
+
+    let outcome: Promise<boolean> | undefined;
+    act(() => {
+      outcome = holder.inbox?.markRead(session.id);
+    });
+    expect(holder.inbox?.unreadBySession).toEqual({ [sessionB.id]: 5 });
+    if (reportedWhileOut !== null) {
+      act(() => {
+        void holder.inbox?.refresh();
+      });
+      await settle();
+      expect(holder.inbox?.unreadBySession).toEqual({ [sessionB.id]: 5 });
+    }
+
+    await act(async () => {
+      fail(mark);
+      await mark.promise.catch(() => undefined);
+    });
+    await settle();
+
+    await expect(outcome).resolves.toBe(false);
+    expect(holder.inbox?.unreadBySession).toEqual({ [session.id]: restored, [sessionB.id]: 5 });
+  });
+
+  it('shows a new unread that arrives after the read, and a failed write leaves it', async () => {
+    const mark = deferred<unknown>();
+    const newReply = { ...inboxRow, last_activity_at: '2026-08-11T00:05:00Z', unread_count: 1 };
+    const listInbox = vi.fn()
+      .mockResolvedValueOnce({ sessions: [inboxRow], next_cursor: null, unread_by_session: twoUnread })
+      .mockResolvedValueOnce({
+        sessions: [newReply],
+        next_cursor: null,
+        unread_by_session: { [session.id]: 1, [sessionB.id]: 5 },
+      });
+    const holder = await mountReadInbox(listInbox, vi.fn().mockReturnValue(mark.promise));
+
+    act(() => {
+      void holder.inbox?.markRead(session.id);
+    });
+    expect(holder.inbox?.unreadBySession).toEqual({ [sessionB.id]: 5 });
+    act(() => {
+      holder.handlers?.onInboxSessionUpdated?.(newReply as never);
+    });
+    expect(holder.inbox?.unreadBySession).toEqual({ [session.id]: 1, [sessionB.id]: 5 });
+    // A whole map that answers while the write is still out reports the new
+    // reply too: the read no longer owns the count, so the map shows it.
+    act(() => {
+      void holder.inbox?.refresh();
+    });
+    await settle();
+    expect(holder.inbox?.unreadBySession).toEqual({ [session.id]: 1, [sessionB.id]: 5 });
+
+    await act(async () => {
+      mark.resolve({ error: 'unavailable' });
+      await mark.promise;
+    });
+    await settle();
+    expect(holder.inbox?.unreadBySession).toEqual({ [session.id]: 1, [sessionB.id]: 5 });
+  });
+
+  it('clears every count in one render when all are marked read', async () => {
+    const marks = [deferred<unknown>(), deferred<unknown>()];
+    const markSessionRead = vi.fn()
+      .mockReturnValueOnce(marks[0].promise)
+      .mockReturnValueOnce(marks[1].promise);
+    const holder = await mountReadInbox(
+      vi.fn().mockResolvedValue({ sessions: [inboxRow], next_cursor: null, unread_by_session: twoUnread }),
+      markSessionRead,
+    );
+    expect(holder.inbox?.totalUnread).toBe(8);
+    const rendered = holder.renders.length;
+
+    // What InboxPage and the sidebar do for "Mark all read".
+    act(() => {
+      void Promise.all(Object.keys(twoUnread).map((id) => holder.inbox?.markRead(id)));
+    });
+    expect(holder.renders.slice(rendered)).toEqual([{}]);
+    expect(holder.inbox?.totalUnread).toBe(0);
+    expect(holder.inbox?.unreadSessions).toBe(0);
+
+    // The first answer was written before the second write: the session that
+    // write still owns stays read.
+    await act(async () => {
+      marks[0].resolve({ updated: 3, unread_by_session: { [sessionB.id]: 5 } });
+      await marks[0].promise;
+    });
+    await settle();
+    expect(holder.inbox?.unreadBySession).toEqual({});
+    await act(async () => {
+      marks[1].resolve({ updated: 5, unread_by_session: {} });
+      await marks[1].promise;
+    });
+    await settle();
+    expect(holder.inbox?.unreadBySession).toEqual({});
   });
 
   it('defers a later load-more until an in-flight Inbox refresh completes', async () => {
