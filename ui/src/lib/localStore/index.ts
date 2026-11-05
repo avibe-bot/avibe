@@ -24,6 +24,7 @@
 //    behaves as it did without this store; nothing here throws to a caller.
 
 import type { WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
+import { MAIN_BOT_SESSION_ID } from '../bots';
 import { isTranscriptMessage } from '../chatMessageTypes';
 import {
   getLocalSnapshotPrincipal,
@@ -67,9 +68,9 @@ export const LOCAL_STORE_BUDGET_BYTES = 1024 * 1024 * 1024;
 /** Eviction stops this far under the budget so it does not run on every write. */
 const EVICTION_TARGET = 0.9;
 const BUDGET_CHECK_INTERVAL_MS = 30 * 1000;
-/** Sessions kept whatever the budget: the most recently active ones. */
+/** The most recently active sessions, evicted only after every other one
+ *  (and before pinned sessions and the main Bot's). */
 const PROTECTED_RECENT_SESSIONS = 40;
-const MAIN_BOT_SESSION_ID = 'ses_main';
 
 type Meta = {
   key: 'reader';
@@ -513,10 +514,12 @@ async function putRow(
     settle(tombstones.get(row.id) as IDBRequest<Tombstone | undefined>),
   ]);
   if ((existing && existing.observedAt > observedAt) || (tombstone && tombstone.observedAt > observedAt)) return false;
-  if (!existing && !tombstone) {
-    const key = orderKeyOf(row);
-    if (watermarks.some((mark) => mark.observedAt > observedAt && withinReach(key, mark.low, mark.high))) return false;
-  }
+  // A newer page of this session that proved this stretch without the row keeps
+  // it out. Neither an older tombstone nor an older copy says so: a page that
+  // finds the row already gone (removed, or stored under another session it moved
+  // to) removes nothing here, so it leaves nothing newer of its own.
+  const key = orderKeyOf(row);
+  if (watermarks.some((mark) => mark.observedAt > observedAt && withinReach(key, mark.low, mark.high))) return false;
   const stored: StoredMessage = {
     id: row.id,
     sessionId,
@@ -730,7 +733,8 @@ export async function recordLocalStoreStreamRow(row: WorkbenchMessage | null | u
       await applySessionDelta(tx, write, now);
       return;
     }
-    if (!(await putRow(write, row, sessionId, ticket.observedAt))) return;
+    // A newer page of the session that left the row out wins over its arrival.
+    if (!(await putRow(write, row, sessionId, ticket.observedAt, record?.watermarks ?? []))) return;
     if (current && streamLive && streamToken === currentStreamToken()) {
       rangesStore.put({ ...current, ranges: extendTailCoverage(current.ranges, orderKeyOf(row), streamToken) } satisfies StoredRanges);
     }

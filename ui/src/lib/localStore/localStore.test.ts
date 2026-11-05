@@ -173,8 +173,9 @@ describe('P1: last observed wins, per row', () => {
     for (const kind of ['tail', 'before', 'around'] as const) {
       // An authorization-change clear: the store stays claimed for this reader.
       await clearLocalSnapshots();
-      await tail(rows(1, 5), null);
-      const slow = beginLocalStoreRead('ses_a', Date.now() - 1000);
+      // Read before the slow page went out, so only the streamed copy is newer.
+      await tail(rows(1, 5), null, Date.now() - 3000);
+      const slow = beginLocalStoreRead('ses_a', Date.now() - 2000);
       await recordLocalStoreStreamRow(row(3, { text: 'quick reply chosen' }));
       await recordLocalStorePage(slow, { kind }, { messages: rows(1, 5), next_before_id: null, next_after_id: null, anchor_id: 'msg_003' });
       expect(await texts()).toContain('quick reply chosen');
@@ -186,6 +187,39 @@ describe('P1: last observed wins, per row', () => {
     // Row 6 moved away; the newer complete tail lands first in an empty store.
     await tail(rows(1, 5), null);
     await recordLocalStorePage(older, { kind: 'tail' }, { messages: rows(1, 6), next_before_id: null });
+    expect(await ids()).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  it('does not let an older answer bring back a row a newer page left out, though an older removal left a tombstone', async () => {
+    // Row 6 was removed at t1, then moved back into the session.
+    await tail(rows(1, 6), null, Date.now() - 3000);
+    await tail(rows(1, 5), null, Date.now() - 2500);
+    // A read at t2 sees it back; a newer complete tail at t3, without it again,
+    // lands first and finds it already gone.
+    const older = beginLocalStoreRead('ses_a', Date.now() - 2000);
+    await tail(rows(1, 5), null);
+    await recordLocalStorePage(older, { kind: 'tail' }, { messages: rows(1, 6), next_before_id: null });
+    expect(await ids()).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  it('does not let an older answer move back a row a newer page left out, though it is stored under another session', async () => {
+    // Row 6 is stored under the session it moved to.
+    await tail([row(6, { session_id: 'ses_b' })], null, Date.now() - 3000, 'ses_b');
+    // A read at t2 sees it back in this session; a newer complete tail at t3,
+    // without it, lands first.
+    const older = beginLocalStoreRead('ses_a', Date.now() - 2000);
+    await tail(rows(1, 5), null);
+    await recordLocalStorePage(older, { kind: 'tail' }, { messages: rows(1, 6), next_before_id: null });
+    expect(await ids()).toEqual([1, 2, 3, 4, 5]);
+    expect(await ids('ses_b')).toEqual([6]);
+  });
+
+  it('does not let a streamed row land after a newer page that left it out', async () => {
+    await tail(rows(1, 5), null, Date.now() - 3000);
+    // A tail whose request went out after row 6 arrived, without it, lands first.
+    const arrival = Date.now();
+    await tail(rows(1, 5), null, arrival + 1000);
+    await recordLocalStoreStreamRow(row(6));
     expect(await ids()).toEqual([1, 2, 3, 4, 5]);
   });
 
@@ -229,11 +263,15 @@ describe('the event stream', () => {
   });
 
   it('removes a stored row that moved to a session the store does not keep', async () => {
-    await tail(rows(1, 3), null);
+    await tail(rows(1, 3), null, Date.now() - 3000);
+    const older = beginLocalStoreRead('ses_a', Date.now() - 2000);
     // promote_suppressed_native_message rebinds row 3; its message.new names the new session.
     await recordLocalStoreStreamRow({ ...row(3), session_id: 'ses_elsewhere' });
     expect(await ids()).toEqual([1, 2]);
     expect(await ids('ses_elsewhere')).toEqual([]);
+    // A page read before the move, landing after it, does not bring it back.
+    await recordLocalStorePage(older, { kind: 'tail' }, { messages: rows(1, 3), next_before_id: null });
+    expect(await ids()).toEqual([1, 2]);
   });
 
   it('does not extend coverage over a row that arrived after the stream broke', async () => {
