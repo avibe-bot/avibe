@@ -30,8 +30,8 @@ import {
   cachedProjectSessions,
   cachedSessionProjects,
   forgetProjectSessions,
+  forgetProjectSessionsListing,
   hydrateProjectSessionSnapshots,
-  projectsWithCachedSession,
   rememberProjectSessions,
   type ProjectSessionsSnapshot,
 } from '../lib/projectSessionSnapshots';
@@ -1220,11 +1220,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         acceptSessionMutation(projectId, data.session_id);
         // Archived or hidden: the stored first page that lists it is out of date
         // for every reader, so it goes, rather than paint the Session again.
-        if (sessionActivityInboxAction(data) === 'drop') {
-          for (const cached of new Set([...projectsWithCachedSession(data.session_id), ...(projectId ? [projectId] : [])])) {
-            forgetProjectSessions(cached);
-          }
-        }
+        if (sessionActivityInboxAction(data) === 'drop') forgetProjectSessionsListing(data.session_id, projectId);
         if (data.event === 'archived') {
           sessionProjectRef.current.delete(data.session_id);
           // Terminal archive (here or in another tab) — drop the row live.
@@ -1675,9 +1671,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       await api.archiveSession(sessionId);
       acceptSessionMutation(projectId, sessionId);
       sessionProjectRef.current.delete(sessionId);
-      for (const cached of new Set([...projectsWithCachedSession(sessionId), ...(projectId ? [projectId] : [])])) {
-        forgetProjectSessions(cached);
-      }
+      forgetProjectSessionsListing(sessionId, projectId);
       if (projectId == null) return; // standalone session: no tree row to drop
       setSessions((prev) => {
         const state = prev[projectId];

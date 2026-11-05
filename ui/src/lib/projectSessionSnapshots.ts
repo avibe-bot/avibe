@@ -107,14 +107,21 @@ export function rememberProjectSessions(projectId: string, page: ProjectSessions
   const target = currentMemory();
   if (!target) return;
   touched.set(projectId, (touched.get(projectId) ?? 0) + 1);
-  const added = !target.pages.has(projectId);
   const value: ProjectSessionsSnapshot = {
     sessions: page.sessions.slice(0, PROJECT_SESSIONS_SNAPSHOT_ROWS),
     next_before_id: page.next_before_id,
   };
+  // Most recently written last, so the memory keeps the same 40 the store does.
+  target.pages.delete(projectId);
   target.pages.set(projectId, value);
+  for (const oldest of [...target.pages.keys()].slice(0, Math.max(0, target.pages.size - PROJECTS_KEPT))) {
+    target.pages.delete(oldest);
+  }
+  // Pruned after every write, not only a write memory thinks is new: a project
+  // evicted from storage may still be in memory, and writing it again re-adds
+  // its record. Pruning reads only the keys until there is something to evict.
   void writeLocalSnapshot(keyOf(projectId), SCHEMA, value).then(() =>
-    added ? pruneLocalSnapshots(KEY_PREFIX, PROJECTS_KEPT, { slack: EVICTION_SLACK }) : undefined,
+    pruneLocalSnapshots(KEY_PREFIX, PROJECTS_KEPT, { slack: EVICTION_SLACK }),
   );
 }
 
@@ -125,11 +132,22 @@ export function forgetProjectSessions(projectId: string): void {
   void deleteLocalSnapshot(keyOf(projectId));
 }
 
-/** The projects whose stored page holds this Session, as far as memory knows. */
-export function projectsWithCachedSession(sessionId: string): string[] {
-  const pages = currentMemory()?.pages;
-  if (!pages) return [];
-  return [...pages].filter(([, page]) => page.sessions.some((row) => row.id === sessionId)).map(([id]) => id);
+/** A Session left the reader's view (archived or hidden): drop every stored page
+ *  that lists it, including ones not loaded into memory yet, which storage is
+ *  checked for, so a later load cannot paint the Session again. ``projectId`` is
+ *  the project the caller already knows it was in, if any. */
+export function forgetProjectSessionsListing(sessionId: string, projectId?: string | null): void {
+  const known = new Set<string>(projectId ? [projectId] : []);
+  for (const [id, page] of currentMemory()?.pages ?? []) {
+    if (page.sessions.some((row) => row.id === sessionId)) known.add(id);
+  }
+  for (const id of known) forgetProjectSessions(id);
+  void readLocalSnapshotsWithPrefix(KEY_PREFIX, SCHEMA, parse).then((stored) => {
+    for (const [key, page] of stored) {
+      const id = key.slice(KEY_PREFIX.length);
+      if (!known.has(id) && page.sessions.some((row) => row.id === sessionId)) forgetProjectSessions(id);
+    }
+  });
 }
 
 /** The projects memory holds a page for. */

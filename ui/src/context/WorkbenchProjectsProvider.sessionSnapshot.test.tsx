@@ -102,10 +102,10 @@ function fakeApi(projects: WorkbenchProject[] = [project]) {
 }
 
 // Every render the tree goes through, so a frame with an open project and no rows shows up.
-function mount(reader: string) {
+function mount(reader: string, { active = true }: { active?: boolean } = {}) {
   const state = { current: null as WorkbenchProjectsTree | null, renders: [] as { open: boolean; rows: string[] | null }[] };
   const Probe = () => {
-    const tree = useWorkbenchProjectsTree();
+    const tree = useWorkbenchProjectsTree({ active });
     state.renders.push({ open: tree.isExpanded('a'), rows: ids(tree.sessionsOf('a').sessions) });
     useEffect(() => { state.current = tree; });
     return null;
@@ -264,5 +264,22 @@ describe('a project\'s stored Sessions', () => {
     const record = await stored();
     expect(ids(record?.sessions)).toEqual(['fresh', 's0', 's1', 's2', 's3', 's4', 's5', 's6']);
     expect(record?.next_before_id).toBe('s6');
+  });
+
+  it('lose a Session hidden while nothing has loaded them: storage is checked, not only memory', async () => {
+    await storePage('local', { sessions: [session('s1'), session('hidden')], next_before_id: null });
+    const api = fakeApi();
+    // A page that reads no project (the phone's Inbox): nothing is loaded, and
+    // the event names no project the tree knows.
+    mount('local', { active: false });
+    await settle();
+    await act(async () => {
+      for (const handler of api.handlers) {
+        handler.onSessionActivity?.({ session_id: 'hidden', scope_id: null, event: 'updated', visibility: 'background' });
+      }
+    });
+    await settle();
+    setLocalSnapshotPrincipal('local');
+    expect(await stored()).toBeNull();
   });
 });

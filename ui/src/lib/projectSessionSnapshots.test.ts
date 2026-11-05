@@ -4,9 +4,16 @@ import 'fake-indexeddb/auto';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { WorkbenchSession } from '../context/ApiContext';
-import { clearLocalSnapshots, readLocalSnapshot, setLocalSnapshotPrincipal, writeLocalSnapshot } from './localSnapshots';
+import {
+  clearLocalSnapshots,
+  readLocalSnapshot,
+  readLocalSnapshotsWithPrefix,
+  setLocalSnapshotPrincipal,
+  writeLocalSnapshot,
+} from './localSnapshots';
 import {
   cachedProjectSessions,
+  cachedSessionProjects,
   forgetProjectSessions,
   hydrateProjectSessionSnapshots,
   rememberProjectSessions,
@@ -34,6 +41,16 @@ describe('project session snapshots', () => {
     expect(await stored('p8')).toBeNull();
     expect(await stored('p9')).not.toBeNull();
     expect(await stored('p40')).not.toBeNull();
+
+    // Writing the evicted projects again (memory still had them) keeps the cap.
+    for (let index = 0; index < 9; index += 1) {
+      rememberProjectSessions(`p${index}`, page(`s${index}b`));
+      await flush();
+    }
+    const kept = await readLocalSnapshotsWithPrefix('projects:sessions:', 1, (value) => value);
+    expect(kept.size).toBeGreaterThan(0);
+    expect(kept.size).toBeLessThanOrEqual(40);
+    expect(cachedSessionProjects().length).toBeLessThanOrEqual(40);
   });
 
   it('load stored pages for the reader, without putting back one forgotten while they load', async () => {
