@@ -215,6 +215,9 @@ const forgotten = new Map<string, number>();
 const documentId = Math.random().toString(36).slice(2);
 let streamEpoch = 0;
 const currentStreamToken = () => `${documentId}:${streamEpoch}`;
+// Whether the event stream is connected now. While it is not, nothing would
+// deliver a newer row, so no page earns a tail claim and none is extended.
+let streamLive = false;
 
 // Sessions this document started a page read for, and when. A row streamed
 // while such a read is out is kept even though the session has no stored range
@@ -495,10 +498,11 @@ export async function recordLocalStorePage(
     const current = await settle(rangesStore.get(sessionId) as IDBRequest<StoredRanges | undefined>);
     const watermarks = (current?.watermarks ?? []).filter((mark) => now - mark.observedAt <= LOCAL_STORE_MAX_ANSWER_AGE_MS);
     for (const row of stored) await putRow(write, row, sessionId, observedAt, watermarks);
-    // A tail read across a stream gap cannot account for what the gap dropped,
-    // so its coverage gets no tail claim and nothing streamed extends it.
+    // A tail read across a stream gap, or while the stream is down, cannot
+    // account for what the stream did not deliver, so its coverage gets no tail
+    // claim and nothing streamed extends it.
     const streamToken = currentStreamToken();
-    const tailClaim = ticket.streamToken === streamToken;
+    const tailClaim = streamLive && ticket.streamToken === streamToken;
     let ranges = mergePageCoverage(current?.ranges ?? [], reach, { streamToken, now, tailClaim });
     if (streamedAbove && tailClaim) ranges = extendTailCoverage(ranges, streamedAbove, streamToken);
     rangesStore.put({
@@ -562,7 +566,7 @@ export async function recordLocalStoreStreamRow(row: WorkbenchMessage | null | u
     if (!current && !readPending(sessionId)) return;
     const write: RowWrite = { tx, sessionDelta: new Map() };
     if (!(await putRow(write, row, sessionId, ticket.observedAt))) return;
-    if (current && streamToken === currentStreamToken()) {
+    if (current && streamLive && streamToken === currentStreamToken()) {
       rangesStore.put({ ...current, ranges: extendTailCoverage(current.ranges, orderKeyOf(row), streamToken) } satisfies StoredRanges);
     }
     await applySessionDelta(tx, write.sessionDelta, now);
@@ -577,6 +581,15 @@ export function noteLocalStoreStreamGap(): void {
   streamEpoch += 1;
 }
 
+/** The event stream's connection state changed. Losing it ends every tail
+ *  claim at once, before any reconnect: a page read while it is down must not
+ *  join an older tail across rows the stream never delivered. Regaining it
+ *  ends nothing; the reconnect's catch-up (``noteLocalStoreStreamGap``) does. */
+export function noteLocalStoreStreamState(live: boolean): void {
+  if (streamLive && !live) streamEpoch += 1;
+  streamLive = live;
+}
+
 // ---------------------------------------------------------------------------
 // Forgetting one session
 
@@ -584,6 +597,8 @@ export function noteLocalStoreStreamGap(): void {
  *  in flight: it was archived, left the reader's Inbox, or the server refused it. */
 export async function forgetLocalStoreSession(sessionId: string): Promise<void> {
   forgotten.set(sessionId, (forgotten.get(sessionId) ?? 0) + 1);
+  // A read voided by the forget no longer admits the session's streamed rows.
+  pendingReads.delete(sessionId);
   await transact('readwrite', [SESSIONS, MESSAGES, RANGES, TOMBSTONES], async (tx) => {
     const messages = tx.objectStore(MESSAGES);
     const keys = await settle(messages.index(BY_SESSION).getAllKeys(sessionKeyRange(sessionId, null, null)));

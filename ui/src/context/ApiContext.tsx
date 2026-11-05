@@ -12,6 +12,7 @@ import {
   forgetLocalStoreSession,
   forgetLocalStoreSessionOnActivity,
   noteLocalStoreStreamGap,
+  noteLocalStoreStreamState,
   recordLocalStorePage,
   recordLocalStoreSession,
   recordLocalStoreStreamRow,
@@ -2864,6 +2865,14 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // When the request behind a read of ``path`` went out: a shared cached read
   // started before the caller asked, and the local message store orders what it
   // writes by when each answer was read (lib/localStore, P1).
+  // The server refused this reader the session, or it is gone: an answer, unlike
+  // a network failure, so the stored history goes (local-sync-store.md 6.2).
+  const forgetRefusedSession = (sessionId: string, error: unknown) => {
+    if (error instanceof ApiError && (error.status === 403 || error.status === 404)) {
+      void forgetLocalStoreSession(sessionId);
+    }
+  };
+
   const readStartedAt = (path: string, fallback: number) => {
     const cached = readCacheRef.current.get(path);
     return cached && cached.expiresAt > Date.now() ? Math.min(cached.startedAt, fallback) : fallback;
@@ -2916,6 +2925,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const setWorkbenchEventConnectionState = (state: WorkbenchEventConnectionState) => {
     if (eventConnectionStateRef.current === state) return;
     eventConnectionStateRef.current = state;
+    // Every path that loses the stream (an error, a failed heartbeat, a stop, a
+    // controller leg going down) passes here; the local store must know at once.
+    noteLocalStoreStreamState(state === 'connected');
     dispatchToWorkbenchHandlers((handlers) => handlers.onConnectionState?.(state));
   };
 
@@ -4215,7 +4227,10 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         ? getJson(path, { handleError: params?.handleError })
         : getCachedJson(path, undefined, { handleError: params?.handleError });
       const ticket = beginLocalStoreRead(sessionId, readStartedAt(path, startedAt));
-      const row = sessionRowFromPayload(await read);
+      const row = sessionRowFromPayload(await read.catch((error) => {
+        forgetRefusedSession(sessionId, error);
+        throw error;
+      }));
       void recordLocalStoreSession(ticket, row);
       return row;
     },
@@ -4252,6 +4267,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getSessionResult: async (sessionId) => {
       const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
       const payload = await res.json().catch(() => null);
+      if (res.status === 403 || res.status === 404) void forgetLocalStoreSession(sessionId);
       if (!(res.ok && payload && typeof payload.id === 'string')) {
         return { status: res.status, session: null };
       }
@@ -4266,10 +4282,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const stored = beginLocalStoreRead(sessionId);
       try {
         const payload = await getJson(`/api/sessions/${encodeURIComponent(sessionId)}/bootstrap`).catch((error) => {
-          // The server refuses this reader the session, or it is gone.
-          if (error instanceof ApiError && (error.status === 403 || error.status === 404)) {
-            void forgetLocalStoreSession(sessionId);
-          }
+          forgetRefusedSession(sessionId, error);
           throw error;
         });
         void recordLocalStorePage(stored, { kind: 'tail' }, payload, payload?.session);
@@ -4332,7 +4345,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           : params?.tail ? 'tail' : params?.beforeId ? 'before' : null;
       if (kind) {
         const ticket = beginLocalStoreRead(sessionId, params?.cache === false ? startedAt : readStartedAt(path, startedAt));
-        read.then((answer) => recordLocalStorePage(ticket, { kind }, answer), () => {});
+        read.then((answer) => recordLocalStorePage(ticket, { kind }, answer), (error) => forgetRefusedSession(sessionId, error));
       }
       return read;
     },

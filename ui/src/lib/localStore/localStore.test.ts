@@ -13,6 +13,7 @@ import {
   beginLocalStoreRead,
   forgetLocalStoreSessionOnActivity,
   noteLocalStoreStreamGap,
+  noteLocalStoreStreamState,
   readLocalStoreWindow,
   recordLocalStorePage,
   recordLocalStoreStreamRow,
@@ -58,9 +59,25 @@ const texts = async (sessionId = 'ses_a') =>
 const tail = (messages: WorkbenchMessage[], next_before_id: string | null = 'cursor', observedAt = Date.now(), sessionId = 'ses_a') =>
   recordLocalStorePage(beginLocalStoreRead(sessionId, observedAt), { kind: 'tail' }, { messages, next_before_id }, session(sessionId));
 const idle = () => new Promise((resolve) => setTimeout(resolve, 30));
+/** Rows on disk, read past every fence: what a wipe must have removed. */
+const rowsOnDisk = () => new Promise<number>((resolve, reject) => {
+  const open = indexedDB.open('avibe-local-store');
+  open.onerror = () => reject(open.error);
+  open.onsuccess = () => {
+    const db = open.result;
+    const count = db.transaction('messages', 'readonly').objectStore('messages').count();
+    count.onsuccess = () => {
+      db.close();
+      resolve(count.result);
+    };
+    count.onerror = () => reject(count.error);
+  };
+});
 
 beforeEach(() => {
   setLocalSnapshotPrincipal('remote:alice');
+  // Most cases run on a connected stream; the outage cases say otherwise.
+  noteLocalStoreStreamState(true);
 });
 
 afterEach(async () => {
@@ -115,6 +132,17 @@ describe('P2: a page speaks only for what it proves', () => {
     // joined to the tail across it.
     await recordLocalStoreStreamRow(row(7));
     expect((await readLocalStoreWindow('ses_a'))?.contiguous).toBe(false);
+  });
+
+  it('ends every tail claim when the stream drops, and grants none to pages read while it is down', async () => {
+    await tail(rows(1, 50), null);
+    noteLocalStoreStreamState(false);
+    // Rows 51-70 arrived on the server; this tail was read during the outage.
+    await tail(rows(71, 100));
+    expect((await readLocalStoreWindow('ses_a', { limit: 60 }))?.contiguous).toBe(false);
+    // A second tail read during the same outage does not join the first either.
+    await tail(rows(111, 120));
+    expect((await readLocalStoreWindow('ses_a', { limit: 15 }))?.contiguous).toBe(false);
   });
 
   it('reports the start of history only when the window reaches it', async () => {
@@ -173,6 +201,13 @@ describe('the event stream', () => {
     beginLocalStoreRead('ses_opening');
     await recordLocalStoreStreamRow(row(1, {}, 'ses_opening'));
     expect(await ids('ses_opening')).toEqual([1]);
+
+    // A read the session's forget voided admits nothing more.
+    beginLocalStoreRead('ses_moved');
+    forgetLocalStoreSessionOnActivity({ session_id: 'ses_moved', event: 'updated', visibility: 'background' });
+    await idle();
+    await recordLocalStoreStreamRow(row(1, {}, 'ses_moved'));
+    expect(await ids('ses_moved')).toEqual([]);
   });
 
   it('covers a row streamed while a tail was out, past a later gap', async () => {
@@ -221,11 +256,13 @@ describe('one reader, and the wipes that end it', () => {
 
   it('LSYNC-018 wipes on a sign-out in another tab, including one running an older build', async () => {
     await tail(rows(1, 3), null);
+    expect(await rowsOnDisk()).toBe(3);
     // An older build bumps the shared generation and knows nothing of this store.
     bumpSignOutGeneration();
     window.dispatchEvent(new StorageEvent('storage', { key: SIGN_OUT_GENERATION_KEY }));
     await idle();
-    expect(await ids()).toEqual([]);
+    // Off the disk now, not only hidden until the next open.
+    expect(await rowsOnDisk()).toBe(0);
   });
 
   it('LSYNC-018 stores and reads nothing more for a reader signed out in another tab', async () => {

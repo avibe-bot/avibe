@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const apiFetch = vi.hoisted(() => vi.fn());
 
-vi.mock('../lib/apiFetch', () => ({ apiFetch }));
+vi.mock('../lib/apiFetch', () => ({ apiFetch, recoverRemoteAuthFromSessionProbe: vi.fn() }));
 vi.mock('./ToastContext', () => ({ useToast: () => ({ showToast: vi.fn() }) }));
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
@@ -140,6 +140,60 @@ describe('local message store write-through at the API layer', () => {
     await settle();
     const window = await readLocalStoreWindow('ses_a');
     expect(window?.messages.map((message) => message.text)).toEqual(['row 1', 'row 2', 'row 3', 'row 5']);
+    expect(window?.contiguous).toBe(false);
+  });
+
+  it('LSYNC-020 forgets a session whose message read the server refuses, and keeps it when the read only failed', async () => {
+    await seed();
+    render(<ApiProvider><Subscriber /></ApiProvider>);
+    apiFetch.mockImplementation(async (path: string) => {
+      if (path.startsWith('/api/sessions/ses_a/messages')) throw new TypeError('Failed to fetch');
+      return json({});
+    });
+    await expect(api.current!.listSessionMessages('ses_a', { tail: true, cache: false })).rejects.toThrow();
+    await settle();
+    expect(await held()).toEqual(['row 1', 'row 2']);
+
+    apiFetch.mockImplementation(async (path: string) => (
+      path.startsWith('/api/sessions/ses_a/messages') ? json({ error: 'forbidden' }, 403) : json({})
+    ));
+    await expect(api.current!.listSessionMessages('ses_a', { beforeId: 'msg_ses_a_1', limit: 50 })).rejects.toThrow();
+    await settle();
+    expect(await held()).toEqual([]);
+
+    // A session read that reports the refusal by status rather than throwing.
+    await seed('ses_b');
+    apiFetch.mockImplementation(async (path: string) => (path === '/api/sessions/ses_b' ? json({ error: 'not found' }, 404) : json({})));
+    expect((await api.current!.getSessionResult('ses_b')).status).toBe(404);
+    await settle();
+    expect(await held('ses_b')).toEqual([]);
+  });
+
+  it('ends tail claims when the stream fails, so a tail read during the outage does not join the stored one', async () => {
+    let tailFrom = 1;
+    apiFetch.mockImplementation(async (path: string) => (
+      path === '/api/sessions/ses_a/bootstrap'
+        ? json({ session: sessionRow(), messages: [row(tailFrom), row(tailFrom + 1)], next_before_id: tailFrom > 1 ? 'cursor' : null })
+        : json({})
+    ));
+    render(<ApiProvider><Subscriber /></ApiProvider>);
+    const source = FakeEventSource.instances.at(-1)!;
+    source.emit('connected', { sub_id: 1 });
+    source.emit('workbench.events.bridge.status', { type: 'workbench.events.bridge.status', data: { connected: true } });
+    await api.current!.getSessionBootstrap('ses_a');
+    await settle();
+    // On the connected stream the tail holds its claim: a streamed row extends it.
+    source.emit('message.new', { type: 'message.new', data: row(3) });
+    await settle();
+    expect((await readLocalStoreWindow('ses_a'))?.contiguous).toBe(true);
+
+    act(() => source.onerror?.(new Event('error')));
+    // Rows 4-6 arrived on the server while the stream was down.
+    tailFrom = 7;
+    await api.current!.getSessionBootstrap('ses_a');
+    await settle();
+    const window = await readLocalStoreWindow('ses_a');
+    expect(window?.messages.map((message) => message.text)).toEqual(['row 1', 'row 2', 'row 3', 'row 7', 'row 8']);
     expect(window?.contiguous).toBe(false);
   });
 
