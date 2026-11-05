@@ -45,11 +45,14 @@ final class WebViewController: UIViewController {
     private var dialogIdentifiersByWebView: [ObjectIdentifier: Set<UUID>] = [:]
 
     private lazy var webView: WKWebView = {
-        let configuration = WKWebViewConfiguration()
+        let configuration = NativeBridgeConfiguration.make(instanceOrigin: instanceOrigin)
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
         configure(webView)
         webView.translatesAutoresizingMaskIntoConstraints = false
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
+        webView.scrollView.isScrollEnabled = false
+        webView.scrollView.bounces = false
         return webView
     }()
 
@@ -81,8 +84,21 @@ final class WebViewController: UIViewController {
             webView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
             webView.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
             webView.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
-            webView.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
+            webView.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
         ])
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(resetOuterScrollPosition),
+            name: UIResponder.keyboardWillChangeFrameNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(resetOuterScrollPosition),
+            name: UIResponder.keyboardWillHideNotification,
+            object: nil
+        )
 
         loadConfiguredInstance()
     }
@@ -97,6 +113,7 @@ final class WebViewController: UIViewController {
     }
 
     deinit {
+        NotificationCenter.default.removeObserver(self)
         cancelAllPendingDialogs(dismissAlerts: false)
         for record in popupRecords.values {
             record.webView.stopLoading()
@@ -106,6 +123,11 @@ final class WebViewController: UIViewController {
         for url in pendingDownloadedFiles {
             removeDownloadedFile(at: url)
         }
+    }
+
+    @objc
+    private func resetOuterScrollPosition() {
+        webView.scrollView.setContentOffset(.zero, animated: false)
     }
 
     private func configure(_ webView: WKWebView) {

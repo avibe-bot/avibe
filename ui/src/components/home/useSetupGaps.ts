@@ -4,6 +4,7 @@ import { useApi } from '../../context/ApiContext';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import { isDesktopShell } from '../../lib/desktopShell';
 import type { SetupItem } from '../../lib/homePreferences';
+import { isNativeShell } from '../../lib/native';
 import { getEnabledPlatforms } from '../../lib/platforms';
 import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { useIsDesktop } from '../../lib/useIsDesktop';
@@ -48,7 +49,7 @@ export function useSetupGaps({ owner, noModel }: { owner: boolean; noModel: bool
   const surfaceActive = useRouteSurfaceActive();
   const desktop = useIsDesktop();
   const { capabilities } = useInstanceAuthorization();
-  const canPush = capabilities.can_read_instance;
+  const canPush = capabilities.can_read_instance && !isNativeShell();
   const [facts, setFacts] = useState<Facts>(UNKNOWN);
 
   const read = useCallback(() => {
@@ -78,6 +79,7 @@ export function useSetupGaps({ owner, noModel }: { owner: boolean; noModel: bool
   }, [read, surfaceActive]);
 
   const enableNotifications = useCallback(async () => {
+    if (!canPush) return;
     try {
       await enableWebPush(api);
     } catch {
@@ -85,7 +87,7 @@ export function useSetupGaps({ owner, noModel }: { owner: boolean; noModel: bool
     }
     const notifications = await readWebPushDeviceState(api);
     setFacts((current) => ({ ...current, notifications }));
-  }, [api]);
+  }, [api, canPush]);
 
   const pending: SetupItem[] = [];
   if (owner && noModel) pending.push('model');

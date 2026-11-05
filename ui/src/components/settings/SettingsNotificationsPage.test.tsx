@@ -7,9 +7,18 @@ import { NotificationPreferencesContext } from '@/context/NotificationPreference
 import type { NotificationPreferences } from '@/lib/notificationPreferences';
 import { SettingsNotificationsPage } from './SettingsNotificationsPage';
 
+const authorization = vi.hoisted(() => ({
+  capabilities: { can_read_instance: false },
+}));
+const native = vi.hoisted(() => ({ shell: false }));
+
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 vi.mock('@/context/InstanceAuthorizationContext', () => ({
-  useInstanceAuthorization: () => ({ capabilities: { can_read_instance: false } }),
+  useInstanceAuthorization: () => authorization,
+}));
+vi.mock('@/lib/native', () => ({ isNativeShell: () => native.shell }));
+vi.mock('../workbench/WebPushControl', () => ({
+  WebPushControl: () => <div data-testid="web-push-control" />,
 }));
 
 function mount(preferences: NotificationPreferences, hasBots: boolean) {
@@ -30,7 +39,11 @@ const switches = () => screen.getAllByRole('switch').map((node) => ({
   disabled: (node as HTMLButtonElement).disabled,
 }));
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  authorization.capabilities.can_read_instance = false;
+  native.shell = false;
+});
 
 describe('Settings › Notifications', () => {
   it('saves each switch as a patch of the account record', () => {
@@ -59,5 +72,18 @@ describe('Settings › Notifications', () => {
     mount({ enabled: true, bots: true, sessions: true }, false);
 
     expect(switches().map(({ label }) => label)).toEqual(['workbench.notifications.title']);
+  });
+
+  it('hides browser Web Push in the native shell', () => {
+    authorization.capabilities.can_read_instance = true;
+    const browser = mount({ enabled: true, bots: true, sessions: true }, false);
+    expect(screen.getByTestId('web-push-control')).toBeTruthy();
+    browser.mockClear();
+    cleanup();
+
+    native.shell = true;
+    mount({ enabled: true, bots: true, sessions: true }, false);
+    expect(screen.queryByTestId('web-push-control')).toBeNull();
+    expect(screen.queryByText('settings.notifications.deviceTitle')).toBeNull();
   });
 });

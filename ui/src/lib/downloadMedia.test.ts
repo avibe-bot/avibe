@@ -3,9 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { apiFetch } from './apiFetch';
 import { handleMediaDownloadClick } from './downloadMedia';
+import { isNativeShell } from './native';
 import { isIosDevice, isStandalonePwa } from './platform';
 
 vi.mock('./apiFetch', () => ({ apiFetch: vi.fn() }));
+vi.mock('./native', () => ({ isNativeShell: vi.fn() }));
 vi.mock('./platform', () => ({ isIosDevice: vi.fn(), isStandalonePwa: vi.fn() }));
 
 const share = vi.fn();
@@ -14,6 +16,7 @@ const url = '/api/media/test-file';
 
 beforeEach(() => {
   vi.resetAllMocks();
+  vi.mocked(isNativeShell).mockReturnValue(false);
   vi.mocked(isIosDevice).mockReturnValue(true);
   vi.mocked(isStandalonePwa).mockReturnValue(true);
   share.mockResolvedValue(undefined);
@@ -70,5 +73,13 @@ describe('media download filenames', () => {
     vi.mocked(isStandalonePwa).mockReturnValue(true);
     expect(click(undefined, 'https://example.test/report.pdf').preventDefault).not.toHaveBeenCalled();
     expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('leaves downloads to WKDownload in the native shell', () => {
+    vi.mocked(isNativeShell).mockReturnValue(true);
+
+    expect(click('report.pdf').preventDefault).not.toHaveBeenCalled();
+    expect(apiFetch).not.toHaveBeenCalled();
+    expect(share).not.toHaveBeenCalled();
   });
 });

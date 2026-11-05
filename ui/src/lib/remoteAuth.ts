@@ -1,5 +1,6 @@
 import { clearLocalSnapshots, forgetLocalSnapshots } from './localSnapshots';
 import { forgetBootSession } from './bootSession';
+import { isNativeShell } from './native';
 import { isIosDevice, isStandalonePwa } from './platform';
 
 export const REMOTE_AUTH_REQUIRED_EVENT = 'avibe.remote-auth-required';
@@ -20,6 +21,7 @@ const SETUP_REDIRECT_EXEMPT_PATHS = new Set(['/pet']);
 type PwaContext = {
   ios: boolean;
   standalone: boolean;
+  nativeShell?: boolean;
 };
 
 type RemoteSession =
@@ -44,9 +46,13 @@ let authorizationProbeRunning = false;
 let redirectingForRemoteAuth = false;
 
 export function shouldDeferRemoteAuthRedirect(
-  context: PwaContext = { ios: isIosDevice(), standalone: isStandalonePwa() },
+  context: PwaContext = {
+    ios: isIosDevice(),
+    standalone: isStandalonePwa(),
+    nativeShell: isNativeShell(),
+  },
 ): boolean {
-  return context.ios && context.standalone;
+  return context.ios && context.standalone && !context.nativeShell;
 }
 
 export function remoteLoginPath(target: string): string {

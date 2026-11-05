@@ -1,4 +1,5 @@
 import { type RefObject, useEffect } from 'react';
+import { isNativeShell } from './native';
 
 // Keep a bottom-pinned composer glued to the on-screen keyboard on mobile iOS
 // Safari (incl. the iOS 26 regression where `position: fixed` stops being
@@ -24,6 +25,7 @@ import { type RefObject, useEffect } from 'react';
 // height that would otherwise override `md:h-[var(--app-vvh)]`).
 export function useIosKeyboardInset(containerRef: RefObject<HTMLDivElement | null>): void {
   useEffect(() => {
+    if (isNativeShell()) return;
     const vv = window.visualViewport;
     if (!vv) return;
     const mql = window.matchMedia('(max-width: 767px)');

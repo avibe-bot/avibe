@@ -6,6 +6,22 @@ declare global {
   }
 }
 
+export function pwaNavigationPolicy({
+  iosStandalone,
+  nativeShell,
+}: {
+  iosStandalone: boolean;
+  nativeShell: boolean;
+}): {
+  guardLoopback: boolean;
+  rewriteSameOriginNewContext: boolean;
+} {
+  return {
+    guardLoopback: iosStandalone || nativeShell,
+    rewriteSameOriginNewContext: iosStandalone && !nativeShell,
+  };
+}
+
 function normalizeHostname(hostname: string): string {
   return hostname.trim().toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
 }

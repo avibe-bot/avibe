@@ -4,6 +4,7 @@ import { Plus, Share, Sparkles, X } from 'lucide-react';
 
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { Button } from './ui/button';
+import { isNativeShell } from '@/lib/native';
 import { isRealMobileSafari, isStandalonePwa } from '@/lib/platform';
 
 const STORAGE_KEY = 'vibe-remote-a2hs';
@@ -14,6 +15,7 @@ const STORAGE_KEY = 'vibe-remote-a2hs';
 // isRealMobileSafari() (shared in lib/platform) encodes that filter.
 function shouldShowHint(): boolean {
   if (typeof window === 'undefined' || !window.matchMedia) return false;
+  if (isNativeShell()) return false;
   if (!window.matchMedia('(max-width: 767px)').matches) return false;
   if (!isRealMobileSafari()) return false;
   return !isStandalonePwa();

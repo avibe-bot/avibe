@@ -140,6 +140,19 @@ interface AvibeNative {
 | `intents` | `intents.donate({kind, sessionId})` | `intent.invoke({intent, params})`, e.g. `talkToMain`, `openSession`, `newSession` |
 | `files` | `files.read({token})` → bytes for a picked or shared file | - |
 
+Phase 0a PR 2 implements this v1 subset:
+
+- `app.info()` returns
+  `{contract, platform, shellVersion, capabilities}`;
+- `app.openExternal({url})` returns `{opened}` and accepts `http`/`https` URLs
+  with a host plus `mailto`/`tel` URLs with a non-empty target;
+- `haptics.impact({style})` accepts `light`, `medium`, `heavy`, `soft`, or
+  `rigid`; `haptics.notify({type})` accepts `success`, `warning`, or `error`;
+  and `haptics.selection()` has no parameters;
+- `voice.permission()` returns `{state: 'granted' | 'denied' | 'prompt'}`. It
+  does not itself display a permission prompt; the user-initiated Web media
+  request remains the single prompt path.
+
 Rules:
 
 - **Discovery**: a document-start script defines `window.avibeNative` before any
@@ -149,16 +162,28 @@ Rules:
 - **Compatibility**: shells ship slowly and instances update weekly, so a new
   Web UI must work with the previous contract major, and a shell must answer
   unknown methods with `{code: 'unsupported'}`. Minor versions only add.
-- **Transport**: on iOS, `WKScriptMessageHandlerWithReply` answers `call`
+- **Transport**: `call` sends `{method, params}` and receives either
+  `{ok: true, result}` or `{ok: false, error: {code, message}}`; the injected
+  JavaScript rejects the latter error object. On iOS,
+  `WKScriptMessageHandlerWithReply` answers `call`
   ([Apple](https://developer.apple.com/documentation/webkit/wkscriptmessagehandlerwithreply)),
   and events are dispatched with `evaluateJavaScript`. On Android,
   `WebViewCompat.addWebMessageListener` and `addDocumentStartJavaScript` carry
   the same JSON and take an origin allowlist natively
   ([AndroidX](https://developer.android.com/reference/androidx/webkit/WebViewCompat)).
 - **Trust**: the shell answers only when the sender's
-  `frameInfo.securityOrigin` is a configured instance origin (section 7). No
-  credential crosses the bridge: push private keys stay native, and
-  `push.subscribe` returns only the public subscription.
+  `frameInfo.isMainFrame` is true and `frameInfo.securityOrigin` is the
+  configured instance origin (section 7). Main and child WebViews share
+  WebKit's supplied configuration, script, and handler, but every document
+  independently passes this rule: an instance-origin child main frame gets the
+  bridge, while authentication/external child main frames and every subframe
+  do not. The handler repeats the check for every message, so calling the
+  transport directly cannot bypass discovery. No credential crosses the
+  bridge: push private keys stay native, and `push.subscribe` returns only the
+  public subscription.
+- **Errors**: malformed requests use `invalid_request`, invalid method
+  parameters use `invalid_argument`, disallowed frames/origins use `forbidden`,
+  and methods outside the compiled surface use `unsupported`.
 - **Fixed surface**: the method set is compiled into the shell. Web content can
   call it but cannot extend it, which is what keeps the app within App Review
   2.5.2 (section 13).
@@ -191,7 +216,7 @@ compares a plain `textarea`, a bare `contenteditable`, bare Lexical, and
 | Symptom | Device result | Consequence |
 | --- | --- | --- |
 | Pinyin candidates sometimes missing | Not reproduced; candidates and composition are normal in every input, `MentionEditor` included | Recheck on the checklist; no dedicated fix |
-| Keyboard pushing the composer | Keyboard open and close are normal in every input. On the first candidate pick in an empty editor, Lexical calls `window.scrollBy` and moves the page; a plain `textarea` does not | PR 1 keeps WebKit and the current Web correction unchanged. PR 2 may coordinate `keyboardLayoutGuide` with `isNativeShell()` and disabling the Web correction as one behavior. The native composer removes Lexical from the path. The web-only fix avibe-bot/avibe#3166 had no device evidence and was closed. |
+| Keyboard pushing the composer | Keyboard open and close are normal in every input. On the first candidate pick in an empty editor, Lexical calls `window.scrollBy` and moves the page; a plain `textarea` does not | PR 1 keeps WebKit and the current Web correction unchanged. PR 2 pins the primary WebView to `keyboardLayoutGuide`, disables its outer scrolling/insets, resets its outer offset during keyboard changes, and disables the Web correction through `isNativeShell()`. The native composer removes Lexical from the path. The web-only fix avibe-bot/avibe#3166 had no device evidence and was closed. |
 | Typing stops after quick Paste (letters go straight in, Pinyin no longer composes) | iOS system behavior: the same in a plain `textarea` | Probably the same in `UITextView`; verify once, no app-side handling |
 | Typeless blank | Intermittent, not reproduced. Lead: the Home Screen web app reloads the whole page after a few seconds away | A shell app keeps its page across brief app switches; recheck on the checklist |
 | Accessory bar | WebKit; a page cannot remove it | Shell flag or the native composer |
@@ -207,12 +232,14 @@ shell to measure what remains (section 15).
   offsets, observe keyboard notifications, or suppress the Web UI's existing
   `useIosKeyboardInset` behavior.
 - **PR 2 owns the coordination point.** It adds `isNativeShell()` with the
-  `avibeNative` bridge. If simulator and device evidence supports native
-  resizing, that same change pins the web view to
+  `avibeNative` bridge, pins the web view to
   `view.keyboardLayoutGuide.topAnchor` (iOS 15+,
   [Apple](https://developer.apple.com/documentation/uikit/uiview/keyboardlayoutguide))
-  and disables `useIosKeyboardInset` inside the shell. Neither half ships
-  independently.
+  with automatic content insets and outer WebView scrolling disabled, resets
+  the outer content offset during keyboard frame changes, and disables
+  `useIosKeyboardInset` inside the shell. The Web UI's own scroll containers
+  remain enabled. Neither half ships independently, so the keyboard has one
+  layout owner.
 - **Accessory bar remains WebKit-owned in Phase 0a.** No public API removes it.
   The common private-content-view override carries App Review risk under the
   license agreement's private-API rule (section 13), so it is not part of the
@@ -334,7 +361,7 @@ later), so that a bridge change and its Web UI consumer land in one PR.
      navigation to them is cancelled.
   4. Instance-origin main frames receive the microphone grant.
   5. Admitted downloads use `WKDownload` and the system share sheet.
-  6. PR 2 injects the native bridge only into an instance main frame and checks
+  6. The native bridge is injected only into an instance main frame and checks
      every message origin.
 
   Everything outside this list uses WebKit defaults. Protected Vault is an
@@ -644,19 +671,38 @@ and open decisions.
 - **Composer**: a native mode in `Composer` (section 5), an anchor for the
   mention pickers at the bottom of the web view, a reserved bottom inset, and a
   shared marker fixture with Swift.
-- **Keyboard**: PR 2 adds `isNativeShell()` and decides native resizing and
-  `useIosKeyboardInset` together. PR 1 keeps both WebKit and the Web hook at
-  their existing defaults.
-- **Notifications**: inside the shell, `getWebPushSupportState` reports a
-  native provider, and `WebPushControl` and the Settings page call `push.*`
-  instead of `PushManager`. Hide the iOS "Add to Home Screen" hint
-  (`InstallHint.tsx`).
+- **Keyboard**: PR 2 adds `isNativeShell()`, makes the primary WebView's
+  `keyboardLayoutGuide` the sole layout owner, and disables
+  `useIosKeyboardInset` only in that shell. Child WebViews retain browser
+  scrolling.
+- **Notifications**: Phase 0a has no native `push` capability. Hide browser
+  Web Push controls and readiness prompts inside the shell instead of offering
+  an unusable Service Worker path. Phase 1 adds the native provider. Hide the
+  iOS "Add to Home Screen" hint (`InstallHint.tsx`).
 - **Haptics**: call the bridge on hold-to-talk start, stop, and cancel, and on
   send. `navigator.vibrate` does not exist on iOS.
 - **Voice**: a tap-to-toggle mode for App Intents and hardware triggers
   (Phase 2).
 - **Sign-in**: a shell-aware message when the user picks Google in Phase 0.
-- **Settings**: an "Open on iPhone" QR code that carries the instance origin.
+- **Settings**: an "Open on iPhone" QR code that carries the instance origin is
+  a later slice after the mobile design frame is approved.
+
+The iOS Home Screen Web App branches resolve individually:
+
+- `appLaunch.ts`'s `iosStandalone` new-context suppression is not reused. The
+  shell has real recursive child WebViews and preserves `window.opener`.
+- `PwaLoopbackLinkGuard` keeps blocking `localhost`, `127.0.0.0/8`, and `::1`
+  links because those addresses still point at the phone, but it does not
+  rewrite same-origin `_blank` links into the current document.
+- `downloadMedia.ts` does not fetch and invoke Web Share in the shell. Ordinary
+  download links reach the shell's admitted `WKDownload` and native share
+  sheet.
+- `remoteAuth.ts` does not defer automatic login for a user gesture. The
+  stranding risk belongs to the Home Screen PWA browser sheet; the shell keeps
+  its existing WebView/auth-origin flow. New first-use and account sign-in UX
+  remain outside Phase 0a PR 2.
+- `ShowPageShareControl` never offers "Add to Home Screen" inside the native
+  shell.
 
 ## 13. Distribution and App Review
 
@@ -838,9 +884,9 @@ Effort assumes one Agent lane per track, with owner review between phases.
 
 | Track | Work | Effort |
 | --- | --- | --- |
-| Native | PR 1: SwiftUI app with one browser-equivalent `WKWebView`, persistent data, instance entry by URL or QR, configured-origin media-capture grant, primary-main-frame navigation handoff, recursive child windows, downloads, safe areas, offline/error UI, and Google interception. PR 2: `avibeNative` v1 with `app`, `haptics`, and `voice`, plus any evidence-backed keyboard layout change coordinated with the Web shell marker | 1.5 weeks |
+| Native | PR 1: SwiftUI app with one browser-equivalent `WKWebView`, persistent data, configured-origin media-capture grant, primary-main-frame navigation handoff, recursive child windows, downloads, safe areas, offline/error UI, and Google interception. PR 2: `avibeNative` v1 with `app`, `haptics`, and `voice`, plus primary-WebView keyboard ownership coordinated with the Web shell marker. First-use instance entry remains a later slice | 1.5 weeks |
 | Build | Xcode project, signing, and `xcodebuild` or fastlane upload to TestFlight | 0.5 week, parallel |
-| Web UI | PR 2: `native.ts`, `isNativeShell()`, the matching `useIosKeyboardInset` decision, Web Push toggle and install hint hidden, haptics calls, and "Open on iPhone" QR | 3 days, parallel |
+| Web UI | PR 2: `native.ts`, `isNativeShell()`, the matching `useIosKeyboardInset` decision, Web Push toggle and install hint hidden, haptics calls, and explicit handling for each iOS Home Screen PWA branch. The "Open on iPhone" QR remains a later slice | 3 days, parallel |
 
 Exit: run the section 15 checklist on the web composer, to measure which input
 problems a shell alone fixes. The microphone items must pass. The results

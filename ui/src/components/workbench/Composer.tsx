@@ -16,6 +16,7 @@ import { useToast } from '../../context/ToastContext';
 import { apiFetch } from '../../lib/apiFetch';
 import { primeCloudToken } from '../../lib/avibeFetch';
 import { isComposingKey } from '../../lib/imeComposition';
+import { nativeHapticImpact } from '../../lib/native';
 import { isSoftKeyboardOpen, isTouchCapableDevice } from '../../lib/softKeyboard';
 import { cn, copyTextToClipboard } from '../../lib/utils';
 import {
@@ -1836,6 +1837,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           onDraftChange?.(submitted);
         }
       } else {
+        void nativeHapticImpact('light');
         for (const attachment of sent) {
           if (stagedUrlsRef.current.delete(attachment.url)) URL.revokeObjectURL(attachment.url);
         }

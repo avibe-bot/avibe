@@ -128,6 +128,13 @@ describe('appTabHref', () => {
     expect(appTabHref({ appId: 'terminal' }, iosPwa)).toBeNull();
     expect(appTabHref({ appId: 'editor' }, iosPwa)).toBeNull();
   });
+
+  it('uses child browsing contexts in the native shell even if WebKit reports standalone', () => {
+    const nativeShell = { iosStandalone: true, nativeShell: true };
+
+    expect(appTabHref({ appId: 'showpage', sessionId: 'abc123' }, nativeShell)).toBe('/show/abc123/');
+    expect(appTabHref({ appId: 'files' }, nativeShell)).toBe('/apps/files?standalone=1');
+  });
 });
 
 describe('isStandaloneAppTab', () => {
@@ -189,5 +196,12 @@ describe('appTabHrefForDockId', () => {
 
     expect(appTabHrefForDockId('terminal', iosPwa)).toBeNull();
     expect(appTabHrefForDockId(showDockId('sess42'), iosPwa)).toBeNull();
+  });
+
+  it('keeps Dock new-tab targets in the native shell', () => {
+    const nativeShell = { iosStandalone: true, nativeShell: true };
+
+    expect(appTabHrefForDockId('terminal', nativeShell)).toBe('/apps/terminal?standalone=1');
+    expect(appTabHrefForDockId(showDockId('sess42'), nativeShell)).toBe('/show/sess42/');
   });
 });

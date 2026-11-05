@@ -19,6 +19,7 @@ import { parseSource } from '../../scripts/typescriptSource.mjs';
 import {
   internalPwaLinkTarget,
   openLinkInNewContext,
+  pwaNavigationPolicy,
   shouldBlockPwaLoopbackLink,
 } from './pwaNavigation';
 
@@ -151,6 +152,28 @@ describe('PWA navigation', () => {
         'http://127.0.0.1:5123/chat/session-123',
       ),
     ).toBe(false);
+  });
+});
+
+describe('PWA navigation policy', () => {
+  it('rewrites new contexts only in the installed iOS PWA', () => {
+    expect(pwaNavigationPolicy({
+      iosStandalone: true,
+      nativeShell: false,
+    })).toEqual({
+      guardLoopback: true,
+      rewriteSameOriginNewContext: true,
+    });
+  });
+
+  it('keeps loopback protection but restores browser contexts in the native shell', () => {
+    expect(pwaNavigationPolicy({
+      iosStandalone: true,
+      nativeShell: true,
+    })).toEqual({
+      guardLoopback: true,
+      rewriteSameOriginNewContext: false,
+    });
   });
 });
 

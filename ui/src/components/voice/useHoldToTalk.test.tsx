@@ -32,6 +32,12 @@ const pipeline = vi.hoisted(() => ({
   /** How long the microphone and audio graph take to open. */
   startMs: 0,
 }));
+const native = vi.hoisted(() => ({
+  impact: vi.fn(),
+  notify: vi.fn(),
+  selection: vi.fn(),
+  permission: vi.fn(),
+}));
 
 vi.mock('../../lib/showPageVoiceDictation', () => ({
   ShowPageVoiceDictation: class {
@@ -70,6 +76,12 @@ vi.mock('../../lib/voiceRecording', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../lib/voiceRecording')>()),
   prewarmVoiceCapture: vi.fn(async () => undefined),
   isVoiceCaptureActive: () => pipeline.captureActive,
+}));
+vi.mock('../../lib/native', () => ({
+  nativeHapticImpact: native.impact,
+  nativeHapticNotify: native.notify,
+  nativeHapticSelection: native.selection,
+  nativeVoicePermission: native.permission,
 }));
 
 class PointerEventShim extends MouseEvent {
@@ -137,6 +149,10 @@ beforeEach(() => {
   pipeline.startMs = 0;
   send.mockReset().mockResolvedValue(true);
   onTap.mockReset();
+  native.impact.mockReset().mockResolvedValue(true);
+  native.notify.mockReset().mockResolvedValue(true);
+  native.selection.mockReset().mockResolvedValue(true);
+  native.permission.mockReset().mockResolvedValue(null);
   Object.defineProperty(navigator, 'permissions', {
     configurable: true,
     value: { query: vi.fn(async () => ({ state: pipeline.permission })) },
@@ -240,6 +256,8 @@ describe('useHoldToTalk', () => {
     expect(send).toHaveBeenCalledWith('帮我看一下周一的发布', { input: 'voice' });
     expect(hold.outcome).toBe('sent');
     expect(hold.phase).toBe('idle');
+    expect(native.impact).toHaveBeenNthCalledWith(1, 'medium');
+    expect(native.impact).toHaveBeenNthCalledWith(2, 'light');
   });
 
   it('arms cancel 80 px up, disarms under 60 px, and a release while armed sends nothing', async () => {
@@ -260,6 +278,8 @@ describe('useHoldToTalk', () => {
     expect(pipeline.takes[0].abort).toHaveBeenCalled();
     expect(send).not.toHaveBeenCalled();
     expect(hold.outcome).toBe('cancelled');
+    expect(native.selection).toHaveBeenCalledTimes(2);
+    expect(native.notify).toHaveBeenCalledWith('warning');
   });
 
   it('drops a take shorter than half a second as too short', async () => {
@@ -369,6 +389,18 @@ describe('useHoldToTalk', () => {
     pipeline.permission = 'denied';
     await holdFor(el);
     expect(hold.outcome).toBe('denied');
+    expect(pipeline.takes).toHaveLength(1);
+  });
+
+  it('uses the shell permission probe before the browser Permissions API', async () => {
+    native.permission.mockResolvedValue('granted');
+    vi.mocked(navigator.permissions.query).mockResolvedValue({ state: 'denied' } as PermissionStatus);
+    const el = await mount();
+
+    await holdFor(el);
+
+    expect(native.permission).toHaveBeenCalled();
+    expect(navigator.permissions.query).not.toHaveBeenCalled();
     expect(pipeline.takes).toHaveLength(1);
   });
 

@@ -6,6 +6,7 @@ import clsx from 'clsx';
 import { useBots } from '../../context/BotsContext';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import { useNotificationPreferences } from '../../context/NotificationPreferencesContext';
+import { isNativeShell } from '../../lib/native';
 import { NOTIFICATIONS_SETTINGS_PATH } from '../../lib/notificationPreferences';
 import { BotAvatar } from '../ui/bot-avatar';
 import { Switch } from '../ui/switch';
@@ -51,6 +52,7 @@ export function NotificationMenu({ onNavigate }: { onNavigate?: () => void }) {
   const { enabled: hasBots, bots, displayName } = useBots();
   const { capabilities } = useInstanceAuthorization();
   const off = !preferences.enabled;
+  const native = isNativeShell();
 
   return (
     <div className="flex w-full flex-col gap-1">
@@ -101,7 +103,7 @@ export function NotificationMenu({ onNavigate }: { onNavigate?: () => void }) {
           )}
         </>
       )}
-      {capabilities.can_read_instance && (
+      {capabilities.can_read_instance && !native && (
         <>
           <div className="mx-1 my-1 h-px bg-border" />
           <div className="flex flex-col gap-1.5 px-1">

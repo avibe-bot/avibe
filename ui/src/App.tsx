@@ -107,6 +107,7 @@ import { ModelHubCapabilityGate } from './components/settings/models/ModelHubCap
 import { MODEL_HUB_SETTINGS_PATH } from './components/settings/models/modelHubRoutes';
 import { settingsOverlayOriginFromState, SETUP_VISIT_SETTINGS_PATHS } from './lib/settingsOverlay';
 import { isSetupComplete } from './lib/setupState';
+import { isNativeShell } from './lib/native';
 import { isIosDevice, isStandalonePwa } from './lib/platform';
 import { bootSessionGeneration, forgetBootSession, readBootSession, recordBootSession } from './lib/bootSession';
 import {
@@ -716,7 +717,7 @@ const PwaRouteMemory = () => {
   const navigate = useNavigate();
   const restoreStartedRef = useRef(false);
   const [launch] = useState(() => {
-    const iosStandalone = isIosDevice() && isStandalonePwa();
+    const iosStandalone = !isNativeShell() && isIosDevice() && isStandalonePwa();
     return {
       iosStandalone,
       locationKey: location.key,

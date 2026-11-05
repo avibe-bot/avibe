@@ -2,6 +2,7 @@ import type { MouseEvent } from 'react';
 
 import { apiFetch } from '@/lib/apiFetch';
 import { isProxyMediaUrl } from '@/lib/mediaProxy';
+import { isNativeShell } from '@/lib/native';
 import { isIosDevice, isStandalonePwa } from '@/lib/platform';
 
 // Saving an agent-reply attachment (image / file) on an iOS Home-Screen PWA.
@@ -121,6 +122,7 @@ async function saveViaShareSheet(url: string, filename?: string): Promise<void> 
 // proxy URL — no ``?download=1`` needed, since we name the File ourselves.
 export function handleMediaDownloadClick(e: MouseEvent, url: string, filename?: string): void {
   if (!isProxyMediaUrl(url)) return;
+  if (isNativeShell()) return;
   if (!(isIosDevice() && isStandalonePwa())) return;
   e.preventDefault();
   void saveViaShareSheet(url, filename);

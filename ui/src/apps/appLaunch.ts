@@ -4,6 +4,7 @@
 // results — shares ONE rule and one testable mapping instead of re-deriving it.
 
 import { dockIdToSession } from '../context/dockDoc';
+import { isNativeShell } from '../lib/native';
 import { IS_APPLE, isIosDevice, isStandalonePwa } from '../lib/platform';
 import { showPagePrivatePath } from './showPageAvatar';
 
@@ -80,10 +81,14 @@ export interface AppTabTarget {
 
 export interface AppTabContext {
   iosStandalone: boolean;
+  nativeShell?: boolean;
 }
 
 function currentAppTabContext(): AppTabContext {
-  return { iosStandalone: isIosDevice() && isStandalonePwa() };
+  return {
+    iosStandalone: isIosDevice() && isStandalonePwa(),
+    nativeShell: isNativeShell(),
+  };
 }
 
 /**
@@ -136,7 +141,7 @@ export function appTabHref(
   target: AppTabTarget,
   context: AppTabContext = currentAppTabContext(),
 ): string | null {
-  if (context.iosStandalone) return null;
+  if (context.iosStandalone && !context.nativeShell) return null;
   if (target.appId === 'showpage') {
     const sessionId = (target.sessionId ?? '').trim();
     return sessionId ? showPagePrivatePath(sessionId) : null;

@@ -9,6 +9,7 @@ import { Switch } from '../ui/switch';
 import { useApi } from '../../context/ApiContext';
 import { useDock } from '../../context/DockContext';
 import { showDockId } from '../../context/dockDoc';
+import { isNativeShell } from '../../lib/native';
 import { isIosDevice, isRealMobileSafari, isStandalonePwa } from '../../lib/platform';
 import type { ShowPageAccess } from '../../lib/showPageAccess';
 import { copyHref, type ShowPageLinkInfo, type ShowPagePayload } from '../../lib/showPageLinks';
@@ -72,7 +73,7 @@ export const ShowPageShareControl: React.FC<{
   const link = payload && !offline ? copyHref(payload) ?? '' : '';
   const canNativeShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
   const iosStandalone = isIosDevice() && isStandalonePwa();
-  const showAddToHome = !!link && (iosStandalone || isRealMobileSafari());
+  const showAddToHome = !isNativeShell() && !!link && (iosStandalone || isRealMobileSafari());
 
   const applyPayload = (next: ShowPagePayload) => {
     setLocalPayload(next);

@@ -5,10 +5,9 @@ shell stores one configured HTTPS instance origin, loads it in a persistent
 `WKWebView`, and owns the platform boundaries that browser content cannot own:
 navigation handoff, downloads, native dialogs, and microphone permission.
 
-Phase 0a deliberately keeps the Web composer. The `avibeNative` bridge is added
-with its Web UI consumer in the next slice so neither side of that contract can
-ship alone. Native keyboard coordination moves with that same shell marker;
-this slice leaves WebKit and the existing Web UI keyboard hook unchanged.
+Phase 0a deliberately keeps the Web composer. The shell and Web UI ship the
+versioned `avibeNative` bridge together, and the same native-shell marker
+coordinates keyboard ownership so native and Web resizing cannot both run.
 
 ## Current contract
 
@@ -48,13 +47,15 @@ this slice leaves WebKit and the existing Web UI keyboard hook unchanged.
   open in `SFSafariViewController`; all other download sources are rejected.
 - Cookies and website data use `WKWebsiteDataStore.default()` and survive app
   launches through WebKit's default persistent store.
-- Keyboard resizing, content insets, scrolling, link previews, media behavior,
-  data detection, and browser preferences use WebKit defaults. PR 2 will add
-  `isNativeShell()` before changing native keyboard layout or disabling the
-  Web UI's `useIosKeyboardInset` hook.
+- The primary WebView is pinned to `keyboardLayoutGuide`, disables automatic
+  content insets and outer scrolling, and resets its outer offset as the
+  keyboard changes. `isNativeShell()` disables the Web UI's
+  `useIosKeyboardInset` correction in the same release. Child WebViews retain
+  WebKit scrolling defaults.
 - `AppIcon.appiconset` contains one opaque 1024-by-1024 icon. It is a temporary
   upscale of the existing 512-pixel iOS Home Screen Vibey artwork and should be
   replaced when a native 1024-pixel source is delivered.
+- The user agent includes `AvibeiOS/<CFBundleShortVersionString>`.
 
 The closed deviation list is:
 
@@ -67,7 +68,46 @@ The closed deviation list is:
 4. Microphone capture is automatically granted only to an instance-origin
    main frame.
 5. Admitted downloads use `WKDownload` and the system activity sheet.
-6. PR 2 adds the origin-checked native bridge only to an instance main frame.
+6. The origin-checked native bridge is available only to an instance main
+   frame.
+
+## Native bridge v1
+
+`NativeBridge.swift` injects `window.avibeNative` at document start. The Web UI
+accesses it only through `ui/src/lib/native.ts`.
+
+```ts
+interface AvibeNative {
+  contract: 1;
+  platform: 'ios';
+  shellVersion: string;
+  capabilities: Record<string, number>;
+  call<T>(method: string, params?: object): Promise<T>;
+  on(event: string, handler: (payload: unknown) => void): () => void;
+}
+```
+
+Each message is accepted only when `frameInfo.isMainFrame` is true and
+`frameInfo.securityOrigin` exactly equals the configured instance origin.
+Instance-origin child main frames receive the bridge because WebKit supplies
+them the shared configuration; authentication and external child documents,
+all subframes, and direct transport calls from those frames remain rejected.
+
+The PR 2 method surface is fixed:
+
+| Capability | Method | Result |
+| --- | --- | --- |
+| `app: 1` | `app.info()` | `{contract, platform, shellVersion, capabilities}` |
+| `app: 1` | `app.openExternal({url})` | `{opened}` for `http`/`https` URLs with a host and `mailto`/`tel` URLs with a target |
+| `haptics: 1` | `haptics.impact({style})` | `null`; styles are `light`, `medium`, `heavy`, `soft`, or `rigid` |
+| `haptics: 1` | `haptics.notify({type})` | `null`; types are `success`, `warning`, or `error` |
+| `haptics: 1` | `haptics.selection()` | `null` |
+| `voice: 1` | `voice.permission()` | `{state: "granted" | "denied" | "prompt"}` without prompting |
+
+Replies use `{ok: true, result}` or
+`{ok: false, error: {code, message}}`. The compiled errors are
+`invalid_request`, `invalid_argument`, `forbidden`, and `unsupported`.
+Unknown methods never expand the native surface.
 
 The production Supabase Auth origin is an explicit primary-navigation
 allowlist entry. If Avibe Cloud moves to another Supabase project, update that
@@ -136,7 +176,8 @@ pinned to Xcode 26.6.
 | Property | Shell value and reason | Verification |
 | --- | --- | --- |
 | `websiteDataStore` | WebKit's default persistent data store. Cookies and sessions survive app launches without a shell override. | Simulator build. |
-| `userContentController` | The root uses WebKit's controller; children receive the exact configuration supplied by WebKit, preserving the same controller and `window.opener`. PR 1 installs no bridge. | New-window implementation build; PR 2 owns bridge tests. |
+| `userContentController` | The root installs the document-start `avibeNative` script and reply handler. Children receive WebKit's exact configuration, preserving the same controller and `window.opener`; each message still repeats the main-frame and exact-origin check. | XCTest covers instance main-frame discovery and calls, subframe absence, external-origin absence, and unknown-method rejection. |
+| `applicationNameForUserAgent` | `AvibeiOS/<CFBundleShortVersionString>`, appended by WebKit to its standard user agent. | Configuration XCTest and Debug/Release simulator builds. |
 | `allowsInlineMediaPlayback`, `mediaTypesRequiringUserActionForPlayback` | WebKit defaults. Phase 0a adds no media playback policy. | API ledger; playback is a device check. |
 | `javaScriptCanOpenWindowsAutomatically` | WebKit default. WebKit decides whether a script may request a new context; accepted requests use the child-WebView rule. | New-window policy tests and simulator build. |
 | `allowsBackForwardNavigationGestures`, `allowsLinkPreview`, `dataDetectorTypes` | WebKit defaults. The shell adds no gesture, preview, or data-detector policy. | API ledger; interactions are manual checks. |
@@ -151,7 +192,7 @@ pinned to Xcode 26.6.
 | `allowsAirPlayForMediaPlayback`, `allowsPictureInPictureMediaPlayback` | WebKit `true` defaults. | API ledger; media UI is a device check. |
 | `suppressesIncrementalRendering`, `ignoresViewportScaleLimits` | WebKit `false` defaults. Pages render incrementally and retain author viewport limits. | API ledger and simulator build. |
 | `allowsInlinePredictions`, `supportsAdaptiveImageGlyph`, `writingToolsBehavior` | WebKit defaults. The shell does not add text-system behavior beyond Safari/WebKit. | API ledger; keyboard behavior is a device check. |
-| `scrollView.isScrollEnabled`, `bounces`, `contentInsetAdjustmentBehavior`, and content offset | UIKit/WebKit defaults. PR 1 installs no keyboard observer, keyboard layout guide constraint, outer-scroll lock, inset override, or offset reset. | Source inspection plus Debug and Release simulator builds. |
+| Primary `scrollView.isScrollEnabled`, `bounces`, `contentInsetAdjustmentBehavior`, and content offset | The primary WebView disables outer scrolling and bounce, uses `.never` inset adjustment, pins its bottom to `keyboardLayoutGuide.topAnchor`, and resets outer offset on keyboard frame/hide notifications. The Web UI disables `useIosKeyboardInset` only when `isNativeShell()` is true. Child WebViews retain WebKit defaults. | Focused Web hook test, source inspection, simulator keyboard fixture, and Debug/Release builds. |
 | iOS 27 webpage preferences (`securityRestrictionMode`, `alternateRequest`, `overrideReferrer`, `allowsJSHandleCreationInPageWorld`, `globalPrivacyControlEnabled`) | WebKit defaults. No Phase 0a requirement justifies changing requests, referrers, page-world handles, or privacy signals. | Documentation-only until the pinned toolchain exposes the full iOS 27 set. |
 
 ## Web platform outcomes
@@ -166,9 +207,26 @@ pinned to Xcode 26.6.
 | Web content process termination | The primary WebView reloads the configured instance; a terminated child closes. |
 | `navigator.share` | Available in the Xcode 26.6 simulator secure-context probe: `{"secureContext":true,"navigatorShare":"function"}`. Presentation remains system-owned. |
 | Clipboard | Uses WebKit edit/clipboard behavior. The Web UI feature-detects writes, falls back to `execCommand`, and reports blocked reads. No native clipboard bridge is added. |
-| Notification and Service Worker | Unsupported in this shell configuration. The Web UI already feature-detects both; native push is later work. |
+| Notification and Service Worker | Unsupported in this shell configuration. Browser Web Push controls and readiness prompts are hidden when `isNativeShell()` is true; native push is Phase 1. |
 | Fullscreen | Deferred. Phase 0a leaves `isElementFullscreenEnabled` at WebKit's default. |
-| iOS Home Screen Web App branches | Deferred to PR 2. `isNativeShell()` must decide whether to reuse in-app windows, loopback protection, and share-sheet media downloads currently gated by `iosStandalone`. |
+| Installation guidance | `InstallHint` and Show Page "Add to Home Screen" guidance are hidden in the native shell. |
+| PWA app launch suppression | Not reused. New-context launches use the shell's recursive child WebViews. |
+| PWA loopback guard | Retained for `localhost`, `127.0.0.0/8`, and `::1`; same-origin `_blank` rewriting is disabled so WebKit creates a child context. |
+| PWA media download sharing | Not reused. Download anchors reach `WKDownload` and the native activity sheet. |
+| PWA remote-auth deferral | Not reused. Automatic login follows the existing WebView authentication-origin flow. |
+| Haptics | Hold-to-talk start/release/cancel and accepted typed/attachment sends use bridge haptics. Browser contexts retain `navigator.vibrate` as the hold fallback. |
+| Voice permission probe | Hold-to-talk reads `voice.permission()` first in the native shell, then retains the browser Permissions API fallback elsewhere. |
+
+## Phase 0a PR 2 verification
+
+- Xcode 27.2 simulator: Debug and Release no-sign builds, XCTest bridge policy
+  and runtime discovery, plus the hermetic keyboard/bridge fixture.
+- CI remains authoritative on Xcode 26.6 and runs `lint` plus `ios-shell`.
+- Web UI: focused Vitest coverage for the bridge adapter, haptics, keyboard
+  ownership, hidden Web Push/installation surfaces, and all five PWA decisions;
+  production TypeScript/Vite build.
+- Simulator screenshots and the machine-readable fixture report are stored
+  outside the repository and linked from the PR description.
 
 ## Local build
 
