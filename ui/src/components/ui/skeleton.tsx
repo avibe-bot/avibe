@@ -35,9 +35,11 @@ export const SkeletonShimmer = ({
   >
     {label && <span className="sr-only">{label}</span>}
     {children}
+    {/* The resting offset is a `transform`, the property the sweep animates, so the sweep
+        replaces it; a translate-x utility would add to it and leave the highlight on the card. */}
     <div
       aria-hidden
-      className="skeleton-shimmer pointer-events-none absolute inset-0 -translate-x-full animate-skeleton-shimmer bg-linear-to-r from-transparent via-foreground/[0.03] to-transparent motion-reduce:animate-none"
+      className="skeleton-shimmer pointer-events-none absolute inset-0 [transform:translateX(-100%)] animate-skeleton-shimmer bg-linear-to-r from-transparent via-foreground/[0.03] to-transparent motion-reduce:animate-none"
     />
   </div>
 );

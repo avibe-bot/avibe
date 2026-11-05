@@ -11,7 +11,7 @@ export function SkeletonPose({ still = false, reduced = false, children }: { sti
       className={clsx(
         'contents',
         reduced && '[&_.skeleton-shimmer]:hidden',
-        still && '[&_.skeleton-shimmer]:translate-x-0 [&_.skeleton-shimmer]:animate-none',
+        still && '[&_.skeleton-shimmer]:[transform:none] [&_.skeleton-shimmer]:animate-none',
       )}
     >
       {children}

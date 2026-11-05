@@ -1,5 +1,8 @@
 /* @vitest-environment jsdom */
 
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -27,6 +30,20 @@ describe('SkeletonShimmer', () => {
     expect(highlight.className).toContain('animate-skeleton-shimmer');
     // The light strength the owner chose (2026-11-05).
     expect(highlight.className).toContain('via-foreground/[0.03]');
+  });
+
+  it('rests the highlight off the card through the property its sweep animates', () => {
+    // A translate-x utility sets CSS `translate`, which composes with the sweep's `transform`
+    // instead of being replaced by it: the highlight would run from -200% to 0% and sit on
+    // the card for the rest of each period. One property: rest and sweep stay off the card.
+    const css = readFileSync(resolve(process.cwd(), 'src/index.css'), 'utf8');
+    const keyframes = /@keyframes skeleton-shimmer\s*\{([\s\S]*?)\n\s*\}/.exec(css)?.[1] ?? '';
+    const animated = new Set([...keyframes.matchAll(/\{\s*([a-z-]+)\s*:/g)].map((match) => match[1]));
+    expect([...animated]).toEqual(['transform']);
+    render(<SkeletonShimmer><Skeleton /></SkeletonShimmer>);
+    const highlight = screen.getByRole('status').querySelector('.skeleton-shimmer')!;
+    expect(highlight.className).toContain('[transform:translateX(-100%)]');
+    expect(highlight.className).not.toMatch(/(^|\s)-?translate-/);
   });
 
   it('stands still under reduced motion: no sweep and no reveal fade', () => {
