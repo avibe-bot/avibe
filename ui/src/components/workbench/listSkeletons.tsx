@@ -166,6 +166,29 @@ export const InboxCardsSkeleton = ({ rows, sections = false }: { rows: number; s
   );
 };
 
+/** Conversation rows in the sidebar's Inbox popover before the feed's first answer
+ *  (`InboxHoverPopover`'s row: the project and title line over a two-line preview). */
+export const InboxPopoverRowsSkeleton = ({ rows }: { rows: number }) => {
+  const { t } = useTranslation();
+  return (
+    <SkeletonShimmer label={t('common.loading')} className="flex flex-col gap-1 rounded-lg">
+      {Array.from({ length: rows }, (_, index) => (
+        <div key={index} className="flex flex-col gap-1.5 rounded-lg px-3 py-2.5">
+          <div className="flex items-center gap-1.5 text-[10px]">
+            <TextLine textClass="w-12" barClass="h-1.5 w-full" />
+            <TextLine textClass="flex-1" barClass={clsx('h-1.5', titleWidth(index))} />
+            <TextLine textClass="font-mono" barClass="h-1.5 w-8" />
+          </div>
+          <div className="flex flex-col text-[11.5px] leading-relaxed">
+            <TextLine textClass="" barClass="h-1.5 w-full" />
+            <TextLine textClass="" barClass={clsx('h-1.5', index % 2 ? 'w-[46%]' : 'w-[70%]')} />
+          </div>
+        </div>
+      ))}
+    </SkeletonShimmer>
+  );
+};
+
 /** Rows that take a skeleton's place: they fade in where it was, once it has shown
  *  in this place, and appear at once when they were there from the start. Their
  *  box mounts with the first row, which is what the fade starts from. */

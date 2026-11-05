@@ -1,10 +1,11 @@
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, ArrowRight, MessageSquareReply } from 'lucide-react';
+import { ArrowLeft, ArrowRight, MessageSquareReply, RefreshCw } from 'lucide-react';
 import clsx from 'clsx';
 
 import type { InboxSession } from '../../context/ApiContext';
+import type { InboxFeedStatus } from '../../context/WorkbenchInboxContext';
 import { useBots } from '../../context/BotsContext';
 import { useNotificationPreferences } from '../../context/NotificationPreferencesContext';
 import { useBotRoster } from '../../context/BotRosterContext';
@@ -18,6 +19,9 @@ import { NotificationMenu } from './NotificationMenu';
 import { useNotificationMode } from './useNotificationMode';
 import { BotTag } from './bots/BotTag';
 import { InboxSectionHeader } from './InboxSectionHeader';
+import { InboxPopoverRowsSkeleton } from './listSkeletons';
+import { FlipList } from '../ui/flip-list';
+import { useSkeletonHandover } from '../ui/skeleton-handover';
 
 // How many rows the peek holds: five in one list, or three per section once the
 // caller has Bots. Named because two things depend on it: which rows are picked,
@@ -64,6 +68,10 @@ export const InboxHoverPopover: React.FC<{
   unreadSessions: number;
   totalUnread: number;
   canMarkRead: boolean;
+  /** The feed's first read: before it answers the peek draws skeleton rows, and a
+   *  failed one says so with a retry, rather than "no conversations". */
+  feedStatus?: InboxFeedStatus;
+  onRetry?: () => void;
   onItemClick: (session: InboxSession) => void;
   onMarkAllRead: () => void;
   onMouseEnter: () => void;
@@ -76,6 +84,8 @@ export const InboxHoverPopover: React.FC<{
   unreadSessions,
   totalUnread,
   canMarkRead,
+  feedStatus = 'loaded',
+  onRetry,
   onItemClick,
   onMarkAllRead,
   onMouseEnter,
@@ -129,8 +139,9 @@ export const InboxHoverPopover: React.FC<{
     ) : null;
     // Unread stays marked in a muted category; only the mint that asks for
     // attention is withheld.
+    // Read eases the wash away (colour only, M7).
     const shell = clsx(
-      'rounded-lg px-3 py-2.5 text-left transition',
+      'rounded-lg px-3 py-2.5 text-left transition-[background-color,border-color] duration-(--motion-duration-fast) ease-(--motion-ease-exit)',
       unread > 0
         ? quiet
           ? 'border-l-2 border-border-strong bg-foreground/[0.04] hover:bg-foreground/[0.07]'
@@ -143,7 +154,7 @@ export const InboxHoverPopover: React.FC<{
       // header already says so, which is why the row carries no Bot tag there.
       const name = botName(bot);
       return (
-        <button key={s.session_id} type="button" onClick={() => onItemClick(s)} className={clsx('flex gap-2.5', shell)}>
+        <button key={s.session_id} data-flip-id={s.session_id} type="button" onClick={() => onItemClick(s)} className={clsx('flex gap-2.5', shell)}>
           <BotAvatar avatar={bot.avatar} name={name} size={28} inList className="mt-0.5" />
           <div className="flex min-w-0 flex-1 flex-col gap-1">
             <div className="flex items-center gap-1.5 text-[11px]">
@@ -160,7 +171,7 @@ export const InboxHoverPopover: React.FC<{
     }
     const projectLabel = s.project_name || s.project_id;
     return (
-      <button key={s.session_id} type="button" onClick={() => onItemClick(s)} className={clsx('flex flex-col gap-1.5', shell)}>
+      <button key={s.session_id} data-flip-id={s.session_id} type="button" onClick={() => onItemClick(s)} className={clsx('flex flex-col gap-1.5', shell)}>
         <div className="flex items-center gap-1.5 text-[10px]">
           {projectLabel && (
             <span className="truncate font-semibold text-cyan-ink after:ml-1.5 after:font-normal after:text-muted after:content-['·']">
@@ -177,6 +188,17 @@ export const InboxHoverPopover: React.FC<{
   };
 
   const anyRows = sections.some((section) => section.rows.length > 0);
+  // Nothing to show and the feed's first answer still owed, or failed (§6).
+  const showSkeleton = !anyRows && feedStatus === 'pending';
+  const showFailed = !anyRows && feedStatus === 'failed';
+  const rowsHandover = useSkeletonHandover(showSkeleton);
+  // What the peek draws, in order, for its motion (M7): a reply moves its row up.
+  const flipIds = sections.flatMap((section, index) => [
+    ...(index > 0 ? [`divider:${section.category}`] : []),
+    ...(section.category ? [`section:${section.category}`] : []),
+    ...section.rows.map((row) => row.session_id),
+    `beyond:${section.category ?? 'all'}`,
+  ]);
 
   return (
     // Portaled (PopoverContent) so it escapes the sidebar's stacking context and
@@ -240,12 +262,29 @@ export const InboxHoverPopover: React.FC<{
             </button>}
           </div>
 
-          {!anyRows ? (
+          {showSkeleton ? (
+            <InboxPopoverRowsSkeleton rows={3} />
+          ) : showFailed ? (
+            <div role="alert" className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-border px-3 py-6 text-center text-[12px] text-muted">
+              {t('workbench.inbox.loadError')}
+              {onRetry && (
+                <button
+                  type="button"
+                  onClick={onRetry}
+                  className="inline-flex items-center gap-1 rounded-md border border-border-strong px-2 py-1 text-[10px] font-medium text-foreground transition hover:bg-foreground/[0.04]"
+                >
+                  <RefreshCw className="size-3" />
+                  {t('common.retry')}
+                </button>
+              )}
+            </div>
+          ) : !anyRows ? (
             <div className="rounded-lg border border-dashed border-border px-3 py-6 text-center text-[12px] text-muted">
               {t('workbench.inbox.empty')}
             </div>
           ) : (
-            sections.map((section, index) => {
+            <FlipList ids={flipIds} className={clsx('flex flex-col gap-2.5', rowsHandover)}>
+            {sections.map((section, index) => {
               const quiet = section.category ? !isCategoryLoud(preferences, section.category) : false;
               // `unreadSessions` counts the whole feed; the rows hold only the pages the
               // provider has loaded, so an unread conversation older than the loaded
@@ -258,14 +297,21 @@ export const InboxHoverPopover: React.FC<{
               const unreadBeyondPeek = unreadShown < section.limit && section.unreadSessions > unreadShown;
               return (
                 <section key={section.category ?? 'all'} className="flex flex-col gap-1">
-                  {index > 0 && <div className="mx-1 mb-1 h-px bg-border" />}
+                  {index > 0 && <div data-flip-id={`divider:${section.category}`} className="mx-1 mb-1 h-px bg-border" />}
                   {section.category && (
-                    <InboxSectionHeader category={section.category} unread={section.unread} quiet={quiet} className="px-1" />
+                    <InboxSectionHeader
+                      category={section.category}
+                      unread={section.unread}
+                      quiet={quiet}
+                      className="px-1"
+                      flipId={`section:${section.category}`}
+                    />
                   )}
                   {section.rows.map((s) => renderRow(s, quiet, section.category === 'bot'))}
                   {unreadBeyondPeek && (
                     <button
                       type="button"
+                      data-flip-id={`beyond:${section.category ?? 'all'}`}
                       onClick={() => openFullInbox('unread')}
                       className="rounded-lg border border-dashed border-border px-3 py-2 text-left text-[11px] leading-relaxed text-muted transition hover:bg-foreground/[0.04] hover:text-foreground"
                     >
@@ -274,7 +320,8 @@ export const InboxHoverPopover: React.FC<{
                   )}
                 </section>
               );
-            })
+            })}
+            </FlipList>
           )}
 
           <button

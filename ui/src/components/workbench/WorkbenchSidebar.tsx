@@ -56,6 +56,9 @@ import { InboxHoverPopover } from './InboxHoverPopover';
 import { useChatPrefetch } from './useChatPrefetch';
 import { SidebarProjectRowsSkeleton, SidebarSessionRowsSkeleton } from './listSkeletons';
 import { useSkeletonHandover } from '../ui/skeleton-handover';
+import { FlipList } from '../ui/flip-list';
+import { Presence } from '../ui/presence';
+import { treeMotion } from './treeMotion';
 import logoImg from '../../assets/logo.png';
 
 interface CapabilityNavItem {
@@ -196,6 +199,7 @@ export const SessionRow: React.FC<{
   if (renaming) {
     return (
       <div
+        data-flip-id={session.id}
         className={clsx(
           'flex items-center gap-2 border-transparent py-1.5 pr-2.5',
           SESSION_ROW_INDENT_CLASS,
@@ -230,6 +234,7 @@ export const SessionRow: React.FC<{
       <PopoverAnchor asChild>
         <div
           data-settings-interaction-owner="true"
+          data-flip-id={session.id}
           onContextMenu={(e) => {
             if (!canManageMetadata) return;
             e.preventDefault();
@@ -267,11 +272,13 @@ export const SessionRow: React.FC<{
             >
               {displayName}
             </span>
-            {unread > 0 && (
-              <span className="inline-flex min-w-[1.1rem] items-center justify-center rounded-full bg-mint px-1.5 font-mono text-[9px] font-bold text-primary-foreground">
-                {unread > 99 ? '99+' : unread}
-              </span>
-            )}
+            <Presence show={unread > 0} value={unread}>
+              {(count) => (
+                <span className="inline-flex min-w-[1.1rem] items-center justify-center rounded-full bg-mint px-1.5 font-mono text-[9px] font-bold text-primary-foreground">
+                  {count > 99 ? '99+' : count}
+                </span>
+              )}
+            </Presence>
           </button>
           {canManageMetadata && (
             <>
@@ -347,6 +354,7 @@ const ProjectSessionList: React.FC<{
       {hasMore && !loadingMore && (
         <button
           type="button"
+          data-flip-id={`more:${projectId}`}
           onClick={onLoadMore}
           className="flex items-center gap-1.5 rounded-md py-1.5 pl-[30px] pr-2.5 text-left text-[11px] font-medium text-muted transition hover:bg-foreground/[0.04] hover:text-foreground"
         >
@@ -440,6 +448,7 @@ const ProjectRow: React.FC<{
     <div className={clsx('flex flex-col gap-0.5', className)}>
       <div
         data-settings-interaction-owner="true"
+        data-flip-id={`project:${project.id}`}
         // The folder sits in the sidebar's icon column (the capability rows' icons);
         // the sessions below line up under the project's name.
         className="group flex items-center gap-1.5 rounded-md py-1.5 pl-[13px] pr-2 transition hover:bg-foreground/[0.04]"
@@ -660,6 +669,8 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
     unreadSessions,
     inboxSessions,
     loading: inboxLoading,
+    feedStatus: inboxFeedStatus,
+    refresh: refreshInbox,
     markRead,
     unreadBySession,
   } = useWorkbenchInbox({
@@ -686,6 +697,15 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
   } = useWorkbenchProjectsTree({ active: surfaceActive });
   // The list's skeleton, and the fade its rows take where it was.
   const projectsSkeleton = projects === null && !projectsError;
+  // The tree as its motion follows it (M7): projects and the sessions shown under
+  // them. A session a turn moves to the top of its project moves; the rows around
+  // it glide. Reordering or opening a project, or its first page of sessions
+  // arriving, is a different tree: no motion (dragging animates itself).
+  const tree = treeMotion(projects, (projectId) => {
+    const open = isExpanded(projectId);
+    const state = open ? sessionsOf(projectId) : null;
+    return { open, rows: state?.sessions ?? null, more: !!state?.cursor && !state.loadingMore };
+  });
   const projectsHandover = useSkeletonHandover(projectsSkeleton);
   const [popoverOpen, setPopoverOpen] = useState(false);
   const closeTimer = useRef<number | null>(null);
@@ -826,6 +846,8 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
             unreadSessions={unreadSessions}
             totalUnread={totalUnread}
             canMarkRead={canChat}
+            feedStatus={inboxFeedStatus}
+            onRetry={() => void refreshInbox()}
             onItemClick={onItemClick}
             onMarkAllRead={onMarkAllRead}
             onMouseEnter={openPopover}
@@ -934,7 +956,8 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
               <span className="min-w-0 truncate text-[11px] text-muted">{t('workbench.projectsEmpty')}</span>
             </div>
           )}
-          {projects !== null && <SortableProjectList
+          {projects !== null && projects.length > 0 && <FlipList ids={tree.ids} group={tree.group} className="flex flex-col gap-0.5">
+          <SortableProjectList
             projects={projects}
             disabled={!canManageProjects || isReorderingProjects}
             onReorder={reorderProjects}
@@ -977,7 +1000,8 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
                 />
               );
             }}
-          </SortableProjectList>}
+          </SortableProjectList>
+          </FlipList>}
         </div>}
       </div>
 

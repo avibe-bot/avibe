@@ -453,7 +453,7 @@
     "src/components/workbench/HostedToolRow.tsx": {
       "avibe/localized-user-text": 14
     },
-    "src/components/workbench/InboxPage.tsx": {
+    "src/components/workbench/InboxCard.tsx": {
       "avibe/localized-user-text": 4
     },
     "src/components/workbench/NewAgentDialog.tsx": {
