@@ -21,12 +21,12 @@ const voiceMocks = vi.hoisted(() => ({
   onSegment: undefined as VoiceSegment | undefined,
   onStopped: undefined as VoiceStopped | undefined,
   onError: undefined as ((error: unknown) => void) | undefined,
-  onLevel: undefined as ((rms: number) => void) | undefined,
+  onPcm: undefined as ((samples: Int16Array) => void) | undefined,
   pipelineStart: vi.fn(),
   realtimeAbort: vi.fn(),
   realtimeFinish: vi.fn(),
   realtimeStart: vi.fn(),
-  realtimeOptions: [] as Array<{ context?: VoiceContextSource }>,
+  realtimeOptions: [] as Array<{ context?: VoiceContextSource; onPreview?: (preview: { text: string; stash: string }) => void }>,
 }));
 vi.hoisted(() => {
   Range.prototype.getBoundingClientRect = () => new DOMRect();
@@ -37,6 +37,8 @@ vi.hoisted(() => {
   });
 });
 const apiFetch = vi.hoisted(() => vi.fn());
+/** `ms` of the recorder's 16 kHz PCM at a steady loudness (RMS, 0–1). */
+const pcm = (rms: number, ms: number) => new Int16Array(Math.round(16 * ms)).fill(Math.round(rms * 32_767));
 
 vi.mock('../../lib/apiFetch', () => ({ apiFetch }));
 vi.mock('../../lib/avibeFetch', async (importOriginal) => ({
@@ -50,12 +52,12 @@ vi.mock('../../lib/voiceRecording', async (importOriginal) => ({
       onStopped: VoiceStopped;
       onSegment: VoiceSegment;
       onError?: (error: unknown) => void;
-      onLevel?: (rms: number) => void;
+      onPcm?: (samples: Int16Array) => void;
     }) {
       voiceMocks.onSegment = options.onSegment;
       voiceMocks.onStopped = options.onStopped;
       voiceMocks.onError = options.onError;
-      voiceMocks.onLevel = options.onLevel;
+      voiceMocks.onPcm = options.onPcm;
     }
 
     start = voiceMocks.pipelineStart;
@@ -164,7 +166,7 @@ beforeEach(() => {
   voiceMocks.onSegment = undefined;
   voiceMocks.onStopped = undefined;
   voiceMocks.onError = undefined;
-  voiceMocks.onLevel = undefined;
+  voiceMocks.onPcm = undefined;
   voiceMocks.pipelineStart.mockReset().mockResolvedValue(true);
   voiceMocks.realtimeAbort.mockReset();
   voiceMocks.realtimeFinish.mockReset();
@@ -508,7 +510,9 @@ describe('Composer voice shortcut', () => {
       fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
       await screen.findByRole('button', { name: en.chat.compose.stopRecording });
       act(() => {
-        for (let reading = 0; reading < 60; reading += 1) voiceMocks.onLevel?.(0.003);
+        voiceMocks.onPcm?.(pcm(0.003, 2_000));
+        // A preview with no words says nothing about speech.
+        voiceMocks.realtimeOptions[0]?.onPreview?.({ text: '', stash: ' ' });
         voiceMocks.onSegment?.(new Blob(['quiet room']), { durationMs: 2_000, final: true });
         voiceMocks.onStopped?.('finish', { pendingSegmentCount: 1 });
       });
@@ -536,7 +540,7 @@ describe('Composer voice shortcut', () => {
       fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
       await screen.findByRole('button', { name: en.chat.compose.stopRecording });
       act(() => {
-        for (let reading = 0; reading < 40; reading += 1) voiceMocks.onLevel?.(0.05);
+        voiceMocks.onPcm?.(pcm(0.05, 1_280));
         voiceMocks.onSegment?.(new Blob(['audio']), { durationMs: 3_000, final: true });
         voiceMocks.onStopped?.('finish', { pendingSegmentCount: 1 });
       });

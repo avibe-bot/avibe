@@ -81,7 +81,10 @@ its text lands or the user discards it.
   above about −40 dBFS is a recognition that failed: the take is kept and can be
   retried. An empty transcript of a quiet take is reported as no speech.
 - A take with no live words whose loudness never holds three readings (about
-  100 ms) at or above about −44 dBFS within a third of a second is silence: it
+  100 ms) at or above about −44 dBFS within a third of a second is silence. The
+  readings are 32 ms RMS windows of the take's own recorded PCM, the tail the
+  recorder flushes after the release included, so what is judged is exactly
+  what would be transcribed. Such a take
   is not sent to recognition, which on near-silence can return its hotwords as
   text, and is reported as no speech. The gate is deliberately loose: speech 33
   dB under ordinary iPhone speech (−14 dBFS) still clears it, a room with nobody

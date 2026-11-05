@@ -52,6 +52,20 @@ describe('the silence gate', () => {
   });
 });
 
+describe('readings from the recorded PCM', () => {
+  it('reads 32 ms windows across however the recorder chunks the samples', () => {
+    const activity = createVoiceActivity();
+    const speech = new Int16Array(16 * 160).fill(Math.round(0.05 * 32_767));
+    // 160 ms of speech-level audio, in uneven chunks.
+    activity.observePcm(speech.subarray(0, 700));
+    activity.observePcm(speech.subarray(700, 1_900));
+    activity.observePcm(speech.subarray(1_900));
+    expect(activity.loudReadings()).toBe(5);
+    expect(activity.silent()).toBe(false);
+    expect(Math.round(20 * Math.log10(activity.peak()))).toBe(-26);
+  });
+});
+
 describe('a dropped take in the reliability log', () => {
   it('says how long it was, how many readings reached the gate, and its loudest, and nothing more', () => {
     const readings = [...Array.from({ length: 12 }, () => fromDb(-50)), fromDb(-36), ...Array.from({ length: 3 }, () => fromDb(-50))];

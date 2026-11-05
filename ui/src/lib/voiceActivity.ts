@@ -25,9 +25,17 @@ export const VOICE_SILENCE_MIN_READINGS = 3;
 /** ...within this many consecutive readings (about a third of a second). */
 export const VOICE_SILENCE_SPAN_READINGS = 10;
 
+/** The recorder's PCM rate, and the samples one reading covers (`VOICE_LEVEL_INTERVAL_MS`). */
+const PCM_SAMPLE_RATE = 16_000;
+const READING_SAMPLES = Math.round((PCM_SAMPLE_RATE * VOICE_LEVEL_INTERVAL_MS) / 1000);
+
 export type VoiceActivity = {
   /** One loudness reading, covering `VOICE_LEVEL_INTERVAL_MS` of audio. */
   observe: (rms: number) => void;
+  /** The take's own 16 kHz PCM, as it is recorded: one reading per `VOICE_LEVEL_INTERVAL_MS`.
+   *  The recorder hands over every sample it puts in a segment, the flushed tail included, so
+   *  what is judged is exactly what would be transcribed. */
+  observePcm: (samples: Int16Array) => void;
   /** Milliseconds of audio at or above `VOICE_ACTIVITY_RMS` so far. */
   voicedMs: () => number;
   voiced: () => boolean;
@@ -48,7 +56,22 @@ export const createVoiceActivity = (): VoiceActivity => {
   let sound = false;
   // The indices of the last readings at or above the gate's threshold.
   const loud: number[] = [];
-  return {
+  // A reading's sum of squares carried across PCM chunks.
+  let squares = 0;
+  let counted = 0;
+  const activity: VoiceActivity = {
+    observePcm: (samples) => {
+      for (let index = 0; index < samples.length; index += 1) {
+        const sample = samples[index]! / 32_768;
+        squares += sample * sample;
+        counted += 1;
+        if (counted === READING_SAMPLES) {
+          activity.observe(Math.sqrt(squares / counted));
+          squares = 0;
+          counted = 0;
+        }
+      }
+    },
     observe: (rms) => {
       if (!Number.isFinite(rms)) return;
       readings += 1;
@@ -67,6 +90,7 @@ export const createVoiceActivity = (): VoiceActivity => {
     loudReadings: () => loudReadings,
     peak: () => peak,
   };
+  return activity;
 };
 
 /** A take the silence gate kept away from recognition, for the reliability log: its length, how

@@ -201,12 +201,11 @@ export class ShowPageVoiceDictation {
           metadata.final,
         ),
         onPcm: (samples) => {
+          // What would be transcribed, its flushed tail included, is what the gate judges.
+          this.activity.observePcm(samples);
           if (this.realtimeState !== 'failed') realtime.sendPcm(samples);
         },
-        onLevel: (rms) => {
-          this.activity.observe(rms);
-          this.input.onLevel?.(rms);
-        },
+        ...(this.input.onLevel ? { onLevel: this.input.onLevel } : {}),
         onError: (error) => {
           this.captureError = error;
           this.realtimeState = 'failed';
