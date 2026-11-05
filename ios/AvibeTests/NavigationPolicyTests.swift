@@ -36,18 +36,39 @@ final class NavigationPolicyTests: XCTestCase {
         XCTAssertEqual(policy.destination(for: URL(string: "https://evil.avibe.bot/login")!), .external)
     }
 
-    func testProtectedVaultOriginIsLimitedToEmbeddedAndPopupContexts() {
+    func testProtectedVaultOriginIsLimitedToPopupMainFrames() {
         let policy = NavigationPolicy(instanceOrigins: [instance])
         let sandbox = URL(string: "https://sandbox.avibe.bot/v/pinned/index.html")!
 
         XCTAssertEqual(policy.destination(for: sandbox), .protectedVault)
-        XCTAssertEqual(policy.disposition(for: sandbox, context: .embeddedFrame), .allow)
         XCTAssertEqual(policy.disposition(for: sandbox, context: .popupMainFrame), .allow)
         XCTAssertEqual(policy.disposition(for: sandbox, context: .primaryMainFrame), .external)
         XCTAssertEqual(
             policy.destination(for: URL(string: "https://evil.sandbox.avibe.bot/")!),
             .external
         )
+    }
+
+    func testSubframesUseWebKitDefaultsExceptForExternalApplicationSchemes() {
+        let policy = NavigationPolicy(instanceOrigins: [instance])
+
+        for url in [
+            URL(string: "about:srcdoc")!,
+            URL(string: "about:blank")!,
+            URL(string: "blob:https://alice-app.avibe.bot/preview-id")!,
+            URL(string: "data:text/html,hello")!,
+            URL(string: "https://example.com/embed")!,
+        ] {
+            XCTAssertEqual(policy.subframeDisposition(for: url), .allow)
+        }
+
+        for url in [
+            URL(string: "tel:+15555550123")!,
+            URL(string: "mailto:support@avibe.bot")!,
+            URL(string: "avibe://settings")!,
+        ] {
+            XCTAssertEqual(policy.subframeDisposition(for: url), .cancel)
+        }
     }
 
     func testPopupBootstrapAllowsOnlyAboutBlankInThePopupMainFrame() {

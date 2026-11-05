@@ -48,6 +48,12 @@ final class WebViewController: UIViewController {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
         configuration.allowsInlineMediaPlayback = true
+        configuration.mediaTypesRequiringUserActionForPlayback = .all
+        configuration.dataDetectorTypes = .all
+        configuration.upgradeKnownHostsToHTTPS = true
+        configuration.limitsNavigationsToAppBoundDomains = false
+        configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
+        configuration.preferences.isElementFullscreenEnabled = false
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
         configure(webView)
@@ -134,6 +140,11 @@ final class WebViewController: UIViewController {
     private func configure(_ webView: WKWebView) {
         webView.navigationDelegate = self
         webView.uiDelegate = self
+        webView.allowsBackForwardNavigationGestures = true
+        webView.allowsLinkPreview = true
+#if DEBUG
+        webView.isInspectable = true
+#endif
         webView.scrollView.contentInsetAdjustmentBehavior = .never
     }
 
@@ -174,33 +185,25 @@ final class WebViewController: UIViewController {
         host.present(alert, animated: true)
     }
 
-    private func navigationContext(for webView: WKWebView, isMainFrame: Bool) -> NavigationContext {
-        if !isMainFrame {
-            return .embeddedFrame
-        }
+    private func navigationContext(for webView: WKWebView) -> NavigationContext {
         return webView === self.webView ? .primaryMainFrame : .popupMainFrame
     }
 
-    private func navigationDecision(
+    private func mainFrameNavigationDecision(
         for url: URL,
-        in webView: WKWebView,
-        isMainFrame: Bool
+        in webView: WKWebView
     ) -> WKNavigationActionPolicy {
-        let context = navigationContext(for: webView, isMainFrame: isMainFrame)
+        let context = navigationContext(for: webView)
         switch navigationPolicy.disposition(for: url, context: context) {
         case .allow:
             return .allow
         case .googleAuthentication:
-            if isMainFrame {
-                finishPrimaryLoadingIfNeeded(webView)
-                presentGoogleSignInMessage()
-            }
+            finishPrimaryLoadingIfNeeded(webView)
+            presentGoogleSignInMessage()
             return .cancel
         case .external:
-            if isMainFrame {
-                finishPrimaryLoadingIfNeeded(webView)
-                presentExternalURL(url)
-            }
+            finishPrimaryLoadingIfNeeded(webView)
+            presentExternalURL(url)
             return .cancel
         case .externalApplication:
             if mainFrameIsTrusted(in: webView) {
@@ -209,9 +212,7 @@ final class WebViewController: UIViewController {
             }
             return .cancel
         case .blocked:
-            if isMainFrame {
-                finishPrimaryLoadingIfNeeded(webView)
-            }
+            finishPrimaryLoadingIfNeeded(webView)
             return .cancel
         }
     }
@@ -661,13 +662,13 @@ extension WebViewController: WKNavigationDelegate {
             return
         }
 
-        decisionHandler(
-            navigationDecision(
-                for: url,
-                in: webView,
-                isMainFrame: navigationAction.targetFrame?.isMainFrame == true
-            )
-        )
+        if navigationAction.targetFrame?.isMainFrame == false {
+            let disposition = navigationPolicy.subframeDisposition(for: url)
+            decisionHandler(disposition == .allow ? .allow : .cancel)
+            return
+        }
+
+        decisionHandler(mainFrameNavigationDecision(for: url, in: webView))
     }
 
     func webView(
@@ -749,6 +750,17 @@ extension WebViewController: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation?, withError error: Error) {
         reportLoadFailure(error, in: webView)
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (
+            URLSession.AuthChallengeDisposition,
+            URLCredential?
+        ) -> Void
+    ) {
+        completionHandler(.performDefaultHandling, nil)
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
@@ -922,6 +934,11 @@ extension WebViewController: WKUIDelegate {
             return nil
         }
 
+        if !navigationAction.sourceFrame.isMainFrame,
+           navigationPolicy.subframeDisposition(for: url) == .cancel {
+            return nil
+        }
+
         switch navigationPolicy.newWindowDisposition(
             for: url,
             trustedMainFrame: trustedMainFrame
@@ -994,6 +1011,17 @@ extension WebViewController: WKDownloadDelegate {
             cancelledDownloads.insert(identifier)
             decisionHandler(.cancel)
         }
+    }
+
+    func download(
+        _ download: WKDownload,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (
+            URLSession.AuthChallengeDisposition,
+            URLCredential?
+        ) -> Void
+    ) {
+        completionHandler(.performDefaultHandling, nil)
     }
 
     func downloadDidFinish(_ download: WKDownload) {

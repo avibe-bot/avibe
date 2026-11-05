@@ -11,7 +11,6 @@ enum NavigationDestination: Equatable {
 
 enum NavigationContext: Equatable {
     case primaryMainFrame
-    case embeddedFrame
     case popupMainFrame
 }
 
@@ -21,6 +20,11 @@ enum NavigationDisposition: Equatable {
     case external
     case externalApplication
     case blocked
+}
+
+enum SubframeNavigationDisposition: Equatable {
+    case allow
+    case cancel
 }
 
 enum NewWindowDisposition: Equatable {
@@ -114,6 +118,10 @@ struct NavigationPolicy {
         case .blocked:
             return .blocked
         }
+    }
+
+    func subframeDisposition(for url: URL) -> SubframeNavigationDisposition {
+        isExternalApplicationURL(url) ? .cancel : .allow
     }
 
     func newWindowDisposition(
