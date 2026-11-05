@@ -30,8 +30,8 @@ const speaking = inShell({ ...teamFixtures, api: { ...teamFixtures.api, '/api/as
 const [mainBot, cso, pm, research] = teamBots;
 const afterSpeaking = { ...speaking, bots: [mainBot, pm, cso, research] };
 const recording = { phase: 'recording', text: spoken.text, stash: spoken.stash, seconds: 6 } as const;
-const held = (hold: Parameters<typeof HeldBot>[0]['hold']) => () => (
-  <HeldBot handle="pm" pointer="touch" hold={hold}>
+const held = (hold: Parameters<typeof HeldBot>[0]['hold'], handle = 'pm') => () => (
+  <HeldBot handle={handle} pointer="touch" hold={hold}>
     {page()}
   </HeldBot>
 );
@@ -58,6 +58,8 @@ const designFrames = frames([
   { name: 'member', title: '工作台 · 没有伙伴的成员：没有伙伴条，底栏中间仍是新会话', width: 390, height: 844, status: 'shipped', fixtures: member, route: '/projects', render: page },
   holdFrame('hold-recording', '按住伙伴说话 · 录音中：卡片在伙伴条下面，取消在手指正上方', held(recording)),
   holdFrame('hold-armed', '按住伙伴说话 · 上滑进取消区：松开取消', held({ ...recording, phase: 'armed', seconds: 7 })),
+  holdFrame('hold-main-recording', '按住最左边的歪比说话 · 取消和提示贴着页头和「伙伴」标题：各自带一圈局部模糊，提示不出屏幕左边', held({ phase: 'listening', seconds: 1 }, 'main')),
+  holdFrame('hold-main-armed', '按住最左边的歪比 · 上滑进取消区（红色）：同样带局部模糊', held({ phase: 'armed', seconds: 3 }, 'main')),
   holdFrame('hold-sent', '按住伙伴说话 · 已发给产品经理：留在工作台，它排到歪比后面', held({ outcome: 'sent', text: spoken.final }), afterSpeaking),
 ]);
 

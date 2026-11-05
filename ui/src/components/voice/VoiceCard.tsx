@@ -182,28 +182,43 @@ export function VoiceInterruptedActions({
   );
 }
 
+/** Whatever else a hold lays over the page (the cancel target and its hint, a mouse's hint, the
+ *  attachments note), in the card's halo made small (`.voice-overlay-halo`, owner request
+ *  2026-11-05): the page under it dims and blurs, so overlay text never sits on the page's own
+ *  text. The halo is drawn behind `children`, never over their own background. */
+export function VoiceHalo({ children, className }: { children: ReactNode; className?: string }) {
+  return (
+    <span className={clsx('relative isolate flex max-w-full', className)}>
+      <span className="voice-overlay-halo" aria-hidden="true" />
+      {children}
+    </span>
+  );
+}
+
 /** Where the finger goes to cancel, and the hint. Armed, it fills red and says "Release to cancel". */
 export function VoiceCancelTarget({ armed, hint }: { armed: boolean; hint?: ReactNode }) {
   const { t } = useTranslation();
   return (
-    <div className="flex flex-col items-center gap-2">
-      <span
-        className={clsx(
-          'grid size-14 place-items-center rounded-full border transition',
-          armed ? 'scale-110 border-destructive bg-destructive text-primary-foreground shadow-xl' : 'border-border-strong bg-surface text-muted',
-        )}
-      >
-        <X className="size-6" />
-      </span>
-      <span className={clsx('flex items-center gap-1 text-xs font-semibold', armed ? 'text-destructive-ink' : 'text-muted')}>
-        {armed ? t('voice.releaseToCancel') : hint ?? (
-          <>
-            <ChevronUp className="size-3.5" />
-            {t('voice.slideToCancel')}
-          </>
-        )}
-      </span>
-    </div>
+    <VoiceHalo>
+      <div className="flex flex-col items-center gap-2">
+        <span
+          className={clsx(
+            'grid size-14 place-items-center rounded-full border transition',
+            armed ? 'scale-110 border-destructive bg-destructive text-primary-foreground shadow-xl' : 'border-border-strong bg-surface text-muted',
+          )}
+        >
+          <X className="size-6" />
+        </span>
+        <span className={clsx('flex items-center gap-1 text-xs font-semibold', armed ? 'text-destructive-ink' : 'text-muted')}>
+          {armed ? t('voice.releaseToCancel') : hint ?? (
+            <>
+              <ChevronUp className="size-3.5" />
+              {t('voice.slideToCancel')}
+            </>
+          )}
+        </span>
+      </div>
+    </VoiceHalo>
   );
 }
 

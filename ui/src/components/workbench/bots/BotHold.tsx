@@ -128,12 +128,18 @@ function findAnchor(handle: string): { avatar: DOMRect; strip: DOMRect } | null 
 
 /** A ref that places its element from the held avatar each time it commits: the card and the
  *  cancel target follow the avatar they belong to without a second render. */
-const placedBy = (handle: string, place: (style: CSSStyleDeclaration, anchor: { avatar: DOMRect; strip: DOMRect }) => void) =>
+const placedBy = (
+  handle: string,
+  place: (style: CSSStyleDeclaration, anchor: { avatar: DOMRect; strip: DOMRect }, node: HTMLElement) => void,
+) =>
   (node: HTMLElement | null) => {
     if (!node) return;
     const anchor = findAnchor(handle);
-    if (anchor) place(node.style, anchor);
+    if (anchor) place(node.style, anchor, node);
   };
+
+/** How close the cancel target may come to the screen's edges. */
+const SCREEN_MARGIN = 8;
 
 /** The take's card while it runs, settles, or waits after being cut off, and how to cancel (owner
  *  decision, 2026-11-04: next to the held avatar on both). A desktop: the card beside the avatar,
@@ -203,9 +209,16 @@ export function BotHoldLayer({
     <>
       {cancel && (
         <div
-          ref={placedBy(handle, (style, { avatar }) => {
-            style.left = `${avatar.left + avatar.width / 2}px`;
-            style.top = `${avatar.top - 8}px`;
+          ref={placedBy(handle, (style, { avatar }, node) => {
+            // Above the finger, but whole on the screen: the main Bot sits at the strip's far
+            // left, and a strip near the top leaves little room under the status bar. Measured
+            // once per take, so the target does not move under the finger when it arms (its hint
+            // changes width).
+            node.dataset.width ??= String(node.offsetWidth);
+            const half = Number(node.dataset.width) / 2;
+            const center = avatar.left + avatar.width / 2;
+            style.left = `${Math.min(Math.max(center, half + SCREEN_MARGIN), window.innerWidth - half - SCREEN_MARGIN)}px`;
+            style.top = `max(${avatar.top - 8}px, calc(env(safe-area-inset-top, 0px) + ${node.offsetHeight + SCREEN_MARGIN}px))`;
           })}
           className="fixed z-50 -translate-x-1/2 -translate-y-full"
         >
