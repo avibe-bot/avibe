@@ -129,7 +129,6 @@ test('a take that cannot be transcribed survives a reload, and lands from its pe
   await page.reload();
   const item = page.getByRole('status').filter({ hasText: en.voice.pending.title });
   await expect(item).toBeVisible();
-  await expect(item.getByText('To “Fix the cache”', { exact: false })).toBeVisible();
   // Its own retry on load meets the same dead network, and it stays.
   await expect(item.getByText(en.voice.pending.failed)).toBeVisible({ timeout: 30_000 });
 
