@@ -97,6 +97,50 @@ its text lands or the user discards it.
   and mints a new one once, because a browser cannot tell a refused token from a
   failed network at the handshake.
 
+## Kept takes
+
+A take's audio is kept on the device until its words land, so a reload, a crash,
+a killed page, or a surface that goes away loses none of it
+(`ui/src/lib/voiceTakeStore.ts`):
+
+- While a take records, every segment's WAV bytes go into IndexedDB
+  (`avibe-voice-takes`), with the take's target (the Session it was spoken into,
+  or `home` for the Home draft) and its intent (`send` for a hold, `insert` for
+  a tap or ⌥Z dictation). Its transcript is kept with it until it is sent or
+  inserted. Bytes are stored, never a Blob, and every retry
+  reads fresh Blobs.
+- A take is deleted when its words were sent or inserted, when the reader
+  discards it, and on sign-out, revocation, or a change of reader (the local
+  snapshots' principal, sign-out generation, and clear hook). An authorization
+  change, a full snapshot quota, or an expired session the same reader signs
+  back into keeps it: it is the reader's own unsent speech, not a server read.
+- At most 3 takes are kept per reader; a new one beyond that evicts the oldest.
+  16 kHz mono PCM is about 1.9 MB a minute.
+- A surface holding a take (recording, finalizing, or showing it) also holds a
+  Web Lock named for it, which the browser releases when the surface lets go or
+  its page goes away. Another tab or the pet window therefore leaves a take
+  another document still holds alone, and waits on that lock, so the take
+  comes back to it when the owner lets go or closes or crashes without a word.
+  A recovery, and sending or inserting a kept take, hold the lock while they
+  run. Without Web Locks, a recovery's result lands only on the stored
+  revision it read, so it never sets back a take its keeper advanced.
+- A take that no surface holds in memory shows as a pending voice item above the
+  composer of its target. One without text is retried from its stored audio,
+  through whichever path works then, once when the page shows it and again
+  whenever the page comes back online or to the front, and on request. One with
+  text waits to be sent or put in the draft. Nothing discards an item but the
+  reader.
+- A crash while recording loses at most the current, not yet emitted segment
+  (under one minute): every completed segment is already stored, and a take the
+  page lost while recording is finalized with a finalize-only request.
+
+While a take records, live recognition that is not working is said on its card
+("Live transcript unavailable; the whole take is transcribed when you
+release"): when the realtime socket fails, or when four seconds of speech above
+about −35 dBFS bring no live preview. In the second case the socket is
+abandoned and the take continues over the HTTP path, so its release does not
+wait on a stalled socket.
+
 ## Reliability baseline
 
 The first stabilization increment establishes these invariants:

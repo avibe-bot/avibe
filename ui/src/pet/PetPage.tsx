@@ -602,6 +602,7 @@ const PetSurface: React.FC = () => {
     enabled: canChat && Boolean(binding) && !uncertain,
     epoch,
     draft,
+    keepTarget: binding ?? null,
     onOpenComposer: openComposer,
     onCaptureEnd: resetVoiceShortcut,
   });
@@ -1268,7 +1269,7 @@ function useHitRegions(rootRef: React.RefObject<HTMLDivElement | null>, epoch?: 
   }, [rootRef, epoch]);
 }
 
-function usePetVoice({ enabled, epoch, draft, onOpenComposer, onCaptureEnd }: { enabled: boolean; epoch: PetSurfaceEpoch; draft: string; onOpenComposer: (text?: string) => void; onCaptureEnd: () => void }) {
+function usePetVoice({ enabled, epoch, draft, keepTarget, onOpenComposer, onCaptureEnd }: { enabled: boolean; epoch: PetSurfaceEpoch; draft: string; keepTarget: string | null; onOpenComposer: (text?: string) => void; onCaptureEnd: () => void }) {
   const [asr, setAsr] = useState<{ epoch: PetSurfaceEpoch; enabled: boolean; available: boolean; checked: boolean; maxFileBytes?: number }>({ epoch, enabled, available: false, checked: false });
   const [preview, setPreview] = useState('');
   const [listening, setListening] = useState(false);
@@ -1322,7 +1323,15 @@ function usePetVoice({ enabled, epoch, draft, onOpenComposer, onCaptureEnd }: { 
     if (!epoch.isCurrent() || !available || captureRef.current) return;
     const before = draft;
     const capture: Capture = {
-      dictation: new ShowPageVoiceDictation({ before, after: '', maxFileBytes: asrForEpoch.maxFileBytes, onPreview: (text) => { if (epoch.isCurrent()) setPreview(text); } }),
+      // Kept on the device until its words reach the pet's draft; a take that cannot be
+      // transcribed waits in the bound conversation's composer (lib/voiceTakeStore).
+      dictation: new ShowPageVoiceDictation({
+        before,
+        after: '',
+        maxFileBytes: asrForEpoch.maxFileBytes,
+        onPreview: (text) => { if (epoch.isCurrent()) setPreview(text); },
+        ...(keepTarget ? { keep: { target: keepTarget, intent: 'insert' as const } } : {}),
+      }),
       ending: false,
       cancelled: false,
     };
@@ -1350,19 +1359,38 @@ function usePetVoice({ enabled, epoch, draft, onOpenComposer, onCaptureEnd }: { 
       if (!settle()) return;
       const next = text.trim();
       if (!next) { onOpenComposer(before); return; }
+      capture.dictation.landed();
       const value = [before.trim(), next].filter(Boolean).join(' ');
       petComposer.noteDictation(before, value);
       onOpenComposer(value);
-    }).catch((reason: unknown) => fail(reason));
+    }).catch((reason: unknown) => {
+      fail(reason);
+      // A take that could not be transcribed stays on the device: the pet lets go of it, so the
+      // bound conversation's pending voice items offer it (lib/voiceTakeStore).
+      capture.dictation.detach();
+    });
     void capture.dictation.start().then(() => {
       if (!epoch.isCurrent()) { capture.dictation.abort(); return; }
       // Release may precede microphone permission or pipeline startup.
       if (capture.ending && !capture.cancelled) capture.dictation.finish();
     }).catch((reason: unknown) => { fail(reason); capture.dictation.abort(); });
-  }, [asrForEpoch.maxFileBytes, available, epoch, draft, onOpenComposer, onCaptureEnd]);
+  }, [asrForEpoch.maxFileBytes, available, epoch, draft, keepTarget, onOpenComposer, onCaptureEnd]);
   const cancel = useCallback(() => stop(false), [stop]);
   const clearError = useCallback(() => setError(null), []);
-  useEffect(() => cancel, [epoch, enabled, cancel]);
+  // The pet's surface changing under a take is not the reader discarding it: what was said is
+  // kept on the device (lib/voiceTakeStore), and nothing more reaches this surface.
+  useEffect(() => () => {
+    const capture = captureRef.current;
+    if (!capture) return;
+    if (!capture.ending) onCaptureEnd();
+    captureRef.current = null;
+    capture.ending = true;
+    capture.cancelled = true;
+    capture.dictation.detach();
+    setListening(false);
+    setFinishing(false);
+    setPreview('');
+  }, [epoch, enabled, onCaptureEnd]);
   useEffect(() => () => setError(null), [epoch, enabled]);
   return {
     available,

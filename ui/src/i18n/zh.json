@@ -6841,7 +6841,18 @@
       "mouseHint": "松开发送 · 移开头像或按 <key>Esc</key> 取消",
       "mouseArmed": "松开取消 · 移回头像继续说"
     },
-    "noText": "还没有文字"
+    "noText": "还没有文字",
+    "liveUnavailable": "实时转写暂不可用，松手后整段识别",
+    "pending": {
+      "title": "还没转写的语音",
+      "ready": "语音已转好",
+      "waiting": "录音保存在这台设备上，网络恢复后会自动重试。",
+      "retrying": "正在转写…",
+      "failed": "没能转成文字，录音还保存在这台设备上。",
+      "lost": "这段录音没能保存在这台设备上。",
+      "insert": "放进输入框",
+      "truncated": "录音的结尾没能保存在这台设备上，这里是保存下来的部分。"
+    }
   },
   "mcpHub": {
     "title": "MCP",

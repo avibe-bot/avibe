@@ -71,7 +71,24 @@ function annotationShortcutBlocked(target: Element | null): boolean {
  * "unknown" so the control disables until the freshly loaded overlay reports —
  * and so one session's state never briefly shows over another's page.
  */
-export function useShowPageAnnotation(src: string | null): AnnotationBridge {
+/** The Session a Show Page belongs to, from its address (`/show/<session>/…`). */
+const showPageSessionId = (src: string): string | null => {
+  try {
+    const match = /^\/show\/([^/]+)\//.exec(new URL(src, window.location.href).pathname);
+    return match ? decodeURIComponent(match[1]) : null;
+  } catch {
+    return null;
+  }
+};
+
+/** `keepTarget`: the conversation the page belongs to, where a take spoken into it waits if the
+ *  page is gone before its words land; read from a private page's address when not given (a
+ *  public `/p/<share>/` page does not carry it). */
+export function useShowPageAnnotation(src: string | null, keepTarget?: string | null): AnnotationBridge {
+  const keepTargetRef = useRef(keepTarget);
+  useEffect(() => {
+    keepTargetRef.current = keepTarget;
+  });
   const routeSurfaceActive = useRouteSurfaceActive();
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const voiceHostRef = useRef<ShowPageVoiceHost | null>(null);
@@ -194,6 +211,12 @@ export function useShowPageAnnotation(src: string | null): AnnotationBridge {
     return new ShowPageVoiceHost({
       post: (event: ShowPageVoiceEvent) => {
         iframe.contentWindow?.postMessage(event, window.location.origin);
+      },
+      // A take spoken into the page is kept until its words reach it; if the page is gone first,
+      // it waits in the composer of the conversation the page belongs to.
+      keep: () => {
+        const target = keepTargetRef.current ?? showPageSessionId(iframe.src);
+        return target ? { target, intent: 'insert' } : null;
       },
       availability: () => {
         if (availability) return availability;

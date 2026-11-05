@@ -50,6 +50,11 @@ export function BotHoldProvider({ children }: { children: ReactNode }) {
       const bot = botForHandle(targetRef.current?.handle);
       return bot ? loadVoiceContext(api.listSessionMessages, bot.session_id) : undefined;
     },
+    // Kept on the device until sent; if it cannot be, it waits in that Bot's composer.
+    keep: () => {
+      const bot = botForHandle(targetRef.current?.handle);
+      return bot ? { target: bot.session_id } : null;
+    },
     gesture: (pointerType) => (pointerType === 'mouse' ? MOUSE_HOLD_GESTURE : {}),
     // The system taking the press (blur, background, a lost pointer) keeps what was heard, as the
     // composer's hold does: the card offers to send, retry, or discard it.
@@ -171,6 +176,7 @@ export function BotHoldLayer({
       seconds={hold.seconds}
       reason={hold.interruptReason ?? 'dropped'}
       level={hold.level}
+      liveUnavailable={hold.liveUnavailable}
       actions={
         <VoiceInterruptedActions
           canRetry={hold.canRetry}

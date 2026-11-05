@@ -1,0 +1,228 @@
+/* @vitest-environment jsdom */
+import 'fake-indexeddb/auto';
+
+import { createInstance } from 'i18next';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { I18nextProvider, initReactI18next } from 'react-i18next';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+vi.hoisted(() => {
+  Range.prototype.getBoundingClientRect = () => new DOMRect();
+  Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
+  Object.defineProperty(window, 'matchMedia', {
+    configurable: true,
+    value: vi.fn().mockReturnValue({ matches: false }),
+  });
+});
+const apiFetch = vi.hoisted(() => vi.fn());
+vi.mock('../../lib/apiFetch', () => ({ apiFetch }));
+vi.mock('../../lib/avibeFetch', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../lib/avibeFetch')>(),
+  primeCloudToken: vi.fn(),
+}));
+
+import { ToastProvider } from '../../context/ToastProvider';
+import en from '../../i18n/en.json';
+import { setLocalSnapshotPrincipal } from '../../lib/localSnapshots';
+import {
+  deleteVoiceTake,
+  readVoiceTakes,
+  saveVoiceTake,
+  saveVoiceTakeAudio,
+  type VoiceTake,
+} from '../../lib/voiceTakeStore';
+import { Composer } from './Composer';
+
+// The takes kept on the device for a conversation, near its composer (ui/design:
+// composer/pending-voice/*): after a reload they are still there, and their words land in the
+// draft or as the spoken message they were meant to be.
+
+const i18n = createInstance();
+void i18n.use(initReactI18next).init({
+  lng: 'en',
+  fallbackLng: 'en',
+  resources: { en: { translation: en } },
+  interpolation: { escapeValue: false },
+});
+
+const kept = (patch: Partial<VoiceTake>): VoiceTake => ({
+  id: 'kept-take',
+  target: 'pending-session',
+  intent: 'send',
+  createdAt: Date.now(),
+  updatedAt: Date.now(),
+  status: 'transcribed',
+  text: 'Ship it on Thursday',
+  segments: [{ sequence: 0, final: true, durationMs: 83_000 }],
+  ...patch,
+});
+
+/** The browser's Web Locks for one origin: how its documents see which takes a surface holds. */
+const installWebLocks = () => {
+  const held = new Map<string, Promise<void>>();
+  const locks = {
+    async request(name: string, ...args: unknown[]) {
+      const [options, callback] = (args.length === 1 ? [{}, args[0]] : args) as [
+        { ifAvailable?: boolean; signal?: AbortSignal },
+        (lock: unknown) => Promise<unknown>,
+      ];
+      while (held.has(name)) {
+        if (options.ifAvailable) return callback(null);
+        await Promise.race([held.get(name), new Promise((_resolve, reject) => {
+          options.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
+        })]);
+      }
+      let free!: () => void;
+      held.set(name, new Promise<void>((resolve) => {
+        free = resolve;
+      }));
+      try {
+        return await callback({ name, mode: 'exclusive' });
+      } finally {
+        held.delete(name);
+        free();
+      }
+    },
+    async query() {
+      return { held: [...held.keys()].map((name) => ({ name, mode: 'exclusive' })), pending: [] };
+    },
+  };
+  Object.defineProperty(navigator, 'locks', { configurable: true, value: locks });
+  return () => Reflect.deleteProperty(navigator, 'locks');
+};
+
+const renderComposer = (onSend = vi.fn(() => true), sendDisabled = false) => render(
+  <I18nextProvider i18n={i18n}>
+    <ToastProvider>
+      <Composer sessionId="pending-session" onSend={onSend} sendDisabled={sendDisabled} />
+    </ToastProvider>
+  </I18nextProvider>,
+);
+
+beforeEach(() => {
+  setLocalSnapshotPrincipal('local');
+  apiFetch.mockReset().mockResolvedValue({
+    ok: true,
+    json: async () => ({ available: true, max_file_bytes: 10_000_000 }),
+  });
+});
+
+afterEach(async () => {
+  cleanup();
+  for (const take of await readVoiceTakes()) await deleteVoiceTake(take.id);
+  setLocalSnapshotPrincipal(null);
+});
+
+describe('Composer pending voice items', () => {
+  it('sends a kept take meant to be sent, as a spoken message, and then forgets it', async () => {
+    await saveVoiceTake(kept({}));
+    const onSend = vi.fn(() => true);
+    renderComposer(onSend);
+
+    const item = (await screen.findByText('Ship it on Thursday')).closest<HTMLElement>('[role="status"]')!;
+    expect(within(item).getByText(en.voice.pending.ready)).toBeTruthy();
+    expect(within(item).getByText('1:23')).toBeTruthy();
+    fireEvent.click(within(item).getByRole('button', { name: en.voice.send }));
+
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith('Ship it on Thursday', [], undefined, { input: 'voice' }));
+    await waitFor(() => expect(item.isConnected).toBe(false));
+    expect(await readVoiceTakes()).toEqual([]);
+  });
+
+  it('holds a kept take back while an earlier send is still unconfirmed', async () => {
+    await saveVoiceTake(kept({}));
+    const onSend = vi.fn(() => true);
+    renderComposer(onSend, true);
+
+    const item = (await screen.findByText('Ship it on Thursday')).closest<HTMLElement>('[role="status"]')!;
+    fireEvent.click(within(item).getByRole('button', { name: en.voice.send }));
+    await act(async () => undefined);
+
+    expect(onSend).not.toHaveBeenCalled();
+    expect(await readVoiceTakes()).toHaveLength(1);
+  });
+
+  it('puts a kept dictation in the draft, and then forgets it', async () => {
+    await saveVoiceTake(kept({ intent: 'insert', text: 'Run make release' }));
+    renderComposer();
+
+    const item = (await screen.findByText('Run make release')).closest<HTMLElement>('[role="status"]')!;
+    expect(within(item).queryByRole('button', { name: en.voice.send })).toBeNull();
+    fireEvent.click(within(item).getByRole('button', { name: en.voice.pending.insert }));
+
+    await waitFor(() => expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('Run make release'));
+    await waitFor(async () => expect(await readVoiceTakes()).toEqual([]));
+  });
+
+  it('keeps what was typed while a kept dictation was on its way into the draft', async () => {
+    await saveVoiceTake(kept({ intent: 'insert', text: 'Run make release' }));
+    renderComposer();
+
+    const item = (await screen.findByText('Run make release')).closest<HTMLElement>('[role="status"]')!;
+    fireEvent.click(within(item).getByRole('button', { name: en.voice.pending.insert }));
+    // Typed before the take's claim and read finish.
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Before that:' } });
+
+    await waitFor(() => expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('Before that: Run make release'));
+  });
+
+  it('keeps a kept dictation whose composer went away before it landed', async () => {
+    await saveVoiceTake(kept({ intent: 'insert', text: 'Run make release' }));
+    const { unmount } = renderComposer();
+
+    const item = (await screen.findByText('Run make release')).closest<HTMLElement>('[role="status"]')!;
+    fireEvent.click(within(item).getByRole('button', { name: en.voice.pending.insert }));
+    // Navigated away before the take's claim and read finish.
+    unmount();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(await readVoiceTakes()).toEqual([expect.objectContaining({ id: 'kept-take', text: 'Run make release' })]);
+  });
+
+  it('shows a take with no text yet as kept, and discards it only on request', async () => {
+    Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => false });
+    try {
+      await saveVoiceTake(kept({ status: 'pending', text: undefined }));
+      await saveVoiceTakeAudio('kept-take', 0, new Blob(['audio'], { type: 'audio/wav' }));
+      renderComposer();
+
+      await screen.findByText(en.voice.pending.title);
+      expect(screen.getByText(en.voice.pending.waiting)).toBeTruthy();
+      expect(screen.getByRole('button', { name: en.voice.retry })).toBeTruthy();
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: en.voice.discard }));
+      });
+      await waitFor(async () => expect(await readVoiceTakes()).toEqual([]));
+      await waitFor(() => expect(screen.queryByText(en.voice.pending.title)).toBeNull());
+    } finally {
+      Reflect.deleteProperty(navigator, 'onLine');
+    }
+  });
+
+  it('leaves a take another document still records to that document, until it lets go or goes away', async () => {
+    Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => false });
+    const uninstall = installWebLocks();
+    try {
+      await saveVoiceTake(kept({ status: 'recording', text: undefined }));
+      await saveVoiceTakeAudio('kept-take', 0, new Blob(['audio'], { type: 'audio/wav' }));
+      // Another tab's recording surface holds it (lib/voiceTakeStore's lock, named across documents).
+      let otherTabLetsGo!: () => void;
+      const otherTab = navigator.locks.request('avibe-voice-take:kept-take', () => new Promise<void>((resolve) => {
+        otherTabLetsGo = resolve;
+      }));
+      renderComposer();
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      });
+      expect(screen.queryByText(en.voice.pending.title)).toBeNull();
+
+      // That window closes, or crashes, telling no one: the take comes back here on its own.
+      otherTabLetsGo();
+      await otherTab;
+      await screen.findByText(en.voice.pending.title);
+    } finally {
+      uninstall();
+      Reflect.deleteProperty(navigator, 'onLine');
+    }
+  });
+});

@@ -1604,7 +1604,7 @@ describe('desktop mini v2 interaction contract', () => {
       constructor() { captures.push(this.completion); }
       start = start;
       finish = () => {};
-      abort = () => {};
+      abort = () => {}; landed = () => {}; detach = () => {};
     }
     await withVoiceEnv(() => true, Dictation, async () => {
       const invoke = vi.fn(async (command: string) => command === 'pet_ready'
@@ -1632,17 +1632,18 @@ describe('desktop mini v2 interaction contract', () => {
   });
 
   it.each([
-    ['microphone start', 'pet.voice.startFailed', () => ({ start: Promise.reject(new DOMException('denied', 'NotAllowedError')), done: new Promise<string>(() => {}) })],
-    ['transcription', 'pet.voice.failed', (TranscriptionError: typeof VoiceTranscriptionErrorType) => ({ start: Promise.resolve(), done: Promise.reject(new TranscriptionError('failed')) })],
-  ])('falls back to text with a note when %s fails, keeping the typed draft', async (_label, note, outcome) => {
+    ['microphone start', 'pet.voice.startFailed', () => ({ start: Promise.reject(new DOMException('denied', 'NotAllowedError')), done: new Promise<string>(() => {}) }), false],
+    ['transcription', 'pet.voice.failed', (TranscriptionError: typeof VoiceTranscriptionErrorType) => ({ start: Promise.resolve(), done: Promise.reject(new TranscriptionError('failed')) }), true],
+  ])('falls back to text with a note when %s fails, keeping the typed draft', async (_label, note, outcome, released) => {
     // Resolved after the module reset so PetPage and the test share one class.
     let TranscriptionError!: typeof VoiceTranscriptionErrorType;
+    const detach = vi.fn();
     class Dictation {
       private readonly outcome = outcome(TranscriptionError);
       done = this.outcome.done;
       start = () => this.outcome.start;
       finish = () => {};
-      abort = () => {};
+      abort = () => {}; landed = () => {}; detach = detach;
     }
     await withVoiceEnv(() => true, Dictation, async () => {
       ({ VoiceTranscriptionError: TranscriptionError } = await import('@/lib/voiceTranscription'));
@@ -1654,6 +1655,9 @@ describe('desktop mini v2 interaction contract', () => {
       expect(pose()).not.toBe('listening');
       expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('typed before voice');
       expect(api.sendSessionMessage).not.toHaveBeenCalled();
+      // A take that was recorded but not transcribed is let go of, for the bound conversation's
+      // pending voice items; nothing was recorded when the microphone did not start.
+      expect(detach).toHaveBeenCalledTimes(released ? 1 : 0);
     });
   });
 
@@ -1661,7 +1665,7 @@ describe('desktop mini v2 interaction contract', () => {
   it('clears a previous ASR-available cache when the authorization epoch changes', async () => {
     const status = deferred<{ ok: boolean; json: () => Promise<unknown> }>();
     let asrCalls = 0;
-    class Dictation { done = new Promise<string>(() => {}); start = async () => {}; finish = () => {}; abort = () => {}; }
+    class Dictation { done = new Promise<string>(() => {}); start = async () => {}; finish = () => {}; abort = () => {}; landed = () => {}; detach = () => {}; }
     await withVoiceEnv(() => true, Dictation, async () => {
       vi.stubGlobal('fetch', vi.fn(() => {
         asrCalls += 1;
@@ -1680,7 +1684,7 @@ describe('desktop mini v2 interaction contract', () => {
   it('opens text while the first ASR status read is still pending, and does not start voice when it later succeeds', async () => {
     const status = deferred<{ ok: boolean; json: () => Promise<unknown> }>();
     const start = vi.fn(async () => {});
-    class Dictation { done = new Promise<string>(() => {}); start = start; finish = () => {}; abort = () => {}; }
+    class Dictation { done = new Promise<string>(() => {}); start = start; finish = () => {}; abort = () => {}; landed = () => {}; detach = () => {}; }
     await withVoiceEnv(() => true, Dictation, async () => {
       vi.stubGlobal('fetch', vi.fn(() => status.promise));
       mainSession('S'); render(<PetPage />); summon('listen');
@@ -1696,7 +1700,7 @@ describe('desktop mini v2 interaction contract', () => {
   it('opens text from an avatar hold while ASR status is pending, and does not start voice when it later succeeds', async () => {
     const status = deferred<{ ok: boolean; json: () => Promise<unknown> }>();
     const start = vi.fn(async () => {});
-    class Dictation { done = new Promise<string>(() => {}); start = start; finish = () => {}; abort = () => {}; }
+    class Dictation { done = new Promise<string>(() => {}); start = start; finish = () => {}; abort = () => {}; landed = () => {}; detach = () => {}; }
     await withVoiceEnv(() => true, Dictation, async () => {
       vi.stubGlobal('fetch', vi.fn(() => status.promise));
       mainSession('S'); render(<PetPage />); await screen.findByLabelText('pet.recentTurns');
@@ -1721,13 +1725,14 @@ describe('desktop mini v2 interaction contract', () => {
     const done = deferred<string>();
     let preview!: (text: string) => void;
     const abort = vi.fn();
+    const detach = vi.fn();
     vi.doMock('@/lib/showPageVoiceDictation', () => ({
       ShowPageVoiceDictation: class {
         done = done.promise;
         constructor(options: { onPreview: (text: string) => void }) { preview = options.onPreview; }
         start = async () => {};
         finish = () => {};
-        abort = abort;
+        abort = abort; landed = () => {}; detach = detach;
       },
     }));
     const locks = Object.getOwnPropertyDescriptor(navigator, 'locks');
@@ -1744,7 +1749,9 @@ describe('desktop mini v2 interaction contract', () => {
       await userEvent.click(await screen.findByLabelText('pet.voice.open'));
       expect(pose()).toBe('listening');
       await emit((h) => h.onAuthorizationChanged?.({}));
-      expect(abort).toHaveBeenCalled();
+      // The take leaves this surface; what was said is kept on the device, not discarded.
+      expect(detach).toHaveBeenCalled();
+      expect(abort).not.toHaveBeenCalled();
       await act(async () => { preview('stale voice preview'); done.resolve('stale voice transcript'); });
       expect(screen.queryByText('stale voice preview')).toBeNull();
       expect(pose()).not.toBe('listening');
@@ -1769,7 +1776,7 @@ describe('desktop mini v2 interaction contract', () => {
       constructor(options: { onPreview: (text: string) => void }) { preview = options.onPreview; }
       start = async () => {};
       finish = finish;
-      abort = () => {};
+      abort = () => {}; landed = () => {}; detach = () => {};
     }
     await withVoiceEnv(() => true, Dictation, async () => {
       mainSession('S'); render(<PetPage />); tapHotkey();
@@ -1802,7 +1809,7 @@ describe('desktop mini v2 interaction contract', () => {
       done = done.promise;
       start = async () => {};
       finish = () => {};
-      abort = () => {};
+      abort = () => {}; landed = () => {}; detach = () => {};
     }
     await withVoiceEnv(() => true, Dictation, async () => {
       mainSession('S'); render(<PetPage />); tapHotkey();
@@ -1825,7 +1832,7 @@ describe('desktop mini v2 interaction contract', () => {
       done = done.promise;
       start = async () => {};
       finish = () => {};
-      abort = abort;
+      abort = abort; landed = () => {}; detach = () => {};
     }
     await withVoiceEnv(() => true, Dictation, async () => {
       mainSession('S'); render(<PetPage />); tapHotkey();
@@ -2086,7 +2093,7 @@ describe('desktop mini v2 interaction contract', () => {
   it('keeps listening and finishing docks active through double-click and blur', async () => {
     const done = deferred<string>();
     const finish = vi.fn();
-    class Dictation { done = done.promise; start = async () => {}; finish = finish; abort = () => {}; }
+    class Dictation { done = done.promise; start = async () => {}; finish = finish; abort = () => {}; landed = () => {}; detach = () => {}; }
     await withVoiceEnv(() => true, Dictation, async () => {
       mainSession('S'); render(<PetPage />);
       await userEvent.click(await screen.findByLabelText('pet.voice.open'));
@@ -2284,7 +2291,7 @@ describe('desktop mini v2 interaction contract', () => {
   it('opens the history above dictation without ending it, and Escape closes the history before cancelling', async () => {
     const abort = vi.fn();
     const finish = vi.fn();
-    class Dictation { done = new Promise<string>(() => {}); start = async () => {}; finish = finish; abort = abort; }
+    class Dictation { done = new Promise<string>(() => {}); start = async () => {}; finish = finish; abort = abort; landed = () => {}; detach = () => {}; }
     await withVoiceEnv(() => true, Dictation, async () => {
       withHistory();
       mainSession('S'); render(<PetPage />);
@@ -3128,7 +3135,7 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
   });
 
   it('hands keyboard focus to Vibey when dictation replaces the bubble', async () => {
-    class Dictation { done = new Promise<string>(() => {}); start = async () => {}; finish = () => {}; abort = () => {}; }
+    class Dictation { done = new Promise<string>(() => {}); start = async () => {}; finish = () => {}; abort = () => {}; landed = () => {}; detach = () => {}; }
     vi.doMock('@/lib/showPageVoiceDictation', () => ({ ShowPageVoiceDictation: Dictation }));
     const locks = Object.getOwnPropertyDescriptor(navigator, 'locks');
     const media = Object.getOwnPropertyDescriptor(navigator, 'mediaDevices');

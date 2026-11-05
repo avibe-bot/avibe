@@ -23,6 +23,8 @@ type Fake = {
   canRetry: ReturnType<typeof vi.fn>;
   retry: ReturnType<typeof vi.fn>;
   voiced: ReturnType<typeof vi.fn>;
+  landed: ReturnType<typeof vi.fn>;
+  detach: ReturnType<typeof vi.fn>;
 };
 
 const pipeline = vi.hoisted(() => ({
@@ -61,6 +63,8 @@ vi.mock('../../lib/showPageVoiceDictation', () => ({
         canRetry: vi.fn(() => true),
         retry: vi.fn(async () => 'heard again'),
         voiced: vi.fn(() => false),
+        landed: vi.fn(),
+        detach: vi.fn(),
       };
       pipeline.takes.push(take);
       return take;

@@ -8,6 +8,9 @@ import { emitVoiceTelemetry, type VoiceTelemetryEvent } from './voiceTelemetry';
  * quiet room −55 to −50, so a take counts as voiced well below normal speech.
  */
 export const VOICE_ACTIVITY_RMS = 0.01; // about −40 dBFS
+/** Louder than this (about −35 dBFS) is taken as someone speaking, not a room's noise: a live
+ *  transcript that stays empty through seconds of it is not working. */
+export const VOICE_SPEECH_RMS = 0.018;
 /** This much sound in a take, in total, and it may hold speech. */
 export const VOICE_ACTIVITY_MIN_MS = 400;
 
