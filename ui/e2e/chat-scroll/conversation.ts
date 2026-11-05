@@ -55,8 +55,9 @@ function row(index: number, extra: Partial<WorkbenchMessage>): WorkbenchMessage 
 }
 
 export function messageAt(index: number): WorkbenchMessage {
-  // Every 23rd row is a Harness callback, as long-running work reports in.
-  if (index % 23 === 11) {
+  // Every 23rd row is a Harness callback, as long-running work reports in, and
+  // four in a row near the end fold into a Harness group.
+  if (index % 23 === 11 || (index >= 372 && index <= 375)) {
     return row(index, {
       author: 'harness',
       type: 'harness',

@@ -73,7 +73,7 @@ test('an upward fling gets the older page before it reaches the top, and startin
   await record(page);
   for (let fling = 0; fling < 3 && (await loads(page)) === 0; fling += 1) await flingUp(page, 900, browserName);
   await expect.poll(() => loads(page)).toBe(1);
-  await expect(transcript(page).locator('[data-message-id]')).toHaveCount(100);
+  await expect(transcript(page).locator('[data-message-id]').first()).toHaveAttribute('data-message-id', 'msg_00301');
   await page.waitForTimeout(400);
   const { frames, writes } = await stop(page);
   await testInfo.attach('trace.json', { body: JSON.stringify({ frames, writes }), contentType: 'application/json' });
@@ -243,16 +243,43 @@ test('a reader starting to scroll up is not pulled back to a tail that is still 
   expect(distances.slice(1).every((distance) => distance > 12), JSON.stringify(distances)).toBe(true);
 });
 
+test('a Harness group opened across the top edge opens where the reader touched it', async ({ page }) => {
+  await open(page, 'delay=0&images=0');
+  const group = transcript(page).locator('[data-harness-group]').last();
+  // Stand with the collapsed group across the top edge, its card still on screen.
+  await group.evaluate((head) => {
+    const el = head.closest<HTMLElement>('[data-testid="chat-transcript"]')!;
+    el.scrollTop += head.getBoundingClientRect().top - el.getBoundingClientRect().top + 30;
+  });
+  await page.waitForTimeout(100);
+  const first = (await group.getAttribute('data-harness-members'))!.split(' ')[0];
+  const before = await group.evaluate((head) => head.getBoundingClientRect().top);
+  const card = (await group.getByRole('button').boundingBox())!;
+  await page.mouse.click(card.x + 60, card.y + card.height - 20);
+  const member = transcript(page).locator(`[data-message-id="${first}"]`);
+  await expect(member).toHaveCount(1);
+  await nextFrames(page);
+  // The group held still, and what it opened is on screen below it.
+  expect(Math.abs(await group.evaluate((head) => head.getBoundingClientRect().top) - before)).toBeLessThanOrEqual(1);
+  const onScreen = await member.evaluate((row) => {
+    const box = row.closest<HTMLElement>('[data-testid="chat-transcript"]')!.getBoundingClientRect();
+    const rect = row.getBoundingClientRect();
+    return rect.top >= box.top && rect.top < box.bottom;
+  });
+  expect(onScreen).toBe(true);
+});
+
 test('older rows appear at once after a chat opened on its skeleton', async ({ page }) => {
   await open(page, 'reader=local&images=0&inbox=1&boot=600&delay=100');
-  await expect(transcript(page).locator('[data-message-id]')).toHaveCount(50);
+  // The live window replaced the skeleton (which holds one row, the Inbox's).
+  await expect(transcript(page).locator('[data-message-id]').first()).toHaveAttribute('data-message-id', 'msg_00351');
   await page.waitForTimeout(1200);
   const opacity = await transcript(page).evaluate(async (el) => {
     el.scrollTop = 0;
     for (;;) {
       await new Promise((resolve) => requestAnimationFrame(resolve));
-      const rows = el.querySelectorAll<HTMLElement>('[data-message-id]');
-      if (rows.length > 50) return getComputedStyle(rows[0]).opacity;
+      const first = el.querySelector<HTMLElement>('[data-message-id]')!;
+      if (first.dataset.messageId !== 'msg_00351') return getComputedStyle(first).opacity;
     }
   });
   expect(opacity).toBe('1');

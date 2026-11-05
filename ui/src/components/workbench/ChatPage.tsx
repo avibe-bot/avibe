@@ -91,7 +91,7 @@ import {
   insertMessageOrdered,
   reconcileWorkbenchClaimedDeliveries,
 } from '../../lib/transcriptOrder';
-import { pickScrollAnchor, resolveScrollAnchor, type ScrollAnchor } from '../../lib/transcriptScrollAnchor';
+import { anchorForTouched, pickScrollAnchor, resolveScrollAnchor, type ScrollAnchor } from '../../lib/transcriptScrollAnchor';
 import { AgentRoutePicker } from './AgentRoutePicker';
 import type { MentionSearchResult } from './MentionEditor';
 import {
@@ -5074,6 +5074,18 @@ export const Transcript: React.FC<TranscriptProps> = ({
     setFollowingTail(false);
     captureAnchor();
   };
+  // What the reader opens (a Harness group, an activity chip) grows from where
+  // they touched it: the row they touched holds still through the commit their
+  // click causes. The first row on screen would hold instead, and the opened
+  // content would be compensated out of view above it. The next scroll takes
+  // the usual anchor again.
+  const holdTouchedRow = (target: EventTarget) => {
+    const content = contentRef.current;
+    if (pinnedRef.current || suppressAnchorRef.current || !content || !(target instanceof Node)) return;
+    restoreScrollPosition();
+    const anchor = anchorForTouched(Array.from(content.children) as HTMLElement[], target, content.getBoundingClientRect().top);
+    if (anchor) anchorRef.current = anchor;
+  };
   // A touch that left the tail but never moved the transcript (a tap, or a drag
   // still inside the touch slop) returns to following when it ends.
   const settleTouch = () => {
@@ -5276,6 +5288,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
         data-testid="chat-transcript"
         tabIndex={0}
         onScroll={handleScroll}
+        onClickCapture={(event) => holdTouchedRow(event.target)}
         onPointerDown={() => {
           pagingGestureRef.current = { kind: 'pointer', consumed: false, at: 0 };
         }}

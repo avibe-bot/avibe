@@ -82,6 +82,25 @@ export const pickScrollAnchor = (
   return straddling ? anchorAt(straddling.el, straddling.rect, contentTop) : null;
 };
 
+/**
+ * The anchor for a change the reader makes: the row holding what they touched
+ * (a Harness group they open, an activity chip, a long message), so what opens
+ * grows from where they touched it. The first row on screen would instead hold
+ * still while the opened content is compensated out of view above it. Null for
+ * anything above the first row, which holds still anyway.
+ */
+export const anchorForTouched = (
+  children: readonly HTMLElement[],
+  target: Node,
+  contentTop: number,
+): ScrollAnchor | null => {
+  const firstRow = children.findIndex(isTranscriptRow);
+  const touched = children.findIndex((child) => child.contains(target));
+  if (firstRow < 0 || touched < firstRow) return null;
+  const el = children[touched];
+  return anchorAt(el, el.getBoundingClientRect(), contentTop);
+};
+
 function anchorAt(el: HTMLElement, rect: DOMRect, contentTop: number): ScrollAnchor {
   const anchor: ScrollAnchor = { el, top: rect.top - contentTop };
   const row = el.dataset.messageId !== undefined ? el : el.querySelector<HTMLElement>('[data-message-id]');

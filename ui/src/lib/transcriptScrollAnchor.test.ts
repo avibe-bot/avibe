@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { pickScrollAnchor, resolveScrollAnchor } from './transcriptScrollAnchor';
+import { anchorForTouched, pickScrollAnchor, resolveScrollAnchor } from './transcriptScrollAnchor';
 
 // jsdom does no layout, so each child declares the rect it would have had. The
 // numbers below mirror the real transcript column: the scroll container carries
@@ -127,6 +127,22 @@ describe('pickScrollAnchor', () => {
       el: firstVisible,
       top: 152 - CONTENT_TOP,
     });
+  });
+});
+
+describe('anchorForTouched', () => {
+  it('holds the row the reader touched, even across the top edge, and nothing above the first row', () => {
+    const banner = chrome({ top: -200, height: 28 });
+    const group = chrome({ top: -40, height: 90 });
+    group.dataset.transcriptRow = '';
+    const next = row({ top: 62, height: 60, id: 'm2' });
+    const button = document.createElement('button');
+    group.append(button);
+    const bannerLink = document.createElement('a');
+    banner.append(bannerLink);
+
+    expect(anchorForTouched([banner, group, next], button, CONTENT_TOP)).toMatchObject({ el: group, top: -40 - CONTENT_TOP });
+    expect(anchorForTouched([banner, group, next], bannerLink, CONTENT_TOP)).toBeNull();
   });
 });
 
