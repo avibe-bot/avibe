@@ -262,15 +262,20 @@ export async function deleteLocalSnapshot(key: string): Promise<void> {
   });
 }
 
-/** Keep the ``keep`` most recently saved records whose key starts with
- *  ``prefix`` and delete the rest. This reads every such record, so call it when
- *  a write may have added one, not on every write. */
-export async function pruneLocalSnapshots(prefix: string, keep: number): Promise<void> {
+/** Keep at most ``keep`` records whose key starts with ``prefix``, the most
+ *  recently saved. Only the keys are read until there is something to evict:
+ *  the records themselves can be half a megabyte each. Evicting then goes down
+ *  to ``keep - slack``, so a store at its cap pays for that full read once every
+ *  ``slack + 1`` additions rather than on each one. */
+export async function pruneLocalSnapshots(prefix: string, keep: number, { slack = 0 }: { slack?: number } = {}): Promise<void> {
   await withStore('readwrite', async (store) => {
+    const ids = await settle(store.getAllKeys());
+    const matchingIds = ids.filter((id) => typeof id === 'string' && id.slice(id.indexOf('\n') + 1).startsWith(prefix));
+    if (matchingIds.length <= keep) return;
     const records = await settle(store.getAll() as IDBRequest<StoredRecord[]>);
     const matching = records
       .filter((record) => typeof record.key === 'string' && record.key.startsWith(prefix))
       .sort((a, b) => (b.savedAt ?? 0) - (a.savedAt ?? 0));
-    for (const record of matching.slice(Math.max(0, keep))) store.delete(record.id);
+    for (const record of matching.slice(Math.max(0, keep - slack))) store.delete(record.id);
   });
 }

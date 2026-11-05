@@ -34,6 +34,9 @@ import {
 const CHAT_SNAPSHOT_SCHEMA = 2;
 /** Conversations kept, least recently written evicted first. */
 const CHAT_SNAPSHOT_SESSIONS = 40;
+/** Evicting at the cap goes this far below it, so the full read eviction needs
+ *  happens once every few new conversations instead of on each. */
+const CHAT_SNAPSHOT_EVICTION_SLACK = 8;
 /** Rows kept per conversation: the bootstrap's tail window. */
 const CHAT_SNAPSHOT_ROWS = 50;
 const KEY_PREFIX = 'chat:';
@@ -213,7 +216,7 @@ export async function writeChatSnapshot(
   written.set(owner.sessionId, chatSnapshotWriteCount(owner.sessionId) + 1);
   const value: StoredChatSnapshot = { ...snapshot, build: UI_BUILD };
   await writeLocalSnapshot(chatSnapshotKey(owner.sessionId), CHAT_SNAPSHOT_SCHEMA, value);
-  if (added) await pruneLocalSnapshots(KEY_PREFIX, CHAT_SNAPSHOT_SESSIONS);
+  if (added) await pruneLocalSnapshots(KEY_PREFIX, CHAT_SNAPSHOT_SESSIONS, { slack: CHAT_SNAPSHOT_EVICTION_SLACK });
 }
 
 /** Delete the stored conversation and void every owner taken for it so far. */

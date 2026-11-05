@@ -12,7 +12,7 @@ import { useBotRoster } from '../../context/BotRosterContext';
 import { inboxCategory, isCategoryLoud, type InboxCategory } from '../../lib/notificationPreferences';
 import type { InboxSession } from '../../context/ApiContext';
 import { formatRelativeTime } from '../../lib/relativeTime';
-import { Markdown } from '../ui/markdown';
+import { InboxPreview } from './InboxPreview';
 import { Button } from '../ui/button';
 import { NotificationMenu } from './NotificationMenu';
 import { useNotificationMode } from './useNotificationMode';
@@ -203,14 +203,13 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
             {t('workbench.inbox.agent')}
           </div>
           {s.preview_text ? (
-            <div
+            <InboxPreview
+              text={s.preview_text}
               className={clsx(
                 'line-clamp-3 text-[13px] leading-relaxed',
                 unread > 0 ? 'text-foreground' : 'text-muted',
               )}
-            >
-              <Markdown content={s.preview_text} interactive={false} className="vr-markdown--preview" />
-            </div>
+            />
           ) : (
             <p className="text-[13px] leading-relaxed text-muted">—</p>
           )}
