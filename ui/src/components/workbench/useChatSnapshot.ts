@@ -17,6 +17,7 @@ import {
   subscribeLocalSnapshotEpoch,
   subscribeLocalSnapshotPrincipal,
 } from '../../lib/localSnapshots';
+import { loadKnownVoiceStatus } from '../../lib/voiceAvailability';
 
 // The conversation snapshot for ChatPage (docs/plans/web-ui-local-cache.md,
 // Phase 2): paint the last known window of the opened chat while its bootstrap
@@ -159,7 +160,9 @@ export function useChatSnapshot({ sessionId, paint, unpaint, drop, messages, old
   useEffect(() => {
     if (!sessionId || !principal) return undefined;
     let cancelled = false;
-    void readChatSnapshot(sessionId).then((snapshot) => {
+    // The composer renders its voice control from the last known status, so
+    // that status is in memory before the chat paints (lib/voiceAvailability).
+    void Promise.all([readChatSnapshot(sessionId), loadKnownVoiceStatus()]).then(([snapshot]) => {
       if (cancelled) return;
       if (snapshot) missingRef.current = false;
       if (!snapshot || liveRef.current || getLocalSnapshotPrincipal() !== principal) return;

@@ -16,6 +16,7 @@ import {
 } from '../../lib/chatSnapshots';
 import { clearLocalSnapshots, setLocalSnapshotPrincipal } from '../../lib/localSnapshots';
 import { writeChatViewMode } from '../../lib/chatViewMemory';
+import { WorkbenchProjectsContext, type WorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
 
 // Opening a chat paints its last known window before the bootstrap answers
 // (docs/plans/web-ui-local-cache.md, Phase 2), fully formed: the composer, its
@@ -57,12 +58,16 @@ const mocks = vi.hoisted(() => ({
     can_use_vault_secrets: false,
   },
   composerMounts: 0,
+  busyHistory: [] as boolean[],
   sessionActionsWritable: [] as boolean[],
   routePicker: null as null | { onChange: (changes: Record<string, unknown>) => void },
   events: null as null | {
     onConnected: () => void;
     onMessageNew: (message: WorkbenchMessage) => void;
     onMessageUpdated: (message: WorkbenchMessage) => void;
+    onTurnEnd: (data: { session_id: string }) => void;
+    onTurnStart: (data: { session_id: string }) => void;
+    onAuthorizationChanged: (data: { resource_kinds?: string[] }) => void;
   },
   composer: null as ComposerProps | null,
   inbox: { unreadBySession: {} as Record<string, number>, markRead: vi.fn() },
@@ -170,6 +175,7 @@ vi.mock('./Composer', async () => {
   return {
     Composer: (props: ComposerProps) => {
       mocks.composer = props;
+      mocks.busyHistory.push(Boolean(props.busy));
       const [instance] = useState(() => {
         mocks.composerMounts += 1;
         return mocks.composerMounts;
@@ -180,6 +186,7 @@ vi.mock('./Composer', async () => {
           data-disabled={String(Boolean(props.disabled))}
           data-instance={instance}
           data-draft={props.initialDraft ?? ''}
+          data-busy={String(Boolean(props.busy))}
         >
           {props.actions}
         </div>
@@ -264,10 +271,13 @@ const bootstrap = (
   draft: { text: draft, updated_at: null },
 });
 
-const seed = async (messages: WorkbenchMessage[], { canChat = true, fontSize = null as number | null } = {}) => {
+const seed = async (
+  messages: WorkbenchMessage[],
+  { canChat = true, fontSize = null as number | null, row = {} as Partial<WorkbenchSession> } = {},
+) => {
   setLocalSnapshotPrincipal('local');
   const value: ChatSnapshot = {
-    session: sessionRow('Cached title'),
+    session: sessionRow('Cached title', row),
     messages,
     next_before_id: null,
     agents: [agent],
@@ -278,13 +288,45 @@ const seed = async (messages: WorkbenchMessage[], { canChat = true, fontSize = n
   await writeChatSnapshot(chatSnapshotOwnerForAnswer(beginChatSnapshotRequest(SESSION))!, value);
 };
 
-const mount = () => render(
-  <MemoryRouter initialEntries={[`/chat/${SESSION}`]}>
-    <Routes>
-      <Route path="/chat/:sessionId" element={<ChatPage />} />
-    </Routes>
-  </MemoryRouter>,
+const PROJECT = 'proj_1';
+
+// The Session list as the sidebar or Projects page loaded it: the row that
+// drives the pulsing status dot.
+const listed = (agentStatus: 'idle' | 'running' | 'failed') => ({
+  sessionsOf: (projectId: string) => ({
+    sessions: projectId === PROJECT ? [sessionRow('Listed title', { project_id: PROJECT, agent_status: agentStatus })] : null,
+    loading: false,
+    loadingMore: false,
+    cursor: null,
+    error: false,
+  }),
+}) as unknown as WorkbenchProjectsTree;
+
+const mount = (list: WorkbenchProjectsTree | null = null) => render(
+  <WorkbenchProjectsContext.Provider value={list}>
+    <MemoryRouter initialEntries={[`/chat/${SESSION}`]}>
+      <Routes>
+        <Route
+          path="/chat/:sessionId"
+          element={(
+            <>
+              <SwitchTo sessionId="ses_other" />
+              <ChatPage />
+            </>
+          )}
+        />
+      </Routes>
+    </MemoryRouter>
+  </WorkbenchProjectsContext.Provider>,
 );
+
+const SwitchTo = ({ sessionId }: { sessionId: string }) => {
+  const navigate = useNavigate();
+  return <button type="button" onClick={() => navigate(`/chat/${sessionId}`)}>switch chat</button>;
+};
+
+const busy = () => screen.queryByTestId('composer')?.getAttribute('data-busy') ?? 'absent';
+const dots = () => document.querySelectorAll('.vr-typing-dot').length > 0;
 
 // File a copy of one reader's record under another reader, as another tab of the
 // same origin could have, without going through the current reader's store.
@@ -323,6 +365,7 @@ beforeEach(() => {
   mocks.events = null;
   mocks.composer = null;
   mocks.composerMounts = 0;
+  mocks.busyHistory = [];
   mocks.sessionActionsWritable = [];
   mocks.routePicker = null;
   mocks.inbox = { unreadBySession: {}, markRead: vi.fn(async () => true) };
@@ -738,5 +781,173 @@ describe('ChatPage conversation snapshot', () => {
     await screen.findByText('Session not found');
     expect(screen.queryByText('cached answer')).toBeNull();
     await waitFor(async () => expect(await readChatSnapshot(SESSION)).toBeNull());
+  });
+});
+
+describe('ChatPage working state on entry', () => {
+  const running = { project_id: PROJECT, agent_status: 'running' as const };
+  const idle = { project_id: PROJECT, agent_status: 'idle' as const };
+  const turnState = (foreground: 'idle' | 'running' | 'unknown') => ({ ...idleTurnState, foreground, in_flight: foreground === 'running' });
+
+  it('opens a run the list shows with the dots and Stop at first paint, before the bootstrap', async () => {
+    await seed([message('m1', 'question', { type: 'user', author: 'user' })], { row: idle });
+    mount(listed('running'));
+    await screen.findByText('question');
+    expect(busy()).toBe('true');
+    expect(dots()).toBe(true);
+    expect(mocks.busyHistory.filter((value) => !value)).toEqual([]);
+  });
+
+  it('falls back to the snapshot row when the list has no row for the session', async () => {
+    await seed([message('m1', 'question', { type: 'user', author: 'user' })], { row: running });
+    mount();
+    await screen.findByText('question');
+    expect(busy()).toBe('true');
+  });
+
+  it('opens idle a session the list shows idle, whatever the snapshot row says', async () => {
+    await seed([message('m1', 'question', { type: 'user', author: 'user' })], { row: running });
+    mount(listed('idle'));
+    await screen.findByText('question');
+    expect(busy()).toBe('false');
+    expect(dots()).toBe(false);
+  });
+
+  it('turns back to Send when the bootstrap says the run already ended', async () => {
+    await seed([message('m1', 'question', { type: 'user', author: 'user' })], { row: running });
+    mount(listed('running'));
+    await screen.findByText('question');
+    expect(busy()).toBe('true');
+
+    await act(async () => live.resolve({ ...bootstrap([message('m1', 'question', { type: 'user', author: 'user' })]), turn_state: turnState('idle') }));
+    await waitFor(() => expect(busy()).toBe('false'));
+    expect(dots()).toBe(false);
+  });
+
+  it('keeps the run without a flicker when the bootstrap says it is still running', async () => {
+    await seed([message('m1', 'question', { type: 'user', author: 'user' })], { row: running });
+    mount(listed('running'));
+    await screen.findByText('question');
+
+    await act(async () => live.resolve({ ...bootstrap([message('m1', 'question', { type: 'user', author: 'user' })]), turn_state: turnState('running') }));
+    await waitFor(() => expect(mocks.api.getSessionBootstrap).toHaveBeenCalled());
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    expect(busy()).toBe('true');
+    expect(mocks.busyHistory.filter((value) => !value)).toEqual([]);
+  });
+
+  it('does not keep a seeded run the bootstrap cannot confirm', async () => {
+    await seed([message('m1', 'question', { type: 'user', author: 'user' })], { row: running });
+    mount(listed('running'));
+    await screen.findByText('question');
+
+    await act(async () => live.resolve({ ...bootstrap([message('m1', 'question', { type: 'user', author: 'user' })]), turn_state: turnState('unknown') }));
+    await waitFor(() => expect(busy()).toBe('false'));
+  });
+
+  it('never downgrades a run the stream confirmed before the paint, even when an older bootstrap says idle', async () => {
+    await seed([message('m1', 'question', { type: 'user', author: 'user' })], { row: running });
+    mount(listed('running'));
+    // The bootstrap is out (its turn-state epoch taken) and the turn starts live
+    // while the snapshot is still being read: the store answers in a later task.
+    await act(async () => undefined);
+    expect(mocks.api.getSessionBootstrap).toHaveBeenCalled();
+    expect(screen.queryByText('question')).toBeNull();
+    act(() => mocks.events!.onTurnStart({ session_id: SESSION }));
+    await screen.findByText('question');
+    expect(busy()).toBe('true');
+
+    // The bootstrap was read before the turn started.
+    await act(async () => live.resolve({ ...bootstrap([message('m1', 'question', { type: 'user', author: 'user' })]), turn_state: turnState('idle') }));
+    await waitFor(() => expect(mocks.api.getSessionBootstrap).toHaveBeenCalled());
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    expect(busy()).toBe('true');
+  });
+
+  it('seeds nothing once the stream said the run ended, whatever the list still shows', async () => {
+    await seed([message('m1', 'question', { type: 'user', author: 'user' })], { row: running });
+    mount(listed('running'));
+    expect(screen.queryByText('question')).toBeNull();
+    act(() => mocks.events!.onTurnEnd({ session_id: SESSION }));
+    await screen.findByText('question');
+    expect(busy()).toBe('false');
+  });
+
+  it('ends a seeded run on turn.end', async () => {
+    await seed([message('m1', 'question', { type: 'user', author: 'user' })], { row: running });
+    mount(listed('running'));
+    await screen.findByText('question');
+    expect(busy()).toBe('true');
+
+    act(() => mocks.events!.onTurnEnd({ session_id: SESSION }));
+    expect(busy()).toBe('false');
+  });
+
+  it('sends the stop request from a seeded run, and settles when nothing was running', async () => {
+    mocks.api.cancelSession.mockResolvedValue({ ok: false, code: 'not_in_flight' });
+    await seed([message('m1', 'question', { type: 'user', author: 'user' })], { row: running });
+    mount(listed('running'));
+    await screen.findByText('question');
+
+    await act(async () => {
+      await mocks.composer!.onStop?.();
+    });
+    expect(mocks.api.cancelSession).toHaveBeenCalledWith(SESSION);
+    expect(busy()).toBe('false');
+  });
+
+  it('does not carry a seeded run into the next chat', async () => {
+    await seed([message('m1', 'question', { type: 'user', author: 'user' })], { row: running });
+    // The next chat is painted from its own snapshot (idle) while its bootstrap is out.
+    await writeChatSnapshot(chatSnapshotOwnerForAnswer(beginChatSnapshotRequest('ses_other'))!, {
+      session: { ...sessionRow('Other title', idle), id: 'ses_other' },
+      messages: [message('m9', 'other question', { type: 'user', author: 'user', session_id: 'ses_other' })],
+      next_before_id: null,
+      agents: [agent],
+      default_agent_name: 'vibey',
+      can_chat: true,
+      chat_message_font_size: null,
+    });
+    mount(listed('running'));
+    await screen.findByText('question');
+    expect(busy()).toBe('true');
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'switch chat' }).click();
+    });
+    await screen.findByText('other question');
+    expect(busy()).toBe('false');
+    expect(dots()).toBe(false);
+  });
+
+  it('does not carry a seeded run over to the next reader', async () => {
+    await seed([message('m1', 'alice question', { type: 'user', author: 'user' })], { row: running });
+    await copyRecordToReader('local', 'remote:bob', (value) => ({
+      ...value,
+      session: { ...value.session, agent_status: 'idle' },
+      messages: [message('m2', 'bob question', { type: 'user', author: 'user' })],
+    }));
+    mount();
+    await screen.findByText('alice question');
+    expect(busy()).toBe('true');
+
+    act(() => setLocalSnapshotPrincipal('remote:bob'));
+    await screen.findByText('bob question');
+    expect(busy()).toBe('false');
+  });
+
+  it('does not keep a seeded run after the bootstrap fails', async () => {
+    await seed([message('m1', 'question', { type: 'user', author: 'user' })], { row: running });
+    mount(listed('running'));
+    await screen.findByText('question');
+    expect(busy()).toBe('true');
+
+    await act(async () => live.reject(Object.assign(new Error('unavailable'), { status: 503 })));
+    await screen.findByText('unavailable');
+    // The page recovers through an authorization refresh whose turn state is unknown.
+    mocks.api.getSession.mockResolvedValue(sessionRow('Live title'));
+    mocks.api.getSessionBootstrap.mockResolvedValue({ ...bootstrap([]), turn_state: turnState('unknown') });
+    await act(async () => mocks.events!.onAuthorizationChanged({ resource_kinds: [] }));
+    await waitFor(() => expect(busy()).toBe('false'));
   });
 });

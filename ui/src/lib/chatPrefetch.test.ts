@@ -119,6 +119,10 @@ describe('conversation prefetch', () => {
     apiFetch.mockImplementation(async (path: string) => bootstrapResponse(sessionOf(path)));
     prefetch.prefetchChatSnapshots(['ses a']);
     await runIdle();
+    // The first read in a fresh document also opens the store; wait for it
+    // rather than for a fixed time.
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
+    await vi.waitFor(async () => expect(await titleOf('ses a')).toBe('live ses a'));
 
     expect(apiFetch.mock.calls).toEqual([
       ['/api/sessions/ses%20a/bootstrap', { headers: { 'X-Avibe-Prefetch': '1' } }],

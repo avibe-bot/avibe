@@ -82,6 +82,7 @@ import {
   type SessionSearchResult,
 } from './MentionEditor';
 import type { MentionReference } from '../../lib/mentions';
+import { beginVoiceStatusRead, knownVoiceStatus } from '../../lib/voiceAvailability';
 
 export type ComposerAttachment = {
   localId: string;
@@ -551,8 +552,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const attachmentFilesRef = useRef(new Map<string, File>());
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
-  const [asrAvailable, setAsrAvailable] = useState(false);
-  const [asrMaxFileBytes, setAsrMaxFileBytes] = useState<number | null>(null);
+  // Voice starts from the last known ``/api/asr/status`` answer for this reader
+  // (lib/voiceAvailability), so the control is in place from the first frame;
+  // the live read below then decides. Once shown, the control keeps its place
+  // for this mount: a live "unavailable" disables it instead of removing it, so
+  // nothing around it moves.
+  const [asrAvailable, setAsrAvailable] = useState(() => (
+    (Boolean(sessionId) || stageMedia) && knownVoiceStatus()?.available === true
+  ));
+  const [voiceSlotHeld, setVoiceSlotHeld] = useState(asrAvailable);
+  const [asrMaxFileBytes, setAsrMaxFileBytes] = useState<number | null>(() => knownVoiceStatus()?.maxFileBytes ?? null);
   const [recordingStarting, setRecordingStarting] = useState(false);
   const [recording, setRecording] = useState(false);
   const [restoringRecording, setRestoringRecording] = useState(() => (
@@ -654,19 +663,22 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     // opened here; this only removes worklet compilation from the first word.
     void prewarmVoiceCapture().catch(() => undefined);
     let alive = true;
+    const statusRead = beginVoiceStatusRead();
     apiFetch('/api/asr/status')
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
-        if (!alive) return;
-        const available = Boolean(data?.available);
+        // A failed read says nothing about availability: keep what is known.
+        if (!alive || !data) return;
+        const available = Boolean(data.available);
+        const maxFileBytes = typeof data?.max_file_bytes === 'number'
+          && Number.isFinite(data.max_file_bytes)
+          && data.max_file_bytes > 0
+          ? Math.floor(data.max_file_bytes)
+          : null;
         setAsrAvailable(available);
-        setAsrMaxFileBytes(
-          typeof data?.max_file_bytes === 'number'
-            && Number.isFinite(data.max_file_bytes)
-            && data.max_file_bytes > 0
-            ? Math.floor(data.max_file_bytes)
-            : null,
-        );
+        if (available) setVoiceSlotHeld(true);
+        setAsrMaxFileBytes(maxFileBytes);
+        statusRead.remember({ available, maxFileBytes });
         // Prewarm the cloud token so the first recording uploads straight to
         // avibe.bot with no mint latency (no-op when the cloud is unavailable).
         if (available) primeCloudToken();
@@ -1424,7 +1436,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           ? 'retry'
           : asrAvailable
             ? 'record'
-            : null;
+            : voiceSlotHeld
+              ? 'unavailable'
+              : null;
   const voiceFlowActive = (
     recording
     || voiceProcessing
@@ -1930,6 +1944,21 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           )}
           aria-label={t('chat.compose.voice')}
           title={voiceShortcutAvailable ? voiceShortcutHint : t('chat.compose.voice')}
+          className="size-9 shrink-0"
+        >
+          <Mic className="size-4" />
+        </Button>
+      )}
+      {voiceControlMode === 'unavailable' && (
+        // Shown from the last known state, then refused by the live read: the
+        // control keeps its place, disabled, until the composer next mounts.
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          disabled
+          aria-label={t('chat.compose.voice')}
+          title={t('chat.compose.voice')}
           className="size-9 shrink-0"
         >
           <Mic className="size-4" />
