@@ -610,7 +610,10 @@ def test_notes_skip_unused_official_build_but_never_publish_a_failed_preview(
         assert jobs[name]["if"] == preview_condition
     assert jobs["show-runtime-bundles"]["needs"] == "resolve-show-runtime-ref"
     assert jobs["build-assets"]["needs"] == ["resolve-desktop-release", "show-runtime-bundles"]
-    assert jobs["release"]["needs"] == ["build-assets", "resolve-desktop-release", "desktop-packages"]
+    assert jobs["release"]["needs"] == [
+        "build-assets", "resolve-desktop-release", "desktop-packages",
+        "certum-windows-sign", "windows-updater-finalize",
+    ]
     # Evaluate the actual bounded job expression for both event kinds. This
     # catches skipped-needs propagation without replacing the condition itself.
     expression = jobs["release"]["if"].strip().removeprefix("${{").removesuffix("}}").strip()
@@ -618,12 +621,19 @@ def test_notes_skip_unused_official_build_but_never_publish_a_failed_preview(
     expression = expression.replace("needs.desktop-packages.result", "desktop_result")
     expression = expression.replace("needs.resolve-desktop-release.result", "resolve_result")
     expression = expression.replace("needs.resolve-desktop-release.outputs.enabled", "desktop_enabled")
+    expression = expression.replace("needs.certum-windows-sign.result", "certum_result")
+    expression = expression.replace("needs.windows-updater-finalize.result", "updater_result")
     expression = expression.replace("github.event.inputs.tag", "input_tag").replace("github.ref_name", "ref")
     expression = re.sub(r"!(?!=)", " not ", expression.replace("&&", " and ").replace("||", " or "))
     expression = " ".join(expression.split())
     result = eval(expression, {"__builtins__": {}}, {
         "build_result": build_result, "desktop_result": desktop_result, "input_tag": tag if event == "workflow_dispatch" else "",
         "resolve_result": resolve_result, "desktop_enabled": "true" if desktop_enabled else "false",
+        "certum_result": (
+            "success" if tag.startswith("gh-v") and desktop_enabled and
+            desktop_result == "success" and resolve_result == "success" else "skipped"
+        ),
+        "updater_result": "skipped",
         "ref": "master" if event == "workflow_dispatch" else tag,
         "cancelled": lambda: cancelled,
         "startsWith": lambda value, prefix: value.startswith(prefix),
@@ -631,4 +641,6 @@ def test_notes_skip_unused_official_build_but_never_publish_a_failed_preview(
     expected = not cancelled and resolve_result == "success" and (
         build_result == "success" or (build_result == "skipped" and not tag.startswith("gh-v"))
     ) and (not (tag.startswith("gh-v") or desktop_enabled) or desktop_result == "success")
+    if tag.startswith("gh-v") and not desktop_enabled:
+        expected = False
     assert result == expected

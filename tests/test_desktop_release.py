@@ -240,7 +240,7 @@ def test_real_assembled_assets_pass_the_release_consumer(tmp_path):
                 "dmg-developer-id-notarized-stapled\n"
             )
         else:
-            assert signature == "installer-unsigned\n"
+            assert signature == "installer-certum-authenticode-timestamped\n"
 
 
 @pytest.mark.parametrize("schema", [1, 2])
@@ -252,7 +252,10 @@ def test_verify_accepts_published_legacy_records_with_their_adhoc_layers(tmp_pat
         source["schema_version"] = schema
         if schema == 1:
             source.pop("computer_use_driver", None)
-        legacy = "app-adhoc\ndmg-unsigned-unnotarized\n" if system == "macos" else None
+        legacy = (
+            "app-adhoc\ndmg-unsigned-unnotarized\n"
+            if system == "macos" else "installer-unsigned\n"
+        )
         rewrite_record(directory, target, source=source, signature=legacy)
     assert len(release.verify(directory, TAG, SOURCE)) == 15
 
@@ -387,6 +390,8 @@ def test_driver_provenance_rejects_unbound_prepared_digest(
 
 @pytest.mark.parametrize("target", release.TARGETS)
 def test_workflow_record_command_feeds_the_release_consumer(tmp_path, target):
+    if target == "x86_64-pc-windows-msvc":
+        pytest.skip("Windows metadata is created only after the isolated Certum job")
     directory = assemble_assets(tmp_path)
     work = tmp_path / target
     scripts = work / "scripts"
@@ -495,6 +500,13 @@ def test_producer_rejects_incorrect_runtime_or_signing(tmp_path, mutation):
                        output=work / "rejected", signing={"signing": "identity", "ad-hoc-release": "ad-hoc"}.get(
                            mutation, "developer-id"), **driver_args)
     assert not (work / "rejected").exists()
+
+
+def test_windows_release_policy_is_rc_only():
+    assert release.release_signature("x86_64-pc-windows-msvc", "gh-v3.2.5rc11") == (
+        "installer-certum-authenticode-timestamped\n"
+    )
+    assert release.release_signature("x86_64-pc-windows-msvc", "v3.2.5") == "installer-unsigned\n"
 
 
 @pytest.mark.parametrize(("profile", "layers"), [
@@ -725,7 +737,15 @@ def test_workflow_signs_every_macos_layer_before_recording():
     assert dmg["if"] == "runner.os == 'macOS' && env.apple_signing == 'enabled'"
     for command in ("sign-dmg", "notarize", "verify-release"):
         assert f"macos_signing.py {command}" in dmg["run"]
-    assert "NotSigned" in step("Verify unsigned Windows installer")["run"]
+    assert "NotSigned" in step("Verify unsigned Windows installer before Certum handoff")["run"]
+    certum_verify = next(
+        item
+        for item in jobs["certum-windows-sign"]["steps"]
+        if item.get("name") == "Verify publisher, code-signing EKU, timestamp, and tamper rejection"
+    )
+    assert "2.5.29.37" in certum_verify["run"]
+    assert "1.3.6.1.5.5.7.3.3" in certum_verify["run"]
+    assert "Oid.Value -eq '1.3.6.1.5.5.7.3.3'" not in certum_verify["run"]
     # The desktop upload stays on the repository's one maintained, full-SHA upload-artifact pin.
     upload_pins = {
         item["uses"]
@@ -734,9 +754,14 @@ def test_workflow_signs_every_macos_layer_before_recording():
         for item in job.get("steps", [])
         if str(item.get("uses", "")).startswith("actions/upload-artifact@")
     }
-    assert re.fullmatch(r"actions/upload-artifact@[0-9a-f]{40}", steps[-2]["uses"])
-    assert upload_pins == {steps[-2]["uses"]}
-    assert steps[-2]["if"] == "env.DESKTOP_CACHE_WARMUP != 'true'"
+    mac_upload = next(
+        item for item in steps
+        if item.get("uses", "").startswith("actions/upload-artifact@")
+        and item.get("if") == "runner.os == 'macOS' && env.DESKTOP_CACHE_WARMUP != 'true'"
+    )
+    assert re.fullmatch(r"actions/upload-artifact@[0-9a-f]{40}", mac_upload["uses"])
+    assert upload_pins == {mac_upload["uses"]}
+    assert mac_upload["if"] == "runner.os == 'macOS' && env.DESKTOP_CACHE_WARMUP != 'true'"
     assert steps[-1]["name"] == "Remove Apple signing material"
     assert steps[-1]["if"] == "always() && runner.os == 'macOS'"
     workflow_text = (ROOT / ".github/workflows/desktop-package.yml").read_text(encoding="utf-8")

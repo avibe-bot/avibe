@@ -41,9 +41,12 @@ SIGNING_PROFILES = {
         ),
         "ad-hoc": ("runtime-unsigned", "app-adhoc", "dmg-unsigned-unnotarized"),
     },
-    "windows": {"unsigned": ("installer-unsigned",)},
+    "windows": {
+        "unsigned": ("installer-unsigned",),
+        "certum-authenticode": ("installer-certum-authenticode-timestamped",),
+    },
 }
-RELEASE_SIGNING_PROFILE = {"macos": "developer-id", "windows": "unsigned"}
+RELEASE_SIGNING_PROFILE = {"macos": "developer-id", "windows": "certum-authenticode"}
 # The layers already-published schema 1 and 2 records carry.
 LEGACY_SIGNATURE = {"macos": "app-adhoc\ndmg-unsigned-unnotarized\n", "windows": "installer-unsigned\n"}
 SEMVER = re.compile(
@@ -207,8 +210,9 @@ def prepare(
         if git_output("rev-parse", "HEAD") != source_sha or version != resolved["version"]:
             raise ValueError("desktop checkout/version does not match the release tag")
         # Tauri never signs with an identity: macOS Developer ID signing and
-        # notarization belong to desktop/scripts/macos_signing.py, and Windows
-        # installers stay unsigned.
+        # notarization belong to desktop/scripts/macos_signing.py. Windows
+        # Authenticode is applied in the isolated Certum signing job after the
+        # unsigned NSIS build has been uploaded.
         override["bundle"] = {
             "macOS": {"signingIdentity": "-"},
             "windows": {"certificateThumbprint": None, "signCommand": None},
@@ -255,6 +259,16 @@ def signature(target: str, profile: str | None = None) -> str:
     if layers is None:
         raise ValueError("Unknown signing profile for this desktop target")
     return "".join(f"{layer}\n" for layer in layers)
+
+
+def release_signature(target: str, tag: str) -> str:
+    """Return the current release policy for the target's channel."""
+    system = TARGETS[target][0]
+    if system == "windows" and not tag.startswith("gh-v"):
+        # Stable releases retain the pre-Certum unsigned contract until a
+        # separately authorized stable migration.
+        return signature(target, "unsigned")
+    return signature(target)
 
 
 def asset_names(version: str, target: str) -> list[str]:
@@ -356,13 +370,14 @@ def driver_provenance(
 
 def record(*, version: str, target: str, tag: str, source_sha: str,
            installer: Path, runtime: Path, output: Path, signing: str,
+           intermediate: bool = False,
            prepared_driver: Path | None = None,
            driver: Path | None = None, driver_provenance_path: Path | None = None,
            driver_cdhash: str | None = None) -> None:
     if SHA.fullmatch(source_sha) is None:
         raise ValueError("Invalid source SHA")
     signature_text = signature(target, signing)
-    if tag and (version != desktop_version_from_tag(tag) or signature_text != signature(target)):
+    if tag and not intermediate and (version != desktop_version_from_tag(tag) or signature_text != release_signature(target, tag)):
         raise ValueError("Release version/signature policy mismatch")
     manifest_path = runtime / "runtime-manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -524,7 +539,7 @@ def verify(directory: Path, tag: str, source_sha: str, *, updater_enabled: bool 
         if source != expected_source:
             raise ValueError("Desktop source provenance mismatch")
         expected_signature = (
-            signature(target)
+            release_signature(target, tag)
             if schema_version == DESKTOP_SOURCE_SCHEMA_VERSION
             else LEGACY_SIGNATURE[TARGETS[target][0]]
         )
@@ -596,7 +611,8 @@ def main() -> None:
     producer.add_argument("--installer", type=Path, required=True)
     producer.add_argument("--runtime", type=Path, required=True)
     producer.add_argument("--output", type=Path, required=True)
-    producer.add_argument("--signing", required=True, help="signing profile: developer-id or ad-hoc (macOS), unsigned (Windows)")
+    producer.add_argument("--signing", required=True, help="signing profile: developer-id, ad-hoc, unsigned, or certum-authenticode")
+    producer.add_argument("--intermediate", action="store_true", help="record a non-publishable unsigned staging artifact")
     producer.add_argument("--prepared-driver", type=Path)
     producer.add_argument("--driver", type=Path)
     producer.add_argument("--driver-provenance-path", type=Path)
