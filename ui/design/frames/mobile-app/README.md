@@ -1,6 +1,20 @@
 # Mobile App onboarding proposal
 
-## Change contract
+## Current checkpoint: visual direction selection
+
+The owner reopened the visual direction on 2026-11-05 at 20:14, with corrections
+at 20:17 and 20:20. See [direction studies](directions.README.md): three distinct
+Chinese directions, each with welcome/email/code/instance pages in both themes.
+The latest contract requires six continuous, equally spaced OTP cells and the
+full email without masking or truncation. Existing branding/tokens remain; the
+prior exact-composition requirement is relaxed. Select a direction before the
+full state/English update and final review/CI gates. All frames remain proposed.
+
+The sections below describe the previous 66-frame flow baseline, retained as a
+secondary reference until selection. Its single visible OTP field is superseded
+by the six-cell display over one accessible input in the direction studies.
+
+## Previous flow baseline: change contract
 
 Define the App-owned path from first launch to an instance, including recovery.
 The **66 proposed frames** cover 33 states in Chinese and English, each in light
