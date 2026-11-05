@@ -6,9 +6,10 @@
 > 1. the store and its write-through (#3264);
 > 2. the access digest (section 6.2, #3272);
 > 3. the chat's first paint from the store, which retires the conversation
->    snapshots (2a);
+>    snapshots (2a, #3278);
 > 4. local-first older pages and deep links with the offline gap marker (2b);
-> 5. prefetch warming and cleanup.
+> 5. prefetch warming the Inbox's first page, and deleting the leftover
+>    `chat:*` records (PR 3).
 > **Owner**: cyhhao
 > **Security**: every implementation PR that touches what the store keeps,
 > when it is wiped, or the sync API needs a Codex security review
@@ -489,7 +490,10 @@ Each of these writes a single row or session:
 Phase 1 also extends prefetch:
 
 - Beyond the 5 newest sessions, it warms the tail of every session on the
-  Inbox's first page that has no stored tail, once per document.
+  Inbox's first page that has no stored tail, once per document. It warms each
+  with the bootstrap read: that is the only read the server lets declare
+  itself a prefetch (and so not renew the session), and it also stores what
+  the chat needs to paint.
 - Its existing conditions still apply: idle, visible, not metered, non-renewing,
   and nothing marked read.
 
@@ -1024,7 +1028,9 @@ The Phase 1 wipe and fence rules are rows of the scenario catalog
 - LSYNC-022: a tab still naming an earlier reader can neither write into nor
   claim the store another tab holds;
 - LSYNC-023: an access change that no `authorization.changed` delivered clears
-  the store at the next session check, at an open or after a stream gap.
+  the store at the next session check, at an open or after a stream gap;
+- LSYNC-024: the `chat:*` records the earlier snapshot design stored are
+  deleted once a reader is named, every reader's.
 
 **Rollout:** no flag, as with the existing cache. A missing or failing store
 falls back to today's behavior (invariant 2).

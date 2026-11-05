@@ -11,12 +11,27 @@
 // returns.
 
 import type { VibeAgentBrief, WorkbenchMessage, WorkbenchSession, WorkbenchSessionBootstrap } from '../context/ApiContext';
+import { pruneLocalSnapshots, subscribeLocalSnapshotPrincipal, getLocalSnapshotPrincipal } from './localSnapshots';
 import {
   knownLocalStoreChat,
   readLocalStoreChat,
   type LocalStoreChat,
   type LocalStoreChatChrome,
 } from './localStore';
+
+// Conversations were once kept in the snapshot store as ``chat:<session>``
+// records (docs/plans/web-ui-local-cache.md). Nothing reads or writes them now,
+// so the first reader named in a document deletes every one of them, whoever
+// wrote it; prefetch refills the message store with the recent ones.
+const LEGACY_CHAT_PREFIX = 'chat:';
+let legacyChatsDeleted = false;
+const deleteLegacyChats = (reader: string | null) => {
+  if (!reader || legacyChatsDeleted) return;
+  legacyChatsDeleted = true;
+  void pruneLocalSnapshots(LEGACY_CHAT_PREFIX, 0);
+};
+subscribeLocalSnapshotPrincipal(deleteLegacyChats);
+deleteLegacyChats(getLocalSnapshotPrincipal());
 
 export type ChatSnapshot = {
   session: WorkbenchSession;
