@@ -1073,10 +1073,11 @@ export const ChatPage: React.FC = () => {
   // drawn below the live rows; ``sentRowFollow`` brings it into view.
   const {
     rows: transcriptRows,
+    queueRows,
     pendingIds: pendingRowIds,
     add: addPendingSend,
     settle: settlePendingSend,
-  } = usePendingSends(sessionId, messages);
+  } = usePendingSends(sessionId, messages, queue);
   const [sentRowFollow, setSentRowFollow] = useState(0);
   // Sends the server queued, by client id. Each keeps its pending row until its
   // message is shown elsewhere: in the queue strip (a queue read begun after it
@@ -2128,6 +2129,15 @@ export const ChatPage: React.FC = () => {
       const clientId = newClientMessageId();
       const sentMetadata = { ...metadata, ...clientMessageMetadata(clientId) };
       const sentAt = new Date().toISOString();
+      // Sent while a turn runs, the server queues it (the controller either
+      // starts a turn or queues the input, atomically), so it goes straight to
+      // the queue strip. Only a confirmed run predicts that: the list's seeded
+      // ``working`` waits for the bootstrap, and a quick reply keeps its place
+      // under the question it answers. A turn ending in the same instant is the
+      // one misprediction, and the server's answer moves the row (below).
+      const place = !metadata?.quick_reply_for && workingRef.current && !workingSeededRef.current
+        ? 'queue'
+        : 'transcript';
       addPendingSend({
         id: clientId,
         scope_id: null,
@@ -2147,8 +2157,8 @@ export const ChatPage: React.FC = () => {
         updated_at: sentAt,
         delivered_at: null,
         read_at: null,
-      });
-      setSentRowFollow((n) => n + 1);
+      }, place);
+      if (place === 'transcript') setSentRowFollow((n) => n + 1);
       // Sent from a historical search window: the message belongs under the live
       // tail, not grafted below old context, so the window starts moving there
       // now, while the POST is out.
@@ -2156,7 +2166,7 @@ export const ChatPage: React.FC = () => {
         if (caughtUp && sessionId === sessionIdRef.current) setSentRowFollow((n) => n + 1);
         return caughtUp;
       });
-      const latestWindow = historicalWindowRef.current ? moveToLatest() : null;
+      const latestWindow = place === 'transcript' && historicalWindowRef.current ? moveToLatest() : null;
       // Set when the pending row must outlive this call (a queued send).
       let settledLater = false;
       markWorking();
@@ -2278,6 +2288,9 @@ export const ChatPage: React.FC = () => {
           await (latestWindow ?? (historicalWindowRef.current ? moveToLatest() : null));
           if (sessionId !== sessionIdRef.current) return;
           appendMessage(message);
+          // Drawn in the queue, it started a turn after all: it moves into the
+          // transcript in this render, and the transcript follows it there.
+          if (place === 'queue') setSentRowFollow((n) => n + 1);
         }
       } catch (err) {
         if (!metadata?.quick_reply_for) {
@@ -3348,7 +3361,8 @@ export const ChatPage: React.FC = () => {
             the flush, Recall appends into the disabled composer. */}
         {writable && (
           <QueueStrip
-            queue={queue}
+            queue={queueRows}
+            pendingIds={pendingRowIds}
             onRemove={removeQueued}
             onRecall={recallQueued}
             onSendNow={sendQueueNow}
@@ -3422,7 +3436,10 @@ export const QueueRow: React.FC<{
   onRecall: (item: WorkbenchMessage) => void;
   /** In a Bot's conversation removing a row means not sending it (no queue there). */
   inBotConversation?: boolean;
-}> = ({ item, onRemove, onRecall, inBotConversation = false }) => {
+  /** A message the reader just sent that the server has not queued yet
+   *  (usePendingSends): drawn as sending, with nothing to recall or remove. */
+  pending?: boolean;
+}> = ({ item, onRemove, onRecall, inBotConversation = false, pending = false }) => {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   // The row's own focusable anchor. An attachment control that stops existing —
@@ -3449,7 +3466,7 @@ export const QueueRow: React.FC<{
   const att = (item.content as Record<string, unknown> | undefined)?.attachments;
   const hasAttachments = Array.isArray(att) && att.length > 0;
   const fenced = isQueueDeliveryFenced(item);
-  const canRecall = item.source === 'user' && !hasAttachments && !fenced;
+  const canRecall = item.source === 'user' && !hasAttachments && !fenced && !pending;
   // Rule 08: a queued annotation belongs to the strip and nowhere else, so the
   // strip is where it has to be identifiable. Same title as the card it will
   // become, so the row the user is looking at and the bubble that replaces it
@@ -3496,9 +3513,10 @@ export const QueueRow: React.FC<{
   return (
     <div
       data-queue-row="true"
-      aria-busy={fenced}
+      aria-busy={fenced || pending}
       className={clsx(
-        'relative flex gap-2 px-2.5 py-1.5 transition-[background-color,box-shadow,border-radius] hover:z-10 hover:rounded-lg hover:bg-surface-1 hover:ring-1 hover:ring-border focus-within:z-10 focus-within:rounded-lg focus-within:bg-surface-1 focus-within:ring-1 focus-within:ring-border motion-reduce:transition-none',
+        pending && 'opacity-60',
+        'relative flex gap-2 px-2.5 py-1.5 transition-[background-color,box-shadow,border-radius,opacity] hover:z-10 hover:rounded-lg hover:bg-surface-1 hover:ring-1 hover:ring-border focus-within:z-10 focus-within:rounded-lg focus-within:bg-surface-1 focus-within:ring-1 focus-within:ring-border motion-reduce:transition-none',
         hasExpandedContent ? 'items-start' : 'items-center',
         // Wrapping is enabled only while the remainder is disclosed. A collapsed
         // row therefore cannot wrap at any width — the one thing that could make
@@ -3582,7 +3600,7 @@ export const QueueRow: React.FC<{
         variant="ghost"
         size="icon"
         onClick={() => onRemove(item.id)}
-        disabled={fenced}
+        disabled={fenced || pending}
         aria-label={t(inBotConversation ? 'bots.conversation.cancelSend' : 'chat.queue.remove')}
         title={t(inBotConversation ? 'bots.conversation.cancelSend' : 'chat.queue.remove')}
         className="size-6 shrink-0 text-muted hover:text-destructive-ink"
@@ -3829,7 +3847,9 @@ export const QueueStrip: React.FC<{
    *  the Bot's Turn refused, which reaches the Bot when that Turn ends. The strip
    *  says so, as not delivered yet, and never calls it a queue. */
   botName?: string | null;
-}> = ({ queue, onRemove, onRecall, onSendNow, sendingNow = false, botName = null }) => {
+  /** Rows the reader just sent that the server has not queued yet. */
+  pendingIds?: ReadonlySet<string>;
+}> = ({ queue, onRemove, onRecall, onSendNow, sendingNow = false, botName = null, pendingIds = NO_PENDING_ROWS }) => {
   const { t } = useTranslation();
   if (queue.length === 0) return null;
   const held = queue.filter((item) => item.requires_explicit_retry === true);
@@ -3842,6 +3862,9 @@ export const QueueStrip: React.FC<{
   const headFenced = isQueueDeliveryFenced(queue[0]);
   const reconciling = queue[0].state === 'reconciling_steer';
   const busy = sendingNow || headFenced;
+  // Rows still being sent are not the server's yet: with nothing else there,
+  // there is nothing to send now.
+  const nothingQueued = queue.every((item) => pendingIds.has(item.id));
   const buttonBusy = sendingNow || (headFenced && !reconciling);
   const waiting = queue.some((item) => !isQueueDeliveryFenced(item));
   const title = retryRequired
@@ -3862,7 +3885,7 @@ export const QueueStrip: React.FC<{
             variant="ghost"
             size="sm"
             onClick={onSendNow}
-            disabled={busy}
+            disabled={busy || nothingQueued}
             aria-busy={buttonBusy}
             className="h-6 min-w-[60px] justify-center px-2 text-[11px] text-cyan-ink"
           >
@@ -3897,8 +3920,17 @@ export const QueueStrip: React.FC<{
           data-queue-batch="true"
           className="flex max-h-32 flex-col overflow-y-auto rounded-lg bg-surface-2"
         >
+          {/* Keyed so a row sent from here keeps its element from pending to the
+              server's queue row. */}
           {queue.map((item) => (
-            <QueueRow key={item.id} item={item} onRemove={onRemove} onRecall={onRecall} inBotConversation={botName !== null} />
+            <QueueRow
+              key={transcriptRowKey(item)}
+              item={item}
+              onRemove={onRemove}
+              onRecall={onRecall}
+              inBotConversation={botName !== null}
+              pending={pendingIds.has(item.id)}
+            />
           ))}
         </div>
       </div>

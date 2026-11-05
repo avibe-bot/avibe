@@ -1,7 +1,9 @@
 // The composer and the queue strip above it, rendered by the shipped ChatPage: a saved draft with voice
 // input offered, messages queued behind a running turn (one carrying a screenshot), and a queue held for an
-// explicit retry after the turn before it failed.
+// explicit retry after the turn before it failed. The shipped QueueStrip alone draws a message sent while
+// the turn runs, which goes straight into the queue and is drawn as sending until the server queues it.
 import regionUrl from '../../assets/annotation-region.svg';
+import { QueueStrip } from '@/components/workbench/ChatPage';
 import { frames } from '../../frame';
 import { agentSays, chatDesktop, chatFixtures, chatPhone, chatRoute, failureApi, failureNotice, message, runningTurn, userSays } from './fixtures';
 
@@ -26,6 +28,24 @@ const held = [
 ];
 
 const api = { '/api/media/tok_region': regionUrl };
+
+// Sent while the turn runs, not yet answered: the reader's own row, keyed by its client id.
+const sending = queued('改完顺便跑一下 InboxPage 的单测。', 0, {
+  id: 'client-sending',
+  state: undefined,
+  metadata: { client_message_id: 'client-sending' },
+});
+const sendingStrip = (width: string) => () => (
+  <div className={`${width} py-4`}>
+    <QueueStrip
+      queue={[waiting[0], sending]}
+      pendingIds={new Set([sending.id])}
+      onRemove={() => {}}
+      onRecall={() => {}}
+      onSendNow={() => {}}
+    />
+  </div>
+);
 
 const designFrames = frames([
   {
@@ -58,6 +78,15 @@ const designFrames = frames([
     route: chatRoute(),
     fixtures: chatFixtures({ session: { title: 'Inbox 未读数' }, messages, queued: waiting, turnState: runningTurn, api }),
     render: chatDesktop,
+  },
+  {
+    name: 'queued-sending',
+    title: '排队区 · Agent 运行中发出的消息直接进排队（发送中）',
+    width: 1192,
+    height: 200,
+    status: 'shipped',
+    fixtures: chatFixtures({ api }),
+    render: sendingStrip('w-[1192px]'),
   },
   {
     name: 'retry-required',
@@ -107,6 +136,15 @@ const designFrames = frames([
     route: chatRoute(),
     fixtures: chatFixtures({ session: { title: 'Inbox 未读数' }, messages, queued: waiting, turnState: runningTurn, api }),
     render: chatPhone,
+  },
+  {
+    name: 'phone-queued-sending',
+    title: '排队区 · Agent 运行中发出的消息直接进排队（发送中） · 手机',
+    width: 390,
+    height: 200,
+    status: 'shipped',
+    fixtures: chatFixtures({ api }),
+    render: sendingStrip('w-[390px]'),
   },
 ]);
 

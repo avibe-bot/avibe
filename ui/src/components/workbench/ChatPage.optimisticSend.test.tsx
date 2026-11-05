@@ -7,7 +7,12 @@ import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 
 import type { SessionRuntimeState, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import type { ComposerProps } from './Composer';
-import { readChatSnapshot } from '../../lib/chatSnapshots';
+import {
+  beginChatSnapshotRequest,
+  chatSnapshotOwnerForAnswer,
+  readChatSnapshot,
+  writeChatSnapshot,
+} from '../../lib/chatSnapshots';
 import { clearLocalSnapshots, setLocalSnapshotPrincipal } from '../../lib/localSnapshots';
 
 // A sent message is on screen the moment it is sent, as the row it will be, and
@@ -742,5 +747,191 @@ describe('ChatPage optimistic send', () => {
 
     await act(async () => clearLocalSnapshots());
     expect(rowsOf('before sign-out')).toHaveLength(0);
+  });
+});
+
+describe('ChatPage send while the agent is busy', () => {
+  const running: SessionRuntimeState = { ...idleTurnState, in_flight: true, foreground: 'running', native_turn_started: true };
+
+  const openBusyChat = async (messages: WorkbenchMessage[] = [message('m1', 'earlier answer')]) => {
+    mocks.api.getTurnState.mockResolvedValue(running);
+    mount();
+    await act(async () => live.resolve({ ...bootstrap(messages), turn_state: running }));
+    await screen.findByText(messages[0].text);
+  };
+
+  const queueRowsOf = (text: string) => screen.queryAllByText(text)
+    .map((node) => node.closest('[data-queue-row]'))
+    .filter((row): row is HTMLElement => row !== null);
+  const transcriptRowsOf = (text: string) => rowsOf(text).filter((row) => row !== null);
+  const queuedAnswer = (post: Post) => ({ ...serverRow(post, 'q1', { type: 'queued', state: 'queued' }), queued: true });
+
+  it('puts a message sent while a turn runs straight into the queue, as sending', async () => {
+    await openBusyChat();
+
+    send('do this next');
+
+    // No await: the row is in the queue strip in the render the send made, and
+    // never in the transcript.
+    expect(queueRowsOf('do this next')).toHaveLength(1);
+    expect(queueRowsOf('do this next')[0].getAttribute('aria-busy')).toBe('true');
+    expect(transcriptRowsOf('do this next')).toHaveLength(0);
+    // Nothing of it is the server's yet: no removing it, no sending it now.
+    const remove = screen.getByRole('button', { name: /^(chat\.queue\.remove|bots\.conversation\.cancelSend)$/ });
+    expect((remove as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'chat.queue.sendNow' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('replaces it in place with the server queue row when the POST answers queued', async () => {
+    await openBusyChat();
+    const queueRead = deferred<{ queued: WorkbenchMessage[] }>();
+    mocks.api.listSessionQueue.mockReturnValue(queueRead.promise);
+    const { post, result } = send('do this next');
+    const row = queueRowsOf('do this next')[0];
+
+    await act(async () => post.reply.resolve(Response.json(queuedAnswer(post), { status: 201 })));
+    await act(async () => result);
+    expect(queueRowsOf('do this next')).toEqual([row]);
+
+    await act(async () => queueRead.resolve({ queued: [serverRow(post, 'q1', { type: 'queued', state: 'queued' })] }));
+    // The same element, now the server's row: no remount, no reorder, one row.
+    expect(queueRowsOf('do this next')).toEqual([row]);
+    expect(row.getAttribute('aria-busy')).toBe('false');
+    expect(transcriptRowsOf('do this next')).toHaveLength(0);
+  });
+
+  it('shows one row when a queue read lists the send before the POST answers', async () => {
+    await openBusyChat();
+    const queueRead = deferred<{ queued: WorkbenchMessage[] }>();
+    mocks.api.listSessionQueue.mockReturnValue(queueRead.promise);
+    const { post } = send('do this next');
+
+    // queue.updated reached this tab before the POST answer did.
+    act(() => mocks.events!.onQueueUpdated({ session_id: SESSION }));
+    await act(async () => queueRead.resolve({ queued: [serverRow(post, 'q1', { type: 'queued', state: 'queued' })] }));
+
+    expect(queueRowsOf('do this next')).toHaveLength(1);
+    expect(queueRowsOf('do this next')[0].getAttribute('aria-busy')).toBe('false');
+  });
+
+  it('moves it into the transcript when the server started a turn after all, answer first', async () => {
+    await openBusyChat();
+    const { post, result } = send('do this next');
+
+    // The turn ended as the message left: the server started a new one with it.
+    await act(async () => post.reply.resolve(Response.json(serverRow(post), { status: 201 })));
+    await act(async () => result);
+
+    expect(queueRowsOf('do this next')).toHaveLength(0);
+    expect(transcriptRowsOf('do this next')).toHaveLength(1);
+    expect(transcriptRowsOf('do this next')[0].getAttribute('data-message-id')).toBe('d1');
+  });
+
+  it('moves it into the transcript when the server started a turn after all, stream first', async () => {
+    await openBusyChat();
+    const { post } = send('do this next');
+
+    act(() => mocks.events!.onMessageNew(serverRow(post)));
+
+    // Out of the queue and into the transcript in the same render: one row.
+    expect(queueRowsOf('do this next')).toHaveLength(0);
+    expect(transcriptRowsOf('do this next')).toHaveLength(1);
+  });
+
+  it('withdraws it from the queue and gives the draft back when the server refuses it', async () => {
+    await openBusyChat();
+    const { post, result } = send('please refuse me');
+
+    await act(async () => post.reply.resolve(Response.json(
+      { error: { code: 'agent_unavailable', message: 'Agent is unavailable' } },
+      { status: 500 },
+    )));
+
+    await expect(result).resolves.toBe(false);
+    expect(queueRowsOf('please refuse me')).toHaveLength(0);
+    expect(transcriptRowsOf('please refuse me')).toHaveLength(0);
+    expect(screen.getByText('errors.agent_unavailable')).toBeTruthy();
+    expect(mocks.api.recoverSessionDraftAfterRejectedSend).toHaveBeenCalledWith(SESSION);
+  });
+
+  it('follows the transcript to a message drawn in the queue that started a turn after all', async () => {
+    await openBusyChat();
+    const frames = () => act(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    await frames();
+    const scroller = screen.getByTestId('chat-transcript');
+    Object.defineProperties(scroller, {
+      scrollHeight: { value: 10_000, configurable: true },
+      clientHeight: { value: 800, configurable: true },
+      scrollTop: { value: 4_000, writable: true, configurable: true },
+    });
+    fireEvent.scroll(scroller);
+    const { post, result } = send('do this next');
+    await frames();
+    // Into the queue: the transcript stays where the reader is.
+    expect(scroller.scrollTop).toBe(4_000);
+
+    await act(async () => post.reply.resolve(Response.json(serverRow(post), { status: 201 })));
+    await act(async () => result);
+    await waitFor(() => expect(scroller.scrollTop).toBe(10_000));
+  });
+
+  it('leaves a historical window where it is when the message goes to the queue', async () => {
+    vi.stubGlobal('CSS', { escape: (value: string) => value });
+    Element.prototype.scrollIntoView = vi.fn();
+    mocks.api.getTurnState.mockResolvedValue(running);
+    const around = deferred<unknown>();
+    mocks.api.listSessionMessages.mockImplementation((_id: string, options: { aroundId?: string }) => (
+      options.aroundId ? around.promise : new Promise(() => {})
+    ));
+    mount(`/chat/${SESSION}?msg=m1`);
+    await act(async () => live.resolve({ ...bootstrap([message('m5', 'latest answer')]), turn_state: running }));
+    await act(async () => around.resolve({ messages: [message('m1', 'old context')], next_after_id: 'm2', next_before_id: null }));
+    await screen.findByText('old context');
+
+    send('do this next');
+
+    expect(queueRowsOf('do this next')).toHaveLength(1);
+    expect(mocks.api.listSessionMessages).not.toHaveBeenCalledWith(SESSION, { limit: 50, tail: true, cache: false });
+    expect(screen.getByText('old context')).toBeTruthy();
+  });
+
+  it('sends to the transcript as before when no turn runs', async () => {
+    await openChat();
+
+    send('hello there');
+
+    expect(transcriptRowsOf('hello there')).toHaveLength(1);
+    expect(queueRowsOf('hello there')).toHaveLength(0);
+  });
+
+  it('keeps a quick reply under the question it answers, even while a turn runs', async () => {
+    await openBusyChat([message('m1', 'Pick one', { content: { quick_replies: ['Yes', 'No'] } })]);
+
+    act(() => screen.getByRole('button', { name: 'Yes' }).click());
+
+    expect(answerRows('Yes')).toHaveLength(1);
+    expect(queueRowsOf('Yes')).toHaveLength(0);
+  });
+
+  it('does not take a run the list only seeded as confirmed', async () => {
+    // A cached chat whose list row says running: until the bootstrap confirms
+    // it, a send goes to the transcript.
+    const snapshotSession = { id: SESSION, title: 'Chat', status: 'active', agent_name: 'vibey', agent_backend: 'vibey', agent_status: 'running' } as WorkbenchSession;
+    await writeChatSnapshot(chatSnapshotOwnerForAnswer(beginChatSnapshotRequest(SESSION))!, {
+      session: snapshotSession,
+      messages: [message('m1', 'cached answer')],
+      next_before_id: null,
+      agents: [agent],
+      default_agent_name: 'vibey',
+      can_chat: true,
+      chat_message_font_size: null,
+    });
+    mount();
+    await screen.findByText('cached answer');
+
+    send('sent while painted');
+
+    expect(transcriptRowsOf('sent while painted')).toHaveLength(1);
+    expect(queueRowsOf('sent while painted')).toHaveLength(0);
   });
 });
