@@ -81,12 +81,19 @@ describe('Inbox previews', () => {
     view.rerender(page());
 
     expect(parsed.contents).toEqual(['A new reply']);
+
+    // Reading a card (now instant, before the write answers) changes only its
+    // colour, which needs no parse at all.
+    feed.unreadBySession = {};
+    parsed.contents = [];
+    view.rerender(page());
+    expect(parsed.contents).toEqual([]);
   });
 
   const cap = INBOX_PREVIEW_MAX_CHARS;
   const paragraph = (length: number) => 'word '.repeat(Math.ceil(length / 5)).slice(0, length);
   const later = `\n\n${paragraph(cap)}`;
-  const codeRows = Array.from({ length: 60 }, (_, i) => `# row ${i} `.padEnd(40, '.'));
+  const codeRows = Array.from({ length: 60 }, (_, i) => `row ${i} `.padEnd(40, '.'));
 
   it.each([
     {
@@ -141,8 +148,7 @@ describe('Inbox previews', () => {
     },
     {
       // Rows are 40 characters and a newline; the cut comes before the first row
-      // that starts at or past the cap, and a row that looks like a heading inside
-      // the block is still code.
+      // that starts at or past the cap.
       name: 'cuts between two lines of a long code block',
       text: `Intro.\n\`\`\`text\n${codeRows.join('\n')}\n\`\`\`${later}`,
       expected: `Intro.\n\`\`\`text\n${codeRows.slice(0, Math.ceil((cap - 15) / 41)).join('\n')}\n`,
@@ -158,22 +164,31 @@ describe('Inbox previews', () => {
       expected: `\`\`\`\ncode\n\`\`\`\n**${paragraph(cap)}\nstill bold** done.\n`,
     },
     {
-      name: 'closes a code block the cut left open before the link definitions',
-      text: `See [the plan][plan].\n~~~\n${paragraph(cap + 100)}\nmore code\n~~~\n\n[plan]: https://example.com/plan`,
-      expected: `See [the plan][plan].\n~~~\n${paragraph(cap + 100)}\n~~~\n\n[plan]: https://example.com/plan`,
-    },
-    {
       name: 'keeps a reply that is one long block whole',
       text: paragraph(cap * 3),
       expected: paragraph(cap * 3),
     },
     {
-      name: 'keeps link definitions from the rest of the reply',
-      text: `See [the plan][plan] and the note[^1].\n${paragraph(cap * 2)}${later}\n\n[plan]: https://example.com/plan\n[^1]: A footnote.`,
-      expected: `See [the plan][plan] and the note[^1].\n${paragraph(cap * 2)}\n\n[plan]: https://example.com/plan\n[^1]: A footnote.`,
+      name: 'keeps a link definition that sits before the cut where it is',
+      text: `See [the plan][plan].\n\n[plan]: https://example.com/plan\n\n${paragraph(cap)}${later}`,
+      expected: `See [the plan][plan].\n\n[plan]: https://example.com/plan\n\n${paragraph(cap)}\n`,
     },
   ])('$name', ({ text, expected }) => {
     expect(inboxPreviewSource(text)).toBe(expected);
+  });
+
+  // A definition anywhere gives meaning to a reference before it, and the
+  // definition's own form (a destination on the next line, a fence around a
+  // definition-shaped example) is not something to reproduce: a reply whose
+  // dropped part holds anything that could be one is kept whole.
+  it.each([
+    { name: 'a link definition', tail: '[plan]: https://example.com/plan' },
+    { name: 'a definition whose destination is on the next line', tail: '[plan]:\n  https://example.com/plan' },
+    { name: 'a footnote definition', tail: '[^1]: A footnote.' },
+    { name: 'a definition-shaped line in a code example', tail: '```md\n[plan]: https://example.com/plan\n```' },
+  ])('keeps the whole reply when the part it would drop holds $name', ({ tail }) => {
+    const text = `See [the plan][plan] and the note[^1].\n${paragraph(cap)}${later}\n\n${tail}`;
+    expect(inboxPreviewSource(text)).toBe(text);
   });
 
   it('hands the card only the part of a long reply it can show', () => {

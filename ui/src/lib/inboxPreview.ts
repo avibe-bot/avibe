@@ -1,5 +1,10 @@
 // The part of a reply an Inbox card's preview can show (see
 // components/workbench/InboxPreview).
+//
+// Markdown is block-local except for one thing: a link reference or footnote
+// definition anywhere in the text gives meaning to a `[label][ref]` or `[^1]`
+// before it. So the part kept must be cut where no block construct spans the
+// cut (below), and nothing may be dropped that could be such a definition.
 
 /** Many times what the deepest clamp (three lines of the widest card) shows. */
 export const INBOX_PREVIEW_MAX_CHARS = 1200;
@@ -7,9 +12,6 @@ export const INBOX_PREVIEW_MAX_CHARS = 1200;
 const BLANK_LINE = /^[ \t\r]*$/;
 const FENCE = /^ {0,3}(`{3,}|~{3,})/;
 const ATX_HEADING = /^ {0,3}#{1,6}(?:[ \t\r]|$)/;
-// A reference-style link or footnote definition (`[id]: url`, `[^1]: text`).
-// The reference may sit in the shown text while its definition is far below.
-const DEFINITION_LINE = /^ {0,3}\[[^\]\n]+\]:.*$/gm;
 
 /** The leading part of ``text`` through the line that holds the
  *  ``INBOX_PREVIEW_MAX_CHARS``th character and on to the next place a cut
@@ -17,9 +19,10 @@ const DEFINITION_LINE = /^ {0,3}\[[^\]\n]+\]:.*$/gm;
  *  ATX heading (each ends a paragraph, and no inline construct such as a link
  *  with a long destination, a data-URL image, emphasis or a code span crosses
  *  one), or between two lines inside a fenced code block. So everything kept
- *  renders exactly as the start of the full reply does. A reply with no such
- *  place after the cap is kept whole, as before. Link definitions from the rest
- *  are appended. Text within the cap is returned as is. */
+ *  renders exactly as the start of the full reply does. When the part that
+ *  would be dropped holds anything that could be a definition (any `]:`), or
+ *  there is no such place after the cap, the reply is kept whole, as before.
+ *  Text within the cap is returned as is. */
 export function inboxPreviewSource(text: string): string {
   if (text.length <= INBOX_PREVIEW_MAX_CHARS) return text;
   let fence: string | null = null;
@@ -30,7 +33,7 @@ export function inboxPreviewSource(text: string): string {
       start >= INBOX_PREVIEW_MAX_CHARS
       && (fence !== null || BLANK_LINE.test(line) || FENCE.test(line) || ATX_HEADING.test(line))
     ) {
-      return withDefinitions(text, start, fence);
+      return text.includes(']:', start) ? text : text.slice(0, start);
     }
     const run = FENCE.exec(line)?.[1];
     if (fence === null) {
@@ -42,12 +45,4 @@ export function inboxPreviewSource(text: string): string {
     start = newline + 1;
   }
   return text;
-}
-
-function withDefinitions(text: string, end: number, fence: string | null): string {
-  const head = text.slice(0, end);
-  const definitions = text.slice(end).match(DEFINITION_LINE);
-  if (!definitions) return head;
-  // Close a fence the cut left open, or the definitions would be code.
-  return `${head}${fence ? `${fence}\n` : ''}\n${definitions.join('\n')}`;
 }
