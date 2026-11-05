@@ -45,6 +45,7 @@ import { StatusProvider } from './context/StatusProvider';
 import { ApiProvider, useApi, ApiError } from './context/ApiContext';
 import type { SessionInfo } from './context/ApiContext';
 import { InstanceAuthorizationProvider } from './context/InstanceAuthorizationProvider';
+import { BootSkeleton } from './components/BootSkeleton';
 import { BotsProvider } from './context/BotsProvider';
 import { BotHoldProvider } from './components/workbench/bots/BotHold';
 import { useWindowManager } from './context/WindowManagerContext';
@@ -556,7 +557,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
     // show as a solid square for the whole recheck; leave the frame empty.
     const guardLoading = setupRedirectExempt
         ? null
-        : <div className="min-h-screen flex items-center justify-center bg-bg text-text">{t('common.loading')}</div>;
+        : <BootSkeleton />;
 
     if (guardStatus === 'loading') {
         return guardLoading;

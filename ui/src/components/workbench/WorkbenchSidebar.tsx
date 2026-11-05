@@ -54,6 +54,8 @@ import { SortableProjectList, type ProjectDragHandle } from './SortableProjectLi
 import { BotStrip } from './bots/BotStrip';
 import { InboxHoverPopover } from './InboxHoverPopover';
 import { useChatPrefetch } from './useChatPrefetch';
+import { SidebarProjectRowsSkeleton, SidebarSessionRowsSkeleton } from './listSkeletons';
+import { useSkeletonHandover } from '../ui/skeleton-handover';
 import logoImg from '../../assets/logo.png';
 
 interface CapabilityNavItem {
@@ -303,6 +305,59 @@ export const SessionRow: React.FC<{
   );
 };
 
+// The Sessions under an expanded project (ui/design: sidebar/workbench-sidebar/
+// loading-sessions). Mounted per expansion, so a window that opens already loaded
+// (or from its cache) appears at once, and only rows that follow a skeleton fade
+// in where it was. Load more is replaced by two skeleton rows while it reads.
+const ProjectSessionList: React.FC<{
+  projectId: string;
+  sessions: WorkbenchSession[] | null;
+  loading: boolean;
+  loadingMore: boolean;
+  hasMore: boolean;
+  onLoadMore: () => void;
+  unreadBySession: Record<string, number>;
+  canChat: boolean;
+  canManageMetadata: boolean;
+}> = ({ projectId, sessions, loading, loadingMore, hasMore, onLoadMore, unreadBySession, canChat, canManageMetadata }) => {
+  const { t } = useTranslation();
+  const showSkeleton = loading && sessions === null;
+  const handover = useSkeletonHandover(showSkeleton);
+  return (
+    <div className="flex flex-col gap-0.5 pb-0.5">
+      {showSkeleton && <SidebarSessionRowsSkeleton rows={3} />}
+      {sessions !== null && sessions.length === 0 && !loading && (
+        <div className="px-3 py-2 pl-[30px] text-[11px] italic text-muted">{t('workbench.sessionsEmpty')}</div>
+      )}
+      {sessions !== null && sessions.length > 0 && (
+        <div className={clsx('flex flex-col gap-0.5', handover)}>
+          {sessions.map((session) => (
+            <SessionRow
+              key={session.id}
+              projectId={projectId}
+              session={session}
+              unread={unreadBySession[session.id] || 0}
+              canChat={canChat}
+              canManageMetadata={canManageMetadata}
+            />
+          ))}
+        </div>
+      )}
+      {hasMore && loadingMore && <SidebarSessionRowsSkeleton rows={2} />}
+      {hasMore && !loadingMore && (
+        <button
+          type="button"
+          onClick={onLoadMore}
+          className="flex items-center gap-1.5 rounded-md py-1.5 pl-[30px] pr-2.5 text-left text-[11px] font-medium text-muted transition hover:bg-foreground/[0.04] hover:text-foreground"
+        >
+          <ChevronDown className="size-3" />
+          {t('workbench.sessionsLoadMore')}
+        </button>
+      )}
+    </div>
+  );
+};
+
 // One project row + (when expanded) the session list under it
 // (ui/design: sidebar/workbench-sidebar/unread-expanded).
 const ProjectRow: React.FC<{
@@ -329,6 +384,8 @@ const ProjectRow: React.FC<{
   onRename: (next: string) => Promise<void>;
   dragHandle?: ProjectDragHandle;
   onArchive: () => Promise<void>;
+  /** The fade a row takes when the list it is in follows a skeleton. */
+  className?: string;
 }> = ({
   project,
   expanded,
@@ -350,6 +407,7 @@ const ProjectRow: React.FC<{
   onRename,
   dragHandle,
   onArchive,
+  className,
 }) => {
   const { t } = useTranslation();
   const wm = useWindowManager();
@@ -379,7 +437,7 @@ const ProjectRow: React.FC<{
   };
 
   return (
-    <div className="flex flex-col gap-0.5">
+    <div className={clsx('flex flex-col gap-0.5', className)}>
       <div
         data-settings-interaction-owner="true"
         // The folder sits in the sidebar's icon column (the capability rows' icons);
@@ -546,36 +604,17 @@ const ProjectRow: React.FC<{
       </div>
 
       {expanded && (
-        <div className="flex flex-col gap-0.5 pb-0.5">
-          {loading && sessions === null && (
-            <div className="px-3 py-2 pl-[30px] text-[11px] italic text-muted">{t('workbench.sessionsLoading')}</div>
-          )}
-          {sessions !== null && sessions.length === 0 && !loading && (
-            <div className="px-3 py-2 pl-[30px] text-[11px] italic text-muted">{t('workbench.sessionsEmpty')}</div>
-          )}
-          {sessions !== null &&
-            sessions.map((session) => (
-              <SessionRow
-                key={session.id}
-                projectId={project.id}
-                session={session}
-                unread={unreadBySession[session.id] || 0}
-                canChat={canChat}
-                canManageMetadata={canManageMetadata}
-              />
-            ))}
-          {hasMore && (
-            <button
-              type="button"
-              onClick={onLoadMore}
-              disabled={loadingMore}
-              className="flex items-center gap-1.5 rounded-md py-1.5 pl-[30px] pr-2.5 text-left text-[11px] font-medium text-muted transition hover:bg-foreground/[0.04] hover:text-foreground disabled:cursor-default disabled:opacity-60"
-            >
-              {loadingMore ? <Loader2 className="size-3 animate-spin" /> : <ChevronDown className="size-3" />}
-              {t('workbench.sessionsLoadMore')}
-            </button>
-          )}
-        </div>
+        <ProjectSessionList
+          projectId={project.id}
+          sessions={sessions}
+          loading={loading}
+          loadingMore={loadingMore}
+          hasMore={hasMore}
+          onLoadMore={onLoadMore}
+          unreadBySession={unreadBySession}
+          canChat={canChat}
+          canManageMetadata={canManageMetadata}
+        />
       )}
 
       {canManageProjects && (
@@ -645,6 +684,9 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
     reorderProjects,
     isReorderingProjects,
   } = useWorkbenchProjectsTree({ active: surfaceActive });
+  // The list's skeleton, and the fade its rows take where it was.
+  const projectsSkeleton = projects === null && !projectsError;
+  const projectsHandover = useSkeletonHandover(projectsSkeleton);
   const [popoverOpen, setPopoverOpen] = useState(false);
   const closeTimer = useRef<number | null>(null);
   const [showNewProject, setShowNewProject] = useState(false);
@@ -879,12 +921,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
         </div>
 
         {projectsOpen && <div id="workbench-project-list" className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto pr-0.5">
-          {projects === null && !projectsError && (
-            <div className="flex items-center gap-2 rounded-md border border-dashed border-border px-3 py-3 text-[11px] text-muted">
-              <Loader2 className="size-3 animate-spin" />
-              {t('workbench.projectsLoading')}
-            </div>
-          )}
+          {projectsSkeleton && <SidebarProjectRowsSkeleton rows={4} />}
           {projectsError && (
             <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[11px] text-destructive-ink">
               {t('workbench.projectsLoadError')}
@@ -907,6 +944,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
               return (
                 <ProjectRow
                   key={project.id}
+                  className={projectsHandover}
                   dragHandle={dragHandle}
                   project={project}
                   expanded={isExpanded(project.id)}

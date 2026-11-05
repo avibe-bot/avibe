@@ -1359,3 +1359,33 @@ pre,
 .bot-strip-scroller.bot-strip-fade {
   mask-image: linear-gradient(to right, transparent, #000 12px, #000 calc(100% - 28px), transparent);
 }
+
+/* Loading without a spinner (ui/design: system/skeleton/*). A list that knows
+   nothing yet draws skeleton blocks the size of its rows; a card-level
+   highlight sweeps across them about 60% of each period and rests for the
+   rest. When the content arrives it fades in where the blocks were, so nothing
+   moves. The motion names are docs/plans/web-ui-motion.md's: these values are
+   provisional until that plan's tokens land, and then come from its `:root`
+   block instead. Under reduced motion the shimmer stays still and nothing fades. */
+:root {
+  --motion-handover-duration: 240ms;
+  --motion-handover-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --motion-shimmer-duration: 1600ms;
+}
+/* A skeleton waits this long before it shows, so a read that answers sooner
+   never flashes one; its space is held all the while. */
+:root {
+  --skeleton-reveal-delay: 120ms;
+}
+@theme {
+  --animate-skeleton-shimmer: skeleton-shimmer var(--motion-shimmer-duration) ease-in-out infinite;
+  @keyframes skeleton-shimmer {
+    0% { transform: translateX(-100%); }
+    60%, 100% { transform: translateX(100%); }
+  }
+  --animate-skeleton-reveal: skeleton-reveal var(--motion-handover-duration) var(--motion-handover-ease) var(--skeleton-reveal-delay) both;
+  @keyframes skeleton-reveal {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+}

@@ -40,14 +40,14 @@ function inboxValue(fixtures: WorkbenchFixtures): InboxState {
   return inert<InboxState>({
     inboxSessions: fixtures.inboxSessions ?? [],
     unreadBySession,
-    unreadLoaded: true,
+    unreadLoaded: !fixtures.inboxLoading,
     totalUnread,
     unreadByCategory: unreadByCategory(unreadBySession, botSessionIds(fixtures)),
     // Every notification switch on, as a new install has them.
     badgeTotal: totalUnread,
     unreadSessions: counts.filter((n) => n > 0).length,
     nextCursor: null,
-    loading: false,
+    loading: fixtures.inboxLoading ?? false,
     loadingMore: false,
     activateFeed: () => () => {},
   });
@@ -60,15 +60,19 @@ function statusValue(fixtures: WorkbenchFixtures) {
 
 function projectsValue(fixtures: WorkbenchFixtures): WorkbenchProjectsTree {
   const expanded = new Set(fixtures.expandedProjects ?? []);
+  const loading = new Set(fixtures.sessionsLoading ?? []);
+  const loadingMore = new Set(fixtures.sessionsLoadingMore ?? []);
+  const more = new Set([...(fixtures.moreSessions ?? []), ...loadingMore]);
   return inert<WorkbenchProjectsTree>({
-    projects: fixtures.projects ?? [],
+    projects: fixtures.projectsLoading ? null : fixtures.projects ?? [],
+    projectsLoaded: !fixtures.projectsLoading,
     projectsError: null,
     activate: () => () => {},
     sessionsOf: (projectId: string) => ({
-      sessions: fixtures.sessionsByProject?.[projectId] ?? [],
-      loading: false,
-      loadingMore: false,
-      cursor: null,
+      sessions: loading.has(projectId) ? null : fixtures.sessionsByProject?.[projectId] ?? [],
+      loading: loading.has(projectId),
+      loadingMore: loadingMore.has(projectId),
+      cursor: more.has(projectId) ? 'more' : null,
       error: false,
     }),
     expanded,
