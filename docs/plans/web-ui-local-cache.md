@@ -111,6 +111,19 @@ IndexedDB stays the source on a cold start. The memory holds nothing that is not
 also written to the store, and the message store
 (`docs/plans/local-sync-store.md`) replaces it with a view on its hot set.
 
+A chat with no cached copy as recent as its lists opens on what they say,
+never on a spinner (ui/design: chat/skeleton/*). Its row from the Projects tree
+(else its Inbox card's title and project, or its Bot) draws the header and the
+composer, and the transcript is a skeleton of bubbles. An Inbox card's preview
+is the Agent's whole newest reply, so when the Agent wrote last that reply is
+drawn as a real bubble at the bottom with the skeleton above it. A cached window
+that already holds it is painted instead. The seed is a painted snapshot like
+any other: the current reader's only, withdrawn on a reader change, released by
+the first live window, and never stored. A stored window as recent replaces it
+when IndexedDB answers. A chat no list knows (opened by a link) draws a skeleton
+of the whole page. The rows that replace a skeleton fade in where it was, and
+the older-page loader is a thin block in its own slot.
+
 Pages render cached data exactly like live data, chrome included (invariant
 4). A painted conversation shows its composer, route picker, message actions,
 and header actions from the cached state, enabled. The composer is the same

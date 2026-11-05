@@ -5,7 +5,7 @@ import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 
-import type { SessionRuntimeState, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
+import type { InboxSession, SessionRuntimeState, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import type { ComposerProps } from './Composer';
 import {
   beginChatSnapshotRequest,
@@ -70,7 +70,7 @@ const mocks = vi.hoisted(() => ({
     onAuthorizationChanged: (data: { resource_kinds?: string[] }) => void;
   },
   composer: null as ComposerProps | null,
-  inbox: { unreadBySession: {} as Record<string, number>, markRead: vi.fn() },
+  inbox: { unreadBySession: {} as Record<string, number>, markRead: vi.fn(), inboxSessions: [] as InboxSession[] },
 }));
 
 vi.mock('react-i18next', () => ({
@@ -376,7 +376,7 @@ beforeEach(() => {
   mocks.busyHistory = [];
   mocks.sessionActionsWritable = [];
   mocks.routePicker = null;
-  mocks.inbox = { unreadBySession: {}, markRead: vi.fn(async () => true) };
+  mocks.inbox = { unreadBySession: {}, markRead: vi.fn(async () => true), inboxSessions: [] };
   Object.assign(mocks.capabilities, { can_chat: true, can_use_show_pages: true });
   vi.clearAllMocks();
   mocks.api.connectWorkbenchEvents.mockImplementation((events) => {
@@ -1003,3 +1003,136 @@ describe('ChatPage working state on entry', () => {
     await waitFor(() => expect(busy()).toBe('false'));
   });
 });
+
+describe('ChatPage opened with no cached copy', () => {
+  // A Projects tree that has loaded this Session's row.
+  const tree = (row: Partial<WorkbenchSession> = {}) => ({
+    projects: [{ id: PROJECT }],
+    sessionsOf: (projectId: string) => ({
+      sessions: projectId === PROJECT ? [sessionRow('Listed title', { project_id: PROJECT, ...row })] : null,
+      loading: false,
+      loadingMore: false,
+      cursor: null,
+      error: false,
+    }),
+  }) as unknown as WorkbenchProjectsTree;
+
+  // This Session's Inbox card: its newest message is the Agent's reply.
+  const inboxRow = (extra: Partial<InboxSession> = {}): InboxSession => ({
+    session_id: SESSION,
+    scope_id: null,
+    project_id: null,
+    project_name: null,
+    title: 'Inbox title',
+    last_activity_at: '2026-11-01T08:00:09Z',
+    last_message_author: 'agent',
+    replied: true,
+    preview_text: 'the latest reply',
+    preview_at: '2026-11-01T08:00:09Z',
+    unread_count: 1,
+    unread: true,
+    ...extra,
+  });
+
+  const skeleton = () => document.querySelector('[role="status"][aria-busy="true"]');
+  const spinner = () => document.querySelector('.animate-spin');
+  const rowsOf = (text: string) => screen.queryAllByText(text).map((node) => node.closest('[data-message-id]'));
+
+  beforeEach(() => setLocalSnapshotPrincipal('local'));
+
+  it('opens on what its list row says, the transcript a skeleton, and hands over to the live window', async () => {
+    mount(tree());
+
+    // No await: the header and composer are the chat's own in the first render;
+    // only the transcript is blocks. No spinner, no empty state.
+    expect(screen.getByText('Listed title')).toBeTruthy();
+    expect(composerState()).toBe('false');
+    expect(skeleton()).not.toBeNull();
+    expect(spinner()).toBeNull();
+    expect(screen.queryByText('chat.transcriptEmpty')).toBeNull();
+    expect(screen.getByTestId('route-picker')).toBeTruthy();
+    const composer = screen.getByTestId('composer');
+
+    await act(async () => live.resolve(bootstrap([message('m1', 'live question', { type: 'user', author: 'user' }), message('m2', 'live answer')])));
+    await screen.findByText('live answer');
+    expect(skeleton()).toBeNull();
+    // The rows fade in where the skeleton was, under the same composer.
+    expect(rowsOf('live answer')[0]?.className).toContain('starting:opacity-0');
+    expect(screen.getByTestId('composer')).toBe(composer);
+    expect(composer.getAttribute('data-instance')).toBe('1');
+  });
+
+  it('opens a chat no list knows on a skeleton of the whole page, never a spinner', async () => {
+    mount();
+
+    expect(document.querySelector('[data-chat-skeleton="page"]')).not.toBeNull();
+    expect(spinner()).toBeNull();
+
+    await act(async () => live.resolve(bootstrap([message('m2', 'live answer')])));
+    await screen.findByText('live answer');
+    expect(document.querySelector('[data-chat-skeleton="page"]')).toBeNull();
+  });
+
+  it('draws the newest reply its Inbox card holds at the bottom, and one copy once the live window lands', async () => {
+    mocks.inbox.inboxSessions = [inboxRow()];
+    mount();
+
+    expect(screen.getByText('Inbox title')).toBeTruthy();
+    expect(rowsOf('the latest reply')).toHaveLength(1);
+    expect(skeleton()).not.toBeNull();
+    expect(screen.getByTestId('chat-transcript').firstElementChild?.className).toContain('justify-end');
+    // The card does not say which Agent the chat runs on: its picker is a block.
+    expect(document.querySelector('[data-route-picker-skeleton]')).not.toBeNull();
+    expect(screen.queryByTestId('route-picker')).toBeNull();
+
+    await act(async () => live.resolve(bootstrap([message('m1', 'question', { type: 'user', author: 'user' }), message('m9', 'the latest reply')])));
+    await waitFor(() => expect(skeleton()).toBeNull());
+    expect(rowsOf('the latest reply')).toHaveLength(1);
+    expect(rowsOf('the latest reply')[0]?.getAttribute('data-message-id')).toBe('m9');
+    expect(screen.getByTestId('route-picker')).toBeTruthy();
+  });
+
+  it('draws nothing more when the cached window already holds the newest reply', async () => {
+    await seed([message('m1', 'cached question'), message('m9', 'the latest reply')]);
+    mocks.inbox.inboxSessions = [inboxRow()];
+    mount();
+
+    expect(screen.getByText('cached question')).toBeTruthy();
+    expect(rowsOf('the latest reply')).toHaveLength(1);
+    expect(skeleton()).toBeNull();
+  });
+
+  it('draws the newest reply over a cached window older than it', async () => {
+    await seed([message('m1', 'cached question'), message('m2', 'cached answer')]);
+    mocks.inbox.inboxSessions = [inboxRow()];
+    mount();
+
+    expect(rowsOf('the latest reply')).toHaveLength(1);
+    expect(skeleton()).not.toBeNull();
+    expect(screen.queryByText('cached answer')).toBeNull();
+  });
+
+  it('withdraws what the Inbox said when another reader is named', async () => {
+    mocks.inbox.inboxSessions = [inboxRow()];
+    mount();
+    expect(rowsOf('the latest reply')).toHaveLength(1);
+
+    act(() => setLocalSnapshotPrincipal('someone-else'));
+    expect(rowsOf('the latest reply')).toHaveLength(0);
+    expect(screen.queryByText('Inbox title')).toBeNull();
+  });
+
+  it('gives way to a stored window that holds what the lists knew once IndexedDB answers', async () => {
+    await seed([message('m1', 'stored question'), message('m9', 'the latest reply')]);
+    asALaterLoad();
+    mocks.inbox.inboxSessions = [inboxRow()];
+    mount(tree());
+    expect(skeleton()).not.toBeNull();
+    expect(screen.queryByText('stored question')).toBeNull();
+
+    await screen.findByText('stored question');
+    expect(skeleton()).toBeNull();
+    expect(rowsOf('the latest reply')).toHaveLength(1);
+  });
+});
+

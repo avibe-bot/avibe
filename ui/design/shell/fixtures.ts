@@ -14,6 +14,10 @@ export interface WorkbenchFixtures {
   instanceKind?: InstanceKind;
   /** The principal the viewer's own Chat rows are written as (`local`, `remote:<sub>`). */
   readerPrincipal?: string;
+  /** The reader the local snapshot store (and its in-memory view) is kept for, as the app names it once
+   *  `/api/session` answers. Unnamed unless a frame draws what that store decides: a chat opened on what
+   *  its lists already know (`chat/skeleton/*`). */
+  localSnapshotReader?: string;
   /** The service status the shell polls (`GET /status`), as the Status provider serves it. */
   status?: RuntimeStatus;
   projects?: WorkbenchProject[];
