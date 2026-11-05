@@ -92,8 +92,11 @@ type StoredSession = {
   bytes: number;
   /** Attachments shown in the session, by media URL, least recently stored first. */
   media?: Record<string, LocalStoreMediaMeta>;
-  /** What the session's last bootstrap said around its transcript. */
+  /** What the session's last bootstrap said around its transcript, and when
+   *  that bootstrap went out. Ordered on its own: a session read carries no
+   *  chrome, so one that answered first does not void a bootstrap's. */
   chrome?: LocalStoreChatChrome;
+  chromeObservedAt?: number;
 };
 type StoredMessage = {
   id: string;
@@ -682,18 +685,28 @@ async function putSession(
 ): Promise<void> {
   const sessions = tx.objectStore(SESSIONS);
   const existing = await settle(sessions.get(session.id) as IDBRequest<StoredSession | undefined>);
-  if (existing && existing.observedAt > observedAt) return;
+  // The row and the chrome each take the newest answer for themselves (P1).
+  const rowFresh = !existing || existing.observedAt <= observedAt;
+  const chromeFresh = chrome !== undefined && (existing?.chromeObservedAt ?? Number.NEGATIVE_INFINITY) <= observedAt;
+  if (!rowFresh && !chromeFresh) return;
+  const row: StoredSession = rowFresh
+    ? {
+      id: session.id,
+      row: session,
+      observedAt,
+      touchedAt: Math.max(existing?.touchedAt ?? 0, now),
+      // Messages stored since may be newer than the session row says.
+      lastActiveAt: laterTime(existing?.lastActiveAt ?? '', session.last_active_at || session.updated_at),
+      bytes: existing?.bytes ?? 0,
+      ...(existing?.media ? { media: existing.media } : {}),
+    }
+    : { ...existing!, chrome: undefined, chromeObservedAt: undefined };
   sessions.put({
-    id: session.id,
-    row: session,
-    observedAt,
-    touchedAt: Math.max(existing?.touchedAt ?? 0, now),
-    // Messages stored since may be newer than the session row says.
-    lastActiveAt: laterTime(existing?.lastActiveAt ?? '', session.last_active_at || session.updated_at),
-    bytes: existing?.bytes ?? 0,
-    ...(existing?.media ? { media: existing.media } : {}),
+    ...row,
     // A session read that is not a bootstrap keeps what the last one said.
-    ...(chrome ? { chrome } : existing?.chrome ? { chrome: existing.chrome } : {}),
+    ...(chromeFresh
+      ? { chrome, chromeObservedAt: observedAt }
+      : existing?.chrome ? { chrome: existing.chrome, chromeObservedAt: existing.chromeObservedAt } : {}),
   } satisfies StoredSession);
 }
 
@@ -1181,10 +1194,15 @@ async function loadHot(reader: string, sessionIds: readonly string[]): Promise<M
     return chats;
   });
   if (!found || generation !== hotGeneration || getLocalSnapshotPrincipal() !== reader) return new Map();
+  // A conversation forgotten or evicted while the read was out is neither held
+  // nor returned: whoever asked would paint it.
+  const current = new Map<string, LocalStoreChat | null>();
   for (const [id, chat] of found) {
-    if ((hotDrops.get(id) ?? 0) === drops.get(id)) holdHot(id, chat);
+    if ((hotDrops.get(id) ?? 0) !== drops.get(id)) continue;
+    holdHot(id, chat);
+    current.set(id, chat);
   }
-  return found;
+  return current;
 }
 
 /** A write touched ``sessionId``: read it again for the hot set, together with

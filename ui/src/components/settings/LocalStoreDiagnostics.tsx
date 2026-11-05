@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { formatBytes } from '@/lib/filePreview';
 import { readLocalStoreDiagnostics, type LocalStoreDiagnostics as Diagnostics } from '@/lib/localStore';
+import { getLocalSnapshotPrincipal, subscribeLocalSnapshotPrincipal } from '@/lib/localSnapshots';
 import { isStandalonePwa } from '@/lib/platform';
 import { offlineHistoryPersistence, type OfflineHistoryPersistence } from './offlineHistoryPersistence';
 
@@ -45,6 +46,9 @@ export const LocalStoreDiagnosticsView: React.FC<{ persistence: OfflineHistoryPe
 };
 
 export const LocalStoreDiagnostics: React.FC = () => {
+  // The store answers only for a named reader, and a page loaded straight here
+  // names one in an effect that runs after this one: read again when it does.
+  const reader = React.useSyncExternalStore(subscribeLocalSnapshotPrincipal, getLocalSnapshotPrincipal);
   const [diagnostics, setDiagnostics] = React.useState<Diagnostics | null>(null);
   React.useEffect(() => {
     let alive = true;
@@ -54,7 +58,7 @@ export const LocalStoreDiagnostics: React.FC = () => {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [reader]);
   // No store for this reader (none named yet, or IndexedDB unavailable): no line.
   if (!diagnostics) return null;
   return (

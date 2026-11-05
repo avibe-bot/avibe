@@ -12,6 +12,7 @@ import {
   noteLocalStoreStreamGap,
   noteLocalStoreStreamState,
   recordLocalStorePage,
+  recordLocalStoreSession,
   type LocalStoreChatChrome,
 } from './localStore';
 
@@ -92,6 +93,23 @@ describe('the conversation a chat paints', () => {
     expect(tail?.next_before_id).toBe(row(51).id);
   });
 
+  it("keeps a bootstrap's chrome when a session read that went out after it answers first, and the newer row", async () => {
+    const start = Date.now();
+    const bootstrapRead = beginLocalStoreRead('ses_a', start);
+    // The chat refreshes its row while its bootstrap is out; that read answers first.
+    await recordLocalStoreSession(beginLocalStoreRead('ses_a', start + 10), { ...session, title: 'renamed' });
+    await recordLocalStorePage(bootstrapRead, { kind: 'tail' }, { messages: rows(1, 3), next_before_id: null }, session, chrome);
+    const snapshot = await readChatSnapshot('ses_a');
+    expect(snapshot?.session.title).toBe('renamed');
+    expect(snapshot?.default_agent_name).toBe('vibey');
+    expect(ids(snapshot?.messages)).toEqual([1, 2, 3]);
+
+    // An older bootstrap landing later does not replace the newer one's chrome.
+    const older = beginLocalStoreRead('ses_a', start - 10);
+    await recordLocalStorePage(older, { kind: 'tail' }, { messages: rows(1, 3), next_before_id: null }, session, { ...chrome, default_agent_name: 'stale' });
+    expect((await readChatSnapshot('ses_a'))?.default_agent_name).toBe('vibey');
+  });
+
   it('is not painted across a gap the store cannot account for', async () => {
     await bootstrap(rows(1, 5));
     // The stream broke; a later tail does not reach back to row 5.
@@ -142,7 +160,9 @@ describe('the hot set', () => {
     for (let tick = 0; tick < 20; tick += 1) await Promise.resolve();
     const forgetting = forgetLocalStoreSession('ses_a');
     expect(knownChatSnapshot('ses_a')).toBeNull();
-    await Promise.all([reading, forgetting]);
+    const [read] = await Promise.all([reading, forgetting]);
+    // Neither held nor handed to the chat that asked.
+    expect(read).toBeNull();
     expect(knownChatSnapshot('ses_a')).toBeNull();
     expect(await readChatSnapshot('ses_a')).toBeNull();
   });
