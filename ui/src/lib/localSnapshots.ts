@@ -187,6 +187,38 @@ export async function readLocalSnapshot<T>(
   }
 }
 
+/** The current principal's snapshots whose key starts with ``prefix``, by key, in
+ *  one read. Only the matching records are read (by key), never the whole store,
+ *  whose records can be half a megabyte each. Like ``readLocalSnapshot``, a record
+ *  of another schema or one ``parse`` rejects is left out. */
+export async function readLocalSnapshotsWithPrefix<T>(
+  prefix: string,
+  schema: number,
+  parse: (value: unknown) => T | null,
+): Promise<Map<string, T>> {
+  const found = new Map<string, T>();
+  const owner = principal;
+  if (!owner) return found;
+  const epoch = clearEpoch;
+  const idPrefix = recordId(owner, prefix);
+  const records = await withStore('readonly', async (store) => {
+    const ids = await settle(store.getAllKeys());
+    const matching = ids.filter((id): id is string => typeof id === 'string' && id.startsWith(idPrefix));
+    return Promise.all(matching.map((id) => settle(store.get(id) as IDBRequest<StoredRecord | undefined>)));
+  });
+  if (!records || owner !== principal || epoch !== clearEpoch) return found;
+  for (const record of records) {
+    if (!record || record.principal !== owner || record.schema !== schema) continue;
+    try {
+      const value = parse(record.value);
+      if (value !== null) found.set(record.key, value);
+    } catch {
+      // An unreadable record is a missing one.
+    }
+  }
+  return found;
+}
+
 /** Store ``value`` as the current principal's snapshot for ``key``. A value too
  *  large to be worth a cold-start read deletes the stale record instead. */
 export async function writeLocalSnapshot(key: string, schema: number, value: unknown): Promise<void> {

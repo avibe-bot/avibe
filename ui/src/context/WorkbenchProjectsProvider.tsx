@@ -26,6 +26,16 @@ import {
   subscribeLocalSnapshotPrincipal,
   writeLocalSnapshot,
 } from '../lib/localSnapshots';
+import {
+  cachedProjectSessions,
+  cachedSessionProjects,
+  forgetProjectSessions,
+  hydrateProjectSessionSnapshots,
+  projectsWithCachedSession,
+  rememberProjectSessions,
+  type ProjectSessionsSnapshot,
+} from '../lib/projectSessionSnapshots';
+import { sessionActivityInboxAction } from '../lib/inboxActivity';
 
 // How many sessions to load per page under a project. The server clamps the
 // /api/sessions limit (to 200) and returns a cursor (next_before_id); both the
@@ -68,6 +78,14 @@ const parseProjectsSnapshot = (value: unknown): ProjectsSnapshot | null => {
 // The rows on screen that came from the snapshot rather than from the server,
 // and the reader they were stored for.
 type PaintedProjectsSnapshot = { principal: string; ids: Set<string> };
+
+// The first page of a window the server just answered, as the project's session
+// snapshot stores it. A window read wider than one page still begins with that
+// page, and the server's cursor after a full page is its last row's id.
+const firstPageOf = (rows: WorkbenchSession[], cursor: string | null): ProjectSessionsSnapshot =>
+  rows.length > SESSIONS_PAGE_SIZE
+    ? { sessions: rows.slice(0, SESSIONS_PAGE_SIZE), next_before_id: rows[SESSIONS_PAGE_SIZE - 1].id }
+    : { sessions: rows, next_before_id: cursor };
 
 const EMPTY_SESSIONS: ProjectSessionsState = {
   sessions: null,
@@ -278,6 +296,19 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   const paintedSnapshotRef = useRef<PaintedProjectsSnapshot | null>(null);
   const [snapshotOnScreen, setSnapshotOnScreen] = useState(false);
   const snapshotRetiredRef = useRef(false);
+  // Session windows painted from a project's session snapshot, by project, with
+  // the reader they were stored for; a live read of the window replaces them.
+  const paintedWindowsRef = useRef(new Map<string, string>());
+  // The projects the last live list named, or null before one (and after an
+  // authorization change). A stored session page for any other project is stale.
+  const liveProjectIdsRef = useRef<Set<string> | null>(null);
+  const forgetSessionsOfUnlistedProjects = useCallback(() => {
+    const listed = liveProjectIdsRef.current;
+    if (!listed) return;
+    for (const projectId of cachedSessionProjects()) {
+      if (!listed.has(projectId)) forgetProjectSessions(projectId);
+    }
+  }, []);
   const setPaintedSnapshot = useCallback((next: PaintedProjectsSnapshot | null) => {
     paintedSnapshotRef.current = next;
     setSnapshotOnScreen(next !== null);
@@ -491,6 +522,13 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     void writeLocalSnapshot(PROJECTS_SNAPSHOT_KEY, PROJECTS_SNAPSHOT_SCHEMA, {
       projects: nextProjects,
     } satisfies ProjectsSnapshot);
+    // A project the reader no longer sees takes its stored Sessions with it (and
+    // again once the stored pages have loaded, if this list came first).
+    liveProjectIdsRef.current = accessibleIds;
+    forgetSessionsOfUnlistedProjects();
+    for (const projectId of [...paintedWindowsRef.current.keys()]) {
+      if (!accessibleIds.has(projectId)) paintedWindowsRef.current.delete(projectId);
+    }
     setSessions((prev) =>
       Object.fromEntries(
         Object.entries(prev).filter(([projectId]) => accessibleIds.has(projectId)),
@@ -501,7 +539,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     for (const projectId of [...pendingReconcileRef.current.keys()]) {
       if (!accessibleIds.has(projectId)) pendingReconcileRef.current.delete(projectId);
     }
-  }, [commitProjects, setPaintedSnapshot]);
+  }, [commitProjects, forgetSessionsOfUnlistedProjects, setPaintedSnapshot]);
 
   // A reconnect and an authorization change are not the same kind of signal. A
   // reconnect says "you may have missed events", so deferring it while nothing
@@ -535,6 +573,8 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     // The snapshot was stored under the old authorization: never paint it again.
     snapshotRetiredRef.current = true;
     setPaintedSnapshot(null);
+    paintedWindowsRef.current.clear();
+    liveProjectIdsRef.current = null;
     sessionsRef.current = {};
     expandedRef.current = new Set();
     sessionProjectRef.current.clear();
@@ -610,7 +650,10 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     pages: Record<string, { sessions: WorkbenchSession[]; next_before_id: string | null } | undefined>,
   ) => {
     for (const [projectId, page] of Object.entries(pages)) {
-      if (page) acceptProjectRows(read, projectId, page.sessions);
+      if (!page) continue;
+      acceptProjectRows(read, projectId, page.sessions);
+      paintedWindowsRef.current.delete(projectId);
+      rememberProjectSessions(projectId, firstPageOf(page.sessions, page.next_before_id));
     }
     setSessions((prev) => {
       let changed = false;
@@ -743,6 +786,8 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
           } while (before && acc.length < targetCount);
           if (!stale && readOwnershipRef.current.isCurrent(read, `project:${projectId}`)) {
             acceptProjectRows(read, projectId, acc);
+            paintedWindowsRef.current.delete(projectId);
+            rememberProjectSessions(projectId, firstPageOf(acc, nextBeforeId));
             setSessions((prev) => ({
               ...prev,
               [projectId]: { sessions: acc, cursor: nextBeforeId, loading: false, loadingMore: false, error: false },
@@ -937,7 +982,25 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         return kept.length > 0 ? kept : null;
       });
     };
+    // Session windows painted for another reader go too, back to a window the
+    // live read in flight (if any) will fill.
+    const dropPaintedWindows = (principal: string) => {
+      const others = [...paintedWindowsRef.current].filter(([, owner]) => owner !== principal).map(([id]) => id);
+      if (others.length === 0) return;
+      for (const projectId of others) paintedWindowsRef.current.delete(projectId);
+      setSessions((prev) => {
+        const next = { ...prev };
+        for (const projectId of others) {
+          if (!prev[projectId]) continue;
+          next[projectId] = { ...EMPTY_SESSIONS, loading: inFlightRef.current.has(projectId) };
+        }
+        return next;
+      });
+    };
     const seed = async (principal: string | null) => {
+      // The session snapshots load into memory now, so expanding a project can
+      // draw its cached rows in the same render.
+      if (principal && isActive()) void hydrateProjectSessionSnapshots().then(forgetSessionsOfUnlistedProjects);
       if (!principal || !isActive() || snapshotRetiredRef.current) return;
       const snapshot = await readLocalSnapshot(PROJECTS_SNAPSHOT_KEY, PROJECTS_SNAPSHOT_SCHEMA, parseProjectsSnapshot);
       if (cancelled || !snapshot || snapshotRetiredRef.current) return;
@@ -951,6 +1014,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     const unsubscribe = subscribeLocalSnapshotPrincipal((principal) => {
       const painted = paintedSnapshotRef.current;
       if (principal && painted && principal !== painted.principal) dropPainted();
+      if (principal) dropPaintedWindows(principal);
       void seed(principal);
     });
     return () => {
@@ -958,7 +1022,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       seedSnapshotRef.current = () => {};
       unsubscribe();
     };
-  }, [commitProjects, isActive, setPaintedSnapshot]);
+  }, [commitProjects, forgetSessionsOfUnlistedProjects, isActive, setPaintedSnapshot]);
 
   useEffect(() => {
     if (active) seedSnapshotRef.current(getLocalSnapshotPrincipal());
@@ -1028,7 +1092,10 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   // question, one round-trip earlier.
   const fetchSessions = useCallback(
     async function fetchSessions(projectId: string, opts?: { append?: boolean }) {
-      const append = opts?.append ?? false;
+      // A painted window is not a page the server answered: paging on from its
+      // cursor would merge the next live page into cached rows. Read the first
+      // page instead, which replaces them.
+      const append = (opts?.append ?? false) && !paintedWindowsRef.current.has(projectId);
       if (append && !sessionsRef.current[projectId]?.cursor) return; // nothing more to load
       if (!canIssueRead('population', projectId)) return;
       if (inFlightRef.current.has(projectId)) return; // serialise per project
@@ -1048,7 +1115,13 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         if (!projectIsInTree(projectId)) return;
         const currentRead = readOwnershipRef.current.isCurrent(read, `project:${projectId}`);
         retryAfterInvalidation = !currentRead && readOwnershipRef.current.isLatestRead(read);
-        if (currentRead) acceptProjectRows(read, projectId, res.sessions);
+        if (currentRead) {
+          acceptProjectRows(read, projectId, res.sessions);
+          if (!append) {
+            paintedWindowsRef.current.delete(projectId);
+            rememberProjectSessions(projectId, { sessions: res.sessions, next_before_id: res.next_before_id });
+          }
+        }
         setSessions((prev) => {
           const cur = prev[projectId] ?? EMPTY_SESSIONS;
           if (!currentRead) {
@@ -1145,6 +1218,13 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
           projectIdForSession(data.session_id);
         if (projectId) sessionProjectRef.current.set(data.session_id, projectId);
         acceptSessionMutation(projectId, data.session_id);
+        // Archived or hidden: the stored first page that lists it is out of date
+        // for every reader, so it goes, rather than paint the Session again.
+        if (sessionActivityInboxAction(data) === 'drop') {
+          for (const cached of new Set([...projectsWithCachedSession(data.session_id), ...(projectId ? [projectId] : [])])) {
+            forgetProjectSessions(cached);
+          }
+        }
         if (data.event === 'archived') {
           sessionProjectRef.current.delete(data.session_id);
           // Terminal archive (here or in another tab) — drop the row live.
@@ -1226,6 +1306,24 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     refreshCachedSessionRow,
   ]);
 
+  // Expanding a project draws its last stored first page in the same render,
+  // while the live read that replaces it is in flight. Only onto a window
+  // nothing has loaded, and never an empty page: the empty state is the live
+  // answer's to show.
+  const paintCachedWindow = useCallback((projectId: string) => {
+    const principal = getLocalSnapshotPrincipal();
+    const cached = cachedProjectSessions(projectId);
+    if (!principal || !cached || cached.sessions.length === 0) return;
+    paintedWindowsRef.current.set(projectId, principal);
+    setSessions((prev) => {
+      if (prev[projectId]?.sessions != null) return prev;
+      return {
+        ...prev,
+        [projectId]: { sessions: cached.sessions, cursor: cached.next_before_id, loading: false, loadingMore: false, error: false },
+      };
+    });
+  }, []);
+
   const toggleExpanded = useCallback(
     (projectId: string) => {
       const willExpand = !expandedRef.current.has(projectId);
@@ -1239,10 +1337,11 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         // Fetch the first page if never loaded or the last load failed (a healthy
         // loaded project keeps the pages the user already paged in).
         const state = sessionsRef.current[projectId];
+        if (!state || state.sessions === null) paintCachedWindow(projectId);
         if (!state || state.sessions === null || state.error) void fetchSessions(projectId);
       }
     },
-    [fetchSessions],
+    [fetchSessions, paintCachedWindow],
   );
 
   // ── A project the server no longer has leaves the tree at once ─────────────
@@ -1256,6 +1355,8 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     (projectId: string) => {
       acceptProjectsMutation();
       acceptSessionMutation(projectId);
+      forgetProjectSessions(projectId);
+      paintedWindowsRef.current.delete(projectId);
       const painted = paintedSnapshotRef.current !== null;
       if (painted) snapshotRetiredRef.current = true;
       commitProjects((prev) => {
@@ -1574,6 +1675,9 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       await api.archiveSession(sessionId);
       acceptSessionMutation(projectId, sessionId);
       sessionProjectRef.current.delete(sessionId);
+      for (const cached of new Set([...projectsWithCachedSession(sessionId), ...(projectId ? [projectId] : [])])) {
+        forgetProjectSessions(cached);
+      }
       if (projectId == null) return; // standalone session: no tree row to drop
       setSessions((prev) => {
         const state = prev[projectId];
