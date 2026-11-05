@@ -280,12 +280,25 @@ several times over.
 
 ### 4.1 Storage layout
 
-The store upgrades the existing database `avibe-local-snapshots` from version 1
-to version 2 and adds object stores beside `snapshots`. One database gives one
-wipe: sign-out and revocation clear every store in a single transaction behind
-the existing sign-out generation fence. A tab still running an old build gets
-`versionchange` and closes; an old build that opens version 2 gets a
-`VersionError` and runs with no cache. Both paths are safe.
+The message store is a separate database, `avibe-local-store`. The snapshot
+database `avibe-local-snapshots` stays at version 1 and is untouched, so a tab
+still running an older build keeps reading and wiping its snapshots as today.
+Sign-out and revocation in a current build clear both databases.
+
+**Wiping across builds.** A tab running an older build does not know the
+message store exists, so its sign-out cannot clear it directly. The shared
+sign-out generation in localStorage (`ui/src/lib/signOutGeneration.ts`) closes
+that gap. Every build since #3228 bumps it on sign-out and on revocation.
+
+- The message store records the generation in `meta`.
+- At every open, and on every `storage` event for that key, a current build
+  compares the two. A newer generation wipes every store before any read.
+- So an older tab's sign-out wipes the store immediately in any open
+  current-build tab, and otherwise at the next open of a current build.
+- In between, the data stays on disk but nothing displays it, and the server
+  has already ended the session.
+- A build older than #3228 does not bump the generation. Its sign-out reaches
+  the store through the login-required rule in section 6.2.
 
 The new stores hold one reader at a time. A `meta` record names that reader;
 any mismatch at open, or a new reader being set, clears them before the first
@@ -294,7 +307,7 @@ principal deletes every other principal's records"), made structural.
 
 | Store | Key | Value | Indexes |
 | --- | --- | --- | --- |
-| `meta` | `'reader'` | `{reader, schema, createdAt}` | None |
+| `meta` | `'reader'` | `{reader, schema, signOutGeneration, accessDigest?, createdAt}` | None |
 | `sessions` | `id` | `{id, row, scopeId, lastActiveAt, openedAt, cursor?, bytes}`; `row` is the `WorkbenchSession` as served | `lastActiveAt`, `scopeId`, `openedAt` |
 | `messages` | `id` | `{id, sessionId, orderAt, row, bytes}`; `orderAt` is the canonical `coalesce(delivered_at, created_at)` | `[sessionId, orderAt, id]` |
 | `ranges` | `[sessionId, fromAt, fromId]` | `{sessionId, from, to, startReached, atTail, verified, verifiedAt}` | `sessionId` |
@@ -319,10 +332,24 @@ between `from` and `to` is on this device, as of `verifiedAt`".
 **Writing a server page** happens in one transaction. The page can be a
 bootstrap tail, a `tail=1` read, a `before_id` page, or an `around_*` window.
 
-1. Delete the session's local rows inside the page's interval that the page
-   does not contain. They were moved, retyped, or never existed.
+1. Delete the session's local rows inside the page's authoritative interval
+   that the page does not contain. They were moved, retyped, or never existed.
 2. Upsert the page's rows.
 3. Add the interval as a range and merge it with any range it overlaps or abuts.
+
+The authoritative interval comes from the request and the cursors, not only
+from the rows the page returned. Otherwise a stale endpoint row, or an empty
+page, would never be repaired.
+
+| Page | Lower bound | Upper bound |
+| --- | --- | --- |
+| Tail (bootstrap or `tail=1`) | First row's key; negative infinity when `next_before_id` is null, which includes an empty page | Positive infinity |
+| `before_id=X` | First row's key; negative infinity when `next_before_id` is null, which includes an empty page | `X`'s key, exclusive |
+| `around_*` window | First row's key; negative infinity when `next_before_id` is null | Last row's key; positive infinity when `next_after_id` is null |
+
+An interval that reaches positive infinity spares one kind of row: a row
+stored from the event stream after the request started. That row is newer than
+the answer, and it survives the replacement, as it does today (#3243).
 
 A page abuts a range when it was fetched with `before_id` equal to that range's
 first row, or when the two share a row id. This generalizes invariant 1 from
@@ -479,15 +506,25 @@ Cost and bounds:
 - Retention runs on the existing maintenance worker, in batches like
   `agent_events_retention`. It drops rows older than 30 days and records
   `sync_floor_seq` in `state_meta`.
+- The log has an incarnation: a random id written to `state_meta`
+  (`sync_log_incarnation`) whenever the table is created. `AUTOINCREMENT`
+  is monotonic only for the life of the table. A downgrade followed by an
+  upgrade recreates the table, and a database restored from a backup
+  (`storage/backups.py`) rolls the sequence back.
 - The queries below are `SEARCH` by primary key or by `(session_id, seq)`, and
   their plans are pinned in tests (AGENTS.md section 6, controller event loop).
 
 ### 5.2 Endpoints
 
-All are viewer-level reads. Each response names `reader` (the `/api/session`
-`author_id`) and carries `floor_seq`.
+All are viewer-level reads. Each response carries:
 
-- **`GET /api/sync/sessions?cursor=<seq>&limit=200`.** Sessions changed after
+- `reader`: the `/api/session` `author_id`;
+- `incarnation` and `floor_seq`;
+- `access_digest` (section 5.5).
+
+Cursors are opaque strings of the form `<incarnation>.<seq>`.
+
+- **`GET /api/sync/sessions?cursor=<cursor>&limit=200`.** Sessions changed after
   the cursor, coalesced per session, in `seq` order:
   - `{session_id, op: 'upsert', session, last_seq}` for a session the reader
     may read now and that is active;
@@ -515,9 +552,15 @@ All are viewer-level reads. Each response names `reader` (the `/api/session`
 **Limits.**
 
 - Pages are clamped to 200.
-- A cursor below `floor_seq` returns `reset: true`. The client marks that
-  session's ranges unverified and starts over from a fresh tail. Nothing is
-  wiped.
+- A cursor returns `reset: true` when any of these holds:
+  - its `seq` is below `floor_seq`;
+  - its incarnation is not the current one, because the table was recreated;
+  - its `seq` is above the log head, because the database was restored from
+    a backup.
+
+  On a reset, the client marks the affected ranges unverified, takes the
+  session list again in snapshot mode, and starts each held session over from
+  a fresh tail. Nothing is wiped.
 - The server scans at most `limit` raw log rows per call, however many of them
   the reader can see, and returns `next_cursor` past the scanned rows. Work is
   bounded by the page, not by history.
@@ -556,19 +599,38 @@ On a metered connection, only session rows and tails sync.
 
   While the stream stays continuous, those pulls are small.
 
-### 5.5 Losing access
+### 5.5 Gaining and losing access
 
 Access can change with no local write: a project policy, an organization group
-claim, an instance role, or a removed Bot. So the feed never streams
-"you lost this" tombstones. Streaming them would also tell a reader about
-sessions they cannot see. Instead:
+claim, an instance role, or a removed Bot. A cursor sees only later log rows, so
+it misses both directions:
 
-- the feed only ever names sessions the reader may read now;
-- the client checks its held sessions with `POST /api/sync/visible` at launch,
-  on resume, on reconnect, on `authorization.changed`, after a session moves to
-  another project, and every 10 minutes while visible, and deletes everything
-  for sessions that are no longer visible;
-- archive arrives as `op: 'remove'`, and live through `session.activity`
+- a session that became readable without changing never enters the store;
+- a session that became unreadable never leaves it.
+
+The feed also never streams "you lost this" tombstones, because those would
+tell a reader about sessions they cannot see.
+
+**Gaining access.**
+
+- Every sync response carries `access_digest`, a hash of the reader's instance
+  role, readable project ids (`accessible_project_ids`), and hidden Bot
+  session ids. Its cost is bounded by the number of projects.
+- When the digest differs from `meta.accessDigest`, the client takes the
+  readable session list again in snapshot mode and adds what it lacks.
+- `authorization.changed`, launch, and resume each trigger a feed pull. A group
+  claim refreshed on the server is therefore noticed at the next pull.
+
+**Losing access.**
+
+- The feed only ever names sessions the reader may read now.
+- The client checks the sessions it holds with `POST /api/sync/visible` and
+  deletes everything for those no longer visible. It checks:
+  - at launch, on resume, and on reconnect;
+  - on `authorization.changed` and whenever the access digest changes;
+  - after a session moves to another project;
+  - every 10 minutes while visible.
+- Archive arrives as `op: 'remove'`, and live through `session.activity`
   `archived` as today.
 
 This replaces the Phase 1 whole-store clear on `authorization.changed` for the
@@ -584,7 +646,8 @@ message store (decision D8).
   older server binary on an upgraded database (rollback without downgrade)
   still has working triggers but no pruning. The log then grows until the
   instance is upgraded again; this is noted in the release notes for that
-  revision.
+  revision. A later upgrade recreates the table with a new incarnation, so
+  every client cursor resets (section 5.2).
 - **Revision id.** The revision follows `20261030_0072_session_digests` at the
   time of writing. The implementation PR rechecks the latest revision at its
   final rebase.
@@ -603,7 +666,7 @@ the server again.
 
 | Event | Phase 1 | Phase 2 |
 | --- | --- | --- |
-| Sign-out from the UI | Wipe all stores before navigating (existing path, extended) | Same |
+| Sign-out from the UI | Wipe both databases before navigating (existing path, extended). A sign-out in an older-build tab wipes through the sign-out generation (section 4.1) | Same |
 | Revocation (`remote.authorization` revoked, or a sync response saying so) | Wipe | Wipe |
 | A different reader confirmed by `/api/session` | Wipe before the first paint (`meta.reader` mismatch) | Same |
 | Login required (session expired) | Wipe the message store. Phase 1 has no way to recheck access when the reader comes back | Hide at once; keep for the same reader, then run the visibility check before showing it again (decision D7) |
@@ -719,7 +782,8 @@ Phases 1 and 2 already give the shell.
 
 **Scope:**
 
-- the version 2 schema;
+- the `avibe-local-store` database, with the cross-build wipe through the
+  sign-out generation;
 - the store module with ranges, interval replacement, the hot mirror, budget
   and eviction, and `persist()`;
 - write-through from every source in section 4.4;
@@ -750,10 +814,15 @@ Phases 1 and 2 already give the shell.
 
 - interval replacement in both directions;
 - range merge, abut, and gap;
+- authoritative intervals: a tail reaches positive infinity, exhausted
+  history reaches negative infinity, and an empty page still clears its
+  interval;
 - tail extension only on a continuous stream;
 - eviction order;
 - a quota error;
 - every wipe trigger with a pending write;
+- a sign-out in an older-build tab, by generation bump, which wipes at the next
+  open and on the `storage` event;
 - two tabs under the lock;
 - the reader fence;
 - schema mismatch.
@@ -791,6 +860,8 @@ falls back to today's behavior (invariant 2).
   needs no request for correctness.
 - A reconnect after a gap of any size recovers exactly the changed sessions.
 - Offline, every synced conversation reads to its synced depth.
+- A project the reader is granted, with no session write, appears after the
+  next pull.
 - A session the reader loses access to leaves the device at the next visibility
   check: at most 10 minutes while open, at resume otherwise.
 - Every message writer produces a change.
@@ -815,6 +886,8 @@ IDs appear in test names and PR bodies. Role semantics reuse the existing
 | LSYNC-011 | Every message writer produces a change: insert, `persist_agent_message`, `set_quick_reply_chosen`, failure retry, `note_turn_mode`, `promote_suppressed_native_message` (a change for both sessions), and `touch_message` (table-driven) |
 | LSYNC-012 | An expired session hides the store at once; the same reader's sign-in shows it only after the visibility check; a different reader wipes it |
 | LSYNC-013 | Backfill and push-worker reads do not renew the remote session |
+| LSYNC-014 | A member granted access to an existing project, by a binding or a group claim with no session write, gets that project's sessions after the next pull, through the access digest |
+| LSYNC-015 | A cursor from another incarnation (table recreated), or above the log head (database restored from a backup), resets instead of silently missing changes |
 
 Manual checks:
 
