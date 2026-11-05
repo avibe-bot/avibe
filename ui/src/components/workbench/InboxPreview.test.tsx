@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import type { InboxSession } from '../../context/ApiContext';
 import { writeInboxFilter } from '../../lib/inboxFilterMemory';
-import { INBOX_PREVIEW_MAX_CHARS, INBOX_PREVIEW_MAX_LINES, inboxPreviewSource } from '../../lib/inboxPreview';
+import { INBOX_PREVIEW_MAX_CHARS, inboxPreviewSource } from '../../lib/inboxPreview';
 import { InboxPage } from './InboxPage';
 
 // Every card previews the latest reply as Markdown, and a reply can be many
@@ -83,47 +83,48 @@ describe('Inbox previews', () => {
     expect(parsed.contents).toEqual(['A new reply']);
   });
 
-  const line = (n: number, width = 40) => `line ${n} `.padEnd(width, 'x');
-  const lines = (count: number, width?: number) => Array.from({ length: count }, (_, i) => line(i, width)).join('\n');
+  const cap = INBOX_PREVIEW_MAX_CHARS;
+  const paragraph = (length: number) => 'word '.repeat(Math.ceil(length / 5)).slice(0, length);
 
   it.each([
     {
-      name: 'keeps a reply within the caps as it is',
-      text: lines(INBOX_PREVIEW_MAX_LINES),
-      expected: lines(INBOX_PREVIEW_MAX_LINES),
+      name: 'keeps a reply within the cap as it is',
+      text: paragraph(cap),
+      expected: paragraph(cap),
     },
     {
-      name: 'keeps the leading whole lines up to the line cap',
-      text: lines(INBOX_PREVIEW_MAX_LINES + 30),
-      expected: `${lines(INBOX_PREVIEW_MAX_LINES)}\n`,
+      name: 'keeps the start of a reply past the cap, cutting inside a line',
+      text: `${paragraph(100)}\n${paragraph(cap * 3)}`,
+      expected: `${paragraph(100)}\n${paragraph(cap * 3)}`.slice(0, cap),
     },
     {
-      name: 'keeps the leading whole lines up to the character cap',
-      text: lines(10, 400),
-      expected: `${lines(2, 400)}\n`,
+      name: 'keeps the paragraph under a short heading',
+      text: `## Summary\n\n${paragraph(cap * 2)}`,
+      expected: `## Summary\n\n${paragraph(cap * 2)}`.slice(0, cap),
     },
     {
-      name: 'cuts one overlong line at the cap',
-      text: 'y'.repeat(INBOX_PREVIEW_MAX_CHARS * 3),
-      expected: 'y'.repeat(INBOX_PREVIEW_MAX_CHARS),
+      name: 'keeps the paragraph after a leading blank line',
+      text: `\n${paragraph(cap * 2)}`,
+      expected: `\n${paragraph(cap * 2)}`.slice(0, cap),
     },
     {
       name: 'never splits a surrogate pair',
-      text: `${'y'.repeat(INBOX_PREVIEW_MAX_CHARS - 1)}😀${'y'.repeat(50)}`,
-      expected: 'y'.repeat(INBOX_PREVIEW_MAX_CHARS - 1),
+      text: `${'y'.repeat(cap - 1)}😀${'y'.repeat(50)}`,
+      expected: 'y'.repeat(cap - 1),
     },
     {
       name: 'keeps link definitions from the rest of the reply',
-      text: `See [the plan][plan] and the note[^1].\n${lines(60)}\n[plan]: https://example.com/plan\n[^1]: A footnote.`,
-      expected: `See [the plan][plan] and the note[^1].\n${lines(INBOX_PREVIEW_MAX_LINES - 1)}\n\n\n[plan]: https://example.com/plan\n[^1]: A footnote.`,
+      text: `See [the plan][plan] and the note[^1].\n${paragraph(cap * 2)}\n[plan]: https://example.com/plan\n[^1]: A footnote.`,
+      expected: `${`See [the plan][plan] and the note[^1].\n${paragraph(cap * 2)}`.slice(0, cap)}\n\n[plan]: https://example.com/plan\n[^1]: A footnote.`,
     },
   ])('$name', ({ text, expected }) => {
     expect(inboxPreviewSource(text)).toBe(expected);
   });
 
   it('hands the card only the part of a long reply it can show', () => {
-    feed.inboxSessions = [row(1, lines(200))];
+    const reply = paragraph(cap * 6);
+    feed.inboxSessions = [row(1, reply)];
     render(page());
-    expect(parsed.contents).toEqual([`${lines(INBOX_PREVIEW_MAX_LINES)}\n`]);
+    expect(parsed.contents).toEqual([reply.slice(0, cap)]);
   });
 });
