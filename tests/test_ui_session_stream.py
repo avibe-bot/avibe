@@ -407,6 +407,75 @@ def test_workbench_dispatch_propagates_attachment_and_resolved_identity(
     assert Path(payload["files"][0]["path"]).read_bytes() == b"attachment-bytes"
 
 
+def test_workbench_send_keeps_its_client_message_id_on_the_answer_and_the_message(
+    isolated_state,
+    tmp_path,
+):
+    """Scenario: the Web chat shows a sent message before the server answers and
+    recognises the server's row by ``metadata.client_message_id``, whichever of
+    the POST answer and the ``message.new`` event lands first. Both carry it: the
+    answer is the public Delivery, the event is the materialized Message read."""
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    with patch("vibe.internal_client.dispatch_async", _accepted_dispatch(session_id)):
+        client = app.test_client()
+        response = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"text": "hello", "metadata": {"client_message_id": "client-1"}},
+            headers=csrf_headers(client),
+        )
+
+    assert response.status_code == 201
+    body = response.get_json()
+    assert body["metadata"]["client_message_id"] == "client-1"
+    with create_sqlite_engine().connect() as conn:
+        published = messages_service.get_message(conn, body["id"])
+    assert published is not None
+    assert published["metadata"]["client_message_id"] == "client-1"
+
+
+def test_a_refused_send_leaves_its_uploaded_attachment_sendable_again(
+    isolated_state,
+    tmp_path,
+):
+    """Scenario: the Web chat withdraws a refused send and gives the draft back
+    with the same attachment tokens; sending again must carry the same file
+    without a new upload."""
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    client = app.test_client()
+    headers = csrf_headers(client)
+    upload = client.post(
+        f"/api/sessions/{session_id}/attachments",
+        data={"upload_id": "upload-id-654321"},
+        files={"file": ("notes.txt", b"attachment-bytes", "text/plain")},
+        headers=headers,
+    )
+    assert upload.status_code == 201
+    submission = {
+        "content": {
+            "text": "read this",
+            "attachments": [{"token": upload.get_json()["token"]}],
+        }
+    }
+
+    refused = AsyncMock(return_value={"status_code": 500, "body": {"error": "backend resolution failed"}})
+    with patch("vibe.internal_client.dispatch_async", refused):
+        first = client.post(f"/api/sessions/{session_id}/messages", json=submission, headers=headers)
+    assert first.status_code == 502
+
+    accepted = _accepted_dispatch(session_id)
+    with patch("vibe.internal_client.dispatch_async", accepted):
+        second = client.post(f"/api/sessions/{session_id}/messages", json=submission, headers=headers)
+
+    assert second.status_code == 201
+    files = accepted.await_args.args[0]["files"]
+    assert [file["name"] for file in files] == ["notes.txt"]
+    assert Path(files[0]["path"]).read_bytes() == b"attachment-bytes"
+
+
 def test_queued_projection_carries_the_uploaded_file_identity(isolated_state, tmp_path):
     """A queued message names the file it is waiting to send, in the shape the
     queue strip draws (issue #2042).
