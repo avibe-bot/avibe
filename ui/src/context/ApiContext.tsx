@@ -31,7 +31,7 @@ import { onPageReactivated, type PageReactivationListener } from '../lib/pageAct
 import type { ScopeKind, ScopeSettingsChange } from '../lib/scopeSettingsPatch';
 import type { ShowPagePayload } from '../lib/showPageLinks';
 import { visibilityActivityEvents } from '../lib/sessionVisibilityEvents';
-import { forgetChatSnapshot, forgetChatSnapshotOnActivity } from '../lib/chatSnapshots';
+import { chatChromeFromBootstrap } from '../lib/chatSnapshots';
 import { normalizeSessionInfo, type InstanceCapabilities, type SessionInfo } from '../lib/sessionInfo';
 import type { VaultSessionPolicy } from '../lib/vaultSandboxPolicy';
 import {
@@ -2734,7 +2734,6 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const convergeSessionArchived = (sessionId: string) => {
     sessionDraftPersistence.clearSession(sessionId);
-    void forgetChatSnapshot(sessionId);
     void forgetLocalStoreSession(sessionId);
     for (const handler of Array.from(sessionArchivedHandlersRef.current)) {
       try {
@@ -3026,7 +3025,6 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // later real SSE event carrying the same change.
   const emitLocalSessionActivity = (data: Parameters<NonNullable<WorkbenchEventHandlers['onSessionActivity']>>[0]) => {
     if (data.session_id) clearSessionReadCache(data.session_id);
-    forgetChatSnapshotOnActivity(data);
     applyLocalStoreSessionActivity(data);
     dispatchToWorkbenchHandlers((handlers) => handlers.onSessionActivity?.(data));
   };
@@ -3367,10 +3365,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (envelope.data.event === 'archived') {
           sessionDraftPersistence.clearSession(envelope.data.session_id);
         }
-        // A Session that leaves the reader's Inbox takes its stored conversation
-        // with it (docs/plans/web-ui-local-cache.md section 4.4), and its history
-        // in the local message store (docs/plans/local-sync-store.md section 6.2).
-        forgetChatSnapshotOnActivity(envelope.data);
+        // A Session that leaves the reader's Inbox takes its history in the local
+        // message store with it (docs/plans/local-sync-store.md section 6.2).
         applyLocalStoreSessionActivity(envelope.data);
       } else {
         clearReadCacheMatching((path) => path.startsWith('/api/inbox') || path.startsWith('/api/sessions'));
@@ -4390,7 +4386,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           forgetRefusedSession(sessionId, error);
           throw error;
         });
-        void recordLocalStorePage(stored, { kind: 'tail' }, payload, payload?.session);
+        // With what the bootstrap says around the transcript, so the chat paints
+        // whole when it is opened again (lib/chatSnapshots).
+        void recordLocalStorePage(stored, { kind: 'tail' }, payload, payload?.session, payload ? chatChromeFromBootstrap(payload) : undefined);
         if (payload?.session?.status === 'archived') {
           sessionDraftPersistence.clearSession(sessionId);
           return payload;

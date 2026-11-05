@@ -29,7 +29,9 @@ scenarios:
     status: covered
     kind: security
     layer: unit
-    test: ui/src/lib/localStore/localStore.test.ts::LSYNC-008 shows a different reader on the same device nothing of the previous one
+    test:
+      - ui/src/lib/localStore/localStore.test.ts::LSYNC-008 shows a different reader on the same device nothing of the previous one
+      - ui/src/lib/chatSnapshots.test.ts::LSYNC-019 is emptied at once when the store is cleared, and LSYNC-008 when another reader is named
   - id: LSYNC-018
     name: A sign-out in another tab, including an older build that does not know the store, wipes it and stops this tab storing for that reader
     status: covered
@@ -45,7 +47,9 @@ scenarios:
     status: covered
     kind: security
     layer: unit
-    test: ui/src/lib/localStore/localStore.test.ts::LSYNC-019 clears the store on an authorization change
+    test:
+      - ui/src/lib/localStore/localStore.test.ts::LSYNC-019 clears the store on an authorization change
+      - ui/src/lib/chatSnapshots.test.ts::LSYNC-019 is emptied at once when the store is cleared, and LSYNC-008 when another reader is named
   - id: LSYNC-020
     name: A session that leaves the reader's Inbox is forgotten, and a read of it still in flight cannot restore it
     status: covered
@@ -57,6 +61,8 @@ scenarios:
       - ui/src/lib/localStore/localStore.test.ts::LSYNC-020 does not let a read in one tab restore a session another tab forgot
       - ui/src/lib/localStore/localStore.test.ts::LSYNC-020 does not let a read pending in one tab admit streamed rows of a session another tab forgot
       - ui/src/context/ApiContext.localStore.test.tsx::LSYNC-020 forgets a session whose message read the server refuses, and keeps it when the read only failed
+      - ui/src/lib/localStore/localStore.test.ts::LSYNC-020 drops it with a forgotten session, and an answer read before the forget does not bring it back
+      - ui/src/lib/chatSnapshots.test.ts::LSYNC-020 drops a forgotten conversation at once, and a read already out does not put it back
   - id: LSYNC-021
     name: An expired session (login required) wipes the store; a session read that only failed does not
     status: covered

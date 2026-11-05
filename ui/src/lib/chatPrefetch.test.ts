@@ -4,7 +4,6 @@ import 'fake-indexeddb/auto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { WorkbenchSession } from '../context/ApiContext';
-import type { ChatSnapshot } from './chatSnapshots';
 
 // The prefetch fills in conversations the reader has not opened yet, in idle
 // time. What it must never do is more than that: send anything but the declared
@@ -42,27 +41,57 @@ const bootstrapResponse = (sessionId: string, title = `live ${sessionId}`) => Re
   turn_state: {},
 });
 
-const stored = (sessionId: string, title: string): ChatSnapshot => ({
-  session: { id: sessionId, title } as WorkbenchSession,
-  messages: [],
-  next_before_id: null,
-  agents: [],
-  default_agent_name: null,
-  can_chat: true,
-  chat_message_font_size: null,
-});
 
 const sessionOf = (path: string) => decodeURIComponent(path.split('/')[3]);
+// A prefetched answer that carries a row, so a case can tell its write has landed
+// (the row and the session are written in one transaction).
+const answerWithRow = async (sessionId: string, title: string) => Response.json({
+  ...(await bootstrapResponse(sessionId, title).json()),
+  messages: [{
+    id: `msg_${sessionId}_1`, session_id: sessionId, type: 'result', author: 'agent', text: 'prefetched row', content: {}, metadata: {},
+    created_at: '2026-11-05T00:00:01.000000Z', updated_at: '2026-11-05T00:00:01.000000Z', delivered_at: null,
+  }],
+});
 
 // Every test starts a fresh document: the prefetch remembers what it tried.
 let prefetch: typeof import('./chatPrefetch');
 let snapshots: typeof import('./chatSnapshots');
 let store: typeof import('./localSnapshots');
+let messageStore: typeof import('./localStore');
+// The reader opens the chat: its bootstrap is stored, as the API layer stores it.
 const storeAs = async (sessionId: string, title: string) => {
-  const owner = snapshots.chatSnapshotOwnerForAnswer(snapshots.beginChatSnapshotRequest(sessionId))!;
-  await snapshots.writeChatSnapshot(owner, stored(sessionId, title));
+  await messageStore.recordLocalStorePage(
+    messageStore.beginLocalStoreRead(sessionId),
+    { kind: 'tail' },
+    { messages: [], next_before_id: null },
+    { id: sessionId, title } as WorkbenchSession,
+    { agents: [], default_agent_name: null, can_chat: true, chat_message_font_size: null },
+  );
 };
 const titleOf = async (sessionId: string) => (await snapshots.readChatSnapshot(sessionId))?.session.title ?? null;
+const rowsOf = async (sessionId: string) =>
+  ((await messageStore.readLocalStoreWindow(sessionId))?.messages ?? []).map((row) => row.text);
+// The stored session row, whether or not the chat could paint from what is stored.
+const storedTitleOf = async (sessionId: string) => (await messageStore.readLocalStoreWindow(sessionId))?.session?.title ?? null;
+// The reader opens the chat while a prefetch of it is out: a newer tail whose
+// reach starts at its own (newest) row, so the older prefetched row, outside
+// that reach, still lands and shows that the prefetch's write did.
+const readerOpens = (sessionId: string, title: string) => messageStore.recordLocalStorePage(
+  messageStore.beginLocalStoreRead(sessionId),
+  { kind: 'tail' },
+  {
+    messages: [{
+      id: `msg_${sessionId}_5`, session_id: sessionId, type: 'result', author: 'agent', text: 'reader row', content: {}, metadata: {},
+      created_at: '2026-11-05T00:00:05.000000Z', updated_at: '2026-11-05T00:00:05.000000Z', delivered_at: null,
+    }],
+    next_before_id: `msg_${sessionId}_5`,
+  } as never,
+  { id: sessionId, title } as WorkbenchSession,
+  { agents: [], default_agent_name: null, can_chat: true, chat_message_font_size: null },
+);
+// The prefetch reads the store before its request goes out; act "while it is
+// out" only once it is.
+const requestOut = () => vi.waitFor(() => expect(apiFetch).toHaveBeenCalled(), SETTLE);
 const requested = () => apiFetch.mock.calls.map(([path]) => sessionOf(path as string));
 
 let idle: Array<() => void> = [];
@@ -72,6 +101,15 @@ const runIdle = async () => {
   pending.forEach((run) => run());
   await new Promise((resolve) => setTimeout(resolve, 30));
 };
+// Each prefetch reads the store before it fetches, which under a loaded run can
+// outlast any fixed pause: wait for the state instead. ``idleUntil`` also runs
+// the idle work the prefetch asks for meanwhile, so use it only where running
+// more of it cannot overshoot the state awaited.
+const SETTLE = { timeout: 10_000, interval: 25 };
+const idleUntil = (assertion: () => void | Promise<void>) => vi.waitFor(async () => {
+  await runIdle();
+  await assertion();
+}, SETTLE);
 
 // Network Information: an EventTarget that announces changes to its fields.
 class FakeConnection extends EventTarget {
@@ -98,12 +136,16 @@ beforeEach(async () => {
   });
   apiFetch.mockReset();
   vi.resetModules();
-  [prefetch, snapshots, store] = await Promise.all([
+  [prefetch, snapshots, store, messageStore] = await Promise.all([
     import('./chatPrefetch'),
     import('./chatSnapshots'),
     import('./localSnapshots'),
+    import('./localStore'),
   ]);
   store.setLocalSnapshotPrincipal('local');
+  // The first read in a fresh document opens and claims the message store; do
+  // it here, so a case times the prefetch rather than that.
+  await messageStore.readLocalStoreWindow('ses_warm_up');
 });
 
 afterEach(async () => {
@@ -149,19 +191,18 @@ describe('conversation prefetch', () => {
     expect(apiFetch).not.toHaveBeenCalled();
     await runIdle();
     // ses_1 already has a snapshot, so it takes a slot only to find that out.
-    expect(requested()).toEqual(['ses_0', 'ses_2']);
+    // No more idle work runs until this is seen, so nothing can overtake it.
+    await vi.waitFor(() => expect(requested()).toEqual(['ses_0', 'ses_2']), SETTLE);
+    // From here on every slot is taken until a response lands, so running more
+    // idle work starts nothing more.
+    await idleUntil(() => expect(requested()).toEqual(['ses_0', 'ses_2', 'ses_3']));
     await runIdle();
-    expect(requested()).toEqual(['ses_0', 'ses_2', 'ses_3']);
-    await runIdle();
-    expect(requested()).toEqual(['ses_0', 'ses_2', 'ses_3']);
+    await vi.waitFor(() => expect(requested()).toEqual(['ses_0', 'ses_2', 'ses_3']), SETTLE);
 
     responses.get('ses_0')!.resolve(bootstrapResponse('ses_0'));
-    await runIdle();
-    await runIdle();
-    expect(requested()).toEqual(['ses_0', 'ses_2', 'ses_3', 'ses_4']);
+    await idleUntil(() => expect(requested()).toEqual(['ses_0', 'ses_2', 'ses_3', 'ses_4']));
     for (const id of ['ses_2', 'ses_3', 'ses_4']) responses.get(id)!.resolve(bootstrapResponse(id));
-    await runIdle();
-    await runIdle();
+    await idleUntil(async () => expect(await titleOf('ses_4')).toBe('live ses_4'));
 
     expect(mostInFlight).toBe(BUDGET);
     expect(await titleOf('ses_0')).toBe('live ses_0');
@@ -186,7 +227,7 @@ describe('conversation prefetch', () => {
     setVisibility('visible');
     prefetch.prefetchChatSnapshots(['ses_a']);
     await runIdle();
-    expect(requested()).toEqual(['ses_a']);
+    await vi.waitFor(() => expect(requested()).toEqual(['ses_a']), SETTLE);
   });
 
   it('runs where the Network Information API is missing', async () => {
@@ -194,7 +235,7 @@ describe('conversation prefetch', () => {
     setConnection(undefined);
     prefetch.prefetchChatSnapshots(['ses_a']);
     await runIdle();
-    expect(requested()).toEqual(['ses_a']);
+    await vi.waitFor(() => expect(requested()).toEqual(['ses_a']), SETTLE);
   });
 
   it('gives back a queued Session when the connection turns metered before the browser is idle, and takes it when it recovers', async () => {
@@ -210,7 +251,7 @@ describe('conversation prefetch', () => {
     // Nothing offers it again but the connection itself.
     connection.set({ type: 'ethernet' });
     await runIdle();
-    expect(requested()).toEqual(['ses_a']);
+    await vi.waitFor(() => expect(requested()).toEqual(['ses_a']), SETTLE);
   });
 
   it('offers again when a page loaded in the background is shown', async () => {
@@ -223,7 +264,7 @@ describe('conversation prefetch', () => {
     setVisibility('visible');
     document.dispatchEvent(new Event('visibilitychange'));
     await runIdle();
-    expect(requested()).toEqual(['ses_a', 'ses_b']);
+    await vi.waitFor(() => expect(requested()).toEqual(['ses_a', 'ses_b']), SETTLE);
   });
 
   it('offers again when a data-saving connection stops saving data', async () => {
@@ -237,16 +278,17 @@ describe('conversation prefetch', () => {
 
     connection.set({ type: 'wifi' });
     await runIdle();
-    expect(requested()).toEqual(['ses_a']);
+    await vi.waitFor(() => expect(requested()).toEqual(['ses_a']), SETTLE);
   });
 
   it('tries a Session once per document, and fails silently', async () => {
     apiFetch.mockResolvedValue(Response.json({ error: 'unavailable' }, { status: 503 }));
     prefetch.prefetchChatSnapshots(['ses_a']);
     await runIdle();
+    await vi.waitFor(() => expect(requested()).toEqual(['ses_a']));
     prefetch.prefetchChatSnapshots(['ses_a']);
     await runIdle();
-    expect(requested()).toEqual(['ses_a']);
+    await vi.waitFor(() => expect(requested()).toEqual(['ses_a']), SETTLE);
     expect(await titleOf('ses_a')).toBeNull();
   });
 
@@ -255,10 +297,11 @@ describe('conversation prefetch', () => {
     apiFetch.mockReturnValue(response.promise);
     prefetch.prefetchChatSnapshots(['ses_a']);
     await runIdle();
-    await storeAs('ses_a', 'opened by the reader');
-    response.resolve(bootstrapResponse('ses_a', 'prefetched'));
-    await runIdle();
-    expect(await titleOf('ses_a')).toBe('opened by the reader');
+    await requestOut();
+    await readerOpens('ses_a', 'opened by the reader');
+    response.resolve(await answerWithRow('ses_a', 'prefetched'));
+    await vi.waitFor(async () => expect(await rowsOf('ses_a')).toEqual(['prefetched row', 'reader row']), SETTLE);
+    expect(await storedTitleOf('ses_a')).toBe('opened by the reader');
   });
 
   // The main Bot's conversation matters most: it is always taken, first, and
@@ -273,7 +316,7 @@ describe('conversation prefetch', () => {
     expect(requested()).toEqual(['ses_main', 'ses_0', 'ses_1']);
     expect(apiFetch.mock.calls[0]).toEqual(['/api/sessions/ses_main/bootstrap', { headers: { 'X-Avibe-Prefetch': '1' } }]);
     await runIdle();
-    expect(await titleOf('ses_main')).toBe('live ses_main');
+    await vi.waitFor(async () => expect(await titleOf('ses_main')).toBe('live ses_main'), SETTLE);
 
     // Once per document, like every other Session.
     prefetch.prefetchChatSnapshots(['ses_0'], { pinned: 'ses_main' });
@@ -289,14 +332,14 @@ describe('conversation prefetch', () => {
     prefetch.prefetchChatSnapshots(['ses_0', 'ses_1', 'ses_2', 'ses_main']);
     prefetch.prefetchChatSnapshots(['ses_0', 'ses_1', 'ses_2', 'ses_main'], { pinned: 'ses_main' });
     await runIdle();
-    expect(requested()).toEqual(['ses_main', 'ses_0', 'ses_1']);
+    await vi.waitFor(() => expect(requested()).toEqual(['ses_main', 'ses_0', 'ses_1']), SETTLE);
     // Its place among the recent was given up for the pinned one, so a slow
     // refresh is not fetched a second time.
     for (let round = 0; round < 4; round += 1) await runIdle();
     expect(requested()).toEqual(['ses_main', 'ses_0', 'ses_1', 'ses_2']);
     main.resolve(bootstrapResponse('ses_main'));
     await runIdle();
-    expect(await titleOf('ses_main')).toBe('live ses_main');
+    await vi.waitFor(async () => expect(await titleOf('ses_main')).toBe('live ses_main'), SETTLE);
   });
 
   it.each([
@@ -309,7 +352,7 @@ describe('conversation prefetch', () => {
     if (openAt === 'queue') prefetch.prefetchChatSnapshots(recent, { pinned: 'ses_main', open: 'ses_main' });
     await runIdle();
     await runIdle();
-    expect(requested()).toEqual(['ses_0']);
+    await vi.waitFor(() => expect(requested()).toEqual(['ses_0']), SETTLE);
   });
 
   it('leaves alone a main Bot chat the reader stored while its refresh was out', async () => {
@@ -318,10 +361,11 @@ describe('conversation prefetch', () => {
     apiFetch.mockReturnValue(response.promise);
     prefetch.prefetchChatSnapshots([], { pinned: 'ses_main' });
     await runIdle();
-    await storeAs('ses_main', 'opened by the reader');
-    response.resolve(bootstrapResponse('ses_main', 'prefetched'));
-    await runIdle();
-    expect(await titleOf('ses_main')).toBe('opened by the reader');
+    await requestOut();
+    await readerOpens('ses_main', 'opened by the reader');
+    response.resolve(await answerWithRow('ses_main', 'prefetched'));
+    await vi.waitFor(async () => expect(await rowsOf('ses_main')).toEqual(['prefetched row', 'reader row']), SETTLE);
+    expect(await storedTitleOf('ses_main')).toBe('opened by the reader');
   });
 
   it('gives the main Bot conversation back when conditions turn, and refreshes it once they recover', async () => {
@@ -336,7 +380,7 @@ describe('conversation prefetch', () => {
 
     connection.set({ type: 'wifi' });
     await runIdle();
-    expect(requested()).toEqual(['ses_main']);
+    await vi.waitFor(() => expect(requested()).toEqual(['ses_main']), SETTLE);
   });
 
   it('stores nothing when the reader changed while the request was out', async () => {
@@ -344,6 +388,7 @@ describe('conversation prefetch', () => {
     apiFetch.mockReturnValue(response.promise);
     prefetch.prefetchChatSnapshots(['ses_a']);
     await runIdle();
+    await requestOut();
     store.setLocalSnapshotPrincipal('remote:bob');
     response.resolve(bootstrapResponse('ses_a', 'answered for the last reader'));
     await runIdle();
@@ -374,9 +419,9 @@ describe('conversation prefetch', () => {
     apiFetch.mockReturnValue(response.promise);
     prefetch.prefetchChatSnapshots(['ses_a']);
     await runIdle();
+    await requestOut();
     await storeAs('ses_a', 'stored meanwhile');
     response.resolve(Response.json({ error: 'Session not found' }, { status: 404 }));
-    await runIdle();
-    expect(await titleOf('ses_a')).toBeNull();
+    await vi.waitFor(async () => expect(await titleOf('ses_a')).toBeNull(), SETTLE);
   });
 });

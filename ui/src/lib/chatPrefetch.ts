@@ -14,15 +14,7 @@
 
 import type { WorkbenchSessionBootstrap } from '../context/ApiContext';
 import { apiFetch } from './apiFetch';
-import {
-  beginChatSnapshotRequest,
-  chatSnapshotFromBootstrap,
-  chatSnapshotOwnerForAnswer,
-  chatSnapshotWriteCount,
-  forgetChatSnapshot,
-  readChatSnapshot,
-  writeChatSnapshot,
-} from './chatSnapshots';
+import { chatChromeFromBootstrap, readChatSnapshot } from './chatSnapshots';
 import { getLocalSnapshotPrincipal } from './localSnapshots';
 import { beginLocalStoreRead, forgetLocalStoreSession, recordLocalStorePage } from './localStore';
 
@@ -170,25 +162,17 @@ function pump(): void {
 
 async function prefetchOne({ sessionId, refresh }: Queued): Promise<void> {
   if (!refresh && await readChatSnapshot(sessionId)) return;
-  // Noted as the request starts, like the chat page's own: a reader change, a
-  // store clear, or a forget of this Session while it is out voids the answer.
-  const request = beginChatSnapshotRequest(sessionId);
-  if (!request.principal) return;
-  const writes = chatSnapshotWriteCount(sessionId);
+  if (!getLocalSnapshotPrincipal()) return;
+  // Noted as the request starts, like the chat page's own. The store's fences
+  // void the answer if the reader changed, the store was cleared, or the
+  // Session was forgotten while it was out, and P1 keeps any newer copy the
+  // open chat wrote meanwhile, so a refresh may simply write.
   const stored = beginLocalStoreRead(sessionId);
   try {
     const bootstrap = await fetchBootstrapForPrefetch(sessionId);
-    // The message store takes every bootstrap it is handed, whatever happens to
-    // the snapshot below: P1 keeps a newer copy the open chat wrote.
-    void recordLocalStorePage(stored, { kind: 'tail' }, bootstrap, bootstrap.session);
-    // The reader may have opened the chat meanwhile; its own record is newer.
-    // A refresh replaces a stored record, so it asks whether one was written
-    // while it was out rather than whether one exists.
-    if (refresh ? chatSnapshotWriteCount(sessionId) !== writes : await readChatSnapshot(sessionId)) return;
-    const owner = chatSnapshotOwnerForAnswer(request);
-    if (owner) await writeChatSnapshot(owner, chatSnapshotFromBootstrap(bootstrap), { added: true });
+    await recordLocalStorePage(stored, { kind: 'tail' }, bootstrap, bootstrap.session, chatChromeFromBootstrap(bootstrap));
   } catch (error) {
     const status = errorStatus(error);
-    if (status === 403 || status === 404) await Promise.all([forgetChatSnapshot(sessionId), forgetLocalStoreSession(sessionId)]);
+    if (status === 403 || status === 404) await forgetLocalStoreSession(sessionId);
   }
 }

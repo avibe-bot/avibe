@@ -90,6 +90,13 @@ type StoredSession = {
   touchedAt: number;
   lastActiveAt: string;
   bytes: number;
+  /** Attachments shown in the session, by media URL, least recently stored first. */
+  media?: Record<string, LocalStoreMediaMeta>;
+  /** What the session's last bootstrap said around its transcript, and when
+   *  that bootstrap went out. Ordered on its own: a session read carries no
+   *  chrome, so one that answered first does not void a bootstrap's. */
+  chrome?: LocalStoreChatChrome;
+  chromeObservedAt?: number;
 };
 type StoredMessage = {
   id: string;
@@ -361,6 +368,9 @@ function claimReader(reader: string): Promise<Claimed | null> {
   void promise.then((claimed) => {
     if (claimed) void requestPersistence();
   });
+  void promise.then((claimed) => {
+    if (claimed) void fillHot(reader);
+  });
   return promise;
 }
 
@@ -377,6 +387,7 @@ const keepableReader = (): string | null => getLocalSnapshotPrincipal();
  *  no one until a reader is named again. */
 async function wipe(keepReader: string | null): Promise<void> {
   pendingReads.clear();
+  clearHot();
   const pending = markWipePending();
   // A wipe that runs out of space gives up rather than wiping again. It stays
   // pending, and the next claim finishes it.
@@ -402,6 +413,7 @@ export function wipeLocalStore(): Promise<void> {
 
 subscribeLocalSnapshotPrincipal((next) => {
   claim = null;
+  clearHot();
   if (next) void claimReader(next);
 });
 if (getLocalSnapshotPrincipal()) void claimReader(getLocalSnapshotPrincipal()!);
@@ -594,6 +606,7 @@ export async function recordLocalStorePage(
   request: LocalStorePageRequest,
   answer: LocalStorePageAnswer,
   session?: WorkbenchSession | null,
+  chrome?: LocalStoreChatChrome,
 ): Promise<void> {
   if (session?.status === 'archived') {
     await forgetLocalStoreSession(ticket.sessionId);
@@ -616,7 +629,7 @@ export async function recordLocalStorePage(
     const current = await settle(rangesStore.get(sessionId) as IDBRequest<StoredRanges | undefined>);
     // Forgotten, in this tab or another, after this answer was read.
     if (current?.forgottenAt != null && current.forgottenAt >= observedAt) return;
-    if (session && session.id === sessionId) await putSession(tx, session, observedAt, now);
+    if (session && session.id === sessionId) await putSession(tx, session, observedAt, now, chrome);
     if (!reach) return;
     const write: RowWrite = { tx, sessionDelta: new Map(), activeAt: new Map() };
     const returned = new Set(stored.map((row) => row.id));
@@ -659,21 +672,41 @@ export async function recordLocalStorePage(
     } satisfies StoredRanges);
     await applySessionDelta(tx, write, now);
   });
+  refreshHot(sessionId);
   scheduleBudgetCheck();
 }
 
-async function putSession(tx: IDBTransaction, session: WorkbenchSession, observedAt: number, now: number): Promise<void> {
+async function putSession(
+  tx: IDBTransaction,
+  session: WorkbenchSession,
+  observedAt: number,
+  now: number,
+  chrome?: LocalStoreChatChrome,
+): Promise<void> {
   const sessions = tx.objectStore(SESSIONS);
   const existing = await settle(sessions.get(session.id) as IDBRequest<StoredSession | undefined>);
-  if (existing && existing.observedAt > observedAt) return;
+  // The row and the chrome each take the newest answer for themselves (P1).
+  const rowFresh = !existing || existing.observedAt <= observedAt;
+  const chromeFresh = chrome !== undefined && (existing?.chromeObservedAt ?? Number.NEGATIVE_INFINITY) <= observedAt;
+  if (!rowFresh && !chromeFresh) return;
+  const row: StoredSession = rowFresh
+    ? {
+      id: session.id,
+      row: session,
+      observedAt,
+      touchedAt: Math.max(existing?.touchedAt ?? 0, now),
+      // Messages stored since may be newer than the session row says.
+      lastActiveAt: laterTime(existing?.lastActiveAt ?? '', session.last_active_at || session.updated_at),
+      bytes: existing?.bytes ?? 0,
+      ...(existing?.media ? { media: existing.media } : {}),
+    }
+    : { ...existing!, chrome: undefined, chromeObservedAt: undefined };
   sessions.put({
-    id: session.id,
-    row: session,
-    observedAt,
-    touchedAt: Math.max(existing?.touchedAt ?? 0, now),
-    // Messages stored since may be newer than the session row says.
-    lastActiveAt: laterTime(existing?.lastActiveAt ?? '', session.last_active_at || session.updated_at),
-    bytes: existing?.bytes ?? 0,
+    ...row,
+    // A session read that is not a bootstrap keeps what the last one said.
+    ...(chromeFresh
+      ? { chrome, chromeObservedAt: observedAt }
+      : existing?.chrome ? { chrome: existing.chrome, chromeObservedAt: existing.chromeObservedAt } : {}),
   } satisfies StoredSession);
 }
 
@@ -692,6 +725,76 @@ export async function recordLocalStoreSession(ticket: LocalStoreTicket, session:
     const marker = await settle(tx.objectStore(RANGES).get(session.id) as IDBRequest<StoredRanges | undefined>);
     if (marker?.forgottenAt != null && marker.forgottenAt >= ticket.observedAt) return;
     await putSession(tx, session, ticket.observedAt, now);
+  });
+  refreshHot(session.id);
+}
+
+// ---------------------------------------------------------------------------
+// Attachments
+
+/** What an attachment's card shows (``/api/media/<token>/meta``): its name,
+ *  type, and size. Never the file itself (decision D1). */
+export type LocalStoreMediaMeta = { name?: string; ext?: string; content_type?: string; size: number | null };
+
+/** Attachments kept per session; the least recently stored go first. Each is a
+ *  few hundred bytes and leaves with its session, so none counts against the
+ *  budget. */
+const MEDIA_PER_SESSION = 200;
+
+function mediaMetaOf(value: unknown): LocalStoreMediaMeta | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const fields = value as Record<string, unknown>;
+  const meta: LocalStoreMediaMeta = { size: typeof fields.size === 'number' && Number.isFinite(fields.size) ? fields.size : null };
+  for (const key of ['name', 'ext', 'content_type'] as const) {
+    if (typeof fields[key] === 'string') meta[key] = fields[key].slice(0, 512);
+  }
+  return meta;
+}
+
+/** Keep the metadata of an attachment shown in ``ticket``'s session, so its
+ *  card shows offline. Only for a session the store
+ *  keeps, and not when the session was forgotten or evicted after the request
+ *  went out. */
+export async function recordLocalStoreMediaMeta(ticket: LocalStoreTicket, url: string, value: unknown): Promise<void> {
+  const meta = mediaMetaOf(value);
+  if (!meta) return;
+  const writer = await writerFor(ticket);
+  if (!writer) return;
+  await transact('readwrite', [META, SESSIONS, RANGES], async (tx) => {
+    if (!(await metaAdmits(tx, writer.reader, writer.epoch))) return;
+    const record = await settle(tx.objectStore(RANGES).get(ticket.sessionId) as IDBRequest<StoredRanges | undefined>);
+    if (record?.forgottenAt != null && record.forgottenAt >= ticket.observedAt) return;
+    // Kept: it has coverage. A forget or an eviction empties the ranges.
+    if (!record || record.ranges.length === 0) return;
+    const sessions = tx.objectStore(SESSIONS);
+    const stored = await settle(sessions.get(ticket.sessionId) as IDBRequest<StoredSession | undefined>);
+    if (!stored) return;
+    const media = { ...stored.media };
+    delete media[url];
+    media[url] = meta;
+    const urls = Object.keys(media);
+    for (const old of urls.slice(0, Math.max(0, urls.length - MEDIA_PER_SESSION))) delete media[old];
+    sessions.put({ ...stored, media } satisfies StoredSession);
+  });
+}
+
+/** What the diagnostics page shows of the store: whether the browser granted
+ *  persistent storage when it was asked (null when it was not asked, as in a
+ *  plain browser tab, decision D5), and the bytes the store holds. */
+export type LocalStoreDiagnostics = { persisted: boolean | null; bytes: number };
+
+export function readLocalStoreDiagnostics(): Promise<LocalStoreDiagnostics | null> {
+  return readAsReader([SESSIONS], async (tx, meta) => {
+    const sessions = await settle(tx.objectStore(SESSIONS).getAll() as IDBRequest<StoredSession[]>);
+    return { persisted: meta.persisted, bytes: sessions.reduce((sum, session) => sum + session.bytes, 0) };
+  });
+}
+
+/** The stored metadata of an attachment shown in ``sessionId``, or null. */
+export function readLocalStoreMediaMeta(sessionId: string, url: string): Promise<LocalStoreMediaMeta | null> {
+  return readAsReader([SESSIONS], async (tx) => {
+    const stored = await settle(tx.objectStore(SESSIONS).get(sessionId) as IDBRequest<StoredSession | undefined>);
+    return stored?.media?.[url] ?? null;
   });
 }
 
@@ -740,6 +843,7 @@ export async function recordLocalStoreStreamRow(row: WorkbenchMessage | null | u
     }
     await applySessionDelta(tx, write, now);
   });
+  refreshHot(sessionId);
   scheduleBudgetCheck();
 }
 
@@ -776,6 +880,7 @@ export function noteLocalStoreStreamState(live: boolean): void {
 /** Delete everything stored for ``sessionId`` and void every read of it still
  *  in flight: it was archived, left the reader's Inbox, or the server refused it. */
 export async function forgetLocalStoreSession(sessionId: string): Promise<void> {
+  dropHot(sessionId);
   // The marker this leaves also stops reads started before it, here or in any
   // tab, from admitting the session's streamed rows.
   await transact('readwrite', [SESSIONS, MESSAGES, RANGES, TOMBSTONES], async (tx) => {
@@ -822,6 +927,7 @@ async function patchStoredSession(sessionId: string, data: SessionActivity): Pro
     if (!stored?.row || stored.observedAt > ticket.observedAt) return;
     sessions.put({ ...stored, row: { ...stored.row, ...patch }, observedAt: ticket.observedAt } satisfies StoredSession);
   });
+  refreshHot(sessionId);
 }
 
 // ---------------------------------------------------------------------------
@@ -847,6 +953,19 @@ async function requestPersistence(): Promise<void> {
     const meta = await settle(tx.objectStore(META).get('reader') as IDBRequest<Meta | undefined>);
     if (meta) tx.objectStore(META).put({ ...meta, persisted } satisfies Meta);
   }, { onQuota: 'wipe' });
+  // The browser may answer after a page showed the diagnostics: tell it.
+  for (const listener of [...diagnosticsListeners]) listener();
+}
+
+const diagnosticsListeners = new Set<() => void>();
+
+/** Called when what ``readLocalStoreDiagnostics`` reports may have changed
+ *  without a reader change: the answer to the persistence request landed. */
+export function subscribeLocalStoreDiagnostics(listener: () => void): () => void {
+  diagnosticsListeners.add(listener);
+  return () => {
+    diagnosticsListeners.delete(listener);
+  };
 }
 
 /** The bytes the store may use: decision D2's budget, or half the origin quota
@@ -884,6 +1003,7 @@ async function evictForSpace(quotaFailure: boolean): Promise<boolean> {
   const db = await openDb();
   if (!db) return false;
   let freed = false;
+  const evicted: string[] = [];
   try {
     const tx = db.transaction([SESSIONS, MESSAGES, RANGES, TOMBSTONES], 'readwrite');
     const tombstones = tx.objectStore(TOMBSTONES);
@@ -917,9 +1037,10 @@ async function evictForSpace(quotaFailure: boolean): Promise<boolean> {
         // Evicted like a forget: an answer read before now would put back older
         // copies of what was just removed, so the marker refuses it.
         tx.objectStore(RANGES).put({ sessionId: session.id, ranges: [], forgottenAt: Date.now() } satisfies StoredRanges);
-        tx.objectStore(SESSIONS).put({ ...session, bytes: 0 } satisfies StoredSession);
+        tx.objectStore(SESSIONS).put({ ...session, bytes: 0, media: undefined } satisfies StoredSession);
         total -= session.bytes;
         freed = true;
+        evicted.push(session.id);
         if (quotaFailure) break;
       }
     }
@@ -927,6 +1048,7 @@ async function evictForSpace(quotaFailure: boolean): Promise<boolean> {
   } catch {
     return false;
   }
+  for (const sessionId of evicted) dropHot(sessionId);
   return freed;
 }
 
@@ -959,48 +1081,199 @@ export type LocalStoreWindow = {
 
 /** Up to ``limit`` of the session's newest stored rows, or those just older than
  *  ``before``, with what the store can vouch for about them. */
-export async function readLocalStoreWindow(
+export function readLocalStoreWindow(
   sessionId: string,
   { before = null, limit = 50 }: { before?: OrderKey | null; limit?: number } = {},
 ): Promise<LocalStoreWindow | null> {
+  return readAsReader([SESSIONS, MESSAGES, RANGES], async (tx) => {
+    const { session, messages, contiguous, startReached } = await windowIn(tx, sessionId, before, limit);
+    return { session: session?.row ?? null, messages, contiguous, startReached } satisfies LocalStoreWindow;
+  });
+}
+
+async function windowIn(
+  tx: IDBTransaction,
+  sessionId: string,
+  before: OrderKey | null,
+  limit: number,
+): Promise<Omit<LocalStoreWindow, 'session'> & { session: StoredSession | undefined; ranges: StoredRanges['ranges'] }> {
+  const session = await settle(tx.objectStore(SESSIONS).get(sessionId) as IDBRequest<StoredSession | undefined>);
+  const ranges = (await settle(tx.objectStore(RANGES).get(sessionId) as IDBRequest<StoredRanges | undefined>))?.ranges ?? [];
+  const rows: StoredMessage[] = [];
+  const upper = before ? IDBKeyRange.bound([sessionId], [sessionId, before.at, before.id], false, true) : sessionKeyRange(sessionId, null, null);
+  await new Promise<void>((resolve, reject) => {
+    const cursor = tx.objectStore(MESSAGES).index(BY_SESSION).openCursor(upper, 'prev');
+    cursor.onsuccess = () => {
+      const current = cursor.result;
+      // One past the limit says whether anything older is stored.
+      if (!current || rows.length > limit) {
+        resolve();
+        return;
+      }
+      rows.push(current.value as StoredMessage);
+      current.continue();
+    };
+    cursor.onerror = () => reject(cursor.error);
+  });
+  const olderStored = rows.length > limit;
+  if (olderStored) rows.length = limit;
+  rows.reverse();
+  const token = currentStreamToken();
+  const contiguous = rows.length > 0
+    && ranges.some((range) => isCovered([range], orderKeyOf(rows[0].row), token) && isCovered([range], orderKeyOf(rows[rows.length - 1].row), token));
+  const startReached = rows.length > 0 && !olderStored
+    && ranges.some((range) => range.from === null && isCovered([range], orderKeyOf(rows[0].row), token));
+  return { session, ranges, messages: rows.map((row) => row.row), contiguous, startReached };
+}
+
+// ---------------------------------------------------------------------------
+// A conversation as its chat paints it, and the hot set
+
+/** What a session's bootstrap says around its transcript, kept with it so a
+ *  chat opened again renders whole before its bootstrap answers. Agents are
+ *  opaque here; the chat page reads them. */
+export type LocalStoreChatChrome = {
+  agents: unknown[];
+  default_agent_name: string | null;
+  can_chat: boolean;
+  chat_message_font_size: number | null;
+};
+
+/** A conversation as its chat paints it: its row, its bootstrap's chrome, its
+ *  newest stored rows (as many as a bootstrap returns), and the cursor for the
+ *  page before them, as the server would give it (null at the start of history). */
+export type LocalStoreChat = {
+  session: WorkbenchSession;
+  chrome: LocalStoreChatChrome;
+  messages: WorkbenchMessage[];
+  next_before_id: string | null;
+};
+
+/** Conversations held in memory, so a chat opened again paints in the commit
+ *  that opens it (plan section 4.3, the hot mirror). */
+const HOT_SESSIONS = 40;
+const HOT_ROWS = 50;
+// Least recently written or read first. It holds only the current reader's:
+// every wipe and every reader change empties it at once, and a read that
+// started before one is dropped.
+const hot = new Map<string, LocalStoreChat>();
+// Advanced by every clear, and per session by every forget or eviction, so a
+// read that started before one cannot put back what it removed.
+let hotGeneration = 0;
+const hotDrops = new Map<string, number>();
+const hotDirty = new Set<string>();
+let hotFlushScheduled = false;
+
+async function chatIn(tx: IDBTransaction, sessionId: string): Promise<LocalStoreChat | null> {
+  const { session, ranges, messages, contiguous, startReached } = await windowIn(tx, sessionId, null, HOT_ROWS);
+  // Kept, chatted in (a bootstrap was stored), and with no gap among the rows
+  // it would paint.
+  if (!session?.row || !session.chrome || ranges.length === 0) return null;
+  if (messages.length > 0 && !contiguous) return null;
+  return {
+    session: session.row,
+    chrome: session.chrome,
+    messages,
+    next_before_id: startReached ? null : (messages[0]?.id ?? null),
+  };
+}
+
+function holdHot(sessionId: string, chat: LocalStoreChat | null): void {
+  hot.delete(sessionId);
+  if (!chat) return;
+  hot.set(sessionId, chat);
+  for (const old of [...hot.keys()].slice(0, Math.max(0, hot.size - HOT_SESSIONS))) hot.delete(old);
+}
+
+function clearHot(): void {
+  hot.clear();
+  hotDirty.clear();
+  hotGeneration += 1;
+}
+
+function dropHot(sessionId: string): void {
+  hot.delete(sessionId);
+  hotDirty.delete(sessionId);
+  hotDrops.set(sessionId, (hotDrops.get(sessionId) ?? 0) + 1);
+}
+
+/** Read ``sessionIds`` for the hot set, and hold what is still current then. */
+async function loadHot(reader: string, sessionIds: readonly string[]): Promise<Map<string, LocalStoreChat | null>> {
+  const generation = hotGeneration;
+  const drops = new Map(sessionIds.map((id) => [id, hotDrops.get(id) ?? 0]));
+  const found = await readAsReader([SESSIONS, MESSAGES, RANGES], async (tx) => {
+    const chats = new Map<string, LocalStoreChat | null>();
+    for (const id of sessionIds) chats.set(id, await chatIn(tx, id));
+    return chats;
+  });
+  if (!found || generation !== hotGeneration || getLocalSnapshotPrincipal() !== reader) return new Map();
+  // A conversation forgotten or evicted while the read was out is neither held
+  // nor returned: whoever asked would paint it.
+  const current = new Map<string, LocalStoreChat | null>();
+  for (const [id, chat] of found) {
+    if ((hotDrops.get(id) ?? 0) !== drops.get(id)) continue;
+    holdHot(id, chat);
+    current.set(id, chat);
+  }
+  return current;
+}
+
+/** A write touched ``sessionId``: read it again for the hot set, together with
+ *  the other writes of this moment. */
+function refreshHot(sessionId: string): void {
+  hotDirty.add(sessionId);
+  if (hotFlushScheduled) return;
+  hotFlushScheduled = true;
+  queueMicrotask(() => {
+    hotFlushScheduled = false;
+    const reader = getLocalSnapshotPrincipal();
+    const ids = [...hotDirty];
+    hotDirty.clear();
+    if (reader && ids.length > 0) void loadHot(reader, ids);
+  });
+}
+
+/** The reader's most recently active conversations, as soon as the store is theirs. */
+async function fillHot(reader: string): Promise<void> {
+  const ids = await readAsReader([SESSIONS], async (tx) => {
+    const sessions = await settle(tx.objectStore(SESSIONS).getAll() as IDBRequest<StoredSession[]>);
+    return sessions
+      .filter((session) => session.chrome && session.bytes > 0)
+      .sort((a, b) => recency(a) - recency(b))
+      .slice(-HOT_SESSIONS)
+      .map((session) => session.id);
+  });
+  if (ids && ids.length > 0) await loadHot(reader, ids);
+}
+
+/** The conversation as its chat paints it, from memory, for the reader this
+ *  document names: synchronous, so a chat can paint it in the commit that opens
+ *  it. Null when this document does not hold it. */
+export function knownLocalStoreChat(sessionId: string): LocalStoreChat | null {
+  return hot.get(sessionId) ?? null;
+}
+
+/** The conversation as its chat paints it, from IndexedDB; held in memory too. */
+export async function readLocalStoreChat(sessionId: string): Promise<LocalStoreChat | null> {
+  const reader = getLocalSnapshotPrincipal();
+  if (!reader) return null;
+  return (await loadHot(reader, [sessionId])).get(sessionId) ?? null;
+}
+
+/** Run a read for the reader this document names, and only while the store is
+ *  theirs and no sign-out has happened since; null otherwise. An answer that
+ *  lands after the reader changed is dropped too. */
+async function readAsReader<T>(
+  stores: readonly string[],
+  work: (tx: IDBTransaction, meta: Meta) => Promise<T | null>,
+): Promise<T | null> {
   const reader = getLocalSnapshotPrincipal();
   if (!reader || !(await claimFor(reader))) return null;
-  const result = await transact('readonly', [META, SESSIONS, MESSAGES, RANGES], async (tx) => {
+  const result = await transact('readonly', [META, ...stores], async (tx) => {
     const meta = await getMeta(tx);
-    if (meta?.reader !== reader || meta.signOutGeneration !== readSignOutGeneration()) return null;
-    const session = await settle(tx.objectStore(SESSIONS).get(sessionId) as IDBRequest<StoredSession | undefined>);
-    const ranges = (await settle(tx.objectStore(RANGES).get(sessionId) as IDBRequest<StoredRanges | undefined>))?.ranges ?? [];
-    const rows: StoredMessage[] = [];
-    const upper = before ? IDBKeyRange.bound([sessionId], [sessionId, before.at, before.id], false, true) : sessionKeyRange(sessionId, null, null);
-    await new Promise<void>((resolve, reject) => {
-      const cursor = tx.objectStore(MESSAGES).index(BY_SESSION).openCursor(upper, 'prev');
-      cursor.onsuccess = () => {
-        const current = cursor.result;
-        // One past the limit says whether anything older is stored.
-        if (!current || rows.length > limit) {
-          resolve();
-          return;
-        }
-        rows.push(current.value as StoredMessage);
-        current.continue();
-      };
-      cursor.onerror = () => reject(cursor.error);
-    });
-    const olderStored = rows.length > limit;
-    if (olderStored) rows.length = limit;
-    rows.reverse();
-    const token = currentStreamToken();
-    const contiguous = rows.length > 0
-      && ranges.some((range) => isCovered([range], orderKeyOf(rows[0].row), token) && isCovered([range], orderKeyOf(rows[rows.length - 1].row), token));
-    const startReached = rows.length > 0 && !olderStored
-      && ranges.some((range) => range.from === null && isCovered([range], orderKeyOf(rows[0].row), token));
-    return {
-      session: session?.row ?? null,
-      messages: rows.map((row) => row.row),
-      contiguous,
-      startReached,
-    } satisfies LocalStoreWindow;
+    if (!meta || meta.reader !== reader || meta.signOutGeneration !== readSignOutGeneration()) return null;
+    return work(tx, meta);
   });
-  if (!result || getLocalSnapshotPrincipal() !== reader) return null;
+  if (result == null || getLocalSnapshotPrincipal() !== reader) return null;
   return result;
 }

@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 import 'fake-indexeddb/auto';
 
-import { act, cleanup, render } from '@testing-library/react';
+import { act, cleanup, render, waitFor } from '@testing-library/react';
 import { useEffect } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -13,19 +13,17 @@ vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
 }));
 
-import type { WorkbenchSession } from './ApiContext';
+import type { WorkbenchMessage, WorkbenchSession } from './ApiContext';
 import { ApiProvider, useApi } from './ApiContext';
-import {
-  beginChatSnapshotRequest,
-  chatSnapshotOwnerForAnswer,
-  readChatSnapshot,
-  writeChatSnapshot,
-} from '../lib/chatSnapshots';
+import { knownChatSnapshot, readChatSnapshot } from '../lib/chatSnapshots';
 import { clearLocalSnapshots, setLocalSnapshotPrincipal } from '../lib/localSnapshots';
+import { beginLocalStoreRead, recordLocalStorePage } from '../lib/localStore';
 
-// A stored conversation goes when its Session leaves the reader's Inbox
-// (docs/plans/web-ui-local-cache.md section 4.4). The signals arrive at the API
-// layer, whichever page is open, so that is where they are applied.
+// The conversation a chat paints before its bootstrap answers comes from the
+// local message store (docs/plans/local-sync-store.md section 4.3). The API
+// layer keeps it: a bootstrap stores what the chat paints, and a Session that
+// leaves the reader's Inbox takes its conversation with it, whichever page is
+// open.
 
 class FakeEventSource {
   static instances: FakeEventSource[] = [];
@@ -68,17 +66,16 @@ const Subscriber = () => {
 };
 
 const store = async (sessionId: string) => {
-  await writeChatSnapshot(chatSnapshotOwnerForAnswer(beginChatSnapshotRequest(sessionId))!, {
-    session: { id: sessionId, title: sessionId } as WorkbenchSession,
-    messages: [],
-    next_before_id: null,
-    agents: [],
-    default_agent_name: null,
-    can_chat: true,
-    chat_message_font_size: null,
-  });
+  await recordLocalStorePage(
+    beginLocalStoreRead(sessionId),
+    { kind: 'tail' },
+    { messages: [], next_before_id: null },
+    { id: sessionId, title: sessionId } as WorkbenchSession,
+    { agents: [], default_agent_name: null, can_chat: true, chat_message_font_size: null },
+  );
   expect(await readChatSnapshot(sessionId)).not.toBeNull();
 };
+const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 
 const settle = () => act(() => new Promise((resolve) => setTimeout(resolve, 30)));
 
@@ -97,6 +94,37 @@ afterEach(async () => {
 });
 
 describe('conversation snapshot invalidation at the API layer', () => {
+  it('keeps what a bootstrap says around its transcript, so the chat paints whole when it is opened again', async () => {
+    const row = { id: 'msg_1', session_id: 'ses_a', type: 'result', author: 'agent', text: 'answer', created_at: '2026-11-05T00:00:01.000000Z', updated_at: '2026-11-05T00:00:01.000000Z' } as WorkbenchMessage;
+    apiFetch.mockImplementation(async (path: string) => (path === '/api/sessions/ses_a/bootstrap'
+      ? json({
+        session: { id: 'ses_a', title: 'A', status: 'active' },
+        capabilities: { can_chat: false },
+        agents: [{ id: 'agent-vibey', name: 'vibey' }],
+        default_agent_name: 'vibey',
+        config: { ui: { chat_message_font_size: 17 } },
+        messages: [row],
+        next_after_id: null,
+        next_before_id: null,
+        queued: [],
+        draft: { text: '', updated_at: null },
+      })
+      : json({})));
+    render(<ApiProvider><Subscriber /></ApiProvider>);
+    await api.current!.getSessionBootstrap('ses_a');
+    await waitFor(async () => expect(await readChatSnapshot('ses_a')).toMatchObject({
+      session: { id: 'ses_a', title: 'A' },
+      messages: [{ id: 'msg_1', text: 'answer' }],
+      next_before_id: null,
+      agents: [{ name: 'vibey' }],
+      default_agent_name: 'vibey',
+      can_chat: false,
+      chat_message_font_size: 17,
+    }));
+    // Held in memory too, so the chat paints in the commit that opens it.
+    expect(knownChatSnapshot('ses_a')?.messages.map((message) => message.id)).toEqual(['msg_1']);
+  });
+
   it('deletes a conversation archived or moved to the background, and keeps one only renamed', async () => {
     for (const id of ['ses_archived', 'ses_background', 'ses_renamed']) await store(id);
     render(<ApiProvider><Subscriber /></ApiProvider>);

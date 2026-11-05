@@ -975,6 +975,17 @@
     "diagnosticsTitle": "Diagnostics",
     "diagnosticsSubtitle": "Run health checks, inspect warnings, and jump into live logs when something is off.",
     "diagnosticsDoctorTitle": "Health checks",
+    "offlineHistory": {
+      "title": "Offline history",
+      "description": "Conversations this device has opened are kept here, so they open at once and can be read without a connection.",
+      "persistence": "Persistent storage",
+      "persistenceGranted": "Granted",
+      "persistenceDenied": "Not granted: the browser may clear it when space runs low",
+      "persistenceNotRequested": "Requested only in the installed app",
+      "persistenceUnknown": "Unknown",
+      "stored": "Stored on this device",
+      "storedNone": "Nothing yet"
+    },
     "logsTitle": "Live logs",
     "logsSubtitle": "Inspect the runtime log stream with filters, search, and source selection.",
     "inProgressTitle": "This settings page is next in the redesign queue",

@@ -8,6 +8,8 @@ import { apiFetch } from '@/lib/apiFetch';
 import { isProxyMediaUrl } from '@/lib/mediaProxy';
 import { handleMediaDownloadClick, mediaDownloadHref } from '@/lib/downloadMedia';
 import { useFileViewer } from '@/components/ui/file-viewer-context';
+import { useMediaSession } from '@/components/ui/media-session-context';
+import { beginLocalStoreRead, readLocalStoreMediaMeta, recordLocalStoreMediaMeta } from '@/lib/localStore';
 import { mediaKind, previewRenderKind, formatBytes } from '@/lib/filePreview';
 import { cn } from '@/lib/utils';
 
@@ -48,6 +50,7 @@ type Meta = { name?: string; ext?: string; size?: number | null; content_type?: 
 export const FileCard: React.FC<{ href: string; children?: React.ReactNode }> = ({ href, children }) => {
   const { t } = useTranslation();
   const viewer = useFileViewer();
+  const sessionId = useMediaSession();
   const label = nodeText(children).trim();
   // Metadata is keyed by the URL it describes: a reused card whose ``href`` changes must not render the
   // previous attachment's kind (e.g. mount a player on an unrelated token) before its own /meta lands.
@@ -59,16 +62,28 @@ export const FileCard: React.FC<{ href: string; children?: React.ReactNode }> = 
     // host that slipped into a non-proxy href.
     if (!isProxyMediaUrl(href)) return;
     let alive = true;
+    let answered = false;
+    // What the card showed when it was last seen in this conversation paints
+    // while the request is out, and offline; the server's answer replaces it.
+    if (sessionId) {
+      void readLocalStoreMediaMeta(sessionId, href).then((stored) => {
+        if (alive && !answered && stored) setResolved({ href, meta: stored });
+      });
+    }
+    const ticket = sessionId ? beginLocalStoreRead(sessionId) : null;
     apiFetch(`${href}/meta`)
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
-        if (alive && data) setResolved({ href, meta: data });
+        if (!data) return;
+        answered = true;
+        if (alive) setResolved({ href, meta: data });
+        if (ticket) void recordLocalStoreMediaMeta(ticket, href, data);
       })
       .catch(() => {});
     return () => {
       alive = false;
     };
-  }, [href]);
+  }, [href, sessionId]);
 
   const ext = (meta?.ext || label.split('.').pop() || '').toLowerCase();
   const { Icon, tile } = kindOf(ext);

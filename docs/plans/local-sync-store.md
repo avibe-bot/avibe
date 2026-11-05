@@ -2,9 +2,13 @@
 
 > **Status**: Approved by the owner 2026-11-05 14:38, with all nine
 > recommendations in section 9 (D1-D9) as written. Phase 1 implementation
-> started: the store and its write-through first (#3264), then the access
-> digest (section 6.2), then the chat read path, then retiring the conversation
-> snapshots.
+> started:
+> 1. the store and its write-through (#3264);
+> 2. the access digest (section 6.2, #3272);
+> 3. the chat's first paint from the store, which retires the conversation
+>    snapshots (2a);
+> 4. local-first older pages and deep links with the offline gap marker (2b);
+> 5. prefetch warming and cleanup.
 > **Owner**: cyhhao
 > **Security**: every implementation PR that touches what the store keeps,
 > when it is wiped, or the sync API needs a Codex security review
@@ -453,6 +457,14 @@ active conversations in memory, per reader:
 It replaces the per-feature mirrors being added now with a single mirror that
 has a single invalidation path.
 
+A chat paints from the store only once a bootstrap of it was stored, because
+the bootstrap's chrome (Agents, the default Agent, `can_chat`, the message font
+size) is kept with the session row. It paints only its newest rows, at most a
+bootstrap's 50, and only when no gap lies among them. The older-page cursor is
+the one the server would give: null once the window reaches the start of
+history, otherwise its first row's id. Without such a stored chat, the page
+paints what the lists know of it (`chatListSeed`), as before.
+
 When the Inbox reads from this store (Phase 2), it keeps the `feedStatus`
 contract of `InboxState`:
 
@@ -513,7 +525,8 @@ whenever the reader looks at it.
 ### 4.6 Attachments
 
 The store keeps attachment metadata from `/api/media/<token>/meta` (name, type,
-size, pixel size). Phase 2 adds a small thumbnail, made in the client from an
+size, pixel size), with the session the card was shown in. It goes with that
+session on a forget or an eviction, and the forget marker refuses a late answer. Phase 2 adds a small thumbnail, made in the client from an
 image the reader actually displayed (at most 64 KB as WebP or JPEG). Originals
 are not stored (decision D1). The server sets `Cache-Control: private,
 no-store` on purpose and authorizes every byte, and originals can be very

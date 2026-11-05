@@ -5,6 +5,7 @@ import { FileText, Stethoscope } from 'lucide-react';
 import clsx from 'clsx';
 
 import { DoctorPanel } from '@/components/steps/DoctorPanel';
+import { LocalStoreDiagnostics } from './LocalStoreDiagnostics';
 import { SettingsPageShell } from './SettingsPageShell';
 
 export const DiagnosticsSectionTabs: React.FC = () => {
@@ -51,6 +52,7 @@ export const SettingsDiagnosticsPage: React.FC = () => {
     >
       <DiagnosticsSectionTabs />
       <DoctorPanel isPage logsPath="/settings/diagnostics/logs" titleKey="settings.diagnosticsDoctorTitle" />
+      <LocalStoreDiagnostics />
     </SettingsPageShell>
   );
 };

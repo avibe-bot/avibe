@@ -7,13 +7,9 @@ import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 
 import type { SessionRuntimeState, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import type { ComposerProps } from './Composer';
-import {
-  beginChatSnapshotRequest,
-  chatSnapshotOwnerForAnswer,
-  readChatSnapshot,
-  writeChatSnapshot,
-} from '../../lib/chatSnapshots';
+import { chatChromeFromBootstrap, readChatSnapshot } from '../../lib/chatSnapshots';
 import { clearLocalSnapshots, setLocalSnapshotPrincipal } from '../../lib/localSnapshots';
+import { beginLocalStoreRead, recordLocalStorePage } from '../../lib/localStore';
 
 // A sent message is on screen the moment it is sent, as the row it will be, and
 // the server's row takes its place without a flicker, whichever of the POST
@@ -283,6 +279,19 @@ const mount = (path = `/chat/${SESSION}`) => render(
     </Routes>
   </MemoryRouter>,
 );
+
+// Store a conversation as the API layer stores a bootstrap of it, and let this
+// document hold it in memory, so the chat paints from it.
+const storeChat = async (answer: ReturnType<typeof bootstrap>) => {
+  await recordLocalStorePage(
+    beginLocalStoreRead(answer.session.id),
+    { kind: 'tail' },
+    answer,
+    answer.session,
+    chatChromeFromBootstrap(answer),
+  );
+  await readChatSnapshot(answer.session.id);
+};
 
 const openChat = async (messages: WorkbenchMessage[] = [message('m1', 'earlier answer')]) => {
   mount();
@@ -672,24 +681,9 @@ describe('ChatPage optimistic send', () => {
     expect(rowsOf('a new question')[0]?.getAttribute('data-message-id')).toBe('d1');
   });
 
-  it('never stores a pending row in the chat snapshot', async () => {
-    await openChat();
-    send('not yet accepted');
-
-    // The write-back settles a second after the window does.
-    await act(() => new Promise((resolve) => setTimeout(resolve, 1000 + 150)));
-    const stored = await readChatSnapshot(SESSION);
-    expect(stored?.messages.map((row) => row.text)).toEqual(['earlier answer']);
-    expect(rowsOf('not yet accepted')).toHaveLength(1);
-  });
-
   it('keeps a row sent from the painted chat through the bootstrap, and hands it to the server row once', async () => {
-    // Paint from a stored snapshot: the first test's write-back leaves one.
-    await openChat();
-    await act(() => new Promise((resolve) => setTimeout(resolve, 1000 + 150)));
-    cleanup();
-    live = deferred();
-    mocks.api.getSessionBootstrap.mockReturnValue(live.promise);
+    // Paint from the stored conversation.
+    await storeChat(bootstrap([message('m1', 'earlier answer')]));
     mount();
     await screen.findByText('earlier answer');
 
@@ -917,15 +911,7 @@ describe('ChatPage send while the agent is busy', () => {
     // A cached chat whose list row says running: until the bootstrap confirms
     // it, a send goes to the transcript.
     const snapshotSession = { id: SESSION, title: 'Chat', status: 'active', agent_name: 'vibey', agent_backend: 'vibey', agent_status: 'running' } as WorkbenchSession;
-    await writeChatSnapshot(chatSnapshotOwnerForAnswer(beginChatSnapshotRequest(SESSION))!, {
-      session: snapshotSession,
-      messages: [message('m1', 'cached answer')],
-      next_before_id: null,
-      agents: [agent],
-      default_agent_name: 'vibey',
-      can_chat: true,
-      chat_message_font_size: null,
-    });
+    await storeChat({ ...bootstrap([message('m1', 'cached answer')]), session: snapshotSession });
     mount();
     await screen.findByText('cached answer');
 

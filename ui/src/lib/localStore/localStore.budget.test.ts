@@ -109,11 +109,17 @@ describe('budget', () => {
     const readBeforeEviction = tab.store.beginLocalStoreRead('ses_old', Date.now() - 1000);
     await tab.tail('ses_main', [row(1, 'ses_main'), row(2, 'ses_main')], session('ses_main', 1));
     await tab.tail('ses_old', [row(1, 'ses_old'), row(2, 'ses_old')], session('ses_old', 2));
+    const attachment = { name: 'old.png', size: 10 };
+    await tab.store.recordLocalStoreMediaMeta(tab.store.beginLocalStoreRead('ses_old'), '/api/media/tok_old', attachment);
     await tab.tail('ses_new', [row(1, 'ses_new'), row(2, 'ses_new')], session('ses_new', 3));
     await checkBudget();
     await vi.waitFor(async () => expect(await tab.held('ses_old'), await onDisk()).toBe(0), SETTLE);
     expect(await tab.held('ses_main'), await onDisk()).toBe(2);
     expect(await tab.held('ses_new'), await onDisk()).toBe(2);
+    // What the diagnostics page reports: the two sessions of 40 KB left, under the target.
+    const stored = (await tab.store.readLocalStoreDiagnostics())?.bytes ?? 0;
+    expect(stored).toBeGreaterThan(80_000);
+    expect(stored).toBeLessThan(90_000);
     // An answer read before the eviction does not put the evicted rows back.
     await tab.store.recordLocalStorePage(
       readBeforeEviction,
@@ -121,6 +127,10 @@ describe('budget', () => {
       { messages: [row(1, 'ses_old'), row(2, 'ses_old')], next_before_id: null },
     );
     expect(await tab.held('ses_old'), await onDisk()).toBe(0);
+    // Its attachments go with it, and none comes back for a session no longer kept.
+    expect(await tab.store.readLocalStoreMediaMeta('ses_old', '/api/media/tok_old')).toBeNull();
+    await tab.store.recordLocalStoreMediaMeta(tab.store.beginLocalStoreRead('ses_old'), '/api/media/tok_old', attachment);
+    expect(await tab.store.readLocalStoreMediaMeta('ses_old', '/api/media/tok_old')).toBeNull();
   });
 
   it('counts rows of a session no session read has named yet against the budget', async () => {
@@ -158,6 +168,44 @@ describe('budget', () => {
   });
 });
 
+describe('the hot set under the budget', () => {
+  it('drops an evicted conversation from the memory of the document that evicted it', async () => {
+    // No quota stub: the budget is 1 GB, so no timed budget check evicts anything here.
+    const tab = await openDocument();
+    const chrome = { agents: [], default_agent_name: null, can_chat: true, chat_message_font_size: null };
+    await tab.tail('ses_main', [row(1, 'ses_main'), row(2, 'ses_main')], session('ses_main', 1));
+    await tab.store.recordLocalStorePage(
+      tab.store.beginLocalStoreRead('ses_old'),
+      { kind: 'tail' },
+      { messages: [row(1, 'ses_old'), row(2, 'ses_old')], next_before_id: null },
+      session('ses_old', 2),
+      chrome,
+    );
+    await tab.tail('ses_new', [row(1, 'ses_new'), row(2, 'ses_new')], session('ses_new', 3));
+    // Another document holds the oldest conversation in memory; its next write
+    // runs out of space, which evicts the least recently active session at once.
+    const next = await openDocument();
+    expect((await next.store.readLocalStoreChat('ses_old'))?.messages).toHaveLength(2);
+    expect(next.store.knownLocalStoreChat('ses_old')).not.toBeNull();
+    const put = IDBObjectStore.prototype.put;
+    let failed = false;
+    const full = vi.spyOn(IDBObjectStore.prototype, 'put').mockImplementation(function (this: IDBObjectStore, ...args) {
+      if (this.name === 'messages' && !failed) {
+        failed = true;
+        throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+      }
+      return put.apply(this, args);
+    });
+    try {
+      await next.tail('ses_check', [row(1, 'ses_check', 'check')], session('ses_check', 59));
+    } finally {
+      full.mockRestore();
+    }
+    expect(await next.held('ses_old'), await onDisk()).toBe(0);
+    expect(next.store.knownLocalStoreChat('ses_old')).toBeNull();
+  });
+});
+
 describe('persistence', () => {
   it('asks for persistent storage silently in an installed app and not in a browser tab', async () => {
     const persist = vi.fn(async () => true);
@@ -166,11 +214,14 @@ describe('persistence', () => {
       platform.standalone = standalone;
       const tab = await openDocument();
       await tab.store.readLocalStoreWindow('ses_a');
+      return tab;
     };
     await openAs(false);
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(persist).not.toHaveBeenCalled();
-    await openAs(true);
+    const app = await openAs(true);
     await vi.waitFor(() => expect(persist).toHaveBeenCalledTimes(1), SETTLE);
+    // The answer is recorded for the diagnostics page.
+    await vi.waitFor(async () => expect((await app.store.readLocalStoreDiagnostics())?.persisted).toBe(true), SETTLE);
   });
 });
