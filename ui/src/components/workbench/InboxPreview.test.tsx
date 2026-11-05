@@ -86,6 +86,7 @@ describe('Inbox previews', () => {
   const cap = INBOX_PREVIEW_MAX_CHARS;
   const paragraph = (length: number) => 'word '.repeat(Math.ceil(length / 5)).slice(0, length);
   const later = `\n\n${paragraph(cap)}`;
+  const codeRows = Array.from({ length: 60 }, (_, i) => `# row ${i} `.padEnd(40, '.'));
 
   it.each([
     {
@@ -132,6 +133,34 @@ describe('Inbox previews', () => {
       name: 'cuts at a blank line written with CRLF',
       text: `${paragraph(cap + 10)}\r\n\r\n${paragraph(cap)}`,
       expected: `${paragraph(cap + 10)}\r\n`,
+    },
+    {
+      name: 'cuts before a code fence that opens right after the paragraph holding the cap',
+      text: `${paragraph(cap + 100)}\n\`\`\`python\nprint(1)\n\`\`\`\nafter`,
+      expected: `${paragraph(cap + 100)}\n`,
+    },
+    {
+      // Rows are 40 characters and a newline; the cut comes before the first row
+      // that starts at or past the cap, and a row that looks like a heading inside
+      // the block is still code.
+      name: 'cuts between two lines of a long code block',
+      text: `Intro.\n\`\`\`text\n${codeRows.join('\n')}\n\`\`\`${later}`,
+      expected: `Intro.\n\`\`\`text\n${codeRows.slice(0, Math.ceil((cap - 15) / 41)).join('\n')}\n`,
+    },
+    {
+      name: 'cuts before a heading',
+      text: `${paragraph(cap + 100)}\n## Next\n${paragraph(cap)}`,
+      expected: `${paragraph(cap + 100)}\n`,
+    },
+    {
+      name: 'leaves a code block closed before the cap behind',
+      text: `\`\`\`\ncode\n\`\`\`\n**${paragraph(cap)}\nstill bold** done.${later}`,
+      expected: `\`\`\`\ncode\n\`\`\`\n**${paragraph(cap)}\nstill bold** done.\n`,
+    },
+    {
+      name: 'closes a code block the cut left open before the link definitions',
+      text: `See [the plan][plan].\n~~~\n${paragraph(cap + 100)}\nmore code\n~~~\n\n[plan]: https://example.com/plan`,
+      expected: `See [the plan][plan].\n~~~\n${paragraph(cap + 100)}\n~~~\n\n[plan]: https://example.com/plan`,
     },
     {
       name: 'keeps a reply that is one long block whole',
