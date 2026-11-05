@@ -119,6 +119,35 @@ describe('the conversation a chat paints', () => {
   });
 });
 
+describe('conversation snapshots of the earlier design', () => {
+  it("LSYNC-024 deletes them once a reader is named, every reader's, and nothing else in the snapshot store", async () => {
+    // Records an older build wrote: two readers' conversations, and an Inbox snapshot.
+    setLocalSnapshotPrincipal(null);
+    vi.resetModules();
+    const older = await import('./localSnapshots');
+    older.setLocalSnapshotPrincipal('remote:bob');
+    await older.writeLocalSnapshot('chat:ses_b', 2, { stored: 'bob' });
+    older.setLocalSnapshotPrincipal('remote:alice');
+    await older.writeLocalSnapshot('chat:ses_a', 2, { stored: 'alice' });
+    await older.writeLocalSnapshot('inbox:feed', 1, { stored: 'inbox' });
+    older.setLocalSnapshotPrincipal(null);
+
+    // This build opens and names its reader.
+    vi.resetModules();
+    const snapshots = await import('./localSnapshots');
+    await import('./chatSnapshots');
+    snapshots.setLocalSnapshotPrincipal('remote:alice');
+    const read = (key: string, schema: number) => snapshots.readLocalSnapshot(key, schema, (value) => value);
+    await vi.waitFor(async () => expect(await read('chat:ses_a', 2)).toBeNull(), SETTLE);
+    expect(await read('inbox:feed', 1)).toEqual({ stored: 'inbox' });
+    // Bob's went too, and stays gone when he is named.
+    snapshots.setLocalSnapshotPrincipal('remote:bob');
+    expect(await read('chat:ses_b', 2)).toBeNull();
+    snapshots.setLocalSnapshotPrincipal(null);
+    await snapshots.clearLocalSnapshots();
+  });
+});
+
 describe('the hot set', () => {
   it('holds a conversation once it is stored, and again at the next open of the store for the same reader', async () => {
     await bootstrap(rows(1, 3));

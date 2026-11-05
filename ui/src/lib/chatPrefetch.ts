@@ -1,9 +1,10 @@
 // Idle-time prefetch of the conversations a reader is most likely to open next
-// (docs/plans/web-ui-local-cache.md section 4.2): the few most recent Inbox
-// Sessions that have no stored snapshot get the same bootstrap the chat page
-// reads, so the first tap on each paints at once too. The main Bot's
-// conversation matters most, so it is always taken, first, and refreshed even
-// when it is stored, unless it is the chat open now.
+// (docs/plans/local-sync-store.md section 4.4): every Session on the Inbox's
+// first page that the local message store cannot paint yet gets the same
+// bootstrap the chat page reads, newest first, once per document, so the first
+// tap on each paints from the store too. The main Bot's conversation matters
+// most, so it is always taken, first, and refreshed even when it is stored,
+// unless it is the chat open now.
 //
 // What it must not do: act as the reader. The read is the bootstrap GET, which
 // marks nothing read (mark-read is a separate POST only an open chat makes), and
@@ -18,8 +19,10 @@ import { chatChromeFromBootstrap, readChatSnapshot } from './chatSnapshots';
 import { getLocalSnapshotPrincipal } from './localSnapshots';
 import { beginLocalStoreRead, forgetLocalStoreSession, recordLocalStorePage } from './localStore';
 
-/** How many of the most recent Inbox Sessions are considered. */
-export const CHAT_PREFETCH_CANDIDATES = 5;
+/** How many of the most recent Inbox Sessions are considered: the Inbox's
+ *  first page. Only the bootstrap read is declared a prefetch (it does not
+ *  renew the session), so warming one is a bootstrap too. */
+export const CHAT_PREFETCH_CANDIDATES = 30;
 /** Bootstraps in flight at once. */
 const CHAT_PREFETCH_CONCURRENCY = 3;
 const IDLE_TIMEOUT_MS = 4000;

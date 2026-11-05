@@ -208,7 +208,22 @@ describe('conversation prefetch', () => {
     expect(await titleOf('ses_0')).toBe('live ses_0');
     expect(await titleOf('ses_4')).toBe('live ses_4');
     expect(await titleOf('ses_1')).toBe('opened before');
-    expect(await titleOf('ses_5')).toBeNull();
+    // Past the five newest, the rest of the Inbox's first page is warmed too.
+    await idleUntil(() => expect(requested()).toEqual(['ses_0', 'ses_2', 'ses_3', 'ses_4', 'ses_5', 'ses_6']));
+  });
+
+  it("warms the Inbox's first page and nothing past it, once per document", async () => {
+    apiFetch.mockImplementation(async (path: string) => bootstrapResponse(sessionOf(path)));
+    const feed = Array.from({ length: prefetch.CHAT_PREFETCH_CANDIDATES + 2 }, (_, i) => `ses_${i}`);
+    prefetch.prefetchChatSnapshots(feed);
+    await idleUntil(() => expect(requested()).toHaveLength(prefetch.CHAT_PREFETCH_CANDIDATES));
+    await idleUntil(async () => expect(await titleOf(feed[prefetch.CHAT_PREFETCH_CANDIDATES - 1])).not.toBeNull());
+    expect(requested()).toEqual(feed.slice(0, prefetch.CHAT_PREFETCH_CANDIDATES));
+
+    // Offered again (the feed re-rendered), nothing is fetched a second time.
+    prefetch.prefetchChatSnapshots(feed);
+    for (let round = 0; round < 3; round += 1) await runIdle();
+    expect(requested()).toHaveLength(prefetch.CHAT_PREFETCH_CANDIDATES);
   });
 
   it('stays off a metered or data-saving connection and a hidden page, and runs once offered under good conditions', async () => {

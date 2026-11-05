@@ -90,3 +90,9 @@ scenarios:
       - "ui/src/context/ApiContext.localStore.test.tsx::LSYNC-023 checks a remote reader's access again after a stream gap, and costs a local reader nothing"
       - ui/src/context/ApiContext.localStore.test.tsx::LSYNC-023 drops what this tab holds when another tab applies an access change
       - tests/test_ui_project_access.py::test_lsync_023_session_access_digest_changes_when_the_reader_loses_a_project
+  - id: LSYNC-024
+    name: Conversations the earlier snapshot design stored (chat:* records) are deleted once a reader is named, for every reader, leaving other snapshots
+    status: covered
+    kind: security
+    layer: unit
+    test: "ui/src/lib/chatSnapshots.test.ts::LSYNC-024 deletes them once a reader is named, every reader's, and nothing else in the snapshot store"
