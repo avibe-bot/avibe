@@ -22,8 +22,12 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Avibe uses the camera when you choose to capture an attachment.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Avibe uses the microphone for hold-to-talk and voice transcription.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Avibe saves images to your photo library when you choose Save Image.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

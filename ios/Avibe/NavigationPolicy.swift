@@ -19,6 +19,21 @@ enum NavigationDisposition: Equatable {
     case allow
     case googleAuthentication
     case external
+    case externalApplication
+    case blocked
+}
+
+enum NewWindowDisposition: Equatable {
+    case childWebView
+    case externalBrowser
+    case externalApplication
+    case googleAuthentication
+    case blocked
+}
+
+enum DownloadDisposition: Equatable {
+    case download
+    case externalBrowser
     case blocked
 }
 
@@ -84,6 +99,9 @@ struct NavigationPolicy {
         if context == .popupMainFrame && isPopupBootstrap(url) {
             return .allow
         }
+        if isExternalApplicationURL(url) {
+            return .externalApplication
+        }
         switch destination(for: url) {
         case .instance, .authentication:
             return .allow
@@ -98,11 +116,79 @@ struct NavigationPolicy {
         }
     }
 
-    func permitsDownload(from url: URL) -> Bool {
-        destination(for: url) == .instance
+    func newWindowDisposition(
+        for url: URL,
+        trustedMainFrame: Bool
+    ) -> NewWindowDisposition {
+        guard trustedMainFrame else {
+            return .blocked
+        }
+        if isPopupBootstrap(url) {
+            return .childWebView
+        }
+        if isExternalApplicationURL(url) {
+            return .externalApplication
+        }
+        switch destination(for: url) {
+        case .instance, .authentication:
+            return .childWebView
+        case .googleAuthentication:
+            return .googleAuthentication
+        case .protectedVault, .external:
+            return .externalBrowser
+        case .blocked:
+            return .blocked
+        }
+    }
+
+    func downloadDisposition(
+        for url: URL,
+        sourceOrigin: WebOrigin?,
+        trustedMainFrame: Bool
+    ) -> DownloadDisposition {
+        guard trustedMainFrame else {
+            return .blocked
+        }
+
+        switch url.scheme?.lowercased() {
+        case "https":
+            return WebOrigin(url: url, requiresHTTPS: false).map(instanceOrigins.contains) == true
+                ? .download
+                : .externalBrowser
+        case "http":
+            return .externalBrowser
+        case "blob":
+            guard
+                let embeddedURL = URL(string: String(url.absoluteString.dropFirst("blob:".count))),
+                let embeddedOrigin = WebOrigin(url: embeddedURL, requiresHTTPS: false),
+                instanceOrigins.contains(embeddedOrigin)
+            else {
+                return .blocked
+            }
+            return .download
+        case "data":
+            return sourceOrigin.map(instanceOrigins.contains) == true ? .download : .blocked
+        default:
+            return .blocked
+        }
     }
 
     func isPopupBootstrap(_ url: URL) -> Bool {
         url.absoluteString.caseInsensitiveCompare("about:blank") == .orderedSame
+    }
+
+    private func isExternalApplicationURL(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(), !scheme.isEmpty else {
+            return false
+        }
+        return ![
+            "http",
+            "https",
+            "about",
+            "blob",
+            "data",
+            "javascript",
+            "file",
+        ].contains(scheme)
     }
 }
