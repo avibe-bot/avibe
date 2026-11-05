@@ -1,11 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 
-import type {
-  VibeAgentBrief,
-  WorkbenchMessage,
-  WorkbenchSession,
-  WorkbenchSessionBootstrap,
-} from '../../context/ApiContext';
+import type { WorkbenchMessage, WorkbenchSessionBootstrap } from '../../context/ApiContext';
 import {
   beginChatSnapshotRequest,
   chatSnapshotFromBootstrap,
@@ -37,11 +32,14 @@ import {
 //    commits first) removes every painted row before it lands. Rows are
 //    tracked by version, not id: a row the stream delivered or updated
 //    meanwhile is live, so it stays, and the live window merges onto it.
-//  * The painted Session row, ``can_chat``, and Agents only decide what renders
-//    until the bootstrap answers. Nothing here enables an action.
-//  * A different reader, or anything that clears the store (an authorization
-//    change, sign-out), drops what was painted at once and stops all storing
-//    until the next bootstrap answers.
+//  * ChatPage seeds the page's own state from the snapshot (the Session row,
+//    ``can_chat``, Agents), so the chat renders fully formed and usable from
+//    the cache; the live answer may only narrow it, and the server enforces
+//    every action.
+//  * A different reader, anything that clears the store (an authorization
+//    change, sign-out), or a failed bootstrap drops what was painted and seeded
+//    at once; the first two also stop all storing until the next bootstrap
+//    answers.
 //  * Store only what the server answered for the reader it answered: the
 //    bootstrap's row, Agents and ``can_chat``, plus the stored rows of the live
 //    transcript window, a second after it settles, when leaving the chat, and
@@ -49,15 +47,8 @@ import {
 
 const CHAT_SNAPSHOT_WRITE_DELAY_MS = 1000;
 
-/** What a painted snapshot renders until the bootstrap answers. */
-type ChatSnapshotView = {
-  sessionId: string;
-  principal: string;
-  session: WorkbenchSession;
-  canChat: boolean;
-  agents: VibeAgentBrief[];
-  defaultAgentName: string | null;
-};
+/** A chat painted from the snapshot, until its bootstrap answers. */
+type ChatSnapshotView = { sessionId: string; principal: string };
 
 type ChatSnapshotBootstrapRead = {
   /** The bootstrap answered for the open chat and its state is installed. */
@@ -71,12 +62,17 @@ type Pending = Owned;
 
 type Options = {
   sessionId: string | undefined;
-  /** Put the cached rows and cursor on screen, onto empty state only. Returns
-   *  false to leave this chat unpainted. */
+  /** Seed the page from the snapshot: rows and cursor onto an empty transcript,
+   *  and the chrome state the bootstrap would supply. Returns false to leave
+   *  this chat unpainted. */
   paint: (snapshot: ChatSnapshot) => boolean;
   /** Remove the painted rows (these exact row objects; a row the stream has
-   *  since replaced is live and stays) and the painted older-page cursor. */
+   *  since replaced is live and stays) and the painted older-page cursor. A
+   *  live transcript window is about to land. */
   unpaint: (rows: ReadonlySet<WorkbenchMessage>) => void;
+  /** Withdraw everything seeded from the snapshot: the painted rows (if still
+   *  on screen) and the chrome state. The cache no longer speaks for this page. */
+  drop: (rows: ReadonlySet<WorkbenchMessage> | null) => void;
   /** The live transcript window and its cursor, for write-back. */
   messages: WorkbenchMessage[];
   olderCursor: string | null;
@@ -89,13 +85,15 @@ const errorStatus = (error: unknown): number | null => {
   return typeof status === 'number' ? status : null;
 };
 
-export function useChatSnapshot({ sessionId, paint, unpaint, messages, olderCursor, historicalWindow }: Options) {
+export function useChatSnapshot({ sessionId, paint, unpaint, drop, messages, olderCursor, historicalWindow }: Options) {
   const paintRef = useRef(paint);
   const unpaintRef = useRef(unpaint);
+  const dropRef = useRef(drop);
   const routeRef = useRef(sessionId);
   useLayoutEffect(() => {
     paintRef.current = paint;
     unpaintRef.current = unpaint;
+    dropRef.current = drop;
     routeRef.current = sessionId;
   });
 
@@ -114,14 +112,28 @@ export function useChatSnapshot({ sessionId, paint, unpaint, messages, olderCurs
   const liveRef = useRef(false);
   // Rows on screen from the snapshot that no live window has replaced yet.
   const paintedRef = useRef<{ principal: string; rows: Set<WorkbenchMessage> } | null>(null);
+  // The reader the open chat was seeded for, until its bootstrap answers.
+  const seededRef = useRef<string | null>(null);
   // The chat had no usable record when it opened, so its first write adds one.
   const missingRef = useRef(true);
 
   useEffect(() => {
     liveRef.current = false;
     paintedRef.current = null;
+    seededRef.current = null;
     missingRef.current = true;
   }, [sessionId]);
+
+  // The cache stops speaking for the page: withdraw what it seeded.
+  const withdraw = useCallback(() => {
+    const painted = paintedRef.current;
+    const seeded = seededRef.current;
+    paintedRef.current = null;
+    seededRef.current = null;
+    if (seeded !== null) dropRef.current(painted?.rows ?? null);
+    else if (painted) unpaintRef.current(painted.rows);
+    setView(null);
+  }, []);
 
   const release = useCallback(() => {
     liveRef.current = true;
@@ -133,22 +145,16 @@ export function useChatSnapshot({ sessionId, paint, unpaint, messages, olderCurs
   useEffect(() => (
     subscribeLocalSnapshotPrincipal((next) => {
       const painted = paintedRef.current;
-      if (painted && painted.principal !== next) {
-        paintedRef.current = null;
-        unpaintRef.current(painted.rows);
-      }
-      setView((current) => (current && current.principal !== next ? null : current));
+      const seeded = seededRef.current;
+      if ((seeded !== null && seeded !== next) || (painted && painted.principal !== next)) withdraw();
       setOwned((current) => (current && current.owner.principal !== next ? null : current));
     })
-  ), []);
+  ), [withdraw]);
 
   useEffect(() => subscribeLocalSnapshotEpoch(() => {
-    const painted = paintedRef.current;
-    paintedRef.current = null;
-    if (painted) unpaintRef.current(painted.rows);
-    setView(null);
+    withdraw();
     setOwned(null);
-  }), []);
+  }), [withdraw]);
 
   useEffect(() => {
     if (!sessionId || !principal) return undefined;
@@ -159,14 +165,8 @@ export function useChatSnapshot({ sessionId, paint, unpaint, messages, olderCurs
       if (!snapshot || liveRef.current || getLocalSnapshotPrincipal() !== principal) return;
       if (!paintRef.current(snapshot)) return;
       paintedRef.current = { principal, rows: new Set(snapshot.messages) };
-      setView({
-        sessionId,
-        principal,
-        session: snapshot.session,
-        canChat: snapshot.can_chat,
-        agents: snapshot.agents,
-        defaultAgentName: snapshot.default_agent_name,
-      });
+      seededRef.current = principal;
+      setView({ sessionId, principal });
     });
     return () => {
       cancelled = true;
@@ -181,14 +181,17 @@ export function useChatSnapshot({ sessionId, paint, unpaint, messages, olderCurs
       commit: (bootstrap) => {
         if (routeRef.current !== requestSessionId) return;
         liveRef.current = true;
+        // The bootstrap's state replaced every seeded value; nothing is left
+        // for the cache to withdraw.
+        seededRef.current = null;
         setView(null);
         const owner = chatSnapshotOwnerForAnswer(request);
         setOwned(owner ? { owner, snapshot: chatSnapshotFromBootstrap(bootstrap), added: missingRef.current } : null);
       },
       fail: (error) => {
         if (routeRef.current !== requestSessionId) return;
-        release();
-        setView(null);
+        liveRef.current = true;
+        withdraw();
         const status = errorStatus(error);
         if (status === 403 || status === 404) {
           setOwned(null);
@@ -196,7 +199,7 @@ export function useChatSnapshot({ sessionId, paint, unpaint, messages, olderCurs
         }
       },
     };
-  }, [release]);
+  }, [withdraw]);
 
   const pendingRef = useRef<Pending | null>(null);
   const timerRef = useRef<number | null>(null);

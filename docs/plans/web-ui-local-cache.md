@@ -53,9 +53,13 @@ Show Pages.
 3. **No widening of access.** A snapshot is only ever data that this principal
    already received from the server. It is partitioned by principal, is never
    shown to another principal, and is removed when access ends (section 4.4).
-4. **Actions stay live.** Sending, approvals, and settings act against the server
-   as today. A cached capability (for example `can_chat`) only decides what is
-   rendered while the bootstrap is in flight; the server still enforces it.
+4. **Render from the cache fully usable; the live answer may only narrow.** A
+   cached surface renders as the live one would, enabled wherever the cached
+   state says it is writable (for example `can_chat`). When the live answer
+   lands it may narrow what the cache allowed: enabled becomes read-only, or a
+   control is withdrawn. Nothing appears from nothing, and nothing goes from
+   disabled to enabled. Every action still goes to the server, which enforces
+   it, so an action the live check refuses fails like any refused action.
 
 ## 4. Design
 
@@ -93,13 +97,17 @@ Caps:
 | --- | --- | --- | --- |
 | Inbox feed and unread map (`WorkbenchInboxProvider`) | First page (30 rows), unread map | Provider mount, before `listInbox` | The first `listInbox` page and unread map; later SSE upserts are written back, debounced |
 | Projects sidebar (`WorkbenchProjectsProvider`) | `projects-bootstrap` payload | Provider mount | `getWorkbenchProjectsBootstrap` |
-| Conversation (`ChatPage`) | Session row, tail messages, `next_before_id`, agents, default agent, `can_chat` | Session switch, before the bootstrap | `getSessionBootstrap`: cached rows are dropped and the bootstrap window installed, keeping any rows that arrived over SSE meanwhile |
+| Conversation (`ChatPage`) | Session row, tail messages, `next_before_id`, agents, default agent, `can_chat`, message font size | Session switch, before the bootstrap | `getSessionBootstrap`: cached rows are dropped and the bootstrap window installed, keeping any rows that arrived over SSE meanwhile |
 
-Pages render cached data exactly like live data. The loading state is
-kept separately, so existing "loading" affordances (for example a disabled
-composer) can still key off the live bootstrap. The first implementation shows
-no "stale" badge; the event stream and the bootstrap usually land within a
-second.
+Pages render cached data exactly like live data, chrome included (invariant
+4). A painted conversation shows its composer, route picker, message actions,
+and header actions from the cached state, enabled. The composer is the same
+one before and after the bootstrap lands, and the bootstrap's draft reaches it
+only while the reader has not touched it. A message sent before the bootstrap
+lands survives the live window replacing the painted rows. The loading state is
+kept separately for what has to wait for the server, such as marking the
+conversation read or a deep-link jump; it never disables chrome. There is no
+"stale" badge; the event stream and the bootstrap usually land within a second.
 
 Phase 2 also prefetches, during browser idle time, the bootstrap for the few
 most recent Inbox sessions that have no snapshot (the five newest, each tried

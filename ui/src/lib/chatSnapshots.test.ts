@@ -58,6 +58,7 @@ const snapshot = (sessionId: string, rows: WorkbenchMessage[] = [row('m1')]): Ch
   agents: [],
   default_agent_name: null,
   can_chat: true,
+  chat_message_font_size: null,
 });
 
 const write = async (sessionId: string, value = snapshot(sessionId), added = false) => {
