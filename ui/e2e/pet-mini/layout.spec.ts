@@ -1289,6 +1289,9 @@ test('clicking and selecting in the Mini input keeps it open, while window blur 
 for (const opening of ['pet click', 'keyboard', 'voice shortcut']) {
   test(`a blur before the Mini window focuses does not dismiss a newly opened composer (${opening})`, async ({ page }) => {
     await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long&activities=0');
+    // A raw shortcut event has no locator auto-wait: send it after Mini has
+    // mounted and received its initial shell layout, just like the click paths.
+    await expect(page.locator('.pet-mini-avatar-button')).toBeVisible();
     await page.evaluate(() => {
       Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => false });
       window.dispatchEvent(new Event('blur'));
