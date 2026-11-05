@@ -343,6 +343,12 @@ Two invariants govern every page. Phase 2 change pulls follow them too.
   started, or when the event that carried it arrived.
 - A write replaces or deletes a row only when its own `observedAt` is not older
   than the row's.
+- A delete leaves a tombstone, `{id, sessionId, observedAt}`, so an older
+  response that is still in flight cannot bring the row back. An upsert older
+  than the tombstone is dropped. Reads skip tombstones.
+- The store drops any response whose request started more than 2 minutes
+  before it lands. That bounds how long a tombstone matters, and tombstones
+  older than 10 minutes are purged. Wipes remove them with everything else.
 - So a page that was in flight never overwrites or deletes a row that the
   stream, or a later-started page, delivered after the page's request started.
   This holds for every page shape, for deletions and upserts alike. Today's
@@ -561,11 +567,18 @@ Cost and bounds:
 - Retention runs on the existing maintenance worker, in batches like
   `agent_events_retention`. It drops rows older than 30 days and records
   `sync_floor_seq` in `state_meta`.
-- The log has an incarnation: a random id written to `state_meta`
-  (`sync_log_incarnation`) whenever the table is created. `AUTOINCREMENT`
-  is monotonic only for the life of the table. A downgrade followed by an
-  upgrade recreates the table, and a database restored from a backup
-  (`storage/backups.py`) rolls the sequence back.
+- The log has an incarnation: a random id in `state_meta`
+  (`sync_log_incarnation`). `AUTOINCREMENT` is monotonic only for the life of
+  the table, and the sequence can move backwards two ways:
+  - a downgrade followed by an upgrade recreates the table, which writes a new
+    incarnation;
+  - restoring a backup (`storage/backups.py::_restore_sqlite_backup_locked`)
+    copies the saved database, old incarnation included. The restore path must
+    therefore write a new incarnation before the service answers any sync
+    request. So must any other path that replaces the database file.
+
+  A seq check alone cannot catch a restore: once the restored log grows past a
+  client's old cursor, that cursor looks valid and silently skips changes.
 - The queries below are `SEARCH` by primary key or by `(session_id, seq)`, and
   their plans are pinned in tests (AGENTS.md section 6, controller event loop).
 
@@ -626,8 +639,8 @@ Cursors are opaque strings of the form `<incarnation>.<seq>`.
 - A cursor returns `reset: true` when any of these holds:
   - its `seq` is below `floor_seq`;
   - its incarnation is not the current one, because the table was recreated;
-  - its `seq` is above the log head, because the database was restored from
-    a backup.
+  - its `seq` is above the log head. This is a cheap extra guard; rotating
+    the incarnation on restore is what makes restores safe.
 
   On a reset, the client marks the affected ranges unverified, takes the
   session list again in snapshot mode, and starts each held session over from
@@ -887,7 +900,8 @@ Phases 1 and 2 already give the shell.
 - interval replacement in both directions;
 - an unresolved `around_*` anchor (no `anchor_id`) leaves the store untouched;
 - P1 for every page shape: a page in flight never overwrites or deletes a row
-  the stream delivered after its request started;
+  the stream delivered after its request started, and never resurrects a row
+  that a newer page or change pull removed (tombstone);
 - P2: an overlap row that moved, or an ignored `before_id`, leaves the page
   unjoined and the gap visible;
 - range merge, abut, and gap;
@@ -966,7 +980,7 @@ IDs appear in test names and PR bodies. Role semantics reuse the existing
 | LSYNC-012 | An expired session hides the store at once; the same reader's sign-in shows it only after the visibility check; a different reader wipes it |
 | LSYNC-013 | Backfill and push-worker reads do not renew the remote session |
 | LSYNC-014 | A member granted access to an existing project, by a binding or a group claim with no session write, gets that project's sessions after the next pull, through the access digest |
-| LSYNC-015 | A cursor from another incarnation (table recreated), or above the log head (database restored from a backup), resets instead of silently missing changes |
+| LSYNC-015 | A cursor from another incarnation resets instead of silently missing changes: after the table is recreated, and after a backup restore, which rotates the incarnation even when the restored log later grows past the old cursor |
 | LSYNC-016 | A session's first cursor marks its pre-existing ranges outside the fresh page unverified; they are revalidated before being read as local-only truth |
 
 Manual checks:
