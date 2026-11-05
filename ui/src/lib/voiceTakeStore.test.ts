@@ -28,8 +28,10 @@ vi.mock('./voiceTranscription', async (importOriginal) => ({
   finalizeVoiceDictation: finalize,
 }));
 /** The segments a recovery sent, as what they are: sequence, final, and whether audio went. */
-const sent = (call = 0) => (finalize.mock.calls[call]?.[0] as { sequence: number; final: boolean; blob: Blob | null }[])
-  .map(({ sequence, final, blob }) => ({ sequence, final, blob: blob !== null }));
+const sent = (call = 0) => {
+  const [segments] = finalize.mock.calls[call] as [{ sequence: number; final: boolean; blob: Blob | null }[]];
+  return segments.map(({ sequence, final, blob }) => ({ sequence, final, blob: blob !== null }));
+};
 
 // The store is what keeps a take's speech through a reload, and what keeps one reader's
 // recordings away from the next person to sign in on the device.
