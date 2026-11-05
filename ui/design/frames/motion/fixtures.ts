@@ -3,10 +3,9 @@
 // draws, so a frame stacks the shipped page in each state (`stage.tsx`) and the loop in `kit/motion`
 // moves between them: the page after the change starts where the page before it was, and glides to where
 // it is. Every comparison uses the same data and the same size, tier by tier.
-import type { InboxState } from '@/context/WorkbenchInboxContext';
-import { unreadByCategory } from '@/lib/notificationPreferences';
+import type { InboxSession } from '@/context/ApiContext';
 
-import { demoBots, inboxRow, type WorkbenchFixtures } from '../../shell/fixtures';
+import { inboxRow, type WorkbenchFixtures } from '../../shell/fixtures';
 import { agentSays, chatFixtures, idleTurn, runningTurn, userSays } from '../chat/fixtures';
 import { workbenchFixtures } from '../workbench/fixtures';
 
@@ -104,10 +103,8 @@ export const STOP = 'button:has(> .lucide-square)';
 
 // ----- The Inbox -----
 
-type InboxRow = InboxState['inboxSessions'][number];
-
 /** The conversation above, as an Inbox card: its last reply was read 45 minutes ago. */
-const ours = (preview: string, minutesAgo: number, unread: number): InboxRow => inboxRow(CHAT.replied, 'avibe', title.title, preview, minutesAgo, unread);
+const ours = (preview: string, minutesAgo: number, unread: number): InboxSession => inboxRow(CHAT.replied, 'avibe', title.title, preview, minutesAgo, unread);
 
 const others = {
   cache: inboxRow('ses_demo_cache', 'avibe', '修复中途断缓存', '定位到清理旧工具结果时前缀断开，PR #3141 已开，等你 review。', 12, 3),
@@ -130,26 +127,14 @@ export const INBOX = {
 } as const;
 export type InboxStateName = keyof typeof INBOX;
 
-const botSessions = new Set(demoBots.map((bot) => bot.session_id));
-
-/** The Inbox context a stacked state reads: its rows and counts, and everything else from the frame's. */
-export function inboxOverride(base: InboxState, state: InboxStateName): InboxState {
-  const { rows, unread } = INBOX[state];
-  const counts = Object.values(unread);
-  const total = counts.reduce((sum, n) => sum + n, 0);
-  const known: Partial<InboxState> = {
-    inboxSessions: [...rows],
-    unreadBySession: { ...unread },
-    totalUnread: total,
-    badgeTotal: total,
-    unreadSessions: counts.filter((n) => n > 0).length,
-    unreadByCategory: unreadByCategory(unread, botSessions),
-  };
-  return new Proxy(known, { get: (target, key) => (key in target ? target[key as keyof InboxState] : base[key as keyof InboxState]) }) as InboxState;
-}
-
-/** The Inbox frames' fixtures: the shell's reads (the Bots, the main one in the tab bar), plus any chat states. */
-export const inboxFixtures = (...states: ChatState[]) => mergeFixtures(workbenchFixtures(), ...states.map((state) => chatStates[state]));
+/** The Inbox frames' fixtures: the shell's reads (the Bots, the main one in the tab bar), both Inbox
+ *  states for `InboxStateProvider`, plus any chat states. */
+export const inboxFixtures = (...states: ChatState[]) => ({
+  ...mergeFixtures(workbenchFixtures(), ...states.map((state) => chatStates[state])),
+  inboxStates: Object.fromEntries(
+    Object.entries(INBOX).map(([name, { rows, unread }]) => [name, { inboxSessions: [...rows], unreadBySession: { ...unread } }]),
+  ),
+});
 
 /** Where each card of the after list sat in the before list, relative to its new slot (px, at 390 px):
  *  the FLIP offsets the implementation measures as the list changes. */

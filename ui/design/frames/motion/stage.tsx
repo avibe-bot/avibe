@@ -1,16 +1,16 @@
 // The stage a moment plays on: the shipped page in each of its states, stacked (fixtures.ts says why).
-import { useContext, useMemo, type ReactNode } from 'react';
+import type { ReactNode } from 'react';
 import { Route, Routes } from 'react-router-dom';
 import clsx from 'clsx';
 
 import { ChatPage } from '@/components/workbench/ChatPage';
 import { InboxPage } from '@/components/workbench/InboxPage';
-import { WorkbenchInboxContext } from '@/context/WorkbenchInboxContext';
 
+import { InboxStateProvider } from '../../shell/DesignShell';
 import { DesktopScreen } from '../../shell/DesktopScreen';
 import { PhoneScreen } from '../../shell/PhoneScreen';
 import { withChatProviders } from '../chat/fixtures';
-import { CHAT, inboxOverride, type ChatState, type InboxStateName } from './fixtures';
+import { CHAT, type ChatState, type InboxStateName } from './fixtures';
 
 /** The shipped chat page for one state, whatever the frame's route. */
 export function ChatAt({ state }: { state: ChatState }) {
@@ -50,14 +50,12 @@ export function PhoneStage({ children }: { children: ReactNode }) {
 
 /** The shipped Inbox page on a phone screen, reading the rows of one state. */
 export function InboxAt({ state }: { state: InboxStateName }) {
-  const base = useContext(WorkbenchInboxContext);
-  const value = useMemo(() => (base ? inboxOverride(base, state) : undefined), [base, state]);
   return (
-    <WorkbenchInboxContext.Provider value={value}>
+    <InboxStateProvider state={state}>
       <PhoneScreen>
         <InboxPage onOpenSearch={() => {}} />
       </PhoneScreen>
-    </WorkbenchInboxContext.Provider>
+    </InboxStateProvider>
   );
 }
 

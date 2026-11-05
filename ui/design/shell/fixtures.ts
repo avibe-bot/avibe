@@ -21,6 +21,9 @@ export interface WorkbenchFixtures {
   expandedProjects?: string[];
   inboxSessions?: InboxSession[];
   unreadBySession?: Record<string, number>;
+  /** Inbox states a frame stacks, by name (a moment drawn as the Inbox before and after a change);
+   *  `InboxStateProvider` serves one in place of `inboxSessions` and `unreadBySession`. */
+  inboxStates?: Record<string, { inboxSessions: InboxSession[]; unreadBySession: Record<string, number> }>;
   /** The Owner's Bots, served as `GET /api/bots` to the real Bots provider. */
   bots?: Bot[];
   /** The places for custom Bots served beside them; by default the custom Bots in `bots` of five (`botLimitOf`). */

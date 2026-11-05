@@ -1,9 +1,8 @@
 // The motion tokens (docs/plans/web-ui-motion.md §4), each shown doing what it is for: a dot crossing a
-// track on that duration and curve, and the curve itself.
+// track on that duration and curve, and the curve itself. Sizes are the spacing scale's.
 import { cut, progress, spring, timed, type Curve, type Track } from '../../kit/motion';
 import { MotionLoop } from '../../kit/MotionLoop';
 
-const TRACK = 300;
 const START = 300;
 const PERIOD = 1800;
 
@@ -58,9 +57,10 @@ export function TokenSheet() {
   const groups = rows();
   const tracks: Track[] = groups.flatMap((group) =>
     group.rows.map((row) => ({
-      el: `[data-token-dot="${row.name}"]`,
+      el: `[data-token-carrier="${row.name}"]`,
       beats: [
-        { at: START, to: { x: TRACK }, curve: row.curve },
+        // The dot rides a carrier as wide as its track less itself, so 100% is the far end.
+        { at: START, to: { x: '100%' }, curve: row.curve },
         { at: PERIOD - 200, to: { opacity: 0 }, curve: timed('fast', 'exit') },
         { at: PERIOD - 30, to: { x: 0, opacity: 1 }, curve: cut },
       ],
@@ -70,46 +70,49 @@ export function TokenSheet() {
     <MotionLoop id="tokens" period={PERIOD} rest={PERIOD - 300} tracks={tracks}>
       <div className="flex h-full flex-col gap-6 overflow-hidden bg-background px-8 py-7 text-foreground">
         <div>
-          <h1 className="text-[18px] font-bold">动效令牌</h1>
-          <p className="mt-1 text-[12px] text-muted">src/index.css · 只动 transform 和 opacity · 每个时刻从这里取一个时长和一条曲线</p>
+          <h1 className="text-lg font-bold">动效令牌</h1>
+          <p className="mt-1 text-xs text-muted">src/index.css · 只动 transform 和 opacity · 每个时刻从这里取一个时长和一条曲线</p>
         </div>
         {groups.map((group) => (
           <section key={group.title} className="flex flex-col gap-3">
-            <h2 className="text-[11px] font-bold uppercase tracking-wider text-mint-ink">{group.title}</h2>
+            <h2 className="text-xs font-bold uppercase tracking-wider text-mint-ink">{group.title}</h2>
             {group.rows.map((row) => (
               <div key={row.name} className="flex items-center gap-4">
                 <div className="w-40 shrink-0">
-                  <div className="font-mono text-[12px] font-semibold">{row.name} · {Math.round(row.curve.dur)}ms</div>
-                  <div className="truncate font-mono text-[10px] text-muted">{row.token}</div>
+                  <div className="font-mono text-xs font-semibold">{row.name} · {Math.round(row.curve.dur)}ms</div>
+                  <div className="truncate font-mono text-2xs text-muted">{row.token}</div>
                 </div>
                 <Plot curve={row.curve} />
-                <div className="relative h-4 shrink-0" style={{ width: TRACK + 12 }}>
+                <div className="relative h-4 w-80 shrink-0">
                   <div className="absolute inset-x-1.5 top-1/2 h-px bg-border" />
-                  <span data-token-dot={row.name} className="absolute left-0 top-0.5 size-3 rounded-full bg-mint shadow-glow-dot-mint" />
+                  <div data-token-carrier={row.name} className="absolute inset-y-0 left-0 right-3">
+                    <span className="absolute left-0 top-0.5 size-3 rounded-full bg-mint shadow-glow-dot-mint" />
+                  </div>
                 </div>
-                <div className="min-w-0 flex-1 text-[12px] text-muted">{row.use}</div>
+                <div className="min-w-0 flex-1 text-xs text-muted">{row.use}</div>
               </div>
             ))}
           </section>
         ))}
         <section className="flex flex-col gap-3">
-          <h2 className="text-[11px] font-bold uppercase tracking-wider text-mint-ink">加载与交接</h2>
+          <h2 className="text-xs font-bold uppercase tracking-wider text-mint-ink">加载与交接</h2>
           <div className="flex items-center gap-4">
             <div className="w-40 shrink-0">
-              <div className="font-mono text-[12px] font-semibold">shimmer · 1600ms</div>
-              <div className="font-mono text-[10px] text-muted">animate-skeleton-shimmer</div>
+              <div className="font-mono text-xs font-semibold">shimmer · 1600ms</div>
+              <div className="font-mono text-2xs text-muted">animate-skeleton-shimmer</div>
             </div>
-            <div className="relative h-3 w-[372px] shrink-0 overflow-hidden rounded-full bg-foreground/[0.06]">
+            <div className="w-14 shrink-0" />
+            <div className="relative h-3 w-80 shrink-0 overflow-hidden rounded-full bg-foreground/[0.06]">
               <span className="absolute inset-0 animate-skeleton-shimmer bg-linear-to-r from-transparent via-foreground/[0.06] to-transparent motion-reduce:animate-none" />
             </div>
-            <div className="min-w-0 flex-1 text-[12px] text-muted">骨架的高光扫过；减少动态效果时静止</div>
+            <div className="min-w-0 flex-1 text-xs text-muted">骨架的高光扫过；减少动态效果时静止</div>
           </div>
           <div className="flex items-center gap-4">
             <div className="w-40 shrink-0">
-              <div className="font-mono text-[12px] font-semibold">handover · 240ms</div>
-              <div className="font-mono text-[10px] text-muted">--motion-handover-*</div>
+              <div className="font-mono text-xs font-semibold">handover · 240ms</div>
+              <div className="font-mono text-2xs text-muted">--motion-handover-*</div>
             </div>
-            <div className="min-w-0 flex-1 text-[12px] text-muted">骨架或缓存交给内容：原位淡入，几何不变（base 时长、enter 曲线）</div>
+            <div className="min-w-0 flex-1 text-xs text-muted">骨架或缓存交给内容：原位淡入，几何不变（base 时长、enter 曲线）</div>
           </div>
         </section>
       </div>
