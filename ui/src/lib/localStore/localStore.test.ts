@@ -15,7 +15,9 @@ import {
   applyLocalStoreSessionActivity,
   noteLocalStoreStreamGap,
   noteLocalStoreStreamState,
+  readLocalStoreMediaMeta,
   readLocalStoreWindow,
+  recordLocalStoreMediaMeta,
   recordLocalStorePage,
   recordLocalStoreStreamRow,
   wipeLocalStore,
@@ -563,5 +565,39 @@ describe('session rows', () => {
     const stored = (await readLocalStoreWindow('ses_a'))?.session;
     expect(stored?.pinned).toBe(true);
     expect(stored?.title).toBe('renamed');
+  });
+});
+
+describe('attachment metadata', () => {
+  // A card's name, type, and size (decision D1: never the file), kept with the
+  // session it was shown in, so the card shows offline.
+  const url = '/api/media/tok_report';
+  const card = { name: 'report.pdf', ext: 'pdf', content_type: 'application/pdf', size: 2048 };
+
+  it('keeps the metadata of an attachment shown in a held session, through later session reads', async () => {
+    await tail(rows(1, 3), null);
+    await recordLocalStoreMediaMeta(beginLocalStoreRead('ses_a'), url, card);
+    // A later session read rewrites the session row; the attachment stays.
+    await tail(rows(1, 3), null);
+    expect(await readLocalStoreMediaMeta('ses_a', url)).toEqual(card);
+    // A session the store does not keep keeps none.
+    await recordLocalStoreMediaMeta(beginLocalStoreRead('ses_x'), url, card);
+    expect(await readLocalStoreMediaMeta('ses_x', url)).toBeNull();
+  });
+
+  it('LSYNC-020 drops it with a forgotten session, and an answer read before the forget does not bring it back', async () => {
+    await tail(rows(1, 3), null);
+    await recordLocalStoreMediaMeta(beginLocalStoreRead('ses_a'), url, card);
+    const late = beginLocalStoreRead('ses_a', Date.now() - 1000);
+    await forgetLocalStoreSession('ses_a');
+    expect(await readLocalStoreMediaMeta('ses_a', url)).toBeNull();
+    // The session is read again after the forget; the answer from before it lands after.
+    const after = Date.now() + 1000;
+    await tail(rows(1, 3), null, after);
+    await recordLocalStoreMediaMeta(late, url, card);
+    expect(await readLocalStoreMediaMeta('ses_a', url)).toBeNull();
+    // One read after the forget is kept.
+    await recordLocalStoreMediaMeta(beginLocalStoreRead('ses_a', after), url, card);
+    expect(await readLocalStoreMediaMeta('ses_a', url)).toEqual(card);
   });
 });

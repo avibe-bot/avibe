@@ -1,4 +1,7 @@
-// Settings · Diagnostics: the health check (Doctor) with its passed, warning, and failed checks.
+// Settings · Diagnostics: the health check (Doctor) with its passed, warning, and failed checks, and
+// the offline history line (the local message store) below it, drawn as its view: the store it reads
+// is IndexedDB, which a frame has no fixture for.
+import { LocalStoreDiagnosticsView } from '@/components/settings/LocalStoreDiagnostics';
 import { SettingsDiagnosticsPage } from '@/components/settings/SettingsDiagnosticsPage';
 
 import { frames } from '../../frame';
@@ -79,6 +82,34 @@ const designFrames = frames([
     route,
     fixtures: settingsFixtures({ '/api/doctor': withIssues }),
     render: page,
+  },
+  {
+    name: 'offline-history',
+    title: '设置 · 诊断 · 离线历史 · 已安装的 App',
+    width: 720,
+    height: 260,
+    status: 'shipped',
+    route,
+    fixtures: settingsFixtures({ '/api/doctor': healthy }),
+    render: () => (
+      <div className="p-6">
+        <LocalStoreDiagnosticsView persistence="granted" bytes={48_300_000} />
+      </div>
+    ),
+  },
+  {
+    name: 'offline-history-tab',
+    title: '设置 · 诊断 · 离线历史 · 浏览器标签页',
+    width: 720,
+    height: 260,
+    status: 'shipped',
+    route,
+    fixtures: settingsFixtures({ '/api/doctor': healthy }),
+    render: () => (
+      <div className="p-6">
+        <LocalStoreDiagnosticsView persistence="not-requested" bytes={3_200_000} />
+      </div>
+    ),
   },
 ]);
 

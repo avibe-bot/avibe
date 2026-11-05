@@ -90,6 +90,8 @@ type StoredSession = {
   touchedAt: number;
   lastActiveAt: string;
   bytes: number;
+  /** Attachments shown in the session, by media URL, least recently stored first. */
+  media?: Record<string, LocalStoreMediaMeta>;
 };
 type StoredMessage = {
   id: string;
@@ -674,6 +676,7 @@ async function putSession(tx: IDBTransaction, session: WorkbenchSession, observe
     // Messages stored since may be newer than the session row says.
     lastActiveAt: laterTime(existing?.lastActiveAt ?? '', session.last_active_at || session.updated_at),
     bytes: existing?.bytes ?? 0,
+    ...(existing?.media ? { media: existing.media } : {}),
   } satisfies StoredSession);
 }
 
@@ -692,6 +695,75 @@ export async function recordLocalStoreSession(ticket: LocalStoreTicket, session:
     const marker = await settle(tx.objectStore(RANGES).get(session.id) as IDBRequest<StoredRanges | undefined>);
     if (marker?.forgottenAt != null && marker.forgottenAt >= ticket.observedAt) return;
     await putSession(tx, session, ticket.observedAt, now);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Attachments
+
+/** What an attachment's card shows (``/api/media/<token>/meta``): its name,
+ *  type, and size. Never the file itself (decision D1). */
+export type LocalStoreMediaMeta = { name?: string; ext?: string; content_type?: string; size: number | null };
+
+/** Attachments kept per session; the least recently stored go first. Each is a
+ *  few hundred bytes and leaves with its session, so none counts against the
+ *  budget. */
+const MEDIA_PER_SESSION = 200;
+
+function mediaMetaOf(value: unknown): LocalStoreMediaMeta | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const fields = value as Record<string, unknown>;
+  const meta: LocalStoreMediaMeta = { size: typeof fields.size === 'number' && Number.isFinite(fields.size) ? fields.size : null };
+  for (const key of ['name', 'ext', 'content_type'] as const) {
+    if (typeof fields[key] === 'string') meta[key] = fields[key].slice(0, 512);
+  }
+  return meta;
+}
+
+/** Keep the metadata of an attachment shown in ``ticket``'s session, so its
+ *  card shows offline. Only for a session the store
+ *  keeps, and not when the session was forgotten or evicted after the request
+ *  went out. */
+export async function recordLocalStoreMediaMeta(ticket: LocalStoreTicket, url: string, value: unknown): Promise<void> {
+  const meta = mediaMetaOf(value);
+  if (!meta) return;
+  const writer = await writerFor(ticket);
+  if (!writer) return;
+  await transact('readwrite', [META, SESSIONS, RANGES], async (tx) => {
+    if (!(await metaAdmits(tx, writer.reader, writer.epoch))) return;
+    const record = await settle(tx.objectStore(RANGES).get(ticket.sessionId) as IDBRequest<StoredRanges | undefined>);
+    if (record?.forgottenAt != null && record.forgottenAt >= ticket.observedAt) return;
+    // Kept: it has coverage. A forget or an eviction empties the ranges.
+    if (!record || record.ranges.length === 0) return;
+    const sessions = tx.objectStore(SESSIONS);
+    const stored = await settle(sessions.get(ticket.sessionId) as IDBRequest<StoredSession | undefined>);
+    if (!stored) return;
+    const media = { ...stored.media };
+    delete media[url];
+    media[url] = meta;
+    const urls = Object.keys(media);
+    for (const old of urls.slice(0, Math.max(0, urls.length - MEDIA_PER_SESSION))) delete media[old];
+    sessions.put({ ...stored, media } satisfies StoredSession);
+  });
+}
+
+/** What the diagnostics page shows of the store: whether the browser granted
+ *  persistent storage when it was asked (null when it was not asked, as in a
+ *  plain browser tab, decision D5), and the bytes the store holds. */
+export type LocalStoreDiagnostics = { persisted: boolean | null; bytes: number };
+
+export function readLocalStoreDiagnostics(): Promise<LocalStoreDiagnostics | null> {
+  return readAsReader([SESSIONS], async (tx, meta) => {
+    const sessions = await settle(tx.objectStore(SESSIONS).getAll() as IDBRequest<StoredSession[]>);
+    return { persisted: meta.persisted, bytes: sessions.reduce((sum, session) => sum + session.bytes, 0) };
+  });
+}
+
+/** The stored metadata of an attachment shown in ``sessionId``, or null. */
+export function readLocalStoreMediaMeta(sessionId: string, url: string): Promise<LocalStoreMediaMeta | null> {
+  return readAsReader([SESSIONS], async (tx) => {
+    const stored = await settle(tx.objectStore(SESSIONS).get(sessionId) as IDBRequest<StoredSession | undefined>);
+    return stored?.media?.[url] ?? null;
   });
 }
 
@@ -917,7 +989,7 @@ async function evictForSpace(quotaFailure: boolean): Promise<boolean> {
         // Evicted like a forget: an answer read before now would put back older
         // copies of what was just removed, so the marker refuses it.
         tx.objectStore(RANGES).put({ sessionId: session.id, ranges: [], forgottenAt: Date.now() } satisfies StoredRanges);
-        tx.objectStore(SESSIONS).put({ ...session, bytes: 0 } satisfies StoredSession);
+        tx.objectStore(SESSIONS).put({ ...session, bytes: 0, media: undefined } satisfies StoredSession);
         total -= session.bytes;
         freed = true;
         if (quotaFailure) break;
@@ -963,11 +1035,7 @@ export async function readLocalStoreWindow(
   sessionId: string,
   { before = null, limit = 50 }: { before?: OrderKey | null; limit?: number } = {},
 ): Promise<LocalStoreWindow | null> {
-  const reader = getLocalSnapshotPrincipal();
-  if (!reader || !(await claimFor(reader))) return null;
-  const result = await transact('readonly', [META, SESSIONS, MESSAGES, RANGES], async (tx) => {
-    const meta = await getMeta(tx);
-    if (meta?.reader !== reader || meta.signOutGeneration !== readSignOutGeneration()) return null;
+  return readAsReader([SESSIONS, MESSAGES, RANGES], async (tx) => {
     const session = await settle(tx.objectStore(SESSIONS).get(sessionId) as IDBRequest<StoredSession | undefined>);
     const ranges = (await settle(tx.objectStore(RANGES).get(sessionId) as IDBRequest<StoredRanges | undefined>))?.ranges ?? [];
     const rows: StoredMessage[] = [];
@@ -1001,6 +1069,22 @@ export async function readLocalStoreWindow(
       startReached,
     } satisfies LocalStoreWindow;
   });
-  if (!result || getLocalSnapshotPrincipal() !== reader) return null;
+}
+
+/** Run a read for the reader this document names, and only while the store is
+ *  theirs and no sign-out has happened since; null otherwise. An answer that
+ *  lands after the reader changed is dropped too. */
+async function readAsReader<T>(
+  stores: readonly string[],
+  work: (tx: IDBTransaction, meta: Meta) => Promise<T | null>,
+): Promise<T | null> {
+  const reader = getLocalSnapshotPrincipal();
+  if (!reader || !(await claimFor(reader))) return null;
+  const result = await transact('readonly', [META, ...stores], async (tx) => {
+    const meta = await getMeta(tx);
+    if (!meta || meta.reader !== reader || meta.signOutGeneration !== readSignOutGeneration()) return null;
+    return work(tx, meta);
+  });
+  if (result == null || getLocalSnapshotPrincipal() !== reader) return null;
   return result;
 }

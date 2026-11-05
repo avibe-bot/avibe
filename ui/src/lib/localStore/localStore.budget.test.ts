@@ -109,11 +109,17 @@ describe('budget', () => {
     const readBeforeEviction = tab.store.beginLocalStoreRead('ses_old', Date.now() - 1000);
     await tab.tail('ses_main', [row(1, 'ses_main'), row(2, 'ses_main')], session('ses_main', 1));
     await tab.tail('ses_old', [row(1, 'ses_old'), row(2, 'ses_old')], session('ses_old', 2));
+    const attachment = { name: 'old.png', size: 10 };
+    await tab.store.recordLocalStoreMediaMeta(tab.store.beginLocalStoreRead('ses_old'), '/api/media/tok_old', attachment);
     await tab.tail('ses_new', [row(1, 'ses_new'), row(2, 'ses_new')], session('ses_new', 3));
     await checkBudget();
     await vi.waitFor(async () => expect(await tab.held('ses_old'), await onDisk()).toBe(0), SETTLE);
     expect(await tab.held('ses_main'), await onDisk()).toBe(2);
     expect(await tab.held('ses_new'), await onDisk()).toBe(2);
+    // What the diagnostics page reports: the two sessions of 40 KB left, under the target.
+    const stored = (await tab.store.readLocalStoreDiagnostics())?.bytes ?? 0;
+    expect(stored).toBeGreaterThan(80_000);
+    expect(stored).toBeLessThan(90_000);
     // An answer read before the eviction does not put the evicted rows back.
     await tab.store.recordLocalStorePage(
       readBeforeEviction,
@@ -121,6 +127,10 @@ describe('budget', () => {
       { messages: [row(1, 'ses_old'), row(2, 'ses_old')], next_before_id: null },
     );
     expect(await tab.held('ses_old'), await onDisk()).toBe(0);
+    // Its attachments go with it, and none comes back for a session no longer kept.
+    expect(await tab.store.readLocalStoreMediaMeta('ses_old', '/api/media/tok_old')).toBeNull();
+    await tab.store.recordLocalStoreMediaMeta(tab.store.beginLocalStoreRead('ses_old'), '/api/media/tok_old', attachment);
+    expect(await tab.store.readLocalStoreMediaMeta('ses_old', '/api/media/tok_old')).toBeNull();
   });
 
   it('counts rows of a session no session read has named yet against the budget', async () => {
@@ -166,11 +176,14 @@ describe('persistence', () => {
       platform.standalone = standalone;
       const tab = await openDocument();
       await tab.store.readLocalStoreWindow('ses_a');
+      return tab;
     };
     await openAs(false);
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(persist).not.toHaveBeenCalled();
-    await openAs(true);
+    const app = await openAs(true);
     await vi.waitFor(() => expect(persist).toHaveBeenCalledTimes(1), SETTLE);
+    // The answer is recorded for the diagnostics page.
+    await vi.waitFor(async () => expect((await app.store.readLocalStoreDiagnostics())?.persisted).toBe(true), SETTLE);
   });
 });
