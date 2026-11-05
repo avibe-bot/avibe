@@ -13,6 +13,7 @@ export const loginStates: { name: string; title: string; fixture: MobileLoginFix
   { name: 'email-rate-limited', title: '发送 · 请求过于频繁', fixture: { step: 'email', email: account.email, error: 'rate-limited' } },
   { name: 'email-network-error', title: '发送 · 网络错误', fixture: { step: 'email', email: account.email, error: 'network' } },
   { name: 'code-sent', title: '验证码已发送 · 可修改邮箱', fixture: codeSent },
+  { name: 'code-partial', title: '验证码 · 输入中', fixture: { ...codeSent, code: '12' } },
   { name: 'code-ready', title: '已输入六位 · 可验证', fixture: { ...codeSent, code: '123456' } },
   { name: 'resending', title: '重新发送中', fixture: { ...codeSent, busy: 'resending' } },
   { name: 'resend-success', title: '重发成功 · 60 秒倒计时', fixture: { ...codeSent, cooldown: 60, resent: true } },
@@ -23,7 +24,7 @@ export const loginStates: { name: string; title: string; fixture: MobileLoginFix
   { name: 'rate-limited', title: '重发 · 请求过于频繁', fixture: { ...codeSent, cooldown: 15, error: 'rate-limited' } },
   { name: 'network-error', title: '验证 · 网络错误保留输入', fixture: { ...codeSent, code: '123456', error: 'network' } },
 ];
-export const smallCodeFixture: MobileLoginFixture = { ...codeSent, email: 'alexandra.chen+research@example.com', cooldown: 15, error: 'resend-failed' };
+export const smallCodeFixture: MobileLoginFixture = { ...codeSent, email: 'alexandra.chen+research-and-product-planning@international.example.com', compact: true, cooldown: 15, error: 'resend-failed' };
 export const personal: MobileInstance = { id: 'personal', name: 'Personal Workbench', host: 'personal-app.avibe.bot', online: true };
 const lab: MobileInstance = { id: 'lab', name: 'Lab', host: 'lab-app.avibe.bot', online: true };
 export const ownInstances = [personal, lab];

@@ -1,190 +1,162 @@
-# Mobile App onboarding proposal
+# Mobile App onboarding — A / Cloud letter
 
-## Current checkpoint: visual direction selection
+Status: **proposed**. The owner selected A (云间来信 / Cloud letter) on
+2026-11-05 at 21:39. This is the complete design-only handoff for PR #3252;
+visual direction selection has finished. B/C studies and the previous ordinary
+compositions are removed. Unchanged shipped component references remain separate.
+Approval and implementation are subsequent decisions. Do not merge this proposal
+without the owner's explicit instruction.
 
-The owner reopened the visual direction on 2026-11-05 at 20:14, with corrections
-at 20:17 and 20:20. See [direction studies](directions.README.md): three distinct
-Chinese directions, each with welcome/email/code/instance pages in both themes.
-The latest contract requires six continuous, equally spaced OTP cells and the
-full email without masking or truncation. Existing branding/tokens remain; the
-prior exact-composition requirement is relaxed. Select a direction before the
-full state/English update and final review/CI gates. All frames remain proposed.
+## Change contract
 
-The sections below describe the previous 66-frame flow baseline, retained as a
-secondary reference until selection. Its single visible OTP field is superseded
-by the six-cell display over one accessible input in the direction studies.
+Welcome → email → six-digit email OTP → instance selection. Preserve the same
+account, instance ownership/sharing, availability and recovery semantics. A uses
+Avibe's high-resolution cloud mascot, subtle mint/cyan/violet background, raised
+rounded surfaces and pill actions. Every proposal exists in Chinese and English,
+and light and dark. No Apple/Google/GitHub choices or browser-login instructions.
 
-## Previous flow baseline: change contract
+Acceptance invariants:
 
-Define the App-owned path from first launch to an instance, including recovery.
-The **66 proposed frames** cover 33 states in Chinese and English, each in light
-and dark themes. Two additional `alignment` frames capture unchanged shipped
-components for comparison and retain `shipped` status. Approval of this proposal
-precedes a separate implementation; no authentication or navigation is built here.
-
-Acceptance properties: every entry/recovery state has a clear next action;
-instance identity, ownership and availability remain readable; first selection is
-distinguishable from switching; account access works before selecting an instance;
-both locales/themes preserve the same hierarchy; each proposed element maps to an
-existing shipped component or an unchanged composition from a shipped page.
-
-Scope stays in `ui/design/`: frames, synthetic fixtures, kit and
-this handoff. No product/native/backend code, planning changes, tokens or new
-dependencies. All source references below were inspected at base `84ae467725`.
+- Every state has a clear next action; busy/cooldown states prevent duplicate
+  actions and retain the email/code. Timers in the frames are static fixtures.
+- Email is always complete: never masked, ellipsized, clipped or truncated in
+  recipient/account text. Long text wraps. The account frame renders the actual
+  `MoreAccountSection` and uses a design-only descendant style to replace its
+  truncation with wrapping; implementation must expose the same wrapping policy.
+  An editable email field retains native email-input editing behavior; any long
+  value must also be shown as complete wrapped text during implementation.
+- OTP is six equal squares in a continuous row, uniform `gap-2`, with no dash or
+  grouping. One accessible input underlies the decorative display.
+- Current instance is marked only when switching. Offline recovery derives its
+  name from the selected fixture, preserves the list and waits for availability.
+- Initial load uses matching skeleton rows; refresh retains existing rows.
+- Scope is `ui/design/` only. No new tokens, dependencies, production components,
+  authentication/native/backend behavior, runtime/config changes or plans edits.
 
 ## Frame inventory
 
-Prefix every entry with `mobile-app/`; append `-zh` or `-en` to proposal states.
+Prefix IDs with `mobile-app/`; append `-zh` or `-en` to proposed states. Existing
+flow IDs remain stable; `welcome/intro` and `welcome/code-partial` complete the A
+flow, and `account/long-email` verifies the account wrapping policy.
 
-| Surface | States |
+| File / surface | States |
 | --- | --- |
-| `welcome` | `default`, `email-invalid`, `sending`, `email-rate-limited`, `email-network-error`, `code-sent`, `code-ready`, `resending`, `resend-success`, `resend-failed`, `verifying`, `code-invalid`, `code-expired`, `rate-limited`, `network-error`, `success`, `code-small` |
+| `welcome` | `intro`, `default` (email entry), `email-invalid`, `sending`, `email-rate-limited`, `email-network-error`, `code-sent` (blank), `code-partial`, `code-ready`, `verifying`, `code-invalid`, `code-expired`, `rate-limited`, `network-error`, `resending`, `resend-success` (60s), `resend-failed` (15s), `success`, `code-small` |
 | `instances` | `own`, `mixed`, `current`, `offline`, `offline-tapped`, `loading`, `error`, `pulling`, `refreshing`, `long-small` |
-| `empty` | `default`, `cli` |
-| `account` | `default`, `no-instance` |
+| `empty` | `default` (desktop + CLI choices), `cli` |
+| `account` | `default`, `no-instance`, `long-email` |
 | `native` | `instance-error`, `window-topbar` |
-| `alignment` (shipped reference, no locale suffix) | `account-reference`, `error-reference` |
+| `alignment` — shipped references, no locale suffix | `account-reference`, `error-reference` |
 
-Stable implementation examples: `mobile-app/welcome/default-zh` and
-`mobile-app/instances/long-small-en`. The `native/instance-error` ID is retained
-for continuity; the recommended implementation is a packaged web shell page.
+**72 proposed frames / 144 theme captures**, plus 2 shipped references / 4
+captures. `welcome/success` immediately presents the existing picker composition;
+there is no invented success detour. Frames normally use 390 × 844. Long email
+and long instance names also use 375 × 667. `compact` is a fixture for the small
+OTP composition: smaller illustration and tighter header spacing make room for
+the full email; implementation adapts to available height and keyboard insets.
+Scrolling owns content that exceeds the viewport; it never conceals email text.
 
-## Alignment inventory
+## Kit, primitives and token sources
 
-The Show Page places a corresponding existing-page screenshot beside **every**
-proposal, with locale/theme controls and a separate element mapping section.
-References are captures of actual components, not redrawn approximations.
+All A drafts live in `ui/design/kit/mobile-app.tsx`; no competing direction kit.
 
-| Proposed element | Shipped component or exact existing composition | Reference frame |
+| Composition | Purpose and shipped reuse | Existing values / source |
 | --- | --- | --- |
-| Brand bar, scrolling content, page insets and background | `PhoneScreen` uses `MobileBrandHeader`, as `AppShell` does; only instance-only tabs are absent | `mobile/workbench-tab/team` |
-| Page title, icon well, subtitle, account action | `WorkbenchPageHeader` with its existing icon/title sizes and `Button` toolbar action | `agents/agents-page/phone` |
-| Section label and refresh action | `PageSectionTitle`, matching ProjectsPage's title/action row | `mobile/projects/collapsed` |
-| Instance row | `MobileProjectRow` composition: `rounded-xl` border/surface, `px-4 py-3.5`, 16px icon, 14px semibold name; instance metadata adds wrapping | `mobile/projects/collapsed` |
-| Online/offline/shared/current labels | `Badge` success/secondary/info/outline variants; no custom status dots | `system/badges/all` |
-| AI partner identity | `BotAvatar` with the existing mascot; mobile identity-row spacing | `mobile/workbench-tab/team` |
-| Email and verification fields | Shipped `Input` and `Label`, `flex flex-col gap-2` composition; `Input` owns `fieldBaseClass`, h-9 and focus ring | `system/fields/all` |
-| Submit and resend actions | Unmodified default-size `Button`: default primary and outline secondary; text/sm change-email action | `system/buttons/variants` |
-| Field errors | `OAuthCallbackCodeInput` inline alert composition, with aria-invalid and aria-describedby | `system/fields/all`; source `settings/oauth/OAuthFlowParts.tsx` |
-| Signed-in account and sign-out | Actual `MoreAccountSection`, using `/api/session` fixture; no copied account markup | `mobile-app/alignment/account-reference` (real mobile Dock account sheet) |
-| Initial load and retry | Exact ProjectsPage spinner/label and retry-panel composition | `mobile/projects/collapsed` (list geometry); source `ProjectsPage` loading/error branches |
-| Empty state | Exact ProjectsPage `px-4 py-10 text-center text-sm text-muted` surface | `mobile/projects/collapsed` (list geometry); source empty branch |
-| Installation choices | Existing More-page row composition, shipped Button variants, pairing language consistent with Remote Access | `settings/remote-access/phone` |
-| Instance failure | ErrorFallback's icon, 15px title, 12.5px body, diagnostic well and sm brand/outline buttons, with instance-specific actions | `mobile-app/alignment/error-reference` |
-| New-window toolbar | Actual `MobileAppHeader`, plus existing compact ghost actions | `apps/file-browser/phone` |
+| `CloudScreen`, `Brand` | PhoneScreen without instance-only tabs; brand/back/account actions | `--gradient-wizard-platforms`; `p-6`, `max-w-xl`, `h-11`, logo asset, shipped Button |
+| `WelcomePage` | Mascot-led welcome with a friendly invitation | Existing `assets/mascot/cloud-tuanzi-v2.png` at `size-52` inside `size-64`; `shadow-mint-card-lg`, `mint`, `surface`, `rounded-full` |
+| `WelcomeIntro`, `CodeInput` | Email form and six-cell OTP state display | Existing `vibey-message.png`; Input/Label; `rounded-3xl`, `p-6`, `shadow-mint-card`; cells `grid-cols-6 gap-2 aspect-square rounded-2xl text-2xl`; ring uses `mint`, invalid uses `destructive` / `destructive-ink` |
+| `Primary` | Full-width primary action | Brand Button, `size=lg`, `rounded-full`, `shadow-mint-card-sm` |
+| `InstanceRow`, `InstancePicker` | Identity, host, ownership, availability and current selection | Button composition; shipped Badge success/secondary/info/outline; `p-5`, `gap-3`, `size-11`, `rounded-3xl`, `border-border`, `bg-surface/80`, `shadow-mint-card-sm` |
+| `InstanceSkeleton` | Same row footprint before data arrives, static here | Shipped Skeleton; text/icon/badge geometry matches the instance card; shipped SkeletonShimmer and handover tokens are the implementation source |
+| `EmptyInstancesPage` | Desktop and CLI installation/pairing guidance | Existing icons, raised surface, Button, `surface-2`, `font-mono` only for actual commands |
+| `AccountPage` | Actual account/sign-out component, wrapping override, current instance, full-row switch | MoreAccountSection, InstanceRow, outline Button, existing radius/shadow tokens |
+| `NativeInstanceError` | Instance failure and retry/switch recovery | Existing AlertTriangle, `gold-ink`, raised identity card, brand/outline Button |
+| `NativeWindowTopBar` | Child-window browser actions | Actual MobileAppHeader, compact ghost Buttons; the document underneath is illustrative |
 
-Other inspected patterns: `AccountMenu` is the desktop account dropdown, so the
-mobile `MoreAccountSection` is the correct reuse. `InboxSectionHeader` binds its
-labels to bots/sessions; `PageSectionTitle` provides the equivalent neutral mobile
-section. `sessionRowLayout` owns sidebar indentation and running-session dots;
-instance rows follow the mobile project row instead. `SortableProjectList` adds
-drag/reorder behavior, which instance selection does not need. `SegmentedRadio`
-is available but this flow has no mutually exclusive display modes. `InstallHint`
-is for adding the browser app to Home Screen; it is not an install-the-computer
-flow. `setup/intro/phone` informed first-use tone and brand ordering; its complete
-assistant-relay story does not belong in account sign-in. There is no generic
-shipped skeleton-row component: initial loading uses the actual ProjectsPage
-spinner panel (also the existing provider screen's initial-loading pattern),
-rather than inventing skeleton geometry.
+All spacing, type, radius, semantic colors, shadows, gradients and motion values
+come from `ui/src/index.css` or existing component variants. No new tokens. The
+round/surface/gradient layers are static, with no animated filter or backdrop.
+Typography retains Avibe's installed product font. Draft bilingual kit copy moves
+to the product's locale catalogs when implemented.
 
-## Flow and interaction handoff
+## Interaction and accessibility handoff
 
-- **Login / registration:** App-owned email input, then one six-digit code field.
-  Both use avibe.bot; new email addresses register through the existing
-  `signInWithOtp` behavior. The heading is “登录 / 注册” / “Sign in / Create account”.
-  Avibe/Agent OS and Vibey as the built-in AI partner remain on the first step.
-  No password, third-party login, browser authentication panel or Apple artwork.
-  Native owns the auth calls and credentials; the packaged React page collects
-  email/code and presents state. Success opens the existing instance picker,
-  represented by `welcome/success`, without an extra success screen.
-- **Code entry:** one shipped Input, `type="text"`, `inputMode="numeric"`,
-  `autoComplete="one-time-code"`, `pattern="[0-9]{6}"`, `maxLength={6}`. It accepts
-  normal paste; do not split the field into six boxes. Implementation mirrors
-  backend digit normalization and enables verification only for six digits.
-  The explicit instruction is “输入邮件里的 6 位验证码”; supporting copy explains
-  that the email link opens Safari and will not return to the App. Android uses
-  its browser name. The recipient stays visible; change-email returns to an
-  editable email step and clears code, errors and resend timer.
-- **Send / resend:** initial success enters `code-sent`, with resend available,
-  matching the pinned web implementation. Only a completed **resend** starts
-  its cooldown: success **60 seconds**, failure **15 seconds**. `resend-success`
-  and `resend-failed` show the starting values; at zero, restore Resend email.
-  These are retry delays, not code expiry or a promise that a server rate limit
-  ends in 15 seconds. Sending/resending/verifying states disable duplicate actions.
-  Rate-limit and network states retain the email/code so the user can retry.
-- **Error copy:** invalid and expired code have separate fixtures but deliberately
-  share backend `otpInvalid`: “验证码无效或已过期，请重试或重新发送邮件。” The existing
-  web client does not distinguish these causes. Rate-limit and network feedback
-  are App proposals; future implementation must map real error outcomes rather
-  than claim the pinned web UI already exposes them. Inline alerts reuse the
-  shipped OAuth callback form treatment. No terms/privacy agreement is added:
-  neither `app/login/page.tsx` nor `login-form.tsx` renders one at the pinned SHA.
-- **Instances:** first selection has no current badge. Switching marks the current
-  instance. Offline row selection preserves the list and uses the selected
-  fixture's identity in its recovery message. Entry waits for availability.
-  There is one permanent refresh action in the section header; no permanent
-  pull-to-refresh hint. Pull/release and refreshing are transient gesture states,
-  and refresh preserves the previous rows. Account stays reachable.
-- **No instances:** desktop is the first installation row, CLI the second. Pair
-  the computer with the same avibe.bot account, then use paired/refresh. Commands
-  match the repository README. The final download/guide destinations must be
-  the project's maintained links, confirmed during implementation.
-- **Account:** the real mobile account/sign-out section appears above current
-  instance and switch/choose. Native credential cleanup handles sign-out in the
-  implementation. Delete account opens avibe.bot for consequences and confirmation;
-  implementation must confirm that destination and complete the return flow.
-- **Connection failure:** recommend the same packaged React shell as the other
-  entry pages; native code reports the error and handles retry/switch. Its existing
-  `native/instance-error` design ID does not mandate Swift/Kotlin rendering.
-- **New window:** directly reuse MobileAppHeader's back, website title and compact
-  action placement. Back navigates window history; Done closes it; Open in Safari
-  hands it off. This is the iOS reference, with corresponding browser copy on
-  Android. The short document below is illustrative content.
+- The email field uses `type=email`, email autocomplete/input mode, no automatic
+  capitalization or spellcheck, and an associated Label. Invalid format displays
+  an inline alert linked through `aria-describedby`; sending disables repeats.
+- Code uses one labeled Input with `type=text`, `inputMode=numeric`,
+  `autocomplete=one-time-code`, `pattern=[0-9]{6}` and `maxLength=6`. The six cells
+  are `aria-hidden`; no six-focus-stop implementation. Blank/partial frames show
+  the current cell's mint border/ring/caret; full codes enable verification.
+  Errors use destructive cells and a text alert, never color alone.
+- Production must synchronize typing, paste and autofill to the display, normalize
+  digits, focus the underlying field when any cell is tapped, expose a visible
+  focus ring for actual input focus (including filled/error states), and announce
+  busy/error/success changes. The static fixture input does not implement those
+  behaviors. No real keyboard, screen-reader or iOS autofill claim is made.
+- Change email is centered with the recipient text. It returns to editable email
+  entry, clears the code, error and resend timer. Busy actions cannot duplicate.
+- Initial send success enters blank code entry with resend available. Resending
+  disables repeat actions. Completed resend success waits 60s; failure waits 15s.
+  At zero the text link becomes Resend again. A 15s UI delay is **not** a promise
+  that server throttling has ended. Rate-limit errors still ask to try later.
+- Error and expired fixtures intentionally share the existing invalid-or-expired
+  wording. Distinct frames do not imply the service can distinguish these causes.
+- Refresh is a single permanent header action; pulling/release/refreshing states
+  are transient. Cached rows remain visible during refresh. No cached data means
+  skeleton, and a failed load gives retry in that region.
+- No instances: desktop first, CLI second. Commands preserve the repository's
+  install + `vibe remote` flow. Pair the same account, return and refresh.
+- Account retains actual MoreAccountSection/sign-out. The full-width switch or
+  choose-instance action is a **proposal awaiting final owner confirmation**.
+  Delete account leads to avibe.bot to review consequences and confirm; final
+  maintained destination and native credential cleanup belong to implementation.
+- Instance failure is a packaged shell-page proposal; its stable `native/*` ID
+  does not require a Swift/Kotlin renderer. Retry/switch remain native-integrated.
+- Child-window back navigates history, Done closes, Open in Safari hands off on
+  iOS. Android uses its corresponding browser copy. This toolbar is not an auth
+  instruction or system-browser login path.
 
-Sensitive operations remain native-owned. Proposed actions are static; shipped
-components retain their existing behavior in the canvas, which is not a working
-mobile onboarding implementation. Real focus, announcements, safe cancellation,
-refresh completion and native transitions remain implementation requirements.
+## Motion specification — approved standard strength
 
-## Responsive and validation
+`docs/plans/web-ui-motion.md` (owner-approved PR #3263) and its existing tokens
+supersede the earlier spinner suggestion and exploratory decorative effects.
+**These frames are static.** The table specifies future implementation only.
 
-Normal frames are 390 × 844; long-copy selection and long-email code entry are
-375 × 667. PhoneScreen owns
-scrolling and native safe-area handling follows the existing shell. Names, domains
-and shared-by text wrap. Existing compact controls keep the shipped geometry;
-actual native hit targets and text scaling require device checks rather than a
-blanket 44px claim.
+| Moment | Existing tokens, duration and curve | Reduced motion |
+| --- | --- | --- |
+| Mascot arrival / floated resting composition | One small rise using `--motion-offset-sm` (4px) and `--motion-spring-smooth` / duration (440ms); opacity on `--motion-duration-base` (240ms), enter. No perpetual idle bobbing, in line with the approved purposeful-motion rule. | No translation; fast 160ms crossfade or immediate appearance. |
+| OTP focus / new digit | Border/fill of the one active cell on `--motion-duration-fast` (160ms), `--motion-ease-enter`; input/focus updates immediately. No six staggered entrances. | Color/focus remains, no travel or scale. |
+| OTP error | Inline alert fades on fast 160ms / enter; cells change destructive color. No repeated shake or animated shadow. The optional exploratory shake is omitted under the approved standard. | Static destructive state and text alert; no shake. |
+| Press / release | Controls scale to `--motion-scale-press-control` (0.94), cards to `--motion-scale-press` (0.97), instant 100ms; release uses snappy 290ms. Respect the approved 60ms scroller touch delay. | Color step only. |
+| First instance load | Shipped Skeleton blocks, one SkeletonShimmer sweep per card on `--motion-shimmer-duration` (1600ms). Use its existing reveal delay; don't flash skeleton for faster reads. No spinner. | Still blocks, no shimmer or reveal fade. |
+| Skeleton → rows / refresh | `--motion-handover-duration` / ease: 240ms / enter. Match row geometry; cached identities remain still. Failure/retry reuses the same region. | Content replaces skeleton in one frame. |
+| Forward / back between entry steps | Follow approved M5: View Transition with sheet 440ms curve on supported iOS 18+, prior page drift `--motion-drift` (30%). Unsupported iOS 17 uses a cut. Skip on new input or native-owned swipe / `hasUAVisualTransition`. | Fast 160ms crossfade, no push. |
 
-Local design typecheck, UI build, lint and explicit design captures gate the PR.
-All 132 proposal captures and the four alignment-reference captures are inspected
-for layout and overflow; the Show Page also exports the existing reference pages.
-Rendering proves neither real authentication nor keyboard/touch accessibility.
-Owner review can focus on the email/code sequence, retry feedback and bilingual copy.
-Input editing/paste uses the native HTML field, but fixture-driven buttons and
-countdown values are static; this is not an interactive authentication prototype.
-iOS email-code autofill, the software keyboard and a real paste-to-submit flow
-must be verified in the implemented App.
+WKWebView budget: compositor transform/opacity only for travelling elements;
+never animate layout dimensions, filters or list shadows. Animate only the
+visible/changed region; pause hidden work. Native edge swipe owns the gesture,
+so no simultaneous web back animation. Follow approved section 5 measurements
+(no motion-caused main-thread task over 16ms, zero per-frame style/layout work,
+no dropped compositor frames; Chromium 4× is only a proxy);
+real iPhone/WKWebView frame-time verification belongs to implementation. This
+proposal adds no runtime animation, duration or parallel motion token system.
 
-## Read-only avibe.bot assessment
+## Final owner review and verification boundary
 
-Behavior and copy are pinned to backend `88a2592bc8261d563baf5b9620c4dd1e45dea6c2`,
-`app/login/login-form.tsx` and `lib/i18n/messages.ts`. The existing magic-link
-path already supports `verifyOtp({ email, token, type: 'email' })`; this proposal
-makes that code path the primary App flow. Email validation, six-digit validation,
-resend success/failure timing and the combined invalid/expired message follow
-that source. Login/register share `signInWithOtp` with automatic user creation.
-No backend change is proposed or implemented. Native session establishment and
-instance-list access still need end-to-end verification during implementation.
+Still proposed for final review: shared error/expired wording; offline-tap
+recovery explanation; centered Change email; full-row switch-instance action.
+The old spinner question is settled by #3263's skeleton policy.
 
-The earlier read-only mobile assessment remains available as historical web
-context: actual sign-in is `site/login/phone`, consent is `oidc/consent/phone`.
-Eight Chinese/English light/dark captures at 390 × 844 fit their content. English
-login footer wraps into two rows with a leading separator on the second; prefer
-an intentional stacked narrow layout. This is the website's existing navigation,
-not a terms/privacy agreement. Existing website OAuth choices and consent are
-not part of the proposed App login.
+Focused checks: design typecheck, UI lint baseline, production build, whitespace,
+all `mobile-app` screenshots and a bounded light/dark visual inspection. Capture
+results and exact-head Codex/CI gates are recorded in the PR. A screenshot proves
+layout, not functioning authentication or accessibility.
 
-Login captures have no console errors or unfixtured reads. Consent has no console
-errors but its existing fixture has an unfixtured `store.getOAuthConsentGrant`
-read. No backend edits. Real-device OTP autofill, keyboard, paste, send/resend,
-verification and native credential/session transitions remain deferred.
+Unverified implementation items: real mail delivery, live Supabase template or
+OTP configuration, native session/token handling, keyboard insets, paste/autofill,
+focus/announcements, touch targets/text scaling on device, refresh/recovery
+completion, maintained install/delete destinations and motion performance. No
+production services, accounts, credentials or auth configuration were changed.
+The prior read-only backend source assessment was pinned to `88a2592`; it is
+historical flow evidence, not a live authentication test.
