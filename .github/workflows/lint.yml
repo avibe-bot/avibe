@@ -240,7 +240,6 @@ jobs:
               npm run test:pet-mini
               npm run test:chat-interactions
               npm run test:inbox-return
-              npm run test:chat-scroll
           - lane: 2
             suites: |
               npm run test:workbench-general -- sidebar-floating.spec.ts desktop-window-chrome.spec.ts composer-route-trigger.spec.ts skills-dialog.spec.ts bots.spec.ts
@@ -262,6 +261,7 @@ jobs:
               npm run test:badge-triggers
               npm run test:chat-selection
               npm run test:voice-shortcut
+              npm run test:chat-scroll
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
