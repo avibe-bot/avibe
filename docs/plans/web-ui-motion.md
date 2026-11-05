@@ -500,3 +500,33 @@ send (they change `ChatPage`).
   (`[--press-scale:1]`, section 5).
 - **Deferred to phase 4**: the desktop sidebar's selection moving between
   conversations (FLIP), since that phase changes the sidebar.
+
+### Phase 3 (sheets and overlays)
+
+- **One set of classes.** `motion-sheet` (a phone sheet), `motion-dialog`
+  (that sheet on a phone, a dialog that fades and grows on a desktop),
+  `motion-scrim`, and `motion-popover` in `src/index.css`, keyed on the
+  `data-state` Radix sets; Radix waits for the closing animation before it
+  unmounts. `Dialog` (with it the Bot switcher and the new-session sheet),
+  `ResponsiveMenu`, and `Popover` use them, and so does the Apps drawer,
+  which keeps itself mounted through its closing animation.
+- **Drag to dismiss** (`src/lib/sheetDrag.ts`) on the `Dialog` sheet, the
+  `ResponsiveMenu` sheet, and the Apps drawer. A touch claims the sheet from
+  its first downward move, where nothing under it scrolls (the handle and the
+  header) or from content scrolled to its top; fields keep their own touch.
+  Dismissing closes the sheet as its close button does; an owner that keeps
+  it open gets it back on `spring-snappy`.
+- **The Apps drawer** moves inside a frame that ends at the tab bar's edge, so
+  it rises from behind the bar and sinks back behind it. Its two inner sheets
+  (a tile's actions, the footer's overflow) rise in; they leave with the cut
+  they had, since each unmounts with the choice that closes it.
+- **Toasts** (`ToastProvider`) move with the Web Animations API. A toast that
+  joins a stack waits one `--motion-beat` while the stack lifts, so the tinted
+  cards never cross. A finger swipes one away sideways. Voice toasts are a
+  separate component and are unchanged.
+- **Not migrated**: the Model Hub menu drawer, the search palette, and the
+  phone Settings panel keep their own animations until they are next touched.
+- **Measuring.** A probe that runs a `requestAnimationFrame` loop makes
+  Chromium recalculate style on every frame while any animation runs; count
+  style and layout without one. Counted that way, the phase 2 push and pop
+  run 3–4 style passes over 420 ms and no layout.

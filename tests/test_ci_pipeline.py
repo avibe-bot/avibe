@@ -531,6 +531,7 @@ _BROWSER_COMMANDS = (
     "composer-route-trigger.spec.ts skills-dialog.spec.ts bots.spec.ts",
     "run test:chat-interactions",
     "run test:pdf-preview",
+    "run test:motion",
 )
 
 

@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState, type AnimationEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { LayoutGrid, Minus, MoreHorizontal, PinOff, Settings, UserRound, X } from 'lucide-react';
@@ -8,6 +8,7 @@ import { showPageAvatar, showPageIconUrl } from '../../apps/showPageAvatar';
 import { ShowPageAvatarContent } from '../../apps/showPageAvatarTile';
 import { useDock } from '../../context/DockContext';
 import { dockIdToSession } from '../../context/dockDoc';
+import { useSheetDrag } from '../../lib/sheetDrag';
 import { useAuthAccount } from '../../lib/useAuthAccount';
 import { useShowPageInventory } from '../useShowPages';
 import { MoreAccountSection, MoreAppearanceSection, MoreConnectionSection } from '../workbench/MorePage';
@@ -57,14 +58,31 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
   const pinBySession = useMemo(() => new Map(pins.map((pin) => [pin.session_id, pin])), [pins]);
   const pageBySession = useMemo(() => new Map(pages.map((page) => [page.session_id, page])), [pages]);
 
+  // The drawer rises from behind the tab bar on the sheet spring, leaves faster, and can be dragged
+  // down to dismiss it (docs/plans/web-ui-motion.md M6). It stays mounted through its closing
+  // animation and goes when that ends; where nothing animates (no Web Animations: a test DOM) it goes
+  // at once.
+  const [drawer, setDrawer] = useState<HTMLDivElement | null>(null);
+  const [leaving, setLeaving] = useState(false);
+  const [wasOpen, setWasOpen] = useState(open);
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    setLeaving(!open && typeof HTMLElement.prototype.animate === 'function');
+  }
+  useSheetDrag(drawer, { enabled: open, onDismiss: onClose });
+  const onDrawerAnimationEnd = useCallback((event: AnimationEvent<HTMLDivElement>) => {
+    if (event.target === event.currentTarget && event.currentTarget.dataset.state === 'closed') setLeaving(false);
+  }, []);
+
   // Reset transient sub-surfaces while closed so a reopen starts clean — the
   // codebase's effect-free "adjust state during render" pattern (cf. LibraryApp's
   // navKey sync), guarded so it can't loop.
   if (!open) {
     if (menu) setMenu(null);
     if (sheet) setSheet(null);
-    return null;
+    if (!leaving) return null;
   }
+  const state = open ? 'open' : 'closed';
 
   // Resolve a persisted Dock id to a renderable tile: a built-in app (icon +
   // accent from the registry) or a pinned Show Page (letter avatar). Mirrors the
@@ -113,18 +131,26 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
   };
 
   return (
-    <div className="md:hidden" role="dialog" aria-modal="true" aria-label={t('nav.apps')}>
+    <div className="md:hidden" role="dialog" aria-modal="true" aria-label={t('nav.apps')} inert={!open || undefined}>
       {/* Scrim from the top of the screen down to the tab bar — the tab bar stays
           visible + tappable below it (tapping Apps again toggles the drawer shut). */}
       <button
         type="button"
         aria-label={t('common.close')}
         onClick={onClose}
-        className="fixed inset-x-0 top-0 bottom-[calc(4.75rem+env(safe-area-inset-bottom))] z-40 bg-background/70 backdrop-blur-sm"
+        data-state={state}
+        className="motion-scrim fixed inset-x-0 top-0 bottom-[calc(4.75rem+env(safe-area-inset-bottom))] z-40 bg-background/70 backdrop-blur-sm"
       />
 
-      {/* The drawer sheet: sits directly above the bottom tab bar. */}
-      <div className="fixed inset-x-0 bottom-[calc(4.75rem+env(safe-area-inset-bottom))] z-50 max-h-[72dvh] overflow-y-auto rounded-t-3xl border border-border bg-surface px-4 pb-4 pt-2 shadow-[0_-16px_40px_-12px_rgba(0,0,0,0.55)]">
+      {/* The drawer sheet: sits directly above the bottom tab bar, and moves inside a frame that ends
+          at the bar's edge, so it rises from behind the bar and sinks back behind it. */}
+      <div className="pointer-events-none fixed inset-x-0 top-0 bottom-[calc(4.75rem+env(safe-area-inset-bottom))] z-50 overflow-hidden">
+      <div
+        ref={setDrawer}
+        data-state={state}
+        onAnimationEnd={onDrawerAnimationEnd}
+        className="motion-sheet pointer-events-auto absolute inset-x-0 bottom-0 max-h-[72dvh] overflow-y-auto rounded-t-3xl border border-border bg-surface px-4 pb-4 pt-2 shadow-[0_-16px_40px_-12px_rgba(0,0,0,0.55)]"
+      >
         {/* Grabber. */}
         <div className="mx-auto mb-3 h-1 w-10 shrink-0 rounded-full bg-border" />
 
@@ -245,6 +271,7 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
           </button>
         </div>
       </div>
+      </div>
 
       {/* Long-press manage sheet — a bottom action sheet with its OWN backdrop
           above the drawer (z-[60]), so a tap outside the actions dismisses it
@@ -255,9 +282,10 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
             type="button"
             aria-label={t('common.close')}
             onClick={() => setMenu(null)}
-            className="absolute inset-0 bg-background/70 backdrop-blur-sm"
+            data-state="open"
+            className="motion-scrim absolute inset-0 bg-background/70 backdrop-blur-sm"
           />
-          <div className="absolute inset-x-0 bottom-0 rounded-t-3xl border-t border-border bg-surface px-3 pb-[calc(1rem+env(safe-area-inset-bottom))] pt-2">
+          <div data-state="open" className="motion-sheet absolute inset-x-0 bottom-0 rounded-t-3xl border-t border-border bg-surface px-3 pb-[calc(1rem+env(safe-area-inset-bottom))] pt-2">
             <div className="mx-auto mb-2 h-1 w-10 rounded-full bg-border" />
             <div className="truncate px-2 pb-1 text-center text-[12px] font-medium text-muted">{menu.label}</div>
             <button
@@ -296,9 +324,10 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
             type="button"
             aria-label={t('common.close')}
             onClick={() => setSheet(null)}
-            className="absolute inset-0 bg-background/70 backdrop-blur-sm"
+            data-state="open"
+            className="motion-scrim absolute inset-0 bg-background/70 backdrop-blur-sm"
           />
-          <div className="absolute inset-x-0 bottom-0 max-h-[82dvh] overflow-y-auto rounded-t-3xl border-t border-border bg-surface px-4 pb-[calc(1.25rem+env(safe-area-inset-bottom))] pt-2">
+          <div data-state="open" className="motion-sheet absolute inset-x-0 bottom-0 max-h-[82dvh] overflow-y-auto rounded-t-3xl border-t border-border bg-surface px-4 pb-[calc(1.25rem+env(safe-area-inset-bottom))] pt-2">
             <div className="mx-auto mb-2 h-1 w-10 rounded-full bg-border" />
             <div className="relative flex items-center justify-center py-1">
               <span className="text-[13px] font-semibold text-foreground">{sheetTitle[sheet]}</span>

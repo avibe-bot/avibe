@@ -29,6 +29,7 @@
     "test:citations": "node scripts/e2e-suite.mjs e2e/citations/tsconfig.json playwright.citations.config.ts",
     "test:chat-selection": "node scripts/e2e-suite.mjs e2e/chat-selection/tsconfig.json playwright.chat-selection.config.ts",
     "test:inbox-return": "node scripts/e2e-suite.mjs e2e/inbox-return/tsconfig.json playwright.inbox-return.config.ts",
+    "test:motion": "node scripts/e2e-suite.mjs e2e/motion/tsconfig.json playwright.motion.config.ts",
     "test:home-media": "node scripts/e2e-suite.mjs e2e/home-media/tsconfig.json playwright.home-media.config.ts",
     "test:badge-triggers": "node scripts/e2e-suite.mjs e2e/badge-triggers/tsconfig.json playwright.badge-triggers.config.ts",
     "test:project-order": "node scripts/e2e-suite.mjs e2e/project-order/tsconfig.json playwright.project-order.config.ts",

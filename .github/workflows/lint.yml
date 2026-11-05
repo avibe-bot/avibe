@@ -251,6 +251,8 @@ jobs:
               npm run test:onboarding-fidelity -- hub-ownership.spec.ts provider-gate.spec.ts lineup.spec.ts
               npm run test:home-media
               npm run test:pdf-preview
+              # Motion of the shared surfaces: sheets, popovers, toasts (Chromium and WebKit).
+              npm run test:motion
           - lane: 4
             suites: |
               npm run test:vault-integrity

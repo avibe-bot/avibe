@@ -50,7 +50,7 @@ Four browser lanes, balanced by the first run's observed command wall times:
 | --- | --- | --- |
 | 1 | pet-mini, chat-interactions, inbox-return | 8:13 |
 | 2 | five workbench-general specs, built composer-mention-picker, project-order | 8:08 |
-| 3 | three onboarding-fidelity specs, home-media, pdf-preview | 8:10 |
+| 3 | three onboarding-fidelity specs, home-media, pdf-preview, motion (added later, about 1 minute) | 8:10 |
 | 4 | vault-integrity, workbench geometry, badge-triggers, chat-selection, voice-shortcut | 7:52 |
 
 Suites remain serial inside each runner. Existing per-suite TypeScript checks
