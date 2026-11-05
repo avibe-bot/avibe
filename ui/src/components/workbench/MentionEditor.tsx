@@ -110,6 +110,9 @@ export interface MentionEditorHandle {
   restoreVoicePreview: () => boolean;
   /** Replace the whole editor with plain text (restore on a failed send). */
   setText: (text: string) => void;
+  /** Replace the whole editor with a saved draft read again after mount. It is
+   *  reported like the mount-time seed (``isDraftSeed``), not as a user edit. */
+  seedText: (text: string) => void;
   /** Insert a mention chip at the current cursor — same node a picker-selected
    *  `@`/`#` yields — when triggered from outside the editor (e.g. "reference
    *  this session" in the sidebar). */
@@ -660,6 +663,19 @@ function BootstrapPlugin({
             root.append(paragraph);
             if (text) paragraph.selectStart().insertText(text);
           });
+        },
+        seedText: (text: string) => {
+          voicePreviewRef.current = null;
+          editor.update(
+            () => {
+              const root = $getRoot();
+              root.clear();
+              const paragraph = $createParagraphNode();
+              root.append(paragraph);
+              if (text) paragraph.selectStart().insertText(text);
+            },
+            { tag: DRAFT_SEED_TAG },
+          );
         },
         // Insert at the live selection (Lexical keeps it across DOM blur), then
         // focus so the user can keep typing. Produces the same node a typed

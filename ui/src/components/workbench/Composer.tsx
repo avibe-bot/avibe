@@ -537,9 +537,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const composerRootRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const valueRef = useRef('');
-  // Seed once from a saved draft, but only while the box is untouched so a
-  // late-arriving draft can't clobber live typing.
-  const draftAppliedRef = useRef(false);
+  // The saved draft the box was last seeded with, and whether the user has
+  // edited it since it mounted. A later ``initialDraft`` (the saved draft read
+  // again, e.g. when a chat painted from its snapshot gets its bootstrap)
+  // replaces an untouched draft as a seed; it never overwrites the user's input.
+  const seededDraftRef = useRef<string | null>(initialDraft);
+  const draftEditedRef = useRef(false);
   // Blocks a same-tick double-submit before the optimistic clear re-renders.
   const pendingRef = useRef(false);
   // Set by setDraft; consumed by the layout effect that focuses after the seeded
@@ -598,12 +601,24 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const referencesRef = useRef<MentionReference[]>([]);
 
   useEffect(() => {
-    // The mention editor seeds itself from ``initialText`` and drives ``value``
-    // via onChange, so the textarea-path seeding is skipped there.
-    if (useMentions || draftAppliedRef.current || initialDraft == null) return;
-    draftAppliedRef.current = true;
-    if (initialDraft) setValue((cur) => (cur ? cur : initialDraft));
-  }, [initialDraft, useMentions]);
+    // The mention editor seeds itself from ``initialText`` on mount; the
+    // textarea path, and every later saved draft, seed here.
+    if (initialDraft == null) return;
+    const mountSeed = useMentions && seededDraftRef.current === initialDraft;
+    seededDraftRef.current = initialDraft;
+    if (mountSeed || draftEditedRef.current || initialDraft === valueRef.current) return;
+    // Voice capture owns the draft while it runs.
+    if (
+      recordingStartRef.current
+      || recordingSessionRef.current !== null
+      || transcribingRef.current
+      || (voiceKey != null && voiceSessionLocksDraft(voiceSessionsById.get(voiceKey)))
+    ) return;
+    valueRef.current = initialDraft;
+    setHasText(initialDraft.trim().length > 0);
+    if (useMentions) mentionRef.current?.seedText(initialDraft);
+    else setValue(initialDraft);
+  }, [initialDraft, useMentions, voiceKey]);
 
   // Keep a ref of the latest value so the async voice-fill can append without a
   // stale closure. The mention path keeps ``valueRef`` current itself (in
@@ -862,6 +877,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     valueRef.current = result.text;
     setValue(result.text);
     setRealtimeAnnouncement('');
+    draftEditedRef.current = true;
     onDraftChange?.(result.text);
     const caret = session.insertion.start + result.insertion.length;
     voiceTextareaCaretRef.current = { start: caret, end: caret };
@@ -1555,6 +1571,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       setValue(next);
       seedFocusRef.current = true;
     }
+    draftEditedRef.current = true;
     onDraftChange?.(next);
     hold.discard();
   };
@@ -1743,6 +1760,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     },
     setDraft: (text: string) => {
       if (voiceDraftLocked()) return;
+      draftEditedRef.current = true;
       valueRef.current = text;
       setHasText(text.trim().length > 0);
       if (useMentions) mentionRef.current?.setText(text);
@@ -1780,6 +1798,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   }, [busyControls, sessionId]);
 
   const update = (next: string) => {
+    draftEditedRef.current = true;
     valueRef.current = next;
     setValue(next);
     onDraftChange?.(next);
@@ -1792,6 +1811,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     const sent = readyAttachments;
     const sentRefs = referencesRef.current;
     pendingRef.current = true;
+    draftEditedRef.current = true;
     // Clear optimistically so the box can't be re-submitted and a slow send can't
     // wipe text typed in the meantime.
     valueRef.current = '';
@@ -2020,6 +2040,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               // is at best a redundant write, and under a stale-props remount it
               // would save the previous session's draft under this session id
               // (mirrors the plain-textarea path, whose seeding never saves).
+              if (!isDraftSeed) draftEditedRef.current = true;
               if (!isDraftSeed && !isVoicePreview) onDraftChange?.(text);
             }}
             onSubmit={submit}

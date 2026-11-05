@@ -326,8 +326,9 @@ export const ChatPage: React.FC = () => {
   // A ``visibility === 'system'`` session is read-only for a DIFFERENT reason and to
   // the same depth: the runtime owns the row (the workspace-notifications session the
   // Inbox links to) and the messages POST answers 403 ``reserved_session``. The reason
-  // is carried alongside at render (``shownReadOnlyReason``) because only the COPY
-  // differs — nothing here may call such a session archived.
+  // is carried alongside because only the COPY differs — nothing here may call such a
+  // session archived.
+  const readOnlyReason = sessionReadOnlyReason(session);
   const readOnly = isSessionReadOnly(session);
   const writable = canChat && !readOnly;
   const metadataWritable = sessionCanChat && !readOnly;
@@ -961,21 +962,55 @@ export const ChatPage: React.FC = () => {
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
   // The last known window of this chat, shown while its bootstrap is out (see
-  // useChatSnapshot). It only ever fills empty state; the first live window
-  // removes its rows, and the live bootstrap alone decides what can be done.
+  // useChatSnapshot). It seeds the same state the bootstrap fills (the Session
+  // row, can_chat, Agents, font size), so the chat renders fully formed and
+  // usable from the cache; the bootstrap then overwrites each value and may only
+  // narrow what the cache allowed, and the server enforces every action. Rows go
+  // only onto an empty transcript, and the first live window removes them.
+  //
+  // ``rowFromSnapshotRef``: the Session row on screen is the seeded one (perhaps
+  // with this tab's own edits on top), not a server read for this route, so it
+  // never outranks the bootstrap's row. ``liveRowRouteRef``: a server read of
+  // the row landed for this route before the paint, so the paint leaves it.
+  // ``bootstrapAnsweredRef``: Agents, the default Agent, and the font size are
+  // instance-wide, so once any bootstrap answered in this page the snapshot no
+  // longer seeds them.
+  const rowFromSnapshotRef = useRef(false);
+  const liveRowRouteRef = useRef<string | null>(null);
+  const bootstrapAnsweredRef = useRef(false);
   const paintChatSnapshot = useCallback((snapshot: ChatSnapshot) => {
     // A chat remembered on its Show Page reopens there: no transcript flash first.
     if (!showChatSignal && readChatViewMode(snapshot.session.id) === 'show-page') return false;
     setMessages((prev) => (prev.length === 0 ? snapshot.messages : prev));
     setOlderCursor((prev) => prev ?? snapshot.next_before_id);
+    if (liveRowRouteRef.current !== snapshot.session.id) {
+      rowFromSnapshotRef.current = true;
+      installServerSession(snapshot.session);
+    }
+    setSessionCanChat(snapshot.can_chat);
+    if (!bootstrapAnsweredRef.current) {
+      setAgents(snapshot.agents);
+      setDefaultAgentName(snapshot.default_agent_name);
+      setMessageFontSize(normalizeChatMessageFontSize(snapshot.chat_message_font_size ?? undefined));
+    }
     return true;
-  }, [showChatSignal]);
+  }, [showChatSignal, installServerSession]);
   const unpaintChatSnapshot = useCallback((rows: ReadonlySet<WorkbenchMessage>) => {
     setMessages((prev) => prev.filter((row) => !rows.has(row)));
     setOlderCursor(null);
     oldestLoadedIdRef.current = null;
     newestLoadedIdRef.current = null;
   }, []);
+  // The cache no longer speaks for this page (another reader, a cleared store, a
+  // failed bootstrap): nothing it seeded may keep acting.
+  const dropChatSnapshot = useCallback((rows: ReadonlySet<WorkbenchMessage> | null) => {
+    if (rows) unpaintChatSnapshot(rows);
+    setSessionCanChat(false);
+    if (rowFromSnapshotRef.current) {
+      rowFromSnapshotRef.current = false;
+      applyLocalSession(null);
+    }
+  }, [unpaintChatSnapshot, applyLocalSession]);
   const {
     view: chatSnapshotView,
     beginBootstrap: beginChatSnapshotBootstrap,
@@ -985,6 +1020,7 @@ export const ChatPage: React.FC = () => {
     sessionId,
     paint: paintChatSnapshot,
     unpaint: unpaintChatSnapshot,
+    drop: dropChatSnapshot,
     messages,
     olderCursor,
     historicalWindow,
@@ -1070,6 +1106,10 @@ export const ChatPage: React.FC = () => {
         // cached a stale row; reusing it inside the read cache's TTL is exactly
         // what the callers are trying to escape.
         const row = await api.getSession(id, { cache: false });
+        if (isCurrent() && row.id === sessionIdRef.current) {
+          rowFromSnapshotRef.current = false;
+          liveRowRouteRef.current = row.id;
+        }
         installServerSession((prev) =>
           isCurrent() && row.id === sessionIdRef.current ? row : prev,
         );
@@ -1551,23 +1591,27 @@ export const ChatPage: React.FC = () => {
       // answers with: opening this chat again is not a reason to show the route the
       // user has already clicked past. ``installServerSession`` re-applies it.
       const bootstrapRow = bootstrap.session;
+      const rowFromSnapshot = rowFromSnapshotRef.current;
+      rowFromSnapshotRef.current = false;
       if (bootstrapIsCurrent()) {
         installServerSession(bootstrapRow);
       } else {
         // A newer turn-end/activity read won the row race. Preserve its row if
         // it landed, but keep this successful bootstrap as the fallback while a
-        // cold-page recovery is pending or if both bounded attempts fail.
-        installServerSession((current) => sessionRowWithBootstrapFallback(
+        // cold-page recovery is pending or if both bounded attempts fail. A row
+        // painted from the snapshot is no newer read: the bootstrap replaces it.
+        installServerSession((current) => (rowFromSnapshot ? bootstrapRow : sessionRowWithBootstrapFallback(
           current,
           sessionId,
           bootstrapRow,
-        ));
+        )));
         void refreshSessionRow();
       }
       // Capability comes from the bootstrap payload, not the session-row race
       // above — set it unconditionally so a lost row race can't strand the
       // composer disabled for a member who can chat.
       setSessionCanChat(Boolean(bootstrap.capabilities?.can_chat));
+      bootstrapAnsweredRef.current = true;
       setAgents(bootstrap.agents);
       setDefaultAgentName(bootstrap.default_agent_name);
       setMessageFontSize(normalizeChatMessageFontSize(bootstrap.config?.ui?.chat_message_font_size));
@@ -1663,6 +1707,8 @@ export const ChatPage: React.FC = () => {
     // while the URL is already on the new chat (Codex P2). Nulling it shows the
     // loading state until refresh() resolves the new session.
     applyLocalSession(null);
+    rowFromSnapshotRef.current = false;
+    liveRowRouteRef.current = null;
     setSessionCanChat(false);
     setMessages([]);
     setHydratedTranscriptSessionId(null);
@@ -2895,15 +2941,7 @@ export const ChatPage: React.FC = () => {
     );
   }
 
-  // While the bootstrap is out, a painted snapshot renders the chat: live state
-  // wins wherever it already exists, and every action still keys off it.
-  const snapshotPending = chatSnapshotView !== null;
-  const shownSession = session?.id === sessionId ? session : chatSnapshotView?.session ?? null;
-  const shownAgents = chatSnapshotView && agents.length === 0 ? chatSnapshotView.agents : agents;
-  const shownDefaultAgentName = chatSnapshotView && agents.length === 0
-    ? chatSnapshotView.defaultAgentName
-    : defaultAgentName;
-  if (viewState === 'failed' || !shownSession) {
+  if (viewState === 'failed' || !session) {
     return (
       <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 py-8">
         <button
@@ -2921,16 +2959,15 @@ export const ChatPage: React.FC = () => {
     );
   }
 
-  const shownReadOnlyReason = sessionReadOnlyReason(shownSession);
-  const agentDisplayName = sessionAgentDisplayName(shownSession, shownAgents);
+  const agentDisplayName = sessionAgentDisplayName(session, agents);
   // A runtime-owned row never inherits the default Agent, so it borrows no avatar from it.
-  const agentBackend = sessionAgentBackend(shownSession, shownAgents, shownReadOnlyReason === 'system' ? null : shownDefaultAgentName);
+  const agentBackend = sessionAgentBackend(session, agents, readOnlyReason === 'system' ? null : defaultAgentName);
   // Who the conversation is with: the Bot, by the name the user gave it, or its
   // Session title (which follows that name) until the Bot list has answered.
   const conversationBot = botConversation ? botForSession(sessionId) : undefined;
   const conversationBotName = conversationBot
     ? botDisplayName(conversationBot)
-    : botConversation ? shownSession.title?.trim() || t('bots.mainDefaultName') : null;
+    : botConversation ? session.title?.trim() || t('bots.mainDefaultName') : null;
   // A Bot's conversation reads like talking to a person while its "Hide details"
   // is on (docs/plans/bots.md D5): on unless the Bot turned it off, including
   // before the Bot list has answered. Anything else shows what it always has.
@@ -2991,9 +3028,9 @@ export const ChatPage: React.FC = () => {
           </div>
         )}
         <ChatHeaderBar
-          session={shownSession}
-          agents={shownAgents}
-          defaultAgentName={shownDefaultAgentName}
+          session={session}
+          agents={agents}
+          defaultAgentName={defaultAgentName}
           onPatch={patch}
           onBack={goBack}
           showPageMode={showPageActive}
@@ -3004,9 +3041,8 @@ export const ChatPage: React.FC = () => {
           onShareOpenChange={setShareOpen}
           annotation={annotation}
           onAnnotateOpenChange={setAnnotateOpen}
-          readOnlyReason={shownReadOnlyReason}
+          readOnlyReason={readOnlyReason}
           writable={writable}
-          pending={snapshotPending}
           showPageAccess={showPageAccess}
           canOpenShowPage={canOpenShowPage}
           canManageShowPage={canManageShowPage}
@@ -3054,10 +3090,10 @@ export const ChatPage: React.FC = () => {
         )}
         <Transcript
           messages={messages}
-          session={shownSession}
+          session={session}
           agentDisplayName={agentDisplayName}
           agentBackend={agentBackend}
-          agents={shownAgents}
+          agents={agents}
           working={working}
           modelRecovery={runtimeState.model_recovery}
           hasOlder={!!olderCursor}
@@ -3108,7 +3144,7 @@ export const ChatPage: React.FC = () => {
             // BEFORE the archive still holds them in state, though — the same
             // stale-tab case that reaches the archived 409 — and their
             // approve/deny buttons would write to a session that can't accept it.
-            sessionId && !readOnly && !snapshotPending && capabilities.can_use_vault_secrets ? (
+            sessionId && !readOnly && capabilities.can_use_vault_secrets ? (
               <VaultChatRequests
                 requests={footerVaultRequests}
                 onResolved={refreshVaultRequests}
@@ -3137,16 +3173,16 @@ export const ChatPage: React.FC = () => {
             botName={conversationBotName}
           />
         )}
-        {sessionId && !readOnly && !snapshotPending && capabilities.can_use_vault_secrets && pendingApprovals.length > 0 ? (
+        {sessionId && !readOnly && capabilities.can_use_vault_secrets && pendingApprovals.length > 0 ? (
           <VaultApprovalFloat offscreen={offscreenApprovals} pending={pendingApprovals} onResolved={refreshVaultRequests} />
         ) : null}
         {/* key by session so the composer remounts per session — its draft-seeding
             + local value reset, instead of carrying across sessions (Codex P2).
-            A painted snapshot shows the composer the live chat will have, inert,
-            and the live one mounts fresh so it seeds from the bootstrap draft. */}
-        {(writable || shownReadOnlyReason !== null || (snapshotPending && capabilities.can_chat && chatSnapshotView.canChat)) && <Compose
-          key={snapshotPending ? `${sessionId}:snapshot` : sessionId}
-          pending={snapshotPending}
+            One mount per session: a chat painted from its snapshot keeps the same
+            composer when the bootstrap lands, and the bootstrap's draft reaches it
+            only while the reader has not touched it (see Composer ``initialDraft``). */}
+        {(writable || readOnlyReason !== null) && <Compose
+          key={sessionId}
           composerRef={composerRef}
           readVoiceContext={readVoiceContext}
           onSend={(text, attachments, references, metadata) => sendMessage(text, attachments, metadata, references)}
@@ -3157,16 +3193,16 @@ export const ChatPage: React.FC = () => {
           onDraftChange={onDraftChange}
           onSearchAgents={searchAgents}
           onSearchSessions={searchSessions}
-          readOnlyReason={shownReadOnlyReason}
+          readOnlyReason={readOnlyReason}
           botName={conversationBotName}
           voiceTarget={conversationBotName
             ? { name: conversationBotName, avatar: conversationBot?.avatar ?? null }
-            : { name: shownSession.title || t('chat.untitled'), title: t('voice.composer.toSession', { title: shownSession.title || t('chat.untitled') }) }}
+            : { name: session.title || t('chat.untitled'), title: t('voice.composer.toSession', { title: session.title || t('chat.untitled') }) }}
           // Hidden with the rest of the chat surface in Show Page mode, which is
           // also where the header used to withdraw the picker.
           actions={writable ? (
             <ChatRoutePicker
-              session={shownSession}
+              session={session}
               agents={agents}
               defaultAgentName={defaultAgentName}
               onPatch={patch}
@@ -3708,14 +3744,11 @@ interface ComposeProps {
   botName?: string | null;
   /** Who a message spoken by holding the composer goes to. */
   voiceTarget: VoiceTarget;
-  /** A painted snapshot is on screen: the composer is shown inert until the
-   *  live bootstrap decides whether this reader can send. */
-  pending?: boolean;
 }
 
-const Compose: React.FC<ComposeProps> = ({ composerRef, actions, readVoiceContext, onSend, onStop, busy, sessionId, initialDraft, onDraftChange, onSearchAgents, onSearchSessions, readOnlyReason, botName, voiceTarget, pending = false }) => {
+const Compose: React.FC<ComposeProps> = ({ composerRef, actions, readVoiceContext, onSend, onStop, busy, sessionId, initialDraft, onDraftChange, onSearchAgents, onSearchSessions, readOnlyReason, botName, voiceTarget }) => {
   const { t } = useTranslation();
-  const readOnly = readOnlyReason !== null || pending;
+  const readOnly = readOnlyReason !== null;
   return (
     // shrink-0 pins the bar at the bottom of the fixed-height chat container; the
     // gradient fades the transcript out behind it (no opaque band / hard border)
@@ -3919,10 +3952,6 @@ interface ChatHeaderBarProps {
   // boolean, because it also picks the badge: a runtime-owned row is not "Archived".
   readOnlyReason: SessionReadOnlyReason | null;
   writable?: boolean;
-  // A painted snapshot is on screen while the bootstrap is out: the header shows
-  // the Session and nothing that acts on it, nor the read-only route label the
-  // live chat may not have.
-  pending?: boolean;
   showPageAccess?: ShowPageAccess | null;
   canOpenShowPage?: boolean;
   canManageShowPage?: boolean;
@@ -3939,7 +3968,7 @@ interface ChatHeaderBarProps {
 
 // Exported for the read-only regression test (ChatArchivedReadOnly.test.tsx),
 // which renders the header alone rather than mounting the whole page.
-export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, showPageMode, showPageBusy, onToggleShowPage, onPrepareShowPageLaunch, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnlyReason, writable = readOnlyReason === null, pending = false, showPageAccess = null, canOpenShowPage = true, canManageShowPage = true, canManageInstance = false, canPinToDock = false, sessionActions, titleFieldRef }) => {
+export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, showPageMode, showPageBusy, onToggleShowPage, onPrepareShowPageLaunch, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnlyReason, writable = readOnlyReason === null, showPageAccess = null, canOpenShowPage = true, canManageShowPage = true, canManageInstance = false, canPinToDock = false, sessionActions, titleFieldRef }) => {
   const { t } = useTranslation();
   // A Bot's conversation (docs/plans/bots.md D5) shows the Bot — avatar and display
   // name, on a phone also the switch to the other Bots (BotConversationTitle) — in
@@ -3953,7 +3982,7 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
   const readOnly = !writable;
   const sessionReadOnly = readOnlyReason !== null;
   const showPageActions = showPageControlActions(sessionReadOnly, showPageMode);
-  const showLaunchControl = !pending && showPageActions.visualize && (showPageMode || canOpenShowPage);
+  const showLaunchControl = showPageActions.visualize && (showPageMode || canOpenShowPage);
   // Share lives ONLY while the page is framed (owner ruling 2026-08-17): the
   // chat header never carries it, for anyone — access-only managers reach it
   // from the framed view (or the app window title bar) instead.
@@ -4044,7 +4073,7 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
             row has no backend at all (``agent_backend`` is empty by design), so the
             agent name — which would fall back to the default agent's, naming a route
             this session will never run — is omitted there rather than invented. */}
-        {!showPageMode && readOnly && (!pending || sessionReadOnly) && (
+        {!showPageMode && readOnly && (
           <div className="flex min-w-0 shrink-0 items-center gap-1.5">
             {readOnlyReason !== 'system' && (
               <span className="truncate text-[12px] font-medium text-muted">

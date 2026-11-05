@@ -75,6 +75,7 @@ const store = async (sessionId: string) => {
     agents: [],
     default_agent_name: null,
     can_chat: true,
+    chat_message_font_size: null,
   });
   expect(await readChatSnapshot(sessionId)).not.toBeNull();
 };

@@ -5,7 +5,7 @@ import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 
-import type { SessionRuntimeState, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
+import type { SessionRuntimeState, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import type { ComposerProps } from './Composer';
 import {
   beginChatSnapshotRequest,
@@ -18,11 +18,14 @@ import { clearLocalSnapshots, setLocalSnapshotPrincipal } from '../../lib/localS
 import { writeChatViewMode } from '../../lib/chatViewMemory';
 
 // Opening a chat paints its last known window before the bootstrap answers
-// (docs/plans/web-ui-local-cache.md, Phase 2). The hand-over is where it can go
-// wrong: a cached row the server deleted surviving the live answer, a row the
-// stream delivered meanwhile being thrown away with the cache, a cached
-// capability letting someone act before the server agreed, or the cache being
-// written from something other than what the server answered for this reader.
+// (docs/plans/web-ui-local-cache.md, Phase 2), fully formed: the composer, its
+// route picker, the actions under messages and in the header all render from
+// the cache, usable, and the live answer may only narrow them. The hand-over is
+// where it can go wrong: a cached row the server deleted surviving the live
+// answer, a row the stream delivered or the reader sent meanwhile being thrown
+// away with the cache, the composer remounting (and losing what was typed), or
+// the cache being written from something other than what the server answered
+// for this reader.
 
 const mocks = vi.hoisted(() => ({
   api: {
@@ -39,8 +42,23 @@ const mocks = vi.hoisted(() => ({
     listSessionQueue: vi.fn(),
     waitForAgentActivityConfigMutations: vi.fn(),
     onSessionArchived: vi.fn(),
+    probeShowPageAccess: vi.fn(),
+    recoverSessionDraftAfterRejectedSend: vi.fn(),
+    reconcileSessionDraftAfterSend: vi.fn(),
+    cacheSessionDraft: vi.fn(),
+    setSessionDraft: vi.fn(),
   },
   apiFetch: vi.fn(),
+  capabilities: {
+    can_chat: true,
+    can_manage_instance: false,
+    can_use_show_pages: true,
+    can_use_system: false,
+    can_use_vault_secrets: false,
+  },
+  composerMounts: 0,
+  sessionActionsWritable: [] as boolean[],
+  routePicker: null as null | { onChange: (changes: Record<string, unknown>) => void },
   events: null as null | {
     onConnected: () => void;
     onMessageNew: (message: WorkbenchMessage) => void;
@@ -70,15 +88,7 @@ vi.mock('../../context/WorkbenchInboxContext', () => ({
 }));
 
 vi.mock('../../context/InstanceAuthorizationContext', () => ({
-  useInstanceAuthorization: () => ({
-    capabilities: {
-      can_chat: true,
-      can_manage_instance: false,
-      can_use_show_pages: false,
-      can_use_system: false,
-      can_use_vault_secrets: false,
-    },
-  }),
+  useInstanceAuthorization: () => ({ capabilities: mocks.capabilities }),
 }));
 
 vi.mock('../../context/ComposerBridgeContext', () => ({
@@ -106,8 +116,37 @@ vi.mock('../../lib/usePendingVaultRequests', () => ({
   usePendingVaultRequests: () => ({ requests: [], refresh: vi.fn() }),
 }));
 
+// The session actions menu lists what the page says is writable.
 vi.mock('./useSessionActions', () => ({
-  useSessionActions: () => ({ actions: [], archiveDialog: null, requestArchive: vi.fn(), canArchive: false }),
+  useSessionActions: ({ writable }: { writable: boolean }) => (mocks.sessionActionsWritable.push(writable), {
+    actions: writable ? [{ id: 'pin', group: 'organize', label: 'pin', onSelect: () => {} }] : [],
+    archiveDialog: null,
+    requestArchive: () => {},
+    canArchive: false,
+  }),
+}));
+
+vi.mock('./ShowPageLaunchControl', () => ({
+  ShowPageLaunchControl: () => <button type="button" data-testid="show-page-launch">show page</button>,
+}));
+
+vi.mock('./AgentRoutePicker', () => ({
+  AgentRoutePicker: (props: {
+    value: { agent_name: string | null; model: string | null };
+    agents: Array<{ name: string }>;
+    disabled?: boolean;
+    onChange: (changes: Record<string, unknown>) => void;
+  }) => {
+    mocks.routePicker = props;
+    return (
+      <div
+        data-testid="route-picker"
+        data-route={`${props.value.agent_name}/${props.value.model}`}
+        data-agents={props.agents.map((choice) => choice.name).join(',')}
+        data-disabled={String(Boolean(props.disabled))}
+      />
+    );
+  },
 }));
 
 vi.mock('./useShowPageAnnotation', () => ({
@@ -122,12 +161,31 @@ vi.mock('./useShowPageAnnotation', () => ({
   }),
 }));
 
-vi.mock('./Composer', () => ({
-  Composer: (props: ComposerProps) => {
-    mocks.composer = props;
-    return <div data-testid="composer" data-disabled={String(Boolean(props.disabled))} />;
-  },
-}));
+// The real composer is covered on its own (Composer.draftReseed.test.tsx); here it
+// records how often it mounted, which draft it was handed, and renders the
+// actions row (the route picker) the page gives it.
+vi.mock('./Composer', async () => {
+  const { useState } = await import('react');
+  return {
+    Composer: (props: ComposerProps) => {
+      mocks.composer = props;
+      const [instance] = useState(() => {
+        mocks.composerMounts += 1;
+        return mocks.composerMounts;
+      });
+      return (
+        <div
+          data-testid="composer"
+          data-disabled={String(Boolean(props.disabled))}
+          data-instance={instance}
+          data-draft={props.initialDraft ?? ''}
+        >
+          {props.actions}
+        </div>
+      );
+    },
+  };
+});
 
 import { ChatPage } from './ChatPage';
 
@@ -176,31 +234,45 @@ const message = (id: string, text: string, extra: Partial<WorkbenchMessage> = {}
   ...extra,
 } as WorkbenchMessage);
 
-const sessionRow = (title: string) => ({ id: SESSION, title, status: 'active' } as WorkbenchSession);
+const sessionRow = (title: string, extra: Partial<WorkbenchSession> = {}) => ({
+  id: SESSION,
+  title,
+  status: 'active',
+  agent_name: 'vibey',
+  agent_backend: 'vibey',
+  model: 'cached-model',
+  ...extra,
+} as WorkbenchSession);
 
-const bootstrap = (messages: WorkbenchMessage[], { canChat = true, title = 'Live title' } = {}) => ({
-  session: sessionRow(title),
+const agent = { id: 'agent-vibey', name: 'vibey', backend: 'vibey', model: 'cached-model' } as VibeAgentBrief;
+
+const bootstrap = (
+  messages: WorkbenchMessage[],
+  { canChat = true, title = 'Live title', session = {} as Partial<WorkbenchSession>, draft = '' } = {},
+) => ({
+  session: sessionRow(title, session),
   capabilities: { can_chat: canChat },
-  agents: [],
-  default_agent_name: null,
+  agents: [agent],
+  default_agent_name: 'vibey',
   config: { ui: {} },
   messages,
   next_after_id: null,
   next_before_id: null,
   turn_state: idleTurnState,
   queued: [],
-  draft: { text: '', updated_at: null },
+  draft: { text: draft, updated_at: null },
 });
 
-const seed = async (messages: WorkbenchMessage[], { canChat = true } = {}) => {
+const seed = async (messages: WorkbenchMessage[], { canChat = true, fontSize = null as number | null } = {}) => {
   setLocalSnapshotPrincipal('local');
   const value: ChatSnapshot = {
     session: sessionRow('Cached title'),
     messages,
     next_before_id: null,
-    agents: [],
-    default_agent_name: null,
+    agents: [agent],
+    default_agent_name: 'vibey',
     can_chat: canChat,
+    chat_message_font_size: fontSize,
   };
   await writeChatSnapshot(chatSnapshotOwnerForAnswer(beginChatSnapshotRequest(SESSION))!, value);
 };
@@ -249,6 +321,10 @@ beforeEach(() => {
   live = deferred();
   mocks.events = null;
   mocks.composer = null;
+  mocks.composerMounts = 0;
+  mocks.sessionActionsWritable = [];
+  mocks.routePicker = null;
+  Object.assign(mocks.capabilities, { can_chat: true, can_use_show_pages: true });
   vi.clearAllMocks();
   mocks.api.connectWorkbenchEvents.mockImplementation((events) => {
     mocks.events = events;
@@ -266,6 +342,10 @@ beforeEach(() => {
   mocks.api.listSessionQueue.mockResolvedValue({ queued: [] });
   mocks.api.waitForAgentActivityConfigMutations.mockResolvedValue(undefined);
   mocks.api.onSessionArchived.mockReturnValue(() => {});
+  mocks.api.probeShowPageAccess.mockReturnValue(new Promise(() => {}));
+  mocks.api.reconcileSessionDraftAfterSend.mockResolvedValue(undefined);
+  mocks.api.recoverSessionDraftAfterRejectedSend.mockResolvedValue(undefined);
+  mocks.api.setSessionDraft.mockResolvedValue({ ok: true });
 });
 
 afterEach(async () => {
@@ -277,18 +357,16 @@ afterEach(async () => {
 });
 
 describe('ChatPage conversation snapshot', () => {
-  it('shows the last known window at once, with an inert composer, and lets the bootstrap replace it', async () => {
+  it('shows the last known window at once, ready to use, and lets the bootstrap replace it', async () => {
     await seed([message('m1', 'cached question'), message('m2', 'cached answer')]);
     mount();
 
     // The server has not answered: the snapshot is on screen instead of a loader,
-    // and the composer is there but cannot send.
+    // and the composer is there, enabled.
     await screen.findByText('cached answer');
     expect(screen.getByText('cached question')).toBeTruthy();
     expect(screen.queryByText('common.loading')).toBeNull();
-    expect(composerState()).toBe('true');
-    expect(await mocks.composer?.onSend('sent from the snapshot')).toBe(false);
-    expect(mocks.apiFetch).not.toHaveBeenCalled();
+    expect(composerState()).toBe('false');
 
     // m1 was deleted on the server, m2 changed, m3 is new.
     await act(async () => live.resolve(bootstrap([message('m2', 'live answer'), message('m3', 'live follow-up')])));
@@ -351,21 +429,128 @@ describe('ChatPage conversation snapshot', () => {
 
     await screen.findByText('recovered answer');
     expect(screen.queryByText('cached question')).toBeNull();
-    // The bootstrap still decides that the chat is live.
-    expect(composerState()).toBe('true');
     await act(async () => live.resolve(bootstrap([message('m2', 'recovered answer')])));
-    await waitFor(() => expect(composerState()).toBe('false'));
+    await waitFor(() => expect(mocks.api.getSessionBootstrap).toHaveBeenCalled());
+    expect(screen.getByText('recovered answer')).toBeTruthy();
     expect(screen.queryByText('cached question')).toBeNull();
   });
 
-  it('never lets a cached can_chat open the composer when the bootstrap refuses it', async () => {
+  it('narrows what the cache enabled when the bootstrap says this reader cannot chat', async () => {
     await seed([message('m1', 'cached answer')], { canChat: true });
     mount();
     await screen.findByText('cached answer');
-    expect(composerState()).toBe('true');
+    expect(composerState()).toBe('false');
 
     await act(async () => live.resolve(bootstrap([message('m1', 'cached answer')], { canChat: false })));
     await waitFor(() => expect(composerState()).toBe('absent'));
+    expect(screen.queryByRole('button', { name: 'workbench.sessionActions' })).toBeNull();
+  });
+
+  it('renders the route picker, the actions under messages, and the header actions at first paint, all enabled', async () => {
+    await seed([message('m1', 'Pick one', { content: { quick_replies: ['Yes', 'No'] } })]);
+    mount();
+    await screen.findByText('Pick one');
+
+    expect(screen.getByTestId('route-picker').getAttribute('data-route')).toBe('vibey/cached-model');
+    expect(screen.getByTestId('route-picker').getAttribute('data-agents')).toBe('vibey');
+    expect(screen.getByTestId('route-picker').getAttribute('data-disabled')).toBe('false');
+    expect((screen.getByRole('button', { name: 'Yes' }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByTestId('show-page-launch')).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: 'workbench.sessionActions' }).length).toBeGreaterThan(0);
+    expect(composerState()).toBe('false');
+    expect(mocks.api.getSessionBootstrap).toHaveBeenCalled();
+    expect(screen.queryByText('common.loading')).toBeNull();
+  });
+
+  it('paints the cached messages at the reader\'s font size', async () => {
+    await seed([message('m1', 'cached answer')], { fontSize: 18 });
+    mount();
+    const text = await screen.findByText('cached answer');
+    expect(text.closest('[style*="font-size"]')?.getAttribute('style')).toContain('font-size: 18px');
+  });
+
+  it('shows the bootstrap\'s Session row over the painted one even when a newer row read is still out', async () => {
+    await seed([message('m1', 'cached answer')]);
+    mount();
+    await screen.findByText('cached answer');
+    expect(screen.getByText('Cached title')).toBeTruthy();
+
+    // A reconnect starts a newer row read (it never answers here) before the
+    // bootstrap lands, so the bootstrap is no longer the newest row read.
+    act(() => mocks.events!.onConnected());
+    await act(async () => live.resolve(bootstrap([message('m1', 'cached answer')], { title: 'Live title' })));
+    await screen.findByText('Live title');
+    expect(screen.queryByText('Cached title')).toBeNull();
+  });
+
+  it('keeps one composer across the bootstrap, and hands it the bootstrap draft', async () => {
+    mocks.api.getCachedSessionDraft.mockReturnValue('local draft');
+    await seed([message('m1', 'cached answer')]);
+    mount();
+    await screen.findByText('cached answer');
+    const before = screen.getByTestId('composer');
+    expect(before.getAttribute('data-instance')).toBe('1');
+    expect(before.getAttribute('data-draft')).toBe('local draft');
+
+    await act(async () => live.resolve(bootstrap([message('m1', 'live answer')], { draft: 'server draft' })));
+    await screen.findByText('live answer');
+    const after = screen.getByTestId('composer');
+    expect(after).toBe(before);
+    expect(after.getAttribute('data-instance')).toBe('1');
+    expect(mocks.composerMounts).toBe(1);
+    // Whether it may replace the box is the composer's call (untouched only).
+    expect(after.getAttribute('data-draft')).toBe('server draft');
+  });
+
+  it('turns the composer and the actions read-only when the live answer says the chat is archived', async () => {
+    await seed([message('m1', 'Pick one', { content: { quick_replies: ['Yes', 'No'] } })]);
+    mount();
+    await screen.findByText('Pick one');
+    expect(composerState()).toBe('false');
+    expect((screen.getByRole('button', { name: 'Yes' }) as HTMLButtonElement).disabled).toBe(false);
+
+    await act(async () => live.resolve(bootstrap(
+      [message('m1', 'Pick one', { content: { quick_replies: ['Yes', 'No'] } })],
+      { session: { status: 'archived', archived_at: '2026-11-04T00:00:00Z' } },
+    )));
+    await waitFor(() => expect(composerState()).toBe('true'));
+    expect((screen.getByRole('button', { name: 'Yes' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByTestId('route-picker')).toBeNull();
+  });
+
+  it('sends from the painted chat, and the sent row survives the live window replacing the painted ones', async () => {
+    await seed([message('m1', 'cached question')]);
+    mocks.apiFetch.mockResolvedValue(Response.json(
+      message('d1', 'sent before the bootstrap', { type: 'user', author: 'user', state: 'claimed', delivery_id: 'd1' } as Partial<WorkbenchMessage>),
+    ));
+    mount();
+    await screen.findByText('cached question');
+
+    await act(async () => {
+      await mocks.composer!.onSend('sent before the bootstrap');
+    });
+    expect(mocks.apiFetch).toHaveBeenCalledWith(
+      `/api/sessions/${SESSION}/messages`,
+      expect.objectContaining({ method: 'POST' }),
+    );
+    await screen.findByText('sent before the bootstrap');
+
+    // The bootstrap was read before the send, and m1 is gone on the server.
+    await act(async () => live.resolve(bootstrap([message('m2', 'live answer')], { draft: 'stale draft' })));
+    await screen.findByText('live answer');
+    expect(screen.getByText('sent before the bootstrap')).toBeTruthy();
+    expect(screen.queryByText('cached question')).toBeNull();
+  });
+
+  it('sends the route change the reader picks while painted, onto the cached route', async () => {
+    mocks.api.updateSession = vi.fn().mockResolvedValue(sessionRow('Cached title', { model: 'picked-model' }));
+    await seed([message('m1', 'cached answer')]);
+    mount();
+    await screen.findByText('cached answer');
+
+    act(() => mocks.routePicker!.onChange({ model: 'picked-model' }));
+    expect(screen.getByTestId('route-picker').getAttribute('data-route')).toBe('vibey/picked-model');
+    await waitFor(() => expect(mocks.api.updateSession).toHaveBeenCalledWith(SESSION, { model: 'picked-model' }));
   });
 
   it('does not flash the transcript of a chat that reopens on its Show Page', async () => {
@@ -416,9 +601,12 @@ describe('ChatPage conversation snapshot', () => {
     mount();
     await screen.findByText('alice cached row');
 
+    expect(mocks.sessionActionsWritable.at(-1)).toBe(true);
     act(() => setLocalSnapshotPrincipal('remote:bob'));
     await waitFor(() => expect(screen.queryByText('alice cached row')).toBeNull());
     expect(screen.getByText('common.loading')).toBeTruthy();
+    // Nothing the cache enabled keeps acting for the new reader.
+    expect(mocks.sessionActionsWritable.at(-1)).toBe(false);
   });
 
   it('drops painted rows when the store is cleared, as an authorization change does', async () => {

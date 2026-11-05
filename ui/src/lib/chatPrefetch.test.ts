@@ -49,6 +49,7 @@ const stored = (sessionId: string, title: string): ChatSnapshot => ({
   agents: [],
   default_agent_name: null,
   can_chat: true,
+  chat_message_font_size: null,
 });
 
 const sessionOf = (path: string) => decodeURIComponent(path.split('/')[3]);

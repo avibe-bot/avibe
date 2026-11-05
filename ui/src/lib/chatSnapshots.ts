@@ -5,7 +5,7 @@
 //
 //  * A record is the bootstrap's tail window: the Session row, its newest
 //    durable transcript rows, the older-page cursor, the Agent list, the default
-//    Agent, and ``can_chat``. Only rows the server stored are kept: a Delivery
+//    Agent, ``can_chat``, and the message font size. Only rows the server stored are kept: a Delivery
 //    (a send still pending) and the claimed-input projection are not.
 //  * Records are tied to the UI build that wrote them, and the 40 most recently
 //    written ones are kept.
@@ -30,7 +30,8 @@ import {
   writeLocalSnapshot,
 } from './localSnapshots';
 
-const CHAT_SNAPSHOT_SCHEMA = 1;
+// 2: the message font size joined the record, so a chat paints at its size.
+const CHAT_SNAPSHOT_SCHEMA = 2;
 /** Conversations kept, least recently written evicted first. */
 const CHAT_SNAPSHOT_SESSIONS = 40;
 /** Rows kept per conversation: the bootstrap's tail window. */
@@ -64,6 +65,7 @@ export type ChatSnapshot = {
   agents: VibeAgentBrief[];
   default_agent_name: string | null;
   can_chat: boolean;
+  chat_message_font_size: number | null;
 };
 
 type StoredChatSnapshot = ChatSnapshot & { build: string };
@@ -89,12 +91,13 @@ const nullableString = (value: unknown): value is string | null => value === nul
 
 function parseChatSnapshot(sessionId: string, value: unknown): ChatSnapshot | null {
   if (!isRecord(value) || value.build !== UI_BUILD) return null;
-  const { session, messages, next_before_id, agents, default_agent_name, can_chat } = value;
+  const { session, messages, next_before_id, agents, default_agent_name, can_chat, chat_message_font_size } = value;
   if (!isRecord(session) || session.id !== sessionId) return null;
   if (!Array.isArray(messages) || !messages.every(isRow)) return null;
   if (!nullableString(next_before_id) || !nullableString(default_agent_name)) return null;
   if (!Array.isArray(agents) || !agents.every((agent) => isRecord(agent) && typeof agent.name === 'string')) return null;
   if (typeof can_chat !== 'boolean') return null;
+  if (chat_message_font_size !== null && typeof chat_message_font_size !== 'number') return null;
   return {
     session: session as WorkbenchSession,
     messages: messages.filter(isStoredTranscriptRow),
@@ -102,6 +105,7 @@ function parseChatSnapshot(sessionId: string, value: unknown): ChatSnapshot | nu
     agents: agents as VibeAgentBrief[],
     default_agent_name,
     can_chat,
+    chat_message_font_size,
   };
 }
 
@@ -128,6 +132,11 @@ export function chatSnapshotWindow(
   return { messages, next_before_id };
 }
 
+const fontSizeOf = (config: unknown): number | null => {
+  const size = (config as { ui?: { chat_message_font_size?: unknown } } | null)?.ui?.chat_message_font_size;
+  return typeof size === 'number' && Number.isFinite(size) ? size : null;
+};
+
 /** The record a bootstrap answer describes. */
 export function chatSnapshotFromBootstrap(bootstrap: WorkbenchSessionBootstrap): ChatSnapshot {
   return {
@@ -136,6 +145,7 @@ export function chatSnapshotFromBootstrap(bootstrap: WorkbenchSessionBootstrap):
     agents: bootstrap.agents ?? [],
     default_agent_name: bootstrap.default_agent_name ?? null,
     can_chat: Boolean(bootstrap.capabilities?.can_chat),
+    chat_message_font_size: fontSizeOf(bootstrap.config),
   };
 }
 

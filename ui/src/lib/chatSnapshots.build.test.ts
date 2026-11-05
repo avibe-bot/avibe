@@ -32,6 +32,7 @@ describe('the UI build of a conversation snapshot', () => {
       agents: [],
       default_agent_name: null,
       can_chat: true,
+      chat_message_font_size: null,
     });
     expect((await before.readChatSnapshot('ses_a'))?.session.title).toBe('stored by build 1');
 
