@@ -1,5 +1,5 @@
 import { useEffect, useReducer, useRef, useState } from 'react';
-import { AudioLines, Loader2, MicOff, PenLine, RotateCcw, Send, Trash2 } from 'lucide-react';
+import { AudioLines, FileHeadphone, FileX, Loader2, PenLine, RotateCcw, Send, Trash2 } from 'lucide-react';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 
@@ -35,7 +35,7 @@ const clock = (ms: number) => {
 
 /** One kept take as drawn: what it holds, and what can be done with it. */
 export type PendingVoiceItemProps = {
-  take: Pick<VoiceTake, 'status' | 'text' | 'label' | 'intent' | 'segments' | 'truncated'>;
+  take: Pick<VoiceTake, 'status' | 'text' | 'intent' | 'segments' | 'truncated'>;
   /** Being transcribed now. */
   retrying?: boolean;
   /** The last attempt failed (as opposed to never tried in this page). */
@@ -48,7 +48,10 @@ export type PendingVoiceItemProps = {
 };
 
 /** A kept take: no text yet (retry, or discard), or text that has not landed (put it in the
- *  draft, send it, or discard). Props only, so a design frame draws it as shipped. */
+ *  draft, send it, or discard). Props only, so a design frame draws it as shipped. It does not
+ *  say who the take was spoken to: it sits above that conversation's own composer. Its icon says
+ *  what is on the device: the words (mint), saved audio waiting for them (amber), or nothing
+ *  that could be saved (amber). */
 export function PendingVoiceItem({ take, retrying = false, failed = false, onRetry, onDiscard, onInsert, onSend }: PendingVoiceItemProps) {
   const { t } = useTranslation();
   const ready = take.status === 'transcribed' && Boolean(take.text?.trim());
@@ -76,12 +79,13 @@ export function PendingVoiceItem({ take, retrying = false, failed = false, onRet
       <div className="flex min-w-0 items-center gap-2 text-xs">
         {ready
           ? <AudioLines className="size-4 shrink-0 text-mint-ink" />
-          : <MicOff className="size-4 shrink-0 text-gold-ink" />}
+          : hasAudio
+            ? <FileHeadphone className="size-4 shrink-0 text-gold-ink" />
+            : <FileX className="size-4 shrink-0 text-gold-ink" />}
         <span className="shrink-0 font-semibold text-foreground">
           {ready ? t('voice.pending.ready') : t('voice.pending.title')}
         </span>
         <span className="shrink-0 font-mono text-muted">{clock(voiceTakeDurationMs(take))}</span>
-        {take.label && <span className="min-w-0 truncate text-muted before:mr-1 before:content-['·']">{take.label}</span>}
         <span className="flex-1" />
         {!ready && discard}
         {!ready && hasAudio && (

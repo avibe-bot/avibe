@@ -1621,12 +1621,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     bounds: () => boxRef.current?.getBoundingClientRect() ?? null,
     onSystemInterrupt: 'interrupt',
     context: () => readVoiceContext?.(),
-    keep: () => (voiceKeepTarget
-      ? {
-          target: voiceKeepTarget,
-          label: voiceTarget?.title ?? (voiceTarget?.name ? t('voice.to', { name: voiceTarget.name }) : null),
-        }
-      : null),
+    keep: () => (voiceKeepTarget ? { target: voiceKeepTarget } : null),
   });
   const holdBusy = hold.phase !== 'idle';
   // A take owns the box from the press to its end: Enter and Send wait, so its staged files go

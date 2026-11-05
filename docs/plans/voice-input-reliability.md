@@ -105,9 +105,9 @@ a killed page, or a surface that goes away loses none of it
 
 - While a take records, every segment's WAV bytes go into IndexedDB
   (`avibe-voice-takes`), with the take's target (the Session it was spoken into,
-  or `home` for the Home draft), its intent (`send` for a hold, `insert` for a
-  tap or ⌥Z dictation), and who it was spoken to. Its transcript is kept with it
-  until it is sent or inserted. Bytes are stored, never a Blob, and every retry
+  or `home` for the Home draft) and its intent (`send` for a hold, `insert` for
+  a tap or ⌥Z dictation). Its transcript is kept with it until it is sent or
+  inserted. Bytes are stored, never a Blob, and every retry
   reads fresh Blobs.
 - A take is deleted when its words were sent or inserted, when the reader
   discards it, and on sign-out, revocation, or a change of reader (the local

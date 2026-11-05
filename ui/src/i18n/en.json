@@ -6846,7 +6846,6 @@
     "pending": {
       "title": "Voice not transcribed yet",
       "ready": "Voice transcribed",
-      "to": "To {{name}}",
       "waiting": "Kept on this device. It retries when you are back online.",
       "retrying": "Transcribing…",
       "failed": "Couldn't transcribe it; the recording is kept on this device.",

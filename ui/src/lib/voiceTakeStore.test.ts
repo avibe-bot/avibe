@@ -43,7 +43,6 @@ const take = (id: string, patch: Partial<VoiceTake> = {}): VoiceTake => ({
   id,
   target: 'ses_a',
   intent: 'send',
-  label: 'To Vibey',
   createdAt: Date.now(),
   updatedAt: Date.now(),
   status: 'pending',
@@ -53,7 +52,7 @@ const take = (id: string, patch: Partial<VoiceTake> = {}): VoiceTake => ({
 
 /** A take recorded through the keeper: two minutes and a tail, then left without text. */
 const keepTake = async (id: string, target = 'ses_a') => {
-  const keeper = new VoiceTakeKeeper(id, { target, intent: 'send', label: 'To Vibey' });
+  const keeper = new VoiceTakeKeeper(id, { target, intent: 'send' });
   keeper.begin();
   keeper.segment({ sequence: 0, final: false, durationMs: 60_000 }, wav('minute one'));
   keeper.segment({ sequence: 1, final: false, durationMs: 60_000, overlapMs: 500 }, wav('minute two'));
@@ -111,7 +110,7 @@ describe('voice take store', () => {
     const keeper = await keepTake('take-1');
 
     const [kept] = await readVoiceTakes('ses_a');
-    expect(kept).toMatchObject({ id: 'take-1', status: 'pending', intent: 'send', label: 'To Vibey' });
+    expect(kept).toMatchObject({ id: 'take-1', status: 'pending', intent: 'send' });
     expect(voiceTakeDurationMs(kept!)).toBe(142_000);
     const audio = await readVoiceTakeAudio('take-1');
     expect(await audio.get(0)?.text()).toBe('minute one');

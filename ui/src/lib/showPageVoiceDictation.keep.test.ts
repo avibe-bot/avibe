@@ -31,7 +31,7 @@ const harness = (options: {
   const dictation = new ShowPageVoiceDictation({
     before: '',
     after: '',
-    keep: { target: 'ses_a', intent: 'send', label: 'To Vibey' },
+    keep: { target: 'ses_a', intent: 'send' },
     onLiveChange: options.onLiveChange,
   }, {
     getUserMedia: async () => ({ getTracks: () => [{ stop: vi.fn() }] }) as unknown as MediaStream,

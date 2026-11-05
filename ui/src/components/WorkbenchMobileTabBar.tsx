@@ -63,7 +63,7 @@ const MainBotTabBar: React.FC<{ items: ShellNavItem[] }> = ({ items }) => {
     onTap: open,
     context: () => loadVoiceContext(api.listSessionMessages, MAIN_BOT_SESSION_ID),
     // Kept on the device until sent; if it cannot be, it waits in the main Bot's composer.
-    keep: () => ({ target: MAIN_BOT_SESSION_ID, label: t('voice.to', { name }) }),
+    keep: () => ({ target: MAIN_BOT_SESSION_ID }),
   });
   return (
     <>

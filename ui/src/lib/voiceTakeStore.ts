@@ -59,8 +59,6 @@ export type VoiceTake = {
   /** Where its words go: a Session id, or `home` for the Home composer's draft. */
   target: string;
   intent: VoiceTakeIntent;
-  /** Who it was spoken to, as the card said it ("To Vibey"); shown with the kept take. */
-  label: string | null;
   createdAt: number;
   updatedAt: number;
   /** recording: still being captured · pending: no text yet · transcribed: text that has not

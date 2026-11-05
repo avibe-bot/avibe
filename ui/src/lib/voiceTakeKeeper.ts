@@ -16,8 +16,6 @@ import {
 export type VoiceTakeKeep = {
   target: string;
   intent: VoiceTakeIntent;
-  /** Who it was spoken to, as its card said it. */
-  label?: string | null;
 };
 
 /**
@@ -43,7 +41,6 @@ export class VoiceTakeKeeper {
       id,
       target: keep.target,
       intent: keep.intent,
-      label: keep.label ?? null,
       createdAt: now,
       updatedAt: now,
       status: 'recording',

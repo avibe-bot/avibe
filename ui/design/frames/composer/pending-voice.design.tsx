@@ -43,13 +43,12 @@ const desktop = (name: string, title: string, items: PendingVoiceItemProps[]) =>
 });
 
 const minutes = (seconds: number) => [{ sequence: 0, final: true, durationMs: seconds * 1000 }];
-const label = '说给首席安全官';
-const waiting: PendingVoiceItemProps = { take: { status: 'pending', label, intent: 'send', segments: minutes(142) } };
+const waiting: PendingVoiceItemProps = { take: { status: 'pending', intent: 'send', segments: minutes(142) } };
 const retrying: PendingVoiceItemProps = { ...waiting, retrying: true };
 const failed: PendingVoiceItemProps = { ...waiting, failed: true };
-const ready: PendingVoiceItemProps = { take: { status: 'transcribed', text: said.final, label, intent: 'send', segments: minutes(142) }, onSend: () => {} };
-const dictated: PendingVoiceItemProps = { take: { status: 'transcribed', text: '把令牌刷新的修复方案整理一下，周一前给我。', label: null, intent: 'insert', segments: minutes(9) } };
-const lost: PendingVoiceItemProps = { take: { status: 'pending', label, intent: 'send', segments: [{ sequence: 0, final: true, durationMs: 0, empty: true }] } };
+const ready: PendingVoiceItemProps = { take: { status: 'transcribed', text: said.final, intent: 'send', segments: minutes(142) }, onSend: () => {} };
+const dictated: PendingVoiceItemProps = { take: { status: 'transcribed', text: '把令牌刷新的修复方案整理一下，周一前给我。', intent: 'insert', segments: minutes(9) } };
+const lost: PendingVoiceItemProps = { take: { status: 'pending', intent: 'send', segments: [{ sequence: 0, final: true, durationMs: 0, empty: true }] } };
 
 const designFrames = frames([
   phone('a-waiting', '1 · 断网时说的一段：录音留在这台设备上（重新打开也在），网络恢复或回到前台会自动重试', [waiting]),

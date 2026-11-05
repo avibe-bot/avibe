@@ -49,7 +49,6 @@ const kept = (patch: Partial<VoiceTake>): VoiceTake => ({
   id: 'kept-take',
   target: 'pending-session',
   intent: 'send',
-  label: 'To Vibey',
   createdAt: Date.now(),
   updatedAt: Date.now(),
   status: 'transcribed',
