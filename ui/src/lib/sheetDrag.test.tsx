@@ -8,9 +8,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { useSheetDrag } from './sheetDrag';
 
-function Sheet({ onDismiss }: { onDismiss: () => void }) {
+function Sheet({ onDismiss, enabled = true }: { onDismiss: () => void; enabled?: boolean }) {
   const [node, setNode] = useState<HTMLDivElement | null>(null);
-  useSheetDrag(node, { enabled: true, onDismiss });
+  useSheetDrag(node, { enabled, onDismiss });
   return <div ref={setNode} data-state="open"><h2>Every Bot</h2></div>;
 }
 let sheet: HTMLElement;
@@ -64,6 +64,24 @@ describe('dragging a phone sheet', () => {
     touch('touchmove', 180, 24);
     touch('touchend', 180, 30);
     expect(onDismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens again at rest when it is reopened while still leaving from a drag', () => {
+    const onDismiss = vi.fn();
+    const view = mount(onDismiss);
+    touch('touchstart', 100, 0);
+    touch('touchmove', 110, 8);
+    touch('touchmove', 400, 16);
+    touch('touchend', 400, 20);
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+    // Leaving: the closing animation starts where the finger let go.
+    view.rerender(<Sheet onDismiss={onDismiss} enabled={false} />);
+    expect(sheet.style.getPropertyValue('--sheet-drag')).toBe('290px');
+    // Reopened on the same element before that ended.
+    view.rerender(<Sheet onDismiss={onDismiss} enabled />);
+    expect(sheet.style.transform).toBe('');
+    expect(sheet.style.getPropertyValue('--sheet-drag')).toBe('');
+    expect(sheet.style.getPropertyValue('--sheet-exit-duration')).toBe('');
   });
 
   it('keeps a drag going when its owner re-renders with a new close, and closes with the newest', () => {
