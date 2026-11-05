@@ -19,6 +19,7 @@ import { useNotificationMode } from './useNotificationMode';
 import { InboxSectionHeader } from './InboxSectionHeader';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { useInboxScrollRestoration } from './useInboxScrollRestoration';
+import { useChatPrefetch } from './useChatPrefetch';
 import { BotAvatar } from '../ui/bot-avatar';
 import { BotTag } from './bots/BotTag';
 import {
@@ -55,6 +56,8 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
     loadMore,
     markRead,
   } = useWorkbenchInbox();
+  // Warm the conversations the reader is most likely to open next.
+  useChatPrefetch(inboxSessions, !loading);
   // Remember the tab across visits instead of always snapping back to Unread.
   // On (re)entry resume the last tab, unless the user has been away long enough
   // that defaulting to Unread is more useful (see resolveInboxFilter).

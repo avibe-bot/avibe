@@ -102,10 +102,14 @@ no "stale" badge; the event stream and the bootstrap usually land within a
 second.
 
 Phase 2 also prefetches, during browser idle time, the bootstrap for the few
-most recent Inbox sessions that have no snapshot. That way the first tap on
-each one is fast too. It uses the same request the chat page makes, at most
-three at a time, and only on unmetered connections when the Network
-Information API says so.
+most recent Inbox sessions that have no snapshot (the five newest, each tried
+once per page load). That way the first tap on each one is fast too. It uses
+the same request the chat page makes, at most three at a time, while the page
+is visible. Where the Network Information API exists, a connection it reports
+as cellular, metered, or data-saving is skipped. Where the API is missing
+(Safari, including the iPhone Home Screen app), the prefetch runs. The request
+is declared a prefetch, so it does not renew the remote session, and it marks
+nothing read.
 
 ### 4.3 Writes
 
