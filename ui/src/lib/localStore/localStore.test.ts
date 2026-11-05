@@ -63,6 +63,12 @@ const idle = () => new Promise((resolve) => setTimeout(resolve, 30));
 // Eviction and hand-offs run on their own; under a full parallel suite they can
 // take well over vitest's one-second default to land.
 const SETTLE = { timeout: 10_000, interval: 25 };
+/** Give the page a ``navigator.storage``. Defined on the real navigator rather
+ *  than by replacing it: fake-indexeddb finds its task scheduler through
+ *  ``navigator.userAgent``, and without it falls back to setTimeout, which a
+ *  case with fake timers then swallows. */
+const stubStorage = (storage: Partial<StorageManager>) =>
+  Object.defineProperty(navigator, 'storage', { configurable: true, value: storage });
 /** Rows on disk, read past every fence: what a wipe must have removed. */
 const rowsOnDisk = () => new Promise<number>((resolve, reject) => {
   const open = indexedDB.open('avibe-local-store');
@@ -87,6 +93,7 @@ beforeEach(() => {
 afterEach(async () => {
   platform.standalone = false;
   platform.ios = false;
+  Reflect.deleteProperty(navigator, 'storage');
   vi.unstubAllGlobals();
   setLocalSnapshotPrincipal(null);
   await clearLocalSnapshots();
@@ -504,78 +511,76 @@ describe('session rows', () => {
 });
 
 describe('budget and persistence', () => {
-  it('evicts the least recently active session first and keeps the main Bot', async () => {
-    // A budget (half the quota) between two and three sessions' rows.
-    vi.stubGlobal('navigator', { ...navigator, storage: { estimate: async () => ({ quota: 200_000, usage: 0 }) } });
-    // The budget check is throttled on a timer, so this case needs a document
-    // with no check pending. IndexedDB here runs on setImmediate, not timers.
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  // A fresh document runs its first budget check on a zero-delay timer after its
+  // first write. Writing every page at once queues all their transactions
+  // before that check creates its own, and IndexedDB runs them in that order,
+  // so the check sees every row, with no fake timers and no race with load.
+  const freshDocument = async () => {
     vi.resetModules();
-    const fresh = await import('.');
+    const store = await import('.');
     const snapshots = await import('../localSnapshots');
     snapshots.setLocalSnapshotPrincipal('remote:alice');
-    const big = (n: number, sessionId: string) => row(n, { text: 'x'.repeat(20_000) }, sessionId);
+    const held = async (sessionId: string) => ((await store.readLocalStoreWindow(sessionId))?.messages ?? []).length;
+    const done = async () => {
+      await store.wipeLocalStore();
+      snapshots.setLocalSnapshotPrincipal(null);
+    };
+    return { store, held, done };
+  };
+  const big = (n: number, sessionId: string) => row(n, { text: 'x'.repeat(20_000) }, sessionId);
+
+  it('evicts the least recently active session first and keeps the main Bot', async () => {
+    // A budget (half the quota) between two and three sessions' rows.
+    stubStorage({ estimate: async () => ({ quota: 200_000, usage: 0 }) });
+    const { store, held, done } = await freshDocument();
     const page = (sessionId: string, lastActive: number) =>
-      fresh.recordLocalStorePage(
-        fresh.beginLocalStoreRead(sessionId),
+      store.recordLocalStorePage(
+        store.beginLocalStoreRead(sessionId),
         { kind: 'tail' },
         { messages: [big(1, sessionId), big(2, sessionId)], next_before_id: null },
         session(sessionId, { last_active_at: at(lastActive) }),
       );
-    const held = async (sessionId: string) =>
-      ((await fresh.readLocalStoreWindow(sessionId))?.messages ?? []).length;
-    try {
-      await page('ses_main', 1);
-      await page('ses_old', 2);
-      await page('ses_new', 3);
-      await vi.advanceTimersByTimeAsync(31_000);
-    } finally {
-      vi.useRealTimers();
-    }
+    const readBeforeEviction = store.beginLocalStoreRead('ses_old', Date.now() - 1000);
+    await Promise.all([page('ses_main', 1), page('ses_old', 2), page('ses_new', 3)]);
     await vi.waitFor(async () => expect(await held('ses_old')).toBe(0), SETTLE);
     expect(await held('ses_main')).toBe(2);
     expect(await held('ses_new')).toBe(2);
-    await fresh.wipeLocalStore();
-    snapshots.setLocalSnapshotPrincipal(null);
+    // An answer read before the eviction does not put the evicted rows back.
+    await store.recordLocalStorePage(
+      readBeforeEviction,
+      { kind: 'tail' },
+      { messages: [big(1, 'ses_old'), big(2, 'ses_old')], next_before_id: null },
+    );
+    expect(await held('ses_old')).toBe(0);
+    await done();
   });
 
   it('counts rows of a session no session read has named yet against the budget', async () => {
     // A budget (half the quota) under two sessions' rows.
-    vi.stubGlobal('navigator', { ...navigator, storage: { estimate: async () => ({ quota: 140_000, usage: 0 }) } });
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    vi.resetModules();
-    const fresh = await import('.');
-    const snapshots = await import('../localSnapshots');
-    snapshots.setLocalSnapshotPrincipal('remote:alice');
-    const big = (n: number, sessionId: string) => row(n, { text: 'x'.repeat(20_000) }, sessionId);
-    const held = async (sessionId: string) =>
-      ((await fresh.readLocalStoreWindow(sessionId))?.messages ?? []).length;
-    try {
-      await fresh.recordLocalStorePage(
-        fresh.beginLocalStoreRead('ses_main'),
+    stubStorage({ estimate: async () => ({ quota: 140_000, usage: 0 }) });
+    const { store, held, done } = await freshDocument();
+    await Promise.all([
+      store.recordLocalStorePage(
+        store.beginLocalStoreRead('ses_main'),
         { kind: 'tail' },
         { messages: [big(1, 'ses_main'), big(2, 'ses_main')], next_before_id: null },
         session('ses_main'),
-      );
+      ),
       // An older page with no session row beside it.
-      await fresh.recordLocalStorePage(
-        fresh.beginLocalStoreRead('ses_orphan'),
+      store.recordLocalStorePage(
+        store.beginLocalStoreRead('ses_orphan'),
         { kind: 'before' },
         { messages: [big(1, 'ses_orphan'), big(2, 'ses_orphan')], next_before_id: 'cursor' },
-      );
-      await vi.advanceTimersByTimeAsync(31_000);
-    } finally {
-      vi.useRealTimers();
-    }
+      ),
+    ]);
     await vi.waitFor(async () => expect(await held('ses_orphan')).toBe(0), SETTLE);
     expect(await held('ses_main')).toBe(2);
-    await fresh.wipeLocalStore();
-    snapshots.setLocalSnapshotPrincipal(null);
+    await done();
   });
 
   it('asks for persistent storage silently in an installed app and not in a browser tab', async () => {
     const persist = vi.fn(async () => true);
-    vi.stubGlobal('navigator', { ...navigator, storage: { persist, persisted: async () => false } });
+    stubStorage({ persist, persisted: async () => false });
     const openAs = async (standalone: boolean) => {
       platform.standalone = standalone;
       vi.resetModules();

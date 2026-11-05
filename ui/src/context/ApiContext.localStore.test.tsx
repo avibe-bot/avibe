@@ -201,6 +201,33 @@ describe('local message store write-through at the API layer', () => {
     expect(window?.contiguous).toBe(false);
   });
 
+  it('does not let a cached read that went out before another tab cleared the store write after it', async () => {
+    await seed();
+    let answer!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => {
+      answer = resolve;
+    });
+    apiFetch.mockImplementation(async (path: string) => (path.startsWith('/api/sessions/ses_a/messages') ? pending : json({})));
+    render(<ApiProvider><Subscriber /></ApiProvider>);
+    const first = api.current!.listSessionMessages('ses_a', { tail: true, limit: 50 });
+
+    // Another tab clears on an authorization change this tab never heard of.
+    vi.resetModules();
+    const otherSnapshots = await import('../lib/localSnapshots');
+    const otherStore = await import('../lib/localStore');
+    otherSnapshots.setLocalSnapshotPrincipal('remote:alice');
+    await otherStore.readLocalStoreWindow('ses_a');
+    await otherSnapshots.clearLocalSnapshots();
+
+    answer(json({ messages: [row(1), row(2), row(3)], next_before_id: null }));
+    // A second caller shares the cached read that went out before the clear.
+    const second = api.current!.listSessionMessages('ses_a', { tail: true, limit: 50 });
+    await Promise.all([first, second]);
+    await settle();
+    expect(await held()).toEqual([]);
+    otherSnapshots.setLocalSnapshotPrincipal(null);
+  });
+
   it('forgets a session archived while the reader watches', async () => {
     await seed();
     render(<ApiProvider><Subscriber /></ApiProvider>);

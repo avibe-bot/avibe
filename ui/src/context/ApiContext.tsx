@@ -8,6 +8,7 @@ import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
 import { clearLocalSnapshots, forgetLocalSnapshots } from '../lib/localSnapshots';
 import {
   type LocalStorePageRequest,
+  type LocalStoreTicket,
   beginLocalStoreRead,
   forgetLocalStoreSession,
   applyLocalStoreSessionActivity,
@@ -2681,7 +2682,13 @@ export const useApi = () => {
 export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { showToast } = useToast();
   const { t } = useTranslation();
-  const readCacheRef = useRef(new Map<string, { expiresAt: number; promise: Promise<any>; startedAt: number }>());
+  const readCacheRef = useRef(new Map<string, {
+    expiresAt: number;
+    promise: Promise<any>;
+    startedAt: number;
+    /** The local message store's ticket for this read, taken as it went out. */
+    localStoreTicket?: LocalStoreTicket;
+  }>());
   const configChangedHandlersRef = useRef(new Set<(config: unknown) => void>());
   // Agent Activity is global across chat routes. Keep its writes ordered for the
   // provider lifetime without making unrelated runtime-backed config saves block chat.
@@ -2873,9 +2880,23 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const readStartedAt = (path: string, fallback: number) => {
-    const cached = readCacheRef.current.get(path);
-    return cached && cached.expiresAt > Date.now() ? Math.min(cached.startedAt, fallback) : fallback;
+  // The local message store's ticket for a read of ``path``. A shared cached
+  // read went out before this caller asked: every caller of it shares the
+  // ticket taken when it went out, so a wipe or forget since then voids its
+  // answer for all of them. A cached read that went out with no ticket (some
+  // other caller made it) has no fences to show, and is not written.
+  const localStoreTicketFor = (sessionId: string, path: string, startedAt: number, cached: boolean): LocalStoreTicket | null => {
+    if (!cached) return beginLocalStoreRead(sessionId, startedAt);
+    const entry = readCacheRef.current.get(path);
+    if (!entry || entry.expiresAt <= Date.now()) return null;
+    if (!entry.localStoreTicket) {
+      // Only the caller that just sent the request may take its ticket. Today
+      // these paths are read through the cache by no other caller; one added
+      // later without a ticket is not written rather than written unfenced.
+      if (entry.startedAt < startedAt) return null;
+      entry.localStoreTicket = beginLocalStoreRead(sessionId, entry.startedAt);
+    }
+    return entry.localStoreTicket;
   };
 
   const clearReadCache = () => {
@@ -4233,12 +4254,12 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         : params?.cache === false
           ? getJson(path)
           : getCachedJson(path);
-      const ticket = beginLocalStoreRead(sessionId, readStartedAt(path, startedAt));
+      const ticket = localStoreTicketFor(sessionId, path, startedAt, params?.handleError !== false && params?.cache !== false);
       const row = sessionRowFromPayload(await read.catch((error) => {
         forgetRefusedSession(sessionId, error);
         throw error;
       }));
-      void recordLocalStoreSession(ticket, row);
+      if (ticket) void recordLocalStoreSession(ticket, row);
       return row;
     },
     getMainSession: async () => {
@@ -4351,8 +4372,10 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           ? 'around'
           : params?.tail ? 'tail' : params?.beforeId ? 'before' : null;
       if (kind) {
-        const ticket = beginLocalStoreRead(sessionId, params?.cache === false ? startedAt : readStartedAt(path, startedAt));
-        read.then((answer) => recordLocalStorePage(ticket, { kind }, answer), (error) => forgetRefusedSession(sessionId, error));
+        const ticket = localStoreTicketFor(sessionId, path, startedAt, params?.cache !== false);
+        read.then((answer) => {
+          if (ticket) void recordLocalStorePage(ticket, { kind }, answer);
+        }, (error) => forgetRefusedSession(sessionId, error));
       }
       return read;
     },

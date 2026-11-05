@@ -689,8 +689,8 @@ export async function recordLocalStoreStreamRow(row: WorkbenchMessage | null | u
     const forgottenAt = record?.forgottenAt;
     // A row that arrived before the session's forget never lands.
     if (forgottenAt != null && ticket.observedAt <= forgottenAt) return;
-    // Kept: never forgotten, or written again since (a forget empties the ranges).
-    const current = record && (forgottenAt == null || record.ranges.length > 0) ? record : undefined;
+    // Kept: it has coverage. A forget or an eviction empties the ranges.
+    const current = record && record.ranges.length > 0 ? record : undefined;
     // A pending read admits the session's rows only if it came after any forget
     // of it in any tab.
     const admitted = readPending(sessionId)
@@ -884,7 +884,9 @@ async function evictForSpace(quotaFailure: boolean): Promise<boolean> {
           tx.objectStore(MESSAGES).index(BY_SESSION).getAllKeys(sessionKeyRange(session.id, null, null)),
         );
         for (const key of keys) tx.objectStore(MESSAGES).delete(key);
-        tx.objectStore(RANGES).delete(session.id);
+        // Evicted like a forget: an answer read before now would put back older
+        // copies of what was just removed, so the marker refuses it.
+        tx.objectStore(RANGES).put({ sessionId: session.id, ranges: [], forgottenAt: Date.now() } satisfies StoredRanges);
         tx.objectStore(SESSIONS).put({ ...session, bytes: 0 } satisfies StoredSession);
         total -= session.bytes;
         freed = true;
