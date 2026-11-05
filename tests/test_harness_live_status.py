@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import event, select, update
+from sqlalchemy.exc import OperationalError
 
 from core.services.harness_status import build_harness_status
 from storage.background import SQLiteBackgroundTaskStore
@@ -69,6 +71,56 @@ def test_record_run_activity_is_monotonic_and_terminal_guarded(tmp_path) -> None
         assert settled["status"] == "succeeded"
         assert settled["last_activity_at"] == "2026-08-12T05:03:00+00:00"
     finally:
+        store.close()
+
+
+@pytest.mark.parametrize("released", [True, False], ids=["retried", "exhausted"])
+def test_record_run_activity_retries_a_contended_writer_with_its_observation_time(
+    tmp_path, released
+) -> None:
+    """Another process holding SQLite's writer delays the activity fact, never restamps it.
+
+    The retry records the instant the dispatcher observed, not the instant it got the writer, and a write that
+    never gets it leaves the Run as it was.
+    """
+
+    store = SQLiteBackgroundTaskStore(tmp_path / "state.sqlite")
+    holder = sqlite3.connect(store.db_path, isolation_level=None, check_same_thread=False)
+    busy_at: list[datetime] = []
+    try:
+        _enqueue_running(store, "run-live")
+
+        @event.listens_for(store.engine, "connect")
+        def _never_wait(dbapi_connection, _record) -> None:
+            dbapi_connection.execute("PRAGMA busy_timeout = 0")
+
+        @event.listens_for(store.engine, "handle_error")
+        def _busy(context) -> None:
+            if str(context.original_exception) == "database is locked":
+                busy_at.append(datetime.now(timezone.utc))
+                if released and len(busy_at) == 1:
+                    holder.execute("ROLLBACK")
+
+        store.engine.dispose()
+        holder.execute("BEGIN IMMEDIATE")
+
+        if not released:
+            with pytest.raises(OperationalError, match="database is locked"):
+                store.record_run_activity(["run-live"])
+            assert len(busy_at) == 3
+            unchanged = store.get_run("run-live")
+            assert unchanged["status"] == "running"
+            assert unchanged["last_activity_at"] is None
+            return
+
+        assert store.record_run_activity(["run-live"]) == ["run-live"]
+        assert len(busy_at) == 1
+        recorded = store.get_run("run-live")
+        assert recorded["status"] == "running"
+        assert recorded["updated_at"] == recorded["last_activity_at"]
+        assert datetime.fromisoformat(recorded["last_activity_at"]) <= busy_at[0]
+    finally:
+        holder.close()
         store.close()
 
 

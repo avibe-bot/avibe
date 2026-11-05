@@ -8995,3 +8995,109 @@ def test_a_cancellation_during_admission_keeps_the_runs_delivery_ownership(monke
         return
     assert result.delivery_owner_transferred is True
     assert stored["delivery_id"] and stored["status"] in {"running", "queued"}
+
+
+@pytest.mark.parametrize("released", [True, False], ids=["retried", "exhausted"])
+@pytest.mark.parametrize("delivered", [True, False], ids=["outcome", "deferred-outcome"])
+def test_a_delivery_outcome_projection_retries_when_another_writer_holds_sqlite(
+    monkeypatch, tmp_path, delivered, released
+):
+    """After a Run's ownership moves to its Delivery, the outcome projection meets another process's writer. It runs
+    its own transaction again, never the delivery; one that never gets the writer is logged, and the submission and
+    the Run's ownership stand as delivered."""
+    import sqlite3
+
+    from sqlalchemy import event
+
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.db import create_sqlite_engine
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session, _owner_turn_id = _create_active_test_turn(tmp_path, native_id="proj_outcome_contention")
+    session_id = session["id"]
+    request_store = TaskExecutionStore()
+    run = request_store.enqueue_definition_run(
+        definition_id="scheduled-outcome-contention",
+        run_type="scheduled",
+        source_kind="scheduler",
+        session_key="",
+        session_id=session_id,
+        post_to=None,
+        deliver_key=None,
+        prompt="digest please",
+        agent_name="worker",
+        session_policy="existing",
+    )
+    assert request_store.claim(run.id) is not None
+    controller = _build_controller_double()
+    internal_server.create_app(controller)
+    manager = controller.session_turns
+    deliver = manager.deliver
+    deliveries: list[str] = []
+
+    holder = sqlite3.connect(engine.url.database, isolation_level=None, check_same_thread=False, timeout=10)
+    busy: list[str] = []
+    # The projection's own engine on the same database, which meets a held writer at once.
+    projection_engine = create_sqlite_engine()
+
+    @event.listens_for(projection_engine, "connect")
+    def _never_wait(dbapi_connection, _record) -> None:
+        dbapi_connection.execute("PRAGMA busy_timeout = 0")
+
+    @event.listens_for(projection_engine, "handle_error")
+    def _busy(context) -> None:
+        if str(context.original_exception) == "database is locked":
+            busy.append(context.statement)
+            if released and len(busy) == 1:
+                holder.execute("ROLLBACK")
+
+    async def _deliver_then_contend(request, *, context):
+        deliveries.append(request.delivery_id)
+        result = await deliver(request, context=context) if delivered else None
+        await asyncio.to_thread(holder.execute, "BEGIN IMMEDIATE")
+        monkeypatch.setattr(internal_server, "get_cached_sqlite_engine", lambda: projection_engine)
+        if not delivered:
+            raise RuntimeError("native dispatch failed after the handoff")
+        return result
+
+    monkeypatch.setattr(manager, "deliver", _deliver_then_contend)
+    ctx = MessageContext(
+        user_id="workbench",
+        channel_id=session_id,
+        platform="avibe",
+        message_id=f"scheduled:scheduled-outcome-contention:{run.id}",
+        platform_specific={
+            "agent_session_id": session_id,
+            "agent_session_target": {"agent_backend": "claude"},
+            "task_execution_id": run.id,
+            "task_trigger_kind": "scheduled",
+            "task_definition_id": "scheduled-outcome-contention",
+        },
+    )
+
+    try:
+        result = asyncio.run(
+            controller.session_turn_gate.submit_scheduled(session_id, ctx, "digest please", delivery_intent="queue")
+        )
+    finally:
+        holder.close()
+        projection_engine.dispose()
+
+    delivery_status = "queued" if delivered else "reserved"
+    assert result == session_turns.TurnSubmissionResult(
+        route="enqueued",
+        queue_persisted=True,
+        target_was_busy=True,
+        delivery_status=delivery_status,
+        delivery_owner_transferred=True,
+    )
+    assert len(deliveries) == 1, "a projection retry never repeats the delivery"
+    assert len(busy) == (1 if released else 3)
+    stored = request_store.get_run(run.id)
+    assert stored["status"] == "running"
+    assert stored["delivery_id"] == deliveries[0]
+    assert stored["metadata"]["delivery_outcome"] == {
+        "intent": "queue",
+        "status": delivery_status if released else "admitted",
+        "target_was_busy": True,
+    }

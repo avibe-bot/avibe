@@ -1,13 +1,26 @@
 from __future__ import annotations
 
+import logging
+import sqlite3
+import time
 from pathlib import Path
 from threading import RLock
+from typing import Callable, TypeVar
 
 from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.engine import URL
+from sqlalchemy.exc import OperationalError
 
 from config import paths
 from storage import loop_writers
+
+logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
+
+#: Pauses between the attempts of ``retry_sqlite_write``: three attempts in all.
+SQLITE_WRITE_RETRY_DELAYS = (0.05, 0.1)
+_SQLITE_BUSY = 5
 
 
 def escape_sql_like(value: str) -> str:
@@ -69,6 +82,47 @@ def create_sqlite_engine(db_path: Path | None = None, *, read_only: bool = False
 
     loop_writers.watch_engine(engine)
     return engine
+
+
+def _is_sqlite_busy(error: BaseException) -> bool:
+    """Whether ``error`` is SQLite writer contention: primary code ``SQLITE_BUSY``, ``BUSY_SNAPSHOT`` included.
+
+    ``SQLITE_LOCKED`` ("database table is locked") is a conflict inside one connection or shared cache, which
+    waiting does not end, so it is not contention. Python 3.10 has no ``sqlite_errorcode``; there the exact busy
+    message stands for the code.
+    """
+    if isinstance(error, OperationalError):
+        error = error.orig
+    if not isinstance(error, sqlite3.OperationalError):
+        return False
+    code = getattr(error, "sqlite_errorcode", None)
+    if code is None:
+        return str(error) == "database is locked"
+    return code & 0xFF == _SQLITE_BUSY
+
+
+def retry_sqlite_write(operation: Callable[[], _T]) -> _T:
+    """Run a complete write transaction again while another writer holds SQLite (``docs/plans/sqlite-write-retries.md``).
+
+    ``operation`` opens its own transaction, repeats every read it decides on, and rolls back before it raises, as
+    ``engine.begin()`` does; it has no external effect, and nothing after its commit can fail. Each attempt can
+    wait the full ``busy_timeout``, so three attempts bound the wait at about 15.15 s. Worker threads only: this
+    sleeps between attempts.
+    """
+    for attempt, delay in enumerate(SQLITE_WRITE_RETRY_DELAYS, start=1):
+        try:
+            return operation()
+        except Exception as exc:
+            if not _is_sqlite_busy(exc):
+                raise
+            logger.warning(
+                "SQLite writer busy; retrying %s (attempt %d of %d)",
+                getattr(operation, "__qualname__", operation),
+                attempt + 1,
+                len(SQLITE_WRITE_RETRY_DELAYS) + 1,
+            )
+        time.sleep(delay)
+    return operation()
 
 
 _cached_engine_lock = RLock()

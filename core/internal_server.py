@@ -45,7 +45,7 @@ from config.atomic_io import write_atomic
 from core.delivery_target import normalize_message_kind
 from core.services.dispatch import SOURCE_SCHEDULED
 from modules.im.base import MessageContext
-from storage.db import get_cached_sqlite_engine
+from storage.db import get_cached_sqlite_engine, retry_sqlite_write
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from core.controller import Controller
@@ -608,8 +608,13 @@ def create_app(
             }
         )
 
+        # The outcome projections below are their own transactions, retried whole when another writer holds
+        # SQLite; the delivery before them never is. Each attempt reads what it records afresh.
         def _record_deferred_outcome() -> tuple[str, bool]:
             with run_update_event_transaction(get_cached_sqlite_engine()) as conn:
+                from storage.agent_session_rows import reserve_write_lock
+
+                reserve_write_lock(conn)
                 persisted = message_deliveries.get_delivery(conn, delivery_id)
                 status = str((persisted or {}).get("state") or "reserved")
                 recorded = record_agent_run_delivery_outcome_in_connection(
@@ -627,7 +632,9 @@ def create_app(
             delivery_status = "reserved"
             try:
                 # Already answering a cancellation: a further one cannot change the answer.
-                deferred_step, _cancelled = await _off_loop(_record_deferred_outcome)
+                deferred_step, _cancelled = await _off_loop(
+                    lambda: retry_sqlite_write(_record_deferred_outcome)
+                )
                 delivery_status, recorded = deferred_step.result()
                 if not recorded:
                     logger.warning(
@@ -726,7 +733,9 @@ def create_app(
             try:
                 # Ownership has moved to the Delivery: the submission's answer must reach
                 # the executor, so a cancellation here does not escape it.
-                outcome_step, _cancelled = await _off_loop(_record_outcome)
+                outcome_step, _cancelled = await _off_loop(
+                    lambda: retry_sqlite_write(_record_outcome)
+                )
                 recorded = outcome_step.result()
                 if not recorded:
                     logger.warning(

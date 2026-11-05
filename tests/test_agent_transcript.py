@@ -9,13 +9,15 @@ the output outbox replays pending responses in order.
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import re
 import sqlite3
 import threading
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import create_engine, event, func, select
+from sqlalchemy.exc import OperationalError
 
 from core.agent_core.messages import (
     AssistantMessage,
@@ -42,7 +44,7 @@ from config.paths import get_sqlite_state_path
 from modules.agents.vibey.store import AdapterTranscriptStore
 from storage import message_deliveries, messages_service
 from storage.agent_transcript import SQLiteTranscriptStore, TranscriptError, resolve_fork_point
-from storage.db import create_sqlite_engine
+from storage.db import create_sqlite_engine, dispose_cached_sqlite_engines, sqlite_url
 from storage.importer import ensure_sqlite_state
 from storage.models import agent_events, messages, session_digests
 from storage.models import message_deliveries as delivery_rows
@@ -787,6 +789,122 @@ async def test_a_cancelled_write_raises_only_after_its_commit_settled(engine) ->
     finally:
         release.join()
         holder.close()
+
+
+def _writer_that_never_waits(on_busy) -> object:
+    """A store engine on the test database that meets a held lock at once (``busy_timeout`` 0).
+
+    Each real ``SQLITE_BUSY`` it meets is passed to ``on_busy`` with the statement that met it, on the writing
+    thread, before its transaction rolls back.
+    """
+    engine = create_engine(sqlite_url())
+
+    @event.listens_for(engine, "connect")
+    def _pragmas(dbapi_connection, _record) -> None:
+        dbapi_connection.execute("PRAGMA foreign_keys = ON")
+        dbapi_connection.execute("PRAGMA busy_timeout = 0")
+
+    @event.listens_for(engine, "handle_error")
+    def _busy(context) -> None:
+        if str(context.original_exception) == "database is locked":
+            on_busy(context.statement or "COMMIT")
+
+    return engine
+
+
+async def test_a_write_whose_commit_meets_another_writer_is_retried_whole_in_session_order(engine) -> None:
+    """A commit that fails after its inserts rolls back and runs again, allocating afresh, before the Session's next
+    write: no row from the failed attempt survives, and the queued write still follows it."""
+    with engine.begin() as conn:
+        home = _scope(conn, "C-home")
+        _session(conn, "ses_main", home)
+        consumed = _row(conn, "ses_main", home, "go")
+    await SQLiteTranscriptStore(engine).consume_input("ses_main", consumed, _user("go"))
+    # In a rollback journal, a reader's shared lock stops a writer's commit after its inserts already ran.
+    engine.dispose()
+    dispose_cached_sqlite_engines()
+    path = get_sqlite_state_path()
+    gc.collect()  # Leaving WAL needs the only connection; close any the disposed pools left to the collector.
+    switch = sqlite3.connect(path, isolation_level=None)
+    try:
+        assert switch.execute("PRAGMA journal_mode = DELETE").fetchone() == ("delete",)
+    finally:
+        switch.close()
+    reader = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
+    reader.execute("BEGIN")
+    reader.execute("SELECT count(*) FROM agent_events").fetchone()
+    busy: list[str] = []
+
+    def release_reader(statement: str) -> None:
+        busy.append(statement)
+        if len(busy) == 1:
+            reader.execute("ROLLBACK")
+
+    contended = _writer_that_never_waits(release_reader)
+    store = SQLiteTranscriptStore(contended)
+    try:
+        first, queued = await asyncio.gather(
+            store.append_tool_result("ses_main", _tool_result("call_1", "ok"), details={}),
+            store.append_tool_result("ses_main", _tool_result("call_2", "ok"), details={}),
+        )
+        assert busy == ["COMMIT"]
+        assert (first.context_seq, queued.context_seq) == (2, 3)
+        assert [entry.row_id for entry in await store.load("ses_main") if entry.kind == "tool_result"] == [
+            first.row_id,
+            queued.row_id,
+        ]
+        with contended.connect() as conn:
+            assert conn.execute(
+                select(func.count()).select_from(agent_events).where(agent_events.c.session_id == "ses_main")
+            ).scalar_one() == 2
+    finally:
+        reader.close()
+        contended.dispose()
+
+
+@pytest.mark.parametrize("cancelled", [False, True], ids=["exhausted", "cancelled-while-retrying"])
+async def test_a_write_that_cannot_take_the_writer_retries_a_bounded_number_of_times(engine, cancelled) -> None:
+    """A write that never gets SQLite's writer fails after its attempts with nothing written. A cancellation that
+    arrives between attempts still waits for the write to land before it escapes."""
+    with engine.begin() as conn:
+        home = _scope(conn, "C-home")
+        _session(conn, "ses_main", home)
+        consumed = _row(conn, "ses_main", home, "go")
+    await SQLiteTranscriptStore(engine).consume_input("ses_main", consumed, _user("go"))
+    holder = sqlite3.connect(get_sqlite_state_path(), isolation_level=None, check_same_thread=False)
+    holder.execute("BEGIN IMMEDIATE")
+    first_busy, proceed = threading.Event(), threading.Event()
+    busy: list[str] = []
+
+    def on_busy(statement: str) -> None:
+        busy.append(statement)
+        if cancelled and len(busy) == 1:
+            first_busy.set()
+            # Hold the failed attempt until the caller is cancelled and the writer is free.
+            proceed.wait(5)
+
+    contended = _writer_that_never_waits(on_busy)
+    store = SQLiteTranscriptStore(contended)
+    try:
+        append = asyncio.create_task(store.append_tool_result("ses_main", _tool_result("call_1", "ok"), details={}))
+        if not cancelled:
+            with pytest.raises(OperationalError, match="database is locked"):
+                await append
+            assert busy == ["BEGIN IMMEDIATE"] * 3
+            assert [entry.kind for entry in await store.load("ses_main")] == ["input"]
+            return
+        assert await asyncio.to_thread(first_busy.wait, 5)
+        append.cancel()
+        holder.execute("COMMIT")
+        proceed.set()
+        with pytest.raises(asyncio.CancelledError):
+            await append
+        assert busy == ["BEGIN IMMEDIATE"]
+        assert [entry.kind for entry in await store.load("ses_main")] == ["input", "tool_result"]
+    finally:
+        proceed.set()
+        holder.close()
+        contended.dispose()
 
 
 @pytest.mark.parametrize(

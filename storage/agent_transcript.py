@@ -57,9 +57,16 @@ record's ``images``) registers each file in ``media_objects`` in its own
 transaction, as an input snapshot is registered: the media sweep keeps exactly
 the files some row registers (``vibey-hosted-tools.md`` §7.3).
 
+Contention. A write whose transaction meets another writer holding SQLite
+(``SQLITE_BUSY``) rolls back and runs again whole, a bounded number of times
+(``retry_sqlite_write``), still under the Session's lock: each attempt allocates
+and re-reads afresh, and its rows are exposed only by its commit. A write that
+never gets the writer raises, so no uncommitted entry is taken as written.
+
 Cancellation. A worker thread cannot be interrupted, so a cancelled write keeps
-the Session's lock until its transaction settles and only then raises: when a
-write call returns or raises, the rows already show whether it committed.
+the Session's lock until its transaction settles, retries included, and only
+then raises: when a write call returns or raises, the rows already show whether
+it committed.
 """
 
 from __future__ import annotations
@@ -92,6 +99,7 @@ from core.agent_core.messages import (
 )
 from storage import agent_events_service, media_service, messages_service
 from storage.agent_session_rows import reserve_write_lock
+from storage.db import retry_sqlite_write
 from storage.message_deliveries import TURN_OWNER_STATES
 from storage.models import (
     MESSAGE_TURN_ID_SQL,
@@ -484,9 +492,12 @@ class SQLiteTranscriptStore:
                 raise
 
     def _commit(self, work: Callable[[Connection], _T]) -> _T:
-        with self._engine.begin() as conn:
-            reserve_write_lock(conn)
-            return work(conn)
+        def attempt() -> _T:
+            with self._engine.begin() as conn:
+                reserve_write_lock(conn)
+                return work(conn)
+
+        return retry_sqlite_write(attempt)
 
     def _append_event(
         self,

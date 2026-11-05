@@ -37,7 +37,7 @@ from storage.agent_session_rows import (
     session_openable_in_chat,
     unchanged_text,
 )
-from storage.db import SqliteInvalidationProbe, create_sqlite_engine
+from storage.db import SqliteInvalidationProbe, create_sqlite_engine, retry_sqlite_write
 from storage.migrations import (
     background_tables_ready,
     ensure_background_indexes,
@@ -5373,7 +5373,9 @@ class SQLiteBackgroundTaskStore:
 
         Activity is output observed at the dispatcher, not a synthetic heartbeat.
         A writer reservation keeps the read/compare/write decision atomic without
-        replacing any lifecycle or ownership state.
+        replacing any lifecycle or ownership state. A transaction that meets
+        another writer runs again whole (``retry_sqlite_write``) with the same
+        observation time, re-reading status and the monotonic guards.
         """
 
         normalized_ids = list(
@@ -5390,52 +5392,55 @@ class SQLiteBackgroundTaskStore:
         if observed_instant is None:
             raise ValueError("observed_at must be an ISO-8601 timestamp")
 
-        touched: list[str] = []
-        with self.engine.begin() as conn:
-            reserve_write_lock(conn)
-            rows = conn.execute(
-                select(
-                    agent_runs.c.id,
-                    agent_runs.c.status,
-                    agent_runs.c.updated_at,
-                    agent_runs.c.metadata_json,
-                ).where(agent_runs.c.id.in_(normalized_ids))
-            ).mappings()
-            for row in rows:
-                if normalize_run_status(row["status"]) != "running":
-                    continue
-                try:
-                    metadata = json.loads(str(row["metadata_json"] or "{}"))
-                except (TypeError, ValueError):
-                    metadata = None
-                if not isinstance(metadata, dict):
-                    logger.warning(
-                        "Run activity metadata is unreadable; preserving Run %s unchanged",
-                        row["id"],
+        def record() -> list[str]:
+            touched: list[str] = []
+            with self.engine.begin() as conn:
+                reserve_write_lock(conn)
+                rows = conn.execute(
+                    select(
+                        agent_runs.c.id,
+                        agent_runs.c.status,
+                        agent_runs.c.updated_at,
+                        agent_runs.c.metadata_json,
+                    ).where(agent_runs.c.id.in_(normalized_ids))
+                ).mappings()
+                for row in rows:
+                    if normalize_run_status(row["status"]) != "running":
+                        continue
+                    try:
+                        metadata = json.loads(str(row["metadata_json"] or "{}"))
+                    except (TypeError, ValueError):
+                        metadata = None
+                    if not isinstance(metadata, dict):
+                        logger.warning(
+                            "Run activity metadata is unreadable; preserving Run %s unchanged",
+                            row["id"],
+                        )
+                        continue
+                    current = str(metadata.get(RUN_LAST_ACTIVITY_METADATA_KEY) or "").strip()
+                    if current:
+                        current_instant = _parse_iso_instant(current)
+                        if current_instant is not None:
+                            if current_instant >= observed_instant:
+                                continue
+                    updated_at = str(row["updated_at"] or "").strip()
+                    if updated_at:
+                        updated_instant = _parse_iso_instant(updated_at)
+                        if updated_instant is not None:
+                            if updated_instant > observed_instant:
+                                continue
+                    metadata[RUN_LAST_ACTIVITY_METADATA_KEY] = now
+                    result = conn.execute(
+                        update(agent_runs)
+                        .where(agent_runs.c.id == row["id"])
+                        .where(agent_runs.c.status.in_(_status_query_values("running")))
+                        .values(metadata_json=_json_dumps(metadata), updated_at=now)
                     )
-                    continue
-                current = str(metadata.get(RUN_LAST_ACTIVITY_METADATA_KEY) or "").strip()
-                if current:
-                    current_instant = _parse_iso_instant(current)
-                    if current_instant is not None:
-                        if current_instant >= observed_instant:
-                            continue
-                updated_at = str(row["updated_at"] or "").strip()
-                if updated_at:
-                    updated_instant = _parse_iso_instant(updated_at)
-                    if updated_instant is not None:
-                        if updated_instant > observed_instant:
-                            continue
-                metadata[RUN_LAST_ACTIVITY_METADATA_KEY] = now
-                result = conn.execute(
-                    update(agent_runs)
-                    .where(agent_runs.c.id == row["id"])
-                    .where(agent_runs.c.status.in_(_status_query_values("running")))
-                    .values(metadata_json=_json_dumps(metadata), updated_at=now)
-                )
-                if result.rowcount:
-                    touched.append(str(row["id"]))
-        return touched
+                    if result.rowcount:
+                        touched.append(str(row["id"]))
+            return touched
+
+        return retry_sqlite_write(record)
 
     def mark_run_execution_started(
         self,
