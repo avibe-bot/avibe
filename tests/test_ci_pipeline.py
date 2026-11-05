@@ -532,6 +532,7 @@ _BROWSER_COMMANDS = (
     "run test:chat-interactions",
     "run test:pdf-preview",
     "run test:motion",
+    "run test:chat-scroll",
 )
 
 

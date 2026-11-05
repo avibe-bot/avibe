@@ -3,8 +3,8 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-import { cleanup, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it } from 'vitest';
+import { act, cleanup, render, screen } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { Skeleton, SkeletonShimmer } from './skeleton';
 import { HANDOVER_CLASS, useSkeletonHandover } from './skeleton-handover';
@@ -69,5 +69,20 @@ describe('useSkeletonHandover', () => {
   it('leaves content that was there from the start (a cached copy) to appear at once', () => {
     render(<Place skeleton={false} />);
     expect(screen.getByTestId('content').className).toBe('');
+  });
+
+  // Content mounted later (an older page, a new message) replaces no skeleton:
+  // fading it in would blank it out under the reader.
+  it('ends the handover once the content that replaced the skeleton has faded in', () => {
+    vi.useFakeTimers();
+    try {
+      const view = render(<Place skeleton />);
+      view.rerender(<Place skeleton={false} />);
+      expect(screen.getByTestId('content').className).toBe(HANDOVER_CLASS);
+      act(() => vi.advanceTimersByTime(1000));
+      expect(screen.getByTestId('content').className).toBe('');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

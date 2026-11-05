@@ -86,7 +86,7 @@ const renderTranscript = (over: Partial<Props> = {}) => {
   };
   const view = render(<MemoryRouter><Transcript {...props} /></MemoryRouter>);
   const scroller = view.getByTestId('chat-transcript');
-  const geometry = { extraAbove: 0 };
+  const geometry = { extraAbove: 0, clientHeight: 800 };
   let scrollTop = 0;
   // jsdom has no layout, so geometry comes from the committed content column's
   // direct children: the head slot and the rows, which pickScrollAnchor walks too.
@@ -99,16 +99,17 @@ const renderTranscript = (over: Partial<Props> = {}) => {
     for (; node; node = node.previousElementSibling) if ((node as HTMLElement).dataset.messageId !== undefined) count += 1;
     return count;
   };
-  // The loading slot or failed-load retry above the rows, plus the column gap.
+  // The head slot above the rows (held while older history exists; loading,
+  // failed-load retry, or end of history), plus the column gap.
   const loadingSlotHeight = () => {
     for (const child of column().children) {
       if ((child as HTMLElement).dataset.messageId !== undefined) return 0;
-      if (child.matches('[role="status"], button') && child.classList.contains('h-8')) return 44;
+      if (child.classList.contains('h-8')) return 44;
     }
     return 0;
   };
   Object.defineProperties(scroller, {
-    clientHeight: { configurable: true, get: () => 800 },
+    clientHeight: { configurable: true, get: () => geometry.clientHeight },
     scrollHeight: { configurable: true, get: () => rowsFrom(column().lastElementChild) * 112 + 40 + loadingSlotHeight() + geometry.extraAbove },
     scrollTop: {
       configurable: true,
@@ -116,9 +117,11 @@ const renderTranscript = (over: Partial<Props> = {}) => {
       set: (value: number) => { scrollTop = Math.max(0, Math.min(value, scroller.scrollHeight - scroller.clientHeight)); },
     },
   });
-  scroller.getBoundingClientRect = () => ({ top: 10, bottom: 810, height: 800 }) as DOMRect;
+  scroller.getBoundingClientRect = () => ({ top: 10, bottom: 10 + geometry.clientHeight, height: geometry.clientHeight }) as DOMRect;
   // A row's position counts the rows before it and the transient loading slot.
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+    // The content column scrolls with the rows, below the container's padding.
+    if (this === column()) return { top: 30 - scrollTop, bottom: 30 - scrollTop + scroller.scrollHeight - 40, height: scroller.scrollHeight - 40 } as DOMRect;
     if (this.dataset.messageId === undefined) return { top: 0, bottom: 0, height: 0 } as DOMRect;
     const index = rowsFrom(this.previousElementSibling);
     const top = 30 + index * 112 + loadingSlotHeight() + (index > 0 ? geometry.extraAbove : 0) - scrollTop;
@@ -197,9 +200,11 @@ describe('transcript older-page loading', () => {
     const anchor = scroller.querySelector('[data-message-id="msg-301"]')!;
     const before = anchor.getBoundingClientRect().top;
     const height = scroller.scrollHeight;
+    // The head slot holds its height while older history exists, so starting
+    // the load moves nothing and writes nothing.
     rerender({ loadingOlder: true });
     expect(anchor.getBoundingClientRect().top).toBe(before);
-    expect(scroller.scrollTop).toBe(44);
+    expect(scroller.scrollTop).toBe(0);
 
     await act(async () => {
       rerender({ messages: messages(251, Math.min(count + 50, 300)), loadingOlder: false });
@@ -301,6 +306,67 @@ describe('transcript older-page loading', () => {
     expect(onLoadOlder).toHaveBeenCalledTimes(1);
     await act(async () => upwardInputs.touch(scroller));
     expect(onLoadOlder).toHaveBeenCalledTimes(2);
+  });
+
+  // A long fling reads through history: the page it asked for landed above the
+  // reader, so the same gesture may ask for the next one.
+  it('lets a gesture whose page landed above the reader ask for the next one', async () => {
+    const first = pendingPage();
+    const onLoadOlder = vi.fn().mockReturnValueOnce(first.promise).mockReturnValue(new Promise(() => {}));
+    const { scroller, rerender } = renderTranscript({ onLoadOlder });
+    // The fling's own scrolling, with no new touch.
+    const flingTo = (top: number) => act(async () => {
+      scroller.scrollTop = top;
+      fireEvent.scroll(scroller);
+    });
+    fireEvent.touchStart(scroller, { touches: [{ clientY: 100 }] });
+    fireEvent.touchMove(scroller, { touches: [{ clientY: 140 }] });
+    fireEvent.touchEnd(scroller);
+    await flingTo(3000);
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    rerender({ loadingOlder: true });
+    await act(async () => {
+      rerender({ messages: messages(251, 100), loadingOlder: false });
+      first.land(true);
+    });
+    // The page landed above: the reader is a page further from the top.
+    expect(scroller.scrollTop).toBe(3000 + 50 * 112);
+    await flingTo(5000);
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    await flingTo(3500);
+    expect(onLoadOlder).toHaveBeenCalledTimes(2);
+  });
+
+  // At the 300-row cap a landing page drops the newest rows. Prefetching from
+  // where those rows are on screen would take them, and the reader's place, away.
+  it('asks for a page that would drop rows near the reader only from the top', async () => {
+    const onLoadOlder = vi.fn().mockResolvedValue(true);
+    const { scrollTo, geometry } = renderTranscript({ messages: messages(1, 300), onLoadOlder });
+    // A tall viewport puts the whole window inside the prefetch band.
+    geometry.clientHeight = 8000;
+    scrollTo(300 * 112 + 84 - 8000);
+    await act(async () => scrollTo(25000));
+    expect(onLoadOlder).not.toHaveBeenCalled();
+    // Far enough up, the rows a page would drop are screens below.
+    await act(async () => scrollTo(5000));
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+  });
+
+  // Following the tail resumes only when the reader comes back to it, not when
+  // a shift above them is compensated while they stand near the bottom.
+  it('stays off the tail through a compensated shift near the bottom', async () => {
+    const { scroller, geometry, props } = renderTranscript({ hasOlder: false });
+    expect(props.followingTailRef.current).toBe(true);
+    scroller.scrollTop -= 40;
+    fireEvent.scroll(scroller);
+    expect(props.followingTailRef.current).toBe(false);
+    geometry.extraAbove = 180;
+    act(TestResizeObserver.resize);
+    fireEvent.scroll(scroller);
+    expect(props.followingTailRef.current).toBe(false);
+    scroller.scrollTop = scroller.scrollHeight;
+    fireEvent.scroll(scroller);
+    expect(props.followingTailRef.current).toBe(true);
   });
 
   it('consumes input begun while a page is pending until the next gesture', async () => {
@@ -413,7 +479,8 @@ describe('transcript older-page loading', () => {
     expect(onLoadOlder).toHaveBeenCalledTimes(1);
     await act(async () => fireEvent.click(getByText('chat.olderLoadFailed')));
     expect(onLoadOlder).toHaveBeenCalledTimes(2);
-    scrollTo(500);
+    // Leaving the prefetch band (five screens) and coming back is a fresh ask.
+    scrollTo(4880);
     await act(async () => scrollTo(0));
     expect(onLoadOlder).toHaveBeenCalledTimes(3);
   });
@@ -423,7 +490,7 @@ describe('transcript older-page loading', () => {
     const onLoadOlder = vi.fn().mockReturnValueOnce(first.promise).mockResolvedValue(true);
     const { scrollTo, queryByText } = renderTranscript({ onLoadOlder });
     scrollTo(0);
-    scrollTo(500);
+    scrollTo(4880);
     await act(async () => first.land(false));
     expect(queryByText('chat.olderLoadFailed')).toBeNull();
     await act(async () => scrollTo(0));
