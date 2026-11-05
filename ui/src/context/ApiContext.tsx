@@ -6,6 +6,17 @@ import type { AgentBackendId, NativeCliBackend, WebOAuthBackend } from '../lib/a
 import { apiFetch, recoverRemoteAuthFromSessionProbe, withApiDeadline } from '../lib/apiFetch';
 import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
 import { clearLocalSnapshots, forgetLocalSnapshots } from '../lib/localSnapshots';
+import {
+  type LocalStorePageRequest,
+  beginLocalStoreRead,
+  forgetLocalStoreSession,
+  forgetLocalStoreSessionOnActivity,
+  noteLocalStoreStreamGap,
+  recordLocalStorePage,
+  recordLocalStoreSession,
+  recordLocalStoreStreamRow,
+  wipeLocalStore,
+} from '../lib/localStore';
 import { blockBootSessionRecording, settleSignOutBootSession } from '../lib/bootSession';
 import { parseBot, parseBotLimit, type AgentBotSummary, type Bot, type BotEmojiAvatarInput, type BotLimit } from '../lib/bots';
 import { parseNotificationPreferences, type InboxCategory, type NotificationPreferences } from '../lib/notificationPreferences';
@@ -2669,7 +2680,7 @@ export const useApi = () => {
 export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { showToast } = useToast();
   const { t } = useTranslation();
-  const readCacheRef = useRef(new Map<string, { expiresAt: number; promise: Promise<any> }>());
+  const readCacheRef = useRef(new Map<string, { expiresAt: number; promise: Promise<any>; startedAt: number }>());
   const configChangedHandlersRef = useRef(new Set<(config: unknown) => void>());
   // Agent Activity is global across chat routes. Keep its writes ordered for the
   // provider lifetime without making unrelated runtime-backed config saves block chat.
@@ -2715,6 +2726,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const convergeSessionArchived = (sessionId: string) => {
     sessionDraftPersistence.clearSession(sessionId);
     void forgetChatSnapshot(sessionId);
+    void forgetLocalStoreSession(sessionId);
     for (const handler of Array.from(sessionArchivedHandlersRef.current)) {
       try {
         handler(sessionId);
@@ -2845,8 +2857,16 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       readCacheRef.current.delete(path);
       throw err;
     });
-    readCacheRef.current.set(path, { expiresAt: now + ttlMs, promise });
+    readCacheRef.current.set(path, { expiresAt: now + ttlMs, promise, startedAt: now });
     return promise;
+  };
+
+  // When the request behind a read of ``path`` went out: a shared cached read
+  // started before the caller asked, and the local message store orders what it
+  // writes by when each answer was read (lib/localStore, P1).
+  const readStartedAt = (path: string, fallback: number) => {
+    const cached = readCacheRef.current.get(path);
+    return cached && cached.expiresAt > Date.now() ? Math.min(cached.startedAt, fallback) : fallback;
   };
 
   const clearReadCache = () => {
@@ -2889,6 +2909,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const emitLocalSessionActivity = (data: Parameters<NonNullable<WorkbenchEventHandlers['onSessionActivity']>>[0]) => {
     if (data.session_id) clearSessionReadCache(data.session_id);
     forgetChatSnapshotOnActivity(data);
+    forgetLocalStoreSessionOnActivity(data);
     dispatchToWorkbenchHandlers((handlers) => handlers.onSessionActivity?.(data));
   };
 
@@ -3128,6 +3149,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       if (eventConnectionRef.current) {
         getWorkbenchEventReconnectLoop().streamOpened();
+        noteLocalStoreStreamGap();
         dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.());
       }
     });
@@ -3209,6 +3231,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       } else {
         clearReadCacheMatching((path) => path.startsWith('/api/inbox') || path.startsWith('/api/sessions'));
       }
+      void recordLocalStoreStreamRow(envelope.data);
       dispatchToWorkbenchHandlers((handlers) => {
         handlers.onAny?.(envelope);
         handlers.onMessageNew?.(envelope.data);
@@ -3218,6 +3241,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const envelope = parseWorkbenchEnvelope<WorkbenchMessage>(e.data);
       if (!envelope?.data.session_id) return;
       clearSessionReadCache(envelope.data.session_id);
+      void recordLocalStoreStreamRow(envelope.data);
       dispatchToWorkbenchHandlers((handlers) => {
         handlers.onAny?.(envelope);
         handlers.onMessageUpdated?.(envelope.data);
@@ -3232,8 +3256,10 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           sessionDraftPersistence.clearSession(envelope.data.session_id);
         }
         // A Session that leaves the reader's Inbox takes its stored conversation
-        // with it (docs/plans/web-ui-local-cache.md section 4.4).
+        // with it (docs/plans/web-ui-local-cache.md section 4.4), and its history
+        // in the local message store (docs/plans/local-sync-store.md section 6.2).
         forgetChatSnapshotOnActivity(envelope.data);
+        forgetLocalStoreSessionOnActivity(envelope.data);
       } else {
         clearReadCacheMatching((path) => path.startsWith('/api/inbox') || path.startsWith('/api/sessions'));
       }
@@ -3368,6 +3394,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // a new stream's opening report is the leg's state, not a recovery, and
       // treating it as one would charge every connect a duplicate catch-up.
       if (previousLeg === 'disconnected' && envelope.data.connected) {
+        noteLocalStoreStreamGap();
         dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.());
       }
     });
@@ -3450,6 +3477,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // replacement's later `connected` is a second catch-up in exactly the case
     // that already paid for two.
     if (!survivedTheGap) {
+      noteLocalStoreStreamGap();
       dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.());
     }
   };
@@ -4181,10 +4209,15 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     forkSession: (sessionId) =>
       postJson(`/api/sessions/${encodeURIComponent(sessionId)}/fork`, {}),
     getSession: async (sessionId, params) => {
-      const payload = params?.cache === false
-        ? await getJson(`/api/sessions/${encodeURIComponent(sessionId)}`, { handleError: params?.handleError })
-        : await getCachedJson(`/api/sessions/${encodeURIComponent(sessionId)}`, undefined, { handleError: params?.handleError });
-      return sessionRowFromPayload(payload);
+      const path = `/api/sessions/${encodeURIComponent(sessionId)}`;
+      const startedAt = Date.now();
+      const read = params?.cache === false
+        ? getJson(path, { handleError: params?.handleError })
+        : getCachedJson(path, undefined, { handleError: params?.handleError });
+      const ticket = beginLocalStoreRead(sessionId, readStartedAt(path, startedAt));
+      const row = sessionRowFromPayload(await read);
+      void recordLocalStoreSession(ticket, row);
+      return row;
     },
     getMainSession: async () => {
       const res = await apiFetch('/api/sessions/main');
@@ -4230,8 +4263,16 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     },
     getSessionBootstrap: async (sessionId) => {
       const read = sessionDraftPersistence.beginRead(sessionId);
+      const stored = beginLocalStoreRead(sessionId);
       try {
-        const payload = await getJson(`/api/sessions/${encodeURIComponent(sessionId)}/bootstrap`);
+        const payload = await getJson(`/api/sessions/${encodeURIComponent(sessionId)}/bootstrap`).catch((error) => {
+          // The server refuses this reader the session, or it is gone.
+          if (error instanceof ApiError && (error.status === 403 || error.status === 404)) {
+            void forgetLocalStoreSession(sessionId);
+          }
+          throw error;
+        });
+        void recordLocalStorePage(stored, { kind: 'tail' }, payload, payload?.session);
         if (payload?.session?.status === 'archived') {
           sessionDraftPersistence.clearSession(sessionId);
           return payload;
@@ -4281,7 +4322,19 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const qs = search.toString();
       const base = `/api/sessions/${encodeURIComponent(sessionId)}/messages`;
       const path = qs ? `${base}?${qs}` : base;
-      return params?.cache === false ? getJson(path) : getCachedJson(path);
+      const startedAt = Date.now();
+      const read = params?.cache === false ? getJson(path) : getCachedJson(path);
+      // The server's own precedence: an anchored window, then the tail, then a
+      // page before a cursor. A page from the oldest end is not written.
+      const kind: LocalStorePageRequest['kind'] | null =
+        params?.aroundId || params?.aroundNativeId || params?.aroundTurnId || params?.aroundRunId
+          ? 'around'
+          : params?.tail ? 'tail' : params?.beforeId ? 'before' : null;
+      if (kind) {
+        const ticket = beginLocalStoreRead(sessionId, params?.cache === false ? startedAt : readStartedAt(path, startedAt));
+        read.then((answer) => recordLocalStorePage(ticket, { kind }, answer), () => {});
+      }
+      return read;
     },
     getSessionActivity: (sessionId) =>
       // Uncached: this is also the gap-recovery resync path, so it must reflect
@@ -4769,6 +4822,10 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (session.remote && session.authenticated && session.authorization_state === 'revoked') {
         void forgetLocalSnapshots();
       }
+      // An answer, not a failed read: the session expired. Phase 1 cannot recheck
+      // what this reader may still see once they sign back in, so the stored
+      // history goes (docs/plans/local-sync-store.md decision D7).
+      if (session.remote && !session.authenticated) void wipeLocalStore();
       return session;
     }),
     signOut: async () => {

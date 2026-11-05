@@ -246,11 +246,17 @@ export async function forgetLocalSnapshots(): Promise<void> {
   await clearLocalSnapshots();
 }
 
-/** Delete every snapshot. Used when an authorization change voids what was
- *  cached, and when storage runs out of quota. */
+/** Delete every snapshot, and everything stored beside them for this reader
+ *  (``registerLocalSnapshotClearHook``). Used when an authorization change voids
+ *  what was cached, and when storage runs out of quota. Resolves once all of it
+ *  is gone, so sign-out can wait for it before navigating away. */
 export async function clearLocalSnapshots(): Promise<void> {
   clearEpoch += 1;
   for (const listener of epochListeners) listener();
+  await Promise.all([clearSnapshotStore(), ...[...clearHooks].map((hook) => hook().catch(() => {}))]);
+}
+
+async function clearSnapshotStore(): Promise<void> {
   const db = await openDb();
   if (!db) return;
   try {
@@ -260,6 +266,15 @@ export async function clearLocalSnapshots(): Promise<void> {
   } catch {
     // Nothing more can be done; a later write overwrites what is left.
   }
+}
+
+// Stores that keep the same reader's data elsewhere (the local message store)
+// and must be emptied whenever these snapshots are.
+const clearHooks = new Set<() => Promise<void>>();
+
+/** Run ``hook`` on every whole-store clear, and wait for it. */
+export function registerLocalSnapshotClearHook(hook: () => Promise<void>): void {
+  clearHooks.add(hook);
 }
 
 // Advanced by every whole-store clear (an authorization change, sign-out,

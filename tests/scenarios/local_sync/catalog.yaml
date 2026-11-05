@@ -1,0 +1,58 @@
+version: 1
+capability:
+  id: local_sync
+  name: Local message store, its reader fence, and its wipe rules
+  plan: docs/plans/local-sync-store.md
+  canonical_tests:
+    - ui/src/lib/localStore/localStore.test.ts
+    - ui/src/context/ApiContext.localStore.test.tsx
+status_legend:
+  covered: automated scenario or contract coverage exists
+  partial: focused coverage exists but a real-device dependency remains
+  manual: validated on a real device or in Incus regression
+  gap: not covered yet
+scenarios:
+  - id: LSYNC-006
+    name: A revoked reader's stored history is wiped
+    status: covered
+    kind: security
+    layer: integration
+    test: ui/src/context/ApiContext.localStore.test.tsx::LSYNC-006 wipes when /api/session reports the reader revoked
+  - id: LSYNC-007
+    name: Sign-out wipes the store, and a write scheduled before it cannot restore data
+    status: covered
+    kind: security
+    layer: unit
+    test: ui/src/lib/localStore/localStore.test.ts::LSYNC-007 wipes on sign-out, and a write still scheduled for the reader cannot put it back
+  - id: LSYNC-008
+    name: A different reader on the same device sees nothing of the previous one
+    status: covered
+    kind: security
+    layer: unit
+    test: ui/src/lib/localStore/localStore.test.ts::LSYNC-008 shows a different reader on the same device nothing of the previous one
+  - id: LSYNC-018
+    name: A sign-out in another tab, including an older build that does not know the store, wipes it
+    status: covered
+    kind: security
+    layer: unit
+    test:
+      - ui/src/lib/localStore/localStore.test.ts::LSYNC-018 wipes on a sign-out in another tab, including one running an older build
+      - ui/src/lib/localStore/localStore.test.ts::LSYNC-018 wipes at the next open after such a sign-out when no current tab was open
+  - id: LSYNC-019
+    name: An authorization change clears the store (Phase 1)
+    status: covered
+    kind: security
+    layer: unit
+    test: ui/src/lib/localStore/localStore.test.ts::LSYNC-019 clears the store on an authorization change
+  - id: LSYNC-020
+    name: A session that leaves the reader's Inbox is forgotten, and a read of it still in flight cannot restore it
+    status: covered
+    kind: visibility
+    layer: unit
+    test: ui/src/lib/localStore/localStore.test.ts::LSYNC-020 forgets a session that leaves the Inbox, and voids a read of it still in flight
+  - id: LSYNC-021
+    name: An expired session (login required) wipes the store; a session read that only failed does not
+    status: covered
+    kind: security
+    layer: integration
+    test: ui/src/context/ApiContext.localStore.test.tsx::LSYNC-021 wipes on a login-required answer, and keeps everything when the session read only failed

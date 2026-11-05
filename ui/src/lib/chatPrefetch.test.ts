@@ -350,6 +350,25 @@ describe('conversation prefetch', () => {
     expect(await titleOf('ses_a')).toBeNull();
   });
 
+  it('writes the prefetched conversation into the local message store too, and forgets it there on a 404', async () => {
+    const localStore = await import('./localStore');
+    const message = {
+      id: 'msg_1', session_id: 'ses_a', type: 'result', author: 'agent', text: 'prefetched', content: {}, metadata: {},
+      created_at: '2026-11-05T00:00:01.000000Z', updated_at: '2026-11-05T00:00:01.000000Z', delivered_at: null,
+    };
+    const held = async () => ((await localStore.readLocalStoreWindow('ses_a'))?.messages ?? []).map((row) => row.text);
+    apiFetch.mockImplementation(async () => Response.json({ ...(await bootstrapResponse('ses_a').json()), messages: [message] }));
+    prefetch.prefetchChatSnapshots(['ses_a']);
+    await runIdle();
+    await vi.waitFor(async () => expect(await held()).toEqual(['prefetched']));
+
+    // A refresh of the pinned conversation the server now refuses.
+    apiFetch.mockImplementation(async () => Response.json({ error: 'Session not found' }, { status: 404 }));
+    prefetch.prefetchChatSnapshots([], { pinned: 'ses_a' });
+    await runIdle();
+    await vi.waitFor(async () => expect(await held()).toEqual([]));
+  });
+
   it('deletes a record stored meanwhile when the server answers 404', async () => {
     const response = deferred<Response>();
     apiFetch.mockReturnValue(response.promise);

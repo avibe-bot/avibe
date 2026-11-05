@@ -1,6 +1,9 @@
 # Local Sync Store · Plan
 
-> **Status**: Proposed 2026-11-05, waiting for owner approval. No code yet.
+> **Status**: Approved by the owner 2026-11-05 14:38, with all nine
+> recommendations in section 9 (D1-D9) as written. Phase 1 implementation
+> started: the store and its write-through first, then the chat read path,
+> then retiring the conversation snapshots.
 > **Owner**: cyhhao
 > **Security**: every implementation PR that touches what the store keeps,
 > when it is wiped, or the sync API needs a Codex security review
@@ -937,6 +940,19 @@ Phases 1 and 2 already give the shell.
 
 Plus `ChatPage` tests: first-frame paint from the mirror, offline older pages,
 and the gap marker. Each with a mutation check, as the lanes do today.
+
+The Phase 1 wipe and fence rules are rows of the scenario catalog
+`tests/scenarios/local_sync/catalog.yaml`:
+
+- LSYNC-006 (revocation), LSYNC-007 (sign-out), and LSYNC-008 (another reader)
+  as defined below;
+- LSYNC-018: a sign-out in another tab, including an older build, wipes
+  through the sign-out generation;
+- LSYNC-019: an authorization change clears the store;
+- LSYNC-020: a session that leaves the Inbox is forgotten, and a read of it
+  still in flight cannot restore it;
+- LSYNC-021: a login-required answer wipes the store, and a failed session
+  read does not.
 
 **Rollout:** no flag, as with the existing cache. A missing or failing store
 falls back to today's behavior (invariant 2).

@@ -1,0 +1,198 @@
+/* @vitest-environment jsdom */
+import 'fake-indexeddb/auto';
+
+import { act, cleanup, render } from '@testing-library/react';
+import { useEffect } from 'react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const apiFetch = vi.hoisted(() => vi.fn());
+
+vi.mock('../lib/apiFetch', () => ({ apiFetch }));
+vi.mock('./ToastContext', () => ({ useToast: () => ({ showToast: vi.fn() }) }));
+vi.mock('react-i18next', () => ({
+  useTranslation: () => ({ t: (key: string) => key }),
+}));
+
+import type { WorkbenchMessage } from './ApiContext';
+import { ApiProvider, useApi } from './ApiContext';
+import { clearLocalSnapshots, setLocalSnapshotPrincipal } from '../lib/localSnapshots';
+import { beginLocalStoreRead, readLocalStoreWindow, recordLocalStorePage } from '../lib/localStore';
+
+// The local message store is written through at the API layer, whichever page
+// made the read (docs/plans/local-sync-store.md section 4.4), and emptied there
+// when the reader's session ends.
+
+class FakeEventSource {
+  static instances: FakeEventSource[] = [];
+  readyState = 1;
+  onerror: ((event: Event) => void) | null = null;
+  private readonly listeners = new Map<string, Set<(event: MessageEvent) => void>>();
+
+  constructor(readonly url: string) {
+    FakeEventSource.instances.push(this);
+  }
+
+  addEventListener(type: string, listener: (event: MessageEvent) => void): void {
+    const bucket = this.listeners.get(type) ?? new Set();
+    bucket.add(listener);
+    this.listeners.set(type, bucket);
+  }
+
+  removeEventListener(type: string, listener: (event: MessageEvent) => void): void {
+    this.listeners.get(type)?.delete(listener);
+  }
+
+  close(): void {
+    this.readyState = 2;
+  }
+
+  emit(type: string, data: unknown): void {
+    const event = { data: JSON.stringify(data) } as MessageEvent;
+    for (const listener of [...(this.listeners.get(type) ?? [])]) listener(event);
+  }
+}
+
+const at = (n: number) => `2026-11-05T00:00:${String(n).padStart(2, '0')}.000000Z`;
+const row = (n: number, sessionId = 'ses_a'): WorkbenchMessage => ({
+  id: `msg_${sessionId}_${n}`,
+  scope_id: null,
+  session_id: sessionId,
+  platform: 'avibe',
+  author: 'agent',
+  type: 'result',
+  source: 'agent',
+  author_id: null,
+  author_name: null,
+  native_message_id: null,
+  parent_native_message_id: null,
+  text: `row ${n}`,
+  content: {},
+  metadata: {},
+  created_at: at(n),
+  updated_at: at(n),
+  delivered_at: null,
+  read_at: null,
+});
+const sessionRow = (id = 'ses_a') => ({ id, title: id, status: 'active', pinned: false, last_active_at: at(1), updated_at: at(1) });
+const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
+const held = async (sessionId = 'ses_a') =>
+  ((await readLocalStoreWindow(sessionId, { limit: 100 }))?.messages ?? []).map((message) => message.text);
+const seed = (sessionId = 'ses_a') =>
+  recordLocalStorePage(beginLocalStoreRead(sessionId), { kind: 'tail' }, { messages: [row(1, sessionId), row(2, sessionId)], next_before_id: null });
+const settle = () => act(() => new Promise((resolve) => setTimeout(resolve, 30)));
+
+const api = { current: null as ReturnType<typeof useApi> | null };
+const Subscriber = () => {
+  const value = useApi();
+  useEffect(() => {
+    api.current = value;
+    return value.connectWorkbenchEvents({});
+  }, [value]);
+  return null;
+};
+
+beforeEach(() => {
+  FakeEventSource.instances = [];
+  vi.stubGlobal('EventSource', FakeEventSource);
+  apiFetch.mockResolvedValue(json({}));
+  setLocalSnapshotPrincipal('remote:alice');
+});
+
+afterEach(async () => {
+  cleanup();
+  vi.unstubAllGlobals();
+  setLocalSnapshotPrincipal(null);
+  await clearLocalSnapshots();
+});
+
+describe('local message store write-through at the API layer', () => {
+  it('stores a bootstrap tail and an older page, and forgets a session the server refuses', async () => {
+    apiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/sessions/ses_a/bootstrap') return json({ session: sessionRow(), messages: [row(3), row(4)], next_before_id: 'msg_ses_a_3' });
+      if (path.startsWith('/api/sessions/ses_a/messages?before_id=')) return json({ messages: [row(2), row(3)], next_before_id: null });
+      if (path === '/api/sessions/ses_b/bootstrap') return json({ error: 'not found' }, 404);
+      return json({});
+    });
+    render(<ApiProvider><Subscriber /></ApiProvider>);
+    await api.current!.getSessionBootstrap('ses_a');
+    await api.current!.listSessionMessages('ses_a', { beforeId: 'msg_ses_a_4', limit: 50 });
+    await settle();
+    expect(await held()).toEqual(['row 2', 'row 3', 'row 4']);
+    expect((await readLocalStoreWindow('ses_a'))?.startReached).toBe(true);
+
+    await seed('ses_b');
+    await expect(api.current!.getSessionBootstrap('ses_b')).rejects.toThrow();
+    await settle();
+    expect(await held('ses_b')).toEqual([]);
+  });
+
+  it('stores streamed rows for a held session and ends their tail claim when the stream reconnects', async () => {
+    await seed();
+    render(<ApiProvider><Subscriber /></ApiProvider>);
+    const source = FakeEventSource.instances.at(-1)!;
+    source.emit('message.new', { type: 'message.new', data: row(3) });
+    await settle();
+    expect(await held()).toEqual(['row 1', 'row 2', 'row 3']);
+
+    // Seeded before this stream connected, so the tail claim did not survive it.
+    source.emit('connected', { sub_id: 1 });
+    source.emit('message.new', { type: 'message.new', data: row(5) });
+    await settle();
+    const window = await readLocalStoreWindow('ses_a');
+    expect(window?.messages.map((message) => message.text)).toEqual(['row 1', 'row 2', 'row 3', 'row 5']);
+    expect(window?.contiguous).toBe(false);
+  });
+
+  it('forgets a session archived while the reader watches', async () => {
+    await seed();
+    render(<ApiProvider><Subscriber /></ApiProvider>);
+    FakeEventSource.instances.at(-1)!.emit('session.activity', { type: 'session.activity', data: { session_id: 'ses_a', event: 'archived' } });
+    await settle();
+    expect(await held()).toEqual([]);
+  });
+});
+
+describe('a revoked reader empties the store', () => {
+  it('LSYNC-006 wipes when /api/session reports the reader revoked', async () => {
+    render(<ApiProvider><Subscriber /></ApiProvider>);
+    await seed();
+    apiFetch.mockImplementation(async (path: string) => (
+      path === '/api/session'
+        ? json({ remote: true, authenticated: true, authorization_state: 'revoked', author_id: 'remote:alice' })
+        : json({})
+    ));
+    await api.current!.getAuthSession();
+    await settle();
+    setLocalSnapshotPrincipal('remote:alice');
+    expect(await held()).toEqual([]);
+  });
+});
+
+describe('an expired session empties the store', () => {
+  it('LSYNC-021 wipes on a login-required answer, and keeps everything when the session read only failed', async () => {
+    render(<ApiProvider><Subscriber /></ApiProvider>);
+    await seed();
+
+    apiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/session') throw new TypeError('Failed to fetch');
+      return json({});
+    });
+    await expect(api.current!.getAuthSession()).rejects.toThrow();
+    await settle();
+    expect(await held()).toEqual(['row 1', 'row 2']);
+
+    apiFetch.mockImplementation(async (path: string) => (
+      path === '/api/session' ? json({ remote: true, authenticated: true, authorization_state: 'current', author_id: 'remote:alice' }) : json({})
+    ));
+    await api.current!.getAuthSession();
+    await settle();
+    expect(await held()).toEqual(['row 1', 'row 2']);
+
+    apiFetch.mockImplementation(async (path: string) => (
+      path === '/api/session' ? json({ remote: true, authenticated: false }) : json({})
+    ));
+    await api.current!.getAuthSession();
+    await settle();
+    expect(await held()).toEqual([]);
+  });
+});
