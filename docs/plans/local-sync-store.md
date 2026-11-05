@@ -2,8 +2,9 @@
 
 > **Status**: Approved by the owner 2026-11-05 14:38, with all nine
 > recommendations in section 9 (D1-D9) as written. Phase 1 implementation
-> started: the store and its write-through first, then the chat read path,
-> then retiring the conversation snapshots.
+> started: the store and its write-through first (#3264), then the access
+> digest (section 6.2), then the chat read path, then retiring the conversation
+> snapshots.
 > **Owner**: cyhhao
 > **Security**: every implementation PR that touches what the store keeps,
 > when it is wiped, or the sync API needs a Codex security review
@@ -452,6 +453,14 @@ active conversations in memory, per reader:
 It replaces the per-feature mirrors being added now with a single mirror that
 has a single invalidation path.
 
+When the Inbox reads from this store (Phase 2), it keeps the `feedStatus`
+contract of `InboxState`:
+
+- `pending` until the first answer;
+- `failed` after a read failure with no retry;
+- back to `pending` when an authorization change clears the window, even if no
+  list is on screen.
+
 ### 4.4 Write-through sources (Phase 1)
 
 Each of these writes through the page rule in section 4.2:
@@ -775,12 +784,48 @@ the server again.
 | A different reader confirmed by `/api/session` | Wipe before the first paint (`meta.reader` mismatch) | Same |
 | Login required (session expired) | Wipe the message store. Phase 1 has no way to recheck access when the reader comes back | Hide at once; keep for the same reader, then run the visibility check before showing it again (decision D7) |
 | `authorization.changed` | Clear the message store (as today) | Visibility check (section 5.5) |
+| `authorization.changed` missed (every tab closed, or the stream down) | The next session check finds the access digest changed and applies the change as the event would have (below) | Visibility check |
 | Archive, move to the background, a 403 or 404 on a session read | Delete that session | Same, plus `op: 'remove'` |
-| Reader no longer allowed a session | Found on the next live read of it | Visibility check |
+| Reader no longer allowed a session | Found by the access digest when a whole project was lost, otherwise on the next live read of it | Visibility check |
 
 Revocation cannot erase data from a device that never comes back online.
 Against a lost device, the protection is the device lock and OS encryption. The
 plan says so plainly in user documentation.
+
+**The access digest (Phase 1).** Only a tab whose event stream is up receives
+`authorization.changed`. Without a further check, a reader who lost a project
+while every tab was closed, or while the stream was down, would keep its
+history on the device until each conversation was read live again.
+
+- Server: `/api/session` returns `access_digest` for a current remote reader
+  (`project_access_service.reader_access_digest`). It is a hash of what that
+  reader may read:
+  - for a role that manages the instance, the role alone, since such a role
+    reads every project, so a new project does not change it;
+  - for any other role, the role and the ids of the projects it may read.
+  If it cannot be computed, the field is null, and the client keeps what it
+  holds until its next check.
+- Client: the digest last seen is kept per reader in localStorage
+  (`avibe.access-digest.v1`), shared by every tab and outliving them. It is
+  compared at every `/api/session` answer, which includes each open, and after
+  every stream gap for a remote reader. A local reader has no digest, so a gap
+  costs it nothing.
+- On a mismatch the client does what a delivered `authorization.changed` does:
+  - drop the authorization-sensitive reads;
+  - clear the snapshots and the message store (keeping the reader);
+  - tell every surface.
+  The new digest is recorded only after that clear, so a page that closes first
+  clears again at its next check.
+- Gaining a project changes the digest too, as the event clears on any access
+  change today. A first digest, or one recorded for another reader, is no
+  change: a different reader empties the stores anyway.
+- What this does not catch:
+  - a session moved into a project the reader cannot read, while its project
+    set stays the same (LSYNC-002, found on the next live read until the
+    Phase 2 visibility check);
+  - a removed Bot's session.
+  The Phase 2 `access_digest` (section 5.5) adds hidden Bot session ids, and
+  turns a mismatch into a visibility check instead of a clear.
 
 ### 6.3 Threats by surface
 
@@ -896,7 +941,9 @@ Phases 1 and 2 already give the shell.
 - prefetch writing into the store, warming the Inbox's first page;
 - wipe rules from section 6.2;
 - `chat:*` records deleted on first run, with no migration code: prefetch refills
-  the recent ones within a day.
+  the recent ones within a day;
+- the access digest in `/api/session` (section 6.2), which merges before the
+  chat read path.
 
 **Acceptance criteria:**
 
@@ -912,7 +959,7 @@ Phases 1 and 2 already give the shell.
   diagnostics line.
 - Sign-out, revocation, reader change, and login required each leave no message
   row behind, including from a write scheduled before the event.
-- No server change.
+- No server change beyond the access digest in `/api/session`.
 
 **Tests:** unit tests with `fake-indexeddb` for:
 
@@ -952,7 +999,11 @@ The Phase 1 wipe and fence rules are rows of the scenario catalog
 - LSYNC-020: a session that leaves the Inbox is forgotten, and a read of it
   still in flight cannot restore it;
 - LSYNC-021: a login-required answer wipes the store, and a failed session
-  read does not.
+  read does not;
+- LSYNC-022: a tab still naming an earlier reader can neither write into nor
+  claim the store another tab holds;
+- LSYNC-023: an access change that no `authorization.changed` delivered clears
+  the store at the next session check, at an open or after a stream gap.
 
 **Rollout:** no flag, as with the existing cache. A missing or failing store
 falls back to today's behavior (invariant 2).

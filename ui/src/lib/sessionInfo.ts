@@ -51,6 +51,9 @@ export type SessionInfo =
       /** When the server says this browser's session cookie expires (Unix
        *  seconds), for instances that report it. */
       session_expires_at?: number;
+      /** A digest of what this reader may read (``lib/accessDigest``), for
+       *  servers that report it. */
+      access_digest?: string;
     };
 
 export const DENIED_INSTANCE_CAPABILITIES: InstanceCapabilities = {
@@ -156,5 +159,6 @@ export const normalizeSessionInfo = (value: unknown): SessionInfo => {
     ...(typeof value.session_expires_at === 'number' && Number.isFinite(value.session_expires_at)
       ? { session_expires_at: value.session_expires_at }
       : {}),
+    ...(typeof value.access_digest === 'string' && value.access_digest ? { access_digest: value.access_digest } : {}),
   };
 };

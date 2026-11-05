@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
+import json
 import re
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -417,3 +419,23 @@ def accessible_project_ids(
         if (include_archived or row.enabled is None or row.enabled != 0)
         and can_read_project(conn, context, str(row.native_id))
     }
+
+
+def reader_access_digest(conn: Connection, context: AuthorizationContext) -> str:
+    """A digest of what ``context`` may read.
+
+    A client keeps the last one it saw, so it can notice an access change whose
+    ``authorization.changed`` event it never received (every tab closed, or the
+    event stream down) and clear what it stored, as that event would have
+    (``docs/plans/local-sync-store.md``, access digest). A role that manages the
+    instance reads every project and every Session outside one, so its role
+    alone decides, and a new project leaves it unchanged. Any other role reads
+    the active projects its policies admit, so their ids are part of it: losing
+    one changes the digest, as gaining one does.
+    """
+
+    basis: dict[str, Any] = {"role": context.instance_role or ""}
+    if not (context.can_manage_projects and context.can_manage_instance):
+        basis["projects"] = sorted(accessible_project_ids(conn, context))
+    encoded = json.dumps(basis, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:32]

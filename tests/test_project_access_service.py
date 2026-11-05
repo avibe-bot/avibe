@@ -402,3 +402,23 @@ def test_policy_delete_cascades_bindings(tmp_path) -> None:
             )
         ).all()
     assert remaining == []
+
+
+def test_reader_access_digest_names_projects_only_for_roles_that_do_not_read_them_all(tmp_path) -> None:
+    """A client compares this digest to notice an access change it missed
+    (``docs/plans/local-sync-store.md``, access digest). Every role has its own,
+    and a new project is a change only for a role that does not read every one.
+    """
+    engine, _project = _engine_with_project(tmp_path)
+    readers = {"owner": instance_owner_context(), "manager": _context("member"), "viewer": _context("viewer")}
+    second = tmp_path / "second"
+    second.mkdir()
+    with engine.begin() as conn:
+        before = {name: project_access_service.reader_access_digest(conn, ctx) for name, ctx in readers.items()}
+        projects_service.create_project(conn, str(second), display_name="Project Two")
+        after = {name: project_access_service.reader_access_digest(conn, ctx) for name, ctx in readers.items()}
+
+    assert len(set(before.values())) == 3
+    assert after["owner"] == before["owner"]
+    assert after["manager"] == before["manager"]
+    assert after["viewer"] != before["viewer"]

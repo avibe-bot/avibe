@@ -819,6 +819,30 @@ def test_remote_editor_message_persists_authoritative_identity_and_dispatches(
     assert after_ids == before_ids
 
 
+def test_lsync_023_session_access_digest_changes_when_the_reader_loses_a_project(monkeypatch, tmp_path) -> None:
+    """LSYNC-023: ``/api/session`` tells the remote reader what it may read, so a
+    client that missed the ``authorization.changed`` for a lost project (every
+    tab closed, or its stream down) still notices it at its next session check."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config, ids = _setup_state(tmp_path)
+    alice = _remote_client(config, role="editor", email="alice@example.com")
+    first = _get(alice, "/api/session").get_json()["access_digest"]
+    assert first
+    assert _get(alice, "/api/session").get_json()["access_digest"] == first
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        # Project A's only binding now names someone else.
+        result = project_access_service.apply_project_access_intent(
+            conn,
+            {**_intent(ids["project_a"], "bob@example.com"), "revision": 2},
+        )
+        assert result.outcome == "applied"
+    engine.dispose()
+
+    assert _get(alice, "/api/session").get_json()["access_digest"] != first
+
+
 def test_viewer_no_match_owner_and_local_matrix(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config, ids = _setup_state(tmp_path)

@@ -5,3 +5,7 @@ observations:
     scenario_ids: [LSYNC-007, LSYNC-008, LSYNC-018, LSYNC-021]
     source: plan_review
     note: Phase 1 keeps every page the client reads on the device, so the wipe rules carry the reader's private history. A tab of an older build signs out without knowing the message store, which is why the shared sign-out generation, not an in-tab call, is the cross-build wipe signal.
+  - date: 2026-11-05
+    scenario_ids: [LSYNC-023]
+    source: code_review
+    note: A Codex security review of the store PR found that authorization.changed is not replayed to a stream that was down or to a device with no tab open, so a lost project kept its history on the device. The owner chose a minimal access digest in /api/session, compared at every session check and after every stream gap, ahead of the chat read path; wiping on every unproven gap would erase history on each resume.
