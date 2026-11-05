@@ -71,6 +71,9 @@ export type VoiceTake = {
    *  bytes): `text` holds what was kept, up to the first missing part. */
   truncated?: boolean;
   segments: VoiceTakeSegmentInfo[];
+  /** How many times its record was written; set by the store. A writer that is not the take's
+   *  keeper (a retry from another surface) updates only the revision it read. */
+  revision?: number;
 };
 
 type StoredTake = VoiceTake & { principal: string; generation: number };
@@ -244,7 +247,8 @@ export async function saveVoiceTake(take: VoiceTake, fence?: VoiceTakeFence | nu
         deleteTakeIn(takes, segments, old.id);
       }
     }
-    takes.put({ ...take, principal: owner, generation } satisfies StoredTake);
+    const existing = all.find((record) => record.id === take.id);
+    takes.put({ ...take, principal: owner, generation, revision: (existing?.revision ?? 0) + 1 } satisfies StoredTake);
     return true;
   });
   if (saved) notify();
@@ -252,14 +256,18 @@ export async function saveVoiceTake(take: VoiceTake, fence?: VoiceTakeFence | nu
 }
 
 /** Updates a take the reader still keeps; one deleted meanwhile (discarded, landed) stays
- *  deleted. Resolves false when there was nothing to update. */
-export async function updateVoiceTake(take: VoiceTake, fence?: VoiceTakeFence | null): Promise<boolean> {
+ *  deleted. With `ifRevision`, only while the stored take is still at that revision: a take its
+ *  keeper advanced meanwhile (more segments, its own text) is never set back. Resolves false
+ *  when nothing was updated. */
+export async function updateVoiceTake(take: VoiceTake, fence?: VoiceTakeFence | null, ifRevision?: number): Promise<boolean> {
   const owner = writer(fence === undefined ? voiceTakeFence() : fence);
   if (!owner) return false;
   const updated = await withStores('readwrite', async (takes) => {
     const record = await settle(takes.get(take.id) as IDBRequest<StoredTake | undefined>);
     if (!owned(record, owner)) return false;
-    takes.put({ ...take, principal: owner, generation: record.generation } satisfies StoredTake);
+    const revision = record.revision ?? 0;
+    if (ifRevision !== undefined && revision !== ifRevision) return false;
+    takes.put({ ...take, principal: owner, generation: record.generation, revision: revision + 1 } satisfies StoredTake);
     return true;
   });
   if (updated) notify();

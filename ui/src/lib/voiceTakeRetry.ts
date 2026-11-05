@@ -71,7 +71,9 @@ export const keptVoiceTakeHasAudio = (take: Pick<VoiceTake, 'segments'>): boolea
 
 /**
  * Transcribes a kept take from its stored audio. Its text is kept with it (`transcribed`) for
- * the reader to insert or send; a failure leaves it `pending`. One run per take at a time.
+ * the reader to insert or send; a failure leaves it `pending`. One run per take at a time. The
+ * result lands only on the take as it was read: if its keeper (another tab still recording or
+ * finalizing it) wrote meanwhile, the keeper's newer record stands.
  */
 export function retryKeptVoiceTake(
   take: VoiceTake,
@@ -82,6 +84,7 @@ export function retryKeptVoiceTake(
   const finalize = dependencies.finalize ?? finalizeVoiceDictation;
   const readAudio = dependencies.readAudio ?? readVoiceTakeAudio;
   const save = dependencies.save ?? updateVoiceTake;
+  const read = take.revision ?? 0;
   const run = (async () => {
     const { segments, truncated } = keptVoiceSegments(take, await readAudio(take.id));
     if (!segments.some((segment) => segment.blob)) throw new VoiceTranscriptionError('failed');
@@ -89,10 +92,10 @@ export function retryKeptVoiceTake(
       const result = await finalize(segments, { dictationId: take.id, before: '', after: '' }, {
         retryUntil: Date.now() + VOICE_SETTLE_RETRY_WINDOW_MS,
       });
-      await save({ ...take, status: 'transcribed', text: result.text, truncated, updatedAt: Date.now() });
+      await save({ ...take, status: 'transcribed', text: result.text, truncated, updatedAt: Date.now() }, undefined, read);
       return result.text;
     } catch (error) {
-      await save({ ...take, status: 'pending', text: undefined, updatedAt: Date.now() });
+      await save({ ...take, status: 'pending', text: undefined, updatedAt: Date.now() }, undefined, read);
       throw error;
     }
   })();

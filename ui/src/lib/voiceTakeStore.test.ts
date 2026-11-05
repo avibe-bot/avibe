@@ -212,6 +212,47 @@ describe('voice take store', () => {
     expect(await readVoiceTakes()).toEqual([]);
   });
 
+  it('never sets back a take its keeper advanced while another surface retried it', async () => {
+    setLocalSnapshotPrincipal('local');
+    // Another tab is still recording it: one minute is kept so far.
+    const keeper = new VoiceTakeKeeper('still-recording', { target: 'ses_a', intent: 'send' });
+    keeper.begin();
+    keeper.segment({ sequence: 0, final: false, durationMs: 60_000 }, wav('minute one'));
+    await keeper.written();
+    // Another surface retries the take as it reads it now, and the keeper writes before it ends.
+    const retryWhileItRecords = async (outcome: (resolve: (value: unknown) => void, reject: (error: Error) => void) => void) => {
+      const [kept] = await readVoiceTakes();
+      let settle!: () => void;
+      const running = retryKeptVoiceTake(kept!, {
+        finalize: (() => new Promise((resolve, reject) => {
+          settle = () => outcome(resolve, reject);
+        })) as never,
+      });
+      return { running, settle: () => settle() };
+    };
+
+    const succeeds = await retryWhileItRecords((resolve) => resolve({ text: 'the first minute only', cleanup: 'success' }));
+    await idle();
+    keeper.segment({ sequence: 1, final: false, durationMs: 60_000, overlapMs: 500 }, wav('minute two'));
+    await keeper.written();
+    succeeds.settle();
+    await succeeds.running;
+    expect((await readVoiceTakes())[0]).toMatchObject({ status: 'recording', segments: [{ sequence: 0 }, { sequence: 1 }] });
+    expect((await readVoiceTakes())[0]?.text).toBeUndefined();
+
+    keeper.transcribed('both minutes');
+    await keeper.written();
+    const fails = await retryWhileItRecords((_resolve, reject) => reject(new Error('Load failed')));
+    await idle();
+    keeper.segment({ sequence: 2, final: true, durationMs: 9_000, overlapMs: 500 }, wav('tail'));
+    keeper.transcribed('both minutes and the tail');
+    await keeper.written();
+    fails.settle();
+    await expect(fails.running).rejects.toThrow('Load failed');
+    expect((await readVoiceTakes())[0]).toMatchObject({ status: 'transcribed', text: 'both minutes and the tail' });
+    expect((await readVoiceTakes())[0]?.segments).toHaveLength(3);
+  });
+
   it('finalizes a take the page lost while it recorded with a finalize-only request', () => {
     const { segments, truncated } = keptVoiceSegments(
       take('crashed', { status: 'recording', segments: [{ sequence: 0, final: false, durationMs: 60_000 }] }),
