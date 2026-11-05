@@ -2591,6 +2591,10 @@ def test_member_repair_serializes_peer_writes_through_marker_seal(member_repair_
             sql = " ".join(statement.split())
             if attempts or not sql.startswith("SELECT") or f"FROM {table.name}" not in sql:
                 return
+            if not _conn.connection.dbapi_connection.in_transaction:
+                # A completed-receipt precheck makes no repair decision; only
+                # the re-read under the writer belongs to this race contract.
+                return
             if family in {"marker", "binding"}:
                 key = "remote_access.instance_binding.v1" if family == "binding" else resource_access_service.LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY
                 if key not in parameters:

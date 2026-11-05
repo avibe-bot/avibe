@@ -807,13 +807,6 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
     No complete historical row immutability is inferred from those clocks.
     """
 
-    # This migration decides from a marker, pairing config, durable binding and
-    # several deferred row families before updating any of them. Reserve the
-    # SQLite writer slot before the first read so that decision and seal share
-    # one serialized state. This also covers callers that already hold a
-    # transaction; reserve_write_lock is explicitly nested-transaction safe.
-    reserve_write_lock(connection)
-
     def _counts(
         *,
         binding_status: str,
@@ -829,6 +822,36 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
         }
 
     empty_unavailable = _counts(binding_status=RESOURCE_BINDING_STATE_UNAVAILABLE)
+    if not connection.connection.dbapi_connection.in_transaction:
+        # A completed v3 receipt is never reopened by this migration. Ordinary
+        # CLI opens must not reserve the writer just to rediscover it. This
+        # SELECT is autocommit (no read snapshot to upgrade); all other markers
+        # are re-read under the writer below. An existing caller transaction
+        # retains the original reservation/decision boundary, including savepoints.
+        completed_value = connection.execute(
+            select(state_meta.c.value_json).where(
+                state_meta.c.key == LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY
+            )
+        ).scalar_one_or_none()
+        try:
+            completed_marker = json.loads(completed_value) if completed_value is not None else None
+        except (TypeError, ValueError):
+            completed_marker = None
+        if (
+            isinstance(completed_marker, dict)
+            and completed_marker.get("state") == "completed"
+            and type(completed_marker.get("schema_version")) is int
+            and completed_marker["schema_version"] == 3
+        ):
+            # Preserve the unavailable diagnostic without giving config I/O a
+            # SQLite writer lock. No authorization or migration is performed.
+            if _configured_resource_state().status == RESOURCE_BINDING_STATE_UNAVAILABLE:
+                return empty_unavailable
+            return _counts(binding_status=RESOURCE_BINDING_STATE_SEALED)
+
+    # Any possible repair still reserves the writer BEFORE its decision reads:
+    # the precheck above grants nothing and its value is never used to write.
+    reserve_write_lock(connection)
     marker_value = connection.execute(
         select(state_meta.c.value_json).where(
             state_meta.c.key == LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY

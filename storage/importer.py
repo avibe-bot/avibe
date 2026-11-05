@@ -156,10 +156,16 @@ def ensure_sqlite_state(
                         db_path=target_db,
                         imported=imported_background,
                         backup_path=backup_path,
-                        counts=_current_counts(conn) | background_counts | data_migration_counts,
+                        counts=background_counts | data_migration_counts,
                     )
                 else:
                     _clear_imported_state(conn)
+
+            if report is not None:
+                # Report-only scans must not extend a migration's writer hold.
+                # Initial import validation below keeps its original boundary.
+                with engine.connect() as conn:
+                    report = replace(report, counts=_current_counts(conn) | report.counts)
 
             if report is None:
                 backup_path = _backup_json_state(target_state_dir)
