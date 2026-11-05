@@ -28,9 +28,11 @@ Their native composers and release dates remain independent; see
   behavior, and what remains on the web side is the accessory bar, Lexical
   nudging the page with `window.scrollBy`, layout corrected only after the
   keyboard settles, and the Home Screen app reloading after a brief switch
-  away. The shell fixes the reload and can fix the layout (Phase 0a); a native
-  `UITextView` composer removes the rest (Phase 0b), and 0a's measurements
-  decide whether 0b is still worth its cost.
+  away. The shell fixes the reload. Phase 0a PR 1 leaves WebKit keyboard
+  behavior unchanged; PR 2 adds `isNativeShell()` and coordinates any native
+  keyboard layout change with disabling the Web correction in the same change.
+  A native `UITextView` composer removes the remaining WebKit editing path
+  (Phase 0b), and 0a's measurements decide whether 0b is still worth its cost.
 - **Microphone**: the shell answers WebKit's media-capture permission request
   itself (`WKUIDelegate`, iOS 15+), so WebKit never shows its own prompt; iOS
   shows its system microphone dialog once per install. A sealed spike confirmed
@@ -45,10 +47,11 @@ Their native composers and release dates remain independent; see
 - **Push**: an APNs relay on avibe.bot receives the instance's existing
   encrypted Web Push and forwards it without being able to read it. Every
   dispatch rule stays as it is today (section 8).
-- **First version**: Phase 0a is the shell with shell-level keyboard fixes
-  (about 2 weeks, TestFlight internal). Phase 0b adds the native composer (about
-  2.5 more weeks). The Phase 0 exit checklist on a real iPhone (section 15)
-  gates both. Push and system sign-in follow in Phase 1.
+- **First version**: Phase 0a is the browser-equivalent shell followed by the
+  native bridge, Web UI shell marker, and coordinated keyboard decision (about
+  2 weeks, TestFlight internal). Phase 0b adds the native composer (about 2.5
+  more weeks). The Phase 0 exit checklist on a real iPhone (section 15) gates
+  both. Push and system sign-in follow in Phase 1.
 
 Evidence levels used below: **verified** means observed in the 2026-11-02 spike
 or read in this workspace's code; **cited** means Apple, WebKit, Google, or
@@ -188,7 +191,7 @@ compares a plain `textarea`, a bare `contenteditable`, bare Lexical, and
 | Symptom | Device result | Consequence |
 | --- | --- | --- |
 | Pinyin candidates sometimes missing | Not reproduced; candidates and composition are normal in every input, `MentionEditor` included | Recheck on the checklist; no dedicated fix |
-| Keyboard pushing the composer | Keyboard open and close are normal in every input. On the first candidate pick in an empty editor, Lexical calls `window.scrollBy` and moves the page; a plain `textarea` does not | Shell: resize the web view to `keyboardLayoutGuide`. Native composer: removes Lexical from the path. The web-only fix avibe-bot/avibe#3166 had no device evidence and was closed. |
+| Keyboard pushing the composer | Keyboard open and close are normal in every input. On the first candidate pick in an empty editor, Lexical calls `window.scrollBy` and moves the page; a plain `textarea` does not | PR 1 keeps WebKit and the current Web correction unchanged. PR 2 may coordinate `keyboardLayoutGuide` with `isNativeShell()` and disabling the Web correction as one behavior. The native composer removes Lexical from the path. The web-only fix avibe-bot/avibe#3166 had no device evidence and was closed. |
 | Typing stops after quick Paste (letters go straight in, Pinyin no longer composes) | iOS system behavior: the same in a plain `textarea` | Probably the same in `UITextView`; verify once, no app-side handling |
 | Typeless blank | Intermittent, not reproduced. Lead: the Home Screen web app reloads the whole page after a few seconds away | A shell app keeps its page across brief app switches; recheck on the checklist |
 | Accessory bar | WebKit; a page cannot remove it | Shell flag or the native composer |
@@ -197,24 +200,23 @@ The Web UI keeps its current composer on mobile web; it does not switch to a
 `textarea`. Phase 0a runs the exit checklist on the web composer inside the
 shell to measure what remains (section 15).
 
-### Shell-level fixes, with or without the native composer (Phase 0a)
+### Shell and Web coordination (Phase 0a PR 2)
 
-- **Resize the web view to the keyboard.** Pin the `WKWebView` bottom to
+- **PR 1 uses browser defaults.** It does not pin the `WKWebView` to
+  `keyboardLayoutGuide`, disable scrolling or automatic insets, reset content
+  offsets, observe keyboard notifications, or suppress the Web UI's existing
+  `useIosKeyboardInset` behavior.
+- **PR 2 owns the coordination point.** It adds `isNativeShell()` with the
+  `avibeNative` bridge. If simulator and device evidence supports native
+  resizing, that same change pins the web view to
   `view.keyboardLayoutGuide.topAnchor` (iOS 15+,
-  [Apple](https://developer.apple.com/documentation/uikit/uiview/keyboardlayoutguide)),
-  so the page's layout viewport ends at the keyboard. Then turn off
-  `useIosKeyboardInset` inside the shell, because it would correct twice.
-- **Stop WebKit's own scroll-into-view.** Set
-  `scrollView.contentInsetAdjustmentBehavior = .never`, disable outer scrolling
-  (the Workbench scrolls inner containers), and reset `contentOffset` on keyboard
-  notifications.
-- **Hide the form accessory bar.** No public API exists. The common technique
-  overrides `inputAccessoryView` on WebKit's private content view; Capacitor's
-  Keyboard plugin ships it as `setAccessoryBarVisible`, alongside resize modes
-  and `setScroll` ([Capacitor](https://capacitorjs.com/docs/apis/keyboard)).
-  Because it touches a private class, it carries a review risk under the
-  license agreement's private-API rule (section 13). Keep it behind a flag; the
-  native composer makes it unnecessary for chat.
+  [Apple](https://developer.apple.com/documentation/uikit/uiview/keyboardlayoutguide))
+  and disables `useIosKeyboardInset` inside the shell. Neither half ships
+  independently.
+- **Accessory bar remains WebKit-owned in Phase 0a.** No public API removes it.
+  The common private-content-view override carries App Review risk under the
+  license agreement's private-API rule (section 13), so it is not part of the
+  shell. The native composer makes it unnecessary for chat.
 
 ### Native composer (Phase 0b)
 
@@ -299,7 +301,7 @@ later), so that a bridge change and its Web UI consumer land in one PR.
   New avibe.bot pieces are control-plane functions: an APNs relay for encrypted
   payloads, Sign in with Apple, account deletion, and optionally an instance
   list.
-- Navigation has three classes:
+- Primary-main-frame navigation has three classes:
   1. **Instance origins** (configured by the user) load in the WebView and get
      the native bridge and the microphone grant.
   2. **Authentication origins** load in the WebView without bridge or
@@ -307,11 +309,41 @@ later), so that a bridge change and its Web UI consumer land in one PR.
      GitHub's OAuth pages. Phase 0 sign-in depends on this class (see Signing
      in). Google's authorization endpoint is intercepted instead, because
      Google rejects embedded webviews.
-  3. **Everything else** opens in `SFSafariViewController`.
+  3. **Other HTTP(S) origins** open in `SFSafariViewController` only when the
+     primary main frame navigates to them.
+
+  Subframes use WebKit defaults except that external application schemes are
+  cancelled. Every ordinary `window.open` or `target="_blank"` request,
+  including instance, authentication, Protected Vault, external HTTP(S), and
+  `about:blank`, opens a closable child WebView with WebKit's supplied
+  configuration so `window.opener` survives. Child main-frame navigation stays
+  in the child regardless of origin, and child windows recurse through the same
+  rule. The child toolbar shows its current host plus Done and Open in Safari.
+  The latter opens the child's current HTTP(S) URL in the Safari app.
 
   The bridge checks the sender's `WKScriptMessage.frameInfo.securityOrigin`
   and the media-capture delegate checks the requesting origin against class 1
-  on every call, so a page in class 2 or 3 never reaches either.
+  on every call, so authentication, Vault, and external pages never receive
+  either capability.
+- The shell's browser behavior has a closed deviation list:
+  1. External primary-main-frame HTTP(S) navigation uses
+     `SFSafariViewController`.
+  2. Google authorization is intercepted because Google rejects embedded
+     browsers.
+  3. User-initiated external application schemes use `UIApplication`; subframe
+     navigation to them is cancelled.
+  4. Instance-origin main frames receive the microphone grant.
+  5. Admitted downloads use `WKDownload` and the system share sheet.
+  6. PR 2 injects the native bridge only into an instance main frame and checks
+     every message origin.
+
+  Everything outside this list uses WebKit defaults. Protected Vault is an
+  ordinary cross-origin browsing context, not a shell-specific navigation
+  class.
+- The shell implements WebKit's JavaScript confirmation delegate and download
+  delegates because the Web UI uses `window.confirm` for guarded actions and
+  attachment responses for Files and Editor downloads. Downloads from the
+  configured instance open the system share sheet, including Save to Files.
 - The microphone grant follows the instance origin, the trust boundary the Web
   UI already uses. Show Pages are same-origin-trusted by product decision: the
   Workbench frames them with `allow-same-origin` and they can reach the parent
@@ -612,8 +644,9 @@ and open decisions.
 - **Composer**: a native mode in `Composer` (section 5), an anchor for the
   mention pickers at the bottom of the web view, a reserved bottom inset, and a
   shared marker fixture with Swift.
-- **Keyboard**: turn off `useIosKeyboardInset` inside the shell, because the
-  shell resizes the web view.
+- **Keyboard**: PR 2 adds `isNativeShell()` and decides native resizing and
+  `useIosKeyboardInset` together. PR 1 keeps both WebKit and the Web hook at
+  their existing defaults.
 - **Notifications**: inside the shell, `getWebPushSupportState` reports a
   native provider, and `WebPushControl` and the Settings page call `push.*`
   instead of `PushManager`. Hide the iOS "Add to Home Screen" hint
@@ -801,13 +834,13 @@ account, and a privacy policy URL.
 
 Effort assumes one Agent lane per track, with owner review between phases.
 
-### Phase 0a: shell and keyboard fixes (TestFlight internal), about 2 weeks
+### Phase 0a: shell, bridge, and keyboard coordination (TestFlight internal), about 2 weeks
 
 | Track | Work | Effort |
 | --- | --- | --- |
-| Native | SwiftUI app with one `WKWebView` and a persistent data store; instance entry by URL or QR; media-capture grant for configured origins; three-class navigation policy; `avibeNative` v1 with `app`, `haptics`, `voice`; keyboard-resized web view; no WebKit scroll-into-view; accessory bar flag; safe areas; offline and error page; Google sign-in interception | 1.5 weeks |
+| Native | PR 1: SwiftUI app with one browser-equivalent `WKWebView`, persistent data, instance entry by URL or QR, configured-origin media-capture grant, primary-main-frame navigation handoff, recursive child windows, downloads, safe areas, offline/error UI, and Google interception. PR 2: `avibeNative` v1 with `app`, `haptics`, and `voice`, plus any evidence-backed keyboard layout change coordinated with the Web shell marker | 1.5 weeks |
 | Build | Xcode project, signing, and `xcodebuild` or fastlane upload to TestFlight | 0.5 week, parallel |
-| Web UI | `native.ts`, `isNativeShell()`, `useIosKeyboardInset` off in the shell, Web Push toggle and install hint hidden, haptics calls, "Open on iPhone" QR | 3 days, parallel |
+| Web UI | PR 2: `native.ts`, `isNativeShell()`, the matching `useIosKeyboardInset` decision, Web Push toggle and install hint hidden, haptics calls, and "Open on iPhone" QR | 3 days, parallel |
 
 Exit: run the section 15 checklist on the web composer, to measure which input
 problems a shell alone fixes. The microphone items must pass. The results
@@ -920,7 +953,8 @@ every item with the native composer.
 3. Build machine: GitHub Actions macOS runners with signing secrets, as for the
    desktop app, are proposed. On an Individual membership this is also how the
    iOS owner ships without holding the signing key (section 13).
-4. Phase 0 scope: put Phase 0a (shell and keyboard fixes) on TestFlight
+4. Phase 0 scope: put Phase 0a (shell, bridge, and coordinated keyboard
+   behavior) on TestFlight
    internal as soon as it is ready and decide 0b (native composer) from its
    checklist results, or commit to 0b now. Push follows in Phase 1 either way.
 5. Approve the APNs relay on avibe.bot as a new backend path (product and
