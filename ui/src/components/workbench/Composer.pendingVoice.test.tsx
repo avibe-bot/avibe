@@ -58,6 +58,38 @@ const kept = (patch: Partial<VoiceTake>): VoiceTake => ({
   ...patch,
 });
 
+/** The browser's Web Locks for one origin: how its documents see which takes a surface holds. */
+const installWebLocks = () => {
+  const held = new Map<string, Promise<void>>();
+  const locks = {
+    async request(name: string, ...args: unknown[]) {
+      const [options, callback] = (args.length === 1 ? [{}, args[0]] : args) as [
+        { ifAvailable?: boolean },
+        (lock: unknown) => Promise<unknown>,
+      ];
+      while (held.has(name)) {
+        if (options.ifAvailable) return callback(null);
+        await held.get(name);
+      }
+      let free!: () => void;
+      held.set(name, new Promise<void>((resolve) => {
+        free = resolve;
+      }));
+      try {
+        return await callback({ name, mode: 'exclusive' });
+      } finally {
+        held.delete(name);
+        free();
+      }
+    },
+    async query() {
+      return { held: [...held.keys()].map((name) => ({ name, mode: 'exclusive' })), pending: [] };
+    },
+  };
+  Object.defineProperty(navigator, 'locks', { configurable: true, value: locks });
+  return () => Reflect.deleteProperty(navigator, 'locks');
+};
+
 const renderComposer = (onSend = vi.fn(() => true), sendDisabled = false) => render(
   <I18nextProvider i18n={i18n}>
     <ToastProvider>
@@ -137,6 +169,35 @@ describe('Composer pending voice items', () => {
       await waitFor(async () => expect(await readVoiceTakes()).toEqual([]));
       await waitFor(() => expect(screen.queryByText(en.voice.pending.title)).toBeNull());
     } finally {
+      Reflect.deleteProperty(navigator, 'onLine');
+    }
+  });
+
+  it('leaves a take another document still records to that document, until it lets go', async () => {
+    Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => false });
+    const uninstall = installWebLocks();
+    try {
+      await saveVoiceTake(kept({ status: 'recording', text: undefined }));
+      await saveVoiceTakeAudio('kept-take', 0, new Blob(['audio'], { type: 'audio/wav' }));
+      // Another tab's recording surface holds it (lib/voiceTakeStore's lock, named across documents).
+      let otherTabLetsGo!: () => void;
+      const otherTab = navigator.locks.request('avibe-voice-take:kept-take', () => new Promise<void>((resolve) => {
+        otherTabLetsGo = resolve;
+      }));
+      renderComposer();
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      });
+      expect(screen.queryByText(en.voice.pending.title)).toBeNull();
+
+      otherTabLetsGo();
+      await otherTab;
+      act(() => {
+        document.dispatchEvent(new Event('visibilitychange'));
+      });
+      await screen.findByText(en.voice.pending.title);
+    } finally {
+      uninstall();
       Reflect.deleteProperty(navigator, 'onLine');
     }
   });

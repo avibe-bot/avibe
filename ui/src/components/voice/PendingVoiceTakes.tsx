@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 
 import {
   deleteVoiceTake,
+  heldVoiceTakes,
   isVoiceTakeLive,
   readVoiceTakes,
   subscribeVoiceTakes,
@@ -121,8 +122,10 @@ function useKeptVoiceTakes(target: string | null): VoiceTake[] {
     if (!target) return;
     let alive = true;
     const read = () => {
-      void readVoiceTakes(target).then((found) => {
-        if (alive) setRead({ target, takes: found });
+      // A take another document holds (still recording or finalizing it, or recovering it) is
+      // that document's; one this document is recovering stays, with its progress.
+      void Promise.all([readVoiceTakes(target), heldVoiceTakes()]).then(([found, held]) => {
+        if (alive) setRead({ target, takes: found.filter((take) => !held.has(take.id) || isRetryingVoiceTake(take.id)) });
       });
     };
     read();

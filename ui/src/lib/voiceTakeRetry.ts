@@ -4,7 +4,7 @@ import {
   VoiceTranscriptionError,
   type VoiceTranscriptionSegment,
 } from './voiceTranscription';
-import { readVoiceTakeAudio, updateVoiceTake, type VoiceTake } from './voiceTakeStore';
+import { claimVoiceTake, readVoiceTakeAudio, updateVoiceTake, type VoiceTake } from './voiceTakeStore';
 
 // Transcribing a take kept on the device (lib/voiceTakeStore) that no surface holds in memory:
 // after a reload, or after the surface it was spoken on went away. Its stored audio is sent
@@ -71,9 +71,10 @@ export const keptVoiceTakeHasAudio = (take: Pick<VoiceTake, 'segments'>): boolea
 
 /**
  * Transcribes a kept take from its stored audio. Its text is kept with it (`transcribed`) for
- * the reader to insert or send; a failure leaves it `pending`. One run per take at a time. The
- * result lands only on the take as it was read: if its keeper (another tab still recording or
- * finalizing it) wrote meanwhile, the keeper's newer record stands.
+ * the reader to insert or send; a failure leaves it `pending`. One run per take at a time, and
+ * none while any surface (in this document or another) holds it: that surface lands its words,
+ * and this resolves '' without a request. The result lands only on the take as it was read: if
+ * it was written meanwhile, the newer record stands.
  */
 export function retryKeptVoiceTake(
   take: VoiceTake,
@@ -86,18 +87,21 @@ export function retryKeptVoiceTake(
   const save = dependencies.save ?? updateVoiceTake;
   const read = take.revision ?? 0;
   const run = (async () => {
-    const { segments, truncated } = keptVoiceSegments(take, await readAudio(take.id));
-    if (!segments.some((segment) => segment.blob)) throw new VoiceTranscriptionError('failed');
-    try {
-      const result = await finalize(segments, { dictationId: take.id, before: '', after: '' }, {
-        retryUntil: Date.now() + VOICE_SETTLE_RETRY_WINDOW_MS,
-      });
-      await save({ ...take, status: 'transcribed', text: result.text, truncated, updatedAt: Date.now() }, undefined, read);
-      return result.text;
-    } catch (error) {
-      await save({ ...take, status: 'pending', text: undefined, updatedAt: Date.now() }, undefined, read);
-      throw error;
-    }
+    const claimed = await claimVoiceTake(take.id, async () => {
+      const { segments, truncated } = keptVoiceSegments(take, await readAudio(take.id));
+      if (!segments.some((segment) => segment.blob)) throw new VoiceTranscriptionError('failed');
+      try {
+        const result = await finalize(segments, { dictationId: take.id, before: '', after: '' }, {
+          retryUntil: Date.now() + VOICE_SETTLE_RETRY_WINDOW_MS,
+        });
+        await save({ ...take, status: 'transcribed', text: result.text, truncated, updatedAt: Date.now() }, undefined, read);
+        return result.text;
+      } catch (error) {
+        await save({ ...take, status: 'pending', text: undefined, updatedAt: Date.now() }, undefined, read);
+        throw error;
+      }
+    });
+    return claimed ? claimed.value : '';
   })();
   running.set(take.id, run);
   notify();

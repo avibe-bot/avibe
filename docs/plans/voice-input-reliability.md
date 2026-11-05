@@ -116,6 +116,12 @@ a killed page, or a surface that goes away loses none of it
   back into keeps it: it is the reader's own unsent speech, not a server read.
 - At most 3 takes are kept per reader; a new one beyond that evicts the oldest.
   16 kHz mono PCM is about 1.9 MB a minute.
+- A surface holding a take (recording, finalizing, or showing it) also holds a
+  Web Lock named for it, which the browser releases when the surface lets go or
+  its page goes away. Another tab or the pet window therefore leaves a take
+  another document still holds alone, and a recovery holds the lock while it
+  runs. Without Web Locks, a recovery's result lands only on the stored
+  revision it read, so it never sets back a take its keeper advanced.
 - A take that no surface holds in memory shows as a pending voice item above the
   composer of its target. One without text is retried from its stored audio,
   through whichever path works then, once when the page shows it and again

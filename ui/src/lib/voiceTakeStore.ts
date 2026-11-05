@@ -337,12 +337,98 @@ export async function deleteVoiceTake(id: string): Promise<void> {
 // retains it, a retry is sending it). The pending voice items leave these to their owner.
 const live = new Set<string>();
 
+// The same, across the documents of this origin: a surface holding a take also holds a Web Lock
+// named for it, so another tab, the pet window, or the Home Screen app sees the take is owned
+// (still recording, still finalizing) and leaves it alone. The browser releases the lock when the
+// surface lets go, and when its document goes away (closed, reloaded, killed), which is exactly
+// when the take becomes the pending voice items' to recover. Where the browser has no Web Locks,
+// only this document knows; the revision check still keeps a recovery from setting a take back.
+const LOCK_PREFIX = 'avibe-voice-take:';
+const holds = new Map<string, () => Promise<void>>();
+
+function lockManager(): LockManager | null {
+  try {
+    return typeof navigator !== 'undefined' && navigator.locks ? navigator.locks : null;
+  } catch {
+    return null;
+  }
+}
+
+function hold(id: string): void {
+  const manager = lockManager();
+  if (!manager) return;
+  let letGo!: () => void;
+  const until = new Promise<void>((resolve) => {
+    letGo = resolve;
+  });
+  let request: Promise<unknown>;
+  try {
+    request = manager.request(LOCK_PREFIX + id, () => until).catch(() => undefined);
+  } catch {
+    return;
+  }
+  holds.set(id, async () => {
+    letGo();
+    await request;
+  });
+}
+
+/** Lets go of this document's lock on a take; resolves once another document can see it is free. */
+function letGoOf(id: string): Promise<void> {
+  const release = holds.get(id);
+  holds.delete(id);
+  return release ? release() : Promise.resolve();
+}
+
 /** Marks a take as held by a live surface of this document, or no longer. */
 export function setVoiceTakeLive(id: string, held: boolean): void {
   if (held === live.has(id)) return;
-  if (held) live.add(id);
-  else live.delete(id);
-  notify();
+  if (held) {
+    live.add(id);
+    hold(id);
+    notify();
+    return;
+  }
+  live.delete(id);
+  // Readers here and elsewhere read again once the lock is gone, so they find the take free.
+  void letGoOf(id).then(notify);
+}
+
+/** The takes some document of this origin holds now (a surface records or shows it, or a
+ *  recovery is sending it). Empty where the browser cannot tell. */
+export async function heldVoiceTakes(): Promise<Set<string>> {
+  const manager = lockManager();
+  if (!manager) return new Set();
+  try {
+    const state = await manager.query();
+    return new Set([...(state.held ?? []), ...(state.pending ?? [])]
+      .map((lock) => lock.name ?? '')
+      .filter((name) => name.startsWith(LOCK_PREFIX))
+      .map((name) => name.slice(LOCK_PREFIX.length)));
+  } catch {
+    return new Set();
+  }
+}
+
+/**
+ * Runs `work` as the take's only owner across documents, holding its lock throughout, or not at
+ * all when another surface (in any document) holds it: resolves null then. Without Web Locks it
+ * always runs.
+ */
+export async function claimVoiceTake<T>(id: string, work: () => Promise<T>): Promise<{ value: T } | null> {
+  const manager = lockManager();
+  if (!manager) return { value: await work() };
+  let claimed = false;
+  try {
+    return await manager.request(LOCK_PREFIX + id, { ifAvailable: true }, async (lock) => {
+      if (!lock) return null;
+      claimed = true;
+      return { value: await work() };
+    });
+  } finally {
+    // Other documents left the take alone while it was claimed: they read it again now.
+    if (claimed) notify();
+  }
 }
 
 export function isVoiceTakeLive(id: string): boolean {

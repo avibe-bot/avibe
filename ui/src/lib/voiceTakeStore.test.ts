@@ -9,6 +9,7 @@ import { VoiceTakeKeeper } from './voiceTakeKeeper';
 import { keptVoiceSegments, retryKeptVoiceTake } from './voiceTakeRetry';
 import {
   deleteVoiceTake,
+  heldVoiceTakes,
   isVoiceTakeLive,
   readVoiceTakeAudio,
   readVoiceTakes,
@@ -47,6 +48,38 @@ const keepTake = async (id: string, target = 'ses_a') => {
   keeper.pending();
   await keeper.written();
   return keeper;
+};
+
+/** The browser's Web Locks for one origin: how its documents see which takes a surface holds. */
+const installWebLocks = () => {
+  const held = new Map<string, Promise<void>>();
+  const locks = {
+    async request(name: string, ...args: unknown[]) {
+      const [options, callback] = (args.length === 1 ? [{}, args[0]] : args) as [
+        { ifAvailable?: boolean },
+        (lock: unknown) => Promise<unknown>,
+      ];
+      while (held.has(name)) {
+        if (options.ifAvailable) return callback(null);
+        await held.get(name);
+      }
+      let free!: () => void;
+      held.set(name, new Promise<void>((resolve) => {
+        free = resolve;
+      }));
+      try {
+        return await callback({ name, mode: 'exclusive' });
+      } finally {
+        held.delete(name);
+        free();
+      }
+    },
+    async query() {
+      return { held: [...held.keys()].map((name) => ({ name, mode: 'exclusive' })), pending: [] };
+    },
+  };
+  Object.defineProperty(navigator, 'locks', { configurable: true, value: locks });
+  return () => Reflect.deleteProperty(navigator, 'locks');
 };
 
 afterEach(async () => {
@@ -212,7 +245,38 @@ describe('voice take store', () => {
     expect(await readVoiceTakes()).toEqual([]);
   });
 
+  it('leaves a take a surface still holds to it, in any document, and recovers it once that surface is gone', async () => {
+    const uninstall = installWebLocks();
+    try {
+      setLocalSnapshotPrincipal('local');
+      // A tab still recording: its first minute is kept, the next is not out yet.
+      const keeper = new VoiceTakeKeeper('held', { target: 'ses_a', intent: 'send' });
+      keeper.begin();
+      keeper.segment({ sequence: 0, final: false, durationMs: 60_000 }, wav('minute one'));
+      await keeper.written();
+      const [kept] = await readVoiceTakes();
+      const finalize = vi.fn(async () => ({ text: 'the first minute', cleanup: 'success' as const }));
+
+      expect(await heldVoiceTakes()).toContain('held');
+      await expect(retryKeptVoiceTake(kept!, { finalize: finalize as never })).resolves.toBe('');
+      expect(finalize).not.toHaveBeenCalled();
+      expect((await readVoiceTakes())[0]).toMatchObject({ status: 'recording' });
+
+      // Its surface let go of it (or its page went away): the take is free to recover.
+      keeper.release();
+      await keeper.written();
+      await vi.waitFor(async () => expect(await heldVoiceTakes()).not.toContain('held'));
+      const [left] = await readVoiceTakes();
+      await expect(retryKeptVoiceTake(left!, { finalize: finalize as never })).resolves.toBe('the first minute');
+      expect((await readVoiceTakes())[0]).toMatchObject({ status: 'transcribed', text: 'the first minute' });
+    } finally {
+      uninstall();
+    }
+  });
+
   it('never sets back a take its keeper advanced while another surface retried it', async () => {
+    // Where the browser has no Web Locks, a document cannot see another's surface: the revision
+    // check is what keeps a recovery from setting the take back.
     setLocalSnapshotPrincipal('local');
     // Another tab is still recording it: one minute is kept so far.
     const keeper = new VoiceTakeKeeper('still-recording', { target: 'ses_a', intent: 'send' });
