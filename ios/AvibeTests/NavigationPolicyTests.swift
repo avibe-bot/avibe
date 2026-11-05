@@ -308,6 +308,15 @@ final class NavigationPolicyTests: XCTestCase {
         XCTAssertEqual(request.method, .hapticsImpact)
         XCTAssertEqual(request.params["style"] as? String, "medium")
         XCTAssertEqual(
+            try NativeBridgeRequest.parse(
+                [
+                    "method": "viewport.setOuterScrollLocked",
+                    "params": ["locked": true],
+                ]
+            ).get().method,
+            .viewportSetOuterScrollLocked
+        )
+        XCTAssertEqual(
             NativeBridgeRequest.parse(["method": "app.instances"]).failure,
             .unsupported
         )
@@ -345,7 +354,8 @@ final class NavigationPolicyTests: XCTestCase {
         )
         let configuration = NativeBridgeConfiguration.make(
             instanceOrigin: instance,
-            metadata: metadata
+            metadata: metadata,
+            setOuterScrollLocked: { _, _ in false }
         )
 
         XCTAssertEqual(configuration.applicationNameForUserAgent, "AvibeiOS/1.2.3")
@@ -359,16 +369,57 @@ final class NavigationPolicyTests: XCTestCase {
     }
 
     @MainActor
+    func testOuterScrollLockIsPrimaryOnlyAndResetsOnPrimaryCommit() {
+        let primary = WKWebView(frame: .zero)
+        let child = WKWebView(frame: .zero)
+        primary.scrollView.isScrollEnabled = true
+        primary.scrollView.bounces = true
+        primary.scrollView.contentInsetAdjustmentBehavior = .automatic
+        let controller = OuterScrollLockController(primaryWebView: primary)
+
+        XCTAssertFalse(controller.isLocked)
+        XCTAssertFalse(controller.setLocked(true, requestedBy: child))
+        XCTAssertTrue(primary.scrollView.isScrollEnabled)
+        XCTAssertTrue(primary.scrollView.bounces)
+        XCTAssertEqual(primary.scrollView.contentInsetAdjustmentBehavior, .automatic)
+
+        XCTAssertTrue(controller.setLocked(true, requestedBy: primary))
+        XCTAssertTrue(controller.isLocked)
+        XCTAssertFalse(primary.scrollView.isScrollEnabled)
+        XCTAssertFalse(primary.scrollView.bounces)
+        XCTAssertEqual(primary.scrollView.contentInsetAdjustmentBehavior, .never)
+        XCTAssertEqual(primary.scrollView.contentOffset, .zero)
+
+        primary.scrollView.setContentOffset(CGPoint(x: 0, y: 40), animated: false)
+        controller.resetContentOffsetForKeyboardChange()
+        XCTAssertEqual(primary.scrollView.contentOffset, .zero)
+
+        controller.resetForNavigationCommit(in: child)
+        XCTAssertTrue(controller.isLocked)
+
+        controller.resetForNavigationCommit(in: primary)
+        XCTAssertFalse(controller.isLocked)
+        XCTAssertTrue(primary.scrollView.isScrollEnabled)
+        XCTAssertTrue(primary.scrollView.bounces)
+        XCTAssertEqual(primary.scrollView.contentInsetAdjustmentBehavior, .automatic)
+    }
+
+    @MainActor
     func testNativeBridgeIsDiscoverableOnlyInTheInstanceMainFrame() async throws {
         let metadata = NativeShellMetadata(
             shellVersion: "1.2.3 (45)",
             userAgentVersion: "1.2.3"
         )
+        var outerScrollRequests: [Bool] = []
         let webView = WKWebView(
             frame: .zero,
             configuration: NativeBridgeConfiguration.make(
                 instanceOrigin: instance,
-                metadata: metadata
+                metadata: metadata,
+                setOuterScrollLocked: { _, locked in
+                    outerScrollRequests.append(locked)
+                    return true
+                }
             )
         )
         let probe = WebViewLoadProbe()
@@ -386,6 +437,10 @@ final class NavigationPolicyTests: XCTestCase {
         let instanceResult = try await webView.callAsyncJavaScript(
             """
             const info = await window.avibeNative.call("app.info");
+            await window.avibeNative.call(
+              "viewport.setOuterScrollLocked",
+              {locked: true}
+            );
             let unsupported = null;
             try {
               await window.avibeNative.call("app.instances");
@@ -398,6 +453,7 @@ final class NavigationPolicyTests: XCTestCase {
               platform: info.platform,
               shellVersion: info.shellVersion,
               appCapability: info.capabilities.app,
+              viewportCapability: info.capabilities.viewport,
               subframeBridge: typeof document.querySelector("#child").contentWindow.avibeNative,
               subframeTransport: await document.querySelector("#child").contentWindow.webkit
                 .messageHandlers.avibeNative.postMessage({method: "app.info", params: {}}),
@@ -414,6 +470,8 @@ final class NavigationPolicyTests: XCTestCase {
         XCTAssertEqual(instancePayload["platform"] as? String, "ios")
         XCTAssertEqual(instancePayload["shellVersion"] as? String, "1.2.3 (45)")
         XCTAssertEqual(instancePayload["appCapability"] as? Int, 1)
+        XCTAssertEqual(instancePayload["viewportCapability"] as? Int, 1)
+        XCTAssertEqual(outerScrollRequests, [true])
         XCTAssertEqual(instancePayload["subframeBridge"] as? String, "undefined")
         XCTAssertEqual(instancePayload["unsupported"] as? String, "unsupported")
         assertForbiddenReply(instancePayload["subframeTransport"])

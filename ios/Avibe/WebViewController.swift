@@ -2,6 +2,89 @@ import SafariServices
 import UIKit
 import WebKit
 
+@MainActor
+final class OuterScrollLockController {
+    private struct UnlockedSettings {
+        let isScrollEnabled: Bool
+        let bounces: Bool
+        let contentInsetAdjustmentBehavior: UIScrollView.ContentInsetAdjustmentBehavior
+    }
+
+    private weak var primaryWebView: WKWebView?
+    private var unlockedSettings: UnlockedSettings?
+    private(set) var isLocked = false
+
+    init(primaryWebView: WKWebView) {
+        self.primaryWebView = primaryWebView
+    }
+
+    @discardableResult
+    func setLocked(_ locked: Bool, requestedBy sourceWebView: WKWebView) -> Bool {
+        guard sourceWebView === primaryWebView else {
+            return false
+        }
+        apply(locked)
+        return true
+    }
+
+    func resetForNavigationCommit(in sourceWebView: WKWebView) {
+        guard sourceWebView === primaryWebView else {
+            return
+        }
+        apply(false)
+    }
+
+    func resetContentOffsetForKeyboardChange() {
+        guard isLocked, let primaryWebView else {
+            return
+        }
+        resetDocumentViewport(in: primaryWebView)
+    }
+
+    private func apply(_ locked: Bool) {
+        guard let primaryWebView else {
+            return
+        }
+        let scrollView = primaryWebView.scrollView
+
+        if locked {
+            if !isLocked {
+                unlockedSettings = UnlockedSettings(
+                    isScrollEnabled: scrollView.isScrollEnabled,
+                    bounces: scrollView.bounces,
+                    contentInsetAdjustmentBehavior: scrollView.contentInsetAdjustmentBehavior
+                )
+            }
+            isLocked = true
+            scrollView.bounces = false
+            scrollView.contentInsetAdjustmentBehavior = .never
+            resetDocumentViewport(in: primaryWebView)
+            scrollView.isScrollEnabled = false
+            return
+        }
+
+        guard isLocked else {
+            return
+        }
+        if let unlockedSettings {
+            scrollView.isScrollEnabled = unlockedSettings.isScrollEnabled
+            scrollView.bounces = unlockedSettings.bounces
+            scrollView.contentInsetAdjustmentBehavior =
+                unlockedSettings.contentInsetAdjustmentBehavior
+        }
+        unlockedSettings = nil
+        isLocked = false
+    }
+
+    private func resetDocumentViewport(in webView: WKWebView) {
+        webView.scrollView.setContentOffset(.zero, animated: false)
+        // WebKit can retain the document offset after the native scroll view reaches zero.
+        DispatchQueue.main.async { [weak webView] in
+            webView?.evaluateJavaScript("window.scrollTo(0, 0)")
+        }
+    }
+}
+
 final class WebViewController: UIViewController {
     private struct PopupRecord {
         let webView: WKWebView
@@ -43,16 +126,23 @@ final class WebViewController: UIViewController {
     private var isPresentingDownloadedFile = false
     private var pendingDialogs: [UUID: PendingJavaScriptDialog] = [:]
     private var dialogIdentifiersByWebView: [ObjectIdentifier: Set<UUID>] = [:]
+    private lazy var outerScrollLockController =
+        OuterScrollLockController(primaryWebView: webView)
 
     private lazy var webView: WKWebView = {
-        let configuration = NativeBridgeConfiguration.make(instanceOrigin: instanceOrigin)
+        let configuration = NativeBridgeConfiguration.make(
+            instanceOrigin: instanceOrigin,
+            setOuterScrollLocked: { [weak self] sourceWebView, locked in
+                self?.outerScrollLockController.setLocked(
+                    locked,
+                    requestedBy: sourceWebView
+                ) ?? false
+            }
+        )
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
         configure(webView)
         webView.translatesAutoresizingMaskIntoConstraints = false
-        webView.scrollView.contentInsetAdjustmentBehavior = .never
-        webView.scrollView.isScrollEnabled = false
-        webView.scrollView.bounces = false
         return webView
     }()
 
@@ -127,7 +217,7 @@ final class WebViewController: UIViewController {
 
     @objc
     private func resetOuterScrollPosition() {
-        webView.scrollView.setContentOffset(.zero, animated: false)
+        outerScrollLockController.resetContentOffsetForKeyboardChange()
     }
 
     private func configure(_ webView: WKWebView) {
@@ -722,6 +812,10 @@ extension WebViewController: WKNavigationDelegate {
         if webView === self.webView {
             didStartLoading()
         }
+    }
+
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation?) {
+        outerScrollLockController.resetForNavigationCommit(in: webView)
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation?) {

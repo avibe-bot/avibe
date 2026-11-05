@@ -9,6 +9,7 @@ import {
   nativeHapticImpact,
   nativeVoicePermission,
   openNativeExternal,
+  setNativeOuterScrollLocked,
 } from './native';
 
 const installBridge = (
@@ -20,7 +21,12 @@ const installBridge = (
         contract: 1,
         platform: 'ios',
         shellVersion: '1.0 (1)',
-        capabilities: { app: 1, haptics: 1, voice: 1 },
+        capabilities: {
+          app: 1,
+          haptics: 1,
+          viewport: 1,
+          voice: 1,
+        },
       };
     }
     if (method === 'app.openExternal') return { opened: true };
@@ -33,7 +39,12 @@ const installBridge = (
       contract: 1,
       platform: 'ios',
       shellVersion: '1.0 (1)',
-      capabilities: { app: 1, haptics: 1, voice: 1 },
+      capabilities: {
+        app: 1,
+        haptics: 1,
+        viewport: 1,
+        voice: 1,
+      },
       call,
       on: vi.fn(() => () => undefined),
       ...overrides,
@@ -69,11 +80,13 @@ describe('native shell bridge', () => {
     });
     await expect(openNativeExternal('https://avibe.bot')).resolves.toBe(true);
     await expect(nativeHapticImpact('medium')).resolves.toBe(true);
+    await expect(setNativeOuterScrollLocked(true)).resolves.toBe(true);
     await expect(nativeVoicePermission()).resolves.toBe('granted');
     expect(call.mock.calls.map(([method]) => method)).toEqual([
       'app.info',
       'app.openExternal',
       'haptics.impact',
+      'viewport.setOuterScrollLocked',
       'voice.permission',
     ]);
   });
@@ -87,6 +100,7 @@ describe('native shell bridge', () => {
     });
 
     await expect(nativeHapticImpact('light')).resolves.toBe(false);
+    await expect(setNativeOuterScrollLocked(true)).resolves.toBe(false);
     await expect(nativeVoicePermission()).resolves.toBeNull();
     await expect(openNativeExternal('https://avibe.bot')).resolves.toBe(false);
   });

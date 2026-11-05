@@ -17,6 +17,7 @@ struct NativeShellMetadata: Equatable {
     static let capabilities = [
         "app": 1,
         "haptics": 1,
+        "viewport": 1,
         "voice": 1,
     ]
 
@@ -62,6 +63,7 @@ enum NativeBridgeMethod: String, CaseIterable {
     case hapticsImpact = "haptics.impact"
     case hapticsNotify = "haptics.notify"
     case hapticsSelection = "haptics.selection"
+    case viewportSetOuterScrollLocked = "viewport.setOuterScrollLocked"
     case voicePermission = "voice.permission"
 }
 
@@ -170,13 +172,15 @@ enum NativeBridgeConfiguration {
 
     static func make(
         instanceOrigin: WebOrigin,
-        metadata: NativeShellMetadata = NativeShellMetadata()
+        metadata: NativeShellMetadata = NativeShellMetadata(),
+        setOuterScrollLocked: @escaping (WKWebView, Bool) -> Bool
     ) -> WKWebViewConfiguration {
         let configuration = WKWebViewConfiguration()
         let controller = WKUserContentController()
         let handler = NativeBridgeHandler(
             policy: NativeBridgePolicy(instanceOrigin: instanceOrigin),
-            metadata: metadata
+            metadata: metadata,
+            setOuterScrollLocked: setOuterScrollLocked
         )
         controller.addScriptMessageHandler(
             handler,
@@ -269,10 +273,16 @@ enum NativeBridgeConfiguration {
 private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
     private let policy: NativeBridgePolicy
     private let metadata: NativeShellMetadata
+    private let setOuterScrollLocked: (WKWebView, Bool) -> Bool
 
-    init(policy: NativeBridgePolicy, metadata: NativeShellMetadata) {
+    init(
+        policy: NativeBridgePolicy,
+        metadata: NativeShellMetadata,
+        setOuterScrollLocked: @escaping (WKWebView, Bool) -> Bool
+    ) {
         self.policy = policy
         self.metadata = metadata
+        self.setOuterScrollLocked = setOuterScrollLocked
     }
 
     func userContentController(
@@ -296,12 +306,17 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         case .failure(let error):
             reply(replyHandler, error: error)
         case .success(let request):
-            handle(request, replyHandler: replyHandler)
+            handle(
+                request,
+                sourceWebView: message.webView,
+                replyHandler: replyHandler
+            )
         }
     }
 
     private func handle(
         _ request: NativeBridgeRequest,
+        sourceWebView: WKWebView?,
         replyHandler: @escaping (Any?, String?) -> Void
     ) {
         switch request.method {
@@ -361,6 +376,24 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
             let generator = UISelectionFeedbackGenerator()
             generator.prepare()
             generator.selectionChanged()
+            reply(replyHandler, result: NSNull())
+        case .viewportSetOuterScrollLocked:
+            guard let locked = request.params["locked"] as? Bool else {
+                reply(
+                    replyHandler,
+                    error: .invalidArgument(
+                        "viewport.setOuterScrollLocked requires a boolean locked value."
+                    )
+                )
+                return
+            }
+            guard
+                let sourceWebView,
+                setOuterScrollLocked(sourceWebView, locked)
+            else {
+                reply(replyHandler, error: .forbidden)
+                return
+            }
             reply(replyHandler, result: NSNull())
         case .voicePermission:
             reply(

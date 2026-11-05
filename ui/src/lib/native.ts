@@ -1,5 +1,5 @@
 export type NativePlatform = 'ios' | 'android';
-export type NativeCapability = 'app' | 'haptics' | 'voice';
+export type NativeCapability = 'app' | 'haptics' | 'viewport' | 'voice';
 export type NativeImpactStyle = 'light' | 'medium' | 'heavy' | 'soft' | 'rigid';
 export type NativeNotificationType = 'success' | 'warning' | 'error';
 export type NativeVoicePermission = 'granted' | 'denied' | 'prompt';
@@ -110,6 +110,20 @@ export async function nativeHapticSelection(): Promise<boolean> {
   try {
     if (!hasNativeCapability('haptics')) return false;
     await callNative<null>('haptics', 'haptics.selection');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function setNativeOuterScrollLocked(locked: boolean): Promise<boolean> {
+  try {
+    if (!hasNativeCapability('viewport')) return false;
+    await callNative<null>(
+      'viewport',
+      'viewport.setOuterScrollLocked',
+      { locked },
+    );
     return true;
   } catch {
     return false;

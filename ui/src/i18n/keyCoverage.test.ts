@@ -913,6 +913,15 @@ const NON_KEY_LITERALS = [
   'ui.show',
   'vault.state',
 
+  // Native bridge method names. They are transport identifiers, never copy.
+  'app.info',
+  'app.openExternal',
+  'haptics.impact',
+  'haptics.notify',
+  'haptics.selection',
+  'viewport.setOuterScrollLocked',
+  'voice.permission',
+
   // Server error codes. `serverCopy.ts` renders these through a `defaultValue`,
   // so the server's own message shows when the client has no copy for the code.
   'modelHub.errors.backend_model_catalog_invalid',
