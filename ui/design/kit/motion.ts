@@ -52,10 +52,17 @@ export const spring = (name: Spring): Curve => ({
   dur: tokenMs(`--motion-spring-${name}-duration`),
   ease: token(`--motion-spring-${name}`),
 });
-/** How far a small thing travels as it enters (`--motion-offset-*`), in px. */
-export const offset = (size: 'sm' | 'md' | 'lg' = 'md') => parseFloat(token(size === 'md' ? '--motion-offset' : `--motion-offset-${size}`));
-/** The scale an element enters from, or a pressed surface sinks to (`--motion-scale-*`). */
-export const scaleFrom = (name: 'enter' | 'press') => parseFloat(token(`--motion-scale-${name}`));
+/** How far a thing travels (`--motion-offset-*`), in px. */
+export const offset = (size: 'sm' | 'md' | 'lg' | 'xl' = 'md') => parseFloat(token(size === 'md' ? '--motion-offset' : `--motion-offset-${size}`));
+/** A scale a moment moves from or to (`--motion-scale-*`). */
+export const scaleOf = (name: 'enter-sm' | 'enter' | 'enter-lg' | 'press' | 'press-control' | 'morph' | 'recede') =>
+  parseFloat(token(`--motion-scale-${name}`));
+/** How far a page beneath drifts on a push (`--motion-drift`), as a leftward travel. */
+export const drift = (): Travel => `${-parseFloat(token('--motion-drift'))}%`;
+/** How dim a receding page gets in the pronounced tier (`--motion-opacity-recede`). */
+export const recedeOpacity = () => parseFloat(token('--motion-opacity-recede'));
+/** One beat (`--motion-beat`), in ms: how long a follower trails its leader. */
+export const beat = () => tokenMs('--motion-beat');
 
 /** No motion: the change lands in one frame, as most of the product does today. */
 export const cut: Curve = { dur: 0, ease: 'linear' };

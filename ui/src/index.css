@@ -88,7 +88,8 @@
    framer-motion's presets of the same names, drawn as `linear()` with the
    duration each needs to settle; Safari before 17.2 has no `linear()` and gets
    the nearest cubic-bezier instead. Only transform and opacity animate.
-   Offsets and scales are how far a moment travels, not sizes of anything. */
+   Offsets, scales, and opacities are how far a moment travels, not sizes or
+   colors of anything at rest. */
 :root {
   --motion-duration-instant: 100ms;
   --motion-duration-fast: 160ms;
@@ -120,11 +121,29 @@
   --motion-handover-ease: var(--motion-ease-enter);
   --motion-shimmer-duration: 1600ms;
 
+  /* A follower trails its leader by one beat (the working bubble after the
+     message, a card arriving after the list made room). */
+  --motion-beat: 120ms;
+
   --motion-offset-sm: 4px;
   --motion-offset: 8px;
   --motion-offset-lg: 16px;
+  --motion-offset-xl: 32px;
+  /* How far the page beneath drifts the other way as a page is pushed over it. */
+  --motion-drift: 30%;
+  /* The scale something enters from: `sm` for a large surface (a card), `lg`
+     for the pronounced tier. */
+  --motion-scale-enter-sm: 0.98;
   --motion-scale-enter: 0.96;
+  --motion-scale-enter-lg: 0.9;
+  /* Under the finger: a surface (a card, a row) and a control (a button, a chip). */
   --motion-scale-press: 0.97;
+  --motion-scale-press-control: 0.94;
+  /* An icon trading places with another (Send and Stop, a badge leaving). */
+  --motion-scale-morph: 0.6;
+  /* The page behind a sheet or a pushed page in the pronounced tier. */
+  --motion-scale-recede: 0.94;
+  --motion-opacity-recede: 0.6;
 }
 @supports (transition-timing-function: linear(0, 1)) {
   :root {

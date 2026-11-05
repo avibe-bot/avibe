@@ -2,7 +2,7 @@
 // card answers the tap, the conversation slides in over the Inbox, which drifts a little the other way
 // (as a native push does), and Back reverses it. Desktop switches conversations in place, so it does not
 // slide (see the plan). Implemented with same-document View Transitions where the browser has them.
-import { cut, offset, scaleFrom, spring, timed, type Track } from '../../kit/motion';
+import { cut, drift, offset, recedeOpacity, scaleOf, spring, timed, type Track } from '../../kit/motion';
 import { MotionLoop } from '../../kit/MotionLoop';
 import { card, CHAT, inLayer, type Tier } from './fixtures';
 import { ChatAt, InboxAt, Layer, PhoneStage } from './stage';
@@ -19,7 +19,7 @@ function pushTracks(tier: Tier): Track[] {
   const press: Track = {
     el: tapped,
     beats: [
-      { at: TAP_AT, to: { scale: scaleFrom('press') }, curve: timed('instant', 'enter') },
+      { at: TAP_AT, to: { scale: scaleOf('press') }, curve: timed('instant', 'enter') },
       { at: PUSH_AT + 500, to: { scale: 1 }, curve: cut },
     ],
   };
@@ -31,21 +31,31 @@ function pushTracks(tier: Tier): Track[] {
     return [{ el: chat, from: { opacity: 0 }, beats: [{ at: PUSH_AT, to: { opacity: 1 }, curve: fade }, { at: BACK_AT, to: { opacity: 0 }, curve: fade }] }];
   }
   if (tier === 'restrained') {
+    // Fade through: the Inbox leaves before the conversation comes in, so two pages of text never
+    // overlap; the conversation drifts in the last `--motion-offset-lg`.
     const shift = offset('lg');
+    const leave = timed('instant', 'exit');
     return [
       press,
+      {
+        el: inbox,
+        beats: [
+          { at: PUSH_AT, to: { opacity: 0 }, curve: leave },
+          { at: BACK_AT + leave.dur, to: { opacity: 1 }, curve: timed('base', 'enter') },
+        ],
+      },
       {
         el: chat,
         from: { opacity: 0, x: shift },
         beats: [
-          { at: PUSH_AT, to: { opacity: 1, x: 0 }, curve: timed('base', 'enter') },
-          { at: BACK_AT, to: { opacity: 0, x: shift }, curve: timed('fast', 'exit') },
+          { at: PUSH_AT + leave.dur, to: { opacity: 1, x: 0 }, curve: timed('base', 'enter') },
+          { at: BACK_AT, to: { opacity: 0, x: shift }, curve: leave },
         ],
       },
     ];
   }
   const slide = spring('sheet');
-  const drift = tier === 'pronounced' ? { x: '-30%' as const, scale: 0.94, opacity: 0.6 } : { x: '-30%' as const };
+  const away = tier === 'pronounced' ? { x: drift(), scale: scaleOf('recede'), opacity: recedeOpacity() } : { x: drift() };
   return [
     press,
     {
@@ -60,7 +70,7 @@ function pushTracks(tier: Tier): Track[] {
       el: inbox,
       origin: 'center',
       beats: [
-        { at: PUSH_AT, to: drift, curve: slide },
+        { at: PUSH_AT, to: away, curve: slide },
         { at: BACK_AT, to: { x: '0%', scale: 1, opacity: 1 }, curve: slide },
       ],
     },

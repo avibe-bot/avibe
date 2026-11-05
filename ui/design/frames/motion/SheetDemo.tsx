@@ -3,7 +3,7 @@
 // finger, springs back from a short pull, and a long or quick one dismisses it with the finger's speed.
 import { NewSessionSheet } from '@/components/workbench/NewSessionSheet';
 
-import { cut, spring, timed, type Curve, type Track } from '../../kit/motion';
+import { cut, scaleOf, spring, timed, type Curve, type Track } from '../../kit/motion';
 import { MotionLoop } from '../../kit/MotionLoop';
 import { TouchPoint } from '../../kit/TouchPoint';
 import { inLayer, type Tier } from './fixtures';
@@ -19,7 +19,8 @@ const PERIOD = 3600;
 
 function sheetTracks(tier: Tier): Track[] {
   if (tier === 'now' || tier === 'reduced') {
-    // Today: tw-animate's slide with a fade, 300 ms in and 200 ms out on `ease`, the scrim on 150 ms.
+    // Today (`now`): the shipped tw-animate values, copied as they are, 300 ms in and 200 ms out on
+    // `ease`, the scrim on 150 ms; reduced motion: a fade on the tokens.
     const now = tier === 'now';
     const open: Curve = now ? { dur: 300, ease: 'ease' } : timed('fast', 'enter');
     const close: Curve = now ? { dur: 200, ease: 'ease' } : timed('fast', 'exit');
@@ -64,7 +65,7 @@ function sheetTracks(tier: Tier): Track[] {
       el: inLayer('page'),
       origin: 'top center',
       beats: [
-        { at: OPEN_AT, to: { scale: 0.94 }, curve: rise },
+        { at: OPEN_AT, to: { scale: scaleOf('recede') }, curve: rise },
         { at: CLOSE_AT, to: { scale: 1 }, curve: timed('base', 'exit') },
       ],
     });

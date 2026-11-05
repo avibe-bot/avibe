@@ -3,7 +3,7 @@
 // Send. The same motion carries a conversation painted from the local cache when the live answer brings
 // rows it did not have: a row that is new rises in, nothing that was already there moves on its own,
 // and nothing pops.
-import { cut, scaleFrom, spring, timed, type Track } from '../../kit/motion';
+import { cut, scaleOf, spring, timed, type Track } from '../../kit/motion';
 import { MotionLoop } from '../../kit/MotionLoop';
 import {
   COMPOSER,
@@ -39,7 +39,7 @@ function arrivalTracks(shift: number): Track[] {
     { el: before(WORKING), beats: [{ at: ARRIVE_AT, to: { opacity: 0 }, curve: leave }] },
     { el: before(HEADER), beats: [{ at: ARRIVE_AT, to: { opacity: 0 }, curve: cut }] },
     { el: before(`${COMPOSER} ${TYPED}`), beats: [{ at: ARRIVE_AT, to: { opacity: 0 }, curve: leave }] },
-    { el: before(STOP), beats: [{ at: ARRIVE_AT, to: { opacity: 0, scale: 0.6 }, curve: leave }] },
+    { el: before(STOP), beats: [{ at: ARRIVE_AT, to: { opacity: 0, scale: scaleOf('morph') }, curve: leave }] },
     { el: before(COMPOSER), beats: [{ at: ARRIVE_AT + leave.dur + timed('fast', 'enter').dur, to: { opacity: 0 }, curve: cut }] },
     { el: inLayer('replied'), from: { opacity: 0 }, beats: [{ at: ARRIVE_AT, to: { opacity: 1 }, curve: cut }] },
     {
@@ -52,11 +52,11 @@ function arrivalTracks(shift: number): Track[] {
     {
       el: after(row(reply.id)),
       origin: 'top left',
-      from: { opacity: 0, scale: scaleFrom('enter') },
+      from: { opacity: 0, scale: scaleOf('enter') },
       beats: [{ at: ARRIVE_AT, to: { opacity: 1, scale: 1 }, curve: glide, fade: timed('base', 'enter') }],
     },
     { el: after(COMPOSER), from: { opacity: 0 }, beats: [{ at: ARRIVE_AT + leave.dur, to: { opacity: 1 }, curve: timed('fast', 'enter') }] },
-    { el: after(SEND), from: { scale: 0.6 }, beats: [{ at: ARRIVE_AT + leave.dur, to: { scale: 1 }, curve: spring('snappy') }] },
+    { el: after(SEND), from: { scale: scaleOf('morph') }, beats: [{ at: ARRIVE_AT + leave.dur, to: { scale: 1 }, curve: spring('snappy') }] },
   ];
 }
 

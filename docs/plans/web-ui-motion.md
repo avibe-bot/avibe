@@ -121,8 +121,13 @@ curves also exposed as `ease-*` utilities through `@theme inline`.
 | `--motion-ease-move` (`ease-move`) | `cubic-bezier(0.32, 0.72, 0, 1)` | Something on screen moving to a new place (the existing `--settle`) |
 | `--motion-spring-{snappy,smooth,sheet,bouncy}` (`ease-spring-*`) | `linear()` curves | The springs below, for CSS |
 | `--motion-spring-*-duration` | 290 / 440 / 440 / 510 ms | The time each spring needs to settle |
-| `--motion-offset-sm` / `--motion-offset` / `--motion-offset-lg` | 4 / 8 / 16 px | How far a small thing travels as it enters |
-| `--motion-scale-enter` / `--motion-scale-press` | 0.96 / 0.97 | The scale an element enters from; a pressed surface |
+| `--motion-beat` | 120 ms | A follower trails its leader (the working bubble after the message) |
+| `--motion-offset-sm` / `--motion-offset` / `--motion-offset-lg` / `--motion-offset-xl` | 4 / 8 / 16 / 32 px | How far a thing travels as it enters (`xl`: the pronounced tier) |
+| `--motion-drift` | 30% | How far the page beneath drifts the other way on a push |
+| `--motion-scale-enter-sm` / `--motion-scale-enter` / `--motion-scale-enter-lg` | 0.98 / 0.96 / 0.9 | The scale a large surface (a card), an element, or the pronounced tier enters from |
+| `--motion-scale-press` / `--motion-scale-press-control` | 0.97 / 0.94 | A pressed surface (card, row); a pressed control (button, chip) |
+| `--motion-scale-morph` | 0.6 | An icon trading places with another (Send ↔ Stop, a badge leaving) |
+| `--motion-scale-recede` / `--motion-opacity-recede` | 0.94 / 0.6 | The page behind a sheet or a pushed page, pronounced tier only |
 | `--motion-handover-duration` / `--motion-handover-ease` | base / enter | Skeleton or cached view to content (section 6) |
 | `--motion-shimmer-duration` (`animate-skeleton-shimmer`) | 1600 ms | A skeleton's highlight sweep (section 6) |
 
@@ -208,8 +213,8 @@ owns its motion and the tokens that lane already uses by name.
 - **Skeleton when there is nothing.** Blocks the size and radius of the rows
   they stand for (`bg-foreground/[0.06]`), inside the real card's border, so
   the content lands without moving anything.
-- **Shimmer.** One highlight per card (`via-foreground/[0.05]`), not one per
-  block, crossing it with `animate-skeleton-shimmer`: about 60% of each
+- **Shimmer.** One highlight per card at the owner's "light" strength
+  (`via-foreground/[0.03]`, decided 2026-11-05), not one per block, crossing it with `animate-skeleton-shimmer`: about 60% of each
   1600 ms period sweeping (`ease-in-out`, transform only), the rest resting.
   Under reduced motion it is still (`motion-reduce:animate-none`): the blocks
   remain, the sweep does not.
@@ -262,11 +267,11 @@ have restrained and pronounced tiers in the frames (section 9).
 
 - **Trigger**: Send or Enter accepted locally; the row is appended before the
   POST (optimistic send lane).
-- **Motion**: the Send button sinks to 0.92 under the finger (`instant`).
+- **Motion**: the Send button sinks to `--motion-scale-press-control` under the finger (`instant`).
   The transcript, already pinned to its new bottom, glides up off its FLIP
   offset on `spring-smooth`, so the new message emerges from behind the
-  composer's top edge; the message itself grows from 0.96 at its bottom-right
-  corner and rises the last `--motion-offset`, fading in on `fast`. The
+  composer's top edge; the message itself grows from `--motion-scale-enter` at its
+  bottom-right corner and rises the last `--motion-offset`, fading in on `fast`. The
   composer hands over in two beats so the texts never overlap: the typed text
   and Send leave (`instant`, exit), then the empty composer and Stop arrive
   (`fast`, enter).
@@ -285,11 +290,11 @@ have restrained and pronounced tiers in the frames (section 9).
 
 ### M2 · Send ↔ Stop, and the working bubble (P1)
 
-- **Send → Stop**: Send scales to 0.6 and fades (`instant`, exit), then Stop
-  grows from 0.6 on `spring-snappy` while it fades in (`fast`). The queue-send
+- **Send → Stop**: Send scales to `--motion-scale-morph` and fades (`instant`,
+  exit), then Stop grows from it on `spring-snappy` while it fades in (`fast`). The queue-send
   button that appears beside Stop when there is text enters the same way.
   Stop → Send is the mirror.
-- **Working bubble**: enters one beat (120 ms) after the message, rising
+- **Working bubble**: enters one beat (`--motion-beat`) after the message, rising
   `--motion-offset-sm` and fading in on `fast`; it leaves by fading where the
   reply grows over it (M3).
 - **Reduced**: crossfade on `fast`; the dots hold still.
@@ -298,7 +303,7 @@ have restrained and pronounced tiers in the frames (section 9).
 ### M3 · A reply arriving, and streamed rows (P1)
 
 - **Motion**: the working bubble fades out (`instant`) while the reply grows
-  in its place from its top-left corner (0.96, `spring-smooth`, fading on
+  in its place from its top-left corner (`--motion-scale-enter`, `spring-smooth`, fading on
   `base`), and the transcript glides up by what the reply adds. Stop hands back
   to Send (M2). Interim rows and activity rows enter the same way, one glide
   per 100 ms at most; a row that grows while it streams is not animated (its
@@ -315,8 +320,8 @@ Inbox: M7's move. Frames: `motion/arrival/*`, `motion/inbox/*`.
 
 - **Phone, hierarchy** (Inbox, Projects, Search → a conversation): the tapped
   card sinks to `--motion-scale-press`; the conversation slides in from the
-  right edge on `spring-sheet` while the page beneath drifts 30% the other
-  way, as a native push does; Back reverses it. Built on same-document View
+  right edge on `spring-sheet` while the page beneath drifts `--motion-drift` the
+  other way, as a native push does; Back reverses it. Built on same-document View
   Transitions (`document.startViewTransition`, Safari 18 and Chrome 111+),
   named per page; where they are missing (iOS 17), navigation stays a cut
   rather than a JavaScript slide.
@@ -344,10 +349,10 @@ Inbox: M7's move. Frames: `motion/arrival/*`, `motion/inbox/*`.
   resistance above its resting place; on release it dismisses when pulled past
   30% of its height or moving down faster than 500 px/s, carrying the finger's
   speed out, and otherwise springs back on `spring-snappy`.
-- **Desktop popovers and menus**: fade and grow from 0.96 at the trigger
+- **Desktop popovers and menus**: fade and grow from `--motion-scale-enter` at the trigger
   (Radix's `--radix-*-transform-origin`) on `fast`, enter; leave with a fade on
   `fast`, exit. Today's 150 ms zoom moves onto the tokens.
-- **Desktop dialogs**: fade and grow from 0.96 on `base`; the scrim on `fast`.
+- **Desktop dialogs**: fade and grow from `--motion-scale-enter` on `base`; the scrim on `fast`.
 - **Reduced**: fade only, on `fast`.
 - **Frames**: `motion/sheets/phone-{now,restrained,standard,pronounced,reduced}`, `phone-drag`.
 
@@ -356,14 +361,14 @@ Inbox: M7's move. Frames: `motion/arrival/*`, `motion/inbox/*`.
 - **Move to the top** (a new reply): the card leaves its old slot (fades on
   `instant`), the cards above glide down into the room (`spring-smooth`), and
   the card comes in at the top with the new reply, from `--motion-offset`
-  above and 0.98 (`spring-smooth`, fade on `base`). Inbox cards are tinted, not
+  above and `--motion-scale-enter-sm` (`spring-smooth`, fade on `base`). Inbox cards are tinted, not
   opaque, so a card never travels across the others.
 - **Insert** (a new conversation): the rows below glide down; the card comes in
   at its slot as above.
-- **Unread cleared**: the count badge shrinks to 0.6 and fades (`fast`,
+- **Unread cleared**: the count badge shrinks to `--motion-scale-morph` and fades (`fast`,
   exit); the card's mint wash eases to the read style with a `fast` color
   transition (one card).
-- **Archive or removal**: the card fades and shrinks to 0.98 (`fast`, exit),
+- **Archive or removal**: the card fades and shrinks to `--motion-scale-enter-sm` (`fast`, exit),
   then the rows below glide up (`spring-smooth`). Height never animates.
 - **Reduced**: crossfade on `fast`.
 - **Frames**: `motion/inbox/phone-move-{now,restrained,standard,pronounced,reduced}`.
@@ -372,7 +377,8 @@ Inbox: M7's move. Frames: `motion/arrival/*`, `motion/inbox/*`.
 
 - **Every tappable surface** (buttons, cards, rows, tab bar items, chips) gets
   a pressed state on `:active`: cards and rows sink to
-  `--motion-scale-press` and darken a step; buttons and chips sink to 0.96.
+  `--motion-scale-press` and darken a step; buttons and chips sink to
+  `--motion-scale-press-control`.
   Press is `instant`; release is `spring-snappy`. On touch the pressed state
   waits 60 ms inside a scroller so a scroll does not flash it. WebKit's grey
   tap highlight is turned off where a pressed state exists.
@@ -392,13 +398,13 @@ the right edge and vanish on dismissal. Reduced: fade.
 ### M10 · Voice composer (P3, alignment)
 
 The shipped voice design stays (meter, thresholds, reduced-motion bar). The
-hold card enters from 0.96 on `spring-snappy` with its halo fading on `base`,
+hold card enters from `--motion-scale-enter` on `spring-snappy` with its halo fading on `base`,
 the cancel target changes color on `fast`, and its existing literals move to
 the tokens. No new motion.
 
 ### Smaller moments
 
-The jump-to-latest control (fade and 0.9 → 1, `fast`), queue rows (enter like a
+The jump-to-latest control (fade and `--motion-scale-enter-lg` → 1, `fast`), queue rows (enter like a
 message, leave like an archived row), Harness group expansion (content fades in
 on `fast`; no height animation), the search jump highlight (kept), and the
 error banner (fade on `fast`).
@@ -407,7 +413,7 @@ error banner (fade on `fast`).
 
 | Tier | What changes | When to choose |
 | --- | --- | --- |
-| Restrained | Fades and short travel (≤ 16 px) on the `ease-*` curves; no scale, no spring | The UI should feel quieter than iOS |
+| Restrained | Fades and short travel (≤ 16 px) on the `ease-*` curves; no scale, no spring; pages fade through (the old one leaves before the new one arrives) | The UI should feel quieter than iOS |
 | Standard (recommended) | iOS-like: springs without visible overshoot, full-distance pushes and sheets, small scales | Native feel, the default |
 | Pronounced | Longer travel, `spring-bouncy` (2% overshoot), the page behind a sheet steps back, a pushed page dims | The owner wants motion to be noticed |
 
@@ -448,9 +454,13 @@ or `approved`, its reduced-motion test, and the measurements in section 5.
 ## 12. Known by design
 
 - Frames are static; each moment is a looping CSS animation over the shipped
-  page in each state (`ui/design/kit/motion.ts`). The offsets a frame moves by
-  are the row heights the shipped page draws for that data (FLIP measures them
-  at run time), so a frame states them.
+  page in each state (`ui/design/kit/motion.ts`). Every proposed motion value
+  (duration, curve, offset, scale, opacity, beat) is read from the tokens. A
+  frame states three kinds of number that are not motion design: when in its
+  loop a moment happens (and, for `now`, today's POST latency and the shipped
+  tw-animate values), the FLIP offsets (the row heights the shipped page draws
+  for that data, which FLIP measures at run time), and a demo gesture's finger
+  path.
 - The chat frames stack two or three shipped pages; the phone chat is an
   opaque sheet, so a stacked page leaves its sheet background off
   (`seeThrough`) to let the composer cross-fade. Nothing in the product changes

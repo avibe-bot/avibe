@@ -2,7 +2,7 @@
 // its old slot, the cards above it glide down into the room, and it comes in at the top with the new
 // reply. The cards are tinted, not opaque, so one never travels across the others. The same motion
 // carries a cached Inbox when the live list lands in another order (M4). Nothing changes height.
-import { cut, offset, scaleFrom, spring, timed, type Curve, type Track } from '../../kit/motion';
+import { beat, cut, offset, scaleOf, spring, timed, type Curve, type Track } from '../../kit/motion';
 import { MotionLoop } from '../../kit/MotionLoop';
 import { card, CHAT, inLayer, INBOX_FLIP, type Tier } from './fixtures';
 import { InboxAt, Layer, PhoneStage } from './stage';
@@ -10,19 +10,21 @@ import { InboxAt, Layer, PhoneStage } from './stage';
 const MOVE_AT = 900;
 const PERIOD = 3600;
 const RESET = 500;
-/** The list closes up once the card has left its slot. */
-const CLOSE_UP = 80;
 
-/** `enterAfter`: the card comes in at the top once the cards below have mostly made room for it. */
-type Feel = { glide: Curve; enter: Curve; from: { y: number; scale: number }; leaveScale: number; enterAfter: number };
+/** `closeUp`: the list closes up once the card has left its slot (its `instant` fade); `enterAfter`: the
+ *  card comes in at the top a beat after the cards below have made most of the room. */
+type Feel = { glide: Curve; enter: Curve; from: { y: number; scale: number }; leaveScale: number; closeUp: number; enterAfter: number };
 
 function feel(tier: 'restrained' | 'standard' | 'pronounced'): Feel {
-  if (tier === 'restrained') return { glide: timed('slow', 'move'), enter: timed('base', 'enter'), from: { y: 0, scale: 1 }, leaveScale: 1, enterAfter: CLOSE_UP + 200 };
+  const closeUp = timed('instant', 'enter').dur;
+  const enterAfter = closeUp + timed('fast', 'enter').dur + beat() / 2;
+  if (tier === 'restrained') return { glide: timed('slow', 'move'), enter: timed('base', 'enter'), from: { y: 0, scale: 1 }, leaveScale: 1, closeUp, enterAfter };
   if (tier === 'pronounced') {
-    return { glide: spring('bouncy'), enter: spring('bouncy'), from: { y: -offset('lg'), scale: 0.94 }, leaveScale: 0.94, enterAfter: CLOSE_UP + 180 };
+    const grow = scaleOf('enter-lg');
+    return { glide: spring('bouncy'), enter: spring('bouncy'), from: { y: -offset('lg'), scale: grow }, leaveScale: grow, closeUp, enterAfter };
   }
-  const grow = 1 - (1 - scaleFrom('enter')) / 2;
-  return { glide: spring('smooth'), enter: spring('smooth'), from: { y: -offset('md'), scale: grow }, leaveScale: grow, enterAfter: CLOSE_UP + 180 };
+  const grow = scaleOf('enter-sm');
+  return { glide: spring('smooth'), enter: spring('smooth'), from: { y: -offset('md'), scale: grow }, leaveScale: grow, closeUp, enterAfter };
 }
 
 function moveTracks(f: Feel): Track[] {
@@ -54,7 +56,7 @@ function moveTracks(f: Feel): Track[] {
       beats: [
         // FLIP: each card takes the offset back to its old slot only as the list changes.
         { at: MOVE_AT - 1, to: { y: from }, curve: cut },
-        { at: MOVE_AT + CLOSE_UP, to: { y: 0 }, curve: f.glide },
+        { at: MOVE_AT + f.closeUp, to: { y: 0 }, curve: f.glide },
       ],
     });
   }

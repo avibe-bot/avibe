@@ -3,7 +3,7 @@
 // working bubble fades in under it. If the send fails, the message is withdrawn the way it came and the
 // text is back in the composer. Each tier is the same conversation at the same size; `now` is what the
 // product does today (the turn starts at once, the message lands when the POST answers).
-import { cut, offset, scaleFrom, spring, timed, type Curve, type Track } from '../../kit/motion';
+import { beat, cut, offset, scaleOf, spring, timed, type Curve, type Track } from '../../kit/motion';
 import { MotionLoop } from '../../kit/MotionLoop';
 import {
   COMPOSER,
@@ -49,30 +49,33 @@ type Feel = {
 };
 
 function feel(tier: Exclude<Tier, 'now' | 'reduced'>): Feel {
+  // Press and the Send/Stop trade are controls: the same in every tier that has them.
+  const press = scaleOf('press-control');
+  const morph = scaleOf('morph');
   if (tier === 'restrained') {
-    return { glide: timed('base', 'enter'), rise: 0, grow: 1, fade: timed('fast', 'enter'), dotsAfter: 120, dotsRise: 0, morph: 1, press: 1 };
+    return { glide: timed('base', 'enter'), rise: 0, grow: 1, fade: timed('fast', 'enter'), dotsAfter: beat(), dotsRise: 0, morph: 1, press: 1 };
   }
   if (tier === 'pronounced') {
     return {
       glide: spring('bouncy'),
-      rise: offset('lg') * 2,
-      grow: 0.9,
+      rise: offset('xl'),
+      grow: scaleOf('enter-lg'),
       fade: timed('base', 'enter'),
-      dotsAfter: 160,
+      dotsAfter: beat(),
       dotsRise: offset('md'),
-      morph: 0.4,
-      press: 0.88,
+      morph,
+      press,
     };
   }
   return {
     glide: spring('smooth'),
     rise: offset('md'),
-    grow: scaleFrom('enter'),
+    grow: scaleOf('enter'),
     fade: timed('fast', 'enter'),
-    dotsAfter: 120,
+    dotsAfter: beat(),
     dotsRise: offset('sm'),
-    morph: 0.6,
-    press: 0.92,
+    morph,
+    press,
   };
 }
 
