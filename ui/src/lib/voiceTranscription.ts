@@ -817,7 +817,9 @@ export const finalizeVoiceDictation = async (
     if (!result.text.trim()) throw new VoiceTranscriptionError('empty');
     return result;
   } catch (error) {
-    if (error instanceof VoiceTranscriptionError && error.status === 422) {
+    // Receipts the server refused, or ones that joined into nothing: a retry recognizes the
+    // retained audio again instead of finalizing the same receipts.
+    if (error instanceof VoiceTranscriptionError && (error.status === 422 || error.code === 'empty')) {
       for (const segment of prior) segment.receipt = undefined;
     }
     finalSegment.error = error;

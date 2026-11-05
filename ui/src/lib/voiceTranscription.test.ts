@@ -750,6 +750,28 @@ describe('voice transcription', () => {
   });
 
   describe('a take is never dropped for one failed request', () => {
+    it('recognizes the retained audio again after the take came back empty, even at a segment boundary', async () => {
+      let final = 0;
+      const cloudFetch = vi.fn(async (_path: string, init?: AvibeFetchRequestInit) => {
+        const form = formOf(init);
+        if (form.get('final') === 'false') return Response.json({ receipt: `fresh-${form.get('sequence')}`, sequence: Number(form.get('sequence')) });
+        final += 1;
+        return final === 1
+          ? Response.json({ text: '', cleanup: 'fallback' })
+          : Response.json({ text: 'heard this time', cleanup: 'success' });
+      });
+      const segments: VoiceTranscriptionSegment[] = [
+        { blob: audioBlob(), sequence: 0, final: false, receipt: 'empty-receipt' },
+        { blob: null, sequence: 1, final: true },
+      ];
+      const input = { dictationId: 'dictation-empty', before: '', after: '' };
+
+      await expect(finalizeVoiceDictation(segments, input, { cloudFetch, retryDelaysMs: [] })).rejects.toMatchObject({ code: 'empty' });
+      expect(segments[0]?.receipt).toBeUndefined();
+      await expect(finalizeVoiceDictation(segments, input, { cloudFetch, retryDelaysMs: [] })).resolves.toEqual({ text: 'heard this time', cleanup: 'success' });
+      expect(segments[0]?.receipt).toBe('fresh-0');
+    });
+
     it('starts no new attempt for a failed segment after the window of the take, but still sends one never tried', async () => {
       const cloudFetch = vi.fn(async () => Response.json({ receipt: 'receipt-2', sequence: 2 }));
       const segments: VoiceTranscriptionSegment[] = [

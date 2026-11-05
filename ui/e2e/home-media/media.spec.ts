@@ -168,13 +168,14 @@ for (const width of [320, 375, 390, 1366, 1600]) {
 test('voice failure retains the recording for explicit retry while preserving the surrounding draft', async ({ page }) => {
   await open(page);
   await input(page).fill('上下文：');
-  await page.evaluate(() => { window.homeMedia.asrFailures = 1; });
+  // Every automatic attempt fails (one and two retries), so the take is left for the user.
+  await page.evaluate(() => { window.homeMedia.asrFailures = 3; });
   await input(page).focus();
   await page.keyboard.press('Alt+z');
   await expect(page.getByRole('button', { name: en.chat.compose.stopRecording, exact: true })).toBeVisible();
   await expect.poll(async () => page.locator('span').filter({ hasText: /^0:01$/ }).count()).toBeGreaterThan(0);
   await page.keyboard.press('Alt+z');
-  await expect(page.getByRole('button', { name: en.chat.compose.voiceRetry, exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: en.chat.compose.voiceRetry, exact: true })).toBeVisible({ timeout: 15_000 });
   await expect(input(page)).toHaveValue('上下文：');
   expect(await writes(page, '/api/sessions')).toEqual([]);
   await page.getByRole('button', { name: en.chat.compose.voiceRetry, exact: true }).click();
