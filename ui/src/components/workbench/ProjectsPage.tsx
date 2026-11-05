@@ -9,7 +9,6 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
-  Loader2,
   Pencil,
   Plus,
   RotateCw,
@@ -55,6 +54,8 @@ import { useSessionActions } from './useSessionActions';
 import { SessionPinIndicator } from './SessionPinIndicator';
 import { SESSION_STATUS_DOT_MOTION_CLASS } from './sessionRowLayout';
 import { SortableProjectList, type ProjectDragHandle } from './SortableProjectList';
+import { MobileProjectCardsSkeleton, MobileSessionRowsSkeleton, SkeletonHandoverRows } from './listSkeletons';
+import { useSkeletonHandover } from '../ui/skeleton-handover';
 
 // Same status → colour mapping the desktop sidebar draws, and the same pulse
 // while the agent is running; the two surfaces share the motion class so a
@@ -194,7 +195,8 @@ const MobileProjectRow: React.FC<{
           {open ? <FolderOpen className="project-drag-icon size-4 shrink-0 text-cyan-ink" /> : <Folder className="project-drag-icon size-4 shrink-0 text-muted" />}
           <span className="min-w-0 flex-1 truncate text-sm font-semibold">{project.display_name}</span>
           {state.sessions !== null && !state.error && (
-            <Badge variant="secondary" className="font-mono text-[10px]">
+            // No taller than the name's line, so the row keeps its height when the count arrives.
+            <Badge variant="secondary" className="font-mono text-[10px] leading-[14px]">
               {state.sessions.length}
               {state.cursor ? '+' : ''}
             </Badge>
@@ -503,6 +505,9 @@ export const ProjectsPage: React.FC = () => {
   };
 
   const list = projects ?? [];
+  // The list's skeleton, and the fade its cards take where it was.
+  const projectsSkeleton = projects === null && !projectsError;
+  const projectsHandover = useSkeletonHandover(projectsSkeleton);
   // New project sits at the end of the Projects title's row, the same height as the title.
   const newProjectButton = canCreateProject ? (
     <Button
@@ -528,12 +533,7 @@ export const ProjectsPage: React.FC = () => {
 
       {/* The provider often has projects cached already (it's mounted app-wide),
           so this loading flash only shows on a genuine cold start. */}
-      {projects === null && !projectsError && (
-        <div className="flex items-center justify-center gap-2 rounded-xl border border-border bg-surface px-4 py-10 text-sm text-muted">
-          <Loader2 className="size-4 animate-spin" />
-          {t('common.loading')}
-        </div>
-      )}
+      {projectsSkeleton && <MobileProjectCardsSkeleton rows={4} />}
       {/* Also over the last known list painted from the local snapshot: those
           rows are not a load, so a failed one still offers its retry. */}
       {projectsError && (list.length === 0 || !projectsLoaded) && (
@@ -565,7 +565,7 @@ export const ProjectsPage: React.FC = () => {
         const hasHiddenCachedSessions = allSessionRows.length > visibleSessionCount;
         const hasMoreSessions = hasHiddenCachedSessions || !!state.cursor;
         return (
-          <div key={project.id} className="overflow-hidden rounded-xl border border-border bg-surface">
+          <div key={project.id} className={clsx('overflow-hidden rounded-xl border border-border bg-surface', projectsHandover)}>
             <MobileProjectRow
               dragHandle={dragHandle}
               project={project}
@@ -577,12 +577,7 @@ export const ProjectsPage: React.FC = () => {
 
             {open && (
               <div className="flex flex-col gap-0.5 border-t border-border px-2 py-2">
-                {state.loading && allSessionRows.length === 0 && (
-                  <div className="flex items-center justify-center gap-2 px-3 py-3 text-[13px] text-muted">
-                    <Loader2 className="size-3.5 animate-spin" />
-                    {t('common.loading')}
-                  </div>
-                )}
+                {state.loading && allSessionRows.length === 0 && <MobileSessionRowsSkeleton rows={3} />}
                 {state.error && allSessionRows.length === 0 && (
                   <button
                     type="button"
@@ -596,26 +591,28 @@ export const ProjectsPage: React.FC = () => {
                 {state.sessions !== null && allSessionRows.length === 0 && !state.loading && !state.error && (
                   <div className="px-3 py-3 text-center text-[13px] text-muted">{t('projects.noSessions')}</div>
                 )}
-                {sessionRows.map((session) => (
-                  <MobileSessionRow
-                    key={session.id}
-                    projectId={project.id}
-                    session={session}
-                    unread={unreadBySession[session.id] ?? 0}
-                    canChat={capabilities.can_chat && project.capabilities.can_chat}
-                    canManageMetadata={capabilities.can_manage_projects || project.capabilities.can_chat}
-                    onOpen={() => openSession(session.id)}
-                    onLeaveToChat={captureListForChatReturn}
-                  />
-                ))}
-                {hasMoreSessions && (
+                <SkeletonHandoverRows skeleton={state.loading && allSessionRows.length === 0} className="flex flex-col gap-0.5">
+                  {sessionRows.map((session) => (
+                    <MobileSessionRow
+                      key={session.id}
+                      projectId={project.id}
+                      session={session}
+                      unread={unreadBySession[session.id] ?? 0}
+                      canChat={capabilities.can_chat && project.capabilities.can_chat}
+                      canManageMetadata={capabilities.can_manage_projects || project.capabilities.can_chat}
+                      onOpen={() => openSession(session.id)}
+                      onLeaveToChat={captureListForChatReturn}
+                    />
+                  ))}
+                </SkeletonHandoverRows>
+                {hasMoreSessions && state.loadingMore && <MobileSessionRowsSkeleton rows={2} />}
+                {hasMoreSessions && !state.loadingMore && (
                   <button
                     type="button"
                     onClick={() => revealMoreSessions(project.id, state, visibleSessionCount, allSessionRows.length)}
-                    disabled={state.loadingMore}
-                    className="flex items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-[12px] font-medium text-cyan-ink transition hover:bg-cyan/[0.06] disabled:opacity-50"
+                    className="flex items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-[12px] font-medium text-cyan-ink transition hover:bg-cyan/[0.06]"
                   >
-                    {state.loadingMore ? <Loader2 className="size-3.5 animate-spin" /> : <ChevronDown className="size-3.5" />}
+                    <ChevronDown className="size-3.5" />
                     {t('projects.loadMore')}
                   </button>
                 )}

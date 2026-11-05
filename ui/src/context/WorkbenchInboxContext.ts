@@ -7,6 +7,12 @@ import type { UnreadByCategory } from '../lib/notificationPreferences';
 // `WorkbenchInboxProvider.tsx` owns the feed, the SSE subscription and the
 // writes; keeping the handle in its own component-free module lets the provider
 // hot-reload on its own.
+
+/** Where the feed's live read stands for the current window: still owed its first
+ *  answer, answered, or failed with no answer yet (nothing to show but a retry).
+ *  A window dropped for a change of reader starts over at `pending`. */
+export type InboxFeedStatus = 'pending' | 'loaded' | 'failed';
+
 export interface InboxState {
   /** Per-session ("Slack-like") feed: one card per conversation, newest
    *  activity first. Driven by realtime ``inbox.session.updated`` upserts. */
@@ -29,6 +35,8 @@ export interface InboxState {
   badgeTotal: number;
   /** Keyset cursor for "load more"; null when the feed is fully loaded. */
   nextCursor: string | null;
+  /** The feed's live read for this window; see `InboxFeedStatus`. */
+  feedStatus: InboxFeedStatus;
   loading: boolean;
   loadingMore: boolean;
   refresh: () => Promise<void>;

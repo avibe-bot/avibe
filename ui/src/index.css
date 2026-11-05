@@ -76,6 +76,8 @@
    max-w-[1080px]; a design anchored to the composer reads it from here). */
 :root {
   --chat-column-w: 1080px;
+  /* A message's width in that column (ChatPage spells it max-w-[min(92%,860px)]). */
+  --chat-message-max-w: min(92%, 860px);
 }
 
 /* Motion (docs/plans/web-ui-motion.md §4; ui/design: motion/tokens/sheet). A
@@ -1358,4 +1360,21 @@ pre,
 /* The strip scrolls sideways once it overflows; its right edge fades out. */
 .bot-strip-scroller.bot-strip-fade {
   mask-image: linear-gradient(to right, transparent, #000 12px, #000 calc(100% - 28px), transparent);
+}
+
+/* Loading without a spinner (ui/design: system/skeleton/*). A list that knows
+   nothing yet draws skeleton blocks the size of its rows; the `skeleton-shimmer`
+   highlight and the `handover` fade are the motion tokens above. What is this
+   surface's own: a skeleton waits `--skeleton-reveal-delay` before it shows, so a
+   read that answers sooner never flashes one; its space is held all the while.
+   Under reduced motion it neither fades in nor sweeps. */
+:root {
+  --skeleton-reveal-delay: 120ms;
+}
+@theme {
+  --animate-skeleton-reveal: skeleton-reveal var(--motion-handover-duration) var(--motion-handover-ease) var(--skeleton-reveal-delay) both;
+  @keyframes skeleton-reveal {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
 }

@@ -17,9 +17,21 @@ export interface WorkbenchFixtures {
   /** The service status the shell polls (`GET /status`), as the Status provider serves it. */
   status?: RuntimeStatus;
   projects?: WorkbenchProject[];
+  /** The project list has not arrived yet (the tree's `projects` is null). */
+  projectsLoading?: boolean;
   sessionsByProject?: Record<string, WorkbenchSession[]>;
   expandedProjects?: string[];
+  /** Expanded projects whose first page of Sessions is still being read. */
+  sessionsLoading?: string[];
+  /** Projects with more Sessions past the loaded ones (a Load more control). */
+  moreSessions?: string[];
+  /** Projects whose next page of Sessions is being read (Load more pressed). */
+  sessionsLoadingMore?: string[];
   inboxSessions?: InboxSession[];
+  /** The Inbox's first page has not arrived yet. */
+  inboxLoading?: boolean;
+  /** The Inbox's first read failed and nothing is cached. */
+  inboxFailed?: boolean;
   unreadBySession?: Record<string, number>;
   /** Inbox states a frame stacks, by name (a moment drawn as the Inbox before and after a change);
    *  `InboxStateProvider` serves one in place of `inboxSessions` and `unreadBySession`. */

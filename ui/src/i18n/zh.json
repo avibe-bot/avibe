@@ -3640,6 +3640,7 @@
       "emptyTitle": "收件箱是空的",
       "emptyBody": "当 Agent 从某个会话回过来,就会显示在这里。",
       "allClearTitle": "全部看完了",
+      "loadError": "收件箱加载失败。",
       "allClearBody": "当前没有未读的 Agent 消息。切到\"全部\"可以浏览历史。",
       "backToCanvas": "回到画布",
       "agent": "Agent",

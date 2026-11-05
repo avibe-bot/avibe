@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { ArrowRight, CheckCheck, ChevronDown, Filter, Inbox, Loader2, MessageSquareReply, RefreshCw, Search } from 'lucide-react';
+import { ArrowRight, CheckCheck, ChevronDown, Filter, Inbox, MessageSquareReply, RefreshCw, Search } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
@@ -20,6 +20,9 @@ import { InboxSectionHeader } from './InboxSectionHeader';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { useInboxScrollRestoration } from './useInboxScrollRestoration';
 import { useChatPrefetch } from './useChatPrefetch';
+import { InboxCardsSkeleton } from './listSkeletons';
+import { Skeleton } from '../ui/skeleton';
+import { useSkeletonHandover } from '../ui/skeleton-handover';
 import { BotAvatar } from '../ui/bot-avatar';
 import { BotTag } from './bots/BotTag';
 import {
@@ -52,10 +55,18 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
     nextCursor,
     loading,
     loadingMore,
+    feedStatus,
     refresh,
     loadMore,
     markRead,
   } = useWorkbenchInbox();
+  // Refresh spins only for the refresh the reader asked for: the first load and the
+  // feed's own revalidations are not an action they are waiting on.
+  const [refreshing, setRefreshing] = useState(false);
+  const onRefresh = () => {
+    setRefreshing(true);
+    void refresh().finally(() => setRefreshing(false));
+  };
   // Warm the conversations the reader is most likely to open next.
   useChatPrefetch(inboxSessions, !loading);
   // Remember the tab across visits instead of always snapping back to Unread.
@@ -268,7 +279,16 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
   // (unreadSessions is pagination-independent) — otherwise unread sessions on a
   // later page would be hidden behind a false "all caught up". On All it means
   // there are simply no more pages.
-  const showEmpty = visible.length === 0 && (filter === 'unread' ? unreadSessions === 0 : !hasMore);
+  // Nothing known yet: no rows (from the server or the local snapshot) and the
+  // feed's first answer still owed. Skeleton cards, not an empty state that the
+  // first page would then replace.
+  const showSkeleton = inboxSessions.length === 0 && feedStatus === 'pending';
+  // The read failed with nothing to show: say so and offer a retry, not a skeleton
+  // that never ends or an "all caught up" that nobody said.
+  const showFailed = inboxSessions.length === 0 && feedStatus === 'failed';
+  const cardsHandover = useSkeletonHandover(showSkeleton);
+  const showEmpty =
+    !showSkeleton && !showFailed && visible.length === 0 && (filter === 'unread' ? unreadSessions === 0 : !hasMore);
 
   return (
     <div ref={listRef} className="mx-auto flex w-full max-w-4xl flex-col gap-6 pb-2 md:pt-2">
@@ -281,23 +301,32 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
         {/* No eyebrow: it only repeated the title. */}
         <div className="flex flex-1 flex-col">
           <h1 className="text-2xl font-bold text-foreground">{t('workbench.inbox.title')}</h1>
-          <p className="text-[13px] text-muted">
-            {t('workbench.inbox.headerCount', { unread: unreadSessions, total: inboxSessions.length })}
-          </p>
+          {/* Counts that are not known yet are not zero. */}
+          {showSkeleton ? (
+            <span className="flex h-[1lh] items-center text-[13px]">
+              <Skeleton className="h-2 w-28" />
+            </span>
+          ) : showFailed ? (
+            <span className="h-[1lh] text-[13px]" />
+          ) : (
+            <p className="text-[13px] text-muted">
+              {t('workbench.inbox.headerCount', { unread: unreadSessions, total: inboxSessions.length })}
+            </p>
+          )}
         </div>
         <div className="flex w-full justify-end sm:w-auto">
           <button
             type="button"
-            onClick={() => refresh()}
+            onClick={onRefresh}
             disabled={loading}
             className={clsx(
               'flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-[12px] font-medium transition',
-              loading
+              refreshing
                 ? 'cursor-wait border-border bg-foreground/[0.02] text-muted'
                 : 'border-border-strong text-foreground hover:bg-foreground/[0.04]',
             )}
           >
-            <RefreshCw className={clsx('size-3.5', loading && 'animate-spin')} />
+            <RefreshCw className={clsx('size-3.5', refreshing && 'animate-spin')} />
             {t('workbench.inbox.refresh')}
           </button>
         </div>
@@ -381,19 +410,32 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
             type="button"
             variant="ghost"
             size="icon"
-            onClick={() => refresh()}
+            onClick={onRefresh}
             disabled={loading}
             aria-label={t('workbench.inbox.refresh')}
             title={t('workbench.inbox.refresh')}
             className="ml-auto size-8 text-muted hover:text-foreground md:hidden"
           >
-            <RefreshCw className={clsx('size-4', loading && 'animate-spin')} />
+            <RefreshCw className={clsx('size-4', refreshing && 'animate-spin')} />
           </Button>
         </div>
       </div>
 
       {/* Empty state */}
-      {showEmpty ? (
+      {showSkeleton ? (
+        <InboxCardsSkeleton rows={3} sections={hasBots} />
+      ) : showFailed ? (
+        <div
+          role="alert"
+          className="flex flex-col items-center gap-3 rounded-2xl border border-dashed border-border bg-surface px-6 py-16 text-center"
+        >
+          <div className="text-[13px] text-muted">{t('workbench.inbox.loadError')}</div>
+          <Button type="button" variant="outline" size="sm" onClick={onRefresh} disabled={loading}>
+            <RefreshCw className={clsx('size-3.5', refreshing && 'animate-spin')} />
+            {t('common.retry')}
+          </Button>
+        </div>
+      ) : showEmpty ? (
         <div className="flex flex-col items-center gap-3 rounded-2xl border border-dashed border-border bg-surface px-6 py-16 text-center">
           <CheckCheck className="size-8 text-mint-ink" />
           <div className="text-[15px] font-semibold text-foreground">
@@ -404,7 +446,7 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
           </div>
         </div>
       ) : (
-        <div className="flex flex-col gap-3">
+        <div className={clsx('flex flex-col gap-3', cardsHandover)}>
           {/* Unread tab, current pages hold no unread but more exist further
               down — prompt to load instead of rendering nothing. */}
           {visible.length === 0 && (
@@ -450,19 +492,13 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
               re-derives ``visible``. Shown on both tabs (and even when the
               Unread tab's current page is empty) so unread sessions deeper in
               history stay reachable. */}
-          {hasMore && (
+          {hasMore && loadingMore && <InboxCardsSkeleton rows={1} />}
+          {hasMore && !loadingMore && (
             <button
               type="button"
               onClick={() => loadMore()}
-              disabled={loadingMore}
-              className={clsx(
-                'flex items-center justify-center gap-1.5 self-center rounded-md border px-4 py-2 text-[12px] font-medium transition',
-                loadingMore
-                  ? 'cursor-wait border-border bg-foreground/[0.02] text-muted'
-                  : 'border-border-strong text-foreground hover:bg-foreground/[0.04]',
-              )}
+              className="flex items-center justify-center gap-1.5 self-center rounded-md border border-border-strong px-4 py-2 text-[12px] font-medium text-foreground transition hover:bg-foreground/[0.04]"
             >
-              {loadingMore && <Loader2 className="size-3.5 animate-spin" />}
               {t('workbench.inbox.loadMore')}
             </button>
           )}

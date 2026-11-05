@@ -3640,6 +3640,7 @@
       "emptyTitle": "Inbox is empty",
       "emptyBody": "When an agent posts back from a session, it shows up here.",
       "allClearTitle": "All caught up",
+      "loadError": "Couldn't load the Inbox.",
       "allClearBody": "No unread agent messages right now. Switch to \"All\" to browse history.",
       "backToCanvas": "Back to canvas",
       "agent": "Agent",

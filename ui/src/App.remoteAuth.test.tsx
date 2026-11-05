@@ -117,6 +117,9 @@ describe('AuthGuard boot from the last confirmed outcome', () => {
     mountGuard();
     expect(screen.queryByText('protected shell')).toBeNull();
     expect(screen.getByText('common.loading')).toBeTruthy();
+    // The wait draws the shell's outline with the brand (ui/design: system/boot/*), not a spinner.
+    expect(screen.getAllByText('appShell.title').length).toBeGreaterThan(0);
+    expect(document.querySelector('.animate-spin')).toBeNull();
   });
 
   it('AUTH-SETUP-141 keeps the gate a revocation put up when the check started before it answers ready', async () => {
