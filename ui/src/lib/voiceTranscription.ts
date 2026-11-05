@@ -603,6 +603,15 @@ const transcribeVoiceSegment = async (
   if (segment.final || !segment.blob) return;
   const blob = segment.blob;
   const { transcribe, ...transcriptionDependencies } = dependencies;
+  // Sending a segment that already failed again is a retry: none starts after the take's
+  // window, however long the requests before it took. A segment never sent still gets its turn.
+  if (
+    segment.error !== undefined
+    && transcriptionDependencies.retryUntil !== undefined
+    && Date.now() >= transcriptionDependencies.retryUntil
+  ) {
+    return;
+  }
   segment.error = undefined;
   try {
     await withVoiceRetries(transcriptionDependencies, async () => {

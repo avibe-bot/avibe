@@ -750,6 +750,26 @@ describe('voice transcription', () => {
   });
 
   describe('a take is never dropped for one failed request', () => {
+    it('starts no new attempt for a failed segment after the window of the take, but still sends one never tried', async () => {
+      const cloudFetch = vi.fn(async () => Response.json({ receipt: 'receipt-2', sequence: 2 }));
+      const segments: VoiceTranscriptionSegment[] = [
+        { blob: audioBlob(), sequence: 0, final: false, receipt: 'receipt-0' },
+        { blob: audioBlob(), sequence: 1, final: false, error: new VoiceTranscriptionError('unavailable') },
+        { blob: audioBlob(), sequence: 2, final: false },
+        { blob: null, sequence: 3, final: true },
+      ];
+
+      await expect(finalizeVoiceDictation(segments, {
+        dictationId: 'dictation-window',
+        before: '',
+        after: '',
+      }, { cloudFetch, retryUntil: Date.now() - 1 })).rejects.toMatchObject({ code: 'unavailable' });
+
+      expect(cloudFetch).toHaveBeenCalledOnce();
+      expect(formOf(cloudFetch.mock.calls[0]?.[1] as AvibeFetchRequestInit | undefined).get('sequence')).toBe('2');
+      expect(segments[2]?.receipt).toBe('receipt-2');
+    });
+
     const minuteOfAudio = () => new Blob([new Uint8Array(1_920_044)], { type: 'audio/wav' });
 
     it('sends a segment through the local relay when the cloud request never got an answer', async () => {
