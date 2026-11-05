@@ -70,7 +70,7 @@ export const SessionActionsTrigger = React.forwardRef<HTMLButtonElement, Session
       aria-label={label}
       title={label}
       className={clsx(
-        'shrink-0 text-muted transition hover:text-foreground',
+        'shrink-0 text-muted hover:text-foreground',
         variant === 'row'
           ? [
               SESSION_ROW_ACTION_BUTTON_CLASS,

@@ -14,6 +14,6 @@ export default defineConfig({
   projects: [
     { name: 'desktop', use: { ...devices['Desktop Chrome'] } },
     { name: 'mobile', use: { ...devices['iPhone 13'], browserName: 'chromium' } },
-    { name: 'mobile-webkit', testMatch: 'search-focus.spec.ts', use: { ...devices['iPhone 13'] } },
+    { name: 'mobile-webkit', testMatch: ['search-focus.spec.ts', 'motion.spec.ts'], use: { ...devices['iPhone 13'] } },
   ],
 });

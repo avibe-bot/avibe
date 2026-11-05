@@ -148,8 +148,9 @@ export const ChatImage: React.FC<{
         // Overlay badge on the image corner: smaller than a standard icon button,
         // dark translucent, revealed on hover. Inline color/decoration override
         // because this <a> can render inside ``.vr-markdown`` whose ``a`` rule
-        // would otherwise tint it cyan + underline.
-        className="absolute right-2 top-2 size-7 rounded-md bg-black/55 text-white opacity-0 backdrop-blur-sm transition hover:bg-black/70 hover:text-white group-hover:opacity-100"
+        // would otherwise tint it cyan + underline. It blurs what is behind it, so it does not
+        // scale under the finger (docs/plans/web-ui-motion.md §5); its fill still steps.
+        className="absolute right-2 top-2 size-7 rounded-md bg-black/55 text-white opacity-0 backdrop-blur-sm [--press-scale:1] hover:bg-black/70 hover:text-white active:bg-black/70 group-hover:opacity-100"
       >
         <a
           href={mediaDownloadHref(src)}

@@ -135,6 +135,9 @@
   /* Under the finger: a surface (a card, a row) and a control (a button, a chip). */
   --motion-scale-press: 0.97;
   --motion-scale-press-control: 0.94;
+  /* How long a touch rests on a surface before it shows pressed, so a scroll
+     that starts on a row or a card does not flash it. */
+  --motion-press-delay: 60ms;
   /* An icon trading places with another (Send and Stop, a badge leaving). */
   --motion-scale-morph: 0.6;
 }
@@ -962,6 +965,52 @@ pre,
 .animate-appwindow-in { animation: appwindow-in 140ms ease-out; }
 .animate-appwindow-out { animation: appwindow-out 130ms ease-in forwards; }
 
+/* Navigation (docs/plans/web-ui-motion.md M5; src/lib/navigationMotion.ts;
+   ui/design: motion/navigation/*). The router runs a same-document view
+   transition for the navigations that move, and the root's `data-nav-motion`
+   says how: `push`, a conversation sliding in from the right edge while the
+   page beneath drifts `--motion-drift` the other way, and `pop`, the reverse,
+   both on the sheet spring; `fade`, a cross-fade on `fast`; or `none`, when the
+   system already animated the step (an edge swipe). Only the two snapshots of
+   the page move, by transform or opacity; the group around them does not
+   animate, since the page keeps its size. */
+:root[data-nav-motion]::view-transition-group(root) {
+  animation: none;
+}
+:root[data-nav-motion="push"]::view-transition-old(root),
+:root[data-nav-motion="push"]::view-transition-new(root),
+:root[data-nav-motion="pop"]::view-transition-old(root),
+:root[data-nav-motion="pop"]::view-transition-new(root) {
+  /* Opaque pages sliding over each other, not two images summed. */
+  mix-blend-mode: normal;
+  animation-duration: var(--motion-spring-sheet-duration);
+  animation-timing-function: var(--motion-spring-sheet);
+  animation-fill-mode: both;
+}
+:root[data-nav-motion="push"]::view-transition-old(root) { animation-name: motion-nav-recede; }
+:root[data-nav-motion="push"]::view-transition-new(root) { animation-name: motion-nav-arrive; }
+/* Going back, the page that leaves is the one on top. */
+:root[data-nav-motion="pop"]::view-transition-old(root) { animation-name: motion-nav-depart; z-index: 1; }
+:root[data-nav-motion="pop"]::view-transition-new(root) { animation-name: motion-nav-return; }
+:root[data-nav-motion="fade"]::view-transition-old(root),
+:root[data-nav-motion="fade"]::view-transition-new(root) {
+  animation-duration: var(--motion-duration-fast);
+  animation-timing-function: var(--motion-ease-move);
+  animation-fill-mode: both;
+}
+:root[data-nav-motion="fade"]::view-transition-old(root) { animation-name: motion-fade-out; }
+:root[data-nav-motion="fade"]::view-transition-new(root) { animation-name: motion-fade-in; }
+:root[data-nav-motion="none"]::view-transition-old(root),
+:root[data-nav-motion="none"]::view-transition-new(root) {
+  animation: none;
+}
+@keyframes motion-nav-arrive { from { transform: translateX(100%); } }
+@keyframes motion-nav-recede { to { transform: translateX(calc(-1 * var(--motion-drift))); } }
+@keyframes motion-nav-depart { to { transform: translateX(100%); } }
+@keyframes motion-nav-return { from { transform: translateX(calc(-1 * var(--motion-drift))); } }
+@keyframes motion-fade-in { from { opacity: 0; } }
+@keyframes motion-fade-out { to { opacity: 0; } }
+
 /* Chat compose "thinking" indicator — three dots fading in sequence while we
    wait for the agent's first streamed chunk (workbench ChatPage). */
 @keyframes vr-typing {
@@ -1376,5 +1425,57 @@ pre,
   @keyframes skeleton-reveal {
     from { opacity: 0; }
     to { opacity: 1; }
+  }
+}
+
+/* Press feedback (docs/plans/web-ui-motion.md M8; ui/design: motion/press/*).
+   Under the finger a control (a button, a chip, a tab) sinks to
+   `--motion-scale-press-control`, and a surface (a row, a card; add
+   `press-surface`) to `--motion-scale-press`. The element's own `active:` fill,
+   the one it hovers to, is the colour step. Press lands on `instant`, release
+   springs back on `spring-snappy`, and colours follow on `fast`. `press` is the
+   element's transition (the colour transitions Tailwind's `transition` carried,
+   plus the press), and WebKit's grey tap flash goes where it answers instead.
+   Reduced motion keeps the colour step and drops the scale. On a touch screen a
+   surface waits `--motion-press-delay` before it shows pressed, so a scroll that
+   starts on it does not flash it. The press scale does not inherit, so a
+   control inside a pressed card still sinks as a control. */
+@property --press-scale {
+  syntax: "*";
+  inherits: false;
+}
+@property --press-delay {
+  syntax: "*";
+  inherits: false;
+}
+@utility press {
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    color var(--motion-duration-fast) var(--motion-ease-move),
+    background-color var(--motion-duration-fast) var(--motion-ease-move),
+    border-color var(--motion-duration-fast) var(--motion-ease-move),
+    outline-color var(--motion-duration-fast) var(--motion-ease-move),
+    text-decoration-color var(--motion-duration-fast) var(--motion-ease-move),
+    fill var(--motion-duration-fast) var(--motion-ease-move),
+    stroke var(--motion-duration-fast) var(--motion-ease-move),
+    opacity var(--motion-duration-fast) var(--motion-ease-move),
+    box-shadow var(--motion-duration-fast) var(--motion-ease-move),
+    transform var(--motion-duration-fast) var(--motion-ease-move),
+    translate var(--motion-duration-fast) var(--motion-ease-move),
+    rotate var(--motion-duration-fast) var(--motion-ease-move),
+    scale var(--motion-spring-snappy-duration) var(--motion-spring-snappy);
+  &:active:not(:disabled, [aria-disabled="true"]) {
+    transition-duration: var(--motion-duration-instant);
+    transition-timing-function: var(--motion-ease-enter);
+    transition-delay: var(--press-delay, 0s);
+    @media (prefers-reduced-motion: no-preference) {
+      scale: var(--press-scale, var(--motion-scale-press-control));
+    }
+  }
+}
+@utility press-surface {
+  --press-scale: var(--motion-scale-press);
+  @media (pointer: coarse) {
+    --press-delay: var(--motion-press-delay);
   }
 }

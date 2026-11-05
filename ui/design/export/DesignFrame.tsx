@@ -10,7 +10,7 @@
 // A live frame is an iframe, which the Show Page's annotation overlay cannot reach. While
 // annotation is on, each frame is drawn as its screenshot instead, in the same place and size,
 // so it can be annotated like any image; the image's alt names the frame and theme. A frame whose
-// state takes a hover or click (`interaction`) is always drawn as its screenshot, which shows that
+// state takes a hover, click or press (`interaction`) is always drawn as its screenshot, which shows that
 // state; "单独打开" still opens it live.
 import { useEffect, useRef, useState } from "react"
 
@@ -116,7 +116,7 @@ function Live({ shot, lang, annotating }: { shot: Shot; lang: string; annotating
         )}
       </div>
       <div className="flex gap-3 text-[10px] text-muted-foreground">
-        <span>{shot.theme === "dark" ? "深色" : "浅色"}{annotating ? " · 批注中，显示截图" : shot.interaction ? " · 截图（点击或悬停后的状态）" : ""}</span>
+        <span>{shot.theme === "dark" ? "深色" : "浅色"}{annotating ? " · 批注中，显示截图" : shot.interaction ? " · 截图（点击、悬停或按下时的状态）" : ""}</span>
         <a href={src} target="_blank" rel="noreferrer" className="hover:underline">单独打开</a>
         <a href={image} target="_blank" rel="noreferrer" className="hover:underline">
           截图

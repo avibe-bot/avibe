@@ -470,3 +470,33 @@ send (they change `ChatPage`).
 - Moments that need interaction state the frames cannot hold (toasts, the
   pressed state on every primitive, desktop popovers) are specified here and
   drawn when their phase lands.
+
+## 13. Delivery notes
+
+### Phase 2 (navigation and touch)
+
+- **Where a push happens.** On a phone, a push or pop runs between a
+  conversation and the lists it is opened from: the tab pages (Inbox,
+  Projects, the capability pages), Search, and the home. A conversation and
+  another full-screen surface (a Show Page, an app, Settings) stay a cut, as do
+  tab switches; one conversation replacing another cross-fades on any screen.
+  The decision lives in one place, the router (`src/lib/navigationMotion.ts`),
+  so every caller that opens a conversation gets it.
+- **The tapped card.** An Inbox card is not itself a tap target; its Open
+  button is, and it presses as a control (0.94) before the push.
+- **The system back swipe.** The iOS shell's bridge exposes no gesture
+  capability, and the shell leaves `allowsBackForwardNavigationGestures` at
+  WebKit's default (off). WebKit marks the history step its own swipe animated
+  with `hasUAVisualTransition`, and the router motion adds nothing to such a
+  step, so a shell that turns the swipe on needs no Web change.
+- **A relaunch** that restores the last page (the Home Screen app after iOS
+  evicted it) lands without a push.
+- **Press.** `press` (controls) and `press-surface` (rows and cards) in
+  `src/index.css`, on `Button`, the segmented control, the tab bar, the Inbox
+  card's buttons, Projects rows, and Search results. Other tappable surfaces
+  adopt the same two classes as they are touched. On a touch screen only
+  surfaces wait `--motion-press-delay` before showing pressed; a control
+  answers at once. A control that blurs what is behind it does not scale
+  (`[--press-scale:1]`, section 5).
+- **Deferred to phase 4**: the desktop sidebar's selection moving between
+  conversations (FLIP), since that phase changes the sidebar.
