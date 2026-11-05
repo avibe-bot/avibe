@@ -6,6 +6,19 @@ import type { AgentBackendId, NativeCliBackend, WebOAuthBackend } from '../lib/a
 import { apiFetch, recoverRemoteAuthFromSessionProbe, withApiDeadline } from '../lib/apiFetch';
 import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
 import { clearLocalSnapshots, forgetLocalSnapshots } from '../lib/localSnapshots';
+import {
+  type LocalStorePageRequest,
+  type LocalStoreTicket,
+  beginLocalStoreRead,
+  forgetLocalStoreSession,
+  applyLocalStoreSessionActivity,
+  noteLocalStoreStreamGap,
+  noteLocalStoreStreamState,
+  recordLocalStorePage,
+  recordLocalStoreSession,
+  recordLocalStoreStreamRow,
+  wipeLocalStore,
+} from '../lib/localStore';
 import { blockBootSessionRecording, settleSignOutBootSession } from '../lib/bootSession';
 import { parseBot, parseBotLimit, type AgentBotSummary, type Bot, type BotEmojiAvatarInput, type BotLimit } from '../lib/bots';
 import { parseNotificationPreferences, type InboxCategory, type NotificationPreferences } from '../lib/notificationPreferences';
@@ -2669,7 +2682,13 @@ export const useApi = () => {
 export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { showToast } = useToast();
   const { t } = useTranslation();
-  const readCacheRef = useRef(new Map<string, { expiresAt: number; promise: Promise<any> }>());
+  const readCacheRef = useRef(new Map<string, {
+    expiresAt: number;
+    promise: Promise<any>;
+    startedAt: number;
+    /** The local message store's ticket for this read, taken as it went out. */
+    localStoreTicket?: LocalStoreTicket;
+  }>());
   const configChangedHandlersRef = useRef(new Set<(config: unknown) => void>());
   // Agent Activity is global across chat routes. Keep its writes ordered for the
   // provider lifetime without making unrelated runtime-backed config saves block chat.
@@ -2715,6 +2734,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const convergeSessionArchived = (sessionId: string) => {
     sessionDraftPersistence.clearSession(sessionId);
     void forgetChatSnapshot(sessionId);
+    void forgetLocalStoreSession(sessionId);
     for (const handler of Array.from(sessionArchivedHandlersRef.current)) {
       try {
         handler(sessionId);
@@ -2845,8 +2865,38 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       readCacheRef.current.delete(path);
       throw err;
     });
-    readCacheRef.current.set(path, { expiresAt: now + ttlMs, promise });
+    readCacheRef.current.set(path, { expiresAt: now + ttlMs, promise, startedAt: now });
     return promise;
+  };
+
+  // When the request behind a read of ``path`` went out: a shared cached read
+  // started before the caller asked, and the local message store orders what it
+  // writes by when each answer was read (lib/localStore, P1).
+  // The server refused this reader the session, or it is gone: an answer, unlike
+  // a network failure, so the stored history goes (local-sync-store.md 6.2).
+  const forgetRefusedSession = (sessionId: string, error: unknown) => {
+    if (error instanceof ApiError && (error.status === 403 || error.status === 404)) {
+      void forgetLocalStoreSession(sessionId);
+    }
+  };
+
+  // The local message store's ticket for a read of ``path``. A shared cached
+  // read went out before this caller asked: every caller of it shares the
+  // ticket taken when it went out, so a wipe or forget since then voids its
+  // answer for all of them. A cached read that went out with no ticket (some
+  // other caller made it) has no fences to show, and is not written.
+  const localStoreTicketFor = (sessionId: string, path: string, startedAt: number, cached: boolean): LocalStoreTicket | null => {
+    if (!cached) return beginLocalStoreRead(sessionId, startedAt);
+    const entry = readCacheRef.current.get(path);
+    if (!entry || entry.expiresAt <= Date.now()) return null;
+    if (!entry.localStoreTicket) {
+      // Only the caller that just sent the request may take its ticket. Today
+      // these paths are read through the cache by no other caller; one added
+      // later without a ticket is not written rather than written unfenced.
+      if (entry.startedAt < startedAt) return null;
+      entry.localStoreTicket = beginLocalStoreRead(sessionId, entry.startedAt);
+    }
+    return entry.localStoreTicket;
   };
 
   const clearReadCache = () => {
@@ -2889,12 +2939,16 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const emitLocalSessionActivity = (data: Parameters<NonNullable<WorkbenchEventHandlers['onSessionActivity']>>[0]) => {
     if (data.session_id) clearSessionReadCache(data.session_id);
     forgetChatSnapshotOnActivity(data);
+    applyLocalStoreSessionActivity(data);
     dispatchToWorkbenchHandlers((handlers) => handlers.onSessionActivity?.(data));
   };
 
   const setWorkbenchEventConnectionState = (state: WorkbenchEventConnectionState) => {
     if (eventConnectionStateRef.current === state) return;
     eventConnectionStateRef.current = state;
+    // Every path that loses the stream (an error, a failed heartbeat, a stop, a
+    // controller leg going down) passes here; the local store must know at once.
+    noteLocalStoreStreamState(state === 'connected');
     dispatchToWorkbenchHandlers((handlers) => handlers.onConnectionState?.(state));
   };
 
@@ -3128,6 +3182,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       if (eventConnectionRef.current) {
         getWorkbenchEventReconnectLoop().streamOpened();
+        noteLocalStoreStreamGap();
         dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.());
       }
     });
@@ -3209,6 +3264,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       } else {
         clearReadCacheMatching((path) => path.startsWith('/api/inbox') || path.startsWith('/api/sessions'));
       }
+      void recordLocalStoreStreamRow(envelope.data);
       dispatchToWorkbenchHandlers((handlers) => {
         handlers.onAny?.(envelope);
         handlers.onMessageNew?.(envelope.data);
@@ -3218,6 +3274,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const envelope = parseWorkbenchEnvelope<WorkbenchMessage>(e.data);
       if (!envelope?.data.session_id) return;
       clearSessionReadCache(envelope.data.session_id);
+      void recordLocalStoreStreamRow(envelope.data);
       dispatchToWorkbenchHandlers((handlers) => {
         handlers.onAny?.(envelope);
         handlers.onMessageUpdated?.(envelope.data);
@@ -3232,8 +3289,10 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           sessionDraftPersistence.clearSession(envelope.data.session_id);
         }
         // A Session that leaves the reader's Inbox takes its stored conversation
-        // with it (docs/plans/web-ui-local-cache.md section 4.4).
+        // with it (docs/plans/web-ui-local-cache.md section 4.4), and its history
+        // in the local message store (docs/plans/local-sync-store.md section 6.2).
         forgetChatSnapshotOnActivity(envelope.data);
+        applyLocalStoreSessionActivity(envelope.data);
       } else {
         clearReadCacheMatching((path) => path.startsWith('/api/inbox') || path.startsWith('/api/sessions'));
       }
@@ -3368,6 +3427,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // a new stream's opening report is the leg's state, not a recovery, and
       // treating it as one would charge every connect a duplicate catch-up.
       if (previousLeg === 'disconnected' && envelope.data.connected) {
+        noteLocalStoreStreamGap();
         dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.());
       }
     });
@@ -3450,6 +3510,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // replacement's later `connected` is a second catch-up in exactly the case
     // that already paid for two.
     if (!survivedTheGap) {
+      noteLocalStoreStreamGap();
       dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.());
     }
   };
@@ -4181,10 +4242,25 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     forkSession: (sessionId) =>
       postJson(`/api/sessions/${encodeURIComponent(sessionId)}/fork`, {}),
     getSession: async (sessionId, params) => {
-      const payload = params?.cache === false
-        ? await getJson(`/api/sessions/${encodeURIComponent(sessionId)}`, { handleError: params?.handleError })
-        : await getCachedJson(`/api/sessions/${encodeURIComponent(sessionId)}`, undefined, { handleError: params?.handleError });
-      return sessionRowFromPayload(payload);
+      const path = `/api/sessions/${encodeURIComponent(sessionId)}`;
+      const startedAt = Date.now();
+      // A silent read resolves a refusal's body instead of throwing; its status
+      // still forgets the session, as a thrown refusal does.
+      const read = params?.handleError === false
+        ? apiFetch(path).then((res) => {
+          if (res.status === 403 || res.status === 404) void forgetLocalStoreSession(sessionId);
+          return res.json();
+        })
+        : params?.cache === false
+          ? getJson(path)
+          : getCachedJson(path);
+      const ticket = localStoreTicketFor(sessionId, path, startedAt, params?.handleError !== false && params?.cache !== false);
+      const row = sessionRowFromPayload(await read.catch((error) => {
+        forgetRefusedSession(sessionId, error);
+        throw error;
+      }));
+      if (ticket) void recordLocalStoreSession(ticket, row);
+      return row;
     },
     getMainSession: async () => {
       const res = await apiFetch('/api/sessions/main');
@@ -4219,6 +4295,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getSessionResult: async (sessionId) => {
       const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
       const payload = await res.json().catch(() => null);
+      if (res.status === 403 || res.status === 404) void forgetLocalStoreSession(sessionId);
       if (!(res.ok && payload && typeof payload.id === 'string')) {
         return { status: res.status, session: null };
       }
@@ -4230,8 +4307,13 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     },
     getSessionBootstrap: async (sessionId) => {
       const read = sessionDraftPersistence.beginRead(sessionId);
+      const stored = beginLocalStoreRead(sessionId);
       try {
-        const payload = await getJson(`/api/sessions/${encodeURIComponent(sessionId)}/bootstrap`);
+        const payload = await getJson(`/api/sessions/${encodeURIComponent(sessionId)}/bootstrap`).catch((error) => {
+          forgetRefusedSession(sessionId, error);
+          throw error;
+        });
+        void recordLocalStorePage(stored, { kind: 'tail' }, payload, payload?.session);
         if (payload?.session?.status === 'archived') {
           sessionDraftPersistence.clearSession(sessionId);
           return payload;
@@ -4281,7 +4363,21 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const qs = search.toString();
       const base = `/api/sessions/${encodeURIComponent(sessionId)}/messages`;
       const path = qs ? `${base}?${qs}` : base;
-      return params?.cache === false ? getJson(path) : getCachedJson(path);
+      const startedAt = Date.now();
+      const read = params?.cache === false ? getJson(path) : getCachedJson(path);
+      // The server's own precedence: an anchored window, then the tail, then a
+      // page before a cursor. A page from the oldest end is not written.
+      const kind: LocalStorePageRequest['kind'] | null =
+        params?.aroundId || params?.aroundNativeId || params?.aroundTurnId || params?.aroundRunId
+          ? 'around'
+          : params?.tail ? 'tail' : params?.beforeId ? 'before' : null;
+      if (kind) {
+        const ticket = localStoreTicketFor(sessionId, path, startedAt, params?.cache !== false);
+        read.then((answer) => {
+          if (ticket) void recordLocalStorePage(ticket, { kind }, answer);
+        }, (error) => forgetRefusedSession(sessionId, error));
+      }
+      return read;
     },
     getSessionActivity: (sessionId) =>
       // Uncached: this is also the gap-recovery resync path, so it must reflect
@@ -4769,6 +4865,10 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (session.remote && session.authenticated && session.authorization_state === 'revoked') {
         void forgetLocalSnapshots();
       }
+      // An answer, not a failed read: the session expired. Phase 1 cannot recheck
+      // what this reader may still see once they sign back in, so the stored
+      // history goes (docs/plans/local-sync-store.md decision D7).
+      if (session.remote && !session.authenticated) void wipeLocalStore();
       return session;
     }),
     signOut: async () => {

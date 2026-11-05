@@ -234,6 +234,16 @@ capabilities:
       - tests/test_backend_failure_retry.py
       - ui/src/components/workbench/FailureRetry.test.tsx
       - ui/src/components/workbench/ChatRowOptimisticWrites.test.tsx
+  - id: local_sync
+    name: Local message store, its reader fence, and its wipe rules
+    status: active
+    catalog: tests/scenarios/local_sync/catalog.yaml
+    observations: tests/scenarios/local_sync/observations.yaml
+    scenario_tests:
+      - ui/src/lib/localStore/localStore.test.ts
+      - ui/src/context/ApiContext.localStore.test.tsx
+    unit_or_contract_tests:
+      - ui/src/lib/localStore/ranges.test.ts
   - id: tunnel_quality
     name: remote-access tunnel quality and smooth route recovery
     status: active

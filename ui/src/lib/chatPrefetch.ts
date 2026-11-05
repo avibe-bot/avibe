@@ -24,6 +24,7 @@ import {
   writeChatSnapshot,
 } from './chatSnapshots';
 import { getLocalSnapshotPrincipal } from './localSnapshots';
+import { beginLocalStoreRead, forgetLocalStoreSession, recordLocalStorePage } from './localStore';
 
 /** How many of the most recent Inbox Sessions are considered. */
 export const CHAT_PREFETCH_CANDIDATES = 5;
@@ -174,8 +175,12 @@ async function prefetchOne({ sessionId, refresh }: Queued): Promise<void> {
   const request = beginChatSnapshotRequest(sessionId);
   if (!request.principal) return;
   const writes = chatSnapshotWriteCount(sessionId);
+  const stored = beginLocalStoreRead(sessionId);
   try {
     const bootstrap = await fetchBootstrapForPrefetch(sessionId);
+    // The message store takes every bootstrap it is handed, whatever happens to
+    // the snapshot below: P1 keeps a newer copy the open chat wrote.
+    void recordLocalStorePage(stored, { kind: 'tail' }, bootstrap, bootstrap.session);
     // The reader may have opened the chat meanwhile; its own record is newer.
     // A refresh replaces a stored record, so it asks whether one was written
     // while it was out rather than whether one exists.
@@ -184,6 +189,6 @@ async function prefetchOne({ sessionId, refresh }: Queued): Promise<void> {
     if (owner) await writeChatSnapshot(owner, chatSnapshotFromBootstrap(bootstrap), { added: true });
   } catch (error) {
     const status = errorStatus(error);
-    if (status === 403 || status === 404) await forgetChatSnapshot(sessionId);
+    if (status === 403 || status === 404) await Promise.all([forgetChatSnapshot(sessionId), forgetLocalStoreSession(sessionId)]);
   }
 }

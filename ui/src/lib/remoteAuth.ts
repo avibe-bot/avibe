@@ -1,11 +1,14 @@
 import { clearLocalSnapshots, forgetLocalSnapshots } from './localSnapshots';
 import { forgetBootSession } from './bootSession';
+import { wipeLocalStore } from './localStore';
 import { isNativeShell } from './native';
 import { isIosDevice, isStandalonePwa } from './platform';
 
 export const REMOTE_AUTH_REQUIRED_EVENT = 'avibe.remote-auth-required';
 export const REMOTE_AUTH_STATE_EVENT = 'avibe.remote-auth-state';
 const REMOTE_LOGIN_PATH = '/auth/login';
+/** The longest a login redirect waits for the local message store's wipe. */
+const LOGIN_WIPE_WAIT_MS = 1500;
 const SETUP_CHECK_BYPASS_PATHS = new Set([
   '/settings/diagnostics',
   '/settings/diagnostics/logs',
@@ -153,9 +156,16 @@ export function reportRemoteAuthorizationState(state: RemoteAuthorizationState):
   // outcome the server has just contradicted.
   if (state === 'login_required' || state === 'revoked') forgetBootSession();
   if (state === 'login_required') {
+    // The reader's session ended. Phase 1 cannot recheck what they may see when
+    // they sign back in, so their stored history goes (local-sync-store.md D7),
+    // before the redirect can unload the page. The wait is bounded: the wipe
+    // marks itself pending first, so one the page does not outlive is finished
+    // at the next open.
+    const wiped = wipeLocalStore();
     clearAuthorizationRetry();
     dispatchRemoteAuthorizationState(state);
-    beginRemoteAuthRecovery();
+    void Promise.race([wiped, new Promise((resolve) => setTimeout(resolve, LOGIN_WIPE_WAIT_MS))])
+      .finally(beginRemoteAuthRecovery);
     return;
   }
   // What this reader may see is no longer what the snapshots were taken under. A

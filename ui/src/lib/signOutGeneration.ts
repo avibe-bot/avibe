@@ -4,7 +4,7 @@
 // moved: a document-local flag cannot fence another tab, and another tab's
 // pending write would restore what the sign-out removed.
 
-const SIGN_OUT_GENERATION_KEY = 'avibe.sign-out-generation.v1';
+export const SIGN_OUT_GENERATION_KEY = 'avibe.sign-out-generation.v1';
 
 export function readSignOutGeneration(): number {
   try {

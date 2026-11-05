@@ -7,7 +7,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const apiFetch = vi.hoisted(() => vi.fn());
 const showToast = vi.hoisted(() => vi.fn());
 
+// The local message store only learns about the stream through these two calls;
+// what it does with them is tested beside it (lib/localStore).
+const localStore = vi.hoisted(() => ({
+  beginLocalStoreRead: vi.fn(),
+  forgetLocalStoreSession: vi.fn(async () => {}),
+  applyLocalStoreSessionActivity: vi.fn(),
+  noteLocalStoreStreamGap: vi.fn(),
+  noteLocalStoreStreamState: vi.fn(),
+  recordLocalStorePage: vi.fn(async () => {}),
+  recordLocalStoreSession: vi.fn(async () => {}),
+  recordLocalStoreStreamRow: vi.fn(async () => {}),
+  wipeLocalStore: vi.fn(async () => {}),
+}));
+
 vi.mock('../lib/apiFetch', () => ({ apiFetch }));
+vi.mock('../lib/localStore', () => localStore);
 vi.mock('./ToastContext', () => ({ useToast: () => ({ showToast }) }));
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
@@ -172,6 +187,8 @@ beforeEach(() => {
   apiFetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({}) });
   showToast.mockReset();
   onConnected.mockReset();
+  localStore.noteLocalStoreStreamGap.mockReset();
+  localStore.noteLocalStoreStreamState.mockReset();
   onMessageNew.mockReset();
   onMessageUpdated.mockReset();
   FakeEventSource.instances = [];
@@ -344,6 +361,23 @@ describe('ApiProvider workbench stream liveness', () => {
     expect(FakeEventSource.latest()).toBe(proven);
     expect(proven.closed).toBe(false);
     expect(onConnected).toHaveBeenCalledTimes(catchUps);
+  });
+
+  it('tells the local message store about every gap consumers catch up on, and every loss of the stream', () => {
+    // A tail the store recorded may claim nothing newer exists only while the
+    // stream that would have delivered anything newer stayed continuous
+    // (docs/plans/local-sync-store.md section 4.2).
+    mountConnectedStream();
+    expect(localStore.noteLocalStoreStreamState).toHaveBeenLastCalledWith(true);
+    awayAndBack({ awayMs: 5_000 });
+    networkBack();
+    emitControllerLeg(false);
+    expect(localStore.noteLocalStoreStreamState).toHaveBeenLastCalledWith(false);
+    emitControllerLeg(true);
+
+    expect(onConnected).toHaveBeenCalledTimes(4);
+    expect(localStore.noteLocalStoreStreamGap).toHaveBeenCalledTimes(4);
+    expect(localStore.noteLocalStoreStreamState).toHaveBeenLastCalledWith(true);
   });
 
   it('ends a controller-leg gap in place, without recycling the browser leg', () => {

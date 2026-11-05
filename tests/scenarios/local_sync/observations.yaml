@@ -1,0 +1,7 @@
+version: 1
+capability: local_sync
+observations:
+  - date: 2026-11-05
+    scenario_ids: [LSYNC-007, LSYNC-008, LSYNC-018, LSYNC-021]
+    source: plan_review
+    note: Phase 1 keeps every page the client reads on the device, so the wipe rules carry the reader's private history. A tab of an older build signs out without knowing the message store, which is why the shared sign-out generation, not an in-tab call, is the cross-build wipe signal.
