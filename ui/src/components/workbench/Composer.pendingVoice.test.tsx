@@ -58,10 +58,10 @@ const kept = (patch: Partial<VoiceTake>): VoiceTake => ({
   ...patch,
 });
 
-const renderComposer = (onSend = vi.fn(() => true)) => render(
+const renderComposer = (onSend = vi.fn(() => true), sendDisabled = false) => render(
   <I18nextProvider i18n={i18n}>
     <ToastProvider>
-      <Composer sessionId="pending-session" onSend={onSend} />
+      <Composer sessionId="pending-session" onSend={onSend} sendDisabled={sendDisabled} />
     </ToastProvider>
   </I18nextProvider>,
 );
@@ -94,6 +94,19 @@ describe('Composer pending voice items', () => {
     await waitFor(() => expect(onSend).toHaveBeenCalledWith('Ship it on Thursday', [], undefined, { input: 'voice' }));
     await waitFor(() => expect(item.isConnected).toBe(false));
     expect(await readVoiceTakes()).toEqual([]);
+  });
+
+  it('holds a kept take back while an earlier send is still unconfirmed', async () => {
+    await saveVoiceTake(kept({}));
+    const onSend = vi.fn(() => true);
+    renderComposer(onSend, true);
+
+    const item = (await screen.findByText('Ship it on Thursday')).closest<HTMLElement>('[role="status"]')!;
+    fireEvent.click(within(item).getByRole('button', { name: en.voice.send }));
+    await act(async () => undefined);
+
+    expect(onSend).not.toHaveBeenCalled();
+    expect(await readVoiceTakes()).toHaveLength(1);
   });
 
   it('puts a kept dictation in the draft, and then forgets it', async () => {

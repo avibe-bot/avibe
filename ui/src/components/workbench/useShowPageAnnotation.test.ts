@@ -4,7 +4,7 @@ import { act, renderHook } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ShowPageVoiceHost } from '../../lib/showPageVoiceBridge';
-import { useShowPageAnnotation } from './useShowPageAnnotation';
+import { showPageSessionId, useShowPageAnnotation } from './useShowPageAnnotation';
 
 let teardown: (() => void) | null = null;
 
@@ -464,3 +464,13 @@ describe('useShowPageAnnotation host Escape forwarding', () => {
     expect(frameKeydown).not.toHaveBeenCalled();
   });
 });
+
+describe('showPageSessionId', () => {
+  it('reads the conversation from a private page address only', () => {
+    expect(showPageSessionId('/show/ses_cso/')).toBe('ses_cso');
+    expect(showPageSessionId(`${window.location.origin}/show/a%20b/projects/alpha?mode=edit`)).toBe('a b');
+    // A public page carries a share id, not the conversation: the caller passes it.
+    expect(showPageSessionId('/p/share_123/')).toBeNull();
+  });
+});
+

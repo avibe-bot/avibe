@@ -4,7 +4,7 @@ import 'fake-indexeddb/auto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { clearLocalSnapshots, forgetLocalSnapshots, setLocalSnapshotPrincipal } from './localSnapshots';
-import { bumpSignOutGeneration } from './signOutGeneration';
+import { bumpSignOutGeneration, SIGN_OUT_GENERATION_KEY } from './signOutGeneration';
 import { VoiceTakeKeeper } from './voiceTakeKeeper';
 import { keptVoiceSegments, retryKeptVoiceTake } from './voiceTakeRetry';
 import {
@@ -13,6 +13,7 @@ import {
   readVoiceTakeAudio,
   readVoiceTakes,
   saveVoiceTake,
+  subscribeVoiceTakes,
   VOICE_TAKE_LIMIT,
   voiceTakeDurationMs,
   type VoiceTake,
@@ -113,6 +114,51 @@ describe('voice take store', () => {
     await clearLocalSnapshots();
     await idle();
     expect(await readVoiceTakes()).toHaveLength(1);
+  });
+
+  it('lets no take still running here bring back speech another tab just signed out', async () => {
+    setLocalSnapshotPrincipal('local');
+    const keeper = new VoiceTakeKeeper('running', { target: 'ses_a', intent: 'send' });
+    keeper.begin();
+    keeper.segment({ sequence: 0, final: false, durationMs: 60_000 }, wav('minute one'));
+    await idle();
+    expect(await readVoiceTakes()).toHaveLength(1);
+
+    // Another tab signs out: its sign-out generation reaches this one through storage.
+    bumpSignOutGeneration();
+    window.dispatchEvent(new StorageEvent('storage', { key: SIGN_OUT_GENERATION_KEY }));
+    await idle();
+    keeper.segment({ sequence: 1, final: true, durationMs: 9_000 }, wav('tail'));
+    keeper.transcribed('words after the sign-out');
+    await idle();
+
+    // Even once this tab names the same reader again, nothing of it is back.
+    setLocalSnapshotPrincipal(null);
+    setLocalSnapshotPrincipal('local');
+    await idle();
+    expect(await readVoiceTakes()).toEqual([]);
+  });
+
+  it('tells its readers when the reader becomes known, even with nothing to delete', async () => {
+    setLocalSnapshotPrincipal('local');
+    await saveVoiceTake(take('mine'));
+    setLocalSnapshotPrincipal(null);
+    let heard = 0;
+    const stop = subscribeVoiceTakes(() => { heard += 1; });
+    setLocalSnapshotPrincipal('local');
+    await idle();
+    stop();
+    expect(heard).toBeGreaterThan(0);
+    expect(await readVoiceTakes()).toHaveLength(1);
+  });
+
+  it('tells other documents of this origin about every change', async () => {
+    setLocalSnapshotPrincipal('local');
+    const other = new BroadcastChannel('avibe-voice-takes');
+    const heard = new Promise((resolve) => { other.onmessage = resolve; });
+    await saveVoiceTake(take('from-the-pet'));
+    await expect(heard).resolves.toBeTruthy();
+    other.close();
   });
 
   it('keeps at most a few takes, letting the oldest go first', async () => {

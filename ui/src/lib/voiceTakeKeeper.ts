@@ -4,7 +4,9 @@ import {
   saveVoiceTake,
   saveVoiceTakeAudio,
   setVoiceTakeLive,
+  voiceTakeFence,
   type VoiceTake,
+  type VoiceTakeFence,
   type VoiceTakeIntent,
   type VoiceTakeSegmentInfo,
 } from './voiceTakeStore';
@@ -25,6 +27,9 @@ export type VoiceTakeKeep = {
  */
 export class VoiceTakeKeeper {
   private readonly take: VoiceTake;
+  /** The reader and sign-out generation the take began under: no write lands after either
+   *  changed, so a sign-out (in any tab) cannot be undone by a take still running here. */
+  private fence: VoiceTakeFence | null = null;
   private writes: Promise<unknown> = Promise.resolve();
   private ended = false;
 
@@ -48,6 +53,7 @@ export class VoiceTakeKeeper {
 
   /** The take started recording: it is stored, and held by its surface. */
   begin(): void {
+    this.fence = voiceTakeFence();
     setVoiceTakeLive(this.take.id, true);
     this.save();
   }
@@ -65,7 +71,7 @@ export class VoiceTakeKeeper {
     };
     this.take.segments = [...this.take.segments.filter((kept) => kept.sequence !== info.sequence), info];
     this.save();
-    this.queue(() => saveVoiceTakeAudio(this.take.id, info.sequence, audio));
+    this.queue(() => saveVoiceTakeAudio(this.take.id, info.sequence, audio, this.currentFence()));
   }
 
   /** Recording ended without text yet. */
@@ -106,7 +112,12 @@ export class VoiceTakeKeeper {
     if (this.ended) return;
     this.take.updatedAt = Date.now();
     const snapshot: VoiceTake = { ...this.take, segments: [...this.take.segments] };
-    this.queue(() => saveVoiceTake(snapshot));
+    this.queue(() => saveVoiceTake(snapshot, this.currentFence()));
+  }
+
+  /** The fence from `begin`, or the reader's now for a keeper that never began. */
+  private currentFence(): VoiceTakeFence | null {
+    return this.fence ?? voiceTakeFence();
   }
 
   private queue(write: () => Promise<unknown>): void {

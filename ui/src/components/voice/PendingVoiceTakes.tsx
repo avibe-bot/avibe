@@ -127,10 +127,18 @@ function useKeptVoiceTakes(target: string | null): VoiceTake[] {
     read();
     const offTakes = subscribeVoiceTakes(read);
     const offRetries = subscribeVoiceTakeRetries(refresh);
+    // Back to the page: another document (the pet, another tab) may have kept a take meanwhile.
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') read();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('online', read);
     return () => {
       alive = false;
       offTakes();
       offRetries();
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('online', read);
     };
   }, [target]);
   const takes = read && read.target === target ? read.takes : [];

@@ -80,7 +80,11 @@ export const voiceTakeDurationMs = (take: Pick<VoiceTake, 'segments'>): number =
 
 let dbPromise: Promise<IDBDatabase | null> | null = null;
 const listeners = new Set<() => void>();
+// The sign-out generation when this document last named its reader: a write is fenced to it, so
+// a sign-out in any tab stops every writer here until the reader is named again.
 let principalGeneration = readGeneration();
+// The generation whose sign-out this document has already wiped for.
+let wipedGeneration = principalGeneration;
 
 function readGeneration(): number {
   try {
@@ -162,13 +166,32 @@ async function withStores<T>(
   }
 }
 
-const notify = () => {
+const notifyHere = () => {
   for (const listener of listeners) {
     try {
       listener();
     } catch {
       // One listener cannot stop the others.
     }
+  }
+};
+
+// Other documents of this origin (the pet window, another tab) hear about every change too.
+const channel = (() => {
+  try {
+    return typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel(DB_NAME);
+  } catch {
+    return null;
+  }
+})();
+if (channel) channel.onmessage = () => notifyHere();
+
+const notify = () => {
+  notifyHere();
+  try {
+    channel?.postMessage('changed');
+  } catch {
+    // A closed channel only costs the other documents a later read.
   }
 };
 
@@ -182,19 +205,32 @@ const owned = (record: StoredTake | undefined, owner: string): record is StoredT
   record !== undefined && record.principal === owner && record.generation === readGeneration()
 );
 
-/** The writer's reader, or null while unknown or after a sign-out this document has not seen. */
-function writer(): string | null {
-  const owner = getLocalSnapshotPrincipal();
-  if (!owner || principalGeneration !== readGeneration()) return null;
-  return owner;
+/** Who may write, and under which sign-out generation: a writer holds this from when its take
+ *  begins, and every write it makes must still match it. */
+export type VoiceTakeFence = { principal: string; generation: number };
+
+/** The current reader's fence, or null while the reader is unknown or after a sign-out (in any
+ *  tab) since this document last named it. */
+export function voiceTakeFence(): VoiceTakeFence | null {
+  const principal = getLocalSnapshotPrincipal();
+  const generation = readGeneration();
+  if (!principal || principalGeneration !== generation) return null;
+  return { principal, generation };
+}
+
+/** The fence's reader, while the fence still holds. */
+function writer(fence: VoiceTakeFence | null = voiceTakeFence()): string | null {
+  const current = voiceTakeFence();
+  if (!fence || !current || current.principal !== fence.principal || current.generation !== fence.generation) return null;
+  return fence.principal;
 }
 
 /**
  * Stores a take's details (not its audio). A new take beyond `VOICE_TAKE_LIMIT` evicts the
  * oldest the reader keeps. Resolves false when nothing could be stored.
  */
-export async function saveVoiceTake(take: VoiceTake): Promise<boolean> {
-  const owner = writer();
+export async function saveVoiceTake(take: VoiceTake, fence?: VoiceTakeFence | null): Promise<boolean> {
+  const owner = writer(fence === undefined ? voiceTakeFence() : fence);
   if (!owner) return false;
   const generation = readGeneration();
   const saved = await withStores('readwrite', async (takes, segments) => {
@@ -214,8 +250,8 @@ export async function saveVoiceTake(take: VoiceTake): Promise<boolean> {
 
 /** Updates a take the reader still keeps; one deleted meanwhile (discarded, landed) stays
  *  deleted. Resolves false when there was nothing to update. */
-export async function updateVoiceTake(take: VoiceTake): Promise<boolean> {
-  const owner = writer();
+export async function updateVoiceTake(take: VoiceTake, fence?: VoiceTakeFence | null): Promise<boolean> {
+  const owner = writer(fence === undefined ? voiceTakeFence() : fence);
   if (!owner) return false;
   const updated = await withStores('readwrite', async (takes) => {
     const record = await settle(takes.get(take.id) as IDBRequest<StoredTake | undefined>);
@@ -228,13 +264,20 @@ export async function updateVoiceTake(take: VoiceTake): Promise<boolean> {
 }
 
 /** Stores one segment's audio (the WAV bytes, or null for a finalize-only marker). */
-export async function saveVoiceTakeAudio(id: string, sequence: number, audio: Blob | null): Promise<boolean> {
-  const owner = writer();
+export async function saveVoiceTakeAudio(
+  id: string,
+  sequence: number,
+  audio: Blob | null,
+  fence?: VoiceTakeFence | null,
+): Promise<boolean> {
+  const owner = writer(fence === undefined ? voiceTakeFence() : fence);
   if (!owner) return false;
   // Bytes, not the Blob: a Blob held across a suspended page may not be readable on iOS.
   const bytes = audio ? await audio.arrayBuffer().catch(() => null) : null;
   if (audio && !bytes) return false;
   const saved = await withStores('readwrite', async (takes, segments) => {
+    // Checked again here: a sign-out may have landed while the bytes were read.
+    if (writer(fence === undefined ? voiceTakeFence() : fence) !== owner) return false;
     const record = await settle(takes.get(id) as IDBRequest<StoredTake | undefined>);
     if (!owned(record, owner)) return false;
     segments.put({ id: [id, sequence], take: id, audio: bytes } satisfies StoredSegment);
@@ -321,11 +364,12 @@ async function deleteWhere(keep: (record: StoredTake) => boolean): Promise<void>
 // revocation (which advances the shared sign-out generation and clears the reader) deletes all.
 let wipe: Promise<void> = Promise.resolve();
 
-/** Deletes every take stored before a sign-out the shared generation shows, once. */
+/** Deletes every take stored before a sign-out the shared generation shows, once. Writers stay
+ *  fenced until the reader is named again. */
 function noteSignOut(): Promise<void> {
   const generation = readGeneration();
-  if (generation !== principalGeneration) {
-    principalGeneration = generation;
+  if (generation !== wipedGeneration) {
+    wipedGeneration = generation;
     wipe = deleteWhere((record) => record.generation === generation);
   }
   return wipe;
@@ -339,11 +383,17 @@ function watchReader(): void {
   // quota clears the snapshots without moving the generation, and leaves the takes.
   registerLocalSnapshotClearHook(noteSignOut);
   subscribeLocalSnapshotPrincipal((next) => {
-    if (readGeneration() !== principalGeneration) {
-      void noteSignOut();
+    const signedOut = readGeneration() !== wipedGeneration ? noteSignOut() : Promise.resolve();
+    if (!next) {
+      void signedOut.then(notify);
       return;
     }
-    if (next) void deleteWhere((record) => record.principal === next);
+    // A reader named (again): writes are allowed under the generation of now.
+    principalGeneration = readGeneration();
+    // Readers that read while the reader was unknown found nothing: they read again.
+    void signedOut
+      .then(() => deleteWhere((record) => record.principal === next))
+      .finally(notify);
   });
   window.addEventListener('storage', (event) => {
     if (event.key === SIGN_OUT_GENERATION_KEY) void noteSignOut();

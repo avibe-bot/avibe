@@ -81,7 +81,14 @@ export const showPageSessionId = (src: string): string | null => {
   }
 };
 
-export function useShowPageAnnotation(src: string | null): AnnotationBridge {
+/** `keepTarget`: the conversation the page belongs to, where a take spoken into it waits if the
+ *  page is gone before its words land; read from a private page's address when not given (a
+ *  public `/p/<share>/` page does not carry it). */
+export function useShowPageAnnotation(src: string | null, keepTarget?: string | null): AnnotationBridge {
+  const keepTargetRef = useRef(keepTarget);
+  useEffect(() => {
+    keepTargetRef.current = keepTarget;
+  });
   const routeSurfaceActive = useRouteSurfaceActive();
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const voiceHostRef = useRef<ShowPageVoiceHost | null>(null);
@@ -208,7 +215,7 @@ export function useShowPageAnnotation(src: string | null): AnnotationBridge {
       // A take spoken into the page is kept until its words reach it; if the page is gone first,
       // it waits in the composer of the conversation the page belongs to.
       keep: () => {
-        const target = showPageSessionId(iframe.src);
+        const target = keepTargetRef.current ?? showPageSessionId(iframe.src);
         return target ? { target, intent: 'insert' } : null;
       },
       availability: () => {

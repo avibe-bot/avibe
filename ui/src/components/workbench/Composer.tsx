@@ -1680,7 +1680,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     return true;
   };
   const sendKeptVoiceText = async (words: string): Promise<boolean> => {
-    if (pendingRef.current || disabledRef.current) return false;
+    // A send whose outcome is still unknown (`sendDisabled`) holds every other send back, this one too.
+    if (pendingRef.current || disabledRef.current || sendDisabled) return false;
     pendingRef.current = true;
     try {
       return (await onSend(words, [], undefined, VOICE_MESSAGE_METADATA)) !== false;
