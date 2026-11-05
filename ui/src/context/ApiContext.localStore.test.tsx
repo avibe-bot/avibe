@@ -80,6 +80,9 @@ const held = async (sessionId = 'ses_a') =>
 const seed = (sessionId = 'ses_a') =>
   recordLocalStorePage(beginLocalStoreRead(sessionId), { kind: 'tail' }, { messages: [row(1, sessionId), row(2, sessionId)], next_before_id: null });
 const settle = () => act(() => new Promise((resolve) => setTimeout(resolve, 30)));
+// Store writes and wipes land on their own; under a full parallel suite they
+// can take far longer than a fixed pause. Wait for the state, not for a time.
+const eventually = (assertion: () => Promise<void>) => vi.waitFor(assertion, { timeout: 10_000, interval: 25 });
 
 const api = { current: null as ReturnType<typeof useApi> | null };
 const Subscriber = () => {
@@ -116,14 +119,12 @@ describe('local message store write-through at the API layer', () => {
     render(<ApiProvider><Subscriber /></ApiProvider>);
     await api.current!.getSessionBootstrap('ses_a');
     await api.current!.listSessionMessages('ses_a', { beforeId: 'msg_ses_a_4', limit: 50 });
-    await settle();
-    expect(await held()).toEqual(['row 2', 'row 3', 'row 4']);
+    await eventually(async () => expect(await held()).toEqual(['row 2', 'row 3', 'row 4']));
     expect((await readLocalStoreWindow('ses_a'))?.startReached).toBe(true);
 
     await seed('ses_b');
     await expect(api.current!.getSessionBootstrap('ses_b')).rejects.toThrow();
-    await settle();
-    expect(await held('ses_b')).toEqual([]);
+    await eventually(async () => expect(await held('ses_b')).toEqual([]));
   });
 
   it('stores streamed rows for a held session and ends their tail claim when the stream reconnects', async () => {
@@ -131,15 +132,14 @@ describe('local message store write-through at the API layer', () => {
     render(<ApiProvider><Subscriber /></ApiProvider>);
     const source = FakeEventSource.instances.at(-1)!;
     source.emit('message.new', { type: 'message.new', data: row(3) });
-    await settle();
-    expect(await held()).toEqual(['row 1', 'row 2', 'row 3']);
+    await eventually(async () => expect(await held()).toEqual(['row 1', 'row 2', 'row 3']));
 
     // Seeded before this stream connected, so the tail claim did not survive it.
     source.emit('connected', { sub_id: 1 });
     source.emit('message.new', { type: 'message.new', data: row(5) });
-    await settle();
+    await eventually(async () => expect((await readLocalStoreWindow('ses_a'))?.messages.map((message) => message.text))
+      .toEqual(['row 1', 'row 2', 'row 3', 'row 5']));
     const window = await readLocalStoreWindow('ses_a');
-    expect(window?.messages.map((message) => message.text)).toEqual(['row 1', 'row 2', 'row 3', 'row 5']);
     expect(window?.contiguous).toBe(false);
   });
 
@@ -158,22 +158,19 @@ describe('local message store write-through at the API layer', () => {
       path.startsWith('/api/sessions/ses_a/messages') ? json({ error: 'forbidden' }, 403) : json({})
     ));
     await expect(api.current!.listSessionMessages('ses_a', { beforeId: 'msg_ses_a_1', limit: 50 })).rejects.toThrow();
-    await settle();
-    expect(await held()).toEqual([]);
+    await eventually(async () => expect(await held()).toEqual([]));
 
     // A silent session read resolves the refusal's body instead of throwing.
     await seed('ses_c');
     apiFetch.mockImplementation(async (path: string) => (path === '/api/sessions/ses_c' ? json({ error: 'not found' }, 404) : json({})));
     await api.current!.getSession('ses_c', { handleError: false });
-    await settle();
-    expect(await held('ses_c')).toEqual([]);
+    await eventually(async () => expect(await held('ses_c')).toEqual([]));
 
     // A session read that reports the refusal by status rather than throwing.
     await seed('ses_b');
     apiFetch.mockImplementation(async (path: string) => (path === '/api/sessions/ses_b' ? json({ error: 'not found' }, 404) : json({})));
     expect((await api.current!.getSessionResult('ses_b')).status).toBe(404);
-    await settle();
-    expect(await held('ses_b')).toEqual([]);
+    await eventually(async () => expect(await held('ses_b')).toEqual([]));
   });
 
   it('ends tail claims when the stream fails, so a tail read during the outage does not join the stored one', async () => {
@@ -188,19 +185,19 @@ describe('local message store write-through at the API layer', () => {
     source.emit('connected', { sub_id: 1 });
     source.emit('workbench.events.bridge.status', { type: 'workbench.events.bridge.status', data: { connected: true } });
     await api.current!.getSessionBootstrap('ses_a');
-    await settle();
+    await eventually(async () => expect(await held()).toEqual(['row 1', 'row 2']));
     // On the connected stream the tail holds its claim: a streamed row extends it.
     source.emit('message.new', { type: 'message.new', data: row(3) });
-    await settle();
+    await eventually(async () => expect((await readLocalStoreWindow('ses_a'))?.messages.length).toBe(3));
     expect((await readLocalStoreWindow('ses_a'))?.contiguous).toBe(true);
 
     act(() => source.onerror?.(new Event('error')));
     // Rows 4-6 arrived on the server while the stream was down.
     tailFrom = 7;
     await api.current!.getSessionBootstrap('ses_a');
-    await settle();
+    await eventually(async () => expect((await readLocalStoreWindow('ses_a'))?.messages.map((message) => message.text))
+      .toEqual(['row 1', 'row 2', 'row 3', 'row 7', 'row 8']));
     const window = await readLocalStoreWindow('ses_a');
-    expect(window?.messages.map((message) => message.text)).toEqual(['row 1', 'row 2', 'row 3', 'row 7', 'row 8']);
     expect(window?.contiguous).toBe(false);
   });
 
@@ -208,8 +205,7 @@ describe('local message store write-through at the API layer', () => {
     await seed();
     render(<ApiProvider><Subscriber /></ApiProvider>);
     FakeEventSource.instances.at(-1)!.emit('session.activity', { type: 'session.activity', data: { session_id: 'ses_a', event: 'archived' } });
-    await settle();
-    expect(await held()).toEqual([]);
+    await eventually(async () => expect(await held()).toEqual([]));
   });
 });
 
@@ -223,9 +219,8 @@ describe('a revoked reader empties the store', () => {
         : json({})
     ));
     await api.current!.getAuthSession();
-    await settle();
     setLocalSnapshotPrincipal('remote:alice');
-    expect(await held()).toEqual([]);
+    await eventually(async () => expect(await held()).toEqual([]));
   });
 });
 
@@ -253,7 +248,6 @@ describe('an expired session empties the store', () => {
       path === '/api/session' ? json({ remote: true, authenticated: false }) : json({})
     ));
     await api.current!.getAuthSession();
-    await settle();
-    expect(await held()).toEqual([]);
+    await eventually(async () => expect(await held()).toEqual([]));
   });
 });

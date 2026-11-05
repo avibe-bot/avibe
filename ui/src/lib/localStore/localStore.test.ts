@@ -59,6 +59,9 @@ const texts = async (sessionId = 'ses_a') =>
 const tail = (messages: WorkbenchMessage[], next_before_id: string | null = 'cursor', observedAt = Date.now(), sessionId = 'ses_a') =>
   recordLocalStorePage(beginLocalStoreRead(sessionId, observedAt), { kind: 'tail' }, { messages, next_before_id }, session(sessionId));
 const idle = () => new Promise((resolve) => setTimeout(resolve, 30));
+// Eviction and hand-offs run on their own; under a full parallel suite they can
+// take well over vitest's one-second default to land.
+const SETTLE = { timeout: 10_000, interval: 25 };
 /** Rows on disk, read past every fence: what a wipe must have removed. */
 const rowsOnDisk = () => new Promise<number>((resolve, reject) => {
   const open = indexedDB.open('avibe-local-store');
@@ -270,9 +273,8 @@ describe('one reader, and the wipes that end it', () => {
     // An older build bumps the shared generation and knows nothing of this store.
     bumpSignOutGeneration();
     window.dispatchEvent(new StorageEvent('storage', { key: SIGN_OUT_GENERATION_KEY }));
-    await idle();
     // Off the disk now, not only hidden until the next open.
-    expect(await rowsOnDisk()).toBe(0);
+    await vi.waitFor(async () => expect(await rowsOnDisk()).toBe(0), SETTLE);
   });
 
   it('LSYNC-018 stores and reads nothing more for a reader signed out in another tab', async () => {
@@ -325,7 +327,7 @@ describe('one reader, and the wipes that end it', () => {
     window.addEventListener(REMOTE_AUTH_REQUIRED_EVENT, onHandOff);
     try {
       reportRemoteAuthorizationState('login_required');
-      await vi.waitFor(() => expect(pendingAtHandOff).not.toBeUndefined());
+      await vi.waitFor(() => expect(pendingAtHandOff).not.toBeUndefined(), SETTLE);
       expect(pendingAtHandOff).toBeNull();
       expect(await rowsOnDisk()).toBe(0);
     } finally {
@@ -463,7 +465,7 @@ describe('session rows', () => {
   it('keeps a stored session\'s pin and title in step with session updates', async () => {
     await tail(rows(1, 2), null);
     applyLocalStoreSessionActivity({ session_id: 'ses_a', event: 'updated', pinned: true, title: 'renamed' });
-    await idle();
+    await vi.waitFor(async () => expect((await readLocalStoreWindow('ses_a'))?.session?.pinned).toBe(true), SETTLE);
     const stored = (await readLocalStoreWindow('ses_a'))?.session;
     expect(stored?.pinned).toBe(true);
     expect(stored?.title).toBe('renamed');
@@ -499,7 +501,7 @@ describe('budget and persistence', () => {
     } finally {
       vi.useRealTimers();
     }
-    await vi.waitFor(async () => expect(await held('ses_old')).toBe(0));
+    await vi.waitFor(async () => expect(await held('ses_old')).toBe(0), SETTLE);
     expect(await held('ses_main')).toBe(2);
     expect(await held('ses_new')).toBe(2);
     await fresh.wipeLocalStore();
@@ -534,7 +536,7 @@ describe('budget and persistence', () => {
     } finally {
       vi.useRealTimers();
     }
-    await vi.waitFor(async () => expect(await held('ses_orphan')).toBe(0));
+    await vi.waitFor(async () => expect(await held('ses_orphan')).toBe(0), SETTLE);
     expect(await held('ses_main')).toBe(2);
     await fresh.wipeLocalStore();
     snapshots.setLocalSnapshotPrincipal(null);
