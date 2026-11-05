@@ -11,6 +11,7 @@ import { clearLocalSnapshots, forgetLocalSnapshots, setLocalSnapshotPrincipal } 
 import { SIGN_OUT_GENERATION_KEY, bumpSignOutGeneration } from '../signOutGeneration';
 import {
   beginLocalStoreRead,
+  forgetLocalStoreSession,
   applyLocalStoreSessionActivity,
   noteLocalStoreStreamGap,
   noteLocalStoreStreamState,
@@ -349,6 +350,21 @@ describe('one reader, and the wipes that end it', () => {
     snapshots.setLocalSnapshotPrincipal(null);
   });
 
+  it('LSYNC-020 keeps the forget fence when a fresh page lands after it', async () => {
+    await tail(rows(1, 60), null);
+    // An older-history read is out when the session is forgotten; a fresh tail
+    // read after the forget lands first.
+    const before = beginLocalStoreRead('ses_a', Date.now() - 1000);
+    applyLocalStoreSessionActivity({ session_id: 'ses_a', event: 'updated', visibility: 'background' });
+    await idle();
+    await tail(rows(51, 60));
+    await recordLocalStorePage(before, { kind: 'before' }, { messages: rows(1, 50), next_before_id: null });
+    expect(await ids()).toEqual(rows(51, 60).map((message) => Number(message.id.slice(-3))));
+    // Still kept as the session written again: a streamed row extends it.
+    await recordLocalStoreStreamRow(row(61));
+    expect((await ids()).at(-1)).toBe(61);
+  });
+
   it('LSYNC-020 forgets a session that leaves the Inbox, and voids a read of it still in flight', async () => {
     await tail(rows(1, 3), null);
     await tail(rows(1, 2, 'ses_b'), null, Date.now(), 'ses_b');
@@ -443,6 +459,21 @@ describe('two tabs sharing the store', () => {
     await idle();
     await recordLocalStoreStreamRow(row(2, {}, 'ses_p'));
     expect(await ids('ses_p')).toEqual([]);
+    other.snapshots.setLocalSnapshotPrincipal(null);
+  });
+
+  it('LSYNC-020 does not let a row that arrived before a forget land after it', async () => {
+    await tail(rows(1, 3), null);
+    // Another tab: its row arrives while its own claim is still landing, so its
+    // write lands after this tab's forget. A read it starts after the forget is
+    // pending, yet the row itself came before the forget.
+    const other = await otherTab();
+    other.snapshots.setLocalSnapshotPrincipal('remote:alice');
+    const streaming = other.store.recordLocalStoreStreamRow(row(9));
+    const forgetting = forgetLocalStoreSession('ses_a');
+    other.store.beginLocalStoreRead('ses_a', Date.now() + 60_000);
+    await Promise.all([streaming, forgetting]);
+    expect(await rowsOnDisk()).toBe(0);
     other.snapshots.setLocalSnapshotPrincipal(null);
   });
 

@@ -102,7 +102,9 @@ type StoredMessage = {
  *  page's reach left out stays out, even when no copy of it was stored to
  *  tombstone. Kept only as long as an older answer could still land. */
 type Watermark = { low: OrderKey | null; high: OrderKey | null; observedAt: number };
-/** ``forgottenAt``: the session was forgotten then (in any tab). An answer read
+/** ``forgottenAt``: the session was forgotten then (in any tab). It stays on
+ *  the record, through later writes, until no answer read before it can still
+ *  land; ``ranges`` hold only what was written since. An answer read
  *  before it may not bring it back; the marker outlives every such answer. */
 type StoredRanges = { sessionId: string; ranges: CoverageRange[]; watermarks?: Watermark[]; forgottenAt?: number };
 type Tombstone = { id: string; sessionId: string; observedAt: number };
@@ -617,13 +619,15 @@ export async function recordLocalStorePage(
     // claim and nothing streamed extends it.
     const streamToken = currentStreamToken();
     const tailClaim = streamLive && ticket.streamToken === streamToken;
-    const held = current?.forgottenAt == null ? current?.ranges ?? [] : [];
-    let ranges = mergePageCoverage(held, reach, { streamToken, now, tailClaim });
+    // A forget emptied the ranges, so what is here was written since.
+    let ranges = mergePageCoverage(current?.ranges ?? [], reach, { streamToken, now, tailClaim });
     if (streamedAbove && tailClaim) ranges = extendTailCoverage(ranges, streamedAbove, streamToken);
     rangesStore.put({
       sessionId,
       ranges,
       watermarks: [...watermarks, { low: reach.low, high: reach.high, observedAt }],
+      // Kept: an answer read before the forget may still be on its way.
+      ...(current?.forgottenAt != null ? { forgottenAt: current.forgottenAt } : {}),
     } satisfies StoredRanges);
     await applySessionDelta(tx, write.sessionDelta, now);
   });
@@ -683,11 +687,14 @@ export async function recordLocalStoreStreamRow(row: WorkbenchMessage | null | u
     const rangesStore = tx.objectStore(RANGES);
     const record = await settle(rangesStore.get(sessionId) as IDBRequest<StoredRanges | undefined>);
     const forgottenAt = record?.forgottenAt;
-    const current = forgottenAt == null ? record : undefined;
-    // A pending read admits the session's rows only if it, and the row, came
-    // after any forget of it in any tab.
+    // A row that arrived before the session's forget never lands.
+    if (forgottenAt != null && ticket.observedAt <= forgottenAt) return;
+    // Kept: never forgotten, or written again since (a forget empties the ranges).
+    const current = record && (forgottenAt == null || record.ranges.length > 0) ? record : undefined;
+    // A pending read admits the session's rows only if it came after any forget
+    // of it in any tab.
     const admitted = readPending(sessionId)
-      && (forgottenAt == null || ((pendingReads.get(sessionId) ?? 0) > forgottenAt && ticket.observedAt > forgottenAt));
+      && (forgottenAt == null || (pendingReads.get(sessionId) ?? 0) > forgottenAt);
     const write: RowWrite = { tx, sessionDelta: new Map() };
     if (!current && !admitted) {
       // A session the store does not keep. The row may still have moved here
@@ -857,7 +864,10 @@ async function evictForSpace(quotaFailure: boolean): Promise<boolean> {
     // Forget markers outlive every answer read before them, and no longer.
     const records = await settle(tx.objectStore(RANGES).getAll() as IDBRequest<StoredRanges[]>);
     for (const record of records) {
-      if (record.forgottenAt != null && record.forgottenAt < Date.now() - TOMBSTONE_TTL_MS) tx.objectStore(RANGES).delete(record.sessionId);
+      if (record.forgottenAt == null || record.forgottenAt >= Date.now() - TOMBSTONE_TTL_MS) continue;
+      // A stale marker goes; ranges written since it stay.
+      if (record.ranges.length === 0) tx.objectStore(RANGES).delete(record.sessionId);
+      else tx.objectStore(RANGES).put({ sessionId: record.sessionId, ranges: record.ranges, watermarks: record.watermarks } satisfies StoredRanges);
     }
     const sessions = await settle(tx.objectStore(SESSIONS).getAll() as IDBRequest<StoredSession[]>);
     let total = sessions.reduce((sum, session) => sum + session.bytes, 0);

@@ -53,6 +53,7 @@ scenarios:
     layer: unit
     test:
       - ui/src/lib/localStore/localStore.test.ts::LSYNC-020 forgets a session that leaves the Inbox, and voids a read of it still in flight
+      - ui/src/lib/localStore/localStore.test.ts::LSYNC-020 keeps the forget fence when a fresh page lands after it
       - ui/src/lib/localStore/localStore.test.ts::LSYNC-020 does not let a read in one tab restore a session another tab forgot
       - ui/src/lib/localStore/localStore.test.ts::LSYNC-020 does not let a read pending in one tab admit streamed rows of a session another tab forgot
       - ui/src/context/ApiContext.localStore.test.tsx::LSYNC-020 forgets a session whose message read the server refuses, and keeps it when the read only failed
