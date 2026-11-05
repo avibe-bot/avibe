@@ -347,6 +347,14 @@ const copyRecordToReader = async (from: string, to: string, edit: (value: ChatSn
   db.close();
 };
 
+// A later load of the page: the reader is named again, and only the store (not
+// this document's memory) holds what an earlier load wrote, so the chat paints
+// when IndexedDB answers.
+const asALaterLoad = () => {
+  setLocalSnapshotPrincipal(null);
+  setLocalSnapshotPrincipal('local');
+};
+
 const composerState = () => screen.queryByTestId('composer')?.getAttribute('data-disabled') ?? 'absent';
 // The write-back settles a second after the window does (plan section 4.3).
 const waitForWriteBack = () => act(() => new Promise((resolve) => setTimeout(resolve, 1000 + 150)));
@@ -403,6 +411,48 @@ afterEach(async () => {
 });
 
 describe('ChatPage conversation snapshot', () => {
+  it('paints a chat this document holds in its first render, never a loading view', async () => {
+    await seed([message('m1', 'cached question'), message('m2', 'cached answer')]);
+    mount();
+
+    // No await: the chat is on screen in the render that mounted it.
+    expect(screen.getByText('cached answer')).toBeTruthy();
+    expect(screen.queryByText('common.loading')).toBeNull();
+    expect(composerState()).toBe('false');
+  });
+
+  it('switches to another chat this document holds in the same render', async () => {
+    mocks.api.getSessionBootstrap.mockImplementation((id: string) => (id === SESSION ? live.promise : new Promise(() => {})));
+    await seed([message('m1', 'cached answer')]);
+    setLocalSnapshotPrincipal('local');
+    await writeChatSnapshot(chatSnapshotOwnerForAnswer(beginChatSnapshotRequest('ses_other'))!, {
+      session: sessionRow('Other chat', { id: 'ses_other' }),
+      messages: [message('o1', 'the other chat', { session_id: 'ses_other' })],
+      next_before_id: null,
+      agents: [agent],
+      default_agent_name: 'vibey',
+      can_chat: true,
+      chat_message_font_size: null,
+    });
+    mount();
+    expect(screen.getByText('cached answer')).toBeTruthy();
+
+    act(() => screen.getByText('switch chat').click());
+    expect(screen.getByText('the other chat')).toBeTruthy();
+    expect(screen.queryByText('cached answer')).toBeNull();
+    expect(screen.queryByText('common.loading')).toBeNull();
+  });
+
+  it('paints a chat an earlier load stored once the store answers', async () => {
+    await seed([message('m1', 'stored answer')]);
+    asALaterLoad();
+    mount();
+    expect(screen.queryByText('stored answer')).toBeNull();
+
+    await screen.findByText('stored answer');
+    expect(screen.queryByText('common.loading')).toBeNull();
+  });
+
   it('shows the last known window at once, ready to use, and lets the bootstrap replace it', async () => {
     await seed([message('m1', 'cached question'), message('m2', 'cached answer')]);
     mount();
@@ -847,6 +897,7 @@ describe('ChatPage working state on entry', () => {
 
   it('never downgrades a run the stream confirmed before the paint, even when an older bootstrap says idle', async () => {
     await seed([message('m1', 'question', { type: 'user', author: 'user' })], { row: running });
+    asALaterLoad();
     mount(listed('running'));
     // The bootstrap is out (its turn-state epoch taken) and the turn starts live
     // while the snapshot is still being read: the store answers in a later task.
@@ -866,6 +917,7 @@ describe('ChatPage working state on entry', () => {
 
   it('seeds nothing once the stream said the run ended, whatever the list still shows', async () => {
     await seed([message('m1', 'question', { type: 'user', author: 'user' })], { row: running });
+    asALaterLoad();
     mount(listed('running'));
     expect(screen.queryByText('question')).toBeNull();
     act(() => mocks.events!.onTurnEnd({ session_id: SESSION }));

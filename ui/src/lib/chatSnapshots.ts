@@ -12,6 +12,9 @@
 //  * Writes are owned. A writer takes an owner when the server answers and may
 //    store only while that owner is still current: same reader, no whole-store
 //    clear since, and no ``forgetChatSnapshot`` for that session since.
+//  * What this document writes or reads is also held in memory
+//    (lib/chatSnapshotMirror), so a chat it opens again paints in its first
+//    frame; ``knownChatSnapshot`` reads it.
 
 import type {
   VibeAgentBrief,
@@ -20,6 +23,7 @@ import type {
   WorkbenchSessionBootstrap,
 } from '../context/ApiContext';
 import { isTranscriptMessage } from './chatMessageTypes';
+import { chatSnapshotMirror } from './chatSnapshotMirror';
 import { sessionActivityInboxAction, type InboxActivityEvent } from './inboxActivity';
 import {
   deleteLocalSnapshot,
@@ -113,13 +117,27 @@ function parseChatSnapshot(sessionId: string, value: unknown): ChatSnapshot | nu
 }
 
 /** The stored conversation for the current reader, or null. A forget that
- *  begins while the read is out voids what it found, as a clear does. */
+ *  begins while the read is out voids what it found, as a clear does. What it
+ *  finds is held in memory too, unless this document already holds the
+ *  conversation: what it holds came from a write or a read at least as recent. */
 export async function readChatSnapshot(sessionId: string): Promise<ChatSnapshot | null> {
-  const generation = forgotten.get(sessionId) ?? 0;
+  const request = beginChatSnapshotRequest(sessionId);
   const snapshot = await readLocalSnapshot(chatSnapshotKey(sessionId), CHAT_SNAPSHOT_SCHEMA, (value) =>
     parseChatSnapshot(sessionId, value),
   );
-  return generation === (forgotten.get(sessionId) ?? 0) ? snapshot : null;
+  if (request.generation !== (forgotten.get(sessionId) ?? 0)) return null;
+  // Held only while it is still this reader's and the store was not cleared.
+  if (snapshot && request.principal && isChatSnapshotOwnerCurrent({ ...request, principal: request.principal })
+    && !chatSnapshotMirror.get(sessionId)) {
+    chatSnapshotMirror.put(sessionId, snapshot);
+  }
+  return snapshot;
+}
+
+/** The conversation this document holds in memory for the current reader, or
+ *  null: synchronous, so a chat can paint it in the commit that opens it. */
+export function knownChatSnapshot(sessionId: string): ChatSnapshot | null {
+  return chatSnapshotMirror.get(sessionId);
 }
 
 /** The newest rows of a live transcript window, capped to what a bootstrap
@@ -214,6 +232,7 @@ export async function writeChatSnapshot(
 ): Promise<void> {
   if (!isChatSnapshotOwnerCurrent(owner)) return;
   written.set(owner.sessionId, chatSnapshotWriteCount(owner.sessionId) + 1);
+  chatSnapshotMirror.put(owner.sessionId, snapshot);
   const value: StoredChatSnapshot = { ...snapshot, build: UI_BUILD };
   await writeLocalSnapshot(chatSnapshotKey(owner.sessionId), CHAT_SNAPSHOT_SCHEMA, value);
   if (added) await pruneLocalSnapshots(KEY_PREFIX, CHAT_SNAPSHOT_SESSIONS, { slack: CHAT_SNAPSHOT_EVICTION_SLACK });
@@ -222,6 +241,7 @@ export async function writeChatSnapshot(
 /** Delete the stored conversation and void every owner taken for it so far. */
 export function forgetChatSnapshot(sessionId: string): Promise<void> {
   forgotten.set(sessionId, (forgotten.get(sessionId) ?? 0) + 1);
+  chatSnapshotMirror.clear(sessionId);
   return deleteLocalSnapshot(chatSnapshotKey(sessionId));
 }
 

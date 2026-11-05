@@ -101,6 +101,16 @@ Caps:
 | Projects sidebar (`WorkbenchProjectsProvider`) | `projects-bootstrap` payload | Provider mount | `getWorkbenchProjectsBootstrap` |
 | Conversation (`ChatPage`) | Session row, tail messages, `next_before_id`, agents, default agent, `can_chat`, message font size | Session switch, before the bootstrap | `getSessionBootstrap`: cached rows are dropped and the bootstrap window installed, keeping any rows that arrived over SSE meanwhile |
 
+An IndexedDB read answers only after the first frame, so the conversations
+this document has already written or read (its own opens, and prefetch) are
+also held in memory, per reader and with the same 40-conversation cap, and
+emptied by a reader change or a whole-store clear like the store. A chat held
+there paints in the commit that opens it: the page's per-route reset runs as a
+layout effect and ends with that paint, before the browser paints anything.
+IndexedDB stays the source on a cold start. The memory holds nothing that is not
+also written to the store, and the message store
+(`docs/plans/local-sync-store.md`) replaces it with a view on its hot set.
+
 Pages render cached data exactly like live data, chrome included (invariant
 4). A painted conversation shows its composer, route picker, message actions,
 and header actions from the cached state, enabled. The composer is the same
