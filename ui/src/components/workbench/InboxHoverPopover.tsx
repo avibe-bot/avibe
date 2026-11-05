@@ -12,7 +12,7 @@ import { writeInboxFilter } from '../../lib/inboxFilterMemory';
 import { inboxCategory, isCategoryLoud, type InboxCategory } from '../../lib/notificationPreferences';
 import { formatRelativeTime } from '../../lib/relativeTime';
 import { BotAvatar } from '../ui/bot-avatar';
-import { Markdown } from '../ui/markdown';
+import { InboxPreview } from './InboxPreview';
 import { PopoverContent } from '../ui/popover';
 import { NotificationMenu } from './NotificationMenu';
 import { useNotificationMode } from './useNotificationMode';
@@ -122,9 +122,10 @@ export const InboxHoverPopover: React.FC<{
       <MessageSquareReply className="size-3 shrink-0 text-cyan-ink" aria-label={t('workbench.inbox.replied')} />
     ) : null;
     const preview = s.preview_text ? (
-      <div className={clsx('line-clamp-2 text-[11.5px] leading-relaxed', unread > 0 ? 'text-foreground' : 'text-muted')}>
-        <Markdown content={s.preview_text} interactive={false} className="vr-markdown--preview" />
-      </div>
+      <InboxPreview
+        text={s.preview_text}
+        className={clsx('line-clamp-2 text-[11.5px] leading-relaxed', unread > 0 ? 'text-foreground' : 'text-muted')}
+      />
     ) : null;
     // Unread stays marked in a muted category; only the mint that asks for
     // attention is withheld.

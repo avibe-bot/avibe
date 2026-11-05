@@ -86,8 +86,10 @@ dependency, because jsdom has no IndexedDB.
 
 Caps:
 
-- Chat snapshots hold the bootstrap tail window (50 rows today) for the 40 most
-  recently opened sessions, evicted least recently used.
+- Chat snapshots hold the bootstrap tail window (50 rows today) for at most the
+  40 most recently opened sessions. Going over the cap evicts the least recently
+  used down to 32, so the full read eviction needs runs once every eight new
+  conversations; below the cap only the keys are read.
 - A record over 512 KB serialized is not stored.
 - A quota error clears the whole store.
 

@@ -61,6 +61,36 @@ describe('local snapshot eviction', () => {
     expect(await read('inbox:first-page')).toBe('inbox');
   });
 
+  // A conversation record can be half a megabyte, and reading them all was a
+  // long task after every prefetch once the store was near its cap.
+  it('reads only the keys while the kind is within its cap', async () => {
+    setLocalSnapshotPrincipal('local');
+    for (const id of ['a', 'b', 'c']) await writeLocalSnapshot(`chat:${id}`, 1, `rows of ${id}`);
+    await writeLocalSnapshot('inbox:first-page', 1, 'inbox');
+    const getAll = vi.spyOn(IDBObjectStore.prototype, 'getAll');
+
+    await pruneLocalSnapshots('chat:', 3);
+
+    expect(getAll).not.toHaveBeenCalled();
+    for (const id of ['a', 'b', 'c']) expect(await read(`chat:${id}`)).toBe(`rows of ${id}`);
+  });
+
+  it('evicts down to the slack below the cap once the cap is exceeded', async () => {
+    let now = 1_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    setLocalSnapshotPrincipal('local');
+    for (const id of ['a', 'b', 'c', 'd', 'e']) {
+      now += 10;
+      await writeLocalSnapshot(`chat:${id}`, 1, `rows of ${id}`);
+    }
+
+    await pruneLocalSnapshots('chat:', 4, { slack: 2 });
+
+    expect(await read('chat:e')).toBe('rows of e');
+    expect(await read('chat:d')).toBe('rows of d');
+    for (const id of ['a', 'b', 'c']) expect(await read(`chat:${id}`)).toBeNull();
+  });
+
   it('returns nothing from a read that a clear overtook', async () => {
     setLocalSnapshotPrincipal('local');
     await writeLocalSnapshot('chat:a', 1, 'rows of a');

@@ -24,6 +24,7 @@ import { clearLocalSnapshots, setLocalSnapshotPrincipal, writeLocalSnapshot } fr
 // The plan's caps (docs/plans/web-ui-local-cache.md section 4.1).
 const WINDOW_ROWS = 50;
 const KEPT_CONVERSATIONS = 40;
+const EVICTED_AT_ONCE = 8;
 
 // Ownership as production takes it: when the request starts, settled when the
 // answer lands.
@@ -172,16 +173,22 @@ describe('conversation snapshots', () => {
     expect(chatSnapshotOwnerForAnswer(beginChatSnapshotRequest('ses_a'))).toBeNull();
   });
 
-  it(`keeps the ${KEPT_CONVERSATIONS} most recently written conversations`, async () => {
+  it(`keeps at most ${KEPT_CONVERSATIONS} conversations, evicting the least recently written ${EVICTED_AT_ONCE} at a time`, async () => {
     let now = 1_000;
     vi.spyOn(Date, 'now').mockImplementation(() => now);
     setLocalSnapshotPrincipal('local');
-    for (let i = 0; i <= KEPT_CONVERSATIONS; i += 1) {
+    for (let i = 0; i < KEPT_CONVERSATIONS; i += 1) {
       now += 10;
       await write(`ses_${i}`, snapshot(`ses_${i}`), true);
     }
-    expect(await readChatSnapshot('ses_0')).toBeNull();
-    expect(await readChatSnapshot('ses_1')).not.toBeNull();
+    expect(await readChatSnapshot('ses_0')).not.toBeNull();
+
+    now += 10;
+    await write(`ses_${KEPT_CONVERSATIONS}`, snapshot(`ses_${KEPT_CONVERSATIONS}`), true);
+    // One past the cap: the oldest go, down to the slack below it.
+    const firstKept = KEPT_CONVERSATIONS + 1 - (KEPT_CONVERSATIONS - EVICTED_AT_ONCE);
+    expect(await readChatSnapshot(`ses_${firstKept - 1}`)).toBeNull();
+    expect(await readChatSnapshot(`ses_${firstKept}`)).not.toBeNull();
     expect(await readChatSnapshot(`ses_${KEPT_CONVERSATIONS}`)).not.toBeNull();
   });
 
