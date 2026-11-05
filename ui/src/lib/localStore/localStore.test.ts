@@ -166,7 +166,8 @@ describe('P2: a page speaks only for what it proves', () => {
 describe('P1: last observed wins, per row', () => {
   it('keeps a row streamed after a slower page started, for every page shape', async () => {
     for (const kind of ['tail', 'before', 'around'] as const) {
-      await wipeLocalStore();
+      // An authorization-change clear: the store stays claimed for this reader.
+      await clearLocalSnapshots();
       await tail(rows(1, 5), null);
       const slow = beginLocalStoreRead('ses_a', Date.now() - 1000);
       await recordLocalStoreStreamRow(row(3, { text: 'quick reply chosen' }));
@@ -220,6 +221,14 @@ describe('the event stream', () => {
     const window = await readLocalStoreWindow('ses_a');
     expect(window?.messages.map((message) => message.id)).toEqual(rows(1, 6).map((message) => message.id));
     expect(window?.contiguous && window.startReached).toBe(true);
+  });
+
+  it('removes a stored row that moved to a session the store does not keep', async () => {
+    await tail(rows(1, 3), null);
+    // promote_suppressed_native_message rebinds row 3; its message.new names the new session.
+    await recordLocalStoreStreamRow({ ...row(3), session_id: 'ses_elsewhere' });
+    expect(await ids()).toEqual([1, 2]);
+    expect(await ids('ses_elsewhere')).toEqual([]);
   });
 
   it('does not extend coverage over a row that arrived after the stream broke', async () => {
@@ -278,6 +287,15 @@ describe('one reader, and the wipes that end it', () => {
     expect(await ids()).toEqual([]);
   });
 
+  it('LSYNC-018 refuses to read or write for the reader even when the sign-out event never reached this tab', async () => {
+    await tail(rows(1, 3), null);
+    // The generation moved (a sign-out elsewhere) and no storage event arrived.
+    bumpSignOutGeneration();
+    expect(await readLocalStoreWindow('ses_a')).toBeNull();
+    await tail(rows(1, 5), null);
+    expect(await rowsOnDisk()).toBe(3);
+  });
+
   it('LSYNC-018 wipes at the next open after such a sign-out when no current tab was open', async () => {
     await tail(rows(1, 3), null);
     bumpSignOutGeneration();
@@ -286,6 +304,8 @@ describe('one reader, and the wipes that end it', () => {
     const snapshots = await import('../localSnapshots');
     snapshots.setLocalSnapshotPrincipal('remote:alice');
     expect((await fresh.readLocalStoreWindow('ses_a'))?.messages ?? []).toEqual([]);
+    // Emptied by the claim, not only hidden.
+    expect(await rowsOnDisk()).toBe(0);
     snapshots.setLocalSnapshotPrincipal(null);
   });
 
@@ -299,6 +319,92 @@ describe('one reader, and the wipes that end it', () => {
     await recordLocalStorePage(pending, { kind: 'tail' }, { messages: rows(1, 3), next_before_id: null }, session());
     expect(await ids()).toEqual([]);
     expect(await ids('ses_b')).toEqual([1, 2]);
+  });
+});
+
+describe('two tabs sharing the store', () => {
+  // Another document of the same origin: its own module state, the same
+  // IndexedDB and localStorage.
+  const otherTab = async () => {
+    vi.resetModules();
+    const store = await import('.');
+    const snapshots = await import('../localSnapshots');
+    return { store, snapshots };
+  };
+
+  it('LSYNC-022 does not let a tab still naming an expired reader write into the store claimed for the next one', async () => {
+    await tail(rows(1, 3), null);
+    const pending = beginLocalStoreRead('ses_a');
+    // Alice's session expires; Bob signs in in another tab.
+    await wipeLocalStore();
+    const bob = await otherTab();
+    bob.snapshots.setLocalSnapshotPrincipal('remote:bob');
+    await bob.store.readLocalStoreWindow('ses_a');
+
+    await recordLocalStorePage(pending, { kind: 'tail' }, { messages: rows(1, 3), next_before_id: null }, session());
+    await tail(rows(4, 6), null);
+    expect(await rowsOnDisk()).toBe(0);
+    expect((await bob.store.readLocalStoreWindow('ses_a'))?.messages ?? []).toEqual([]);
+    bob.snapshots.setLocalSnapshotPrincipal(null);
+  });
+
+  it('LSYNC-022 does not let an authorization-change clear in a stale tab claim the store another reader holds', async () => {
+    const bob = await otherTab();
+    bob.snapshots.setLocalSnapshotPrincipal('remote:bob');
+    await bob.store.readLocalStoreWindow('ses_b');
+    // Alice's tab, still naming Alice, clears on an authorization change.
+    await clearLocalSnapshots();
+    await tail(rows(1, 3), null);
+    expect(await rowsOnDisk()).toBe(0);
+    bob.snapshots.setLocalSnapshotPrincipal(null);
+  });
+
+  it('drops a write whose transaction lands after another tab cleared the store for the same reader', async () => {
+    await tail(rows(1, 3), null);
+    const other = await otherTab();
+    other.snapshots.setLocalSnapshotPrincipal('remote:alice');
+    await other.store.readLocalStoreWindow('ses_a');
+    // This tab's write is under way when the other tab clears on an
+    // authorization change; the store stays Alice's at a new epoch.
+    const writing = tail(rows(4, 6), null);
+    const clearing = other.snapshots.clearLocalSnapshots();
+    await Promise.all([writing, clearing]);
+    expect(await rowsOnDisk()).toBe(0);
+    other.snapshots.setLocalSnapshotPrincipal(null);
+  });
+
+  it('keeps writing after the epoch mirror in localStorage was cleared on its own', async () => {
+    await tail(rows(1, 3), null);
+    window.localStorage.clear();
+    // A new document names the same reader; the store and its meta are intact.
+    const next = await otherTab();
+    next.snapshots.setLocalSnapshotPrincipal('remote:alice');
+    await next.store.recordLocalStorePage(
+      next.store.beginLocalStoreRead('ses_a'),
+      { kind: 'tail' },
+      { messages: rows(1, 4), next_before_id: null },
+    );
+    await next.store.recordLocalStorePage(
+      next.store.beginLocalStoreRead('ses_a'),
+      { kind: 'tail' },
+      { messages: rows(1, 5), next_before_id: null },
+    );
+    expect(((await next.store.readLocalStoreWindow('ses_a'))?.messages ?? []).length).toBe(5);
+    next.snapshots.setLocalSnapshotPrincipal(null);
+  });
+
+  it('LSYNC-020 does not let a read in one tab restore a session another tab forgot', async () => {
+    await tail(rows(1, 3), null);
+    const pending = beginLocalStoreRead('ses_a');
+    const other = await otherTab();
+    other.snapshots.setLocalSnapshotPrincipal('remote:alice');
+    await other.store.readLocalStoreWindow('ses_a');
+    other.store.forgetLocalStoreSessionOnActivity({ session_id: 'ses_a', event: 'archived' });
+    await idle();
+
+    await recordLocalStorePage(pending, { kind: 'tail' }, { messages: rows(1, 3), next_before_id: null }, session());
+    expect(await ids()).toEqual([]);
+    other.snapshots.setLocalSnapshotPrincipal(null);
   });
 });
 

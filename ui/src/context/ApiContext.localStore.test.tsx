@@ -161,6 +161,13 @@ describe('local message store write-through at the API layer', () => {
     await settle();
     expect(await held()).toEqual([]);
 
+    // A silent session read resolves the refusal's body instead of throwing.
+    await seed('ses_c');
+    apiFetch.mockImplementation(async (path: string) => (path === '/api/sessions/ses_c' ? json({ error: 'not found' }, 404) : json({})));
+    await api.current!.getSession('ses_c', { handleError: false });
+    await settle();
+    expect(await held('ses_c')).toEqual([]);
+
     // A session read that reports the refusal by status rather than throwing.
     await seed('ses_b');
     apiFetch.mockImplementation(async (path: string) => (path === '/api/sessions/ses_b' ? json({ error: 'not found' }, 404) : json({})));

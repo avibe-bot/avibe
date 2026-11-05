@@ -39,6 +39,7 @@ scenarios:
       - ui/src/lib/localStore/localStore.test.ts::LSYNC-018 wipes on a sign-out in another tab, including one running an older build
       - ui/src/lib/localStore/localStore.test.ts::LSYNC-018 wipes at the next open after such a sign-out when no current tab was open
       - ui/src/lib/localStore/localStore.test.ts::LSYNC-018 stores and reads nothing more for a reader signed out in another tab
+      - ui/src/lib/localStore/localStore.test.ts::LSYNC-018 refuses to read or write for the reader even when the sign-out event never reached this tab
   - id: LSYNC-019
     name: An authorization change clears the store (Phase 1)
     status: covered
@@ -50,10 +51,21 @@ scenarios:
     status: covered
     kind: visibility
     layer: unit
-    test: ui/src/lib/localStore/localStore.test.ts::LSYNC-020 forgets a session that leaves the Inbox, and voids a read of it still in flight
+    test:
+      - ui/src/lib/localStore/localStore.test.ts::LSYNC-020 forgets a session that leaves the Inbox, and voids a read of it still in flight
+      - ui/src/lib/localStore/localStore.test.ts::LSYNC-020 does not let a read in one tab restore a session another tab forgot
+      - ui/src/context/ApiContext.localStore.test.tsx::LSYNC-020 forgets a session whose message read the server refuses, and keeps it when the read only failed
   - id: LSYNC-021
     name: An expired session (login required) wipes the store; a session read that only failed does not
     status: covered
     kind: security
     layer: integration
     test: ui/src/context/ApiContext.localStore.test.tsx::LSYNC-021 wipes on a login-required answer, and keeps everything when the session read only failed
+  - id: LSYNC-022
+    name: A tab still naming an earlier reader can neither write into nor claim the store another tab holds for the current reader
+    status: covered
+    kind: security
+    layer: unit
+    test:
+      - ui/src/lib/localStore/localStore.test.ts::LSYNC-022 does not let a tab still naming an expired reader write into the store claimed for the next one
+      - ui/src/lib/localStore/localStore.test.ts::LSYNC-022 does not let an authorization-change clear in a stale tab claim the store another reader holds

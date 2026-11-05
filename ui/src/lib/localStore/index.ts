@@ -26,7 +26,6 @@
 import type { WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import { isTranscriptMessage } from '../chatMessageTypes';
 import {
-  getLocalSnapshotEpoch,
   getLocalSnapshotPrincipal,
   registerLocalSnapshotClearHook,
   subscribeLocalSnapshotPrincipal,
@@ -72,7 +71,16 @@ const BUDGET_CHECK_INTERVAL_MS = 30 * 1000;
 const PROTECTED_RECENT_SESSIONS = 40;
 const MAIN_BOT_SESSION_ID = 'ses_main';
 
-type Meta = { key: 'reader'; reader: string; schema: number; signOutGeneration: number; persisted: boolean | null };
+type Meta = {
+  key: 'reader';
+  /** Null while the store belongs to no one: after a sign-out, a revocation, or an expiry. */
+  reader: string | null;
+  schema: number;
+  /** Advanced by every wipe in any tab; mirrored in localStorage (``STORE_EPOCH_KEY``). */
+  epoch: number;
+  signOutGeneration: number;
+  persisted: boolean | null;
+};
 type StoredSession = {
   id: string;
   /** Null while only rows of the session have arrived, before any session read. */
@@ -94,7 +102,9 @@ type StoredMessage = {
  *  page's reach left out stays out, even when no copy of it was stored to
  *  tombstone. Kept only as long as an older answer could still land. */
 type Watermark = { low: OrderKey | null; high: OrderKey | null; observedAt: number };
-type StoredRanges = { sessionId: string; ranges: CoverageRange[]; watermarks?: Watermark[] };
+/** ``forgottenAt``: the session was forgotten then (in any tab). An answer read
+ *  before it may not bring it back; the marker outlives every such answer. */
+type StoredRanges = { sessionId: string; ranges: CoverageRange[]; watermarks?: Watermark[]; forgottenAt?: number };
 type Tombstone = { id: string; sessionId: string; observedAt: number };
 
 // ---------------------------------------------------------------------------
@@ -159,9 +169,15 @@ function settle<T>(request: IDBRequest<T>): Promise<T> {
 
 function done(tx: IDBTransaction): Promise<void> {
   return new Promise((resolve, reject) => {
+    // A failed request's error event reaches the transaction before it aborts
+    // and before ``tx.error`` is set, so keep the first one for the abort to
+    // report: a quota failure must still read as one.
+    let requestError: DOMException | null = null;
     tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error);
+    tx.onerror = (event) => {
+      requestError ??= (event.target as IDBRequest | null)?.error ?? null;
+    };
+    tx.onabort = () => reject(tx.error ?? requestError);
   });
 }
 
@@ -188,7 +204,7 @@ async function transact<T>(
   } catch (error) {
     if (!isQuotaError(error)) return null;
     if (retryOnQuota && (await evictForSpace(true))) return transact(mode, stores, work, { retryOnQuota: false });
-    await wipe();
+    await wipe(keepableReader());
     return null;
   }
 }
@@ -203,12 +219,57 @@ const byteSize = (value: unknown): number => {
 
 // ---------------------------------------------------------------------------
 // The reader, and every fence that voids a write
+//
+// The database is shared by every tab of the origin, so the fences that decide
+// whether a write may land live in it too. ``meta`` names the reader the store
+// belongs to and its epoch: a counter every wipe in any tab advances. The same
+// counter is mirrored in localStorage, which a read can note synchronously when
+// it starts; its answer is written only if ``meta`` still names the same reader
+// at the same epoch, checked inside the write's own transaction. The in-memory
+// fences below only drop doomed writes early.
 
-// Advanced by every wipe in this document. A write captures it when its request
-// starts and is dropped if a wipe happened since.
-let wipeEpoch = 0;
-// Advanced per session by every forget, with the same purpose.
-const forgotten = new Map<string, number>();
+const STORE_EPOCH_KEY = 'avibe.local-store.epoch.v1';
+
+function readStoreEpoch(): number {
+  try {
+    const raw = window.localStorage.getItem(STORE_EPOCH_KEY);
+    const value = raw === null ? 0 : Number(raw);
+    return Number.isFinite(value) ? value : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function writeStoreEpoch(epoch: number): void {
+  try {
+    window.localStorage.setItem(STORE_EPOCH_KEY, String(epoch));
+  } catch {
+    // Without localStorage no read can note the epoch, so writes are refused
+    // (``writerFor``): the store stays empty rather than unfenced.
+  }
+}
+
+/** A new epoch above both the mirror and ``meta``'s own: the mirror may have
+ *  been cleared on its own, and an epoch must never repeat. */
+function nextStoreEpoch(meta: Meta | undefined): number {
+  const next = Math.max(readStoreEpoch(), meta?.epoch ?? 0) + 1;
+  writeStoreEpoch(next);
+  return next;
+}
+
+const getMeta = (tx: IDBTransaction) => settle(tx.objectStore(META).get('reader') as IDBRequest<Meta | undefined>);
+
+function putMeta(tx: IDBTransaction, fields: Omit<Meta, 'key' | 'schema'>): void {
+  tx.objectStore(META).put({ key: 'reader', schema: STORE_SCHEMA, ...fields } satisfies Meta);
+}
+
+/** Whether, inside ``tx``, the store still belongs to ``reader`` at ``epoch``. */
+async function metaAdmits(tx: IDBTransaction, reader: string, epoch: number): Promise<boolean> {
+  const meta = await getMeta(tx);
+  return !!meta && meta.reader === reader && meta.epoch === epoch && meta.schema === STORE_SCHEMA
+    && meta.signOutGeneration === readSignOutGeneration();
+}
+
 // Names the event stream rows are arriving on. A reconnect, a resumed page, or
 // a recovered controller leg starts a new one: whatever the old one would have
 // delivered may be missing, so no range keeps a tail claim across it.
@@ -224,75 +285,86 @@ let streamLive = false;
 // yet: the page lands after it, and its tail coverage reaches over it.
 const pendingReads = new Map<string, number>();
 
-// The sign-out generation when the current reader was named. A sign-out in any
-// tab bumps it; from then on this document stores and reads nothing for that
-// reader, however it learned of them, until a new reader is named (a fresh
-// sign-in reloads the page).
-let readerGeneration = readSignOutGeneration();
-const readerCurrent = () => readerGeneration === readSignOutGeneration();
+// The store is claimed for a reader only when this document names one: the
+// snapshot store's principal, which the server confirmed or the boot replayed.
+// Nothing else takes the store over, so a tab still naming an old reader cannot
+// empty and claim a store another tab claimed for the reader signed in now.
+/** A claim that landed. When it had to empty the store it moved the epoch from
+ *  ``from`` to ``epoch``; a read this document started just before, for the
+ *  same reader, belongs to the claimed store rather than to the emptied one. */
+type Claimed = { from: number; epoch: number };
+let claim: { reader: string; promise: Promise<Claimed | null> } | null = null;
 
-// The reader whose meta record is in place, so writes may proceed.
-let readyReader: { reader: string; epoch: number; promise: Promise<boolean> } | null = null;
-
-/** Open the store for ``reader``: empty it first when it was written for
- *  someone else, under another schema, or before a newer sign-out anywhere. */
-function ensureReader(reader: string): Promise<boolean> {
-  if (readyReader && readyReader.reader === reader && readyReader.epoch === wipeEpoch) return readyReader.promise;
-  const epoch = wipeEpoch;
-  const promise = (async () => {
+/** Claim the store for ``reader``: empty it first when it belongs to no one or
+ *  someone else, was written under another schema, or predates a newer sign-out. */
+function claimReader(reader: string): Promise<Claimed | null> {
+  const promise = transact('readwrite', ALL_STORES, async (tx): Promise<Claimed> => {
     const generation = readSignOutGeneration();
-    const opened = await transact('readwrite', ALL_STORES, async (tx) => {
-      const meta = await settle(tx.objectStore(META).get('reader') as IDBRequest<Meta | undefined>);
-      if (!meta || meta.reader !== reader || meta.schema !== STORE_SCHEMA || meta.signOutGeneration < generation) {
-        for (const store of ALL_STORES) tx.objectStore(store).clear();
-        const fresh: Meta = { key: 'reader', reader, schema: STORE_SCHEMA, signOutGeneration: generation, persisted: null };
-        tx.objectStore(META).put(fresh);
-      }
-      return true;
-    });
-    return opened === true && epoch === wipeEpoch && getLocalSnapshotPrincipal() === reader;
-  })();
-  readyReader = { reader, epoch, promise };
-  void promise.then((ok) => {
-    if (ok) void requestPersistence();
+    const meta = await getMeta(tx);
+    // What reads this document started before the claim noted.
+    const from = readStoreEpoch();
+    if (meta && meta.reader === reader && meta.schema === STORE_SCHEMA && meta.signOutGeneration >= generation) {
+      return { from, epoch: meta.epoch };
+    }
+    for (const store of ALL_STORES) tx.objectStore(store).clear();
+    const epoch = nextStoreEpoch(meta);
+    putMeta(tx, { reader, epoch, signOutGeneration: generation, persisted: null });
+    return { from, epoch };
+  });
+  claim = { reader, promise };
+  void promise.then((claimed) => {
+    if (claimed) void requestPersistence();
   });
   return promise;
 }
 
-async function wipe(): Promise<void> {
-  wipeEpoch += 1;
-  readyReader = null;
-  forgotten.clear();
+const claimFor = (reader: string): Promise<Claimed | null> =>
+  claim && claim.reader === reader ? claim.promise : Promise.resolve(null);
+
+/** The reader a wipe may keep the store for: the one this document names. The
+ *  wipe keeps it only if the store is still theirs. */
+const keepableReader = (): string | null => getLocalSnapshotPrincipal();
+
+/** Empty the store and advance its epoch, voiding every read in flight in any
+ *  tab. With ``keepReader`` it stays claimed for that reader (an authorization
+ *  change, a quota failure), but only if it was theirs; otherwise it belongs to
+ *  no one until a reader is named again. */
+async function wipe(keepReader: string | null): Promise<void> {
   pendingReads.clear();
-  await transact('readwrite', ALL_STORES, (tx) => {
+  await transact('readwrite', ALL_STORES, async (tx) => {
+    const meta = await getMeta(tx);
     for (const store of ALL_STORES) tx.objectStore(store).clear();
+    putMeta(tx, {
+      reader: keepReader && meta?.reader === keepReader ? keepReader : null,
+      epoch: nextStoreEpoch(meta),
+      signOutGeneration: readSignOutGeneration(),
+      persisted: null,
+    });
   }, { retryOnQuota: false });
 }
 
-/** Empty the store. Sign-out and revocation reach here through the snapshot
- *  store's clear (``registerLocalSnapshotClearHook``); an expired session calls
- *  it directly. */
+/** Empty the store for good: the reader's session ended (it expired). It stays
+ *  unclaimed until a reader is named again. */
 export function wipeLocalStore(): Promise<void> {
-  return wipe();
+  return wipe(null);
 }
 
-// A new reader, or none, voids what the store held for the last one. Whether it
-// is emptied is decided when the new reader opens it (``ensureReader``), so a
-// provisional replay of the same reader keeps its data.
-subscribeLocalSnapshotPrincipal(() => {
-  readyReader = null;
-  readerGeneration = readSignOutGeneration();
+subscribeLocalSnapshotPrincipal((next) => {
+  claim = null;
+  if (next) void claimReader(next);
 });
-// Every whole-store clear of the snapshots (sign-out, revocation, an
-// authorization change, a quota failure) is a clear of this store too, awaited
-// by whoever cleared, so sign-out does not navigate away before it lands.
-registerLocalSnapshotClearHook(wipe);
+if (getLocalSnapshotPrincipal()) void claimReader(getLocalSnapshotPrincipal()!);
+// Every whole-store clear of the snapshots is a clear of this store too, awaited
+// by whoever cleared, so sign-out does not navigate away before it lands. A
+// sign-out or revocation unnames the reader first, so the store is left
+// unclaimed; an authorization change or a quota failure keeps the reader.
+registerLocalSnapshotClearHook(() => wipe(keepableReader()));
 // A sign-out in another tab, including one running an older build that does not
 // know this store exists, bumps the shared generation. Empty the store now
 // rather than at the next open.
 if (typeof window !== 'undefined') {
   window.addEventListener('storage', (event) => {
-    if (event.key === SIGN_OUT_GENERATION_KEY) void wipe();
+    if (event.key === SIGN_OUT_GENERATION_KEY) void wipe(null);
   });
 }
 
@@ -301,9 +373,7 @@ if (typeof window !== 'undefined') {
 export type LocalStoreTicket = {
   readonly sessionId: string;
   readonly reader: string | null;
-  readonly snapshotEpoch: number;
-  readonly wipeEpoch: number;
-  readonly forgotten: number;
+  readonly storeEpoch: number;
   readonly observedAt: number;
   readonly streamToken: string;
 };
@@ -319,9 +389,7 @@ function ticketFor(sessionId: string, observedAt: number): LocalStoreTicket {
   return {
     sessionId,
     reader: getLocalSnapshotPrincipal(),
-    snapshotEpoch: getLocalSnapshotEpoch(),
-    wipeEpoch,
-    forgotten: forgotten.get(sessionId) ?? 0,
+    storeEpoch: readStoreEpoch(),
     observedAt,
     streamToken: currentStreamToken(),
   };
@@ -332,21 +400,24 @@ const readPending = (sessionId: string) =>
 
 /** The reader a ticket's answer belongs to, or null when it may not be stored.
  *  A read that started before any reader was named belongs to the one named
- *  since, unless a clear, wipe, or forget happened meanwhile. */
+ *  since. Wipes, sign-outs, and forgets in any tab are checked inside the
+ *  transaction that writes it (``metaAdmits``, ``forgottenAt``). */
 function ticketReader(ticket: LocalStoreTicket): string | null {
   const reader = ticket.reader ?? getLocalSnapshotPrincipal();
-  if (!reader || reader !== getLocalSnapshotPrincipal() || !readerCurrent()) return null;
-  if (ticket.snapshotEpoch !== getLocalSnapshotEpoch() || ticket.wipeEpoch !== wipeEpoch) return null;
-  if (ticket.forgotten !== (forgotten.get(ticket.sessionId) ?? 0)) return null;
+  if (!reader || reader !== getLocalSnapshotPrincipal()) return null;
   if (Date.now() - ticket.observedAt > LOCAL_STORE_MAX_ANSWER_AGE_MS) return null;
   return reader;
 }
 
-/** Ready to write for this ticket: the reader is open and nothing voided it. */
-async function writableFor(ticket: LocalStoreTicket): Promise<boolean> {
+/** The reader and store epoch to write a ticket's answer under, once this
+ *  document's claim for that reader has landed; null when it may not be
+ *  written. Any wipe since the read started, in any tab, has moved the epoch. */
+async function writerFor(ticket: LocalStoreTicket): Promise<{ reader: string; epoch: number } | null> {
   const reader = ticketReader(ticket);
-  if (!reader || !(await ensureReader(reader))) return false;
-  return ticketReader(ticket) === reader;
+  if (!reader) return null;
+  const claimed = await claimFor(reader);
+  if (!claimed || ticketReader(ticket) !== reader) return null;
+  return { reader, epoch: ticket.storeEpoch === claimed.from ? claimed.epoch : ticket.storeEpoch };
 }
 
 // ---------------------------------------------------------------------------
@@ -465,11 +536,16 @@ export async function recordLocalStorePage(
     .filter((row) => row.session_id === ticket.sessionId && isStoredTranscriptRow(row));
   const reach = reachOf(request, answer, stored);
   if (!reach && !session) return;
-  if (!(await writableFor(ticket))) return;
+  const writer = await writerFor(ticket);
+  if (!writer) return;
   const { sessionId, observedAt } = ticket;
   const now = Date.now();
-  await transact('readwrite', [SESSIONS, MESSAGES, RANGES, TOMBSTONES], async (tx) => {
-    if (ticketReader(ticket) === null) return;
+  await transact('readwrite', [META, SESSIONS, MESSAGES, RANGES, TOMBSTONES], async (tx) => {
+    if (!(await metaAdmits(tx, writer.reader, writer.epoch))) return;
+    const rangesStore = tx.objectStore(RANGES);
+    const current = await settle(rangesStore.get(sessionId) as IDBRequest<StoredRanges | undefined>);
+    // Forgotten, in this tab or another, after this answer was read.
+    if (current?.forgottenAt != null && current.forgottenAt >= observedAt) return;
     if (session && session.id === sessionId) await putSession(tx, session, observedAt, now);
     if (!reach) return;
     const write: RowWrite = { tx, sessionDelta: new Map() };
@@ -494,8 +570,6 @@ export async function recordLocalStorePage(
       tx.objectStore(TOMBSTONES).put({ id: row.id, sessionId, observedAt } satisfies Tombstone);
       write.sessionDelta.set(sessionId, (write.sessionDelta.get(sessionId) ?? 0) - row.bytes);
     }
-    const rangesStore = tx.objectStore(RANGES);
-    const current = await settle(rangesStore.get(sessionId) as IDBRequest<StoredRanges | undefined>);
     const watermarks = (current?.watermarks ?? []).filter((mark) => now - mark.observedAt <= LOCAL_STORE_MAX_ANSWER_AGE_MS);
     for (const row of stored) await putRow(write, row, sessionId, observedAt, watermarks);
     // A tail read across a stream gap, or while the stream is down, cannot
@@ -503,7 +577,8 @@ export async function recordLocalStorePage(
     // claim and nothing streamed extends it.
     const streamToken = currentStreamToken();
     const tailClaim = streamLive && ticket.streamToken === streamToken;
-    let ranges = mergePageCoverage(current?.ranges ?? [], reach, { streamToken, now, tailClaim });
+    const held = current?.forgottenAt == null ? current?.ranges ?? [] : [];
+    let ranges = mergePageCoverage(held, reach, { streamToken, now, tailClaim });
     if (streamedAbove && tailClaim) ranges = extendTailCoverage(ranges, streamedAbove, streamToken);
     rangesStore.put({
       sessionId,
@@ -536,10 +611,13 @@ export async function recordLocalStoreSession(ticket: LocalStoreTicket, session:
     await forgetLocalStoreSession(session.id);
     return;
   }
-  if (!(await writableFor(ticket))) return;
+  const writer = await writerFor(ticket);
+  if (!writer) return;
   const now = Date.now();
-  await transact('readwrite', [SESSIONS], async (tx) => {
-    if (ticketReader(ticket) === null) return;
+  await transact('readwrite', [META, SESSIONS, RANGES], async (tx) => {
+    if (!(await metaAdmits(tx, writer.reader, writer.epoch))) return;
+    const marker = await settle(tx.objectStore(RANGES).get(session.id) as IDBRequest<StoredRanges | undefined>);
+    if (marker?.forgottenAt != null && marker.forgottenAt >= ticket.observedAt) return;
     await putSession(tx, session, ticket.observedAt, now);
   });
 }
@@ -557,14 +635,23 @@ export async function recordLocalStoreStreamRow(row: WorkbenchMessage | null | u
   // Not a read: an arriving row does not make its own session one worth keeping.
   const ticket = ticketFor(sessionId, Date.now());
   const streamToken = currentStreamToken();
-  if (!(await writableFor(ticket))) return;
+  const writer = await writerFor(ticket);
+  if (!writer) return;
   const now = Date.now();
-  await transact('readwrite', [SESSIONS, MESSAGES, RANGES, TOMBSTONES], async (tx) => {
-    if (ticketReader(ticket) === null) return;
+  await transact('readwrite', [META, SESSIONS, MESSAGES, RANGES, TOMBSTONES], async (tx) => {
+    if (!(await metaAdmits(tx, writer.reader, writer.epoch))) return;
     const rangesStore = tx.objectStore(RANGES);
-    const current = await settle(rangesStore.get(sessionId) as IDBRequest<StoredRanges | undefined>);
-    if (!current && !readPending(sessionId)) return;
+    const record = await settle(rangesStore.get(sessionId) as IDBRequest<StoredRanges | undefined>);
+    const current = record?.forgottenAt == null ? record : undefined;
     const write: RowWrite = { tx, sessionDelta: new Map() };
+    if (!current && !readPending(sessionId)) {
+      // A session the store does not keep. The row may still have moved here
+      // from one it keeps (``promote_suppressed_native_message`` rebinds rows):
+      // the old copy leaves that session under the same P1 ordering.
+      await removeMovedRow(write, row, sessionId, ticket.observedAt);
+      await applySessionDelta(tx, write.sessionDelta, now);
+      return;
+    }
     if (!(await putRow(write, row, sessionId, ticket.observedAt))) return;
     if (current && streamLive && streamToken === currentStreamToken()) {
       rangesStore.put({ ...current, ranges: extendTailCoverage(current.ranges, orderKeyOf(row), streamToken) } satisfies StoredRanges);
@@ -572,6 +659,17 @@ export async function recordLocalStoreStreamRow(row: WorkbenchMessage | null | u
     await applySessionDelta(tx, write.sessionDelta, now);
   });
   scheduleBudgetCheck();
+}
+
+/** Remove the stored copy of ``row`` when it now belongs to ``sessionId``, a
+ *  session the store does not keep, unless the stored copy is newer. */
+async function removeMovedRow({ tx, sessionDelta }: RowWrite, row: WorkbenchMessage, sessionId: string, observedAt: number): Promise<void> {
+  const messages = tx.objectStore(MESSAGES);
+  const existing = await settle(messages.get(row.id) as IDBRequest<StoredMessage | undefined>);
+  if (!existing || existing.sessionId === sessionId || existing.observedAt > observedAt) return;
+  messages.delete(row.id);
+  tx.objectStore(TOMBSTONES).put({ id: row.id, sessionId: existing.sessionId, observedAt } satisfies Tombstone);
+  sessionDelta.set(existing.sessionId, (sessionDelta.get(existing.sessionId) ?? 0) - existing.bytes);
 }
 
 /** The event stream may have missed something: a new stream connected, a page
@@ -596,7 +694,6 @@ export function noteLocalStoreStreamState(live: boolean): void {
 /** Delete everything stored for ``sessionId`` and void every read of it still
  *  in flight: it was archived, left the reader's Inbox, or the server refused it. */
 export async function forgetLocalStoreSession(sessionId: string): Promise<void> {
-  forgotten.set(sessionId, (forgotten.get(sessionId) ?? 0) + 1);
   // A read voided by the forget no longer admits the session's streamed rows.
   pendingReads.delete(sessionId);
   await transact('readwrite', [SESSIONS, MESSAGES, RANGES, TOMBSTONES], async (tx) => {
@@ -606,7 +703,8 @@ export async function forgetLocalStoreSession(sessionId: string): Promise<void> 
     const tombstones = tx.objectStore(TOMBSTONES);
     const tombstoneKeys = await settle(tombstones.index(BY_SESSION).getAllKeys(IDBKeyRange.only(sessionId)));
     for (const key of tombstoneKeys) tombstones.delete(key);
-    tx.objectStore(RANGES).delete(sessionId);
+    // The marker other tabs' reads of it are checked against.
+    tx.objectStore(RANGES).put({ sessionId, ranges: [], forgottenAt: Date.now() } satisfies StoredRanges);
     tx.objectStore(SESSIONS).delete(sessionId);
   }, { retryOnQuota: false });
 }
@@ -685,6 +783,11 @@ async function evictForSpace(quotaFailure: boolean): Promise<boolean> {
       tombstones.index(BY_OBSERVED).getAllKeys(IDBKeyRange.upperBound(Date.now() - TOMBSTONE_TTL_MS)),
     );
     for (const key of expired) tombstones.delete(key);
+    // Forget markers outlive every answer read before them, and no longer.
+    const records = await settle(tx.objectStore(RANGES).getAll() as IDBRequest<StoredRanges[]>);
+    for (const record of records) {
+      if (record.forgottenAt != null && record.forgottenAt < Date.now() - TOMBSTONE_TTL_MS) tx.objectStore(RANGES).delete(record.sessionId);
+    }
     const sessions = await settle(tx.objectStore(SESSIONS).getAll() as IDBRequest<StoredSession[]>);
     let total = sessions.reduce((sum, session) => sum + session.bytes, 0);
     if (quotaFailure || total > budget) {
@@ -747,9 +850,10 @@ export async function readLocalStoreWindow(
   { before = null, limit = 50 }: { before?: OrderKey | null; limit?: number } = {},
 ): Promise<LocalStoreWindow | null> {
   const reader = getLocalSnapshotPrincipal();
-  if (!reader || !readerCurrent() || !(await ensureReader(reader))) return null;
-  const epoch = wipeEpoch;
-  const result = await transact('readonly', [SESSIONS, MESSAGES, RANGES], async (tx) => {
+  if (!reader || !(await claimFor(reader))) return null;
+  const result = await transact('readonly', [META, SESSIONS, MESSAGES, RANGES], async (tx) => {
+    const meta = await getMeta(tx);
+    if (meta?.reader !== reader || meta.signOutGeneration !== readSignOutGeneration()) return null;
     const session = await settle(tx.objectStore(SESSIONS).get(sessionId) as IDBRequest<StoredSession | undefined>);
     const ranges = (await settle(tx.objectStore(RANGES).get(sessionId) as IDBRequest<StoredRanges | undefined>))?.ranges ?? [];
     const rows: StoredMessage[] = [];
@@ -783,6 +887,6 @@ export async function readLocalStoreWindow(
       startReached,
     } satisfies LocalStoreWindow;
   });
-  if (!result || epoch !== wipeEpoch || getLocalSnapshotPrincipal() !== reader) return null;
+  if (!result || getLocalSnapshotPrincipal() !== reader) return null;
   return result;
 }

@@ -4223,9 +4223,16 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getSession: async (sessionId, params) => {
       const path = `/api/sessions/${encodeURIComponent(sessionId)}`;
       const startedAt = Date.now();
-      const read = params?.cache === false
-        ? getJson(path, { handleError: params?.handleError })
-        : getCachedJson(path, undefined, { handleError: params?.handleError });
+      // A silent read resolves a refusal's body instead of throwing; its status
+      // still forgets the session, as a thrown refusal does.
+      const read = params?.handleError === false
+        ? apiFetch(path).then((res) => {
+          if (res.status === 403 || res.status === 404) void forgetLocalStoreSession(sessionId);
+          return res.json();
+        })
+        : params?.cache === false
+          ? getJson(path)
+          : getCachedJson(path);
       const ticket = beginLocalStoreRead(sessionId, readStartedAt(path, startedAt));
       const row = sessionRowFromPayload(await read.catch((error) => {
         forgetRefusedSession(sessionId, error);
