@@ -42,7 +42,7 @@ export const longInstances: MobileInstance[] = [
 export function bilingual(name: string, title: string, render: () => ReactNode, size: [number, number] = [390, 844]): FrameSpec[] {
   return (['zh', 'en'] as const).map(lang => ({
     name: `${name}-${lang}`, title: `${title} · ${lang === 'zh' ? '中文' : 'English'}`,
-    width: size[0], height: size[1], status: 'proposed', themes: ['light', 'dark'],
+    width: size[0], height: size[1], status: 'approved', themes: ['light', 'dark'],
     fixtures: {
       bots: [],
       api: { '/api/session': { remote: true, authenticated: true, email: account.email } },

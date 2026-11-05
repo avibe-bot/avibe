@@ -1,18 +1,18 @@
 # Mobile App onboarding — A / Cloud letter
 
-Status: **proposed**. The owner selected A (云间来信 / Cloud letter) on
-2026-11-05 at 21:39. This is the complete design-only handoff for PR #3252;
-visual direction selection has finished. B/C studies and the previous ordinary
-compositions are removed. Unchanged shipped component references remain separate.
-Approval and implementation are subsequent decisions. Do not merge this proposal
-without the owner's explicit instruction.
+Status: **approved** by the owner on 2026-11-05 at 23:56 Asia/Shanghai as the
+implementation contract. The owner selected A (云间来信 / Cloud letter) at 21:39
+and approved the final design and merge at 23:56. This is the complete design-only
+handoff for PR #3252. B/C studies and the previous ordinary compositions are
+removed. Unchanged shipped component references remain separate. Product
+implementation is a subsequent task; approval does not verify runtime behavior.
 
 ## Change contract
 
 Welcome → email → six-digit email OTP → instance selection. Preserve the same
 account, instance ownership/sharing, availability and recovery semantics. A uses
 Avibe's high-resolution cloud mascot, subtle mint/cyan/violet background, raised
-rounded surfaces and pill actions. Every proposal exists in Chinese and English,
+rounded surfaces and pill actions. Every approved design exists in Chinese and English,
 and light and dark. No Apple/Google/GitHub choices or browser-login instructions.
 
 Acceptance invariants:
@@ -35,7 +35,7 @@ Acceptance invariants:
 
 ## Frame inventory
 
-Prefix IDs with `mobile-app/`; append `-zh` or `-en` to proposed states. Existing
+Prefix IDs with `mobile-app/`; append `-zh` or `-en` to approved states. Existing
 flow IDs remain stable; `welcome/intro` and `welcome/code-partial` complete the A
 flow, and `account/long-email` verifies the account wrapping policy.
 
@@ -48,7 +48,7 @@ flow, and `account/long-email` verifies the account wrapping policy.
 | `native` | `instance-error`, `window-topbar` |
 | `alignment` — shipped references, no locale suffix | `account-reference`, `error-reference` |
 
-**72 proposed frames / 144 theme captures**, plus 2 shipped references / 4
+**72 approved frames / 144 theme captures**, plus 2 shipped references / 4
 captures. `welcome/success` immediately presents the existing picker composition;
 there is no invented success detour. Frames normally use 390 × 844. Long email
 and long instance names also use 375 × 667. `compact` is a fixture for the small
@@ -108,7 +108,7 @@ to the product's locale catalogs when implemented.
 - No instances: desktop first, CLI second. Commands preserve the repository's
   install + `vibe remote` flow. Pair the same account, return and refresh.
 - Account retains actual MoreAccountSection/sign-out. The full-width switch or
-  choose-instance action is a **proposal awaiting final owner confirmation**.
+  choose-instance action is **owner-approved**.
   Delete account leads to avibe.bot to review consequences and confirm; final
   maintained destination and native credential cleanup belong to implementation.
 - Instance failure is a packaged shell-page proposal; its stable `native/*` ID
@@ -142,10 +142,11 @@ no dropped compositor frames; Chromium 4× is only a proxy);
 real iPhone/WKWebView frame-time verification belongs to implementation. This
 proposal adds no runtime animation, duration or parallel motion token system.
 
-## Final owner review and verification boundary
+## Owner approval and verification boundary
 
-Still proposed for final review: shared error/expired wording; offline-tap
-recovery explanation; centered Change email; full-row switch-instance action.
+The owner approved these four decisions on 2026-11-05 at 23:56 Asia/Shanghai:
+shared error/expired wording; offline-tap recovery explanation; centered Change
+email; full-row switch-instance action.
 The old spinner question is settled by #3263's skeleton policy.
 
 Focused checks: design typecheck, UI lint baseline, production build, whitespace,
