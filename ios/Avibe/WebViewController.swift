@@ -85,18 +85,35 @@ final class OuterScrollLockController {
 @MainActor
 final class WebViewFactory {
     private let instanceOrigin: WebOrigin
+    private let websiteDataStore: WKWebsiteDataStore
+    private let showAccount: () -> Void
     private var outerScrollLockControllers: [
         ObjectIdentifier: OuterScrollLockController
     ] = [:]
     private lazy var nativeConfiguration = NativeBridgeConfiguration.make(
         instanceOrigin: instanceOrigin,
+        websiteDataStore: websiteDataStore,
         setOuterScrollLocked: { [weak self] webView, locked in
             self?.setOuterScrollLocked(locked, in: webView) ?? false
-        }
+        },
+        showAccount: showAccount
     )
 
-    init(instanceOrigin: WebOrigin) {
+    init(
+        instanceOrigin: WebOrigin,
+        websiteDataStore: WKWebsiteDataStore,
+        showAccount: @escaping () -> Void = {}
+    ) {
         self.instanceOrigin = instanceOrigin
+        self.websiteDataStore = websiteDataStore
+        self.showAccount = showAccount
+    }
+
+    convenience init(instanceOrigin: WebOrigin) {
+        self.init(
+            instanceOrigin: instanceOrigin,
+            websiteDataStore: .default()
+        )
     }
 
     func makeWebView<Delegate: WKNavigationDelegate & WKUIDelegate>(
@@ -197,6 +214,8 @@ final class WebViewController: UIViewController {
     private let didStartLoading: () -> Void
     private let didFinishLoading: () -> Void
     private let didFailLoading: () -> Void
+    private let websiteDataStore: WKWebsiteDataStore
+    private let showAccount: () -> Void
     private var popupRecords: [ObjectIdentifier: PopupRecord] = [:]
     private var downloadContexts: [ObjectIdentifier: DownloadContext] = [:]
     private var downloadDestinations: [ObjectIdentifier: URL] = [:]
@@ -205,22 +224,46 @@ final class WebViewController: UIViewController {
     private var isPresentingDownloadedFile = false
     private var pendingDialogs: [UUID: PendingJavaScriptDialog] = [:]
     private var dialogIdentifiersByWebView: [ObjectIdentifier: Set<UUID>] = [:]
-    private lazy var webViewFactory = WebViewFactory(instanceOrigin: instanceOrigin)
+    private var isInvalidatedForAccountTransition = false
+    private lazy var webViewFactory = WebViewFactory(
+        instanceOrigin: instanceOrigin,
+        websiteDataStore: websiteDataStore,
+        showAccount: showAccount
+    )
 
     private lazy var webView = webViewFactory.makeWebView(delegate: self)
 
     init(
         instanceOrigin: WebOrigin,
+        websiteDataStore: WKWebsiteDataStore,
+        showAccount: @escaping () -> Void = {},
         didStartLoading: @escaping () -> Void,
         didFinishLoading: @escaping () -> Void,
         didFailLoading: @escaping () -> Void
     ) {
         self.instanceOrigin = instanceOrigin
+        self.websiteDataStore = websiteDataStore
+        self.showAccount = showAccount
         navigationPolicy = NavigationPolicy(instanceOrigins: [instanceOrigin])
         self.didStartLoading = didStartLoading
         self.didFinishLoading = didFinishLoading
         self.didFailLoading = didFailLoading
         super.init(nibName: nil, bundle: nil)
+    }
+
+    convenience init(
+        instanceOrigin: WebOrigin,
+        didStartLoading: @escaping () -> Void,
+        didFinishLoading: @escaping () -> Void,
+        didFailLoading: @escaping () -> Void
+    ) {
+        self.init(
+            instanceOrigin: instanceOrigin,
+            websiteDataStore: .default(),
+            didStartLoading: didStartLoading,
+            didFinishLoading: didFinishLoading,
+            didFailLoading: didFailLoading
+        )
     }
 
     @available(*, unavailable)
@@ -272,6 +315,9 @@ final class WebViewController: UIViewController {
 
     deinit {
         NotificationCenter.default.removeObserver(self)
+        webView.stopLoading()
+        webView.navigationDelegate = nil
+        webView.uiDelegate = nil
         cancelAllPendingDialogs(dismissAlerts: false)
         for record in popupRecords.values {
             record.webView.stopLoading()
@@ -289,7 +335,24 @@ final class WebViewController: UIViewController {
     }
 
     private func loadConfiguredInstance() {
+        guard !isInvalidatedForAccountTransition else {
+            return
+        }
         webView.load(URLRequest(url: instanceOrigin.url))
+    }
+
+    func invalidateForAccountTransition() {
+        guard !isInvalidatedForAccountTransition else {
+            return
+        }
+        isInvalidatedForAccountTransition = true
+        cancelAllPendingDialogs()
+        discardAllPopups(animated: false)
+        discardPendingDownloadedFiles()
+        webView.stopLoading()
+        webView.navigationDelegate = nil
+        webView.uiDelegate = nil
+        webViewFactory.unregister(webView)
     }
 
     private func presentExternalURL(_ url: URL) {

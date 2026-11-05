@@ -7,6 +7,7 @@ import {
   isNativeShell,
   nativeAppInfo,
   nativeHapticImpact,
+  nativeShowAccount,
   nativeVoicePermission,
   openNativeExternal,
   setNativeOuterScrollLocked,
@@ -22,6 +23,7 @@ const installBridge = (
         platform: 'ios',
         shellVersion: '1.0 (1)',
         capabilities: {
+          accountPresentation: 1,
           app: 1,
           haptics: 1,
           keyboardResizesViewport: 1,
@@ -41,6 +43,7 @@ const installBridge = (
       platform: 'ios',
       shellVersion: '1.0 (1)',
       capabilities: {
+        accountPresentation: 1,
         app: 1,
         haptics: 1,
         keyboardResizesViewport: 1,
@@ -65,6 +68,7 @@ describe('native shell bridge', () => {
     expect(isNativeShell()).toBe(false);
     installBridge();
     expect(isNativeShell()).toBe(true);
+    expect(hasNativeCapability('accountPresentation')).toBe(true);
     expect(hasNativeCapability('haptics')).toBe(true);
     expect(hasNativeCapability('keyboardResizesViewport')).toBe(true);
     expect(hasNativeCapability('haptics', 2)).toBe(false);
@@ -82,12 +86,14 @@ describe('native shell bridge', () => {
       shellVersion: '1.0 (1)',
     });
     await expect(openNativeExternal('https://avibe.bot')).resolves.toBe(true);
+    await expect(nativeShowAccount()).resolves.toBe(true);
     await expect(nativeHapticImpact('medium')).resolves.toBe(true);
     await expect(setNativeOuterScrollLocked(true)).resolves.toBe(true);
     await expect(nativeVoicePermission()).resolves.toBe('granted');
     expect(call.mock.calls.map(([method]) => method)).toEqual([
       'app.info',
       'app.openExternal',
+      'app.showAccount',
       'haptics.impact',
       'viewport.setOuterScrollLocked',
       'voice.permission',
@@ -95,8 +101,14 @@ describe('native shell bridge', () => {
   });
 
   it('uses harmless fallbacks when a capability is missing or a call fails', async () => {
-    installBridge({
+    const missingCall = installBridge({
       capabilities: { app: 1 },
+    });
+    await expect(nativeShowAccount()).resolves.toBe(false);
+    expect(missingCall).not.toHaveBeenCalledWith('app.showAccount', {});
+
+    installBridge({
+      capabilities: { accountPresentation: 1, app: 1 },
       call: vi.fn(async () => {
         throw { code: 'failed', message: 'unavailable' };
       }),
@@ -106,5 +118,6 @@ describe('native shell bridge', () => {
     await expect(setNativeOuterScrollLocked(true)).resolves.toBe(false);
     await expect(nativeVoicePermission()).resolves.toBeNull();
     await expect(openNativeExternal('https://avibe.bot')).resolves.toBe(false);
+    await expect(nativeShowAccount()).resolves.toBe(false);
   });
 });

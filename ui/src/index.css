@@ -153,6 +153,17 @@
   }
 }
 
+@keyframes mobile-mascot-arrive {
+  from {
+    opacity: 0;
+    transform: translateY(var(--motion-offset-sm));
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);

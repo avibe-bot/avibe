@@ -1,0 +1,182 @@
+# Mobile App Onboarding
+
+## Goal
+
+Ship the approved `mobile-app/*` onboarding flow as a bundled React experience
+inside the iOS shell:
+
+1. Enter a full email address.
+2. Request and verify a six-digit Supabase email OTP.
+3. Select an owned or permitted shared Avibe.
+4. Continue through the existing instance-to-control-plane OIDC and consent
+   flow.
+5. Restore only a selection that still belongs to the same authorized account.
+
+Android is outside this slice. The bridge contract stays platform-neutral, but
+the implementation adds no Android framework or runtime.
+
+## Authentication Flow
+
+The bundled page can call only a narrow account bridge installed in its own
+local `WKWebView`. Instance pages, child windows, Show Pages, and iframes never
+receive these handlers.
+
+The native account client reads the public Supabase URL and anon key from
+`/api/config/auth` and runs fixed Supabase `/auth/v1/otp` and `/auth/v1/verify`
+requests in `WKContentWorld.defaultClient`. The returned access and refresh
+tokens exist transiently in that isolated WebKit JavaScript world and are posted
+directly to the existing `/auth/callback`; they are never returned to bundled or
+remote page JavaScript. The callback remains responsible for Supabase
+`setSession`, invitation activation, membership email synchronization, and the
+`avibe_session` cookie.
+
+`GET /api/mobile/session` is the account-scoped discovery boundary. It accepts
+only the existing website cookie session and returns the account plus owned and
+permitted shared instances. That includes paired active Personal and
+Organization instances admitted by the existing email, domain, or
+Organization-group authorization rules. Organization management roles do not
+imply runtime access. The response is limited to account id/full email and
+`id`, display name, host, URL, owner/shared relationship, owner email, and
+availability for each instance. Runtime availability is informational; the
+instance and control plane remain authoritative when the user opens an Avibe.
+
+`DELETE /api/mobile/session` performs current-device logout with Supabase local
+scope and clears the Avibe session cookie. It does not call the existing global
+logout route and does not delete remembered consent grants. The native request
+sets `Origin` to the configured control-plane origin so the existing
+cookie-mutation guard remains strict; another origin still receives `403`.
+
+The iOS app depends on `avibe-backend#308`, merged to backend `main` as
+`1cea1dffdc3e68c6a2cc8594064bf94367485b5c` and successfully deployed to
+Production by Vercel on 2026-11-05 at 18:44:16 UTC. A public no-cookie request
+to the mobile session endpoint returns the expected `401`, and health returns
+200. Hosted behavior with a real account remains unverified.
+
+## Native Bridge Contract
+
+The bundled page receives only these account operations:
+
+| Method | Input | Result |
+| --- | --- | --- |
+| `session.bootstrap` | none | signed-out or current account, instances, and valid selected instance |
+| `auth.requestOtp` | full email | provider cooldown metadata |
+| `auth.verifyOtp` | full email and six-digit code | current account and instances |
+| `session.refresh` | none | current account and authorized instances |
+| `session.selectInstance` | instance id | accepted selected instance |
+| `session.logout` | none | signed-out state |
+| `app.openExternal` | HTTPS URL from the closed install/help allowlist | whether iOS accepted the handoff |
+
+The runtime `avibeNative` bridge adds only `app.showAccount`, admitted by the
+dedicated `accountPresentation: 1` capability. It asks the app to show the
+bundled account surface; it does not expose account methods, tokens, or an
+authenticated fetch primitive to instance pages. A new Web UI keeps its prior
+web sign-out action when an older app omits the capability or the native call
+fails. A new app loading an older instance Web UI still provides Account and
+Change Instance through the native browser menu.
+
+## Data Ownership
+
+| Field | Owner |
+| --- | --- |
+| Supabase access and refresh tokens during sign-in | Transient fixed script in `WKContentWorld.defaultClient` |
+| Supabase and `avibe_session` cookies | Account-scoped persistent WebKit website data store |
+| Account id and full email | Control-plane mobile session response |
+| Instance ownership, sharing, and current authorization | Control plane |
+| Instance runtime availability | Control-plane runtime status projection |
+| Selected instance id and URL | App storage, scoped by account id |
+| OTP input, busy state, error, and cooldown | Bundled page state |
+| Session generation | Native app state |
+
+The app never sends control-plane cookies to an instance URL or third-party
+redirect. It never exposes access or refresh tokens to the bundled page.
+
+## Cookie Synchronization
+
+WebKit is the only persistent cookie owner. The app does not copy a complete
+cookie snapshot through `URLSession`.
+
+Each active phone account uses one persistent named `WKWebsiteDataStore`. The
+native-owned hidden transport and every runtime WebView for that account share
+that store. The transport runs public Supabase OTP calls, posts the resulting
+session to the existing control-plane callback, and reads or deletes the mobile
+session without returning access or refresh tokens to the bundled page.
+
+The hidden transport uses one bounded-request mechanism across readiness and
+all fixed scripts. Control-plane readiness has a native deadline, account
+requests use an `AbortController` deadline, and current-device DELETE uses the
+same mechanism with a shorter bound. Navigation actions and responses must
+remain on the configured control-plane origin before any auth script can run.
+Fixed requests reject redirects, so email, OTP, tokens, and control-plane
+cookies cannot follow a response to another origin.
+
+Logout or account switch increments the session generation, detaches all views
+using the old store, replaces the persisted store identifier, and removes the
+old store. A late request can therefore mutate only an abandoned store and
+cannot restore credentials into the next account. XCTest with a hermetic server
+and real `WKHTTPCookieStore` must prove:
+
+- there is no native snapshot writer that can overwrite a newer WebKit cookie;
+- chunk rotation and deletion are reflected by WebKit;
+- delayed responses from an old generation remain confined to the abandoned
+  store after logout or account switch;
+- control-plane cookies are not sent to instance or third-party origins.
+
+The production control plane is HTTPS. A local HTTP control-plane override is
+compiled only in Debug/test builds; Release ignores it.
+
+## Lifecycle And Failure Semantics
+
+- Sending and verifying OTP are single-flight operations. Provider throttling
+  overrides the client cooldown. First delivery has no client-generated resend
+  delay; a successful resend starts the approved 60-second timer, and changing
+  email clears that client timer.
+- The bundled page has one token-owning account operation at a time. While it
+  is active, every control that can navigate, edit account inputs, open an
+  external page, or start another operation is disabled and guarded. Only that
+  token may apply a result or clear the lock; a native `busy` rejection is not
+  rendered as the current operation's failure.
+- Invalid, expired, throttled, and network failures preserve the full email and
+  the entered code when recovery is possible. A verification transport failure
+  clears the code because the provider may already have consumed it; the
+  approved network state remains on the code screen with resend available.
+- Error classification follows the failed stage. Only a provider response from
+  the verify stage can be `invalid_or_expired`; callback, session, malformed
+  response, abort, timeout, and script failures are `network`. Provider OTP
+  throttling preserves `Retry-After`, and request rejections preserve the
+  provider code.
+- A mobile-session 401 is the only fetch result that means signed out. Other
+  fetch failures preserve the current store and account state. Remote logout is
+  best effort; failure or timeout never prevents local teardown and store
+  rotation.
+- Cold launch validates the cookie session before restoring a selection. The
+  stored account id must match, and the selected instance must still appear in
+  the authorized response.
+- Login, logout, and account switch increment a session generation. Async
+  results apply only when their generation is still current.
+- The native coordinator is the single runtime admission authority. Login,
+  logout, refresh, account switch, and store rotation revoke the selectable
+  snapshot and detach any runtime before their first suspension. Selection,
+  cold restore, and WebView registration require a current generation/store
+  lease; a delayed open from the previous account is rejected.
+- Runtime entry points are limited to validated cold restore and
+  `session.selectInstance`. Runtime exits are the native Account/Change
+  Instance menu, `app.showAccount`, and every account transition; all of them
+  converge on the same AppModel route and teardown path.
+- Revoked or stale selections return to the picker. An unavailable selected
+  instance keeps account and switching controls usable.
+- Instance entry continues through existing OIDC and consent. The app does not
+  bypass first-instance consent or convert availability into authorization.
+- Logout clears phone-owned control-plane and instance cookies, selection,
+  private cache, and late results without revoking other devices.
+- Signed-out bootstrap, account mismatch, failed verification, logout, and
+  account switch rotate away from the previous account store.
+- Cold restore accepts a stored selection only when the current account id
+  matches and the instance still appears in the latest authorized response.
+
+## Evidence Boundary
+
+Backend authorization and response behavior, React state/accessibility, Swift
+session state, cookie handling, and simulator UI use hermetic fixtures.
+Production Supabase email delivery, hosted OTP length and template, real account
+refresh, and real instance consent remain explicitly unverified until an
+isolated integration environment is available.

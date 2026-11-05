@@ -1,9 +1,11 @@
 # Avibe iOS shell
 
-This directory contains the thin SwiftUI shell for the Avibe Workbench. The
-shell stores one configured HTTPS instance origin, loads it in a persistent
-`WKWebView`, and owns the platform boundaries that browser content cannot own:
-navigation handoff, downloads, native dialogs, and microphone permission.
+This directory contains the SwiftUI shell for Avibe's bundled mobile account
+flow and Web Workbench. The app signs in through local React pages, discovers
+the current account's permitted instances, loads the selected HTTPS origin in
+a persistent `WKWebView`, and owns the platform boundaries that browser content
+cannot own: navigation handoff, downloads, native dialogs, and microphone
+permission.
 
 Phase 0a deliberately keeps the Web composer. The shell and Web UI ship the
 versioned `avibeNative` bridge together. The explicit
@@ -46,8 +48,10 @@ and Web resizing cannot both run.
   instance-frame `data:` downloads use `WKDownload`, a unique temporary
   destination, and the system activity sheet. Other HTTP(S) download targets
   open in `SFSafariViewController`; all other download sources are rejected.
-- Cookies and website data use `WKWebsiteDataStore.default()` and survive app
-  launches through WebKit's default persistent store.
+- Each phone account uses one persistent named `WKWebsiteDataStore`. The hidden
+  account transport and runtime WebViews use that store at different lifecycle
+  phases, so WebKit remains the only cookie owner and sessions survive app
+  launches without native cookie snapshots.
 - Primary and child WebViews are created through one factory and pinned to
   `keyboardLayoutGuide`. Outer scrolling and automatic content insets use
   WebKit defaults until an instance-origin Workbench document requests
@@ -106,6 +110,7 @@ The PR 2 method surface is fixed:
 
 | Capability | Method | Result |
 | --- | --- | --- |
+| `accountPresentation: 1` | `app.showAccount()` | `null`; closes the runtime surface and opens the bundled account page |
 | `app: 1` | `app.info()` | `{contract, platform, shellVersion, capabilities}` |
 | `app: 1` | `app.openExternal({url})` | `{opened}` for `http`/`https` URLs with a host and `mailto`/`tel` URLs with a target |
 | `haptics: 1` | `haptics.impact({style})` | `null`; styles are `light`, `medium`, `heavy`, `soft`, or `rigid` |
@@ -123,6 +128,75 @@ Unknown methods never expand the native surface.
 The production Supabase Auth origin is an explicit primary-navigation
 allowlist entry. If Avibe Cloud moves to another Supabase project, update that
 origin and its navigation test in the same change.
+
+## Mobile account onboarding
+
+The app bundles the approved `mobile-app/*` React flow and exposes a separate
+`window.avibeMobile` bridge only to its top-level
+`avibe-app://bundle` document. A read-only `WKURLSchemeHandler` serves the
+checked-in Vite build from the app bundle so ES modules, styles, and image
+assets share one fixed local origin. Its fixed
+surface is `session.bootstrap`, `auth.requestOtp`, `auth.verifyOtp`,
+`session.refresh`, `session.selectInstance`, `session.logout`, and the closed
+install-guide `app.openExternal` allowlist. Instance documents, child windows,
+Show Pages, and iframes do not receive these handlers.
+
+The hidden account transport is a native-owned `WKWebView` with no message
+handler. It loads only the configured control-plane auth configuration and runs
+fixed scripts in `WKContentWorld.defaultClient`: public Supabase OTP requests,
+the existing `/auth/callback`, and the mobile session GET/DELETE endpoints. The
+isolated world is defense in depth, not a separate security process. The actual
+boundary comes from the fixed control-plane origin, narrow compiled scripts,
+no page bridge, and lifecycle separation from runtime WebViews. Access and
+refresh tokens are transient script arguments and are never returned to the
+bundled page or instance content.
+
+Readiness navigation has a native 10-second deadline. Fixed account scripts
+share one `AbortController` deadline mechanism: OTP/session operations use 15
+seconds and best-effort current-device DELETE uses 5 seconds. Both navigation
+actions and responses must remain on the configured control-plane origin.
+Fixed requests reject redirects, so email, OTP, tokens, and cookies cannot
+follow another origin.
+Timeout, abort, malformed response, and script failures map to `network`.
+Only a Supabase verify-stage rejection maps to `invalid_or_expired`; provider
+throttling preserves `Retry-After`, and OTP request rejections preserve the
+provider error code.
+
+WebKit owns every persistent cookie. The account transport and runtime share one
+named store, but the account transport is invalidated before an instance opens.
+Returning to Account first stops the primary and child runtime WebViews; the
+hidden transport is created only when the bundled account controller appears.
+The native coordinator is the single runtime admission authority. Login,
+logout, refresh, account switch, and store rotation increment the generation,
+revoke the selectable snapshot, and detach any runtime before their first
+suspension. Selection and cold restore issue a generation/store runtime lease;
+the AppModel route and WebView registration both reject a delayed old lease.
+Logout can preempt an older account request, attempts current-device server
+logout under its short bound, clears the stored selection, rotates to a new
+named store, and removes the old store even when DELETE fails or times out.
+Late results can mutate only the abandoned store and cannot restore the next
+account.
+The bundled page also admits one token-owning account operation at a time.
+Every interactive control consumes the derived lock, and only the current token
+may apply an async result or release the page for another operation.
+Signed-out bootstrap, a stored-selection account mismatch, and failed OTP
+verification also rotate to a fresh store before another account attempt.
+Successful first delivery leaves resend available unless the provider returns
+`Retry-After`; successful resends use the approved client cooldown, while any
+provider cooldown takes precedence. A verification network failure keeps the
+email and approved network presentation but clears the possibly consumed code,
+leaving resend as the recovery path. A mobile-session 401 alone means signed
+out; every other fetch failure preserves the current store and state.
+
+Cold launch validates `/api/mobile/session` before restoring a selection. The
+stored account id must match, the instance must still be in the authorized
+list, and it must be available. Owned, explicitly shared, and permitted
+Organization instances come from the backend's existing authorization rules;
+availability is informational and the instance OIDC/consent flow remains the
+entry authority. The app depends on backend PR #308, merged as
+`1cea1dffdc3e68c6a2cc8594064bf94367485b5c` and successfully deployed to
+Production by Vercel on 2026-11-05 at 18:44:16 UTC. Public no-cookie and health
+probes return the expected 401 and 200; no real account session was used.
 
 ## WebKit API inventory
 
@@ -186,7 +260,7 @@ pinned to Xcode 26.6.
 
 | Property | Shell value and reason | Verification |
 | --- | --- | --- |
-| `websiteDataStore` | WebKit's default persistent data store. Cookies and sessions survive app launches without a shell override. | Simulator build. |
+| `websiteDataStore` | One persistent named store belongs to the current phone account. Runtime primary/child WebViews and the hidden account transport use it in non-overlapping phases; logout/account switch rotates the identifier and deletes the old store. | Coordinator lifecycle XCTest plus real `WKHTTPCookieStore` handoff, chunk rotation/deletion, redirect isolation, and delayed-response tests. |
 | `userContentController` | The root installs the document-start `avibeNative` script and reply handler. Children receive WebKit's exact configuration through the shared WebView factory, preserving the same controller and `window.opener`; each message still repeats the main-frame and exact-origin check. | XCTest covers instance main-frame discovery and calls, child discovery, subframe absence, external-origin absence, and unknown-method rejection. |
 | `applicationNameForUserAgent` | `AvibeiOS/<CFBundleShortVersionString>`, appended by WebKit to its standard user agent. | Configuration XCTest and Debug/Release simulator builds. |
 | `allowsInlineMediaPlayback`, `mediaTypesRequiringUserActionForPlayback` | WebKit defaults. Phase 0a adds no media playback policy. | API ledger; playback is a device check. |
@@ -227,6 +301,7 @@ pinned to Xcode 26.6.
 | PWA remote-auth deferral | Not reused. Automatic login follows the existing WebView authentication-origin flow. |
 | Haptics | Hold-to-talk start/release/cancel and accepted typed/attachment sends use bridge haptics. Browser contexts retain `navigator.vibrate` as the hold fallback. |
 | Voice permission probe | Hold-to-talk reads `voice.permission()` first in the native shell, then retains the browser Permissions API fallback elsewhere. |
+| Account presentation | `accountPresentation: 1` opens the bundled account surface. Older apps keep the Web UI's prior sign-out action; a failed native call also falls back to sign-out. New apps loading older instance Web UIs retain the native Account and Change Instance menu. |
 | Workbench outer-scroll lock | An AppShell in either primary or child requests the `viewport: 1` lock for its own WebView while mounted and releases it on unmount or `pagehide`. Authentication pages, Show Pages, shared pages, previews, errors, and other ordinary documents keep WebKit scrolling by default. |
 
 ## Primary and child behavior inventory
@@ -259,6 +334,7 @@ bridge and do not run these Web UI branches.
 | Web Push surfaces | `isNativeShell()` | Setup gap, Settings toggle, and notification menu omit browser push. | Same. |
 | Haptics | `haptics: 1` | Native haptics for hold-to-talk and accepted sends. | Same. |
 | Voice permission probe | `voice: 1` | Reads native permission state before browser fallback. | Same. |
+| Account presentation | `accountPresentation: 1` | Web account controls open the bundled account surface; missing/rejected support retains web sign-out. The native browser menu remains available independently of the instance Web UI version. | Same. |
 | `appLaunch` new-context suppression | `isNativeShell()` | iOS standalone suppression is disabled; `window.open` reaches native child creation. | Same for nested windows. |
 | `PwaLoopbackLinkGuard` | `isNativeShell()` | Loopback blocking remains; same-origin `_blank` rewriting is disabled. | Same. |
 | `downloadMedia` | `isNativeShell()` | PWA Web Share interception is disabled; admitted anchors reach `WKDownload`. | Same. |
@@ -266,17 +342,22 @@ bridge and do not run these Web UI branches.
 | `ShowPageShareControl` | `isNativeShell()` | System Web Share remains feature-detected; Add to Home Screen is hidden. | Same. |
 | PWA route-memory restoration in `App.tsx` | `isNativeShell()` | The iOS standalone-only restoration path is disabled. | Same. |
 
-## Phase 0a PR 2 verification
+## Verification
 
-- Xcode 27.2 simulator: Debug and Release no-sign builds, XCTest bridge policy,
-  runtime discovery, and outer-scroll state, plus hermetic authentication-scroll
-  and Workbench keyboard fixtures.
+- Xcode 27.2 simulator: Debug XCTest and Release-macro XCTest with no signing,
+  including bridge policy, runtime `app.showAccount`, account transport
+  lifecycle, stage-accurate failure mapping, bounded hanging readiness/GET/DELETE,
+  cold selection ownership, and real WebKit cookie behavior against a hermetic
+  local server.
 - CI remains authoritative on Xcode 26.6 and runs `lint` plus `ios-shell`.
-- Web UI: focused Vitest coverage for the bridge adapter, haptics, Workbench
-  outer-scroll lifecycle, keyboard ownership, hidden Web Push/installation
-  surfaces, and all five PWA decisions; production TypeScript/Vite build.
+- Web UI: focused Vitest coverage for the bundled OTP/picker/account flow,
+  bridge adapter, haptics, Workbench outer-scroll lifecycle, keyboard ownership,
+  hidden Web Push/installation surfaces, and all five PWA decisions; production
+  Workbench and bundled-mobile TypeScript/Vite builds.
 - Simulator screenshots and the machine-readable fixture report are stored
   outside the repository and linked from the PR description.
+- Production Supabase mail delivery, hosted OTP policy, real account refresh,
+  consent, and device behavior remain unverified.
 
 ## Local build
 
@@ -309,6 +390,14 @@ xcodebuild \
 Tests and development builds must use disposable instance URLs, `loadHTMLString`
 fixtures, or local fixture servers. Do not point automated tests at a real
 Avibe instance.
+
+When bundled mobile UI changes, rebuild the checked-in app resource before
+building Xcode:
+
+```sh
+cd ui
+npm run build:mobile
+```
 
 ## CI
 
