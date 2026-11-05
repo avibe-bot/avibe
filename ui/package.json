@@ -26,6 +26,7 @@
     "e2e:headed": "playwright test --headed",
     "test:chat-interactions": "node scripts/e2e-suite.mjs e2e/chat-interactions/tsconfig.json playwright.chat-interactions.config.ts",
     "test:chat-paging": "node scripts/e2e-suite.mjs e2e/chat-paging/tsconfig.json playwright.chat-paging.config.ts",
+    "test:chat-scroll": "node scripts/e2e-suite.mjs e2e/chat-scroll/tsconfig.json playwright.chat-scroll.config.ts",
     "test:citations": "node scripts/e2e-suite.mjs e2e/citations/tsconfig.json playwright.citations.config.ts",
     "test:chat-selection": "node scripts/e2e-suite.mjs e2e/chat-selection/tsconfig.json playwright.chat-selection.config.ts",
     "test:inbox-return": "node scripts/e2e-suite.mjs e2e/inbox-return/tsconfig.json playwright.inbox-return.config.ts",

@@ -240,6 +240,7 @@ jobs:
               npm run test:pet-mini
               npm run test:chat-interactions
               npm run test:inbox-return
+              npm run test:chat-scroll
           - lane: 2
             suites: |
               npm run test:workbench-general -- sidebar-floating.spec.ts desktop-window-chrome.spec.ts composer-route-trigger.spec.ts skills-dialog.spec.ts bots.spec.ts
