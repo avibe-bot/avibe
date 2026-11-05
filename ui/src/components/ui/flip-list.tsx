@@ -274,7 +274,10 @@ class FlipListCore extends React.Component<Props> {
       const origin = root.getBoundingClientRect();
       for (const leave of plan.leaves) {
         const copy = snapshot.copies.get(leave.id);
-        if (!copy) continue;
+        // It leaves as it was seen: a row still coming in (its copy carries none of its motion)
+        // fades from where its fade had got to, and one not yet showing leaves nothing behind.
+        const seen = snapshot.opacity.get(leave.id) ?? 1;
+        if (!copy || seen < 0.01) continue;
         const timing = !moving ? fadeOut : leave.kind === 'removed' ? tokens.fastExit : tokens.instant;
         if (moving) closeUp = Math.max(closeUp, timing.duration);
         Object.assign(copy.style, {
@@ -287,7 +290,7 @@ class FlipListCore extends React.Component<Props> {
         });
         layer.appendChild(copy);
         const to = moving ? { opacity: 0, transform: `scale(${tokens.enterScale})` } : { opacity: 0 };
-        const from = moving ? { opacity: 1, transform: 'scale(1)' } : { opacity: 1 };
+        const from = moving ? { opacity: seen, transform: 'scale(1)' } : { opacity: seen };
         const animation = copy.animate([from, to], { ...timing, fill: 'forwards' });
         const drop = () => copy.remove();
         animation.finished.then(drop, drop);

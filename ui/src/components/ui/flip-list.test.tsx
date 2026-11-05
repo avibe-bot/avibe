@@ -267,4 +267,30 @@ describe('FlipList', () => {
     frame();
     expect(on('c').map((entry) => entry.keyframes)).toEqual([[{ opacity: 0.6 }, { opacity: 1 }]]);
   });
+
+  it('leaves a row caught coming in as it was seen, from its fade so far', () => {
+    const view = render(<List ids={['a', 'b', 'c', 'd']} />);
+    view.rerender(<List ids={['c', 'a', 'b', 'd']} />);
+    frame();
+    const card = document.querySelector<HTMLElement>('[data-flip-id="c"]')!;
+    // Partway through its entrance, c is taken away again.
+    card.style.opacity = '0.3';
+    view.rerender(<List ids={['a', 'b', 'd']} />);
+    frame();
+    // (The copy its first move left is still there: these animations never finish on their own.)
+    const copy = ghosts().filter((ghost) => ghost.textContent === 'c').at(-1)!;
+    expect(played.find((entry) => entry.element === copy)!.keyframes[0]).toMatchObject({ opacity: 0.3 });
+
+  });
+
+  it('leaves no copy of a row taken away before it began to show', () => {
+    const view = render(<List ids={['a', 'b', 'c']} />);
+    view.rerender(<List ids={['a', 'b', 'c', 'n']} />);
+    frame();
+    // Still waiting to come in: its delay holds it at 0.
+    document.querySelector<HTMLElement>('[data-flip-id="n"]')!.style.opacity = '0';
+    view.rerender(<List ids={['a', 'b', 'c']} />);
+    frame();
+    expect(ghosts().filter((ghost) => ghost.textContent === 'n')).toEqual([]);
+  });
 });
