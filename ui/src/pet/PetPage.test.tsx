@@ -2068,17 +2068,19 @@ describe('desktop mini v2 interaction contract', () => {
     expect(wrap.classList.contains('is-hovered')).toBe(true);
   });
 
-  it('keeps the typing dock active through a double-click and window blur', async () => {
+  it('keeps typing through a double-click until the window actually blurs', async () => {
     mainSession('S'); render(<PetPage />);
     await userEvent.click(await screen.findByLabelText('pet.keyboard.open'));
     const input = await screen.findByRole('textbox');
     const { petBridge } = await import('./petBridge');
     vi.spyOn(petBridge, 'open').mockResolvedValue();
     await userEvent.dblClick(screen.getByLabelText('pet.recentTurns'));
-    act(() => window.dispatchEvent(new Event('blur')));
     expect(document.querySelector('.pet-mini-dock.is-active')).not.toBeNull();
     expect(document.querySelector('.is-hover-suppressed')).toBeNull();
     expect(screen.getByRole('textbox')).toBe(input);
+    act(() => window.dispatchEvent(new Event('blur')));
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(document.querySelector('.pet-mini-dock.is-active')).toBeNull();
   });
 
   it('keeps listening and finishing docks active through double-click and blur', async () => {

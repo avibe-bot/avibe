@@ -324,6 +324,12 @@ test('attention leads the list and referencing sends only through the main compo
   await expect(page.locator('.pet-mini-reference-chip')).toHaveCount(1);
   await expect(page.locator('.pet-mini-reply-bubble')).toHaveCount(0);
   await page.getByRole('textbox').fill('请总结进展');
+  await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+  await expect(page.getByRole('textbox')).toHaveCount(0);
+  await page.locator('.pet-mini-avatar-button').hover();
+  await page.getByRole('button', { name: 'Type a message', exact: true }).click();
+  await expect(page.getByRole('textbox')).toHaveValue('请总结进展');
+  await expect(page.locator('.pet-mini-reference-chip')).toHaveCount(1);
   await page.getByRole('textbox').press('Enter');
   await expect.poll(() => page.evaluate(() => window.petFixtureSends)).toEqual([{
     sessionId: 'ses_main', payload: { text: '#<ses_fixture_0> 请总结进展', content: { references: [{ kind: 'session', session_id: 'ses_fixture_0', title: '修复桌宠语音输入' }] } },
@@ -1263,7 +1269,7 @@ test('voice capture releases the typing background and blank clicks do not cance
   await expect(page.locator('.pet-mini-marquee')).toBeVisible();
 });
 
-test('clicking and selecting in the Mini input or blurring the window keeps it open', async ({ page }) => {
+test('clicking and selecting in the Mini input keeps it open, while window blur dismisses it', async ({ page }) => {
   await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long&activities=0');
   await page.locator('.pet-mini-avatar-button').click();
   const input = page.getByRole('textbox');
@@ -1274,7 +1280,70 @@ test('clicking and selecting in the Mini input or blurring the window keeps it o
   expect(await input.evaluate((node: HTMLTextAreaElement) => node.selectionEnd - node.selectionStart)).toBeGreaterThan(0);
   await expect(input).toHaveValue('keep this draft');
   await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+  await expect(input).toHaveCount(0);
+  await page.locator('.pet-mini-avatar-button').hover();
+  await page.getByRole('button', { name: '输入消息', exact: true }).click();
   await expect(input).toHaveValue('keep this draft');
+});
+
+for (const opening of ['pet click', 'keyboard', 'voice shortcut']) {
+  test(`a blur before the Mini window focuses does not dismiss a newly opened composer (${opening})`, async ({ page }) => {
+    await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long&activities=0');
+    // A raw shortcut event has no locator auto-wait: send it after Mini has
+    // mounted and received its initial shell layout, just like the click paths.
+    await expect(page.locator('.pet-mini-avatar-button')).toBeVisible();
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => false });
+      window.dispatchEvent(new Event('blur'));
+    });
+    if (opening === 'pet click') await page.locator('.pet-mini-avatar-button').click();
+    else if (opening === 'keyboard') {
+      await page.locator('.pet-mini-avatar-button').hover();
+      // Blur suppresses the dock until the native shell reports pointer re-entry.
+      await page.evaluate(() => {
+        window.dispatchEvent(new CustomEvent('avibe:pet-hover', { detail: { hover: false } }));
+        window.dispatchEvent(new CustomEvent('avibe:pet-hover', { detail: { hover: true } }));
+      });
+      await expect(page.locator('.pet-mini-dock')).toHaveCSS('opacity', '1');
+      await expect(page.locator('.pet-mini-dock')).toHaveCSS('pointer-events', 'auto');
+      await page.getByRole('button', { name: '输入消息', exact: true }).click();
+    } else {
+      await page.evaluate(() => window.dispatchEvent(new CustomEvent('avibe:pet-summon', { detail: { intent: 'listen' } })));
+    }
+    const input = page.getByRole('textbox');
+    await expect(input).toBeVisible();
+    await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+    await expect(input).toBeVisible();
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => true });
+      window.dispatchEvent(new Event('focus'));
+    });
+    await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+    await expect(input).toHaveCount(0);
+    // A new opening cannot inherit the previous one's acquired focus.
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => false });
+      window.dispatchEvent(new CustomEvent('avibe:pet-summon', { detail: { intent: 'listen' } }));
+    });
+    await expect(input).toBeVisible();
+    await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+    await expect(input).toBeVisible();
+  });
+}
+
+test('a pre-focus blur while native expansion is pending preserves the opening composer', async ({ page }) => {
+  await page.goto('/e2e/pet-mini/fixture.html?activities=0&pendingExpansion');
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => false });
+  });
+  await page.locator('.pet-mini-avatar-button').click();
+  await expect(page.getByRole('textbox')).toBeVisible();
+  await page.evaluate(() => {
+    window.dispatchEvent(new Event('blur'));
+    window.petFixtureReleaseExpansion();
+  });
+  await expect(page.locator('.pet-mini-detail.is-open')).toHaveCount(1);
+  await expect(page.getByRole('textbox')).toBeVisible();
 });
 
 test('holding Vibey still starts input, not the history', async ({ page }) => {
@@ -1454,8 +1523,10 @@ for (const theme of ['light', 'dark']) {
       await expect(page.getByRole('textbox')).toBeVisible();
       await avatar.dblclick();
       await page.evaluate(() => window.dispatchEvent(new Event('blur')));
-      await expect(dock).toHaveClass(/is-active/);
-      await expect(dock).toHaveCSS('opacity', '1');
+      // The gesture still opens Avibe; the ensuing window blur now closes
+      // text composition (owner decision, 2026-11-05).
+      await expect(page.getByRole('textbox')).toHaveCount(0);
+      await expect(dock).not.toHaveClass(/is-active/);
     });
   }
 }
