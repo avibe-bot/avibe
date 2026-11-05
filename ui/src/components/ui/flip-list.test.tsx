@@ -243,4 +243,28 @@ describe('FlipList', () => {
     expect(moves(on('s1'))).toEqual([]);
     expect(moves(on('s2'))).toEqual([]);
   });
+
+  it('lets a row this change leaves in place finish its fade from where it was seen', () => {
+    const view = render(<List ids={['a', 'b', 'c', 'd']} reduced />);
+    view.rerender(<List ids={['c', 'a', 'b', 'd']} reduced />);
+    frame();
+    const [fade] = on('c');
+    // Partway through its fade (jsdom reads the running value from the style)...
+    const card = document.querySelector<HTMLElement>('[data-flip-id="c"]')!;
+    card.style.opacity = '0.4';
+    // ...the last row goes, and c stays where it is.
+    view.rerender(<List ids={['c', 'a', 'b']} reduced />);
+    card.style.opacity = '';
+    frame();
+    expect(fade.animation.cancel).toHaveBeenCalled();
+    expect(on('c').at(-1)!.keyframes).toEqual([{ opacity: 0.4 }, { opacity: 1 }]);
+
+    // A row this change brings in again fades once, from where it was, not twice.
+    card.style.opacity = '0.6';
+    played = [];
+    view.rerender(<List ids={['a', 'b', 'c']} reduced />);
+    card.style.opacity = '';
+    frame();
+    expect(on('c').map((entry) => entry.keyframes)).toEqual([[{ opacity: 0.6 }, { opacity: 1 }]]);
+  });
 });

@@ -186,7 +186,8 @@ class FlipListCore extends React.Component<Props> {
     if (!snapshot || !this.root.current) return;
     const rows = this.rows();
     // A row caught mid-move is measured where layout puts it, then moved on from where it was seen.
-    for (const row of rows.values()) this.stop(row);
+    const stopped = new Set<string>();
+    for (const [id, row] of rows) if (this.stop(row)) stopped.add(id);
     const after = new Map<string, Box>();
     for (const [id, row] of rows) after.set(id, boxOf(row));
 
@@ -197,9 +198,22 @@ class FlipListCore extends React.Component<Props> {
     const changes = countChanges(snapshot.prevIds, ids);
     const mode = chooseListMotion({ reduced, changes, recentChanges: this.changes.length });
     const plan = planListMotion({ prevIds: snapshot.prevIds, nextIds: ids, before: snapshot.before, after, viewport: this.viewport(), mode });
+    // A row this change does not move finishes its fade from where it was seen. (A row that
+    // still has somewhere to go is a glide of this change; in the fade forms nothing travels.)
+    for (const id of [...plan.glides, ...plan.enters].map((step) => step.id)) stopped.delete(id);
+    this.resume(stopped, rows, snapshot);
     if (plan.leaves.length + plan.glides.length + plan.enters.length === 0) return;
     if (changes > 0) this.changes.push(now);
     this.play(plan, mode, rows, snapshot);
+  }
+
+  /** Rows stopped for measuring that this change does not move: a fade under way carries on. */
+  private resume(ids: Set<string>, rows: Map<string, HTMLElement>, snapshot: Snapshot) {
+    for (const id of ids) {
+      const row = rows.get(id);
+      const opacity = snapshot.opacity.get(id);
+      if (row && opacity !== undefined) this.track(row, row.animate([{ opacity }, { opacity: 1 }], listTokens().fastEnter));
+    }
   }
 
   componentWillUnmount() {
@@ -214,11 +228,13 @@ class FlipListCore extends React.Component<Props> {
     this.layer.current?.replaceChildren();
   }
 
+  /** Cancels what the row is playing; whether it was playing anything. */
   private stop(row: Element) {
     const running = this.running.get(row);
-    if (!running) return;
+    if (!running) return false;
     this.running.delete(row);
     for (const animation of running) animation.cancel();
+    return true;
   }
 
   private track(row: Element, animation: Animation | null) {
