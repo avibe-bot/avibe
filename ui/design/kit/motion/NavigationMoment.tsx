@@ -2,17 +2,17 @@
 // card answers the tap, the conversation slides in over the Inbox, which drifts a little the other way
 // (as a native push does), and Back reverses it. Desktop switches conversations in place, so it does not
 // slide (see the plan). Implemented with same-document View Transitions where the browser has them.
-import { cut, drift, scaleOf, spring, timed, type Track } from '../../kit/motion';
-import { MotionLoop } from '../../kit/MotionLoop';
-import { card, CHAT, inLayer } from './fixtures';
-import { ChatAt, InboxAt, Layer, PhoneStage } from './stage';
+import { cut, drift, scaleOf, spring, timed, type Track } from './loop';
+import { MotionLoop } from './MotionLoop';
+import { card, inLayer } from './selectors';
+import { ChatAt, InboxAt, Layer, PhoneStage } from './Stage';
 
 const TAP_AT = 500;
 const PUSH_AT = 600;
 const BACK_AT = 2600;
 const PERIOD = 4400;
 
-function pushTracks(reduced: boolean): Track[] {
+function pushTracks(reduced: boolean, tapped: string): Track[] {
   const chat = inLayer('chat');
   const inbox = inLayer('inbox');
   if (reduced) {
@@ -23,7 +23,7 @@ function pushTracks(reduced: boolean): Track[] {
   const slide = spring('sheet');
   return [
     {
-      el: inLayer('inbox', card(CHAT.replied)),
+      el: inLayer('inbox', card(tapped)),
       beats: [
         { at: TAP_AT, to: { scale: scaleOf('press') }, curve: timed('instant', 'enter') },
         { at: PUSH_AT + 500, to: { scale: 1 }, curve: cut },
@@ -47,12 +47,13 @@ function pushTracks(reduced: boolean): Track[] {
   ];
 }
 
-export function NavigationLoop({ reduced = false }: { reduced?: boolean }) {
+/** `session`: the conversation the tapped card opens (its card in the Inbox, and the page pushed in). */
+export function NavigationLoop({ session, reduced = false }: { session: string; reduced?: boolean }) {
   return (
-    <MotionLoop id={`navigation${reduced ? '-reduced' : ''}`} period={PERIOD} rest={PUSH_AT + 1200} tracks={pushTracks(reduced)}>
+    <MotionLoop id={`navigation${reduced ? '-reduced' : ''}`} period={PERIOD} rest={PUSH_AT + 1200} tracks={pushTracks(reduced, session)}>
       <PhoneStage>
         <Layer name="inbox" opaque><InboxAt state="after" /></Layer>
-        <Layer name="chat"><ChatAt state="replied" /></Layer>
+        <Layer name="chat"><ChatAt session={session} /></Layer>
       </PhoneStage>
     </MotionLoop>
   );

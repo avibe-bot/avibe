@@ -2,10 +2,11 @@
 // its old slot, the cards above it glide down into the room, and it comes in at the top with the new
 // reply. The cards are tinted, not opaque, so one never travels across the others. The same motion
 // carries a cached Inbox when the live list lands in another order (M4). Nothing changes height.
-import { beat, cut, offset, scaleOf, spring, timed, type Curve, type Track } from '../../kit/motion';
-import { MotionLoop } from '../../kit/MotionLoop';
-import { card, CHAT, inLayer, INBOX_FLIP } from './fixtures';
-import { InboxAt, Layer, PhoneStage } from './stage';
+import { beat, cut, offset, scaleOf, spring, timed, type Curve, type Track } from './loop';
+import { MotionLoop } from './MotionLoop';
+import type { InboxCast } from './cast';
+import { card, inLayer } from './selectors';
+import { InboxAt, Layer, PhoneStage } from './Stage';
 
 const MOVE_AT = 900;
 const PERIOD = 3600;
@@ -29,8 +30,8 @@ function feel(): Feel {
   };
 }
 
-function moveTracks(f: Feel): Track[] {
-  const moved = card(CHAT.replied);
+function moveTracks(f: Feel, cast: InboxCast): Track[] {
+  const moved = card(cast.moved);
   const tracks: Track[] = [
     { el: inLayer('after'), from: { opacity: 0 }, beats: [{ at: MOVE_AT, to: { opacity: 1 }, curve: cut }] },
     // The card as it was, alone over the new list, leaving its old slot.
@@ -51,8 +52,8 @@ function moveTracks(f: Feel): Track[] {
       beats: [{ at: MOVE_AT + f.enterAfter, to: { opacity: 1, y: 0, scale: 1 }, curve: f.enter, fade: timed('base', 'enter') }],
     },
   ];
-  for (const [sessionId, from] of Object.entries(INBOX_FLIP)) {
-    if (sessionId === CHAT.replied) continue;
+  for (const [sessionId, from] of Object.entries(cast.flip)) {
+    if (sessionId === cast.moved) continue;
     tracks.push({
       el: inLayer('after', card(sessionId)),
       beats: [
@@ -65,7 +66,7 @@ function moveTracks(f: Feel): Track[] {
   return tracks;
 }
 
-export function InboxMoveLoop({ reduced = false }: { reduced?: boolean }) {
+export function InboxMoveLoop({ cast, reduced = false }: { cast: InboxCast; reduced?: boolean }) {
   if (reduced) {
     return (
       <MotionLoop
@@ -83,7 +84,7 @@ export function InboxMoveLoop({ reduced = false }: { reduced?: boolean }) {
     );
   }
   return (
-    <MotionLoop id="inbox" period={PERIOD} reset={RESET} rest={MOVE_AT + 1200} tracks={moveTracks(feel())}>
+    <MotionLoop id="inbox" period={PERIOD} reset={RESET} rest={MOVE_AT + 1200} tracks={moveTracks(feel(), cast)}>
       <PhoneStage>
         <Layer name="before" opaque><InboxAt state="before" /></Layer>
         <Layer name="after" opaque><InboxAt state="after" /></Layer>

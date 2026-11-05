@@ -3,17 +3,17 @@
 // working bubble follows a beat later; a failed send goes back the way it came. Each with its
 // reduced-motion form.
 import { frames } from '../../frame';
-import { CHAT, chatStatesFixtures, SHIFT } from './fixtures';
-import { FailLoop, SendLoop } from './SendDemo';
+import { FailLoop, SendLoop } from '../../kit/motion/SendMoment';
+import { CHAT, CHAT_CAST, chatStatesFixtures, SHIFT } from './fixtures';
 
 const phone = { width: 390, height: 844, status: 'approved' as const, route: `/chat/${CHAT.after}`, fixtures: chatStatesFixtures('before', 'after') };
 const desktop = { ...phone, width: 1280, height: 800 };
 
 const designFrames = frames([
-  { ...phone, name: 'phone', title: '发送 · 手机', render: () => <SendLoop shift={SHIFT.phone.send} /> },
-  { ...phone, name: 'phone-reduced', title: '发送 · 减少动态效果 · 手机', render: () => <SendLoop reduced shift={SHIFT.phone.send} /> },
-  { ...phone, name: 'phone-failed', title: '发送失败，消息退回输入框 · 手机', render: () => <FailLoop /> },
-  { ...desktop, name: 'desktop', title: '发送 · 桌面', render: () => <SendLoop desktop shift={SHIFT.desktop.send} /> },
+  { ...phone, name: 'phone', title: '发送 · 手机', render: () => <SendLoop cast={CHAT_CAST} shift={SHIFT.phone.send} /> },
+  { ...phone, name: 'phone-reduced', title: '发送 · 减少动态效果 · 手机', render: () => <SendLoop cast={CHAT_CAST} shift={SHIFT.phone.send} reduced /> },
+  { ...phone, name: 'phone-failed', title: '发送失败，消息退回输入框 · 手机', render: () => <FailLoop cast={CHAT_CAST} shift={SHIFT.phone.send} /> },
+  { ...desktop, name: 'desktop', title: '发送 · 桌面', render: () => <SendLoop cast={CHAT_CAST} shift={SHIFT.desktop.send} desktop /> },
 ]);
 
 export default designFrames;

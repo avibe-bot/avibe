@@ -3,8 +3,8 @@
 // new-session sheet over the Inbox.
 import { frames } from '../../frame';
 import { agentsApi } from '../agents/fixtures';
+import { SheetDragLoop, SheetLoop } from '../../kit/motion/SheetMoment';
 import { inboxFixtures, mergeFixtures } from './fixtures';
-import { SheetDragLoop, SheetLoop } from './SheetDemo';
 
 const fixtures = mergeFixtures(inboxFixtures(), { api: agentsApi() });
 const phone = { width: 390, height: 844, status: 'approved' as const, route: '/inbox', fixtures };

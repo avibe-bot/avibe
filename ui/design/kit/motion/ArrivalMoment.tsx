@@ -3,22 +3,11 @@
 // Send. The same motion carries a conversation painted from the local cache when the live answer brings
 // rows it did not have: a row that is new rises in, nothing that was already there moves on its own,
 // and nothing pops.
-import { cut, scaleOf, spring, timed, type Track } from '../../kit/motion';
-import { MotionLoop } from '../../kit/MotionLoop';
-import {
-  COMPOSER,
-  HEADER,
-  inLayer,
-  reply,
-  row,
-  SEND,
-  SHIFT,
-  STOP,
-  TRANSCRIPT_ROWS,
-  TYPED,
-  WORKING,
-} from './fixtures';
-import { ChatAt, Layer, PhoneStage } from './stage';
+import { cut, scaleOf, spring, timed, type Track } from './loop';
+import { MotionLoop } from './MotionLoop';
+import type { ChatCast } from './cast';
+import { COMPOSER, HEADER, inLayer, row, SEND, STOP, TRANSCRIPT_ROWS, TYPED, WORKING } from './selectors';
+import { ChatAt, Layer, PhoneStage } from './Stage';
 
 const ARRIVE_AT = 800;
 const PERIOD = 3600;
@@ -26,7 +15,7 @@ const RESET = 500;
 /** The page pins its transcript to the bottom when its data lands; the loop starts after that. */
 const PIN_FIRST = 1500;
 
-function arrivalTracks(shift: number): Track[] {
+function arrivalTracks(shift: number, replyId: string): Track[] {
   const before = (selector: string) => inLayer('after', selector);
   const after = (selector: string) => inLayer('replied', selector);
   const leave = timed('instant', 'exit');
@@ -49,7 +38,7 @@ function arrivalTracks(shift: number): Track[] {
       ],
     },
     {
-      el: after(row(reply.id)),
+      el: after(row(replyId)),
       origin: 'top left',
       from: { opacity: 0, scale: scaleOf('enter') },
       beats: [{ at: ARRIVE_AT, to: { opacity: 1, scale: 1 }, curve: glide, fade: timed('base', 'enter') }],
@@ -59,13 +48,13 @@ function arrivalTracks(shift: number): Track[] {
   ];
 }
 
-export function ArrivalLoop({ reduced = false }: { reduced?: boolean }) {
+export function ArrivalLoop({ cast, shift, reduced = false }: { cast: ChatCast; shift: number; reduced?: boolean }) {
   if (!reduced) {
     return (
-      <MotionLoop delay={PIN_FIRST} id="arrival" period={PERIOD} reset={RESET} rest={ARRIVE_AT + 1200} tracks={arrivalTracks(SHIFT.phone.arrival)}>
+      <MotionLoop delay={PIN_FIRST} id="arrival" period={PERIOD} reset={RESET} rest={ARRIVE_AT + 1200} tracks={arrivalTracks(shift, cast.replyId)}>
         <PhoneStage>
-          <Layer name="after" opaque><ChatAt state="after" /></Layer>
-          <Layer name="replied" seeThrough><ChatAt state="replied" /></Layer>
+          <Layer name="after" opaque><ChatAt session={cast.after} /></Layer>
+          <Layer name="replied" seeThrough><ChatAt session={cast.replied} /></Layer>
         </PhoneStage>
       </MotionLoop>
     );
@@ -81,8 +70,8 @@ export function ArrivalLoop({ reduced = false }: { reduced?: boolean }) {
       tracks={[{ el: inLayer('after'), beats: [{ at: ARRIVE_AT, to: { opacity: 0 }, curve: timed('fast', 'enter') }] }]}
     >
       <PhoneStage>
-        <Layer name="replied" opaque><ChatAt state="replied" /></Layer>
-        <Layer name="after" opaque><ChatAt state="after" /></Layer>
+        <Layer name="replied" opaque><ChatAt session={cast.replied} /></Layer>
+        <Layer name="after" opaque><ChatAt session={cast.after} /></Layer>
       </PhoneStage>
     </MotionLoop>
   );

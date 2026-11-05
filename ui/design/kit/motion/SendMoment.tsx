@@ -2,23 +2,11 @@
 // settles in place while the conversation glides up to make room, Send turns into Stop, and the agent's
 // working bubble fades in under it. If the send fails, the message is withdrawn the way it came and the
 // text is back in the composer. With reduced motion the conversation cross-fades to its new state.
-import { beat, cut, offset, scaleOf, spring, timed, type Curve, type Track } from '../../kit/motion';
-import { MotionLoop } from '../../kit/MotionLoop';
-import {
-  COMPOSER,
-  HEADER,
-  inLayer,
-  row,
-  SEND,
-  sent,
-  SHIFT,
-  STOP,
-  TYPED,
-  TRANSCRIPT,
-  TRANSCRIPT_ROWS,
-  WORKING,
-} from './fixtures';
-import { ChatAt, DesktopStage, Layer, PhoneStage } from './stage';
+import { beat, cut, offset, scaleOf, spring, timed, type Curve, type Track } from './loop';
+import { MotionLoop } from './MotionLoop';
+import type { ChatCast } from './cast';
+import { COMPOSER, HEADER, inLayer, row, SEND, STOP, TRANSCRIPT, TRANSCRIPT_ROWS, TYPED, WORKING } from './selectors';
+import { ChatAt, DesktopStage, Layer, PhoneStage } from './Stage';
 
 /** When Send is pressed, and how long one loop runs. */
 const SEND_AT = 700;
@@ -58,7 +46,7 @@ const feel = (): Feel => ({
 
 /** The pressed Send button, the before page handing over to the after page, and the after page
  *  starting where the before page was. */
-function sendTracks(f: Feel, shift: number): Track[] {
+function sendTracks(f: Feel, shift: number, sentId: string): Track[] {
   const before = (selector: string) => inLayer('before', selector);
   const after = (selector: string) => inLayer('after', selector);
   // The composer hands over in two beats, so the two texts never overlap: the typed text and Send
@@ -90,7 +78,7 @@ function sendTracks(f: Feel, shift: number): Track[] {
       ],
     },
     {
-      el: after(row(sent.id)),
+      el: after(row(sentId)),
       origin: 'bottom right',
       from: { opacity: 0, y: f.rise, scale: f.grow },
       beats: [{ at: SEND_AT, to: { opacity: 1, y: 0, scale: 1 }, curve: f.glide, fade: f.fade }],
@@ -106,7 +94,7 @@ function sendTracks(f: Feel, shift: number): Track[] {
   ];
 }
 
-export function SendLoop({ reduced = false, shift, desktop = false }: { reduced?: boolean; shift: number; desktop?: boolean }) {
+export function SendLoop({ cast, shift, reduced = false, desktop = false }: { cast: ChatCast; shift: number; reduced?: boolean; desktop?: boolean }) {
   const Stage = desktop ? DesktopStage : PhoneStage;
   const id = `send-${desktop ? 'desktop' : 'phone'}${reduced ? '-reduced' : ''}`;
   if (reduced) {
@@ -121,17 +109,17 @@ export function SendLoop({ reduced = false, shift, desktop = false }: { reduced?
         tracks={[{ el: inLayer('before'), beats: [{ at: SEND_AT, to: { opacity: 0 }, curve: timed('fast', 'enter') }] }]}
       >
         <Stage>
-          <Layer name="after" opaque><ChatAt state="after" /></Layer>
-          <Layer name="before" opaque><ChatAt state="before" /></Layer>
+          <Layer name="after" opaque><ChatAt session={cast.after} /></Layer>
+          <Layer name="before" opaque><ChatAt session={cast.before} /></Layer>
         </Stage>
       </MotionLoop>
     );
   }
   return (
-    <MotionLoop delay={PIN_FIRST} id={id} period={PERIOD} reset={RESET} rest={SETTLED} tracks={sendTracks(feel(), shift)}>
+    <MotionLoop delay={PIN_FIRST} id={id} period={PERIOD} reset={RESET} rest={SETTLED} tracks={sendTracks(feel(), shift, cast.sentId)}>
       <Stage>
-        <Layer name="before" opaque><ChatAt state="before" /></Layer>
-        <Layer name="after" seeThrough><ChatAt state="after" /></Layer>
+        <Layer name="before" opaque><ChatAt session={cast.before} /></Layer>
+        <Layer name="after" seeThrough><ChatAt session={cast.after} /></Layer>
       </Stage>
     </MotionLoop>
   );
@@ -141,7 +129,7 @@ export function SendLoop({ reduced = false, shift, desktop = false }: { reduced?
  *  back in the composer with Send. */
 const FAIL_AT = 2100;
 
-export function FailLoop() {
+export function FailLoop({ cast, shift }: { cast: ChatCast; shift: number }) {
   const f = feel();
   const leave = timed('instant', 'exit');
   const back = timed('base', 'move');
@@ -159,20 +147,20 @@ export function FailLoop() {
     [before(SEND)]: [{ at: FAIL_AT, to: { opacity: 1, scale: 1 }, curve: cut }],
     [before(`${COMPOSER} ${TYPED}`)]: [{ at: FAIL_AT, to: { opacity: 1 }, curve: cut }],
     [inLayer('after')]: [{ at: settled, to: { opacity: 0 }, curve: cut }],
-    [after(TRANSCRIPT_ROWS)]: [{ at: sinkAt, to: { y: SHIFT.phone.send }, curve: back }],
-    [after(row(sent.id))]: [{ at: sinkAt, to: { opacity: 0, y: f.rise, scale: f.grow }, curve: back, fade: timed('base', 'exit') }],
+    [after(TRANSCRIPT_ROWS)]: [{ at: sinkAt, to: { y: shift }, curve: back }],
+    [after(row(cast.sentId))]: [{ at: sinkAt, to: { opacity: 0, y: f.rise, scale: f.grow }, curve: back, fade: timed('base', 'exit') }],
     [after(WORKING)]: [{ at: FAIL_AT, to: { opacity: 0 }, curve: leave }],
     [after(STOP)]: [{ at: FAIL_AT, to: { opacity: 0, scale: f.morph }, curve: leave }],
     [after(`${COMPOSER} ${TYPED}`)]: [{ at: FAIL_AT, to: { opacity: 0 }, curve: leave }],
     [after(COMPOSER)]: [{ at: sinkAt, to: { opacity: 0 }, curve: timed('fast', 'enter') }],
   };
-  const tracks: Track[] = sendTracks(f, SHIFT.phone.send).map((track) => ({ ...track, beats: [...track.beats, ...(undo[track.el] ?? [])] }));
+  const tracks: Track[] = sendTracks(f, shift, cast.sentId).map((track) => ({ ...track, beats: [...track.beats, ...(undo[track.el] ?? [])] }));
   tracks.push({ el: after(`${COMPOSER} ${TYPED}`), beats: undo[after(`${COMPOSER} ${TYPED}`)] });
   return (
     <MotionLoop delay={PIN_FIRST} id="send-failed" period={PERIOD} rest={FAIL_AT - 100} tracks={tracks}>
       <PhoneStage>
-        <Layer name="before" opaque><ChatAt state="before" /></Layer>
-        <Layer name="after" seeThrough><ChatAt state="after" /></Layer>
+        <Layer name="before" opaque><ChatAt session={cast.before} /></Layer>
+        <Layer name="after" seeThrough><ChatAt session={cast.after} /></Layer>
       </PhoneStage>
     </MotionLoop>
   );

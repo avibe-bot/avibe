@@ -3,10 +3,10 @@
 // finger, springs back from a short pull, and a long or quick one dismisses it with the finger's speed.
 import { NewSessionSheet } from '@/components/workbench/NewSessionSheet';
 
-import { cut, spring, timed, type Curve, type Track } from '../../kit/motion';
-import { MotionLoop } from '../../kit/MotionLoop';
-import { TouchPoint } from '../../kit/TouchPoint';
-import { InboxAt, Layer, PhoneStage } from './stage';
+import { cut, spring, timed, type Curve, type Track } from './loop';
+import { MotionLoop } from './MotionLoop';
+import { TouchPoint } from './TouchPoint';
+import { InboxAt, Layer, PhoneStage } from './Stage';
 
 /** The sheet and its scrim, which the dialog portals to the document body. */
 const SHEET = '[role="dialog"][data-state="open"]';

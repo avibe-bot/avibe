@@ -1,7 +1,7 @@
-// The motion demo wrapper (kit/motion.ts writes its keyframes): `display: contents`, so it adds no box.
+// The motion demo wrapper (loop.ts writes its keyframes): `display: contents`, so it adds no box.
 import type { ReactNode } from 'react';
 
-import { loopRules, type Track } from './motion';
+import { loopRules, type Track } from './loop';
 
 /** A moment as a loop of `period` ms over `children` (see `loopRules`). */
 export function MotionLoop({

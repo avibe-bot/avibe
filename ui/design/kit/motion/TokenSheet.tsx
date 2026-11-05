@@ -1,7 +1,7 @@
 // The motion tokens (docs/plans/web-ui-motion.md §4), each shown doing what it is for: a dot crossing a
 // track on that duration and curve, and the curve itself. Sizes are the spacing scale's.
-import { cut, progress, spring, timed, type Curve, type Track } from '../../kit/motion';
-import { MotionLoop } from '../../kit/MotionLoop';
+import { cut, progress, spring, timed, type Curve, type Track } from './loop';
+import { MotionLoop } from './MotionLoop';
 
 const START = 300;
 const PERIOD = 1800;

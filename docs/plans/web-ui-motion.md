@@ -456,7 +456,8 @@ send (they change `ChatPage`).
 ## 12. Known by design
 
 - Frames are static; each moment is a looping CSS animation over the shipped
-  page in each state (`ui/design/kit/motion.ts`). Every proposed motion value
+  page in each state. The moments are kit components (`ui/design/kit/motion/`);
+  the frames own the data and pass it to them. Every proposed motion value
   (duration, curve, offset, scale, opacity, beat) is read from the tokens. A
   frame states three kinds of number that are not motion design: when in its
   loop a moment happens, the FLIP offsets (the row heights the shipped page

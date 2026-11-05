@@ -1,10 +1,8 @@
-// What the motion frames share (docs/plans/web-ui-motion.md): one real conversation and one real Inbox,
-// and the selectors a choreography moves. A moment is the change between two states the product already
-// draws, so a frame stacks the shipped page in each state (`stage.tsx`) and the loop in `kit/motion`
-// moves between them: the page after the change starts where the page before it was, and glides to where
-// it is. Every comparison uses the same data and the same size, tier by tier.
+// What the motion frames share (docs/plans/web-ui-motion.md): one real conversation and one real Inbox in
+// the states a moment moves between, and what the kit's moments (`kit/motion/`) are told about them.
 import type { InboxSession } from '@/context/ApiContext';
 
+import type { ChatCast, ChatShift, InboxCast } from '../../kit/motion/cast';
 import { inboxRow, type WorkbenchFixtures } from '../../shell/fixtures';
 import { agentSays, chatFixtures, idleTurn, runningTurn, userSays } from '../chat/fixtures';
 import { workbenchFixtures } from '../workbench/fixtures';
@@ -36,12 +34,11 @@ export const sent = userSays(SENT_TEXT, 0);
 export const reply = agentSays('好，按「标准」档实现。第一步是发送、停止和工作中这三个过渡，我先把动效令牌接进输入框和消息列表。', 0);
 
 /** How far the conversation moves when rows go in below it: the row heights the shipped page draws for
- *  this data (FLIP measures them at run time; a frame has to state them). `send`: the message and the
- *  working bubble; `arrival`: what the reply adds over the bubble it replaces. */
-export const SHIFT = {
+ *  this data, at 390 px and at 1280 px (FLIP measures them at run time; a frame has to state them). */
+export const SHIFT: Record<'phone' | 'desktop', ChatShift> = {
   phone: { send: 147, arrival: 76 },
   desktop: { send: 66, arrival: 31 },
-} as const;
+};
 
 /** The Session ids each state reads (ids as the server mints them). */
 export const CHAT = {
@@ -63,29 +60,11 @@ export const chatStates: Record<ChatState, WorkbenchFixtures> = {
   replied: chatFixtures({ session: { ...title, id: CHAT.replied }, messages: [...history, sent, reply], turnState: idleTurn }),
 };
 
+/** The conversation as the kit's chat moments read it. */
+export const CHAT_CAST: ChatCast = { before: CHAT.before, after: CHAT.after, replied: CHAT.replied, sentId: sent.id, replyId: reply.id };
+
 /** The fixtures for a frame that stacks these states. */
 export const chatStatesFixtures = (...states: ChatState[]) => mergeFixtures(...states.map((state) => chatStates[state]));
-
-// ----- Selectors into the shipped chat page -----
-
-/** Inside one stacked state. */
-export const inLayer = (layer: string, selector = '') => `[data-motion-layer="${layer}"] ${selector}`.trim();
-/** The transcript's scrolling viewport, and the column of rows inside it. */
-export const TRANSCRIPT = '[data-testid="chat-transcript"]';
-export const TRANSCRIPT_ROWS = `${TRANSCRIPT} > div`;
-/** One message row by id. */
-export const row = (id: string) => `[data-message-id="${id}"]`;
-/** The agent-working bubble: the transcript's tail while a turn runs. */
-export const WORKING = `${TRANSCRIPT_ROWS} > :last-child`;
-/** The chat header. */
-export const HEADER = '[data-chat-header]';
-/** The composer: the chat surface's last child, below the transcript. */
-export const COMPOSER = `div:has(> div > ${TRANSCRIPT}) > :last-child`;
-/** What is typed in the composer (the editor and its placeholder). */
-export const TYPED = 'div:has(> [contenteditable])';
-/** The composer's Send and Stop buttons, by their icons (so in either language). */
-export const SEND = 'button:has(> .lucide-send)';
-export const STOP = 'button:has(> .lucide-square)';
 
 // ----- The Inbox -----
 
@@ -122,14 +101,10 @@ export const inboxFixtures = (...states: ChatState[]) => ({
   ),
 });
 
-/** Where each card of the after list sat in the before list, relative to its new slot (px, at 390 px):
- *  the FLIP offsets the implementation measures as the list changes. */
-export const INBOX_FLIP: Record<string, number> = {
-  [CHAT.replied]: 369,
-  ses_demo_cache: -184,
-  ses_demo_pr: -185,
-  ses_demo_docs: 21,
+/** The Inbox move: our conversation goes to the top; where each card of the after list sat in the before
+ *  list, relative to its new slot (px, at 390 px), the FLIP offsets the implementation measures. */
+export const INBOX_MOVE: InboxCast = {
+  moved: CHAT.replied,
+  flip: { [CHAT.replied]: 369, ses_demo_cache: -184, ses_demo_pr: -185, ses_demo_docs: 21 },
 };
 
-/** An Inbox card by its Session. */
-export const card = (sessionId: string) => `[data-inbox-session-id="${sessionId}"]`;
