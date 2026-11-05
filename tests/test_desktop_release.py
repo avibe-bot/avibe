@@ -738,6 +738,14 @@ def test_workflow_signs_every_macos_layer_before_recording():
     for command in ("sign-dmg", "notarize", "verify-release"):
         assert f"macos_signing.py {command}" in dmg["run"]
     assert "NotSigned" in step("Verify unsigned Windows installer before Certum handoff")["run"]
+    certum_verify = next(
+        item
+        for item in jobs["certum-windows-sign"]["steps"]
+        if item.get("name") == "Verify publisher, code-signing EKU, timestamp, and tamper rejection"
+    )
+    assert "2.5.29.37" in certum_verify["run"]
+    assert "1.3.6.1.5.5.7.3.3" in certum_verify["run"]
+    assert "Oid.Value -eq '1.3.6.1.5.5.7.3.3'" not in certum_verify["run"]
     # The desktop upload stays on the repository's one maintained, full-SHA upload-artifact pin.
     upload_pins = {
         item["uses"]
