@@ -10229,6 +10229,8 @@ def sessions_create():
                 speed=payload.get("speed"),
                 authorization_context=getattr(g, "authorization_context", None),
             )
+    except workbench_sessions_service.ProjectNotFoundError as err:
+        return _coded_error_response(err.code, t("error.projectNotFound", _request_ui_language()), 404)
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
     except ValueError as err:
@@ -10237,6 +10239,10 @@ def sessions_create():
         code = err.code
         message = t("error.projectAccessDenied", _request_ui_language())
         return _coded_error_response(code, message, 403)
+    except workbench_sessions_service.ProjectArchivedError as err:
+        # 409 like ``session_archived``: the project is there and the caller may use
+        # it, but its archived state refuses the write. 403 stays for access.
+        return _coded_error_response(err.code, t("error.projectArchived", _request_ui_language()), 409)
     except PermissionError as err:
         return jsonify({"error": str(err)}), 403
     broker.publish("session.activity", {"session_id": session["id"], "scope_id": session["scope_id"], "event": "created"})

@@ -103,6 +103,28 @@ class ProjectAccessDeniedError(PermissionError):
         super().__init__(self.code)
 
 
+class ProjectArchivedError(PermissionError):
+    """A session was asked for in a project that has been archived.
+
+    ``PermissionError`` by inheritance, so callers that treat any refusal alike
+    keep doing so; the code lets a client tell this terminal state apart.
+    """
+
+    code = "project_archived"
+
+    def __init__(self, scope_id: str) -> None:
+        super().__init__(f"Scope is archived: {scope_id}")
+
+
+class ProjectNotFoundError(LookupError):
+    """A session was asked for in a project that does not exist (deleted, or never was)."""
+
+    code = "project_not_found"
+
+    def __init__(self, scope_id: str) -> None:
+        super().__init__(f"Scope not found: {scope_id}")
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -546,10 +568,10 @@ def create_session(
             .where(scopes.c.id == scope_id)
         ).mappings().first()
         if found is None:
-            raise LookupError(f"Scope not found: {scope_id}")
+            raise ProjectNotFoundError(scope_id)
         scope_row = dict(found)
         if scope_row.get("enabled") == 0:
-            raise PermissionError(f"Scope is archived: {scope_id}")
+            raise ProjectArchivedError(scope_id)
     if agent_name and not agent_backend:
         agent_backend = _backend_for_agent_name(conn, str(agent_name))
     # Inherit the project's default Agent when the caller didn't pin a backend.

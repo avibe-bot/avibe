@@ -103,6 +103,12 @@ const appliedRoute = (route: ProjectDefaultAgent): ProjectDefaultAgent | null =>
 const isProjectAgentConflictError = (err: unknown): boolean =>
   (err as { code?: unknown } | null | undefined)?.code === 'project_agent_conflict';
 
+// The server's answer to a write into a project that was archived or deleted
+// since this document read it. Duck-typed on ``code`` the same way.
+const PROJECT_GONE_CODES = new Set(['project_archived', 'project_not_found']);
+const isProjectGoneError = (err: unknown): boolean =>
+  PROJECT_GONE_CODES.has((err as { code?: unknown } | null | undefined)?.code as string);
+
 // Scan every project's loaded rows for a session id and apply `patch`; returns a
 // new state only when something actually changed (so unrelated consumers don't
 // re-render). Used for both the status-dot and title SSE patches — keyed on
@@ -1239,6 +1245,34 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     [fetchSessions],
   );
 
+  // ── A project the server no longer has leaves the tree at once ─────────────
+  // Archiving it here, or learning from a refused write that it was archived or
+  // deleted elsewhere. The reads in flight still describe the project, so they
+  // are fenced first and cannot put the row back. A painted snapshot still holds
+  // it too, so once a painted row is known to be gone this document stops
+  // painting the snapshot, and a painted list it empties goes back to loading
+  // rather than to the empty state, which is the live answer's to show.
+  const dropProject = useCallback(
+    (projectId: string) => {
+      acceptProjectsMutation();
+      acceptSessionMutation(projectId);
+      const painted = paintedSnapshotRef.current !== null;
+      if (painted) snapshotRetiredRef.current = true;
+      commitProjects((prev) => {
+        if (!prev) return prev;
+        const next = prev.filter((p) => p.id !== projectId);
+        return painted && next.length === 0 ? null : next;
+      });
+      setExpanded((prev) => {
+        if (!prev.has(projectId)) return prev;
+        const next = new Set(prev);
+        next.delete(projectId);
+        return next;
+      });
+    },
+    [acceptProjectsMutation, acceptSessionMutation, commitProjects],
+  );
+
   const createSessionForProject = useCallback(
     async (projectId: string, overrides?: Partial<WorkbenchSessionCreate>): Promise<WorkbenchSession | null> => {
       setCreating((prev) => new Set(prev).add(projectId));
@@ -1273,6 +1307,14 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         if (!alreadyLoaded) void fetchSessions(projectId); // load the full list incl. the new one
         return session;
       } catch (err) {
+        // The row outlived its project: painted from the snapshot, or a live row
+        // whose archive this document missed. The API layer already showed the
+        // localized reason, so the only thing left is to stop offering the row
+        // and let a live read bring the list in line. No navigation: null.
+        if (isProjectGoneError(err)) {
+          dropProject(projectId);
+          void fetchProjects({ cache: false });
+        }
         console.error('[workbench] create session failed', err);
         return null;
       } finally {
@@ -1283,7 +1325,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         });
       }
     },
-    [acceptSessionMutation, api, fetchSessions],
+    [acceptSessionMutation, api, dropProject, fetchProjects, fetchSessions],
   );
 
   const renameProject = useCallback(
@@ -1480,20 +1522,12 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     async (projectId: string) => {
       try {
         await api.archiveProject(projectId);
-        acceptProjectsMutation();
-        acceptSessionMutation(projectId);
-        commitProjects((prev) => (prev ? prev.filter((p) => p.id !== projectId) : prev));
-        setExpanded((prev) => {
-          if (!prev.has(projectId)) return prev;
-          const next = new Set(prev);
-          next.delete(projectId);
-          return next;
-        });
+        dropProject(projectId);
       } catch (err) {
         console.error('[workbench] archive project failed', err);
       }
     },
-    [acceptProjectsMutation, acceptSessionMutation, api, commitProjects],
+    [api, dropProject],
   );
 
   const renameSession = useCallback(

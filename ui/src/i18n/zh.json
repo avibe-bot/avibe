@@ -3031,6 +3031,7 @@
     "icon_write_failed": "无法保存图标，请重试。",
     "project_no_folder": "这个项目没有配置本地文件夹。",
     "project_not_found": "找不到这个项目。",
+    "project_archived": "这个项目已归档，无法在其中新建会话。",
     "project_agent_conflict": "该项目的 Agent 已在别处变更，正在重新加载，请再次修改。",
     "project_order_conflict": "项目顺序已在别处变更，列表已刷新，请重新拖动。",
     "invalid_project_order": "无法保存项目顺序，请刷新列表后重试。",
