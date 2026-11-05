@@ -40,7 +40,7 @@ import {
   type VoiceTranscriptionSegment,
   VoiceTranscriptionError,
 } from '../../lib/voiceTranscription';
-import { createVoiceActivity, type VoiceActivity } from '../../lib/voiceActivity';
+import { createVoiceActivity, reportVoiceSilenceGate, type VoiceActivity } from '../../lib/voiceActivity';
 import {
   emitVoiceTelemetry,
   type VoiceTelemetryOutcome,
@@ -204,6 +204,8 @@ type VoiceRecordingSession = {
   realtime?: VoiceRealtimeSession;
   realtimeState?: 'connecting' | 'active' | 'failed' | 'finalized';
   realtimeFirstPreviewAt?: number;
+  /** A live preview carried words: the take held speech, whatever its levels say. */
+  realtimeHeardWords?: boolean;
   realtimeFinalAt?: number;
   /** The conversation this dictation is spoken into, read once when it starts: realtime
    *  recognition, its HTTP fallback, and a retry all send the same. */
@@ -1254,6 +1256,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         onPreview: (preview) => {
           if (recordingSessionRef.current !== session || unmountedRef.current) return;
           session.realtimeFirstPreviewAt ??= Date.now();
+          if (`${preview.text}${preview.stash}`.trim()) session.realtimeHeardWords = true;
           showRealtimePreview(session, `${preview.text}${preview.stash}`.trim());
         },
         onError: () => {
@@ -1283,11 +1286,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           metadata.final,
         ),
         onPcm: (samples) => {
+          // What would be transcribed, its flushed tail included, is what the gate judges.
+          session.activity.observePcm(samples);
           if (session.realtimeState === 'connecting' || session.realtimeState === 'active') {
             session.realtime?.sendPcm(samples);
           }
         },
-        onLevel: (rms) => session.activity.observe(rms),
         onStopRequested: (reason, metadata) => {
           if (reason === 'abort') return;
           session.stoppedAt = metadata.requestedAt;
@@ -1323,7 +1327,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             return;
           }
           session.backlogAtStop = (session.backlogAtStop ?? 0) + metadata.pendingSegmentCount;
-          if (!session.segments.length && session.captureError === undefined) {
+          // Nothing recorded, or a take that neither showed live words nor got as loud as a
+          // soft syllable (the silence gate, lib/voiceActivity): no speech, and recognition is
+          // not asked, since on near-silence it can return its hotwords as text.
+          const silent = session.activity.silent() && !session.realtimeHeardWords;
+          if (silent) reportVoiceSilenceGate(session.activity, session.stoppedAt === undefined || session.startedAt === undefined ? undefined : session.stoppedAt - session.startedAt);
+          if ((!session.segments.length && session.captureError === undefined) || silent) {
+            session.abortController.abort();
             session.realtime?.abort();
             restoreRealtimePreview(session);
             reportVoiceFinalization(session, 'empty');

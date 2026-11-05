@@ -18,6 +18,9 @@ const deferred = <T>(): Deferred<T> => {
   return { promise, resolve };
 };
 
+/** `ms` of the recorder's 16 kHz PCM at a steady loudness (RMS, 0–1). */
+const pcm = (rms: number, ms: number) => new Int16Array(Math.round(16 * ms)).fill(Math.round(rms * 32_767));
+
 const fakeStream = () => {
   const stop = vi.fn();
   return {
@@ -416,12 +419,87 @@ describe('ShowPageVoiceDictation', () => {
 
     await dictation.start();
     // A quiet room: about −55 dBFS for three seconds.
-    for (let reading = 0; reading < 94; reading += 1) pipelineOptions!.onLevel?.(0.0018);
+    pipelineOptions!.onPcm?.(pcm(0.0018, 3_000));
     expect(dictation.voiced()).toBe(false);
     // Soft speech: about −30 dBFS for half a second.
-    for (let reading = 0; reading < 16; reading += 1) pipelineOptions!.onLevel?.(0.03);
+    pipelineOptions!.onPcm?.(pcm(0.03, 512));
     expect(dictation.voiced()).toBe(true);
     dictation.abort();
+  });
+
+  describe('the silence gate', () => {
+    const gated = (realtimeFinish: () => Promise<{ text: string; cleanup: 'success' | 'fallback' }>) => {
+      const { stream } = fakeStream();
+      let pipelineOptions: VoiceRecordingPipelineOptions | null = null;
+      let realtimeOptions: VoiceRealtimeOptions | null = null;
+      const finalize = vi.fn();
+      const realtimeAbort = vi.fn();
+      const finish = vi.fn(() => {
+        pipelineOptions!.onSegment(new Blob(['quiet'], { type: 'audio/wav' }), { durationMs: 3_000, final: true });
+        pipelineOptions!.onStopped('finish', { pendingSegmentCount: 1 });
+      });
+      const dictation = new ShowPageVoiceDictation({ before: '', after: '' }, {
+        getUserMedia: async () => stream,
+        createRealtime: (options) => {
+          realtimeOptions = options;
+          return { start: async () => undefined, sendPcm: vi.fn(() => true), finish: vi.fn(realtimeFinish), abort: realtimeAbort };
+        },
+        createQueue: () => ({ enqueue: async () => undefined }),
+        createPipeline: (options) => {
+          pipelineOptions = options;
+          return { start: async () => true, abort: vi.fn(), finish };
+        },
+        finalize,
+      });
+      return { dictation, finalize, realtimeAbort, pipeline: () => pipelineOptions!, realtime: () => realtimeOptions! };
+    };
+    // A room with nobody speaking: about −50 dBFS for three seconds.
+    const quiet = (pipeline: VoiceRecordingPipelineOptions, readings = 94) => {
+      pipeline.onPcm?.(pcm(0.0032, readings * 32));
+    };
+
+    it('does not ask recognition about a take that held no speech', async () => {
+      const take = gated(async () => ({ text: 'Vibe、Vibey、Avibe 语音输入。', cleanup: 'success' }));
+      await take.dictation.start();
+      quiet(take.pipeline());
+      take.dictation.finish();
+
+      await expect(take.dictation.done).rejects.toMatchObject({ code: 'empty' });
+      expect(take.finalize).not.toHaveBeenCalled();
+      expect(take.realtimeAbort).toHaveBeenCalled();
+      expect(take.dictation.voiced()).toBe(false);
+      expect(take.dictation.canRetry()).toBe(false);
+    });
+
+    it('judges the tail the recorder flushes after the release too', async () => {
+      const take = gated(async () => ({ text: 'said at the very end', cleanup: 'success' }));
+      await take.dictation.start();
+      quiet(take.pipeline());
+      // Speech still queued in the capture when the release came: it reaches the segment, and the gate.
+      take.pipeline().onPcm?.(pcm(0.05, 400));
+      take.dictation.finish();
+
+      await expect(take.dictation.done).resolves.toBe('said at the very end');
+    });
+
+    it('trusts live words over the levels', async () => {
+      const take = gated(async () => ({ text: '轻声说的一句', cleanup: 'success' }));
+      await take.dictation.start();
+      quiet(take.pipeline(), 30);
+      take.realtime().onPreview?.({ text: '轻声', stash: '说的' });
+      quiet(take.pipeline(), 30);
+      take.dictation.finish();
+
+      await expect(take.dictation.done).resolves.toBe('轻声说的一句');
+    });
+
+    it('sends a take on as before when no loudness was reported', async () => {
+      const take = gated(async () => ({ text: 'heard', cleanup: 'success' }));
+      await take.dictation.start();
+      take.dictation.finish();
+
+      await expect(take.dictation.done).resolves.toBe('heard');
+    });
   });
 });
 

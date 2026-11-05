@@ -162,3 +162,44 @@ def test_voice_telemetry_rejects_non_object_payload():
 
     assert response.status_code == 400
     assert response.get_json() == {"error": "invalid_payload"}
+
+
+def test_voice_telemetry_records_a_silence_gate_without_content(caplog):
+    client = app.test_client()
+    with caplog.at_level(logging.INFO, logger="vibe.ui_server"):
+        response = client.post(
+            "/api/asr/telemetry",
+            json={
+                "event": "dictation_gated",
+                "outcome": "empty",
+                "providerStage": "finalization",
+                "totalDurationMs": 520,
+                "voicedReadings": 1,
+                "peakDbfs": -36,
+                "transcript": "Vibe, Vibey, Avibe",
+            },
+            headers=csrf_headers(client),
+        )
+
+    assert response.status_code == 200
+    record = next(record for record in caplog.records if record.message.startswith("voice_reliability "))
+    metric = json.loads(record.message.removeprefix("voice_reliability "))
+    assert metric["event"] == "dictation_gated"
+    assert metric["totalDurationMs"] == 520
+    assert metric["voicedReadings"] == 1
+    assert metric["peakDbfs"] == -36
+    assert "transcript" not in metric
+
+
+def test_voice_telemetry_rejects_a_peak_above_full_scale():
+    client = app.test_client()
+    for peak in (3, -201, -36.5, True):
+        response = client.post(
+            "/api/asr/telemetry",
+            json={"event": "dictation_gated", "outcome": "empty", "peakDbfs": peak},
+            headers=csrf_headers(client),
+        )
+
+        assert response.status_code == 400
+        assert response.get_json() == {"error": "invalid_field", "field": "peakDbfs"}
+
