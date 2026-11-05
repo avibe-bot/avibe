@@ -8,7 +8,11 @@ import logging
 from typing import Any
 
 from config.paths import ensure_data_dirs, get_logs_dir
-from vibe.logging_config import APPLICATION_LOG_BACKUP_COUNT, APPLICATION_LOG_MAX_BYTES
+from vibe.logging_config import (
+    APPLICATION_LOG_BACKUP_COUNT,
+    APPLICATION_LOG_FORMAT,
+    APPLICATION_LOG_MAX_BYTES,
+)
 from vibe.service_logging import (
     ServiceFileHandler,
     ServiceStreamHandler,
@@ -46,11 +50,10 @@ def _build_logging_handlers(logs_dir: str) -> list[logging.Handler]:
 def setup_logging(level: str = "INFO") -> None:
     """Keep destination I/O on the service logging listener, not the controller."""
     log_level = getattr(logging, level.upper())
-    log_format = '%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(funcName)s() - %(message)s'
     ensure_data_dirs()
     logs_dir = str(get_logs_dir())
     configure_service_logging(
-        lambda: _build_logging_handlers(logs_dir), log_level, logging.Formatter(log_format),
+        lambda: _build_logging_handlers(logs_dir), log_level, logging.Formatter(APPLICATION_LOG_FORMAT),
     )
 
 

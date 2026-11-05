@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 
+APPLICATION_LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(funcName)s() - %(message)s"
 APPLICATION_LOG_MAX_BYTES = 20 * 1024 * 1024
 APPLICATION_LOG_BACKUP_COUNT = 5
 
