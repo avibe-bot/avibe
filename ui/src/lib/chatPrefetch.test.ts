@@ -257,6 +257,84 @@ describe('conversation prefetch', () => {
     expect(await titleOf('ses_a')).toBe('opened by the reader');
   });
 
+  // The main Bot's conversation matters most: it is always taken, first, and
+  // refreshed even when stored, so opening it is instant and current.
+  it('takes the main Bot conversation first and refreshes it, even stored and not among the recent', async () => {
+    await storeAs('ses_main', 'stored before');
+    apiFetch.mockImplementation(async (path: string) => bootstrapResponse(sessionOf(path)));
+
+    prefetch.prefetchChatSnapshots(['ses_0', 'ses_1', 'ses_2'], { pinned: 'ses_main' });
+    await runIdle();
+
+    expect(requested()).toEqual(['ses_main', 'ses_0', 'ses_1']);
+    expect(apiFetch.mock.calls[0]).toEqual(['/api/sessions/ses_main/bootstrap', { headers: { 'X-Avibe-Prefetch': '1' } }]);
+    await runIdle();
+    expect(await titleOf('ses_main')).toBe('live ses_main');
+
+    // Once per document, like every other Session.
+    prefetch.prefetchChatSnapshots(['ses_0'], { pinned: 'ses_main' });
+    await runIdle();
+    expect(requested().filter((id) => id === 'ses_main')).toHaveLength(1);
+  });
+
+  it('goes ahead of recent Sessions already queued when the main Bot becomes known later, and once', async () => {
+    const main = deferred<Response>();
+    apiFetch.mockImplementation((path: string) => (
+      sessionOf(path) === 'ses_main' ? main.promise : Promise.resolve(bootstrapResponse(sessionOf(path)))
+    ));
+    prefetch.prefetchChatSnapshots(['ses_0', 'ses_1', 'ses_2', 'ses_main']);
+    prefetch.prefetchChatSnapshots(['ses_0', 'ses_1', 'ses_2', 'ses_main'], { pinned: 'ses_main' });
+    await runIdle();
+    expect(requested()).toEqual(['ses_main', 'ses_0', 'ses_1']);
+    // Its place among the recent was given up for the pinned one, so a slow
+    // refresh is not fetched a second time.
+    for (let round = 0; round < 4; round += 1) await runIdle();
+    expect(requested()).toEqual(['ses_main', 'ses_0', 'ses_1', 'ses_2']);
+    main.resolve(bootstrapResponse('ses_main'));
+    await runIdle();
+    expect(await titleOf('ses_main')).toBe('live ses_main');
+  });
+
+  it.each([
+    { when: 'when offered', openAt: 'offer' },
+    { when: 'before its turn comes', openAt: 'queue' },
+  ])('leaves the main Bot conversation alone while it is the chat open $when', async ({ openAt }) => {
+    apiFetch.mockImplementation(async (path: string) => bootstrapResponse(sessionOf(path)));
+    const recent = ['ses_0', 'ses_main'];
+    prefetch.prefetchChatSnapshots(recent, { pinned: 'ses_main', open: openAt === 'offer' ? 'ses_main' : null });
+    if (openAt === 'queue') prefetch.prefetchChatSnapshots(recent, { pinned: 'ses_main', open: 'ses_main' });
+    await runIdle();
+    await runIdle();
+    expect(requested()).toEqual(['ses_0']);
+  });
+
+  it('leaves alone a main Bot chat the reader stored while its refresh was out', async () => {
+    await storeAs('ses_main', 'stored before');
+    const response = deferred<Response>();
+    apiFetch.mockReturnValue(response.promise);
+    prefetch.prefetchChatSnapshots([], { pinned: 'ses_main' });
+    await runIdle();
+    await storeAs('ses_main', 'opened by the reader');
+    response.resolve(bootstrapResponse('ses_main', 'prefetched'));
+    await runIdle();
+    expect(await titleOf('ses_main')).toBe('opened by the reader');
+  });
+
+  it('gives the main Bot conversation back when conditions turn, and refreshes it once they recover', async () => {
+    apiFetch.mockImplementation(async (path: string) => bootstrapResponse(sessionOf(path)));
+    const connection = new FakeConnection();
+    connection.set({ type: 'wifi' });
+    setConnection(connection);
+    prefetch.prefetchChatSnapshots([], { pinned: 'ses_main' });
+    connection.set({ type: 'cellular' });
+    await runIdle();
+    expect(apiFetch).not.toHaveBeenCalled();
+
+    connection.set({ type: 'wifi' });
+    await runIdle();
+    expect(requested()).toEqual(['ses_main']);
+  });
+
   it('stores nothing when the reader changed while the request was out', async () => {
     const response = deferred<Response>();
     apiFetch.mockReturnValue(response.promise);

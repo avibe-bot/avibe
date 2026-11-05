@@ -193,6 +193,15 @@ function isChatSnapshotOwnerCurrent(owner: ChatSnapshotOwner): boolean {
     && owner.generation === (forgotten.get(owner.sessionId) ?? 0);
 }
 
+// Advanced by every write a current owner makes, so a background refresh can
+// tell that someone (the opened chat) stored this conversation while it was out.
+const written = new Map<string, number>();
+
+/** How many writes of ``sessionId`` this document has made. */
+export function chatSnapshotWriteCount(sessionId: string): number {
+  return written.get(sessionId) ?? 0;
+}
+
 /** Store ``snapshot`` if ``owner`` is still current. ``added`` says the write
  *  may create a record, which is when the oldest ones beyond the cap go. */
 export async function writeChatSnapshot(
@@ -201,6 +210,7 @@ export async function writeChatSnapshot(
   { added = false }: { added?: boolean } = {},
 ): Promise<void> {
   if (!isChatSnapshotOwnerCurrent(owner)) return;
+  written.set(owner.sessionId, chatSnapshotWriteCount(owner.sessionId) + 1);
   const value: StoredChatSnapshot = { ...snapshot, build: UI_BUILD };
   await writeLocalSnapshot(chatSnapshotKey(owner.sessionId), CHAT_SNAPSHOT_SCHEMA, value);
   if (added) await pruneLocalSnapshots(KEY_PREFIX, CHAT_SNAPSHOT_SESSIONS);
