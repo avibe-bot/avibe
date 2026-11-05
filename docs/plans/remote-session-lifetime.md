@@ -73,7 +73,10 @@ Revocation and sign-out remain immediate and durable.
     the Vibe Cloud configuration).
 - **Renewal**: `session_needs_renewal` becomes "issued more than 1 day ago and
   not already at the cap". The cookie's `max_age` is the remaining lifetime of
-  that `exp`, never a fixed constant.
+  that `exp`, never a fixed constant. A top-level page load (Fetch Metadata
+  `Sec-Fetch-Mode: navigate`, `Sec-Fetch-Dest: document`) renews once the
+  cookie is more than 1 hour old, so every app launch stores a cookie WebKit
+  does not cap (see Risks).
 - **Sign-out revocation must survive restarts.** `_REVOKED_BROWSER_SESSIONS`
   is in memory today. With 24 h cookies the window after a restart was at most
   a day; with 30–90 day cookies it is not acceptable.
@@ -114,12 +117,17 @@ Revocation and sign-out remain immediate and durable.
 
 ## 5. Risks
 
-- **Safari tracking prevention may cap the cookie at 7 days.** WebKit caps
-  first-party cookies set by responses from an IP address that differs from
-  the first-party site's. Whether a tunnel host such as `*-app.avibe.bot` is
-  affected must be checked on an iPhone (Safari and Home Screen app). If it
-  is, iOS readers get 7 days, not 30; the native iOS shell would have the same
-  limit.
+- **Safari tracking prevention may cap a renewed cookie at 7 days.** For a
+  same-site subresource (a fetch) whose response has no CNAME, WebKit compares
+  the response's IP address with the one the page itself loaded from and caps
+  the cookies it sets to 7 days when fewer than half the bits match (16 for
+  IPv4, 64 for IPv6), or the families differ (`NetworkTaskCocoa.mm`,
+  `setCookieTransformForFirstPartyRequest`). It never applies to a top-level
+  navigation. `*-app.avibe.bot` resolves to two unrelated Cloudflare addresses,
+  so a renewal on a fetch over the other one can be capped. The sign-in
+  callback is a top-level navigation, and a page load renews the cookie after
+  an hour, so a capped cookie survives only while the app stays open without a
+  reload. The worst case is a sign-in after 7 idle days instead of 30.
 - **A lost device keeps access for up to the idle limit.** The mitigations are
   sign-out on another device, owner revocation, and the 90-day cap. The
   console's authorized-users page should keep showing who has access.

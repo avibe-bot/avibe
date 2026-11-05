@@ -51,6 +51,12 @@ ORGANIZATION_SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 SESSION_ABSOLUTE_TTL_SECONDS = 90 * 24 * 60 * 60
 # A successful authenticated request re-issues the cookie once it is this old.
 SESSION_RENEW_AFTER_SECONDS = 24 * 60 * 60
+# A top-level page load re-issues it sooner. WebKit never caps a cookie set on a
+# top-level navigation, but may cut one set on a same-site fetch to 7 days when
+# the response comes from an address unrelated to the page's (third-party IP
+# address cloaking), which a CDN's alternative address can look like. Renewing
+# on every app launch keeps the full idle period in the cookie a browser stores.
+SESSION_NAVIGATION_RENEW_AFTER_SECONDS = 60 * 60
 ORGANIZATION_AUTHORIZATION_REFRESH_SECONDS = 12 * 60 * 60
 ORGANIZATION_AUTHORIZATION_OUTAGE_GRACE_SECONDS = 6 * 60 * 60
 # Compatibility aliases for released callers and persisted metadata. Policy
@@ -7260,12 +7266,15 @@ def session_needs_renewal(
     now: int | None = None,
     *,
     instance_kind: object = None,
+    renew_after: int = SESSION_RENEW_AFTER_SECONDS,
 ) -> bool:
     """Return whether a successful request should re-issue the session cookie.
 
-    The cookie is re-issued once it is more than SESSION_RENEW_AFTER_SECONDS
-    old, or sooner when that would move its expiry later by more than that
-    (a cookie from before this policy), and never once it sits at the cap.
+    The cookie is re-issued once it is more than ``renew_after`` seconds old
+    (SESSION_RENEW_AFTER_SECONDS, or SESSION_NAVIGATION_RENEW_AFTER_SECONDS for
+    a top-level page load), or sooner when that would move its expiry later by
+    more than that (a cookie from before this policy), and never once it sits
+    at the cap.
     """
     current = now if now is not None else int(time.time())
     try:
@@ -7280,8 +7289,8 @@ def session_needs_renewal(
     if renewed_expires_at <= current or renewed_expires_at == expires_at:
         return False
     return (
-        current - issued_at > SESSION_RENEW_AFTER_SECONDS
-        or renewed_expires_at - expires_at > SESSION_RENEW_AFTER_SECONDS
+        current - issued_at > renew_after
+        or renewed_expires_at - expires_at > renew_after
     )
 
 
