@@ -1,9 +1,9 @@
 name: desktop-self-contained-package
 
-# Release (tag) builds Developer ID sign and notarize every macOS layer and fail
-# without the complete Apple credential set; manual builds sign when the whole
-# set is configured and stay ad-hoc when none of it is. Apple and updater keys
-# come only from desktop-updater.
+# Release (tag) builds Developer ID sign and notarize every macOS layer. The
+# Windows NSIS build is intentionally unsigned here; a downstream job binds the
+# `windows-signing` environment, signs exactly the final installer, and then
+# rebuilds all release metadata from those signed bytes.
 #
 # Only reruns of the same tag can read a tag's caches, so release builds
 # restore caches but never save them. The unsigned cache warm-up (a master push
@@ -435,7 +435,7 @@ jobs:
           python scripts/macos_signing.py verify-release \
             --app target/release/bundle/macos/Avibe.app --dmg "$dmg"
 
-      - name: Verify unsigned Windows installer
+      - name: Verify unsigned Windows installer before Certum handoff
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -444,7 +444,19 @@ jobs:
           $signature = Get-AuthenticodeSignature $installers[0].FullName
           if ($signature.Status -ne 'NotSigned') { throw "Expected an unsigned TEST installer" }
 
+      - name: Stage unsigned Windows installer for Certum
+        if: runner.os == 'Windows' && startsWith(inputs.release_tag, 'gh-v')
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem desktop/target/release/bundle/nsis/*setup.exe)
+          if ($installers.Count -ne 1) { throw "Expected exactly one NSIS installer" }
+          Remove-Item -Recurse -Force windows-signing-input -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force windows-signing-input/runtime | Out-Null
+          Copy-Item $installers[0].FullName windows-signing-input/
+          Copy-Item desktop/src-tauri/resources/runtime/* windows-signing-input/runtime/ -Force
+
       - name: Record artifact hashes
+        if: runner.os != 'Windows' || !startsWith(inputs.release_tag, 'gh-v')
         shell: bash
         env:
           AVIBE_DESKTOP_VERSION: ${{ env.DESKTOP_VERSION }}
@@ -476,7 +488,7 @@ jobs:
             --signing "$signing" ${driver_args[@]+"${driver_args[@]}"}
 
       - name: Sign and verify final updater artifacts
-        if: inputs.updater_enabled
+        if: inputs.updater_enabled && (runner.os != 'Windows' || !startsWith(inputs.release_tag, 'gh-v'))
         shell: bash
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
@@ -490,7 +502,23 @@ jobs:
             --target "$TARGET" --app desktop/target/release/bundle/macos/Avibe.app
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
-        if: env.DESKTOP_CACHE_WARMUP != 'true'
+        if: runner.os == 'macOS' && env.DESKTOP_CACHE_WARMUP != 'true'
+        with:
+          name: avibe-desktop-${{ env.DESKTOP_VERSION }}-${{ matrix.target }}
+          path: desktop-package/
+          if-no-files-found: error
+          retention-days: 14
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        if: runner.os == 'Windows' && startsWith(inputs.release_tag, 'gh-v') && env.DESKTOP_CACHE_WARMUP != 'true'
+        with:
+          name: avibe-desktop-unsigned-${{ env.DESKTOP_VERSION }}-${{ matrix.target }}
+          path: windows-signing-input/
+          if-no-files-found: error
+          retention-days: 14
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        if: runner.os == 'Windows' && !startsWith(inputs.release_tag, 'gh-v') && env.DESKTOP_CACHE_WARMUP != 'true'
         with:
           name: avibe-desktop-${{ env.DESKTOP_VERSION }}-${{ matrix.target }}
           path: desktop-package/
