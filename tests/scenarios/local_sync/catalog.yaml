@@ -31,13 +31,14 @@ scenarios:
     layer: unit
     test: ui/src/lib/localStore/localStore.test.ts::LSYNC-008 shows a different reader on the same device nothing of the previous one
   - id: LSYNC-018
-    name: A sign-out in another tab, including an older build that does not know the store, wipes it
+    name: A sign-out in another tab, including an older build that does not know the store, wipes it and stops this tab storing for that reader
     status: covered
     kind: security
     layer: unit
     test:
       - ui/src/lib/localStore/localStore.test.ts::LSYNC-018 wipes on a sign-out in another tab, including one running an older build
       - ui/src/lib/localStore/localStore.test.ts::LSYNC-018 wipes at the next open after such a sign-out when no current tab was open
+      - ui/src/lib/localStore/localStore.test.ts::LSYNC-018 stores and reads nothing more for a reader signed out in another tab
   - id: LSYNC-019
     name: An authorization change clears the store (Phase 1)
     status: covered

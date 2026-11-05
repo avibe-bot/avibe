@@ -42,6 +42,7 @@ import {
   isCovered,
   mergePageCoverage,
   orderKeyOf,
+  withinReach,
 } from './ranges';
 
 const DB_NAME = 'avibe-local-store';
@@ -89,7 +90,11 @@ type StoredMessage = {
   observedAt: number;
   bytes: number;
 };
-type StoredRanges = { sessionId: string; ranges: CoverageRange[] };
+/** A page that landed: what it proved, and when it was read. A row a newer
+ *  page's reach left out stays out, even when no copy of it was stored to
+ *  tombstone. Kept only as long as an older answer could still land. */
+type Watermark = { low: OrderKey | null; high: OrderKey | null; observedAt: number };
+type StoredRanges = { sessionId: string; ranges: CoverageRange[]; watermarks?: Watermark[] };
 type Tombstone = { id: string; sessionId: string; observedAt: number };
 
 // ---------------------------------------------------------------------------
@@ -216,6 +221,13 @@ const currentStreamToken = () => `${documentId}:${streamEpoch}`;
 // yet: the page lands after it, and its tail coverage reaches over it.
 const pendingReads = new Map<string, number>();
 
+// The sign-out generation when the current reader was named. A sign-out in any
+// tab bumps it; from then on this document stores and reads nothing for that
+// reader, however it learned of them, until a new reader is named (a fresh
+// sign-in reloads the page).
+let readerGeneration = readSignOutGeneration();
+const readerCurrent = () => readerGeneration === readSignOutGeneration();
+
 // The reader whose meta record is in place, so writes may proceed.
 let readyReader: { reader: string; epoch: number; promise: Promise<boolean> } | null = null;
 
@@ -266,6 +278,7 @@ export function wipeLocalStore(): Promise<void> {
 // provisional replay of the same reader keeps its data.
 subscribeLocalSnapshotPrincipal(() => {
   readyReader = null;
+  readerGeneration = readSignOutGeneration();
 });
 // Every whole-store clear of the snapshots (sign-out, revocation, an
 // authorization change, a quota failure) is a clear of this store too, awaited
@@ -319,7 +332,7 @@ const readPending = (sessionId: string) =>
  *  since, unless a clear, wipe, or forget happened meanwhile. */
 function ticketReader(ticket: LocalStoreTicket): string | null {
   const reader = ticket.reader ?? getLocalSnapshotPrincipal();
-  if (!reader || reader !== getLocalSnapshotPrincipal()) return null;
+  if (!reader || reader !== getLocalSnapshotPrincipal() || !readerCurrent()) return null;
   if (ticket.snapshotEpoch !== getLocalSnapshotEpoch() || ticket.wipeEpoch !== wipeEpoch) return null;
   if (ticket.forgotten !== (forgotten.get(ticket.sessionId) ?? 0)) return null;
   if (Date.now() - ticket.observedAt > LOCAL_STORE_MAX_ANSWER_AGE_MS) return null;
@@ -353,7 +366,13 @@ type RowWrite = { tx: IDBTransaction; sessionDelta: Map<string, number> };
 
 /** Put ``row`` under P1: skipped when the store holds a newer copy or a newer
  *  tombstone for it. */
-async function putRow({ tx, sessionDelta }: RowWrite, row: WorkbenchMessage, sessionId: string, observedAt: number): Promise<boolean> {
+async function putRow(
+  { tx, sessionDelta }: RowWrite,
+  row: WorkbenchMessage,
+  sessionId: string,
+  observedAt: number,
+  watermarks: readonly Watermark[] = [],
+): Promise<boolean> {
   const messages = tx.objectStore(MESSAGES);
   const tombstones = tx.objectStore(TOMBSTONES);
   const [existing, tombstone] = await Promise.all([
@@ -361,6 +380,10 @@ async function putRow({ tx, sessionDelta }: RowWrite, row: WorkbenchMessage, ses
     settle(tombstones.get(row.id) as IDBRequest<Tombstone | undefined>),
   ]);
   if ((existing && existing.observedAt > observedAt) || (tombstone && tombstone.observedAt > observedAt)) return false;
+  if (!existing && !tombstone) {
+    const key = orderKeyOf(row);
+    if (watermarks.some((mark) => mark.observedAt > observedAt && withinReach(key, mark.low, mark.high))) return false;
+  }
   const stored: StoredMessage = {
     id: row.id,
     sessionId,
@@ -468,13 +491,21 @@ export async function recordLocalStorePage(
       tx.objectStore(TOMBSTONES).put({ id: row.id, sessionId, observedAt } satisfies Tombstone);
       write.sessionDelta.set(sessionId, (write.sessionDelta.get(sessionId) ?? 0) - row.bytes);
     }
-    for (const row of stored) await putRow(write, row, sessionId, observedAt);
     const rangesStore = tx.objectStore(RANGES);
     const current = await settle(rangesStore.get(sessionId) as IDBRequest<StoredRanges | undefined>);
+    const watermarks = (current?.watermarks ?? []).filter((mark) => now - mark.observedAt <= LOCAL_STORE_MAX_ANSWER_AGE_MS);
+    for (const row of stored) await putRow(write, row, sessionId, observedAt, watermarks);
+    // A tail read across a stream gap cannot account for what the gap dropped,
+    // so its coverage gets no tail claim and nothing streamed extends it.
     const streamToken = currentStreamToken();
-    let ranges = mergePageCoverage(current?.ranges ?? [], reach, { streamToken, now });
-    if (streamedAbove && ticket.streamToken === streamToken) ranges = extendTailCoverage(ranges, streamedAbove, streamToken);
-    rangesStore.put({ sessionId, ranges } satisfies StoredRanges);
+    const tailClaim = ticket.streamToken === streamToken;
+    let ranges = mergePageCoverage(current?.ranges ?? [], reach, { streamToken, now, tailClaim });
+    if (streamedAbove && tailClaim) ranges = extendTailCoverage(ranges, streamedAbove, streamToken);
+    rangesStore.put({
+      sessionId,
+      ranges,
+      watermarks: [...watermarks, { low: reach.low, high: reach.high, observedAt }],
+    } satisfies StoredRanges);
     await applySessionDelta(tx, write.sessionDelta, now);
   });
   scheduleBudgetCheck();
@@ -532,7 +563,7 @@ export async function recordLocalStoreStreamRow(row: WorkbenchMessage | null | u
     const write: RowWrite = { tx, sessionDelta: new Map() };
     if (!(await putRow(write, row, sessionId, ticket.observedAt))) return;
     if (current && streamToken === currentStreamToken()) {
-      rangesStore.put({ sessionId, ranges: extendTailCoverage(current.ranges, orderKeyOf(row), streamToken) } satisfies StoredRanges);
+      rangesStore.put({ ...current, ranges: extendTailCoverage(current.ranges, orderKeyOf(row), streamToken) } satisfies StoredRanges);
     }
     await applySessionDelta(tx, write.sessionDelta, now);
   });
@@ -701,7 +732,7 @@ export async function readLocalStoreWindow(
   { before = null, limit = 50 }: { before?: OrderKey | null; limit?: number } = {},
 ): Promise<LocalStoreWindow | null> {
   const reader = getLocalSnapshotPrincipal();
-  if (!reader || !(await ensureReader(reader))) return null;
+  if (!reader || !readerCurrent() || !(await ensureReader(reader))) return null;
   const epoch = wipeEpoch;
   const result = await transact('readonly', [SESSIONS, MESSAGES, RANGES], async (tx) => {
     const session = await settle(tx.objectStore(SESSIONS).get(sessionId) as IDBRequest<StoredSession | undefined>);
@@ -712,7 +743,8 @@ export async function readLocalStoreWindow(
       const cursor = tx.objectStore(MESSAGES).index(BY_SESSION).openCursor(upper, 'prev');
       cursor.onsuccess = () => {
         const current = cursor.result;
-        if (!current || rows.length >= limit) {
+        // One past the limit says whether anything older is stored.
+        if (!current || rows.length > limit) {
           resolve();
           return;
         }
@@ -721,11 +753,14 @@ export async function readLocalStoreWindow(
       };
       cursor.onerror = () => reject(cursor.error);
     });
+    const olderStored = rows.length > limit;
+    if (olderStored) rows.length = limit;
     rows.reverse();
     const token = currentStreamToken();
     const contiguous = rows.length > 0
       && ranges.some((range) => isCovered([range], orderKeyOf(rows[0].row), token) && isCovered([range], orderKeyOf(rows[rows.length - 1].row), token));
-    const startReached = rows.length > 0 && ranges.some((range) => range.from === null && isCovered([range], orderKeyOf(rows[0].row), token));
+    const startReached = rows.length > 0 && !olderStored
+      && ranges.some((range) => range.from === null && isCovered([range], orderKeyOf(rows[0].row), token));
     return {
       session: session?.row ?? null,
       messages: rows.map((row) => row.row),

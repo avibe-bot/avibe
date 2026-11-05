@@ -56,6 +56,11 @@ const maxTo = (a: OrderKey | null, b: OrderKey | null) => {
   return compareKeys(a, b) >= 0 ? a : b;
 };
 
+/** Whether ``key`` lies inside ``[low, high]``, a null bound being open. */
+export function withinReach(key: OrderKey, low: OrderKey | null, high: OrderKey | null): boolean {
+  return (low === null || compareKeys(key, low) >= 0) && (high === null || compareKeys(key, high) <= 0);
+}
+
 /** Whether a range's tail claim still holds under the current stream. */
 export const tailHolds = (range: CoverageRange, streamToken: string): boolean =>
   range.atTail && range.streamToken === streamToken;
@@ -76,19 +81,20 @@ function overlaps(range: CoverageRange, low: OrderKey | null, high: OrderKey | n
  * everything inside its reach, so a range that overlaps the reach is contiguous
  * with it and joins it; a range that does not stays apart, and the keys between
  * them stay a gap. A page that reaches the tail takes the tail claim from every
- * other range.
+ * other range, and keeps it only with ``tailClaim``: a read that started before
+ * the current stream did cannot speak for what the stream between dropped.
  */
 export function mergePageCoverage(
   ranges: readonly CoverageRange[],
   reach: PageReach,
-  { streamToken, now }: { streamToken: string; now: number },
+  { streamToken, now, tailClaim = true }: { streamToken: string; now: number; tailClaim?: boolean },
 ): CoverageRange[] {
   const atTail = reach.high === null;
   let merged: CoverageRange = {
     from: reach.low === null ? null : reach.first,
     to: reach.last,
-    atTail,
-    streamToken: atTail ? streamToken : null,
+    atTail: atTail && tailClaim,
+    streamToken: atTail && tailClaim ? streamToken : null,
     verifiedAt: now,
   };
   const kept: CoverageRange[] = [];

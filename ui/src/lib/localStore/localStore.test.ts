@@ -107,6 +107,22 @@ describe('P2: a page speaks only for what it proves', () => {
     expect(await ids()).toEqual([]);
   });
 
+  it('gives no tail claim to a tail read that started before a stream gap', async () => {
+    const slow = beginLocalStoreRead('ses_a');
+    noteLocalStoreStreamGap();
+    await recordLocalStorePage(slow, { kind: 'tail' }, { messages: rows(1, 5), next_before_id: null }, session());
+    // Row 6 may have been dropped in the gap; a later streamed row must not be
+    // joined to the tail across it.
+    await recordLocalStoreStreamRow(row(7));
+    expect((await readLocalStoreWindow('ses_a'))?.contiguous).toBe(false);
+  });
+
+  it('reports the start of history only when the window reaches it', async () => {
+    await tail(rows(1, 100), null);
+    expect((await readLocalStoreWindow('ses_a', { limit: 50 }))?.startReached).toBe(false);
+    expect((await readLocalStoreWindow('ses_a', { limit: 200 }))?.startReached).toBe(true);
+  });
+
   it('keeps two tails separated by a disconnect apart, leaving the gap visible', async () => {
     await tail(rows(1, 50), null);
     noteLocalStoreStreamGap();
@@ -129,6 +145,14 @@ describe('P1: last observed wins, per row', () => {
       await recordLocalStorePage(slow, { kind }, { messages: rows(1, 5), next_before_id: null, next_after_id: null, anchor_id: 'msg_003' });
       expect(await texts()).toContain('quick reply chosen');
     }
+  });
+
+  it('does not let an older answer insert a row a newer page left out, though none was stored', async () => {
+    const older = beginLocalStoreRead('ses_a', Date.now() - 2000);
+    // Row 6 moved away; the newer complete tail lands first in an empty store.
+    await tail(rows(1, 5), null);
+    await recordLocalStorePage(older, { kind: 'tail' }, { messages: rows(1, 6), next_before_id: null });
+    expect(await ids()).toEqual([1, 2, 3, 4, 5]);
   });
 
   it('does not let an older answer bring back a row a newer one removed', async () => {
@@ -201,6 +225,19 @@ describe('one reader, and the wipes that end it', () => {
     bumpSignOutGeneration();
     window.dispatchEvent(new StorageEvent('storage', { key: SIGN_OUT_GENERATION_KEY }));
     await idle();
+    expect(await ids()).toEqual([]);
+  });
+
+  it('LSYNC-018 stores and reads nothing more for a reader signed out in another tab', async () => {
+    await tail(rows(1, 3), null);
+    bumpSignOutGeneration();
+    window.dispatchEvent(new StorageEvent('storage', { key: SIGN_OUT_GENERATION_KEY }));
+    await idle();
+    // The principal is still named in this tab; a cached answer still arrives.
+    await tail(rows(1, 3), null);
+    expect(await readLocalStoreWindow('ses_a')).toBeNull();
+    setLocalSnapshotPrincipal(null);
+    setLocalSnapshotPrincipal('remote:alice');
     expect(await ids()).toEqual([]);
   });
 
