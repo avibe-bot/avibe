@@ -1,8 +1,13 @@
-# Apple sign-in button artwork
+# Sign in with Apple mark
 
-Downloaded from Apple's official button generator on 2026-11-05 for static design reference.
-Source: https://developer.apple.com/documentation/signinwithapple/incorporating-sign-in-with-apple-into-other-platforms
-Endpoint: https://appleid.cdn-apple.com/appleid/button
-Parameters: `height=52&width=350&color={black|white}&border=false&type=sign-in&border_radius=12&scale=2&locale={en_US|zh_CN}`.
+`logo-white.png` is the unmodified image returned by Apple's official logo-only
+button generator on 2026-11-05:
 
-The PNGs preserve Apple's logo, localized label, alignment and neutral colors. The iOS implementation must use Apple's native Sign in with Apple control. These assets do not implement authentication. At narrower widths preserve the aspect ratio; native controls should instead be laid out at their intrinsic 52-point height.
+`https://appleid.cdn-apple.com/appleid/button/logo?height=28&width=28&color=white&border=false&border_radius=0&scale=2`
+
+The generator returns a 60 × 60 PNG (its minimum size). The proposal displays it
+at 28 × 28 inside the shipped `Button` size `lg`: the complete button shares the
+adjacent action's 48px height, 14px label and `rounded-lg` radius. The official
+Apple mark and required white/black palette remain intact; text uses the same
+product typography as the adjacent action. Implementation uses the native Apple
+control with this matching geometry.
