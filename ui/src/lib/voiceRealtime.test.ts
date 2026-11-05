@@ -304,4 +304,32 @@ describe('voice realtime client protocol', () => {
     await second;
     expect(startFrame(stalled)).toEqual({ type: 'start', before: '', after: '' });
   });
+
+  it('drops the token of a socket that never became ready, and keeps it after a ready one', async () => {
+    const refused = new FakeSocket();
+    const invalidateRefused = vi.fn();
+    const failing = new VoiceRealtimeSession({
+      before: '',
+      after: '',
+      openSocket: async () => ({ socket: refused as unknown as WebSocket, capabilities: [], invalidate: invalidateRefused }),
+    });
+    const started = failing.start();
+    refused.close();
+    await expect(started).rejects.toThrow('realtime_closed');
+    expect(invalidateRefused).toHaveBeenCalledOnce();
+
+    const accepted = new FakeSocket();
+    const invalidateAccepted = vi.fn();
+    const working = new VoiceRealtimeSession({
+      before: '',
+      after: '',
+      openSocket: async () => ({ socket: accepted as unknown as WebSocket, capabilities: [], invalidate: invalidateAccepted }),
+    });
+    const ready = working.start();
+    accepted.open();
+    await ready;
+    accepted.close();
+    expect(invalidateAccepted).not.toHaveBeenCalled();
+  });
 });
+

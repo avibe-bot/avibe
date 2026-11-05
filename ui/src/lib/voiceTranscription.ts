@@ -33,6 +33,28 @@ export const VOICE_TRANSCRIPTION_TIMEOUT_MS = (
   + COMPATIBILITY_UPSTREAM_TIMEOUT_MS
 );
 
+// One dictation request's own deadline, sized to what it carries: a fixed allowance for the token,
+// the connection, and recognition, the upload at a slow but working uplink's pace, and the final
+// request's cleanup on top. A request on a dead path ends here instead of whenever the platform's
+// network stack gives up (iOS takes about 13 s), and the retries below take over.
+const DICTATION_ATTEMPT_BASE_MS = 15_000;
+const DICTATION_UPLOAD_BYTES_PER_SECOND = 128 * 1024;
+const DICTATION_FINAL_ALLOWANCE_MS = CLEANUP_UPSTREAM_TIMEOUT_MS + SERVER_FINALIZATION_ALLOWANCE_MS;
+
+export const voiceDictationAttemptTimeoutMs = (bytes: number, final: boolean): number => Math.min(
+  VOICE_TRANSCRIPTION_TIMEOUT_MS,
+  DICTATION_ATTEMPT_BASE_MS
+    + Math.ceil((Math.max(0, bytes) * 1000) / DICTATION_UPLOAD_BYTES_PER_SECOND)
+    + (final ? DICTATION_FINAL_ALLOWANCE_MS : 0),
+);
+
+/** The pauses between automatic attempts of one dictation request: three attempts in all. */
+export const VOICE_RETRY_DELAYS_MS: readonly number[] = [1_000, 3_000];
+/** After a release, no new automatic attempt starts this long after the first one: the take is
+ *  then left for the user to retry, its audio kept, instead of 「正在整理」 waiting on a network
+ *  that is not there. */
+export const VOICE_SETTLE_RETRY_WINDOW_MS = 10_000;
+
 const EXTENSION_BY_MIME: Record<string, string> = {
   'audio/aac': 'aac',
   'audio/mp4': 'mp4',
@@ -79,6 +101,14 @@ export type VoiceTranscriptionDependencies = {
   /** The conversation this dictation is spoken into, sent with every segment (each is recognized
    *  on its own). Pass one `resolveVoiceContext` promise per dictation, so it settles once. */
   context?: VoiceContextSource;
+  /** Pauses between automatic attempts of one dictation request (`VOICE_RETRY_DELAYS_MS`). */
+  retryDelaysMs?: readonly number[];
+  /** No automatic retry starts after this time (epoch ms); the request in flight still finishes. */
+  retryUntil?: number;
+  /** Aborted, no further automatic retry starts; unlike `signal`, the request in flight goes on. */
+  retrySignal?: AbortSignal;
+  /** Whether the browser reports a network at all (`navigator.onLine`). */
+  online?: () => boolean;
 };
 
 // avibe.bot declares this on the user token when its dictation segments accept `reply` and
@@ -111,6 +141,8 @@ type VoiceSegmentTranscriptionDependencies = VoiceTranscriptionDependencies & {
 };
 
 type VoiceFinalizationDependencies = VoiceTranscriptionDependencies & {
+  /** Sends a segment that has no receipt yet in place of the server request (tests). */
+  transcribe?: (blob: Blob) => Promise<string>;
   finalize?: (input: {
     blob: Blob | null;
     sequence: number;
@@ -178,10 +210,89 @@ const normalizeTranscriptionError = (
   if (isAbortError(error) || signal.aborted) {
     return new VoiceTranscriptionError('cancelled', { cause: error });
   }
+  // fetch rejects with a TypeError when the request never got an answer: the network failed.
+  if (error instanceof TypeError) {
+    return new VoiceTranscriptionError('unavailable', { cause: error });
+  }
   return new VoiceTranscriptionError('failed', { cause: error });
 };
 
 const telemetryOutcome = (error: VoiceTranscriptionError): VoiceTelemetryOutcome => error.code;
+
+const browserOnline = (): boolean => (
+  typeof navigator === 'undefined' || navigator.onLine !== false
+);
+
+/** Whether trying the same request again can change its answer: the network or the service
+ *  failed, not the request itself. An empty, oversized, cancelled, or rejected request cannot. */
+export const isRetryableVoiceError = (error: unknown): boolean => {
+  if (!(error instanceof VoiceTranscriptionError)) return false;
+  if (error.code === 'unavailable' || error.code === 'timeout') return true;
+  if (error.code !== 'failed') return false;
+  return error.status == null || error.status >= 500 || error.status === 408 || error.status === 429;
+};
+
+const anySignal = (...signals: Array<AbortSignal | undefined>): AbortSignal | undefined => {
+  const present = signals.filter((signal): signal is AbortSignal => signal !== undefined);
+  if (present.length <= 1) return present[0];
+  const controller = new AbortController();
+  for (const signal of present) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener('abort', () => controller.abort(), { once: true });
+  }
+  return controller.signal;
+};
+
+/** Waits `ms`, or resolves false at once when `signal` aborts. */
+const pause = (ms: number, signal?: AbortSignal): Promise<boolean> => new Promise((resolve) => {
+  if (signal?.aborted) {
+    resolve(false);
+    return;
+  }
+  const onAbort = () => {
+    globalThis.clearTimeout(timer);
+    resolve(false);
+  };
+  const timer = globalThis.setTimeout(() => {
+    signal?.removeEventListener('abort', onAbort);
+    resolve(true);
+  }, ms);
+  signal?.addEventListener('abort', onAbort, { once: true });
+});
+
+/**
+ * Runs one dictation request, again after a pause while its failure is the network's or the
+ * service's (`isRetryableVoiceError`), at most `retryDelaysMs.length + 1` times. A browser with no
+ * network fails at once rather than waiting out a request that cannot leave; it is retried when
+ * the network returns, by the caller. No attempt starts after `retryUntil`.
+ */
+const withVoiceRetries = async <T>(
+  dependencies: VoiceTranscriptionDependencies,
+  attempt: () => Promise<T>,
+): Promise<T> => {
+  const delays = dependencies.retryDelaysMs ?? VOICE_RETRY_DELAYS_MS;
+  const online = dependencies.online ?? browserOnline;
+  for (let index = 0; ; index += 1) {
+    if (!online()) throw new VoiceTranscriptionError('unavailable');
+    try {
+      return await attempt();
+    } catch (error) {
+      const delay = delays[index];
+      if (
+        delay === undefined
+        || !isRetryableVoiceError(error)
+        || dependencies.signal?.aborted
+        || dependencies.retrySignal?.aborted
+        || !online()
+        || (dependencies.retryUntil !== undefined && Date.now() + delay > dependencies.retryUntil)
+      ) {
+        throw error;
+      }
+      if (!(await pause(delay, anySignal(dependencies.signal, dependencies.retrySignal)))) throw error;
+      if (dependencies.retrySignal?.aborted) throw error;
+    }
+  }
+};
 
 const responseError = async (response: Response): Promise<VoiceTranscriptionError> => {
   const payload = (await response.json().catch(() => null)) as { error?: unknown } | null;
@@ -305,7 +416,11 @@ const requestVoiceServer = async (
 ): Promise<VoiceServerResponse> => {
   const cloudFetch = dependencies.cloudFetch ?? avibeFetch;
   const localFetch = dependencies.localFetch ?? apiFetch;
-  const timeoutMs = dependencies.timeoutMs ?? VOICE_TRANSCRIPTION_TIMEOUT_MS;
+  const timeoutMs = dependencies.timeoutMs ?? (
+    metadata
+      ? voiceDictationAttemptTimeoutMs(blob?.size ?? 0, metadata.final)
+      : VOICE_TRANSCRIPTION_TIMEOUT_MS
+  );
   const telemetry = dependencies.telemetry ?? emitVoiceTelemetry;
   const attemptCount = dependencies.attemptCount ?? 1;
   const timeout = requestTimeout(timeoutMs, dependencies.signal);
@@ -413,8 +528,24 @@ const requestVoiceServer = async (
     );
     return payload;
   } catch (error) {
-    if (error instanceof CloudUnavailableError && !error.uploadStarted) {
-      report('cloud', 'token', 'fallback', cloudStageStartedAt);
+    // A dictation request the cloud could not take (no token, a refused token that could not be
+    // replaced, or a network failure before any answer) goes through the local relay, a different
+    // network path. Repeating a dictation request is safe: segments are recognized statelessly
+    // and the final one only joins receipts. A timeout or an answer from the cloud is final here.
+    const cloudNetworkFailure = metadata !== undefined
+      && !timeout.signal.aborted
+      && (error instanceof CloudUnavailableError || error instanceof TypeError);
+    if ((error instanceof CloudUnavailableError && !error.uploadStarted) || cloudNetworkFailure) {
+      report(
+        'cloud',
+        error instanceof CloudUnavailableError && !error.uploadStarted
+          ? 'token'
+          : error instanceof CloudUnavailableError ? 'refresh' : 'upload',
+        'fallback',
+        cloudStageStartedAt,
+        undefined,
+        { attemptCount: cloudAttemptCount },
+      );
       const localStartedAt = Date.now();
       try {
         const payload = await transcribeLocally(blob, localFetch, timeout.signal, metadata);
@@ -470,39 +601,42 @@ const transcribeVoiceSegment = async (
   dependencies: VoiceSegmentTranscriptionDependencies,
 ): Promise<void> => {
   if (segment.final || !segment.blob) return;
+  const blob = segment.blob;
   const { transcribe, ...transcriptionDependencies } = dependencies;
   segment.error = undefined;
-  segment.attemptCount = (segment.attemptCount ?? 0) + 1;
   try {
-    if (transcribe) {
-      segment.receipt = await transcribe(segment.blob);
-      return;
-    }
-    const dictationId = transcriptionDependencies.dictationId;
-    if (!dictationId) throw new VoiceTranscriptionError('failed');
-    const response = await requestVoiceServer(
-      segment.blob,
-      {
-        ...transcriptionDependencies,
-        durationMs: segment.durationMs,
-        attemptCount: segment.attemptCount,
-      },
-      {
-        dictationId,
-        sequence: segment.sequence,
-        overlapMs: segment.overlapMs ?? 0,
-        final: false,
-        finalizeOnly: false,
-        receipts: [],
-        before: '',
-        after: '',
-        context: await resolveVoiceContext(transcriptionDependencies.context),
-      },
-    );
-    if (response.kind !== 'receipt' || response.sequence !== segment.sequence) {
-      throw new VoiceTranscriptionError('failed');
-    }
-    segment.receipt = response.receipt;
+    await withVoiceRetries(transcriptionDependencies, async () => {
+      segment.attemptCount = (segment.attemptCount ?? 0) + 1;
+      if (transcribe) {
+        segment.receipt = await transcribe(blob);
+        return;
+      }
+      const dictationId = transcriptionDependencies.dictationId;
+      if (!dictationId) throw new VoiceTranscriptionError('failed');
+      const response = await requestVoiceServer(
+        blob,
+        {
+          ...transcriptionDependencies,
+          durationMs: segment.durationMs,
+          attemptCount: segment.attemptCount,
+        },
+        {
+          dictationId,
+          sequence: segment.sequence,
+          overlapMs: segment.overlapMs ?? 0,
+          final: false,
+          finalizeOnly: false,
+          receipts: [],
+          before: '',
+          after: '',
+          context: await resolveVoiceContext(transcriptionDependencies.context),
+        },
+      );
+      if (response.kind !== 'receipt' || response.sequence !== segment.sequence) {
+        throw new VoiceTranscriptionError('failed');
+      }
+      segment.receipt = response.receipt;
+    });
   } catch (error) {
     segment.error = error;
   }
@@ -623,6 +757,12 @@ export const finalizeVoiceDictation = async (
     throw new VoiceTranscriptionError('failed');
   }
   const prior = ordered.filter((segment) => !segment.final);
+  // A segment that has no receipt yet (it failed, or was never sent) is sent again now, with its
+  // retries: one failed minute does not void the take, and the last segment is still sent.
+  const { finalize, transcribe, ...requestDependencies } = dependencies;
+  if (prior.some((segment) => !segment.receipt)) {
+    await transcribeVoiceSegments(prior, { ...requestDependencies, dictationId: input.dictationId, transcribe });
+  }
   const failed = prior.find((segment) => segment.error || !segment.receipt);
   if (failed) {
     if (failed.error instanceof Error) throw failed.error;
@@ -630,40 +770,41 @@ export const finalizeVoiceDictation = async (
   }
   const receipts = prior.map((segment) => segment.receipt as string);
   finalSegment.error = undefined;
-  finalSegment.attemptCount = (finalSegment.attemptCount ?? 0) + 1;
   try {
-    const result = dependencies.finalize
-      ? await dependencies.finalize({
+    const result = await withVoiceRetries(requestDependencies, async () => {
+      finalSegment.attemptCount = (finalSegment.attemptCount ?? 0) + 1;
+      if (finalize) {
+        return finalize({
           blob: finalSegment.blob,
           sequence: finalSegment.sequence,
           receipts,
-        })
-      : await (async () => {
-          const response = await requestVoiceServer(
-            finalSegment.blob,
-            {
-              ...dependencies,
-              durationMs: finalSegment.durationMs,
-              attemptCount: finalSegment.attemptCount,
-              dictationId: input.dictationId,
-            },
-            {
-              dictationId: input.dictationId,
-              sequence: finalSegment.sequence,
-              overlapMs: finalSegment.overlapMs ?? 0,
-              final: true,
-              finalizeOnly: finalSegment.blob === null,
-              receipts,
-              before: input.before,
-              after: input.after,
-              context: await resolveVoiceContext(dependencies.context),
-            },
-          );
-          if (response.kind !== 'text' || !response.cleanup) {
-            throw new VoiceTranscriptionError('failed');
-          }
-          return { text: response.text, cleanup: response.cleanup };
-        })();
+        });
+      }
+      const response = await requestVoiceServer(
+        finalSegment.blob,
+        {
+          ...requestDependencies,
+          durationMs: finalSegment.durationMs,
+          attemptCount: finalSegment.attemptCount,
+          dictationId: input.dictationId,
+        },
+        {
+          dictationId: input.dictationId,
+          sequence: finalSegment.sequence,
+          overlapMs: finalSegment.overlapMs ?? 0,
+          final: true,
+          finalizeOnly: finalSegment.blob === null,
+          receipts,
+          before: input.before,
+          after: input.after,
+          context: await resolveVoiceContext(requestDependencies.context),
+        },
+      );
+      if (response.kind !== 'text' || !response.cleanup) {
+        throw new VoiceTranscriptionError('failed');
+      }
+      return { text: response.text, cleanup: response.cleanup };
+    });
     if (!result.text.trim()) throw new VoiceTranscriptionError('empty');
     return result;
   } catch (error) {

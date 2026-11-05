@@ -72,6 +72,8 @@ export type ShowPageVoiceSession = {
   start(): Promise<void>;
   finish(): void;
   canRetry(): boolean;
+  /** Whether the take held sound loud enough for speech (an empty transcript is then kept). */
+  voiced?(): boolean;
   retry(context: { before: string; after: string }): Promise<string>;
   abort(): void;
 };
@@ -341,7 +343,11 @@ export class ShowPageVoiceHost {
     if (this.disposed || this.active !== active) return;
     active.captureClaim.release();
     const code = voiceErrorCode(error);
-    const retryable = code !== 'cancelled' && code !== 'empty' && active.session.canRetry();
+    // An empty transcript of a take that held speech-loud sound is a recognition that failed:
+    // its recording stays, to be retried.
+    const retryable = code !== 'cancelled'
+      && (code !== 'empty' || active.session.voiced?.() === true)
+      && active.session.canRetry();
     if (!retryable) this.active = null;
     this.postError(active.requestId, code, retryable);
   }

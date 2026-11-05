@@ -67,6 +67,7 @@ const designFrames = frames([
   frame('k-denied', '× · 麦克风被拒绝：说明去哪里打开，可以直接打字', hold({ outcome: 'denied' })),
   frame('l-unavailable', '× · 语音服务暂时不可用：可以直接打字', hold({ outcome: 'unavailable' })),
   frame('m-interrupted', '× · 录音中断（断网、语音服务断开、App 切到后台）：文字保留，发送或重试；处理前不能再按住录音', hold({ phase: 'interrupted', interruptReason: 'dropped', text: said.text + said.stash, seconds: 9 }), csoFixtures({ hint: false })),
+  frame('m-interrupted-empty', '× · 中断时一个字都还没转出来（实时转写一直没连上，回退也失败）：卡片如实说「还没有文字」，录音保留，只能重试或不要', hold({ phase: 'interrupted', interruptReason: 'dropped', seconds: 142 }), csoFixtures({ hint: false })),
   frame('n-keyboard-up', '规则 · 键盘弹起后：长按交给系统（光标、粘贴），不录音；提示不再显示', withKeyboard(<SystemEditMenu items={['粘贴', '自动填充']} />), csoFixtures({ hint: false })),
   frame('n-has-text', '规则 · 输入框有字：长按交给系统（选择、粘贴），不录音', () => (
     <PhoneConversation overlay={<SystemEditMenu items={['选择', '全选', '粘贴']} />} />

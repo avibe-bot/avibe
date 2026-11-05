@@ -1,7 +1,7 @@
 import {
   finalizeVoiceDictation,
-  transcribeVoiceSegments,
   VOICE_SEGMENT_MS,
+  VOICE_SETTLE_RETRY_WINDOW_MS,
   VOICE_TRANSCRIPTION_CONCURRENCY,
   VoiceTranscriptionError,
   VoiceTranscriptionQueue,
@@ -13,6 +13,7 @@ import {
   type VoiceCaptureClaim,
   type VoiceRecordingPipelineOptions,
 } from './voiceRecording';
+import { createVoiceActivity } from './voiceActivity';
 import { resolveVoiceContext, type VoiceContext, type VoiceContextSource } from './voiceContext';
 import {
   VoiceRealtimeSession,
@@ -51,11 +52,11 @@ export type ShowPageVoiceDictationDependencies = {
   createQueue?: (options: {
     concurrency: number;
     signal: AbortSignal;
+    retrySignal: AbortSignal;
     dictationId: string;
     context: Promise<VoiceContext>;
   }) => VoiceQueue;
   finalize?: typeof finalizeVoiceDictation;
-  transcribeSegments?: typeof transcribeVoiceSegments;
   newDictationId?: () => string;
 };
 
@@ -66,6 +67,12 @@ const newDictationId = (): string => (
 
 const cancelledError = (): VoiceTranscriptionError => new VoiceTranscriptionError('cancelled');
 
+/** A capture that ended because its graph never rendered a frame (`VoiceTranscriptionError`
+ *  'empty' from the recorder): it holds silence, not speech. */
+const capturedNothing = (error: unknown): boolean => (
+  error instanceof VoiceTranscriptionError && error.code === 'empty'
+);
+
 /**
  * One Show Page dictation backed by the exact recording, realtime, segmentation,
  * and HTTP fallback primitives used by Chat. Segment duration is internal; the
@@ -75,6 +82,11 @@ export class ShowPageVoiceDictation {
   private readonly input: ShowPageVoiceDictationInput;
   private readonly dependencies: Required<ShowPageVoiceDictationDependencies>;
   private readonly abortController = new AbortController();
+  /** Aborted when capture stops: segments sent while recording stop retrying on their own, and
+   *  finalization takes them over within its bounded window. */
+  private readonly captureRetries = new AbortController();
+  /** When the take's automatic attempts end (epoch ms), set when capture stops. */
+  private settleBy: number | undefined;
   private readonly dictationId: string;
   private readonly segments: PendingVoiceSegment[] = [];
   private readonly queue: VoiceQueue;
@@ -87,6 +99,8 @@ export class ShowPageVoiceDictation {
   private realtimeState: 'connecting' | 'active' | 'failed' = 'connecting';
   private stream: MediaStream | null = null;
   private captureError: unknown;
+  /** How much of what the microphone heard was loud enough to be speech. */
+  private readonly activity = createVoiceActivity();
   private stopped = false;
   private settled = false;
   private resolveDone!: (text: string) => void;
@@ -109,7 +123,6 @@ export class ShowPageVoiceDictation {
       createQueue: dependencies.createQueue
         ?? ((options) => new VoiceTranscriptionQueue(options)),
       finalize: dependencies.finalize ?? finalizeVoiceDictation,
-      transcribeSegments: dependencies.transcribeSegments ?? transcribeVoiceSegments,
       newDictationId: dependencies.newDictationId ?? newDictationId,
     };
     this.dictationId = this.dependencies.newDictationId();
@@ -117,6 +130,7 @@ export class ShowPageVoiceDictation {
     this.queue = this.dependencies.createQueue({
       concurrency: VOICE_TRANSCRIPTION_CONCURRENCY,
       signal: this.abortController.signal,
+      retrySignal: this.captureRetries.signal,
       dictationId: this.dictationId,
       context: this.context,
     });
@@ -185,7 +199,10 @@ export class ShowPageVoiceDictation {
         onPcm: (samples) => {
           if (this.realtimeState !== 'failed') realtime.sendPcm(samples);
         },
-        ...(this.input.onLevel ? { onLevel: this.input.onLevel } : {}),
+        onLevel: (rms) => {
+          this.activity.observe(rms);
+          this.input.onLevel?.(rms);
+        },
         onError: (error) => {
           this.captureError = error;
           this.realtimeState = 'failed';
@@ -194,6 +211,8 @@ export class ShowPageVoiceDictation {
         },
         onStopped: (reason) => {
           this.stopped = true;
+          this.settleBy = Date.now() + VOICE_SETTLE_RETRY_WINDOW_MS;
+          this.captureRetries.abort();
           this.releaseCaptureClaim();
           if (reason === 'abort') {
             this.reject(cancelledError());
@@ -235,23 +254,29 @@ export class ShowPageVoiceDictation {
     this.reject(cancelledError());
   }
 
+  /** Whether the take holds audio that can be transcribed again: it ended, was not discarded,
+   *  and recorded something. A capture that broke midway keeps what it recorded until then. */
   canRetry(): boolean {
     return this.stopped
-      && this.captureError === undefined
-      && !this.abortController.signal.aborted;
+      && !this.abortController.signal.aborted
+      && !capturedNothing(this.captureError)
+      && this.segments.some((segment) => segment.blob !== null);
   }
 
+  /** Whether the microphone heard enough sound for speech: an empty transcript of such a take is
+   *  a recognition that failed, not a silence, and the take is kept. */
+  voiced(): boolean {
+    return this.activity.voiced();
+  }
+
+  /** Sends the kept audio again through whichever path works now (cloud, then the local relay):
+   *  the segments that have no receipt yet, then the last one. */
   async retry(context: { before: string; after: string }): Promise<string> {
     if (!this.canRetry()) {
       throw this.captureError ?? cancelledError();
     }
     this.cleanupContext = context;
-    await this.dependencies.transcribeSegments(this.segments, {
-      concurrency: VOICE_TRANSCRIPTION_CONCURRENCY,
-      signal: this.abortController.signal,
-      dictationId: this.dictationId,
-      context: this.context,
-    });
+    this.settleBy = Date.now() + VOICE_SETTLE_RETRY_WINDOW_MS;
     return this.finalizeHttp();
   }
 
@@ -295,9 +320,11 @@ export class ShowPageVoiceDictation {
   }
 
   private async finalize(): Promise<string> {
-    if (!this.segments.length && this.captureError === undefined) {
-      throw new VoiceTranscriptionError('empty');
+    if (!this.segments.length) {
+      throw this.captureError ?? new VoiceTranscriptionError('empty');
     }
+    // A graph that never rendered a frame recorded silence: there is nothing to keep.
+    if (capturedNothing(this.captureError)) throw this.captureError;
     this.ensureFinalSegment();
     if (this.realtime && this.realtimeState !== 'failed' && this.captureError === undefined) {
       try {
@@ -307,17 +334,20 @@ export class ShowPageVoiceDictation {
       } catch {
         if (this.abortController.signal.aborted) throw cancelledError();
         this.realtimeState = 'failed';
+        // The wait for the realtime result is not the HTTP path's: it gets its own window.
+        this.settleBy = Date.now() + VOICE_SETTLE_RETRY_WINDOW_MS;
         this.activateHttpFallback();
       }
     }
     return this.finalizeHttp();
   }
 
+  /** Transcribes the kept audio over HTTP. A capture error does not void what was recorded
+   *  before it: those segments are transcribed like any others. */
   private async finalizeHttp(): Promise<string> {
     this.activateHttpFallback();
     await Promise.all(this.segments.map((segment) => segment.task));
     if (this.abortController.signal.aborted) throw cancelledError();
-    if (this.captureError !== undefined) throw this.captureError;
     const result = await this.dependencies.finalize(this.segments, {
       dictationId: this.dictationId,
       before: this.cleanupContext.before,
@@ -325,6 +355,7 @@ export class ShowPageVoiceDictation {
     }, {
       signal: this.abortController.signal,
       context: this.context,
+      retryUntil: this.settleBy ?? Date.now() + VOICE_SETTLE_RETRY_WINDOW_MS,
     });
     return result.text;
   }

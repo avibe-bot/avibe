@@ -32,14 +32,15 @@ import {
 } from '../../lib/voiceCleanup';
 import {
   finalizeVoiceDictation,
-  transcribeVoiceSegments,
   VOICE_SEGMENT_MS,
   VOICE_TRANSCRIPTION_CONCURRENCY,
   VoiceTranscriptionQueue,
+  VOICE_SETTLE_RETRY_WINDOW_MS,
   type VoiceCleanupOutcome,
   type VoiceTranscriptionSegment,
   VoiceTranscriptionError,
 } from '../../lib/voiceTranscription';
+import { createVoiceActivity, type VoiceActivity } from '../../lib/voiceActivity';
 import {
   emitVoiceTelemetry,
   type VoiceTelemetryOutcome,
@@ -178,6 +179,9 @@ type VoiceRecordingSession = {
   sessionId: string;
   dictationId: string;
   abortController: AbortController;
+  /** Aborted when capture stops: segments sent while recording stop retrying on their own, and
+   *  finalization takes them over within its bounded window. */
+  captureRetries: AbortController;
   segments: VoiceSegment[];
   status: 'recording' | 'transcribing' | 'failed' | 'ready';
   startedAt?: number;
@@ -204,6 +208,8 @@ type VoiceRecordingSession = {
   /** The conversation this dictation is spoken into, read once when it starts: realtime
    *  recognition, its HTTP fallback, and a retry all send the same. */
   context: Promise<VoiceContext>;
+  /** How much of what the microphone heard was loud enough to be speech. */
+  activity: VoiceActivity;
 };
 
 // Composer remounts when the user switches chats. Keep pending or retryable
@@ -232,6 +238,7 @@ const settleVoiceSession = async (session: VoiceRecordingSession): Promise<void>
         }, {
           signal: session.abortController.signal,
           context: session.context,
+          retryUntil: Date.now() + VOICE_SETTLE_RETRY_WINDOW_MS,
         });
       } finally {
         session.finalizedFailedSegmentCount = session.segments.filter(
@@ -260,7 +267,9 @@ const runVoiceFinalization = async (session: VoiceRecordingSession): Promise<voi
     deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
     return;
   }
-  if (session.captureError !== undefined) {
+  // A capture that broke midway keeps what it recorded until then: only one that recorded
+  // nothing (or only silence) fails here.
+  if (session.captureError !== undefined && !voiceSessionHasAudio(session)) {
     session.transcript = undefined;
     session.error = session.captureError;
     session.status = 'failed';
@@ -279,18 +288,14 @@ const finalizeVoiceSession = (session: VoiceRecordingSession): Promise<void> => 
   return session.finalization;
 };
 
+// Sends the kept audio again, through whichever path works now: finalization sends the segments
+// that have no receipt yet, then the last one.
 const retryStoredVoiceSession = (session: VoiceRecordingSession): Promise<void> => {
-  if (session.captureError !== undefined) return Promise.resolve();
+  if (!canRetryVoiceSession(session)) return Promise.resolve();
   session.retryCount += 1;
   session.status = 'transcribing';
   session.error = undefined;
   session.finalization = (async () => {
-    await transcribeVoiceSegments(session.segments, {
-      concurrency: VOICE_TRANSCRIPTION_CONCURRENCY,
-      signal: session.abortController.signal,
-      dictationId: session.dictationId,
-      context: session.context,
-    });
     if (session.abortController.signal.aborted) {
       deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
       return;
@@ -303,7 +308,9 @@ const retryStoredVoiceSession = (session: VoiceRecordingSession): Promise<void> 
   return session.finalization;
 };
 
-const voiceErrorTranslationKey = (error: unknown): TranslationKey => {
+const voiceErrorTranslationKey = (session: VoiceRecordingSession): TranslationKey => {
+  const { error } = session;
+  if (voiceSessionVoicedEmpty(session)) return 'chat.compose.voiceEmptyKept';
   if (!(error instanceof VoiceTranscriptionError)) return 'chat.compose.voiceFailed';
   if (error.code === 'too_large') return 'chat.compose.voiceTooLarge';
   if (error.code === 'timeout') return 'chat.compose.voiceTimedOut';
@@ -315,12 +322,33 @@ const voiceErrorTranslationKey = (error: unknown): TranslationKey => {
 const voiceTelemetryOutcome = (error: unknown): VoiceTelemetryOutcome =>
   error instanceof VoiceTranscriptionError ? error.code : 'failed';
 
-const canRetryVoiceSession = (session: VoiceRecordingSession): boolean =>
-  session.captureError === undefined
-  && !(
+/** Whether the session recorded audio worth transcribing: some segment, and not a capture
+ *  whose graph never rendered a frame (silence). */
+function voiceSessionHasAudio(session: VoiceRecordingSession): boolean {
+  if (session.captureError instanceof VoiceTranscriptionError && session.captureError.code === 'empty') {
+    return false;
+  }
+  return session.segments.some((segment) => segment.blob !== null);
+}
+
+/** Whether the empty transcript of this session is a recognition that failed: the microphone
+ *  heard sound loud enough for speech. */
+const voiceSessionVoicedEmpty = (session: VoiceRecordingSession): boolean => (
+  session.error instanceof VoiceTranscriptionError
+  && session.error.code === 'empty'
+  && session.activity.voiced()
+);
+
+// A take keeps its audio and can be sent again unless there is nothing to send: no audio, or an
+// empty transcript of a take that was silent.
+function canRetryVoiceSession(session: VoiceRecordingSession): boolean {
+  if (!voiceSessionHasAudio(session)) return false;
+  return !(
     session.error instanceof VoiceTranscriptionError
     && session.error.code === 'empty'
+    && !session.activity.voiced()
   );
+}
 
 const reportVoiceFinalization = (
   session: VoiceRecordingSession,
@@ -1019,7 +1047,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     }
     if (session.status === 'failed') {
       retainSettledVoiceSession(session);
-      showToast(t(voiceErrorTranslationKey(session.error)), 'error');
+      showToast(t(voiceErrorTranslationKey(session)), 'error');
     }
   }, [insertVoiceTranscript, retainSettledVoiceSession, voiceKey, showToast, t]);
 
@@ -1196,19 +1224,23 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       }
 
       const abortController = new AbortController();
+      const captureRetries = new AbortController();
       const dictationId = newVoiceDictationId();
       const session: VoiceRecordingSession = {
         sessionId: voiceKey,
         dictationId,
         abortController,
+        captureRetries,
         segments: [],
         status: 'recording',
         retryCount: 0,
         insertion,
         context,
+        activity: createVoiceActivity(),
         transcriptionQueue: new VoiceTranscriptionQueue({
           concurrency: VOICE_TRANSCRIPTION_CONCURRENCY,
           signal: abortController.signal,
+          retrySignal: captureRetries.signal,
           dictationId,
           context,
         }),
@@ -1255,6 +1287,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             session.realtime?.sendPcm(samples);
           }
         },
+        onLevel: (rms) => session.activity.observe(rms),
         onStopRequested: (reason, metadata) => {
           if (reason === 'abort') return;
           session.stoppedAt = metadata.requestedAt;
@@ -1274,6 +1307,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           }
         },
         onStopped: (reason, metadata) => {
+          session.captureRetries.abort();
           captureClaim.release();
           if (voiceCaptureClaimRef.current === captureClaim) voiceCaptureClaimRef.current = null;
           if (recorderRef.current === pipeline) recorderRef.current = null;

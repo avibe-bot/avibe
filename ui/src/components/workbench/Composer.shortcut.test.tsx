@@ -20,6 +20,8 @@ const voiceMocks = vi.hoisted(() => ({
   getUserMedia: vi.fn(),
   onSegment: undefined as VoiceSegment | undefined,
   onStopped: undefined as VoiceStopped | undefined,
+  onError: undefined as ((error: unknown) => void) | undefined,
+  onLevel: undefined as ((rms: number) => void) | undefined,
   pipelineStart: vi.fn(),
   realtimeAbort: vi.fn(),
   realtimeFinish: vi.fn(),
@@ -44,9 +46,16 @@ vi.mock('../../lib/avibeFetch', async (importOriginal) => ({
 vi.mock('../../lib/voiceRecording', async (importOriginal) => ({
   ...await importOriginal<typeof import('../../lib/voiceRecording')>(),
   VoiceRecordingPipeline: class {
-    constructor(options: { onStopped: VoiceStopped; onSegment: VoiceSegment }) {
+    constructor(options: {
+      onStopped: VoiceStopped;
+      onSegment: VoiceSegment;
+      onError?: (error: unknown) => void;
+      onLevel?: (rms: number) => void;
+    }) {
       voiceMocks.onSegment = options.onSegment;
       voiceMocks.onStopped = options.onStopped;
+      voiceMocks.onError = options.onError;
+      voiceMocks.onLevel = options.onLevel;
     }
 
     start = voiceMocks.pipelineStart;
@@ -154,6 +163,8 @@ beforeEach(() => {
   voiceMocks.getUserMedia.mockReset();
   voiceMocks.onSegment = undefined;
   voiceMocks.onStopped = undefined;
+  voiceMocks.onError = undefined;
+  voiceMocks.onLevel = undefined;
   voiceMocks.pipelineStart.mockReset().mockResolvedValue(true);
   voiceMocks.realtimeAbort.mockReset();
   voiceMocks.realtimeFinish.mockReset();
@@ -457,4 +468,58 @@ describe('Composer voice shortcut', () => {
       userPrevious: 'When do we ship?',
     });
   });
+
+  describe('never drops what was recorded', () => {
+    // The local relay answers; the cloud has no token (the compatibility path).
+    const relayAnswers = (answer: () => Response) => {
+      apiFetch.mockReset().mockImplementation(async (path: string) => {
+        if (path === '/api/asr/transcribe') return answer();
+        if (path === '/api/cloud/token') return Response.json({ error: 'cloud_unavailable' }, { status: 503 });
+        if (path === '/api/asr/telemetry') return Response.json({ ok: true });
+        return Response.json({ available: true, max_file_bytes: 10_000_000 });
+      });
+    };
+
+    it('transcribes the audio recorded before the capture broke', async () => {
+      relayAnswers(() => Response.json({ text: 'what was said before the call', cleanup: 'success' }));
+      renderComposer('capture-broke-session');
+      await screen.findByRole('button', { name: en.chat.compose.voice });
+      const textbox = screen.getByRole('textbox') as HTMLTextAreaElement;
+      await act(async () => undefined);
+
+      fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
+      await screen.findByRole('button', { name: en.chat.compose.stopRecording });
+      act(() => {
+        voiceMocks.onError?.(new Error('voice microphone track ended unexpectedly'));
+        voiceMocks.onSegment?.(new Blob(['audio']), { durationMs: 8_000, final: true });
+        voiceMocks.onStopped?.('error', { pendingSegmentCount: 1 });
+      });
+
+      await waitFor(() => expect(textbox.value).toBe('what was said before the call'));
+    });
+
+    it('keeps a take that held speech when nothing was recognized, and transcribes it again on retry', async () => {
+      let answer = () => Response.json({ error: 'transcription_empty' }, { status: 422 });
+      relayAnswers(() => answer());
+      renderComposer('voiced-empty-session');
+      await screen.findByRole('button', { name: en.chat.compose.voice });
+      const textbox = screen.getByRole('textbox') as HTMLTextAreaElement;
+      await act(async () => undefined);
+
+      fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
+      await screen.findByRole('button', { name: en.chat.compose.stopRecording });
+      act(() => {
+        for (let reading = 0; reading < 40; reading += 1) voiceMocks.onLevel?.(0.05);
+        voiceMocks.onSegment?.(new Blob(['audio']), { durationMs: 3_000, final: true });
+        voiceMocks.onStopped?.('finish', { pendingSegmentCount: 1 });
+      });
+
+      const retry = await screen.findByRole('button', { name: en.chat.compose.voiceRetry });
+      expect(await screen.findByText(en.chat.compose.voiceEmptyKept)).toBeTruthy();
+      answer = () => Response.json({ text: 'recognized the second time', cleanup: 'success' });
+      fireEvent.click(retry);
+      await waitFor(() => expect(textbox.value).toBe('recognized the second time'));
+    });
+  });
 });
+

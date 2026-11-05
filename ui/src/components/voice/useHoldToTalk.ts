@@ -126,6 +126,14 @@ type Take = {
   heard: { text: string; stash: string };
 };
 
+/** Why a take that could not be transcribed stopped, for the card: the network or the service
+ *  failed (`dropped`), recognition did (`failed`), or the system took the press (`system`). */
+const failureReason = (take: Take, error: unknown): HoldInterruptReason => {
+  if (take.ending === 'system') return 'system';
+  const failed = error instanceof VoiceTranscriptionError && (error.code === 'failed' || error.code === 'too_large' || error.code === 'empty');
+  return failed ? 'failed' : 'dropped';
+};
+
 const vibrate = () => {
   try {
     navigator.vibrate?.(10);
@@ -335,13 +343,14 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       end('denied');
       return;
     }
-    if (error instanceof VoiceTranscriptionError && error.code === 'empty') {
+    // Nothing recognized in a take the microphone heard as silence: nothing to keep. One that
+    // held sound loud enough for speech is a recognition that failed, and keeps its recording.
+    if (error instanceof VoiceTranscriptionError && error.code === 'empty' && !current.dictation.voiced()) {
       end('too-short');
       return;
     }
-    const failed = error instanceof VoiceTranscriptionError && (error.code === 'failed' || error.code === 'too_large');
     const heard = `${current.heard.text}${current.heard.stash}`.trim();
-    interrupt(current.ending === 'system' ? 'system' : failed ? 'failed' : 'dropped', heard);
+    interrupt(failureReason(current, error), heard);
   }, [end, interrupt]);
 
   const startTake = useCallback((granted: boolean) => {
@@ -663,8 +672,10 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
         if (!words.trim()) end('too-short');
         else void deliver(words.trim());
       },
-      () => {
-        if (take.current === current) interrupt('failed', text);
+      (error: unknown) => {
+        if (take.current !== current) return;
+        if (error instanceof VoiceTranscriptionError && error.code === 'cancelled') return;
+        interrupt(failureReason(current, error), text);
       },
     );
   }, [deliver, end, interrupt, text, toPhase]);

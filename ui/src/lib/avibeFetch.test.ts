@@ -207,4 +207,34 @@ describe('avibeFetch', () => {
     expect(opened).toEqual([['wss://example.test/api/cloud/voice/realtime', 'avibe-asr-v1.tok']]);
     expect(connection.capabilities).toEqual(expected);
   });
+
+  it('drops the token a failed socket carried and mints a new one, once', async () => {
+    const { apiFetch, openAvibeWebSocket } = await loadModules();
+    const tokenResponse = (token: string) => Response.json({
+      token,
+      base_url: 'https://example.test',
+      expires_at: Math.floor(Date.now() / 1000) + 3600,
+    });
+    apiFetch.mockReset();
+    apiFetch
+      .mockResolvedValueOnce(tokenResponse('refused'))
+      .mockResolvedValueOnce(tokenResponse('fresh'));
+    const opened: string[] = [];
+    vi.stubGlobal('WebSocket', class {
+      constructor(_url: string, protocol: string) {
+        opened.push(protocol);
+      }
+    });
+
+    const first = await openAvibeWebSocket('/api/cloud/voice/realtime', 'avibe-asr-v1');
+    first.invalidate?.();
+    // A second report about the same token mints nothing more.
+    first.invalidate?.();
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(2));
+    await openAvibeWebSocket('/api/cloud/voice/realtime', 'avibe-asr-v1');
+
+    expect(opened).toEqual(['avibe-asr-v1.refused', 'avibe-asr-v1.fresh']);
+    expect(apiFetch).toHaveBeenCalledTimes(2);
+  });
 });
+

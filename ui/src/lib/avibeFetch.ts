@@ -30,6 +30,10 @@ export type AvibeWebSocketConnection = {
   /** Capabilities of the token this socket authenticated with, so a caller
    *  gates optional protocol fields on the backend that will parse them. */
   capabilities: readonly string[];
+  /** The socket's handshake failed. A browser cannot tell a refused token from a failed
+   *  network there, so the token it carried is dropped and a new one minted once: the next
+   *  socket or request never rides a token avibe.bot may have refused. */
+  invalidate?: () => void;
 };
 
 export type AvibeFetchAttemptEvent =
@@ -177,7 +181,16 @@ export const openAvibeWebSocket = async (
     else signal.addEventListener('abort', abort, { once: true });
     socket.addEventListener('close', () => signal.removeEventListener('abort', abort), { once: true });
   }
-  return { socket, capabilities: token.capabilities };
+  const used = token;
+  return {
+    socket,
+    capabilities: token.capabilities,
+    invalidate: () => {
+      if (current !== used) return;
+      current = null;
+      void mint().catch(() => undefined);
+    },
+  };
 };
 
 const waitForSignal = <Value>(promise: Promise<Value>, signal?: AbortSignal): Promise<Value> => {

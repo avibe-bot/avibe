@@ -314,7 +314,6 @@ describe('ShowPageVoiceDictation', () => {
         },
       }),
       finalize,
-      transcribeSegments: async () => undefined,
     });
 
     await dictation.start();
@@ -330,4 +329,99 @@ describe('ShowPageVoiceDictation', () => {
       expect.objectContaining({ before: 'latest before', after: 'latest after' }),
     ]);
   });
+
+  it('keeps what was recorded before the capture broke, transcribes it, and can send it again', async () => {
+    const { stream } = fakeStream();
+    let pipelineOptions: VoiceRecordingPipelineOptions | null = null;
+    const finalize = vi.fn()
+      .mockRejectedValueOnce(new VoiceTranscriptionError('unavailable'))
+      .mockResolvedValueOnce({ text: 'what was said before the call', cleanup: 'success' as const });
+    const dictation = new ShowPageVoiceDictation({ before: '', after: '' }, {
+      getUserMedia: async () => stream,
+      createRealtime: () => ({
+        start: async () => undefined,
+        sendPcm: vi.fn(() => true),
+        finish: async () => ({ text: 'unused', cleanup: 'success' as const }),
+        abort: vi.fn(),
+      }),
+      createQueue: () => ({ enqueue: async () => undefined }),
+      createPipeline: (options) => {
+        pipelineOptions = options;
+        return { start: async () => true, abort: vi.fn(), finish: vi.fn() };
+      },
+      finalize,
+    });
+
+    await dictation.start();
+    pipelineOptions!.onSegment(new Blob(['minute'], { type: 'audio/wav' }), { durationMs: 60_000, final: false });
+    // An incoming call ends the microphone track: the recorder flushes what it heard, then stops.
+    pipelineOptions!.onError?.(new Error('voice microphone track ended unexpectedly'));
+    pipelineOptions!.onSegment(new Blob(['tail'], { type: 'audio/wav' }), { durationMs: 8_000, final: true });
+    pipelineOptions!.onStopped('error', { pendingSegmentCount: 1 });
+
+    await expect(dictation.done).rejects.toMatchObject({ code: 'unavailable' });
+    expect(finalize).toHaveBeenCalledOnce();
+    expect(dictation.canRetry()).toBe(true);
+    await expect(dictation.retry({ before: '', after: '' })).resolves.toBe('what was said before the call');
+    expect((finalize.mock.calls[1] as unknown[])[0]).toHaveLength(2);
+  });
+
+  it('keeps nothing from a capture that never rendered a frame', async () => {
+    const { stream } = fakeStream();
+    let pipelineOptions: VoiceRecordingPipelineOptions | null = null;
+    const finalize = vi.fn();
+    const dictation = new ShowPageVoiceDictation({ before: '', after: '' }, {
+      getUserMedia: async () => stream,
+      createRealtime: () => ({
+        start: async () => undefined,
+        sendPcm: vi.fn(() => true),
+        finish: async () => ({ text: 'unused', cleanup: 'success' as const }),
+        abort: vi.fn(),
+      }),
+      createQueue: () => ({ enqueue: async () => undefined }),
+      createPipeline: (options) => {
+        pipelineOptions = options;
+        return { start: async () => true, abort: vi.fn(), finish: vi.fn() };
+      },
+      finalize,
+    });
+
+    await dictation.start();
+    pipelineOptions!.onError?.(new VoiceTranscriptionError('empty'));
+    pipelineOptions!.onSegment(new Blob(['silence'], { type: 'audio/wav' }), { durationMs: 1_000, final: true });
+    pipelineOptions!.onStopped('error', { pendingSegmentCount: 1 });
+
+    await expect(dictation.done).rejects.toMatchObject({ code: 'empty' });
+    expect(finalize).not.toHaveBeenCalled();
+    expect(dictation.canRetry()).toBe(false);
+  });
+
+  it('tells a take that held speech-loud sound from a silent one', async () => {
+    const { stream } = fakeStream();
+    let pipelineOptions: VoiceRecordingPipelineOptions | null = null;
+    const dictation = new ShowPageVoiceDictation({ before: '', after: '' }, {
+      getUserMedia: async () => stream,
+      createRealtime: () => ({
+        start: async () => undefined,
+        sendPcm: vi.fn(() => true),
+        finish: async () => ({ text: '', cleanup: 'fallback' as const }),
+        abort: vi.fn(),
+      }),
+      createQueue: () => ({ enqueue: async () => undefined }),
+      createPipeline: (options) => {
+        pipelineOptions = options;
+        return { start: async () => true, abort: vi.fn(), finish: vi.fn() };
+      },
+    });
+
+    await dictation.start();
+    // A quiet room: about −55 dBFS for three seconds.
+    for (let reading = 0; reading < 94; reading += 1) pipelineOptions!.onLevel?.(0.0018);
+    expect(dictation.voiced()).toBe(false);
+    // Soft speech: about −30 dBFS for half a second.
+    for (let reading = 0; reading < 16; reading += 1) pipelineOptions!.onLevel?.(0.03);
+    expect(dictation.voiced()).toBe(true);
+    dictation.abort();
+  });
 });
+

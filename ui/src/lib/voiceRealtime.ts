@@ -143,7 +143,7 @@ export class VoiceRealtimeSession {
   private async connect(): Promise<void> {
     // Read alongside the socket opening, so a context still loading costs no extra wait.
     const contextPromise = resolveVoiceContext(this.options.context);
-    const { socket, capabilities } = await this.openSocket(
+    const { socket, capabilities, invalidate } = await this.openSocket(
       VOICE_REALTIME_PATH,
       VOICE_REALTIME_PROTOCOL,
       this.options.signal,
@@ -220,6 +220,9 @@ export class VoiceRealtimeSession {
         this.socket.send(JSON.stringify({ type: 'audio', audio: this.pendingAudio.shift() }));
       }
     } catch (error) {
+      // A socket that never became ready may have been refused for its token: the next one
+      // (and the HTTP fallback) gets a fresh token instead of riding the same one again.
+      if (!this.aborted && !this.options.signal?.aborted) invalidate?.();
       this.fail(error);
       throw error;
     } finally {

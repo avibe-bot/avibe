@@ -5505,7 +5505,7 @@
       "voiceDiscard": "Discard recording",
       "voiceFailed": "Voice transcription failed. Your recording is available to retry.",
       "voiceTimedOut": "Voice transcription timed out. Your recording is available to retry.",
-      "voiceUnavailable": "Voice transcription is temporarily unavailable.",
+      "voiceUnavailable": "Voice transcription can't be reached right now. Your recording is kept, so you can retry.",
       "voiceTooLarge": "This recording is too large to transcribe.",
       "voiceEmpty": "No speech was detected in this recording.",
       "voicePermissionFailed": "Microphone access failed. Check your browser permission and try again.",
@@ -5519,7 +5519,8 @@
       "retryAttachment": "Retry upload",
       "removeAttachment": "Remove",
       "previewAttachment": "Preview {{name}}",
-      "dropOverlay": "Drop files to attach"
+      "dropOverlay": "Drop files to attach",
+      "voiceEmptyKept": "Nothing was recognized, but the recording had sound. It is kept, so you can retry."
     },
     "media": {
       "preview": "Preview",
@@ -6787,7 +6788,10 @@
       "dropped": "The connection dropped. Everything heard so far is above: send it, or retry transcribing the recording.",
       "failed": "This couldn't be transcribed; the recording is kept. Retry, or send what was heard.",
       "system": "The take was interrupted. Everything heard so far is above, ready to send.",
-      "sendFailed": "It wasn't sent; the text is kept. Send it again."
+      "sendFailed": "It wasn't sent; the text is kept. Send it again.",
+      "droppedEmpty": "The connection dropped before any words came back. The recording is kept: retry once you're online.",
+      "failedEmpty": "This couldn't be transcribed; the recording is kept, so you can retry.",
+      "systemEmpty": "The take was interrupted before any words came back. The recording is kept, so you can retry."
     },
     "retry": "Retry",
     "send": "Send",
@@ -6825,7 +6829,8 @@
     "avatar": {
       "mouseHint": "Release to send · move off the avatar or press <key>Esc</key> to cancel",
       "mouseArmed": "Release to cancel · move back to keep talking"
-    }
+    },
+    "noText": "No words yet"
   },
   "mcpHub": {
     "title": "MCP",

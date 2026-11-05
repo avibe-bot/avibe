@@ -4,8 +4,11 @@
 
 Voice input is an input method, not an agent turn. It must:
 
-1. preserve the recording until text is produced or the user discards it;
-2. never submit the same recording to two transcription paths automatically;
+1. preserve the recording until text is produced or the user discards it: a
+   failed request, a broken capture, or an empty transcript of a take that held
+   speech never discards it;
+2. never submit the same recording to two transcription paths at once; a
+   request that got no answer may be repeated, on the same path or the other;
 3. never auto-send the resulting text;
 4. return raw ASR text even when optional text cleanup is unavailable;
 5. support continuous dictation without an arbitrary total recording limit;
@@ -45,9 +48,41 @@ getUserMedia / AudioWorklet
   -> the same receipt and finalization contract
 ```
 
-The compatibility path is selected before a cloud upload starts. A response or
-timeout from the direct cloud request is final for that attempt; the user may
-retry only the failed retained segments explicitly.
+The compatibility path is taken when no cloud token can be obtained, and also
+when a dictation request to avibe.bot fails before any answer (a network error,
+or a refused token that could not be replaced). Repeating a dictation request is
+safe: segments are recognized statelessly into receipts, and the final request
+only joins receipts and runs cleanup. A response or a timeout from the direct
+cloud request is final for that attempt.
+
+## Failure handling
+
+Every dictation request is bounded and retried; the take's audio is kept until
+its text lands or the user discards it.
+
+- Each request has its own deadline, sized to what it carries: 15 seconds, plus
+  the upload at 128 KB/s, plus the cleanup allowance (35 seconds) for the final
+  request, capped at the full compatibility budget. A request on a dead path
+  ends there instead of whenever the platform gives up.
+- A request that fails for the network or the service (no answer, a timeout,
+  `unavailable`, or a 5xx, 408, or 429 answer) is tried again after 1 and 3
+  seconds. An empty, oversized, or rejected request is not.
+- While the browser reports no network (`navigator.onLine === false`), a request
+  fails at once instead of waiting for the platform's network timeout.
+- Segments sent while recording retry on their own until capture stops. From
+  then on finalization owns them: it sends every segment that still has no
+  receipt, then the last segment, and starts no automatic attempt later than 10
+  seconds after the release (or after the realtime result failed). The take is
+  then left on its card for the user to retry, with its audio.
+- A capture that breaks midway (the microphone track ends, the recorder fails to
+  stop) keeps and transcribes what it recorded until then. Only a graph that
+  never rendered a frame, which recorded silence, has nothing to keep.
+- An empty transcript of a take whose microphone level showed at least 400 ms
+  above about −40 dBFS is a recognition that failed: the take is kept and can be
+  retried. An empty transcript of a quiet take is reported as no speech.
+- A realtime socket that never becomes ready drops the cloud token it carried
+  and mints a new one once, because a browser cannot tell a refused token from a
+  failed network at the handshake.
 
 ## Reliability baseline
 
@@ -66,7 +101,7 @@ The first stabilization increment establishes these invariants:
   not for the complete dictation;
 - distinguish timeout, size, availability, empty-audio, and generic failures;
 - retain the complete recording and expose an explicit retry action that
-  resubmits only failed segments;
+  resubmits only segments without a receipt, through whichever path works then;
 - keep pending and retryable batches keyed by chat session so ordinary
   navigation cannot discard audio;
 - log request size, MIME type, duration, provider stage, and attempt count, but
