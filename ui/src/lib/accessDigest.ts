@@ -10,12 +10,20 @@ const ACCESS_DIGEST_KEY = 'avibe.access-digest.v1';
 
 type Recorded = { reader: string; digest: string };
 
-function readRecorded(): Recorded | null {
+function parseRecorded(raw: string | null): Recorded | null {
   try {
-    const value: unknown = JSON.parse(window.localStorage.getItem(ACCESS_DIGEST_KEY) ?? 'null');
+    const value: unknown = JSON.parse(raw ?? 'null');
     if (typeof value !== 'object' || value === null) return null;
     const { reader, digest } = value as Partial<Recorded>;
     return typeof reader === 'string' && typeof digest === 'string' ? { reader, digest } : null;
+  } catch {
+    return null;
+  }
+}
+
+function readRecorded(): Recorded | null {
+  try {
+    return parseRecorded(window.localStorage.getItem(ACCESS_DIGEST_KEY));
   } catch {
     return null;
   }
@@ -36,4 +44,15 @@ export function recordAccessDigest(reader: string, digest: string): void {
   } catch {
     // Without storage every check is a first one; nothing is compared.
   }
+}
+
+/** Whether ``event`` is another tab recording a changed digest for the same
+ *  reader. That tab has cleared the shared stores already (it records only
+ *  after), but what this document holds in memory, and what it read before and
+ *  may still write, is this document's to drop. */
+export function isAccessDigestChange(event: StorageEvent): boolean {
+  if (event.key !== ACCESS_DIGEST_KEY) return false;
+  const before = parseRecorded(event.oldValue);
+  const after = parseRecorded(event.newValue);
+  return before !== null && after !== null && before.reader === after.reader && before.digest !== after.digest;
 }

@@ -4,7 +4,7 @@ import { useToast } from './ToastContext';
 import type { PickerAgentCatalog } from '../components/settings/models/types';
 import type { AgentBackendId, NativeCliBackend, WebOAuthBackend } from '../lib/agentBackends';
 import { apiFetch, recoverRemoteAuthFromSessionProbe, withApiDeadline } from '../lib/apiFetch';
-import { accessDigestChanged, recordAccessDigest } from '../lib/accessDigest';
+import { accessDigestChanged, isAccessDigestChange, recordAccessDigest } from '../lib/accessDigest';
 import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
 import { clearLocalSnapshots, forgetLocalSnapshots } from '../lib/localSnapshots';
 import {
@@ -2970,7 +2970,16 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     recordAccessDigest(reader, digest);
   };
 
-  const readAuthSession = (options?: { handleError?: boolean }) => getJson('/api/session', options).then((payload) => {
+  const readAuthSession = async ({ quiet = false }: { quiet?: boolean } = {}) => {
+    // A quiet read (the check after a stream gap) announces nothing, but still
+    // rejects a failed response: only an answer may say the reader signed out
+    // or lost access, never the body of a 503.
+    const payload: unknown = quiet
+      ? await apiFetch('/api/session').then((res) => {
+        if (!res.ok) throw new Error(`Request failed: /api/session (${res.status})`);
+        return res.json();
+      })
+      : await getJson('/api/session');
     const session = normalizeSessionInfo(payload);
     // Revocation reaches the guard through this read too, not only through
     // ``reportRemoteAuthorizationState``; either way the reader's snapshots go.
@@ -2983,16 +2992,28 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (session.remote && !session.authenticated) void wipeLocalStore();
     void checkAccessDigest(session);
     return session;
-  });
+  };
 
   /** The stream may have missed something. Tail claims end, a remote reader's
    *  access is checked again (an ``authorization.changed`` the stream missed
    *  would otherwise go unnoticed), and every surface catches up. */
   const announceStreamGap = () => {
     noteLocalStoreStreamGap();
-    if (remoteReaderRef.current) void readAuthSession({ handleError: false }).catch(() => undefined);
+    if (remoteReaderRef.current) void readAuthSession({ quiet: true }).catch(() => undefined);
     dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.());
   };
+
+  // Another tab found an access change and applied it: it cleared the shared
+  // stores and then recorded the new digest. This document drops what it holds
+  // in memory too, and stops writing what it read before, as if the event had
+  // reached it. It records nothing, so no tab hears about it twice.
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (isAccessDigestChange(event)) void applyAuthorizationChange({});
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
 
   // Feed a locally-synthesized session.activity event through the SAME handler
   // set + read-cache invalidation the SSE 'session.activity' listener uses, so a

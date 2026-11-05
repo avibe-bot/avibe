@@ -316,6 +316,45 @@ describe('an access change no authorization.changed delivered', () => {
     expect(apiFetch.mock.calls.filter(([path]) => path === '/api/session')).toEqual([]);
   });
 
+  it('LSYNC-023 drops what this tab holds when another tab applies an access change', async () => {
+    render(<ApiProvider><Subscriber /></ApiProvider>);
+    await seed();
+    const changed = vi.fn();
+    const stop = api.current!.connectWorkbenchEvents({ onAuthorizationChanged: changed });
+    const record = (reader: string, digest: string) => JSON.stringify({ reader, digest });
+    const recordedElsewhere = (oldValue: string | null, newValue: string) =>
+      window.dispatchEvent(new StorageEvent('storage', { key: DIGEST_KEY, oldValue, newValue }));
+    // A first record, and one for another reader, are no change.
+    recordedElsewhere(null, record('remote:alice', 'digest-1'));
+    recordedElsewhere(record('remote:bob', 'digest-bob'), record('remote:alice', 'digest-1'));
+    await settle();
+    expect(changed).not.toHaveBeenCalled();
+    expect(await held()).toEqual(['row 1', 'row 2']);
+
+    // Another tab found Alice's access changed, cleared, and recorded the new digest.
+    recordedElsewhere(record('remote:alice', 'digest-1'), record('remote:alice', 'digest-2'));
+    await eventually(async () => expect(await held()).toEqual([]));
+    expect(changed).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
+  it('keeps everything when the check after a gap gets no answer, and checks again at the next gap', async () => {
+    render(<ApiProvider><Subscriber /></ApiProvider>);
+    await seed();
+    let answer = () => current('remote:alice', 'digest-1');
+    serveSession(() => answer());
+    await api.current!.getAuthSession();
+    // The server is briefly unavailable when the stream reconnects.
+    answer = () => json({ detail: 'Service unavailable' }, 503);
+    FakeEventSource.instances.at(-1)!.emit('connected', { sub_id: 2 });
+    await settle();
+    expect(await held()).toEqual(['row 1', 'row 2']);
+
+    answer = () => current('remote:alice', 'digest-2');
+    FakeEventSource.instances.at(-1)!.emit('connected', { sub_id: 3 });
+    await eventually(async () => expect(await held()).toEqual([]));
+  });
+
   it('records the new digest only once the clear it calls for is done, so a page closing first clears again', async () => {
     render(<ApiProvider><Subscriber /></ApiProvider>);
     let digest = 'digest-1';

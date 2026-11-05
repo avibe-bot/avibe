@@ -816,6 +816,14 @@ history on the device until each conversation was read live again.
   - tell every surface.
   The new digest is recorded only after that clear, so a page that closes first
   clears again at its next check.
+- Recording the new digest is also how the other open tabs hear of it. Each one
+  receives a `storage` event with the old and new record, and applies the same
+  change to what it holds in memory: its read cache, its snapshot epoch (so a
+  write it still has scheduled cannot restore revoked rows), and its surfaces.
+  It records nothing itself.
+- A session check that gets no answer (a failed response, or no response) says
+  nothing about access. It neither clears nor forgets that the reader is remote,
+  so the next gap checks again.
 - Gaining a project changes the digest too, as the event clears on any access
   change today. A first digest, or one recorded for another reader, is no
   change: a different reader empties the stores anyway.
