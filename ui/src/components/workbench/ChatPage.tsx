@@ -1,7 +1,7 @@
 import { desktopDragRegion } from '../../lib/desktopShell';
 import { createPortal } from 'react-dom';
 import { useDesktopWindowChrome } from '../../context/DesktopWindowChromeContext';
-import { Fragment, forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, forwardRef, memo, useCallback, useContext, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, Bell, Bot, ChevronDown, ChevronRight, Clock, Eye, EyeOff, GitFork, Image as ImageIcon, Info, Loader2, MapPin, MessageSquare, MessageSquareQuote, Pencil, Terminal, Undo2, UploadCloud, X } from 'lucide-react';
@@ -13,6 +13,7 @@ import { useApi } from '../../context/ApiContext';
 import { selectApiErrorFields } from '../../context/apiErrorParse';
 import { useToast } from '../../context/ToastContext';
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
+import { WorkbenchProjectsContext } from '../../context/WorkbenchProjectsContext';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import { useBots } from '../../context/BotsContext';
 import { conversationDetails, isBotSessionId, isSelectableAgent, liveBotAgentNames, type BotAvatar as BotAvatarSpec } from '../../lib/bots';
@@ -740,6 +741,11 @@ export const ChatPage: React.FC = () => {
   // install a snapshot, including an empty one that clears an earlier wait.
   const turnStateRequestRef = useRef(0);
   const workingSetAtRef = useRef(0);
+  // ``working`` was seeded at paint from the freshest known Session status (the
+  // list's row, else the snapshot's) and no live signal has confirmed it since.
+  // Every live "running" goes through ``markWorking``, which clears this; the
+  // bootstrap's answer clears what is still only seeded.
+  const workingSeededRef = useRef(false);
   // A single pending "re-check after the post-send grace expires" timer + a ref
   // to the latest syncTurnState, so an idle reading that arrives INSIDE the grace
   // (which we can't trust to clear yet) still gets re-evaluated once the grace
@@ -760,6 +766,7 @@ export const ChatPage: React.FC = () => {
     turnEpochRef.current += 1;
     workingSetAtRef.current = Date.now();
     activityForegroundRef.current = 'running';
+    workingSeededRef.current = false;
     workingRef.current = true;
     setWorking(true);
   }, [dispatchLive]);
@@ -978,6 +985,9 @@ export const ChatPage: React.FC = () => {
   const rowFromSnapshotRef = useRef(false);
   const liveRowRouteRef = useRef<string | null>(null);
   const bootstrapAnsweredRef = useRef(false);
+  // The Session list's live rows (the pulsing status dot), read without
+  // activating the tree: whatever the sidebar or Projects page already loaded.
+  const projectsTree = useContext(WorkbenchProjectsContext);
   const paintChatSnapshot = useCallback((snapshot: ChatSnapshot) => {
     // A chat remembered on its Show Page reopens there: no transcript flash first.
     if (!showChatSignal && readChatViewMode(snapshot.session.id) === 'show-page') return false;
@@ -988,13 +998,27 @@ export const ChatPage: React.FC = () => {
       installServerSession(snapshot.session);
     }
     setSessionCanChat(snapshot.can_chat);
+    // A run the list already shows opens as running: the dots and Stop are in
+    // place at once, and the bootstrap's turn state corrects them. The list's
+    // live row wins over the snapshot's; a Session it shows idle opens idle.
+    const projectId = snapshot.session.project_id;
+    const listed = projectId
+      ? projectsTree?.sessionsOf(projectId).sessions?.find((row) => row.id === snapshot.session.id)
+      : undefined;
+    if ((listed ?? snapshot.session).agent_status === 'running') {
+      workingSeededRef.current = true;
+      // Not a send: no registration grace holds back an idle answer.
+      workingSetAtRef.current = 0;
+      workingRef.current = true;
+      setWorking(true);
+    }
     if (!bootstrapAnsweredRef.current) {
       setAgents(snapshot.agents);
       setDefaultAgentName(snapshot.default_agent_name);
       setMessageFontSize(normalizeChatMessageFontSize(snapshot.chat_message_font_size ?? undefined));
     }
     return true;
-  }, [showChatSignal, installServerSession]);
+  }, [showChatSignal, installServerSession, projectsTree]);
   const unpaintChatSnapshot = useCallback((rows: ReadonlySet<WorkbenchMessage>) => {
     setMessages((prev) => prev.filter((row) => !rows.has(row)));
     setOlderCursor(null);
@@ -1006,6 +1030,11 @@ export const ChatPage: React.FC = () => {
   const dropChatSnapshot = useCallback((rows: ReadonlySet<WorkbenchMessage> | null) => {
     if (rows) unpaintChatSnapshot(rows);
     setSessionCanChat(false);
+    if (workingSeededRef.current) {
+      workingSeededRef.current = false;
+      workingRef.current = false;
+      setWorking(false);
+    }
     if (rowFromSnapshotRef.current) {
       rowFromSnapshotRef.current = false;
       applyLocalSession(null);
@@ -1665,6 +1694,14 @@ export const ChatPage: React.FC = () => {
             ? bootstrap.turn_state.model_recovery : [],
         });
       }
+      // A run seeded from the list that nothing live has confirmed (a running
+      // answer would have, through ``markWorking``) ends with this answer: idle,
+      // unknown, or a read from before a later lifecycle change.
+      if (workingSeededRef.current) {
+        workingSeededRef.current = false;
+        workingRef.current = false;
+        setWorking(false);
+      }
       // Reconcile only after restoring the live generation above, so a recovered
       // running turn's history request is tagged with the generation it belongs to.
       if (activityEnabled) {
@@ -1732,6 +1769,7 @@ export const ChatPage: React.FC = () => {
       window.clearTimeout(highlightTimerRef.current);
       highlightTimerRef.current = null;
     }
+    workingSeededRef.current = false;
     workingRef.current = false;
     setWorking(false);
     setRuntimeState(emptyRuntimeState());
@@ -1854,6 +1892,7 @@ export const ChatPage: React.FC = () => {
           turnEpochRef.current += 1;
           activityForegroundRef.current = 'idle';
           setRuntimeState((current) => ({ ...current, in_flight: false, foreground: 'idle', model_recovery: [] }));
+          workingSeededRef.current = false;
           workingRef.current = false;
           setWorking(false);
           // Agent Activity: the turn settled (result / error / interrupt) → mark the

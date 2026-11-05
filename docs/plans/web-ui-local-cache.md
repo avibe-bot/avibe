@@ -109,6 +109,17 @@ kept separately for what has to wait for the server, such as marking the
 conversation read or a deep-link jump; it never disables chrome. There is no
 "stale" badge; the event stream and the bootstrap usually land within a second.
 
+Two more states render from the best known value and are then corrected live:
+
+- **Turn state.** A conversation that the Session list shows as running (its
+  pulsing dot), or whose snapshot row says so when the list has no row, opens
+  with the working dots and Stop at once. The bootstrap's turn state then
+  decides. Any path that ends working today also ends the optimistic value, and
+  a Session the list shows idle opens idle.
+- **The composer's voice control.** It renders from the reader's last known
+  transcription status, kept per reader in this store. If the live read then
+  refuses, the control is disabled in place, so nothing around it moves.
+
 Phase 2 also prefetches, during browser idle time, the bootstrap for the few
 most recent Inbox sessions that have no snapshot (the five newest, each tried
 once per page load). That way the first tap on each one is fast too. The main
