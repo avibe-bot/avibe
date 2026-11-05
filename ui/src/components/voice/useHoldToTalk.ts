@@ -11,6 +11,7 @@ import {
 import { IS_APPLE } from '../../lib/platform';
 import { ShowPageVoiceDictation } from '../../lib/showPageVoiceDictation';
 import type { VoiceContextSource } from '../../lib/voiceContext';
+import type { VoiceTakeKeep } from '../../lib/voiceTakeKeeper';
 import { createVoiceLevel } from '../../lib/voiceLevel';
 import { VOICE_MESSAGE_METADATA, type VoiceMessageMetadata } from '../../lib/voiceMessage';
 import { isVoiceCaptureActive, prewarmVoiceCapture } from '../../lib/voiceRecording';
@@ -88,6 +89,10 @@ export type HoldToTalkOptions = {
   /** The conversation the take is spoken into (its Agent's last reply, the user's previous
    *  message), read when the microphone opens and sent to recognition; it may still be loading. */
   context?: () => VoiceContextSource;
+  /** Where a take's words go, read when the microphone opens: the take is kept on the device
+   *  (lib/voiceTakeStore) until they land, so a reload or a surface that goes away loses none
+   *  of it. The intent is always `send`. */
+  keep?: () => Omit<VoiceTakeKeep, 'intent'> | null;
 };
 
 const HOLD_STYLE: CSSProperties = {
@@ -195,6 +200,9 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
   const [outcome, setOutcome] = useState<HoldOutcome | null>(null);
   const [available, setAvailable] = useState<boolean | null>(null);
   const [canRetry, setCanRetry] = useState(false);
+  // Live recognition stopped working during this take (lib/showPageVoiceDictation onLiveChange):
+  // the card says so, and that the take is still being kept.
+  const [liveUnavailable, setLiveUnavailable] = useState(false);
   // The microphone's loudness for the card's meter: written as the take records, read each frame.
   const [level] = useState(createVoiceLevel);
   const maxFileBytes = useRef<number | null>(null);
@@ -275,10 +283,13 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     setProgress(0);
     setInterruptReason(null);
     setCanRetry(false);
+    setLiveUnavailable(false);
   }, [level, stopClock]);
 
   /** The press is over with nothing to keep: back to rest, saying how it ended. */
   const end = useCallback((how: HoldOutcome | null) => {
+    // Nothing of the take is kept: its stored copy goes too (a no-op once it was discarded).
+    take.current?.dictation.abort();
     take.current = null;
     releasePointer();
     reset();
@@ -301,11 +312,14 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
   }, [level, releasePointer, stopClock, toPhase]);
 
   const deliver = useCallback(async (words: string) => {
+    const current = take.current;
     toPhase('settling');
     const ok = await latest.current.send(words, VOICE_MESSAGE_METADATA).catch(() => false);
+    // The words landed: the kept copy goes, whether or not this surface is still here.
+    if (ok) current?.dictation.landed();
     if (!mounted.current) return;
     if (ok) {
-      take.current = null;
+      if (take.current === current) take.current = null;
       reset();
       setText(words);
       toPhase('idle');
@@ -354,11 +368,16 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
   }, [end, interrupt]);
 
   const startTake = useCallback((granted: boolean) => {
+    const keep = latest.current.keep?.();
     const dictation = new ShowPageVoiceDictation({
       before: '',
       after: '',
       context: latest.current.context?.(),
       maxFileBytes: maxFileBytes.current,
+      ...(keep ? { keep: { ...keep, intent: 'send' as const } } : {}),
+      onLiveChange: (live) => {
+        if (take.current === current && mounted.current) setLiveUnavailable(!live);
+      },
       onLevel: (rms) => {
         if (take.current === current) level.set(rms);
       },
@@ -509,13 +528,16 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     };
   }, [end, finishTake, live, systemTook]);
 
-  // Leaving the page ends the take; nothing is sent from a surface that is gone.
+  // Leaving the page ends the take; nothing is sent from a surface that is gone. What was said
+  // is not lost with it: a take the user meant to keep (recording, settling, or cut off) stays
+  // on the device, for the pending voice items near its conversation's composer.
   useEffect(() => () => {
     const current = take.current;
     take.current = null;
     if (current) {
+      if (current.started && current.ending !== 'cancel') current.dictation.detach();
+      else current.dictation.abort();
       current.ending = 'cancel';
-      current.dictation.abort();
     }
     if (clock.current) clearInterval(clock.current);
     if (press.current) {
@@ -698,6 +720,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     available,
     holdable,
     canRetry,
+    liveUnavailable,
     level,
     bind: {
       onPointerDown,

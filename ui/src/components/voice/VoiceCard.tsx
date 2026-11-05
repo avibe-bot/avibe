@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, type ReactNode } from 'react';
-import { AlertTriangle, ChevronUp, MessagesSquare, RotateCcw, Send, X } from 'lucide-react';
+import { AlertTriangle, ChevronUp, CloudOff, MessagesSquare, RotateCcw, Send, X } from 'lucide-react';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 
@@ -39,6 +39,7 @@ export function VoiceCard({
   long = false,
   actions,
   level,
+  liveUnavailable = false,
 }: {
   to: VoiceTarget;
   phase: VoiceCardPhase;
@@ -51,6 +52,9 @@ export function VoiceCard({
   actions?: ReactNode;
   /** The microphone's loudness, for the meter (`useHoldToTalk().level`). */
   level?: VoiceLevelSource | null;
+  /** Live recognition is not working for this take: the card says so, quietly, and that the
+   *  take is still transcribed in full on release (`useHoldToTalk().liveUnavailable`). */
+  liveUnavailable?: boolean;
 }) {
   const { t } = useTranslation();
   const scroller = useRef<HTMLDivElement | null>(null);
@@ -139,6 +143,12 @@ export function VoiceCard({
               {reasonCopy[reason]}
             </div>
             {actions && <div className="flex justify-end gap-2">{actions}</div>}
+          </div>
+        )}
+        {running && !armed && liveUnavailable && (
+          <div className="flex items-center gap-1.5 text-xs text-muted" role="status">
+            <CloudOff className="size-3.5 shrink-0" />
+            {t('voice.liveUnavailable')}
           </div>
         )}
         {running && <VoiceMeter level={level} mode={armed ? 'armed' : 'live'} />}

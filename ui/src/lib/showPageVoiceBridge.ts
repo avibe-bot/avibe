@@ -10,6 +10,7 @@ import {
   claimVoiceCapture,
   type VoiceCaptureClaim,
 } from './voiceRecording';
+import type { VoiceTakeKeep } from './voiceTakeKeeper';
 
 export const ANNOTATION_VOICE_REQUEST_MESSAGE = 'avibe:annotation:voice:request';
 export const ANNOTATION_VOICE_EVENT_MESSAGE = 'avibe:annotation:voice:event';
@@ -76,12 +77,19 @@ export type ShowPageVoiceSession = {
   voiced?(): boolean;
   retry(context: { before: string; after: string }): Promise<string>;
   abort(): void;
+  /** The words reached the page: the take's kept copy goes. */
+  landed?(): void;
+  /** The page went away: nothing more is posted, but the take stays on the device. */
+  detach?(): void;
 };
 
 export type ShowPageVoiceHostDependencies = {
   post: (event: ShowPageVoiceEvent) => void;
   availability: () => Promise<ShowPageVoiceAvailability>;
   createSession?: (input: ShowPageVoiceDictationInput) => ShowPageVoiceSession;
+  /** Where a take's words go if this page is gone before they land (lib/voiceTakeStore): the
+   *  take is kept on the device until then. */
+  keep?: () => VoiceTakeKeep | null;
 };
 
 type StartingVoiceSession = {
@@ -161,6 +169,7 @@ export class ShowPageVoiceHost {
       ...dependencies,
       createSession: dependencies.createSession
         ?? ((input) => new ShowPageVoiceDictation(input)),
+      keep: dependencies.keep ?? (() => null),
     };
   }
 
@@ -196,7 +205,9 @@ export class ShowPageVoiceHost {
       this.starting.captureClaim.release();
     }
     this.starting = null;
-    this.active?.session.abort();
+    // The page is gone, not the speech: a take it was recording or transcribing is kept.
+    if (this.active?.session.detach) this.active.session.detach();
+    else this.active?.session.abort();
     this.active?.captureClaim.release();
     this.active = null;
   }
@@ -244,11 +255,13 @@ export class ShowPageVoiceHost {
         this.postError(request.requestId, 'unavailable', false);
         return;
       }
+      const keep = this.dependencies.keep?.() ?? null;
       const session = this.dependencies.createSession({
         before: request.before,
         after: request.after,
         captureClaim,
         maxFileBytes: availability.maxFileBytes,
+        ...(keep ? { keep } : {}),
         onPreview: (text) => {
           if (this.active?.requestId !== request.requestId || this.disposed) return;
           this.dependencies.post({
@@ -328,6 +341,7 @@ export class ShowPageVoiceHost {
     if (this.disposed || this.active !== active) return;
     active.captureClaim.release();
     this.active = null;
+    active.session.landed?.();
     this.dependencies.post({
       type: ANNOTATION_VOICE_EVENT_MESSAGE,
       kind: 'result',
@@ -348,7 +362,11 @@ export class ShowPageVoiceHost {
     const retryable = code !== 'cancelled'
       && (code !== 'empty' || active.session.voiced?.() === true)
       && active.session.canRetry();
-    if (!retryable) this.active = null;
+    if (!retryable) {
+      this.active = null;
+      // Nothing to send again: nothing to keep.
+      active.session.abort();
+    }
     this.postError(active.requestId, code, retryable);
   }
 

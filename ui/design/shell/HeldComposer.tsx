@@ -14,6 +14,7 @@ import {
   type ComposerHoldView,
   type HoldPointer,
 } from '@/components/voice/ComposerHold';
+import { PendingVoiceItem, type PendingVoiceItemProps } from '@/components/voice/PendingVoiceTakes';
 import type { VoiceTarget } from '@/components/voice/VoiceCard';
 import { Composer } from '@/components/workbench/Composer';
 import { useBots } from '@/context/BotsContext';
@@ -158,3 +159,23 @@ export function SoftKeyboard() {
     </div>
   );
 }
+
+/** The takes kept on the device above the composer (ui/design: composer/pending-voice/*): the
+ *  shipped `PendingVoiceItem`s, where `ComposerHoldCard` lays the pending items over the
+ *  composer while no take or note is showing. */
+export function KeptVoiceTakes({ items }: { items: PendingVoiceItemProps[] }) {
+  return (
+    <div className="pointer-events-none absolute inset-0 z-50 flex flex-col justify-end">
+      <ComposerSlot>
+        <div className="absolute inset-x-0 bottom-full z-40 mb-3 flex flex-col items-center">
+          <div className="flex w-full max-w-xl flex-col gap-2">
+            {items.map((item, index) => (
+              <PendingVoiceItem key={index} onRetry={noop} onDiscard={noop} onInsert={noop} {...item} />
+            ))}
+          </div>
+        </div>
+      </ComposerSlot>
+    </div>
+  );
+}
+

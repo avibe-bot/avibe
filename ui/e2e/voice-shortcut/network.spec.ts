@@ -29,9 +29,15 @@ declare global {
 const FINAL_TEXT = 'Every word, over HTTP';
 const REALTIME_TEXT = 'Every word, live';
 
+/** Steers the network, now and across a reload of the page. */
+const setNet = (page: Page, net: Partial<Net>) => page.evaluate((next) => {
+  Object.assign(window.voiceNet, next);
+  sessionStorage.setItem('voiceNet', JSON.stringify(window.voiceNet));
+}, net);
+
 const open = async (page: Page, net: Partial<Net> = {}) => {
   await page.goto('/e2e/voice-shortcut/network.html');
-  await page.evaluate((next) => Object.assign(window.voiceNet, next), net);
+  await setNet(page, net);
   const box = page.locator('[data-hold-to-talk="ready"]');
   await expect(box).toBeVisible();
   const rect = (await box.boundingBox())!;
@@ -97,7 +103,12 @@ test('the token hangs and nothing is reachable: the take is kept, said honestly,
 
 test('a refused realtime socket costs its token: the next take opens with a fresh one', async ({ page }) => {
   const at = await open(page, { socket: 'refuse' });
-  await holdFor(page, at, 2_000);
+  await page.mouse.move(at.x, at.y);
+  await page.mouse.down();
+  // No live words: the card says so, and that the take is still transcribed on release.
+  await expect(page.getByRole('dialog').getByText(en.voice.liveUnavailable)).toBeVisible();
+  await page.waitForTimeout(1_500);
+  await page.mouse.up();
   await expect.poll(() => sent(page)).toEqual([FINAL_TEXT]);
 
   await page.evaluate(() => { window.voiceNet.socket = 'ok'; });
@@ -106,4 +117,34 @@ test('a refused realtime socket costs its token: the next take opens with a fres
   const sockets = await page.evaluate(() => window.voiceNetLog.sockets);
   expect(sockets).toHaveLength(2);
   expect(sockets[1]).not.toBe(sockets[0]);
+});
+
+test('a take that cannot be transcribed survives a reload, and lands from its pending item once the network is back', async ({ page }) => {
+  test.setTimeout(90_000);
+  const at = await open(page, { token: 'fail', cloud: 'down', relay: 'down' });
+  await holdFor(page, at, 6_000);
+  await expect(page.getByRole('dialog').getByText(en.voice.cutOff)).toBeVisible({ timeout: 30_000 });
+
+  // The page goes away (a reload, the system killing the app): the speech does not.
+  await page.reload();
+  const item = page.getByRole('status').filter({ hasText: en.voice.pending.title });
+  await expect(item).toBeVisible();
+  await expect(item.getByText('To “Fix the cache”', { exact: false })).toBeVisible();
+  // Its own retry on load meets the same dead network, and it stays.
+  await expect(item.getByText(en.voice.pending.failed)).toBeVisible({ timeout: 30_000 });
+
+  // The network comes back: the page retries on its own and the words wait to be sent.
+  await setNet(page, { token: 'ok', cloud: 'ok', relay: 'ok' });
+  await page.evaluate(() => window.dispatchEvent(new Event('online')));
+  const ready = page.getByRole('status').filter({ hasText: en.voice.pending.ready });
+  await expect(ready.getByText(FINAL_TEXT)).toBeVisible({ timeout: 30_000 });
+  await ready.getByRole('button', { name: en.voice.send }).click();
+  await expect.poll(() => sent(page)).toEqual([FINAL_TEXT]);
+  await expect(ready).toHaveCount(0);
+
+  // Nothing is kept once the words landed.
+  await page.reload();
+  await expect(page.locator('[data-hold-to-talk="ready"]')).toBeVisible();
+  await page.waitForTimeout(500);
+  await expect(page.getByRole('status').filter({ hasText: en.voice.pending.title })).toHaveCount(0);
 });

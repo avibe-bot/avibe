@@ -41,6 +41,7 @@ import {
   VoiceTranscriptionError,
 } from '../../lib/voiceTranscription';
 import { createVoiceActivity, reportVoiceSilenceGate, type VoiceActivity } from '../../lib/voiceActivity';
+import { VoiceTakeKeeper } from '../../lib/voiceTakeKeeper';
 import {
   emitVoiceTelemetry,
   type VoiceTelemetryOutcome,
@@ -59,7 +60,7 @@ import {
   type VoiceRealtimeFinal,
 } from '../../lib/voiceRealtime';
 import { resolveVoiceContext, type VoiceContext, type VoiceContextSource } from '../../lib/voiceContext';
-import type { VoiceMessageMetadata } from '../../lib/voiceMessage';
+import { VOICE_MESSAGE_METADATA, type VoiceMessageMetadata } from '../../lib/voiceMessage';
 import {
   ComposerHoldCard,
   ComposerHoldSurface,
@@ -212,6 +213,8 @@ type VoiceRecordingSession = {
   context: Promise<VoiceContext>;
   /** How much of what the microphone heard was loud enough to be speech. */
   activity: VoiceActivity;
+  /** The take kept on the device until its text is inserted (lib/voiceTakeStore). */
+  keeper?: VoiceTakeKeeper;
 };
 
 // Composer remounts when the user switches chats. Keep pending or retryable
@@ -255,11 +258,13 @@ const settleVoiceSession = async (session: VoiceRecordingSession): Promise<void>
     session.segments = [];
     session.error = undefined;
     session.status = 'ready';
+    session.keeper?.transcribed(result.text);
   } catch (error) {
     session.cleanupElapsedMs = Date.now() - startedAt;
     session.transcript = undefined;
     session.error = error;
     session.status = 'failed';
+    session.keeper?.pending();
   }
 };
 
@@ -557,6 +562,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [value, setValue] = useState('');
   const [homeVoiceKey] = useState(() => `draft:${newLocalId()}`);
   const voiceKey = sessionId ?? (stageMedia ? homeVoiceKey : undefined);
+  // Where a take spoken here is kept until its words land (lib/voiceTakeStore): this Session, or
+  // the Home draft, which a reload starts afresh under a new key but the same place.
+  const voiceKeepTarget = sessionId ?? (stageMedia ? 'home' : null);
   const stagedUrlsRef = useRef(new Set<string>());
   // The mention editor (Lexical) OWNS its text, so we don't mirror every
   // keystroke into ``value`` there — a fast third-party IME (e.g. a voice
@@ -771,6 +779,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     for (const url of stagedUrlsRef.current) URL.revokeObjectURL(url);
     // A home draft has no durable chat to restore into after a real departure.
     const voice = voiceSessionsById.get(homeVoiceKey);
+    // Its audio stays on the device, for the Home composer's pending voice items.
+    voice?.keeper?.release();
     voice?.abortController.abort();
     voiceSessionsById.delete(homeVoiceKey);
   }, [homeVoiceKey]);
@@ -1001,6 +1011,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       task: Promise.resolve(),
     };
     session.segments.push(segment);
+    session.keeper?.segment(segment, blob);
     if (session.realtimeState === 'connecting' || session.realtimeState === 'active') {
       return;
     }
@@ -1044,6 +1055,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       }
       voiceSessionsById.delete(session.sessionId);
       setVoiceRetainedSession(null);
+      session.keeper?.forget();
       reportVoiceInsertion(session);
       return;
     }
@@ -1098,6 +1110,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         session.segments = [];
         session.error = undefined;
         session.status = 'ready';
+        session.keeper?.transcribed(result.text);
       } catch (_error) {
         if (session.abortController.signal.aborted) return;
         session.realtimeState = 'failed';
@@ -1132,6 +1145,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   };
 
   const discardVoiceSession = useCallback((session: VoiceRecordingSession) => {
+    session.keeper?.forget();
     session.abortController.abort();
     restoreRealtimePreview(session);
     deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
@@ -1239,6 +1253,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         insertion,
         context,
         activity: createVoiceActivity(),
+        keeper: voiceKeepTarget ? new VoiceTakeKeeper(dictationId, { target: voiceKeepTarget, intent: 'insert' }) : undefined,
         transcriptionQueue: new VoiceTranscriptionQueue({
           concurrency: VOICE_TRANSCRIPTION_CONCURRENCY,
           signal: abortController.signal,
@@ -1274,6 +1289,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         activateHttpFallback(session);
       });
       startingSession = session;
+      session.keeper?.begin();
       const pipeline = new VoiceRecordingPipeline({
         stream,
         segmentMs: VOICE_SEGMENT_MS,
@@ -1320,6 +1336,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           if (!unmountedRef.current) setRecording(false);
 
           if (reason === 'abort') {
+            session.keeper?.forget();
             session.abortController.abort();
             session.realtime?.abort();
             restoreRealtimePreview(session);
@@ -1333,6 +1350,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           const silent = session.activity.silent() && !session.realtimeHeardWords;
           if (silent) reportVoiceSilenceGate(session.activity, session.stoppedAt === undefined || session.startedAt === undefined ? undefined : session.stoppedAt - session.startedAt);
           if ((!session.segments.length && session.captureError === undefined) || silent) {
+            session.keeper?.forget();
             session.abortController.abort();
             session.realtime?.abort();
             restoreRealtimePreview(session);
@@ -1344,14 +1362,17 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             return;
           }
           if (session.segments.length && !session.segments.at(-1)?.final) {
-            session.segments.push({
+            const marker: VoiceSegment = {
               blob: null,
               sequence: session.segments.length,
               final: true,
               durationMs: 0,
               task: Promise.resolve(),
-            });
+            };
+            session.segments.push(marker);
+            session.keeper?.segment(marker, null);
           }
+          session.keeper?.pending();
           if (session.realtime && session.realtimeState !== 'failed') {
             void finishRealtimeVoiceSession(session);
           } else {
@@ -1392,6 +1413,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     } catch {
       // getUserMedia may have handed us a live stream before capture setup
       // threw. Release it so the mic does not stay on.
+      startingSession?.keeper?.forget();
       startingSession?.abortController.abort();
       startingSession?.realtime?.abort();
       if (startingSession) restoreRealtimePreview(startingSession);
@@ -1599,6 +1621,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     bounds: () => boxRef.current?.getBoundingClientRect() ?? null,
     onSystemInterrupt: 'interrupt',
     context: () => readVoiceContext?.(),
+    keep: () => (voiceKeepTarget
+      ? {
+          target: voiceKeepTarget,
+          label: voiceTarget?.title ?? (voiceTarget?.name ? t('voice.to', { name: voiceTarget.name }) : null),
+        }
+      : null),
   });
   const holdBusy = hold.phase !== 'idle';
   // A take owns the box from the press to its end: Enter and Send wait, so its staged files go
@@ -1622,11 +1650,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     ? holdPlaceholder ?? (placeholder === undefined ? t('voice.composer.placeholder') : placeholder)
     : placeholder ?? t('chat.compose.placeholder');
   const holdTarget: VoiceTarget = voiceTarget ?? { name: '', title: t('voice.composer.toHere') };
-  const putHeardInDraft = () => {
-    const heard = hold.text.trim();
-    if (!heard) return;
+  /** Spoken words into the end of the draft, to edit before sending. */
+  const appendToDraft = (words: string) => {
     const current = useMentions ? valueRef.current : value;
-    const next = current.trim() ? `${current.replace(/\s+$/, '')} ${heard}` : heard;
+    const next = current.trim() ? `${current.replace(/\s+$/, '')} ${words}` : words;
     valueRef.current = next;
     setHasText(true);
     if (useMentions) {
@@ -1638,7 +1665,30 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     }
     draftEditedRef.current = true;
     onDraftChange?.(next);
+  };
+  const putHeardInDraft = () => {
+    const heard = hold.text.trim();
+    if (!heard) return;
+    appendToDraft(heard);
     hold.discard();
+  };
+  // A kept take's words (ui/design: composer/pending-voice/*): into the draft unless voice owns
+  // it right now, or sent as the spoken message they were meant to be.
+  const insertKeptVoiceText = (words: string): boolean => {
+    if (disabledRef.current || voiceDraftLocked() || hold.phase !== 'idle') return false;
+    appendToDraft(words);
+    return true;
+  };
+  const sendKeptVoiceText = async (words: string): Promise<boolean> => {
+    if (pendingRef.current || disabledRef.current) return false;
+    pendingRef.current = true;
+    try {
+      return (await onSend(words, [], undefined, VOICE_MESSAGE_METADATA)) !== false;
+    } catch {
+      return false;
+    } finally {
+      pendingRef.current = false;
+    }
   };
   const holdHandlers = mediaEnabled ? {
     onPointerDown: (event: React.PointerEvent<HTMLDivElement>) => {
@@ -2261,6 +2311,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       to={holdTarget}
       attachments={readyAttachments.map((attachment) => attachment.name)}
       onEditFirst={putHeardInDraft}
+      pending={{ target: voiceKeepTarget, onInsert: insertKeptVoiceText, onSend: sendKeptVoiceText }}
     />
   );
   const holdSurface = mediaEnabled && (

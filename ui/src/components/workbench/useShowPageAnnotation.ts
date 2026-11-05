@@ -71,6 +71,16 @@ function annotationShortcutBlocked(target: Element | null): boolean {
  * "unknown" so the control disables until the freshly loaded overlay reports —
  * and so one session's state never briefly shows over another's page.
  */
+/** The Session a Show Page belongs to, from its address (`/show/<session>/…`). */
+export const showPageSessionId = (src: string): string | null => {
+  try {
+    const match = /^\/show\/([^/]+)\//.exec(new URL(src, window.location.href).pathname);
+    return match ? decodeURIComponent(match[1]) : null;
+  } catch {
+    return null;
+  }
+};
+
 export function useShowPageAnnotation(src: string | null): AnnotationBridge {
   const routeSurfaceActive = useRouteSurfaceActive();
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
@@ -194,6 +204,12 @@ export function useShowPageAnnotation(src: string | null): AnnotationBridge {
     return new ShowPageVoiceHost({
       post: (event: ShowPageVoiceEvent) => {
         iframe.contentWindow?.postMessage(event, window.location.origin);
+      },
+      // A take spoken into the page is kept until its words reach it; if the page is gone first,
+      // it waits in the composer of the conversation the page belongs to.
+      keep: () => {
+        const target = showPageSessionId(iframe.src);
+        return target ? { target, intent: 'insert' } : null;
       },
       availability: () => {
         if (availability) return availability;

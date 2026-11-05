@@ -43,6 +43,7 @@ const designFrames = frames([
   frame('c-listening', '3 · 满 350ms：麦克风打开，还没出字', hold({ phase: 'listening', seconds: 1 })),
   frame('d-recording', '4 · 录音中：实时转写在输入框上方，波形是麦克风的真实音量；松开发送', hold(recording)),
   frame('d-recording-reduced', '4d · 系统开了「减少动态效果」：只有一条静态音量条', hold({ ...recording, level: stillVoiceLevel(speakingMeter, { reducedMotion: true }) })),
+  frame('d-recording-no-live', '4e · 实时转写连不上（或说了几秒话却一直没出字）：卡片安静地说明，松手后整段识别，说的话都留着', hold({ phase: 'recording', seconds: 23, liveUnavailable: true })),
   frame('d-recording-long', '4b · 说得很长：转写区滚动，停在最新一行，不限时长', hold({ phase: 'recording', text: saidLong.text, stash: saidLong.stash, seconds: 48 })),
   frame('d-recording-attachment', '4c · 只放了附件、没有文字：照样按住录音，附件和语音一起发', hold(recording, { attachments: [staged] })),
   frame('e-armed', '5 · 指针移出输入框：波形压平变红，松开取消（移回来继续说；按 Esc 直接取消）', hold({ ...recording, phase: 'armed', seconds: 7 })),

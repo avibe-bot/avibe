@@ -56,6 +56,7 @@ const designFrames = frames([
   frame('b-pressed', '2 · 按下 100ms 后输入框亮起（未到 200ms：松开 = 点一下，弹出键盘）', hold({ phase: 'pressing', progress: 0.5 })),
   frame('c-listening', '3 · 按满 200ms：开始录音，还没出字', hold({ phase: 'listening', seconds: 1 })),
   frame('d-recording', '4 · 录音中：实时转写，上滑取消 · 松开发送', hold(recording)),
+  frame('d-recording-no-live', '4e · 实时转写连不上（或说了几秒话却一直没出字）：卡片安静地说明，松手后整段识别，说的话都留着', hold({ phase: 'recording', seconds: 23, liveUnavailable: true })),
   frame('d-recording-long', '4b · 说得很长：转写区滚动，停在最新一行，不限时长', hold({ phase: 'recording', text: saidLong.text, stash: saidLong.stash, seconds: 48 })),
   frame('d-recording-attachment', '4c · 只放了附件、没有文字：照样按住录音，附件和语音一起发', hold(recording, { attachments: [staged] })),
   frame('e-armed', '5 · 上滑超过 80px：松开取消（滑回 60px 以下恢复）', hold({ ...recording, phase: 'armed', seconds: 7 })),

@@ -21,6 +21,8 @@ export type HoldView = Pick<
 > & {
   /** The microphone's loudness for the card's meter. */
   level?: VoiceLevelSource | null;
+  /** Live recognition is not working for this take. */
+  liveUnavailable?: boolean;
 };
 type Hold = HoldView;
 type MainBot = { name: string; avatar: BotAvatarSpec | null };
@@ -45,6 +47,7 @@ export function MainBotHoldOverlay({ hold, bot }: { hold: Hold; bot: MainBot }) 
           seconds={hold.seconds}
           reason={hold.interruptReason ?? 'dropped'}
           level={hold.level}
+          liveUnavailable={hold.liveUnavailable}
           actions={
             <VoiceInterruptedActions
               canRetry={hold.canRetry}

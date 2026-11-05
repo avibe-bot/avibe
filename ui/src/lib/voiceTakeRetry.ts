@@ -1,0 +1,92 @@
+import {
+  finalizeVoiceDictation,
+  VOICE_SETTLE_RETRY_WINDOW_MS,
+  VoiceTranscriptionError,
+  type VoiceTranscriptionSegment,
+} from './voiceTranscription';
+import { readVoiceTakeAudio, updateVoiceTake, type VoiceTake } from './voiceTakeStore';
+
+// Transcribing a take kept on the device (lib/voiceTakeStore) that no surface holds in memory:
+// after a reload, or after the surface it was spoken on went away. Its stored audio is sent
+// again through whichever path works now (the cloud, then the local relay), under its own
+// dictation id, and the text is kept with it until the reader inserts or sends it.
+
+type Finalize = typeof finalizeVoiceDictation;
+
+const running = new Map<string, Promise<string>>();
+const listeners = new Set<() => void>();
+
+const notify = () => {
+  for (const listener of listeners) listener();
+};
+
+/** Whether a kept take is being transcribed in this document now. */
+export const isRetryingVoiceTake = (id: string): boolean => running.has(id);
+
+export function subscribeVoiceTakeRetries(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
+/** The segments a kept take can be finalized from: its stored audio, in order, ending with
+ *  the last segment, or a finalize-only marker for a take the page lost while it recorded. */
+export const keptVoiceSegments = (
+  take: Pick<VoiceTake, 'segments'>,
+  audio: Map<number, Blob | null>,
+): VoiceTranscriptionSegment[] => {
+  const ordered = [...take.segments].sort((left, right) => left.sequence - right.sequence);
+  const segments: VoiceTranscriptionSegment[] = ordered.map((segment) => ({
+    blob: audio.get(segment.sequence) ?? null,
+    sequence: segment.sequence,
+    final: segment.final,
+    durationMs: segment.durationMs,
+    ...(segment.overlapMs ? { overlapMs: segment.overlapMs } : {}),
+  }));
+  if (segments.length && !segments.at(-1)?.final) {
+    segments.push({ blob: null, sequence: segments.length, final: true, durationMs: 0 });
+  }
+  return segments;
+};
+
+/** Whether a kept take holds audio to transcribe at all. */
+export const keptVoiceTakeHasAudio = (take: Pick<VoiceTake, 'segments'>): boolean => (
+  take.segments.some((segment) => !segment.empty)
+);
+
+/**
+ * Transcribes a kept take from its stored audio. Its text is kept with it (`transcribed`) for
+ * the reader to insert or send; a failure leaves it `pending`. One run per take at a time.
+ */
+export function retryKeptVoiceTake(
+  take: VoiceTake,
+  dependencies: { finalize?: Finalize; readAudio?: typeof readVoiceTakeAudio; save?: typeof updateVoiceTake } = {},
+): Promise<string> {
+  const existing = running.get(take.id);
+  if (existing) return existing;
+  const finalize = dependencies.finalize ?? finalizeVoiceDictation;
+  const readAudio = dependencies.readAudio ?? readVoiceTakeAudio;
+  const save = dependencies.save ?? updateVoiceTake;
+  const run = (async () => {
+    const segments = keptVoiceSegments(take, await readAudio(take.id));
+    if (!segments.some((segment) => segment.blob)) throw new VoiceTranscriptionError('failed');
+    try {
+      const result = await finalize(segments, { dictationId: take.id, before: '', after: '' }, {
+        retryUntil: Date.now() + VOICE_SETTLE_RETRY_WINDOW_MS,
+      });
+      await save({ ...take, status: 'transcribed', text: result.text, updatedAt: Date.now() });
+      return result.text;
+    } catch (error) {
+      await save({ ...take, status: 'pending', text: undefined, updatedAt: Date.now() });
+      throw error;
+    }
+  })();
+  running.set(take.id, run);
+  notify();
+  void run.then(() => undefined, () => undefined).finally(() => {
+    running.delete(take.id);
+    notify();
+  });
+  return run;
+}

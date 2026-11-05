@@ -6841,7 +6841,18 @@
       "mouseHint": "Release to send · move off the avatar or press <key>Esc</key> to cancel",
       "mouseArmed": "Release to cancel · move back to keep talking"
     },
-    "noText": "No words yet"
+    "noText": "No words yet",
+    "liveUnavailable": "Live transcript unavailable; the whole take is transcribed when you release",
+    "pending": {
+      "title": "Voice not transcribed yet",
+      "ready": "Voice transcribed",
+      "to": "To {{name}}",
+      "waiting": "Kept on this device. It retries when you are back online.",
+      "retrying": "Transcribing…",
+      "failed": "Couldn't transcribe it; the recording is kept on this device.",
+      "lost": "The recording couldn't be saved on this device.",
+      "insert": "Put in the draft"
+    }
   },
   "mcpHub": {
     "title": "MCP",

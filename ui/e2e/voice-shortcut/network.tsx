@@ -2,6 +2,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Composer } from '../../src/components/workbench/Composer';
 import { ToastProvider } from '../../src/context/ToastProvider';
+import { setLocalSnapshotPrincipal } from '../../src/lib/localSnapshots';
 import i18n from '../../src/i18n';
 import '../../src/index.css';
 
@@ -39,7 +40,17 @@ declare global {
   }
 }
 
-window.voiceNet = { token: 'ok', socket: 'ok', cloud: 'ok', relay: 'ok', cloudFailOnce: [] };
+// The network as the spec last set it, kept across a reload of this page (`sessionStorage`).
+window.voiceNet = {
+  token: 'ok',
+  socket: 'ok',
+  cloud: 'ok',
+  relay: 'ok',
+  cloudFailOnce: [],
+  ...JSON.parse(sessionStorage.getItem('voiceNet') ?? '{}') as Partial<Net>,
+};
+// The reader, as InstanceAuthorizationProvider names it: kept takes belong to it.
+setLocalSnapshotPrincipal('local');
 window.voiceNetLog = { tokens: [], sockets: [], dictations: [], sent: [] };
 
 const CLOUD = 'https://cloud.test';

@@ -6,6 +6,7 @@ import { Trans, useTranslation } from 'react-i18next';
 import type { VoiceLevelSource } from '@/lib/voiceLevel';
 import { Button } from '../ui/button';
 import type { HoldOutcome, useHoldToTalk } from './useHoldToTalk';
+import { PendingVoiceTakes } from './PendingVoiceTakes';
 import { VoiceCancelTarget, VoiceCard, VoiceHalo, VoiceToastClose, type VoiceTarget } from './VoiceCard';
 
 // Holding an empty composer to talk (ui/design: composer/hold-desktop/*, composer/hold-mobile/*):
@@ -20,6 +21,8 @@ export type ComposerHoldView = Pick<
 > & {
   /** The microphone's loudness for the card's meter. */
   level?: VoiceLevelSource | null;
+  /** Live recognition is not working for this take. */
+  liveUnavailable?: boolean;
 };
 
 /** What pressed: a mouse (the ring, leave-to-cancel, Esc) or a finger or pen (slide up). */
@@ -38,6 +41,7 @@ export function ComposerHoldCard({
   to,
   attachments = [],
   onEditFirst,
+  pending,
 }: {
   hold: ComposerHoldView;
   pointer: HoldPointer;
@@ -46,6 +50,13 @@ export function ComposerHoldCard({
   attachments?: string[];
   /** An interrupted take's text, into the draft to edit before sending. */
   onEditFirst: () => void;
+  /** The takes kept on this device for this conversation whose words have not landed
+   *  (ui/design: composer/pending-voice/*), shown while no take or note is. */
+  pending?: {
+    target: string | null;
+    onInsert: (text: string) => boolean;
+    onSend?: (text: string) => Promise<boolean>;
+  };
 }) {
   const { t, i18n } = useTranslation();
   const { phase, outcome, dismiss } = hold;
@@ -57,7 +68,14 @@ export function ComposerHoldCard({
   }, [quiet, dismiss]);
   const card = live(phase) || phase === 'settling' || phase === 'interrupted';
   const note = !card && outcome && outcome !== 'sent' ? outcome : null;
-  if (!card && !note) return null;
+  if (!card && !note) {
+    if (!pending?.target) return null;
+    return (
+      <div className="absolute inset-x-0 bottom-full z-40 mb-3 flex flex-col items-center">
+        <PendingVoiceTakes target={pending.target} onInsert={pending.onInsert} onSend={pending.onSend} />
+      </div>
+    );
+  }
   const heard = hold.text.trim().length > 0;
   const mouse = pointer === 'mouse';
   return (
@@ -76,6 +94,7 @@ export function ComposerHoldCard({
             seconds={hold.seconds}
             reason={hold.interruptReason ?? 'dropped'}
             level={hold.level}
+            liveUnavailable={hold.liveUnavailable}
             actions={
               <>
                 <Button type="button" variant="ghost" size="icon" className="mr-auto size-8 text-muted" aria-label={t('voice.discard')} onClick={hold.discard}>

@@ -9,11 +9,13 @@ import {
 } from './voiceTranscription';
 import {
   claimVoiceCapture,
+  VOICE_LEVEL_INTERVAL_MS,
   VoiceRecordingPipeline,
   type VoiceCaptureClaim,
   type VoiceRecordingPipelineOptions,
 } from './voiceRecording';
-import { createVoiceActivity, reportVoiceSilenceGate } from './voiceActivity';
+import { createVoiceActivity, reportVoiceSilenceGate, VOICE_SPEECH_RMS } from './voiceActivity';
+import { VoiceTakeKeeper, type VoiceTakeKeep } from './voiceTakeKeeper';
 import { resolveVoiceContext, type VoiceContext, type VoiceContextSource } from './voiceContext';
 import {
   VoiceRealtimeSession,
@@ -43,7 +45,17 @@ export type ShowPageVoiceDictationInput = {
   context?: VoiceContextSource;
   /** The microphone's loudness (RMS, 0–1) as it records, for a meter. */
   onLevel?: (rms: number) => void;
+  /** Keep the take on this device until its words land (lib/voiceTakeStore): where they go. */
+  keep?: VoiceTakeKeep;
+  /** Whether live recognition is working: false once the realtime path failed, or produced no
+   *  preview while the microphone heard speech for `VOICE_LIVE_SILENT_SPEECH_MS`. What is said
+   *  is still recorded and transcribed when the take ends. */
+  onLiveChange?: (live: boolean) => void;
 };
+
+/** Speech heard without one live preview for this long: the realtime path is taken as not
+ *  working, and the take goes on over HTTP. */
+export const VOICE_LIVE_SILENT_SPEECH_MS = 4_000;
 
 export type ShowPageVoiceDictationDependencies = {
   getUserMedia?: () => Promise<MediaStream>;
@@ -104,6 +116,10 @@ export class ShowPageVoiceDictation {
   /** A live preview carried words: the take held speech, whatever the levels say. */
   private heardWords = false;
   private startedAt: number | undefined;
+  /** Speech heard since the last live preview (or the start), in ms. */
+  private speechWithoutPreviewMs = 0;
+  private live = true;
+  private readonly keeper: VoiceTakeKeeper | null;
   private stopped = false;
   private settled = false;
   private resolveDone!: (text: string) => void;
@@ -129,6 +145,7 @@ export class ShowPageVoiceDictation {
       newDictationId: dependencies.newDictationId ?? newDictationId,
     };
     this.dictationId = this.dependencies.newDictationId();
+    this.keeper = input.keep ? new VoiceTakeKeeper(this.dictationId, input.keep) : null;
     this.context = resolveVoiceContext(input.context);
     this.queue = this.dependencies.createQueue({
       concurrency: VOICE_TRANSCRIPTION_CONCURRENCY,
@@ -171,23 +188,23 @@ export class ShowPageVoiceDictation {
         context: this.context,
         signal: this.abortController.signal,
         onPreview: (preview) => {
+          this.speechWithoutPreviewMs = 0;
           if (`${preview.text}${preview.stash}`.trim()) this.heardWords = true;
           this.input.onPreview?.(`${preview.text}${preview.stash}`.trim());
           this.input.onPreviewParts?.(preview);
         },
         onError: () => {
           if (this.abortController.signal.aborted) return;
-          this.realtimeState = 'failed';
-          this.activateHttpFallback();
+          this.realtimeFailed();
         },
       });
       this.realtime = realtime;
+      this.keeper?.begin();
       void realtime.start().then(() => {
-        if (!this.abortController.signal.aborted) this.realtimeState = 'active';
+        if (!this.abortController.signal.aborted && this.realtimeState !== 'failed') this.realtimeState = 'active';
       }).catch(() => {
         if (this.abortController.signal.aborted) return;
-        this.realtimeState = 'failed';
-        this.activateHttpFallback();
+        this.realtimeFailed();
       });
 
       const pipeline = this.dependencies.createPipeline({
@@ -205,12 +222,14 @@ export class ShowPageVoiceDictation {
           this.activity.observePcm(samples);
           if (this.realtimeState !== 'failed') realtime.sendPcm(samples);
         },
-        ...(this.input.onLevel ? { onLevel: this.input.onLevel } : {}),
+        onLevel: (rms) => {
+          this.watchLiveness(rms);
+          this.input.onLevel?.(rms);
+        },
         onError: (error) => {
           this.captureError = error;
-          this.realtimeState = 'failed';
           realtime.abort();
-          this.activateHttpFallback();
+          this.realtimeFailed();
         },
         onStopped: (reason) => {
           this.stopped = true;
@@ -221,6 +240,7 @@ export class ShowPageVoiceDictation {
             this.reject(cancelledError());
             return;
           }
+          this.keeper?.pending();
           void this.finalize().then(
             (text) => this.resolve(text),
             (error) => this.reject(error),
@@ -248,7 +268,29 @@ export class ShowPageVoiceDictation {
     this.pipeline?.finish();
   }
 
+  /** The take's words were inserted or sent: its kept copy is deleted. */
+  landed(): void {
+    this.keeper?.forget();
+  }
+
+  /**
+   * The surface holding this take is gone (unmounted, navigated away). Nothing is sent from it,
+   * but nothing is lost either: a take still recording finishes (what was heard is kept), one
+   * still transcribing goes on, and the result stays on the device as a pending voice item.
+   */
+  detach(): void {
+    if (this.abortController.signal.aborted) return;
+    if (!this.stopped) this.pipeline?.finish();
+    if (!this.keeper) {
+      this.abort();
+      return;
+    }
+    void this.done.then(() => undefined, () => undefined).finally(() => this.keeper?.release());
+  }
+
+  /** Discards the take: capture stops, nothing more is sent, and its kept copy is deleted. */
   abort(): void {
+    this.keeper?.forget();
     if (this.abortController.signal.aborted) return;
     this.abortController.abort();
     this.realtime?.abort();
@@ -287,7 +329,14 @@ export class ShowPageVoiceDictation {
     }
     this.cleanupContext = context;
     this.settleBy = Date.now() + VOICE_SETTLE_RETRY_WINDOW_MS;
-    return this.finalizeHttp();
+    try {
+      const text = await this.finalizeHttp();
+      this.keeper?.transcribed(text);
+      return text;
+    } catch (error) {
+      if (!(error instanceof VoiceTranscriptionError && error.code === 'cancelled')) this.keeper?.pending();
+      throw error;
+    }
   }
 
   private queueSegment(
@@ -305,6 +354,7 @@ export class ShowPageVoiceDictation {
       task: Promise.resolve(),
     };
     this.segments.push(segment);
+    this.keeper?.segment(segment, blob);
     if (this.realtimeState !== 'failed' || final) return;
     segment.transcriptionStarted = true;
     segment.task = this.queue.enqueue(segment);
@@ -320,13 +370,39 @@ export class ShowPageVoiceDictation {
 
   private ensureFinalSegment(): void {
     if (this.segments.at(-1)?.final) return;
-    this.segments.push({
+    const marker: PendingVoiceSegment = {
       blob: null,
       sequence: this.segments.length,
       final: true,
       durationMs: 0,
       task: Promise.resolve(),
-    });
+    };
+    this.segments.push(marker);
+    this.keeper?.segment(marker, null);
+  }
+
+  /** The realtime path cannot carry this take: what was recorded goes over HTTP instead. */
+  private realtimeFailed(): void {
+    this.realtimeState = 'failed';
+    this.activateHttpFallback();
+    this.setLive(false);
+  }
+
+  /** Speech that produces no live preview for a while means the realtime path is not working
+   *  (a socket that is open but stalled): the take stops waiting on it. */
+  private watchLiveness(rms: number): void {
+    if (this.realtimeState === 'failed' || this.stopped) return;
+    if (!(rms >= VOICE_SPEECH_RMS)) return;
+    this.speechWithoutPreviewMs += VOICE_LEVEL_INTERVAL_MS;
+    if (this.speechWithoutPreviewMs < VOICE_LIVE_SILENT_SPEECH_MS) return;
+    this.realtime?.abort();
+    this.realtimeFailed();
+  }
+
+  private setLive(live: boolean): void {
+    if (this.live === live) return;
+    this.live = live;
+    this.input.onLiveChange?.(live);
   }
 
   private async finalize(): Promise<string> {
@@ -380,12 +456,17 @@ export class ShowPageVoiceDictation {
   private resolve(text: string): void {
     if (this.settled) return;
     this.settled = true;
+    this.keeper?.transcribed(text);
     this.resolveDone(text);
   }
 
   private reject(error: unknown): void {
     if (this.settled) return;
     this.settled = true;
+    // A discarded take is forgotten by abort(), and a silent one has nothing to keep; one that
+    // failed stays on the device.
+    if (error instanceof VoiceTranscriptionError && error.code === 'empty' && !this.voiced()) this.keeper?.forget();
+    else if (!(error instanceof VoiceTranscriptionError && error.code === 'cancelled')) this.keeper?.pending();
     this.rejectDone(error);
   }
 
