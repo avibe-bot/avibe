@@ -6,7 +6,7 @@ import { Trans, useTranslation } from 'react-i18next';
 import type { VoiceLevelSource } from '@/lib/voiceLevel';
 import { Button } from '../ui/button';
 import type { HoldOutcome, useHoldToTalk } from './useHoldToTalk';
-import { VoiceCancelTarget, VoiceCard, VoiceToastClose, type VoiceTarget } from './VoiceCard';
+import { VoiceCancelTarget, VoiceCard, VoiceHalo, VoiceToastClose, type VoiceTarget } from './VoiceCard';
 
 // Holding an empty composer to talk (ui/design: composer/hold-desktop/*, composer/hold-mobile/*):
 // the take's card above the composer, what the composer itself shows while it is held, and the
@@ -101,16 +101,18 @@ export function ComposerHoldCard({
         </div>
       )}
       {card && attachments.length > 0 && (
-        <span className="flex max-w-full items-center gap-1.5 rounded-full border border-border-strong bg-surface px-3 py-1 text-xs text-muted shadow-md">
-          <Paperclip className="size-3.5 shrink-0" />
-          <span className="min-w-0 truncate">
-            <Trans
-              i18nKey="voice.composer.withAttachments"
-              values={{ names: new Intl.ListFormat(i18n.language, { style: 'short', type: 'conjunction' }).format(attachments) }}
-              components={{ names: <span className="font-medium text-foreground" /> }}
-            />
+        <VoiceHalo>
+          <span className="flex max-w-full items-center gap-1.5 rounded-full border border-border-strong bg-surface px-3 py-1 text-xs text-muted shadow-md">
+            <Paperclip className="size-3.5 shrink-0" />
+            <span className="min-w-0 truncate">
+              <Trans
+                i18nKey="voice.composer.withAttachments"
+                values={{ names: new Intl.ListFormat(i18n.language, { style: 'short', type: 'conjunction' }).format(attachments) }}
+                components={{ names: <span className="font-medium text-foreground" /> }}
+              />
+            </span>
           </span>
-        </span>
+        </VoiceHalo>
       )}
       {live(phase) && (mouse ? <MouseHint armed={phase === 'armed'} /> : <VoiceCancelTarget armed={phase === 'armed'} />)}
       {note && <HoldNote note={note} pointer={pointer} onDismiss={dismiss} />}
@@ -123,21 +125,23 @@ export function ComposerHoldCard({
 export function MouseHint({ armed, box = 'composer' }: { armed: boolean; box?: 'composer' | 'avatar' }) {
   const { t } = useTranslation();
   return (
-    <span
-      className={clsx(
-        'flex items-center gap-1.5 rounded-full border bg-surface px-3 py-1 text-xs font-semibold shadow-md',
-        armed ? 'border-destructive/50 text-destructive-ink' : 'border-border-strong text-muted',
-      )}
-    >
-      {armed ? (
-        t(box === 'avatar' ? 'voice.avatar.mouseArmed' : 'voice.composer.mouseArmed')
-      ) : (
-        <Trans
-          i18nKey={box === 'avatar' ? 'voice.avatar.mouseHint' : 'voice.composer.mouseHint'}
-          components={{ key: <kbd className="rounded border border-border-strong bg-surface-2 px-1 font-mono text-2xs text-foreground" /> }}
-        />
-      )}
-    </span>
+    <VoiceHalo>
+      <span
+        className={clsx(
+          'flex items-center gap-1.5 rounded-full border bg-surface px-3 py-1 text-xs font-semibold shadow-md',
+          armed ? 'border-destructive/50 text-destructive-ink' : 'border-border-strong text-muted',
+        )}
+      >
+        {armed ? (
+          t(box === 'avatar' ? 'voice.avatar.mouseArmed' : 'voice.composer.mouseArmed')
+        ) : (
+          <Trans
+            i18nKey={box === 'avatar' ? 'voice.avatar.mouseHint' : 'voice.composer.mouseHint'}
+            components={{ key: <kbd className="rounded border border-border-strong bg-surface-2 px-1 font-mono text-2xs text-foreground" /> }}
+          />
+        )}
+      </span>
+    </VoiceHalo>
   );
 }
 

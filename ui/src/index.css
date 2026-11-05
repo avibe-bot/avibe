@@ -40,10 +40,14 @@
   /* How far the hold-to-talk card's halo reaches past its edge (`.voice-card-halo`): a phone's
      screen is small, so its halo is half a desktop's. */
   --voice-card-halo: 28px;
+  /* The same halo, smaller, around everything else a hold lays over the page (`.voice-overlay-halo`):
+     the cancel target and its hint, a mouse's hint, the note about attachments. */
+  --voice-overlay-halo: 18px;
 }
 @media (min-width: 768px) {
   :root {
     --voice-card-halo: 56px;
+    --voice-overlay-halo: 24px;
   }
 }
 
@@ -1383,23 +1387,49 @@ pre,
 /* The hold-to-talk card's halo (VoiceCard, owner decision 2026-11-04): instead of the whole page,
    only the page right around the card is dimmed and blurred, strongest at the card's edge and
    clear `--voice-card-halo` away, so the rest of the screen stays readable while the user talks.
-   It sits under the card and under the cancel hint beside it (a negative z-index in the card
-   layer's stacking context), so both stay sharp. */
-.voice-card-halo {
-  /* Opaque at the card's edge, falling off fast, gone at the halo's own edge; on both axes. */
-  --voice-card-halo-x: linear-gradient(to right, transparent, rgb(0 0 0 / 0.12) calc(var(--voice-card-halo) * 0.45), rgb(0 0 0 / 0.5) calc(var(--voice-card-halo) * 0.78), #000 var(--voice-card-halo), #000 calc(100% - var(--voice-card-halo)), rgb(0 0 0 / 0.5) calc(100% - var(--voice-card-halo) * 0.78), rgb(0 0 0 / 0.12) calc(100% - var(--voice-card-halo) * 0.45), transparent);
-  --voice-card-halo-y: linear-gradient(to bottom, transparent, rgb(0 0 0 / 0.12) calc(var(--voice-card-halo) * 0.45), rgb(0 0 0 / 0.5) calc(var(--voice-card-halo) * 0.78), #000 var(--voice-card-halo), #000 calc(100% - var(--voice-card-halo)), rgb(0 0 0 / 0.5) calc(100% - var(--voice-card-halo) * 0.78), rgb(0 0 0 / 0.12) calc(100% - var(--voice-card-halo) * 0.45), transparent);
+   Everything else a hold lays over the page (the cancel target and its hint, a mouse's hint, the
+   attachments note) carries the same halo, smaller (`.voice-overlay-halo`, owner request
+   2026-11-05): no overlay text ever sits bare on the page's own text. Each sits under what it
+   belongs to (a negative z-index in that element's stacking context), so the element stays sharp. */
+.voice-card-halo,
+.voice-overlay-halo {
   position: absolute;
-  inset: calc(var(--voice-card-halo) * -1);
   z-index: -1;
   pointer-events: none;
   background: color-mix(in srgb, var(--background) 72%, transparent);
   -webkit-backdrop-filter: blur(10px);
   backdrop-filter: blur(10px);
+}
+.voice-card-halo {
+  /* Opaque at the card's edge, falling off fast, gone at the halo's own edge; on both axes. */
+  --voice-card-halo-x: linear-gradient(to right, transparent, rgb(0 0 0 / 0.12) calc(var(--voice-card-halo) * 0.45), rgb(0 0 0 / 0.5) calc(var(--voice-card-halo) * 0.78), #000 var(--voice-card-halo), #000 calc(100% - var(--voice-card-halo)), rgb(0 0 0 / 0.5) calc(100% - var(--voice-card-halo) * 0.78), rgb(0 0 0 / 0.12) calc(100% - var(--voice-card-halo) * 0.45), transparent);
+  --voice-card-halo-y: linear-gradient(to bottom, transparent, rgb(0 0 0 / 0.12) calc(var(--voice-card-halo) * 0.45), rgb(0 0 0 / 0.5) calc(var(--voice-card-halo) * 0.78), #000 var(--voice-card-halo), #000 calc(100% - var(--voice-card-halo)), rgb(0 0 0 / 0.5) calc(100% - var(--voice-card-halo) * 0.78), rgb(0 0 0 / 0.12) calc(100% - var(--voice-card-halo) * 0.45), transparent);
+  inset: calc(var(--voice-card-halo) * -1);
   -webkit-mask-image: var(--voice-card-halo-x), var(--voice-card-halo-y);
   -webkit-mask-composite: source-in;
   mask-image: var(--voice-card-halo-x), var(--voice-card-halo-y);
   mask-composite: intersect;
+}
+/* The small halo is an ellipse, not a box: a small element's box halo shows straight edges and
+   corners, and cuts a line or a word of the page off crisply where it ends. The ellipse takes the
+   shape of what it wraps (insets in percent of it), wide enough that the element's corners sit in
+   its opaque core, and fades to nothing over the outer half of its reach, so page text it
+   overlaps dims progressively. */
+.voice-overlay-halo {
+  --voice-overlay-halo-fade: #000 52%, rgb(0 0 0 / 0.82) 62%, rgb(0 0 0 / 0.5) 74%, rgb(0 0 0 / 0.2) 87%, transparent 100%;
+  --voice-overlay-halo-mask: radial-gradient(closest-side, var(--voice-overlay-halo-fade));
+  inset: calc(-68% - var(--voice-overlay-halo) / 3);
+  -webkit-mask-image: var(--voice-overlay-halo-mask);
+  mask-image: var(--voice-overlay-halo-mask);
+}
+/* The cancel target (a 56px ×, 8px gap, a 16px hint line) has one halo made of two ellipses
+   joined: one around the ×, set a little above it and wide, so the page's header beside and above
+   it (a logo, a word) dims as a whole; and a long, low one along the hint. Both are gone before
+   the avatar under the finger (8px below the hint), and inside the halo's box, so it has no edge. */
+.voice-overlay-halo.voice-cancel-halo {
+  --voice-overlay-halo-mask: radial-gradient(100px 64px at 50% 64px, var(--voice-overlay-halo-fade)),
+    radial-gradient(50% 22px at 50% calc(100% - 24px), var(--voice-overlay-halo-fade));
+  inset: -44px -72px -16px;
 }
 .bot-strip-scroller {
   margin: -14px 0 0 -12px;
