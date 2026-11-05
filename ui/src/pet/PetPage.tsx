@@ -767,11 +767,17 @@ const PetSurface: React.FC = () => {
   // open — and then for a short on-screen linger of a fresh reply. Unread
   // replies only light Vibey's badge. Every input is the current epoch's own
   // state, so nothing carries a bubble over from a previous session.
-  const needsYou = Boolean((!data.running && failure) || uncertain || queued || vaultRequests.length > 0);
+  // Vault requests already have the pet's needs-input pose and existing
+  // authorization entry points. They must not pin an unrelated, expired
+  // reply summary in the speech bubble.
+  const needsYou = Boolean((!data.running && failure) || uncertain || queued);
   // A history the user asked for but the shell has not confirmed yet holds the
   // bubble too: it neither folds nor spends the linger while it waits.
   const historyPending = detailOpen && !expanded;
-  const held = Boolean(data.running || optimisticTitle || needsYou || historyOpen || historyPending);
+  // Quick replies are an actionable part of this reply, so keep their entry
+  // point available. A Vault request belongs to the existing needs-input
+  // surface and does not keep the old reply bubble alive.
+  const held = Boolean(data.running || optimisticTitle || needsYou || quickReplies || historyOpen || historyPending);
   // A turn that ends while this epoch watches is what lingers: the moment the
   // server's turn state goes from running to done, derived during render from
   // the last value seen, so the render that ends the turn is the render that
@@ -790,8 +796,8 @@ const PetSurface: React.FC = () => {
   // counts, a promoted answer to an earlier input (#2815) included: it keeps
   // the badge but does not linger. A stopped turn ends with an empty result
   // and has none; a reply that lands after its turn end lingers then.
-  // `seen` holds the replies shown while the history was open (expansion
-  // confirmed by the shell); those do not linger again.
+  // `seen` holds replies shown in confirmed history, including before the
+  // server acknowledges mark-read. They share the ordinary linger budget.
   const inputId = exchange.user?.id ?? '';
   const [turnWatch, setTurnWatch] = useState(() => ({ epoch, running: data.serverRunning, endedFor: null as string | null, seen: NO_REPLIES }));
   let watched = turnWatch;
@@ -809,7 +815,10 @@ const PetSurface: React.FC = () => {
     watched = { ...watched, seen: new Set([...watched.seen, turnReply.id]) };
   }
   if (watched !== turnWatch) setTurnWatch(watched);
-  const lingerReply = turnReply && !watched.seen.has(turnReply.id) ? turnReply : null;
+  // Seen/read replies share the same 30s budget. Confirmed history starts
+  // the read budget and pauses it while open; it does not suppress expiry.
+  const lingerReply = turnReply;
+  const replyRead = Boolean(lingerReply && (lingerReply.read_at || watched.seen.has(lingerReply.id)));
   // The input or the dictation marquee holds the bottom of the speech slot.
   const inputShown = voice.busy || (composing && canChat && !uncertain);
   // The bubble is drawn: the speech slot shows it, alone or, while its history
@@ -846,7 +855,9 @@ const PetSurface: React.FC = () => {
   const { lingeringId, keepAtLeast } = useReplyLinger({
     scope: epoch,
     candidateId: lingerReply?.id ?? null,
-    counting: documentVisible && replyOnScreen && !pointerOverBubble && !historyPending && !historyOpen && !inputShown,
+    read: replyRead,
+    // Read replies spend wall time even while hidden; unread replies need exposure.
+    counting: (replyRead || documentVisible) && replyOnScreen && !pointerOverBubble && !historyPending && !historyOpen && !inputShown,
     keyboardHeld: () => {
       const node = bubbleRef.current;
       const active = document.activeElement;
@@ -871,8 +882,8 @@ const PetSurface: React.FC = () => {
   // its leave event may never come (the input replaced it under a still
   // pointer); a stale reading would pause the reply for good.
   if ((!bubbleDrawn || !showReplyBubble) && pointerOverBubble) setPointerOverBubble(false);
-  // Looking at the history is looking at the reply (`seen` above): once it
-  // closes, the reply does not linger again.
+  // Looking at history marks the reply seen. Its budget pauses while open
+  // and resumes when the reply is shown again.
   function openHistory() {
     if (turnReply) setReplyUnreadDotClearedFor(turnReply.id);
     setDetailOpen(true);
