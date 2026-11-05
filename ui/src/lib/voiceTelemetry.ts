@@ -11,7 +11,7 @@ export type VoiceTelemetryOutcome =
   | 'unavailable';
 
 export type VoiceTelemetryEvent = {
-  event: 'segment_transcription' | 'dictation_finalized' | 'dictation_inserted';
+  event: 'segment_transcription' | 'dictation_finalized' | 'dictation_inserted' | 'dictation_gated';
   outcome: VoiceTelemetryOutcome;
   dictationId?: string;
   path?: 'cloud' | 'local';
@@ -31,6 +31,9 @@ export type VoiceTelemetryEvent = {
   firstPreviewMs?: number;
   stopToFinalMs?: number;
   retry?: boolean;
+  /** The silence gate's evidence (`dictation_gated`): readings that reached it, and the loudest. */
+  voicedReadings?: number;
+  peakDbfs?: number;
 };
 
 type TelemetryFetch = (path: string, init?: RequestInit) => Promise<Response>;

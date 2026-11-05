@@ -13,7 +13,7 @@ import {
   type VoiceCaptureClaim,
   type VoiceRecordingPipelineOptions,
 } from './voiceRecording';
-import { createVoiceActivity } from './voiceActivity';
+import { createVoiceActivity, reportVoiceSilenceGate } from './voiceActivity';
 import { resolveVoiceContext, type VoiceContext, type VoiceContextSource } from './voiceContext';
 import {
   VoiceRealtimeSession,
@@ -101,6 +101,9 @@ export class ShowPageVoiceDictation {
   private captureError: unknown;
   /** How much of what the microphone heard was loud enough to be speech. */
   private readonly activity = createVoiceActivity();
+  /** A live preview carried words: the take held speech, whatever the levels say. */
+  private heardWords = false;
+  private startedAt: number | undefined;
   private stopped = false;
   private settled = false;
   private resolveDone!: (text: string) => void;
@@ -168,6 +171,7 @@ export class ShowPageVoiceDictation {
         context: this.context,
         signal: this.abortController.signal,
         onPreview: (preview) => {
+          if (`${preview.text}${preview.stash}`.trim()) this.heardWords = true;
           this.input.onPreview?.(`${preview.text}${preview.stash}`.trim());
           this.input.onPreviewParts?.(preview);
         },
@@ -227,6 +231,7 @@ export class ShowPageVoiceDictation {
       this.pipeline = pipeline;
       const active = await pipeline.start();
       if (!active) return;
+      this.startedAt = Date.now();
       if (!captureClaim.isCurrent()) {
         pipeline.finish();
       }
@@ -260,13 +265,19 @@ export class ShowPageVoiceDictation {
     return this.stopped
       && !this.abortController.signal.aborted
       && !capturedNothing(this.captureError)
+      && !this.isSilent()
       && this.segments.some((segment) => segment.blob !== null);
   }
 
   /** Whether the microphone heard enough sound for speech: an empty transcript of such a take is
    *  a recognition that failed, not a silence, and the take is kept. */
   voiced(): boolean {
-    return this.activity.voiced();
+    return this.heardWords || this.activity.voiced();
+  }
+
+  /** The silence gate: no live words, and no moment loud enough for speech. */
+  private isSilent(): boolean {
+    return !this.heardWords && this.activity.silent();
   }
 
   /** Sends the kept audio again through whichever path works now (cloud, then the local relay):
@@ -325,6 +336,13 @@ export class ShowPageVoiceDictation {
     }
     // A graph that never rendered a frame recorded silence: there is nothing to keep.
     if (capturedNothing(this.captureError)) throw this.captureError;
+    // Neither loud enough nor heard as words: no speech. Recognition is not asked, since on
+    // near-silence it can return its hotwords as text (voiceActivity, the silence gate).
+    if (this.isSilent()) {
+      reportVoiceSilenceGate(this.activity, this.startedAt === undefined ? undefined : Date.now() - this.startedAt);
+      this.realtime?.abort();
+      throw new VoiceTranscriptionError('empty');
+    }
     this.ensureFinalSegment();
     if (this.realtime && this.realtimeState !== 'failed' && this.captureError === undefined) {
       try {

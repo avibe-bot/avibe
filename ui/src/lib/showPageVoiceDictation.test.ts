@@ -423,5 +423,69 @@ describe('ShowPageVoiceDictation', () => {
     expect(dictation.voiced()).toBe(true);
     dictation.abort();
   });
+
+  describe('the silence gate', () => {
+    const gated = (realtimeFinish: () => Promise<{ text: string; cleanup: 'success' | 'fallback' }>) => {
+      const { stream } = fakeStream();
+      let pipelineOptions: VoiceRecordingPipelineOptions | null = null;
+      let realtimeOptions: VoiceRealtimeOptions | null = null;
+      const finalize = vi.fn();
+      const realtimeAbort = vi.fn();
+      const finish = vi.fn(() => {
+        pipelineOptions!.onSegment(new Blob(['quiet'], { type: 'audio/wav' }), { durationMs: 3_000, final: true });
+        pipelineOptions!.onStopped('finish', { pendingSegmentCount: 1 });
+      });
+      const dictation = new ShowPageVoiceDictation({ before: '', after: '' }, {
+        getUserMedia: async () => stream,
+        createRealtime: (options) => {
+          realtimeOptions = options;
+          return { start: async () => undefined, sendPcm: vi.fn(() => true), finish: vi.fn(realtimeFinish), abort: realtimeAbort };
+        },
+        createQueue: () => ({ enqueue: async () => undefined }),
+        createPipeline: (options) => {
+          pipelineOptions = options;
+          return { start: async () => true, abort: vi.fn(), finish };
+        },
+        finalize,
+      });
+      return { dictation, finalize, realtimeAbort, pipeline: () => pipelineOptions!, realtime: () => realtimeOptions! };
+    };
+    // A room with nobody speaking: about −50 dBFS for three seconds.
+    const quiet = (pipeline: VoiceRecordingPipelineOptions, readings = 94) => {
+      for (let reading = 0; reading < readings; reading += 1) pipeline.onLevel?.(0.0032);
+    };
+
+    it('does not ask recognition about a take that held no speech', async () => {
+      const take = gated(async () => ({ text: 'Vibe、Vibey、Avibe 语音输入。', cleanup: 'success' }));
+      await take.dictation.start();
+      quiet(take.pipeline());
+      take.dictation.finish();
+
+      await expect(take.dictation.done).rejects.toMatchObject({ code: 'empty' });
+      expect(take.finalize).not.toHaveBeenCalled();
+      expect(take.realtimeAbort).toHaveBeenCalled();
+      expect(take.dictation.voiced()).toBe(false);
+      expect(take.dictation.canRetry()).toBe(false);
+    });
+
+    it('trusts live words over the levels', async () => {
+      const take = gated(async () => ({ text: '轻声说的一句', cleanup: 'success' }));
+      await take.dictation.start();
+      quiet(take.pipeline(), 30);
+      take.realtime().onPreview?.({ text: '轻声', stash: '说的' });
+      quiet(take.pipeline(), 30);
+      take.dictation.finish();
+
+      await expect(take.dictation.done).resolves.toBe('轻声说的一句');
+    });
+
+    it('sends a take on as before when no loudness was reported', async () => {
+      const take = gated(async () => ({ text: 'heard', cleanup: 'success' }));
+      await take.dictation.start();
+      take.dictation.finish();
+
+      await expect(take.dictation.done).resolves.toBe('heard');
+    });
+  });
 });
 

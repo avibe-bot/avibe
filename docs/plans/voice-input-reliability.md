@@ -80,6 +80,16 @@ its text lands or the user discards it.
 - An empty transcript of a take whose microphone level showed at least 400 ms
   above about −40 dBFS is a recognition that failed: the take is kept and can be
   retried. An empty transcript of a quiet take is reported as no speech.
+- A take with no live words whose loudness never holds three readings (about
+  100 ms) at or above about −44 dBFS within a third of a second is silence: it
+  is not sent to recognition, which on near-silence can return its hotwords as
+  text, and is reported as no speech. The gate is deliberately loose: speech 33
+  dB under ordinary iPhone speech (−14 dBFS) still clears it, a room with nobody
+  speaking measured −49 to −86 dBFS, and live preview words always override it.
+  Without loudness readings nothing is gated. Each dropped take logs a
+  `dictation_gated` reliability event with only its duration, the readings that
+  reached the gate, and its loudest reading in dBFS, so a false block shows in
+  the logs.
 - A realtime socket that never becomes ready drops the cloud token it carried
   and mints a new one once, because a browser cannot tell a refused token from a
   failed network at the handshake.

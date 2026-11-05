@@ -40,7 +40,7 @@ import {
   type VoiceTranscriptionSegment,
   VoiceTranscriptionError,
 } from '../../lib/voiceTranscription';
-import { createVoiceActivity, type VoiceActivity } from '../../lib/voiceActivity';
+import { createVoiceActivity, reportVoiceSilenceGate, type VoiceActivity } from '../../lib/voiceActivity';
 import {
   emitVoiceTelemetry,
   type VoiceTelemetryOutcome,
@@ -1323,7 +1323,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             return;
           }
           session.backlogAtStop = (session.backlogAtStop ?? 0) + metadata.pendingSegmentCount;
-          if (!session.segments.length && session.captureError === undefined) {
+          // Nothing recorded, or a take that neither showed live words nor got as loud as a
+          // soft syllable (the silence gate, lib/voiceActivity): no speech, and recognition is
+          // not asked, since on near-silence it can return its hotwords as text.
+          const silent = session.activity.silent() && session.realtimeFirstPreviewAt === undefined;
+          if (silent) reportVoiceSilenceGate(session.activity, session.stoppedAt === undefined || session.startedAt === undefined ? undefined : session.stoppedAt - session.startedAt);
+          if ((!session.segments.length && session.captureError === undefined) || silent) {
+            session.abortController.abort();
             session.realtime?.abort();
             restoreRealtimePreview(session);
             reportVoiceFinalization(session, 'empty');

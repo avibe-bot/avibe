@@ -12827,6 +12827,9 @@ def asr_telemetry():
         "segment_transcription",
         "dictation_finalized",
         "dictation_inserted",
+        # A take the browser's silence gate kept away from recognition: only its length, how
+        # many of its loudness readings reached the gate, and its loudest reading.
+        "dictation_gated",
     }:
         return jsonify({"error": "invalid_event"}), 400
 
@@ -12894,6 +12897,7 @@ def asr_telemetry():
         "stopToInsertionMs",
         "firstPreviewMs",
         "stopToFinalMs",
+        "voicedReadings",
     }
     for key in integer_fields:
         if key not in payload:
@@ -12902,6 +12906,16 @@ def asr_telemetry():
         if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 10**12:
             return jsonify({"error": "invalid_field", "field": key}), 400
         sanitized[key] = value
+
+    if "peakDbfs" in payload:
+        peak_dbfs = payload["peakDbfs"]
+        if (
+            not isinstance(peak_dbfs, int)
+            or isinstance(peak_dbfs, bool)
+            or not -200 <= peak_dbfs <= 0
+        ):
+            return jsonify({"error": "invalid_field", "field": "peakDbfs"}), 400
+        sanitized["peakDbfs"] = peak_dbfs
 
     if "httpStatus" in payload:
         http_status = payload["httpStatus"]

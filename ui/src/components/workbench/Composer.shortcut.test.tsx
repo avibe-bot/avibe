@@ -498,6 +498,33 @@ describe('Composer voice shortcut', () => {
       await waitFor(() => expect(textbox.value).toBe('what was said before the call'));
     });
 
+    it('does not ask recognition about a dictation that held no speech', async () => {
+      relayAnswers(() => Response.json({ text: 'Vibe, Vibey, Avibe voice input.', cleanup: 'success' }));
+      renderComposer('silent-session');
+      await screen.findByRole('button', { name: en.chat.compose.voice });
+      const textbox = screen.getByRole('textbox') as HTMLTextAreaElement;
+      await act(async () => undefined);
+
+      fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
+      await screen.findByRole('button', { name: en.chat.compose.stopRecording });
+      act(() => {
+        for (let reading = 0; reading < 60; reading += 1) voiceMocks.onLevel?.(0.003);
+        voiceMocks.onSegment?.(new Blob(['quiet room']), { durationMs: 2_000, final: true });
+        voiceMocks.onStopped?.('finish', { pendingSegmentCount: 1 });
+      });
+
+      expect(await screen.findByText(en.chat.compose.voiceEmpty)).toBeTruthy();
+      expect(apiFetch.mock.calls.map(([path]) => path)).not.toContain('/api/asr/transcribe');
+      expect(textbox.value).toBe('');
+      // A false block would show in the reliability log: the gate's evidence, nothing said.
+      const gate = apiFetch.mock.calls
+        .filter(([path]) => path === '/api/asr/telemetry')
+        .map(([, init]) => JSON.parse(String((init as RequestInit).body)))
+        .find((event) => event.event === 'dictation_gated');
+      expect(gate).toMatchObject({ outcome: 'empty', voicedReadings: 0, peakDbfs: -50 });
+      expect(Object.keys(gate)).not.toContain('text');
+    });
+
     it('keeps a take that held speech when nothing was recognized, and transcribes it again on retry', async () => {
       let answer = () => Response.json({ error: 'transcription_empty' }, { status: 422 });
       relayAnswers(() => answer());
