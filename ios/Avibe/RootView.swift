@@ -99,7 +99,6 @@ private struct BrowserScreen: View {
                 }
             )
             .id(reloadID)
-            .ignoresSafeArea(.keyboard)
 
             if isLoading && !failed {
                 ProgressView("browser.loading")

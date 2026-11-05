@@ -3,34 +3,42 @@
 This directory contains the thin SwiftUI shell for the Avibe Workbench. The
 shell stores one configured HTTPS instance origin, loads it in a persistent
 `WKWebView`, and owns the platform boundaries that browser content cannot own:
-navigation, keyboard layout, and microphone permission.
+navigation handoff, downloads, native dialogs, and microphone permission.
 
 Phase 0a deliberately keeps the Web composer. The `avibeNative` bridge is added
 with its Web UI consumer in the next slice so neither side of that contract can
-ship alone.
+ship alone. Native keyboard coordination moves with that same shell marker;
+this slice leaves WebKit and the existing Web UI keyboard hook unchanged.
 
 ## Current contract
 
 - Bundle identifier: `bot.avibe.ios`
 - Display name: `Avibe`
 - Deployment target: iOS 17
-- Configured instance and authentication origins stay in top-level WebViews.
-  The pinned Protected Vault origin may also load in an app-created popup.
-  Direct primary-main-frame Vault navigation leaves the shell.
+- The shell follows WebKit browser behavior except for the closed deviation
+  list below. Origin-specific exceptions are not added for individual Web UI
+  features.
+- Configured instance and authentication origins stay in the primary WebView.
+  Other primary-main-frame HTTP(S) navigation opens in
+  `SFSafariViewController`.
 - Subframes use WebKit's browser behavior for HTTP(S), `about:blank`,
   `about:srcdoc`, `blob:`, and `data:` navigation. A subframe cannot launch
   `mailto:`, `tel:`, or another external application scheme.
-- New windows requested by an instance browsing context open instance,
-  authentication, and `about:blank` targets in closable child WebViews created
-  with WebKit's supplied configuration. External HTTP(S) targets use
-  `SFSafariViewController`, and `window.close()` closes the corresponding child
-  WebView.
+- Every ordinary `window.open` and `target="_blank"` target opens in a
+  closable child WebView created with WebKit's supplied configuration,
+  regardless of origin. This preserves `window.opener`; children apply the same
+  rule recursively, and `window.close()` closes the matching child subtree.
+  Each child shows its current host plus Done and Open in Safari controls; the
+  latter opens the current HTTP(S) URL in the Safari app.
+- Ordinary child-main-frame navigation stays in that child regardless of
+  origin. Google authorization remains intercepted, and external application
+  schemes use the system.
 - Microphone capture is granted only to the configured instance main frame.
-  Protected Vault, authentication, and arbitrary subframes receive neither
-  microphone access nor a native bridge.
+  Authentication, external, and arbitrary subframes receive neither microphone
+  access nor a native bridge.
 - Google authorization is intercepted with an email-code explanation.
-- Other top-level HTTP(S) origins open in `SFSafariViewController`; external
-  application schemes from a trusted top-level context use `UIApplication`.
+- External application schemes from top-level browsing contexts use
+  `UIApplication`.
 - JavaScript alerts, confirmations, and prompts use native alerts. Their
   completion handlers are completed exactly once when the user responds or
   when the owning page, WebView, or content process goes away.
@@ -39,16 +47,31 @@ ship alone.
   destination, and the system activity sheet. Other HTTP(S) download targets
   open in `SFSafariViewController`; all other download sources are rejected.
 - Cookies and website data use `WKWebsiteDataStore.default()` and survive app
-  launches.
-- The WebView is pinned to `keyboardLayoutGuide`, has automatic content insets
-  disabled, and does not expose an outer scrolling surface.
+  launches through WebKit's default persistent store.
+- Keyboard resizing, content insets, scrolling, link previews, media behavior,
+  data detection, and browser preferences use WebKit defaults. PR 2 will add
+  `isNativeShell()` before changing native keyboard layout or disabling the
+  Web UI's `useIosKeyboardInset` hook.
 - `AppIcon.appiconset` contains one opaque 1024-by-1024 icon. It is a temporary
   upscale of the existing 512-pixel iOS Home Screen Vibey artwork and should be
   replaced when a native 1024-pixel source is delivered.
 
-The production Supabase Auth origin is an explicit allowlist entry. If Avibe
-Cloud moves to another Supabase project, update that origin and its navigation
-test in the same change.
+The closed deviation list is:
+
+1. Primary-main-frame HTTP(S) navigation outside the configured instance and
+   authentication origins opens in `SFSafariViewController`.
+2. Google authorization endpoints are intercepted because Google rejects
+   embedded browsers.
+3. Top-level external application schemes use `UIApplication`; subframes
+   cancel them.
+4. Microphone capture is automatically granted only to an instance-origin
+   main frame.
+5. Admitted downloads use `WKDownload` and the system activity sheet.
+6. PR 2 adds the origin-checked native bridge only to an instance main frame.
+
+The production Supabase Auth origin is an explicit primary-navigation
+allowlist entry. If Avibe Cloud moves to another Supabase project, update that
+origin and its navigation test in the same change.
 
 ## WebKit API inventory
 
@@ -61,7 +84,7 @@ pinned to Xcode 26.6.
 
 | Method | Handling | Verification |
 | --- | --- | --- |
-| `decidePolicyFor navigationAction` | Implemented. Download actions use the download admission rule. New contexts continue to `WKUIDelegate`. Subframes follow WebKit except external application schemes, which are cancelled. Main frames use the instance/authentication/Vault/Google/external classification. | Pure tests cover top-level destinations, `about:srcdoc`, blank, blob, data, cross-origin HTTPS, external schemes, and trusted/untrusted download sources. |
+| `decidePolicyFor navigationAction` | Implemented. Download actions use the download admission rule. New contexts continue to `WKUIDelegate`. Subframes follow WebKit except external application schemes. The primary main frame externalizes HTTP(S) destinations outside instance/authentication origins; child main frames use WebKit except for Google and external application schemes. | Pure tests cover primary and child top-level destinations, `about:srcdoc`, blank, blob, data, cross-origin HTTPS, external schemes, and trusted/untrusted download sources. |
 | `decidePolicyFor navigationAction:preferences:` | Intentionally not implemented because WebKit calls this overload instead of the implemented action-policy method. `defaultWebpagePreferences` remains the single preference owner. | Simulator build verifies the selected overload. |
 | `decidePolicyFor navigationResponse` | Implemented. Attachment and non-displayable responses use the same download admission rule; displayable responses use WebKit. | Simulator XCTest and build cover response conversion to `WKDownload`. |
 | `didStartProvisionalNavigation` | Implemented. Cancels stale JavaScript dialogs and starts primary loading state. | Simulator build; exactly-once dialog cleanup is a manual interaction check. |
@@ -75,21 +98,21 @@ pinned to Xcode 26.6.
 | `authenticationChallenge:shouldAllowDeprecatedTLS` | Intentionally not implemented, so deprecated TLS is not admitted by shell policy. | API ledger; no deprecated-TLS fixture is maintained. |
 | `navigationAction:didBecome download` | Implemented and attaches the shared download context/delegate. | Simulator build and download policy tests. |
 | `navigationResponse:didBecome download` | Implemented and attaches the shared download context/delegate. | Simulator build and download policy tests. |
-| `shouldGoTo backForwardListItem` | Uses WebKit default. JavaScript and swipe back/forward navigation are not given a second shell policy. | `allowsBackForwardNavigationGestures` is enabled; interactive traversal is a manual check. |
+| `shouldGoTo backForwardListItem` | Uses WebKit default. JavaScript and back-forward-list navigation are not given a second shell policy. | API ledger; interactive traversal is a manual check. |
 | `willSubmitForm` (iOS 27) | Uses WebKit default continuation. The pinned Xcode 26.6 toolchain does not expose this method. | Revisit when CI moves to an iOS 27 SDK. |
 
 ### `WKUIDelegate`
 
 | Method | Handling | Verification |
 | --- | --- | --- |
-| `createWebViewWith` | Implemented. A trusted instance WebView creates closable child WebViews for instance, authentication, and `about:blank` targets with WebKit's exact configuration. External HTTP(S) uses Safari. Child-frame external application schemes are cancelled. | Pure new-window tests cover every destination class and untrusted containing main frames; simulator build covers recursive delegates. |
+| `createWebViewWith` | Implemented. Every ordinary new-window target creates a closable child WebView with WebKit's exact configuration, preserving `window.opener` across origins and recursive child creation. Google is intercepted and external application schemes use the system. | Pure new-window tests cover instance, authentication, Vault, external HTTP(S), `about:blank`, Google, and application schemes; simulator evidence covers the host toolbar and same-origin opener round trip. |
 | `webViewDidClose` | Implemented and closes the matching child subtree. | Simulator build; `window.close()` is an interactive check. |
 | `runJavaScriptAlertPanelWithMessage` | Implemented with an initiating-WebView `UIAlertController` and exactly-once completion. | Simulator build; interaction and removal cleanup are manual checks. |
 | `runJavaScriptConfirmPanelWithMessage` | Implemented with OK/Cancel and exactly-once completion. | Simulator build; existing Web UI `confirm()` callers are manual checks. |
 | `runJavaScriptTextInputPanelWithPrompt` | Implemented with a text field and exactly-once completion. | Simulator build; interaction is a manual check. |
 | `requestMediaCapturePermissionFor` | Implemented. Only microphone access from the configured instance main frame is granted; camera and every other origin/frame are denied. | Origin policy is compiled in simulator CI; microphone persistence is a device check. |
 | `requestDeviceOrientationAndMotionPermissionFor` | Uses WebKit/system prompting. The shell adds no broader permission grant. | Manual device check if a Web UI caller is added. |
-| `shouldPreviewElement`, `previewingViewControllerForElement`, `commitPreviewingViewController` | Deprecated APIs are intentionally not implemented; current WebKit link-preview behavior is retained. | `allowsLinkPreview` remains enabled; long-press preview is a manual check. |
+| `shouldPreviewElement`, `previewingViewControllerForElement`, `commitPreviewingViewController` | Deprecated APIs are intentionally not implemented; current WebKit link-preview behavior is retained. | WebKit default; long-press preview is a manual check. |
 | `contextMenuConfigurationForElement`, `contextMenuWillPresentForElement`, `contextMenuForElement:willCommitWithAnimator:`, `contextMenuDidEndForElement` | Use WebKit's default context menu and commit behavior. | Manual long-press check. |
 | `showLockdownModeFirstUseMessage` | Uses WebKit's default Lockdown Mode message. | System-owned behavior; no shell test. |
 | `willPresentEditMenuWithAnimator`, `willDismissEditMenuWithAnimator` | Use WebKit's default edit menu. This preserves selection, copy, paste, and the Web UI clipboard fallback. | Existing Web UI clipboard tests plus manual copy/paste check. |
@@ -112,18 +135,14 @@ pinned to Xcode 26.6.
 
 | Property | Shell value and reason | Verification |
 | --- | --- | --- |
-| `websiteDataStore` | Explicit `.default()` so cookies and sessions persist like Safari. | Simulator build. |
+| `websiteDataStore` | WebKit's default persistent data store. Cookies and sessions survive app launches without a shell override. | Simulator build. |
 | `userContentController` | The root uses WebKit's controller; children receive the exact configuration supplied by WebKit, preserving the same controller and `window.opener`. PR 1 installs no bridge. | New-window implementation build; PR 2 owns bridge tests. |
-| `allowsInlineMediaPlayback` | `true`, overriding the iPhone `WKWebView` default to match inline Safari media. | Simulator build; playback is a device check. |
-| `mediaTypesRequiringUserActionForPlayback` | `.all`, keeping audible/video playback user-initiated. | Simulator build; playback is a device check. |
-| `javaScriptCanOpenWindowsAutomatically` | `false`. User-initiated `window.open` works through `WKUIDelegate`; script-only popups remain blocked. | New-window policy tests and simulator build. |
-| `allowsBackForwardNavigationGestures` | `true`, restoring Safari-style swipe traversal where history exists. | Simulator build; gesture behavior is a manual check. |
-| `allowsLinkPreview` | `true`, retaining Safari/WebKit link previews. | Simulator build; long-press is a manual check. |
-| `dataDetectorTypes` | `.all`, restoring iPhone-style detection of links, phone numbers, addresses, and dates. Generated external schemes still pass navigation policy. | Simulator build; detected-link interaction is a manual check. |
-| `isElementFullscreenEnabled` | `false`. Fullscreen product behavior is deferred from Phase 0a. | Simulator build; the deferral is recorded below. |
-| `isInspectable` | `true` only in Debug builds; Release keeps WebKit's `false` default. | Debug simulator build setting and compilation. |
-| `upgradeKnownHostsToHTTPS` | `true`, retaining WebKit's HTTPS upgrade default. | Simulator build. |
-| `limitsNavigationsToAppBoundDomains` | `false`; App-Bound Domains would break configured local/cloud instances and authentication origins. | Simulator build and origin policy tests. |
+| `allowsInlineMediaPlayback`, `mediaTypesRequiringUserActionForPlayback` | WebKit defaults. Phase 0a adds no media playback policy. | API ledger; playback is a device check. |
+| `javaScriptCanOpenWindowsAutomatically` | WebKit default. WebKit decides whether a script may request a new context; accepted requests use the child-WebView rule. | New-window policy tests and simulator build. |
+| `allowsBackForwardNavigationGestures`, `allowsLinkPreview`, `dataDetectorTypes` | WebKit defaults. The shell adds no gesture, preview, or data-detector policy. | API ledger; interactions are manual checks. |
+| `isElementFullscreenEnabled` | WebKit default. Fullscreen product work remains deferred. | API ledger; the deferral is recorded below. |
+| `isInspectable` | WebKit default in both Debug and Release. Temporary simulator fixtures do not ship an inspectability override. | Debug and Release simulator builds. |
+| `upgradeKnownHostsToHTTPS`, `limitsNavigationsToAppBoundDomains` | WebKit defaults. Configured instance input independently requires HTTPS; the shell does not opt into App-Bound Domains. | Simulator build and origin policy tests. |
 | `defaultWebpagePreferences.preferredContentMode` | WebKit `.recommended`, which selects the iPhone-appropriate content mode. | API ledger and simulator build. |
 | `defaultWebpagePreferences.allowsContentJavaScript` | WebKit `true`; the Workbench requires JavaScript. | The simulator capability probe executes JavaScript. |
 | `defaultWebpagePreferences.lockdownModeEnabled` | System/WebKit default. The shell does not weaken Lockdown Mode. | System-owned behavior. |
@@ -132,13 +151,14 @@ pinned to Xcode 26.6.
 | `allowsAirPlayForMediaPlayback`, `allowsPictureInPictureMediaPlayback` | WebKit `true` defaults. | API ledger; media UI is a device check. |
 | `suppressesIncrementalRendering`, `ignoresViewportScaleLimits` | WebKit `false` defaults. Pages render incrementally and retain author viewport limits. | API ledger and simulator build. |
 | `allowsInlinePredictions`, `supportsAdaptiveImageGlyph`, `writingToolsBehavior` | WebKit defaults. The shell does not add text-system behavior beyond Safari/WebKit. | API ledger; keyboard behavior is a device check. |
+| `scrollView.isScrollEnabled`, `bounces`, `contentInsetAdjustmentBehavior`, and content offset | UIKit/WebKit defaults. PR 1 installs no keyboard observer, keyboard layout guide constraint, outer-scroll lock, inset override, or offset reset. | Source inspection plus Debug and Release simulator builds. |
 | iOS 27 webpage preferences (`securityRestrictionMode`, `alternateRequest`, `overrideReferrer`, `allowsJSHandleCreationInPageWorld`, `globalPrivacyControlEnabled`) | WebKit defaults. No Phase 0a requirement justifies changing requests, referrers, page-world handles, or privacy signals. | Documentation-only until the pinned toolchain exposes the full iOS 27 set. |
 
 ## Web platform outcomes
 
 | Capability | Outcome |
 | --- | --- |
-| New windows and `window.close()` | Supported by `createWebViewWith` and `webViewDidClose`; child WebViews recursively use the same delegates. |
+| New windows and `window.close()` | Supported by `createWebViewWith` and `webViewDidClose`; every ordinary target opens in a child WebView, children recursively use the same delegates, and the toolbar exposes host, Done, and Open in Safari. The Safari action is enabled only for HTTP(S) URLs. |
 | JavaScript `alert`, `confirm`, and `prompt` | Supported with native dialogs and exactly-once completion on every exit path. |
 | Instance HTTPS, matching `blob:`, and instance-frame `data:` downloads | Supported through the action/response policies and `WKDownloadDelegate`; non-displayable MIME and attachment responses use the same rule. |
 | File selection, camera, and photo saving | Uses WebKit's Safari-style picker and the system activity sheet. `NSCameraUsageDescription` and `NSPhotoLibraryAddUsageDescription` are localized. |
@@ -147,7 +167,7 @@ pinned to Xcode 26.6.
 | `navigator.share` | Available in the Xcode 26.6 simulator secure-context probe: `{"secureContext":true,"navigatorShare":"function"}`. Presentation remains system-owned. |
 | Clipboard | Uses WebKit edit/clipboard behavior. The Web UI feature-detects writes, falls back to `execCommand`, and reports blocked reads. No native clipboard bridge is added. |
 | Notification and Service Worker | Unsupported in this shell configuration. The Web UI already feature-detects both; native push is later work. |
-| Fullscreen | Deferred. `isElementFullscreenEnabled` remains false in Phase 0a. |
+| Fullscreen | Deferred. Phase 0a leaves `isElementFullscreenEnabled` at WebKit's default. |
 | iOS Home Screen Web App branches | Deferred to PR 2. `isNativeShell()` must decide whether to reuse in-app windows, loopback protection, and share-sheet media downloads currently gated by `iosStandalone`. |
 
 ## Local build

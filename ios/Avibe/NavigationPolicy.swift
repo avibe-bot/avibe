@@ -3,10 +3,9 @@ import Foundation
 enum NavigationDestination: Equatable {
     case instance
     case authentication
-    case protectedVault
     case googleAuthentication
     case external
-    case blocked
+    case browserInternal
 }
 
 enum NavigationContext: Equatable {
@@ -19,7 +18,6 @@ enum NavigationDisposition: Equatable {
     case googleAuthentication
     case external
     case externalApplication
-    case blocked
 }
 
 enum SubframeNavigationDisposition: Equatable {
@@ -29,10 +27,8 @@ enum SubframeNavigationDisposition: Equatable {
 
 enum NewWindowDisposition: Equatable {
     case childWebView
-    case externalBrowser
     case externalApplication
     case googleAuthentication
-    case blocked
 }
 
 enum DownloadDisposition: Equatable {
@@ -50,12 +46,6 @@ struct NavigationPolicy {
         result.insert(origin)
     }
 
-    private static let productionProtectedVaultOrigins: Set<WebOrigin> = [
-        WebOrigin.parseConfigured("https://sandbox.avibe.bot"),
-    ].compactMap { $0 }.reduce(into: []) { result, origin in
-        result.insert(origin)
-    }
-
     private static let googleAuthenticationOrigins: Set<WebOrigin> = [
         WebOrigin.parseConfigured("https://accounts.google.com"),
         WebOrigin.parseConfigured("https://accounts.googleusercontent.com"),
@@ -65,24 +55,21 @@ struct NavigationPolicy {
 
     let instanceOrigins: Set<WebOrigin>
     let authenticationOrigins: Set<WebOrigin>
-    let protectedVaultOrigins: Set<WebOrigin>
     let googleOrigins: Set<WebOrigin>
 
     init(
         instanceOrigins: Set<WebOrigin>,
         authenticationOrigins: Set<WebOrigin> = Self.productionAuthenticationOrigins,
-        protectedVaultOrigins: Set<WebOrigin> = Self.productionProtectedVaultOrigins,
         googleOrigins: Set<WebOrigin> = Self.googleAuthenticationOrigins
     ) {
         self.instanceOrigins = instanceOrigins
         self.authenticationOrigins = authenticationOrigins
-        self.protectedVaultOrigins = protectedVaultOrigins
         self.googleOrigins = googleOrigins
     }
 
     func destination(for url: URL) -> NavigationDestination {
         guard let origin = WebOrigin(url: url, requiresHTTPS: false) else {
-            return .blocked
+            return .browserInternal
         }
         if instanceOrigins.contains(origin) {
             return .instance
@@ -90,33 +77,25 @@ struct NavigationPolicy {
         if authenticationOrigins.contains(origin) {
             return .authentication
         }
-        if protectedVaultOrigins.contains(origin) {
-            return .protectedVault
-        }
         if googleOrigins.contains(origin) {
             return .googleAuthentication
         }
-        return origin.scheme == "http" || origin.scheme == "https" ? .external : .blocked
+        return origin.scheme == "http" || origin.scheme == "https"
+            ? .external
+            : .browserInternal
     }
 
     func disposition(for url: URL, context: NavigationContext) -> NavigationDisposition {
-        if context == .popupMainFrame && isPopupBootstrap(url) {
-            return .allow
-        }
         if isExternalApplicationURL(url) {
             return .externalApplication
         }
         switch destination(for: url) {
-        case .instance, .authentication:
-            return .allow
-        case .protectedVault:
-            return context == .primaryMainFrame ? .external : .allow
         case .googleAuthentication:
             return .googleAuthentication
         case .external:
-            return .external
-        case .blocked:
-            return .blocked
+            return context == .primaryMainFrame ? .external : .allow
+        case .instance, .authentication, .browserInternal:
+            return .allow
         }
     }
 
@@ -124,28 +103,15 @@ struct NavigationPolicy {
         isExternalApplicationURL(url) ? .cancel : .allow
     }
 
-    func newWindowDisposition(
-        for url: URL,
-        trustedMainFrame: Bool
-    ) -> NewWindowDisposition {
-        guard trustedMainFrame else {
-            return .blocked
-        }
-        if isPopupBootstrap(url) {
-            return .childWebView
-        }
+    func newWindowDisposition(for url: URL) -> NewWindowDisposition {
         if isExternalApplicationURL(url) {
             return .externalApplication
         }
         switch destination(for: url) {
-        case .instance, .authentication:
-            return .childWebView
         case .googleAuthentication:
             return .googleAuthentication
-        case .protectedVault, .external:
-            return .externalBrowser
-        case .blocked:
-            return .blocked
+        case .instance, .authentication, .external, .browserInternal:
+            return .childWebView
         }
     }
 
@@ -179,10 +145,6 @@ struct NavigationPolicy {
         default:
             return .blocked
         }
-    }
-
-    func isPopupBootstrap(_ url: URL) -> Bool {
-        url.absoluteString.caseInsensitiveCompare("about:blank") == .orderedSame
     }
 
     private func isExternalApplicationURL(_ url: URL) -> Bool {

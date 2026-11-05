@@ -46,20 +46,10 @@ final class WebViewController: UIViewController {
 
     private lazy var webView: WKWebView = {
         let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .default()
-        configuration.allowsInlineMediaPlayback = true
-        configuration.mediaTypesRequiringUserActionForPlayback = .all
-        configuration.dataDetectorTypes = .all
-        configuration.upgradeKnownHostsToHTTPS = true
-        configuration.limitsNavigationsToAppBoundDomains = false
-        configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
-        configuration.preferences.isElementFullscreenEnabled = false
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
         configure(webView)
         webView.translatesAutoresizingMaskIntoConstraints = false
-        webView.scrollView.isScrollEnabled = false
-        webView.scrollView.bounces = false
         return webView
     }()
 
@@ -91,21 +81,8 @@ final class WebViewController: UIViewController {
             webView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
             webView.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
             webView.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
-            webView.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
+            webView.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
         ])
-
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(resetOuterScrollPosition),
-            name: UIResponder.keyboardWillChangeFrameNotification,
-            object: nil
-        )
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(resetOuterScrollPosition),
-            name: UIResponder.keyboardWillHideNotification,
-            object: nil
-        )
 
         loadConfiguredInstance()
     }
@@ -120,7 +97,6 @@ final class WebViewController: UIViewController {
     }
 
     deinit {
-        NotificationCenter.default.removeObserver(self)
         cancelAllPendingDialogs(dismissAlerts: false)
         for record in popupRecords.values {
             record.webView.stopLoading()
@@ -132,20 +108,9 @@ final class WebViewController: UIViewController {
         }
     }
 
-    @objc
-    private func resetOuterScrollPosition() {
-        webView.scrollView.setContentOffset(.zero, animated: false)
-    }
-
     private func configure(_ webView: WKWebView) {
         webView.navigationDelegate = self
         webView.uiDelegate = self
-        webView.allowsBackForwardNavigationGestures = true
-        webView.allowsLinkPreview = true
-#if DEBUG
-        webView.isInspectable = true
-#endif
-        webView.scrollView.contentInsetAdjustmentBehavior = .never
     }
 
     private func loadConfiguredInstance() {
@@ -161,6 +126,10 @@ final class WebViewController: UIViewController {
     }
 
     private func openExternalApplication(_ url: URL) {
+        UIApplication.shared.open(url)
+    }
+
+    private func openInSafari(_ url: URL) {
         UIApplication.shared.open(url)
     }
 
@@ -206,13 +175,8 @@ final class WebViewController: UIViewController {
             presentExternalURL(url)
             return .cancel
         case .externalApplication:
-            if mainFrameIsTrusted(in: webView) {
-                finishPrimaryLoadingIfNeeded(webView)
-                openExternalApplication(url)
-            }
-            return .cancel
-        case .blocked:
             finishPrimaryLoadingIfNeeded(webView)
+            openExternalApplication(url)
             return .cancel
         }
     }
@@ -294,13 +258,17 @@ final class WebViewController: UIViewController {
         configure(childWebView)
 
         let popupController = PopupWebViewController(
-            webView: childWebView
-        ) { [weak self, weak childWebView] in
-            guard let self, let childWebView else {
-                return
+            webView: childWebView,
+            onClose: { [weak self, weak childWebView] in
+                guard let self, let childWebView else {
+                    return
+                }
+                self.closePopup(childWebView)
+            },
+            onOpenInSafari: { [weak self] url in
+                self?.openInSafari(url)
             }
-            self.closePopup(childWebView)
-        }
+        )
         let navigationController = UINavigationController(rootViewController: popupController)
         navigationController.modalPresentationStyle = .formSheet
         navigationController.isModalInPresentation = true
@@ -934,25 +902,13 @@ extension WebViewController: WKUIDelegate {
             return nil
         }
 
-        if !navigationAction.sourceFrame.isMainFrame,
-           navigationPolicy.subframeDisposition(for: url) == .cancel {
-            return nil
-        }
-
-        switch navigationPolicy.newWindowDisposition(
-            for: url,
-            trustedMainFrame: trustedMainFrame
-        ) {
+        switch navigationPolicy.newWindowDisposition(for: url) {
         case .childWebView:
             return presentChildWebView(using: configuration, from: webView)
-        case .externalBrowser:
-            presentExternalURL(url)
         case .externalApplication:
             openExternalApplication(url)
         case .googleAuthentication:
             presentGoogleSignInMessage()
-        case .blocked:
-            break
         }
         return nil
     }
@@ -1058,11 +1014,24 @@ extension WebViewController: WKDownloadDelegate {
 private final class PopupWebViewController: UIViewController {
     private let webView: WKWebView
     private let onClose: () -> Void
+    private let onOpenInSafari: (URL) -> Void
     private var didRequestClose = false
+    private var urlObservation: NSKeyValueObservation?
+    private lazy var openInSafariButton = UIBarButtonItem(
+        title: String(localized: "browser.open_in_safari"),
+        style: .plain,
+        target: self,
+        action: #selector(openInSafari)
+    )
 
-    init(webView: WKWebView, onClose: @escaping () -> Void) {
+    init(
+        webView: WKWebView,
+        onClose: @escaping () -> Void,
+        onOpenInSafari: @escaping (URL) -> Void
+    ) {
         self.webView = webView
         self.onClose = onClose
+        self.onOpenInSafari = onOpenInSafari
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -1090,11 +1059,42 @@ private final class PopupWebViewController: UIViewController {
             webView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
         navigationItem.leftBarButtonItem = UIBarButtonItem(
-            systemItem: .close,
-            primaryAction: UIAction { [weak self] _ in
-                self?.requestClose()
-            }
+            title: String(localized: "common.done"),
+            style: .done,
+            target: self,
+            action: #selector(close)
         )
+        navigationItem.rightBarButtonItem = openInSafariButton
+        urlObservation = webView.observe(\.url, options: [.initial, .new]) { [weak self] webView, _ in
+            self?.updateNavigationItem(for: webView.url)
+        }
+    }
+
+    @objc
+    private func close() {
+        requestClose()
+    }
+
+    @objc
+    private func openInSafari() {
+        guard
+            let url = webView.url,
+            let scheme = url.scheme?.lowercased(),
+            scheme == "http" || scheme == "https"
+        else {
+            return
+        }
+        onOpenInSafari(url)
+    }
+
+    private func updateNavigationItem(for url: URL?) {
+        let displayTitle = url?.host?.isEmpty == false
+            ? url?.host
+            : url?.absoluteString
+        navigationItem.title = displayTitle
+
+        let scheme = url?.scheme?.lowercased()
+        openInSafariButton.isEnabled = scheme == "http" || scheme == "https"
     }
 
     private func requestClose() {

@@ -36,17 +36,16 @@ final class NavigationPolicyTests: XCTestCase {
         XCTAssertEqual(policy.destination(for: URL(string: "https://evil.avibe.bot/login")!), .external)
     }
 
-    func testProtectedVaultOriginIsLimitedToPopupMainFrames() {
+    func testPrimaryExternalNavigationUsesSafariWhileChildNavigationStaysInWebView() {
         let policy = NavigationPolicy(instanceOrigins: [instance])
         let sandbox = URL(string: "https://sandbox.avibe.bot/v/pinned/index.html")!
+        let external = URL(string: "https://example.com/docs")!
 
-        XCTAssertEqual(policy.destination(for: sandbox), .protectedVault)
-        XCTAssertEqual(policy.disposition(for: sandbox, context: .popupMainFrame), .allow)
+        XCTAssertEqual(policy.destination(for: sandbox), .external)
         XCTAssertEqual(policy.disposition(for: sandbox, context: .primaryMainFrame), .external)
-        XCTAssertEqual(
-            policy.destination(for: URL(string: "https://evil.sandbox.avibe.bot/")!),
-            .external
-        )
+        XCTAssertEqual(policy.disposition(for: sandbox, context: .popupMainFrame), .allow)
+        XCTAssertEqual(policy.disposition(for: external, context: .primaryMainFrame), .external)
+        XCTAssertEqual(policy.disposition(for: external, context: .popupMainFrame), .allow)
     }
 
     func testSubframesUseWebKitDefaultsExceptForExternalApplicationSchemes() {
@@ -71,14 +70,21 @@ final class NavigationPolicyTests: XCTestCase {
         }
     }
 
-    func testPopupBootstrapAllowsOnlyAboutBlankInThePopupMainFrame() {
+    func testBrowserInternalURLsUseWebKitDefaultsAtTopLevel() {
         let policy = NavigationPolicy(instanceOrigins: [instance])
-        let aboutBlank = URL(string: "about:blank")!
 
-        XCTAssertTrue(policy.isPopupBootstrap(aboutBlank))
-        XCTAssertEqual(policy.disposition(for: aboutBlank, context: .popupMainFrame), .allow)
-        XCTAssertEqual(policy.disposition(for: aboutBlank, context: .primaryMainFrame), .blocked)
-        XCTAssertFalse(policy.isPopupBootstrap(URL(string: "about:srcdoc")!))
+        for url in [
+            URL(string: "about:blank")!,
+            URL(string: "about:srcdoc")!,
+            URL(string: "blob:https://alice-app.avibe.bot/export-id")!,
+            URL(string: "data:text/plain,hello")!,
+            URL(string: "javascript:void(0)")!,
+            URL(fileURLWithPath: "/tmp/example.txt"),
+        ] {
+            XCTAssertEqual(policy.destination(for: url), .browserInternal)
+            XCTAssertEqual(policy.disposition(for: url, context: .primaryMainFrame), .allow)
+            XCTAssertEqual(policy.disposition(for: url, context: .popupMainFrame), .allow)
+        }
     }
 
     func testGoogleAuthorizationOriginIsIntercepted() {
@@ -95,7 +101,7 @@ final class NavigationPolicyTests: XCTestCase {
 
         XCTAssertEqual(policy.destination(for: URL(string: "https://example.com/docs")!), .external)
         XCTAssertEqual(policy.destination(for: URL(string: "http://example.com/docs")!), .external)
-        XCTAssertEqual(policy.destination(for: URL(string: "avibe://settings")!), .blocked)
+        XCTAssertEqual(policy.destination(for: URL(string: "avibe://settings")!), .browserInternal)
         XCTAssertEqual(
             policy.disposition(
                 for: URL(string: "mailto:support@avibe.bot")!,
@@ -151,66 +157,39 @@ final class NavigationPolicyTests: XCTestCase {
         )
     }
 
-    func testTrustedNewWindowsUseChildWebViewsForInternalBrowsingContexts() {
+    func testNewWindowsUseChildWebViewsForEveryWebOrigin() {
         let policy = NavigationPolicy(instanceOrigins: [instance])
 
-        XCTAssertEqual(
-            policy.newWindowDisposition(
-                for: URL(string: "https://alice-app.avibe.bot/show/ses_1/")!,
-                trustedMainFrame: true
-            ),
-            .childWebView
-        )
-        XCTAssertEqual(
-            policy.newWindowDisposition(
-                for: URL(string: "https://github.com/login/oauth/authorize")!,
-                trustedMainFrame: true
-            ),
-            .childWebView
-        )
-        XCTAssertEqual(
-            policy.newWindowDisposition(
-                for: URL(string: "about:blank")!,
-                trustedMainFrame: true
-            ),
-            .childWebView
-        )
+        for url in [
+            URL(string: "https://alice-app.avibe.bot/show/ses_1/")!,
+            URL(string: "https://github.com/login/oauth/authorize")!,
+            URL(string: "https://sandbox.avibe.bot/v/pinned/index.html")!,
+            URL(string: "https://example.com/docs")!,
+        ] {
+            XCTAssertEqual(policy.newWindowDisposition(for: url), .childWebView)
+        }
     }
 
-    func testTrustedNewWindowsHandExternalDestinationsToSystemSurfaces() {
+    func testNewWindowsKeepBrowserInternalURLsAndRouteClosedListExceptions() {
         let policy = NavigationPolicy(instanceOrigins: [instance])
 
         XCTAssertEqual(
-            policy.newWindowDisposition(
-                for: URL(string: "https://example.com/docs")!,
-                trustedMainFrame: true
-            ),
-            .externalBrowser
+            policy.newWindowDisposition(for: URL(string: "about:blank")!),
+            .childWebView
         )
         XCTAssertEqual(
-            policy.newWindowDisposition(
-                for: URL(string: "https://sandbox.avibe.bot/v/pinned/index.html")!,
-                trustedMainFrame: true
-            ),
-            .externalBrowser
-        )
-        XCTAssertEqual(
-            policy.newWindowDisposition(
-                for: URL(string: "mailto:support@avibe.bot")!,
-                trustedMainFrame: true
-            ),
+            policy.newWindowDisposition(for: URL(string: "mailto:support@avibe.bot")!),
             .externalApplication
         )
         XCTAssertEqual(
             policy.newWindowDisposition(
-                for: URL(string: "https://accounts.google.com/o/oauth2/v2/auth")!,
-                trustedMainFrame: true
+                for: URL(string: "https://accounts.google.com/o/oauth2/v2/auth")!
             ),
             .googleAuthentication
         )
     }
 
-    func testNewWindowsAreBlockedWhenTheContainingMainFrameIsNotTheInstance() {
+    func testChildBrowsingContextsCanOpenFurtherChildBrowsingContexts() {
         let policy = NavigationPolicy(instanceOrigins: [instance])
 
         for url in [
@@ -218,12 +197,8 @@ final class NavigationPolicyTests: XCTestCase {
             URL(string: "https://github.com/login/oauth/authorize")!,
             URL(string: "about:blank")!,
             URL(string: "https://example.com/docs")!,
-            URL(string: "mailto:support@avibe.bot")!,
         ] {
-            XCTAssertEqual(
-                policy.newWindowDisposition(for: url, trustedMainFrame: false),
-                .blocked
-            )
+            XCTAssertEqual(policy.newWindowDisposition(for: url), .childWebView)
         }
     }
 
