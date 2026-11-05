@@ -564,9 +564,18 @@ Cursors are opaque strings of the form `<incarnation>.<seq>`.
     may read now and that is active;
   - `{session_id, op: 'remove', reason: 'archived'}` for an archived one.
   - A session the reader cannot read now never appears.
-  - Without a cursor, the endpoint pages the reader's current readable sessions
-    (snapshot mode) and returns `next_cursor` set to the log head at the start
-    of the snapshot.
+  - Without a cursor, the endpoint runs in snapshot mode. It pages the
+    reader's currently readable sessions by id, and its continuation is
+    separate from the log cursor:
+    - the first snapshot request pins `resume_cursor`, the log head when the
+      snapshot started, and every page repeats it;
+    - each page returns `snapshot_after`, the last session id it covered, and
+      `has_more`;
+    - the client passes `snapshot_after` until `has_more` is false. Only then
+      does it switch to incremental mode with `resume_cursor`.
+
+    Changes made while the snapshot was paging come back in incremental mode,
+    because the cursor was pinned before the first page.
 - **`GET /api/sessions/:id/changes?since=<seq>&limit=200`.** The current state
   of every message in that session changed after `since`, in `seq` order:
   - `op: 'upsert'` with the transcript payload, for a row now in this session
@@ -613,7 +622,8 @@ Network Information API does not report as metered, and under the Web Locks
 lease. When the API is missing, as on Safari, the reader's setting decides
 (decision D6). The steps are:
 
-1. Sync the session list (`/api/sync/sessions`) until `has_more` is false.
+1. Sync the session list (`/api/sync/sessions`): finish the snapshot pages if
+   one is in progress, then pull incremental pages until `has_more` is false.
 2. Rank sessions: the main Bot first, then pinned, then by `lastActiveAt`.
 3. For each session, fetch the tail, then walk `before_id` pages of 200 until
    `startReached`, the depth (decision D3), or the budget is reached.
@@ -917,6 +927,7 @@ IDs appear in test names and PR bodies. Role semantics reuse the existing
 | ID | Scenario |
 | --- | --- |
 | LSYNC-001 | A member without access to a restricted project receives no session or message change from it, in snapshot mode or with a cursor |
+| LSYNC-017 | A snapshot of more than one page enumerates every readable session through `snapshot_after`; a change made mid-snapshot arrives through the pinned `resume_cursor` |
 | LSYNC-002 | A session moved into a project the member cannot read is deleted from the member's device at the next visibility check |
 | LSYNC-003 | Narrowing project access (binding removed, group claim changed, project archived) removes the member's held sessions at the next check |
 | LSYNC-004 | Bot sessions never reach a non-owner's feed; a removed Bot's session leaves the owner's device |
