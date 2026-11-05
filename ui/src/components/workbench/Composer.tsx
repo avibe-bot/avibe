@@ -535,10 +535,17 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // that path we keep the live text in ``valueRef`` and track only whether the
   // box is non-empty (``hasText``) for the Send button; ``value`` still backs the
   // plain-textarea (home) path. See onChange below.
-  const [hasText, setHasText] = useState(false);
+  //
+  // The mention editor seeds itself with the saved draft when it mounts, and the
+  // change event for that seed may never come: Lexical's OnChangePlugin drops
+  // the editor's first committed update, which a browser commits together with
+  // the editor's initial state. So that text starts here, as the editor's does,
+  // and a restored draft can be sent (or queued) without being edited first.
+  const useMentions = Boolean(onSearchAgents && onSearchSessions);
+  const [hasText, setHasText] = useState(() => useMentions && Boolean(initialDraft?.trim()));
   const composerRootRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const valueRef = useRef('');
+  const valueRef = useRef(useMentions ? initialDraft ?? '' : '');
   // The saved draft the box was last seeded with, and whether the user has
   // edited it since it mounted. A later ``initialDraft`` (the saved draft read
   // again, e.g. when a chat painted from its snapshot gets its bootstrap)
@@ -606,7 +613,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // content; ``valueRef`` holds its live serialized marker text for the
   // send/draft path (``hasText`` gates the Send button) and ``referencesRef``
   // holds the resolved sidecar for the send payload.
-  const useMentions = Boolean(onSearchAgents && onSearchSessions);
   const mentionRef = useRef<MentionEditorHandle | null>(null);
   const referencesRef = useRef<MentionReference[]>([]);
 
