@@ -5,41 +5,51 @@
 // on the right, the Agent's on the left under its name, each with the time line the transcript keeps
 // under a bubble. `latest`: opened from the Inbox, the newest Agent reply is known (its row's
 // preview), so it is drawn as the real bubble at the bottom and only older messages are blocks.
-// ChatPage belongs to another lane; this is the look it is asked to build. The header, bubble,
-// composer, and picker are the shipped pieces, laid out the way ChatPage lays them.
-import { Archive, ArrowLeft, GitFork, Hash, Pin } from 'lucide-react';
+// ChatPage belongs to another lane; this is the look it is asked to build. The header is the shipped
+// `ChatHeaderBar`; the bubble, composer, and picker are the shipped pieces, laid out the way ChatPage
+// lays them. Bubble sizes are Tailwind's scale (a fraction of the column, capped on the spacing scale),
+// and the column and message widths are `--chat-column-w` and `--chat-message-max-w`.
+import { Archive, GitFork, Hash, Pin } from 'lucide-react';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 
-import { Button } from '@/components/ui/button';
 import { Markdown } from '@/components/ui/markdown';
 import { Skeleton, SkeletonShimmer } from '@/components/ui/skeleton';
 import { BackendAvatar, type BackendId } from '@/components/visual/BackendIcon';
 import { AgentRoutePicker } from '@/components/workbench/AgentRoutePicker';
+import { ChatHeaderBar } from '@/components/workbench/ChatPage';
 import { AGENT_BUBBLE } from '@/components/workbench/chatBubble';
 import { Composer } from '@/components/workbench/Composer';
 import { RoleAvatar } from '@/components/workbench/RoleAvatar';
-import { ChatSessionActionMenu, type SessionActionDescriptor } from '@/components/workbench/sessionActions';
-import { ShowPageLaunchControl } from '@/components/workbench/ShowPageLaunchControl';
+import type { SessionActionDescriptor } from '@/components/workbench/sessionActions';
 import type { VibeAgentBrief, WorkbenchSession } from '@/context/ApiContext';
 
 const noop = () => {};
+const inertAnnotation = {
+  state: null,
+  setIframe: noop,
+  handleIframeLoad: noop,
+  handleShortcutKeyDown: noop,
+  enable: noop,
+  disable: noop,
+  setMode: noop,
+};
 
 // Each bubble: which side, its width in the column, and its lines (the last one shorter, as text wraps).
 type BubbleShape = { side: 'user' | 'agent'; width: string; lines: string[] };
 const OPENING: BubbleShape[] = [
-  { side: 'user', width: 'w-[min(22rem,72%)]', lines: ['w-full', 'w-[58%]'] },
-  { side: 'agent', width: 'w-[min(44rem,88%)]', lines: ['w-full', 'w-[94%]', 'w-[86%]', 'w-[48%]'] },
-  { side: 'user', width: 'w-[min(14rem,52%)]', lines: ['w-[88%]'] },
-  { side: 'agent', width: 'w-[min(38rem,84%)]', lines: ['w-full', 'w-[90%]', 'w-[40%]'] },
+  { side: 'user', width: 'w-18/25 max-w-88', lines: ['w-full', 'w-29/50'] },
+  { side: 'agent', width: 'w-22/25 max-w-176', lines: ['w-full', 'w-47/50', 'w-43/50', 'w-12/25'] },
+  { side: 'user', width: 'w-13/25 max-w-56', lines: ['w-22/25'] },
+  { side: 'agent', width: 'w-21/25 max-w-152', lines: ['w-full', 'w-9/10', 'w-2/5'] },
 ];
 // Above a known latest reply: older messages, the newest of them last (a user message, which the
 // reply answers).
 const OLDER: BubbleShape[] = [
-  { side: 'agent', width: 'w-[min(40rem,86%)]', lines: ['w-full', 'w-[92%]', 'w-[54%]'] },
-  { side: 'user', width: 'w-[min(18rem,64%)]', lines: ['w-full', 'w-[40%]'] },
-  { side: 'agent', width: 'w-[min(36rem,82%)]', lines: ['w-full', 'w-[70%]'] },
-  { side: 'user', width: 'w-[min(20rem,70%)]', lines: ['w-[84%]'] },
+  { side: 'agent', width: 'w-43/50 max-w-160', lines: ['w-full', 'w-23/25', 'w-27/50'] },
+  { side: 'user', width: 'w-16/25 max-w-72', lines: ['w-full', 'w-2/5'] },
+  { side: 'agent', width: 'w-41/50 max-w-144', lines: ['w-full', 'w-7/10'] },
+  { side: 'user', width: 'w-7/10 max-w-80', lines: ['w-21/25'] },
 ];
 
 /** The Agent's avatar and name above its bubble, as the transcript draws them. */
@@ -57,7 +67,7 @@ function AgentHead({ backend, name }: { backend: string; name: string }) {
 function BubbleSkeleton({ side, width, lines }: BubbleShape) {
   return (
     <div className={clsx('flex w-full', side === 'user' ? 'justify-end' : 'justify-start')}>
-      <div className={clsx('flex max-w-[min(92%,860px)] flex-col gap-1', side === 'user' ? 'items-end' : 'items-start', width)}>
+      <div className={clsx('flex flex-col gap-1', side === 'user' ? 'items-end' : 'items-start', width)}>
         {side === 'agent' && (
           <div className="flex items-center gap-2 px-0.5">
             <Skeleton className="size-6 rounded-full" />
@@ -109,45 +119,33 @@ export function ChatSkeleton({
   /** The newest Agent reply, known from the Inbox row the chat was opened from. */
   latest?: string;
 }) {
-  const { t } = useTranslation();
   const actions = useHeaderActions();
   const backend = session.agent_backend ?? '';
   return (
     <div className="fixed inset-x-0 bottom-0 top-0 z-40 flex flex-col bg-background pt-[env(safe-area-inset-top)] md:relative md:inset-auto md:z-auto md:-mx-10 md:-my-8 md:h-[var(--app-vvh)] md:bg-transparent md:pt-0">
-      {/* The header bar (ChatHeaderBar): back, title, the session menu, and the Show Page control. */}
-      <div className="shrink-0 border-b border-border bg-surface/70 px-4 py-2.5 backdrop-blur md:px-8">
-        <div className="mx-auto flex w-full max-w-[1080px] items-center gap-3">
-          <Button type="button" variant="outline" size="icon" aria-label={t('chat.back')} className="size-7 shrink-0">
-            <ArrowLeft className="size-3.5" />
-          </Button>
-          <button
-            type="button"
-            className="-mx-1.5 inline-flex min-w-0 items-center truncate rounded-md px-1.5 py-0.5 text-left text-[16px] font-bold text-foreground"
-          >
-            <span className="truncate">{session.title || t('chat.untitled')}</span>
-          </button>
-          <ChatSessionActionMenu actions={actions} label={t('workbench.sessionActions')} viewport="wide" />
-          <div className="ml-auto flex items-center gap-1.5">
-            <ShowPageLaunchControl
-              sessionId={session.id}
-              title={session.title}
-              showPageMode={false}
-              busy={false}
-              onToggle={noop}
-              onPrepareLaunch={async () => true}
-            />
-            <ChatSessionActionMenu actions={actions} label={t('workbench.sessionActions')} viewport="compact" />
-          </div>
-        </div>
-      </div>
+      {/* The header: the shipped bar, with what the Session row already says. */}
+      <ChatHeaderBar
+        session={session}
+        agents={agents}
+        defaultAgentName={null}
+        onPatch={noop}
+        onBack={noop}
+        showPageMode={false}
+        showPageBusy={false}
+        onToggleShowPage={noop}
+        onPrepareShowPageLaunch={() => Promise.resolve(true)}
+        annotation={inertAnnotation}
+        readOnlyReason={null}
+        sessionActions={actions}
+      />
       <SkeletonShimmer className="min-h-0 flex-1 px-4 py-5 md:px-8">
-        <div className={clsx('mx-auto flex w-full max-w-[1080px] flex-col gap-3', latest && 'h-full justify-end')}>
+        <div className={clsx('mx-auto flex w-full max-w-(--chat-column-w) flex-col gap-3', latest && 'h-full justify-end')}>
           {(latest ? OLDER : OPENING).map((bubble, index) => (
             <BubbleSkeleton key={index} {...bubble} />
           ))}
           {latest && (
             <div className="flex w-full justify-start">
-              <div className="flex max-w-[min(92%,860px)] flex-col items-start gap-1">
+              <div className="flex max-w-(--chat-message-max-w) flex-col items-start gap-1">
                 <AgentHead backend={backend} name={session.agent_name ?? ''} />
                 <div className={AGENT_BUBBLE} style={{ fontSize: '14px' }}>
                   <Markdown content={latest} className="vr-markdown--inherit-size" />
@@ -170,7 +168,6 @@ export function ChatSkeleton({
               value={session}
               agents={agents}
               onChange={noop}
-              triggerClassName="max-w-[min(60vw,360px)]"
               align="end"
               speed={session.speed ?? null}
               onSpeedChange={noop}

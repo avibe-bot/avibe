@@ -47,6 +47,7 @@ function inboxValue(fixtures: WorkbenchFixtures): InboxState {
     badgeTotal: totalUnread,
     unreadSessions: counts.filter((n) => n > 0).length,
     nextCursor: null,
+    feedStatus: fixtures.inboxLoading ? 'pending' : fixtures.inboxFailed ? 'failed' : 'loaded',
     loading: fixtures.inboxLoading ?? false,
     loadingMore: false,
     activateFeed: () => () => {},

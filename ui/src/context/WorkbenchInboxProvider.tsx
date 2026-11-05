@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 
 import { useApi } from './ApiContext';
 import type { InboxSession } from './ApiContext';
-import { WorkbenchInboxContext, type InboxState } from './WorkbenchInboxContext';
+import { WorkbenchInboxContext, type InboxFeedStatus, type InboxState } from './WorkbenchInboxContext';
 import { useNotificationPreferences } from './NotificationPreferencesContext';
 import { useBotRoster } from './BotRosterContext';
 import { badgeTotal as loudUnread, unreadByCategory as splitUnread } from '../lib/notificationPreferences';
@@ -120,6 +120,19 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
+  // Whether this window's feed has had a live answer. Distinct from the snapshot
+  // (rows painted before any answer) and from ``loading`` (any read, including a
+  // refresh of a feed that is already known): a consumer with no rows tells
+  // "still reading" from "the read failed" by this, not by a read having ended.
+  // The ref is what a read checks when it settles, before React renders.
+  const [feedStatus, setFeedStatus] = useState<InboxFeedStatus>('pending');
+  const feedLoadedRef = useRef(false);
+  const feedReadStarted = useCallback(() => {
+    if (!feedLoadedRef.current) setFeedStatus('pending');
+  }, []);
+  const feedReadFailed = useCallback(() => {
+    if (!feedLoadedRef.current) setFeedStatus('failed');
+  }, []);
   // Mirror the cursor into a ref so ``loadMore`` can read the latest value
   // without re-creating its identity (and the context value) on every page.
   const cursorRef = useRef<string | null>(null);
@@ -146,6 +159,8 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   const wholeUnreadAppliedRef = useRef(false);
   const markFeedAuthoritative = useCallback(() => {
     feedCommittedRef.current = true;
+    feedLoadedRef.current = true;
+    setFeedStatus('loaded');
     seededIdsRef.current.clear();
     authoritativePrincipalRef.current ??= getLocalSnapshotPrincipal();
   }, []);
@@ -466,6 +481,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       return true;
     };
     setLoading(true);
+    feedReadStarted();
     try {
       const result = await api.listInbox({ platform: 'avibe', limit: PAGE_SIZE });
       const feedCurrent = readOwnershipRef.current.isCurrent(read, 'inbox-feed');
@@ -482,14 +498,17 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         applyWholeUnreadRead(read, result.unread_by_session ?? {});
       }
     } catch (err) {
-      if (!retryAfterInvalidation()) console.error('[inbox] refresh failed', err);
+      if (!retryAfterInvalidation()) {
+        console.error('[inbox] refresh failed', err);
+        feedReadFailed();
+      }
     } finally {
       if (refreshLoadingGenerationRef.current === loadingGeneration) setLoading(false);
       wholeUnreadReadsInFlightRef.current.delete(read);
       broadReadInFlightRef.current = false;
       flushFeedReadIntent();
     }
-  }, [acceptFeedRows, api, applyNextCursor, applyWholeUnreadRead, flushFeedReadIntent, markFeedAuthoritative, mergeTargetedSnapshots, queueRefreshIntent]);
+  }, [acceptFeedRows, api, applyNextCursor, applyWholeUnreadRead, feedReadFailed, feedReadStarted, flushFeedReadIntent, markFeedAuthoritative, mergeTargetedSnapshots, queueRefreshIntent]);
 
   const loadMore = useCallback(async function loadMore() {
     if (
@@ -641,6 +660,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     // afterward whether the read overlapped what we already had (cursor note).
     const loadedIds = new Set(inboxSessionsRef.current.map((s) => s.session_id));
     const limit = Math.min(Math.max(loadedIds.size, PAGE_SIZE), 100);
+    feedReadStarted();
     try {
       const result = await api.listInbox({
         platform: 'avibe',
@@ -700,13 +720,16 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         applyWholeUnreadRead(read, result.unread_by_session ?? {});
       }
     } catch (err) {
-      if (!retryAfterInvalidation()) console.error('[inbox] reconcile failed', err);
+      if (!retryAfterInvalidation()) {
+        console.error('[inbox] reconcile failed', err);
+        feedReadFailed();
+      }
     } finally {
       wholeUnreadReadsInFlightRef.current.delete(read);
       broadReadInFlightRef.current = false;
       flushFeedReadIntent();
     }
-  }, [acceptFeedRows, api, applyNextCursor, applyWholeUnreadRead, flushFeedReadIntent, markFeedAuthoritative, mergeTargetedSnapshots, queueReconcileIntent]);
+  }, [acceptFeedRows, api, applyNextCursor, applyWholeUnreadRead, feedReadFailed, feedReadStarted, flushFeedReadIntent, markFeedAuthoritative, mergeTargetedSnapshots, queueReconcileIntent]);
 
   // Counts-only read for routes that render no feed. Same endpoint and the same
   // pagination-independent unread map as refresh()/reconcile(), with the row
@@ -792,6 +815,9 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     // The snapshot was taken under the old scope: never paint it after this.
     seededIdsRef.current.clear();
     feedCommittedRef.current = true;
+    // The next reader's feed is unread: its consumers wait for its first answer.
+    feedLoadedRef.current = false;
+    setFeedStatus('pending');
     targetedSnapshotsRef.current.clear();
     targetedReadPendingRef.current.clear();
     setInboxSessions([]);
@@ -1245,6 +1271,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       unreadByCategory,
       badgeTotal,
       nextCursor,
+      feedStatus,
       loading,
       loadingMore,
       refresh,
@@ -1262,6 +1289,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       unreadByCategory,
       badgeTotal,
       nextCursor,
+      feedStatus,
       loading,
       loadingMore,
       refresh,

@@ -55,7 +55,7 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
     nextCursor,
     loading,
     loadingMore,
-    unreadLoaded,
+    feedStatus,
     refresh,
     loadMore,
     markRead,
@@ -279,12 +279,16 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
   // (unreadSessions is pagination-independent) — otherwise unread sessions on a
   // later page would be hidden behind a false "all caught up". On All it means
   // there are simply no more pages.
-  // Nothing known yet: no rows (from the server or the local snapshot) and no
-  // answer that said there are none. Skeleton cards, not an empty state that the
+  // Nothing known yet: no rows (from the server or the local snapshot) and the
+  // feed's first answer still owed. Skeleton cards, not an empty state that the
   // first page would then replace.
-  const showSkeleton = inboxSessions.length === 0 && (loading || !unreadLoaded);
+  const showSkeleton = inboxSessions.length === 0 && feedStatus === 'pending';
+  // The read failed with nothing to show: say so and offer a retry, not a skeleton
+  // that never ends or an "all caught up" that nobody said.
+  const showFailed = inboxSessions.length === 0 && feedStatus === 'failed';
   const cardsHandover = useSkeletonHandover(showSkeleton);
-  const showEmpty = !showSkeleton && visible.length === 0 && (filter === 'unread' ? unreadSessions === 0 : !hasMore);
+  const showEmpty =
+    !showSkeleton && !showFailed && visible.length === 0 && (filter === 'unread' ? unreadSessions === 0 : !hasMore);
 
   return (
     <div ref={listRef} className="mx-auto flex w-full max-w-4xl flex-col gap-6 pb-2 md:pt-2">
@@ -302,6 +306,8 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
             <span className="flex h-[1lh] items-center text-[13px]">
               <Skeleton className="h-2 w-28" />
             </span>
+          ) : showFailed ? (
+            <span className="h-[1lh] text-[13px]" />
           ) : (
             <p className="text-[13px] text-muted">
               {t('workbench.inbox.headerCount', { unread: unreadSessions, total: inboxSessions.length })}
@@ -418,6 +424,17 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
       {/* Empty state */}
       {showSkeleton ? (
         <InboxCardsSkeleton rows={3} sections={hasBots} />
+      ) : showFailed ? (
+        <div
+          role="alert"
+          className="flex flex-col items-center gap-3 rounded-2xl border border-dashed border-border bg-surface px-6 py-16 text-center"
+        >
+          <div className="text-[13px] text-muted">{t('workbench.inbox.loadError')}</div>
+          <Button type="button" variant="outline" size="sm" onClick={onRefresh} disabled={loading}>
+            <RefreshCw className={clsx('size-3.5', refreshing && 'animate-spin')} />
+            {t('common.retry')}
+          </Button>
+        </div>
       ) : showEmpty ? (
         <div className="flex flex-col items-center gap-3 rounded-2xl border border-dashed border-border bg-surface px-6 py-16 text-center">
           <CheckCheck className="size-8 text-mint-ink" />

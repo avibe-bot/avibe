@@ -76,6 +76,8 @@
    max-w-[1080px]; a design anchored to the composer reads it from here). */
 :root {
   --chat-column-w: 1080px;
+  /* A message's width in that column (ChatPage spells it max-w-[min(92%,860px)]). */
+  --chat-message-max-w: min(92%, 860px);
 }
 
 /* Motion (docs/plans/web-ui-motion.md §4; ui/design: motion/tokens/sheet). A

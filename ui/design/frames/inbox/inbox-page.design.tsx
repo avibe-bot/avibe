@@ -22,6 +22,8 @@ const allTab = { 'vibe-remote:inbox-filter': JSON.stringify({ tab: 'all', leftAt
 // The first page has not arrived and nothing is cached (ui/design: system/skeleton/*). Beside each, the
 // same page once it did, at the same size.
 const loading = workbenchFixtures({}, { inboxLoading: true });
+// The first read failed and nothing is cached: no skeleton that never ends, no false "all caught up".
+const failed = workbenchFixtures({}, { inboxFailed: true });
 
 const designFrames = frames([
   {
@@ -42,6 +44,26 @@ const designFrames = frames([
     status: 'shipped',
     route: '/inbox',
     fixtures: loading,
+    render: phoneShell('/inbox', page),
+  },
+  {
+    name: 'load-failed',
+    title: '收件箱 · 首次加载失败（可重试）',
+    width: 1192,
+    height: 700,
+    status: 'shipped',
+    route: '/inbox',
+    fixtures: failed,
+    render: consolePage(page),
+  },
+  {
+    name: 'phone-load-failed',
+    title: '收件箱 · 首次加载失败 · 手机',
+    width: 390,
+    height: 844,
+    status: 'shipped',
+    route: '/inbox',
+    fixtures: failed,
     render: phoneShell('/inbox', page),
   },
   {

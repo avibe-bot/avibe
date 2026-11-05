@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 
 import type { InboxSession } from '../../context/ApiContext';
+import type { InboxFeedStatus } from '../../context/WorkbenchInboxContext';
 import { BotsContext, type BotsState } from '../../context/BotsContext';
 import { writeInboxFilter } from '../../lib/inboxFilterMemory';
 import { HANDOVER_CLASS } from '../ui/skeleton-handover';
@@ -18,7 +19,7 @@ const feed = vi.hoisted(() => ({
   inboxSessions: [] as InboxSession[],
   unreadBySession: {} as Record<string, number>,
   loading: true,
-  unreadLoaded: false,
+  feedStatus: 'pending' as InboxFeedStatus,
   refresh: vi.fn(),
 }));
 vi.mock('../../context/WorkbenchInboxContext', () => ({
@@ -60,7 +61,7 @@ beforeEach(() => {
   feed.inboxSessions = [];
   feed.unreadBySession = {};
   feed.loading = true;
-  feed.unreadLoaded = false;
+  feed.feedStatus = 'pending';
   feed.refresh = vi.fn();
 });
 afterEach(cleanup);
@@ -90,18 +91,33 @@ describe('the Inbox first load', () => {
     feed.inboxSessions = [row('ses_a')];
     feed.unreadBySession = { ses_a: 1 };
     feed.loading = false;
-    feed.unreadLoaded = true;
+    feed.feedStatus = 'loaded';
     view.rerender(app());
     expect(cardsSkeleton()).toHaveLength(0);
     const list = document.querySelector('[data-inbox-session-id="ses_a"]')!.closest('section')!.parentElement!;
     expect(list.className).toContain(HANDOVER_CLASS);
   });
 
+  it('says a failed first read failed and offers a retry, not a skeleton or an all-clear', () => {
+    feed.loading = false;
+    feed.feedStatus = 'failed';
+    feed.refresh = vi.fn(() => Promise.resolve());
+    render(app());
+    expect(cardsSkeleton()).toHaveLength(0);
+    expect(screen.queryAllByRole('status')).toHaveLength(0);
+    expect(screen.queryByText('workbench.inbox.allClearTitle')).toBeNull();
+    expect(screen.queryByText('workbench.inbox.headerCount')).toBeNull();
+    const alert = screen.getByRole('alert');
+    expect(alert.textContent).toContain('workbench.inbox.loadError');
+    fireEvent.click(screen.getByRole('button', { name: 'common.retry' }));
+    expect(feed.refresh).toHaveBeenCalledTimes(1);
+  });
+
   it('spins the refresh icon only for the refresh the reader asked for', async () => {
     feed.inboxSessions = [row('ses_a')];
     feed.unreadBySession = { ses_a: 1 };
     feed.loading = false;
-    feed.unreadLoaded = true;
+    feed.feedStatus = 'loaded';
     let finish!: () => void;
     feed.refresh = vi.fn(() => new Promise<void>((resolve) => { finish = resolve; }));
     render(app());

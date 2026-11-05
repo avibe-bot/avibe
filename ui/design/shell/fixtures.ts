@@ -30,6 +30,8 @@ export interface WorkbenchFixtures {
   inboxSessions?: InboxSession[];
   /** The Inbox's first page has not arrived yet. */
   inboxLoading?: boolean;
+  /** The Inbox's first read failed and nothing is cached. */
+  inboxFailed?: boolean;
   unreadBySession?: Record<string, number>;
   /** Inbox states a frame stacks, by name (a moment drawn as the Inbox before and after a change);
    *  `InboxStateProvider` serves one in place of `inboxSessions` and `unreadBySession`. */

@@ -8,7 +8,7 @@ import { frames } from '../../frame';
 import { ChatSkeleton } from '../../kit/ChatSkeleton';
 import { demoAgents } from '../agents/fixtures';
 import { consolePage, phoneShell } from '../workbench/fixtures';
-import { agentSays, chatDesktop, chatFixtures, chatPhone, chatRoute, chatSession, userSays } from './fixtures';
+import { agentSays, chatDesktop, chatFixtures, chatPhone, chatRoute, chatSession, userSays, withChatProviders } from './fixtures';
 
 const messages = [
   userSays('帮我把 avibe 工作台适配移动端，交互可以和 PC 不一样，但功能要完备。', 62),
@@ -31,8 +31,9 @@ const history = [
 ];
 
 const session = chatSession();
-const opening = <ChatSkeleton session={session} agents={demoAgents} />;
-const fromInbox = <ChatSkeleton session={session} agents={demoAgents} latest={latest} />;
+// In the providers ChatPage's header reads in the app, as the loaded frames have them.
+const opening = withChatProviders(<ChatSkeleton session={session} agents={demoAgents} />);
+const fromInbox = withChatProviders(<ChatSkeleton session={session} agents={demoAgents} latest={latest} />);
 
 const designFrames = frames([
   {
