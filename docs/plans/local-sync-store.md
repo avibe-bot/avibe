@@ -359,6 +359,11 @@ row to the last row, with `startReached` and `atTail` as flags.
 
 - An empty page records coverage only when it reaches both ends: an empty tail
   with a null `next_before_id` means the session has no transcript rows.
+- A `before_id=X` page with a null `next_before_id`, empty or not, sets
+  `startReached` on the range it joins at `X`.
+- A tail range counts as verified from the moment its request started.
+  Event-stream rows that arrived while it was in flight, on a continuous
+  stream, extend it once it lands.
 - After a disconnect that let more than 50 rows arrive, the old tail range
   ends at its last row and has lost `atTail`. The new tail starts at its first
   row. The two share no row, so they stay separate, and the gap between them
