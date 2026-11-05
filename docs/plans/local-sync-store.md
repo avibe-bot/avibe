@@ -308,8 +308,8 @@ principal deletes every other principal's records"), made structural.
 | Store | Key | Value | Indexes |
 | --- | --- | --- | --- |
 | `meta` | `'reader'` | `{reader, schema, signOutGeneration, accessDigest?, createdAt}` | None |
-| `sessions` | `id` | `{id, row, scopeId, lastActiveAt, openedAt, cursor?, bytes}`; `row` is the `WorkbenchSession` as served | `lastActiveAt`, `scopeId`, `openedAt` |
-| `messages` | `id` | `{id, sessionId, orderAt, row, bytes}`; `orderAt` is the canonical `coalesce(delivered_at, created_at)` | `[sessionId, orderAt, id]` |
+| `sessions` | `id` | `{id, row, scopeId, lastActiveAt, openedAt, observedAt, cursor?, bytes}`; `row` is the `WorkbenchSession` as served | `lastActiveAt`, `scopeId`, `openedAt` |
+| `messages` | `id` | `{id, sessionId, orderAt, row, observedAt, bytes}`; `orderAt` is the canonical `coalesce(delivered_at, created_at)`; `observedAt` is defined in section 4.2 (P1) | `[sessionId, orderAt, id]` |
 | `ranges` | `[sessionId, fromAt, fromId]` | `{sessionId, from, to, startReached, atTail, verified, verifiedAt}` | `sessionId` |
 | `media` | `token` | `{token, sessionId, meta, thumb?, bytes}` | `sessionId` |
 
@@ -335,32 +335,63 @@ has shown.
 
 **Writing a server page** happens in one transaction. The page can be a
 bootstrap tail, a `tail=1` read, a `before_id` page, or an `around_*` window.
+Two invariants govern every page. Phase 2 change pulls follow them too.
 
-1. Delete the session's local rows inside the page's replacement interval
-   that the page does not contain. They were moved, retyped, or never existed.
-2. Upsert the page's rows.
-3. Record the page's coverage as a range, and merge it with any range whose
-   coverage it overlaps or abuts.
+**P1. Last observed wins, per row.**
 
-The two intervals differ on purpose.
+- Every stored row carries `observedAt`: when the request that returned it
+  started, or when the event that carried it arrived.
+- A write replaces or deletes a row only when its own `observedAt` is not older
+  than the row's.
+- So a page that was in flight never overwrites or deletes a row that the
+  stream, or a later-started page, delivered after the page's request started.
+  This holds for every page shape, for deletions and upserts alike. Today's
+  rule that a row streamed during the load survives (#3243), and a
+  quick-reply choice made in another tab while an older page loads, are both
+  cases of it.
 
-**Replacement interval** (step 1). This one comes from the request and its
-cursors, not only from the returned rows. Otherwise a stale endpoint row, or an
-empty page, would never be repaired.
+**P2. A page speaks only for what it proves.** A page is authoritative for its
+own rows. It reaches beyond them only as far as the server's answer proves:
 
-| Page | Lower bound | Upper bound |
+| Reach | Proven by | Otherwise |
 | --- | --- | --- |
-| Tail (bootstrap or `tail=1`) | First row's key; negative infinity when `next_before_id` is null, which includes an empty page | Positive infinity |
-| `before_id=X` | First row's key; negative infinity when `next_before_id` is null, which includes an empty page | `X`'s key, exclusive |
-| `around_*` window | First row's key; negative infinity when `next_before_id` is null | Last row's key; positive infinity when `next_after_id` is null |
+| Up to positive infinity | A tail page: it is the server's newest rows | Not applicable |
+| Down to negative infinity | A null `next_before_id`: nothing is older. An empty tail with a null `next_before_id` means the session has no transcript rows | The first row's key |
+| Up to a held range (a join) | The page contains that range's first row with the order key the client stored | The last row's key |
+| Up to positive infinity, `around_*` | A null `next_after_id` | The last row's key |
+| Anything, `around_*` | The response carries `anchor_id` | Nothing is applied: an anchor the server cannot resolve returns no rows and null cursors |
 
-**Coverage** (step 3). This one is bounded by the rows returned: from the first
-row to the last row, with `startReached` and `atTail` as flags.
+**Overlap proves joins.** Older history is fetched with one row of overlap.
 
-- An empty page records coverage only when it reaches both ends: an empty tail
-  with a null `next_before_id` means the session has no transcript rows.
-- A `before_id=X` page with a null `next_before_id`, empty or not, sets
-  `startReached` on the range it joins at `X`.
+- `before_id` names the range's second row, so the page should end with the
+  range's first row. A one-row range uses an `around_id` window on that row
+  instead.
+- If the server has since moved that row, the join is not proven:
+  `promote_suppressed_native_message` changes both its session and its
+  `delivered_at` (section 3.1). The row is then missing from the page or has
+  another key.
+- An unproven page stands alone between its own first and last rows, and the
+  gap stays visible to gap fetches.
+- The same holds when the server ignores an unresolvable `before_id` and
+  answers with the newest rows.
+
+**Steps.**
+
+1. Delete the session's local rows inside the page's proven reach that the
+   page does not contain and that are not newer than it (P1). They were moved,
+   retyped, or never existed.
+2. Upsert the page's rows, except rows the store holds with a newer
+   `observedAt`.
+3. Record coverage from the first to the last returned row, with
+   `startReached` and `atTail` as flags. Merge it with a range only where a
+   shared row with the same order key proves continuity.
+
+**Coverage details.**
+
+- Coverage never reaches past returned rows. An empty page records coverage
+  only when it reaches both ends.
+- A page with a null `next_before_id` that joins a range sets `startReached`
+  on it.
 - A tail range counts as verified from the moment its request started.
   Event-stream rows that arrived while it was in flight, on a continuous
   stream, extend it once it lands.
@@ -369,26 +400,8 @@ row to the last row, with `startReached` and `atTail` as flags.
   row. The two share no row, so they stay separate, and the gap between them
   stays visible to the offline marker and to gap fetches.
 
-Null cursors alone do not prove anything. A page is applied only when its
-request resolved:
-
-- An `around_*` window counts only when the response carries `anchor_id`. For
-  an anchor it cannot resolve (unknown, or moved to another session), the
-  server returns no rows, null cursors, and no `anchor_id`. That answer
-  changes nothing locally.
-- A `before_id` page is always anchored on a row the client holds. The server
-  resolves that id across sessions, and rows are never deleted (section 3.1).
-  If deletion is ever added, an unresolved `before_id`, which the server
-  ignores today, must stop being applied too.
-
-An interval that reaches positive infinity spares one kind of row: a row
-stored from the event stream after the request started. That row is newer than
-the answer, and it survives the replacement, as it does today (#3243).
-
-A page abuts a range when it was fetched with `before_id` equal to that range's
-first row, or when the two share a row id. This generalizes invariant 1 from
-"the live window replaces the cached window" to "every live page is
-authoritative for its interval".
+This generalizes invariant 1 from "the live window replaces the cached window"
+to "every live page is authoritative for what it proves".
 
 **Live rows.**
 
@@ -487,7 +500,15 @@ it needs a connection.
 
 ### 4.7 Tabs, workers, and the reader fence
 
-- Writes are idempotent upserts, and each page is applied in one transaction.
+- Writes are idempotent upserts under P1, and each page is applied in one
+  transaction.
+- A page or event is dropped if its request started before any of these:
+  - a wipe;
+  - a reader change;
+  - a forget of its session (archive, 403 or 404, visibility check).
+
+  These are the owner, epoch, and generation rules of today's `chatSnapshots.ts`,
+  carried over to every write.
 - Only one tab backfills at a time, using the Web Locks API
   (`navigator.locks.request(..., {ifAvailable: true})`; Safari 15.4+, Chrome 69+
   per MDN browser-compat-data).
@@ -865,6 +886,10 @@ Phases 1 and 2 already give the shell.
 
 - interval replacement in both directions;
 - an unresolved `around_*` anchor (no `anchor_id`) leaves the store untouched;
+- P1 for every page shape: a page in flight never overwrites or deletes a row
+  the stream delivered after its request started;
+- P2: an overlap row that moved, or an ignored `before_id`, leaves the page
+  unjoined and the gap visible;
 - range merge, abut, and gap;
 - replacement intervals: a tail reaches positive infinity, exhausted history
   reaches negative infinity, and an empty page still clears its interval;
