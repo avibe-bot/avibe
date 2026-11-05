@@ -502,7 +502,9 @@ Known data limitations for P1:
   samples `document.hasFocus()` and listens for window focus/blur. Textarea
   autofocus in an inactive WebView does not arm dismissal. Voice capture and
   finishing suspend this listener; a later text opening starts a fresh focus
-  observation. No shell event, command or capability is added.
+  observation. The same guard prevents an early blur from cancelling a pending
+  history expansion, whose refusal path would otherwise close an empty input.
+  No shell event, command or capability is added.
 
   Transient UI inventory (2026-11-05): the Mini composer has text, session
   reference chips, mic and send controls, but no upload/file picker. Microphone

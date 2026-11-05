@@ -608,13 +608,15 @@ const PetSurface: React.FC = () => {
 
   const clearVoiceError = voice.clearError;
   useEffect(() => { if (!composing) clearVoiceError(); }, [composing, clearVoiceError]);
+  const composerFocusedRef = useRef(false);
   useLayoutEffect(() => {
+    composerFocusedRef.current = false;
     if (!composing || !canChat || uncertain || voice.busy) return;
     // Autofocusing a textarea in an inactive WebView is not window activation.
     // Arm each visible text opening only once the document really has focus.
-    let focused = document.hasFocus();
-    const onFocus = () => { if (document.hasFocus()) focused = true; };
-    const onBlur = () => { if (focused) closeComposer(); };
+    composerFocusedRef.current = document.hasFocus();
+    const onFocus = () => { if (document.hasFocus()) composerFocusedRef.current = true; };
+    const onBlur = () => { if (composerFocusedRef.current) closeComposer(); };
     window.addEventListener('focus', onFocus);
     window.addEventListener('blur', onBlur);
     return () => {
@@ -678,6 +680,9 @@ const PetSurface: React.FC = () => {
   }, []);
   useEffect(() => {
     const onBlur = () => {
+      // Before activation, do not cancel a still-pending openHistory expansion:
+      // its refusal path would otherwise close the new, empty composer too.
+      if (inputRef.current && !composerFocusedRef.current) return;
       suppressDock(doubleOpenedRef.current && !composerBeforeClickRef.current && !draft.trim() && !voice.busy);
       if (!voice.busy) resetVoiceShortcut();
       // Opening Avibe must preserve the history/card list through its key change.

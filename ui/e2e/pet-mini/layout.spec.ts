@@ -1321,6 +1321,21 @@ for (const opening of ['pet click', 'keyboard', 'voice shortcut']) {
   });
 }
 
+test('a pre-focus blur while native expansion is pending preserves the opening composer', async ({ page }) => {
+  await page.goto('/e2e/pet-mini/fixture.html?activities=0&pendingExpansion');
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => false });
+  });
+  await page.locator('.pet-mini-avatar-button').click();
+  await expect(page.getByRole('textbox')).toBeVisible();
+  await page.evaluate(() => {
+    window.dispatchEvent(new Event('blur'));
+    window.petFixtureReleaseExpansion();
+  });
+  await expect(page.locator('.pet-mini-detail.is-open')).toHaveCount(1);
+  await expect(page.getByRole('textbox')).toBeVisible();
+});
+
 test('holding Vibey still starts input, not the history', async ({ page }) => {
   // Voice is unavailable here, so a hold opens the text input instead of
   // dictation: the same hold path, without a microphone in the test browser.

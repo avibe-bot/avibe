@@ -44,6 +44,7 @@ declare global {
     petFixtureMessage: (message: Record<string, unknown>) => void;
     petFixtureAddActivity: () => void;
     petFixtureFinishTurn: (result: Record<string, unknown>) => void;
+    petFixtureReleaseExpansion: () => void;
   }
 }
 window.petLayoutHitRegions = [];
@@ -56,6 +57,13 @@ window.petFixtureOpens = [];
 window.petFixtureStops = [];
 window.petFixtureMarkReads = [];
 petBridge.open = async (link) => { window.petFixtureOpens.push(link); };
+if (params.has('pendingExpansion')) {
+  const expanded = new Promise<void>((resolve) => { window.petFixtureReleaseExpansion = resolve; });
+  petBridge.setExpanded = async (next) => {
+    if (next) await expanded;
+    return { panel_side: 'left', panel_edge: 'bottom' };
+  };
+}
 // `edge=top`: the layout a shell chooses near the top of the display (§9.1).
 if (params.get('edge') === 'top') petPanel.applySnapshot({ revision: 1, layout: { panel_side: 'left', panel_edge: 'top' } });
 const hasMain = params.get('main') !== 'false';
