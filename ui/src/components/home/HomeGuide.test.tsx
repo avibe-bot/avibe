@@ -13,8 +13,13 @@ const api = vi.hoisted(() => ({
   getConfig: vi.fn(),
   remoteAccessStatus: vi.fn(),
 }));
-const push = vi.hoisted(() => ({ state: 'unavailable' as 'on' | 'off' | 'unavailable', enable: vi.fn() }));
+const push = vi.hoisted(() => ({
+  state: 'unavailable' as 'on' | 'off' | 'unavailable',
+  enable: vi.fn(),
+  read: vi.fn(),
+}));
 const computerUse = vi.hoisted(() => ({ read: vi.fn() }));
+const native = vi.hoisted(() => ({ shell: false }));
 const authorization = vi.hoisted(() => ({
   capabilities: { can_read_instance: true, can_use_show_pages: true, can_use_vault_secrets: true, can_use_skills: true },
 }));
@@ -26,9 +31,10 @@ vi.mock('../../context/ApiContext', async (importOriginal) => ({
 }));
 // This device's push: the browser's own state is the webPush module's business; here only what it reports.
 vi.mock('../../lib/webPush', () => ({
-  readWebPushDeviceState: async () => push.state,
+  readWebPushDeviceState: (...args: unknown[]) => push.read(...args),
   enableWebPush: (...args: unknown[]) => push.enable(...args),
 }));
+vi.mock('../../lib/native', () => ({ isNativeShell: () => native.shell }));
 vi.mock('../workbench/computerUseStatus', () => ({ readComputerUseStatus: () => computerUse.read() }));
 vi.mock('../../context/InstanceAuthorizationContext', () => ({ useInstanceAuthorization: () => authorization }));
 vi.mock('../../lib/useIsDesktop', () => ({ useIsDesktop: () => viewport.desktop }));
@@ -96,6 +102,8 @@ beforeEach(() => {
   viewport.desktop = true;
   push.state = 'unavailable';
   push.enable.mockReset();
+  push.read.mockReset().mockImplementation(async () => push.state);
+  native.shell = false;
   computerUse.read.mockResolvedValue({ kind: 'unsupported' });
   // The server's record: a save merges into it (the not-needed list only grows), a read returns it.
   let stored = prefs();
@@ -186,6 +194,16 @@ describe('Getting started reads what the UI already observes (ui/design: home/ho
     await waitFor(() => expect(items()).toEqual(['Turn on notifications']));
     expect(screen.queryByRole('button', { name: /more$/ })).toBeNull();
     expect(api.getConfig).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not read or offer browser Web Push in the native shell', async () => {
+    native.shell = true;
+    push.state = 'off';
+    renderGuide();
+
+    await waitFor(() => expect(api.getHomePreferences).toHaveBeenCalled());
+    expect(push.read).not.toHaveBeenCalled();
+    expect(items()).not.toContain('Turn on notifications');
   });
 });
 

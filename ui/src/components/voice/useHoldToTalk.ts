@@ -2,6 +2,12 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties, type Mous
 
 import { apiFetch } from '../../lib/apiFetch';
 import { primeCloudToken } from '../../lib/avibeFetch';
+import {
+  nativeHapticImpact,
+  nativeHapticNotify,
+  nativeHapticSelection,
+  nativeVoicePermission,
+} from '../../lib/native';
 import { IS_APPLE } from '../../lib/platform';
 import { ShowPageVoiceDictation } from '../../lib/showPageVoiceDictation';
 import type { VoiceContextSource } from '../../lib/voiceContext';
@@ -128,12 +134,32 @@ const vibrate = () => {
   }
 };
 
+const impactFeedback = (style: 'light' | 'medium') => {
+  void nativeHapticImpact(style).then((handled) => {
+    if (!handled) vibrate();
+  });
+};
+
+const cancelFeedback = () => {
+  void nativeHapticNotify('warning').then((handled) => {
+    if (!handled) vibrate();
+  });
+};
+
+const selectionFeedback = () => {
+  void nativeHapticSelection().then((handled) => {
+    if (!handled) vibrate();
+  });
+};
+
 // The user allowed the microphone when a hold asked, in this page. iOS Safari can go on
 // answering `prompt` to the permission query after that, which would turn every later press
 // into another ask that never records; the stream it handed over is the better answer.
 let allowedOnAsk = false;
 
 const permissionState = async (): Promise<PermissionState | null> => {
+  const native = await nativeVoicePermission();
+  if (native) return native;
   try {
     const status = await navigator.permissions?.query({ name: 'microphone' as PermissionName });
     return status?.state ?? null;
@@ -342,7 +368,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     setText('');
     setStash('');
     toPhase('listening');
-    vibrate();
+    impactFeedback('medium');
     setSeconds(0);
     clock.current = setInterval(() => {
       if (mounted.current) setSeconds(Math.floor((Date.now() - current.startedAt) / 1000));
@@ -422,6 +448,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       return;
     }
     if (how === 'cancel') {
+      cancelFeedback();
       current.dictation.abort();
       end('cancelled');
       return;
@@ -434,6 +461,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     }
     stopClock();
     armed.current = false;
+    impactFeedback('light');
     toPhase('settling');
     current.dictation.finish();
   }, [end, releasePointer, stopClock, toPhase]);
@@ -504,7 +532,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     const next = armed.current ? distance > uncancelPx : distance > cancelPx;
     if (next === armed.current) return;
     armed.current = next;
-    if (next) vibrate();
+    if (next) selectionFeedback();
     const heard = `${take.current.heard.text}${take.current.heard.stash}`.trim();
     toPhase(next ? 'armed' : heard ? 'recording' : 'listening');
   }, [end, toPhase]);

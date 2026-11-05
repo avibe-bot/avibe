@@ -22,7 +22,9 @@ vi.hoisted(() => {
 });
 
 const apiFetch = vi.hoisted(() => vi.fn());
+const nativeHapticImpact = vi.hoisted(() => vi.fn());
 vi.mock('../../lib/apiFetch', () => ({ apiFetch }));
+vi.mock('../../lib/native', () => ({ nativeHapticImpact }));
 vi.mock('../../lib/avibeFetch', async (importOriginal) => ({
   ...await importOriginal<typeof import('../../lib/avibeFetch')>(),
   primeCloudToken: vi.fn(),
@@ -112,6 +114,7 @@ beforeEach(() => {
     if (path === '/api/asr/status') return new Response(JSON.stringify({ available: true }), { status: 200 });
     return new Response('{}', { status: 200 });
   });
+  nativeHapticImpact.mockReset().mockResolvedValue(true);
 });
 
 afterEach(() => cleanup());
@@ -255,6 +258,7 @@ describe('sending what was said', () => {
     expect(references).toBeUndefined();
     expect(metadata).toEqual({ input: 'voice' });
     await waitFor(() => expect(screen.queryByText('scan.png')).toBeNull());
+    expect(nativeHapticImpact).not.toHaveBeenCalled();
   });
 
   it('reports a refused send to the hook, which keeps the words', async () => {
@@ -271,6 +275,27 @@ describe('sending what was said', () => {
     renderComposer({ onSend: () => { throw new Error('offline'); } });
     await asrAvailable();
     await expect(hookMock.options!.send('Hello', VOICE_MESSAGE_METADATA)).resolves.toBe(false);
+  });
+});
+
+describe('typed send haptics', () => {
+  it('fires after a typed send is accepted', async () => {
+    const onSend = vi.fn(() => true);
+    renderComposer({ onSend });
+    fireEvent.change(textarea(), { target: { value: 'Ship it' } });
+
+    fireEvent.click(screen.getByRole('button', { name: en.chat.compose.send }));
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith('Ship it', [], undefined));
+    expect(nativeHapticImpact).toHaveBeenCalledWith('light');
+  });
+
+  it('does not fire when the send is refused', async () => {
+    renderComposer({ onSend: () => false });
+    fireEvent.change(textarea(), { target: { value: 'Try again' } });
+
+    fireEvent.click(screen.getByRole('button', { name: en.chat.compose.send }));
+    await waitFor(() => expect(textarea().value).toBe('Try again'));
+    expect(nativeHapticImpact).not.toHaveBeenCalled();
   });
 });
 

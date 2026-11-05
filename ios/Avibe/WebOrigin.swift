@@ -51,6 +51,14 @@ struct WebOrigin: Hashable, Codable, Sendable {
         return components.url!
     }
 
+    var serialized: String {
+        var components = URLComponents()
+        components.scheme = scheme
+        components.host = host
+        components.port = port
+        return components.string!
+    }
+
     private static func normalizedPort(_ port: Int?, scheme: String) -> Int? {
         switch (scheme, port) {
         case ("https", 443), ("http", 80):

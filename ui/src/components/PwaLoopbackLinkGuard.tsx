@@ -3,8 +3,13 @@ import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 
 import { useToast } from '@/context/ToastContext';
+import { isNativeShell } from '@/lib/native';
 import { isIosDevice, isStandalonePwa } from '@/lib/platform';
-import { internalPwaLinkTarget, shouldBlockPwaLoopbackLink } from '@/lib/pwaNavigation';
+import {
+  internalPwaLinkTarget,
+  pwaNavigationPolicy,
+  shouldBlockPwaLoopbackLink,
+} from '@/lib/pwaNavigation';
 
 // iOS opens `_blank` links from a Home-Screen app in a secondary browser context
 // and may restore that context after evicting the PWA process. Keep every
@@ -17,9 +22,19 @@ export const PwaLoopbackLinkGuard = () => {
   const navigate = useNavigate();
 
   useEffect(() => {
-    if (!(isIosDevice() && isStandalonePwa())) return;
+    const nativeShell = isNativeShell();
+    const policy = pwaNavigationPolicy({
+      iosStandalone: isIosDevice() && isStandalonePwa(),
+      nativeShell,
+    });
+    if (!policy.guardLoopback) return;
 
-    const openSameOrigin = (href: string) => {
+    const handleNewContext = (href: string) => {
+      if (shouldBlockPwaLoopbackLink(href, window.location.href)) {
+        showToast(t('common.localLinkUnavailable'), 'warning');
+        return true;
+      }
+      if (!policy.rewriteSameOriginNewContext) return false;
       const target = internalPwaLinkTarget(href, window.location.href);
       if (!target) return false;
       if (target.navigation === 'spa') navigate(target.path);
@@ -36,10 +51,9 @@ export const PwaLoopbackLinkGuard = () => {
         anchor.target.toLowerCase() === '_blank' && !anchor.hasAttribute('download')
           ? internalPwaLinkTarget(anchor.href, window.location.href)
           : null;
-      if (internalTarget) {
+      if (internalTarget && handleNewContext(anchor.href)) {
         event.preventDefault();
         event.stopPropagation();
-        openSameOrigin(anchor.href);
         return;
       }
 
@@ -50,11 +64,11 @@ export const PwaLoopbackLinkGuard = () => {
       showToast(t('common.localLinkUnavailable'), 'warning');
     };
 
-    window.__AVIBE_PWA_NAVIGATE_SAME_ORIGIN__ = openSameOrigin;
+    window.__AVIBE_PWA_NAVIGATE_SAME_ORIGIN__ = handleNewContext;
     document.addEventListener('click', onClick, true);
     return () => {
       document.removeEventListener('click', onClick, true);
-      if (window.__AVIBE_PWA_NAVIGATE_SAME_ORIGIN__ === openSameOrigin) {
+      if (window.__AVIBE_PWA_NAVIGATE_SAME_ORIGIN__ === handleNewContext) {
         delete window.__AVIBE_PWA_NAVIGATE_SAME_ORIGIN__;
       }
     };

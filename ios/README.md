@@ -5,10 +5,10 @@ shell stores one configured HTTPS instance origin, loads it in a persistent
 `WKWebView`, and owns the platform boundaries that browser content cannot own:
 navigation handoff, downloads, native dialogs, and microphone permission.
 
-Phase 0a deliberately keeps the Web composer. The `avibeNative` bridge is added
-with its Web UI consumer in the next slice so neither side of that contract can
-ship alone. Native keyboard coordination moves with that same shell marker;
-this slice leaves WebKit and the existing Web UI keyboard hook unchanged.
+Phase 0a deliberately keeps the Web composer. The shell and Web UI ship the
+versioned `avibeNative` bridge together. The explicit
+`keyboardResizesViewport` capability coordinates keyboard ownership so native
+and Web resizing cannot both run.
 
 ## Current contract
 
@@ -48,13 +48,19 @@ this slice leaves WebKit and the existing Web UI keyboard hook unchanged.
   open in `SFSafariViewController`; all other download sources are rejected.
 - Cookies and website data use `WKWebsiteDataStore.default()` and survive app
   launches through WebKit's default persistent store.
-- Keyboard resizing, content insets, scrolling, link previews, media behavior,
-  data detection, and browser preferences use WebKit defaults. PR 2 will add
-  `isNativeShell()` before changing native keyboard layout or disabling the
-  Web UI's `useIosKeyboardInset` hook.
+- Primary and child WebViews are created through one factory and pinned to
+  `keyboardLayoutGuide`. Outer scrolling and automatic content insets use
+  WebKit defaults until an instance-origin Workbench document requests
+  `viewport.setOuterScrollLocked({locked: true})` for its own WebView. Each
+  WebView keeps independent lock state. The lock is released on AppShell
+  teardown, `pagehide`, or that WebView's next main-frame navigation commit,
+  and reacquired on `pageshow` when WebKit restores the Workbench from its page
+  cache. The Web UI disables `useIosKeyboardInset` only when the bridge
+  declares `keyboardResizesViewport: 1`.
 - `AppIcon.appiconset` contains one opaque 1024-by-1024 icon. It is a temporary
   upscale of the existing 512-pixel iOS Home Screen Vibey artwork and should be
   replaced when a native 1024-pixel source is delivered.
+- The user agent includes `AvibeiOS/<CFBundleShortVersionString>`.
 
 The closed deviation list is:
 
@@ -67,7 +73,52 @@ The closed deviation list is:
 4. Microphone capture is automatically granted only to an instance-origin
    main frame.
 5. Admitted downloads use `WKDownload` and the system activity sheet.
-6. PR 2 adds the origin-checked native bridge only to an instance main frame.
+6. The origin-checked native bridge is available only to an instance main
+   frame.
+
+## Native bridge v1
+
+`NativeBridge.swift` injects `window.avibeNative` at document start. The Web UI
+accesses it only through `ui/src/lib/native.ts`.
+
+```ts
+interface AvibeNative {
+  contract: 1;
+  platform: 'ios';
+  shellVersion: string;
+  capabilities: Record<string, number>;
+  call<T>(method: string, params?: object): Promise<T>;
+  on(event: string, handler: (payload: unknown) => void): () => void;
+}
+```
+
+Each message is accepted only when `frameInfo.isMainFrame` is true and
+`frameInfo.securityOrigin` exactly equals the configured instance origin.
+Instance-origin child main frames receive the bridge because WebKit supplies
+them the shared configuration; authentication and external child documents,
+all subframes, and direct transport calls from those frames remain rejected.
+The viewport method additionally requires the source to be a WebView managed
+by the shared factory. Both the primary WebView and an instance-origin child
+can therefore lock their own outer scroll state; an unknown WebView receives
+`forbidden`.
+
+The PR 2 method surface is fixed:
+
+| Capability | Method | Result |
+| --- | --- | --- |
+| `app: 1` | `app.info()` | `{contract, platform, shellVersion, capabilities}` |
+| `app: 1` | `app.openExternal({url})` | `{opened}` for `http`/`https` URLs with a host and `mailto`/`tel` URLs with a target |
+| `haptics: 1` | `haptics.impact({style})` | `null`; styles are `light`, `medium`, `heavy`, `soft`, or `rigid` |
+| `haptics: 1` | `haptics.notify({type})` | `null`; types are `success`, `warning`, or `error` |
+| `haptics: 1` | `haptics.selection()` | `null` |
+| `keyboardResizesViewport: 1` | No method | Declares that UIKit shrinks this WebView's viewport with `keyboardLayoutGuide` |
+| `voice: 1` | `voice.permission()` | `{state: "granted" | "denied" | "prompt"}` without prompting |
+| `viewport: 1` | `viewport.setOuterScrollLocked({locked})` | `null`; applies to the calling managed WebView |
+
+Replies use `{ok: true, result}` or
+`{ok: false, error: {code, message}}`. The compiled errors are
+`invalid_request`, `invalid_argument`, `forbidden`, and `unsupported`.
+Unknown methods never expand the native surface.
 
 The production Supabase Auth origin is an explicit primary-navigation
 allowlist entry. If Avibe Cloud moves to another Supabase project, update that
@@ -90,7 +141,7 @@ pinned to Xcode 26.6.
 | `didStartProvisionalNavigation` | Implemented. Cancels stale JavaScript dialogs and starts primary loading state. | Simulator build; exactly-once dialog cleanup is a manual interaction check. |
 | `didReceiveServerRedirectForProvisionalNavigation` | Uses WebKit default. Final action/response policy and download redirect admission remain authoritative. | Redirected downloads are rechecked by `WKDownloadDelegate`; normal redirects are a manual navigation check. |
 | `didFailProvisionalNavigation` | Implemented. Reports non-cancellation primary failures. | Simulator build; failure UI is a manual check. |
-| `didCommit` | Uses WebKit default; the shell has no commit-time behavior. | API ledger plus simulator build. |
+| `didCommit` | A commit in any managed WebView releases that WebView's document-requested outer-scroll lock before the new document runs. | Per-WebView outer-scroll state XCTest plus simulator build. |
 | `didFinish` | Implemented. Completes primary loading state. | Simulator build. |
 | `didFail` | Implemented. Reports non-cancellation committed failures. | Simulator build; failure UI is a manual check. |
 | `didReceive challenge` | Implemented with `performDefaultHandling`. The shell adds no certificate, HTTP-auth, or client-certificate override. | Standard HTTPS loads in simulator CI; custom challenge UI is unsupported. |
@@ -136,7 +187,8 @@ pinned to Xcode 26.6.
 | Property | Shell value and reason | Verification |
 | --- | --- | --- |
 | `websiteDataStore` | WebKit's default persistent data store. Cookies and sessions survive app launches without a shell override. | Simulator build. |
-| `userContentController` | The root uses WebKit's controller; children receive the exact configuration supplied by WebKit, preserving the same controller and `window.opener`. PR 1 installs no bridge. | New-window implementation build; PR 2 owns bridge tests. |
+| `userContentController` | The root installs the document-start `avibeNative` script and reply handler. Children receive WebKit's exact configuration through the shared WebView factory, preserving the same controller and `window.opener`; each message still repeats the main-frame and exact-origin check. | XCTest covers instance main-frame discovery and calls, child discovery, subframe absence, external-origin absence, and unknown-method rejection. |
+| `applicationNameForUserAgent` | `AvibeiOS/<CFBundleShortVersionString>`, appended by WebKit to its standard user agent. | Configuration XCTest and Debug/Release simulator builds. |
 | `allowsInlineMediaPlayback`, `mediaTypesRequiringUserActionForPlayback` | WebKit defaults. Phase 0a adds no media playback policy. | API ledger; playback is a device check. |
 | `javaScriptCanOpenWindowsAutomatically` | WebKit default. WebKit decides whether a script may request a new context; accepted requests use the child-WebView rule. | New-window policy tests and simulator build. |
 | `allowsBackForwardNavigationGestures`, `allowsLinkPreview`, `dataDetectorTypes` | WebKit defaults. The shell adds no gesture, preview, or data-detector policy. | API ledger; interactions are manual checks. |
@@ -151,7 +203,7 @@ pinned to Xcode 26.6.
 | `allowsAirPlayForMediaPlayback`, `allowsPictureInPictureMediaPlayback` | WebKit `true` defaults. | API ledger; media UI is a device check. |
 | `suppressesIncrementalRendering`, `ignoresViewportScaleLimits` | WebKit `false` defaults. Pages render incrementally and retain author viewport limits. | API ledger and simulator build. |
 | `allowsInlinePredictions`, `supportsAdaptiveImageGlyph`, `writingToolsBehavior` | WebKit defaults. The shell does not add text-system behavior beyond Safari/WebKit. | API ledger; keyboard behavior is a device check. |
-| `scrollView.isScrollEnabled`, `bounces`, `contentInsetAdjustmentBehavior`, and content offset | UIKit/WebKit defaults. PR 1 installs no keyboard observer, keyboard layout guide constraint, outer-scroll lock, inset override, or offset reset. | Source inspection plus Debug and Release simulator builds. |
+| Managed WebView `scrollView.isScrollEnabled`, `bounces`, `contentInsetAdjustmentBehavior`, and content offset | WebKit defaults apply independently in every primary or child WebView until its Workbench AppShell requests `viewport.setOuterScrollLocked({locked: true})`. While locked, the shell disables that WebView's outer scrolling and bounce, uses `.never` inset adjustment, and resets its outer offset on keyboard frame/hide notifications. Unmount, `pagehide`, or that WebView's commit restores the captured defaults; `pageshow` reacquires the lock after a WebKit page-cache restoration. Every managed WebView is pinned to `keyboardLayoutGuide.topAnchor`, and the Web UI disables `useIosKeyboardInset` only when `keyboardResizesViewport: 1` is present. | Factory/constraint and per-WebView state XCTest, focused Web lifecycle and capability tests, simulator primary/child keyboard fixtures, and Debug/Release builds. |
 | iOS 27 webpage preferences (`securityRestrictionMode`, `alternateRequest`, `overrideReferrer`, `allowsJSHandleCreationInPageWorld`, `globalPrivacyControlEnabled`) | WebKit defaults. No Phase 0a requirement justifies changing requests, referrers, page-world handles, or privacy signals. | Documentation-only until the pinned toolchain exposes the full iOS 27 set. |
 
 ## Web platform outcomes
@@ -166,9 +218,65 @@ pinned to Xcode 26.6.
 | Web content process termination | The primary WebView reloads the configured instance; a terminated child closes. |
 | `navigator.share` | Available in the Xcode 26.6 simulator secure-context probe: `{"secureContext":true,"navigatorShare":"function"}`. Presentation remains system-owned. |
 | Clipboard | Uses WebKit edit/clipboard behavior. The Web UI feature-detects writes, falls back to `execCommand`, and reports blocked reads. No native clipboard bridge is added. |
-| Notification and Service Worker | Unsupported in this shell configuration. The Web UI already feature-detects both; native push is later work. |
+| Notification and Service Worker | Unsupported in this shell configuration. Browser Web Push controls and readiness prompts are hidden when `isNativeShell()` is true; native push is Phase 1. |
 | Fullscreen | Deferred. Phase 0a leaves `isElementFullscreenEnabled` at WebKit's default. |
-| iOS Home Screen Web App branches | Deferred to PR 2. `isNativeShell()` must decide whether to reuse in-app windows, loopback protection, and share-sheet media downloads currently gated by `iosStandalone`. |
+| Installation guidance | `InstallHint` and Show Page "Add to Home Screen" guidance are hidden in the native shell. |
+| PWA app launch suppression | Not reused. New-context launches use the shell's recursive child WebViews. |
+| PWA loopback guard | Retained for `localhost`, `127.0.0.0/8`, and `::1`; same-origin `_blank` rewriting is disabled so WebKit creates a child context. |
+| PWA media download sharing | Not reused. Download anchors reach `WKDownload` and the native activity sheet. |
+| PWA remote-auth deferral | Not reused. Automatic login follows the existing WebView authentication-origin flow. |
+| Haptics | Hold-to-talk start/release/cancel and accepted typed/attachment sends use bridge haptics. Browser contexts retain `navigator.vibrate` as the hold fallback. |
+| Voice permission probe | Hold-to-talk reads `voice.permission()` first in the native shell, then retains the browser Permissions API fallback elsewhere. |
+| Workbench outer-scroll lock | An AppShell in either primary or child requests the `viewport: 1` lock for its own WebView while mounted and releases it on unmount or `pagehide`. Authentication pages, Show Pages, shared pages, previews, errors, and other ordinary documents keep WebKit scrolling by default. |
+
+## Primary and child behavior inventory
+
+The tables below cover primary and child WebViews while they load the configured
+instance origin. Authentication and external child documents do not receive the
+bridge and do not run these Web UI branches.
+
+### Native behavior
+
+| Area | Primary instance WebView | Child instance WebView | Reason for any difference |
+| --- | --- | --- | --- |
+| Construction and configuration | Shared `WebViewFactory`; native bridge, message handler, delegates, safe-area constraints, keyboard layout, and scroll-lock state are installed together. | Same factory using WebKit's supplied configuration, which preserves `window.opener` and the shared user content controller. | None. |
+| Keyboard viewport | Bottom is pinned to `keyboardLayoutGuide.topAnchor`. | Same. | None. |
+| Outer-scroll lock | The instance main frame can lock only its own WebView; commit resets only that state. | Same, with independent state. | None. |
+| Navigation policy | Instance/authentication stay in the primary; other top-level HTTP(S) destinations open in `SFSafariViewController`. | Main-frame HTTP(S) navigation stays in the child. | This is the shell's closed primary-navigation deviation; a child is already the requested browsing context. |
+| Subframes and external application schemes | WebKit handles ordinary subframes; external application schemes are cancelled. Trusted top-level application schemes use the system. | Same. | None. |
+| Dialogs, downloads, microphone, and nested windows | Shared delegates and origin checks. | Same, including recursive child creation. | None. |
+| Window chrome and close | The app's root loading/error UI owns the configured instance. | Host title, Done, and Open in Safari own the child browsing-context lifecycle; `window.close()` closes its subtree. | A child needs an explicit close affordance and external-browser escape. |
+| Content-process termination | Closes all children and reloads the configured instance URL. | Closes the terminated child subtree. | Reloading a popup after process loss would invent navigation state; the primary has one configured recovery URL. |
+| Loading callbacks | Drives the root loading/error state. | Does not change root loading/error state. | Child loading is contained by its own presented window. |
+
+### Web UI decisions
+
+| Web decision | Signal | Primary instance WebView | Child instance WebView |
+| --- | --- | --- | --- |
+| `useIosKeyboardInset` | `keyboardResizesViewport: 1` | Browser correction disabled; UIKit owns viewport resizing. | Same. An older shell without the capability keeps the correction in both. |
+| Workbench outer-scroll lock | `viewport: 1` | Mounted AppShell locks its own WebView. | Same. |
+| Installation prompts | `isNativeShell()` | `InstallHint` and Show Page Add to Home Screen are hidden. | Same. |
+| Web Push surfaces | `isNativeShell()` | Setup gap, Settings toggle, and notification menu omit browser push. | Same. |
+| Haptics | `haptics: 1` | Native haptics for hold-to-talk and accepted sends. | Same. |
+| Voice permission probe | `voice: 1` | Reads native permission state before browser fallback. | Same. |
+| `appLaunch` new-context suppression | `isNativeShell()` | iOS standalone suppression is disabled; `window.open` reaches native child creation. | Same for nested windows. |
+| `PwaLoopbackLinkGuard` | `isNativeShell()` | Loopback blocking remains; same-origin `_blank` rewriting is disabled. | Same. |
+| `downloadMedia` | `isNativeShell()` | PWA Web Share interception is disabled; admitted anchors reach `WKDownload`. | Same. |
+| `remoteAuth` | `isNativeShell()` | Automatic login is not deferred for a PWA user gesture. | Same. |
+| `ShowPageShareControl` | `isNativeShell()` | System Web Share remains feature-detected; Add to Home Screen is hidden. | Same. |
+| PWA route-memory restoration in `App.tsx` | `isNativeShell()` | The iOS standalone-only restoration path is disabled. | Same. |
+
+## Phase 0a PR 2 verification
+
+- Xcode 27.2 simulator: Debug and Release no-sign builds, XCTest bridge policy,
+  runtime discovery, and outer-scroll state, plus hermetic authentication-scroll
+  and Workbench keyboard fixtures.
+- CI remains authoritative on Xcode 26.6 and runs `lint` plus `ios-shell`.
+- Web UI: focused Vitest coverage for the bridge adapter, haptics, Workbench
+  outer-scroll lifecycle, keyboard ownership, hidden Web Push/installation
+  surfaces, and all five PWA decisions; production TypeScript/Vite build.
+- Simulator screenshots and the machine-readable fixture report are stored
+  outside the repository and linked from the PR description.
 
 ## Local build
 

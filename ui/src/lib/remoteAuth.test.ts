@@ -34,6 +34,14 @@ describe('remote auth navigation', () => {
     expect(shouldDeferRemoteAuthRedirect({ ios: true, standalone: true })).toBe(true);
   });
 
+  it('keeps automatic login in the native shell', () => {
+    expect(shouldDeferRemoteAuthRedirect({
+      ios: true,
+      standalone: true,
+      nativeShell: true,
+    })).toBe(false);
+  });
+
   it.each([
     { ios: true, standalone: false },
     { ios: false, standalone: true },

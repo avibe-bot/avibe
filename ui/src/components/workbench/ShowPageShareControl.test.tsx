@@ -15,6 +15,19 @@ const permissionsApi = vi.hoisted(() => ({
   getResourceAccess: vi.fn(),
   updateResourceAccess: vi.fn(),
 }));
+const native = vi.hoisted(() => ({ shell: false }));
+const platform = vi.hoisted(() => ({
+  ios: false,
+  safari: false,
+  standalone: false,
+}));
+
+vi.mock('../../lib/native', () => ({ isNativeShell: () => native.shell }));
+vi.mock('../../lib/platform', () => ({
+  isIosDevice: () => platform.ios,
+  isRealMobileSafari: () => platform.safari,
+  isStandalonePwa: () => platform.standalone,
+}));
 
 vi.mock('@/features/permissions/api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/features/permissions/api')>()),
@@ -71,6 +84,10 @@ beforeEach(() => {
   permissionsApi.updateResourceAccess.mockReset();
   dock.isDocked.mockReturnValue(false);
   dock.isPinned.mockReturnValue(false);
+  native.shell = false;
+  platform.ios = false;
+  platform.safari = false;
+  platform.standalone = false;
 });
 
 afterEach(() => {
@@ -131,6 +148,45 @@ describe('ShowPageShareControl trigger presentation', () => {
     expect(html).toContain('text-muted');
     expect(html).toContain('hover:text-foreground');
     expect(html).not.toContain('size-7');
+  });
+});
+
+describe('ShowPageShareControl installation guidance', () => {
+  const payload = {
+    session_id: 'ses-1',
+    visibility: 'private',
+    active_url: '/show/ses-1/',
+    share_id: null,
+    url_available: true,
+    offline: false,
+    title: null,
+  };
+
+  const renderOpenControl = async () => {
+    api.getShowPage.mockResolvedValue(payload);
+    api.getShowPageAccess.mockResolvedValue(showPageAccess());
+    render(
+      <I18nextProvider i18n={i18n}>
+        <ShowPageShareControl
+          sessionId="ses-1"
+          initialAccess={showPageAccess()}
+        />
+      </I18nextProvider>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }));
+    await screen.findByDisplayValue(/\/show\/ses-1\//);
+  };
+
+  it('hides Add to Home Screen guidance in the native shell', async () => {
+    platform.ios = true;
+    platform.safari = true;
+    await renderOpenControl();
+    expect(screen.getByText('Add to Home Screen')).toBeTruthy();
+    cleanup();
+
+    native.shell = true;
+    await renderOpenControl();
+    expect(screen.queryByText('Add to Home Screen')).toBeNull();
   });
 });
 
