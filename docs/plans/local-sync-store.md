@@ -347,6 +347,18 @@ page, would never be repaired.
 | `before_id=X` | First row's key; negative infinity when `next_before_id` is null, which includes an empty page | `X`'s key, exclusive |
 | `around_*` window | First row's key; negative infinity when `next_before_id` is null | Last row's key; positive infinity when `next_after_id` is null |
 
+Null cursors alone do not prove anything. A page is applied only when its
+request resolved:
+
+- An `around_*` window counts only when the response carries `anchor_id`. For
+  an anchor it cannot resolve (unknown, or moved to another session), the
+  server returns no rows, null cursors, and no `anchor_id`. That answer
+  changes nothing locally.
+- A `before_id` page is always anchored on a row the client holds. The server
+  resolves that id across sessions, and rows are never deleted (section 3.1).
+  If deletion is ever added, an unresolved `before_id`, which the server
+  ignores today, must stop being applied too.
+
 An interval that reaches positive infinity spares one kind of row: a row
 stored from the event stream after the request started. That row is newer than
 the answer, and it survives the replacement, as it does today (#3243).
@@ -544,7 +556,14 @@ Cursors are opaque strings of the form `<incarnation>.<seq>`.
   500 ids). Returns the subset the reader may read now. Section 5.5 explains
   why this is a check and not a tombstone stream.
 - **`sync_seq` on existing reads.** The bootstrap and `GET .../messages` add
-  `sync_seq`, the log head when the read ran. A session's cursor starts there.
+  `sync_seq`, the log head when the read ran.
+  - A session's first cursor starts there.
+  - That page only proves its own interval. Every range the session already
+    held outside it, such as Phase 1 history, becomes unverified at that
+    moment.
+  - An unverified range still paints at once. Online, it is revalidated by its
+    page request, as in Phase 1, until backfill or a view replaces it. It is
+    never read as local-only truth.
 - **Background requests do not renew the session.** Backfill and push-worker
   reads send `X-Avibe-Prefetch: 1`, and `renew_remote_access_cookie` learns the
   new paths. An unattended device must not keep a session alive.
@@ -813,6 +832,7 @@ Phases 1 and 2 already give the shell.
 **Tests:** unit tests with `fake-indexeddb` for:
 
 - interval replacement in both directions;
+- an unresolved `around_*` anchor (no `anchor_id`) leaves the store untouched;
 - range merge, abut, and gap;
 - authoritative intervals: a tail reaches positive infinity, exhausted
   history reaches negative infinity, and an empty page still clears its
@@ -888,6 +908,7 @@ IDs appear in test names and PR bodies. Role semantics reuse the existing
 | LSYNC-013 | Backfill and push-worker reads do not renew the remote session |
 | LSYNC-014 | A member granted access to an existing project, by a binding or a group claim with no session write, gets that project's sessions after the next pull, through the access digest |
 | LSYNC-015 | A cursor from another incarnation (table recreated), or above the log head (database restored from a backup), resets instead of silently missing changes |
+| LSYNC-016 | A session's first cursor marks its pre-existing ranges outside the fresh page unverified; they are revalidated before being read as local-only truth |
 
 Manual checks:
 
