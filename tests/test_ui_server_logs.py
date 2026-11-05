@@ -42,6 +42,7 @@ def test_logs_endpoint_returns_multiple_sources(monkeypatch, tmp_path):
     assert {source["key"] for source in payload["sources"]} == {
         "all",
         "service",
+        "ui",
         "service_stdout",
         "service_stderr",
         "ui_stdout",
@@ -70,6 +71,24 @@ def test_logs_endpoint_reads_rotated_service_generations(monkeypatch, tmp_path):
     assert payload["total"] == 1
     assert payload["logs"][0]["message"] == "retained failure"
     assert next(source for source in payload["sources"] if source["key"] == "service")["exists"] is True
+
+
+def test_logs_endpoint_reads_rotated_ui_generations(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    (paths.get_logs_dir() / "vibe_ui.log.1").write_text(
+        "2026-03-25 15:51:17,428 - vibe.ui_server - INFO - retained UI telemetry\n",
+        encoding="utf-8",
+    )
+
+    client = app.test_client()
+    response = client.post("/api/logs", json={"lines": 20, "source": "ui"}, headers=csrf_headers(client))
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["total"] == 1
+    assert payload["logs"][0]["message"] == "retained UI telemetry"
+    assert next(source for source in payload["sources"] if source["key"] == "ui")["exists"] is True
 
 
 def test_logs_endpoint_skips_generation_removed_during_rotation(monkeypatch, tmp_path):

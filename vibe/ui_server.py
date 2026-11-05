@@ -86,8 +86,19 @@ from modules.agents.catalog import (
     supports_runtime_refresh,
 )
 from vibe.i18n import get_supported_languages, t
-from vibe.logging_config import application_log_paths
+from vibe.logging_config import (
+    APPLICATION_LOG_BACKUP_COUNT,
+    APPLICATION_LOG_FORMAT,
+    APPLICATION_LOG_MAX_BYTES,
+    application_log_paths,
+)
 from vibe.runtime import get_ui_dist_path, get_working_dir
+from vibe.service_logging import (
+    ServiceFileHandler,
+    ServiceStreamHandler,
+    configure_service_logging,
+    shutdown_service_logging,
+)
 from vibe import ui_asset_archive
 from storage.delivery_states import ADMITTED_DELIVERY_STATES
 
@@ -96,6 +107,44 @@ if TYPE_CHECKING:
     from vibe.runtime import DesktopRuntimeClaimRefused
 
 logger = logging.getLogger(__name__)
+
+_ROTATED_LOG_SOURCES = frozenset({"service", "ui"})
+_UI_LOG_FILENAME = "vibe_ui.log"
+
+
+def _configure_ui_logging(level: str = "INFO") -> None:
+    """Use the service logging contract without sharing its rotating file.
+
+    The UI and controller are independent processes. Sharing a
+    ``RotatingFileHandler`` path would let their unsynchronized rotations race,
+    so the UI gets the same bounded handler, format, and configured level on its
+    own log file while retaining stderr output for crash diagnostics.
+    """
+
+    log_level = getattr(logging, level.upper())
+    log_path = paths.get_logs_dir() / _UI_LOG_FILENAME
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def build_handlers() -> list[logging.Handler]:
+        stderr_handler = ServiceStreamHandler(sys.stderr)
+        # Preserve the pre-existing UI stderr contract: warnings and above
+        # carry crashes/tracebacks to the runtime sink; lower-level telemetry
+        # is persisted in the rotating UI log without flooding stderr.
+        stderr_handler.setLevel(logging.WARNING)
+        return [
+            ServiceFileHandler(
+                log_path,
+                maxBytes=APPLICATION_LOG_MAX_BYTES,
+                backupCount=APPLICATION_LOG_BACKUP_COUNT,
+            ),
+            stderr_handler,
+        ]
+
+    configure_service_logging(
+        build_handlers,
+        log_level,
+        logging.Formatter(APPLICATION_LOG_FORMAT),
+    )
 
 
 def _desktop_computer_use_supported() -> bool:
@@ -298,6 +347,7 @@ TRUSTED_PROXY_IPS_ENV = "VIBE_UI_TRUSTED_PROXY_IPS"
 TRUSTED_PUBLIC_ORIGINS_ENV = "VIBE_UI_TRUSTED_PUBLIC_ORIGINS"
 LOG_SOURCES = (
     ("service", "vibe_remote.log", lambda: paths.get_logs_dir() / "vibe_remote.log"),
+    ("ui", _UI_LOG_FILENAME, lambda: paths.get_logs_dir() / _UI_LOG_FILENAME),
     ("service_stdout", "service_stdout.log", lambda: paths.get_runtime_dir() / "service_stdout.log"),
     ("service_stderr", "service_stderr.log", lambda: paths.get_runtime_dir() / "service_stderr.log"),
     ("ui_stdout", "ui_stdout.log", lambda: paths.get_runtime_dir() / "ui_stdout.log"),
@@ -3302,7 +3352,7 @@ def renew_remote_access_cookie(response: Response) -> Response:
 
 
 def _read_log_entries(log_path: Path, source_key: str, lines: int) -> tuple[list[dict[str, Any]], int]:
-    log_paths = application_log_paths(log_path) if source_key == "service" else [log_path]
+    log_paths = application_log_paths(log_path) if source_key in _ROTATED_LOG_SOURCES else [log_path]
     existing_paths = [path for path in log_paths if path.exists()]
     if not existing_paths:
         return [], 0
@@ -3364,7 +3414,7 @@ def _resolve_log_sources() -> list[dict[str, Any]]:
     ]
     for key, filename, path_factory in LOG_SOURCES:
         path = path_factory()
-        exists = any(candidate.exists() for candidate in application_log_paths(path)) if key == "service" else path.exists()
+        exists = any(candidate.exists() for candidate in application_log_paths(path)) if key in _ROTATED_LOG_SOURCES else path.exists()
         resolved.append(
             {
                 "key": key,
@@ -18573,64 +18623,72 @@ def run_ui_server(host: str, port: int) -> None:
     import uvicorn
 
     paths.ensure_data_dirs()
+    config = None
+    config_load_error = None
     try:
         from core.services import settings as settings_service
 
         config = settings_service.load_config()
     except FileNotFoundError:
-        config = None
+        pass
     except Exception as exc:
-        logger.warning("Skipping UI startup reconciliation because config load failed: %s", exc)
-        config = None
-    if config is not None:
-        try:
-            from vibe import remote_access
+        config_load_error = exc
 
-            remote_access.start_runtime_monitoring(config)
-        except Exception:
-            logger.warning("Failed to start remote access status heartbeat", exc_info=True)
-    print(f"UI Server running at http://{host}:{port}")
-
-    # Retry binding in case of TIME_WAIT or port still held by old server during reload
-    for attempt in range(10):
-        bound_sockets: list[socket.socket] = []
-        try:
-            uvicorn_config = uvicorn.Config(
-                app,
-                host=host,
-                port=port,
-                log_config=None,
-                access_log=False,
-                loop="asyncio",
-                lifespan="on",
-                workers=1,
-                timeout_keep_alive=_UI_KEEPALIVE_TIMEOUT_SECONDS,
-            )
-            bound_sockets = _bind_ui_sockets(host, port)
-            _server = _create_ui_server(uvicorn_config)
-            # Reconcile remote_access in the background so cloudflared download/
-            # connector start does not block /health and the rest of the UI
-            # from coming up after restart/reload.
-            threading.Thread(
-                target=_reconcile_remote_access_for_ui_start,
-                args=(config,),
-                daemon=True,
-                name="remote-access-reconcile-on-start",
-            ).start()
-            _UI_RUNTIME_ACTIVE = True
+    _configure_ui_logging(getattr(getattr(config, "runtime", None), "log_level", "INFO"))
+    try:
+        if config_load_error is not None:
+            logger.warning("Skipping UI startup reconciliation because config load failed: %s", config_load_error)
+        if config is not None:
             try:
-                _server.run(sockets=bound_sockets)
-            finally:
-                _UI_RUNTIME_ACTIVE = False
-            break
-        except OSError as e:
-            for bound_socket in bound_sockets:
-                bound_socket.close()
-            if e.errno == 48 and attempt < 9:  # Address already in use (macOS)
-                print(f"Port {port} in use, retrying in 1s... (attempt {attempt + 1})")
-                time.sleep(1)
-            elif e.errno == 98 and attempt < 9:  # Address already in use (Linux)
-                print(f"Port {port} in use, retrying in 1s... (attempt {attempt + 1})")
-                time.sleep(1)
-            else:
-                raise
+                from vibe import remote_access
+
+                remote_access.start_runtime_monitoring(config)
+            except Exception:
+                logger.warning("Failed to start remote access status heartbeat", exc_info=True)
+        print(f"UI Server running at http://{host}:{port}")
+
+        # Retry binding in case of TIME_WAIT or port still held by old server during reload
+        for attempt in range(10):
+            bound_sockets: list[socket.socket] = []
+            try:
+                uvicorn_config = uvicorn.Config(
+                    app,
+                    host=host,
+                    port=port,
+                    log_config=None,
+                    access_log=False,
+                    loop="asyncio",
+                    lifespan="on",
+                    workers=1,
+                    timeout_keep_alive=_UI_KEEPALIVE_TIMEOUT_SECONDS,
+                )
+                bound_sockets = _bind_ui_sockets(host, port)
+                _server = _create_ui_server(uvicorn_config)
+                # Reconcile remote_access in the background so cloudflared download/
+                # connector start does not block /health and the rest of the UI
+                # from coming up after restart/reload.
+                threading.Thread(
+                    target=_reconcile_remote_access_for_ui_start,
+                    args=(config,),
+                    daemon=True,
+                    name="remote-access-reconcile-on-start",
+                ).start()
+                _UI_RUNTIME_ACTIVE = True
+                try:
+                    _server.run(sockets=bound_sockets)
+                finally:
+                    _UI_RUNTIME_ACTIVE = False
+                break
+            except OSError as e:
+                for bound_socket in bound_sockets:
+                    bound_socket.close()
+                if e.errno == 48 and attempt < 9:  # Address already in use (macOS)
+                    print(f"Port {port} in use, retrying in 1s... (attempt {attempt + 1})")
+                    time.sleep(1)
+                elif e.errno == 98 and attempt < 9:  # Address already in use (Linux)
+                    print(f"Port {port} in use, retrying in 1s... (attempt {attempt + 1})")
+                    time.sleep(1)
+                else:
+                    raise
+    finally:
+        shutdown_service_logging()
