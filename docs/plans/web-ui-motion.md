@@ -215,7 +215,10 @@ owns its motion and the tokens that lane already uses by name.
   (`via-foreground/[0.03]`, decided 2026-11-05), not one per block, crossing it with `animate-skeleton-shimmer`: about 60% of each
   1600 ms period sweeping (`ease-in-out`, transform only), the rest resting.
   Under reduced motion it is still (`motion-reduce:animate-none`): the blocks
-  remain, the sweep does not.
+  remain, the sweep does not. The highlight rests off its block
+  (`[transform:translateX(-100%)]`), so a still one shows nothing; not a
+  `translate-x-*` utility, whose separate `translate` property adds to the
+  keyframes' `transform` and shifts the sweep.
 - **Skeleton to content.** The content fades in where the skeleton was, on
   `--motion-handover-duration` and `--motion-handover-ease` (240 ms, enter),
   and the skeleton goes as it arrives. Geometry does not change, so nothing

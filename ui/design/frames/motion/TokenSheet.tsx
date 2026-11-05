@@ -102,7 +102,9 @@ export function TokenSheet() {
             </div>
             <div className="w-14 shrink-0" />
             <div className="relative h-3 w-80 shrink-0 overflow-hidden rounded-full bg-foreground/[0.06]">
-              <span className="absolute inset-0 animate-skeleton-shimmer bg-linear-to-r from-transparent via-foreground/[0.03] to-transparent motion-reduce:animate-none" />
+              {/* Rests off the block: still under reduced motion, it shows no highlight. A transform, not a
+                  `translate-x-*` utility (the separate `translate` property would add to the keyframes'). */}
+              <span className="absolute inset-0 animate-skeleton-shimmer bg-linear-to-r from-transparent via-foreground/[0.03] to-transparent [transform:translateX(-100%)] motion-reduce:animate-none" />
             </div>
             <div className="min-w-0 flex-1 text-xs text-muted">骨架的高光扫过；减少动态效果时静止</div>
           </div>
