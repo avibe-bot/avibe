@@ -349,6 +349,9 @@ Two invariants govern every page. Phase 2 change pulls follow them too.
 - The store drops any response whose request started more than 2 minutes
   before it lands. That bounds how long a tombstone matters, and tombstones
   older than 10 minutes are purged. Wipes remove them with everything else.
+- Session rows and session removals follow the same rule. For example, a
+  visibility answer that started before a newer feed upsert of that session
+  does not delete it.
 - So a page that was in flight never overwrites or deletes a row that the
   stream, or a later-started page, delivered after the page's request started.
   This holds for every page shape, for deletions and upserts alike. Today's
@@ -489,7 +492,8 @@ whenever the reader looks at it.
   3. Whole sessions by `lastActiveAt`.
 
   The main Bot's session, pinned sessions, and the hot set are evicted last.
-  Eviction trims ranges from the old end.
+  Eviction trims ranges from the old end and clears `startReached` on what
+  it trims.
 - **Quota errors.** On `QuotaExceededError`, the store evicts one batch and
   retries once. If that fails, it clears the message store and keeps the
   snapshot records.
@@ -559,6 +563,10 @@ Triggers:
 - **Derived state.** When a message's derived state changes without a row
   write, the publisher of that `message.updated` calls `touch_message(conn, id)`
   in the same transaction. Today that is the failure-retry state.
+- **Other derived fields lag.** This covers message sender labels and
+  provenance titles, and on sessions, the Agent display name read from the
+  `agents` table. They update when their row next changes or is read again,
+  as the derived message fields do (section 6.3).
 
 Cost and bounds:
 
@@ -618,10 +626,15 @@ Cursors are opaque strings of the form `<incarnation>.<seq>`.
   - changes whose old and new types are both non-transcript are skipped.
   - Authorization is the same session check as `GET .../messages`.
 - **`POST /api/sync/visible {session_ids: [...]}`** (CSRF-protected, at most
-  500 ids). Returns the subset the reader may read now. Section 5.5 explains
+  500 ids per call, so the client batches). Returns the subset the reader may
+  read now. Unreadable and nonexistent ids are indistinguishable, so the
+  endpoint reveals nothing about other sessions. Section 5.5 explains
   why this is a check and not a tombstone stream.
 - **`sync_seq` on existing reads.** The bootstrap and `GET .../messages` add
   `sync_seq`, the log head when the read ran.
+  - The server reads the head before it reads the rows. A cursor that starts
+    early only replays changes, and replaying is idempotent because changes
+    carry current state. A cursor that starts late would skip changes.
   - A session's first cursor starts there.
   - That page only proves its own interval. Every range the session already
     held outside it, such as Phase 1 history, becomes unverified at that
@@ -645,6 +658,9 @@ Cursors are opaque strings of the form `<incarnation>.<seq>`.
   On a reset, the client marks the affected ranges unverified, takes the
   session list again in snapshot mode, and starts each held session over from
   a fresh tail. Nothing is wiped.
+- SQLite has a single writer, so seqs become visible in commit order. A reader
+  never sees seq n+1 before seq n, and advancing a cursor past the scanned
+  rows skips nothing.
 - The server scans at most `limit` raw log rows per call, however many of them
   the reader can see, and returns `next_cursor` past the scanned rows. Work is
   bounded by the page, not by history.
