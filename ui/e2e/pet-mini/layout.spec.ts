@@ -1299,6 +1299,13 @@ for (const opening of ['pet click', 'keyboard', 'voice shortcut']) {
     if (opening === 'pet click') await page.locator('.pet-mini-avatar-button').click();
     else if (opening === 'keyboard') {
       await page.locator('.pet-mini-avatar-button').hover();
+      // Blur suppresses the dock until the native shell reports pointer re-entry.
+      await page.evaluate(() => {
+        window.dispatchEvent(new CustomEvent('avibe:pet-hover', { detail: { hover: false } }));
+        window.dispatchEvent(new CustomEvent('avibe:pet-hover', { detail: { hover: true } }));
+      });
+      await expect(page.locator('.pet-mini-dock')).toHaveCSS('opacity', '1');
+      await expect(page.locator('.pet-mini-dock')).toHaveCSS('pointer-events', 'auto');
       await page.getByRole('button', { name: '输入消息', exact: true }).click();
     } else {
       await page.evaluate(() => window.dispatchEvent(new CustomEvent('avibe:pet-summon', { detail: { intent: 'listen' } })));
