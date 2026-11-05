@@ -1,21 +1,30 @@
 import { createContext, useContext, type ReactNode } from 'react';
 import {
-  AlertTriangle, ArrowDown, ArrowLeft, ArrowRight, Check, ChevronRight,
+  AlertTriangle, ArrowDown, ArrowLeft, Check, ChevronRight,
   ExternalLink, Globe, Laptop, Loader2, MonitorDown, RotateCcw, RotateCw, UserRound,
 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import { BotAvatar } from '@/components/ui/bot-avatar';
 import { WorkbenchPageHeader } from '@/components/workbench/WorkbenchPageHeader';
 import { PageSectionTitle } from '@/components/workbench/PageSectionTitle';
 import { MoreAccountSection } from '@/components/workbench/MorePage';
 import { MobileAppHeader } from '@/components/apps/MobileAppHeader';
-import appleLogo from '../assets/apple-sign-in/logo-white.png';
 import { PhoneScreen } from '../shell/PhoneScreen';
 
 export type MobileLocale = 'zh' | 'en';
-export type WelcomeState = 'default' | 'signing-in' | 'cancelled' | 'network-error' | 'denied';
+export interface MobileLoginFixture {
+  step: 'email' | 'code';
+  email: string;
+  code?: string;
+  busy?: 'sending' | 'resending' | 'verifying';
+  error?: 'email-invalid' | 'code-invalid' | 'code-expired' | 'rate-limited' | 'network' | 'resend-failed';
+  cooldown?: 60 | 15;
+  resent?: boolean;
+}
 export type PickerState = 'own' | 'mixed' | 'current' | 'offline' | 'offline-tapped' | 'loading' | 'error' | 'pulling' | 'refreshing';
 export interface MobileInstance { id: string; name: string; host: string; owner?: string; online: boolean }
 export interface MobileAccount { name: string; email: string }
@@ -43,28 +52,50 @@ function BackAction() {
   return <Button variant="ghost" size="sm" className="self-start" ><ArrowLeft />{t('返回', 'Back')}</Button>;
 }
 
-export function WelcomeIntro({ state = 'default' }: { state?: WelcomeState }) {
+export function WelcomeIntro({ fixture }: { fixture: MobileLoginFixture }) {
   const t = useCopy();
-  const pending = state === 'signing-in';
-  const notice = state === 'cancelled' ? t('已取消登录。准备好后，可以重新登录。', 'Sign-in cancelled. Try again when you are ready.')
-    : state === 'network-error' ? t('暂时连不上 avibe.bot。检查网络后重试。', 'Could not reach avibe.bot. Check your connection and retry.')
-    : state === 'denied' ? t('登录未获授权。请重新登录并允许访问账号。', 'Sign-in was denied. Try again and allow access to your account.') : null;
+  const { step, email, code = '', busy, error, cooldown, resent } = fixture;
+  const codeStep = step === 'code';
+  const fieldInvalid = error === 'email-invalid' || error === 'code-invalid' || error === 'code-expired';
+  const notice = error === 'email-invalid' ? t('请填写有效的邮箱以接收验证码。', 'Enter a valid email to receive a verification code.')
+    : error === 'code-invalid' || error === 'code-expired' ? t('验证码无效或已过期，请重试或重新发送邮件。', 'Invalid or expired code. Try again or resend the email.')
+    : error === 'rate-limited' ? t('请求过于频繁，请稍后再试。', 'Too many requests. Please try again later.')
+    : error === 'network' ? t('暂时连不上 avibe.bot。检查网络后重试。', 'Could not reach avibe.bot. Check your connection and retry.')
+    : error === 'resend-failed' ? t('发送失败，请稍后再试。', "Couldn't resend. Try again in a moment.") : null;
   return <Screen>
-    <WorkbenchPageHeader icon={<Globe className="size-5" />} title={t('连接你的 Avibe', 'Connect to your Avibe')} subtitle={t('在手机上访问你的 Agent OS', 'Your Agent OS, on your phone')} />
-    <div className="overflow-hidden rounded-xl border border-border bg-surface">
+    <WorkbenchPageHeader icon={<Globe className="size-5" />} title={t('登录 / 注册', 'Sign in / Create account')} subtitle={codeStep ? t('输入邮件里的 6 位验证码', 'Enter the 6-digit code from your email') : t('在手机上访问你的 Agent OS', 'Your Agent OS, on your phone')} />
+    {!codeStep && <div className="overflow-hidden rounded-xl border border-border bg-surface">
       <div className="flex items-center gap-3 px-4 py-3">
         <BotAvatar avatar={{ kind: 'mascot' }} name="Vibey" size={40} />
         <div className="min-w-0"><p className="text-sm font-semibold">Vibey</p><p className="text-[12px] text-muted">{t('内置的 AI 伙伴，随时在身边', 'Your built-in AI partner, wherever you are')}</p></div>
       </div>
       <p className="border-t border-border px-4 py-3 text-sm text-muted">{t('登录 avibe.bot，选择自己的实例或别人共享的实例。', 'Sign in to avibe.bot, then choose your own instance or one shared with you.')}</p>
-    </div>
+    </div>}
+    {codeStep && <div className="flex flex-col gap-2">
+      <p role="status" className="break-all text-sm text-muted">{t('验证码已发送至', 'Code sent to')} <span className="font-medium text-foreground">{email}</span></p>
+      <Button variant="text" size="sm" className="self-start" disabled={Boolean(busy)}>{t('修改邮箱', 'Change email')}</Button>
+    </div>}
     <div className="flex flex-col gap-3">
-      {/* Both use the shipped lg control: 48px high, 14px label, rounded-lg. Apple owns its mark and black/white palette. */}
-      <Button size="lg" disabled={pending}>{pending ? <Loader2 className="animate-spin" /> : null}{notice ? t('重新登录', 'Try sign-in again') : t('登录 / 注册', 'Sign in / Create account')}<ArrowRight /></Button>
-      <Button size="lg" variant="outline" disabled={pending} className="gap-1.5 border-black bg-white text-black hover:bg-white hover:text-black"><img src={appleLogo} alt="" className="size-7" />{t('通过 Apple 登录', 'Sign in with Apple')}</Button>
-      <p className="text-center text-[12px] leading-relaxed text-muted">{t('登录 / 注册将在系统面板中打开 avibe.bot。', 'Sign in / Create account opens avibe.bot in a system panel.')}</p>
-      {pending && <div role="status" className="flex items-center justify-center gap-2 rounded-xl border border-border bg-surface px-4 py-10 text-sm text-muted"><Loader2 className="size-4 animate-spin" /><span>{t('请在系统面板中完成登录', 'Finish sign-in in the system panel')}</span></div>}
-      {notice && <p role={state === 'cancelled' ? 'status' : 'alert'} className={state === 'cancelled' ? 'text-center text-sm text-muted' : 'text-center text-sm text-destructive-ink'}>{notice}</p>}
+      <div className="flex flex-col gap-2">
+        <Label htmlFor={codeStep ? 'mobile-login-code' : 'mobile-login-email'}>{codeStep ? t('验证码', 'Verification code') : t('邮箱', 'Email')}</Label>
+        {codeStep ? <Input id="mobile-login-code" type="text" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} defaultValue={code} placeholder="000000" disabled={Boolean(busy)} aria-invalid={fieldInvalid || undefined} aria-describedby={`mobile-login-hint${notice ? ' mobile-login-error' : ''}`} />
+          : <Input id="mobile-login-email" type="email" inputMode="email" autoComplete="email" autoCapitalize="none" spellCheck={false} defaultValue={email} placeholder="you@example.com" disabled={Boolean(busy)} aria-invalid={fieldInvalid || undefined} aria-describedby={`mobile-login-hint${notice ? ' mobile-login-error' : ''}`} />}
+        <p id="mobile-login-hint" className="text-[12px] leading-relaxed text-muted">{codeStep ? t('支持粘贴验证码。邮件里的链接会打开 Safari，不会回到 App。请在这里输入验证码。', 'You can paste the code. The email link opens Safari and will not return to the App. Enter the code here.')
+          : t('新邮箱将自动注册。在 App 内完成登录，无需密码。', 'New emails create an account automatically. Sign in here without a password.')}</p>
+        {notice && <p id="mobile-login-error" role="alert" className="text-[12px] leading-relaxed text-destructive-ink">{notice}</p>}
+      </div>
+      <Button disabled={Boolean(busy) || (codeStep && code.length !== 6)}>
+        {busy === 'sending' || busy === 'verifying' ? <Loader2 className="animate-spin" /> : null}
+        {codeStep ? (busy === 'verifying' ? t('验证中…', 'Verifying…') : t('验证并登录', 'Verify and sign in')) : (busy === 'sending' ? t('发送中…', 'Sending…') : t('发送验证码', 'Send verification code'))}
+      </Button>
+      {codeStep && <>
+        <Button variant="outline" disabled={Boolean(busy) || Boolean(cooldown)}>
+          {busy === 'resending' ? <Loader2 className="animate-spin" /> : null}
+          {busy === 'resending' ? t('重新发送中…', 'Resending…') : cooldown ? t(`${cooldown} 秒后可重发`, `Resend in ${cooldown}s`) : t('重新发送', 'Resend email')}
+        </Button>
+        {resent && <p role="status" className="text-[12px] text-muted">{t('已重新发送，请再次查看邮箱。', 'Sent — check your inbox again.')}</p>}
+        <p className="text-[12px] leading-relaxed text-muted">{t('等了一分钟还没收到？检查垃圾邮件文件夹，重新发送，或者换一个邮箱。', "If it hasn't arrived after a minute, check your spam folder, resend, or try another email.")}</p>
+      </>}
     </div>
   </Screen>;
 }

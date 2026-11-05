@@ -1,13 +1,11 @@
 import { frames } from '../../frame';
-import { WelcomeIntro } from '../../kit/mobile-app';
-import { bilingual } from './fixtures';
+import { InstancePicker, WelcomeIntro } from '../../kit/mobile-app';
+import { bilingual, loginStates, mixedInstances, smallCodeFixture } from './fixtures';
 
 const designFrames = frames([
-  ...bilingual('default', '欢迎 · 登录或注册', () => <WelcomeIntro />),
-  ...bilingual('signing-in', '等待系统登录返回 · 按钮禁用', () => <WelcomeIntro state="signing-in" />),
-  ...bilingual('cancelled', '用户取消 · 中性反馈', () => <WelcomeIntro state="cancelled" />),
-  ...bilingual('network-error', '登录 · 网络错误', () => <WelcomeIntro state="network-error" />),
-  ...bilingual('denied', '登录 · 未获授权', () => <WelcomeIntro state="denied" />),
+  ...loginStates.flatMap(({ name, title, fixture }) => bilingual(name, title, () => <WelcomeIntro fixture={fixture} />)),
+  ...bilingual('success', '验证成功 → 选择实例', () => <InstancePicker state="mixed" instances={mixedInstances} />),
+  ...bilingual('code-small', '验证码 · 长邮箱与小屏', () => <WelcomeIntro fixture={smallCodeFixture} />, [375, 667]),
 ]);
 
 export default designFrames;
