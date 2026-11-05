@@ -40,3 +40,12 @@ and confirm their IDs and loaded row counts survive a history return. Do not
 repurpose a remote instance or restart the user's host service. Native iOS Safari
 edge-swipe recognition is a separate device check; Chromium exercises its
 history-POP navigation result, not Safari's gesture recognizer.
+
+`motion.spec.ts` loads the fixture with `?motion`, which installs the production
+navigation motion (`src/lib/navigationMotion.ts`, docs/plans/web-ui-motion.md M5
+and M8). In Chromium and mobile WebKit it checks that opening a conversation on a
+phone pushes it and Back pops it, with the Inbox already back at the reader's
+position in the snapshot the pop reveals; that reduced motion cross-fades instead;
+that a touch during a push finishes it at once; that a desktop navigation runs no
+transition; and that a pressed control sinks and steps its colour, keeping only
+the colour under reduced motion. Frame rate on an iPhone is a device check.

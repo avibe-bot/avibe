@@ -29,9 +29,11 @@ export const MobileNavLink: React.FC<{ item: ShellNavItem }> = ({ item }) => {
   const active = item.match ? item.match(location.pathname) : location.pathname === item.to;
   const Icon = item.icon;
 
+  // A tab answers a press like any control (docs/plans/web-ui-motion.md M8); an unselected tab's
+  // colour step is the wash a selected one rests on.
   const className = clsx(
-    'flex min-w-0 flex-1 flex-col items-center justify-center gap-1 rounded-lg px-1 py-2 text-[10px] transition-colors',
-    active ? 'bg-mint/[0.08] text-mint-ink' : 'text-muted'
+    'press flex min-w-0 flex-1 flex-col items-center justify-center gap-1 rounded-lg px-1 py-2 text-[10px]',
+    active ? 'bg-mint/[0.08] text-mint-ink' : 'text-muted active:bg-mint/[0.08]'
   );
   const inner = (
     <>

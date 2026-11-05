@@ -11,6 +11,7 @@ import { ToastContext } from '../../src/context/ToastContext';
 import { WindowManagerContext, type WindowManagerValue } from '../../src/context/WindowManagerContext';
 import { OWNER_INSTANCE_CAPABILITIES } from '../../src/lib/sessionInfo';
 import { APP_SHELL_SCROLL_ID } from '../../src/lib/mobileProjectsListMemory';
+import { installNavigationMotion } from '../../src/lib/navigationMotion';
 import '../../src/i18n';
 import '../../src/index.css';
 
@@ -89,6 +90,8 @@ export function Fixture() {
 
 // Match production: a data router hosting descendant declarative routes.
 const router = createHashRouter([{ path: '*', element: <Fixture /> }]);
+// `?motion` runs the production navigation motion (docs/plans/web-ui-motion.md M5) on this router.
+if (params.has('motion')) installNavigationMotion(router);
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

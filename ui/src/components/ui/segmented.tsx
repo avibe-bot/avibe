@@ -73,10 +73,10 @@ export function SegmentedRadio<T extends string>({
             disabled={disabled}
             onClick={() => onChange(opt.id)}
             className={clsx(
-              'flex-1 whitespace-nowrap rounded-[4px] px-3 text-[12px] transition-colors',
+              'press flex-1 whitespace-nowrap rounded-[4px] px-3 text-[12px]',
               active
                 ? ACTIVE_TONES[tone]
-                : 'font-medium text-muted hover:text-foreground',
+                : 'font-medium text-muted hover:text-foreground active:bg-foreground/[0.04] active:text-foreground',
               disabled && 'cursor-not-allowed',
             )}
           >

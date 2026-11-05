@@ -36,6 +36,16 @@ export interface FrameSpec {
    *  screenshot waits it out again after each `click`, for a click that starts a timed transition (setup's
    *  screen handoff). */
   wait?: number;
+  /** A CSS selector the screenshot holds a pointer down on before capturing, for a pressed state
+   *  (`:active`): after any `click` and `hover`, until the shot is taken. */
+  press?: string;
+  /** The screenshot asks for reduced motion (`prefers-reduced-motion: reduce`), for a moment's reduced
+   *  form; the canvas follows the system setting. */
+  reducedMotion?: boolean;
+  /** For a frame that plays the product's own one-shot motion (keyframes named `motion-*` in
+   *  `src/index.css`): the canvas starts it again every `replay` ms, so it loops. The screenshot shows
+   *  where it settles. */
+  replay?: number;
   render: () => ReactNode;
 }
 

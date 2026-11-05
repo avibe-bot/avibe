@@ -3,13 +3,16 @@
 // trigger) import the recipe, and a component module stays exporting only components.
 import { cva } from 'class-variance-authority';
 
+// Every Button answers a press (docs/plans/web-ui-motion.md M8; ui/design: motion/press/*): `press`
+// sinks it under the finger, and each variant's `active:` fill, the one it hovers to, is the colour
+// step. A Button drawn as a row or a card adds `press-surface`, which sinks it less.
 export const buttonVariants = cva(
-  'inline-flex items-center justify-center whitespace-nowrap rounded-lg font-medium transition disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background [&_svg]:shrink-0',
+  'inline-flex items-center justify-center whitespace-nowrap rounded-lg font-medium press disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background [&_svg]:shrink-0',
   {
     variants: {
       variant: {
         // Mint primary — flat, no glow shadow (ui/design: system/buttons/variants).
-        default: 'gap-1.5 bg-primary text-primary-foreground hover:bg-primary-hover',
+        default: 'gap-1.5 bg-primary text-primary-foreground hover:bg-primary-hover active:bg-primary-hover',
         // Brand CTA — bright bg + brand-color glow shadow + bold text.
         // The fill is the accent itself and the label its paired *-foreground: a dark
         // ink on the dark theme's neon accents, white on light's vivid ones (and white
@@ -38,27 +41,27 @@ export const buttonVariants = cva(
         // foreground contract owned by the theme (`--primary-foreground`) in
         // both modes instead of coupling the variant to the palette alias.
         brand:
-          'gap-2 bg-primary font-bold text-primary-foreground shadow-glow-cta-mint hover:bg-primary-hover disabled:shadow-none',
+          'gap-2 bg-primary font-bold text-primary-foreground shadow-glow-cta-mint hover:bg-primary-hover active:bg-primary-hover disabled:shadow-none',
         'brand-cyan':
-          'gap-2 bg-cyan font-bold text-accent-foreground shadow-glow-cta-cyan hover:bg-cyan-hover disabled:shadow-none',
+          'gap-2 bg-cyan font-bold text-accent-foreground shadow-glow-cta-cyan hover:bg-cyan-hover active:bg-cyan-hover disabled:shadow-none',
         'brand-gold':
-          'gap-2 bg-gold font-bold text-gold-foreground shadow-glow-cta-gold hover:bg-gold-hover disabled:shadow-none',
+          'gap-2 bg-gold font-bold text-gold-foreground shadow-glow-cta-gold hover:bg-gold-hover active:bg-gold-hover disabled:shadow-none',
         'brand-violet':
-          'gap-2 bg-violet font-bold text-violet-foreground shadow-glow-cta-violet hover:bg-violet-hover disabled:shadow-none',
-        secondary: 'gap-1.5 border border-border bg-secondary text-secondary-foreground hover:border-border-strong',
+          'gap-2 bg-violet font-bold text-violet-foreground shadow-glow-cta-violet hover:bg-violet-hover active:bg-violet-hover disabled:shadow-none',
+        secondary: 'gap-1.5 border border-border bg-secondary text-secondary-foreground hover:border-border-strong active:border-border-strong',
         // Outline — bg matches page surface so it sits cleanly on glow gradients.
         outline:
-          'gap-1.5 border border-border bg-background text-foreground shadow-[0_1px_2px_rgba(0,0,0,0.05)] hover:bg-surface-2',
+          'gap-1.5 border border-border bg-background text-foreground shadow-[0_1px_2px_rgba(0,0,0,0.05)] hover:bg-surface-2 active:bg-surface-2',
         // Cyan outline — for "Read Vibe Remote" / docs style CTAs.
         'outline-cyan':
-          'gap-1.5 border border-cyan/40 bg-cyan/[0.06] text-cyan-ink hover:bg-cyan/[0.10]',
-        ghost: 'gap-1.5 text-foreground hover:bg-surface-2',
+          'gap-1.5 border border-cyan/40 bg-cyan/[0.06] text-cyan-ink hover:bg-cyan/[0.10] active:bg-cyan/[0.10]',
+        ghost: 'gap-1.5 text-foreground hover:bg-surface-2 active:bg-surface-2',
         // Hover swaps the fill rather than fading it: opacity blends the fill toward
         // the page surface, which pulls the white label *down* toward AA (4.70:1 ->
         // ~4.25:1 in light). A fixed brightness-95 was no better — it only deepened,
         // which helps light's white label but drags dark's #080812 label the wrong
         // way. --destructive-hover is declared per theme like every other brand fill.
-        destructive: 'gap-1.5 bg-destructive text-destructive-foreground hover:bg-destructive-hover',
+        destructive: 'gap-1.5 bg-destructive text-destructive-foreground hover:bg-destructive-hover active:bg-destructive-hover',
         // Pink-soft destructive (ui/design: system/buttons/variants). Pink fill + pink border
         // + pink text/icon, used for in-panel delete CTAs where a full
         // destructive shouts too loud. Drives the --pink / --pink-soft tokens
@@ -69,12 +72,12 @@ export const buttonVariants = cva(
         // same visual weight as the mint-soft "Run" button it usually sits next
         // to — a balanced soft pair rather than a near-invisible wash.
         'destructive-soft':
-          'gap-1.5 border border-pink/45 bg-pink/15 text-pink-ink hover:border-pink/60 hover:bg-pink/[0.22]',
-        link: 'text-primary-ink underline-offset-4 hover:underline',
+          'gap-1.5 border border-pink/45 bg-pink/15 text-pink-ink hover:border-pink/60 hover:bg-pink/[0.22] active:border-pink/60 active:bg-pink/[0.22]',
+        link: 'text-primary-ink underline-offset-4 hover:underline active:underline',
         // A card's small action (ui/design: home/home/*): text alone, no border or fill, a soft
         // wash on hover. The one lead on a page stays solid (`brand`).
-        text: 'gap-0.5 font-semibold text-mint-ink hover:bg-mint-soft',
-        accent: 'gap-1.5 border border-cyan/40 bg-cyan-soft text-cyan-ink hover:bg-cyan/15',
+        text: 'gap-0.5 font-semibold text-mint-ink hover:bg-mint-soft active:bg-mint-soft',
+        accent: 'gap-1.5 border border-cyan/40 bg-cyan-soft text-cyan-ink hover:bg-cyan/15 active:bg-cyan/15',
       },
       size: {
         // h-6 inline chips beside a chat notice (failure retry).

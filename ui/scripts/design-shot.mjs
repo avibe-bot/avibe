@@ -60,6 +60,7 @@ async function shoot(frame, t) {
   const failure = (reason) => ({ line: { frame: frame.id, theme: t, ms: Date.now() - started, errors: [reason, ...errors] } });
   try {
     await page.setViewportSize({ width: frame.width, height: frame.height });
+    if (frame.reducedMotion) await page.emulateMedia({ reducedMotion: 'reduce' });
     await page.goto(`${base}design.html?frame=${encodeURIComponent(frame.id)}&theme=${t}&lang=${lang}`);
     const ready = await page.waitForSelector('body[data-design-ready]', { timeout: 15_000 }).then(() => true, () => false);
     if (!ready) {
@@ -92,6 +93,14 @@ async function shoot(frame, t) {
       await page.hover(frame.hover);
       await page.waitForTimeout(800);
       await page.evaluate(() => window.__DESIGN__.quiet());
+    }
+    if (frame.press) {
+      // A pressed state lasts while the pointer is down: hold it there through the capture.
+      const box = await page.locator(frame.press).first().boundingBox({ timeout: 5_000 }).catch(() => null);
+      if (!box) return failure(`nothing to press for ${frame.press}`);
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      await page.mouse.down();
+      await page.waitForTimeout(300);
     }
     // Images load outside the fixture network (assets the page serves itself), so readiness does
     // not cover them: wait until each image on the page has loaded and decoded, or a shot can catch
@@ -174,7 +183,7 @@ if (manifestPath && shots.length) {
   const fresh = new Map(
     shots.map((s) => [
       key({ ...s, canvas }),
-      { id: s.id, file: s.file, title: s.title, status: s.status, theme: s.theme, lang, width: s.width, height: s.height, interaction: Boolean(s.hover || s.click?.length), hash: s.hash, src: relative(dirname(manifestPath), s.png).split('\\').join('/'), canvas },
+      { id: s.id, file: s.file, title: s.title, status: s.status, theme: s.theme, lang, width: s.width, height: s.height, interaction: Boolean(s.hover || s.click?.length || s.press), hash: s.hash, src: relative(dirname(manifestPath), s.png).split('\\').join('/'), canvas },
     ]),
   );
   const kept = previous.filter((s) => (s.canvas ?? 'canvas') !== canvas || (known.has(s.id) && !fresh.has(key(s))));

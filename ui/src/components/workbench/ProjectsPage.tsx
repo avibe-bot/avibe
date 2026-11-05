@@ -381,7 +381,7 @@ const MobileSessionRow: React.FC<{
       <button
         type="button"
         onClick={onOpen}
-        className="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg px-3 py-2.5 text-left transition hover:bg-foreground/[0.04]"
+        className="press press-surface flex min-w-0 flex-1 items-center gap-2.5 rounded-lg px-3 py-2.5 text-left hover:bg-foreground/[0.04] active:bg-foreground/[0.04]"
       >
         <span className={clsx('size-1.5 shrink-0 rounded-full', DOT[session.agent_status] ?? DOT.idle)} />
         <span className="min-w-0 flex-1 truncate text-[13px] font-medium">

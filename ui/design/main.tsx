@@ -29,7 +29,7 @@ void i18n.changeLanguage(lang);
 declare global {
   interface Window {
     __DESIGN__?: {
-      frames: { id: string; file: string; title: string; status: string; width: number; height: number; themes: DesignTheme[]; hover?: string; click?: string[]; wait?: number }[];
+      frames: { id: string; file: string; title: string; status: string; width: number; height: number; themes: DesignTheme[]; hover?: string; click?: string[]; wait?: number; press?: string; reducedMotion?: boolean }[];
       unfixtured: () => string[];
       quiet: () => Promise<void>;
       t: (key: string) => string;
@@ -55,7 +55,7 @@ async function boot() {
   // The desktop app marks its own window before any page script runs (`isDesktopShell()`).
   if (shown?.fixtures?.desktopShell) Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
   window.__DESIGN__ = {
-    frames: frames.map((f) => ({ id: f.id, file: f.file, title: f.title, status: f.status, width: f.width, height: f.height, themes: f.themes ?? ['light', 'dark'], hover: f.hover, click: f.click, wait: f.wait })),
+    frames: frames.map((f) => ({ id: f.id, file: f.file, title: f.title, status: f.status, width: f.width, height: f.height, themes: f.themes ?? ['light', 'dark'], hover: f.hover, click: f.click, wait: f.wait, press: f.press, reducedMotion: f.reducedMotion })),
     unfixtured: () => designNetwork.unfixtured(),
     quiet: () => designNetwork.quiet(),
     // Click selectors name copy by key (`{t:<key>}`); the page resolves it in the frame's language.

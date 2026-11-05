@@ -128,6 +128,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './com
 import { Button } from './components/ui/button';
 import { PermissionsPage } from './features/permissions/PermissionsPage';
 import { legacySettingsRedirectTarget, LEGACY_SETTINGS_REDIRECTS } from './lib/settingsRoutes';
+import { installNavigationMotion } from './lib/navigationMotion';
 
 const LegacySettingsRedirectRoute = ({ to }: { to: string }) => {
   const { hash } = useLocation();
@@ -768,7 +769,8 @@ const PwaRouteMemory = () => {
   useEffect(() => {
     if (!restorePath || restoreStartedRef.current) return;
     restoreStartedRef.current = true;
-    navigate(restorePath);
+    // A relaunch lands where the reader left, as iOS restores an app: no push.
+    navigate(restorePath, { viewTransition: false });
   }, [navigate, restorePath]);
 
   return null;
@@ -916,6 +918,8 @@ const router = createBrowserRouter(
     </>,
   ),
 );
+// Phone push and pop, and the conversation cross-fade (docs/plans/web-ui-motion.md M5).
+installNavigationMotion(router);
 
 function App() {
   return (

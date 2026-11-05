@@ -47,6 +47,20 @@ function Single({ frame, theme }: { frame: Frame; theme: DesignTheme }) {
       cancelled = true;
     };
   }, [frame, theme]);
+  // A frame that plays the product's own one-shot motion loops it: every `replay` ms, its `motion-*`
+  // animations start over (the page's other animations, a skeleton's reveal, are left alone).
+  useEffect(() => {
+    if (!frame.replay) return;
+    const timer = window.setInterval(() => {
+      for (const animation of document.getAnimations()) {
+        if (!(animation instanceof CSSAnimation) || !animation.animationName.startsWith('motion-')) continue;
+        if (animation.effect?.getTiming().iterations === Infinity) continue;
+        animation.currentTime = 0;
+        animation.play();
+      }
+    }, frame.replay);
+    return () => window.clearInterval(timer);
+  }, [frame]);
   return <FrameBox frame={frame} theme={theme} />;
 }
 

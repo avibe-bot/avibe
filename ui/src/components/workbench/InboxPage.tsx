@@ -230,7 +230,7 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
           <button
             type="button"
             onClick={() => openSession(s)}
-            className="inline-flex items-center gap-1.5 rounded-md border border-mint/30 bg-mint/[0.06] px-3 py-1.5 text-[11px] font-semibold text-mint-ink transition hover:bg-mint/[0.12]"
+            className="press inline-flex items-center gap-1.5 rounded-md border border-mint/30 bg-mint/[0.06] px-3 py-1.5 text-[11px] font-semibold text-mint-ink hover:bg-mint/[0.12] active:bg-mint/[0.12]"
           >
             {unread > 0 && (
               <span
@@ -249,7 +249,7 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
             <button
               type="button"
               onClick={() => markRead(s.session_id)}
-              className="inline-flex items-center gap-1.5 rounded-md border border-border-strong px-3 py-1.5 text-[11px] font-medium text-foreground transition hover:bg-foreground/[0.04]"
+              className="press inline-flex items-center gap-1.5 rounded-md border border-border-strong px-3 py-1.5 text-[11px] font-medium text-foreground hover:bg-foreground/[0.04] active:bg-foreground/[0.04]"
             >
               <CheckCheck className="size-3" />
               {t('workbench.inbox.markRead')}
