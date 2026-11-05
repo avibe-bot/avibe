@@ -106,13 +106,16 @@ test('switches pages on a desktop without a transition', async ({ page, isMobile
 test('sinks a pressed control and steps its colour, and keeps only the colour under reduced motion', async ({ page }) => {
   await open(page);
   const chip = openButton(page, 1);
+  // Until the chip's transitions (the press, or the release's spring) have run their course.
+  const settled = () => chip.evaluate((el) => Promise.all(el.getAnimations().map((animation) => animation.finished.catch(() => undefined))));
   const pressed = async () => {
     const box = (await chip.boundingBox())!;
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
     await page.mouse.down();
-    await page.waitForTimeout(250);
+    await settled();
     const style = await chip.evaluate((el) => ({ scale: getComputedStyle(el).scale, fill: getComputedStyle(el).backgroundColor }));
     await page.mouse.up();
+    await settled();
     return style;
   };
   const rest = await chip.evaluate((el) => getComputedStyle(el).backgroundColor);

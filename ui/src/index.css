@@ -1015,6 +1015,100 @@ pre,
 @keyframes motion-fade-in { from { opacity: 0; } }
 @keyframes motion-fade-out { to { opacity: 0; } }
 
+/* Sheets, dialogs, popovers (docs/plans/web-ui-motion.md M6; src/lib/sheetDrag.ts;
+   ui/design: motion/sheets/*). Keyed on the `data-state` Radix sets, which waits
+   for the closing animation before it unmounts.
+   - `motion-sheet`, a phone sheet: rises from the bottom edge on the sheet spring
+     and leaves faster, on `base`, exit. A sheet dragged down leaves from where
+     the finger let it go (`--sheet-drag`) and at the finger's speed
+     (`--sheet-exit-duration`, `--sheet-exit-ease`; sheetDrag.ts sets them).
+   - `motion-dialog`: that sheet on a phone; on a desktop a dialog that fades and
+     grows from `--motion-scale-enter` on `base`, and leaves the way it came on
+     `fast`, exit. `motion-card`: that dialog on every screen, for one a phone
+     shows as a card away from the bottom edge.
+   - `motion-scrim`, behind either: fades on `base` under a phone sheet and on
+     `fast` under a desktop dialog. Its blur stays still while it fades.
+   - `motion-popover`, a popover or menu: fades and grows from
+     `--motion-scale-enter` at its trigger on `fast`, enter, and fades out on
+     `fast`, exit.
+   Entering animations fill backwards only, so a drag's transform is not held
+   under a finished one. Reduced motion: fade only, on `fast`. */
+.motion-sheet[data-state="open"] {
+  animation: motion-sheet-rise var(--motion-spring-sheet-duration) var(--motion-spring-sheet) backwards;
+}
+.motion-sheet[data-state="closed"] {
+  animation: motion-sheet-sink var(--sheet-exit-duration, var(--motion-duration-base)) var(--sheet-exit-ease, var(--motion-ease-exit)) forwards;
+}
+.motion-scrim[data-state="open"] {
+  animation: motion-fade-in var(--motion-duration-base) var(--motion-ease-enter) backwards;
+}
+.motion-scrim[data-state="closed"] {
+  animation: motion-fade-out var(--motion-duration-base) var(--motion-ease-exit) forwards;
+}
+.motion-card[data-state="open"] {
+  animation: motion-grow-in var(--motion-duration-base) var(--motion-ease-enter) backwards;
+}
+.motion-card[data-state="closed"] {
+  animation: motion-shrink-out var(--motion-duration-fast) var(--motion-ease-exit) forwards;
+}
+.motion-popover {
+  transform-origin: var(--radix-popover-content-transform-origin);
+}
+.motion-popover[data-state="open"] {
+  animation: motion-grow-in var(--motion-duration-fast) var(--motion-ease-enter) backwards;
+}
+.motion-popover[data-state="closed"] {
+  animation: motion-fade-out var(--motion-duration-fast) var(--motion-ease-exit) forwards;
+}
+@media (max-width: 767px) {
+  .motion-dialog[data-state="open"] {
+    animation: motion-sheet-rise var(--motion-spring-sheet-duration) var(--motion-spring-sheet) backwards;
+  }
+  .motion-dialog[data-state="closed"] {
+    animation: motion-sheet-sink var(--sheet-exit-duration, var(--motion-duration-base)) var(--sheet-exit-ease, var(--motion-ease-exit)) forwards;
+  }
+}
+@media (min-width: 768px) {
+  .motion-dialog[data-state="open"] {
+    animation: motion-grow-in var(--motion-duration-base) var(--motion-ease-enter) backwards;
+  }
+  .motion-dialog[data-state="closed"] {
+    animation: motion-shrink-out var(--motion-duration-fast) var(--motion-ease-exit) forwards;
+  }
+  .motion-scrim[data-state="open"] {
+    animation-duration: var(--motion-duration-fast);
+  }
+  .motion-scrim[data-state="closed"] {
+    animation-duration: var(--motion-duration-fast);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .motion-sheet[data-state="open"],
+  .motion-dialog[data-state="open"],
+  .motion-card[data-state="open"],
+  .motion-popover[data-state="open"],
+  .motion-scrim[data-state="open"] {
+    animation: motion-fade-in var(--motion-duration-fast) var(--motion-ease-enter) backwards;
+  }
+  .motion-sheet[data-state="closed"],
+  .motion-dialog[data-state="closed"],
+  .motion-card[data-state="closed"],
+  .motion-popover[data-state="closed"],
+  .motion-scrim[data-state="closed"] {
+    animation: motion-fade-out var(--motion-duration-fast) var(--motion-ease-exit) forwards;
+  }
+}
+/* On the individual `translate` and `scale` properties, so they add to whatever
+   transform a surface is placed with (a dialog centred by its own transform)
+   instead of replacing it. */
+@keyframes motion-sheet-rise { from { translate: 0 100%; } }
+@keyframes motion-sheet-sink {
+  from { translate: 0 var(--sheet-drag, 0px); }
+  to { translate: 0 100%; }
+}
+@keyframes motion-grow-in { from { opacity: 0; scale: var(--motion-scale-enter); } }
+@keyframes motion-shrink-out { to { opacity: 0; scale: var(--motion-scale-enter); } }
+
 /* Chat compose "thinking" indicator — three dots fading in sequence while we
    wait for the agent's first streamed chunk (workbench ChatPage). */
 @keyframes vr-typing {

@@ -4,6 +4,8 @@ import { X } from 'lucide-react';
 
 import { cn } from '@/lib/utils';
 import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
+import { useSheetDrag } from '@/lib/sheetDrag';
+import { useIsMobile } from '@/lib/useIsMobile';
 import { useLatestRef } from '@/lib/useLatestRef';
 
 export const Dialog = DialogPrimitive.Root;
@@ -18,7 +20,8 @@ export const DialogOverlay = React.forwardRef<
   <DialogPrimitive.Overlay
     ref={ref}
     className={cn(
-      'fixed inset-0 z-50 bg-background/70 backdrop-blur-sm data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0',
+      // Fades on `base` under a phone sheet, on `fast` under a desktop dialog (index.css `motion-scrim`).
+      'motion-scrim fixed inset-0 z-50 bg-background/70 backdrop-blur-sm',
       className
     )}
     {...props}
@@ -31,21 +34,37 @@ type DialogContentProps = React.ComponentPropsWithoutRef<typeof DialogPrimitive.
   mobileSheetHeight?: 'content' | 'tall';
   /** Accessible label for the built-in close control. */
   closeLabel?: string;
+  /** How a phone shows it: a bottom `sheet` (the default) rises from the bottom edge and can be dragged
+   *  down to dismiss it; a `card` the caller places itself (away from the bottom edge) grows in place,
+   *  as a desktop dialog does (docs/plans/web-ui-motion.md M6). */
+  mobilePresentation?: 'sheet' | 'card';
 };
 
 export const DialogContent = React.forwardRef<
   React.ComponentRef<typeof DialogPrimitive.Content>,
   DialogContentProps
->(({ className, children, mobileSheetHeight = 'content', closeLabel = 'Close', onCloseAutoFocus, ...props }, ref) => {
+>(({ className, children, mobileSheetHeight = 'content', closeLabel = 'Close', mobilePresentation = 'sheet', onCloseAutoFocus, ...props }, ref) => {
   const active = useRouteSurfaceActive();
   const activeRef = useLatestRef(active);
   const previousFocusRef = React.useRef<HTMLElement | null>(null);
+  // On a phone the dialog is a sheet a finger can drag down to dismiss (docs/plans/web-ui-motion.md M6);
+  // letting go far or fast enough closes it as its own close button does.
+  const phone = useIsMobile();
+  const [sheet, setSheet] = React.useState<HTMLDivElement | null>(null);
+  const closeRef = React.useRef<HTMLButtonElement>(null);
+  const dismiss = React.useCallback(() => closeRef.current?.click(), []);
+  useSheetDrag(sheet, { enabled: phone && active && mobilePresentation === 'sheet', onDismiss: dismiss });
+  const setRefs = React.useCallback((node: HTMLDivElement | null) => {
+    setSheet(node);
+    if (typeof ref === 'function') ref(node);
+    else if (ref) ref.current = node;
+  }, [ref]);
   if (!active) return null;
   return (
     <DialogPortal>
       <DialogOverlay />
       <DialogPrimitive.Content
-        ref={ref}
+        ref={setRefs}
         className={cn(
           // Desktop: centered modal. Mobile (max-md): a bottom sheet — full-width,
           // slides up from the bottom edge, rounded top + drag handle, capped height
@@ -55,7 +74,10 @@ export const DialogContent = React.forwardRef<
           // resolved 90dvh height without re-declaring the shared sheet behavior.
           // One minmax(0, 1fr) column: content that does not wrap (a truncated
           // line, a long word) can never widen the track past the dialog.
-          'fixed left-1/2 top-1/2 z-50 grid grid-cols-1 min-w-0 w-full max-w-lg max-h-[calc(100dvh-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 overflow-y-auto rounded-xl border border-border bg-card p-6 shadow-xl data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=open]:fade-in-0 data-[state=closed]:fade-out-0 data-[state=open]:zoom-in-95 data-[state=closed]:zoom-out-95 max-md:left-0 max-md:right-0 max-md:top-auto max-md:bottom-0 max-md:w-full max-md:max-w-none max-md:max-h-[90dvh] max-md:translate-x-0 max-md:translate-y-0 max-md:rounded-2xl max-md:rounded-b-none max-md:p-5 max-md:pb-[calc(1.5rem+env(safe-area-inset-bottom))] max-md:data-[state=open]:zoom-in-100 max-md:data-[state=closed]:zoom-out-100 max-md:data-[state=open]:slide-in-from-bottom max-md:data-[state=closed]:slide-out-to-bottom max-md:data-[state=open]:duration-300 max-md:data-[state=closed]:duration-200',
+          // `motion-dialog` (index.css): a sheet's rise and fall on a phone, a dialog's fade and grow on
+          // a desktop; `motion-card`, that fade and grow on a phone too.
+          mobilePresentation === 'card' ? 'motion-card' : 'motion-dialog',
+          'fixed left-1/2 top-1/2 z-50 grid grid-cols-1 min-w-0 w-full max-w-lg max-h-[calc(100dvh-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 overflow-y-auto rounded-xl border border-border bg-card p-6 shadow-xl max-md:left-0 max-md:right-0 max-md:top-auto max-md:bottom-0 max-md:w-full max-md:max-w-none max-md:max-h-[90dvh] max-md:translate-x-0 max-md:translate-y-0 max-md:rounded-2xl max-md:rounded-b-none max-md:p-5 max-md:pb-[calc(1.5rem+env(safe-area-inset-bottom))]',
           mobileSheetHeight === 'tall' && 'max-md:h-[90dvh]',
           className
         )}
@@ -91,7 +113,7 @@ export const DialogContent = React.forwardRef<
         {/* Bottom-sheet drag handle — mobile only. */}
         <div className="mx-auto h-1.5 w-10 shrink-0 rounded-full bg-border-strong md:hidden" aria-hidden />
         {children}
-        <DialogPrimitive.Close className="absolute right-4 top-4 rounded-md p-1 text-muted opacity-70 transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring">
+        <DialogPrimitive.Close ref={closeRef} className="absolute right-4 top-4 rounded-md p-1 text-muted opacity-70 transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring">
           <X className="size-4" />
           <span className="sr-only">{closeLabel}</span>
         </DialogPrimitive.Close>

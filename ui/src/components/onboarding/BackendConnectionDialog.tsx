@@ -322,7 +322,8 @@ export function BackendConnectionDialog({ backend, method, onClose, onConnected,
   }, [naming, method, query]);
 
   return <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
-    <DialogContent ref={frame} className="connection-dialog" data-backend={backend} closeLabel={t('common.close')}>
+    {/* Centred on a phone too (connection.css), so it grows in place rather than rising as a sheet. */}
+    <DialogContent ref={frame} className="connection-dialog" data-backend={backend} closeLabel={t('common.close')} mobilePresentation="card">
       <div className="connection-heading"><div className="connection-logo"><BackendIcon backend={backend} variant="brand" brandFit="mark" size={28} aria-hidden="true" /></div>
         <div><DialogTitle>{title}</DialogTitle><p>{t('onboarding.setup.forNamed', { name: getBackendUiMeta(backend).label })}</p></div>
       </div>

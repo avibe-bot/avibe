@@ -15,6 +15,7 @@ import { useTranslation } from 'react-i18next';
 
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
+import { useSheetDrag } from '@/lib/sheetDrag';
 import { useIsMobile } from '@/lib/useIsMobile';
 
 export const ResponsiveMenu: React.FC<{
@@ -60,7 +61,17 @@ export const ResponsiveMenu: React.FC<{
 }) => {
   const { t } = useTranslation();
   const isMobile = useIsMobile();
-  const contentRef = React.useRef<HTMLDivElement>(null);
+  const contentRef = React.useRef<HTMLDivElement | null>(null);
+  const [sheet, setSheet] = React.useState<HTMLDivElement | null>(null);
+  const setSheetRef = React.useCallback((node: HTMLDivElement | null) => {
+    contentRef.current = node;
+    setSheet(node);
+  }, []);
+  // The sheet can be dragged down to dismiss it (docs/plans/web-ui-motion.md M6), closing as its
+  // closing row does.
+  const closeRef = React.useRef<HTMLButtonElement>(null);
+  const dismiss = React.useCallback(() => closeRef.current?.click(), []);
+  useSheetDrag(sheet, { enabled: isMobile, onDismiss: dismiss });
 
   if (!isMobile) {
     return (
@@ -81,9 +92,9 @@ export const ResponsiveMenu: React.FC<{
     <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
       <DialogPrimitive.Trigger asChild>{trigger}</DialogPrimitive.Trigger>
       <DialogPrimitive.Portal>
-        <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-background/70 backdrop-blur-sm data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
+        <DialogPrimitive.Overlay className="motion-scrim fixed inset-0 z-50 bg-background/70 backdrop-blur-sm" />
         <DialogPrimitive.Content
-          ref={contentRef}
+          ref={setSheetRef}
           // Radix focuses the first item on open, which paints a focus ring on
           // 重命名 for someone who just tapped 「…」. Focus the panel itself
           // instead: no ring, and Tab / Escape / the focus trap still work.
@@ -93,8 +104,8 @@ export const ResponsiveMenu: React.FC<{
           }}
           tabIndex={-1}
           className={cn(
-            'fixed inset-x-0 bottom-0 z-50 flex max-h-[88dvh] flex-col rounded-t-2xl border-t border-border bg-card pb-[env(safe-area-inset-bottom)] shadow-2xl outline-none',
-            'data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=open]:slide-in-from-bottom data-[state=closed]:slide-out-to-bottom data-[state=open]:duration-300 data-[state=closed]:duration-200',
+            // `motion-sheet` (index.css): rises on the sheet spring, leaves faster.
+            'motion-sheet fixed inset-x-0 bottom-0 z-50 flex max-h-[88dvh] flex-col rounded-t-2xl border-t border-border bg-card pb-[env(safe-area-inset-bottom)] shadow-2xl outline-none',
           )}
         >
           <div className="mx-auto mt-2.5 h-1.5 w-10 shrink-0 rounded-full bg-border-strong" aria-hidden />
@@ -119,7 +130,7 @@ export const ResponsiveMenu: React.FC<{
           <div className="flex min-h-0 flex-1 flex-col overflow-y-auto border-t border-border">{children}</div>
 
           <div className="shrink-0 px-4 pb-4 pt-3">
-            <DialogPrimitive.Close className="flex h-12 w-full items-center justify-center rounded-xl border border-border bg-surface text-[14px] font-semibold text-foreground transition-colors hover:bg-surface-2">
+            <DialogPrimitive.Close ref={closeRef} className="flex h-12 w-full items-center justify-center rounded-xl border border-border bg-surface text-[14px] font-semibold text-foreground transition-colors hover:bg-surface-2">
               {sheetCloseLabel ?? t('common.cancel')}
             </DialogPrimitive.Close>
           </div>
