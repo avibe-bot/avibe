@@ -48,15 +48,6 @@ export class VoiceTakeKeeper {
     };
   }
 
-  get id(): string {
-    return this.take.id;
-  }
-
-  /** Resolves once every write queued so far has landed (or failed). */
-  written(): Promise<void> {
-    return this.writes.then(() => undefined);
-  }
-
   /** The take started recording: it is stored, and held by its surface. */
   begin(): void {
     this.fence = voiceTakeFence();

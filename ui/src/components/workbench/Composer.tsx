@@ -78,6 +78,7 @@ import { Button } from '../ui/button';
 import { useImageViewer } from '../ui/image-viewer-context';
 import { inForegroundSurface } from './chatShortcuts';
 import { useRouteSurfaceWindowEvent } from '../../lib/routeSurfaceActivity';
+import { useLatestRef } from '../../lib/useLatestRef';
 import {
   MentionEditor,
   type MentionSearchResult,
@@ -1624,6 +1625,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     keep: () => (voiceKeepTarget ? { target: voiceKeepTarget } : null),
   });
   const holdBusy = hold.phase !== 'idle';
+  const holdPhaseRef = useLatestRef(hold.phase);
   // A take owns the box from the press to its end: Enter and Send wait, so its staged files go
   // with one message only.
   const canSubmitNow = canSubmit && !holdBusy;
@@ -1669,9 +1671,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     hold.discard();
   };
   // A kept take's words (ui/design: composer/pending-voice/*): into the draft unless voice owns
-  // it right now, or sent as the spoken message they were meant to be.
+  // it right now, or sent as the spoken message they were meant to be. They land after an
+  // asynchronous claim, so this reads the composer as it is then: one that is gone, or that a
+  // take started on meanwhile, refuses them and the take stays kept.
   const insertKeptVoiceText = (words: string): boolean => {
-    if (disabledRef.current || voiceDraftLocked() || hold.phase !== 'idle') return false;
+    if (unmountedRef.current || disabledRef.current || voiceDraftLocked() || holdPhaseRef.current !== 'idle') return false;
     appendToDraft(words);
     return true;
   };

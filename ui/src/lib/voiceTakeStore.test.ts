@@ -50,6 +50,12 @@ const take = (id: string, patch: Partial<VoiceTake> = {}): VoiceTake => ({
   ...patch,
 });
 
+/** Waits until the store holds the take as expected: the keeper writes in order, so its last
+ *  write landing means every earlier one did. */
+const stored = (id: string, expected: Partial<VoiceTake>) => vi.waitFor(async () => {
+  expect((await readVoiceTakes()).find((kept) => kept.id === id)).toMatchObject(expected);
+});
+
 /** A take recorded through the keeper: two minutes and a tail, then left without text. */
 const keepTake = async (id: string, target = 'ses_a') => {
   const keeper = new VoiceTakeKeeper(id, { target, intent: 'send' });
@@ -58,7 +64,7 @@ const keepTake = async (id: string, target = 'ses_a') => {
   keeper.segment({ sequence: 1, final: false, durationMs: 60_000, overlapMs: 500 }, wav('minute two'));
   keeper.segment({ sequence: 2, final: true, durationMs: 23_000, overlapMs: 500 }, wav('tail'));
   keeper.pending();
-  await keeper.written();
+  await stored(id, { status: 'pending', segments: [{ sequence: 0 }, { sequence: 1 }, { sequence: 2 }] });
   return keeper;
 };
 
@@ -118,14 +124,12 @@ describe('voice take store', () => {
     expect(isVoiceTakeLive('take-1')).toBe(true);
 
     keeper.transcribed('everything that was said');
-    await keeper.written();
-    expect((await readVoiceTakes('ses_a'))[0]).toMatchObject({ status: 'transcribed', text: 'everything that was said' });
+    await stored('take-1', { status: 'transcribed', text: 'everything that was said' });
 
     keeper.forget();
-    await keeper.written();
+    await vi.waitFor(() => expect(isVoiceTakeLive('take-1')).toBe(false));
     expect(await readVoiceTakes()).toEqual([]);
     expect((await readVoiceTakeAudio('take-1')).size).toBe(0);
-    expect(isVoiceTakeLive('take-1')).toBe(false);
   });
 
   it('returns takes only to the reader who spoke them, and drops them when another reader signs in', async () => {
@@ -269,7 +273,7 @@ describe('voice take store', () => {
       const keeper = new VoiceTakeKeeper('held', { target: 'ses_a', intent: 'send' });
       keeper.begin();
       keeper.segment({ sequence: 0, final: false, durationMs: 60_000 }, wav('minute one'));
-      await keeper.written();
+      await stored('held', { segments: [{ sequence: 0 }] });
       const [kept] = await readVoiceTakes();
       finalize.mockResolvedValue({ text: 'the first minute', cleanup: 'success' });
 
@@ -281,7 +285,6 @@ describe('voice take store', () => {
       // Its surface let go of it (or its page went away): the take is free to recover, with a
       // finalize-only request for the end the recording never reached.
       keeper.release();
-      await keeper.written();
       await vi.waitFor(async () => expect(await heldVoiceTakes()).not.toContain('held'));
       const [left] = await readVoiceTakes();
       await expect(retryKeptVoiceTake(left!)).resolves.toBe('the first minute');
@@ -330,7 +333,7 @@ describe('voice take store', () => {
       const keeper = new VoiceTakeKeeper('held', { target: 'ses_a', intent: 'send' });
       keeper.begin();
       keeper.transcribed('words');
-      await keeper.written();
+      await stored('held', { status: 'transcribed', text: 'words' });
       await expect(landVoiceTake('held', land)).resolves.toBe(false);
       expect(land).toHaveBeenCalledTimes(1);
       expect(await readVoiceTakes()).toHaveLength(1);
@@ -363,7 +366,7 @@ describe('voice take store', () => {
     const keeper = new VoiceTakeKeeper('still-recording', { target: 'ses_a', intent: 'send' });
     keeper.begin();
     keeper.segment({ sequence: 0, final: false, durationMs: 60_000 }, wav('minute one'));
-    await keeper.written();
+    await stored('still-recording', { segments: [{ sequence: 0 }] });
     // Another surface retries the take as it reads it now, and the keeper writes before it ends.
     const retryWhileItRecords = async (outcome: (resolve: (value: unknown) => void, reject: (error: Error) => void) => void) => {
       const [kept] = await readVoiceTakes();
@@ -378,19 +381,19 @@ describe('voice take store', () => {
     const succeeds = await retryWhileItRecords((resolve) => resolve({ text: 'the first minute only', cleanup: 'success' }));
     await idle();
     keeper.segment({ sequence: 1, final: false, durationMs: 60_000, overlapMs: 500 }, wav('minute two'));
-    await keeper.written();
+    await stored('still-recording', { segments: [{ sequence: 0 }, { sequence: 1 }] });
     succeeds.settle();
     await succeeds.running;
     expect((await readVoiceTakes())[0]).toMatchObject({ status: 'recording', segments: [{ sequence: 0 }, { sequence: 1 }] });
     expect((await readVoiceTakes())[0]?.text).toBeUndefined();
 
     keeper.transcribed('both minutes');
-    await keeper.written();
+    await stored('still-recording', { status: 'transcribed', text: 'both minutes' });
     const fails = await retryWhileItRecords((_resolve, reject) => reject(new Error('Load failed')));
     await idle();
     keeper.segment({ sequence: 2, final: true, durationMs: 9_000, overlapMs: 500 }, wav('tail'));
     keeper.transcribed('both minutes and the tail');
-    await keeper.written();
+    await stored('still-recording', { text: 'both minutes and the tail' });
     fails.settle();
     await expect(fails.running).rejects.toThrow('Load failed');
     expect((await readVoiceTakes())[0]).toMatchObject({ status: 'transcribed', text: 'both minutes and the tail' });
