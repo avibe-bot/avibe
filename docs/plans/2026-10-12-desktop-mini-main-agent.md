@@ -488,7 +488,39 @@ Known data limitations for P1:
   automatic opening path restores them. Input controls and text selection
   remain inside the input; the dock keeps its own keyboard and voice actions.
   Vibey's click, double-click, hold and drag semantics do not change.
-  Window blur does not dismiss the input.
+  **Owner follow-up, 2026-11-05:** when the text composer is visible and voice
+  is not busy, losing the Mini window's focus closes it through the same path as
+  the keyboard button and in-window outside clicks. The current session draft
+  and selected references remain available when it is reopened. A blur that
+  arrives before the Mini window has actually focused during the opening
+  handoff is ignored, so opening from Vibey or the summon hotkey cannot
+  immediately dismiss its own composer. Focus moving to another Avibe window
+  follows the same dismissal rule. This supersedes the November 3 boundary
+  that deliberately excluded window blur.
+
+  The page owns this alongside composer visibility: each visible text opening
+  samples `document.hasFocus()` and listens for window focus/blur. Textarea
+  autofocus in an inactive WebView does not arm dismissal. Voice capture and
+  finishing suspend this listener; a later text opening starts a fresh focus
+  observation. No shell event, command or capability is added.
+
+  Transient UI inventory (2026-11-05): the Mini composer has text, session
+  reference chips, mic and send controls, but no upload/file picker. Microphone
+  permission is requested while voice is busy. Vault authorization, settings,
+  and Open in Avibe transfer to the main window; drafts/references survive
+  the composer closing. History image previews are DOM UI; image/file/link
+  clicks already follow the in-window outside-dismiss path. The native pet
+  context menu only offers Hide Mini. Cancelling it preserves composing
+  context; a macOS native menu probe retained both document focus and input.
+  If a platform menu transfers focus, dismissal still retains the draft.
+
+  An isolated macOS AppKit/WKWebView probe loaded the real Mini fixture with
+  in-memory website data and separate test bundle identities: a native pet
+  click opened the input without self-dismissal; switching to a second test
+  app closed it; reopening restored the draft. A summon delivered while
+  inactive survived autofocus, then dismissed after actual focus and a later
+  app switch. This verifies DOM focus observation in WKWebView, not packaged
+  Tauri acceptance. Windows WebView2 native acceptance remains unverified.
   **Follow-up decision, 2026-11-03 20:33:** while the text input is open
   (and voice is not busy), blank space inside the Mini window also takes
   clicks and dismisses the input. The first click belongs entirely to Mini;
@@ -502,7 +534,10 @@ Known data limitations for P1:
   ownership. Escape retains its explicit discard behavior below.
   Validate at the existing `test:pet-mini` browser boundary: outside clicks
   close the input, dismissal/reopening retains drafts, and clicking/selecting
-  inside the input keeps it open. Existing tests cover the pet gestures,
+  inside the input keeps it open. Window blur after focus closes it without
+  losing text/references; blur before focus does not, across pet, keyboard
+  and voice-shortcut openings. Voice busy remains unaffected.
+  Existing tests cover the pet gestures,
   voice, send, references, and session switching.
 - **Look:** the same width as a card, radius 22px, background `#2a2a2e`,
   border `white / 10%`, padding 6px (14px left), no shadow.

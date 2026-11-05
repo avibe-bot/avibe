@@ -608,6 +608,20 @@ const PetSurface: React.FC = () => {
 
   const clearVoiceError = voice.clearError;
   useEffect(() => { if (!composing) clearVoiceError(); }, [composing, clearVoiceError]);
+  useLayoutEffect(() => {
+    if (!composing || !canChat || uncertain || voice.busy) return;
+    // Autofocusing a textarea in an inactive WebView is not window activation.
+    // Arm each visible text opening only once the document really has focus.
+    let focused = document.hasFocus();
+    const onFocus = () => { if (document.hasFocus()) focused = true; };
+    const onBlur = () => { if (focused) closeComposer(); };
+    window.addEventListener('focus', onFocus);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      window.removeEventListener('blur', onBlur);
+    };
+  }, [composing, canChat, uncertain, voice.busy, closeComposer]);
   useEffect(() => {
     if (!composing || voice.busy) return;
     const onClick = (event: MouseEvent) => {
