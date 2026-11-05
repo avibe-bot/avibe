@@ -1,7 +1,9 @@
 // Idle-time prefetch of the conversations a reader is most likely to open next
 // (docs/plans/web-ui-local-cache.md section 4.2): the few most recent Inbox
 // Sessions that have no stored snapshot get the same bootstrap the chat page
-// reads, so the first tap on each paints at once too.
+// reads, so the first tap on each paints at once too. The main Bot's
+// conversation matters most, so it is always taken, first, and refreshed even
+// when it is stored, unless it is the chat open now.
 //
 // What it must not do: act as the reader. The read is the bootstrap GET, which
 // marks nothing read (mark-read is a separate POST only an open chat makes), and
@@ -16,6 +18,7 @@ import {
   beginChatSnapshotRequest,
   chatSnapshotFromBootstrap,
   chatSnapshotOwnerForAnswer,
+  chatSnapshotWriteCount,
   forgetChatSnapshot,
   readChatSnapshot,
   writeChatSnapshot,
@@ -72,8 +75,11 @@ const errorStatus = (error: unknown): number | null => {
 
 // Per document: a Session is tried once, whatever the outcome. A chat the reader
 // opens stores itself; one that failed is not worth retrying in the background.
+// The pinned Session (the main Bot's) is refreshed once per document as well.
 const tried = new Set<string>();
-const queue: string[] = [];
+const refreshed = new Set<string>();
+type Queued = { sessionId: string; refresh: boolean };
+const queue: Queued[] = [];
 let active = 0;
 let idleScheduled = false;
 // The latest Sessions offered. An offer made while the page was hidden or the
@@ -81,6 +87,8 @@ let idleScheduled = false;
 // page shows or the connection changes, so a moment in the background or on
 // cellular does not switch the prefetch off for the rest of the document.
 let latestOffer: readonly string[] = [];
+let latestPinned: string | null = null;
+let latestOpen: string | null = null;
 let watchingConditions = false;
 
 const conditionsAllowPrefetch = () =>
@@ -89,25 +97,40 @@ const conditionsAllowPrefetch = () =>
 function watchConditions(): void {
   if (watchingConditions) return;
   watchingConditions = true;
-  const offerAgain = () => offer(latestOffer);
+  const offerAgain = () => offer();
   if (typeof document !== 'undefined') document.addEventListener('visibilitychange', offerAgain);
   networkInformation()?.addEventListener?.('change', offerAgain);
 }
 
 /** Offer the Inbox's most recent Sessions, newest first. Those without a stored
- *  conversation are prefetched when the browser is idle. */
-export function prefetchChatSnapshots(sessionIds: readonly string[]): void {
+ *  conversation are prefetched when the browser is idle. ``pinned`` (the main
+ *  Bot's Session) goes first and is refreshed even when stored; ``open`` is the
+ *  chat on screen, which keeps its own record current and is not taken. */
+export function prefetchChatSnapshots(
+  sessionIds: readonly string[],
+  { pinned = null, open = null }: { pinned?: string | null; open?: string | null } = {},
+): void {
   latestOffer = sessionIds.slice(0, CHAT_PREFETCH_CANDIDATES);
+  latestPinned = pinned;
+  latestOpen = open;
   watchConditions();
-  offer(latestOffer);
+  offer();
 }
 
-function offer(sessionIds: readonly string[]): void {
+function offer(): void {
   if (!conditionsAllowPrefetch()) return;
-  for (const sessionId of sessionIds) {
+  const pinned = latestPinned;
+  if (pinned && !refreshed.has(pinned)) {
+    refreshed.add(pinned);
+    tried.add(pinned);
+    const queued = queue.findIndex((item) => item.sessionId === pinned);
+    if (queued !== -1) queue.splice(queued, 1);
+    queue.unshift({ sessionId: pinned, refresh: true });
+  }
+  for (const sessionId of latestOffer) {
     if (tried.has(sessionId)) continue;
     tried.add(sessionId);
-    queue.push(sessionId);
+    queue.push({ sessionId, refresh: false });
   }
   schedule();
 }
@@ -126,29 +149,37 @@ function pump(): void {
   // goes back to untried, and the next page show or connection change offers it
   // again.
   if (!conditionsAllowPrefetch()) {
-    for (const sessionId of queue.splice(0)) tried.delete(sessionId);
+    for (const { sessionId, refresh } of queue.splice(0)) {
+      tried.delete(sessionId);
+      if (refresh) refreshed.delete(sessionId);
+    }
     return;
   }
   while (active < CHAT_PREFETCH_CONCURRENCY && queue.length > 0) {
-    const sessionId = queue.shift()!;
+    const item = queue.shift()!;
+    // The chat on screen keeps its own record current.
+    if (item.refresh && item.sessionId === latestOpen) continue;
     active += 1;
-    void prefetchOne(sessionId).finally(() => {
+    void prefetchOne(item).finally(() => {
       active -= 1;
       schedule();
     });
   }
 }
 
-async function prefetchOne(sessionId: string): Promise<void> {
-  if (await readChatSnapshot(sessionId)) return;
+async function prefetchOne({ sessionId, refresh }: Queued): Promise<void> {
+  if (!refresh && await readChatSnapshot(sessionId)) return;
   // Noted as the request starts, like the chat page's own: a reader change, a
   // store clear, or a forget of this Session while it is out voids the answer.
   const request = beginChatSnapshotRequest(sessionId);
   if (!request.principal) return;
+  const writes = chatSnapshotWriteCount(sessionId);
   try {
     const bootstrap = await fetchBootstrapForPrefetch(sessionId);
     // The reader may have opened the chat meanwhile; its own record is newer.
-    if (await readChatSnapshot(sessionId)) return;
+    // A refresh replaces a stored record, so it asks whether one was written
+    // while it was out rather than whether one exists.
+    if (refresh ? chatSnapshotWriteCount(sessionId) !== writes : await readChatSnapshot(sessionId)) return;
     const owner = chatSnapshotOwnerForAnswer(request);
     if (owner) await writeChatSnapshot(owner, chatSnapshotFromBootstrap(bootstrap), { added: true });
   } catch (error) {

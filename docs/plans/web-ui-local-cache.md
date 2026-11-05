@@ -111,7 +111,11 @@ conversation read or a deep-link jump; it never disables chrome. There is no
 
 Phase 2 also prefetches, during browser idle time, the bootstrap for the few
 most recent Inbox sessions that have no snapshot (the five newest, each tried
-once per page load). That way the first tap on each one is fast too. It uses
+once per page load). That way the first tap on each one is fast too. The main
+Bot's conversation always comes first: it is taken whether or not it is among
+the five, and refreshed even when it has a snapshot (once per page load), unless
+it is the chat open on screen. A refresh that answers after the open chat
+stored the conversation is dropped. It uses
 the same request the chat page makes, at most three at a time, while the page
 is visible. Where the Network Information API exists, a connection it reports
 as cellular, metered, or data-saving is skipped. Where the API is missing
