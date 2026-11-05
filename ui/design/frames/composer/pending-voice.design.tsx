@@ -57,6 +57,7 @@ const designFrames = frames([
   phone('c-failed', '3 · 这次也没成功：录音还在，可以再试，或者不要了', [failed]),
   phone('d-ready', '4 · 识别出来了，还没发：按住说的话可以发送，也可以放进输入框改一改', [ready]),
   phone('e-dictated', '4b · 点按/⌥Z 听写的一段：只放进输入框，不直接发送', [dictated]),
+  phone('e2-truncated', '4c · 页面在保存最后一段时崩了：只识别保存下来的部分，并明确说结尾没存下来', [{ ...ready, take: { ...ready.take, truncated: true } }]),
   phone('f-several', '5 · 有好几段（最多保留 3 段，再多会挤掉最早的那段）', [ready, failed, waiting]),
   phone('g-lost', '× · 这段录音没能存下来（页面在第一分钟内就崩了）：只能不要了', [lost]),
   desktop('h-waiting-desktop', '1 · 桌面：断网时说的一段，留在输入框上方', [waiting]),
