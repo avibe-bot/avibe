@@ -1,8 +1,7 @@
 // Sending a message (docs/plans/web-ui-motion.md M1, M2): the message rises out of the composer and
 // settles in place while the conversation glides up to make room, Send turns into Stop, and the agent's
 // working bubble fades in under it. If the send fails, the message is withdrawn the way it came and the
-// text is back in the composer. Each tier is the same conversation at the same size; `now` is what the
-// product does today (the turn starts at once, the message lands when the POST answers).
+// text is back in the composer. With reduced motion the conversation cross-fades to its new state.
 import { beat, cut, offset, scaleOf, spring, timed, type Curve, type Track } from '../../kit/motion';
 import { MotionLoop } from '../../kit/MotionLoop';
 import {
@@ -18,7 +17,6 @@ import {
   TRANSCRIPT,
   TRANSCRIPT_ROWS,
   WORKING,
-  type Tier,
 } from './fixtures';
 import { ChatAt, DesktopStage, Layer, PhoneStage } from './stage';
 
@@ -30,8 +28,6 @@ const RESET = 500;
 const PIN_FIRST = 1500;
 /** Where the frame rests when animations are off: sent, and settled. */
 const SETTLED = SEND_AT + 1500;
-/** Today the message lands with the POST answer, this long after the working bubble. */
-const POST_ANSWER = 450;
 
 type Feel = {
   /** The conversation gliding up. */
@@ -48,36 +44,17 @@ type Feel = {
   press: number;
 };
 
-function feel(tier: Exclude<Tier, 'now' | 'reduced'>): Feel {
-  // Press and the Send/Stop trade are controls: the same in every tier that has them.
-  const press = scaleOf('press-control');
-  const morph = scaleOf('morph');
-  if (tier === 'restrained') {
-    return { glide: timed('base', 'enter'), rise: 0, grow: 1, fade: timed('fast', 'enter'), dotsAfter: beat(), dotsRise: 0, morph: 1, press: 1 };
-  }
-  if (tier === 'pronounced') {
-    return {
-      glide: spring('bouncy'),
-      rise: offset('xl'),
-      grow: scaleOf('enter-lg'),
-      fade: timed('base', 'enter'),
-      dotsAfter: beat(),
-      dotsRise: offset('md'),
-      morph,
-      press,
-    };
-  }
-  return {
-    glide: spring('smooth'),
-    rise: offset('md'),
-    grow: scaleOf('enter'),
-    fade: timed('fast', 'enter'),
-    dotsAfter: beat(),
-    dotsRise: offset('sm'),
-    morph,
-    press,
-  };
-}
+/** The approved (standard) send, from the tokens. */
+const feel = (): Feel => ({
+  glide: spring('smooth'),
+  rise: offset('md'),
+  grow: scaleOf('enter'),
+  fade: timed('fast', 'enter'),
+  dotsAfter: beat(),
+  dotsRise: offset('sm'),
+  morph: scaleOf('morph'),
+  press: scaleOf('press-control'),
+});
 
 /** The pressed Send button, the before page handing over to the after page, and the after page
  *  starting where the before page was. */
@@ -129,32 +106,10 @@ function sendTracks(f: Feel, shift: number): Track[] {
   ];
 }
 
-export function SendLoop({ tier, shift, desktop = false }: { tier: Tier; shift: number; desktop?: boolean }) {
+export function SendLoop({ reduced = false, shift, desktop = false }: { reduced?: boolean; shift: number; desktop?: boolean }) {
   const Stage = desktop ? DesktopStage : PhoneStage;
-  const id = `send-${desktop ? 'desktop-' : ''}${tier}`;
-  if (tier === 'now') {
-    // Opaque pages over each other, each removed in one frame.
-    return (
-      <MotionLoop
-        delay={PIN_FIRST}
-        id={id}
-        period={PERIOD}
-        reset={RESET}
-        rest={SETTLED}
-        tracks={[
-          { el: inLayer('before'), beats: [{ at: SEND_AT, to: { opacity: 0 }, curve: cut }] },
-          { el: inLayer('waiting'), beats: [{ at: SEND_AT + POST_ANSWER, to: { opacity: 0 }, curve: cut }] },
-        ]}
-      >
-        <Stage>
-          <Layer name="after" opaque><ChatAt state="after" /></Layer>
-          <Layer name="waiting" opaque><ChatAt state="waiting" /></Layer>
-          <Layer name="before" opaque><ChatAt state="before" /></Layer>
-        </Stage>
-      </MotionLoop>
-    );
-  }
-  if (tier === 'reduced') {
+  const id = `send-${desktop ? 'desktop' : 'phone'}${reduced ? '-reduced' : ''}`;
+  if (reduced) {
     // No travel: the before page fades out over the after page.
     return (
       <MotionLoop
@@ -173,7 +128,7 @@ export function SendLoop({ tier, shift, desktop = false }: { tier: Tier; shift: 
     );
   }
   return (
-    <MotionLoop delay={PIN_FIRST} id={id} period={PERIOD} reset={RESET} rest={SETTLED} tracks={sendTracks(feel(tier), shift)}>
+    <MotionLoop delay={PIN_FIRST} id={id} period={PERIOD} reset={RESET} rest={SETTLED} tracks={sendTracks(feel(), shift)}>
       <Stage>
         <Layer name="before" opaque><ChatAt state="before" /></Layer>
         <Layer name="after" seeThrough><ChatAt state="after" /></Layer>
@@ -186,24 +141,8 @@ export function SendLoop({ tier, shift, desktop = false }: { tier: Tier; shift: 
  *  back in the composer with Send. */
 const FAIL_AT = 2100;
 
-export function FailLoop({ tier }: { tier: 'now' | 'standard' }) {
-  if (tier === 'now') {
-    return (
-      <MotionLoop
-        delay={PIN_FIRST}
-        id="send-failed-now"
-        period={PERIOD}
-        rest={FAIL_AT - 100}
-        tracks={[{ el: inLayer('before'), beats: [{ at: SEND_AT, to: { opacity: 0 }, curve: cut }, { at: FAIL_AT, to: { opacity: 1 }, curve: cut }] }]}
-      >
-        <PhoneStage>
-          <Layer name="after" opaque><ChatAt state="after" /></Layer>
-          <Layer name="before" opaque><ChatAt state="before" /></Layer>
-        </PhoneStage>
-      </MotionLoop>
-    );
-  }
-  const f = feel('standard');
+export function FailLoop() {
+  const f = feel();
   const leave = timed('instant', 'exit');
   const back = timed('base', 'move');
   // The working bubble and Stop leave first; then the message sinks back under the composer as the
@@ -230,7 +169,7 @@ export function FailLoop({ tier }: { tier: 'now' | 'standard' }) {
   const tracks: Track[] = sendTracks(f, SHIFT.phone.send).map((track) => ({ ...track, beats: [...track.beats, ...(undo[track.el] ?? [])] }));
   tracks.push({ el: after(`${COMPOSER} ${TYPED}`), beats: undo[after(`${COMPOSER} ${TYPED}`)] });
   return (
-    <MotionLoop delay={PIN_FIRST} id="send-failed-standard" period={PERIOD} rest={FAIL_AT - 100} tracks={tracks}>
+    <MotionLoop delay={PIN_FIRST} id="send-failed" period={PERIOD} rest={FAIL_AT - 100} tracks={tracks}>
       <PhoneStage>
         <Layer name="before" opaque><ChatAt state="before" /></Layer>
         <Layer name="after" seeThrough><ChatAt state="after" /></Layer>
@@ -238,5 +177,3 @@ export function FailLoop({ tier }: { tier: 'now' | 'standard' }) {
     </MotionLoop>
   );
 }
-
-

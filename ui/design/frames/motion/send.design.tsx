@@ -1,39 +1,19 @@
-// Sending a message (docs/plans/web-ui-motion.md M1, M2): the message rises out of the composer and
-// settles in place while the conversation glides up to make room, Send turns into Stop, and the agent's
-// working bubble fades in under it. If the send fails, the message is withdrawn the way it came and the
-// text is back in the composer. Each tier is the same conversation at the same size; `now` is what the
-// product does today (the turn starts at once, the message lands when the POST answers).
+// Sending a message (docs/plans/web-ui-motion.md M1, M2), approved by the owner on 2026-11-05: the
+// message rises out of the composer while the conversation glides up, Send turns into Stop, and the
+// working bubble follows a beat later; a failed send goes back the way it came. Each with its
+// reduced-motion form.
 import { frames } from '../../frame';
-import { CHAT, chatStatesFixtures, SHIFT, TIER_TITLE } from './fixtures';
+import { CHAT, chatStatesFixtures, SHIFT } from './fixtures';
 import { FailLoop, SendLoop } from './SendDemo';
 
-const phone = { width: 390, height: 844, status: 'proposed' as const, route: `/chat/${CHAT.after}` };
+const phone = { width: 390, height: 844, status: 'approved' as const, route: `/chat/${CHAT.after}`, fixtures: chatStatesFixtures('before', 'after') };
+const desktop = { ...phone, width: 1280, height: 800 };
 
 const designFrames = frames([
-  ...(['now', 'restrained', 'standard', 'pronounced', 'reduced'] as const).map((tier) => ({
-    ...phone,
-    name: `phone-${tier}`,
-    title: `发送 · ${TIER_TITLE[tier]} · 手机`,
-    fixtures: chatStatesFixtures('before', 'waiting', 'after'),
-    render: () => <SendLoop tier={tier} shift={SHIFT.phone.send} />,
-  })),
-  ...(['now', 'standard'] as const).map((tier) => ({
-    ...phone,
-    name: `phone-failed-${tier}`,
-    title: `发送失败，消息退回输入框 · ${TIER_TITLE[tier]} · 手机`,
-    fixtures: chatStatesFixtures('before', 'after'),
-    render: () => <FailLoop tier={tier} />,
-  })),
-  ...(['now', 'standard'] as const).map((tier) => ({
-    name: `desktop-${tier}`,
-    title: `发送 · ${TIER_TITLE[tier]} · 桌面`,
-    width: 1280,
-    height: 800,
-    status: 'proposed' as const,
-    route: `/chat/${CHAT.after}`,
-    fixtures: chatStatesFixtures('before', 'waiting', 'after'),
-    render: () => <SendLoop tier={tier} shift={SHIFT.desktop.send} desktop />,
-  })),
+  { ...phone, name: 'phone', title: '发送 · 手机', render: () => <SendLoop shift={SHIFT.phone.send} /> },
+  { ...phone, name: 'phone-reduced', title: '发送 · 减少动态效果 · 手机', render: () => <SendLoop reduced shift={SHIFT.phone.send} /> },
+  { ...phone, name: 'phone-failed', title: '发送失败，消息退回输入框 · 手机', render: () => <FailLoop /> },
+  { ...desktop, name: 'desktop', title: '发送 · 桌面', render: () => <SendLoop desktop shift={SHIFT.desktop.send} /> },
 ]);
 
 export default designFrames;

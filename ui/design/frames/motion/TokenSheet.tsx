@@ -33,7 +33,6 @@ function rows(): { title: string; rows: Row[] }[] {
         { name: 'snappy', token: '--motion-spring-snappy', use: '控件：松手回弹、发送↔停止', curve: spring('snappy') },
         { name: 'smooth', token: '--motion-spring-smooth', use: '内容：消息升起、行移动', curve: spring('smooth') },
         { name: 'sheet', token: '--motion-spring-sheet', use: '界面：底部弹层、页面推入', curve: spring('sheet') },
-        { name: 'bouncy', token: '--motion-spring-bouncy', use: '只用于「明显」档，约 2% 过冲', curve: spring('bouncy') },
       ],
     },
   ];

@@ -9,17 +9,6 @@ import { inboxRow, type WorkbenchFixtures } from '../../shell/fixtures';
 import { agentSays, chatFixtures, idleTurn, runningTurn, userSays } from '../chat/fixtures';
 import { workbenchFixtures } from '../workbench/fixtures';
 
-/** How strongly a moment moves. `now` is what the product does today; the plan recommends `standard`. */
-export type Tier = 'now' | 'restrained' | 'standard' | 'pronounced' | 'reduced';
-
-export const TIER_TITLE: Record<Tier, string> = {
-  now: '现在',
-  restrained: '克制',
-  standard: '标准（推荐）',
-  pronounced: '明显',
-  reduced: '减少动态效果',
-};
-
 /** Several fixture sets in one frame: one page per state, each reading its own Session. */
 export function mergeFixtures(...sets: WorkbenchFixtures[]): WorkbenchFixtures {
   return { ...sets[0], api: Object.assign({}, ...sets.map((set) => set.api)) };
@@ -57,7 +46,6 @@ export const SHIFT = {
 /** The Session ids each state reads (ids as the server mints them). */
 export const CHAT = {
   before: 'sesmo7b4f0re1',
-  waiting: 'sesmo7w4i7in2',
   after: 'sesmo7a4f7er3',
   replied: 'sesmo7r3p1ed4',
 } as const;
@@ -69,8 +57,6 @@ const title = { title: 'Inbox 卡顿与动效' };
 export const chatStates: Record<ChatState, WorkbenchFixtures> = {
   // A draft typed and ready to send.
   before: chatFixtures({ session: { ...title, id: CHAT.before }, messages: history, draft: SENT_TEXT, turnState: idleTurn }),
-  // Today: the turn starts at once, the message only lands when the POST answers.
-  waiting: chatFixtures({ session: { ...title, id: CHAT.waiting }, messages: history, turnState: runningTurn }),
   // Sent: the message is in, the agent is working.
   after: chatFixtures({ session: { ...title, id: CHAT.after }, messages: [...history, sent], turnState: runningTurn }),
   // The reply has landed and the turn is over.

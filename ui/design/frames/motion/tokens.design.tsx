@@ -3,7 +3,7 @@ import { frames } from '../../frame';
 import { TokenSheet } from './TokenSheet';
 
 const designFrames = frames([
-  { name: 'sheet', title: '动效令牌：时长、曲线、弹簧、加载', width: 900, height: 960, status: 'proposed', render: () => <TokenSheet /> },
+  { name: 'sheet', title: '动效令牌：时长、曲线、弹簧、加载', width: 900, height: 960, status: 'approved', render: () => <TokenSheet /> },
 ]);
 
 export default designFrames;

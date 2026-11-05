@@ -1,8 +1,8 @@
 # Web UI Motion · Plan
 
-> **Status**: Proposed 2026-11-05, awaiting the owner's choice of tiers (section 10).
+> **Status**: Approved by the owner 2026-11-05 (decisions in section 11).
 > **Owner**: cyhhao
-> **Design**: `ui/design/frames/motion/` (status `proposed`), `ui/design: motion/*`
+> **Design**: `ui/design/frames/motion/` (status `approved`), `ui/design: motion/*`
 
 ## 1. Background
 
@@ -25,9 +25,9 @@ Owner constraints carried from earlier design rounds:
 - **Quality, not spectacle.** The reference is the voice meter: mint, smooth
   interpolation, a stable frame rate, little CPU, and a full fallback when
   "Reduce motion" is on.
-- **Choice by comparison.** Each main moment is drawn in three strengths,
-  restrained, standard, and pronounced, on the same data and size as today's
-  behavior, so the owner picks.
+- **Chosen by comparison.** Each main moment was drawn in three strengths
+  (restrained, standard, pronounced) beside today's behavior, on the same data
+  and size; the owner chose standard for phone and desktop alike (section 9).
 - **Budget for the iPhone Home Screen app and `WKWebView`,** not for desktop
   Chromium.
 
@@ -119,15 +119,14 @@ curves also exposed as `ease-*` utilities through `@theme inline`.
 | `--motion-ease-enter` (`ease-enter`) | `cubic-bezier(0.22, 1, 0.36, 1)` | Entering: decelerates into place |
 | `--motion-ease-exit` (`ease-exit`) | `cubic-bezier(0.4, 0, 1, 1)` | Leaving: accelerates away, on a shorter duration |
 | `--motion-ease-move` (`ease-move`) | `cubic-bezier(0.32, 0.72, 0, 1)` | Something on screen moving to a new place (the existing `--settle`) |
-| `--motion-spring-{snappy,smooth,sheet,bouncy}` (`ease-spring-*`) | `linear()` curves | The springs below, for CSS |
-| `--motion-spring-*-duration` | 290 / 440 / 440 / 510 ms | The time each spring needs to settle |
+| `--motion-spring-{snappy,smooth,sheet}` (`ease-spring-*`) | `linear()` curves | The springs below, for CSS |
+| `--motion-spring-*-duration` | 290 / 440 / 440 ms | The time each spring needs to settle |
 | `--motion-beat` | 120 ms | A follower trails its leader (the working bubble after the message) |
-| `--motion-offset-sm` / `--motion-offset` / `--motion-offset-lg` / `--motion-offset-xl` | 4 / 8 / 16 / 32 px | How far a thing travels as it enters (`xl`: the pronounced tier) |
+| `--motion-offset-sm` / `--motion-offset` / `--motion-offset-lg` | 4 / 8 / 16 px | How far a thing travels as it enters |
 | `--motion-drift` | 30% | How far the page beneath drifts the other way on a push |
-| `--motion-scale-enter-sm` / `--motion-scale-enter` / `--motion-scale-enter-lg` | 0.98 / 0.96 / 0.9 | The scale a large surface (a card), an element, or the pronounced tier enters from |
+| `--motion-scale-enter-sm` / `--motion-scale-enter` | 0.98 / 0.96 | The scale a large surface (a card) or an element enters from |
 | `--motion-scale-press` / `--motion-scale-press-control` | 0.97 / 0.94 | A pressed surface (card, row); a pressed control (button, chip) |
 | `--motion-scale-morph` | 0.6 | An icon trading places with another (Send ↔ Stop, a badge leaving) |
-| `--motion-scale-recede` / `--motion-opacity-recede` | 0.94 / 0.6 | The page behind a sheet or a pushed page, pronounced tier only |
 | `--motion-handover-duration` / `--motion-handover-ease` | base / enter | Skeleton or cached view to content (section 6) |
 | `--motion-shimmer-duration` (`animate-skeleton-shimmer`) | 1600 ms | A skeleton's highlight sweep (section 6) |
 
@@ -143,7 +142,6 @@ cubic-bezier through `@supports`.
 | `snappy` | `{ type: 'spring', visualDuration: 0.2, bounce: 0 }` | 685 / 52 | 290 ms | Controls: press release, Send ↔ Stop, badges |
 | `smooth` | `{ visualDuration: 0.3, bounce: 0 }` | 305 / 35 | 440 ms | Content: a message rising, rows moving (FLIP) |
 | `sheet` | `{ visualDuration: 0.38, bounce: 0.08 }` | 190 / 25 | 440 ms | Surfaces: sheets, drawers, page push |
-| `bouncy` | `{ visualDuration: 0.36, bounce: 0.22 }` | 212 / 23 | 510 ms, 2% overshoot | The pronounced tier only |
 
 Existing literal durations move onto these tokens as each phase touches their
 component; nothing is migrated in bulk.
@@ -260,8 +258,8 @@ Every moment's reduced form is drawn in at least one frame (`*-reduced`).
 
 Priority is perceived impact on a phone: P1 is the conversation (the most
 frequent action), P2 how the app moves between places and answers a touch, P3
-lists and notices. Each moment names its standard tier; the main moments also
-have restrained and pronounced tiers in the frames (section 9).
+lists and notices. Each moment is the approved standard strength, with its
+reduced-motion form.
 
 ### M1 · Optimistic send (P1)
 
@@ -285,8 +283,7 @@ have restrained and pronounced tiers in the frames (section 9).
 - **Reduced**: the transcript cross-fades to its new state on `fast`.
 - **Components**: `ChatPage` (`Transcript`, `MessageRow`), `Composer`, the
   optimistic row.
-- **Frames**: `motion/send/phone-{now,restrained,standard,pronounced,reduced}`,
-  `phone-failed-{now,standard}`, `desktop-{now,standard}`.
+- **Frames**: `motion/send/phone`, `phone-reduced`, `phone-failed`, `desktop`.
 
 ### M2 · Send ↔ Stop, and the working bubble (P1)
 
@@ -309,7 +306,7 @@ have restrained and pronounced tiers in the frames (section 9).
   per 100 ms at most; a row that grows while it streams is not animated (its
   height change is followed by the pinned glide).
 - **Reduced**: crossfade on `fast`.
-- **Frames**: `motion/arrival/phone-{now,standard,reduced}`.
+- **Frames**: `motion/arrival/phone`, `phone-reduced`.
 
 ### M4 · Cache → live hand-over (P1)
 
@@ -336,7 +333,7 @@ Inbox: M7's move. Frames: `motion/arrival/*`, `motion/inbox/*`.
   on `fast` with the composer in place; the sidebar's selection moves (FLIP,
   `spring-snappy`) instead of jumping.
 - **Reduced**: crossfade on `fast`.
-- **Frames**: `motion/navigation/phone-push-{now,restrained,standard,pronounced,reduced}`.
+- **Frames**: `motion/navigation/phone-push`, `phone-push-reduced`.
 
 ### M6 · Sheets, drawers, popovers, menus (P2)
 
@@ -354,7 +351,7 @@ Inbox: M7's move. Frames: `motion/arrival/*`, `motion/inbox/*`.
   `fast`, exit. Today's 150 ms zoom moves onto the tokens.
 - **Desktop dialogs**: fade and grow from `--motion-scale-enter` on `base`; the scrim on `fast`.
 - **Reduced**: fade only, on `fast`.
-- **Frames**: `motion/sheets/phone-{now,restrained,standard,pronounced,reduced}`, `phone-drag`.
+- **Frames**: `motion/sheets/phone`, `phone-drag`, `phone-reduced`.
 
 ### M7 · Inbox rows (P3)
 
@@ -371,14 +368,15 @@ Inbox: M7's move. Frames: `motion/arrival/*`, `motion/inbox/*`.
 - **Archive or removal**: the card fades and shrinks to `--motion-scale-enter-sm` (`fast`, exit),
   then the rows below glide up (`spring-smooth`). Height never animates.
 - **Reduced**: crossfade on `fast`.
-- **Frames**: `motion/inbox/phone-move-{now,restrained,standard,pronounced,reduced}`.
+- **Frames**: `motion/inbox/phone-move`, `phone-move-reduced`.
 
 ### M8 · Press feedback and quick replies (P2)
 
 - **Every tappable surface** (buttons, cards, rows, tab bar items, chips) gets
   a pressed state on `:active`: cards and rows sink to
-  `--motion-scale-press` and darken a step; buttons and chips sink to
-  `--motion-scale-press-control`.
+  `--motion-scale-press` and buttons and chips to
+  `--motion-scale-press-control`, each with a color step (a pressed fill one
+  step darker, or the surface's hover fill).
   Press is `instant`; release is `spring-snappy`. On touch the pressed state
   waits 60 ms inside a scroller so a scroll does not flash it. WebKit's grey
   tap highlight is turned off where a pressed state exists.
@@ -404,26 +402,28 @@ the tokens. No new motion.
 
 ### Smaller moments
 
-The jump-to-latest control (fade and `--motion-scale-enter-lg` → 1, `fast`), queue rows (enter like a
+The jump-to-latest control (fade and `--motion-scale-enter` → 1, `fast`), queue rows (enter like a
 message, leave like an archived row), Harness group expansion (content fades in
 on `fast`; no height animation), the search jump highlight (kept), and the
 error banner (fade on `fast`).
 
-## 9. Tiers
+## 9. Strength
 
-| Tier | What changes | When to choose |
-| --- | --- | --- |
-| Restrained | Fades and short travel (≤ 16 px) on the `ease-*` curves; no scale, no spring; pages fade through (the old one leaves before the new one arrives) | The UI should feel quieter than iOS |
-| Standard (recommended) | iOS-like: springs without visible overshoot, full-distance pushes and sheets, small scales | Native feel, the default |
-| Pronounced | Longer travel, `spring-bouncy` (2% overshoot), the page behind a sheet steps back, a pushed page dims | The owner wants motion to be noticed |
-
-The owner can choose per moment; a choice of tier changes only token choices
-inside that moment's implementation.
+The owner compared three strengths side by side on the same data (the preview
+video and frames of 2026-11-05) and chose **standard**, the same on phone and
+desktop: iOS-like springs without visible overshoot, full-distance pushes and
+sheets, small scales. Restrained (fades and short travel only) and pronounced
+(longer travel, a 2% overshoot spring, receding pages) were not chosen; their
+frames and the tokens only they used were removed.
 
 ## 10. Phases
 
-Each phase is one PR (or two small ones), with its frames moved to `shipped`
-or `approved`, its reduced-motion test, and the measurements in section 5.
+Each phase is one PR, with its frames moved to `shipped`, its reduced-motion
+test, the Chromium 4× measurements in section 5, and a place for the device
+numbers. Delivery order (2026-11-05), to stay clear of other work in flight:
+phase 2 and phase 3 first; phase 4 after the list skeleton PR (it also changes
+the Inbox and the sidebar); phase 1 after the chat skeleton PR and optimistic
+send (they change `ChatPage`).
 
 1. **Conversation (P1)**: `ui/src/lib/motion.ts` (springs, `useMotionPreference`,
    a small WAAPI FLIP helper), then M1–M4 in `ChatPage` and `Composer`. Lands
@@ -438,18 +438,17 @@ or `approved`, its reduced-motion test, and the measurements in section 5.
    project tree, and the loading hand-over (section 6) where the skeleton
    lanes have not already adopted the tokens.
 
-## 11. Decisions for the owner
+## 11. Decisions (owner, 2026-11-05)
 
-1. **Tier per moment**: standard is recommended for every moment; restrained is
-   the alternative for desktop.
-2. **Phone push on iOS 17**: View Transitions need iOS 18; on iOS 17 navigation
-   stays a cut (recommended) rather than a JavaScript slide.
-3. **Drag to dismiss** on phone sheets (recommended), which adds gesture code to
-   the sheet primitive.
-4. **Pressed state**: scale for cards and buttons as above (recommended), or
-   color only.
-5. **Native edge-swipe back** in the iOS shell (`allowsBackForwardNavigationGestures`):
-   if the shell enables it, the web pop animation steps aside for it.
+1. **Strength**: standard for every moment, on phone and desktop alike.
+2. **Phone push**: View Transitions on iOS 18 and later; on iOS 17 navigation is
+   a cut, never a JavaScript slide.
+3. **Drag to dismiss**: phone sheets support it (M6).
+4. **Pressed state**: cards and rows sink to 0.97 (`--motion-scale-press`) and
+   buttons and chips to 0.94 (`--motion-scale-press-control`), each with a
+   color step (M8).
+5. **Native back swipe**: when the iOS shell enables the system edge swipe,
+   the web pop animation steps aside for it (M5).
 
 ## 12. Known by design
 
@@ -457,10 +456,9 @@ or `approved`, its reduced-motion test, and the measurements in section 5.
   page in each state (`ui/design/kit/motion.ts`). Every proposed motion value
   (duration, curve, offset, scale, opacity, beat) is read from the tokens. A
   frame states three kinds of number that are not motion design: when in its
-  loop a moment happens (and, for `now`, today's POST latency and the shipped
-  tw-animate values), the FLIP offsets (the row heights the shipped page draws
-  for that data, which FLIP measures at run time), and a demo gesture's finger
-  path.
+  loop a moment happens, the FLIP offsets (the row heights the shipped page
+  draws for that data, which FLIP measures at run time), and a demo gesture's
+  finger path.
 - The chat frames stack two or three shipped pages; the phone chat is an
   opaque sheet, so a stacked page leaves its sheet background off
   (`seeThrough`) to let the composer cross-fade. Nothing in the product changes

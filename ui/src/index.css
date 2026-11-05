@@ -88,8 +88,8 @@
    framer-motion's presets of the same names, drawn as `linear()` with the
    duration each needs to settle; Safari before 17.2 has no `linear()` and gets
    the nearest cubic-bezier instead. Only transform and opacity animate.
-   Offsets, scales, and opacities are how far a moment travels, not sizes or
-   colors of anything at rest. */
+   Offsets and scales are how far a moment travels, not sizes of anything at
+   rest. */
 :root {
   --motion-duration-instant: 100ms;
   --motion-duration-fast: 160ms;
@@ -103,16 +103,13 @@
   --motion-ease-move: cubic-bezier(0.32, 0.72, 0, 1);
 
   /* snappy: controls (press release, send/stop, badges); smooth: content
-     (a message rising, a row moving); sheet: surfaces (sheets, page push);
-     bouncy: the pronounced tier only, about 2% overshoot. */
+     (a message rising, a row moving); sheet: surfaces (sheets, page push). */
   --motion-spring-snappy: cubic-bezier(0.25, 1, 0.5, 1);
   --motion-spring-snappy-duration: 290ms;
   --motion-spring-smooth: cubic-bezier(0.25, 1, 0.5, 1);
   --motion-spring-smooth-duration: 440ms;
   --motion-spring-sheet: cubic-bezier(0.32, 0.72, 0, 1);
   --motion-spring-sheet-duration: 440ms;
-  --motion-spring-bouncy: cubic-bezier(0.34, 1.2, 0.64, 1);
-  --motion-spring-bouncy-duration: 510ms;
 
   /* Loading (plan §6): content taking over from a skeleton or from the
      cached view fades in place on `handover`; a skeleton's shimmer sweeps once
@@ -128,29 +125,22 @@
   --motion-offset-sm: 4px;
   --motion-offset: 8px;
   --motion-offset-lg: 16px;
-  --motion-offset-xl: 32px;
   /* How far the page beneath drifts the other way as a page is pushed over it. */
   --motion-drift: 30%;
-  /* The scale something enters from: `sm` for a large surface (a card), `lg`
-     for the pronounced tier. */
+  /* The scale something enters from; `sm` for a large surface (a card). */
   --motion-scale-enter-sm: 0.98;
   --motion-scale-enter: 0.96;
-  --motion-scale-enter-lg: 0.9;
   /* Under the finger: a surface (a card, a row) and a control (a button, a chip). */
   --motion-scale-press: 0.97;
   --motion-scale-press-control: 0.94;
   /* An icon trading places with another (Send and Stop, a badge leaving). */
   --motion-scale-morph: 0.6;
-  /* The page behind a sheet or a pushed page in the pronounced tier. */
-  --motion-scale-recede: 0.94;
-  --motion-opacity-recede: 0.6;
 }
 @supports (transition-timing-function: linear(0, 1)) {
   :root {
     --motion-spring-snappy: linear(0, 0.016 2.5%, 0.079 6%, 0.178 10%, 0.439 19.5%, 0.558 24.5%, 0.61 27%, 0.692 31.5%, 0.738 34.5%, 0.828 42%, 0.872 47%, 0.905 52%, 0.93 57%, 0.954 64%, 0.98 77%, 0.995 99.5%, 1);
     --motion-spring-smooth: linear(0, 0.017 2.5%, 0.08 6%, 0.181 10%, 0.444 19.5%, 0.552 24%, 0.615 27%, 0.688 31%, 0.743 34.5%, 0.833 42%, 0.876 47%, 0.908 52%, 0.952 62.5%, 0.981 77%, 1);
     --motion-spring-sheet: linear(0, 0.004 1.5%, 0.02 3.5%, 0.046 5.5%, 0.089 8%, 0.183 12.5%, 0.46 24.5%, 0.609 32%, 0.727 39.5%, 0.816 47%, 0.861 52%, 0.896 57%, 0.947 67.5%, 0.978 80%, 1);
-    --motion-spring-bouncy: linear(0, 0.006 1.5%, 0.03 3.5%, 0.057 5%, 0.116 7.5%, 0.187 10%, 0.515 20.5%, 0.613 24%, 0.711 28%, 0.764 30.5%, 0.828 34%, 0.886 38%, 0.921 41%, 0.961 45.5%, 0.987 50%, 1.006 55%, 1.015 60%, 1.019 72%, 1);
   }
 }
 
@@ -225,7 +215,6 @@
   --ease-spring-snappy: var(--motion-spring-snappy);
   --ease-spring-smooth: var(--motion-spring-smooth);
   --ease-spring-sheet: var(--motion-spring-sheet);
-  --ease-spring-bouncy: var(--motion-spring-bouncy);
 
   /* A skeleton's shimmer: a highlight crossing its block, transform only.
      Pair it with `motion-reduce:animate-none`, which leaves the block still. */

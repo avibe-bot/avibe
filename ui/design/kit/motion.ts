@@ -40,7 +40,7 @@ function tokenMs(name: string): number {
 
 export type Duration = 'instant' | 'fast' | 'base' | 'slow';
 export type Ease = 'enter' | 'exit' | 'move';
-export type Spring = 'snappy' | 'smooth' | 'sheet' | 'bouncy';
+export type Spring = 'snappy' | 'smooth' | 'sheet';
 
 /** A duration token on a curve token: `timed('base', 'enter')`. */
 export const timed = (duration: Duration, ease: Ease): Curve => ({
@@ -53,21 +53,17 @@ export const spring = (name: Spring): Curve => ({
   ease: token(`--motion-spring-${name}`),
 });
 /** How far a thing travels (`--motion-offset-*`), in px. */
-export const offset = (size: 'sm' | 'md' | 'lg' | 'xl' = 'md') => parseFloat(token(size === 'md' ? '--motion-offset' : `--motion-offset-${size}`));
+export const offset = (size: 'sm' | 'md' | 'lg' = 'md') => parseFloat(token(size === 'md' ? '--motion-offset' : `--motion-offset-${size}`));
 /** A scale a moment moves from or to (`--motion-scale-*`). */
-export const scaleOf = (name: 'enter-sm' | 'enter' | 'enter-lg' | 'press' | 'press-control' | 'morph' | 'recede') =>
+export const scaleOf = (name: 'enter-sm' | 'enter' | 'press' | 'press-control' | 'morph') =>
   parseFloat(token(`--motion-scale-${name}`));
 /** How far a page beneath drifts on a push (`--motion-drift`), as a leftward travel. */
 export const drift = (): Travel => `${-parseFloat(token('--motion-drift'))}%`;
-/** How dim a receding page gets in the pronounced tier (`--motion-opacity-recede`). */
-export const recedeOpacity = () => parseFloat(token('--motion-opacity-recede'));
 /** One beat (`--motion-beat`), in ms: how long a follower trails its leader. */
 export const beat = () => tokenMs('--motion-beat');
 
 /** No motion: the change lands in one frame, as most of the product does today. */
 export const cut: Curve = { dur: 0, ease: 'linear' };
-/** What a shipped animation does today (tw-animate's sheet: 300 ms `ease`), for the "now" side of a comparison. */
-export const shipped = (dur: number, ease = 'ease'): Curve => ({ dur, ease });
 
 const isPercent = (v: Travel | undefined) => typeof v === 'string';
 const amount = (v: Travel | undefined) => (typeof v === 'string' ? parseFloat(v) : (v ?? 0));

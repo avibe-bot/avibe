@@ -17,7 +17,6 @@ import {
   TRANSCRIPT_ROWS,
   TYPED,
   WORKING,
-  type Tier,
 } from './fixtures';
 import { ChatAt, Layer, PhoneStage } from './stage';
 
@@ -60,10 +59,10 @@ function arrivalTracks(shift: number): Track[] {
   ];
 }
 
-export function ArrivalLoop({ tier }: { tier: Extract<Tier, 'now' | 'standard' | 'reduced'> }) {
-  if (tier === 'standard') {
+export function ArrivalLoop({ reduced = false }: { reduced?: boolean }) {
+  if (!reduced) {
     return (
-      <MotionLoop delay={PIN_FIRST} id="arrival-standard" period={PERIOD} reset={RESET} rest={ARRIVE_AT + 1200} tracks={arrivalTracks(SHIFT.phone.arrival)}>
+      <MotionLoop delay={PIN_FIRST} id="arrival" period={PERIOD} reset={RESET} rest={ARRIVE_AT + 1200} tracks={arrivalTracks(SHIFT.phone.arrival)}>
         <PhoneStage>
           <Layer name="after" opaque><ChatAt state="after" /></Layer>
           <Layer name="replied" seeThrough><ChatAt state="replied" /></Layer>
@@ -71,10 +70,16 @@ export function ArrivalLoop({ tier }: { tier: Extract<Tier, 'now' | 'standard' |
       </MotionLoop>
     );
   }
-  // Today the reply replaces the bubble in one frame; with reduced motion the pages cross-fade.
-  const curve = tier === 'now' ? cut : timed('fast', 'enter');
+  // With reduced motion the pages cross-fade.
   return (
-    <MotionLoop delay={PIN_FIRST} id={`arrival-${tier}`} period={PERIOD} reset={RESET} rest={ARRIVE_AT + 1200} tracks={[{ el: inLayer('after'), beats: [{ at: ARRIVE_AT, to: { opacity: 0 }, curve }] }]}>
+    <MotionLoop
+      delay={PIN_FIRST}
+      id="arrival-reduced"
+      period={PERIOD}
+      reset={RESET}
+      rest={ARRIVE_AT + 1200}
+      tracks={[{ el: inLayer('after'), beats: [{ at: ARRIVE_AT, to: { opacity: 0 }, curve: timed('fast', 'enter') }] }]}
+    >
       <PhoneStage>
         <Layer name="replied" opaque><ChatAt state="replied" /></Layer>
         <Layer name="after" opaque><ChatAt state="after" /></Layer>
@@ -82,4 +87,3 @@ export function ArrivalLoop({ tier }: { tier: Extract<Tier, 'now' | 'standard' |
     </MotionLoop>
   );
 }
-

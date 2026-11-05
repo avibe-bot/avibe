@@ -3,10 +3,9 @@
 // finger, springs back from a short pull, and a long or quick one dismisses it with the finger's speed.
 import { NewSessionSheet } from '@/components/workbench/NewSessionSheet';
 
-import { cut, scaleOf, spring, timed, type Curve, type Track } from '../../kit/motion';
+import { cut, spring, timed, type Curve, type Track } from '../../kit/motion';
 import { MotionLoop } from '../../kit/MotionLoop';
 import { TouchPoint } from '../../kit/TouchPoint';
-import { inLayer, type Tier } from './fixtures';
 import { InboxAt, Layer, PhoneStage } from './stage';
 
 /** The sheet and its scrim, which the dialog portals to the document body. */
@@ -17,35 +16,21 @@ const OPEN_AT = 600;
 const CLOSE_AT = 2400;
 const PERIOD = 3600;
 
-function sheetTracks(tier: Tier): Track[] {
-  if (tier === 'now' || tier === 'reduced') {
-    // Today (`now`): the shipped tw-animate values, copied as they are, 300 ms in and 200 ms out on
-    // `ease`, the scrim on 150 ms; reduced motion: a fade on the tokens.
-    const now = tier === 'now';
-    const open: Curve = now ? { dur: 300, ease: 'ease' } : timed('fast', 'enter');
-    const close: Curve = now ? { dur: 200, ease: 'ease' } : timed('fast', 'exit');
-    const scrim: Curve = now ? { dur: 150, ease: 'ease' } : timed('fast', 'enter');
+function sheetTracks(reduced: boolean): Track[] {
+  if (reduced) {
+    // No travel: the sheet and its scrim fade in place.
     return [
-      {
-        el: SHEET,
-        global: true,
-        from: { opacity: 0, y: now ? '100%' : 0 },
-        beats: [
-          { at: OPEN_AT, to: { opacity: 1, y: '0%' }, curve: open },
-          { at: CLOSE_AT, to: { opacity: 0, y: now ? '100%' : '0%' }, curve: close },
-        ],
-      },
-      { el: SCRIM, global: true, from: { opacity: 0 }, beats: [{ at: OPEN_AT, to: { opacity: 1 }, curve: scrim }, { at: CLOSE_AT, to: { opacity: 0 }, curve: scrim }] },
+      { el: SHEET, global: true, from: { opacity: 0 }, beats: [{ at: OPEN_AT, to: { opacity: 1 }, curve: timed('fast', 'enter') }, { at: CLOSE_AT, to: { opacity: 0 }, curve: timed('fast', 'exit') }] },
+      { el: SCRIM, global: true, from: { opacity: 0 }, beats: [{ at: OPEN_AT, to: { opacity: 1 }, curve: timed('fast', 'enter') }, { at: CLOSE_AT, to: { opacity: 0 }, curve: timed('fast', 'exit') }] },
     ];
   }
-  const rise = tier === 'restrained' ? timed('slow', 'move') : spring('sheet');
-  const tracks: Track[] = [
+  return [
     {
       el: SHEET,
       global: true,
       from: { y: '100%' },
       beats: [
-        { at: OPEN_AT, to: { y: '0%' }, curve: rise },
+        { at: OPEN_AT, to: { y: '0%' }, curve: spring('sheet') },
         { at: CLOSE_AT, to: { y: '100%' }, curve: timed('base', 'exit') },
       ],
     },
@@ -59,23 +44,11 @@ function sheetTracks(tier: Tier): Track[] {
       ],
     },
   ];
-  if (tier === 'pronounced') {
-    // The page behind steps back a little, as a native card sheet does.
-    tracks.push({
-      el: inLayer('page'),
-      origin: 'top center',
-      beats: [
-        { at: OPEN_AT, to: { scale: scaleOf('recede') }, curve: rise },
-        { at: CLOSE_AT, to: { scale: 1 }, curve: timed('base', 'exit') },
-      ],
-    });
-  }
-  return tracks;
 }
 
-export function SheetLoop({ tier }: { tier: Tier }) {
+export function SheetLoop({ reduced = false }: { reduced?: boolean }) {
   return (
-    <MotionLoop id={`sheet-${tier}`} period={PERIOD} rest={OPEN_AT + 1200} tracks={sheetTracks(tier)}>
+    <MotionLoop id={`sheet${reduced ? '-reduced' : ''}`} period={PERIOD} rest={OPEN_AT + 1200} tracks={sheetTracks(reduced)}>
       <PhoneStage>
         <Layer name="page" opaque><InboxAt state="after" /></Layer>
         <NewSessionSheet open onClose={() => {}} onOpen={() => {}} />

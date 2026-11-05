@@ -4,7 +4,7 @@
 // carries a cached Inbox when the live list lands in another order (M4). Nothing changes height.
 import { beat, cut, offset, scaleOf, spring, timed, type Curve, type Track } from '../../kit/motion';
 import { MotionLoop } from '../../kit/MotionLoop';
-import { card, CHAT, inLayer, INBOX_FLIP, type Tier } from './fixtures';
+import { card, CHAT, inLayer, INBOX_FLIP } from './fixtures';
 import { InboxAt, Layer, PhoneStage } from './stage';
 
 const MOVE_AT = 900;
@@ -15,16 +15,18 @@ const RESET = 500;
  *  card comes in at the top a beat after the cards below have made most of the room. */
 type Feel = { glide: Curve; enter: Curve; from: { y: number; scale: number }; leaveScale: number; closeUp: number; enterAfter: number };
 
-function feel(tier: 'restrained' | 'standard' | 'pronounced'): Feel {
+/** The approved (standard) move, from the tokens. */
+function feel(): Feel {
   const closeUp = timed('instant', 'enter').dur;
-  const enterAfter = closeUp + timed('fast', 'enter').dur + beat() / 2;
-  if (tier === 'restrained') return { glide: timed('slow', 'move'), enter: timed('base', 'enter'), from: { y: 0, scale: 1 }, leaveScale: 1, closeUp, enterAfter };
-  if (tier === 'pronounced') {
-    const grow = scaleOf('enter-lg');
-    return { glide: spring('bouncy'), enter: spring('bouncy'), from: { y: -offset('lg'), scale: grow }, leaveScale: grow, closeUp, enterAfter };
-  }
   const grow = scaleOf('enter-sm');
-  return { glide: spring('smooth'), enter: spring('smooth'), from: { y: -offset('md'), scale: grow }, leaveScale: grow, closeUp, enterAfter };
+  return {
+    glide: spring('smooth'),
+    enter: spring('smooth'),
+    from: { y: -offset('md'), scale: grow },
+    leaveScale: grow,
+    closeUp,
+    enterAfter: closeUp + timed('fast', 'enter').dur + beat() / 2,
+  };
 }
 
 function moveTracks(f: Feel): Track[] {
@@ -63,11 +65,16 @@ function moveTracks(f: Feel): Track[] {
   return tracks;
 }
 
-export function InboxMoveLoop({ tier }: { tier: Tier }) {
-  if (tier === 'now' || tier === 'reduced') {
-    const curve = tier === 'now' ? cut : timed('fast', 'enter');
+export function InboxMoveLoop({ reduced = false }: { reduced?: boolean }) {
+  if (reduced) {
     return (
-      <MotionLoop id={`inbox-${tier}`} period={PERIOD} reset={RESET} rest={MOVE_AT + 1200} tracks={[{ el: inLayer('before'), beats: [{ at: MOVE_AT, to: { opacity: 0 }, curve }] }]}>
+      <MotionLoop
+        id="inbox-reduced"
+        period={PERIOD}
+        reset={RESET}
+        rest={MOVE_AT + 1200}
+        tracks={[{ el: inLayer('before'), beats: [{ at: MOVE_AT, to: { opacity: 0 }, curve: timed('fast', 'enter') }] }]}
+      >
         <PhoneStage>
           <Layer name="after" opaque><InboxAt state="after" /></Layer>
           <Layer name="before" opaque><InboxAt state="before" /></Layer>
@@ -76,7 +83,7 @@ export function InboxMoveLoop({ tier }: { tier: Tier }) {
     );
   }
   return (
-    <MotionLoop id={`inbox-${tier}`} period={PERIOD} reset={RESET} rest={MOVE_AT + 1200} tracks={moveTracks(feel(tier))}>
+    <MotionLoop id="inbox" period={PERIOD} reset={RESET} rest={MOVE_AT + 1200} tracks={moveTracks(feel())}>
       <PhoneStage>
         <Layer name="before" opaque><InboxAt state="before" /></Layer>
         <Layer name="after" opaque><InboxAt state="after" /></Layer>
