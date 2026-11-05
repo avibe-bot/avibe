@@ -26,6 +26,8 @@ export function Surfaces() {
           <DialogTitle>Every Bot</DialogTitle>
           {/* A stage that pans and zooms under the finger itself (as the file preview's image does). */}
           <div data-testid="pan-stage" className="h-24 touch-none rounded-lg border border-border">Pan stage</div>
+          {/* A grip that reorders a row (as the Model Hub catalog's does). */}
+          <button type="button" data-testid="grip" className="h-12 cursor-grab rounded-lg border border-border">Grip</button>
           <ul data-testid="dialog-list" className="flex flex-col gap-1">
             {Array.from({ length: 40 }, (_, i) => <li key={i} className="rounded-lg border border-border px-3 py-3">Bot {i + 1}</li>)}
           </ul>

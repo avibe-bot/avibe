@@ -59,14 +59,15 @@ const browserPansVertically = (touchAction: string) =>
 
 /** Whether a touch at `target` inside `sheet` may drag it: `both` ways where nothing scrolls under it,
  *  only `down` from a scroller at its top, and `none` from a scroller scrolled down, from a field, or from
- *  anything that handles its own touch. */
+ *  anything that handles its own touch: a stage that pans (its `touch-action`), or a handle that drags
+ *  something else (its `grab` cursor, as a reorder grip shows). */
 function dragAllowance(target: Element, sheet: HTMLElement): 'both' | 'down' | 'none' {
   if (target.closest(OWN_TOUCH)) return 'none';
   let allowance: 'both' | 'down' = 'both';
   for (let node: Element | null = target; node && sheet.contains(node); node = node.parentElement) {
     if (!(node instanceof HTMLElement)) continue;
     const style = getComputedStyle(node);
-    if (!browserPansVertically(style.touchAction)) return 'none';
+    if (!browserPansVertically(style.touchAction) || style.cursor === 'grab' || style.cursor === 'grabbing') return 'none';
     if (node.scrollHeight <= node.clientHeight + 1) continue;
     if (style.overflowY !== 'auto' && style.overflowY !== 'scroll') continue;
     if (node.scrollTop > 0) return 'none';

@@ -104,14 +104,16 @@ test.describe('dragging a phone sheet', () => {
     await expect(sheet).toHaveCount(0);
   });
 
-  test('leaves a stage that handles its own touch to it', async ({ page }) => {
-    const { sheet, cdp } = await openSheet(page);
-    const stage = (await page.getByTestId('pan-stage').boundingBox())!;
-    await drag(cdp, page, { x: stage.x + 40, y: stage.y + 20 }, steps(240, 8), 12);
-    await page.waitForTimeout(400);
-    await expect(sheet).toBeVisible();
-    expect(await translateOf(sheet)).toMatch(/^(none|0px)$/);
-  });
+  for (const owner of ['pan-stage', 'grip']) {
+    test(`leaves a ${owner} that handles its own touch to it`, async ({ page }) => {
+      const { sheet, cdp } = await openSheet(page);
+      const box = (await page.getByTestId(owner).boundingBox())!;
+      await drag(cdp, page, { x: box.x + 40, y: box.y + 20 }, steps(240, 8), 12);
+      await page.waitForTimeout(400);
+      await expect(sheet).toBeVisible();
+      expect(await translateOf(sheet)).toMatch(/^(none|0px)$/);
+    });
+  }
 
   test('grows a centred card in place, and does not drag it', async ({ page }) => {
     await open(page);
