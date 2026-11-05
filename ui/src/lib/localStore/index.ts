@@ -188,13 +188,19 @@ function isQuotaError(error: unknown): boolean {
     && (error.name === 'QuotaExceededError' || error.name === 'NS_ERROR_DOM_QUOTA_REACHED');
 }
 
+/** What a transaction does when it runs out of space: evict one session and
+ *  retry once, then wipe (``evict``); wipe at once (``wipe``); or give up
+ *  (``none``), which the wipe itself does, since wiping again from there could
+ *  never end. */
+type QuotaRecovery = 'evict' | 'wipe' | 'none';
+
 /** Run ``work`` in one transaction over ``stores``. Null when the database is
- *  unavailable or the work failed; a quota failure evicts once and retries. */
+ *  unavailable or the work failed. */
 async function transact<T>(
   mode: IDBTransactionMode,
   stores: readonly string[],
   work: (tx: IDBTransaction) => Promise<T> | T,
-  { retryOnQuota = true }: { retryOnQuota?: boolean } = {},
+  { onQuota = 'evict' }: { onQuota?: QuotaRecovery } = {},
 ): Promise<T | null> {
   const db = await openDb();
   if (!db) return null;
@@ -204,8 +210,8 @@ async function transact<T>(
     await done(tx);
     return result;
   } catch (error) {
-    if (!isQuotaError(error)) return null;
-    if (retryOnQuota && (await evictForSpace(true))) return transact(mode, stores, work, { retryOnQuota: false });
+    if (!isQuotaError(error) || onQuota === 'none') return null;
+    if (onQuota === 'evict' && (await evictForSpace(true))) return transact(mode, stores, work, { onQuota: 'wipe' });
     await wipe(keepableReader());
     return null;
   }
@@ -371,6 +377,8 @@ const keepableReader = (): string | null => getLocalSnapshotPrincipal();
 async function wipe(keepReader: string | null): Promise<void> {
   pendingReads.clear();
   const pending = markWipePending();
+  // A wipe that runs out of space gives up rather than wiping again. It stays
+  // pending, and the next claim finishes it.
   const wiped = await transact('readwrite', ALL_STORES, async (tx) => {
     const meta = await getMeta(tx);
     for (const store of ALL_STORES) tx.objectStore(store).clear();
@@ -381,7 +389,7 @@ async function wipe(keepReader: string | null): Promise<void> {
       persisted: null,
     });
     return true;
-  }, { retryOnQuota: false });
+  }, { onQuota: 'none' });
   if (wiped) settleWipePending(pending);
 }
 
@@ -758,7 +766,7 @@ export async function forgetLocalStoreSession(sessionId: string): Promise<void> 
     // The marker other tabs' reads of it are checked against.
     tx.objectStore(RANGES).put({ sessionId, ranges: [], forgottenAt: Date.now() } satisfies StoredRanges);
     tx.objectStore(SESSIONS).delete(sessionId);
-  }, { retryOnQuota: false });
+  }, { onQuota: 'wipe' });
 }
 
 type SessionActivity = { session_id?: string | null; event?: string; visibility?: string; title?: string | null; pinned?: boolean };
@@ -816,7 +824,7 @@ async function requestPersistence(): Promise<void> {
   await transact('readwrite', [META], async (tx) => {
     const meta = await settle(tx.objectStore(META).get('reader') as IDBRequest<Meta | undefined>);
     if (meta) tx.objectStore(META).put({ ...meta, persisted } satisfies Meta);
-  }, { retryOnQuota: false });
+  }, { onQuota: 'wipe' });
 }
 
 /** The bytes the store may use: decision D2's budget, or half the origin quota

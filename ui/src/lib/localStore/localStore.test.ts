@@ -357,6 +357,31 @@ describe('one reader, and the wipes that end it', () => {
     snapshots.setLocalSnapshotPrincipal(null);
   });
 
+  it('gives up a wipe that itself runs out of space, leaving it pending for the next open', async () => {
+    await tail(rows(1, 3), null);
+    // Every write of the store's metadata fails for space, the wipe's included.
+    const put = IDBObjectStore.prototype.put;
+    let metaWrites = 0;
+    const full = vi.spyOn(IDBObjectStore.prototype, 'put').mockImplementation(function (this: IDBObjectStore, ...args) {
+      if (this.name !== 'meta') return put.apply(this, args);
+      metaWrites += 1;
+      throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+    });
+    let outcome: string;
+    try {
+      // A wipe that wiped again on its own failure would never settle.
+      outcome = await Promise.race([
+        wipeLocalStore().then(() => 'settled'),
+        new Promise<string>((resolve) => setTimeout(resolve, 2_000, 'still wiping')),
+      ]);
+    } finally {
+      full.mockRestore();
+    }
+    expect(outcome).toBe('settled');
+    expect(metaWrites).toBe(1);
+    expect(window.localStorage.getItem('avibe.local-store.wipe-pending.v1')).not.toBeNull();
+  });
+
   it('LSYNC-020 keeps the forget fence when a fresh page lands after it', async () => {
     await tail(rows(1, 60), null);
     // An older-history read is out when the session is forgotten; a fresh tail
