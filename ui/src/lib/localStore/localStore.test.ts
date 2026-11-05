@@ -84,6 +84,33 @@ const rowsOnDisk = () => new Promise<number>((resolve, reject) => {
   };
 });
 
+// TEMPORARY CI diagnostics for the budget cases; removed in the next head.
+const rawDump = () => new Promise<unknown>((resolve) => {
+  const open = indexedDB.open('avibe-local-store');
+  open.onsuccess = () => {
+    const db = open.result;
+    const tx = db.transaction(['meta', 'messages', 'sessions', 'ranges'], 'readonly');
+    const meta = tx.objectStore('meta').getAll();
+    const msgs = tx.objectStore('messages').getAll();
+    const sess = tx.objectStore('sessions').getAll();
+    const ranges = tx.objectStore('ranges').getAll();
+    tx.oncomplete = () => {
+      db.close();
+      const per: Record<string, number> = {};
+      for (const m of msgs.result as { sessionId: string }[]) per[m.sessionId] = (per[m.sessionId] ?? 0) + 1;
+      resolve({
+        meta: meta.result,
+        per,
+        sessions: (sess.result as { id: string; bytes: number }[]).map((s) => [s.id, s.bytes]),
+        ranges: (ranges.result as { sessionId: string; ranges: unknown[]; forgottenAt?: number }[]).map((r) => [r.sessionId, r.ranges.length, r.forgottenAt ?? null]),
+        ls: { ...window.localStorage },
+        env: { platform: process.platform, si: typeof setImmediate, ua: navigator.userAgent.slice(0, 30) },
+      });
+    };
+  };
+});
+const diag = async (label: string, extra: unknown = null) => console.log(`LSDIAG ${label} ${Date.now() % 100000}`, JSON.stringify({ extra, raw: await rawDump() }));
+
 beforeEach(() => {
   setLocalSnapshotPrincipal('remote:alice');
   // Most cases run on a connected stream; the outage cases say otherwise.
@@ -558,6 +585,7 @@ describe('budget and persistence', () => {
     // A budget (half the quota) between two and three sessions' rows.
     stubStorage({ estimate: async () => ({ quota: 200_000, usage: 0 }) });
     const { store, held, done } = await freshDocument();
+    await diag('evict:after-claim-start');
     const page = (sessionId: string, lastActive: number) =>
       store.recordLocalStorePage(
         store.beginLocalStoreRead(sessionId),
@@ -567,7 +595,9 @@ describe('budget and persistence', () => {
       );
     const readBeforeEviction = store.beginLocalStoreRead('ses_old', Date.now() - 1000);
     await Promise.all([page('ses_main', 1), page('ses_old', 2), page('ses_new', 3)]);
+    await diag('evict:after-writes', await store.readLocalStoreWindow('ses_main').then((w) => (w ? w.messages.length : 'null')));
     await vi.waitFor(async () => expect(await held('ses_old')).toBe(0), SETTLE);
+    if ((await held('ses_main')) !== 2) await diag('evict:FAILED', await store.readLocalStoreWindow('ses_main').then((w) => (w ? w.messages.length : 'null')));
     expect(await held('ses_main')).toBe(2);
     expect(await held('ses_new')).toBe(2);
     // An answer read before the eviction does not put the evicted rows back.
@@ -598,7 +628,9 @@ describe('budget and persistence', () => {
         { messages: [big(1, 'ses_orphan'), big(2, 'ses_orphan')], next_before_id: 'cursor' },
       ),
     ]);
+    await diag('orphan:after-writes', await store.readLocalStoreWindow('ses_main').then((w) => (w ? w.messages.length : 'null')));
     await vi.waitFor(async () => expect(await held('ses_orphan')).toBe(0), SETTLE);
+    if ((await held('ses_main')) !== 2) await diag('orphan:FAILED', await store.readLocalStoreWindow('ses_main').then((w) => (w ? w.messages.length : 'null')));
     expect(await held('ses_main')).toBe(2);
     await done();
   });
