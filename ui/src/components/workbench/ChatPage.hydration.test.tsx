@@ -1,6 +1,7 @@
 /** @vitest-environment jsdom */
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { useEffect } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import type { TurnActivityGroupWire } from '../../lib/agentActivity';
@@ -24,7 +25,11 @@ const mocks = vi.hoisted(() => ({
     mutateConfig: vi.fn(),
     waitForAgentActivityConfigMutations: vi.fn(),
     onSessionArchived: vi.fn(),
+    listInbox: vi.fn(),
+    markSessionRead: vi.fn(),
   },
+  // The real Inbox provider, for the tests that hold ChatPage to its unread state.
+  realInbox: false,
   events: null as null | {
     onSessionActivity: (data: { session_id: string; event: string }) => void;
     onConnected: () => void;
@@ -59,9 +64,17 @@ vi.mock('../../context/ToastContext', () => ({
   useToast: () => ({ showToast: vi.fn() }),
 }));
 
-vi.mock('../../context/WorkbenchInboxContext', () => ({
-  useWorkbenchInbox: () => ({ unreadBySession: {}, markRead: vi.fn() }),
-}));
+vi.mock('../../context/WorkbenchInboxContext', async () => {
+  const actual = await vi.importActual<typeof import('../../context/WorkbenchInboxContext')>(
+    '../../context/WorkbenchInboxContext',
+  );
+  const idle = { unreadBySession: {}, markRead: vi.fn() };
+  return {
+    ...actual,
+    useWorkbenchInbox: (options?: { feed?: boolean }) =>
+      mocks.realInbox ? actual.useWorkbenchInbox(options) : idle,
+  };
+});
 
 vi.mock('../../context/InstanceAuthorizationContext', () => ({
   useInstanceAuthorization: () => ({
@@ -123,6 +136,9 @@ vi.mock('./Composer', () => ({
 }));
 
 import { ChatPage } from './ChatPage';
+import { WorkbenchInboxProvider } from '../../context/WorkbenchInboxProvider';
+import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
+import type { InboxSession, WorkbenchEventHandlers } from '../../context/ApiContext';
 
 type Deferred<T> = {
   promise: Promise<T>;
@@ -254,6 +270,53 @@ describe('ChatPage transcript hydration', () => {
     cleanup();
     vi.unstubAllGlobals();
     vi.useRealTimers();
+    mocks.realInbox = false;
+    Reflect.deleteProperty(document, 'hasFocus');
+  });
+
+  it('waits for a new count before marking a chat read again after the write is refused', async () => {
+    // The Inbox clears the count at once and puts it back when the write is
+    // refused; the open chat must not read that as a new unread and re-send.
+    mocks.realInbox = true;
+    document.hasFocus = () => true;
+    const handlers: WorkbenchEventHandlers[] = [];
+    mocks.api.connectWorkbenchEvents.mockImplementation((events: WorkbenchEventHandlers) => {
+      handlers.push(events);
+      return () => {};
+    });
+    mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
+    mocks.api.getSessionBootstrap.mockResolvedValue(bootstrapPayload('session-new'));
+    mocks.api.listInbox.mockResolvedValue({ sessions: [], next_cursor: null, unread_by_session: { 'session-new': 2 } });
+    mocks.api.markSessionRead.mockResolvedValue({ error: 'unavailable' });
+    const shown: { unread: Record<string, number> } = { unread: {} };
+    const Badge = () => {
+      const { unreadBySession } = useWorkbenchInbox({ feed: false });
+      useEffect(() => {
+        shown.unread = unreadBySession;
+      }, [unreadBySession]);
+      return null;
+    };
+
+    render(
+      <WorkbenchInboxProvider>
+        <Badge />
+        <MemoryRouter initialEntries={['/chat/session-new']}>
+          <Routes><Route path="/chat/:sessionId" element={<ChatPage />} /></Routes>
+        </MemoryRouter>
+      </WorkbenchInboxProvider>,
+    );
+    await waitFor(() => expect(mocks.api.markSessionRead).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(shown.unread).toEqual({ 'session-new': 2 }));
+    await act(async () => {
+      for (let i = 0; i < 10; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(mocks.api.markSessionRead).toHaveBeenCalledTimes(1);
+
+    const reply = { session_id: 'session-new', unread_count: 3, last_activity_at: '2026-08-15T00:01:00Z' };
+    act(() => {
+      for (const events of handlers) events.onInboxSessionUpdated?.(reply as InboxSession);
+    });
+    await waitFor(() => expect(mocks.api.markSessionRead).toHaveBeenCalledTimes(2));
   });
 
   it.each([

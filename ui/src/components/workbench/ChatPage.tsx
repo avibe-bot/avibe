@@ -2671,6 +2671,13 @@ export const ChatPage: React.FC = () => {
   // the chat you're looking at. Reactive to the unread map, so it's race-free
   // against the cross-process event ordering. Owning this on the mounted route
   // also keeps a canceled blocked navigation from clearing unread state early.
+  //
+  // The Inbox clears the count before the write and puts it back when the write
+  // is refused, which this effect sees as unread again. So a refusal is
+  // remembered for that count: the next try waits for a new count, another
+  // session, or the view closing and opening again, instead of re-sending at
+  // once forever (an offline fetch fails without a round trip).
+  const refusedReadRef = useRef<{ sessionId: string; count: number } | null>(null);
   useEffect(() => {
     // Org members without chat capability are viewers; viewing must not
     // consume the owner's unread state.
@@ -2683,10 +2690,17 @@ export const ChatPage: React.FC = () => {
       historicalWindow,
       showPageActive,
       foregroundAppWindow: isDesktop && foregroundAppWindowId !== null,
-    })) return;
-    if (sessionId && (unreadBySession[sessionId] ?? 0) > 0) {
-      void markInboxRead(sessionId);
+    })) {
+      refusedReadRef.current = null;
+      return;
     }
+    const count = sessionId ? unreadBySession[sessionId] ?? 0 : 0;
+    if (!sessionId || count <= 0) return;
+    const refused = refusedReadRef.current;
+    if (refused?.sessionId === sessionId && refused.count === count) return;
+    void markInboxRead(sessionId).then((applied) => {
+      refusedReadRef.current = applied ? null : { sessionId, count };
+    });
   }, [
     sessionId,
     unreadBySession,
