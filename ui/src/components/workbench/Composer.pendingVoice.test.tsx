@@ -154,6 +154,18 @@ describe('Composer pending voice items', () => {
     await waitFor(async () => expect(await readVoiceTakes()).toEqual([]));
   });
 
+  it('keeps what was typed while a kept dictation was on its way into the draft', async () => {
+    await saveVoiceTake(kept({ intent: 'insert', text: 'Run make release' }));
+    renderComposer();
+
+    const item = (await screen.findByText('Run make release')).closest<HTMLElement>('[role="status"]')!;
+    fireEvent.click(within(item).getByRole('button', { name: en.voice.pending.insert }));
+    // Typed before the take's claim and read finish.
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Before that:' } });
+
+    await waitFor(() => expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('Before that: Run make release'));
+  });
+
   it('shows a take with no text yet as kept, and discards it only on request', async () => {
     Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => false });
     try {

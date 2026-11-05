@@ -1645,9 +1645,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     ? holdPlaceholder ?? (placeholder === undefined ? t('voice.composer.placeholder') : placeholder)
     : placeholder ?? t('chat.compose.placeholder');
   const holdTarget: VoiceTarget = voiceTarget ?? { name: '', title: t('voice.composer.toHere') };
-  /** Spoken words into the end of the draft, to edit before sending. */
+  /** Spoken words into the end of the draft, to edit before sending. Reads the live draft: a
+   *  kept take lands after an asynchronous claim, and edits made meanwhile stay. */
   const appendToDraft = (words: string) => {
-    const current = useMentions ? valueRef.current : value;
+    const current = valueRef.current;
     const next = current.trim() ? `${current.replace(/\s+$/, '')} ${words}` : words;
     valueRef.current = next;
     setHasText(true);
