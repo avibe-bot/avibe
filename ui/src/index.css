@@ -1024,7 +1024,8 @@ pre,
      (`--sheet-exit-duration`, `--sheet-exit-ease`; sheetDrag.ts sets them).
    - `motion-dialog`: that sheet on a phone; on a desktop a dialog that fades and
      grows from `--motion-scale-enter` on `base`, and leaves the way it came on
-     `fast`, exit.
+     `fast`, exit. `motion-card`: that dialog on every screen, for one a phone
+     shows as a card away from the bottom edge.
    - `motion-scrim`, behind either: fades on `base` under a phone sheet and on
      `fast` under a desktop dialog. Its blur stays still while it fades.
    - `motion-popover`, a popover or menu: fades and grows from
@@ -1043,6 +1044,12 @@ pre,
 }
 .motion-scrim[data-state="closed"] {
   animation: motion-fade-out var(--motion-duration-base) var(--motion-ease-exit) forwards;
+}
+.motion-card[data-state="open"] {
+  animation: motion-grow-in var(--motion-duration-base) var(--motion-ease-enter) backwards;
+}
+.motion-card[data-state="closed"] {
+  animation: motion-shrink-out var(--motion-duration-fast) var(--motion-ease-exit) forwards;
 }
 .motion-popover {
   transform-origin: var(--radix-popover-content-transform-origin);
@@ -1078,12 +1085,14 @@ pre,
 @media (prefers-reduced-motion: reduce) {
   .motion-sheet[data-state="open"],
   .motion-dialog[data-state="open"],
+  .motion-card[data-state="open"],
   .motion-popover[data-state="open"],
   .motion-scrim[data-state="open"] {
     animation: motion-fade-in var(--motion-duration-fast) var(--motion-ease-enter) backwards;
   }
   .motion-sheet[data-state="closed"],
   .motion-dialog[data-state="closed"],
+  .motion-card[data-state="closed"],
   .motion-popover[data-state="closed"],
   .motion-scrim[data-state="closed"] {
     animation: motion-fade-out var(--motion-duration-fast) var(--motion-ease-exit) forwards;

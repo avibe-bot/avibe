@@ -252,6 +252,8 @@ export function AddSkillDialogView({
     <Dialog open onOpenChange={(next) => { if (!next) onClose(); }}>
       <DialogContent
         closeLabel={t('common.close')}
+        // A card near the top on a phone, not a bottom sheet: it grows in place.
+        mobilePresentation="card"
         className="max-w-[560px] w-[calc(100vw-2rem)] gap-0 overflow-y-auto overflow-x-hidden rounded-2xl border-border-strong bg-surface-2 p-0 shadow-[0_24px_60px_-12px_rgba(0,0,0,0.7)] sm:w-[calc(100vw-5rem)] md:top-10 md:max-h-[calc(100dvh-5rem)] md:translate-y-0 max-md:bottom-auto max-md:left-1/2 max-md:right-auto max-md:top-4 max-md:w-[calc(100vw-2rem)] max-md:max-w-none max-md:max-h-[calc(100dvh-2rem)] max-md:translate-x-[-50%] max-md:translate-y-0 max-md:rounded-2xl max-md:p-0 max-md:pb-0"
       >
         <div className="flex min-w-0 items-center gap-3 border-b border-border px-5 py-4">

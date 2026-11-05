@@ -34,12 +34,16 @@ type DialogContentProps = React.ComponentPropsWithoutRef<typeof DialogPrimitive.
   mobileSheetHeight?: 'content' | 'tall';
   /** Accessible label for the built-in close control. */
   closeLabel?: string;
+  /** How a phone shows it: a bottom `sheet` (the default) rises from the bottom edge and can be dragged
+   *  down to dismiss it; a `card` the caller places itself (away from the bottom edge) grows in place,
+   *  as a desktop dialog does (docs/plans/web-ui-motion.md M6). */
+  mobilePresentation?: 'sheet' | 'card';
 };
 
 export const DialogContent = React.forwardRef<
   React.ComponentRef<typeof DialogPrimitive.Content>,
   DialogContentProps
->(({ className, children, mobileSheetHeight = 'content', closeLabel = 'Close', onCloseAutoFocus, ...props }, ref) => {
+>(({ className, children, mobileSheetHeight = 'content', closeLabel = 'Close', mobilePresentation = 'sheet', onCloseAutoFocus, ...props }, ref) => {
   const active = useRouteSurfaceActive();
   const activeRef = useLatestRef(active);
   const previousFocusRef = React.useRef<HTMLElement | null>(null);
@@ -49,7 +53,7 @@ export const DialogContent = React.forwardRef<
   const [sheet, setSheet] = React.useState<HTMLDivElement | null>(null);
   const closeRef = React.useRef<HTMLButtonElement>(null);
   const dismiss = React.useCallback(() => closeRef.current?.click(), []);
-  useSheetDrag(sheet, { enabled: phone && active, onDismiss: dismiss });
+  useSheetDrag(sheet, { enabled: phone && active && mobilePresentation === 'sheet', onDismiss: dismiss });
   const setRefs = React.useCallback((node: HTMLDivElement | null) => {
     setSheet(node);
     if (typeof ref === 'function') ref(node);
@@ -71,8 +75,9 @@ export const DialogContent = React.forwardRef<
           // One minmax(0, 1fr) column: content that does not wrap (a truncated
           // line, a long word) can never widen the track past the dialog.
           // `motion-dialog` (index.css): a sheet's rise and fall on a phone, a dialog's fade and grow on
-          // a desktop.
-          'motion-dialog fixed left-1/2 top-1/2 z-50 grid grid-cols-1 min-w-0 w-full max-w-lg max-h-[calc(100dvh-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 overflow-y-auto rounded-xl border border-border bg-card p-6 shadow-xl max-md:left-0 max-md:right-0 max-md:top-auto max-md:bottom-0 max-md:w-full max-md:max-w-none max-md:max-h-[90dvh] max-md:translate-x-0 max-md:translate-y-0 max-md:rounded-2xl max-md:rounded-b-none max-md:p-5 max-md:pb-[calc(1.5rem+env(safe-area-inset-bottom))]',
+          // a desktop; `motion-card`, that fade and grow on a phone too.
+          mobilePresentation === 'card' ? 'motion-card' : 'motion-dialog',
+          'fixed left-1/2 top-1/2 z-50 grid grid-cols-1 min-w-0 w-full max-w-lg max-h-[calc(100dvh-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 overflow-y-auto rounded-xl border border-border bg-card p-6 shadow-xl max-md:left-0 max-md:right-0 max-md:top-auto max-md:bottom-0 max-md:w-full max-md:max-w-none max-md:max-h-[90dvh] max-md:translate-x-0 max-md:translate-y-0 max-md:rounded-2xl max-md:rounded-b-none max-md:p-5 max-md:pb-[calc(1.5rem+env(safe-area-inset-bottom))]',
           mobileSheetHeight === 'tall' && 'max-md:h-[90dvh]',
           className
         )}
