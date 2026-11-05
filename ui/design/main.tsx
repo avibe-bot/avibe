@@ -17,6 +17,7 @@ import { loadAllFrames, loadFrame } from './registry';
 import { installFixedClock } from './shell/clock';
 import { apiResponses } from './shell/fixtures';
 import { designNetwork, installDesignNetwork } from './shell/network';
+import { setLocalSnapshotPrincipal } from '@/lib/localSnapshots';
 
 installFixedClock();
 installDesignNetwork();
@@ -49,6 +50,8 @@ async function boot() {
   for (const [key, text] of Object.entries(shown?.fixtures?.copy ?? {})) i18n.addResource(lang, 'translation', key, text[lang]);
   designNetwork.setSockets(shown?.fixtures?.sockets);
   designStorage.seed(shown?.fixtures?.storage);
+  // Named before the page renders, as the app's authorization boundary names it before a chat opens.
+  if (shown?.fixtures?.localSnapshotReader) setLocalSnapshotPrincipal(shown.fixtures.localSnapshotReader);
   // The desktop app marks its own window before any page script runs (`isDesktopShell()`).
   if (shown?.fixtures?.desktopShell) Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
   window.__DESIGN__ = {

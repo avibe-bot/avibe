@@ -180,6 +180,15 @@ describe('transcript older-page loading', () => {
     expect(onLoadOlder).toHaveBeenCalledTimes(2);
   });
 
+  it('shows the older page on its way as a thin block in its slot, not a spinner', () => {
+    const { scroller, rerender } = renderTranscript();
+    rerender({ loadingOlder: true });
+    const slot = scroller.querySelector('[role="status"]');
+    expect(slot?.className).toContain('h-8');
+    expect(slot?.querySelector('[aria-hidden]')).not.toBeNull();
+    expect(scroller.querySelector('.animate-spin')).toBeNull();
+  });
+
   it.each([50, 300])('preserves the reader through a prepend with %i retained rows and no resize notification', async (count) => {
     const page = pendingPage();
     const onLoadOlder = vi.fn().mockReturnValueOnce(page.promise).mockReturnValue(new Promise(() => {}));

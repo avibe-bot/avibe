@@ -19,6 +19,7 @@ import {
   subscribeLocalSnapshotPrincipal,
 } from '../../lib/localSnapshots';
 import { loadKnownVoiceStatus } from '../../lib/voiceAvailability';
+import type { ChatListSeed } from './chatListSeed';
 
 // The conversation snapshot for ChatPage (docs/plans/web-ui-local-cache.md,
 // Phase 2): paint the last known window of the opened chat while its bootstrap
@@ -52,8 +53,10 @@ import { loadKnownVoiceStatus } from '../../lib/voiceAvailability';
 
 const CHAT_SNAPSHOT_WRITE_DELAY_MS = 1000;
 
-/** A chat painted from the snapshot, until its bootstrap answers. */
-type ChatSnapshotView = { sessionId: string; principal: string };
+/** A chat painted from the snapshot, until its bootstrap answers. ``partial``:
+ *  painted from what the lists say (its row, perhaps its newest message), so the
+ *  rest of its transcript is still to come. */
+type ChatSnapshotView = { sessionId: string; principal: string; partial: boolean };
 
 type ChatSnapshotBootstrapRead = {
   /** The bootstrap answered for the open chat and its state is installed. */
@@ -68,9 +71,13 @@ type Pending = Owned;
 type Options = {
   sessionId: string | undefined;
   /** Seed the page from the snapshot: rows and cursor onto an empty transcript,
-   *  and the chrome state the bootstrap would supply. Returns false to leave
-   *  this chat unpainted. */
-  paint: (snapshot: ChatSnapshot) => boolean;
+   *  and the chrome state the bootstrap would supply. ``partial``: built from
+   *  the lists, so only its row and rows are known. Returns false to leave this
+   *  chat unpainted. */
+  paint: (snapshot: ChatSnapshot, partial: boolean) => boolean;
+  /** What the lists the chat was opened from say about it, for the current
+   *  reader, or null (chatListSeed). */
+  knownFromLists: (sessionId: string) => ChatListSeed | null;
   /** Remove the painted rows (these exact row objects; a row the stream has
    *  since replaced is live and stays) and the painted older-page cursor. A
    *  live transcript window is about to land. */
@@ -90,13 +97,36 @@ const errorStatus = (error: unknown): number | null => {
   return typeof status === 'number' ? status : null;
 };
 
-export function useChatSnapshot({ sessionId, paint, unpaint, drop, messages, olderCursor, historicalWindow }: Options) {
+const timeOf = (iso: string | null | undefined): number => {
+  const ms = iso ? Date.parse(iso) : Number.NaN;
+  return Number.isNaN(ms) ? 0 : ms;
+};
+
+/** Whether a stored window already holds what the lists know: nothing newer
+ *  than its newest row. */
+const coversSeed = (snapshot: ChatSnapshot, latestAt: string | null): boolean =>
+  latestAt === null || timeOf(snapshot.messages[snapshot.messages.length - 1]?.created_at) >= timeOf(latestAt);
+
+/** The page state a list seed paints: its row, and its newest message if known. */
+const seedSnapshot = (seed: ChatListSeed): ChatSnapshot => ({
+  session: seed.session,
+  messages: seed.latest ? [seed.latest] : [],
+  next_before_id: null,
+  agents: [],
+  default_agent_name: null,
+  can_chat: false,
+  chat_message_font_size: null,
+});
+
+export function useChatSnapshot({ sessionId, paint, knownFromLists, unpaint, drop, messages, olderCursor, historicalWindow }: Options) {
   const paintRef = useRef(paint);
+  const knownFromListsRef = useRef(knownFromLists);
   const unpaintRef = useRef(unpaint);
   const dropRef = useRef(drop);
   const routeRef = useRef(sessionId);
   useLayoutEffect(() => {
     paintRef.current = paint;
+    knownFromListsRef.current = knownFromLists;
     unpaintRef.current = unpaint;
     dropRef.current = drop;
     routeRef.current = sessionId;
@@ -121,6 +151,9 @@ export function useChatSnapshot({ sessionId, paint, unpaint, drop, messages, old
   const seededRef = useRef<string | null>(null);
   // The chat had no usable record when it opened, so its first write adds one.
   const missingRef = useRef(true);
+  // Painted from the lists: the time of the newest message they knew, if any. A
+  // stored window as recent replaces it when IndexedDB answers.
+  const partialRef = useRef<{ latestAt: string | null } | null>(null);
 
   // A layout effect, so it runs before the page's reset and its ``paintKnown``.
   useLayoutEffect(() => {
@@ -128,26 +161,32 @@ export function useChatSnapshot({ sessionId, paint, unpaint, drop, messages, old
     paintedRef.current = null;
     seededRef.current = null;
     missingRef.current = true;
+    partialRef.current = null;
   }, [sessionId]);
 
-  const paintSnapshot = useCallback((snapshot: ChatSnapshot, reader: string) => {
-    if (!paintRef.current(snapshot)) return;
+  const paintSnapshot = useCallback((snapshot: ChatSnapshot, reader: string, partial = false) => {
+    if (!paintRef.current(snapshot, partial)) return;
     paintedRef.current = { principal: reader, rows: new Set(snapshot.messages) };
     seededRef.current = reader;
-    setView({ sessionId: snapshot.session.id, principal: reader });
+    partialRef.current = partial ? { latestAt: snapshot.messages[snapshot.messages.length - 1]?.created_at ?? null } : null;
+    setView({ sessionId: snapshot.session.id, principal: reader, partial });
   }, []);
 
-  // Paint the record this document holds for the open chat, at once. Called by
-  // the page at the end of the layout effect that resets it for a route, onto
-  // the state it just emptied, so the first frame the browser paints is the
-  // chat, not a loading state.
+  // Paint what is known of the open chat, at once: the record this document
+  // holds, or, without one as recent as what the lists know, the lists' seed (a
+  // skeleton fills the rest of the transcript). Called by the page at the end of
+  // the layout effect that resets it for a route, onto the state it just
+  // emptied, so the first frame the browser paints is the chat, not a loading
+  // state.
   const paintKnown = useCallback(() => {
     const route = routeRef.current;
     const reader = getLocalSnapshotPrincipal();
-    const snapshot = route && reader ? knownChatSnapshot(route) : null;
-    if (!snapshot || !reader) return;
-    missingRef.current = false;
-    paintSnapshot(snapshot, reader);
+    if (!route || !reader) return;
+    const snapshot = knownChatSnapshot(route);
+    const seed = knownFromListsRef.current(route);
+    if (snapshot) missingRef.current = false;
+    if (snapshot && coversSeed(snapshot, seed?.latest?.created_at ?? null)) paintSnapshot(snapshot, reader);
+    else if (seed) paintSnapshot(seedSnapshot(seed), reader, true);
   }, [paintSnapshot]);
 
   // The cache stops speaking for the page: withdraw what it seeded.
@@ -156,6 +195,7 @@ export function useChatSnapshot({ sessionId, paint, unpaint, drop, messages, old
     const seeded = seededRef.current;
     paintedRef.current = null;
     seededRef.current = null;
+    partialRef.current = null;
     if (seeded !== null) dropRef.current(painted?.rows ?? null);
     else if (painted) unpaintRef.current(painted.rows);
     setView(null);
@@ -163,6 +203,7 @@ export function useChatSnapshot({ sessionId, paint, unpaint, drop, messages, old
 
   const release = useCallback(() => {
     liveRef.current = true;
+    partialRef.current = null;
     const painted = paintedRef.current;
     paintedRef.current = null;
     if (painted) unpaintRef.current(painted.rows);
@@ -190,7 +231,18 @@ export function useChatSnapshot({ sessionId, paint, unpaint, drop, messages, old
     void Promise.all([readChatSnapshot(sessionId), loadKnownVoiceStatus()]).then(([snapshot]) => {
       if (cancelled) return;
       if (snapshot) missingRef.current = false;
-      if (!snapshot || liveRef.current || paintedRef.current || getLocalSnapshotPrincipal() !== principal) return;
+      if (!snapshot || liveRef.current || getLocalSnapshotPrincipal() !== principal) return;
+      // A full window already on screen stays. One painted from the lists gives
+      // way to a stored window that holds what they knew.
+      const partial = partialRef.current;
+      if (paintedRef.current && !partial) return;
+      if (partial) {
+        if (!coversSeed(snapshot, partial.latestAt)) return;
+        const painted = paintedRef.current;
+        paintedRef.current = null;
+        partialRef.current = null;
+        if (painted) unpaintRef.current(painted.rows);
+      }
       paintSnapshot(snapshot, principal);
     });
     return () => {

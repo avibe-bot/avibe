@@ -136,6 +136,10 @@ import {
 } from './sessionRowRefresh';
 import { chatSessionViewState } from './chatSessionViewState';
 import { useChatSnapshot } from './useChatSnapshot';
+import { latestFromInboxRow, listedSession, sessionFromList, type ChatListSeed } from './chatListSeed';
+import { ChatPageSkeleton, TranscriptSkeleton } from './ChatTranscriptSkeleton';
+import { Skeleton } from '../ui/skeleton';
+import { useSkeletonHandover } from '../ui/skeleton-handover';
 import {
   clientMessageMetadata,
   newClientMessageId,
@@ -304,7 +308,7 @@ export const ChatPage: React.FC = () => {
   // This session's own unread state, plus the mark-read write. Neither needs the
   // feed page, so this component never asks for one; whether the document loads
   // one at all is decided by the sidebar, which mounts on desktop only.
-  const { unreadBySession, markRead: markInboxRead } = useWorkbenchInbox({ feed: false });
+  const { unreadBySession, markRead: markInboxRead, inboxSessions } = useWorkbenchInbox({ feed: false });
   const { focusedId: foregroundAppWindowId, focusCanvas } = useWindowManager();
   const isDesktop = useIsDesktop();
   const routeSurfaceActive = useRouteSurfaceActive();
@@ -1000,7 +1004,7 @@ export const ChatPage: React.FC = () => {
   // The Session list's live rows (the pulsing status dot), read without
   // activating the tree: whatever the sidebar or Projects page already loaded.
   const projectsTree = useContext(WorkbenchProjectsContext);
-  const paintChatSnapshot = useCallback((snapshot: ChatSnapshot) => {
+  const paintChatSnapshot = useCallback((snapshot: ChatSnapshot, partial: boolean) => {
     // A chat remembered on its Show Page reopens there: no transcript flash first.
     if (!showChatSignal && readChatViewMode(snapshot.session.id) === 'show-page') return false;
     setMessages((prev) => (prev.length === 0 ? snapshot.messages : prev));
@@ -1009,7 +1013,9 @@ export const ChatPage: React.FC = () => {
       rowFromSnapshotRef.current = true;
       installServerSession(snapshot.session);
     }
-    setSessionCanChat(snapshot.can_chat);
+    // From the lists alone the chat grant is not known yet: the instance's says
+    // whether this reader may chat at all, and the bootstrap may only narrow it.
+    setSessionCanChat(partial ? capabilities.can_chat : snapshot.can_chat);
     // A run the list already shows opens as running: the dots and Stop are in
     // place at once, and the bootstrap's turn state corrects them. The list's
     // live row wins over the snapshot's; a Session it shows idle opens idle.
@@ -1024,13 +1030,24 @@ export const ChatPage: React.FC = () => {
       workingRef.current = true;
       setWorking(true);
     }
-    if (!bootstrapAnsweredRef.current) {
+    if (!partial && !bootstrapAnsweredRef.current) {
       setAgents(snapshot.agents);
       setDefaultAgentName(snapshot.default_agent_name);
       setMessageFontSize(normalizeChatMessageFontSize(snapshot.chat_message_font_size ?? undefined));
     }
     return true;
-  }, [showChatSignal, installServerSession, projectsTree]);
+  }, [showChatSignal, installServerSession, projectsTree, capabilities.can_chat]);
+  // What the lists say about a chat (chatListSeed), for a chat opened with no
+  // cached copy as recent: its row from the Projects tree, else from its Inbox
+  // row and its Bot, and from the Inbox row its newest message.
+  const knownFromLists = useCallback((id: string): ChatListSeed | null => {
+    const inboxRow = inboxSessions?.find((row) => row.session_id === id) ?? null;
+    const bot = isBotSessionId(id) ? botForSession(id) : undefined;
+    const session = listedSession(projectsTree, id, inboxRow?.project_id ?? null)
+      ?? (inboxRow || bot ? sessionFromList(id, inboxRow, bot?.agent_name ?? null) : null);
+    if (!session) return null;
+    return { session, latest: inboxRow ? latestFromInboxRow(inboxRow) : null };
+  }, [inboxSessions, projectsTree, botForSession]);
   const unpaintChatSnapshot = useCallback((rows: ReadonlySet<WorkbenchMessage>) => {
     setMessages((prev) => prev.filter((row) => !rows.has(row)));
     setOlderCursor(null);
@@ -1061,6 +1078,7 @@ export const ChatPage: React.FC = () => {
   } = useChatSnapshot({
     sessionId,
     paint: paintChatSnapshot,
+    knownFromLists,
     unpaint: unpaintChatSnapshot,
     drop: dropChatSnapshot,
     messages,
@@ -3132,14 +3150,9 @@ export const ChatPage: React.FC = () => {
     failedBootstrapSessionId,
     snapshotSessionId: chatSnapshotView?.sessionId ?? null,
   });
-  if (viewState === 'loading') {
-    return (
-      <div className="flex h-[60vh] flex-col items-center justify-center gap-2 text-muted">
-        <Loader2 className="size-5 animate-spin" />
-        <span className="text-[12px]">{t('common.loading')}</span>
-      </div>
-    );
-  }
+  // Nothing is known of this chat yet, not even its row (opened by a link, or
+  // before any list has it): a skeleton of the whole chat, never a spinner.
+  if (viewState === 'loading') return <ChatPageSkeleton onBack={goBack} />;
 
   if (viewState === 'failed' || !session) {
     return (
@@ -3290,6 +3303,7 @@ export const ChatPage: React.FC = () => {
         )}
         <Transcript
           messages={transcriptRows}
+          skeleton={Boolean(chatSnapshotView?.partial)}
           pendingIds={pendingRowIds}
           sentRowFollow={sentRowFollow}
           session={session}
@@ -3403,7 +3417,11 @@ export const ChatPage: React.FC = () => {
             : { name: session.title || t('chat.untitled'), title: t('voice.composer.toSession', { title: session.title || t('chat.untitled') }) }}
           // Hidden with the rest of the chat surface in Show Page mode, which is
           // also where the header used to withdraw the picker.
-          actions={writable ? (
+          actions={!writable ? null : chatSnapshotView?.partial && !session.agent_name ? (
+            // Opened from a list that does not say which Agent the chat runs on:
+            // the picker's place holds a block until the bootstrap names it.
+            <Skeleton data-route-picker-skeleton className="h-6 w-36 rounded-full" />
+          ) : (
             <ChatRoutePicker
               session={session}
               agents={agents}
@@ -3413,7 +3431,7 @@ export const ChatPage: React.FC = () => {
               working={working}
               lockAgent={botConversation}
             />
-          ) : null}
+          )}
         />}
       </div>
       {/* Archive confirm — mounted at the chat surface (not inside the header's
@@ -4541,6 +4559,10 @@ interface TranscriptProps {
   // bottom of the transcript, where the sent row is, into view.
   pendingIds?: ReadonlySet<string>;
   sentRowFollow?: number;
+  // The transcript is known only in part (a chat opened on what its lists say):
+  // the rest of it is a skeleton until the live window lands, and the rows that
+  // replace it fade in where it was.
+  skeleton?: boolean;
   // Agent Activity panel state (undefined-safe: when ``enabled`` is false the
   // transcript renders exactly as before — the ThinkingBubble and nothing else).
   activity?: {
@@ -4600,6 +4622,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
   followingTailRef,
   pendingIds = NO_PENDING_ROWS,
   sentRowFollow = 0,
+  skeleton = false,
   activity,
   footer,
 }) => {
@@ -4850,13 +4873,16 @@ export const Transcript: React.FC<TranscriptProps> = ({
           harnessOpen={openRowIds.has(message.id)}
           onHarnessOpenChange={setHarnessRowOpen}
           pending={pendingIds.has(message.id)}
+          enterClassName={rowHandover}
         />
         {after?.map((group) => renderActivityChip(group))}
       </>
     );
   };
   // With Harness rows hidden, a conversation that holds nothing else reads as new.
-  const empty = (showHarnessMessages ? messages.length === 0 : transcriptItems.length === 0 && !hasOlder) && !working;
+  const empty = !skeleton && (showHarnessMessages ? messages.length === 0 : transcriptItems.length === 0 && !hasOlder) && !working;
+  // Rows that replace the skeleton fade in where it was (ui/design: system/skeleton).
+  const rowHandover = useSkeletonHandover(skeleton);
   // The end-of-history line answers "why did paging stop?" — a question only a
   // reader who actually scrolled can have asked. A chat that fits the viewport
   // never paged, so there the same line is noise rather than an answer.
@@ -5207,19 +5233,29 @@ export const Transcript: React.FC<TranscriptProps> = ({
         }}
         className="min-h-0 flex-1 overflow-y-auto px-4 py-5 [overflow-anchor:none] md:px-8"
       >
-        <div ref={contentRef} className="mx-auto flex w-full max-w-[1080px] flex-col gap-3">
+        <div
+          ref={contentRef}
+          className={clsx(
+            'mx-auto flex w-full max-w-[1080px] flex-col gap-3',
+            // Above a known newest message, the skeleton and that message sit at
+            // the bottom, where the loaded conversation will be read from.
+            skeleton && transcriptItems.length > 0 && 'min-h-full justify-end',
+          )}
+        >
           {organizationNotice}
           {forkSourceBanner}
           {/* One slot at the head of the history for every way paging can end, so
               each outcome resolves in place instead of the top twitching: still
               loading, failed (and retryable), or nothing older left. */}
           {loadingOlder ? (
+            // The page above is on its way: one thin block in the slot's own
+            // height, so nothing moves when the rows land.
             <div
               role="status"
               aria-label={t('chat.loadingOlder')}
-              className="flex h-8 items-center justify-center text-muted"
+              className="flex h-8 items-center justify-center"
             >
-              <Loader2 className="size-4 animate-spin" />
+              <Skeleton className="h-1.5 w-24 animate-skeleton-reveal motion-reduce:animate-none" />
             </div>
           ) : olderLoadFailed ? (
             <button
@@ -5234,6 +5270,8 @@ export const Transcript: React.FC<TranscriptProps> = ({
               {t('chat.noEarlierMessages')}
             </div>
           ) : null}
+          {/* The part of the transcript still to come, above what is known of it. */}
+          {skeleton && <TranscriptSkeleton older={transcriptItems.length > 0} />}
           {/* Degenerate null-anchor groups render at the TOP (never the tail). */}
           {activity?.enabled && activity.topGroups.map((group) => renderActivityChip(group))}
           {transcriptItems.map((item) => {
@@ -5423,6 +5461,8 @@ type MessageRowProps = {
   // A message the reader sent that the server has not answered yet: the bubble
   // is drawn as sending until the server's row takes its place.
   pending?: boolean;
+  // How the row enters: the handover fade when it replaces a skeleton.
+  enterClassName?: string;
 };
 
 // Memoized so a transcript re-render that doesn't touch THIS row — the scroll
@@ -5452,6 +5492,7 @@ export const MessageRow = memo(function MessageRow({
   harnessOpen = false,
   onHarnessOpenChange,
   pending = false,
+  enterClassName,
 }: MessageRowProps) {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -5471,7 +5512,7 @@ export const MessageRow = memo(function MessageRow({
   //  - ``data-message-id`` lets the transcript locate the row to scroll to.
   //  - ``msg-highlight`` paints the brief mint fade.
   // Each branch composes this onto its own ``justify-*`` so alignment is kept.
-  const rowClass = (extra: string) => clsx('flex w-full', extra, highlighted && 'msg-highlight');
+  const rowClass = (extra: string) => clsx('flex w-full', extra, highlighted && 'msg-highlight', enterClassName);
 
   // Which card family draws this row — one decision, made once, in a pure mapper
   // (``chatRowKind``) so the ordering between the families is testable without

@@ -1,14 +1,16 @@
-// A conversation opened before its messages arrived (ui/design: system/skeleton/*). What the app
-// already knows is drawn as itself (the header with its menu and Show Page control, the composer with
-// Attach, the Agent's route, and Send); only the transcript is blocks. `from-inbox`: opened from an
-// Inbox row, whose preview is the newest Agent reply, so that reply is the real bubble at the bottom.
-// Beside each, the same conversation once its messages arrived, at the same size. ChatPage is another
-// lane's; `kit/ChatSkeleton` is the look it is asked to build.
+// A conversation opened before its messages arrived, rendered by the shipped ChatPage (ui/design:
+// system/skeleton/*). What the lists already say is drawn as itself: the header with the Session's
+// title, its menu and Show Page control, and the composer with Attach, the Agent's route, and Send.
+// Only the transcript is blocks. `from-inbox`: opened from an Inbox card, whose preview is the newest
+// Agent reply, so that reply is the real bubble at the bottom. `unlisted`: opened by a link before any
+// list has the Session, so even its title is a block and the composer a block of its shape. Beside each,
+// the same conversation once its messages arrived, at the same size. The bootstrap never answers in the
+// skeleton frames.
+import type { InboxSession } from '@/context/ApiContext';
 import { frames } from '../../frame';
-import { ChatSkeleton } from '../../kit/ChatSkeleton';
-import { demoAgents } from '../agents/fixtures';
-import { consolePage, phoneShell } from '../workbench/fixtures';
-import { agentSays, chatDesktop, chatFixtures, chatPhone, chatRoute, chatSession, userSays, withChatProviders } from './fixtures';
+import { demoProjects, type WorkbenchFixtures } from '../../shell/fixtures';
+import { UNANSWERED } from '../../shell/network';
+import { CHAT_ID, agentSays, at, chatDesktop, chatFixtures, chatPhone, chatRoute, chatSession, userSays } from './fixtures';
 
 const messages = [
   userSays('帮我把 avibe 工作台适配移动端，交互可以和 PC 不一样，但功能要完备。', 62),
@@ -31,9 +33,31 @@ const history = [
 ];
 
 const session = chatSession();
-// In the providers ChatPage's header reads in the app, as the loaded frames have them.
-const opening = withChatProviders(<ChatSkeleton session={session} agents={demoAgents} />);
-const fromInbox = withChatProviders(<ChatSkeleton session={session} agents={demoAgents} latest={latest} />);
+// The chat is opened from the Projects list, which has its row; the bootstrap is still out.
+const projectId = session.project_id ?? '';
+const opened: WorkbenchFixtures = {
+  localSnapshotReader: 'local',
+  projects: demoProjects,
+  sessionsByProject: { [projectId]: [session] },
+  expandedProjects: [projectId],
+};
+const pending = { [`/api/sessions/${CHAT_ID}/bootstrap`]: UNANSWERED };
+// …and from its Inbox card, whose preview is the newest reply.
+const card: InboxSession = {
+  session_id: CHAT_ID,
+  scope_id: session.scope_id,
+  project_id: session.project_id,
+  project_name: 'avibe',
+  title: session.title,
+  last_activity_at: at(2),
+  last_message_author: 'agent',
+  replied: true,
+  preview_text: latest,
+  preview_at: at(2),
+  unread_count: 1,
+  unread: true,
+};
+const fromInbox: WorkbenchFixtures = { ...opened, inboxSessions: [card] };
 
 const designFrames = frames([
   {
@@ -41,10 +65,10 @@ const designFrames = frames([
     title: '会话 · 骨架 · 桌面',
     width: 1192,
     height: 900,
-    status: 'approved',
+    status: 'shipped',
     route: chatRoute(),
-    fixtures: chatFixtures({ messages }),
-    render: consolePage(opening),
+    fixtures: chatFixtures({ messages, api: pending, extra: opened }),
+    render: chatDesktop,
   },
   {
     name: 'desktop-loaded',
@@ -61,10 +85,10 @@ const designFrames = frames([
     title: '会话 · 骨架 · 手机',
     width: 390,
     height: 844,
-    status: 'approved',
+    status: 'shipped',
     route: chatRoute(),
-    fixtures: chatFixtures({ messages }),
-    render: phoneShell('/chat/:sessionId', opening),
+    fixtures: chatFixtures({ messages, api: pending, extra: opened }),
+    render: chatPhone,
   },
   {
     name: 'phone-loaded',
@@ -81,10 +105,10 @@ const designFrames = frames([
     title: '会话 · 骨架 · 从收件箱进入（最新回复已知）· 桌面',
     width: 1192,
     height: 900,
-    status: 'approved',
+    status: 'shipped',
     route: chatRoute(),
-    fixtures: chatFixtures({ messages: history }),
-    render: consolePage(fromInbox),
+    fixtures: chatFixtures({ messages: history, api: pending, extra: fromInbox }),
+    render: chatDesktop,
   },
   {
     name: 'from-inbox-loaded',
@@ -101,10 +125,10 @@ const designFrames = frames([
     title: '会话 · 骨架 · 从收件箱进入（最新回复已知）· 手机',
     width: 390,
     height: 844,
-    status: 'approved',
+    status: 'shipped',
     route: chatRoute(),
-    fixtures: chatFixtures({ messages: history }),
-    render: phoneShell('/chat/:sessionId', fromInbox),
+    fixtures: chatFixtures({ messages: history, api: pending, extra: fromInbox }),
+    render: chatPhone,
   },
   {
     name: 'phone-from-inbox-loaded',
@@ -114,6 +138,26 @@ const designFrames = frames([
     status: 'shipped',
     route: chatRoute(),
     fixtures: chatFixtures({ messages: history }),
+    render: chatPhone,
+  },
+  {
+    name: 'unlisted',
+    title: '会话 · 骨架 · 列表里还没有这个会话（由链接打开）· 桌面',
+    width: 1192,
+    height: 900,
+    status: 'shipped',
+    route: chatRoute(),
+    fixtures: chatFixtures({ messages, api: pending, extra: { localSnapshotReader: 'local' } }),
+    render: chatDesktop,
+  },
+  {
+    name: 'phone-unlisted',
+    title: '会话 · 骨架 · 列表里还没有这个会话（由链接打开）· 手机',
+    width: 390,
+    height: 844,
+    status: 'shipped',
+    route: chatRoute(),
+    fixtures: chatFixtures({ messages, api: pending, extra: { localSnapshotReader: 'local' } }),
     render: chatPhone,
   },
 ]);
