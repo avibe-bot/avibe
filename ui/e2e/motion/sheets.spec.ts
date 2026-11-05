@@ -7,7 +7,7 @@ const SCRIM = 'div.motion-scrim';
 
 /** The CSS animations an element is playing right now. */
 const playing = (target: Locator) => target.evaluate((element) => element.getAnimations().map((animation) => (animation as CSSAnimation).animationName));
-const transformOf = (target: Locator) => target.evaluate((element) => getComputedStyle(element).transform);
+const translateOf = (target: Locator) => target.evaluate((element) => getComputedStyle(element).translate);
 
 async function open(page: Page) {
   await page.route('**/api/**', (route) => route.fulfill({ status: 503, json: { error: 'No backend in this fixture' } }));
@@ -83,7 +83,7 @@ test.describe('dragging a phone sheet', () => {
     await drag(cdp, page, grab, steps(80, 8), 40);
     await page.waitForTimeout(500);
     await expect(sheet).toBeVisible();
-    expect(await transformOf(sheet)).toBe('none');
+    expect(await translateOf(sheet)).toMatch(/^(none|0px)$/);
   });
 
   test('dismisses past 30% of its height, from where the finger let it go', async ({ page }) => {
@@ -104,6 +104,34 @@ test.describe('dragging a phone sheet', () => {
     await expect(sheet).toHaveCount(0);
   });
 
+  test('leaves a stage that handles its own touch to it', async ({ page }) => {
+    const { sheet, cdp } = await openSheet(page);
+    const stage = (await page.getByTestId('pan-stage').boundingBox())!;
+    await drag(cdp, page, { x: stage.x + 40, y: stage.y + 20 }, steps(240, 8), 12);
+    await page.waitForTimeout(400);
+    await expect(sheet).toBeVisible();
+    expect(await translateOf(sheet)).toMatch(/^(none|0px)$/);
+  });
+
+  test('grows a centred card in place, and does not drag it', async ({ page }) => {
+    await open(page);
+    await page.getByRole('button', { name: 'Open card' }).click();
+    const card = page.locator(DIALOG);
+    expect(await playing(card)).toEqual(['motion-grow-in']);
+    // Mid-grow it is still centred: the motion adds to the transform that places it.
+    await card.evaluate((element) => { for (const animation of element.getAnimations()) { animation.pause(); animation.currentTime = 60; } });
+    const box = (await card.boundingBox())!;
+    const viewport = page.viewportSize()!;
+    expect(Math.abs(box.x + box.width / 2 - viewport.width / 2)).toBeLessThan(2);
+    await card.evaluate((element) => { for (const animation of element.getAnimations()) animation.finish(); });
+    const title = (await page.getByRole('heading', { name: 'Connect' }).boundingBox())!;
+    const cdp = await page.context().newCDPSession(page);
+    await drag(cdp, page, { x: title.x + 20, y: title.y + 10 }, steps(240, 8), 12);
+    await page.waitForTimeout(400);
+    await expect(card).toBeVisible();
+    expect(await translateOf(card)).toMatch(/^(none|0px)$/);
+  });
+
   test('leaves content that is scrolled down to scroll', async ({ page }) => {
     const { sheet, cdp } = await openSheet(page);
     await sheet.evaluate((element) => { element.scrollTop = 400; });
@@ -112,7 +140,7 @@ test.describe('dragging a phone sheet', () => {
     await drag(cdp, page, { x: row.x + 40, y: row.y + row.height / 2 }, steps(240, 8), 12);
     await page.waitForTimeout(400);
     await expect(sheet).toBeVisible();
-    expect(await transformOf(sheet)).toBe('none');
+    expect(await translateOf(sheet)).toMatch(/^(none|0px)$/);
     expect(await sheet.evaluate((element) => element.scrollTop)).toBeLessThan(300);
   });
 });

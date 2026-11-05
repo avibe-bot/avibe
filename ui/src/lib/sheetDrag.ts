@@ -52,15 +52,23 @@ const EXIT_PROPERTIES = ['--sheet-drag', '--sheet-exit-duration', '--sheet-exit-
 /** Inputs and editors keep their own touch (selecting, scrolling a field). */
 const OWN_TOUCH = 'input, textarea, select, [contenteditable=""], [contenteditable="true"], [data-sheet-no-drag]';
 
+/** Whether a `touch-action` leaves vertical moves to the browser, and so not to a gesture of the page's own
+ *  (an image stage that pans and zooms, a drag handle: `none`). */
+const browserPansVertically = (touchAction: string) =>
+  touchAction === '' || touchAction === 'auto' || touchAction === 'manipulation' || touchAction.includes('pan-y');
+
 /** Whether a touch at `target` inside `sheet` may drag it: `both` ways where nothing scrolls under it,
- *  only `down` from a scroller at its top, and `none` from a scroller scrolled down or from a field. */
+ *  only `down` from a scroller at its top, and `none` from a scroller scrolled down, from a field, or from
+ *  anything that handles its own touch. */
 function dragAllowance(target: Element, sheet: HTMLElement): 'both' | 'down' | 'none' {
   if (target.closest(OWN_TOUCH)) return 'none';
   let allowance: 'both' | 'down' = 'both';
   for (let node: Element | null = target; node && sheet.contains(node); node = node.parentElement) {
-    if (!(node instanceof HTMLElement) || node.scrollHeight <= node.clientHeight + 1) continue;
-    const overflow = getComputedStyle(node).overflowY;
-    if (overflow !== 'auto' && overflow !== 'scroll') continue;
+    if (!(node instanceof HTMLElement)) continue;
+    const style = getComputedStyle(node);
+    if (!browserPansVertically(style.touchAction)) return 'none';
+    if (node.scrollHeight <= node.clientHeight + 1) continue;
+    if (style.overflowY !== 'auto' && style.overflowY !== 'scroll') continue;
     if (node.scrollTop > 0) return 'none';
     allowance = 'down';
   }
@@ -85,9 +93,10 @@ export function useSheetDrag(sheet: HTMLElement | null, { enabled, onDismiss }: 
     let check = 0;
 
     const touchOf = (event: TouchEvent, id: number) => [...event.changedTouches].find((touch) => touch.identifier === id);
+    // The offset rides on `translate`, adding to any transform the sheet is placed with.
     const place = (offset: number) => {
-      if (offset === 0) sheet.style.removeProperty('transform');
-      else sheet.style.setProperty('transform', `translateY(${offset}px)`);
+      if (offset === 0) sheet.style.removeProperty('translate');
+      else sheet.style.setProperty('translate', `0 ${offset}px`);
     };
     // A drag that dismissed the sheet stays on it through the closing animation; open again, it starts
     // at rest.
@@ -97,7 +106,7 @@ export function useSheetDrag(sheet: HTMLElement | null, { enabled, onDismiss }: 
     const springBack = (from: number) => {
       place(0);
       if (from === 0 || prefersReducedMotion() || !canAnimate(sheet)) return;
-      settle = sheet.animate([{ transform: `translateY(${from}px)` }, { transform: 'translateY(0px)' }], springTiming('snappy'));
+      settle = sheet.animate([{ translate: `0 ${from}px` }, { translate: '0 0' }], springTiming('snappy'));
     };
 
     const onStart = (event: TouchEvent) => {
@@ -129,7 +138,7 @@ export function useSheetDrag(sheet: HTMLElement | null, { enabled, onDismiss }: 
         if (Math.abs(dy) < SLOP) return;
         gesture.dragging = true;
         gesture.startY = touch.clientY;
-        sheet.style.setProperty('will-change', 'transform');
+        sheet.style.setProperty('will-change', 'translate');
       }
       // The sheet, not the page or its content, moves under the finger.
       if (event.cancelable) event.preventDefault();

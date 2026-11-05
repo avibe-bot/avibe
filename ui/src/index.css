@@ -1098,13 +1098,16 @@ pre,
     animation: motion-fade-out var(--motion-duration-fast) var(--motion-ease-exit) forwards;
   }
 }
-@keyframes motion-sheet-rise { from { transform: translateY(100%); } }
+/* On the individual `translate` and `scale` properties, so they add to whatever
+   transform a surface is placed with (a dialog centred by its own transform)
+   instead of replacing it. */
+@keyframes motion-sheet-rise { from { translate: 0 100%; } }
 @keyframes motion-sheet-sink {
-  from { transform: translateY(var(--sheet-drag, 0px)); }
-  to { transform: translateY(100%); }
+  from { translate: 0 var(--sheet-drag, 0px); }
+  to { translate: 0 100%; }
 }
-@keyframes motion-grow-in { from { opacity: 0; transform: scale(var(--motion-scale-enter)); } }
-@keyframes motion-shrink-out { to { opacity: 0; transform: scale(var(--motion-scale-enter)); } }
+@keyframes motion-grow-in { from { opacity: 0; scale: var(--motion-scale-enter); } }
+@keyframes motion-shrink-out { to { opacity: 0; scale: var(--motion-scale-enter); } }
 
 /* Chat compose "thinking" indicator — three dots fading in sequence while we
    wait for the agent's first streamed chunk (workbench ChatPage). */

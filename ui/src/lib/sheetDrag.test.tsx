@@ -52,7 +52,7 @@ describe('dragging a phone sheet', () => {
     // Held still for half a second, 70 px down (under 30% of 600), then let go.
     touch('touchend', 180, 524);
     expect(onDismiss).not.toHaveBeenCalled();
-    expect(sheet.style.transform).toBe('');
+    expect(sheet.style.translate).toBe('');
   });
 
   it('dismisses a flick that is still moving as it lets go', () => {
@@ -79,7 +79,7 @@ describe('dragging a phone sheet', () => {
     expect(sheet.style.getPropertyValue('--sheet-drag')).toBe('290px');
     // Reopened on the same element before that ended.
     view.rerender(<Sheet onDismiss={onDismiss} enabled />);
-    expect(sheet.style.transform).toBe('');
+    expect(sheet.style.translate).toBe('');
     expect(sheet.style.getPropertyValue('--sheet-drag')).toBe('');
     expect(sheet.style.getPropertyValue('--sheet-exit-duration')).toBe('');
   });
@@ -93,7 +93,7 @@ describe('dragging a phone sheet', () => {
     touch('touchmove', 200, 200);
     view.rerender(<Sheet onDismiss={latest} />);
     touch('touchmove', 400, 400);
-    expect(sheet.style.transform).toBe('translateY(290px)');
+    expect(sheet.style.translate).toBe('0 290px');
     touch('touchend', 400, 410);
     expect(first).not.toHaveBeenCalled();
     expect(latest).toHaveBeenCalledTimes(1);

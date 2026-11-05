@@ -27,12 +27,12 @@ const sheetOverInbox = (pose?: ReactNode) => () => (
 );
 
 /** Where a finger has pulled the sheet: 120 px down from its resting place, held by its header (the shipped
- *  sheet's top at 390 × 844, where `useSheetDrag` writes the same transform). */
+ *  sheet's top at 390 × 844, where `useSheetDrag` writes the same offset). */
 const PULL = 120;
 const GRAB_Y = 573;
 const dragged = (
   <>
-    <style>{`[role="dialog"][data-state="open"] { transform: translateY(${PULL}px); }`}</style>
+    <style>{`[role="dialog"][data-state="open"] { translate: 0 ${PULL}px; }`}</style>
     <TouchPoint top={GRAB_Y + PULL} left={195} />
   </>
 );

@@ -15,6 +15,7 @@ import '../../src/index.css';
 export function Surfaces() {
   const { showToast } = useToast();
   const [dialog, setDialog] = useState(false);
+  const [card, setCard] = useState(false);
   const [menu, setMenu] = useState(false);
   const [toasts, setToasts] = useState(0);
   return (
@@ -23,9 +24,19 @@ export function Surfaces() {
       <Dialog open={dialog} onOpenChange={setDialog}>
         <DialogContent aria-describedby={undefined} closeLabel="Close">
           <DialogTitle>Every Bot</DialogTitle>
+          {/* A stage that pans and zooms under the finger itself (as the file preview's image does). */}
+          <div data-testid="pan-stage" className="h-24 touch-none rounded-lg border border-border">Pan stage</div>
           <ul data-testid="dialog-list" className="flex flex-col gap-1">
             {Array.from({ length: 40 }, (_, i) => <li key={i} className="rounded-lg border border-border px-3 py-3">Bot {i + 1}</li>)}
           </ul>
+        </DialogContent>
+      </Dialog>
+      <Button variant="outline" onClick={() => setCard(true)}>Open card</Button>
+      <Dialog open={card} onOpenChange={setCard}>
+        {/* A dialog a phone shows as a card, centred by its own transform (as the backend connection dialog is). */}
+        <DialogContent aria-describedby={undefined} closeLabel="Close" mobilePresentation="card" className="max-md:top-1/2 max-md:bottom-auto max-md:left-1/2 max-md:w-[320px] max-md:[transform:translate(-50%,-50%)]">
+          <DialogTitle>Connect</DialogTitle>
+          <p>Centred card</p>
         </DialogContent>
       </Dialog>
       <ResponsiveMenu open={menu} onOpenChange={setMenu} trigger={<Button variant="outline">Open menu</Button>} sheetTitle="Session">
