@@ -4,6 +4,7 @@ import { useToast } from './ToastContext';
 import type { PickerAgentCatalog } from '../components/settings/models/types';
 import type { AgentBackendId, NativeCliBackend, WebOAuthBackend } from '../lib/agentBackends';
 import { apiFetch, recoverRemoteAuthFromSessionProbe, withApiDeadline } from '../lib/apiFetch';
+import { accessDigestChanged, isAccessDigestChange, recordAccessDigest } from '../lib/accessDigest';
 import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
 import { clearLocalSnapshots, forgetLocalSnapshots } from '../lib/localSnapshots';
 import {
@@ -2931,6 +2932,93 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  /** What an authorization change voids, whether its event arrived or the
+   *  access digest found one no event delivered: every authorization-sensitive
+   *  read, every local snapshot, and each surface's view of what it may show. */
+  const applyAuthorizationChange = (
+    data: Parameters<NonNullable<WorkbenchEventHandlers['onAuthorizationChanged']>>[0],
+    envelope?: WorkbenchEventEnvelope,
+  ): Promise<void> => {
+    clearReadCacheMatching(isAuthorizationSensitiveReadPath);
+    // Every local snapshot is an authorization-sensitive read too. Dropping them
+    // here, not only overwriting them on the next read, keeps a document that
+    // closes before that read from painting revoked rows on its next start.
+    const cleared = clearLocalSnapshots();
+    dispatchToWorkbenchHandlers((handlers) => {
+      if (envelope) handlers.onAny?.(envelope);
+      handlers.onAuthorizationChanged?.(data);
+    });
+    return cleared;
+  };
+
+  // The reader the last session answer named, when it was a current remote one:
+  // only such a reader has an access digest to check again after a stream gap.
+  const remoteReaderRef = useRef<string | null>(null);
+
+  /** Compare the access digest of a session answer with the one last recorded
+   *  for its reader. A change no ``authorization.changed`` delivered (every tab
+   *  closed, or the stream down) is applied as that event would have been, and
+   *  the new digest is recorded only once it is, so a page that closes first
+   *  clears again at its next check. */
+  const checkAccessDigest = async (session: SessionInfo) => {
+    // Authorization the server cannot resolve right now says nothing about who
+    // reads or what they may read: the reader known before stays, so the next
+    // gap checks again.
+    if (session.remote && session.authenticated && session.authorization_state === 'unavailable') return;
+    const current = session.remote && session.authenticated && session.authorization_state === 'current' ? session : null;
+    remoteReaderRef.current = current?.author_id ?? null;
+    const reader = current?.author_id;
+    const digest = current?.access_digest;
+    if (!reader || !digest) return;
+    if (accessDigestChanged(reader, digest)) await applyAuthorizationChange({});
+    recordAccessDigest(reader, digest);
+  };
+
+  const readAuthSession = async ({ quiet = false }: { quiet?: boolean } = {}) => {
+    // A quiet read (the check after a stream gap) announces nothing, but still
+    // rejects a failed response: only an answer may say the reader signed out
+    // or lost access, never the body of a 503.
+    const payload: unknown = quiet
+      ? await apiFetch('/api/session').then((res) => {
+        if (!res.ok) throw new Error(`Request failed: /api/session (${res.status})`);
+        return res.json();
+      })
+      : await getJson('/api/session');
+    const session = normalizeSessionInfo(payload);
+    // Revocation reaches the guard through this read too, not only through
+    // ``reportRemoteAuthorizationState``; either way the reader's snapshots go.
+    if (session.remote && session.authenticated && session.authorization_state === 'revoked') {
+      void forgetLocalSnapshots();
+    }
+    // An answer, not a failed read: the session expired. Phase 1 cannot recheck
+    // what this reader may still see once they sign back in, so the stored
+    // history goes (docs/plans/local-sync-store.md decision D7).
+    if (session.remote && !session.authenticated) void wipeLocalStore();
+    void checkAccessDigest(session);
+    return session;
+  };
+
+  /** The stream may have missed something. Tail claims end, a remote reader's
+   *  access is checked again (an ``authorization.changed`` the stream missed
+   *  would otherwise go unnoticed), and every surface catches up. */
+  const announceStreamGap = () => {
+    noteLocalStoreStreamGap();
+    if (remoteReaderRef.current) void readAuthSession({ quiet: true }).catch(() => undefined);
+    dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.());
+  };
+
+  // Another tab found an access change and applied it: it cleared the shared
+  // stores and then recorded the new digest. This document drops what it holds
+  // in memory too, and stops writing what it read before, as if the event had
+  // reached it. It records nothing, so no tab hears about it twice.
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (isAccessDigestChange(event)) void applyAuthorizationChange({});
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
+
   // Feed a locally-synthesized session.activity event through the SAME handler
   // set + read-cache invalidation the SSE 'session.activity' listener uses, so a
   // client-originated change (e.g. a visibility PATCH) reconciles every workbench
@@ -3182,8 +3270,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       if (eventConnectionRef.current) {
         getWorkbenchEventReconnectLoop().streamOpened();
-        noteLocalStoreStreamGap();
-        dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.());
+        announceStreamGap();
       }
     });
     // The server's proof of life. It carries no news, so nothing is dispatched
@@ -3210,15 +3297,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         instance_authorization_revision?: number;
       }>(e.data);
       if (!envelope) return;
-      clearReadCacheMatching(isAuthorizationSensitiveReadPath);
-      // Every local snapshot is an authorization-sensitive read too. Dropping them
-      // here, not only overwriting them on the next read, keeps a document that
-      // closes before that read from painting revoked rows on its next start.
-      void clearLocalSnapshots();
-      dispatchToWorkbenchHandlers((handlers) => {
-        handlers.onAny?.(envelope);
-        handlers.onAuthorizationChanged?.(envelope.data);
-      });
+      void applyAuthorizationChange(envelope.data, envelope);
     });
     source.addEventListener('projects.changed', (e: MessageEvent) => {
       const envelope = parseWorkbenchEnvelope<Record<string, never>>(e.data);
@@ -3427,8 +3506,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // a new stream's opening report is the leg's state, not a recovery, and
       // treating it as one would charge every connect a duplicate catch-up.
       if (previousLeg === 'disconnected' && envelope.data.connected) {
-        noteLocalStoreStreamGap();
-        dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.());
+        announceStreamGap();
       }
     });
     source.onerror = (err) => {
@@ -3510,8 +3588,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // replacement's later `connected` is a second catch-up in exactly the case
     // that already paid for two.
     if (!survivedTheGap) {
-      noteLocalStoreStreamGap();
-      dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.());
+      announceStreamGap();
     }
   };
   resumeWorkbenchEventsRef.current = wakeWorkbenchEvents;
@@ -4858,19 +4935,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getRemoteAccessNetworkInterfaces: () => getJson('/api/remote-access/network-interfaces'),
     saveRemoteAccessSettings: (settings) => postJson('/api/remote-access/settings', settings),
     diagnoseRemoteAccess: () => postJson('/api/remote-access/diagnostics', {}),
-    getAuthSession: () => getJson('/api/session').then((payload) => {
-      const session = normalizeSessionInfo(payload);
-      // Revocation reaches the guard through this read too, not only through
-      // ``reportRemoteAuthorizationState``; either way the reader's snapshots go.
-      if (session.remote && session.authenticated && session.authorization_state === 'revoked') {
-        void forgetLocalSnapshots();
-      }
-      // An answer, not a failed read: the session expired. Phase 1 cannot recheck
-      // what this reader may still see once they sign back in, so the stored
-      // history goes (docs/plans/local-sync-store.md decision D7).
-      if (session.remote && !session.authenticated) void wipeLocalStore();
-      return session;
-    }),
+    getAuthSession: () => readAuthSession(),
     signOut: async () => {
       // Before the request, so a failed logout leaves nothing of this reader on
       // the device: no boot session for the next cold start (and no guard check

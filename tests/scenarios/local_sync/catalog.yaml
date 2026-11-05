@@ -74,3 +74,13 @@ scenarios:
     test:
       - ui/src/lib/localStore/localStore.test.ts::LSYNC-022 does not let a tab still naming an expired reader write into the store claimed for the next one
       - ui/src/lib/localStore/localStore.test.ts::LSYNC-022 does not let an authorization-change clear in a stale tab claim the store another reader holds
+  - id: LSYNC-023
+    name: An access change no authorization.changed delivered (every tab closed, or the stream down) clears the stored history at the next session check
+    status: covered
+    kind: security
+    layer: integration
+    test:
+      - ui/src/context/ApiContext.localStore.test.tsx::LSYNC-023 clears the stored history when a session check finds a change no event delivered
+      - "ui/src/context/ApiContext.localStore.test.tsx::LSYNC-023 checks a remote reader's access again after a stream gap, and costs a local reader nothing"
+      - ui/src/context/ApiContext.localStore.test.tsx::LSYNC-023 drops what this tab holds when another tab applies an access change
+      - tests/test_ui_project_access.py::test_lsync_023_session_access_digest_changes_when_the_reader_loses_a_project

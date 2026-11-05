@@ -8187,6 +8187,7 @@ def api_session():
                         # carried: this route is auth-exempt and never renews
                         # it, so no later value can be reported.
                         "session_expires_at": int(identity["exp"]),
+                        "access_digest": _reader_access_digest(context),
                     }
                 )
     # Identity payload must never be cached by intermediaries (Cloudflare etc.).
@@ -9358,6 +9359,22 @@ def _projects_engine():
     from storage.db import create_sqlite_engine
 
     return create_sqlite_engine()
+
+
+def _reader_access_digest(context) -> str | None:
+    """``project_access_service.reader_access_digest`` for ``/api/session``.
+
+    None when it cannot be computed now: the client then keeps what it holds
+    until its next check, rather than clearing on a transient failure.
+    """
+    from storage import project_access_service
+
+    try:
+        with _projects_engine().connect() as conn:
+            return project_access_service.reader_access_digest(conn, context)
+    except Exception:
+        logger.warning("Reader access digest unavailable", exc_info=True)
+        return None
 
 
 def _accessible_project_scope_ids_for_context(conn, context) -> list[str] | None:

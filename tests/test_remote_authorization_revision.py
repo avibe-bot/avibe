@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import itertools
@@ -293,7 +295,7 @@ def test_released_cookie_keeps_working_and_gains_auth_time_on_its_first_renewal(
 
 
 @pytest.mark.parametrize("state", ["current", "revoked", "unavailable"])
-def test_session_endpoint_only_adds_the_cookie_expiry_to_its_released_shape(
+def test_session_endpoint_only_adds_fields_to_its_released_shape(
     monkeypatch,
     tmp_path,
     state,
@@ -346,6 +348,7 @@ def test_session_endpoint_only_adds_the_cookie_expiry_to_its_released_shape(
     if state == "current":
         assert body.pop("session_expires_at") == _cookie_payload(cookie)["exp"]
         assert body.pop("capabilities")["is_instance_owner"] is True
+        assert re.fullmatch(r"[0-9a-f]{32}", body.pop("access_digest"))
     assert body == released
     # Local and signed-out readers get exactly the released shape.
     assert app.test_client().get(

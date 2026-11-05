@@ -15,7 +15,7 @@ vi.mock('react-i18next', () => ({
 
 import type { WorkbenchMessage } from './ApiContext';
 import { ApiProvider, useApi } from './ApiContext';
-import { clearLocalSnapshots, setLocalSnapshotPrincipal } from '../lib/localSnapshots';
+import { clearLocalSnapshots, registerLocalSnapshotClearHook, setLocalSnapshotPrincipal } from '../lib/localSnapshots';
 import { beginLocalStoreRead, readLocalStoreWindow, recordLocalStorePage } from '../lib/localStore';
 
 // The local message store is written through at the API layer, whichever page
@@ -248,6 +248,137 @@ describe('a revoked reader empties the store', () => {
     await api.current!.getAuthSession();
     setLocalSnapshotPrincipal('remote:alice');
     await eventually(async () => expect(await held()).toEqual([]));
+  });
+});
+
+describe('an access change no authorization.changed delivered', () => {
+  // Every tab was closed, or the event stream was down, when the reader lost
+  // access: the session check compares what /api/session says they may read.
+  const DIGEST_KEY = 'avibe.access-digest.v1';
+  const current = (author: string, digest: string) => json({
+    remote: true,
+    authenticated: true,
+    authorization_state: 'current',
+    instance_role: 'editor',
+    author_id: author,
+    access_digest: digest,
+  });
+  const serveSession = (answer: () => Response) =>
+    apiFetch.mockImplementation(async (path: string) => (path === '/api/session' ? answer() : json({})));
+  const recorded = () => (JSON.parse(window.localStorage.getItem(DIGEST_KEY) ?? 'null') as { digest?: string } | null)?.digest;
+
+  afterEach(() => {
+    window.localStorage.removeItem(DIGEST_KEY);
+  });
+
+  it('LSYNC-023 clears the stored history when a session check finds a change no event delivered', async () => {
+    render(<ApiProvider><Subscriber /></ApiProvider>);
+    await seed();
+    const changed = vi.fn();
+    const stop = api.current!.connectWorkbenchEvents({ onAuthorizationChanged: changed });
+    // Another reader's digest, then this reader's first and the same again: no change.
+    serveSession(() => current('remote:bob', 'digest-bob'));
+    await api.current!.getAuthSession();
+    let digest = 'digest-1';
+    serveSession(() => current('remote:alice', digest));
+    await api.current!.getAuthSession();
+    await api.current!.getAuthSession();
+    await settle();
+    expect(await held()).toEqual(['row 1', 'row 2']);
+    expect(changed).not.toHaveBeenCalled();
+
+    // Alice lost a project while no tab was listening.
+    digest = 'digest-2';
+    await api.current!.getAuthSession();
+    await eventually(async () => expect(await held()).toEqual([]));
+    expect(changed).toHaveBeenCalledTimes(1);
+    expect(recorded()).toBe('digest-2');
+    stop();
+  });
+
+  it("LSYNC-023 checks a remote reader's access again after a stream gap, and costs a local reader nothing", async () => {
+    render(<ApiProvider><Subscriber /></ApiProvider>);
+    await seed();
+    let digest = 'digest-1';
+    serveSession(() => current('remote:alice', digest));
+    await api.current!.getAuthSession();
+    // The stream was down when the change happened; it reconnects.
+    digest = 'digest-2';
+    FakeEventSource.instances.at(-1)!.emit('connected', { sub_id: 2 });
+    await eventually(async () => expect(await held()).toEqual([]));
+
+    // A local reader has no access digest, so a gap reads no session for it.
+    serveSession(() => json({ remote: false, author_id: 'local' }));
+    await api.current!.getAuthSession();
+    apiFetch.mockClear();
+    FakeEventSource.instances.at(-1)!.emit('connected', { sub_id: 3 });
+    await settle();
+    expect(apiFetch.mock.calls.filter(([path]) => path === '/api/session')).toEqual([]);
+  });
+
+  it('LSYNC-023 drops what this tab holds when another tab applies an access change', async () => {
+    render(<ApiProvider><Subscriber /></ApiProvider>);
+    await seed();
+    const changed = vi.fn();
+    const stop = api.current!.connectWorkbenchEvents({ onAuthorizationChanged: changed });
+    const record = (reader: string, digest: string) => JSON.stringify({ reader, digest });
+    const recordedElsewhere = (oldValue: string | null, newValue: string) =>
+      window.dispatchEvent(new StorageEvent('storage', { key: DIGEST_KEY, oldValue, newValue }));
+    // A first record, and one for another reader, are no change.
+    recordedElsewhere(null, record('remote:alice', 'digest-1'));
+    recordedElsewhere(record('remote:bob', 'digest-bob'), record('remote:alice', 'digest-1'));
+    await settle();
+    expect(changed).not.toHaveBeenCalled();
+    expect(await held()).toEqual(['row 1', 'row 2']);
+
+    // Another tab found Alice's access changed, cleared, and recorded the new digest.
+    recordedElsewhere(record('remote:alice', 'digest-1'), record('remote:alice', 'digest-2'));
+    await eventually(async () => expect(await held()).toEqual([]));
+    expect(changed).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
+  it('keeps everything when the check after a gap gets no answer about access, and checks again at the next gap', async () => {
+    render(<ApiProvider><Subscriber /></ApiProvider>);
+    let answer = () => current('remote:alice', 'digest-0');
+    serveSession(() => answer());
+    await api.current!.getAuthSession();
+    // The server is briefly down, or cannot resolve the reader's authorization,
+    // when the stream reconnects; it answers again at the next reconnect.
+    const outages = [
+      () => json({ detail: 'Service unavailable' }, 503),
+      () => json({ remote: true, authenticated: true, authorization_state: 'unavailable', email: 'alice@example.com' }),
+    ];
+    for (const [round, outage] of outages.entries()) {
+      await seed();
+      answer = outage;
+      FakeEventSource.instances.at(-1)!.emit('connected', { sub_id: 10 + 2 * round });
+      await settle();
+      expect(await held()).toEqual(['row 1', 'row 2']);
+
+      answer = () => current('remote:alice', `digest-${round + 1}`);
+      FakeEventSource.instances.at(-1)!.emit('connected', { sub_id: 11 + 2 * round });
+      await eventually(async () => expect(await held()).toEqual([]));
+    }
+  });
+
+  it('records the new digest only once the clear it calls for is done, so a page closing first clears again', async () => {
+    render(<ApiProvider><Subscriber /></ApiProvider>);
+    let digest = 'digest-1';
+    serveSession(() => current('remote:alice', digest));
+    await api.current!.getAuthSession();
+    // A clear still under way when the page could close.
+    let finish!: () => void;
+    const clearing = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    registerLocalSnapshotClearHook(() => clearing);
+    digest = 'digest-2';
+    await api.current!.getAuthSession();
+    await settle();
+    expect(recorded()).toBe('digest-1');
+    finish();
+    await eventually(async () => expect(recorded()).toBe('digest-2'));
   });
 });
 
