@@ -159,8 +159,10 @@ live traffic before its fix.
   the Web Animations API (`element.animate`) so it runs off the main thread.
   Not framer-motion `layout`, which writes a transform every frame from
   JavaScript. Inside a scroller, apply the inverse only after the scroll
-  position has been pinned, and never re-pin during the glide (a positive
-  transform extends the scrollable area).
+  position has been pinned, and never re-pin during the glide: a positive
+  transform extends the scrollable area, and `ChatPage` re-pins after every
+  commit (`useLayoutEffect(restoreScrollPosition)`), so the pin must ignore
+  the running offset until the glide ends.
 - **Only what is on screen moves.** Rows outside the viewport plus one screen
   snap. At most 8 elements animate in one moment, and at most 5 rows stagger.
 - **Bursts coalesce.** A second update during a move retargets the running

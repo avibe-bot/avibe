@@ -26,6 +26,8 @@ import { ChatAt, DesktopStage, Layer, PhoneStage } from './stage';
 const SEND_AT = 700;
 const PERIOD = 4400;
 const RESET = 500;
+/** The page pins its transcript to the bottom when its data lands; the loop starts after that. */
+const PIN_FIRST = 1500;
 /** Where the frame rests when animations are off: sent, and settled. */
 const SETTLED = SEND_AT + 1500;
 /** Today the message lands with the POST answer, this long after the working bubble. */
@@ -131,6 +133,7 @@ export function SendLoop({ tier, shift, desktop = false }: { tier: Tier; shift: 
     // Opaque pages over each other, each removed in one frame.
     return (
       <MotionLoop
+        delay={PIN_FIRST}
         id={id}
         period={PERIOD}
         reset={RESET}
@@ -152,6 +155,7 @@ export function SendLoop({ tier, shift, desktop = false }: { tier: Tier; shift: 
     // No travel: the before page fades out over the after page.
     return (
       <MotionLoop
+        delay={PIN_FIRST}
         id={id}
         period={PERIOD}
         reset={RESET}
@@ -166,7 +170,7 @@ export function SendLoop({ tier, shift, desktop = false }: { tier: Tier; shift: 
     );
   }
   return (
-    <MotionLoop id={id} period={PERIOD} reset={RESET} rest={SETTLED} tracks={sendTracks(feel(tier), shift)}>
+    <MotionLoop delay={PIN_FIRST} id={id} period={PERIOD} reset={RESET} rest={SETTLED} tracks={sendTracks(feel(tier), shift)}>
       <Stage>
         <Layer name="before" opaque><ChatAt state="before" /></Layer>
         <Layer name="after" seeThrough><ChatAt state="after" /></Layer>
@@ -183,6 +187,7 @@ export function FailLoop({ tier }: { tier: 'now' | 'standard' }) {
   if (tier === 'now') {
     return (
       <MotionLoop
+        delay={PIN_FIRST}
         id="send-failed-now"
         period={PERIOD}
         rest={FAIL_AT - 100}
@@ -222,7 +227,7 @@ export function FailLoop({ tier }: { tier: 'now' | 'standard' }) {
   const tracks: Track[] = sendTracks(f, SHIFT.phone.send).map((track) => ({ ...track, beats: [...track.beats, ...(undo[track.el] ?? [])] }));
   tracks.push({ el: after(`${COMPOSER} ${TYPED}`), beats: undo[after(`${COMPOSER} ${TYPED}`)] });
   return (
-    <MotionLoop id="send-failed-standard" period={PERIOD} rest={FAIL_AT - 100} tracks={tracks}>
+    <MotionLoop delay={PIN_FIRST} id="send-failed-standard" period={PERIOD} rest={FAIL_AT - 100} tracks={tracks}>
       <PhoneStage>
         <Layer name="before" opaque><ChatAt state="before" /></Layer>
         <Layer name="after" seeThrough><ChatAt state="after" /></Layer>

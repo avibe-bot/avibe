@@ -24,6 +24,8 @@ import { ChatAt, Layer, PhoneStage } from './stage';
 const ARRIVE_AT = 800;
 const PERIOD = 3600;
 const RESET = 500;
+/** The page pins its transcript to the bottom when its data lands; the loop starts after that. */
+const PIN_FIRST = 1500;
 
 function arrivalTracks(shift: number): Track[] {
   const before = (selector: string) => inLayer('after', selector);
@@ -61,7 +63,7 @@ function arrivalTracks(shift: number): Track[] {
 export function ArrivalLoop({ tier }: { tier: Extract<Tier, 'now' | 'standard' | 'reduced'> }) {
   if (tier === 'standard') {
     return (
-      <MotionLoop id="arrival-standard" period={PERIOD} reset={RESET} rest={ARRIVE_AT + 1200} tracks={arrivalTracks(SHIFT.phone.arrival)}>
+      <MotionLoop delay={PIN_FIRST} id="arrival-standard" period={PERIOD} reset={RESET} rest={ARRIVE_AT + 1200} tracks={arrivalTracks(SHIFT.phone.arrival)}>
         <PhoneStage>
           <Layer name="after" opaque><ChatAt state="after" /></Layer>
           <Layer name="replied" seeThrough><ChatAt state="replied" /></Layer>
@@ -72,7 +74,7 @@ export function ArrivalLoop({ tier }: { tier: Extract<Tier, 'now' | 'standard' |
   // Today the reply replaces the bubble in one frame; with reduced motion the pages cross-fade.
   const curve = tier === 'now' ? cut : timed('fast', 'enter');
   return (
-    <MotionLoop id={`arrival-${tier}`} period={PERIOD} reset={RESET} rest={ARRIVE_AT + 1200} tracks={[{ el: inLayer('after'), beats: [{ at: ARRIVE_AT, to: { opacity: 0 }, curve }] }]}>
+    <MotionLoop delay={PIN_FIRST} id={`arrival-${tier}`} period={PERIOD} reset={RESET} rest={ARRIVE_AT + 1200} tracks={[{ el: inLayer('after'), beats: [{ at: ARRIVE_AT, to: { opacity: 0 }, curve }] }]}>
       <PhoneStage>
         <Layer name="replied" opaque><ChatAt state="replied" /></Layer>
         <Layer name="after" opaque><ChatAt state="after" /></Layer>

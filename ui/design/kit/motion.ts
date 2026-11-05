@@ -192,6 +192,7 @@ export function loopRules({
   reset = 0,
   freeze,
   rest,
+  delay = 0,
 }: {
   id: string;
   period: number;
@@ -202,6 +203,9 @@ export function loopRules({
   /** The instant every element rests at when animations are off (the design screenshot): where the
    *  moment has settled. Without it, each element rests at its own style. */
   rest?: number;
+  /** Hold the first loop's opening pose this long: a page that pins its scroll position when its data
+   *  lands must do so before a FLIP offset is on its rows (an offset there widens what it pins to). */
+  delay?: number;
 }): string {
   const scope = `[data-motion-loop="${id}"]`;
   const rules: string[] = [];
@@ -241,12 +245,12 @@ export function loopRules({
       if (moves.length) {
         const name = `motion-${id}-${index}-move`;
         rules.push(keyframes(name, moves, from, period, (p) => `transform: ${transform(p)};`));
-        animations.push(`${name} ${period}ms linear infinite`);
+        animations.push(`${name} ${period}ms linear ${delay}ms infinite both`);
       }
       if (fades.length) {
         const name = `motion-${id}-${index}-fade`;
         rules.push(keyframes(name, fades, from, period, (p) => `opacity: ${p.opacity ?? 1};`));
-        animations.push(`${name} ${period}ms linear infinite`);
+        animations.push(`${name} ${period}ms linear ${delay}ms infinite both`);
       }
       if (animations.length) declarations.push(`animation: ${animations.join(', ')};`);
     }

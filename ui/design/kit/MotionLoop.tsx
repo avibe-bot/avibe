@@ -14,6 +14,7 @@ export function MotionLoop({
   reset?: number;
   freeze?: number;
   rest?: number;
+  delay?: number;
   children: ReactNode;
 }) {
   return (
