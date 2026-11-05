@@ -244,7 +244,7 @@ const ReturnToApp: React.FC<{
 export const SettingsLayout: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
-  const { capabilities } = useInstanceAuthorization();
+  const { capabilities, provisional } = useInstanceAuthorization();
   const location = useLocation();
   const navigate = useNavigate();
   const isDesktop = useIsDesktop();
@@ -367,10 +367,12 @@ export const SettingsLayout: React.FC = () => {
   // desktop keeps that rail on screen, so the root has nothing left to show
   // there and resolves through to a section: the resumed one, the same answer
   // its entry link resolves for itself.
+  // Replayed capabilities may be stale, so the section choice waits for the
+  // guard's check rather than resolving the root on them.
   useEffect(() => {
-    if (!atRoot || !isDesktop) return;
+    if (!atRoot || !isDesktop || provisional) return;
     navigate(settingsResumePath(capabilities.can_manage_instance), { replace: true });
-  }, [atRoot, capabilities.can_manage_instance, isDesktop, navigate]);
+  }, [atRoot, capabilities.can_manage_instance, isDesktop, navigate, provisional]);
 
   return (
     <div className="relative flex h-full min-h-0 flex-col overflow-hidden bg-background md:h-[var(--app-shell-h)]">

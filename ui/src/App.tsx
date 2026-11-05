@@ -108,6 +108,7 @@ import { MODEL_HUB_SETTINGS_PATH } from './components/settings/models/modelHubRo
 import { settingsOverlayOriginFromState, SETUP_VISIT_SETTINGS_PATHS } from './lib/settingsOverlay';
 import { isSetupComplete } from './lib/setupState';
 import { isIosDevice, isStandalonePwa } from './lib/platform';
+import { bootSessionGeneration, forgetBootSession, readBootSession, recordBootSession } from './lib/bootSession';
 import {
   readLastPwaPath,
   resolvePwaLaunchPath,
@@ -304,10 +305,21 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
     const { t } = useTranslation();
     const location = useLocation();
     const guardTarget = location.pathname + location.search;
-    const [guardStatus, setGuardStatus] = useState<GuardStatus>('loading');
+    // A cold start with a recent confirmed outcome renders the shell from it
+    // right away and lets the first check below confirm or tear it down
+    // (docs/plans/web-ui-local-cache.md section 4.5). Without one, the guard
+    // waits for the server as it always has.
+    const [bootSession] = useState(() => readBootSession());
+    const provisionalRef = useRef(bootSession !== null);
+    const [provisional, setProvisional] = useState(bootSession !== null);
+    // Bumped by every terminal authorization signal (revoked, login required).
+    // A check that started before one can still answer ``ready``; it must not
+    // replace the gate the signal put up, nor record the reader again.
+    const terminalSignalRef = useRef(0);
+    const [guardStatus, setGuardStatus] = useState<GuardStatus>(() => (bootSession ? 'ready' : 'loading'));
     const [blockedCode, setBlockedCode] = useState<string | null>(null);
     const [authCheckVersion, setAuthCheckVersion] = useState(0);
-    const [authorizationSession, setAuthorizationSession] = useState<SessionInfo | null>(null);
+    const [authorizationSession, setAuthorizationSession] = useState<SessionInfo | null>(bootSession);
     const [authorizationUnavailable, setAuthorizationUnavailable] = useState(false);
     const [setupModelHubAllowed, setSetupModelHubAllowed] = useState(false);
     const authorizationUnavailableRef = useRef(false);
@@ -331,10 +343,20 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
     }, [isSetupRoute]);
 
     useEffect(() => {
-        const onRemoteAuthRequired = () => setGuardStatus('remote-login-required');
+        // A terminal signal settles the guard as surely as a check does.
+        const settleOnTerminalSignal = () => {
+            terminalSignalRef.current += 1;
+            provisionalRef.current = false;
+            setProvisional(false);
+        };
+        const onRemoteAuthRequired = () => {
+            settleOnTerminalSignal();
+            setGuardStatus('remote-login-required');
+        };
         const onRemoteAuthorizationState = (event: Event) => {
             const state = (event as CustomEvent<{ state?: RemoteAuthorizationState }>).detail?.state;
             if (state === 'revoked') {
+                settleOnTerminalSignal();
                 authorizationUnavailableRef.current = false;
                 setAuthorizationUnavailable(false);
                 setGuardStatus('authorization-revoked');
@@ -382,19 +404,28 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
 
     useEffect(() => {
         let cancelled = false;
+        const signalAtStart = terminalSignalRef.current;
+        // A sign-out in any tab while this check is out voids what it answers.
+        const bootGeneration = bootSessionGeneration();
+        const superseded = () => cancelled || terminalSignalRef.current !== signalAtStart;
 
         // Reset to loading while (re)validating. On the setup-boundary
         // re-run this prevents a one-frame bounce: a stale `needs-setup`
         // on a non-/setup route would otherwise redirect to /setup before
         // the fresh config resolves. Showing Loading for that single
         // transition is fine — it's the setup boundary, not every nav.
-        setGuardStatus('loading');
+        // The one exception is the first check behind a provisional shell:
+        // that check is what confirms the shell, so it runs behind it.
+        if (!provisionalRef.current) setGuardStatus('loading');
         setSetupModelHubAllowed(false);
 
         checkRemoteAuthForPath(location.pathname, getAuthSession).then(({ session, loginRequired, checkSetup }) => {
-            if (cancelled) return;
+            if (superseded()) return;
+            provisionalRef.current = false;
+            setProvisional(false);
             setAuthorizationSession(session);
             if (loginRequired) {
+                forgetBootSession();
                 setGuardStatus('remote-login-required');
                 return null;
             }
@@ -403,6 +434,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
                 && session.authenticated
                 && session.authorization_state === 'revoked'
             ) {
+                forgetBootSession();
                 setGuardStatus('authorization-revoked');
                 return null;
             }
@@ -411,6 +443,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
                 && session.authenticated
                 && session.authorization_state === 'unavailable'
             ) {
+                forgetBootSession();
                 setGuardStatus('authorization-unavailable');
                 reportRemoteAuthorizationState('unavailable');
                 return null;
@@ -421,6 +454,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
                 && session.authorization_state === 'current'
                 && !session.capabilities.can_manage_instance
             ) {
+                recordBootSession(session, Date.now(), bootGeneration);
                 setGuardStatus('ready');
                 return null;
             }
@@ -429,23 +463,30 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
                 return null;
             }
             return getConfig().then(config => {
-                if (cancelled) return;
+                if (superseded()) return;
                 // Only successful config/session reads can grant this narrow
                 // setup repair route. Unlike Diagnostics it is not a bypass.
                 setSetupModelHubAllowed(Boolean(config?.mode
                     && 'capabilities' in session && session.capabilities?.can_manage_instance));
                 if (!isSetupComplete(config)) {
+                    forgetBootSession();
                     setGuardStatus('needs-setup');
                     return;
                 }
+                recordBootSession(session, Date.now(), bootGeneration);
                 setGuardStatus('ready');
             });
         }).catch(async (error) => {
-            if (cancelled) return;
+            if (superseded()) return;
+            // The replay stays provisional through the retry: until it answers,
+            // nothing has confirmed or replaced the replayed capabilities.
             const authCheck = await checkRemoteAuthForPath(location.pathname, getAuthSession).catch(() => null);
-            if (cancelled) return;
+            if (superseded()) return;
+            provisionalRef.current = false;
+            setProvisional(false);
             if (authCheck?.session) setAuthorizationSession(authCheck.session);
             if (authCheck?.loginRequired) {
+                forgetBootSession();
                 setGuardStatus('remote-login-required');
                 return;
             }
@@ -454,6 +495,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
                 && authCheck.session.authenticated
                 && authCheck.session.authorization_state === 'revoked'
             ) {
+                forgetBootSession();
                 setGuardStatus('authorization-revoked');
                 return;
             }
@@ -462,6 +504,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
                 && authCheck.session.authenticated
                 && authCheck.session.authorization_state === 'unavailable'
             ) {
+                forgetBootSession();
                 setGuardStatus('authorization-unavailable');
                 reportRemoteAuthorizationState('unavailable');
                 return;
@@ -470,6 +513,8 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
                 setGuardStatus('ready');
                 return;
             }
+            // Blocked or needs setup: a gate either way.
+            forgetBootSession();
             const blocked = accessBlockedCode(error);
             if (blocked) {
                 // Server is up and the session probe was fine, but it refused
@@ -569,7 +614,9 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
     }
     return (
         <>
-            <InstanceAuthorizationProvider session={authorizationSession}>{children}</InstanceAuthorizationProvider>
+            <InstanceAuthorizationProvider session={authorizationSession} provisional={provisional}>
+                {children}
+            </InstanceAuthorizationProvider>
             {authorizationUnavailable ? (
                 <div
                     role="status"

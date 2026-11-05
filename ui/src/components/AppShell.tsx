@@ -151,7 +151,7 @@ export const AppShell: React.FC = () => {
   // fetch on a phone. A demand gate keyed on mounting is only honest if mounting
   // implies visible, so the mount site has to carry the viewport too.
   const isDesktop = useIsDesktop();
-  const { capabilities } = useInstanceAuthorization();
+  const { capabilities, provisional } = useInstanceAuthorization();
   // Where the sidebar's Settings control points: the section this device was
   // left on, or General when there is none to resume. Subscribed, because the
   // rail that moves it can be in another tab of the same origin.
@@ -346,6 +346,10 @@ export const AppShell: React.FC = () => {
     resourceUseDenied ||
     appAccessDenied
   ) {
+    // Capabilities replayed from the last session may predate a grant. Leaving
+    // the route on them would lose the URL the reader opened, so wait for the
+    // guard's check to confirm the denial first.
+    if (provisional) return null;
     return <Navigate to="/" replace />;
   }
 

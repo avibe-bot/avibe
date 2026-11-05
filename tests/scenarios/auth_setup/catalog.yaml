@@ -162,6 +162,51 @@ scenarios:
     layer: scenario
     backend: shared
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_hub_subscription_grant_binds_a_source_and_supplies_its_models
+  - id: AUTH-SETUP-139
+    name: A cold start renders the shell from the last confirmed session and keeps it when the guard's check agrees
+    status: covered
+    kind: happy_path
+    layer: contract
+    backend: web
+    test: ui/src/App.remoteAuth.test.tsx::AUTH-SETUP-139 renders the shell before the check answers, and keeps it when the check agrees
+    reason: >-
+      The flow is client-only: AuthGuard confirms a session, records the outcome
+      in localStorage, and replays it on the next mount while the same
+      /api/session check runs. The server contract is unchanged, so the owning
+      boundary is AuthGuard itself; the Vitest case mounts the real guard twice
+      (confirm, then relaunch) against a mocked /api/session.
+  - id: AUTH-SETUP-140
+    name: A replayed session the guard's check rejects is torn down to the gate and not replayed again
+    status: covered
+    kind: negative_path
+    layer: contract
+    backend: web
+    test: ui/src/App.remoteAuth.test.tsx::AUTH-SETUP-140 tears the shell down when the check disagrees, and waits for the server on the next start
+    reason: >-
+      Closed loop at the guard: confirm and record, relaunch provisionally, the
+      check answers revoked, the revoked gate replaces the shell, and a third
+      mount waits for the server instead of replaying.
+  - id: AUTH-SETUP-141
+    name: A revocation during the provisional check wins over a late ready from that check
+    status: covered
+    kind: concurrency
+    layer: contract
+    backend: web
+    test: ui/src/App.remoteAuth.test.tsx::AUTH-SETUP-141 keeps the gate a revocation put up when the check started before it answers ready
+  - id: AUTH-SETUP-142
+    name: A recorded session is replayed only until it expires, by the server-reported expiry; a remote session without one is not replayed
+    status: covered
+    kind: negative_path
+    layer: contract
+    backend: web
+    test: "ui/src/App.remoteAuth.test.tsx::AUTH-SETUP-142 boots only until the session expires: its reported expiry, else not for a remote session"
+  - id: AUTH-SETUP-143
+    name: Sign-out forgets the recorded session even when a guard check answers ready while logout is in flight
+    status: covered
+    kind: concurrency
+    layer: contract
+    backend: web
+    test: ui/src/context/ApiContext.bootSession.test.tsx::AUTH-SETUP-143 forgets the boot session and refuses a late guard check that would record it again
   - id: AUTH-SETUP-201
     name: Re-entering setup replaces the active flow
     status: covered

@@ -13,9 +13,11 @@ import { setLocalSnapshotPrincipal } from '../lib/localSnapshots';
 
 export const InstanceAuthorizationProvider = ({
   session,
+  provisional = false,
   children,
 }: {
   session: SessionInfo;
+  provisional?: boolean;
   children: ReactNode;
 }) => {
   const value = useMemo<InstanceAuthorizationValue>(() => {
@@ -26,6 +28,7 @@ export const InstanceAuthorizationProvider = ({
         instanceRole: session.instance_role ?? 'owner',
         capabilities: session.capabilities ?? OWNER_INSTANCE_CAPABILITIES,
         readerPrincipal: session.author_id ?? null,
+        provisional,
       };
     }
     if (!session.authenticated || session.authorization_state !== 'current') {
@@ -42,8 +45,9 @@ export const InstanceAuthorizationProvider = ({
       instanceRole: session.instance_role,
       capabilities: session.capabilities,
       readerPrincipal: session.author_id ?? null,
+      provisional,
     };
-  }, [session]);
+  }, [provisional, session]);
 
   // Local snapshots are stored per reader, so they follow the same answer: known
   // while this boundary is mounted with a principal, unknown otherwise.

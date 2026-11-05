@@ -16,6 +16,7 @@ import { reportRemoteAuthorizationState, REMOTE_AUTH_STATE_EVENT } from './lib/r
 import { DESKTOP_OPEN_SETTINGS_EVENT } from './lib/desktopShell';
 import { DesktopSettingsCommand } from './components/DesktopSettingsCommand';
 import { SettingsOverlayNavigationBoundary } from './components/settings/SettingsOverlayNavigationBoundary';
+import { BOOT_SESSION_MAX_AGE_MS, readBootSession, recordBootSession } from './lib/bootSession';
 
 vi.hoisted(() => {
   vi.stubGlobal('matchMedia', vi.fn().mockImplementation((query: string) => ({
@@ -53,6 +54,168 @@ afterEach(() => {
   cleanup();
   vi.clearAllMocks();
   vi.useRealTimers();
+  // The guard remembers its last confirmed outcome here; no test may inherit one.
+  window.localStorage.clear();
+});
+
+// A cold start renders the shell from the last outcome the server confirmed
+// (docs/plans/web-ui-local-cache.md section 4.5). What must hold: the shell is
+// there before the check answers, it goes the moment the check disagrees, and a
+// contradicted or expired outcome is never used again.
+describe('AuthGuard boot from the last confirmed outcome', () => {
+  const member = {
+    remote: true as const,
+    authenticated: true as const,
+    email: 'member@example.com',
+    instance_kind: 'organization' as const,
+    instance_role: 'viewer' as const,
+    capabilities: { ...DENIED_INSTANCE_CAPABILITIES, can_read_instance: true },
+    authorization_state: 'current' as const,
+    author_id: 'remote:member',
+    // The instance reports when this browser's cookie expires (30 days out).
+    session_expires_at: Math.floor(Date.now() / 1000) + 30 * 24 * 3600,
+  };
+  const mountGuard = () => render(
+    <MemoryRouter initialEntries={['/']}>
+      <AuthGuard><div>protected shell</div></AuthGuard>
+    </MemoryRouter>,
+  );
+  const confirmOnce = async () => {
+    api.getAuthSession.mockResolvedValueOnce(member);
+    const view = mountGuard();
+    expect(await screen.findByText('protected shell')).toBeTruthy();
+    view.unmount();
+  };
+
+  it('AUTH-SETUP-139 renders the shell before the check answers, and keeps it when the check agrees', async () => {
+    await confirmOnce();
+
+    let answer: (value: typeof member) => void = () => {};
+    api.getAuthSession.mockReturnValueOnce(new Promise((resolve) => { answer = resolve; }));
+    mountGuard();
+    expect(screen.getByText('protected shell')).toBeTruthy();
+
+    await act(async () => { answer(member); });
+    expect(screen.getByText('protected shell')).toBeTruthy();
+  });
+
+  it('AUTH-SETUP-140 tears the shell down when the check disagrees, and waits for the server on the next start', async () => {
+    await confirmOnce();
+
+    let answer: (value: unknown) => void = () => {};
+    api.getAuthSession.mockReturnValueOnce(new Promise((resolve) => { answer = resolve; }));
+    const second = mountGuard();
+    expect(screen.getByText('protected shell')).toBeTruthy();
+    await act(async () => {
+      answer({ ...member, capabilities: undefined, instance_role: undefined, authorization_state: 'revoked' });
+    });
+    expect(screen.queryByText('protected shell')).toBeNull();
+    expect(screen.getByText('remoteAuthorization.revoked.title')).toBeTruthy();
+    second.unmount();
+
+    api.getAuthSession.mockReturnValueOnce(new Promise(() => {}));
+    mountGuard();
+    expect(screen.queryByText('protected shell')).toBeNull();
+    expect(screen.getByText('common.loading')).toBeTruthy();
+  });
+
+  it('AUTH-SETUP-141 keeps the gate a revocation put up when the check started before it answers ready', async () => {
+    await confirmOnce();
+
+    let answer: (value: typeof member) => void = () => {};
+    api.getAuthSession.mockReturnValueOnce(new Promise((resolve) => { answer = resolve; }));
+    mountGuard();
+    expect(screen.getByText('protected shell')).toBeTruthy();
+
+    // A request from the mounted shell learns the reader was revoked.
+    await act(async () => { reportRemoteAuthorizationState('revoked'); });
+    expect(screen.getByText('remoteAuthorization.revoked.title')).toBeTruthy();
+
+    // The check that left before the revocation answers with the old session.
+    await act(async () => { answer(member); });
+    expect(screen.queryByText('protected shell')).toBeNull();
+    expect(screen.getByText('remoteAuthorization.revoked.title')).toBeTruthy();
+    expect(readBootSession()).toBeNull();
+  });
+
+  it('does not record an answer from a check that started before another tab voided the record', async () => {
+    await confirmOnce();
+    let answer: (value: typeof member) => void = () => {};
+    api.getAuthSession.mockReturnValueOnce(new Promise((resolve) => { answer = resolve; }));
+    mountGuard();
+
+    // Another tab (same origin storage, its own module state) learns the reader
+    // was revoked, or signs out, and forgets the record while this check is out.
+    vi.resetModules();
+    const otherTab = await import('./lib/bootSession');
+    otherTab.forgetBootSession();
+
+    await act(async () => { answer(member); });
+    expect(readBootSession()).toBeNull();
+  });
+
+  it('keeps the replay provisional while the guard retries a failed session read', async () => {
+    await confirmOnce();
+    const readsBefore = api.getAuthSession.mock.calls.length;
+    const seen: Array<boolean | undefined> = [];
+    const Probe = () => {
+      const { provisional } = useInstanceAuthorization();
+      useEffect(() => { seen.push(provisional); });
+      return <div>protected shell</div>;
+    };
+    let answerRetry: (value: typeof member) => void = () => {};
+    api.getAuthSession
+      .mockRejectedValueOnce(new Error('network'))
+      .mockReturnValueOnce(new Promise((resolve) => { answerRetry = resolve; }));
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <AuthGuard><Probe /></AuthGuard>
+      </MemoryRouter>,
+    );
+    // The first read has failed and the retry is out: still the replay.
+    await act(async () => undefined);
+    expect(api.getAuthSession.mock.calls.length - readsBefore).toBe(2);
+    expect(seen.at(-1)).toBe(true);
+
+    await act(async () => { answerRetry(member); });
+    await act(async () => undefined);
+    expect(seen.at(-1)).toBe(false);
+    consoleError.mockRestore();
+  });
+
+  it('AUTH-SETUP-142 boots only until the session expires: its reported expiry, else not for a remote session', () => {
+    const day = 24 * 60 * 60 * 1000;
+    const nowSeconds = () => Math.floor(Date.now() / 1000);
+    const startsWithShell = () => {
+      api.getAuthSession.mockReturnValueOnce(new Promise(() => {}));
+      const view = mountGuard();
+      const shown = screen.queryByText('protected shell') !== null;
+      view.unmount();
+      return shown;
+    };
+    const { session_expires_at: _expiry, ...withoutExpiry } = member;
+
+    // A 30-day session recorded three days ago is still live.
+    recordBootSession({ ...member, session_expires_at: nowSeconds() + 27 * 24 * 3600 }, Date.now() - 3 * day);
+    expect(startsWithShell()).toBe(true);
+
+    // Its reported expiry has passed.
+    recordBootSession({ ...member, session_expires_at: nowSeconds() - 1 }, Date.now() - 3 * day);
+    expect(startsWithShell()).toBe(false);
+
+    // An instance that does not report the expiry: nothing bounds the cookie,
+    // so a remote session is not replayed even a minute later.
+    recordBootSession(withoutExpiry, Date.now() - 60 * 1000);
+    expect(startsWithShell()).toBe(false);
+
+    // A local session has no credential to outlive: the fixed window applies.
+    const local = { remote: false as const, instance_kind: null, author_id: 'local' };
+    recordBootSession(local, Date.now() - 11 * 60 * 60 * 1000);
+    expect(startsWithShell()).toBe(true);
+    recordBootSession(local, Date.now() - BOOT_SESSION_MAX_AGE_MS - 1);
+    expect(startsWithShell()).toBe(false);
+  });
 });
 
 describe('AuthGuard remote authorization recovery', () => {

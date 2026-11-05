@@ -124,7 +124,8 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // Local snapshot state. ``seededIdsRef`` holds the rows painted from the
   // snapshot and not yet confirmed by a live read; ``authoritativePrincipalRef``
   // is the reader the live feed was read for, set by the first whole-window
-  // commit. Once it is set the snapshot is never applied again in this document.
+  // commit after it was last cleared (a change of reader clears it). Once the
+  // feed has committed, the snapshot is never applied again in this document.
   const seededIdsRef = useRef<Set<string>>(new Set());
   const authoritativePrincipalRef = useRef<string | null>(null);
   const feedCommittedRef = useRef(false);
@@ -1011,24 +1012,60 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // onto an empty feed and map, so it can never overwrite live data. The map is
   // painted without ``unreadLoaded``: the app-icon badge still waits for the
   // server (see ``badgeKnown``).
+  //
+  // The reader can change under a painted snapshot: a cold start replays the
+  // last confirmed session (AuthGuard), and its check may confirm someone else.
+  // The painted rows and counts are then another reader's, so they go the
+  // moment a different reader is named, before any live read answers.
   useEffect(() => {
     let cancelled = false;
+    let seededPrincipal: string | null = null;
+    let seededUnread = false;
+    const dropSeed = () => {
+      const seeded = seededIdsRef.current;
+      seededPrincipal = null;
+      if (seeded.size > 0) {
+        seededIdsRef.current = new Set();
+        const kept = inboxSessionsRef.current.filter((row) => !seeded.has(row.session_id));
+        inboxSessionsRef.current = kept;
+        setInboxSessions(kept);
+      }
+      if (seededUnread && !wholeUnreadAppliedRef.current) setUnreadBySession({});
+      seededUnread = false;
+    };
     const seed = async (principal: string | null) => {
+      if (principal && seededPrincipal && principal !== seededPrincipal) dropSeed();
       if (!principal || feedCommittedRef.current) return;
       const snapshot = await readLocalSnapshot(INBOX_SNAPSHOT_KEY, INBOX_SNAPSHOT_SCHEMA, parseInboxSnapshot);
       if (cancelled || !snapshot || feedCommittedRef.current) return;
       if (getLocalSnapshotPrincipal() !== principal) return;
       if (inboxSessionsRef.current.length === 0 && snapshot.sessions.length > 0) {
         seededIdsRef.current = new Set(snapshot.sessions.map((row) => row.session_id));
+        seededPrincipal = principal;
         inboxSessionsRef.current = snapshot.sessions;
         setInboxSessions(snapshot.sessions);
       }
       if (!wholeUnreadAppliedRef.current) {
-        setUnreadBySession((prev) => (Object.keys(prev).length > 0 ? prev : snapshot.unread));
+        setUnreadBySession((prev) => {
+          if (Object.keys(prev).length > 0) return prev;
+          seededPrincipal = principal;
+          seededUnread = true;
+          return snapshot.unread;
+        });
       }
     };
     void seed(getLocalSnapshotPrincipal());
-    const unsubscribe = subscribeLocalSnapshotPrincipal((principal) => void seed(principal));
+    const unsubscribe = subscribeLocalSnapshotPrincipal((principal) => {
+      // A live read committed for one reader does not make the feed another's:
+      // when a different reader is named (a replayed session confirmed as someone
+      // else, say), the snapshot has no owner until the next whole-window read
+      // names one, so nothing on screen is stored under the wrong reader and the
+      // new reader's snapshot resumes with its first live read.
+      if (authoritativePrincipalRef.current !== null && authoritativePrincipalRef.current !== principal) {
+        authoritativePrincipalRef.current = null;
+      }
+      void seed(principal);
+    });
     return () => {
       cancelled = true;
       unsubscribe();

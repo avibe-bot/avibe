@@ -6,6 +6,7 @@ import type { AgentBackendId, NativeCliBackend, WebOAuthBackend } from '../lib/a
 import { apiFetch, recoverRemoteAuthFromSessionProbe, withApiDeadline } from '../lib/apiFetch';
 import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
 import { clearLocalSnapshots, forgetLocalSnapshots } from '../lib/localSnapshots';
+import { blockBootSessionRecording, settleSignOutBootSession } from '../lib/bootSession';
 import { parseBot, parseBotLimit, type AgentBotSummary, type Bot, type BotEmojiAvatarInput, type BotLimit } from '../lib/bots';
 import { parseNotificationPreferences, type InboxCategory, type NotificationPreferences } from '../lib/notificationPreferences';
 import { mcpPath } from '../lib/mcpPath';
@@ -4771,20 +4772,29 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return session;
     }),
     signOut: async () => {
-      // Before the request: a failed logout must not leave this reader's
-      // snapshots behind for whoever uses the device next, and a write the Inbox
-      // still has scheduled must not put them back.
-      await forgetLocalSnapshots();
-      let endpoint: string | undefined;
+      // Before the request, so a failed logout leaves nothing of this reader on
+      // the device: no boot session for the next cold start (and no guard check
+      // still in flight may record one again), and no local snapshots (a write
+      // the Inbox still has scheduled must not put them back).
+      blockBootSessionRecording();
       try {
-        endpoint = (await getExistingWebPushSubscription())?.endpoint;
-      } catch {
-        // Logout remains authoritative when Push APIs are unavailable.
+        await forgetLocalSnapshots();
+        let endpoint: string | undefined;
+        try {
+          endpoint = (await getExistingWebPushSubscription())?.endpoint;
+        } catch {
+          // Logout remains authoritative when Push APIs are unavailable.
+        }
+        return await postJson('/auth/logout', {
+          device_id: await getWebPushDeviceId(),
+          ...(endpoint ? { endpoint } : {}),
+        });
+      } finally {
+        // Again once the request settles: anything another tab started while it
+        // was out may have answered meanwhile (see settleSignOutBootSession).
+        settleSignOutBootSession();
+        await forgetLocalSnapshots();
       }
-      return postJson('/auth/logout', {
-        device_id: await getWebPushDeviceId(),
-        ...(endpoint ? { endpoint } : {}),
-      });
     },
     // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }), [sessionDraftPersistence, showToast, t]);

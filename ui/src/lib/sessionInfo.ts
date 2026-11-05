@@ -48,6 +48,9 @@ export type SessionInfo =
       capabilities: InstanceCapabilities;
       authorization_state: 'current';
       author_id?: string | null;
+      /** When the server says this browser's session cookie expires (Unix
+       *  seconds), for instances that report it. */
+      session_expires_at?: number;
     };
 
 export const DENIED_INSTANCE_CAPABILITIES: InstanceCapabilities = {
@@ -150,5 +153,8 @@ export const normalizeSessionInfo = (value: unknown): SessionInfo => {
     capabilities,
     authorization_state: 'current',
     ...authorIdField(value.author_id),
+    ...(typeof value.session_expires_at === 'number' && Number.isFinite(value.session_expires_at)
+      ? { session_expires_at: value.session_expires_at }
+      : {}),
   };
 };
