@@ -257,6 +257,38 @@ function nextStoreEpoch(meta: Meta | undefined): number {
   return next;
 }
 
+// Set, synchronously, when a wipe starts and removed once it has committed. A
+// wipe the page did not live to finish (a navigation, a closed tab) is
+// therefore finished by the next claim, in any document, before anything is
+// read or written.
+const WIPE_PENDING_KEY = 'avibe.local-store.wipe-pending.v1';
+
+function markWipePending(): string {
+  const token = `${Date.now()}:${Math.random().toString(36).slice(2)}`;
+  try {
+    window.localStorage.setItem(WIPE_PENDING_KEY, token);
+  } catch {
+    // Without localStorage the store takes no writes anyway (``writeStoreEpoch``).
+  }
+  return token;
+}
+
+function wipePending(): boolean {
+  try {
+    return window.localStorage.getItem(WIPE_PENDING_KEY) !== null;
+  } catch {
+    return false;
+  }
+}
+
+function settleWipePending(token: string | null): void {
+  try {
+    if (token === null || window.localStorage.getItem(WIPE_PENDING_KEY) === token) window.localStorage.removeItem(WIPE_PENDING_KEY);
+  } catch {
+    // Nothing more to do.
+  }
+}
+
 const getMeta = (tx: IDBTransaction) => settle(tx.objectStore(META).get('reader') as IDBRequest<Meta | undefined>);
 
 function putMeta(tx: IDBTransaction, fields: Omit<Meta, 'key' | 'schema'>): void {
@@ -303,13 +335,18 @@ function claimReader(reader: string): Promise<Claimed | null> {
     const meta = await getMeta(tx);
     // What reads this document started before the claim noted.
     const from = readStoreEpoch();
-    if (meta && meta.reader === reader && meta.schema === STORE_SCHEMA && meta.signOutGeneration >= generation) {
+    const unfinishedWipe = wipePending();
+    if (!unfinishedWipe && meta && meta.reader === reader && meta.schema === STORE_SCHEMA && meta.signOutGeneration >= generation) {
       return { from, epoch: meta.epoch };
     }
     for (const store of ALL_STORES) tx.objectStore(store).clear();
     const epoch = nextStoreEpoch(meta);
     putMeta(tx, { reader, epoch, signOutGeneration: generation, persisted: null });
     return { from, epoch };
+  });
+  // A wipe left unfinished is finished once this claim has emptied the store.
+  void promise.then((claimed) => {
+    if (claimed) settleWipePending(null);
   });
   claim = { reader, promise };
   void promise.then((claimed) => {
@@ -331,7 +368,8 @@ const keepableReader = (): string | null => getLocalSnapshotPrincipal();
  *  no one until a reader is named again. */
 async function wipe(keepReader: string | null): Promise<void> {
   pendingReads.clear();
-  await transact('readwrite', ALL_STORES, async (tx) => {
+  const pending = markWipePending();
+  const wiped = await transact('readwrite', ALL_STORES, async (tx) => {
     const meta = await getMeta(tx);
     for (const store of ALL_STORES) tx.objectStore(store).clear();
     putMeta(tx, {
@@ -340,7 +378,9 @@ async function wipe(keepReader: string | null): Promise<void> {
       signOutGeneration: readSignOutGeneration(),
       persisted: null,
     });
+    return true;
   }, { retryOnQuota: false });
+  if (wiped) settleWipePending(pending);
 }
 
 /** Empty the store for good: the reader's session ended (it expired). It stays

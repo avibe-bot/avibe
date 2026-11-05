@@ -310,15 +310,41 @@ describe('one reader, and the wipes that end it', () => {
     snapshots.setLocalSnapshotPrincipal(null);
   });
 
-  it('LSYNC-021 wipes when any read reports the session expired, not only a session check', async () => {
+  it('LSYNC-021 wipes when any read reports the session expired, before login can take the page away', async () => {
     await tail(rows(1, 3), null);
-    // The iOS Home Screen app hands login to its gate instead of navigating.
+    // The iOS Home Screen app hands login to its gate instead of navigating;
+    // either way the hand-off comes after the wipe has committed.
     platform.ios = true;
     platform.standalone = true;
-    const { reportRemoteAuthorizationState } = await import('../remoteAuth');
-    reportRemoteAuthorizationState('login_required');
-    await idle();
+    const { REMOTE_AUTH_REQUIRED_EVENT, reportRemoteAuthorizationState } = await import('../remoteAuth');
+    // At the hand-off the wipe has committed: nothing is left pending.
+    let pendingAtHandOff: string | null | undefined;
+    const onHandOff = () => {
+      pendingAtHandOff = window.localStorage.getItem('avibe.local-store.wipe-pending.v1');
+    };
+    window.addEventListener(REMOTE_AUTH_REQUIRED_EVENT, onHandOff);
+    try {
+      reportRemoteAuthorizationState('login_required');
+      await vi.waitFor(() => expect(pendingAtHandOff).not.toBeUndefined());
+      expect(pendingAtHandOff).toBeNull();
+      expect(await rowsOnDisk()).toBe(0);
+    } finally {
+      window.removeEventListener(REMOTE_AUTH_REQUIRED_EVENT, onHandOff);
+    }
+  });
+
+  it('LSYNC-021 finishes, at the next open, a wipe the page did not live to commit', async () => {
+    await tail(rows(1, 3), null);
+    // A wipe marked itself pending and the page unloaded before it committed.
+    window.localStorage.setItem('avibe.local-store.wipe-pending.v1', 'interrupted');
+    vi.resetModules();
+    const fresh = await import('.');
+    const snapshots = await import('../localSnapshots');
+    snapshots.setLocalSnapshotPrincipal('remote:alice');
+    await fresh.readLocalStoreWindow('ses_a');
     expect(await rowsOnDisk()).toBe(0);
+    expect(window.localStorage.getItem('avibe.local-store.wipe-pending.v1')).toBeNull();
+    snapshots.setLocalSnapshotPrincipal(null);
   });
 
   it('LSYNC-020 forgets a session that leaves the Inbox, and voids a read of it still in flight', async () => {

@@ -63,7 +63,8 @@ scenarios:
     layer: integration
     test:
       - ui/src/context/ApiContext.localStore.test.tsx::LSYNC-021 wipes on a login-required answer, and keeps everything when the session read only failed
-      - ui/src/lib/localStore/localStore.test.ts::LSYNC-021 wipes when any read reports the session expired, not only a session check
+      - ui/src/lib/localStore/localStore.test.ts::LSYNC-021 wipes when any read reports the session expired, before login can take the page away
+      - ui/src/lib/localStore/localStore.test.ts::LSYNC-021 finishes, at the next open, a wipe the page did not live to commit
   - id: LSYNC-022
     name: A tab still naming an earlier reader can neither write into nor claim the store another tab holds for the current reader
     status: covered
