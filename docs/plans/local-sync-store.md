@@ -323,29 +323,46 @@ wipe history. A hand-bumped `schema` in `meta` is the only wholesale reset.
 ### 4.2 Contiguity ranges and gap tracking
 
 A range says: "every transcript row of this session whose order key falls
-between `from` and `to` is on this device, as of `verifiedAt`".
+between `from` and `to` is on this device, as of `verifiedAt`". `from` and `to`
+are always keys of rows the server returned. A range never covers keys no page
+has shown.
 
 - `startReached` means nothing is older: the page that produced the range had
   no `next_before_id`.
-- `atTail` means nothing was newer when the range was verified.
+- `atTail` means nothing was newer when the range was verified. It holds only
+  while the event stream stays continuous: every `onConnected` catch-up clears
+  it on all ranges until a new tail page sets it again.
 
 **Writing a server page** happens in one transaction. The page can be a
 bootstrap tail, a `tail=1` read, a `before_id` page, or an `around_*` window.
 
-1. Delete the session's local rows inside the page's authoritative interval
+1. Delete the session's local rows inside the page's replacement interval
    that the page does not contain. They were moved, retyped, or never existed.
 2. Upsert the page's rows.
-3. Add the interval as a range and merge it with any range it overlaps or abuts.
+3. Record the page's coverage as a range, and merge it with any range whose
+   coverage it overlaps or abuts.
 
-The authoritative interval comes from the request and the cursors, not only
-from the rows the page returned. Otherwise a stale endpoint row, or an empty
-page, would never be repaired.
+The two intervals differ on purpose.
+
+**Replacement interval** (step 1). This one comes from the request and its
+cursors, not only from the returned rows. Otherwise a stale endpoint row, or an
+empty page, would never be repaired.
 
 | Page | Lower bound | Upper bound |
 | --- | --- | --- |
 | Tail (bootstrap or `tail=1`) | First row's key; negative infinity when `next_before_id` is null, which includes an empty page | Positive infinity |
 | `before_id=X` | First row's key; negative infinity when `next_before_id` is null, which includes an empty page | `X`'s key, exclusive |
 | `around_*` window | First row's key; negative infinity when `next_before_id` is null | Last row's key; positive infinity when `next_after_id` is null |
+
+**Coverage** (step 3). This one is bounded by the rows returned: from the first
+row to the last row, with `startReached` and `atTail` as flags.
+
+- An empty page records coverage only when it reaches both ends: an empty tail
+  with a null `next_before_id` means the session has no transcript rows.
+- After a disconnect that let more than 50 rows arrive, the old tail range
+  ends at its last row and has lost `atTail`. The new tail starts at its first
+  row. The two share no row, so they stay separate, and the gap between them
+  stays visible to the offline marker and to gap fetches.
 
 Null cursors alone do not prove anything. A page is applied only when its
 request resolved:
@@ -374,7 +391,7 @@ authoritative for its interval".
   event stream has stayed continuous since that range was verified, meaning
   `ApiContext` has fired no `onConnected` catch-up in between.
 - After a reconnect, the catch-up tail read either merges with the stored tail
-  or leaves a gap between two ranges.
+  (they share a row) or leaves a gap between two ranges.
 - A `message.updated` row replaces the stored row and does not change any range.
 
 **Gaps.**
@@ -834,9 +851,10 @@ Phases 1 and 2 already give the shell.
 - interval replacement in both directions;
 - an unresolved `around_*` anchor (no `anchor_id`) leaves the store untouched;
 - range merge, abut, and gap;
-- authoritative intervals: a tail reaches positive infinity, exhausted
-  history reaches negative infinity, and an empty page still clears its
-  interval;
+- replacement intervals: a tail reaches positive infinity, exhausted history
+  reaches negative infinity, and an empty page still clears its interval;
+- coverage stays bounded by returned rows: a disconnect longer than one tail
+  leaves two separate ranges and a visible gap;
 - tail extension only on a continuous stream;
 - eviction order;
 - a quota error;
