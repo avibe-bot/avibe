@@ -5,7 +5,8 @@ import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
-vi.mock('@/lib/platform', () => ({ isStandalonePwa: () => false, isIosDevice: () => false }));
+const platform = vi.hoisted(() => ({ standalone: false }));
+vi.mock('@/lib/platform', () => ({ isStandalonePwa: () => platform.standalone, isIosDevice: () => false }));
 
 import type { WorkbenchMessage } from '@/context/ApiContext';
 import { clearLocalSnapshots, setLocalSnapshotPrincipal } from '@/lib/localSnapshots';
@@ -18,6 +19,8 @@ import { offlineHistoryPersistence } from './offlineHistoryPersistence';
 
 afterEach(async () => {
   cleanup();
+  platform.standalone = false;
+  Reflect.deleteProperty(navigator, 'storage');
   setLocalSnapshotPrincipal(null);
   await clearLocalSnapshots();
 });
@@ -45,5 +48,23 @@ describe('offline history diagnostics', () => {
     act(() => setLocalSnapshotPrincipal('remote:alice'));
     expect(await screen.findByText('settings.offlineHistory.persistenceNotRequested')).toBeTruthy();
     expect(screen.getByText(/^4\.\d KB$/)).toBeTruthy();
+  });
+
+  // Last: the store asks for persistence once per document, and earlier cases
+  // ran as a browser tab, which never asks.
+  it('shows the answer to the installed app\'s persistence request when it lands after the page read the store', async () => {
+    platform.standalone = true;
+    let grant!: (granted: boolean) => void;
+    const persist = vi.fn(() => new Promise<boolean>((resolve) => {
+      grant = resolve;
+    }));
+    Object.defineProperty(navigator, 'storage', { configurable: true, value: { persist, persisted: async () => false } });
+    render(<LocalStoreDiagnostics />);
+    act(() => setLocalSnapshotPrincipal('remote:alice'));
+    expect(await screen.findByText('settings.offlineHistory.persistenceUnknown')).toBeTruthy();
+
+    await vi.waitFor(() => expect(persist).toHaveBeenCalled());
+    await act(async () => grant(true));
+    expect(await screen.findByText('settings.offlineHistory.persistenceGranted')).toBeTruthy();
   });
 });

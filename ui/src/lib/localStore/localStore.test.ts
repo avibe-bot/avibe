@@ -61,10 +61,33 @@ const texts = async (sessionId = 'ses_a') =>
   ((await readLocalStoreWindow(sessionId, { limit: 500 }))?.messages ?? []).map((message) => message.text);
 const tail = (messages: WorkbenchMessage[], next_before_id: string | null = 'cursor', observedAt = Date.now(), sessionId = 'ses_a') =>
   recordLocalStorePage(beginLocalStoreRead(sessionId, observedAt), { kind: 'tail' }, { messages, next_before_id }, session(sessionId));
-const idle = () => new Promise((resolve) => setTimeout(resolve, 30));
 // Hand-offs run on their own; under a full parallel suite they can
 // take well over vitest's one-second default to land.
 const SETTLE = { timeout: 10_000, interval: 25 };
+/** When ``sessionId`` was last forgotten (or evicted), read past every fence. */
+const forgottenAt = (sessionId: string) => new Promise<number | null>((resolve, reject) => {
+  const open = indexedDB.open('avibe-local-store');
+  open.onerror = () => reject(open.error);
+  open.onsuccess = () => {
+    const db = open.result;
+    const read = db.transaction('ranges', 'readonly').objectStore('ranges').get(sessionId);
+    read.onsuccess = () => {
+      db.close();
+      resolve((read.result as { forgottenAt?: number } | undefined)?.forgottenAt ?? null);
+    };
+    read.onerror = () => reject(read.error);
+  };
+});
+// A forget an event starts runs on its own: wait for it to land, not for a time.
+const forgetLanded = (sessionId: string) => vi.waitFor(async () => expect(await forgottenAt(sessionId)).not.toBeNull(), SETTLE);
+// The store orders a read after a forget only when it started in a later
+// millisecond: one from the same millisecond cannot be told apart from one that
+// started before it, and is refused. A case about a read after the forget
+// starts it once the clock has passed the forget.
+const pastForget = async (sessionId: string) => {
+  const at = await forgottenAt(sessionId);
+  await vi.waitFor(() => expect(Date.now()).toBeGreaterThan(at ?? Number.POSITIVE_INFINITY), SETTLE);
+};
 /** Rows on disk, read past every fence: what a wipe must have removed. */
 const rowsOnDisk = () => new Promise<number>((resolve, reject) => {
   const open = indexedDB.open('avibe-local-store');
@@ -247,7 +270,9 @@ describe('the event stream', () => {
     // A read the session's forget voided admits nothing more.
     beginLocalStoreRead('ses_moved');
     applyLocalStoreSessionActivity({ session_id: 'ses_moved', event: 'updated', visibility: 'background' });
-    await idle();
+    await forgetLanded('ses_moved');
+    // The row arrives after the forget.
+    await pastForget('ses_moved');
     await recordLocalStoreStreamRow(row(1, {}, 'ses_moved'));
     expect(await ids('ses_moved')).toEqual([]);
   });
@@ -322,7 +347,7 @@ describe('one reader, and the wipes that end it', () => {
     await tail(rows(1, 3), null);
     bumpSignOutGeneration();
     window.dispatchEvent(new StorageEvent('storage', { key: SIGN_OUT_GENERATION_KEY }));
-    await idle();
+    await vi.waitFor(async () => expect(await rowsOnDisk()).toBe(0), SETTLE);
     // The principal is still named in this tab; a cached answer still arrives.
     await tail(rows(1, 3), null);
     expect(await readLocalStoreWindow('ses_a')).toBeNull();
@@ -421,7 +446,8 @@ describe('one reader, and the wipes that end it', () => {
     // read after the forget lands first.
     const before = beginLocalStoreRead('ses_a', Date.now() - 1000);
     applyLocalStoreSessionActivity({ session_id: 'ses_a', event: 'updated', visibility: 'background' });
-    await idle();
+    await forgetLanded('ses_a');
+    await pastForget('ses_a');
     await tail(rows(51, 60));
     await recordLocalStorePage(before, { kind: 'before' }, { messages: rows(1, 50), next_before_id: null });
     expect(await ids()).toEqual(rows(51, 60).map((message) => Number(message.id.slice(-3))));
@@ -436,7 +462,7 @@ describe('one reader, and the wipes that end it', () => {
     const pending = beginLocalStoreRead('ses_a');
     applyLocalStoreSessionActivity({ session_id: 'ses_a', event: 'archived' });
     applyLocalStoreSessionActivity({ session_id: 'ses_b', event: 'updated' });
-    await idle();
+    await forgetLanded('ses_a');
     await recordLocalStorePage(pending, { kind: 'tail' }, { messages: rows(1, 3), next_before_id: null }, session());
     expect(await ids()).toEqual([]);
     expect(await ids('ses_b')).toEqual([1, 2]);
@@ -521,7 +547,9 @@ describe('two tabs sharing the store', () => {
     other.snapshots.setLocalSnapshotPrincipal('remote:alice');
     await other.store.readLocalStoreWindow('ses_p');
     other.store.applyLocalStoreSessionActivity({ session_id: 'ses_p', event: 'archived' });
-    await idle();
+    await forgetLanded('ses_p');
+    // The row arrives after the forget: only the read pending from before it could admit it.
+    await pastForget('ses_p');
     await recordLocalStoreStreamRow(row(2, {}, 'ses_p'));
     expect(await ids('ses_p')).toEqual([]);
     other.snapshots.setLocalSnapshotPrincipal(null);
@@ -549,7 +577,7 @@ describe('two tabs sharing the store', () => {
     other.snapshots.setLocalSnapshotPrincipal('remote:alice');
     await other.store.readLocalStoreWindow('ses_a');
     other.store.applyLocalStoreSessionActivity({ session_id: 'ses_a', event: 'archived' });
-    await idle();
+    await forgetLanded('ses_a');
 
     await recordLocalStorePage(pending, { kind: 'tail' }, { messages: rows(1, 3), next_before_id: null }, session());
     expect(await ids()).toEqual([]);

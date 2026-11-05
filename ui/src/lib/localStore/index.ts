@@ -953,6 +953,19 @@ async function requestPersistence(): Promise<void> {
     const meta = await settle(tx.objectStore(META).get('reader') as IDBRequest<Meta | undefined>);
     if (meta) tx.objectStore(META).put({ ...meta, persisted } satisfies Meta);
   }, { onQuota: 'wipe' });
+  // The browser may answer after a page showed the diagnostics: tell it.
+  for (const listener of [...diagnosticsListeners]) listener();
+}
+
+const diagnosticsListeners = new Set<() => void>();
+
+/** Called when what ``readLocalStoreDiagnostics`` reports may have changed
+ *  without a reader change: the answer to the persistence request landed. */
+export function subscribeLocalStoreDiagnostics(listener: () => void): () => void {
+  diagnosticsListeners.add(listener);
+  return () => {
+    diagnosticsListeners.delete(listener);
+  };
 }
 
 /** The bytes the store may use: decision D2's budget, or half the origin quota
