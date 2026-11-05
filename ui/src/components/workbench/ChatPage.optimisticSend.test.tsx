@@ -54,6 +54,7 @@ const mocks = vi.hoisted(() => ({
     onConnected: () => void;
     onMessageNew: (message: WorkbenchMessage) => void;
     onMessageUpdated: (message: WorkbenchMessage) => void;
+    onQueueUpdated: (data: { session_id: string }) => void;
   },
   composer: null as ComposerProps | null,
   inbox: { unreadBySession: {} as Record<string, number>, markRead: vi.fn() },
@@ -424,6 +425,44 @@ describe('ChatPage optimistic send', () => {
     await waitFor(() => expect(sendingRows()).toHaveLength(0));
     expect(screen.queryAllByText('do this next')).toHaveLength(1);
     expect(rowsOf('do this next')[0]).toBeNull();
+  });
+
+  it('keeps a queued row while the queue cannot be read, until a later read shows it', async () => {
+    await openChat();
+    mocks.api.listSessionQueue.mockRejectedValueOnce(new Error('offline'));
+    const { post, result } = send('do this next');
+    const queued = serverRow(post, 'q1', { type: 'queued', state: 'queued' });
+
+    await act(async () => post.reply.resolve(Response.json({ ...queued, queued: true }, { status: 201 })));
+    await act(async () => result);
+    // The queue read failed: the strip does not have it, so the row stays.
+    expect(rowsOf('do this next')).toHaveLength(1);
+
+    mocks.api.listSessionQueue.mockResolvedValue({ queued: [queued] });
+    await act(async () => mocks.events!.onQueueUpdated({ session_id: SESSION }));
+    await waitFor(() => expect(sendingRows()).toHaveLength(0));
+    expect(screen.queryAllByText('do this next')).toHaveLength(1);
+    expect(rowsOf('do this next')[0]).toBeNull();
+  });
+
+  it('does not take a queue read begun before the send was queued as showing it', async () => {
+    await openChat();
+    const earlier = deferred<{ queued: WorkbenchMessage[] }>();
+    const later = deferred<{ queued: WorkbenchMessage[] }>();
+    mocks.api.listSessionQueue.mockReturnValueOnce(earlier.promise).mockReturnValueOnce(later.promise);
+    const { post, result } = send('do this next');
+    const queued = serverRow(post, 'q1', { type: 'queued', state: 'queued' });
+    // Another queue change is being read while the POST is out.
+    act(() => mocks.events!.onQueueUpdated({ session_id: SESSION }));
+
+    await act(async () => post.reply.resolve(Response.json({ ...queued, queued: true }, { status: 201 })));
+    await act(async () => result);
+    await act(async () => earlier.resolve({ queued: [] }));
+    expect(rowsOf('do this next')).toHaveLength(1);
+
+    await act(async () => later.resolve({ queued: [queued] }));
+    await waitFor(() => expect(sendingRows()).toHaveLength(0));
+    expect(screen.queryAllByText('do this next')).toHaveLength(1);
   });
 
   it('withdraws the row and shows the archived error when the chat was archived', async () => {

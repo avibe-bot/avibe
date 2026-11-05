@@ -1,12 +1,18 @@
 // Design frames never reach a server. Every request is answered here: from the
-// frame's API fixtures (keyed by path plus query, else by path; a fixture that is a
-// `Response`, such as a file's raw text, is served as that response), else with an
-// empty object. A WebSocket receives the messages its socket fixture lists (by path
+// frame's API fixtures (keyed by method and path plus query, method and path, path
+// plus query, else path, so `POST /api/...` answers only that method; a fixture that
+// is a `Response`, such as a file's raw text, is served as that response, and one
+// that is `UNANSWERED` is never answered, as a request the server is still working
+// on), else with an empty object. A WebSocket receives the messages its socket fixture lists (by path
 // prefix) and otherwise stays connecting. An image the page points at an API path
 // (agent media, `/api/media/<token>`) is drawn from the URL its fixture names, else as
 // a blank pixel; an iframe a frame's page opens is drawn from the URL its fixture names
 // (by path), else left blank. Paths a frame touched without a fixture are recorded, so
 // the screenshot tool can report what a frame depends on.
+
+/** An API fixture the server never answers: the request stays in flight, as a send does
+ *  until the server has decided what to do with it. */
+export const UNANSWERED = Symbol('unanswered');
 
 /** A message a frame's WebSocket receives once open: text as is, `{ binary }` as UTF-8 bytes. */
 export type DesignSocketMessage = string | { binary: string };
@@ -88,13 +94,21 @@ function installSources(frames: boolean) {
 }
 
 export function installDesignNetwork() {
-  window.fetch = async (input: RequestInfo | URL) => {
+  window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     inflight += 1;
     try {
       const url = urlOf(input);
-      const key = [`${url.pathname}${url.search}`, url.pathname].find((candidate) => candidate in responses);
+      const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
+      const key = [
+        `${method} ${url.pathname}${url.search}`,
+        `${method} ${url.pathname}`,
+        `${url.pathname}${url.search}`,
+        url.pathname,
+      ].find((candidate) => candidate in responses);
       if (key === undefined) touched.add(url.pathname);
       const body = key === undefined ? {} : responses[key];
+      // Settled for the frame's quiet check at once: the page is waiting, not the shot.
+      if (body === UNANSWERED) return new Promise<Response>(() => {});
       if (body instanceof Response) return body.clone();
       return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
     } finally {

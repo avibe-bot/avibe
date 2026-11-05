@@ -1122,6 +1122,10 @@ export const ChatPage: React.FC = () => {
     settle: settlePendingSend,
   } = usePendingSends(sessionId, messages);
   const [sentRowFollow, setSentRowFollow] = useState(0);
+  // Sends the server queued, by client id: each keeps its pending row until a
+  // queue read begun after it was queued commits (refreshQueue).
+  const queuedSendsRef = useRef(new Map<string, { sessionId: string; afterRead: number }>());
+  const queueReadSeqRef = useRef(0);
 
   // The header's route and backend lock both come from the durable Session row.
   // Every settled turn refreshes it because turn start may materialize inherited
@@ -1425,6 +1429,7 @@ export const ChatPage: React.FC = () => {
   const refreshQueue = useCallback(async (isCurrentRequest?: () => boolean) => {
     if (!sessionId) return null;
     const claimQueueSnapshot = beginQueueSnapshotRead(sessionId);
+    const read = ++queueReadSeqRef.current;
     try {
       const res = await api.listSessionQueue(sessionId, { cache: false });
       if (isCurrentRequest && !isCurrentRequest()) return null;
@@ -1432,12 +1437,20 @@ export const ChatPage: React.FC = () => {
       if (!claimQueueSnapshot()) return null;
       const queued = res.queued ?? [];
       setQueue(queued);
+      // A queue read begun after a send was queued shows where that message is
+      // now (in the queue, or already started), so its pending row ends in the
+      // same render.
+      for (const [clientId, sent] of queuedSendsRef.current) {
+        if (sent.sessionId !== sessionId || read <= sent.afterRead) continue;
+        queuedSendsRef.current.delete(clientId);
+        settlePendingSend(clientId);
+      }
       return queued;
     } catch {
       /* leave the last-known queue; the next queue.updated refetches */
       return null;
     }
-  }, [api, beginQueueSnapshotRead, sessionId]);
+  }, [api, beginQueueSnapshotRead, sessionId, settlePendingSend]);
 
   // Returns false only when the fetch itself failed, so the transcript scroller can
   // re-arm and let a later scroll retry; true for success / no-op / stale session.
@@ -2209,10 +2222,13 @@ export const ChatPage: React.FC = () => {
           // Sent while a turn was running → enqueued: the message moves to the
           // queue above the composer (also announced by queue.updated). A turn IS
           // in flight, so keep working/Stop. The pending row leaves the
-          // transcript once the queue has been read, so the message is never in
-          // neither place; the composer is free again at once.
+          // transcript once a queue read shows the queue after this answer (a
+          // failed read keeps it for the next one: queue.updated, a reconnect),
+          // so the message is never in neither place. The composer is free again
+          // at once.
           settledLater = true;
-          void refreshQueue().finally(() => settlePendingSend(clientId));
+          queuedSendsRef.current.set(clientId, { sessionId, afterRead: queueReadSeqRef.current });
+          void refreshQueue();
           return;
         }
         // A turn started: the server's row replaces the pending one. From a
