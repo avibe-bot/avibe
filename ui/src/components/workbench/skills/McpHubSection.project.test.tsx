@@ -254,4 +254,16 @@ describe('McpHubSection project view', () => {
     expect(screen.getByText(en.mcpHub.projectSectionGlobal)).toBeTruthy();
     expect(screen.getByText(en.mcpHub.globalBadge)).toBeTruthy();
   });
+
+  it('shows the no-match state for a project search and keeps the selected detail', async () => {
+    renderHub();
+    await screen.findByText('pending');
+    fireEvent.click(rowButton('echo'));
+    const search = screen.getByPlaceholderText(en.mcpHub.searchProjectPlaceholder);
+    fireEvent.change(search, { target: { value: 'definitely-no-match' } });
+
+    expect(await screen.findByText(en.mcpHub.noSearchMatch)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /^echo/ })).toBeNull();
+    expect(within(detail()).getByText('echo')).toBeTruthy();
+  });
 });

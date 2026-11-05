@@ -712,6 +712,21 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null, se
   const inheritedRows = useMemo(() => filtered.filter((server) => server.source !== 'project'), [filtered]);
 
   const current = servers.find((item) => item.name === selected) ?? null;
+  const currentInherited = Boolean(projectId && current && current.source !== 'project');
+  const renderRows = (rows: McpServerSummary[], inherited = false) => (
+    <div className="flex flex-col gap-2">{rows.map((server) => (
+      <McpRow
+        key={server.name}
+        server={server}
+        inherited={inherited}
+        selected={selected === server.name}
+        onSelect={() => setSelected(server.name)}
+        loginLink={server.auth === 'needs_login'}
+        onActivateLogin={onActivateLogin}
+        projectId={projectId}
+      />
+    ))}</div>
+  );
 
   const onDiscover = async () => {
     if (!canManage) return;
@@ -947,20 +962,10 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null, se
                   hint={t('mcpHub.projectSectionLocalHint')}
                 />
                 {projectRows.length > 0 ? (
-                  <div className="flex flex-col gap-2">{projectRows.map((server) => (
-                    <McpRow
-                      key={server.name}
-                      server={server}
-                      selected={selected === server.name}
-                      onSelect={() => setSelected(server.name)}
-                      loginLink={server.auth === 'needs_login'}
-                      onActivateLogin={onActivateLogin}
-                      projectId={projectId}
-                    />
-                  ))}</div>
+                  renderRows(projectRows)
                 ) : (
                   <div className="rounded-xl border border-dashed border-border bg-surface px-4 py-6 text-center text-[12px] text-muted">
-                    {t('mcpHub.projectEmpty')}
+                    {filtered.length === 0 && servers.length > 0 ? t('mcpHub.noSearchMatch') : t('mcpHub.projectEmpty')}
                   </div>
                 )}
               </div>
@@ -971,18 +976,7 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null, se
                     label={t('mcpHub.projectSectionGlobal')}
                     hint={t('mcpHub.projectSectionGlobalHint')}
                   />
-                  <div className="flex flex-col gap-2">{inheritedRows.map((server) => (
-                    <McpRow
-                      key={server.name}
-                      server={server}
-                      inherited
-                      selected={selected === server.name}
-                      onSelect={() => setSelected(server.name)}
-                      loginLink={server.auth === 'needs_login'}
-                      onActivateLogin={onActivateLogin}
-                      projectId={projectId}
-                    />
-                  ))}</div>
+                  {renderRows(inheritedRows, true)}
                 </div>
               ) : null}
             </>
@@ -997,16 +991,7 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null, se
               ) : null}
             </div>
           ) : (
-            filtered.map((server) => (
-              <McpRow
-                key={server.name}
-                server={server}
-                selected={selected === server.name}
-                onSelect={() => setSelected(server.name)}
-                loginLink={server.auth === 'needs_login'}
-                onActivateLogin={onActivateLogin}
-              />
-            ))
+            renderRows(filtered)
           )}
         </div>
 
@@ -1014,7 +999,7 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null, se
           <McpServerDetail
             server={current}
             project={projectId}
-            canManage={canManage && !(projectId && current.source !== 'project')}
+            canManage={canManage && !currentInherited}
             expandedTools={expandedTools}
             busy={busy !== null}
             refreshing={busy === `refresh:${current.name}`}

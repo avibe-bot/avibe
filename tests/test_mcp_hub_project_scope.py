@@ -741,6 +741,24 @@ def test_project_add_and_replace_preserve_oauth_options(tmp_path, runtime):
         assert written["mcpServers"]["remote"]["oauth"] == oauth
 
 
+def test_project_discover_refreshes_global_and_returns_project_tools(tmp_path, runtime, monkeypatch):
+    root = _project(tmp_path / "repo", {"project-echo": ECHO})
+    assert _run(runtime, "add", {"servers": [{"name": "global-echo", "server": ECHO}]})["ok"]
+    payload = {"workingDirectory": str(root), "name": "project-echo"}
+    assert _run(runtime, "approve", payload)["ok"] is True
+
+    async def discover(*_):
+        from mcp.types import Tool
+        return [Tool(name="ping", inputSchema={"type": "object"})], None, None
+
+    monkeypatch.setattr(runtime, "_discover", discover)
+    result = _run(runtime, "discover", {"workingDirectory": str(root)})
+    rows = {row["name"]: row for row in result["results"]}
+    assert rows["project-echo"]["status"] == "registered"
+    assert rows["project-echo"]["toolCount"] == 1
+    assert rows["global-echo"]["status"] == "registered"
+
+
 @pytest.mark.parametrize("entrypoint", ["runtime", "cli", "web"])
 @pytest.mark.parametrize("project", [True, False])
 def test_owned_add_preserves_unconfigured_url(tmp_path, monkeypatch, runtime, entrypoint, project):
