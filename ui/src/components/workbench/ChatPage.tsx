@@ -136,6 +136,12 @@ import {
 } from './sessionRowRefresh';
 import { chatSessionViewState } from './chatSessionViewState';
 import { useChatSnapshot } from './useChatSnapshot';
+import {
+  clientMessageMetadata,
+  newClientMessageId,
+  transcriptRowKey,
+  usePendingSends,
+} from './usePendingSends';
 import type { ChatSnapshot } from '../../lib/chatSnapshots';
 import { InstallHint } from '../InstallHint';
 import { Badge } from '../ui/badge';
@@ -265,6 +271,7 @@ export const ChatPage: React.FC = () => {
   const api = useApi();
   const {
     capabilities,
+    readerPrincipal,
   } = useInstanceAuthorization();
   // A Bot's permanent conversation (docs/plans/bots.md D5): the header shows the
   // Bot, and the Session cannot be archived or renamed. The id namespace says so
@@ -1062,6 +1069,28 @@ export const ChatPage: React.FC = () => {
   // Same-route refreshes can overlap (for example, the initial load and an
   // authorization refresh). Only the latest bootstrap may commit state: a
   // superseded success or failure describes an older authorization snapshot.
+  // What the reader sent and the server has not answered yet (usePendingSends),
+  // drawn below the live rows; ``sentRowFollow`` brings it into view.
+  const {
+    rows: transcriptRows,
+    pendingIds: pendingRowIds,
+    add: addPendingSend,
+    settle: settlePendingSend,
+  } = usePendingSends(sessionId, messages);
+  const [sentRowFollow, setSentRowFollow] = useState(0);
+  // Sends the server queued, by client id. Each keeps its pending row until its
+  // message is shown elsewhere: in the queue strip (a queue read begun after it
+  // was queued lists it), or, once such a read no longer lists it because a turn
+  // took it, in a transcript read begun after that one (the claimed projection or
+  // the Message, perhaps merged with other input). See refreshQueue and
+  // beginTranscriptSnapshotRead; reads are numbered by their queue and transcript
+  // read generations.
+  const queuedSendsRef = useRef(new Map<string, {
+    sessionId: string;
+    deliveryId: string;
+    afterQueueRead: number;
+    afterTranscriptRead: number | null;
+  }>());
   const bootstrapRequestGenerationRef = useRef(0);
   // Bootstrap, recovery, and jump-to-latest all return authoritative live-tail
   // snapshots. Order their successful commits through one generation so an
@@ -1082,9 +1111,16 @@ export const ChatPage: React.FC = () => {
       committedTranscriptReadGenerationRef.current = generation;
       // A live window lands next: no painted row may stay under it.
       releaseChatSnapshot();
+      // ...and it shows every queued send a turn took before it began.
+      for (const [clientId, sent] of queuedSendsRef.current) {
+        if (sent.sessionId !== requestSessionId || sent.afterTranscriptRead === null) continue;
+        if (generation <= sent.afterTranscriptRead) continue;
+        queuedSendsRef.current.delete(clientId);
+        settlePendingSend(clientId);
+      }
       return true;
     };
-  }, [releaseChatSnapshot]);
+  }, [releaseChatSnapshot, settlePendingSend]);
 
   const appendMessage = useCallback((msg: WorkbenchMessage) => {
     setMessages((prev) => {
@@ -1406,9 +1442,30 @@ export const ChatPage: React.FC = () => {
 
   // The send-while-busy queue (pending messages shown above the composer).
   // Re-fetched on mount + on every ``queue.updated`` (enqueue / flush / remove).
+  // A queue read began after a send was queued and its queue is now on screen.
+  // If it lists the send, the strip shows it, so the pending row ends in this
+  // render. If not, a turn took it, and it shows in the transcript only once a
+  // read of it that begins now lands (beginTranscriptSnapshotRead).
+  const showQueuedSends = useCallback((requestSessionId: string, queueRead: number, queued: WorkbenchMessage[]) => {
+    let readTranscript = false;
+    for (const [clientId, sent] of queuedSendsRef.current) {
+      if (sent.sessionId !== requestSessionId || sent.afterTranscriptRead !== null) continue;
+      if (queueRead <= sent.afterQueueRead) continue;
+      if (queued.some((row) => row.id === sent.deliveryId)) {
+        queuedSendsRef.current.delete(clientId);
+        settlePendingSend(clientId);
+      } else {
+        queuedSendsRef.current.set(clientId, { ...sent, afterTranscriptRead: transcriptReadGenerationRef.current });
+        readTranscript = true;
+      }
+    }
+    if (readTranscript) void reconcile({ force: true });
+  }, [settlePendingSend, reconcile]);
+
   const refreshQueue = useCallback(async (isCurrentRequest?: () => boolean) => {
     if (!sessionId) return null;
     const claimQueueSnapshot = beginQueueSnapshotRead(sessionId);
+    const queueRead = queueReadGenerationRef.current;
     try {
       const res = await api.listSessionQueue(sessionId, { cache: false });
       if (isCurrentRequest && !isCurrentRequest()) return null;
@@ -1416,12 +1473,13 @@ export const ChatPage: React.FC = () => {
       if (!claimQueueSnapshot()) return null;
       const queued = res.queued ?? [];
       setQueue(queued);
+      showQueuedSends(sessionId, queueRead, queued);
       return queued;
     } catch {
       /* leave the last-known queue; the next queue.updated refetches */
       return null;
     }
-  }, [api, beginQueueSnapshotRead, sessionId]);
+  }, [api, beginQueueSnapshotRead, sessionId, showQueuedSends]);
 
   // Returns false only when the fetch itself failed, so the transcript scroller can
   // re-arm and let a later scroll retry; true for success / no-op / stale session.
@@ -1618,6 +1676,7 @@ export const ChatPage: React.FC = () => {
       const bootstrapIsCurrent = await sessionRowRefreshGateRef.current.begin();
       const epochAtRequest = turnEpochRef.current;
       const claimQueueSnapshot = beginQueueSnapshotRead(sessionId);
+      const queueRead = queueReadGenerationRef.current;
       const bootstrap = await api.getSessionBootstrap(sessionId);
       // Drop a response if the user switched chats or a newer bootstrap for
       // this route began while it was in flight.
@@ -1679,7 +1738,10 @@ export const ChatPage: React.FC = () => {
       }
       setHydratedTranscriptSessionId(sessionId);
       setFailedBootstrapSessionId(null);
-      if (claimQueueSnapshot()) setQueue(bootstrap.queued ?? []);
+      if (claimQueueSnapshot()) {
+        setQueue(bootstrap.queued ?? []);
+        showQueuedSends(sessionId, queueRead, bootstrap.queued ?? []);
+      }
       setInitialDraft(bootstrap.draft?.text ?? '');
       // Restore Stop for a turn that is still running (e.g. opened in another tab
       // or reloaded mid-turn). markWorking on the live branch so a racing
@@ -1730,7 +1792,7 @@ export const ChatPage: React.FC = () => {
       // of its own loading state into a premature not-found / error view.
       if (requestIsCurrent()) setLoading(false);
     }
-  }, [api, sessionId, markWorking, scheduleActivityRefresh, refreshSessionRow, beginTranscriptSnapshotRead, beginQueueSnapshotRead, installServerSession, beginChatSnapshotBootstrap]);
+  }, [api, sessionId, markWorking, scheduleActivityRefresh, refreshSessionRow, beginTranscriptSnapshotRead, beginQueueSnapshotRead, installServerSession, beginChatSnapshotBootstrap, showQueuedSends]);
 
   // Clear per-session state the instant the session changes (React Router swaps
   // only :sessionId, reusing this instance), before the new session's
@@ -2033,6 +2095,70 @@ export const ChatPage: React.FC = () => {
       const ready = (attachments ?? []).filter((a) => a.status === 'ready');
       if (!sessionId || (!text.trim() && ready.length === 0)) return;
       const refs = references ?? [];
+      const content =
+        ready.length > 0 || refs.length > 0
+          ? {
+              text,
+              ...(ready.length > 0
+                ? {
+                    attachments: ready.map((a) => ({
+                      token: a.token,
+                      name: a.name,
+                      mime: a.mime,
+                      size: a.size,
+                      kind: a.kind,
+                      url: a.url,
+                      // Persist image pixel size when known so the box is reserved on
+                      // reload (undefined keys drop out of the JSON).
+                      width: a.width,
+                      height: a.height,
+                    })),
+                  }
+                : {}),
+              // @-agent / #-session mention sidecar (see lib/mentions): the text
+              // keeps the `@<name>` / `#<id>` markers; this carries resolved ids +
+              // session titles for chip rendering and the backend reference block.
+              ...(refs.length > 0 ? { references: refs } : {}),
+            }
+          : undefined;
+      // The sent message is on screen at once, as the row it will be, and the
+      // server's row takes its place when either the answer below or the stream
+      // brings it (usePendingSends). Quick-reply clicks tag the row with the
+      // agent message they answer, so the choice can be derived on reload.
+      const clientId = newClientMessageId();
+      const sentMetadata = { ...metadata, ...clientMessageMetadata(clientId) };
+      const sentAt = new Date().toISOString();
+      addPendingSend({
+        id: clientId,
+        scope_id: null,
+        session_id: sessionId,
+        platform: 'avibe',
+        author: 'user',
+        type: 'user',
+        source: 'user',
+        author_id: readerPrincipal ?? null,
+        author_name: null,
+        native_message_id: null,
+        parent_native_message_id: null,
+        text,
+        content: content ?? {},
+        metadata: sentMetadata,
+        created_at: sentAt,
+        updated_at: sentAt,
+        delivered_at: null,
+        read_at: null,
+      });
+      setSentRowFollow((n) => n + 1);
+      // Sent from a historical search window: the message belongs under the live
+      // tail, not grafted below old context, so the window starts moving there
+      // now, while the POST is out.
+      const moveToLatest = () => reloadLatestMessages().then((caughtUp) => {
+        if (caughtUp && sessionId === sessionIdRef.current) setSentRowFollow((n) => n + 1);
+        return caughtUp;
+      });
+      const latestWindow = historicalWindowRef.current ? moveToLatest() : null;
+      // Set when the pending row must outlive this call (a queued send).
+      let settledLater = false;
       markWorking();
       setError(null);
       try {
@@ -2041,38 +2167,10 @@ export const ChatPage: React.FC = () => {
         // stream — we don't hold the response open. ``apiFetch`` attaches the
         // CSRF token that ``protect_mutating_ui_requests`` requires under
         // remote-access mode (raw ``fetch`` would 403).
-        const content =
-          ready.length > 0 || refs.length > 0
-            ? {
-                text,
-                ...(ready.length > 0
-                  ? {
-                      attachments: ready.map((a) => ({
-                        token: a.token,
-                        name: a.name,
-                        mime: a.mime,
-                        size: a.size,
-                        kind: a.kind,
-                        url: a.url,
-                        // Persist image pixel size when known so the box is reserved on
-                        // reload (undefined keys drop out of the JSON).
-                        width: a.width,
-                        height: a.height,
-                      })),
-                    }
-                  : {}),
-                // @-agent / #-session mention sidecar (see lib/mentions): the text
-                // keeps the `@<name>` / `#<id>` markers; this carries resolved ids +
-                // session titles for chip rendering and the backend reference block.
-                ...(refs.length > 0 ? { references: refs } : {}),
-              }
-            : undefined;
         const requestBody = {
           text,
           ...(content ? { content } : {}),
-          // Quick-reply click: tag the user row with the agent message it answers
-          // so the locked/highlighted state can be derived on reload.
-          ...(metadata ? { metadata } : {}),
+          metadata: sentMetadata,
         };
         // This POST does not wait for the header's route writes, so a prompt sent
         // in the same breath as a model pick can be admitted on the route the row
@@ -2154,26 +2252,32 @@ export const ChatPage: React.FC = () => {
           return false;
         }
         if (body?.queued) {
-          // Sent while a turn was running → enqueued (shows above the composer
-          // via queue.updated). A turn IS in flight, so keep working/Stop; don't
-          // add a transcript row. Refresh immediately in case the event races.
+          // Sent while a turn was running → enqueued: the message moves to the
+          // queue above the composer (also announced by queue.updated). A turn IS
+          // in flight, so keep working/Stop. The pending row stays until the
+          // message shows in the queue strip, or in the transcript if a turn took
+          // it first (queuedSendsRef); a failed read keeps it for the next one
+          // (queue.updated, a reconnect), so the message is never in neither
+          // place. The composer is free again at once.
+          settledLater = true;
+          queuedSendsRef.current.set(clientId, {
+            sessionId,
+            deliveryId: String(body.id ?? ''),
+            afterQueueRead: queueReadGenerationRef.current,
+            afterTranscriptRead: null,
+          });
           void refreshQueue();
           return;
         }
-        // A turn started — show the user row. If this send happened from a
-        // historical search window, first replace that window with the live tail;
-        // the persisted prompt belongs there, not grafted below old context.
+        // A turn started: the server's row replaces the pending one. From a
+        // historical window (also one the stream detached meanwhile), it lands
+        // once the live tail is in place; a failed reload leaves it below the
+        // window, as before.
         if (body?.id) {
           const message = body as WorkbenchMessage;
-          if (historicalWindowRef.current) {
-            const caughtUp = await reloadLatestMessages();
-            if (sessionId === sessionIdRef.current) {
-              if (caughtUp) setJumpTarget(message.id);
-              else appendMessage(message);
-            }
-          } else {
-            appendMessage(message);
-          }
+          await (latestWindow ?? (historicalWindowRef.current ? moveToLatest() : null));
+          if (sessionId !== sessionIdRef.current) return;
+          appendMessage(message);
         }
       } catch (err) {
         if (!metadata?.quick_reply_for) {
@@ -2190,12 +2294,19 @@ export const ChatPage: React.FC = () => {
         // above. Returning false also lets an unmounted old Composer persist its
         // submitted text after navigation.
         return false;
+      } finally {
+        // Every outcome ends the pending row, in the same render as the row that
+        // replaces it (or the error and restored draft that withdraw it).
+        if (!settledLater) settlePendingSend(clientId);
       }
     },
     [
       sessionId,
       api,
       appendMessage,
+      addPendingSend,
+      settlePendingSend,
+      readerPrincipal,
       refreshQueue,
       markWorking,
       reloadLatestMessages,
@@ -3159,7 +3270,9 @@ export const ChatPage: React.FC = () => {
           </div>
         )}
         <Transcript
-          messages={messages}
+          messages={transcriptRows}
+          pendingIds={pendingRowIds}
+          sentRowFollow={sentRowFollow}
           session={session}
           agentDisplayName={agentDisplayName}
           agentBackend={agentBackend}
@@ -4385,6 +4498,11 @@ interface TranscriptProps {
   // tail. Lifted so the retained-window trim (ChatPage.appendMessage) can tell
   // when dropping the oldest rows is safe (reader pinned to the bottom).
   followingTailRef: React.MutableRefObject<boolean>;
+  // Rows the reader sent that the server has not answered yet (usePendingSends):
+  // drawn as sending. ``sentRowFollow`` changes on each send, and brings the
+  // bottom of the transcript, where the sent row is, into view.
+  pendingIds?: ReadonlySet<string>;
+  sentRowFollow?: number;
   // Agent Activity panel state (undefined-safe: when ``enabled`` is false the
   // transcript renders exactly as before — the ThinkingBubble and nothing else).
   activity?: {
@@ -4414,6 +4532,8 @@ interface TranscriptProps {
 // Exported for tests (like ChatHeaderBar / MessageRow / ThinkingBubble below):
 // the older-page trigger is a property of this subtree, and driving it through
 // the whole ChatPage would prove it only for one wiring of the props.
+const NO_PENDING_ROWS: ReadonlySet<string> = new Set();
+
 export const Transcript: React.FC<TranscriptProps> = ({
   messages,
   session,
@@ -4440,6 +4560,8 @@ export const Transcript: React.FC<TranscriptProps> = ({
   readOnly,
   showHarnessMessages = true,
   followingTailRef,
+  pendingIds = NO_PENDING_ROWS,
+  sentRowFollow = 0,
   activity,
   footer,
 }) => {
@@ -4689,6 +4811,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
           highlighted={message.id === highlightedId}
           harnessOpen={openRowIds.has(message.id)}
           onHarnessOpenChange={setHarnessRowOpen}
+          pending={pendingIds.has(message.id)}
         />
         {after?.map((group) => renderActivityChip(group))}
       </>
@@ -4734,6 +4857,14 @@ export const Transcript: React.FC<TranscriptProps> = ({
     anchorRef.current = null;
     setShowJump(false);
   }, [setFollowingTail]);
+
+  // The reader sent a message: it is the last row, so follow the tail to it,
+  // also from a scrolled-up position, the way a sent message lands in any chat.
+  useEffect(() => {
+    if (!sentRowFollow) return undefined;
+    const id = requestAnimationFrame(() => scrollToBottom());
+    return () => cancelAnimationFrame(id);
+  }, [sentRowFollow, scrollToBottom]);
 
   // Jump-to-latest handler behind the down-arrow button. A search result that
   // was not already loaded installs a centered historical window; its loaded
@@ -5099,7 +5230,8 @@ export const Transcript: React.FC<TranscriptProps> = ({
                 </Fragment>
               );
             }
-            return <Fragment key={item.message.id}>{renderTranscriptRow(item.message, item.index)}</Fragment>;
+            // Keyed so a sent row keeps its element from pending to the server's row.
+            return <Fragment key={transcriptRowKey(item.message)}>{renderTranscriptRow(item.message, item.index)}</Fragment>;
           })}
           {/* The transcript TAIL is reserved exclusively for the live running card
               (or the ThinkingBubble fallback) — never a settled/interrupted chip. */}
@@ -5250,6 +5382,9 @@ type MessageRowProps = {
   // because whether the reader is reading it decides whether a group may fold it.
   harnessOpen?: boolean;
   onHarnessOpenChange?: (messageId: string, open: boolean) => void;
+  // A message the reader sent that the server has not answered yet: the bubble
+  // is drawn as sending until the server's row takes its place.
+  pending?: boolean;
 };
 
 // Memoized so a transcript re-render that doesn't touch THIS row — the scroll
@@ -5278,6 +5413,7 @@ export const MessageRow = memo(function MessageRow({
   highlighted,
   harnessOpen = false,
   onHarnessOpenChange,
+  pending = false,
 }: MessageRowProps) {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -5523,10 +5659,13 @@ export const MessageRow = memo(function MessageRow({
         />
       ) : null;
     return (
-      <div data-message-id={message.id} className={rowClass('justify-end')}>
+      <div data-message-id={message.id} className={rowClass('justify-end')} aria-busy={pending || undefined}>
         <div className="group/message flex max-w-[min(92%,860px)] flex-col items-end gap-1">
           {senderHead}
-          <div className={USER_BUBBLE} style={messageFontStyle}>
+          <div
+            className={clsx(USER_BUBBLE, 'transition-opacity duration-200', pending && 'opacity-60')}
+            style={messageFontStyle}
+          >
             {bodyNode}
             {attachmentsNode}
           </div>

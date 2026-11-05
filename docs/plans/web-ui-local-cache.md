@@ -106,7 +106,20 @@ Pages render cached data exactly like live data, chrome included (invariant
 and header actions from the cached state, enabled. The composer is the same
 one before and after the bootstrap lands, and the bootstrap's draft reaches it
 only while the reader has not touched it. A message sent before the bootstrap
-lands survives the live window replacing the painted rows. The loading state is
+lands survives the live window replacing the painted rows.
+
+A sent message is on screen at once, drawn as sending, before the server
+answers. It is page state beside the transcript, not a row of it, so it is never
+stored in a snapshot, never a paging cursor, and no live window replaces it. The
+send carries `metadata.client_message_id`, which the server keeps on the
+Delivery the POST answers with and on the Message the event stream publishes.
+Whichever lands first takes the pending row's place, keyed by that id so the row
+does not remount, and the POST's outcome ends the pending row in every case: a
+refused send is withdrawn and its draft given back, and a queued one moves to
+the queue. A different reader or a cleared store drops it. A send from a
+historical window starts the reload of the live tail at once.
+
+The loading state is
 kept separately for what has to wait for the server, such as marking the
 conversation read or a deep-link jump; it never disables chrome. There is no
 "stale" badge; the event stream and the bootstrap usually land within a second.

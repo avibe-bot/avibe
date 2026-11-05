@@ -1,8 +1,10 @@
 // The chat conversation: the header, the transcript, and the composer, rendered by the shipped ChatPage.
-// ui/design: chat/conversation/* — the empty states, a Bot's conversation, a fork, an archived chat, and the
-// named senders of an Organization instance's shared transcript.
+// ui/design: chat/conversation/* — the empty states, a Bot's conversation, a fork, an archived chat, the
+// named senders of an Organization instance's shared transcript, and a message the reader just sent:
+// on screen at once as sending, then the server's row in its place.
 import { frames } from '../../frame';
-import { agentSays, at, chatDesktop, chatFixtures, chatPhone, chatRoute, chatSession, userSays } from './fixtures';
+import { UNANSWERED } from '../../shell/network';
+import { CHAT_ID, agentSays, at, chatDesktop, chatFixtures, chatPhone, chatRoute, chatSession, userSays } from './fixtures';
 
 const messages = [
   userSays('帮我把 avibe 工作台适配移动端，交互可以和 PC 不一样，但功能要完备。', 62),
@@ -17,6 +19,14 @@ const messages = [
     { content: { quick_replies: ['继续做收件箱', '先开 PR'] } },
   ),
 ];
+
+// The reader answers the last message's quick reply. While the server has not answered, the message
+// is drawn as sending; once it has, the server's row takes its place.
+const answer = '继续做收件箱';
+const sendAnswer = [`role=button[name="${answer}"]`];
+const sendPath = `POST /api/sessions/${CHAT_ID}/messages`;
+const sending = { [sendPath]: UNANSWERED };
+const sent = { [sendPath]: { ...userSays(answer, 0), id: 'msg_sent_answer', session_id: CHAT_ID } };
 
 const bot = chatSession({ id: 'ses_cso', project_id: null, scope_id: null, title: '首席安全官', agent_name: 'cso' });
 // The main Bot, whose Agent description is written for Agents and never shows here.
@@ -127,6 +137,28 @@ const designFrames = frames([
     render: chatDesktop,
   },
   {
+    name: 'sending',
+    title: '会话 · 刚发出的消息（服务器还没回应）',
+    width: 1192,
+    height: 900,
+    status: 'shipped',
+    route: chatRoute(),
+    fixtures: chatFixtures({ messages, api: sending }),
+    click: sendAnswer,
+    render: chatDesktop,
+  },
+  {
+    name: 'sent',
+    title: '会话 · 消息已送达（服务器的那一行接替）',
+    width: 1192,
+    height: 900,
+    status: 'shipped',
+    route: chatRoute(),
+    fixtures: chatFixtures({ messages, api: sent }),
+    click: sendAnswer,
+    render: chatDesktop,
+  },
+  {
     name: 'phone',
     title: '会话 · 手机',
     width: 390,
@@ -134,6 +166,17 @@ const designFrames = frames([
     status: 'shipped',
     route: chatRoute(),
     fixtures: chatFixtures({ messages }),
+    render: chatPhone,
+  },
+  {
+    name: 'phone-sending',
+    title: '会话 · 手机 · 刚发出的消息',
+    width: 390,
+    height: 844,
+    status: 'shipped',
+    route: chatRoute(),
+    fixtures: chatFixtures({ messages, api: sending }),
+    click: sendAnswer,
     render: chatPhone,
   },
   {

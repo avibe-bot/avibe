@@ -438,9 +438,11 @@ describe('the chat row under an optimistic write', () => {
     });
     await settle();
     expect(messagePosts()).toHaveLength(1);
+    // Beside the caller's metadata, every send carries the client id its pending
+    // row is matched by (usePendingSends).
     expect(JSON.parse(String((messagePosts()[0][1] as RequestInit).body))).toEqual({
       text: 'fix the token refresh first',
-      metadata: { input: 'voice' },
+      metadata: { input: 'voice', client_message_id: expect.any(String) },
     });
   });
 
