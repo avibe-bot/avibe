@@ -1069,6 +1069,28 @@ export const ChatPage: React.FC = () => {
   // Same-route refreshes can overlap (for example, the initial load and an
   // authorization refresh). Only the latest bootstrap may commit state: a
   // superseded success or failure describes an older authorization snapshot.
+  // What the reader sent and the server has not answered yet (usePendingSends),
+  // drawn below the live rows; ``sentRowFollow`` brings it into view.
+  const {
+    rows: transcriptRows,
+    pendingIds: pendingRowIds,
+    add: addPendingSend,
+    settle: settlePendingSend,
+  } = usePendingSends(sessionId, messages);
+  const [sentRowFollow, setSentRowFollow] = useState(0);
+  // Sends the server queued, by client id. Each keeps its pending row until its
+  // message is shown elsewhere: in the queue strip (a queue read begun after it
+  // was queued lists it), or, once such a read no longer lists it because a turn
+  // took it, in a transcript read begun after that one (the claimed projection or
+  // the Message, perhaps merged with other input). See refreshQueue and
+  // beginTranscriptSnapshotRead; reads are numbered by their queue and transcript
+  // read generations.
+  const queuedSendsRef = useRef(new Map<string, {
+    sessionId: string;
+    deliveryId: string;
+    afterQueueRead: number;
+    afterTranscriptRead: number | null;
+  }>());
   const bootstrapRequestGenerationRef = useRef(0);
   // Bootstrap, recovery, and jump-to-latest all return authoritative live-tail
   // snapshots. Order their successful commits through one generation so an
@@ -1089,9 +1111,16 @@ export const ChatPage: React.FC = () => {
       committedTranscriptReadGenerationRef.current = generation;
       // A live window lands next: no painted row may stay under it.
       releaseChatSnapshot();
+      // ...and it shows every queued send a turn took before it began.
+      for (const [clientId, sent] of queuedSendsRef.current) {
+        if (sent.sessionId !== requestSessionId || sent.afterTranscriptRead === null) continue;
+        if (generation <= sent.afterTranscriptRead) continue;
+        queuedSendsRef.current.delete(clientId);
+        settlePendingSend(clientId);
+      }
       return true;
     };
-  }, [releaseChatSnapshot]);
+  }, [releaseChatSnapshot, settlePendingSend]);
 
   const appendMessage = useCallback((msg: WorkbenchMessage) => {
     setMessages((prev) => {
@@ -1113,19 +1142,6 @@ export const ChatPage: React.FC = () => {
       return next;
     });
   }, []);
-  // What the reader sent and the server has not answered yet (usePendingSends),
-  // drawn below the live rows; ``sentRowFollow`` brings it into view.
-  const {
-    rows: transcriptRows,
-    pendingIds: pendingRowIds,
-    add: addPendingSend,
-    settle: settlePendingSend,
-  } = usePendingSends(sessionId, messages);
-  const [sentRowFollow, setSentRowFollow] = useState(0);
-  // Sends the server queued, by client id: each keeps its pending row until a
-  // queue read begun after it was queued commits (refreshQueue).
-  const queuedSendsRef = useRef(new Map<string, { sessionId: string; afterRead: number }>());
-  const queueReadSeqRef = useRef(0);
 
   // The header's route and backend lock both come from the durable Session row.
   // Every settled turn refreshes it because turn start may materialize inherited
@@ -1426,10 +1442,30 @@ export const ChatPage: React.FC = () => {
 
   // The send-while-busy queue (pending messages shown above the composer).
   // Re-fetched on mount + on every ``queue.updated`` (enqueue / flush / remove).
+  // A queue read began after a send was queued and its queue is now on screen.
+  // If it lists the send, the strip shows it, so the pending row ends in this
+  // render. If not, a turn took it, and it shows in the transcript only once a
+  // read of it that begins now lands (beginTranscriptSnapshotRead).
+  const showQueuedSends = useCallback((requestSessionId: string, queueRead: number, queued: WorkbenchMessage[]) => {
+    let readTranscript = false;
+    for (const [clientId, sent] of queuedSendsRef.current) {
+      if (sent.sessionId !== requestSessionId || sent.afterTranscriptRead !== null) continue;
+      if (queueRead <= sent.afterQueueRead) continue;
+      if (queued.some((row) => row.id === sent.deliveryId)) {
+        queuedSendsRef.current.delete(clientId);
+        settlePendingSend(clientId);
+      } else {
+        queuedSendsRef.current.set(clientId, { ...sent, afterTranscriptRead: transcriptReadGenerationRef.current });
+        readTranscript = true;
+      }
+    }
+    if (readTranscript) void reconcile({ force: true });
+  }, [settlePendingSend, reconcile]);
+
   const refreshQueue = useCallback(async (isCurrentRequest?: () => boolean) => {
     if (!sessionId) return null;
     const claimQueueSnapshot = beginQueueSnapshotRead(sessionId);
-    const read = ++queueReadSeqRef.current;
+    const queueRead = queueReadGenerationRef.current;
     try {
       const res = await api.listSessionQueue(sessionId, { cache: false });
       if (isCurrentRequest && !isCurrentRequest()) return null;
@@ -1437,20 +1473,13 @@ export const ChatPage: React.FC = () => {
       if (!claimQueueSnapshot()) return null;
       const queued = res.queued ?? [];
       setQueue(queued);
-      // A queue read begun after a send was queued shows where that message is
-      // now (in the queue, or already started), so its pending row ends in the
-      // same render.
-      for (const [clientId, sent] of queuedSendsRef.current) {
-        if (sent.sessionId !== sessionId || read <= sent.afterRead) continue;
-        queuedSendsRef.current.delete(clientId);
-        settlePendingSend(clientId);
-      }
+      showQueuedSends(sessionId, queueRead, queued);
       return queued;
     } catch {
       /* leave the last-known queue; the next queue.updated refetches */
       return null;
     }
-  }, [api, beginQueueSnapshotRead, sessionId, settlePendingSend]);
+  }, [api, beginQueueSnapshotRead, sessionId, showQueuedSends]);
 
   // Returns false only when the fetch itself failed, so the transcript scroller can
   // re-arm and let a later scroll retry; true for success / no-op / stale session.
@@ -1647,6 +1676,7 @@ export const ChatPage: React.FC = () => {
       const bootstrapIsCurrent = await sessionRowRefreshGateRef.current.begin();
       const epochAtRequest = turnEpochRef.current;
       const claimQueueSnapshot = beginQueueSnapshotRead(sessionId);
+      const queueRead = queueReadGenerationRef.current;
       const bootstrap = await api.getSessionBootstrap(sessionId);
       // Drop a response if the user switched chats or a newer bootstrap for
       // this route began while it was in flight.
@@ -1708,7 +1738,10 @@ export const ChatPage: React.FC = () => {
       }
       setHydratedTranscriptSessionId(sessionId);
       setFailedBootstrapSessionId(null);
-      if (claimQueueSnapshot()) setQueue(bootstrap.queued ?? []);
+      if (claimQueueSnapshot()) {
+        setQueue(bootstrap.queued ?? []);
+        showQueuedSends(sessionId, queueRead, bootstrap.queued ?? []);
+      }
       setInitialDraft(bootstrap.draft?.text ?? '');
       // Restore Stop for a turn that is still running (e.g. opened in another tab
       // or reloaded mid-turn). markWorking on the live branch so a racing
@@ -1759,7 +1792,7 @@ export const ChatPage: React.FC = () => {
       // of its own loading state into a premature not-found / error view.
       if (requestIsCurrent()) setLoading(false);
     }
-  }, [api, sessionId, markWorking, scheduleActivityRefresh, refreshSessionRow, beginTranscriptSnapshotRead, beginQueueSnapshotRead, installServerSession, beginChatSnapshotBootstrap]);
+  }, [api, sessionId, markWorking, scheduleActivityRefresh, refreshSessionRow, beginTranscriptSnapshotRead, beginQueueSnapshotRead, installServerSession, beginChatSnapshotBootstrap, showQueuedSends]);
 
   // Clear per-session state the instant the session changes (React Router swaps
   // only :sessionId, reusing this instance), before the new session's
@@ -2221,13 +2254,18 @@ export const ChatPage: React.FC = () => {
         if (body?.queued) {
           // Sent while a turn was running → enqueued: the message moves to the
           // queue above the composer (also announced by queue.updated). A turn IS
-          // in flight, so keep working/Stop. The pending row leaves the
-          // transcript once a queue read shows the queue after this answer (a
-          // failed read keeps it for the next one: queue.updated, a reconnect),
-          // so the message is never in neither place. The composer is free again
-          // at once.
+          // in flight, so keep working/Stop. The pending row stays until the
+          // message shows in the queue strip, or in the transcript if a turn took
+          // it first (queuedSendsRef); a failed read keeps it for the next one
+          // (queue.updated, a reconnect), so the message is never in neither
+          // place. The composer is free again at once.
           settledLater = true;
-          queuedSendsRef.current.set(clientId, { sessionId, afterRead: queueReadSeqRef.current });
+          queuedSendsRef.current.set(clientId, {
+            sessionId,
+            deliveryId: String(body.id ?? ''),
+            afterQueueRead: queueReadGenerationRef.current,
+            afterTranscriptRead: null,
+          });
           void refreshQueue();
           return;
         }

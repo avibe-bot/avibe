@@ -55,6 +55,7 @@ const mocks = vi.hoisted(() => ({
     onMessageNew: (message: WorkbenchMessage) => void;
     onMessageUpdated: (message: WorkbenchMessage) => void;
     onQueueUpdated: (data: { session_id: string }) => void;
+    onConnected: () => void;
   },
   composer: null as ComposerProps | null,
   inbox: { unreadBySession: {} as Record<string, number>, markRead: vi.fn() },
@@ -445,6 +446,31 @@ describe('ChatPage optimistic send', () => {
     expect(rowsOf('do this next')[0]).toBeNull();
   });
 
+  it('lets the bootstrap of a chat opened again show where a queued send went', async () => {
+    await openChat();
+    mocks.api.listSessionQueue.mockRejectedValueOnce(new Error('offline'));
+    const { post, result } = send('do this next');
+    const queued = serverRow(post, 'q1', { type: 'queued', state: 'queued' });
+    await act(async () => post.reply.resolve(Response.json({ ...queued, queued: true }, { status: 201 })));
+    await act(async () => result);
+    expect(rowsOf('do this next')).toHaveLength(1);
+
+    const chatB = bootstrap([message('b1', 'chat b answer', { session_id: 'ses_b' })]);
+    mocks.api.getSessionBootstrap.mockImplementation((id: string) => Promise.resolve(
+      id === SESSION
+        ? { ...bootstrap([message('m1', 'earlier answer')]), queued: [queued] }
+        : { ...chatB, session: { ...chatB.session, id: 'ses_b' } },
+    ));
+    act(() => screen.getByRole('button', { name: 'open chat b' }).click());
+    await screen.findByText('chat b answer');
+    act(() => screen.getByRole('button', { name: 'open chat a' }).click());
+    await screen.findByText('earlier answer');
+
+    await waitFor(() => expect(sendingRows()).toHaveLength(0));
+    expect(screen.queryAllByText('do this next')).toHaveLength(1);
+    expect(rowsOf('do this next')[0]).toBeNull();
+  });
+
   it('does not take a queue read begun before the send was queued as showing it', async () => {
     await openChat();
     const earlier = deferred<{ queued: WorkbenchMessage[] }>();
@@ -463,6 +489,62 @@ describe('ChatPage optimistic send', () => {
     await act(async () => later.resolve({ queued: [queued] }));
     await waitFor(() => expect(sendingRows()).toHaveLength(0));
     expect(screen.queryAllByText('do this next')).toHaveLength(1);
+  });
+
+  it('keeps a queued row a turn took before the queue was read, until the transcript shows it', async () => {
+    await openChat();
+    const queueRead = deferred<{ queued: WorkbenchMessage[] }>();
+    const tail = deferred<unknown>();
+    mocks.api.listSessionQueue.mockReturnValue(queueRead.promise);
+    mocks.api.listSessionMessages.mockReturnValue(tail.promise);
+    const { post, result } = send('do this next');
+
+    await act(async () => post.reply.resolve(Response.json(
+      { ...serverRow(post, 'q1', { type: 'queued', state: 'queued' }), queued: true },
+      { status: 201 },
+    )));
+    await act(async () => result);
+    // The turn claimed it already: the queue no longer lists it, and its row is
+    // not in the transcript yet.
+    await act(async () => queueRead.resolve({ queued: [] }));
+    expect(rowsOf('do this next')).toHaveLength(1);
+    expect(mocks.api.listSessionMessages).toHaveBeenCalledWith(SESSION, { limit: 50, tail: true, cache: false });
+
+    // The transcript shows it, merged with the input the turn took with it.
+    const claimed = message('p1', 'the earlier input, and do this next', {
+      type: 'user', author: 'user', source: 'user', projection: 'claimed_delivery', state: 'claimed',
+    });
+    await act(async () => tail.resolve({ messages: [message('m1', 'earlier answer'), claimed], next_before_id: null }));
+    await waitFor(() => expect(sendingRows()).toHaveLength(0));
+    expect(rowsOf('do this next')).toHaveLength(0);
+    expect(document.querySelector('[data-message-id="p1"]')).not.toBeNull();
+  });
+
+  it('does not take a transcript read begun before the queue stopped listing the send as showing it', async () => {
+    await openChat();
+    const queueAfterSend = deferred<{ queued: WorkbenchMessage[] }>();
+    const tailBefore = deferred<unknown>();
+    const tailAfter = deferred<unknown>();
+    mocks.api.listSessionQueue.mockReturnValueOnce(queueAfterSend.promise).mockReturnValue(new Promise(() => {}));
+    mocks.api.listSessionMessages.mockReturnValueOnce(tailBefore.promise).mockReturnValueOnce(tailAfter.promise);
+    const { post, result } = send('do this next');
+    await act(async () => post.reply.resolve(Response.json(
+      { ...serverRow(post, 'q1', { type: 'queued', state: 'queued' }), queued: true },
+      { status: 201 },
+    )));
+    await act(async () => result);
+    // A reconnect starts its transcript read before the queue read lands.
+    act(() => mocks.events!.onConnected());
+    await act(async () => queueAfterSend.resolve({ queued: [] }));
+
+    await act(async () => tailBefore.resolve({ messages: [message('m1', 'earlier answer')], next_before_id: null }));
+    expect(rowsOf('do this next')).toHaveLength(1);
+
+    const claimed = message('p1', 'do this next, as the turn took it', {
+      type: 'user', author: 'user', source: 'user', projection: 'claimed_delivery', state: 'claimed',
+    });
+    await act(async () => tailAfter.resolve({ messages: [message('m1', 'earlier answer'), claimed], next_before_id: null }));
+    await waitFor(() => expect(sendingRows()).toHaveLength(0));
   });
 
   it('withdraws the row and shows the archived error when the chat was archived', async () => {
