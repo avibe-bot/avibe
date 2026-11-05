@@ -66,12 +66,21 @@ export function VoiceCard({
     if (running) node.scrollTop = node.scrollHeight;
     if (fade.current) fade.current.hidden = !long && node.scrollHeight <= node.clientHeight + 1;
   }, [long, running, text, stash]);
-  const reasonCopy: Record<HoldInterruptReason, string> = {
-    dropped: t('voice.interrupted.dropped'),
-    failed: t('voice.interrupted.failed'),
-    system: t('voice.interrupted.system'),
-    'send-failed': t('voice.interrupted.sendFailed'),
-  };
+  // What the card says about a cut-off take never points at words that are not there.
+  const heard = Boolean(`${text}${stash}`.trim());
+  const reasonCopy: Record<HoldInterruptReason, string> = heard
+    ? {
+        dropped: t('voice.interrupted.dropped'),
+        failed: t('voice.interrupted.failed'),
+        system: t('voice.interrupted.system'),
+        'send-failed': t('voice.interrupted.sendFailed'),
+      }
+    : {
+        dropped: t('voice.interrupted.droppedEmpty'),
+        failed: t('voice.interrupted.failedEmpty'),
+        system: t('voice.interrupted.systemEmpty'),
+        'send-failed': t('voice.interrupted.sendFailed'),
+      };
   return (
     // The page right around the card is dimmed and blurred, strongest at its edge and clear a short
     // way out (`.voice-card-halo`), so the rest of the screen stays readable while the user talks
@@ -111,7 +120,7 @@ export function VoiceCard({
                   <span className="text-muted">{stash}</span>
                 </>
               ) : (
-                <span className="text-muted">{t('pet.voice.listening')}</span>
+                <span className="text-muted">{running ? t('pet.voice.listening') : t('voice.noText')}</span>
               )}
             </p>
           </div>

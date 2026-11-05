@@ -9,6 +9,7 @@ import {
   type ShowPageVoiceSession,
 } from './showPageVoiceBridge';
 import { claimVoiceCapture } from './voiceRecording';
+import { VoiceTranscriptionError } from './voiceTranscription';
 
 type Deferred<T> = {
   promise: Promise<T>;
@@ -248,4 +249,30 @@ describe('ShowPageVoiceHost', () => {
     nextHost.dispose();
     expect(replacement.abort).toHaveBeenCalledOnce();
   });
+
+  it.each([
+    ['held speech', true, true],
+    ['was silent', false, false],
+  ])('offers a retry of an empty transcript only when the take %s', async (_case, voiced, retryable) => {
+    const events: ShowPageVoiceEvent[] = [];
+    const session = Object.assign(new FakeVoiceSession(), { voiced: vi.fn(() => voiced) });
+    const host = new ShowPageVoiceHost({
+      post: (event) => events.push(event),
+      availability: async () => ({ available: true, maxFileBytes: null }),
+      createSession: () => session,
+    });
+    host.handle({
+      type: ANNOTATION_VOICE_REQUEST_MESSAGE,
+      action: 'start',
+      requestId: 'voice-empty',
+      before: '',
+      after: '',
+    });
+    await vi.waitFor(() => expect(session.start).toHaveBeenCalledOnce());
+    session.result.reject(new VoiceTranscriptionError('empty'));
+
+    await vi.waitFor(() => expect(events.at(-1)).toMatchObject({ kind: 'error', code: 'empty', retryable }));
+    host.dispose();
+  });
 });
+

@@ -12,7 +12,9 @@ import {
   type VoiceTranscriptionSegment,
   transcribeVoiceSegments,
   VOICE_TRANSCRIPTION_TIMEOUT_MS,
+  voiceDictationAttemptTimeoutMs,
   voiceRecordingFileName,
+  VoiceTranscriptionError,
 } from './voiceTranscription';
 
 const audioBlob = () => new Blob(['audio'], { type: 'audio/mp4; codecs=mp4a.40.2' });
@@ -744,6 +746,156 @@ describe('voice transcription', () => {
       blob: segments[2]?.blob,
       sequence: 2,
       receipts: ['first', 'two'],
+    });
+  });
+
+  describe('a take is never dropped for one failed request', () => {
+    it('recognizes the retained audio again after the take came back empty, even at a segment boundary', async () => {
+      let final = 0;
+      const cloudFetch = vi.fn(async (_path: string, init?: AvibeFetchRequestInit) => {
+        const form = formOf(init);
+        if (form.get('final') === 'false') return Response.json({ receipt: `fresh-${form.get('sequence')}`, sequence: Number(form.get('sequence')) });
+        final += 1;
+        return final === 1
+          ? Response.json({ text: '', cleanup: 'fallback' })
+          : Response.json({ text: 'heard this time', cleanup: 'success' });
+      });
+      const segments: VoiceTranscriptionSegment[] = [
+        { blob: audioBlob(), sequence: 0, final: false, receipt: 'empty-receipt' },
+        { blob: null, sequence: 1, final: true },
+      ];
+      const input = { dictationId: 'dictation-empty', before: '', after: '' };
+
+      await expect(finalizeVoiceDictation(segments, input, { cloudFetch, retryDelaysMs: [] })).rejects.toMatchObject({ code: 'empty' });
+      expect(segments[0]?.receipt).toBeUndefined();
+      await expect(finalizeVoiceDictation(segments, input, { cloudFetch, retryDelaysMs: [] })).resolves.toEqual({ text: 'heard this time', cleanup: 'success' });
+      expect(segments[0]?.receipt).toBe('fresh-0');
+    });
+
+    it('starts no new attempt for a failed segment after the window of the take, but still sends one never tried', async () => {
+      const cloudFetch = vi.fn(async () => Response.json({ receipt: 'receipt-2', sequence: 2 }));
+      const segments: VoiceTranscriptionSegment[] = [
+        { blob: audioBlob(), sequence: 0, final: false, receipt: 'receipt-0' },
+        { blob: audioBlob(), sequence: 1, final: false, error: new VoiceTranscriptionError('unavailable') },
+        { blob: audioBlob(), sequence: 2, final: false },
+        { blob: null, sequence: 3, final: true },
+      ];
+
+      await expect(finalizeVoiceDictation(segments, {
+        dictationId: 'dictation-window',
+        before: '',
+        after: '',
+      }, { cloudFetch, retryUntil: Date.now() - 1 })).rejects.toMatchObject({ code: 'unavailable' });
+
+      expect(cloudFetch).toHaveBeenCalledOnce();
+      expect(formOf(cloudFetch.mock.calls[0]?.[1] as AvibeFetchRequestInit | undefined).get('sequence')).toBe('2');
+      expect(segments[2]?.receipt).toBe('receipt-2');
+    });
+
+    const minuteOfAudio = () => new Blob([new Uint8Array(1_920_044)], { type: 'audio/wav' });
+
+    it('sends a segment through the local relay when the cloud request never got an answer', async () => {
+      const cloudFetch = vi.fn().mockRejectedValue(new TypeError('Load failed'));
+      const localFetch = vi.fn().mockResolvedValue(Response.json({ receipt: 'relay-receipt', sequence: 0 }));
+      const segments: VoiceTranscriptionSegment[] = [{ blob: audioBlob(), sequence: 0, final: false }];
+
+      await transcribeVoiceSegments(segments, { cloudFetch, localFetch, dictationId: 'dictation-relay', retryDelaysMs: [] });
+
+      expect(localFetch).toHaveBeenCalledWith('/api/asr/transcribe', expect.anything());
+      expect(segments[0]).toMatchObject({ receipt: 'relay-receipt', error: undefined });
+    });
+
+    it('tries a segment again after the network or the service fails, and keeps the receipt', async () => {
+      const cloudFetch = vi.fn()
+        .mockResolvedValueOnce(Response.json({ error: 'asr_unavailable' }, { status: 503 }))
+        .mockResolvedValueOnce(Response.json({ error: 'transcription_failed' }, { status: 502 }))
+        .mockResolvedValueOnce(Response.json({ receipt: 'third-time', sequence: 0 }));
+      const segments: VoiceTranscriptionSegment[] = [{ blob: audioBlob(), sequence: 0, final: false }];
+
+      await transcribeVoiceSegments(segments, { cloudFetch, dictationId: 'dictation-flaky', retryDelaysMs: [0, 0] });
+
+      expect(cloudFetch).toHaveBeenCalledTimes(3);
+      expect(segments[0]).toMatchObject({ receipt: 'third-time', error: undefined, attemptCount: 3 });
+    });
+
+    it('does not repeat a request that cannot change its answer', async () => {
+      const cloudFetch = vi.fn().mockResolvedValue(Response.json({ error: 'file_too_large' }, { status: 413 }));
+      const segments: VoiceTranscriptionSegment[] = [{ blob: audioBlob(), sequence: 0, final: false }];
+
+      await transcribeVoiceSegments(segments, { cloudFetch, dictationId: 'dictation-large', retryDelaysMs: [0, 0] });
+
+      expect(cloudFetch).toHaveBeenCalledOnce();
+      expect(segments[0]?.error).toMatchObject({ code: 'too_large' });
+    });
+
+    it('fails at once, without a request, while the browser has no network', async () => {
+      const cloudFetch = vi.fn();
+      const localFetch = vi.fn();
+      const segments: VoiceTranscriptionSegment[] = [{ blob: audioBlob(), sequence: 0, final: false }];
+
+      await transcribeVoiceSegments(segments, { cloudFetch, localFetch, dictationId: 'dictation-offline', online: () => false });
+
+      expect(cloudFetch).not.toHaveBeenCalled();
+      expect(localFetch).not.toHaveBeenCalled();
+      expect(segments[0]?.error).toMatchObject({ code: 'unavailable' });
+    });
+
+    it('gives a hung dictation request its own deadline, sized to what it uploads', async () => {
+      vi.useFakeTimers();
+      try {
+        const cloudFetch = vi.fn((_path: string, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+        }));
+        const blob = minuteOfAudio();
+        const segments: VoiceTranscriptionSegment[] = [{ blob, sequence: 0, final: false }];
+        const deadline = voiceDictationAttemptTimeoutMs(blob.size, false);
+        expect(deadline).toBeLessThan(VOICE_TRANSCRIPTION_TIMEOUT_MS / 3);
+
+        const transcription = transcribeVoiceSegments(segments, { cloudFetch, dictationId: 'dictation-hung', retryDelaysMs: [] });
+        await vi.advanceTimersByTimeAsync(deadline);
+        await transcription;
+
+        expect(segments[0]?.error).toMatchObject({ code: 'timeout' });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('sends a failed segment again before the last one, so one failed minute does not void the take', async () => {
+      const cloudFetch = vi.fn(async (_path: string, init?: AvibeFetchRequestInit) => {
+        const form = formOf(init);
+        if (form.get('final') === 'false') return Response.json({ receipt: 'receipt-1', sequence: 1 });
+        expect(form.getAll('receipt')).toEqual(['receipt-0', 'receipt-1']);
+        return Response.json({ text: 'all of it', cleanup: 'success' });
+      });
+      const segments: VoiceTranscriptionSegment[] = [
+        { blob: audioBlob(), sequence: 0, final: false, receipt: 'receipt-0' },
+        { blob: audioBlob(), sequence: 1, final: false, error: new VoiceTranscriptionError('unavailable') },
+        { blob: audioBlob(), sequence: 2, final: true },
+      ];
+
+      await expect(finalizeVoiceDictation(segments, {
+        dictationId: 'dictation-resend',
+        before: '',
+        after: '',
+      }, { cloudFetch, retryDelaysMs: [] })).resolves.toEqual({ text: 'all of it', cleanup: 'success' });
+      expect(cloudFetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('tries the last segment again after a transient failure', async () => {
+      const cloudFetch = vi.fn()
+        .mockRejectedValueOnce(new TypeError('Load failed'))
+        .mockResolvedValueOnce(Response.json({ text: 'landed', cleanup: 'success' }));
+      const localFetch = vi.fn().mockRejectedValue(new TypeError('Load failed'));
+      const segments: VoiceTranscriptionSegment[] = [{ blob: audioBlob(), sequence: 0, final: true }];
+
+      await expect(finalizeVoiceDictation(segments, {
+        dictationId: 'dictation-final-retry',
+        before: '',
+        after: '',
+      }, { cloudFetch, localFetch, retryDelaysMs: [0] })).resolves.toEqual({ text: 'landed', cleanup: 'success' });
+      expect(cloudFetch).toHaveBeenCalledTimes(2);
+      expect(localFetch).toHaveBeenCalledOnce();
     });
   });
 });

@@ -22,6 +22,7 @@ type Fake = {
   abort: ReturnType<typeof vi.fn>;
   canRetry: ReturnType<typeof vi.fn>;
   retry: ReturnType<typeof vi.fn>;
+  voiced: ReturnType<typeof vi.fn>;
 };
 
 const pipeline = vi.hoisted(() => ({
@@ -59,6 +60,7 @@ vi.mock('../../lib/showPageVoiceDictation', () => ({
         abort: vi.fn(() => reject(new VoiceTranscriptionError('cancelled'))),
         canRetry: vi.fn(() => true),
         retry: vi.fn(async () => 'heard again'),
+        voiced: vi.fn(() => false),
       };
       pipeline.takes.push(take);
       return take;
@@ -302,6 +304,43 @@ describe('useHoldToTalk', () => {
     await flush();
     expect(send).not.toHaveBeenCalled();
     expect(hold.outcome).toBe('too-short');
+  });
+
+  it('keeps a take that held speech when nothing was recognized, and offers to retry it', async () => {
+    const el = await mount();
+    await holdFor(el);
+    await elapse(3_000);
+    up(el);
+    pipeline.takes[0].voiced.mockReturnValue(true);
+    await act(async () => pipeline.takes[0].reject(new VoiceTranscriptionError('empty')));
+    await flush();
+
+    expect(send).not.toHaveBeenCalled();
+    expect(hold.phase).toBe('interrupted');
+    expect(hold.interruptReason).toBe('failed');
+    expect(hold.canRetry).toBe(true);
+    expect(pipeline.takes[0].abort).not.toHaveBeenCalled();
+  });
+
+  it('says the network dropped again when a retry cannot reach the service, and keeps the take', async () => {
+    const el = await mount();
+    await holdFor(el);
+    await elapse(1_000);
+    up(el);
+    await act(async () => pipeline.takes[0].reject(new VoiceTranscriptionError('unavailable')));
+    await flush();
+    expect(hold.interruptReason).toBe('dropped');
+
+    pipeline.takes[0].retry.mockRejectedValueOnce(new VoiceTranscriptionError('unavailable'));
+    await act(async () => hold.retry());
+    await flush();
+    expect(hold.phase).toBe('interrupted');
+    expect(hold.interruptReason).toBe('dropped');
+    expect(hold.canRetry).toBe(true);
+
+    await act(async () => hold.retry());
+    await flush();
+    expect(send).toHaveBeenCalledWith('heard again', { input: 'voice' });
   });
 
   it('keeps what was heard when the take is cut off, and sends it on request', async () => {
