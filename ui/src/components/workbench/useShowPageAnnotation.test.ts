@@ -4,11 +4,30 @@ import { act, renderHook } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ShowPageVoiceHost } from '../../lib/showPageVoiceBridge';
-import { showPageSessionId, useShowPageAnnotation } from './useShowPageAnnotation';
+import { useShowPageAnnotation } from './useShowPageAnnotation';
+
+// The page's takes, at the dictation's module boundary: what each was told to keep.
+const dictations = vi.hoisted(() => [] as { keep?: unknown }[]);
+vi.mock('../../lib/showPageVoiceDictation', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../lib/showPageVoiceDictation')>(),
+  ShowPageVoiceDictation: class {
+    done = new Promise<string>(() => undefined);
+    constructor(input: { keep?: unknown }) {
+      dictations.push(input);
+    }
+    start = async () => undefined;
+    finish = () => undefined;
+    abort = () => undefined;
+    detach = () => undefined;
+    landed = () => undefined;
+    canRetry = () => false;
+  },
+}));
 
 let teardown: (() => void) | null = null;
 
 afterEach(() => {
+  dictations.length = 0;
   teardown?.();
   teardown = null;
   document.body.replaceChildren();
@@ -465,12 +484,36 @@ describe('useShowPageAnnotation host Escape forwarding', () => {
   });
 });
 
-describe('showPageSessionId', () => {
-  it('reads the conversation from a private page address only', () => {
-    expect(showPageSessionId('/show/ses_cso/')).toBe('ses_cso');
-    expect(showPageSessionId(`${window.location.origin}/show/a%20b/projects/alpha?mode=edit`)).toBe('a b');
-    // A public page carries a share id, not the conversation: the caller passes it.
-    expect(showPageSessionId('/p/share_123/')).toBeNull();
+describe('useShowPageAnnotation keeps what is said into a page', () => {
+  it.each([
+    ['a private page, for the conversation in its address', '/show/a%20b/projects/alpha?mode=edit', undefined, 'a b'],
+    ['a public page, for the conversation its host names', '/p/share_123/', 'ses_owner', 'ses_owner'],
+    ['a public page no conversation is named for: not kept', '/p/share_123/', undefined, null],
+  ])('%s', async (_label, src, keepTarget, kept) => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      JSON.stringify({ available: true, max_file_bytes: 1_000_000 }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ));
+    const iframe = document.createElement('iframe');
+    iframe.setAttribute('src', src);
+    document.body.append(iframe);
+    const hook = renderHook(() => useShowPageAnnotation(src, keepTarget));
+    act(() => hook.result.current.setIframe(iframe));
+    teardown = () => {
+      act(() => hook.result.current.setIframe(null));
+      hook.unmount();
+      iframe.remove();
+    };
+
+    dispatchFrameMessage(iframe, {
+      type: 'avibe:annotation:voice:request',
+      action: 'start',
+      requestId: 'voice-take',
+      before: '',
+      after: '',
+    });
+    await vi.waitFor(() => expect(dictations).toHaveLength(1));
+    expect(dictations[0]?.keep ?? null).toEqual(kept ? { target: kept, intent: 'insert' } : null);
   });
 });
 

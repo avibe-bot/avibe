@@ -4,7 +4,7 @@ import 'fake-indexeddb/auto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { setLocalSnapshotPrincipal } from './localSnapshots';
-import { ShowPageVoiceDictation, VOICE_LIVE_SILENT_SPEECH_MS } from './showPageVoiceDictation';
+import { ShowPageVoiceDictation } from './showPageVoiceDictation';
 import { VOICE_LEVEL_INTERVAL_MS, type VoiceRecordingPipelineOptions } from './voiceRecording';
 import type { VoiceRealtimeOptions } from './voiceRealtime';
 import { deleteVoiceTake, isVoiceTakeLive, readVoiceTakeAudio, readVoiceTakes } from './voiceTakeStore';
@@ -143,7 +143,8 @@ describe('ShowPageVoiceDictation says when live recognition is not working', () 
     take.pipeline().onSegment(new Blob(['minute'], { type: 'audio/wav' }), { durationMs: 60_000, final: false });
     expect(take.enqueued).toEqual([]);
 
-    speak(take.pipeline(), VOICE_LIVE_SILENT_SPEECH_MS - 500);
+    // Four seconds of speech with no preview: not after three and a half, but after four.
+    speak(take.pipeline(), 3_500);
     expect(onLiveChange).not.toHaveBeenCalled();
     speak(take.pipeline(), 600);
     expect(onLiveChange).toHaveBeenCalledWith(false);

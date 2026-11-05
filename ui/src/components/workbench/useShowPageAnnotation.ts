@@ -72,7 +72,7 @@ function annotationShortcutBlocked(target: Element | null): boolean {
  * and so one session's state never briefly shows over another's page.
  */
 /** The Session a Show Page belongs to, from its address (`/show/<session>/…`). */
-export const showPageSessionId = (src: string): string | null => {
+const showPageSessionId = (src: string): string | null => {
   try {
     const match = /^\/show\/([^/]+)\//.exec(new URL(src, window.location.href).pathname);
     return match ? decodeURIComponent(match[1]) : null;

@@ -55,7 +55,7 @@ export type ShowPageVoiceDictationInput = {
 
 /** Speech heard without one live preview for this long: the realtime path is taken as not
  *  working, and the take goes on over HTTP. */
-export const VOICE_LIVE_SILENT_SPEECH_MS = 4_000;
+const VOICE_LIVE_SILENT_SPEECH_MS = 4_000;
 
 export type ShowPageVoiceDictationDependencies = {
   getUserMedia?: () => Promise<MediaStream>;
