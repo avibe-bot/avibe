@@ -543,7 +543,7 @@ def _apply_entry(servers: dict[str, Any], key: ScopedName, entry: dict[str, Any]
     A transport change (command <-> url) also drops the fields of the old kind.
     """
 
-    if key.name in servers and not replace:
+    if key.name in servers and not replace and not repository.is_project(key):
         raise McpHubError("exists", f"MCP server {key.name} already exists.")
     old = servers.get(key.name)
     old = old if isinstance(old, dict) else {}

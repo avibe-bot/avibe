@@ -67,6 +67,14 @@ def is_project(name: object) -> bool:
     return getattr(name, "project_root", None) is not None
 
 
+def is_owned(name: object) -> bool:
+    """Whether a scoped name is backed by an Avibe-owned definition."""
+
+    if is_project(name):
+        return True
+    return read_avibe_definition(str(name)) is not None
+
+
 def _not_found(name: str) -> McpHubError:
     return McpHubError("not_found", f"MCP server {str(name)!r} does not exist.", hint="vibe mcp --list")
 

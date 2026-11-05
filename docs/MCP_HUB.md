@@ -21,7 +21,7 @@ Controller startup runs one discovery pass in the background. To run it now:
 vibe mcp-discover
 ```
 
-Avibe-owned definitions remain listed if discovery fails, with no callable tools. Native discovery failures are omitted; `vibe mcp-discover` prints the reason. Concurrent passes join.
+Avibe-owned definitions remain listed if discovery fails, with no callable tools. Native discovery failures are omitted; `vibe mcp-discover` prints the reason. A discovery requested from a project directory refreshes both the global candidates and that project's approved, configured servers. Concurrent global passes join.
 
 Refresh one server:
 

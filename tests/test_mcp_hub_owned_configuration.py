@@ -197,7 +197,7 @@ def test_released_normalized_global_files_load_without_rewrite(tmp_path, transpo
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('owned', ['global'], indirect=True)
+@pytest.mark.parametrize('owned', ['global', 'project'], indirect=True)
 @pytest.mark.parametrize('entry', [
     {'url': 'https://example.invalid/mcp', 'headers': {'Authorization': 'Bearer ${TOKEN}', 'X-Mode': 'readonly'}},
     {'command': 'fixture-server', 'env': {'AUTH': 'Bearer ${TOKEN}', 'MODE': 'readonly'}},
