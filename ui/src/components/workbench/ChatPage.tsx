@@ -2676,7 +2676,11 @@ export const ChatPage: React.FC = () => {
   // is refused, which this effect sees as unread again. So a refusal is
   // remembered for that count: the next try waits for a new count, another
   // session, or the view closing and opening again, instead of re-sending at
-  // once forever (an offline fetch fails without a round trip).
+  // once forever (an offline fetch fails without a round trip). Any read seen
+  // since (another tab, "Mark all read", a later write of this effect) ends the
+  // unread state the refusal was about, so it is forgotten: a later reply that
+  // happens to bring the same count back is new. The refusal is recorded after
+  // the Inbox has put the count back, so its own clear is never seen after it.
   const refusedReadRef = useRef<{ sessionId: string; count: number } | null>(null);
   useEffect(() => {
     // Org members without chat capability are viewers; viewing must not
@@ -2695,11 +2699,15 @@ export const ChatPage: React.FC = () => {
       return;
     }
     const count = sessionId ? unreadBySession[sessionId] ?? 0 : 0;
-    if (!sessionId || count <= 0) return;
+    if (!sessionId || count <= 0) {
+      refusedReadRef.current = null;
+      return;
+    }
     const refused = refusedReadRef.current;
     if (refused?.sessionId === sessionId && refused.count === count) return;
     void markInboxRead(sessionId).then((applied) => {
-      refusedReadRef.current = applied ? null : { sessionId, count };
+      if (!applied) refusedReadRef.current = { sessionId, count };
+      else if (refusedReadRef.current?.sessionId === sessionId) refusedReadRef.current = null;
     });
   }, [
     sessionId,

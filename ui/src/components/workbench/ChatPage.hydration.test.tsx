@@ -274,7 +274,7 @@ describe('ChatPage transcript hydration', () => {
     Reflect.deleteProperty(document, 'hasFocus');
   });
 
-  it('waits for a new count before marking a chat read again after the write is refused', async () => {
+  it('waits for a new count or a read elsewhere before marking a chat read again after the write is refused', async () => {
     // The Inbox clears the count at once and puts it back when the write is
     // refused; the open chat must not read that as a new unread and re-send.
     mocks.realInbox = true;
@@ -312,11 +312,32 @@ describe('ChatPage transcript hydration', () => {
     });
     expect(mocks.api.markSessionRead).toHaveBeenCalledTimes(1);
 
-    const reply = { session_id: 'session-new', unread_count: 3, last_activity_at: '2026-08-15T00:01:00Z' };
-    act(() => {
-      for (const events of handlers) events.onInboxSessionUpdated?.(reply as InboxSession);
-    });
+    const reply = (unread: number, at: string) => {
+      const row = { session_id: 'session-new', unread_count: unread, last_activity_at: at };
+      act(() => {
+        for (const events of handlers) events.onInboxSessionUpdated?.(row as InboxSession);
+      });
+    };
+    reply(3, '2026-08-15T00:01:00Z');
     await waitFor(() => expect(mocks.api.markSessionRead).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(shown.unread).toEqual({ 'session-new': 3 }));
+
+    // Read elsewhere (another tab, "Mark all read"): the refused unread state is
+    // gone, so a later reply that brings the same count back is new.
+    act(() => {
+      for (const events of handlers) {
+        events.onInboxUnreadChanged?.({
+          session_id: 'session-new',
+          scope_id: null,
+          delta: -3,
+          unread_counts: {},
+          unread_by_session: {},
+        } as never);
+      }
+    });
+    await waitFor(() => expect(shown.unread).toEqual({}));
+    reply(3, '2026-08-15T00:02:00Z');
+    await waitFor(() => expect(mocks.api.markSessionRead).toHaveBeenCalledTimes(3));
   });
 
   it.each([
