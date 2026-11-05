@@ -45,7 +45,7 @@ const keepTake = async (id: string, target = 'ses_a') => {
   keeper.segment({ sequence: 1, final: false, durationMs: 60_000, overlapMs: 500 }, wav('minute two'));
   keeper.segment({ sequence: 2, final: true, durationMs: 23_000, overlapMs: 500 }, wav('tail'));
   keeper.pending();
-  await idle();
+  await keeper.written();
   return keeper;
 };
 
@@ -70,11 +70,11 @@ describe('voice take store', () => {
     expect(isVoiceTakeLive('take-1')).toBe(true);
 
     keeper.transcribed('everything that was said');
-    await idle();
+    await keeper.written();
     expect((await readVoiceTakes('ses_a'))[0]).toMatchObject({ status: 'transcribed', text: 'everything that was said' });
 
     keeper.forget();
-    await idle();
+    await keeper.written();
     expect(await readVoiceTakes()).toEqual([]);
     expect((await readVoiceTakeAudio('take-1')).size).toBe(0);
     expect(isVoiceTakeLive('take-1')).toBe(false);
@@ -213,13 +213,48 @@ describe('voice take store', () => {
   });
 
   it('finalizes a take the page lost while it recorded with a finalize-only request', () => {
-    const segments = keptVoiceSegments(
+    const { segments, truncated } = keptVoiceSegments(
       take('crashed', { status: 'recording', segments: [{ sequence: 0, final: false, durationMs: 60_000 }] }),
       new Map([[0, wav('minute one')]]),
     );
+    expect(truncated).toBe(false);
     expect(segments.map(({ sequence, final, blob }) => ({ sequence, final, blob: blob !== null }))).toEqual([
       { sequence: 0, final: false, blob: true },
       { sequence: 1, final: true, blob: false },
     ]);
+  });
+
+  it('never takes audio that did not reach the device for the end of the take, and says the rest is cut', () => {
+    const { segments, truncated } = keptVoiceSegments(
+      take('cut', {
+        segments: [
+          { sequence: 0, final: false, durationMs: 60_000 },
+          { sequence: 1, final: false, durationMs: 60_000 },
+          { sequence: 2, final: true, durationMs: 20_000 },
+        ],
+      }),
+      // The page died between the last segment's details and its bytes.
+      new Map([[0, wav('minute one')], [1, wav('minute two')]]),
+    );
+    expect(truncated).toBe(true);
+    expect(segments.map(({ sequence, final, blob }) => ({ sequence, final, blob: blob !== null }))).toEqual([
+      { sequence: 0, final: false, blob: true },
+      { sequence: 1, final: false, blob: true },
+      { sequence: 2, final: true, blob: false },
+    ]);
+  });
+
+  it('keeps a take another tab discarded discarded, while its recording here goes on', async () => {
+    setLocalSnapshotPrincipal('local');
+    const keeper = new VoiceTakeKeeper('discarded-elsewhere', { target: 'ses_a', intent: 'send' });
+    keeper.begin();
+    keeper.segment({ sequence: 0, final: false, durationMs: 60_000 }, wav('minute one'));
+    await idle();
+    // Another tab's pending item discards it.
+    await deleteVoiceTake('discarded-elsewhere');
+    keeper.segment({ sequence: 1, final: true, durationMs: 9_000 }, wav('tail'));
+    keeper.transcribed('words');
+    await idle();
+    expect(await readVoiceTakes()).toEqual([]);
   });
 });

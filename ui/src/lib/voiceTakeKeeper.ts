@@ -3,6 +3,7 @@ import {
   deleteVoiceTake,
   saveVoiceTake,
   saveVoiceTakeAudio,
+  updateVoiceTake,
   setVoiceTakeLive,
   voiceTakeFence,
   type VoiceTake,
@@ -32,6 +33,9 @@ export class VoiceTakeKeeper {
   private fence: VoiceTakeFence | null = null;
   private writes: Promise<unknown> = Promise.resolve();
   private ended = false;
+  /** The take's record was written once: every later write only updates it, so a take another
+   *  tab discarded or sent meanwhile stays gone. */
+  private created = false;
 
   constructor(id: string, keep: VoiceTakeKeep) {
     const now = Date.now();
@@ -49,6 +53,11 @@ export class VoiceTakeKeeper {
 
   get id(): string {
     return this.take.id;
+  }
+
+  /** Resolves once every write queued so far has landed (or failed). */
+  written(): Promise<void> {
+    return this.writes.then(() => undefined);
   }
 
   /** The take started recording: it is stored, and held by its surface. */
@@ -112,7 +121,11 @@ export class VoiceTakeKeeper {
     if (this.ended) return;
     this.take.updatedAt = Date.now();
     const snapshot: VoiceTake = { ...this.take, segments: [...this.take.segments] };
-    this.queue(() => saveVoiceTake(snapshot, this.currentFence()));
+    const create = !this.created;
+    this.created = true;
+    this.queue(() => (create
+      ? saveVoiceTake(snapshot, this.currentFence())
+      : updateVoiceTake(snapshot, this.currentFence())));
   }
 
   /** The fence from `begin`, or the reader's now for a keeper that never began. */

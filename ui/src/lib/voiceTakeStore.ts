@@ -67,6 +67,9 @@ export type VoiceTake = {
    *  landed yet. */
   status: 'recording' | 'pending' | 'transcribed';
   text?: string;
+  /** Some recorded audio never reached the device (the page died between a segment and its
+   *  bytes): `text` holds what was kept, up to the first missing part. */
+  truncated?: boolean;
   segments: VoiceTakeSegmentInfo[];
 };
 

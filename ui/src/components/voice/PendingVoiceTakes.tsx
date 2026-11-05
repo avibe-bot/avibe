@@ -32,7 +32,7 @@ const clock = (ms: number) => {
 
 /** One kept take as drawn: what it holds, and what can be done with it. */
 export type PendingVoiceItemProps = {
-  take: Pick<VoiceTake, 'status' | 'text' | 'label' | 'intent' | 'segments'>;
+  take: Pick<VoiceTake, 'status' | 'text' | 'label' | 'intent' | 'segments' | 'truncated'>;
   /** Being transcribed now. */
   retrying?: boolean;
   /** The last attempt failed (as opposed to never tried in this page). */
@@ -91,6 +91,7 @@ export function PendingVoiceItem({ take, retrying = false, failed = false, onRet
       {ready ? (
         <>
           <p className="line-clamp-2 pr-1.5 text-sm leading-relaxed text-foreground">{take.text}</p>
+          {take.truncated && <p className="pr-1.5 text-xs leading-relaxed text-gold-ink">{t('voice.pending.truncated')}</p>}
           <div className="flex items-center justify-end gap-2">
             <span className="mr-auto -ml-2">{discard}</span>
             <Button type="button" variant={onSend ? 'ghost' : 'brand'} size="sm" className="gap-1.5" onClick={onInsert}>

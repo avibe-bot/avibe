@@ -77,18 +77,19 @@ describe('ShowPageVoiceDictation keeps its take', () => {
     const take = harness();
     await take.dictation.start();
     take.pipeline().onSegment(new Blob(['minute'], { type: 'audio/wav' }), { durationMs: 60_000, final: false });
-    await idle();
-    expect((await readVoiceTakes('ses_a'))[0]).toMatchObject({ id: 'kept-take', status: 'recording' });
-    expect(await (await readVoiceTakeAudio('kept-take')).get(0)?.text()).toBe('minute');
+    await vi.waitFor(async () => {
+      expect((await readVoiceTakes('ses_a'))[0]).toMatchObject({ id: 'kept-take', status: 'recording' });
+      expect(await (await readVoiceTakeAudio('kept-take')).get(0)?.text()).toBe('minute');
+    });
 
     take.dictation.finish();
     await expect(take.dictation.done).resolves.toBe('every word');
-    await idle();
-    expect((await readVoiceTakes('ses_a'))[0]).toMatchObject({ status: 'transcribed', text: 'every word' });
+    await vi.waitFor(async () => {
+      expect((await readVoiceTakes('ses_a'))[0]).toMatchObject({ status: 'transcribed', text: 'every word' });
+    });
 
     take.dictation.landed();
-    await idle();
-    expect(await readVoiceTakes()).toEqual([]);
+    await vi.waitFor(async () => expect(await readVoiceTakes()).toEqual([]));
   });
 
   it('keeps a take that could not be transcribed, with its audio, for later', async () => {
@@ -97,9 +98,10 @@ describe('ShowPageVoiceDictation keeps its take', () => {
     await take.dictation.start();
     take.dictation.finish();
     await expect(take.dictation.done).rejects.toMatchObject({ code: 'unavailable' });
-    await idle();
-    expect((await readVoiceTakes('ses_a'))[0]).toMatchObject({ status: 'pending' });
-    expect(await (await readVoiceTakeAudio('kept-take')).get(0)?.text()).toBe('tail');
+    await vi.waitFor(async () => {
+      expect((await readVoiceTakes('ses_a'))[0]).toMatchObject({ status: 'pending' });
+      expect(await (await readVoiceTakeAudio('kept-take')).get(0)?.text()).toBe('tail');
+    });
   });
 
   it('finishes a take whose surface went away, and leaves it on the device for the pending items', async () => {
@@ -111,9 +113,10 @@ describe('ShowPageVoiceDictation keeps its take', () => {
     take.dictation.detach();
     expect(take.finish).toHaveBeenCalledOnce();
     await take.dictation.done.catch(() => undefined);
-    await idle();
-    expect(isVoiceTakeLive('kept-take')).toBe(false);
-    expect((await readVoiceTakes('ses_a'))[0]).toMatchObject({ status: 'pending' });
+    await vi.waitFor(async () => {
+      expect(isVoiceTakeLive('kept-take')).toBe(false);
+      expect((await readVoiceTakes('ses_a'))[0]).toMatchObject({ status: 'pending' });
+    });
   });
 
   it('forgets a take the reader discards', async () => {
@@ -123,7 +126,7 @@ describe('ShowPageVoiceDictation keeps its take', () => {
     take.pipeline().onSegment(new Blob(['minute'], { type: 'audio/wav' }), { durationMs: 60_000, final: false });
     take.dictation.abort();
     await idle();
-    expect(await readVoiceTakes()).toEqual([]);
+    await vi.waitFor(async () => expect(await readVoiceTakes()).toEqual([]));
   });
 });
 

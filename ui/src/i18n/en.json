@@ -6851,7 +6851,8 @@
       "retrying": "Transcribing…",
       "failed": "Couldn't transcribe it; the recording is kept on this device.",
       "lost": "The recording couldn't be saved on this device.",
-      "insert": "Put in the draft"
+      "insert": "Put in the draft",
+      "truncated": "The end of the recording wasn't saved on this device; this is the part that was."
     }
   },
   "mcpHub": {

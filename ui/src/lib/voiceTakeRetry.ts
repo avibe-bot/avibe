@@ -30,24 +30,38 @@ export function subscribeVoiceTakeRetries(listener: () => void): () => void {
   };
 }
 
-/** The segments a kept take can be finalized from: its stored audio, in order, ending with
- *  the last segment, or a finalize-only marker for a take the page lost while it recorded. */
+/**
+ * The segments a kept take can be finalized from: its stored audio, in order, then the last
+ * segment or a finalize-only marker for a take the page lost while it recorded. Only a segment
+ * recorded as empty may lack audio: one whose bytes never reached the device ends what can be
+ * transcribed there (`truncated`), and is never taken for the end of the take.
+ */
 export const keptVoiceSegments = (
   take: Pick<VoiceTake, 'segments'>,
   audio: Map<number, Blob | null>,
-): VoiceTranscriptionSegment[] => {
+): { segments: VoiceTranscriptionSegment[]; truncated: boolean } => {
   const ordered = [...take.segments].sort((left, right) => left.sequence - right.sequence);
-  const segments: VoiceTranscriptionSegment[] = ordered.map((segment) => ({
-    blob: audio.get(segment.sequence) ?? null,
-    sequence: segment.sequence,
-    final: segment.final,
-    durationMs: segment.durationMs,
-    ...(segment.overlapMs ? { overlapMs: segment.overlapMs } : {}),
-  }));
+  const segments: VoiceTranscriptionSegment[] = [];
+  let truncated = false;
+  for (const segment of ordered) {
+    const blob = audio.get(segment.sequence) ?? null;
+    if (!blob && !segment.empty) {
+      truncated = true;
+      break;
+    }
+    segments.push({
+      blob,
+      sequence: segment.sequence,
+      final: segment.final,
+      durationMs: segment.durationMs,
+      ...(segment.overlapMs ? { overlapMs: segment.overlapMs } : {}),
+    });
+    if (segment.final) break;
+  }
   if (segments.length && !segments.at(-1)?.final) {
     segments.push({ blob: null, sequence: segments.length, final: true, durationMs: 0 });
   }
-  return segments;
+  return { segments, truncated };
 };
 
 /** Whether a kept take holds audio to transcribe at all. */
@@ -69,13 +83,13 @@ export function retryKeptVoiceTake(
   const readAudio = dependencies.readAudio ?? readVoiceTakeAudio;
   const save = dependencies.save ?? updateVoiceTake;
   const run = (async () => {
-    const segments = keptVoiceSegments(take, await readAudio(take.id));
+    const { segments, truncated } = keptVoiceSegments(take, await readAudio(take.id));
     if (!segments.some((segment) => segment.blob)) throw new VoiceTranscriptionError('failed');
     try {
       const result = await finalize(segments, { dictationId: take.id, before: '', after: '' }, {
         retryUntil: Date.now() + VOICE_SETTLE_RETRY_WINDOW_MS,
       });
-      await save({ ...take, status: 'transcribed', text: result.text, updatedAt: Date.now() });
+      await save({ ...take, status: 'transcribed', text: result.text, truncated, updatedAt: Date.now() });
       return result.text;
     } catch (error) {
       await save({ ...take, status: 'pending', text: undefined, updatedAt: Date.now() });
