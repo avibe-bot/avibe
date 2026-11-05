@@ -711,6 +711,36 @@ def test_route_enqueues_when_turn_in_progress(isolated_state, tmp_path):
     assert sent["user_message_id"] == body["id"]
 
 
+def test_queued_send_keeps_its_client_message_id_on_the_queue_row(isolated_state, tmp_path):
+    """Scenario: the Web chat draws a message sent while the agent is busy in the
+    queue strip at once, and recognises the server's queue row by
+    ``metadata.client_message_id``, whether the POST answer or a queue read
+    lands first. Both carry it."""
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+
+    async def dispatch(payload):
+        settled = _settle_reserved_delivery(payload, state="queued")
+        return {"status_code": 202, "body": {"ok": True, "queued": True, "delivery_state": settled["state"]}}
+
+    with patch("vibe.internal_client.dispatch_async", AsyncMock(side_effect=dispatch)):
+        client = app.test_client()
+        response = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"text": "while busy", "metadata": {"client_message_id": "client-2"}},
+            headers=csrf_headers(client),
+        )
+    assert response.status_code == 202
+    assert response.get_json()["metadata"]["client_message_id"] == "client-2"
+
+    queue = client.get(f"/api/sessions/{session_id}/queue")
+    assert queue.status_code == 200
+    [row] = queue.get_json()["queued"]
+    assert row["id"] == response.get_json()["id"]
+    assert row["metadata"]["client_message_id"] == "client-2"
+
+
 @pytest.mark.parametrize(
     ("error_kind", "expected_status", "expected_error", "expected_delivery_state"),
     (
