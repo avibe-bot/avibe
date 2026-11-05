@@ -85,6 +85,7 @@ describe('Inbox previews', () => {
 
   const cap = INBOX_PREVIEW_MAX_CHARS;
   const paragraph = (length: number) => 'word '.repeat(Math.ceil(length / 5)).slice(0, length);
+  const later = `\n\n${paragraph(cap)}`;
 
   it.each([
     {
@@ -93,38 +94,63 @@ describe('Inbox previews', () => {
       expected: paragraph(cap),
     },
     {
-      name: 'keeps the start of a reply past the cap, cutting inside a line',
-      text: `${paragraph(100)}\n${paragraph(cap * 3)}`,
-      expected: `${paragraph(100)}\n${paragraph(cap * 3)}`.slice(0, cap),
+      name: 'keeps the blocks through the one that holds the cap',
+      text: `${paragraph(500)}\n\n${paragraph(1000)}${later}`,
+      expected: `${paragraph(500)}\n\n${paragraph(1000)}\n`,
     },
     {
       name: 'keeps the paragraph under a short heading',
-      text: `## Summary\n\n${paragraph(cap * 2)}`,
-      expected: `## Summary\n\n${paragraph(cap * 2)}`.slice(0, cap),
+      text: `## Summary\n\n${paragraph(cap * 2)}${later}`,
+      expected: `## Summary\n\n${paragraph(cap * 2)}\n`,
     },
     {
       name: 'keeps the paragraph after a leading blank line',
-      text: `\n${paragraph(cap * 2)}`,
-      expected: `\n${paragraph(cap * 2)}`.slice(0, cap),
+      text: `\n${paragraph(cap * 2)}${later}`,
+      expected: `\n${paragraph(cap * 2)}\n`,
     },
     {
-      name: 'never splits a surrogate pair',
-      text: `${'y'.repeat(cap - 1)}😀${'y'.repeat(50)}`,
-      expected: 'y'.repeat(cap - 1),
+      name: 'keeps a link whose destination runs past the cap',
+      text: `Download [the build](https://example.com/${'a'.repeat(cap * 2)}) now.${later}`,
+      expected: `Download [the build](https://example.com/${'a'.repeat(cap * 2)}) now.\n`,
+    },
+    {
+      name: 'keeps a data-URL image that runs past the cap',
+      text: `![chart](data:image/png;base64,${'A'.repeat(cap * 3)})${later}`,
+      expected: `![chart](data:image/png;base64,${'A'.repeat(cap * 3)})\n`,
+    },
+    {
+      name: 'keeps emphasis that closes on a later line of the same paragraph',
+      text: `**${paragraph(cap)}\nstill bold** done.${later}`,
+      expected: `**${paragraph(cap)}\nstill bold** done.\n`,
+    },
+    {
+      name: 'keeps a table whose delimiter row lies past the cap',
+      text: `${paragraph(cap - 20)}\n| a | b |\n| --- | --- |\n| 1 | 2 |${later}`,
+      expected: `${paragraph(cap - 20)}\n| a | b |\n| --- | --- |\n| 1 | 2 |\n`,
+    },
+    {
+      name: 'cuts at a blank line written with CRLF',
+      text: `${paragraph(cap + 10)}\r\n\r\n${paragraph(cap)}`,
+      expected: `${paragraph(cap + 10)}\r\n`,
+    },
+    {
+      name: 'keeps a reply that is one long block whole',
+      text: paragraph(cap * 3),
+      expected: paragraph(cap * 3),
     },
     {
       name: 'keeps link definitions from the rest of the reply',
-      text: `See [the plan][plan] and the note[^1].\n${paragraph(cap * 2)}\n[plan]: https://example.com/plan\n[^1]: A footnote.`,
-      expected: `${`See [the plan][plan] and the note[^1].\n${paragraph(cap * 2)}`.slice(0, cap)}\n\n[plan]: https://example.com/plan\n[^1]: A footnote.`,
+      text: `See [the plan][plan] and the note[^1].\n${paragraph(cap * 2)}${later}\n\n[plan]: https://example.com/plan\n[^1]: A footnote.`,
+      expected: `See [the plan][plan] and the note[^1].\n${paragraph(cap * 2)}\n\n[plan]: https://example.com/plan\n[^1]: A footnote.`,
     },
   ])('$name', ({ text, expected }) => {
     expect(inboxPreviewSource(text)).toBe(expected);
   });
 
   it('hands the card only the part of a long reply it can show', () => {
-    const reply = paragraph(cap * 6);
-    feed.inboxSessions = [row(1, reply)];
+    const blocks = Array.from({ length: 8 }, () => paragraph(700));
+    feed.inboxSessions = [row(1, blocks.join('\n\n'))];
     render(page());
-    expect(parsed.contents).toEqual([reply.slice(0, cap)]);
+    expect(parsed.contents).toEqual([`${blocks[0]}\n\n${blocks[1]}\n`]);
   });
 });
