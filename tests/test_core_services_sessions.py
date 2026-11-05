@@ -107,6 +107,10 @@ def test_public_surface_is_stable():
         "ReservedSessionError",
         # Stable authorization denial translated by API callers:
         "ProjectAccessDeniedError",
+        # Coded refusals for a create in a project archived or deleted since the
+        # caller read it (a Web UI row painted from the local snapshot):
+        "ProjectArchivedError",
+        "ProjectNotFoundError",
     }
     assert set(sessions_service.__all__) == expected | {"SESSION_ARCHIVED_I18N_KEY"}
     for name in expected:

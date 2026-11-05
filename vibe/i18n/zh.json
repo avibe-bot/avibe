@@ -364,6 +364,8 @@
     "sessionArchived": "该会话已归档，无法再修改。",
     "sessionArchiveUnavailable": "Avibe 控制器当前不可用，暂时无法归档该会话。请稍后重试。",
     "projectAccessDenied": "你没有权限在这个项目中创建会话。",
+    "projectArchived": "这个项目已归档，无法在其中新建会话。",
+    "projectNotFound": "找不到这个项目。",
     "workbenchAttachment": {
       "session_not_found": "当前会话已不可用。",
       "file_required": "请选择要上传的文件。",

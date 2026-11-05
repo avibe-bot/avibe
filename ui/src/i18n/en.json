@@ -3031,6 +3031,7 @@
     "icon_write_failed": "Couldn't save the icon. Please try again.",
     "project_no_folder": "This project has no local folder configured.",
     "project_not_found": "Project not found.",
+    "project_archived": "This project was archived, so no new session can start in it.",
     "project_agent_conflict": "The project's Agent changed elsewhere. Reloading it — apply your change again.",
     "project_order_conflict": "Project order changed elsewhere. The list has been refreshed; move the project again.",
     "invalid_project_order": "Project order could not be saved. Refresh the list and try again.",

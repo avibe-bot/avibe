@@ -4233,6 +4233,49 @@ def test_sessions_create_preserves_metadata_without_web_push_owner(monkeypatch, 
     assert "_web_push_user_key" not in metadata
 
 
+def test_sessions_create_names_a_project_that_is_archived_or_gone(monkeypatch, tmp_path):
+    """A row painted from the Web UI's snapshot can outlive its project. The refusal
+    carries a code the client acts on and a localized reason, not the raw scope id."""
+    from storage.db import create_sqlite_engine
+    from storage.projects_service import archive_project, create_project
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    with engine.begin() as conn:
+        live = create_project(conn, str(project_dir), display_name="Live")
+        archived_dir = tmp_path / "archived"
+        archived_dir.mkdir()
+        archived = create_project(conn, str(archived_dir), display_name="Archived")
+        archive_project(conn, archived["id"])
+
+    client = app.test_client()
+
+    def create(project_id: str, language: str = "en"):
+        return client.post(
+            "/api/sessions",
+            json={"project_id": project_id},
+            headers={**csrf_headers(client), "Accept-Language": language},
+        )
+
+    assert create(live["id"]).status_code == 201
+
+    refused = create(archived["id"])
+    assert refused.status_code == 409
+    assert refused.get_json()["error"] == {
+        "code": "project_archived",
+        "message": "This project was archived, so no new session can start in it.",
+    }
+    assert create(archived["id"], "zh").get_json()["error"]["message"] == "这个项目已归档，无法在其中新建会话。"
+
+    missing = create("proj_000000000000")
+    assert missing.status_code == 404
+    assert missing.get_json()["error"] == {"code": "project_not_found", "message": "Project not found."}
+    assert create("proj_000000000000", "zh").get_json()["error"]["message"] == "找不到这个项目。"
+
+
 def test_sessions_create_locks_before_agent_validation(monkeypatch, tmp_path):
     from core.vibe_agents import VibeAgentStore
     from sqlalchemy import event
