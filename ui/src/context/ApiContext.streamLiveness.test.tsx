@@ -12,7 +12,7 @@ const showToast = vi.hoisted(() => vi.fn());
 const localStore = vi.hoisted(() => ({
   beginLocalStoreRead: vi.fn(),
   forgetLocalStoreSession: vi.fn(async () => {}),
-  forgetLocalStoreSessionOnActivity: vi.fn(),
+  applyLocalStoreSessionActivity: vi.fn(),
   noteLocalStoreStreamGap: vi.fn(),
   noteLocalStoreStreamState: vi.fn(),
   recordLocalStorePage: vi.fn(async () => {}),

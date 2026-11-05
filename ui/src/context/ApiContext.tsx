@@ -10,7 +10,7 @@ import {
   type LocalStorePageRequest,
   beginLocalStoreRead,
   forgetLocalStoreSession,
-  forgetLocalStoreSessionOnActivity,
+  applyLocalStoreSessionActivity,
   noteLocalStoreStreamGap,
   noteLocalStoreStreamState,
   recordLocalStorePage,
@@ -2918,7 +2918,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const emitLocalSessionActivity = (data: Parameters<NonNullable<WorkbenchEventHandlers['onSessionActivity']>>[0]) => {
     if (data.session_id) clearSessionReadCache(data.session_id);
     forgetChatSnapshotOnActivity(data);
-    forgetLocalStoreSessionOnActivity(data);
+    applyLocalStoreSessionActivity(data);
     dispatchToWorkbenchHandlers((handlers) => handlers.onSessionActivity?.(data));
   };
 
@@ -3271,7 +3271,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // with it (docs/plans/web-ui-local-cache.md section 4.4), and its history
         // in the local message store (docs/plans/local-sync-store.md section 6.2).
         forgetChatSnapshotOnActivity(envelope.data);
-        forgetLocalStoreSessionOnActivity(envelope.data);
+        applyLocalStoreSessionActivity(envelope.data);
       } else {
         clearReadCacheMatching((path) => path.startsWith('/api/inbox') || path.startsWith('/api/sessions'));
       }

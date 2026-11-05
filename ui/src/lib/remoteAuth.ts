@@ -1,5 +1,6 @@
 import { clearLocalSnapshots, forgetLocalSnapshots } from './localSnapshots';
 import { forgetBootSession } from './bootSession';
+import { wipeLocalStore } from './localStore';
 import { isNativeShell } from './native';
 import { isIosDevice, isStandalonePwa } from './platform';
 
@@ -153,6 +154,9 @@ export function reportRemoteAuthorizationState(state: RemoteAuthorizationState):
   // outcome the server has just contradicted.
   if (state === 'login_required' || state === 'revoked') forgetBootSession();
   if (state === 'login_required') {
+    // The reader's session ended. Phase 1 cannot recheck what they may see when
+    // they sign back in, so their stored history goes (local-sync-store.md D7).
+    void wipeLocalStore();
     clearAuthorizationRetry();
     dispatchRemoteAuthorizationState(state);
     beginRemoteAuthRecovery();

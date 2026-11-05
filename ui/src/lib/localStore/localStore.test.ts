@@ -3,15 +3,15 @@ import 'fake-indexeddb/auto';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const platform = vi.hoisted(() => ({ standalone: false }));
-vi.mock('../platform', () => ({ isStandalonePwa: () => platform.standalone }));
+const platform = vi.hoisted(() => ({ standalone: false, ios: false }));
+vi.mock('../platform', () => ({ isStandalonePwa: () => platform.standalone, isIosDevice: () => platform.ios }));
 
 import type { WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import { clearLocalSnapshots, forgetLocalSnapshots, setLocalSnapshotPrincipal } from '../localSnapshots';
 import { SIGN_OUT_GENERATION_KEY, bumpSignOutGeneration } from '../signOutGeneration';
 import {
   beginLocalStoreRead,
-  forgetLocalStoreSessionOnActivity,
+  applyLocalStoreSessionActivity,
   noteLocalStoreStreamGap,
   noteLocalStoreStreamState,
   readLocalStoreWindow,
@@ -82,6 +82,7 @@ beforeEach(() => {
 
 afterEach(async () => {
   platform.standalone = false;
+  platform.ios = false;
   vi.unstubAllGlobals();
   setLocalSnapshotPrincipal(null);
   await clearLocalSnapshots();
@@ -205,7 +206,7 @@ describe('the event stream', () => {
 
     // A read the session's forget voided admits nothing more.
     beginLocalStoreRead('ses_moved');
-    forgetLocalStoreSessionOnActivity({ session_id: 'ses_moved', event: 'updated', visibility: 'background' });
+    applyLocalStoreSessionActivity({ session_id: 'ses_moved', event: 'updated', visibility: 'background' });
     await idle();
     await recordLocalStoreStreamRow(row(1, {}, 'ses_moved'));
     expect(await ids('ses_moved')).toEqual([]);
@@ -309,12 +310,23 @@ describe('one reader, and the wipes that end it', () => {
     snapshots.setLocalSnapshotPrincipal(null);
   });
 
+  it('LSYNC-021 wipes when any read reports the session expired, not only a session check', async () => {
+    await tail(rows(1, 3), null);
+    // The iOS Home Screen app hands login to its gate instead of navigating.
+    platform.ios = true;
+    platform.standalone = true;
+    const { reportRemoteAuthorizationState } = await import('../remoteAuth');
+    reportRemoteAuthorizationState('login_required');
+    await idle();
+    expect(await rowsOnDisk()).toBe(0);
+  });
+
   it('LSYNC-020 forgets a session that leaves the Inbox, and voids a read of it still in flight', async () => {
     await tail(rows(1, 3), null);
     await tail(rows(1, 2, 'ses_b'), null, Date.now(), 'ses_b');
     const pending = beginLocalStoreRead('ses_a');
-    forgetLocalStoreSessionOnActivity({ session_id: 'ses_a', event: 'archived' });
-    forgetLocalStoreSessionOnActivity({ session_id: 'ses_b', event: 'updated' });
+    applyLocalStoreSessionActivity({ session_id: 'ses_a', event: 'archived' });
+    applyLocalStoreSessionActivity({ session_id: 'ses_b', event: 'updated' });
     await idle();
     await recordLocalStorePage(pending, { kind: 'tail' }, { messages: rows(1, 3), next_before_id: null }, session());
     expect(await ids()).toEqual([]);
@@ -393,18 +405,42 @@ describe('two tabs sharing the store', () => {
     next.snapshots.setLocalSnapshotPrincipal(null);
   });
 
+  it('LSYNC-020 does not let a read pending in one tab admit streamed rows of a session another tab forgot', async () => {
+    beginLocalStoreRead('ses_p');
+    await recordLocalStoreStreamRow(row(1, {}, 'ses_p'));
+    const other = await otherTab();
+    other.snapshots.setLocalSnapshotPrincipal('remote:alice');
+    await other.store.readLocalStoreWindow('ses_p');
+    other.store.applyLocalStoreSessionActivity({ session_id: 'ses_p', event: 'archived' });
+    await idle();
+    await recordLocalStoreStreamRow(row(2, {}, 'ses_p'));
+    expect(await ids('ses_p')).toEqual([]);
+    other.snapshots.setLocalSnapshotPrincipal(null);
+  });
+
   it('LSYNC-020 does not let a read in one tab restore a session another tab forgot', async () => {
     await tail(rows(1, 3), null);
     const pending = beginLocalStoreRead('ses_a');
     const other = await otherTab();
     other.snapshots.setLocalSnapshotPrincipal('remote:alice');
     await other.store.readLocalStoreWindow('ses_a');
-    other.store.forgetLocalStoreSessionOnActivity({ session_id: 'ses_a', event: 'archived' });
+    other.store.applyLocalStoreSessionActivity({ session_id: 'ses_a', event: 'archived' });
     await idle();
 
     await recordLocalStorePage(pending, { kind: 'tail' }, { messages: rows(1, 3), next_before_id: null }, session());
     expect(await ids()).toEqual([]);
     other.snapshots.setLocalSnapshotPrincipal(null);
+  });
+});
+
+describe('session rows', () => {
+  it('keeps a stored session\'s pin and title in step with session updates', async () => {
+    await tail(rows(1, 2), null);
+    applyLocalStoreSessionActivity({ session_id: 'ses_a', event: 'updated', pinned: true, title: 'renamed' });
+    await idle();
+    const stored = (await readLocalStoreWindow('ses_a'))?.session;
+    expect(stored?.pinned).toBe(true);
+    expect(stored?.title).toBe('renamed');
   });
 });
 

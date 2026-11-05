@@ -642,9 +642,14 @@ export async function recordLocalStoreStreamRow(row: WorkbenchMessage | null | u
     if (!(await metaAdmits(tx, writer.reader, writer.epoch))) return;
     const rangesStore = tx.objectStore(RANGES);
     const record = await settle(rangesStore.get(sessionId) as IDBRequest<StoredRanges | undefined>);
-    const current = record?.forgottenAt == null ? record : undefined;
+    const forgottenAt = record?.forgottenAt;
+    const current = forgottenAt == null ? record : undefined;
+    // A pending read admits the session's rows only if it, and the row, came
+    // after any forget of it in any tab.
+    const admitted = readPending(sessionId)
+      && (forgottenAt == null || ((pendingReads.get(sessionId) ?? 0) > forgottenAt && ticket.observedAt > forgottenAt));
     const write: RowWrite = { tx, sessionDelta: new Map() };
-    if (!current && !readPending(sessionId)) {
+    if (!current && !admitted) {
       // A session the store does not keep. The row may still have moved here
       // from one it keeps (``promote_suppressed_native_message`` rebinds rows):
       // the old copy leaves that session under the same P1 ordering.
@@ -694,8 +699,8 @@ export function noteLocalStoreStreamState(live: boolean): void {
 /** Delete everything stored for ``sessionId`` and void every read of it still
  *  in flight: it was archived, left the reader's Inbox, or the server refused it. */
 export async function forgetLocalStoreSession(sessionId: string): Promise<void> {
-  // A read voided by the forget no longer admits the session's streamed rows.
-  pendingReads.delete(sessionId);
+  // The marker this leaves also stops reads started before it, here or in any
+  // tab, from admitting the session's streamed rows.
   await transact('readwrite', [SESSIONS, MESSAGES, RANGES, TOMBSTONES], async (tx) => {
     const messages = tx.objectStore(MESSAGES);
     const keys = await settle(messages.index(BY_SESSION).getAllKeys(sessionKeyRange(sessionId, null, null)));
@@ -709,11 +714,37 @@ export async function forgetLocalStoreSession(sessionId: string): Promise<void> 
   }, { retryOnQuota: false });
 }
 
-/** A ``session.activity`` event that takes the Session out of the reader's
- *  Inbox (archived, or moved to the background) deletes it from the store. */
-export function forgetLocalStoreSessionOnActivity(data: { session_id?: string | null; event?: string; visibility?: string }): void {
+type SessionActivity = { session_id?: string | null; event?: string; visibility?: string; title?: string | null; pinned?: boolean };
+
+/** A ``session.activity`` event. One that takes the Session out of the
+ *  reader's Inbox (archived, or moved to the background) deletes it from the
+ *  store. An update patches the stored row's title and pin, which decide how it
+ *  is shown and whether eviction spares it. */
+export function applyLocalStoreSessionActivity(data: SessionActivity): void {
   if (!data.session_id) return;
-  if (data.event === 'archived' || data.visibility === 'background') void forgetLocalStoreSession(data.session_id);
+  if (data.event === 'archived' || data.visibility === 'background') {
+    void forgetLocalStoreSession(data.session_id);
+    return;
+  }
+  if (data.event === 'updated') void patchStoredSession(data.session_id, data);
+}
+
+async function patchStoredSession(sessionId: string, data: SessionActivity): Promise<void> {
+  const patch: Partial<WorkbenchSession> = {};
+  if (typeof data.pinned === 'boolean') patch.pinned = data.pinned;
+  if (Object.prototype.hasOwnProperty.call(data, 'title')) patch.title = data.title ?? null;
+  if (data.visibility === 'foreground' || data.visibility === 'system') patch.visibility = data.visibility;
+  if (Object.keys(patch).length === 0) return;
+  const ticket = ticketFor(sessionId, Date.now());
+  const writer = await writerFor(ticket);
+  if (!writer) return;
+  await transact('readwrite', [META, SESSIONS], async (tx) => {
+    if (!(await metaAdmits(tx, writer.reader, writer.epoch))) return;
+    const sessions = tx.objectStore(SESSIONS);
+    const stored = await settle(sessions.get(sessionId) as IDBRequest<StoredSession | undefined>);
+    if (!stored?.row || stored.observedAt > ticket.observedAt) return;
+    sessions.put({ ...stored, row: { ...stored.row, ...patch }, observedAt: ticket.observedAt } satisfies StoredSession);
+  });
 }
 
 // ---------------------------------------------------------------------------

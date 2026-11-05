@@ -54,13 +54,16 @@ scenarios:
     test:
       - ui/src/lib/localStore/localStore.test.ts::LSYNC-020 forgets a session that leaves the Inbox, and voids a read of it still in flight
       - ui/src/lib/localStore/localStore.test.ts::LSYNC-020 does not let a read in one tab restore a session another tab forgot
+      - ui/src/lib/localStore/localStore.test.ts::LSYNC-020 does not let a read pending in one tab admit streamed rows of a session another tab forgot
       - ui/src/context/ApiContext.localStore.test.tsx::LSYNC-020 forgets a session whose message read the server refuses, and keeps it when the read only failed
   - id: LSYNC-021
     name: An expired session (login required) wipes the store; a session read that only failed does not
     status: covered
     kind: security
     layer: integration
-    test: ui/src/context/ApiContext.localStore.test.tsx::LSYNC-021 wipes on a login-required answer, and keeps everything when the session read only failed
+    test:
+      - ui/src/context/ApiContext.localStore.test.tsx::LSYNC-021 wipes on a login-required answer, and keeps everything when the session read only failed
+      - ui/src/lib/localStore/localStore.test.ts::LSYNC-021 wipes when any read reports the session expired, not only a session check
   - id: LSYNC-022
     name: A tab still naming an earlier reader can neither write into nor claim the store another tab holds for the current reader
     status: covered
