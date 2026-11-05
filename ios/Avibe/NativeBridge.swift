@@ -17,6 +17,7 @@ struct NativeShellMetadata: Equatable {
     static let capabilities = [
         "app": 1,
         "haptics": 1,
+        "keyboardResizesViewport": 1,
         "viewport": 1,
         "voice": 1,
     ]

@@ -366,42 +366,88 @@ final class NavigationPolicyTests: XCTestCase {
         XCTAssertTrue(script.source.contains(#""instanceOrigin""#))
         XCTAssertTrue(script.source.contains(instance.host))
         XCTAssertTrue(script.source.contains(#""contract":1"#))
+        XCTAssertTrue(script.source.contains(#""keyboardResizesViewport":1"#))
     }
 
     @MainActor
-    func testOuterScrollLockIsPrimaryOnlyAndResetsOnPrimaryCommit() {
-        let primary = WKWebView(frame: .zero)
-        let child = WKWebView(frame: .zero)
+    func testWebViewFactoryUsesTheSameKeyboardLayoutForPrimaryAndChild() {
+        let factory = WebViewFactory(instanceOrigin: instance)
+        let delegate = WebViewDelegateProbe()
+        let primary = factory.makeWebView(delegate: delegate)
+        let child = factory.makeWebView(
+            configuration: primary.configuration,
+            delegate: delegate
+        )
+        let primaryContainer = UIView()
+        let childContainer = UIView()
+
+        let primaryConstraints = factory.install(primary, in: primaryContainer)
+        let childConstraints = factory.install(child, in: childContainer)
+
+        XCTAssertTrue(factory.isManaging(primary))
+        XCTAssertTrue(factory.isManaging(child))
+        assertKeyboardBottomConstraint(
+            primaryConstraints,
+            webView: primary,
+            containerView: primaryContainer
+        )
+        assertKeyboardBottomConstraint(
+            childConstraints,
+            webView: child,
+            containerView: childContainer
+        )
+        XCTAssertTrue(
+            primary.configuration.userContentController
+                === child.configuration.userContentController
+        )
+    }
+
+    @MainActor
+    func testOuterScrollLockWorksPerWebViewAndResetsOnItsCommit() {
+        let factory = WebViewFactory(instanceOrigin: instance)
+        let delegate = WebViewDelegateProbe()
+        let primary = factory.makeWebView(delegate: delegate)
+        let child = factory.makeWebView(
+            configuration: primary.configuration,
+            delegate: delegate
+        )
         primary.scrollView.isScrollEnabled = true
         primary.scrollView.bounces = true
         primary.scrollView.contentInsetAdjustmentBehavior = .automatic
-        let controller = OuterScrollLockController(primaryWebView: primary)
+        child.scrollView.isScrollEnabled = true
+        child.scrollView.bounces = true
+        child.scrollView.contentInsetAdjustmentBehavior = .automatic
 
-        XCTAssertFalse(controller.isLocked)
-        XCTAssertFalse(controller.setLocked(true, requestedBy: child))
-        XCTAssertTrue(primary.scrollView.isScrollEnabled)
-        XCTAssertTrue(primary.scrollView.bounces)
-        XCTAssertEqual(primary.scrollView.contentInsetAdjustmentBehavior, .automatic)
-
-        XCTAssertTrue(controller.setLocked(true, requestedBy: primary))
-        XCTAssertTrue(controller.isLocked)
+        XCTAssertTrue(factory.setOuterScrollLocked(true, in: primary))
         XCTAssertFalse(primary.scrollView.isScrollEnabled)
         XCTAssertFalse(primary.scrollView.bounces)
         XCTAssertEqual(primary.scrollView.contentInsetAdjustmentBehavior, .never)
         XCTAssertEqual(primary.scrollView.contentOffset, .zero)
+        XCTAssertTrue(child.scrollView.isScrollEnabled)
 
         primary.scrollView.setContentOffset(CGPoint(x: 0, y: 40), animated: false)
-        controller.resetContentOffsetForKeyboardChange()
+        factory.resetLockedContentOffsetsForKeyboardChange()
         XCTAssertEqual(primary.scrollView.contentOffset, .zero)
 
-        controller.resetForNavigationCommit(in: child)
-        XCTAssertTrue(controller.isLocked)
+        XCTAssertTrue(factory.setOuterScrollLocked(true, in: child))
+        XCTAssertFalse(child.scrollView.isScrollEnabled)
+        XCTAssertFalse(child.scrollView.bounces)
+        XCTAssertEqual(child.scrollView.contentInsetAdjustmentBehavior, .never)
 
-        controller.resetForNavigationCommit(in: primary)
-        XCTAssertFalse(controller.isLocked)
+        factory.resetForNavigationCommit(in: child)
+        XCTAssertFalse(primary.scrollView.isScrollEnabled)
+        XCTAssertTrue(child.scrollView.isScrollEnabled)
+        XCTAssertTrue(child.scrollView.bounces)
+        XCTAssertEqual(child.scrollView.contentInsetAdjustmentBehavior, .automatic)
+
+        factory.resetForNavigationCommit(in: primary)
         XCTAssertTrue(primary.scrollView.isScrollEnabled)
         XCTAssertTrue(primary.scrollView.bounces)
         XCTAssertEqual(primary.scrollView.contentInsetAdjustmentBehavior, .automatic)
+
+        XCTAssertFalse(
+            factory.setOuterScrollLocked(true, in: WKWebView(frame: .zero))
+        )
     }
 
     @MainActor
@@ -453,6 +499,7 @@ final class NavigationPolicyTests: XCTestCase {
               platform: info.platform,
               shellVersion: info.shellVersion,
               appCapability: info.capabilities.app,
+              keyboardResizesViewport: info.capabilities.keyboardResizesViewport,
               viewportCapability: info.capabilities.viewport,
               subframeBridge: typeof document.querySelector("#child").contentWindow.avibeNative,
               subframeTransport: await document.querySelector("#child").contentWindow.webkit
@@ -470,6 +517,7 @@ final class NavigationPolicyTests: XCTestCase {
         XCTAssertEqual(instancePayload["platform"] as? String, "ios")
         XCTAssertEqual(instancePayload["shellVersion"] as? String, "1.2.3 (45)")
         XCTAssertEqual(instancePayload["appCapability"] as? Int, 1)
+        XCTAssertEqual(instancePayload["keyboardResizesViewport"] as? Int, 1)
         XCTAssertEqual(instancePayload["viewportCapability"] as? Int, 1)
         XCTAssertEqual(outerScrollRequests, [true])
         XCTAssertEqual(instancePayload["subframeBridge"] as? String, "undefined")
@@ -498,6 +546,38 @@ final class NavigationPolicyTests: XCTestCase {
         let externalPayload = try jsonObject(from: externalResult)
         XCTAssertEqual(externalPayload["bridge"] as? String, "undefined")
         assertForbiddenReply(externalPayload["transport"])
+
+        let childWebView = WKWebView(
+            frame: .zero,
+            configuration: webView.configuration
+        )
+        let childProbe = WebViewLoadProbe()
+        childWebView.navigationDelegate = childProbe
+        try await childProbe.loadHTML(
+            "<!doctype html><title>Child instance</title>",
+            baseURL: instance.url,
+            in: childWebView
+        )
+        let childResult = try await childWebView.callAsyncJavaScript(
+            """
+            const info = await window.avibeNative.call("app.info");
+            await window.avibeNative.call(
+              "viewport.setOuterScrollLocked",
+              {locked: false}
+            );
+            return JSON.stringify({
+              bridge: typeof window.avibeNative,
+              keyboardResizesViewport: info.capabilities.keyboardResizesViewport
+            });
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+        let childPayload = try jsonObject(from: childResult)
+        XCTAssertEqual(childPayload["bridge"] as? String, "object")
+        XCTAssertEqual(childPayload["keyboardResizesViewport"] as? Int, 1)
+        XCTAssertEqual(outerScrollRequests, [true, false])
     }
 
     @MainActor
@@ -545,6 +625,29 @@ final class NavigationPolicyTests: XCTestCase {
         XCTAssertEqual(reply?["ok"] as? Bool, false, file: file, line: line)
         let error = reply?["error"] as? [String: Any]
         XCTAssertEqual(error?["code"] as? String, "forbidden", file: file, line: line)
+    }
+
+    @MainActor
+    private func assertKeyboardBottomConstraint(
+        _ constraints: [NSLayoutConstraint],
+        webView: WKWebView,
+        containerView: UIView,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let hasKeyboardBottomConstraint = constraints.contains { constraint in
+            guard
+                let firstItem = constraint.firstItem as? WKWebView,
+                let secondItem = constraint.secondItem as? UILayoutGuide
+            else {
+                return false
+            }
+            return firstItem === webView
+                && constraint.firstAttribute == .bottom
+                && secondItem === containerView.keyboardLayoutGuide
+                && constraint.secondAttribute == .top
+        }
+        XCTAssertTrue(hasKeyboardBottomConstraint, file: file, line: line)
     }
 }
 
@@ -595,3 +698,6 @@ private final class WebViewLoadProbe: NSObject, WKNavigationDelegate {
         continuation = nil
     }
 }
+
+@MainActor
+private final class WebViewDelegateProbe: NSObject, WKNavigationDelegate, WKUIDelegate {}

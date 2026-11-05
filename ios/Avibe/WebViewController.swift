@@ -10,42 +10,39 @@ final class OuterScrollLockController {
         let contentInsetAdjustmentBehavior: UIScrollView.ContentInsetAdjustmentBehavior
     }
 
-    private weak var primaryWebView: WKWebView?
+    private weak var webView: WKWebView?
     private var unlockedSettings: UnlockedSettings?
     private(set) var isLocked = false
 
-    init(primaryWebView: WKWebView) {
-        self.primaryWebView = primaryWebView
+    init(webView: WKWebView) {
+        self.webView = webView
     }
 
     @discardableResult
-    func setLocked(_ locked: Bool, requestedBy sourceWebView: WKWebView) -> Bool {
-        guard sourceWebView === primaryWebView else {
+    func setLocked(_ locked: Bool) -> Bool {
+        guard webView != nil else {
             return false
         }
         apply(locked)
         return true
     }
 
-    func resetForNavigationCommit(in sourceWebView: WKWebView) {
-        guard sourceWebView === primaryWebView else {
-            return
-        }
+    func resetForNavigationCommit() {
         apply(false)
     }
 
     func resetContentOffsetForKeyboardChange() {
-        guard isLocked, let primaryWebView else {
+        guard isLocked, let webView else {
             return
         }
-        resetDocumentViewport(in: primaryWebView)
+        resetDocumentViewport(in: webView)
     }
 
     private func apply(_ locked: Bool) {
-        guard let primaryWebView else {
+        guard let webView else {
             return
         }
-        let scrollView = primaryWebView.scrollView
+        let scrollView = webView.scrollView
 
         if locked {
             if !isLocked {
@@ -58,7 +55,7 @@ final class OuterScrollLockController {
             isLocked = true
             scrollView.bounces = false
             scrollView.contentInsetAdjustmentBehavior = .never
-            resetDocumentViewport(in: primaryWebView)
+            resetDocumentViewport(in: webView)
             scrollView.isScrollEnabled = false
             return
         }
@@ -82,6 +79,88 @@ final class OuterScrollLockController {
         DispatchQueue.main.async { [weak webView] in
             webView?.evaluateJavaScript("window.scrollTo(0, 0)")
         }
+    }
+}
+
+@MainActor
+final class WebViewFactory {
+    private let instanceOrigin: WebOrigin
+    private var outerScrollLockControllers: [
+        ObjectIdentifier: OuterScrollLockController
+    ] = [:]
+    private lazy var nativeConfiguration = NativeBridgeConfiguration.make(
+        instanceOrigin: instanceOrigin,
+        setOuterScrollLocked: { [weak self] webView, locked in
+            self?.setOuterScrollLocked(locked, in: webView) ?? false
+        }
+    )
+
+    init(instanceOrigin: WebOrigin) {
+        self.instanceOrigin = instanceOrigin
+    }
+
+    func makeWebView<Delegate: WKNavigationDelegate & WKUIDelegate>(
+        configuration: WKWebViewConfiguration? = nil,
+        delegate: Delegate
+    ) -> WKWebView {
+        let webView = WKWebView(
+            frame: .zero,
+            configuration: configuration ?? nativeConfiguration
+        )
+        webView.navigationDelegate = delegate
+        webView.uiDelegate = delegate
+        webView.translatesAutoresizingMaskIntoConstraints = false
+        outerScrollLockControllers[ObjectIdentifier(webView)] =
+            OuterScrollLockController(webView: webView)
+        return webView
+    }
+
+    @discardableResult
+    func install(_ webView: WKWebView, in containerView: UIView) -> [NSLayoutConstraint] {
+        precondition(isManaging(webView))
+        containerView.addSubview(webView)
+        let constraints = [
+            webView.topAnchor.constraint(
+                equalTo: containerView.safeAreaLayoutGuide.topAnchor
+            ),
+            webView.leadingAnchor.constraint(
+                equalTo: containerView.safeAreaLayoutGuide.leadingAnchor
+            ),
+            webView.trailingAnchor.constraint(
+                equalTo: containerView.safeAreaLayoutGuide.trailingAnchor
+            ),
+            webView.bottomAnchor.constraint(
+                equalTo: containerView.keyboardLayoutGuide.topAnchor
+            ),
+        ]
+        NSLayoutConstraint.activate(constraints)
+        return constraints
+    }
+
+    @discardableResult
+    func setOuterScrollLocked(_ locked: Bool, in webView: WKWebView) -> Bool {
+        outerScrollLockControllers[ObjectIdentifier(webView)]?.setLocked(locked)
+            ?? false
+    }
+
+    func resetForNavigationCommit(in webView: WKWebView) {
+        outerScrollLockControllers[
+            ObjectIdentifier(webView)
+        ]?.resetForNavigationCommit()
+    }
+
+    func resetLockedContentOffsetsForKeyboardChange() {
+        for controller in outerScrollLockControllers.values {
+            controller.resetContentOffsetForKeyboardChange()
+        }
+    }
+
+    func unregister(_ webView: WKWebView) {
+        outerScrollLockControllers.removeValue(forKey: ObjectIdentifier(webView))
+    }
+
+    func isManaging(_ webView: WKWebView) -> Bool {
+        outerScrollLockControllers[ObjectIdentifier(webView)] != nil
     }
 }
 
@@ -126,25 +205,9 @@ final class WebViewController: UIViewController {
     private var isPresentingDownloadedFile = false
     private var pendingDialogs: [UUID: PendingJavaScriptDialog] = [:]
     private var dialogIdentifiersByWebView: [ObjectIdentifier: Set<UUID>] = [:]
-    private lazy var outerScrollLockController =
-        OuterScrollLockController(primaryWebView: webView)
+    private lazy var webViewFactory = WebViewFactory(instanceOrigin: instanceOrigin)
 
-    private lazy var webView: WKWebView = {
-        let configuration = NativeBridgeConfiguration.make(
-            instanceOrigin: instanceOrigin,
-            setOuterScrollLocked: { [weak self] sourceWebView, locked in
-                self?.outerScrollLockController.setLocked(
-                    locked,
-                    requestedBy: sourceWebView
-                ) ?? false
-            }
-        )
-
-        let webView = WKWebView(frame: .zero, configuration: configuration)
-        configure(webView)
-        webView.translatesAutoresizingMaskIntoConstraints = false
-        return webView
-    }()
+    private lazy var webView = webViewFactory.makeWebView(delegate: self)
 
     init(
         instanceOrigin: WebOrigin,
@@ -168,14 +231,7 @@ final class WebViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
-        view.addSubview(webView)
-
-        NSLayoutConstraint.activate([
-            webView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
-            webView.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
-            webView.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
-            webView.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
-        ])
+        webViewFactory.install(webView, in: view)
 
         NotificationCenter.default.addObserver(
             self,
@@ -187,6 +243,18 @@ final class WebViewController: UIViewController {
             self,
             selector: #selector(resetOuterScrollPosition),
             name: UIResponder.keyboardWillHideNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(resetOuterScrollPosition),
+            name: UIResponder.keyboardDidChangeFrameNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(resetOuterScrollPosition),
+            name: UIResponder.keyboardDidHideNotification,
             object: nil
         )
 
@@ -217,12 +285,7 @@ final class WebViewController: UIViewController {
 
     @objc
     private func resetOuterScrollPosition() {
-        outerScrollLockController.resetContentOffsetForKeyboardChange()
-    }
-
-    private func configure(_ webView: WKWebView) {
-        webView.navigationDelegate = self
-        webView.uiDelegate = self
+        webViewFactory.resetLockedContentOffsetsForKeyboardChange()
     }
 
     private func loadConfiguredInstance() {
@@ -366,11 +429,14 @@ final class WebViewController: UIViewController {
             return nil
         }
 
-        let childWebView = WKWebView(frame: .zero, configuration: configuration)
-        configure(childWebView)
+        let childWebView = webViewFactory.makeWebView(
+            configuration: configuration,
+            delegate: self
+        )
 
         let popupController = PopupWebViewController(
             webView: childWebView,
+            webViewFactory: webViewFactory,
             onClose: { [weak self, weak childWebView] in
                 guard let self, let childWebView else {
                     return
@@ -424,6 +490,7 @@ final class WebViewController: UIViewController {
             record.webView.stopLoading()
             record.webView.navigationDelegate = nil
             record.webView.uiDelegate = nil
+            webViewFactory.unregister(record.webView)
         }
         rootRecord.navigationController.dismiss(animated: true)
     }
@@ -441,6 +508,7 @@ final class WebViewController: UIViewController {
             record.webView.stopLoading()
             record.webView.navigationDelegate = nil
             record.webView.uiDelegate = nil
+            webViewFactory.unregister(record.webView)
         }
         popupRecords.removeAll()
     }
@@ -815,7 +883,7 @@ extension WebViewController: WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation?) {
-        outerScrollLockController.resetForNavigationCommit(in: webView)
+        webViewFactory.resetForNavigationCommit(in: webView)
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation?) {
@@ -1129,6 +1197,7 @@ extension WebViewController: WKDownloadDelegate {
 
 private final class PopupWebViewController: UIViewController {
     private let webView: WKWebView
+    private let webViewFactory: WebViewFactory
     private let onClose: () -> Void
     private let onOpenInSafari: (URL) -> Void
     private var didRequestClose = false
@@ -1142,10 +1211,12 @@ private final class PopupWebViewController: UIViewController {
 
     init(
         webView: WKWebView,
+        webViewFactory: WebViewFactory,
         onClose: @escaping () -> Void,
         onOpenInSafari: @escaping (URL) -> Void
     ) {
         self.webView = webView
+        self.webViewFactory = webViewFactory
         self.onClose = onClose
         self.onOpenInSafari = onOpenInSafari
         super.init(nibName: nil, bundle: nil)
@@ -1166,14 +1237,7 @@ private final class PopupWebViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
-        webView.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(webView)
-        NSLayoutConstraint.activate([
-            webView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
-            webView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            webView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            webView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-        ])
+        webViewFactory.install(webView, in: view)
         navigationItem.leftBarButtonItem = UIBarButtonItem(
             title: String(localized: "common.done"),
             style: .done,

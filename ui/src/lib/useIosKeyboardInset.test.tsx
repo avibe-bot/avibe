@@ -4,8 +4,11 @@ import { cleanup, render } from '@testing-library/react';
 import { useRef } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const native = vi.hoisted(() => ({ shell: false }));
-vi.mock('./native', () => ({ isNativeShell: () => native.shell }));
+const native = vi.hoisted(() => ({ keyboardResizesViewport: false }));
+vi.mock('./native', () => ({
+  hasNativeCapability: (capability: string) =>
+    capability === 'keyboardResizesViewport' && native.keyboardResizesViewport,
+}));
 
 import { useIosKeyboardInset } from './useIosKeyboardInset';
 
@@ -28,7 +31,7 @@ function Harness() {
 }
 
 beforeEach(() => {
-  native.shell = false;
+  native.keyboardResizesViewport = false;
   vi.clearAllMocks();
   Object.defineProperty(window, 'visualViewport', {
     configurable: true,
@@ -43,15 +46,15 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe('useIosKeyboardInset', () => {
-  it('lets the native shell own keyboard layout', () => {
-    native.shell = true;
+  it('lets a native viewport-resize capability own keyboard layout', () => {
+    native.keyboardResizesViewport = true;
     render(<Harness />);
 
     expect(window.matchMedia).not.toHaveBeenCalled();
     expect(viewport.addEventListener).not.toHaveBeenCalled();
   });
 
-  it('retains the browser correction outside the native shell', () => {
+  it('retains the browser correction without the explicit capability', () => {
     render(<Harness />);
 
     expect(window.matchMedia).toHaveBeenCalledWith('(max-width: 767px)');

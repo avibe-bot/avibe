@@ -1,5 +1,10 @@
 export type NativePlatform = 'ios' | 'android';
-export type NativeCapability = 'app' | 'haptics' | 'viewport' | 'voice';
+export type NativeCapability =
+  | 'app'
+  | 'haptics'
+  | 'keyboardResizesViewport'
+  | 'viewport'
+  | 'voice';
 export type NativeImpactStyle = 'light' | 'medium' | 'heavy' | 'soft' | 'rigid';
 export type NativeNotificationType = 'success' | 'warning' | 'error';
 export type NativeVoicePermission = 'granted' | 'denied' | 'prompt';

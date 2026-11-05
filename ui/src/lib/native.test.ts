@@ -24,6 +24,7 @@ const installBridge = (
         capabilities: {
           app: 1,
           haptics: 1,
+          keyboardResizesViewport: 1,
           viewport: 1,
           voice: 1,
         },
@@ -42,6 +43,7 @@ const installBridge = (
       capabilities: {
         app: 1,
         haptics: 1,
+        keyboardResizesViewport: 1,
         viewport: 1,
         voice: 1,
       },
@@ -64,6 +66,7 @@ describe('native shell bridge', () => {
     installBridge();
     expect(isNativeShell()).toBe(true);
     expect(hasNativeCapability('haptics')).toBe(true);
+    expect(hasNativeCapability('keyboardResizesViewport')).toBe(true);
     expect(hasNativeCapability('haptics', 2)).toBe(false);
 
     installBridge({ contract: 2 as 1 });

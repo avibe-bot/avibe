@@ -133,6 +133,7 @@ interface AvibeNative {
 | --- | --- | --- |
 | `app` | `app.info()`, `app.openExternal({url})`, `app.instances()` | `app.foreground`, `app.background` |
 | `haptics` | `haptics.impact({style})`, `haptics.notify({type})`, `haptics.selection()` | - |
+| `keyboardResizesViewport` | No calls. Declares that UIKit shrinks this WebView's viewport with `keyboardLayoutGuide`. | - |
 | `voice` | `voice.permission()` (the grant itself needs no call) | `voice.trigger({action: 'start' \| 'stop'})` from App Intents and hardware |
 | `viewport` | `viewport.setOuterScrollLocked({locked})` | - |
 | `composer` | `composer.attach({surface, sessionId, draft, placeholder, busy, disabled, actions})`, `composer.update({...})`, `composer.detach()`, `composer.insertMention({trigger, value, data})`, `composer.setText({text})`, `composer.focus()`, `composer.voicePreview({text})`, `composer.voiceCommit({text})`, `composer.voiceRestore()` | `composer.change({text, references})`, `composer.submit({text, references, files})`, `composer.stop`, `composer.trigger({trigger, query, active})`, `composer.voice({phase})`, `composer.files({files})`, `composer.action({id})`, `composer.layout({height})` |
@@ -153,10 +154,14 @@ Phase 0a PR 2 implements this v1 subset:
 - `voice.permission()` returns `{state: 'granted' | 'denied' | 'prompt'}`. It
   does not itself display a permission prompt; the user-initiated Web media
   request remains the single prompt path;
+- `keyboardResizesViewport: 1` declares that the current WebView is pinned to
+  `keyboardLayoutGuide`, so the Web UI must not apply its browser-only visual
+  viewport correction;
 - `viewport.setOuterScrollLocked({locked})` lets the Workbench request or
-  release primary-WebView outer-scroll suppression. It is accepted only from
-  the configured instance document in the primary WebView. Child WebViews
-  receive `forbidden`, even for an instance-origin main frame.
+  release outer-scroll suppression for its own WebView. It is accepted from
+  any configured-instance main frame, including an instance-origin child.
+  Each WebView owns independent lock state, and its next main-frame commit
+  releases that state.
 
 Rules:
 
@@ -183,9 +188,10 @@ Rules:
   independently passes this rule: an instance-origin child main frame gets the
   bridge, while authentication/external child main frames and every subframe
   do not. The handler repeats the check for every message, so calling the
-  transport directly cannot bypass discovery. Individual methods may narrow
-  this boundary further: `viewport.setOuterScrollLocked` is primary-WebView
-  only. No credential crosses the bridge: push private keys stay native, and
+  transport directly cannot bypass discovery. The factory recognizes every
+  WebView it created before applying `viewport.setOuterScrollLocked`, so an
+  unknown WebView cannot acquire state. No credential crosses the bridge:
+  push private keys stay native, and
   `push.subscribe` returns only the public subscription.
 - **Errors**: malformed requests use `invalid_request`, invalid method
   parameters use `invalid_argument`, disallowed frames/origins use `forbidden`,
@@ -222,7 +228,7 @@ compares a plain `textarea`, a bare `contenteditable`, bare Lexical, and
 | Symptom | Device result | Consequence |
 | --- | --- | --- |
 | Pinyin candidates sometimes missing | Not reproduced; candidates and composition are normal in every input, `MentionEditor` included | Recheck on the checklist; no dedicated fix |
-| Keyboard pushing the composer | Keyboard open and close are normal in every input. On the first candidate pick in an empty editor, Lexical calls `window.scrollBy` and moves the page; a plain `textarea` does not | PR 1 keeps WebKit and the current Web correction unchanged. PR 2 pins the primary WebView to `keyboardLayoutGuide`; the Workbench requests outer-scroll suppression through `viewport.setOuterScrollLocked`, while every other document keeps WebKit scrolling. The native composer removes Lexical from the path. The web-only fix avibe-bot/avibe#3166 had no device evidence and was closed. |
+| Keyboard pushing the composer | Keyboard open and close are normal in every input. On the first candidate pick in an empty editor, Lexical calls `window.scrollBy` and moves the page; a plain `textarea` does not | PR 1 keeps WebKit and the current Web correction unchanged. PR 2 pins every shell WebView to `keyboardLayoutGuide`; a Workbench document requests outer-scroll suppression for its own WebView through `viewport.setOuterScrollLocked`, while every other document keeps WebKit scrolling. The native composer removes Lexical from the path. The web-only fix avibe-bot/avibe#3166 had no device evidence and was closed. |
 | Typing stops after quick Paste (letters go straight in, Pinyin no longer composes) | iOS system behavior: the same in a plain `textarea` | Probably the same in `UITextView`; verify once, no app-side handling |
 | Typeless blank | Intermittent, not reproduced. Lead: the Home Screen web app reloads the whole page after a few seconds away | A shell app keeps its page across brief app switches; recheck on the checklist |
 | Accessory bar | WebKit; a page cannot remove it | Shell flag or the native composer |
@@ -238,20 +244,23 @@ shell to measure what remains (section 15).
   offsets, observe keyboard notifications, or suppress the Web UI's existing
   `useIosKeyboardInset` behavior.
 - **PR 2 owns the coordination point.** It adds `isNativeShell()` with the
-  `avibeNative` bridge, pins the web view to
+  `avibeNative` bridge, creates primary and child WebViews through one factory,
+  pins each web view to
   `view.keyboardLayoutGuide.topAnchor` (iOS 15+,
   [Apple](https://developer.apple.com/documentation/uikit/uiview/keyboardlayoutguide)),
-  and disables `useIosKeyboardInset` inside the shell. Every document starts
-  with WebKit's default outer scrolling and automatic insets. The Workbench
-  AppShell uses the `viewport: 1` capability to request outer-scroll
-  suppression while mounted and releases it on unmount or `pagehide`; a
-  `pageshow` after WebKit page-cache restoration requests it again, and a
-  primary-frame navigation commit also releases it. While requested, the shell
-  disables outer scrolling and bounce, uses `.never` inset adjustment, and
-  resets the outer offset during keyboard changes. Child WebViews can never
-  request the lock. The Web UI's own scroll containers remain enabled. Neither
-  half ships independently, so the keyboard has one layout owner without
-  changing ordinary document scrolling.
+  and publishes `keyboardResizesViewport: 1`. The Web UI disables
+  `useIosKeyboardInset` only when that explicit capability is present; an old
+  shell without the declaration retains the browser correction. Every
+  document starts with WebKit's default outer scrolling and automatic insets.
+  A Workbench AppShell in either primary or child uses `viewport: 1` to request
+  outer-scroll suppression for its own WebView while mounted and releases it
+  on unmount or `pagehide`; a `pageshow` after WebKit page-cache restoration
+  requests it again, and that WebView's next main-frame navigation commit also
+  releases it. While requested, the shell disables outer scrolling and bounce,
+  uses `.never` inset adjustment, and resets the outer offset during keyboard
+  changes. The Web UI's own scroll containers remain enabled. Neither half
+  ships independently, so the keyboard has one layout owner without changing
+  ordinary document scrolling.
 - **Accessory bar remains WebKit-owned in Phase 0a.** No public API removes it.
   The common private-content-view override carries App Review risk under the
   license agreement's private-API rule (section 13), so it is not part of the
@@ -683,11 +692,12 @@ and open decisions.
 - **Composer**: a native mode in `Composer` (section 5), an anchor for the
   mention pickers at the bottom of the web view, a reserved bottom inset, and a
   shared marker fixture with Swift.
-- **Keyboard**: PR 2 adds `isNativeShell()`, makes the primary WebView's
-  `keyboardLayoutGuide` the sole layout owner, and disables
-  `useIosKeyboardInset` only in that shell. The Workbench requests the
-  `viewport: 1` outer-scroll lock for its mounted lifetime; other primary
-  documents and every child WebView retain browser scrolling.
+- **Keyboard**: PR 2 creates primary and child WebViews through one factory,
+  pins both to `keyboardLayoutGuide`, and publishes
+  `keyboardResizesViewport: 1`. `useIosKeyboardInset` is disabled only when
+  that capability exists. A Workbench in either window requests the
+  `viewport: 1` outer-scroll lock for its own WebView; every other document
+  retains browser scrolling.
 - **Notifications**: Phase 0a has no native `push` capability. Hide browser
   Web Push controls and readiness prompts inside the shell instead of offering
   an unusable Service Worker path. Phase 1 adds the native provider. Hide the
@@ -897,9 +907,9 @@ Effort assumes one Agent lane per track, with owner review between phases.
 
 | Track | Work | Effort |
 | --- | --- | --- |
-| Native | PR 1: SwiftUI app with one browser-equivalent `WKWebView`, persistent data, configured-origin media-capture grant, primary-main-frame navigation handoff, recursive child windows, downloads, safe areas, offline/error UI, and Google interception. PR 2: `avibeNative` v1 with `app`, `haptics`, and `voice`, plus primary-WebView keyboard ownership coordinated with the Web shell marker. First-use instance entry remains a later slice | 1.5 weeks |
+| Native | PR 1: SwiftUI app with one browser-equivalent `WKWebView`, persistent data, configured-origin media-capture grant, primary-main-frame navigation handoff, recursive child windows, downloads, safe areas, offline/error UI, and Google interception. PR 2: `avibeNative` v1 with `app`, `haptics`, `keyboardResizesViewport`, `viewport`, and `voice`, plus one factory that gives primary and child WebViews the same keyboard ownership and independent page-requested outer-scroll state. First-use instance entry remains a later slice | 1.5 weeks |
 | Build | Xcode project, signing, and `xcodebuild` or fastlane upload to TestFlight | 0.5 week, parallel |
-| Web UI | PR 2: `native.ts`, `isNativeShell()`, the matching `useIosKeyboardInset` decision, Web Push toggle and install hint hidden, haptics calls, and explicit handling for each iOS Home Screen PWA branch. The "Open on iPhone" QR remains a later slice | 3 days, parallel |
+| Web UI | PR 2: `native.ts`, `isNativeShell()`, the capability-based `useIosKeyboardInset` decision, Web Push toggle and install hint hidden, haptics calls, and explicit handling for each iOS Home Screen PWA branch. The "Open on iPhone" QR remains a later slice | 3 days, parallel |
 
 Exit: run the section 15 checklist on the web composer, to measure which input
 problems a shell alone fixes. The microphone items must pass. The results
