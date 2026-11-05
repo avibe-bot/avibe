@@ -11,6 +11,7 @@ import {
   deleteVoiceTake,
   heldVoiceTakes,
   isVoiceTakeLive,
+  landVoiceTake,
   readVoiceTakeAudio,
   readVoiceTakes,
   saveVoiceTake,
@@ -272,6 +273,56 @@ describe('voice take store', () => {
     } finally {
       uninstall();
     }
+  });
+
+  it('lands a kept take\'s words once across documents, and never one already gone or held elsewhere', async () => {
+    const uninstall = installWebLocks();
+    try {
+      setLocalSnapshotPrincipal('local');
+      await saveVoiceTake(take('twice', { status: 'transcribed', text: 'Ship it' }));
+      // The same take, shown in two tabs, sent from both at once.
+      let sent!: (value: boolean) => void;
+      const land = vi.fn(() => new Promise<boolean>((resolve) => {
+        sent = resolve;
+      }));
+      const first = landVoiceTake('twice', land);
+      const second = landVoiceTake('twice', land);
+      await expect(second).resolves.toBe(false);
+      await vi.waitFor(() => expect(land).toHaveBeenCalledTimes(1));
+      sent(true);
+      await expect(first).resolves.toBe(true);
+      expect(await readVoiceTakes()).toEqual([]);
+      // A stale item for a take another tab already sent.
+      await expect(landVoiceTake('twice', land)).resolves.toBe(false);
+      expect(land).toHaveBeenCalledTimes(1);
+
+      // One a surface still holds (recording, or showing it in its card) is that surface's.
+      const keeper = new VoiceTakeKeeper('held', { target: 'ses_a', intent: 'send' });
+      keeper.begin();
+      keeper.transcribed('words');
+      await keeper.written();
+      await expect(landVoiceTake('held', land)).resolves.toBe(false);
+      expect(land).toHaveBeenCalledTimes(1);
+      expect(await readVoiceTakes()).toHaveLength(1);
+    } finally {
+      uninstall();
+    }
+  });
+
+  it('returns nothing from a read the reader changed under', async () => {
+    setLocalSnapshotPrincipal('alice');
+    (await keepTake('private')).release();
+    const takes = readVoiceTakes();
+    const audio = readVoiceTakeAudio('private');
+    setLocalSnapshotPrincipal('bob');
+    expect(await takes).toEqual([]);
+    expect((await audio).size).toBe(0);
+
+    setLocalSnapshotPrincipal('carol');
+    (await keepTake('signed-out')).release();
+    const afterSignOut = readVoiceTakes();
+    bumpSignOutGeneration();
+    expect(await afterSignOut).toEqual([]);
   });
 
   it('never sets back a take its keeper advanced while another surface retried it', async () => {

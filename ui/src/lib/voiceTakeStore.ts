@@ -297,11 +297,19 @@ export async function saveVoiceTakeAudio(
   return saved === true;
 }
 
+/** Whether the reader a read began for is still the reader, under the same sign-out generation:
+ *  a read that outlived a change of reader returns nothing (as the local snapshots do). */
+const stillReading = (owner: string, generation: number): boolean => (
+  getLocalSnapshotPrincipal() === owner && readGeneration() === generation
+);
+
 /** The reader's kept takes, oldest first; only those for `target` when it is given. */
 export async function readVoiceTakes(target?: string): Promise<VoiceTake[]> {
   const owner = getLocalSnapshotPrincipal();
   if (!owner) return [];
+  const generation = readGeneration();
   const records = await withStores('readonly', (takes) => settle(takes.getAll() as IDBRequest<StoredTake[]>));
+  if (!stillReading(owner, generation)) return [];
   return (records ?? [])
     .filter((record) => owned(record, owner) && (target === undefined || record.target === target))
     .sort((left, right) => left.createdAt - right.createdAt)
@@ -313,15 +321,35 @@ export async function readVoiceTakeAudio(id: string): Promise<Map<number, Blob |
   const audio = new Map<number, Blob | null>();
   const owner = getLocalSnapshotPrincipal();
   if (!owner) return audio;
+  const generation = readGeneration();
   const found = await withStores('readonly', async (takes, segments) => {
     const record = await settle(takes.get(id) as IDBRequest<StoredTake | undefined>);
     if (!owned(record, owner)) return [];
     return settle(segments.index('byTake').getAll(id) as IDBRequest<StoredSegment[]>);
   });
+  if (!stillReading(owner, generation)) return audio;
   for (const segment of found ?? []) {
     audio.set(segment.id[1], segment.audio ? new Blob([segment.audio], { type: 'audio/wav' }) : null);
   }
   return audio;
+}
+
+/**
+ * Lands a kept take's words once, across documents: claims the take, checks the reader still
+ * keeps it (another tab may have sent it already), runs `land` (into a draft, or as a message),
+ * and deletes the take once it landed. Resolves false, without running `land`, while another
+ * surface holds the take or once it is gone.
+ */
+export async function landVoiceTake(id: string, land: () => boolean | Promise<boolean>): Promise<boolean> {
+  const claimed = await claimVoiceTake(id, async () => {
+    const owner = getLocalSnapshotPrincipal();
+    if (!owner) return false;
+    const kept = await withStores('readonly', async (takes) => owned(await settle(takes.get(id) as IDBRequest<StoredTake | undefined>), owner));
+    if (!kept || !(await land())) return false;
+    await deleteVoiceTake(id);
+    return true;
+  });
+  return claimed?.value ?? false;
 }
 
 /** Deletes a take and its audio: its words landed, or the reader discarded it. */
@@ -423,6 +451,8 @@ export async function claimVoiceTake<T>(id: string, work: () => Promise<T>): Pro
     return await manager.request(LOCK_PREFIX + id, { ifAvailable: true }, async (lock) => {
       if (!lock) return null;
       claimed = true;
+      // Other documents read again, and leave the take alone while it is claimed.
+      notify();
       return { value: await work() };
     });
   } finally {

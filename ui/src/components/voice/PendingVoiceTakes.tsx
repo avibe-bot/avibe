@@ -7,6 +7,7 @@ import {
   deleteVoiceTake,
   heldVoiceTakes,
   isVoiceTakeLive,
+  landVoiceTake,
   readVoiceTakes,
   subscribeVoiceTakes,
   voiceTakeDurationMs,
@@ -226,15 +227,13 @@ export function PendingVoiceTakes({
               );
             }}
             onDiscard={() => void deleteVoiceTake(take.id)}
+            // Once, across documents: another tab showing the same take cannot land it again.
             onInsert={() => {
-              if (text && onInsert(text)) void deleteVoiceTake(take.id);
+              if (text) void landVoiceTake(take.id, () => onInsert(text));
             }}
             onSend={onSend && take.intent === 'send'
               ? () => {
-                  if (!text) return;
-                  void onSend(text).then((sent) => {
-                    if (sent) void deleteVoiceTake(take.id);
-                  });
+                  if (text) void landVoiceTake(take.id, () => onSend(text));
                 }
               : undefined}
           />

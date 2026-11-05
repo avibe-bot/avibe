@@ -1632,17 +1632,18 @@ describe('desktop mini v2 interaction contract', () => {
   });
 
   it.each([
-    ['microphone start', 'pet.voice.startFailed', () => ({ start: Promise.reject(new DOMException('denied', 'NotAllowedError')), done: new Promise<string>(() => {}) })],
-    ['transcription', 'pet.voice.failed', (TranscriptionError: typeof VoiceTranscriptionErrorType) => ({ start: Promise.resolve(), done: Promise.reject(new TranscriptionError('failed')) })],
-  ])('falls back to text with a note when %s fails, keeping the typed draft', async (_label, note, outcome) => {
+    ['microphone start', 'pet.voice.startFailed', () => ({ start: Promise.reject(new DOMException('denied', 'NotAllowedError')), done: new Promise<string>(() => {}) }), false],
+    ['transcription', 'pet.voice.failed', (TranscriptionError: typeof VoiceTranscriptionErrorType) => ({ start: Promise.resolve(), done: Promise.reject(new TranscriptionError('failed')) }), true],
+  ])('falls back to text with a note when %s fails, keeping the typed draft', async (_label, note, outcome, released) => {
     // Resolved after the module reset so PetPage and the test share one class.
     let TranscriptionError!: typeof VoiceTranscriptionErrorType;
+    const detach = vi.fn();
     class Dictation {
       private readonly outcome = outcome(TranscriptionError);
       done = this.outcome.done;
       start = () => this.outcome.start;
       finish = () => {};
-      abort = () => {}; landed = () => {}; detach = () => {};
+      abort = () => {}; landed = () => {}; detach = detach;
     }
     await withVoiceEnv(() => true, Dictation, async () => {
       ({ VoiceTranscriptionError: TranscriptionError } = await import('@/lib/voiceTranscription'));
@@ -1654,6 +1655,9 @@ describe('desktop mini v2 interaction contract', () => {
       expect(pose()).not.toBe('listening');
       expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('typed before voice');
       expect(api.sendSessionMessage).not.toHaveBeenCalled();
+      // A take that was recorded but not transcribed is let go of, for the bound conversation's
+      // pending voice items; nothing was recorded when the microphone did not start.
+      expect(detach).toHaveBeenCalledTimes(released ? 1 : 0);
     });
   });
 

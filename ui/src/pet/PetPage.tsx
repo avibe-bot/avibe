@@ -1363,7 +1363,12 @@ function usePetVoice({ enabled, epoch, draft, keepTarget, onOpenComposer, onCapt
       const value = [before.trim(), next].filter(Boolean).join(' ');
       petComposer.noteDictation(before, value);
       onOpenComposer(value);
-    }).catch((reason: unknown) => fail(reason));
+    }).catch((reason: unknown) => {
+      fail(reason);
+      // A take that could not be transcribed stays on the device: the pet lets go of it, so the
+      // bound conversation's pending voice items offer it (lib/voiceTakeStore).
+      capture.dictation.detach();
+    });
     void capture.dictation.start().then(() => {
       if (!epoch.isCurrent()) { capture.dictation.abort(); return; }
       // Release may precede microphone permission or pipeline startup.
