@@ -486,12 +486,21 @@ const isRow = (value: unknown): value is WorkbenchMessage =>
   && typeof (value as { id?: unknown }).id === 'string'
   && typeof (value as { type?: unknown }).type === 'string';
 
-type RowWrite = { tx: IDBTransaction; sessionDelta: Map<string, number> };
+/** One transaction's row writes: each session's change in bytes, and the
+ *  newest message each one gained, which is activity eviction ranks by. */
+type RowWrite = { tx: IDBTransaction; sessionDelta: Map<string, number>; activeAt: Map<string, string> };
+
+/** The later of two server timestamps; a missing or unreadable one loses. */
+function laterTime(a: string, b: string | null | undefined): string {
+  if (!b || Number.isNaN(Date.parse(b))) return a;
+  if (!a || Number.isNaN(Date.parse(a))) return b;
+  return Date.parse(b) > Date.parse(a) ? b : a;
+}
 
 /** Put ``row`` under P1: skipped when the store holds a newer copy or a newer
  *  tombstone for it. */
 async function putRow(
-  { tx, sessionDelta }: RowWrite,
+  { tx, sessionDelta, activeAt }: RowWrite,
   row: WorkbenchMessage,
   sessionId: string,
   observedAt: number,
@@ -520,6 +529,7 @@ async function putRow(
   if (tombstone) tombstones.delete(row.id);
   if (existing) sessionDelta.set(existing.sessionId, (sessionDelta.get(existing.sessionId) ?? 0) - existing.bytes);
   sessionDelta.set(sessionId, (sessionDelta.get(sessionId) ?? 0) + stored.bytes);
+  activeAt.set(sessionId, laterTime(activeAt.get(sessionId) ?? '', row.created_at));
   return true;
 }
 
@@ -532,13 +542,20 @@ function sessionKeyRange(sessionId: string, low: OrderKey | null, high: OrderKey
 }
 
 /** Keep each session's byte count in step with its rows, so eviction sees
- *  every row, including rows of a session no session read has named yet. */
-async function applySessionDelta(tx: IDBTransaction, sessionDelta: Map<string, number>, touchedAt: number): Promise<void> {
+ *  every row, including rows of a session no session read has named yet; and
+ *  its activity, so a conversation whose messages keep arriving on the stream
+ *  ranks as active without another session read. */
+async function applySessionDelta(tx: IDBTransaction, { sessionDelta, activeAt }: RowWrite, touchedAt: number): Promise<void> {
   const sessions = tx.objectStore(SESSIONS);
-  for (const [sessionId, delta] of sessionDelta) {
+  for (const sessionId of new Set([...sessionDelta.keys(), ...activeAt.keys()])) {
     const stored = await settle(sessions.get(sessionId) as IDBRequest<StoredSession | undefined>)
       ?? { id: sessionId, row: null, observedAt: 0, touchedAt, lastActiveAt: '', bytes: 0 };
-    sessions.put({ ...stored, bytes: Math.max(0, stored.bytes + delta), touchedAt: Math.max(stored.touchedAt, touchedAt) } satisfies StoredSession);
+    sessions.put({
+      ...stored,
+      bytes: Math.max(0, stored.bytes + (sessionDelta.get(sessionId) ?? 0)),
+      touchedAt: Math.max(stored.touchedAt, touchedAt),
+      lastActiveAt: laterTime(stored.lastActiveAt, activeAt.get(sessionId)),
+    } satisfies StoredSession);
   }
 }
 
@@ -598,7 +615,7 @@ export async function recordLocalStorePage(
     if (current?.forgottenAt != null && current.forgottenAt >= observedAt) return;
     if (session && session.id === sessionId) await putSession(tx, session, observedAt, now);
     if (!reach) return;
-    const write: RowWrite = { tx, sessionDelta: new Map() };
+    const write: RowWrite = { tx, sessionDelta: new Map(), activeAt: new Map() };
     const returned = new Set(stored.map((row) => row.id));
     const messages = tx.objectStore(MESSAGES);
     const inReach = await settle(
@@ -637,7 +654,7 @@ export async function recordLocalStorePage(
       // Kept: an answer read before the forget may still be on its way.
       ...(current?.forgottenAt != null ? { forgottenAt: current.forgottenAt } : {}),
     } satisfies StoredRanges);
-    await applySessionDelta(tx, write.sessionDelta, now);
+    await applySessionDelta(tx, write, now);
   });
   scheduleBudgetCheck();
 }
@@ -651,7 +668,8 @@ async function putSession(tx: IDBTransaction, session: WorkbenchSession, observe
     row: session,
     observedAt,
     touchedAt: Math.max(existing?.touchedAt ?? 0, now),
-    lastActiveAt: session.last_active_at || session.updated_at || '',
+    // Messages stored since may be newer than the session row says.
+    lastActiveAt: laterTime(existing?.lastActiveAt ?? '', session.last_active_at || session.updated_at),
     bytes: existing?.bytes ?? 0,
   } satisfies StoredSession);
 }
@@ -703,20 +721,20 @@ export async function recordLocalStoreStreamRow(row: WorkbenchMessage | null | u
     // of it in any tab.
     const admitted = readPending(sessionId)
       && (forgottenAt == null || (pendingReads.get(sessionId) ?? 0) > forgottenAt);
-    const write: RowWrite = { tx, sessionDelta: new Map() };
+    const write: RowWrite = { tx, sessionDelta: new Map(), activeAt: new Map() };
     if (!current && !admitted) {
       // A session the store does not keep. The row may still have moved here
       // from one it keeps (``promote_suppressed_native_message`` rebinds rows):
       // the old copy leaves that session under the same P1 ordering.
       await removeMovedRow(write, row, sessionId, ticket.observedAt);
-      await applySessionDelta(tx, write.sessionDelta, now);
+      await applySessionDelta(tx, write, now);
       return;
     }
     if (!(await putRow(write, row, sessionId, ticket.observedAt))) return;
     if (current && streamLive && streamToken === currentStreamToken()) {
       rangesStore.put({ ...current, ranges: extendTailCoverage(current.ranges, orderKeyOf(row), streamToken) } satisfies StoredRanges);
     }
-    await applySessionDelta(tx, write.sessionDelta, now);
+    await applySessionDelta(tx, write, now);
   });
   scheduleBudgetCheck();
 }
@@ -881,11 +899,11 @@ async function evictForSpace(quotaFailure: boolean): Promise<boolean> {
     let total = sessions.reduce((sum, session) => sum + session.bytes, 0);
     if (quotaFailure || total > budget) {
       const target = budget * EVICTION_TARGET;
-      const byRecency = [...sessions].sort((a, b) => recency(b).localeCompare(recency(a)));
+      const byRecency = [...sessions].sort((a, b) => recency(b) - recency(a));
       const recent = new Set(byRecency.slice(0, PROTECTED_RECENT_SESSIONS).map((session) => session.id));
       const evictable = byRecency
         .filter((session) => session.bytes > 0)
-        .sort((a, b) => evictionRank(a, recent) - evictionRank(b, recent) || recency(a).localeCompare(recency(b)));
+        .sort((a, b) => evictionRank(a, recent) - evictionRank(b, recent) || recency(a) - recency(b));
       for (const session of evictable) {
         if (!quotaFailure && total <= target) break;
         const keys = await settle(
@@ -908,9 +926,10 @@ async function evictForSpace(quotaFailure: boolean): Promise<boolean> {
   return freed;
 }
 
-/** How recently the conversation was active, by the server's clock. A session
- *  row without one falls back to when this device last wrote it. */
-const recency = (session: StoredSession) => session.lastActiveAt || new Date(session.touchedAt).toISOString();
+/** How recently the conversation was active, by the server's clock: its session
+ *  row or the newest message stored for it. With neither, when this device last
+ *  wrote it. */
+const recency = (session: StoredSession): number => Date.parse(session.lastActiveAt) || session.touchedAt;
 
 /** Lower ranks go first. */
 function evictionRank(session: StoredSession, recent: Set<string>): number {
