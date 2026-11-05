@@ -1,0 +1,472 @@
+# Web UI Motion · Plan
+
+> **Status**: Approved by the owner 2026-11-05 (decisions in section 11).
+> **Owner**: cyhhao
+> **Design**: `ui/design/frames/motion/` (status `approved`), `ui/design: motion/*`
+
+## 1. Background
+
+The owner wants the Web UI to feel like a native app, and much of that feel is
+motion. The Web UI now renders from local caches first
+(`docs/plans/web-ui-local-cache.md`), optimistic send and optimistic working
+state are being built, and the iOS app will show this Web UI inside a native
+`WKWebView` shell (`docs/plans/ios-app.md`), so "close to native iOS" is the bar.
+
+The rule that governs the cache work governs motion too: **nothing pops in from
+nothing; state may change, but smoothly; render the best known state first,
+then let live correct it.**
+
+Owner constraints carried from earlier design rounds:
+
+- **Restrained.** Motion is added to the existing visual design. It does not
+  restyle, relayout, or remove anything (a full visual redesign was rejected,
+  including a variant without chat bubbles). Bubbles, cards, colors, and
+  spacing stay exactly as shipped.
+- **Quality, not spectacle.** The reference is the voice meter: mint, smooth
+  interpolation, a stable frame rate, little CPU, and a full fallback when
+  "Reduce motion" is on.
+- **Chosen by comparison.** Each main moment was drawn in three strengths
+  (restrained, standard, pronounced) beside today's behavior, on the same data
+  and size; the owner chose standard for phone and desktop alike (section 9).
+- **Budget for the iPhone Home Screen app and `WKWebView`,** not for desktop
+  Chromium.
+
+## 2. What exists today (inventory, `master` at c2214a537)
+
+**Keyframes in `ui/src/index.css`**
+
+| Name | Use | Timing | Reduced motion |
+| --- | --- | --- | --- |
+| `slide-in` | Every toast, from the right edge | 200 ms `ease-out`, `translateX(100%)` | none |
+| `appwindow-in` / `-out` | App windows (desktop) | 140 / 130 ms | none |
+| `vr-typing` | The agent working dots (`ThinkingBubble`) | 1.2 s loop | none |
+| `msg-highlight` | Search jump target | 3 s background fade (paints) | none |
+| `project-pickup` | Project drag preview | 140 ms | yes |
+
+**tw-animate-css** (`animate-in` / `animate-out` on Radix state): `Dialog`
+(overlay fade 150 ms; content fade + zoom 95% on desktop, slide from the bottom
+on phones, 300 ms in and 200 ms out on `ease`), `ResponsiveMenu` (the same
+sheet), `Popover` (fade + zoom 95% + 2 px slide), and the settings panel on
+phones (`slide-in-from-right-4`, 200 ms, `motion-safe` only). None of these
+respects reduced motion except the settings panel.
+
+**framer-motion** is used only for drag reordering (`Reorder` in the Dock, the
+Library, the Model Hub source order and catalog) and `useReducedMotion`
+(project and model order lists, onboarding). There is no `motion.*`,
+`AnimatePresence`, or `layout` anywhere.
+
+**Transitions**: 227 bare `transition` (Tailwind's 150 ms on every animatable
+property), 139 `transition-colors`, and about 20 different literal durations
+(80 to 650 ms) and five curves across components and CSS. The desktop pet
+already uses the iOS settle curve `cubic-bezier(.32,.72,0,1)` as `--settle`.
+`AppWindow` animates `left/top/width/height` (layout), and `ProgressBar` and
+`ModeSelection` use `transition-all`.
+
+**Reduced motion**: about 20 call sites use `motion-reduce:` or `motion-safe:`,
+the voice meter has its own static bar, and the onboarding diagram stops
+itself. There is no shared policy.
+
+**Voice**: the meter is drawn from refs every animation frame (no React render
+per frame), breathes when quiet, goes flat and red when armed, sweeps while
+settling, and is one static bar under reduced motion. A finger opens the
+microphone at 200 ms with the ring from 100 ms; the desktop composer at 350 ms
+with the ring from 100 ms.
+
+**What pops today** (appears or changes in one frame): a sent message (it
+lands when the POST answers, after the working dots), the working dots, Send
+and Stop, a reply replacing the dots, new rows from the event stream or from a
+live answer replacing the cached view, Inbox reorders and unread badges, every
+route change, the mobile Apps drawer (no animation at all), the inline error
+banner (which also pushes the transcript down), and toasts leaving.
+
+**Taps on iOS** show WebKit's grey tap highlight (`-webkit-tap-highlight-color`
+is unset outside PDF links), and no tappable surface has a pressed state.
+
+## 3. Principles
+
+1. **Purposeful.** Motion explains a change: where a thing came from, where it
+   went, what replaced what. Decoration and idle motion are out, except the
+   shimmer and the working dots, which say "still loading" and "still working".
+2. **Fast.** Feedback within one frame of input; most moments finish in
+   160–360 ms; nothing over 500 ms except a spring's settling tail.
+3. **Interruptible.** A new input or a new state retargets a running animation
+   from where it is; it never queues behind it or snaps back first.
+4. **Spatially consistent.** A thing leaves the way it came. A message rises
+   from the composer and is withdrawn into it; a page pushed from the right
+   goes back to the right.
+5. **Never blocking input.** State and focus change at once; the motion plays
+   over a UI that already accepts input. No moment disables a control while it
+   animates.
+6. **Render the best known state first.** Cached, optimistic, or skeleton
+   first; live corrects it with the same motions as any other change.
+7. **Reduced motion respected.** Every moment has a no-motion or crossfade
+   fallback (section 7).
+8. **Additive.** Motion never changes a resting layout, color, or style.
+
+## 4. Tokens (`ui/src/index.css`, this PR)
+
+Plain custom properties in `:root` (Tailwind emits only the theme variables a
+utility uses, and the design kit and future CSS read these directly), with the
+curves also exposed as `ease-*` utilities through `@theme inline`.
+
+| Token | Value | Use |
+| --- | --- | --- |
+| `--motion-duration-instant` | 100 ms | Press feedback; the two halves of a hand-over in a control |
+| `--motion-duration-fast` | 160 ms | Small things (dots, badges, icons); every exit; reduced-motion crossfades |
+| `--motion-duration-base` | 240 ms | An element within a surface: a message, a row, a popover |
+| `--motion-duration-slow` | 360 ms | A surface: a page, a sheet; list moves without a spring |
+| `--motion-stagger` | 24 ms | Between rows entering together; at most five rows |
+| `--motion-ease-enter` (`ease-enter`) | `cubic-bezier(0.22, 1, 0.36, 1)` | Entering: decelerates into place |
+| `--motion-ease-exit` (`ease-exit`) | `cubic-bezier(0.4, 0, 1, 1)` | Leaving: accelerates away, on a shorter duration |
+| `--motion-ease-move` (`ease-move`) | `cubic-bezier(0.32, 0.72, 0, 1)` | Something on screen moving to a new place (the existing `--settle`) |
+| `--motion-spring-{snappy,smooth,sheet}` (`ease-spring-*`) | `linear()` curves | The springs below, for CSS |
+| `--motion-spring-*-duration` | 290 / 440 / 440 ms | The time each spring needs to settle |
+| `--motion-beat` | 120 ms | A follower trails its leader (the working bubble after the message) |
+| `--motion-offset-sm` / `--motion-offset` / `--motion-offset-lg` | 4 / 8 / 16 px | How far a thing travels as it enters |
+| `--motion-drift` | 30% | How far the page beneath drifts the other way on a push |
+| `--motion-scale-enter-sm` / `--motion-scale-enter` | 0.98 / 0.96 | The scale a large surface (a card) or an element enters from |
+| `--motion-scale-press` / `--motion-scale-press-control` | 0.97 / 0.94 | A pressed surface (card, row); a pressed control (button, chip) |
+| `--motion-scale-morph` | 0.6 | An icon trading places with another (Send ↔ Stop, a badge leaving) |
+| `--motion-handover-duration` / `--motion-handover-ease` | base / enter | Skeleton or cached view to content (section 6) |
+| `--motion-shimmer-duration` (`animate-skeleton-shimmer`) | 1600 ms | A skeleton's highlight sweep (section 6) |
+
+**Springs.** One set of names for framer-motion and CSS. The framer presets
+(added in Phase 1 as `ui/src/lib/motion.ts`) are framer's own
+`visualDuration` / `bounce` form; the CSS tokens are the same springs sampled
+into `linear()` (overshoot included) with the duration each needs to settle
+within 0.4%. Safari before 17.2 has no `linear()` and falls back to the nearest
+cubic-bezier through `@supports`.
+
+| Preset | framer-motion | stiffness / damping | CSS | Use |
+| --- | --- | --- | --- | --- |
+| `snappy` | `{ type: 'spring', visualDuration: 0.2, bounce: 0 }` | 685 / 52 | 290 ms | Controls: press release, Send ↔ Stop, badges |
+| `smooth` | `{ visualDuration: 0.3, bounce: 0 }` | 305 / 35 | 440 ms | Content: a message rising, rows moving (FLIP) |
+| `sheet` | `{ visualDuration: 0.38, bounce: 0.08 }` | 190 / 25 | 440 ms | Surfaces: sheets, drawers, page push |
+
+Existing literal durations move onto these tokens as each phase touches their
+component; nothing is migrated in bulk.
+
+## 5. Performance rules and budget
+
+The target device is a mid-range iPhone running the Home Screen app or the iOS
+shell's `WKWebView`, where #3256 measured Inbox renders of 100 ms or more under
+live traffic before its fix.
+
+- **Transform and opacity only.** They run on the compositor, so they keep
+  their frame rate while the main thread renders a live update. Height, width,
+  top, left, margin, `clip-path`, filters, and shadows never animate. Color and
+  shadow may change on a single small element with a `fast` transition (a
+  badge, a pressed card), never across a list.
+- **FLIP for anything that moves in a list or transcript.** Measure once
+  (all reads, then all writes), apply the inverse transform, and play it with
+  the Web Animations API (`element.animate`) so it runs off the main thread.
+  Not framer-motion `layout`, which writes a transform every frame from
+  JavaScript. Inside a scroller, apply the inverse only after the scroll
+  position has been pinned, and never re-pin during the glide: a positive
+  transform extends the scrollable area, and `ChatPage` re-pins after every
+  commit (`useLayoutEffect(restoreScrollPosition)`), so the pin must ignore
+  the running offset until the glide ends.
+- **Only what is on screen moves.** Rows outside the viewport plus one screen
+  snap. At most 8 elements animate in one moment, and at most 5 rows stagger.
+- **Bursts coalesce.** A second update during a move retargets the running
+  animation (`effect.updateTiming` or a new FLIP from the current position);
+  it never queues. During a burst of live updates (more than 3 in 1 s) list
+  moves fall back to the crossfade.
+- **No React render per frame.** Continuous motion (the voice meter, a drag)
+  writes styles from refs in `requestAnimationFrame`, as the meter does.
+- **Layers are temporary.** `will-change` only while an animation runs; never
+  on list rows at rest (each layer costs memory in WebKit).
+- **No backdrop blur on what moves.** A scrim with `backdrop-filter` may fade
+  (opacity), but no element with a backdrop filter translates or scales; on
+  phones, the sheet scrim's blur is kept static while it fades.
+- **Start after commit.** A moment starts in the frame after React commits
+  (`useLayoutEffect` measuring, then `animate`), never inside a render, and
+  heavy work it triggers (Markdown, IndexedDB writes) is scheduled after the
+  first frame of the motion.
+- **Budget per moment**, measured in Chromium with 4× CPU throttling as the
+  proxy until a device lab run: no dropped compositor frames, no main-thread
+  task over 16 ms during the motion caused by the motion itself, and zero
+  style recalculation or layout per frame from the animation. Each
+  implementation PR records this, plus one run on an iPhone with Safari Web
+  Inspector's timeline (the `WKWebView` is inspectable in development builds).
+
+**Limitation of this design round:** the preview video and the checks behind
+it ran in desktop Chromium (Playwright), with frames stepped deterministically,
+so the video shows the intended timing exactly but says nothing about an
+iPhone's frame rate. The choreography only uses compositor properties, which
+is what makes it cheap on WebKit too, but the device numbers come with each
+implementation PR.
+
+## 6. Loading and hand-over
+
+The owner's rule for loading (2026-11-05): main surfaces never show "a spinner
+first, then content". The skeleton's look is designed by the lists lane in its
+own PR (frames `system/skeleton/*`, `inbox/inbox-page/*-loading`,
+`chat/skeleton/*`, `system/boot/*`, and the `Skeleton` primitive); this section
+owns its motion and the tokens that lane already uses by name.
+
+- **Cache first.** A surface with a snapshot renders it at once, fully
+  usable, and refreshes quietly. It shows no skeleton and no loading
+  indicator.
+- **Skeleton when there is nothing.** Blocks the size and radius of the rows
+  they stand for (`bg-foreground/[0.06]`), inside the real card's border, so
+  the content lands without moving anything.
+- **Shimmer.** One highlight per card at the owner's "light" strength
+  (`via-foreground/[0.03]`, decided 2026-11-05), not one per block, crossing it with `animate-skeleton-shimmer`: about 60% of each
+  1600 ms period sweeping (`ease-in-out`, transform only), the rest resting.
+  Under reduced motion it is still (`motion-reduce:animate-none`): the blocks
+  remain, the sweep does not. The highlight rests off its block
+  (`[transform:translateX(-100%)]`), so a still one shows nothing; not a
+  `translate-x-*` utility, whose separate `translate` property adds to the
+  keyframes' `transform` and shifts the sweep.
+- **Skeleton to content.** The content fades in where the skeleton was, on
+  `--motion-handover-duration` and `--motion-handover-ease` (240 ms, enter),
+  and the skeleton goes as it arrives. Geometry does not change, so nothing
+  moves; a row count that differs is absorbed by the rows below gliding (FLIP).
+  Under reduced motion the content replaces the skeleton in one frame, which
+  is safe because nothing moves.
+- **Cache to live.** Rows with the same identity stay where they are and do
+  not animate. A row that is new enters as a reply does (section 8, M3); a row
+  removed leaves as an archived row does (M7); a changed order uses the Inbox
+  move (M7). When the live answer differs too much to describe as row changes
+  (more than 5 rows, or the scroll anchor is gone), the whole list cross-fades
+  on the hand-over tokens. Chrome never changes (`web-ui-local-cache.md`
+  invariant 4).
+- **Loading more.** No spinner. At the end of a list, one or two skeleton rows
+  in the list's own row shape, with the shimmer, replaced by the rows on the
+  hand-over. Older messages at the top of a conversation keep the existing
+  32 px slot (`h-8`) and show a slim skeleton bar there instead of `Loader2`,
+  so the anchor never shifts.
+- **Retry.** A failed load shows its message in the same slot the skeleton
+  held (no layout change), and the retry starts the skeleton again.
+
+## 7. Reduced motion
+
+`prefers-reduced-motion: reduce` gets each moment's fallback, never a global
+kill switch (the dots, the shimmer, and the voice meter have their own still
+forms, and a progress indicator may still turn).
+
+- Anything that travels (translate, scale, a push, a sheet) becomes a
+  crossfade on `fast`, or no animation where a crossfade would only flash.
+- Press feedback keeps its color change and drops its scale.
+- The working dots hold still at mid opacity; the shimmer stops; the voice
+  meter keeps its static bar.
+- Implementation reads one hook (`useMotionPreference()` in Phase 1, built on
+  framer's `useReducedMotion`) for JavaScript-driven motion, and
+  `motion-reduce:` for CSS.
+
+Every moment's reduced form is drawn in at least one frame (`*-reduced`).
+
+## 8. Catalog
+
+Priority is perceived impact on a phone: P1 is the conversation (the most
+frequent action), P2 how the app moves between places and answers a touch, P3
+lists and notices. Each moment is the approved standard strength, with its
+reduced-motion form.
+
+### M1 · Optimistic send (P1)
+
+- **Trigger**: Send or Enter accepted locally; the row is appended before the
+  POST (optimistic send lane).
+- **Motion**: the Send button sinks to `--motion-scale-press-control` under the finger (`instant`).
+  The transcript, already pinned to its new bottom, glides up off its FLIP
+  offset on `spring-smooth`, so the new message emerges from behind the
+  composer's top edge; the message itself grows from `--motion-scale-enter` at its
+  bottom-right corner and rises the last `--motion-offset`, fading in on `fast`. The
+  composer hands over in two beats so the texts never overlap: the typed text
+  and Send leave (`instant`, exit), then the empty composer and Stop arrive
+  (`fast`, enter).
+- **Failure**: the working bubble and Stop leave first (`instant`); the
+  message sinks back under the composer as the transcript glides down (`base`,
+  move; the message fades on `base`, exit); the composer shows the text and
+  Send again. The existing inline error fades in on `fast` (it still inserts
+  above the transcript; changing that is a layout decision outside this plan).
+- **Not pinned** (the reader is up in the history): no glide; the
+  jump-to-latest control appears (`fast`).
+- **Reduced**: the transcript cross-fades to its new state on `fast`.
+- **Components**: `ChatPage` (`Transcript`, `MessageRow`), `Composer`, the
+  optimistic row.
+- **Frames**: `motion/send/phone`, `phone-reduced`, `phone-failed`, `desktop`.
+
+### M2 · Send ↔ Stop, and the working bubble (P1)
+
+- **Send → Stop**: Send scales to `--motion-scale-morph` and fades (`instant`,
+  exit), then Stop grows from it on `spring-snappy` while it fades in (`fast`). The queue-send
+  button that appears beside Stop when there is text enters the same way.
+  Stop → Send is the mirror.
+- **Working bubble**: enters one beat (`--motion-beat`) after the message, rising
+  `--motion-offset-sm` and fading in on `fast`; it leaves by fading where the
+  reply grows over it (M3).
+- **Reduced**: crossfade on `fast`; the dots hold still.
+- **Components**: `Composer`, `ThinkingBubble`.
+
+### M3 · A reply arriving, and streamed rows (P1)
+
+- **Motion**: the working bubble fades out (`instant`) while the reply grows
+  in its place from its top-left corner (`--motion-scale-enter`, `spring-smooth`, fading on
+  `base`), and the transcript glides up by what the reply adds. Stop hands back
+  to Send (M2). Interim rows and activity rows enter the same way, one glide
+  per 100 ms at most; a row that grows while it streams is not animated (its
+  height change is followed by the pinned glide).
+- **Reduced**: crossfade on `fast`.
+- **Frames**: `motion/arrival/phone`, `phone-reduced`.
+
+### M4 · Cache → live hand-over (P1)
+
+Section 6. Chat: M3's arrival for new tail rows, M7's leave for removed rows.
+Inbox: M7's move. Frames: `motion/arrival/*`, `motion/inbox/*`.
+
+### M5 · Navigation (P2)
+
+- **Phone, hierarchy** (Inbox, Projects, Search → a conversation): the tapped
+  card sinks to `--motion-scale-press`; the conversation slides in from the
+  right edge on `spring-sheet` while the page beneath drifts `--motion-drift` the
+  other way, as a native push does; Back reverses it. Built on same-document View
+  Transitions (`document.startViewTransition`, Safari 18 and Chrome 111+),
+  named per page; where they are missing (iOS 17), navigation stays a cut
+  rather than a JavaScript slide.
+  - Input is never held: any pointer or key input during a transition calls
+    `skipTransition()`, and the transition is at most 440 ms.
+  - When the system already animated the change (a native edge swipe in the
+    iOS shell, or `hasUAVisualTransition` on the event), no web transition
+    runs.
+- **Phone, tabs** (the tab bar): no slide, as on iOS; at most a `fast`
+  crossfade of the content.
+- **Desktop**: no slide. Switching conversations cross-fades the chat column
+  on `fast` with the composer in place; the sidebar's selection moves (FLIP,
+  `spring-snappy`) instead of jumping.
+- **Reduced**: crossfade on `fast`.
+- **Frames**: `motion/navigation/phone-push`, `phone-push-reduced`.
+
+### M6 · Sheets, drawers, popovers, menus (P2)
+
+- **Phone sheets** (`Dialog` and `ResponsiveMenu` on phones, the new-session
+  sheet, the Apps drawer, the Bot switcher): rise from the bottom edge on
+  `spring-sheet`; the scrim fades on `base`. They leave faster: `base`, exit.
+  The Apps drawer, which has no motion today, joins them.
+- **Drag to dismiss**: from the handle or the sheet header (or anywhere once
+  its content is scrolled to the top). The sheet follows the finger 1:1, with
+  resistance above its resting place; on release it dismisses when pulled past
+  30% of its height or moving down faster than 500 px/s, carrying the finger's
+  speed out, and otherwise springs back on `spring-snappy`.
+- **Desktop popovers and menus**: fade and grow from `--motion-scale-enter` at the trigger
+  (Radix's `--radix-*-transform-origin`) on `fast`, enter; leave with a fade on
+  `fast`, exit. Today's 150 ms zoom moves onto the tokens.
+- **Desktop dialogs**: fade and grow from `--motion-scale-enter` on `base`; the scrim on `fast`.
+- **Reduced**: fade only, on `fast`.
+- **Frames**: `motion/sheets/phone`, `phone-drag`, `phone-reduced`.
+
+### M7 · Inbox rows (P3)
+
+- **Move to the top** (a new reply): the card leaves its old slot (fades on
+  `instant`), the cards above glide down into the room (`spring-smooth`), and
+  the card comes in at the top with the new reply, from `--motion-offset`
+  above and `--motion-scale-enter-sm` (`spring-smooth`, fade on `base`). Inbox cards are tinted, not
+  opaque, so a card never travels across the others.
+- **Insert** (a new conversation): the rows below glide down; the card comes in
+  at its slot as above.
+- **Unread cleared**: the count badge shrinks to `--motion-scale-morph` and fades (`fast`,
+  exit); the card's mint wash eases to the read style with a `fast` color
+  transition (one card).
+- **Archive or removal**: the card fades and shrinks to `--motion-scale-enter-sm` (`fast`, exit),
+  then the rows below glide up (`spring-smooth`). Height never animates.
+- **Reduced**: crossfade on `fast`.
+- **Frames**: `motion/inbox/phone-move`, `phone-move-reduced`.
+
+### M8 · Press feedback and quick replies (P2)
+
+- **Every tappable surface** (buttons, cards, rows, tab bar items, chips) gets
+  a pressed state on `:active`: cards and rows sink to
+  `--motion-scale-press` and buttons and chips to
+  `--motion-scale-press-control`, each with a color step (a pressed fill one
+  step darker, or the surface's hover fill).
+  Press is `instant`; release is `spring-snappy`. On touch the pressed state
+  waits 60 ms inside a scroller so a scroll does not flash it. WebKit's grey
+  tap highlight is turned off where a pressed state exists.
+- **Quick reply**: the chip presses as above; on choice it fills (its shipped
+  chosen style, `fast` color) while the others fade to their locked state, and
+  the user message rises as in M1.
+- **Reduced**: the color step stays; the scale goes.
+
+### M9 · Toasts (P3)
+
+Toasts rise from below their stack (phone: above the tab bar) by
+`--motion-offset-lg` on `spring-smooth`, fading on `fast`; the stack moves up
+with FLIP; a toast leaves with a fade and a `--motion-offset` drop on `fast`,
+exit, and can be swiped sideways on a phone. Today they slide in from beyond
+the right edge and vanish on dismissal. Reduced: fade.
+
+### M10 · Voice composer (P3, alignment)
+
+The shipped voice design stays (meter, thresholds, reduced-motion bar). The
+hold card enters from `--motion-scale-enter` on `spring-snappy` with its halo fading on `base`,
+the cancel target changes color on `fast`, and its existing literals move to
+the tokens. No new motion.
+
+### Smaller moments
+
+The jump-to-latest control (fade and `--motion-scale-enter` → 1, `fast`), queue rows (enter like a
+message, leave like an archived row), Harness group expansion (content fades in
+on `fast`; no height animation), the search jump highlight (kept), and the
+error banner (fade on `fast`).
+
+## 9. Strength
+
+The owner compared three strengths side by side on the same data (the preview
+video and frames of 2026-11-05) and chose **standard**, the same on phone and
+desktop: iOS-like springs without visible overshoot, full-distance pushes and
+sheets, small scales. Restrained (fades and short travel only) and pronounced
+(longer travel, a 2% overshoot spring, receding pages) were not chosen; their
+frames and the tokens only they used were removed.
+
+## 10. Phases
+
+Each phase is one PR, with its frames moved to `shipped`, its reduced-motion
+test, the Chromium 4× measurements in section 5, and a place for the device
+numbers. Delivery order (2026-11-05), to stay clear of other work in flight:
+phase 2 and phase 3 first; phase 4 after the list skeleton PR (it also changes
+the Inbox and the sidebar); phase 1 after the chat skeleton PR and optimistic
+send (they change `ChatPage`).
+
+1. **Conversation (P1)**: `ui/src/lib/motion.ts` (springs, `useMotionPreference`,
+   a small WAAPI FLIP helper), then M1–M4 in `ChatPage` and `Composer`. Lands
+   on top of the optimistic send lane.
+2. **Navigation and touch (P2)**: View Transitions push and pop on phones, the
+   desktop column crossfade, M8 press feedback (a shared pressed-state class on
+   the primitives), the tap highlight.
+3. **Sheets and overlays (P2)**: M6 for `Dialog`, `ResponsiveMenu`, the Apps
+   drawer and the Bot switcher, drag to dismiss, popover and menu tokens, M9
+   toasts.
+4. **Lists (P3)**: M7 in the Inbox page, the sidebar Inbox popover and the
+   project tree, and the loading hand-over (section 6) where the skeleton
+   lanes have not already adopted the tokens.
+
+## 11. Decisions (owner, 2026-11-05)
+
+1. **Strength**: standard for every moment, on phone and desktop alike.
+2. **Phone push**: View Transitions on iOS 18 and later; on iOS 17 navigation is
+   a cut, never a JavaScript slide.
+3. **Drag to dismiss**: phone sheets support it (M6).
+4. **Pressed state**: cards and rows sink to 0.97 (`--motion-scale-press`) and
+   buttons and chips to 0.94 (`--motion-scale-press-control`), each with a
+   color step (M8).
+5. **Native back swipe**: when the iOS shell enables the system edge swipe,
+   the web pop animation steps aside for it (M5).
+
+## 12. Known by design
+
+- Frames are static; each moment is a looping CSS animation over the shipped
+  page in each state. The moments are kit components (`ui/design/kit/motion/`);
+  the frames own the data and pass it to them. Every proposed motion value
+  (duration, curve, offset, scale, opacity, beat) is read from the tokens. A
+  frame states three kinds of number that are not motion design: when in its
+  loop a moment happens, the FLIP offsets (the row heights the shipped page
+  draws for that data, which FLIP measures at run time), and a demo gesture's
+  finger path.
+- The chat frames stack two or three shipped pages; the phone chat is an
+  opaque sheet, so a stacked page leaves its sheet background off
+  (`seeThrough`) to let the composer cross-fade. Nothing in the product changes
+  for this.
+- Moments that need interaction state the frames cannot hold (toasts, the
+  pressed state on every primitive, desktop popovers) are specified here and
+  drawn when their phase lands.

@@ -1,4 +1,4 @@
-import { useMemo, type ReactNode } from 'react';
+import { createContext, useContext, useMemo, type ReactNode } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 
 import { ApiProvider } from '@/context/ApiContext';
@@ -82,6 +82,20 @@ function projectsValue(fixtures: WorkbenchFixtures): WorkbenchProjectsTree {
   });
 }
 
+/** The frame's fixtures, for providers a frame places itself (`InboxStateProvider`). */
+const FixturesContext = createContext<WorkbenchFixtures>({});
+
+/** One of the frame's `inboxStates`: the Inbox context this shell builds for the frame, with that
+ *  state's rows and counts, for a frame that stacks the Inbox before and after a change. */
+export function InboxStateProvider({ state, children }: { state: string; children: ReactNode }) {
+  const fixtures = useContext(FixturesContext);
+  const value = useMemo(() => {
+    const rows = fixtures.inboxStates?.[state];
+    return inboxValue(rows ? { ...fixtures, ...rows } : fixtures);
+  }, [fixtures, state]);
+  return <WorkbenchInboxContext.Provider value={value}>{children}</WorkbenchInboxContext.Provider>;
+}
+
 // Nothing is docked or being dragged: the chat header's Show Page control reads these.
 const dock = inert<DockValue>({ order: [], pins: [], isPinned: () => false, isDocked: () => false, pinFor: () => null });
 const showPageDrag = inert<ShowPageDragValue>({ active: false });
@@ -117,6 +131,7 @@ export function DesignShell({
   );
   return (
     <MemoryRouter initialEntries={[route]}>
+      <FixturesContext.Provider value={fixtures}>
       <ToastProvider>
         <ApiProvider>
           <InstanceAuthorizationContext.Provider value={authorization}>
@@ -142,6 +157,7 @@ export function DesignShell({
           </InstanceAuthorizationContext.Provider>
         </ApiProvider>
       </ToastProvider>
+      </FixturesContext.Provider>
     </MemoryRouter>
   );
 }

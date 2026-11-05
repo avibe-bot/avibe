@@ -78,6 +78,72 @@
   --chat-column-w: 1080px;
 }
 
+/* Motion (docs/plans/web-ui-motion.md §4; ui/design: motion/tokens/sheet). A
+   moment picks one duration and one curve from here; nothing animates on a
+   literal. Durations: `instant` answers a press, `fast` moves small things
+   (dots, badges, icons) and every exit, `base` moves an element within a
+   surface (a message, a row, a popover), `slow` moves a surface (a page, a
+   sheet). Curves: `enter` decelerates into place, `exit` accelerates away,
+   `move` carries something already on screen to a new place. The springs are
+   framer-motion's presets of the same names, drawn as `linear()` with the
+   duration each needs to settle; Safari before 17.2 has no `linear()` and gets
+   the nearest cubic-bezier instead. Only transform and opacity animate.
+   Offsets and scales are how far a moment travels, not sizes of anything at
+   rest. */
+:root {
+  --motion-duration-instant: 100ms;
+  --motion-duration-fast: 160ms;
+  --motion-duration-base: 240ms;
+  --motion-duration-slow: 360ms;
+  /* Between rows entering together; at most five rows are staggered. */
+  --motion-stagger: 24ms;
+
+  --motion-ease-enter: cubic-bezier(0.22, 1, 0.36, 1);
+  --motion-ease-exit: cubic-bezier(0.4, 0, 1, 1);
+  --motion-ease-move: cubic-bezier(0.32, 0.72, 0, 1);
+
+  /* snappy: controls (press release, send/stop, badges); smooth: content
+     (a message rising, a row moving); sheet: surfaces (sheets, page push). */
+  --motion-spring-snappy: cubic-bezier(0.25, 1, 0.5, 1);
+  --motion-spring-snappy-duration: 290ms;
+  --motion-spring-smooth: cubic-bezier(0.25, 1, 0.5, 1);
+  --motion-spring-smooth-duration: 440ms;
+  --motion-spring-sheet: cubic-bezier(0.32, 0.72, 0, 1);
+  --motion-spring-sheet-duration: 440ms;
+
+  /* Loading (plan §6): content taking over from a skeleton or from the
+     cached view fades in place on `handover`; a skeleton's shimmer sweeps once
+     per `shimmer` period and rests for the rest of it. */
+  --motion-handover-duration: var(--motion-duration-base);
+  --motion-handover-ease: var(--motion-ease-enter);
+  --motion-shimmer-duration: 1600ms;
+
+  /* A follower trails its leader by one beat (the working bubble after the
+     message, a card arriving after the list made room). */
+  --motion-beat: 120ms;
+
+  --motion-offset-sm: 4px;
+  --motion-offset: 8px;
+  --motion-offset-lg: 16px;
+  /* How far the page beneath drifts the other way as a page is pushed over it. */
+  --motion-drift: 30%;
+  /* The scale something enters from; `sm` for a large surface (a card). */
+  --motion-scale-enter-sm: 0.98;
+  --motion-scale-enter: 0.96;
+  /* Under the finger: a surface (a card, a row) and a control (a button, a chip). */
+  --motion-scale-press: 0.97;
+  --motion-scale-press-control: 0.94;
+  /* An icon trading places with another (Send and Stop, a badge leaving). */
+  --motion-scale-morph: 0.6;
+}
+@supports (transition-timing-function: linear(0, 1)) {
+  :root {
+    --motion-spring-snappy: linear(0, 0.016 2.5%, 0.079 6%, 0.178 10%, 0.439 19.5%, 0.558 24.5%, 0.61 27%, 0.692 31.5%, 0.738 34.5%, 0.828 42%, 0.872 47%, 0.905 52%, 0.93 57%, 0.954 64%, 0.98 77%, 0.995 99.5%, 1);
+    --motion-spring-smooth: linear(0, 0.017 2.5%, 0.08 6%, 0.181 10%, 0.444 19.5%, 0.552 24%, 0.615 27%, 0.688 31%, 0.743 34.5%, 0.833 42%, 0.876 47%, 0.908 52%, 0.952 62.5%, 0.981 77%, 1);
+    --motion-spring-sheet: linear(0, 0.004 1.5%, 0.02 3.5%, 0.046 5.5%, 0.089 8%, 0.183 12.5%, 0.46 24.5%, 0.609 32%, 0.727 39.5%, 0.816 47%, 0.861 52%, 0.896 57%, 0.947 67.5%, 0.978 80%, 1);
+  }
+}
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -141,6 +207,22 @@
   --color-bg: var(--background);
   --color-panel: var(--surface);
   --color-text: var(--foreground);
+
+  /* The motion curves as `ease-*` utilities (the values live in :root above). */
+  --ease-enter: var(--motion-ease-enter);
+  --ease-exit: var(--motion-ease-exit);
+  --ease-move: var(--motion-ease-move);
+  --ease-spring-snappy: var(--motion-spring-snappy);
+  --ease-spring-smooth: var(--motion-spring-smooth);
+  --ease-spring-sheet: var(--motion-spring-sheet);
+
+  /* A skeleton's shimmer: a highlight crossing its block, transform only.
+     Pair it with `motion-reduce:animate-none`, which leaves the block still. */
+  --animate-skeleton-shimmer: skeleton-shimmer var(--motion-shimmer-duration) ease-in-out infinite;
+  @keyframes skeleton-shimmer {
+    0% { transform: translateX(-100%); }
+    60%, 100% { transform: translateX(100%); }
+  }
 
   --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
     Helvetica, Arial, sans-serif;
