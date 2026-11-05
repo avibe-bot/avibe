@@ -106,6 +106,8 @@ class FlipListCore extends React.Component<Props> {
   /** The change waiting for its frame, from the state last painted. */
   private pending: Snapshot | null = null;
   private frame = 0;
+  /** Every row animation running, so a change of list can end them. */
+  private playing = new Set<Animation>();
 
   private rows(): Map<string, HTMLElement> {
     const out = new Map<string, HTMLElement>();
@@ -124,7 +126,9 @@ class FlipListCore extends React.Component<Props> {
   getSnapshotBeforeUpdate(prevProps: Props): Snapshot | null {
     const { ids, group, disabled } = this.props;
     if (disabled || prevProps.disabled || group !== prevProps.group) {
+      // Another list: what the old one was playing ends here, copies and all.
       this.drop();
+      this.halt();
       return null;
     }
     // Already waiting for a frame: nothing has been painted since, so the screen still shows
@@ -200,6 +204,13 @@ class FlipListCore extends React.Component<Props> {
 
   componentWillUnmount() {
     this.drop();
+    this.halt();
+  }
+
+  /** Ends every row animation and removes every copy. */
+  private halt() {
+    for (const animation of [...this.playing]) animation.cancel();
+    this.playing.clear();
     this.layer.current?.replaceChildren();
   }
 
@@ -212,6 +223,9 @@ class FlipListCore extends React.Component<Props> {
 
   private track(row: Element, animation: Animation | null) {
     if (!animation) return;
+    this.playing.add(animation);
+    const done = () => this.playing.delete(animation);
+    animation.finished.then(done, done);
     const list = this.running.get(row) ?? [];
     list.push(animation);
     this.running.set(row, list);
@@ -264,11 +278,20 @@ class FlipListCore extends React.Component<Props> {
       }
     }
 
-    // Staying: from where each row was to where it is, once the leaving rows have gone.
+    // Staying: from where each row was to where it is, once the leaving rows have gone. A row
+    // inside another that glides (a session in a phone project card) moves with it already, so it
+    // glides only by the difference, on the same timing.
+    const gliding = new Map(plan.glides.map((glide) => [glide.id, glide]));
     for (const glide of plan.glides) {
       const row = rows.get(glide.id);
       if (!row) continue;
-      this.track(row, playFlip(row, { x: glide.dx, y: glide.dy }, { ...tokens.smooth, delay: closeUp }));
+      const holder = row.parentElement?.closest<HTMLElement>(`[${FLIP_ATTRIBUTE}]`);
+      const carried = holder && root?.contains(holder) ? gliding.get(holder.getAttribute(FLIP_ATTRIBUTE)!) : undefined;
+      const dx = glide.dx - (carried?.dx ?? 0);
+      const dy = glide.dy - (carried?.dy ?? 0);
+      if (Math.abs(dx) >= 0.5 || Math.abs(dy) >= 0.5) {
+        this.track(row, playFlip(row, { x: dx, y: dy }, { ...tokens.smooth, delay: closeUp }));
+      }
       const seen = snapshot.opacity.get(glide.id);
       if (seen !== undefined) this.track(row, row.animate([{ opacity: seen }, { opacity: 1 }], tokens.fastEnter));
     }

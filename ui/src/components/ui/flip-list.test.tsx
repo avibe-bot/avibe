@@ -204,4 +204,43 @@ describe('FlipList', () => {
     expect(ghosts().map((ghost) => ghost.textContent).sort()).toEqual(['c', 'd']);
     expect(moves(on('a'))[0].keyframes[0]).toEqual({ transform: 'translate(0px, -96px)' });
   });
+
+  it('ends what the old list was playing when the list changes group, copies and all', () => {
+    const view = render(<List ids={['a', 'b', 'c', 'd']} />);
+    view.rerender(<List ids={['c', 'a', 'b', 'd']} />);
+    frame();
+    const running = played.filter((entry) => entry.element.hasAttribute('data-flip-id'));
+    expect(running.length).toBeGreaterThan(0);
+    expect(ghosts()).toHaveLength(1);
+    view.rerender(<List ids={['c', 'a', 'b', 'd']} group="all" />);
+    for (const entry of running) expect(entry.animation.cancel).toHaveBeenCalled();
+    expect(ghosts()).toEqual([]);
+  });
+
+  it('glides a row inside a gliding row only by the difference, since it moves with its holder', () => {
+    // A phone project card holds its session rows; a session added in the card above pushes this
+    // whole card (and so its rows) down 48 px, and nothing moves inside it.
+    const boxes: Record<string, number> = { n0: 0, p2: 48, s1: 60, s2: 84 };
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function rect(this: HTMLElement) {
+      const top = boxes[this.getAttribute('data-flip-id') ?? ''] ?? 0;
+      return { top, left: 0, width: 360, height: 24, right: 360, bottom: top + 24, x: 0, y: top, toJSON: () => ({}) } as DOMRect;
+    });
+    const Tree = ({ ids }: { ids: string[] }) => (
+      <FlipList ids={ids} className="flex flex-col">
+        {ids.includes('n1') && <div data-flip-id="n1">n1</div>}
+        <div data-flip-id="n0">n0</div>
+        <div data-flip-id="p2">
+          <div data-flip-id="s1">s1</div>
+          <div data-flip-id="s2">s2</div>
+        </div>
+      </FlipList>
+    );
+    const view = render(<Tree ids={['n0', 'p2', 's1', 's2']} />);
+    view.rerender(<Tree ids={['n1', 'n0', 'p2', 's1', 's2']} />);
+    Object.assign(boxes, { n1: 0, n0: 24, p2: 72, s1: 84, s2: 108 });
+    frame();
+    expect(moves(on('p2'))[0].keyframes[0]).toEqual({ transform: 'translate(0px, -24px)' });
+    expect(moves(on('s1'))).toEqual([]);
+    expect(moves(on('s2'))).toEqual([]);
+  });
 });
