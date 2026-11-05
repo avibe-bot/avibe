@@ -7,6 +7,7 @@ import {
   chatSnapshotOwnerForAnswer,
   chatSnapshotWindow,
   forgetChatSnapshot,
+  knownChatSnapshot,
   readChatSnapshot,
   writeChatSnapshot,
   type ChatSnapshot,
@@ -28,7 +29,10 @@ import { loadKnownVoiceStatus } from '../../lib/voiceAvailability';
 // it. The rules:
 //
 //  * Paint once per opened chat, onto empty state, before anything live landed
-//    for it, and for the reader whose record it is.
+//    for it, and for the reader whose record it is. A record this document
+//    holds in memory paints in the commit that opens the chat (``paintKnown``,
+//    which ChatPage calls right after it resets for the route); otherwise the
+//    stored record paints when IndexedDB answers.
 //  * The first live transcript window (the bootstrap, or a recovery read that
 //    commits first) removes every painted row before it lands. Rows are
 //    tracked by version, not id: a row the stream delivered or updated
@@ -118,12 +122,33 @@ export function useChatSnapshot({ sessionId, paint, unpaint, drop, messages, old
   // The chat had no usable record when it opened, so its first write adds one.
   const missingRef = useRef(true);
 
-  useEffect(() => {
+  // A layout effect, so it runs before the page's reset and its ``paintKnown``.
+  useLayoutEffect(() => {
     liveRef.current = false;
     paintedRef.current = null;
     seededRef.current = null;
     missingRef.current = true;
   }, [sessionId]);
+
+  const paintSnapshot = useCallback((snapshot: ChatSnapshot, reader: string) => {
+    if (!paintRef.current(snapshot)) return;
+    paintedRef.current = { principal: reader, rows: new Set(snapshot.messages) };
+    seededRef.current = reader;
+    setView({ sessionId: snapshot.session.id, principal: reader });
+  }, []);
+
+  // Paint the record this document holds for the open chat, at once. Called by
+  // the page at the end of the layout effect that resets it for a route, onto
+  // the state it just emptied, so the first frame the browser paints is the
+  // chat, not a loading state.
+  const paintKnown = useCallback(() => {
+    const route = routeRef.current;
+    const reader = getLocalSnapshotPrincipal();
+    const snapshot = route && reader ? knownChatSnapshot(route) : null;
+    if (!snapshot || !reader) return;
+    missingRef.current = false;
+    paintSnapshot(snapshot, reader);
+  }, [paintSnapshot]);
 
   // The cache stops speaking for the page: withdraw what it seeded.
   const withdraw = useCallback(() => {
@@ -165,16 +190,13 @@ export function useChatSnapshot({ sessionId, paint, unpaint, drop, messages, old
     void Promise.all([readChatSnapshot(sessionId), loadKnownVoiceStatus()]).then(([snapshot]) => {
       if (cancelled) return;
       if (snapshot) missingRef.current = false;
-      if (!snapshot || liveRef.current || getLocalSnapshotPrincipal() !== principal) return;
-      if (!paintRef.current(snapshot)) return;
-      paintedRef.current = { principal, rows: new Set(snapshot.messages) };
-      seededRef.current = principal;
-      setView({ sessionId, principal });
+      if (!snapshot || liveRef.current || paintedRef.current || getLocalSnapshotPrincipal() !== principal) return;
+      paintSnapshot(snapshot, principal);
     });
     return () => {
       cancelled = true;
     };
-  }, [sessionId, principal]);
+  }, [sessionId, principal, paintSnapshot]);
 
   const beginBootstrap = useCallback((requestSessionId: string): ChatSnapshotBootstrapRead => {
     // Noted before the request: a reader change, a store clear, or a forget
@@ -250,5 +272,8 @@ export function useChatSnapshot({ sessionId, paint, unpaint, drop, messages, old
     release,
     /** Painted rows are on screen; older paging waits for the live window. */
     isPainted,
+    /** Paint the record held in memory for the open chat, if any: the page
+     *  calls it in the layout effect that resets it for the route. */
+    paintKnown,
   };
 }

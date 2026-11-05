@@ -1057,6 +1057,7 @@ export const ChatPage: React.FC = () => {
     beginBootstrap: beginChatSnapshotBootstrap,
     release: releaseChatSnapshot,
     isPainted: isChatSnapshotPainted,
+    paintKnown: paintKnownChatSnapshot,
   } = useChatSnapshot({
     sessionId,
     paint: paintChatSnapshot,
@@ -1798,8 +1799,12 @@ export const ChatPage: React.FC = () => {
   // Clear per-session state the instant the session changes (React Router swaps
   // only :sessionId, reusing this instance), before the new session's
   // load/subscribe — so the previous conversation / queue / draft never leak in
-  // and the merge in ``refresh`` only ever unions same-session rows.
-  useEffect(() => {
+  // and the merge in ``refresh`` only ever unions same-session rows. A layout
+  // effect, ending with the conversation this document already holds for the
+  // new route (useChatSnapshot ``paintKnown``): both land before the browser
+  // paints, so a chat opened again shows itself in its first frame, never a
+  // loading state.
+  useLayoutEffect(() => {
     bootstrapRequestGenerationRef.current += 1;
     // Returning to the same session must not revive an earlier send's ownership.
     queueSendGenerationRef.current += 1;
@@ -1868,7 +1873,8 @@ export const ChatPage: React.FC = () => {
       window.clearTimeout(graceResyncRef.current);
       graceResyncRef.current = null;
     }
-  }, [api, sessionId, applyLocalSession, dispatchLive]);
+    paintKnownChatSnapshot();
+  }, [api, sessionId, applyLocalSession, dispatchLive, paintKnownChatSnapshot]);
 
   // Persistent per-session subscription: append every transcript-visible
   // ``message.new`` for THIS session for as long as the page is open. An agent
