@@ -86,7 +86,7 @@ const renderTranscript = (over: Partial<Props> = {}) => {
   };
   const view = render(<MemoryRouter><Transcript {...props} /></MemoryRouter>);
   const scroller = view.getByTestId('chat-transcript');
-  const geometry = { extraAbove: 0 };
+  const geometry = { extraAbove: 0, clientHeight: 800 };
   let scrollTop = 0;
   // jsdom has no layout, so geometry comes from the committed content column's
   // direct children: the head slot and the rows, which pickScrollAnchor walks too.
@@ -109,7 +109,7 @@ const renderTranscript = (over: Partial<Props> = {}) => {
     return 0;
   };
   Object.defineProperties(scroller, {
-    clientHeight: { configurable: true, get: () => 800 },
+    clientHeight: { configurable: true, get: () => geometry.clientHeight },
     scrollHeight: { configurable: true, get: () => rowsFrom(column().lastElementChild) * 112 + 40 + loadingSlotHeight() + geometry.extraAbove },
     scrollTop: {
       configurable: true,
@@ -117,7 +117,7 @@ const renderTranscript = (over: Partial<Props> = {}) => {
       set: (value: number) => { scrollTop = Math.max(0, Math.min(value, scroller.scrollHeight - scroller.clientHeight)); },
     },
   });
-  scroller.getBoundingClientRect = () => ({ top: 10, bottom: 810, height: 800 }) as DOMRect;
+  scroller.getBoundingClientRect = () => ({ top: 10, bottom: 10 + geometry.clientHeight, height: geometry.clientHeight }) as DOMRect;
   // A row's position counts the rows before it and the transient loading slot.
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
     // The content column scrolls with the rows, below the container's padding.
@@ -335,6 +335,38 @@ describe('transcript older-page loading', () => {
     expect(onLoadOlder).toHaveBeenCalledTimes(1);
     await flingTo(3500);
     expect(onLoadOlder).toHaveBeenCalledTimes(2);
+  });
+
+  // At the 300-row cap a landing page drops the newest rows. Prefetching from
+  // where those rows are on screen would take them, and the reader's place, away.
+  it('asks for a page that would drop rows near the reader only from the top', async () => {
+    const onLoadOlder = vi.fn().mockResolvedValue(true);
+    const { scrollTo, geometry } = renderTranscript({ messages: messages(1, 300), onLoadOlder });
+    // A tall viewport puts the whole window inside the prefetch band.
+    geometry.clientHeight = 8000;
+    scrollTo(300 * 112 + 84 - 8000);
+    await act(async () => scrollTo(25000));
+    expect(onLoadOlder).not.toHaveBeenCalled();
+    // Far enough up, the rows a page would drop are screens below.
+    await act(async () => scrollTo(5000));
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+  });
+
+  // Following the tail resumes only when the reader comes back to it, not when
+  // a shift above them is compensated while they stand near the bottom.
+  it('stays off the tail through a compensated shift near the bottom', async () => {
+    const { scroller, geometry, props } = renderTranscript({ hasOlder: false });
+    expect(props.followingTailRef.current).toBe(true);
+    scroller.scrollTop -= 40;
+    fireEvent.scroll(scroller);
+    expect(props.followingTailRef.current).toBe(false);
+    geometry.extraAbove = 180;
+    act(TestResizeObserver.resize);
+    fireEvent.scroll(scroller);
+    expect(props.followingTailRef.current).toBe(false);
+    scroller.scrollTop = scroller.scrollHeight;
+    fireEvent.scroll(scroller);
+    expect(props.followingTailRef.current).toBe(true);
   });
 
   it('consumes input begun while a page is pending until the next gesture', async () => {

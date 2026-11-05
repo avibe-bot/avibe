@@ -242,6 +242,11 @@ const MAX_RETAINED_MESSAGES = 300;
 const OLDER_PREFETCH_SCREENS = 5;
 const OLDER_PREFETCH_MIN_PX = 2500;
 const olderPrefetchBand = (el: HTMLElement) => Math.max(OLDER_PREFETCH_MIN_PX, el.clientHeight * OLDER_PREFETCH_SCREENS);
+// Near the hard top an older page is always asked for (the band paging used
+// before the prefetch).
+const OLDER_AT_TOP_PX = 120;
+// One older page: ``loadOlderMessages`` asks for this many rows.
+const OLDER_PAGE_SIZE = 50;
 // Wheel events have no gesture-end event; an idle gap ends a momentum burst.
 const PAGING_WHEEL_IDLE_MS = 200;
 
@@ -1514,7 +1519,7 @@ export const ChatPage: React.FC = () => {
     loadingOlderRef.current = true;
     setLoadingOlder(true);
     try {
-      const res = await api.listSessionMessages(sessionId, { limit: 50, beforeId: olderCursor });
+      const res = await api.listSessionMessages(sessionId, { limit: OLDER_PAGE_SIZE, beforeId: olderCursor });
       if (sessionId !== sessionIdRef.current) return true; // switched chats mid-fetch
       const older = res.messages.filter(isTranscriptMessage);
       if (older.length) {
@@ -5022,21 +5027,37 @@ export const Transcript: React.FC<TranscriptProps> = ({
 
   // Only upward input asks for another page. Settling a request or changing
   // layout is not a new request, even if the viewport remains near the top.
+  // At the retained-window cap, a page that lands drops the newest rows (see
+  // ``loadOlderMessages``). Ahead of the top, a page is asked for only while
+  // those rows are at least a screen below the viewport, so it can never take
+  // away rows the reader is looking at, nor the row their position is held by.
+  const olderPageWouldDropNearbyRows = useCallback((el: HTMLElement) => {
+    const dropped = messages.length + OLDER_PAGE_SIZE - MAX_RETAINED_MESSAGES;
+    if (dropped <= 0) return false;
+    const id = messages[Math.max(0, messages.length - dropped)].id.replace(/["\\]/g, '\\$&');
+    const row = contentRef.current?.querySelector<HTMLElement>(`[data-message-id="${id}"], [data-harness-members~="${id}"]`);
+    if (!row) return true;
+    const viewport = el.getBoundingClientRect();
+    return row.getBoundingClientRect().top < viewport.bottom + el.clientHeight;
+  }, [messages]);
+
   const maybeLoadOlder = useCallback(() => {
     const el = scrollRef.current;
     if (!el || el.scrollTop > olderPrefetchBand(el) || olderLoadFailed || suppressAnchorRef.current) return;
+    if (el.scrollTop > OLDER_AT_TOP_PX && olderPageWouldDropNearbyRows(el)) return;
     const gesture = pagingGestureRef.current;
     if (gesture?.consumed) return;
     // A gesture made during an outstanding request is consumed too, rather
     // than becoming a queued request when the page settles mid-gesture.
     if (gesture) gesture.consumed = true;
     runLoadOlder();
-  }, [olderLoadFailed, runLoadOlder]);
+  }, [olderLoadFailed, olderPageWouldDropNearbyRows, runLoadOlder]);
 
   const handleScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
     const movingUp = Math.max(0, el.scrollTop) < lastScrollTopRef.current;
+    const movingDown = Math.max(0, el.scrollTop) > lastScrollTopRef.current;
     // Content above the anchor can have moved in this same frame, ahead of the
     // ResizeObserver, which is delivered after scroll events (an image landing
     // mid-fling). Compensate it against the anchor it moved before the anchor
@@ -5050,9 +5071,14 @@ export const Transcript: React.FC<TranscriptProps> = ({
     // the reader leaving the tail: following stops at once, so a row streaming in
     // cannot pull them back while they start to scroll up. (Content shrinking at
     // the bottom clamps scrollTop upward too, but leaves the reader at the
-    // bottom.) A historical search window cannot be considered pinned to the live
-    // tail until the explicit latest reload succeeds.
-    const pinned = distance < 80 && !(movingUp && distance > 1) && !needsLatestReload;
+    // bottom.) Following resumes only when the reader comes back: moving down
+    // into the band, or at the very bottom. A scroll that only compensated a
+    // shift above the reader (no movement of theirs) changes nothing. A
+    // historical search window cannot be considered pinned to the live tail
+    // until the explicit latest reload succeeds.
+    const pinned = !needsLatestReload && (pinnedRef.current
+      ? distance < 80 && !(movingUp && distance > 1)
+      : distance <= 1 || (movingDown && distance < 80));
     setFollowingTail(pinned);
     setShowJump(distance > 240 || needsLatestReload);
     // Only track an anchor while reading history; following needs none (the bottom
