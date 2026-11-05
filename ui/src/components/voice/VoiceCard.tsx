@@ -186,20 +186,21 @@ export function VoiceInterruptedActions({
  *  attachments note), in the card's halo made small (`.voice-overlay-halo`, owner request
  *  2026-11-05): the page under it dims and blurs, so overlay text never sits on the page's own
  *  text. The halo is drawn behind `children`, never over their own background. */
-export function VoiceHalo({ children, className }: { children: ReactNode; className?: string }) {
+export function VoiceHalo({ children, className, shape }: { children: ReactNode; className?: string; shape?: 'cancel' }) {
   return (
     <span className={clsx('relative isolate flex max-w-full', className)}>
-      <span className="voice-overlay-halo" aria-hidden="true" />
+      <span className={clsx('voice-overlay-halo', shape === 'cancel' && 'voice-cancel-halo')} aria-hidden="true" />
       {children}
     </span>
   );
 }
 
-/** Where the finger goes to cancel, and the hint. Armed, it fills red and says "Release to cancel". */
+/** Where the finger goes to cancel, and the hint. Armed, it fills red and says "Release to cancel".
+ *  One halo for both, shaped to them (`.voice-cancel-halo`), so neither part's halo blurs the other. */
 export function VoiceCancelTarget({ armed, hint }: { armed: boolean; hint?: ReactNode }) {
   const { t } = useTranslation();
   return (
-    <VoiceHalo>
+    <VoiceHalo shape="cancel">
       <div className="flex flex-col items-center gap-2">
         <span
           className={clsx(
