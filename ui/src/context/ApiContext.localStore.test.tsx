@@ -338,21 +338,28 @@ describe('an access change no authorization.changed delivered', () => {
     stop();
   });
 
-  it('keeps everything when the check after a gap gets no answer, and checks again at the next gap', async () => {
+  it('keeps everything when the check after a gap gets no answer about access, and checks again at the next gap', async () => {
     render(<ApiProvider><Subscriber /></ApiProvider>);
-    await seed();
-    let answer = () => current('remote:alice', 'digest-1');
+    let answer = () => current('remote:alice', 'digest-0');
     serveSession(() => answer());
     await api.current!.getAuthSession();
-    // The server is briefly unavailable when the stream reconnects.
-    answer = () => json({ detail: 'Service unavailable' }, 503);
-    FakeEventSource.instances.at(-1)!.emit('connected', { sub_id: 2 });
-    await settle();
-    expect(await held()).toEqual(['row 1', 'row 2']);
+    // The server is briefly down, or cannot resolve the reader's authorization,
+    // when the stream reconnects; it answers again at the next reconnect.
+    const outages = [
+      () => json({ detail: 'Service unavailable' }, 503),
+      () => json({ remote: true, authenticated: true, authorization_state: 'unavailable', email: 'alice@example.com' }),
+    ];
+    for (const [round, outage] of outages.entries()) {
+      await seed();
+      answer = outage;
+      FakeEventSource.instances.at(-1)!.emit('connected', { sub_id: 10 + 2 * round });
+      await settle();
+      expect(await held()).toEqual(['row 1', 'row 2']);
 
-    answer = () => current('remote:alice', 'digest-2');
-    FakeEventSource.instances.at(-1)!.emit('connected', { sub_id: 3 });
-    await eventually(async () => expect(await held()).toEqual([]));
+      answer = () => current('remote:alice', `digest-${round + 1}`);
+      FakeEventSource.instances.at(-1)!.emit('connected', { sub_id: 11 + 2 * round });
+      await eventually(async () => expect(await held()).toEqual([]));
+    }
   });
 
   it('records the new digest only once the clear it calls for is done, so a page closing first clears again', async () => {

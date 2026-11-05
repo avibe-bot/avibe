@@ -2961,6 +2961,10 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
    *  the new digest is recorded only once it is, so a page that closes first
    *  clears again at its next check. */
   const checkAccessDigest = async (session: SessionInfo) => {
+    // Authorization the server cannot resolve right now says nothing about who
+    // reads or what they may read: the reader known before stays, so the next
+    // gap checks again.
+    if (session.remote && session.authenticated && session.authorization_state === 'unavailable') return;
     const current = session.remote && session.authenticated && session.authorization_state === 'current' ? session : null;
     remoteReaderRef.current = current?.author_id ?? null;
     const reader = current?.author_id;
