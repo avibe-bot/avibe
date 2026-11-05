@@ -66,6 +66,7 @@ const mocks = vi.hoisted(() => ({
     onMessageNew: (message: WorkbenchMessage) => void;
     onMessageUpdated: (message: WorkbenchMessage) => void;
     onTurnEnd: (data: { session_id: string }) => void;
+    onTurnStart: (data: { session_id: string }) => void;
     onAuthorizationChanged: (data: { resource_kinds?: string[] }) => void;
   },
   composer: null as ComposerProps | null,
@@ -842,6 +843,34 @@ describe('ChatPage working state on entry', () => {
 
     await act(async () => live.resolve({ ...bootstrap([message('m1', 'question', { type: 'user', author: 'user' })]), turn_state: turnState('unknown') }));
     await waitFor(() => expect(busy()).toBe('false'));
+  });
+
+  it('never downgrades a run the stream confirmed before the paint, even when an older bootstrap says idle', async () => {
+    await seed([message('m1', 'question', { type: 'user', author: 'user' })], { row: running });
+    mount(listed('running'));
+    // The bootstrap is out (its turn-state epoch taken) and the turn starts live
+    // while the snapshot is still being read: the store answers in a later task.
+    await act(async () => undefined);
+    expect(mocks.api.getSessionBootstrap).toHaveBeenCalled();
+    expect(screen.queryByText('question')).toBeNull();
+    act(() => mocks.events!.onTurnStart({ session_id: SESSION }));
+    await screen.findByText('question');
+    expect(busy()).toBe('true');
+
+    // The bootstrap was read before the turn started.
+    await act(async () => live.resolve({ ...bootstrap([message('m1', 'question', { type: 'user', author: 'user' })]), turn_state: turnState('idle') }));
+    await waitFor(() => expect(mocks.api.getSessionBootstrap).toHaveBeenCalled());
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    expect(busy()).toBe('true');
+  });
+
+  it('seeds nothing once the stream said the run ended, whatever the list still shows', async () => {
+    await seed([message('m1', 'question', { type: 'user', author: 'user' })], { row: running });
+    mount(listed('running'));
+    expect(screen.queryByText('question')).toBeNull();
+    act(() => mocks.events!.onTurnEnd({ session_id: SESSION }));
+    await screen.findByText('question');
+    expect(busy()).toBe('false');
   });
 
   it('ends a seeded run on turn.end', async () => {

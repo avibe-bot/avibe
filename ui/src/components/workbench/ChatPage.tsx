@@ -746,6 +746,10 @@ export const ChatPage: React.FC = () => {
   // Every live "running" goes through ``markWorking``, which clears this; the
   // bootstrap's answer clears what is still only seeded.
   const workingSeededRef = useRef(false);
+  // Something live about this route's turn arrived (a turn start or end, a
+  // turn-state answer, the bootstrap's turn state, or this tab's own send).
+  // From then on the paint seeds nothing: a guess never overrides what is known.
+  const turnKnownRef = useRef(false);
   // A single pending "re-check after the post-send grace expires" timer + a ref
   // to the latest syncTurnState, so an idle reading that arrives INSIDE the grace
   // (which we can't trust to clear yet) still gets re-evaluated once the grace
@@ -767,6 +771,7 @@ export const ChatPage: React.FC = () => {
     workingSetAtRef.current = Date.now();
     activityForegroundRef.current = 'running';
     workingSeededRef.current = false;
+    turnKnownRef.current = true;
     workingRef.current = true;
     setWorking(true);
   }, [dispatchLive]);
@@ -1005,7 +1010,7 @@ export const ChatPage: React.FC = () => {
     const listed = projectId
       ? projectsTree?.sessionsOf(projectId).sessions?.find((row) => row.id === snapshot.session.id)
       : undefined;
-    if ((listed ?? snapshot.session).agent_status === 'running') {
+    if (!turnKnownRef.current && (listed ?? snapshot.session).agent_status === 'running') {
       workingSeededRef.current = true;
       // Not a send: no registration grace holds back an idle answer.
       workingSetAtRef.current = 0;
@@ -1532,6 +1537,7 @@ export const ChatPage: React.FC = () => {
         || turnEpochRef.current !== epochAtRequest
         || request !== turnStateRequestRef.current) return;
       if (res.foreground === 'unknown') return;
+      turnKnownRef.current = true;
       if (res.foreground === 'running') {
         // markWorking (not setWorking): bump the epoch + timestamp so an OLDER
         // overlapping sync whose idle response lands AFTER this one can't clear
@@ -1682,6 +1688,7 @@ export const ChatPage: React.FC = () => {
       // Hydrate the transcript even if live lifecycle events outran this read,
       // but never reinstall an older Turn's working state or recovery snapshot.
       if (epochAtRequest === turnEpochRef.current) {
+        if (bootstrap.turn_state.foreground !== 'unknown') turnKnownRef.current = true;
         activityForegroundRef.current = bootstrap.turn_state.foreground;
         if (bootstrap.turn_state.foreground === 'running') markWorking();
         else if (bootstrap.turn_state.foreground === 'idle') {
@@ -1770,6 +1777,7 @@ export const ChatPage: React.FC = () => {
       highlightTimerRef.current = null;
     }
     workingSeededRef.current = false;
+    turnKnownRef.current = false;
     workingRef.current = false;
     setWorking(false);
     setRuntimeState(emptyRuntimeState());
@@ -1893,6 +1901,7 @@ export const ChatPage: React.FC = () => {
           activityForegroundRef.current = 'idle';
           setRuntimeState((current) => ({ ...current, in_flight: false, foreground: 'idle', model_recovery: [] }));
           workingSeededRef.current = false;
+          turnKnownRef.current = true;
           workingRef.current = false;
           setWorking(false);
           // Agent Activity: the turn settled (result / error / interrupt) → mark the
