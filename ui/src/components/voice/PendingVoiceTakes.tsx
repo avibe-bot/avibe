@@ -11,6 +11,7 @@ import {
   readVoiceTakes,
   subscribeVoiceTakes,
   voiceTakeDurationMs,
+  voiceTakeFreed,
   type VoiceTake,
 } from '@/lib/voiceTakeStore';
 import {
@@ -122,11 +123,24 @@ function useKeptVoiceTakes(target: string | null): VoiceTake[] {
   useEffect(() => {
     if (!target) return;
     let alive = true;
+    const stop = new AbortController();
+    const waiting = new Set<string>();
     const read = () => {
       // A take another document holds (still recording or finalizing it, or recovering it) is
       // that document's; one this document is recovering stays, with its progress.
       void Promise.all([readVoiceTakes(target), heldVoiceTakes()]).then(([found, held]) => {
-        if (alive) setRead({ target, takes: found.filter((take) => !held.has(take.id) || isRetryingVoiceTake(take.id)) });
+        if (!alive) return;
+        setRead({ target, takes: found.filter((take) => !held.has(take.id) || isRetryingVoiceTake(take.id)) });
+        // It comes back here once that document lets go of it, or goes away without a word
+        // (closed, crashed): wait on its lock rather than on a message it may never send.
+        for (const take of found) {
+          if (!held.has(take.id) || waiting.has(take.id) || isVoiceTakeLive(take.id) || isRetryingVoiceTake(take.id)) continue;
+          waiting.add(take.id);
+          void voiceTakeFreed(take.id, stop.signal).then(() => {
+            waiting.delete(take.id);
+            if (alive) read();
+          });
+        }
       });
     };
     read();
@@ -140,6 +154,7 @@ function useKeptVoiceTakes(target: string | null): VoiceTake[] {
     window.addEventListener('online', read);
     return () => {
       alive = false;
+      stop.abort();
       offTakes();
       offRetries();
       document.removeEventListener('visibilitychange', onVisible);

@@ -38,7 +38,7 @@ const TAKES = 'takes';
 const SEGMENTS = 'segments';
 
 /** The most takes kept per reader; a new one beyond it evicts the oldest. */
-export const VOICE_TAKE_LIMIT = 3;
+const VOICE_TAKE_LIMIT = 3;
 
 /** How a take's words were meant to land: sent as a message (a hold) or put into a draft
  *  (a tap or ⌥Z dictation). */
@@ -344,8 +344,10 @@ export async function landVoiceTake(id: string, land: () => boolean | Promise<bo
   const claimed = await claimVoiceTake(id, async () => {
     const owner = getLocalSnapshotPrincipal();
     if (!owner) return false;
+    const generation = readGeneration();
     const kept = await withStores('readonly', async (takes) => owned(await settle(takes.get(id) as IDBRequest<StoredTake | undefined>), owner));
-    if (!kept || !(await land())) return false;
+    // Checked again right before the words go anywhere: the reader may have changed meanwhile.
+    if (!kept || !stillReading(owner, generation) || !(await land())) return false;
     await deleteVoiceTake(id);
     return true;
   });
@@ -435,6 +437,22 @@ export async function heldVoiceTakes(): Promise<Set<string>> {
       .map((name) => name.slice(LOCK_PREFIX.length)));
   } catch {
     return new Set();
+  }
+}
+
+/**
+ * Resolves once no surface in any document holds the take: its owner let go, or its page went
+ * away (closed, crashed, killed), which tells no one. Never resolves where the browser cannot
+ * tell, nor once `signal` aborts.
+ */
+export function voiceTakeFreed(id: string, signal: AbortSignal): Promise<void> {
+  const manager = lockManager();
+  const never = new Promise<void>(() => undefined);
+  if (!manager) return never;
+  try {
+    return manager.request(LOCK_PREFIX + id, { mode: 'shared', signal }, () => undefined).then(() => undefined, () => never);
+  } catch {
+    return never;
   }
 }
 

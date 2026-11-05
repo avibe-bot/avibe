@@ -11,8 +11,6 @@ import { claimVoiceTake, readVoiceTakeAudio, updateVoiceTake, type VoiceTake } f
 // again through whichever path works now (the cloud, then the local relay), under its own
 // dictation id, and the text is kept with it until the reader inserts or sends it.
 
-type Finalize = typeof finalizeVoiceDictation;
-
 const running = new Map<string, Promise<string>>();
 const listeners = new Set<() => void>();
 
@@ -36,7 +34,7 @@ export function subscribeVoiceTakeRetries(listener: () => void): () => void {
  * recorded as empty may lack audio: one whose bytes never reached the device ends what can be
  * transcribed there (`truncated`), and is never taken for the end of the take.
  */
-export const keptVoiceSegments = (
+const keptVoiceSegments = (
   take: Pick<VoiceTake, 'segments'>,
   audio: Map<number, Blob | null>,
 ): { segments: VoiceTranscriptionSegment[]; truncated: boolean } => {
@@ -76,28 +74,22 @@ export const keptVoiceTakeHasAudio = (take: Pick<VoiceTake, 'segments'>): boolea
  * and this resolves '' without a request. The result lands only on the take as it was read: if
  * it was written meanwhile, the newer record stands.
  */
-export function retryKeptVoiceTake(
-  take: VoiceTake,
-  dependencies: { finalize?: Finalize; readAudio?: typeof readVoiceTakeAudio; save?: typeof updateVoiceTake } = {},
-): Promise<string> {
+export function retryKeptVoiceTake(take: VoiceTake): Promise<string> {
   const existing = running.get(take.id);
   if (existing) return existing;
-  const finalize = dependencies.finalize ?? finalizeVoiceDictation;
-  const readAudio = dependencies.readAudio ?? readVoiceTakeAudio;
-  const save = dependencies.save ?? updateVoiceTake;
   const read = take.revision ?? 0;
   const run = (async () => {
     const claimed = await claimVoiceTake(take.id, async () => {
-      const { segments, truncated } = keptVoiceSegments(take, await readAudio(take.id));
+      const { segments, truncated } = keptVoiceSegments(take, await readVoiceTakeAudio(take.id));
       if (!segments.some((segment) => segment.blob)) throw new VoiceTranscriptionError('failed');
       try {
-        const result = await finalize(segments, { dictationId: take.id, before: '', after: '' }, {
+        const result = await finalizeVoiceDictation(segments, { dictationId: take.id, before: '', after: '' }, {
           retryUntil: Date.now() + VOICE_SETTLE_RETRY_WINDOW_MS,
         });
-        await save({ ...take, status: 'transcribed', text: result.text, truncated, updatedAt: Date.now() }, undefined, read);
+        await updateVoiceTake({ ...take, status: 'transcribed', text: result.text, truncated, updatedAt: Date.now() }, undefined, read);
         return result.text;
       } catch (error) {
-        await save({ ...take, status: 'pending', text: undefined, updatedAt: Date.now() }, undefined, read);
+        await updateVoiceTake({ ...take, status: 'pending', text: undefined, updatedAt: Date.now() }, undefined, read);
         throw error;
       }
     });

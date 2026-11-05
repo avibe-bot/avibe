@@ -64,12 +64,14 @@ const installWebLocks = () => {
   const locks = {
     async request(name: string, ...args: unknown[]) {
       const [options, callback] = (args.length === 1 ? [{}, args[0]] : args) as [
-        { ifAvailable?: boolean },
+        { ifAvailable?: boolean; signal?: AbortSignal },
         (lock: unknown) => Promise<unknown>,
       ];
       while (held.has(name)) {
         if (options.ifAvailable) return callback(null);
-        await held.get(name);
+        await Promise.race([held.get(name), new Promise((_resolve, reject) => {
+          options.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
+        })]);
       }
       let free!: () => void;
       held.set(name, new Promise<void>((resolve) => {
@@ -173,7 +175,7 @@ describe('Composer pending voice items', () => {
     }
   });
 
-  it('leaves a take another document still records to that document, until it lets go', async () => {
+  it('leaves a take another document still records to that document, until it lets go or goes away', async () => {
     Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => false });
     const uninstall = installWebLocks();
     try {
@@ -190,11 +192,9 @@ describe('Composer pending voice items', () => {
       });
       expect(screen.queryByText(en.voice.pending.title)).toBeNull();
 
+      // That window closes, or crashes, telling no one: the take comes back here on its own.
       otherTabLetsGo();
       await otherTab;
-      act(() => {
-        document.dispatchEvent(new Event('visibilitychange'));
-      });
       await screen.findByText(en.voice.pending.title);
     } finally {
       uninstall();

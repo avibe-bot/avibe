@@ -119,8 +119,10 @@ a killed page, or a surface that goes away loses none of it
 - A surface holding a take (recording, finalizing, or showing it) also holds a
   Web Lock named for it, which the browser releases when the surface lets go or
   its page goes away. Another tab or the pet window therefore leaves a take
-  another document still holds alone, and a recovery holds the lock while it
-  runs. Without Web Locks, a recovery's result lands only on the stored
+  another document still holds alone, and waits on that lock, so the take
+  comes back to it when the owner lets go or closes or crashes without a word.
+  A recovery, and sending or inserting a kept take, hold the lock while they
+  run. Without Web Locks, a recovery's result lands only on the stored
   revision it read, so it never sets back a take its keeper advanced.
 - A take that no surface holds in memory shows as a pending voice item above the
   composer of its target. One without text is retried from its stored audio,

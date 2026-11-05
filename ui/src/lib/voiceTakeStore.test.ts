@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { clearLocalSnapshots, forgetLocalSnapshots, setLocalSnapshotPrincipal } from './localSnapshots';
 import { bumpSignOutGeneration, SIGN_OUT_GENERATION_KEY } from './signOutGeneration';
 import { VoiceTakeKeeper } from './voiceTakeKeeper';
-import { keptVoiceSegments, retryKeptVoiceTake } from './voiceTakeRetry';
+import { retryKeptVoiceTake } from './voiceTakeRetry';
 import {
   deleteVoiceTake,
   heldVoiceTakes,
@@ -15,11 +15,21 @@ import {
   readVoiceTakeAudio,
   readVoiceTakes,
   saveVoiceTake,
+  saveVoiceTakeAudio,
   subscribeVoiceTakes,
-  VOICE_TAKE_LIMIT,
   voiceTakeDurationMs,
   type VoiceTake,
 } from './voiceTakeStore';
+
+// Recognition, at its module boundary: what a recovery sends, and what comes back.
+const finalize = vi.hoisted(() => vi.fn());
+vi.mock('./voiceTranscription', async (importOriginal) => ({
+  ...await importOriginal<typeof import('./voiceTranscription')>(),
+  finalizeVoiceDictation: finalize,
+}));
+/** The segments a recovery sent, as what they are: sequence, final, and whether audio went. */
+const sent = (call = 0) => (finalize.mock.calls[call]?.[0] as { sequence: number; final: boolean; blob: Blob | null }[])
+  .map(({ sequence, final, blob }) => ({ sequence, final, blob: blob !== null }));
 
 // The store is what keeps a take's speech through a reload, and what keeps one reader's
 // recordings away from the next person to sign in on the device.
@@ -57,12 +67,14 @@ const installWebLocks = () => {
   const locks = {
     async request(name: string, ...args: unknown[]) {
       const [options, callback] = (args.length === 1 ? [{}, args[0]] : args) as [
-        { ifAvailable?: boolean },
+        { ifAvailable?: boolean; signal?: AbortSignal },
         (lock: unknown) => Promise<unknown>,
       ];
       while (held.has(name)) {
         if (options.ifAvailable) return callback(null);
-        await held.get(name);
+        await Promise.race([held.get(name), new Promise((_resolve, reject) => {
+          options.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
+        })]);
       }
       let free!: () => void;
       held.set(name, new Promise<void>((resolve) => {
@@ -84,6 +96,7 @@ const installWebLocks = () => {
 };
 
 afterEach(async () => {
+  finalize.mockReset();
   setLocalSnapshotPrincipal('cleanup');
   for (const kept of await readVoiceTakes()) await deleteVoiceTake(kept.id);
   setLocalSnapshotPrincipal(null);
@@ -197,7 +210,8 @@ describe('voice take store', () => {
 
   it('keeps at most a few takes, letting the oldest go first', async () => {
     setLocalSnapshotPrincipal('local');
-    for (let index = 0; index <= VOICE_TAKE_LIMIT; index += 1) {
+    // Three are kept; a fourth lets the oldest go.
+    for (let index = 0; index < 4; index += 1) {
       await saveVoiceTake(take(`take-${index}`, { createdAt: 1_000 + index }));
     }
     expect((await readVoiceTakes()).map((kept) => kept.id)).toEqual(['take-1', 'take-2', 'take-3']);
@@ -215,12 +229,14 @@ describe('voice take store', () => {
     const keeper = await keepTake('reloaded');
     keeper.release();
     const [kept] = await readVoiceTakes('ses_a');
-    const finalize = vi.fn(async (segments: unknown[]) => {
-      expect(segments).toHaveLength(3);
-      return { text: 'all of it, recovered', cleanup: 'success' as const };
-    });
+    finalize.mockResolvedValue({ text: 'all of it, recovered', cleanup: 'success' });
 
-    await expect(retryKeptVoiceTake(kept!, { finalize: finalize as never })).resolves.toBe('all of it, recovered');
+    await expect(retryKeptVoiceTake(kept!)).resolves.toBe('all of it, recovered');
+    expect(sent()).toEqual([
+      { sequence: 0, final: false, blob: true },
+      { sequence: 1, final: false, blob: true },
+      { sequence: 2, final: true, blob: true },
+    ]);
     expect((await readVoiceTakes('ses_a'))[0]).toMatchObject({ status: 'transcribed', text: 'all of it, recovered' });
   });
 
@@ -228,17 +244,15 @@ describe('voice take store', () => {
     setLocalSnapshotPrincipal('local');
     (await keepTake('still-down')).release();
     const [kept] = await readVoiceTakes();
-    await expect(retryKeptVoiceTake(kept!, {
-      finalize: (async () => { throw new Error('Load failed'); }) as never,
-    })).rejects.toThrow('Load failed');
+    finalize.mockRejectedValueOnce(new Error('Load failed'));
+    await expect(retryKeptVoiceTake(kept!)).rejects.toThrow('Load failed');
     expect((await readVoiceTakes())[0]).toMatchObject({ status: 'pending' });
 
     let release!: () => void;
-    const running = retryKeptVoiceTake(kept!, {
-      finalize: (() => new Promise((resolve) => {
-        release = () => resolve({ text: 'too late', cleanup: 'success' });
-      })) as never,
-    });
+    finalize.mockImplementationOnce(() => new Promise((resolve) => {
+      release = () => resolve({ text: 'too late', cleanup: 'success' });
+    }));
+    const running = retryKeptVoiceTake(kept!);
     await idle();
     await deleteVoiceTake(kept!.id);
     release();
@@ -256,20 +270,25 @@ describe('voice take store', () => {
       keeper.segment({ sequence: 0, final: false, durationMs: 60_000 }, wav('minute one'));
       await keeper.written();
       const [kept] = await readVoiceTakes();
-      const finalize = vi.fn(async () => ({ text: 'the first minute', cleanup: 'success' as const }));
+      finalize.mockResolvedValue({ text: 'the first minute', cleanup: 'success' });
 
       expect(await heldVoiceTakes()).toContain('held');
-      await expect(retryKeptVoiceTake(kept!, { finalize: finalize as never })).resolves.toBe('');
+      await expect(retryKeptVoiceTake(kept!)).resolves.toBe('');
       expect(finalize).not.toHaveBeenCalled();
       expect((await readVoiceTakes())[0]).toMatchObject({ status: 'recording' });
 
-      // Its surface let go of it (or its page went away): the take is free to recover.
+      // Its surface let go of it (or its page went away): the take is free to recover, with a
+      // finalize-only request for the end the recording never reached.
       keeper.release();
       await keeper.written();
       await vi.waitFor(async () => expect(await heldVoiceTakes()).not.toContain('held'));
       const [left] = await readVoiceTakes();
-      await expect(retryKeptVoiceTake(left!, { finalize: finalize as never })).resolves.toBe('the first minute');
-      expect((await readVoiceTakes())[0]).toMatchObject({ status: 'transcribed', text: 'the first minute' });
+      await expect(retryKeptVoiceTake(left!)).resolves.toBe('the first minute');
+      expect(sent()).toEqual([
+        { sequence: 0, final: false, blob: true },
+        { sequence: 1, final: true, blob: false },
+      ]);
+      expect((await readVoiceTakes())[0]).toMatchObject({ status: 'transcribed', text: 'the first minute', truncated: false });
     } finally {
       uninstall();
     }
@@ -295,6 +314,16 @@ describe('voice take store', () => {
       // A stale item for a take another tab already sent.
       await expect(landVoiceTake('twice', land)).resolves.toBe(false);
       expect(land).toHaveBeenCalledTimes(1);
+
+      // Nor the previous reader's words, once the reader changed while the take was checked.
+      await saveVoiceTake(take('switched', { status: 'transcribed', text: 'Alice only' }));
+      const landAlice = vi.fn(() => true);
+      const landing = landVoiceTake('switched', landAlice);
+      await vi.waitFor(async () => expect(await heldVoiceTakes()).toContain('switched'));
+      setLocalSnapshotPrincipal('bob');
+      await landing;
+      expect(landAlice).not.toHaveBeenCalled();
+      setLocalSnapshotPrincipal('local');
 
       // One a surface still holds (recording, or showing it in its card) is that surface's.
       const keeper = new VoiceTakeKeeper('held', { target: 'ses_a', intent: 'send' });
@@ -338,11 +367,10 @@ describe('voice take store', () => {
     const retryWhileItRecords = async (outcome: (resolve: (value: unknown) => void, reject: (error: Error) => void) => void) => {
       const [kept] = await readVoiceTakes();
       let settle!: () => void;
-      const running = retryKeptVoiceTake(kept!, {
-        finalize: (() => new Promise((resolve, reject) => {
-          settle = () => outcome(resolve, reject);
-        })) as never,
-      });
+      finalize.mockImplementationOnce(() => new Promise((resolve, reject) => {
+        settle = () => outcome(resolve, reject);
+      }));
+      const running = retryKeptVoiceTake(kept!);
       return { running, settle: () => settle() };
     };
 
@@ -368,36 +396,27 @@ describe('voice take store', () => {
     expect((await readVoiceTakes())[0]?.segments).toHaveLength(3);
   });
 
-  it('finalizes a take the page lost while it recorded with a finalize-only request', () => {
-    const { segments, truncated } = keptVoiceSegments(
-      take('crashed', { status: 'recording', segments: [{ sequence: 0, final: false, durationMs: 60_000 }] }),
-      new Map([[0, wav('minute one')]]),
-    );
-    expect(truncated).toBe(false);
-    expect(segments.map(({ sequence, final, blob }) => ({ sequence, final, blob: blob !== null }))).toEqual([
-      { sequence: 0, final: false, blob: true },
-      { sequence: 1, final: true, blob: false },
-    ]);
-  });
+  it('never takes audio that did not reach the device for the end of the take, and says the rest is cut', async () => {
+    setLocalSnapshotPrincipal('local');
+    await saveVoiceTake(take('cut', {
+      segments: [
+        { sequence: 0, final: false, durationMs: 60_000 },
+        { sequence: 1, final: false, durationMs: 60_000 },
+        { sequence: 2, final: true, durationMs: 20_000 },
+      ],
+    }));
+    // The page died between the last segment's details and its bytes.
+    await saveVoiceTakeAudio('cut', 0, wav('minute one'));
+    await saveVoiceTakeAudio('cut', 1, wav('minute two'));
+    finalize.mockResolvedValue({ text: 'two minutes', cleanup: 'success' });
 
-  it('never takes audio that did not reach the device for the end of the take, and says the rest is cut', () => {
-    const { segments, truncated } = keptVoiceSegments(
-      take('cut', {
-        segments: [
-          { sequence: 0, final: false, durationMs: 60_000 },
-          { sequence: 1, final: false, durationMs: 60_000 },
-          { sequence: 2, final: true, durationMs: 20_000 },
-        ],
-      }),
-      // The page died between the last segment's details and its bytes.
-      new Map([[0, wav('minute one')], [1, wav('minute two')]]),
-    );
-    expect(truncated).toBe(true);
-    expect(segments.map(({ sequence, final, blob }) => ({ sequence, final, blob: blob !== null }))).toEqual([
+    await expect(retryKeptVoiceTake((await readVoiceTakes())[0]!)).resolves.toBe('two minutes');
+    expect(sent()).toEqual([
       { sequence: 0, final: false, blob: true },
       { sequence: 1, final: false, blob: true },
       { sequence: 2, final: true, blob: false },
     ]);
+    expect((await readVoiceTakes())[0]).toMatchObject({ status: 'transcribed', text: 'two minutes', truncated: true });
   });
 
   it('keeps a take another tab discarded discarded, while its recording here goes on', async () => {
