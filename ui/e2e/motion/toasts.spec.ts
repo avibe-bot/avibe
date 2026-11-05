@@ -52,6 +52,26 @@ test('only fades toasts under reduced motion', async ({ page }) => {
   expect(await moving(page, 0)).toEqual([]);
 });
 
+test('a swipe that stops before letting go keeps the toast', async ({ page, isMobile, browserName }) => {
+  test.skip(!isMobile || browserName !== 'chromium', 'touch emulation through Chromium');
+  await open(page);
+  await page.getByRole('button', { name: 'Toast' }).click();
+  await page.waitForTimeout(600);
+  const box = (await toasts(page).first().boundingBox())!;
+  const cdp = await page.context().newCDPSession(page);
+  const y = box.y + box.height / 2;
+  const x = box.x + 20;
+  // A quick 20% of its width, then held still before letting go.
+  const dx = Math.round(box.width * 0.2);
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] });
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: x + 10, y }] });
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: x + dx, y }] });
+  await page.waitForTimeout(400);
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await page.waitForTimeout(500);
+  await expect(toasts(page)).toHaveCount(1);
+});
+
 test('a finger swipes a toast away sideways on a phone', async ({ page, isMobile, browserName }) => {
   test.skip(!isMobile || browserName !== 'chromium', 'touch emulation through Chromium');
   await open(page);

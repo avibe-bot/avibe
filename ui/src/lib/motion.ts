@@ -81,6 +81,31 @@ export function useMotionPreference(): { reduced: boolean } {
   return { reduced: forced ?? system === true };
 }
 
+/** A finger's track: where it was (`at`, px along the gesture's axis) and when (`t`, an event's timeStamp). */
+export type GestureSample = { t: number; at: number };
+/** How far back a release looks for the finger's speed. */
+export const RELEASE_WINDOW_MS = 100;
+
+/** Keeps a gesture's track short: the samples of the last `RELEASE_WINDOW_MS`, and the one before them. */
+export function trackGesture(samples: GestureSample[], sample: GestureSample): void {
+  samples.push(sample);
+  while (samples.length > 2 && samples[1].t <= sample.t - RELEASE_WINDOW_MS) samples.shift();
+}
+
+/**
+ * The finger's speed as it lets go at `releasedAt` (px/ms along the axis): from where it was
+ * `RELEASE_WINDOW_MS` earlier to where it last was, over the whole time between, so a finger that
+ * stopped before letting go reads as still however fast it moved before.
+ */
+export function releaseVelocity(samples: readonly GestureSample[], releasedAt: number): number {
+  if (samples.length === 0) return 0;
+  let from = samples[0];
+  for (const sample of samples) if (sample.t <= releasedAt - RELEASE_WINDOW_MS) from = sample;
+  const last = samples[samples.length - 1];
+  const elapsed = releasedAt - from.t;
+  return elapsed > 0 ? (last.at - from.at) / elapsed : 0;
+}
+
 /** Whether this browser runs the Web Animations API (jsdom does not; nothing animates there). */
 export const canAnimate = (element: Element | null | undefined): element is Element =>
   !!element && typeof (element as Element & { animate?: unknown }).animate === 'function';

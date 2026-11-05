@@ -10,7 +10,8 @@
 // (`--sheet-exit-duration`, `--sheet-exit-ease`).
 import { useEffect } from 'react';
 
-import { canAnimate, motionTiming, prefersReducedMotion, readMotionMs, readMotionToken, springTiming } from './motion';
+import { canAnimate, motionTiming, prefersReducedMotion, readMotionMs, readMotionToken, releaseVelocity, springTiming, trackGesture, type GestureSample } from './motion';
+import { useLatestRef } from './useLatestRef';
 
 /** Past this share of its height, a released sheet dismisses. */
 export const DISMISS_FRACTION = 0.3;
@@ -18,8 +19,6 @@ export const DISMISS_FRACTION = 0.3;
 export const DISMISS_VELOCITY = 0.5;
 /** How far the finger travels before the gesture is read as a drag or as something else. */
 const SLOP = 6;
-/** The samples a release velocity is read from. */
-const VELOCITY_WINDOW_MS = 100;
 /** How `ease-enter` starts: its first control point's rise over run, the speed it leaves at (×distance/duration). */
 const ENTER_INITIAL_SLOPE = 1 / 0.22;
 
@@ -70,9 +69,12 @@ function dragAllowance(target: Element, sheet: HTMLElement): 'both' | 'down' | '
  * sheet's closing animation carries it the rest of the way; a sheet its owner keeps open springs back.
  */
 export function useSheetDrag(sheet: HTMLElement | null, { enabled, onDismiss }: { enabled: boolean; onDismiss: () => void }) {
+  // The newest close, read when the finger lets go: an owner re-rendering mid-drag (a status poll) must not
+  // restart the listeners and drop the gesture.
+  const dismissRef = useLatestRef(onDismiss);
   useEffect(() => {
     if (!enabled || !sheet) return;
-    type Gesture = { id: number; startX: number; startY: number; allowance: 'both' | 'down'; dragging: boolean; offset: number; samples: { t: number; y: number }[] };
+    type Gesture = { id: number; startX: number; startY: number; allowance: 'both' | 'down'; dragging: boolean; offset: number; samples: GestureSample[] };
     let gesture: Gesture | null = null;
     let settle: Animation | null = null;
     let check = 0;
@@ -122,9 +124,7 @@ export function useSheetDrag(sheet: HTMLElement | null, { enabled, onDismiss }: 
       // The sheet, not the page or its content, moves under the finger.
       if (event.cancelable) event.preventDefault();
       gesture.offset = dragOffset(touch.clientY - gesture.startY);
-      const now = event.timeStamp;
-      gesture.samples.push({ t: now, y: touch.clientY });
-      while (gesture.samples.length > 2 && now - gesture.samples[0].t > VELOCITY_WINDOW_MS) gesture.samples.shift();
+      trackGesture(gesture.samples, { t: event.timeStamp, at: touch.clientY });
       place(gesture.offset);
     };
 
@@ -134,16 +134,14 @@ export function useSheetDrag(sheet: HTMLElement | null, { enabled, onDismiss }: 
       gesture = null;
       if (!ended.dragging) return;
       sheet.style.willChange = '';
-      const first = ended.samples[0];
-      const last = ended.samples[ended.samples.length - 1];
-      const velocity = first && last && last.t > first.t ? (last.y - first.y) / (last.t - first.t) : 0;
+      const velocity = releaseVelocity(ended.samples, event.timeStamp);
       const height = sheet.getBoundingClientRect().height;
       if (event.type === 'touchend' && releaseDismisses(ended.offset, height, velocity)) {
         const timing = exitTiming(ended.offset, height, velocity);
         sheet.style.setProperty('--sheet-drag', `${ended.offset}px`);
         sheet.style.setProperty('--sheet-exit-duration', `${Math.round(timing.duration)}ms`);
         sheet.style.setProperty('--sheet-exit-ease', timing.easing);
-        onDismiss();
+        dismissRef.current();
         // An owner that keeps the sheet open (a form that will not lose its edits) gets it back.
         check = requestAnimationFrame(() => {
           if (sheet.dataset.state === 'closed') return;
@@ -160,6 +158,11 @@ export function useSheetDrag(sheet: HTMLElement | null, { enabled, onDismiss }: 
     sheet.addEventListener('touchend', onEnd);
     sheet.addEventListener('touchcancel', onEnd);
     return () => {
+      // Gone mid-drag (the sheet unmounted, or dragging turned off): leave it where it rests.
+      if (gesture?.dragging) {
+        place(0);
+        sheet.style.willChange = '';
+      }
       sheet.removeEventListener('touchstart', onStart);
       sheet.removeEventListener('touchmove', onMove);
       sheet.removeEventListener('touchend', onEnd);
@@ -167,5 +170,5 @@ export function useSheetDrag(sheet: HTMLElement | null, { enabled, onDismiss }: 
       settle?.cancel();
       cancelAnimationFrame(check);
     };
-  }, [sheet, enabled, onDismiss]);
+  }, [sheet, enabled, dismissRef]);
 }

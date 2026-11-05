@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { AlertTriangle, CheckCircle, XCircle, X } from 'lucide-react';
 
-import { canAnimate, motionTiming, playFlip, prefersReducedMotion, readMotionMs, readMotionNumber, springTiming } from '../lib/motion';
+import { canAnimate, motionTiming, playFlip, prefersReducedMotion, readMotionMs, readMotionNumber, releaseVelocity, springTiming, trackGesture, type GestureSample } from '../lib/motion';
 import { ToastContext, type ToastType } from './ToastContext';
 import { shouldCoalesceToast, type ToastAction } from './toastCoalesce';
 
@@ -249,7 +249,7 @@ function ToastCard({
     register(toast.id, element);
   }, [register, toast.id]);
   // Where a finger has the toast, and where it let it go when that dismissed it.
-  const swipe = useRef<{ pointer: number; x: number; y: number; dx: number; active: boolean; samples: { t: number; x: number }[] } | null>(null);
+  const swipe = useRef<{ pointer: number; x: number; y: number; dx: number; active: boolean; samples: GestureSample[] } | null>(null);
   const swiped = useRef<{ dx: number; velocity: number } | null>(null);
   // Whether it arrived below others: read once, as it arrives.
   const joinedStack = useRef(joins);
@@ -326,8 +326,7 @@ function ToastCard({
       event.currentTarget.setPointerCapture(event.pointerId);
     }
     gesture.dx = event.clientX - gesture.x;
-    gesture.samples.push({ t: event.timeStamp, x: event.clientX });
-    while (gesture.samples.length > 2 && event.timeStamp - gesture.samples[0].t > 100) gesture.samples.shift();
+    trackGesture(gesture.samples, { t: event.timeStamp, at: event.clientX });
     place(gesture.dx);
   };
   const onPointerEnd = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -335,9 +334,7 @@ function ToastCard({
     if (!gesture || gesture.pointer !== event.pointerId) return;
     swipe.current = null;
     if (!gesture.active) return;
-    const first = gesture.samples[0];
-    const last = gesture.samples[gesture.samples.length - 1];
-    const velocity = first && last && last.t > first.t ? (last.x - first.x) / (last.t - first.t) : 0;
+    const velocity = releaseVelocity(gesture.samples, event.timeStamp);
     const width = event.currentTarget.getBoundingClientRect().width;
     const flung = Math.abs(velocity) > SWIPE_VELOCITY && Math.sign(velocity) === Math.sign(gesture.dx);
     if (event.type === 'pointerup' && (Math.abs(gesture.dx) > width * SWIPE_FRACTION || flung)) {
