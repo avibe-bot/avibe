@@ -138,10 +138,15 @@ def managed_opencode_runtime_config_content(
             if isinstance(entry, dict):
                 managed_mcp[name] = {**entry, "enabled": False}
     else:
-        payload["policies"] = [
+        existing_policies = payload.get("policies")
+        policies = list(existing_policies) if isinstance(existing_policies, list) else []
+        for policy in (
             {"action": "integration.use", "resource": "mcp:*", "effect": "deny"},
             {"action": "mcp.use", "resource": "*", "effect": "deny"},
-        ]
+        ):
+            if policy not in policies:
+                policies.append(policy)
+        payload["policies"] = policies
     if managed_mcp:
         payload["mcp"] = managed_mcp
     else:

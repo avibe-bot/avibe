@@ -87,7 +87,7 @@ _ADOPTION_PROBE_INTERVAL_SECONDS = 2.0
 _DURABLE_ATTEMPT_ID_RE = re.compile(r"^atm_([0-9a-f]{32})$")
 # Bump whenever the process-level Avibe policy applied at launch changes. It is
 # a launch spec input, so the next turn starts a generation under the new policy.
-_MANAGED_RUNTIME_POLICY_REVISION = "disable-native-skill-v2"
+_MANAGED_RUNTIME_POLICY_REVISION = "disable-native-skill-v3-native-mcp"
 
 
 def _percent_encode_path(path: str) -> str:

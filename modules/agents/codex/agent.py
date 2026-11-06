@@ -3231,11 +3231,13 @@ class CodexAgent(BaseAgent):
             read_params["cwd"] = request.working_path
         response = await transport.send_request("config/read", read_params)
         config = response.get("config") if isinstance(response, dict) else None
-        servers = config.get("mcp_servers") if isinstance(config, dict) else None
+        servers = config.get("mcp_servers", {}) if isinstance(config, dict) else {}
         if not isinstance(servers, dict):
-            raise RuntimeError("Codex config/read did not return effective mcp_servers")
+            raise RuntimeError("Codex config/read returned invalid mcp_servers")
         runtime_config = dict(params.get("config") or {})
-        runtime_config.update({f"mcp_servers.{name}.enabled": False for name in servers if isinstance(name, str)})
+        runtime_config.update(
+            {f"mcp_servers.{json.dumps(name)}.enabled": False for name in servers if isinstance(name, str)}
+        )
         params["config"] = runtime_config
 
     def _codex_runtime_environment(self) -> Mapping[str, str]:
@@ -3431,6 +3433,7 @@ class CodexAgent(BaseAgent):
                         "Codex source turn completed during fork boundary read; "
                         "preserving completed history"
                     )
+            await self._inject_native_mcp_disabled_config(transport, params, request)
             resp = await transport.send_request("thread/fork", params)
             thread_id = resp.get("id", "")
             if not thread_id:

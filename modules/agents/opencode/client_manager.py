@@ -223,7 +223,7 @@ def compute_launch_spec(inputs: OpenCodeLaunchInputs, overlay: Any | None) -> Op
         if not isinstance(content, (bytes, str)):
             raise RuntimeError("Model Hub OpenCode overlay content is unavailable")
         file_content = content.encode() if isinstance(content, str) else content
-        inline_content = managed_opencode_runtime_config_content(content)
+        inline_content = managed_opencode_runtime_config_content(content, opencode_version=_binary_version(inputs))
         overlay_hash = str(overlay.content_hash)
         if hashlib.sha256(inline_content.encode()).hexdigest() != overlay_hash:
             raise RuntimeError("Model Hub OpenCode overlay content hash changed")
