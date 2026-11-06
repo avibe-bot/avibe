@@ -1825,14 +1825,17 @@ describe('desktop mini v2 interaction contract', () => {
     });
   });
 
-  it('cancels an in-flight finish so Escape and an epoch change do not stick on Finishing', async () => {
+  // Escape while a take finishes stops waiting for its words, as a voice card's × does: the take is
+  // set aside (kept for the pending voice items when it held speech), never discarded outright.
+  it('sets an in-flight finish aside on Escape, so Finishing does not stick and nothing said is lost', async () => {
     const done = deferred<string>();
     const abort = vi.fn();
+    const setAside = vi.fn(() => true);
     class Dictation {
       done = done.promise;
       start = async () => {};
       finish = () => {};
-      abort = abort; landed = () => {}; detach = () => {};
+      abort = abort; setAside = setAside; landed = () => {}; detach = () => {};
     }
     await withVoiceEnv(() => true, Dictation, async () => {
       mainSession('S'); render(<PetPage />); tapHotkey();
@@ -1841,7 +1844,8 @@ describe('desktop mini v2 interaction contract', () => {
       await userEvent.click(screen.getByLabelText('pet.voice.stop'));
       expect(screen.getByText('pet.voice.finishing')).toBeTruthy();
       await userEvent.keyboard('{Escape}');
-      expect(abort).toHaveBeenCalled();
+      expect(setAside).toHaveBeenCalledOnce();
+      expect(abort).not.toHaveBeenCalled();
       expect(screen.queryByText('pet.voice.finishing')).toBeNull();
       expect(await screen.findByRole('textbox')).toBeTruthy();
       await act(async () => done.resolve('late cleaned words'));

@@ -1322,10 +1322,15 @@ function usePetVoice({ enabled, epoch, draft, keepTarget, onOpenComposer, onCapt
       return;
     }
     if (capture.cancelled) return;
+    // Escape while the take is finishing stops waiting for its words, as a voice card's × does: a
+    // take worth keeping waits in the bound conversation's pending voice items, a slip is discarded
+    // (ShowPageVoiceDictation.setAside). Escape while it still listens discards it.
+    const finishing = capture.ending;
     capture.ending = true;
     capture.cancelled = true;
     captureRef.current = null;
-    capture.dictation.abort();
+    if (finishing) capture.dictation.setAside();
+    else capture.dictation.abort();
     setListening(false);
     setFinishing(false);
     setPreview('');
