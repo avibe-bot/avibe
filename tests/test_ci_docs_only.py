@@ -197,9 +197,9 @@ def synthetic_merge_group(repo: Path, change=None, **merge_group) -> tuple[dict,
     pr_event, head = synthetic_pr(repo, change)
     group = {
         "base_sha": pr_event["pull_request"]["base"]["sha"],
-        "base_ref": "main",
+        "base_ref": "refs/heads/main",
         "head_sha": head,
-        "head_ref": "gh-readonly-queue/main/pr-1",
+        "head_ref": "refs/heads/gh-readonly-queue/main/pr-1",
     }
     group.update(merge_group)
     return {

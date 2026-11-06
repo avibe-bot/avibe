@@ -743,7 +743,10 @@ def test_windows_platform_checks_route_queue_entries_like_pull_requests() -> Non
         expected_scope + " && needs.changes.outputs.platform != 'skip' && github.event_name != 'pull_request'"
     )
     assert jobs["windows-control-ipc"]["needs"] == ["changes", "build-linux-artifacts"]
-    assert jobs["windows-control-ipc"]["if"] == expected_scope + " && needs.changes.outputs.windows_control_ipc == 'true'"
+    assert jobs["windows-control-ipc"]["if"] == (
+        expected_scope + " && (github.event_name != 'pull_request' || "
+        "needs.changes.outputs.windows_control_ipc == 'true')"
+    )
     skill_step = next(
         step for step in jobs["windows-control-ipc"]["steps"]
         if step.get("name") == "Verify Skill discovery keeps real directory identities"

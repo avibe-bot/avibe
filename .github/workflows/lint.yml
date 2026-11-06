@@ -1187,7 +1187,7 @@ jobs:
   windows-control-ipc:
     runs-on: windows-latest
     needs: [changes, build-linux-artifacts]
-    if: needs.changes.outputs.docs_only == 'false' && needs.changes.outputs.windows_control_ipc == 'true'
+    if: needs.changes.outputs.docs_only == 'false' && (github.event_name != 'pull_request' || needs.changes.outputs.windows_control_ipc == 'true')
     # Every pytest run in this job writes its junit report here (tests/conftest.py).
     env:
       AVIBE_CI_JUNIT_DIR: ${{ github.workspace }}/ci-junit

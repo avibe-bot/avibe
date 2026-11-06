@@ -195,6 +195,8 @@ def targets_default_branch(event_name: str, event: dict) -> bool:
     elif event_name == "merge_group":
         group = event.get("merge_group")
         ref = group.get("base_ref") if isinstance(group, dict) else None
+        if isinstance(ref, str) and ref.startswith("refs/heads/"):
+            ref = ref.removeprefix("refs/heads/")
     else:
         return False
     return isinstance(ref, str) and bool(ref) and ref == default
