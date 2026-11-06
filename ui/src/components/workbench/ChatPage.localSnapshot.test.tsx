@@ -1060,9 +1060,14 @@ describe('ChatPage history this device saved', () => {
     await readChatSnapshot(SESSION);
   };
   const liveWindow = (messages: WorkbenchMessage[], nextBeforeId: string | null) => ({ ...bootstrap(messages), next_before_id: nextBeforeId });
-  const scrollUp = () => act(async () => {
-    fireEvent.wheel(screen.getByTestId('chat-transcript'), { deltaY: -100 });
-  });
+  // An upward gesture while an older page is still loading is consumed by
+  // design: scroll again only once the head slot no longer shows one loading.
+  const scrollUp = async () => {
+    await waitFor(() => expect(screen.queryByRole('status', { name: 'chat.loadingOlder' })).toBeNull());
+    await act(async () => {
+      fireEvent.wheel(screen.getByTestId('chat-transcript'), { deltaY: -100 });
+    });
+  };
   type Page = { messages: WorkbenchMessage[]; next_before_id?: string | null; next_after_id?: string | null };
   const serve = (pages: { older?: Promise<Page>; around?: Promise<Page>; tail?: Promise<Page> }) =>
     mocks.api.listSessionMessages.mockImplementation((_id: string, params: { beforeId?: string; aroundId?: string; tail?: boolean } = {}) => {
