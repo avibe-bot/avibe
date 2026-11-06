@@ -76,6 +76,7 @@ export function HeldComposer({
     retry: noop,
     discard: noop,
     dismiss: noop,
+    cancelSettling: noop,
     ...hold,
     level: hold.level ?? meterFor(hold.phase ?? 'idle'),
   };

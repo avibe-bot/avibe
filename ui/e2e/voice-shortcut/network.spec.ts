@@ -9,10 +9,12 @@ import en from '../../src/i18n/en.json' with { type: 'json' };
 type Net = {
   token: 'ok' | 'fail' | 'hang';
   socket: 'ok' | 'refuse' | 'kill-mid';
-  cloud: 'ok' | 'down';
+  cloud: 'ok' | 'slow' | 'down';
   relay: 'ok' | 'down';
   cloudFailOnce: number[];
+  slowMs: number;
 };
+type SlowRequest = { path: 'cloud'; sequence: number; final: boolean };
 
 declare global {
   interface Window {
@@ -21,6 +23,8 @@ declare global {
       tokens: string[];
       sockets: string[];
       dictations: { path: 'cloud' | 'relay'; sequence: number; final: boolean; receipts: string[] }[];
+      slow: SlowRequest[];
+      aborted: SlowRequest[];
       sent: string[];
     };
   }
@@ -146,4 +150,65 @@ test('a take that cannot be transcribed survives a reload, and lands from its pe
   await expect(page.locator('[data-hold-to-talk="ready"]')).toBeVisible();
   await page.waitForTimeout(500);
   await expect(page.getByRole('status').filter({ hasText: en.voice.pending.title })).toHaveCount(0);
+});
+
+// The card's × while a take is finishing (ui/design: composer/hold-desktop/f-settling): the realtime
+// path is refused, so the words come over HTTP, and the network is slow. The × stops waiting at once.
+test.describe('the × on a finishing card', () => {
+  const SLOW_MS = 8_000;
+  const slow = (page: Page) => page.evaluate(() => window.voiceNetLog.slow);
+  const aborted = (page: Page) => page.evaluate(() => window.voiceNetLog.aborted);
+
+  /** Holds for `ms`, releases, and taps the × once the final request is waiting on the network. */
+  const cancelWhileFinishing = async (page: Page, ms: number) => {
+    const at = await open(page, { socket: 'refuse', cloud: 'slow', slowMs: SLOW_MS });
+    await holdFor(page, at, ms);
+    const card = page.getByRole('dialog');
+    await expect(card.getByText(en.pet.voice.finishing)).toBeVisible();
+    await expect.poll(() => slow(page)).toContainEqual({ path: 'cloud', sequence: 0, final: true });
+    await card.getByRole('button', { name: en.voice.cancelSettling }).click();
+    // Closed at once, with no spinner left on the composer, and the request it waited on stopped.
+    await expect(card).toHaveCount(0);
+    await expect(page.locator('.animate-spin')).toHaveCount(0);
+    expect(await aborted(page)).toContainEqual({ path: 'cloud', sequence: 0, final: true });
+    return at;
+  };
+
+  test('a take with speech, 3 s or longer, is kept on the device and never sent', async ({ page }) => {
+    test.setTimeout(60_000);
+    await cancelWhileFinishing(page, 4_500);
+    await expect(page.getByRole('status').filter({ hasText: en.voice.composer.cancelledKept })).toBeVisible();
+
+    // Past the moment the slow answer would have come: nothing was sent.
+    await page.waitForTimeout(SLOW_MS + 1_000);
+    expect(await sent(page)).toEqual([]);
+    // The take waits near the composer for the reader to retry or discard it; nothing tries it
+    // again on its own meanwhile.
+    const item = page.getByRole('status').filter({ hasText: en.voice.pending.title });
+    await expect(item).toBeVisible();
+    await expect(item.getByText(en.voice.pending.waiting)).toBeVisible();
+    expect(await slow(page)).toHaveLength(1);
+
+    // It is the user's to retry: once the network is back, it lands as a draft or a message.
+    await setNet(page, { cloud: 'ok' });
+    await item.getByRole('button', { name: en.voice.retry }).click();
+    const ready = page.getByRole('status').filter({ hasText: en.voice.pending.ready });
+    await expect(ready.getByText(FINAL_TEXT)).toBeVisible();
+    expect(await sent(page)).toEqual([]);
+  });
+
+  test('a short take is discarded: nothing is sent and nothing is kept', async ({ page }) => {
+    test.setTimeout(60_000);
+    await cancelWhileFinishing(page, 1_800);
+    await expect(page.getByRole('status').getByText(en.voice.cancelled, { exact: true })).toBeVisible();
+
+    await page.waitForTimeout(SLOW_MS + 1_000);
+    expect(await sent(page)).toEqual([]);
+    await expect(page.getByRole('status').filter({ hasText: en.voice.pending.title })).toHaveCount(0);
+    // Not after a reload either.
+    await page.reload();
+    await expect(page.locator('[data-hold-to-talk="ready"]')).toBeVisible();
+    await page.waitForTimeout(500);
+    await expect(page.getByRole('status').filter({ hasText: en.voice.pending.title })).toHaveCount(0);
+  });
 });

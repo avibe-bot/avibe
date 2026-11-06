@@ -25,8 +25,9 @@ const clock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(seconds
 
 /** The take as it is heard: who it goes to, the clock, the live transcript (the settled part dark,
  *  the tail the recognizer may still revise light), and the meter (the microphone's real level;
- *  flat and red while a release would cancel; a sweep beside "Finishing…"), or — once the take was
- *  cut off — why, and what can be done (`actions`, default Retry / Send). A long transcript
+ *  flat and red while a release would cancel; a sweep beside "Finishing…", with a gray × that stops
+ *  waiting), or — once the take was cut off — why, and what can be done (`actions`, default Retry /
+ *  Send). A long transcript
  *  scrolls inside the card and stays on its newest line while the take runs, with the top edge
  *  fading to say there is more above. */
 export function VoiceCard({
@@ -40,6 +41,7 @@ export function VoiceCard({
   actions,
   level,
   liveUnavailable = false,
+  onCancel,
 }: {
   to: VoiceTarget;
   phase: VoiceCardPhase;
@@ -55,6 +57,9 @@ export function VoiceCard({
   /** Live recognition is not working for this take: the card says so, quietly, and that the
    *  take is still transcribed in full on release (`useHoldToTalk().liveUnavailable`). */
   liveUnavailable?: boolean;
+  /** Settling: stop waiting for the take's words (`useHoldToTalk().cancelSettling`), the × at the
+   *  end of the "Finishing…" line (ui/design: composer/hold-mobile/f-settling). */
+  onCancel?: (() => void) | null;
 }) {
   const { t } = useTranslation();
   const scroller = useRef<HTMLDivElement | null>(null);
@@ -134,6 +139,12 @@ export function VoiceCard({
           <div className="flex items-center gap-3 text-xs text-mint-ink">
             <VoiceMeter level={level} mode="settling" />
             {t('pet.voice.finishing')}
+            {onCancel && (
+              <>
+                <span className="flex-1" />
+                <VoiceClose label={t('voice.cancelSettling')} onClick={onCancel} />
+              </>
+            )}
           </div>
         )}
         {interrupted && (
@@ -233,9 +244,10 @@ export function VoiceCancelTarget({ armed, hint }: { armed: boolean; hint?: Reac
   );
 }
 
-/** The close on a voice toast: a small × whose target is a fingertip (44 pt) without making the
- *  toast taller, overlapping the toast's own padding at its top-right corner. */
-export function VoiceToastClose({ label, onClick }: { label: string; onClick: () => void }) {
+/** The small gray × on a voice toast (close) or on a card that is finishing (stop waiting): its
+ *  target is a fingertip (44 pt) without making its line taller, overlapping the padding at the
+ *  right edge, so nothing moves when it comes or goes. */
+export function VoiceClose({ label, onClick }: { label: string; onClick: () => void }) {
   return (
     <button
       type="button"

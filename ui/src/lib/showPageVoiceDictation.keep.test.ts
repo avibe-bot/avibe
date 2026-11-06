@@ -7,8 +7,9 @@ import { setLocalSnapshotPrincipal } from './localSnapshots';
 import { ShowPageVoiceDictation } from './showPageVoiceDictation';
 import { VOICE_LEVEL_INTERVAL_MS, type VoiceRecordingPipelineOptions } from './voiceRecording';
 import type { VoiceRealtimeOptions } from './voiceRealtime';
+import { firstVoiceTakeRetry } from './voiceTakeRetry';
 import { deleteVoiceTake, isVoiceTakeLive, readVoiceTakeAudio, readVoiceTakes } from './voiceTakeStore';
-import { VoiceTranscriptionError } from './voiceTranscription';
+import { finalizeVoiceDictation, VoiceTranscriptionError } from './voiceTranscription';
 
 // A dictation that keeps its take on the device: a reload, a crash, or a surface that goes away
 // loses none of what was said.
@@ -19,13 +20,18 @@ const harness = (options: {
   finalize?: ReturnType<typeof vi.fn>;
   realtimeFinish?: () => Promise<{ text: string; cleanup: 'success' | 'fallback' }>;
   onLiveChange?: (live: boolean) => void;
+  /** Finishing writes the last segment and stops at once; false leaves it to the test. */
+  stopOnFinish?: boolean;
 } = {}) => {
   let pipeline!: VoiceRecordingPipelineOptions;
   let realtime!: VoiceRealtimeOptions;
   const realtimeAbort = vi.fn();
-  const finish = vi.fn(() => {
+  const stop = () => {
     pipeline.onSegment(new Blob(['tail'], { type: 'audio/wav' }), { durationMs: 20_000, overlapMs: 500, final: true });
     pipeline.onStopped('finish', { pendingSegmentCount: 1 });
+  };
+  const finish = vi.fn(() => {
+    if (options.stopOnFinish ?? true) stop();
   });
   const enqueued: number[] = [];
   const dictation = new ShowPageVoiceDictation({
@@ -59,6 +65,7 @@ const harness = (options: {
   return {
     dictation,
     finish,
+    stop,
     realtimeAbort,
     enqueued,
     pipeline: () => pipeline,
@@ -127,6 +134,89 @@ describe('ShowPageVoiceDictation keeps its take', () => {
     take.dictation.abort();
     await idle();
     await vi.waitFor(async () => expect(await readVoiceTakes()).toEqual([]));
+  });
+});
+
+// The reader stops waiting for a take's words (the card's × while it is finalized): nothing more is
+// asked of the network, nothing lands, and what was said is kept only when it was worth saying.
+describe('ShowPageVoiceDictation set aside', () => {
+  /** One second of the microphone at a level: speech, or a quiet room. */
+  const second = (amplitude: number) => new Int16Array(16_000).map((_, index) => (index % 2 ? amplitude : -amplitude));
+  const SPEECH = 3_000;
+  const SILENCE = 0;
+  /** A finalization that waits on the network until its signal aborts. */
+  const slowFinalize = () => vi.fn((...[, , dependencies]: Parameters<typeof finalizeVoiceDictation>) => new Promise<never>((_, reject) => {
+    dependencies?.signal?.addEventListener('abort', () => reject(new VoiceTranscriptionError('cancelled')));
+  }));
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Records `ms` of `amplitude`, as the clock and the recorder see it. */
+  const record = (take: ReturnType<typeof harness>, ms: number, amplitude: number) => {
+    for (let elapsed = 0; elapsed < ms; elapsed += 1_000) take.pipeline().onPcm?.(second(amplitude));
+    vi.setSystemTime(Date.now() + ms);
+  };
+
+  it('stops the request it waits on and keeps a take that held speech for 3 s, for the reader', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    setLocalSnapshotPrincipal('local');
+    const finalize = slowFinalize();
+    const take = harness({ finalize });
+    await take.dictation.start();
+    record(take, 5_000, SPEECH);
+    take.dictation.finish();
+    await vi.waitFor(() => expect(finalize).toHaveBeenCalledOnce());
+    const signal = finalize.mock.calls[0]![2]!.signal!;
+
+    expect(take.dictation.setAside()).toBe(true);
+    expect(signal.aborted).toBe(true);
+    expect(take.realtimeAbort).toHaveBeenCalled();
+    await expect(take.dictation.done).rejects.toMatchObject({ code: 'cancelled' });
+    // On the device, with its audio, for the pending voice items: no surface holds it, and they
+    // leave it to the reader rather than trying it again on their own at once.
+    await vi.waitFor(async () => {
+      expect(isVoiceTakeLive('kept-take')).toBe(false);
+      expect((await readVoiceTakes('ses_a'))[0]).toMatchObject({ id: 'kept-take', status: 'pending' });
+      expect(await (await readVoiceTakeAudio('kept-take')).get(0)?.text()).toBe('tail');
+    });
+    expect(firstVoiceTakeRetry('kept-take')).toBe(false);
+    // A discard meant for the surface's own copy does not reach the kept take.
+    take.dictation.abort();
+    await idle();
+    expect(await readVoiceTakes('ses_a')).toHaveLength(1);
+  });
+
+  it.each([
+    { said: 'speech for 5 s', ms: 5_000, amplitude: SPEECH, kept: true },
+    { said: 'speech for 2 s', ms: 2_000, amplitude: SPEECH, kept: false },
+    { said: 'silence for 5 s', ms: 5_000, amplitude: SILENCE, kept: false },
+  ])('set aside while its last segment is still being written, $said is kept: $kept', async ({ ms, amplitude, kept }) => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    setLocalSnapshotPrincipal('local');
+    const finalize = vi.fn();
+    const take = harness({ finalize, stopOnFinish: false });
+    await take.dictation.start();
+    record(take, ms, amplitude);
+    take.dictation.finish();
+
+    expect(take.dictation.setAside()).toBe(kept);
+    take.stop();
+    await expect(take.dictation.done).rejects.toMatchObject({ code: 'cancelled' });
+    await idle();
+    await vi.waitFor(async () => {
+      expect(isVoiceTakeLive('kept-take')).toBe(false);
+      const takes = await readVoiceTakes('ses_a');
+      if (!kept) {
+        expect(takes).toEqual([]);
+        return;
+      }
+      expect(takes[0]).toMatchObject({ status: 'pending' });
+      expect(await (await readVoiceTakeAudio('kept-take')).get(0)?.text()).toBe('tail');
+    });
+    // Nothing is asked of recognition once the reader stopped waiting.
+    expect(finalize).not.toHaveBeenCalled();
   });
 });
 

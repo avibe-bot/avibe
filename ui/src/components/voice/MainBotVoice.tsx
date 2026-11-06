@@ -7,7 +7,7 @@ import type { BotAvatar as BotAvatarSpec } from '@/lib/bots';
 import type { VoiceLevelSource } from '@/lib/voiceLevel';
 import { BotAvatar } from '../ui/bot-avatar';
 import type { useHoldToTalk } from './useHoldToTalk';
-import { VoiceCancelTarget, VoiceCard, VoiceInterruptedActions, VoiceToastClose } from './VoiceCard';
+import { VoiceCancelTarget, VoiceCard, VoiceInterruptedActions, VoiceClose } from './VoiceCard';
 import { VoiceMark } from './VoiceMark';
 
 // Holding the main Bot in the middle of the phone's tab bar (ui/design: mobile/main-bot-voice/*):
@@ -19,6 +19,8 @@ export type HoldView = Pick<
   ReturnType<typeof useHoldToTalk>,
   'phase' | 'interruptReason' | 'text' | 'stash' | 'seconds' | 'outcome' | 'canRetry' | 'sendInterrupted' | 'retry' | 'discard' | 'dismiss'
 > & {
+  /** Stops waiting for a finishing take's words (the card's ×); absent or null when it cannot. */
+  cancelSettling?: (() => void) | null;
   /** The microphone's loudness for the card's meter. */
   level?: VoiceLevelSource | null;
   /** Live recognition is not working for this take. */
@@ -48,6 +50,7 @@ export function MainBotHoldOverlay({ hold, bot }: { hold: Hold; bot: MainBot }) 
           reason={hold.interruptReason ?? 'dropped'}
           level={hold.level}
           liveUnavailable={hold.liveUnavailable}
+          onCancel={hold.cancelSettling}
           actions={
             <VoiceInterruptedActions
               canRetry={hold.canRetry}
@@ -92,7 +95,7 @@ export function MainBotVoiceToast({ hold, bot, onView, placement = 'bar' }: { ho
     >
       <div className={clsx('pointer-events-auto flex w-full max-w-sm items-start gap-3 rounded-2xl border bg-surface-2 px-3.5 py-3 shadow-xl', tone)}>
         {outcome === 'sent' && <BotAvatar avatar={bot.avatar} name={bot.name} size={28} />}
-        {outcome === 'cancelled' && <Undo2 className="mt-0.5 size-4 shrink-0 text-muted" />}
+        {(outcome === 'cancelled' || outcome === 'kept') && <Undo2 className="mt-0.5 size-4 shrink-0 text-muted" />}
         {(outcome === 'too-short' || outcome === 'asking') && <MicOff className="mt-0.5 size-4 shrink-0 text-muted" />}
         {(outcome === 'denied' || failed) && <MicOff className="mt-0.5 size-4 shrink-0 text-destructive-ink" />}
         {outcome === 'unavailable' && <CloudOff className="mt-0.5 size-4 shrink-0 text-muted" />}
@@ -114,6 +117,7 @@ export function MainBotVoiceToast({ hold, bot, onView, placement = 'bar' }: { ho
                 </>
               )}
               {outcome === 'cancelled' && <span className="text-foreground">{t('voice.cancelled')}</span>}
+              {outcome === 'kept' && <span className="text-foreground">{t('voice.cancelledKept', { name: bot.name })}</span>}
               {outcome === 'too-short' && <span className="text-foreground">{t('voice.tooShort')}</span>}
               {outcome === 'asking' && <span className="text-foreground">{t('voice.asking')}</span>}
               {outcome === 'denied' && (
@@ -143,7 +147,7 @@ export function MainBotVoiceToast({ hold, bot, onView, placement = 'bar' }: { ho
             {t('voice.retry')}
           </button>
         )}
-        {failed ? <VoiceToastClose label={t('voice.discard')} onClick={hold.discard} /> : <VoiceToastClose label={t('voice.dismiss')} onClick={dismiss} />}
+        {failed ? <VoiceClose label={t('voice.discard')} onClick={hold.discard} /> : <VoiceClose label={t('voice.dismiss')} onClick={dismiss} />}
       </div>
     </div>
   );

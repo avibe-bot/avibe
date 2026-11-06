@@ -18,6 +18,25 @@ const notify = () => {
   for (const listener of listeners) listener();
 };
 
+// Takes this document has tried on its own once since it loaded, and takes whose words the reader
+// stopped waiting for here: the pending voice items do not try either again on their own until the
+// page comes back (online, to the front, or reloaded).
+const triedHere = new Set<string>();
+
+/** Whether the pending voice items may try a take on their own as this page first shows it:
+ *  true once per take. */
+export const firstVoiceTakeRetry = (id: string): boolean => {
+  if (triedHere.has(id)) return false;
+  triedHere.add(id);
+  return true;
+};
+
+/** The reader stopped waiting for this take's words here: its pending item waits for the reader,
+ *  or for the page to come back, before it is tried again. */
+export const leaveVoiceTakeToReader = (id: string): void => {
+  triedHere.add(id);
+};
+
 /** Whether a kept take is being transcribed in this document now. */
 export const isRetryingVoiceTake = (id: string): boolean => running.has(id);
 

@@ -25,6 +25,7 @@ type Fake = {
   voiced: ReturnType<typeof vi.fn>;
   landed: ReturnType<typeof vi.fn>;
   detach: ReturnType<typeof vi.fn>;
+  setAside: ReturnType<typeof vi.fn>;
 };
 
 const pipeline = vi.hoisted(() => ({
@@ -34,6 +35,8 @@ const pipeline = vi.hoisted(() => ({
   captureActive: false,
   /** How long the microphone and audio graph take to open. */
   startMs: 0,
+  /** What the dictation decides when the reader stops waiting: keep the take, or discard it. */
+  keepOnSetAside: true,
 }));
 const native = vi.hoisted(() => ({
   impact: vi.fn(),
@@ -65,6 +68,11 @@ vi.mock('../../lib/showPageVoiceDictation', () => ({
         voiced: vi.fn(() => false),
         landed: vi.fn(),
         detach: vi.fn(),
+        // As the dictation does: its requests stop, and `done` rejects as cancelled.
+        setAside: vi.fn(() => {
+          reject(new VoiceTranscriptionError('cancelled'));
+          return pipeline.keepOnSetAside;
+        }),
       };
       pipeline.takes.push(take);
       return take;
@@ -153,6 +161,7 @@ beforeEach(() => {
   pipeline.permission = 'granted';
   pipeline.captureActive = false;
   pipeline.startMs = 0;
+  pipeline.keepOnSetAside = true;
   send.mockReset().mockResolvedValue(true);
   onTap.mockReset();
   native.impact.mockReset().mockResolvedValue(true);
@@ -530,6 +539,93 @@ describe('useHoldToTalk', () => {
     expect(hold.outcome).toBe('cancelled');
     up(el);
     expect(send).not.toHaveBeenCalled();
+  });
+
+  // The card's × while the words are finalized (ui/design: composer/hold-mobile/f-settling).
+  it.each([
+    { how: 'the card’s ×', kept: true, outcome: 'kept' },
+    { how: 'the card’s ×', kept: false, outcome: 'cancelled' },
+    { how: 'Esc', kept: true, outcome: 'kept' },
+  ] as const)('stops waiting for the words on $how: the card closes, nothing is ever sent, and the take is $outcome', async ({ how, kept, outcome }) => {
+    pipeline.keepOnSetAside = kept;
+    const el = await mount();
+    await holdFor(el);
+    await speak('帮我看一下', '周一');
+    // While it records there is nothing to stop waiting for: release sends, sliding up cancels.
+    expect(hold.cancelSettling).toBeNull();
+    await elapse(4_000);
+    up(el);
+    expect(hold.phase).toBe('settling');
+
+    if (how === 'Esc') {
+      act(() => {
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+      });
+    } else {
+      act(() => hold.cancelSettling!());
+    }
+    await flush();
+    const take = pipeline.takes[0];
+    expect(take.setAside).toHaveBeenCalledOnce();
+    expect(take.abort).not.toHaveBeenCalled();
+    expect(hold.phase).toBe('idle');
+    expect(hold.cancelSettling).toBeNull();
+    expect(hold.outcome).toBe(outcome);
+    expect([hold.text, hold.stash]).toEqual(['', '']);
+    expect(native.notify).toHaveBeenCalledWith('warning');
+
+    // Words that arrive after the cancel, partial or final, are never sent.
+    await act(async () => take.resolve('帮我看一下周一的发布'));
+    await elapse(10_000);
+    await flush();
+    expect(send).not.toHaveBeenCalled();
+    expect(hold.phase).toBe('idle');
+  });
+
+  it('stops waiting for a retry of a cut-off take the same way', async () => {
+    const el = await mount();
+    await holdFor(el);
+    await elapse(4_000);
+    up(el);
+    await act(async () => pipeline.takes[0].reject(new VoiceTranscriptionError('unavailable')));
+    await flush();
+    expect(hold.phase).toBe('interrupted');
+    expect(hold.cancelSettling).toBeNull();
+
+    pipeline.takes[0].retry.mockReturnValueOnce(new Promise(() => undefined));
+    await act(async () => hold.retry());
+    expect(hold.phase).toBe('settling');
+    act(() => hold.cancelSettling!());
+    await flush();
+    expect(pipeline.takes[0].setAside).toHaveBeenCalledOnce();
+    expect(hold.phase).toBe('idle');
+    expect(hold.outcome).toBe('kept');
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('offers no way to stop once the words are on their way as a message', async () => {
+    let accept!: (ok: boolean) => void;
+    send.mockImplementationOnce(() => new Promise((resolve) => {
+      accept = resolve;
+    }));
+    const el = await mount();
+    await holdFor(el);
+    await elapse(4_000);
+    up(el);
+    expect(hold.cancelSettling).not.toBeNull();
+    await act(async () => pipeline.takes[0].resolve('发出去'));
+    await flush();
+    expect(send).toHaveBeenCalledWith('发出去', { input: 'voice' });
+    expect(hold.phase).toBe('settling');
+    expect(hold.cancelSettling).toBeNull();
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    });
+    expect(pipeline.takes[0].setAside).not.toHaveBeenCalled();
+
+    await act(async () => accept(true));
+    await flush();
+    expect(hold.outcome).toBe('sent');
   });
 
   it('starts a new take with an empty transcript, not the words the last one sent', async () => {

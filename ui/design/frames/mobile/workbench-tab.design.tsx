@@ -60,6 +60,8 @@ const designFrames = frames([
   holdFrame('hold-armed', '按住伙伴说话 · 上滑进取消区：松开取消', held({ ...recording, phase: 'armed', seconds: 7 })),
   holdFrame('hold-main-recording', '按住最左边的歪比说话 · 取消和提示贴着页头和「伙伴」标题：各自带一圈局部模糊，提示不出屏幕左边', held({ phase: 'listening', seconds: 1 }, 'main')),
   holdFrame('hold-main-armed', '按住最左边的歪比 · 上滑进取消区（红色）：同样带局部模糊', held({ phase: 'armed', seconds: 3 }, 'main')),
+  holdFrame('hold-settling', '按住伙伴说话 · 松开：最终文字整理中；行末灰色的叉立即停下、不发送', held({ phase: 'settling', text: spoken.final, seconds: 8 })),
+  holdFrame('hold-cancelled-kept', '按住伙伴说话 · 整理中点了叉，录音里有说话、超过 3 秒：没有发送，录音留在这台设备上，可以在和产品经理的对话里重试', held({ outcome: 'kept' })),
   holdFrame('hold-sent', '按住伙伴说话 · 已发给产品经理：留在工作台，它排到歪比后面', held({ outcome: 'sent', text: spoken.final }), afterSpeaking),
 ]);
 
