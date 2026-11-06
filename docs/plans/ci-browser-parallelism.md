@@ -27,21 +27,26 @@ a time (20–40 s each; 30 s in all locally). That brought the static part from
 2:18–2:34 to 5:10, still under the tests part (8:40) and every browser lane
 (9:31–11:44) of the same run.
 
-`test:chat-paging` joined lane 2, the emptiest (its suites summed 377 s and
-459 s in master runs `42165094179` and `42167111540`). It took 52 s on CI.
-Suites whose browser cases no lane runs:
+### Suites under a minute run in the lanes (2026-11-06)
 
-| Suite | Local wall time | Where its cases run |
+A suite outside the lanes is measured once on CI. If it takes under a minute,
+it joins the lane that is emptiest at the time; a longer one stays out, and is
+still type-checked. Lane load is the sum of the median command times over nine
+successful runs on 2026-11-06 (lanes 1–4: 636, 476 with chat-paging, 484 and 739 s). Suites
+are placed largest first. Measured in PR runs `42190302240` (chat-paging) and
+`42198314805` (the rest), and in the nightly runs for model-catalog:
+
+| Suite | On CI | Placement |
 | --- | --- | --- |
-| model-catalog | 409 s (622 s on CI) | nightly `model-hub-ui-regression` |
-| model-provider | 28 s (49 s on CI) | nightly `model-hub-ui-regression` |
-| citations | 24 s | nowhere |
-| queue-attachments | 69 s | nowhere |
-| session-dot | 20 s | nowhere |
-| web-fetch | 3 s, no npm script | nowhere (manual screenshots) |
+| chat-paging | 52 s | lane 2 |
+| model-provider | 41 s (49–50 s nightly) | lane 2; still in the nightly run as well |
+| citations | 29 s | lane 3 |
+| session-dot | 24 s | lane 3 |
+| web-fetch | 10 s | lane 2, through the new `test:web-fetch` |
+| queue-attachments | 101 s | out |
+| model-catalog | 619–628 s, nightly | out; nightly `model-hub-ui-regression` |
 
-Local times are whole npm commands on an Apple Silicon Mac. On the three lane
-suites measured both ways, CI took 1.3–2.0 times as long.
+Lanes 2 and 3 come to about 530 s and 540 s, still under lanes 1 and 4.
 
 The sections below record the original PR #3232 contract and measurements, not
 a requirement to restore its screenshot gate. Removing parallel captures reduces
@@ -77,8 +82,8 @@ Four browser lanes, balanced by the first run's observed command wall times:
 | Lane | Commands | Estimated execution |
 | --- | --- | --- |
 | 1 | pet-mini, chat-interactions, inbox-return | 8:13 |
-| 2 | five workbench-general specs, built composer-mention-picker, project-order, chat-paging (added later, about 1 minute) | 8:08 |
-| 3 | three onboarding-fidelity specs, home-media, pdf-preview, motion (added later, about 1 minute) | 8:10 |
+| 2 | five workbench-general specs, built composer-mention-picker, project-order; added later: chat-paging, model-provider, web-fetch (about 1:45 together) | 8:08 |
+| 3 | three onboarding-fidelity specs, home-media, pdf-preview; added later: motion, citations, session-dot (about 1:40 together) | 8:10 |
 | 4 | vault-integrity, workbench geometry, badge-triggers, chat-selection, voice-shortcut, chat-scroll (added later, about 1 minute) | 7:52 |
 
 Suites remain serial inside each runner. Existing per-suite TypeScript checks

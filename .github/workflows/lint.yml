@@ -250,7 +250,7 @@ jobs:
               npm run test:project-order
               # Paging older history through the retained-window cap (Chromium, desktop and phone).
               npm run test:chat-paging
-              npm run test:queue-attachments
+              npm run test:model-provider
               npm run test:web-fetch
           - lane: 3
             suites: |
@@ -259,7 +259,6 @@ jobs:
               npm run test:pdf-preview
               # Motion of the shared surfaces: sheets, popovers, toasts (Chromium and WebKit).
               npm run test:motion
-              npm run test:model-provider
               npm run test:citations
               npm run test:session-dot
           - lane: 4
@@ -325,8 +324,9 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" "$HOME/.cache/playwright-apt"
 
       - name: Test browser interactions
-        # Model Hub catalog/provider regression runs on the scheduled/manual
-        # model-hub-ui-regression workflow instead of blocking every PR.
+        # The Model Hub catalog regression (about ten minutes) runs on the
+        # scheduled/manual model-hub-ui-regression workflow instead of blocking
+        # every PR. Its provider suite also runs here, in lane 2.
         working-directory: ui
         run: |
           # Time the entire npm command (including built-app preparation), not
