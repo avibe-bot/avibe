@@ -33,7 +33,9 @@ import {
   HISTORY_PUSH_TAG,
   KEY_ENTER_COMMAND,
   PASTE_COMMAND,
+  ParagraphNode,
   SKIP_SCROLL_INTO_VIEW_TAG,
+  TextNode,
   type EditorState,
   type LexicalNode,
   type PointType,
@@ -780,30 +782,58 @@ function MentionCaretFixPlugin() {
 // dropped under the keyboard until the inset caught up. A desktop, or a touch
 // screen on a hardware keyboard, keeps Lexical's scrolling to the caret.
 //
-// The tag rides on the update the input makes: each input event is caught on
-// the editor before Lexical's own listener (capture runs first at the target),
-// and an update made then is the pending one Lexical's edit joins, so its tags
-// are that edit's.
-const TYPING_EVENTS = ['beforeinput', 'input', 'compositionstart', 'compositionupdate', 'compositionend', 'keydown', 'paste'] as const;
+// The tag rides on the update that edits the text (typing, an IME's
+// composition, a paste, a new line, a deletion): a transform adds it inside that
+// very update, on the text that changed or on the paragraph whose content did
+// (a node removed or inserted, a line break).
+//
+// The tag also skips the editor's own scroll (its box is max-h-40 and scrolls),
+// so after a pinned update the caret is brought into sight inside that box, and
+// never past it.
 function KeyboardPinnedPagePlugin() {
   const [editor] = useLexicalComposerContext();
   useEffect(() => {
+    let pinned = false;
     const pin = () => {
-      if (isSoftKeyboardOpen()) editor.update(() => $addUpdateTag(SKIP_SCROLL_INTO_VIEW_TAG));
+      if (!isSoftKeyboardOpen()) return;
+      pinned = true;
+      $addUpdateTag(SKIP_SCROLL_INTO_VIEW_TAG);
     };
-    let current: HTMLElement | null = null;
-    const listen = (root: HTMLElement | null) => {
-      for (const type of TYPING_EVENTS) current?.removeEventListener(type, pin, true);
-      current = root;
-      for (const type of TYPING_EVENTS) current?.addEventListener(type, pin, true);
-    };
-    const unregister = editor.registerRootListener((root) => listen(root));
+    const unregisterText = editor.registerNodeTransform(TextNode, pin);
+    const unregisterParagraph = editor.registerNodeTransform(ParagraphNode, pin);
+    const unregisterUpdate = editor.registerUpdateListener(({ tags }) => {
+      if (!pinned || !tags.has(SKIP_SCROLL_INTO_VIEW_TAG)) return;
+      pinned = false;
+      const root = editor.getRootElement();
+      if (root) revealCaretInside(root);
+    });
     return () => {
-      unregister();
-      listen(null);
+      unregisterText();
+      unregisterParagraph();
+      unregisterUpdate();
     };
   }, [editor]);
   return null;
+}
+
+/** Scroll ``root`` (and nothing else) so the caret is inside its box. */
+function revealCaretInside(root: HTMLElement) {
+  const selection = root.ownerDocument.getSelection();
+  const node = selection?.focusNode ?? null;
+  if (!selection || !node || !root.contains(node)) return;
+  const range = root.ownerDocument.createRange();
+  range.setStart(node, selection.focusOffset);
+  let caret = range.getBoundingClientRect();
+  if (caret.top === 0 && caret.bottom === 0) {
+    // A caret between elements (after a line break) has no box of its own: use
+    // its neighbour's.
+    const near = node.childNodes[selection.focusOffset - 1] ?? node.childNodes[selection.focusOffset] ?? node;
+    range.selectNode(near === root ? root.lastChild ?? root : near);
+    caret = range.getBoundingClientRect();
+  }
+  const box = root.getBoundingClientRect();
+  if (caret.bottom > box.bottom) root.scrollTop += caret.bottom - box.bottom;
+  else if (caret.top < box.top) root.scrollTop -= box.top - caret.top;
 }
 
 // Voice/dictation IMEs (e.g. Typeless) "replace" a selection by deleting it and

@@ -18,6 +18,9 @@ Chromium and WebKit browsers. CI runs this suite in `lint / ui-checks`.
   editor's own update after the send does not focus it again. A refused send
   gives the text back without focusing the editor. A desktop send keeps the
   editor focused with its caret, so the next message is typed straight away.
+- On a phone, an edit (a long paste, a new line, a key Lexical inserts itself)
+  never scrolls the page; a long paste scrolls the editor's own box to the
+  caret, down and back up.
 - Desktop, keyboard, assistive clicks, incomplete gestures, and the bounded
   missing-terminal-event recovery retain their existing behavior.
 
