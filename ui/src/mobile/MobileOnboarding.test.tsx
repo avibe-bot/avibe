@@ -134,6 +134,22 @@ afterEach(() => {
 });
 
 describe('mobile onboarding', () => {
+  it('owns one fixed viewport that scrolls every bundled screen inside the document lock', async () => {
+    render(<MobileOnboarding />);
+
+    const viewport = await screen.findByRole('main');
+    expect(viewport.className).toContain('h-dvh');
+    expect(viewport.className).toContain('overflow-y-auto');
+    expect(viewport.className).not.toContain('min-h-[100dvh]');
+
+    const content = viewport.firstElementChild as HTMLElement | null;
+    expect(content).not.toBeNull();
+    expect(content?.className).toContain('min-h-full');
+    expect(content?.className).toContain('shrink-0');
+    expect(content?.className).toContain('env(safe-area-inset-top)');
+    expect(content?.className).toContain('env(safe-area-inset-bottom)');
+  });
+
   it('uses one OTP input, normalizes paste, and prevents duplicate sends', async () => {
     const user = userEvent.setup();
     let finishSend: ((value: { cooldown_seconds: number }) => void) | undefined;

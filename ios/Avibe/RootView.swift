@@ -14,6 +14,7 @@ struct RootView: View {
                     coordinator: appModel.mobileSessionCoordinator,
                     startScreen: startScreen
                 )
+                .ignoresSafeArea(.container, edges: .all)
             case .browser(let runtime):
                 BrowserScreen(runtime: runtime)
             }

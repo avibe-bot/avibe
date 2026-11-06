@@ -157,6 +157,7 @@ logs/
 node_modules/
 ui/dist/
 ui/.vite/
+ios/Avibe/Resources/MobileApp/
 vibe/show_runtime/*.tgz
 vibe/show_runtime_manifest.json
 tmp/

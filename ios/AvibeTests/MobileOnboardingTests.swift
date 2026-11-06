@@ -39,6 +39,102 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertTrue(rendered)
     }
 
+    func testBundledPageFillsItsContainerAndStillTracksTheKeyboard() throws {
+        let controller = MobileOnboardingViewController(
+            coordinator: makeCoordinator(
+                defaults: makeDefaults(),
+                transports: [FakeMobileAuthTransport()]
+            )
+        )
+        controller.loadViewIfNeeded()
+
+        let webView = try XCTUnwrap(
+            controller.view.subviews.compactMap { $0 as? WKWebView }.first
+        )
+        let constraints = controller.view.constraints
+        XCTAssertTrue(
+            constraints.contains {
+                $0.firstItem === webView
+                    && $0.firstAttribute == .top
+                    && $0.secondItem === controller.view
+                    && $0.secondAttribute == .top
+            }
+        )
+        XCTAssertTrue(
+            constraints.contains {
+                $0.firstItem === webView
+                    && $0.firstAttribute == .leading
+                    && $0.secondItem === controller.view
+                    && $0.secondAttribute == .leading
+            }
+        )
+        XCTAssertTrue(
+            constraints.contains {
+                $0.firstItem === webView
+                    && $0.firstAttribute == .trailing
+                    && $0.secondItem === controller.view
+                    && $0.secondAttribute == .trailing
+            }
+        )
+        XCTAssertTrue(
+            constraints.contains {
+                $0.firstItem === webView
+                    && $0.firstAttribute == .bottom
+                    && $0.secondItem === controller.view.keyboardLayoutGuide
+                    && $0.secondAttribute == .top
+            }
+        )
+    }
+
+    func testBundledPageInstallsTheMobileBridgeAtItsTrustedOrigin() async throws {
+        let transport = FakeMobileAuthTransport()
+        transport.session = snapshot(accountID: "account-1")
+        let controller = MobileOnboardingViewController(
+            coordinator: makeCoordinator(
+                defaults: makeDefaults(),
+                transports: [transport]
+            )
+        )
+        let window = UIWindow(frame: UIScreen.main.bounds)
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        controller.beginAppearanceTransition(true, animated: false)
+        controller.endAppearanceTransition()
+
+        let webView = try XCTUnwrap(
+            controller.view.subviews.compactMap { $0 as? WKWebView }.first
+        )
+        let loaded = try await waitForJavaScriptValue(in: webView) {
+            """
+            document.body.textContent.includes("Personal Avibe")
+            """
+        }
+        XCTAssertTrue(loaded)
+
+        let evaluated = try await webView.evaluateJavaScript(
+            """
+            JSON.stringify({
+              href: window.location.href,
+              protocol: window.location.protocol,
+              hostname: window.location.hostname,
+              port: window.location.port,
+              bridge: typeof window.avibeMobile
+            })
+            """
+        )
+        let details = try XCTUnwrap(evaluated as? String)
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: Data(details.utf8)
+            ) as? [String: String]
+        )
+        XCTAssertEqual(object["href"], "avibe-app://bundle/mobile.html#instances")
+        XCTAssertEqual(object["protocol"], "avibe-app:")
+        XCTAssertEqual(object["hostname"], "bundle")
+        XCTAssertEqual(object["port"], "")
+        XCTAssertEqual(object["bridge"], "object", details)
+    }
+
     func testMobileBridgeMethodSurfaceIsClosed() {
         XCTAssertEqual(
             Set(MobileBridgeMethod.allCases.map(\.rawValue)),

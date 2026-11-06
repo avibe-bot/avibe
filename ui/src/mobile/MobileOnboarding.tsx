@@ -152,10 +152,10 @@ function CloudScreen({
 }) {
   return (
     <main
-      className="flex min-h-[100dvh] w-full flex-col overflow-y-auto bg-bg text-foreground"
+      className="h-dvh w-full overflow-y-auto bg-bg text-foreground"
       style={{ background: 'var(--gradient-wizard-platforms)' }}
     >
-      <div className="mx-auto flex min-h-[100dvh] w-full max-w-xl flex-col p-6 pb-[max(1.5rem,env(safe-area-inset-bottom))]">
+      <div className="mx-auto flex min-h-full w-full max-w-xl shrink-0 flex-col px-6 pt-[max(1.5rem,env(safe-area-inset-top))] pb-[max(1.5rem,env(safe-area-inset-bottom))]">
         {children}
       </div>
     </main>

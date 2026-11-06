@@ -151,6 +151,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 800000000000000000000002 /* Build configuration list for PBXNativeTarget "Avibe" */;
 			buildPhases = (
+				D00000000000000000000001 /* Verify Mobile App Bundle */,
 				900000000000000000000001 /* Sources */,
 				600000000000000000000001 /* Frameworks */,
 				A00000000000000000000001 /* Resources */,
@@ -242,6 +243,32 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		D00000000000000000000001 /* Verify Mobile App Bundle */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/Avibe/Resources/MobileApp/assets",
+				"$(SRCROOT)/Avibe/Resources/MobileApp/mobile.html",
+				"$(SRCROOT)/scripts/verify_mobile_bundle.sh",
+			);
+			name = "Verify Mobile App Bundle";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "AVIBE_MOBILE_BUNDLE_EXISTENCE_ONLY=1 /bin/sh \"$SRCROOT/scripts/verify_mobile_bundle.sh\" \"$SRCROOT/Avibe/Resources/MobileApp\"\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		900000000000000000000001 /* Sources */ = {

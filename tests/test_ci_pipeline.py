@@ -513,6 +513,102 @@ def test_browser_lanes_check_out_exactly_the_paths_the_classifier_treats_as_thei
     assert sources and all(in_browser_checkout(source) for source in sources), sources
 
 
+def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/ios-shell.yml").read_text(encoding="utf-8")
+    )
+    triggers = workflow[True]
+    expected_paths = [
+        "ios/**",
+        "ui/src/mobile/**",
+        "ui/mobile.html",
+        "ui/vite.mobile.config.ts",
+        "ui/package*.json",
+        "assets/mascot/cloud-tuanzi-v2.png",
+        ".github/workflows/ios-shell.yml",
+    ]
+    assert triggers["pull_request"]["paths"] == expected_paths
+    assert triggers["push"]["paths"] == expected_paths
+
+    steps = workflow["jobs"]["simulator"]["steps"]
+    setup_node, = [
+        (index, step) for index, step in enumerate(steps)
+        if step.get("uses", "").startswith("actions/setup-node@")
+    ]
+    node_index, node_step = setup_node
+    assert node_step["with"] == {
+        "node-version": "22.23.4",
+        "cache": "npm",
+        "cache-dependency-path": "ui/package-lock.json",
+    }
+
+    bundle_index, bundle_step = next(
+        (index, step) for index, step in enumerate(steps)
+        if step.get("name") == "Build bundled mobile UI"
+    )
+    verify_index, verify_step = next(
+        (index, step) for index, step in enumerate(steps)
+        if step.get("name") == "Verify bundled mobile UI"
+    )
+    assert node_index < bundle_index < verify_index
+    assert bundle_step["working-directory"] == "ui"
+    assert bundle_step["run"].splitlines() == ["npm ci", "npm run build:mobile"]
+    assert verify_step["run"] == (
+        "ios/scripts/verify_mobile_bundle.sh ios/Avibe/Resources/MobileApp"
+    )
+
+    app_builds = [
+        index for index, step in enumerate(steps)
+        if "-project ios/Avibe.xcodeproj" in step.get("run", "")
+    ]
+    assert len(app_builds) == 2
+    assert all(verify_index < index for index in app_builds)
+
+
+def test_xcode_mobile_bundle_guard_is_actionable_and_checks_vite_assets(tmp_path: Path) -> None:
+    script = ROOT / "ios/scripts/verify_mobile_bundle.sh"
+    missing = subprocess.run(
+        ["/bin/sh", str(script), str(tmp_path / "MobileApp")],
+        capture_output=True,
+        text=True,
+    )
+    assert missing.returncode == 1
+    assert "npm run build:mobile" in missing.stderr
+
+    bundle = tmp_path / "MobileApp"
+    assets = bundle / "assets"
+    assets.mkdir(parents=True)
+    (bundle / "mobile.html").write_text(
+        '<script src="./assets/mobile.js"></script>'
+        '<link href="./assets/mobile.css" rel="stylesheet">',
+        encoding="utf-8",
+    )
+    (assets / "mobile.js").write_text("", encoding="utf-8")
+    incomplete = subprocess.run(
+        ["/bin/sh", str(script), str(bundle)],
+        capture_output=True,
+        text=True,
+    )
+    assert incomplete.returncode == 1
+    assert "npm run build:mobile" in incomplete.stderr
+
+    (assets / "mobile.css").write_text("", encoding="utf-8")
+    complete = subprocess.run(
+        ["/bin/sh", str(script), str(bundle)],
+        capture_output=True,
+        text=True,
+    )
+    assert complete.returncode == 0, complete.stderr
+
+    project = (ROOT / "ios/Avibe.xcodeproj/project.pbxproj").read_text(encoding="utf-8")
+    target_phases = project.split("buildPhases = (", 1)[1].split(");", 1)[0]
+    assert target_phases.index("Verify Mobile App Bundle") < target_phases.index("Sources")
+    assert (
+        'shellScript = "AVIBE_MOBILE_BUNDLE_EXISTENCE_ONLY=1 '
+        '/bin/sh \\"$SRCROOT/scripts/verify_mobile_bundle.sh\\"'
+    ) in project
+
+
 # The PR browser selection before parallelization: preserve these exact callers,
 # including spec filters, rather than deriving expected coverage from the matrix.
 _BROWSER_COMMANDS = (

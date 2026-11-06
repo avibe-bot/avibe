@@ -182,17 +182,11 @@ enum MobileBridgeConfiguration {
         return configuration
     }
 
+    // Custom-scheme documents still expose about:blank at document start.
+    // Install the page API eagerly; the native handler owns the origin boundary.
     static let scriptSource = """
     (() => {
       "use strict";
-      if (
-        window !== window.top ||
-        window.location.protocol !== "avibe-app:" ||
-        window.location.hostname !== "bundle" ||
-        window.location.port !== "" ||
-        window.location.username !== "" ||
-        window.location.password !== ""
-      ) return;
       if (Object.prototype.hasOwnProperty.call(window, "avibeMobile")) return;
       const call = (method, params = {}) => {
         const handler = window.webkit?.messageHandlers?.avibeMobile;

@@ -134,12 +134,21 @@ origin and its navigation test in the same change.
 The app bundles the approved `mobile-app/*` React flow and exposes a separate
 `window.avibeMobile` bridge only to its top-level
 `avibe-app://bundle` document. A read-only `WKURLSchemeHandler` serves the
-checked-in Vite build from the app bundle so ES modules, styles, and image
-assets share one fixed local origin. Its fixed
+Vite build generated from the same source commit so ES modules, styles, and
+image assets share one fixed local origin. Its fixed
 surface is `session.bootstrap`, `auth.requestOtp`, `auth.verifyOtp`,
 `session.refresh`, `session.selectInstance`, `session.logout`, and the closed
 install-guide `app.openExternal` allowlist. Instance documents, child windows,
 Show Pages, and iframes do not receive these handlers.
+
+The bundled surface fills the container safe area so its gradient reaches the
+status bar and Home indicator. Its shared `h-dvh` viewport owns vertical
+scrolling inside the mobile document lock, while the content column applies
+top and bottom safe-area padding and grows from `min-height: 100%`. Every
+screen therefore keeps long content reachable, including OTP with the software
+keyboard, long email addresses, offline recovery, account details, and large
+instance lists. UIKit still pins the WebView bottom to
+`keyboardLayoutGuide.topAnchor`.
 
 The hidden account transport is a native-owned `WKWebView` with no message
 handler. It loads only the configured control-plane auth configuration and runs
@@ -347,23 +356,39 @@ bridge and do not run these Web UI branches.
 - Xcode 27.2 simulator: Debug XCTest and Release-macro XCTest with no signing,
   including bridge policy, runtime `app.showAccount`, account transport
   lifecycle, stage-accurate failure mapping, bounded hanging readiness/GET/DELETE,
-  cold selection ownership, and real WebKit cookie behavior against a hermetic
-  local server.
+  cold selection ownership, bundled full-bleed/keyboard constraints, and real
+  WebKit cookie behavior against a hermetic local server.
 - CI remains authoritative on Xcode 26.6 and runs `lint` plus `ios-shell`.
 - Web UI: focused Vitest coverage for the bundled OTP/picker/account flow,
   bridge adapter, haptics, Workbench outer-scroll lifecycle, keyboard ownership,
   hidden Web Push/installation surfaces, and all five PWA decisions; production
   Workbench and bundled-mobile TypeScript/Vite builds.
 - Simulator screenshots and the machine-readable fixture report are stored
-  outside the repository and linked from the PR description.
+  outside the repository and linked from the PR description. XCUITest evidence
+  covers scrolling to and selecting the final instance plus OTP button access
+  with the keyboard on a compact viewport; light and dark screenshots verify
+  full-bleed safe-area backgrounds.
 - Production Supabase mail delivery, hosted OTP policy, real account refresh,
   consent, and device behavior remain unverified.
 
 ## Local build
 
-Open `ios/Avibe.xcodeproj` in Xcode, select an iPhone simulator, and run the
-shared `Avibe` scheme. The command-line build does not need an Apple account or
-signing identity:
+Generate the bundled React application before opening or building the Xcode
+project:
+
+```sh
+cd ui
+npm run build:mobile
+```
+
+The generated `ios/Avibe/Resources/MobileApp` directory is ignored build
+output. Xcode verifies that `mobile.html` and the asset directory exist and
+fails with the command above when they do not; Xcode never invokes Node or npm.
+The CI verifier additionally checks every asset referenced by the entry.
+
+Then open `ios/Avibe.xcodeproj` in Xcode, select an iPhone simulator, and run
+the shared `Avibe` scheme. The command-line build does not need an Apple
+account or signing identity:
 
 ```sh
 xcodebuild \
@@ -391,26 +416,24 @@ Tests and development builds must use disposable instance URLs, `loadHTMLString`
 fixtures, or local fixture servers. Do not point automated tests at a real
 Avibe instance.
 
-When bundled mobile UI changes, rebuild the checked-in app resource before
-building Xcode:
-
-```sh
-cd ui
-npm run build:mobile
-```
-
 ## CI
 
-`.github/workflows/ios-shell.yml` runs only when `ios/**` or the workflow itself
-changes. It pins the same Xcode 26.6 toolchain used by the desktop native
-workflow, builds against the iOS Simulator SDK without signing, and runs the
-XCTest navigation, new-window, download, and WebKit capability contracts on an
-available iPhone simulator.
+`.github/workflows/ios-shell.yml` runs for iOS changes and direct bundled-mobile
+inputs. It installs the repository-pinned Node version and lockfile, runs
+`build:mobile`, verifies the generated entry and assets, then pins the same
+Xcode 26.6 toolchain used by the desktop native workflow. The workflow builds
+against the iOS Simulator SDK without signing and runs the XCTest navigation,
+new-window, download, bundled-page, and WebKit capability contracts on an
+available iPhone simulator. Debug and Release use the same generated folder
+resource; the bundled-page XCTest resolves `MobileApp` from the built
+application bundle and executes its React entry through `avibe-app://bundle`.
 
 ## TestFlight prerequisites
 
 PR builds never sign or upload. A later owner-authorized TestFlight workflow
-still needs the one-time setup held by the Apple Account Holder:
+must run `npm ci`, `npm run build:mobile`, and the bundle verification in the
+same job before archive or upload. It also needs the one-time setup held by the
+Apple Account Holder:
 
 - the registered `bot.avibe.ios` identifier and App Store Connect app record;
 - an Apple Distribution certificate and password;
