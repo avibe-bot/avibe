@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 
-import { fontsSettled } from './fonts';
+import { blockWebFonts } from './fonts';
 import type { LabFrame, LabWrite } from './recorder';
 
 // The shipped ChatPage on a long conversation of mixed rows (fixture.tsx). Each
@@ -21,9 +21,9 @@ async function open(page: Page, query: string, { imageDelay = 50, imagesHeldUnti
     await (imagesHeldUntil ?? new Promise((resolve) => setTimeout(resolve, imageDelay)));
     await route.fulfill({ status: 200, contentType: 'image/svg+xml', body: IMAGE }).catch(() => {});
   });
+  await blockWebFonts(page);
   await page.goto(`/e2e/chat-scroll/fixture.html?${query}`);
   await expect(transcript(page).locator('[data-message-id]').first()).toBeVisible();
-  await fontsSettled(page);
   await expect.poll(() => transcript(page).evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThan(1);
   await page.waitForTimeout(300);
 }
