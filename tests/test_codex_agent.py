@@ -2748,7 +2748,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             thread_id = await agent._start_or_resume_thread(transport, request)
 
         self.assertEqual(thread_id, "thread-existing")
-        self.assertEqual(transport.send_request.await_count, 3)
+        self.assertEqual(transport.send_request.await_count, 2)
         method, params = transport.send_request.await_args_list[2].args
         self.assertEqual(method, "thread/resume")
         self.assertEqual(params["threadId"], "thread-existing")
@@ -3411,7 +3411,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
                     },
                 )
                 self.assertEqual(thread_id, "thread-fork")
-                self.assertEqual(transport.send_request.await_count, 3)
+                self.assertEqual(transport.send_request.await_count, 2)
                 agent.sessions.bind_agent_session.assert_called_once()
                 agent._inject_forked_session_correction.assert_awaited_once_with(
                     transport, request, "thread-fork"
