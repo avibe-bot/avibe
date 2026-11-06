@@ -128,6 +128,7 @@ curves also exposed as `ease-*` utilities through `@theme inline`.
 | `--motion-scale-enter-sm` / `--motion-scale-enter` | 0.98 / 0.96 | The scale a large surface (a card) or an element enters from |
 | `--motion-scale-press` / `--motion-scale-press-control` | 0.97 / 0.94 | A pressed surface (card, row); a pressed control (button, chip) |
 | `--motion-scale-morph` | 0.6 | An icon trading places with another (Send ↔ Stop, a badge leaving) |
+| `--motion-scale-arm` | 1.15 | What a swipe uncovers grows its icon to once letting go would commit it (M7) |
 | `--motion-handover-duration` / `--motion-handover-ease` | base / enter | Skeleton or cached view to content (section 6) |
 | `--motion-shimmer-duration` (`animate-skeleton-shimmer`) | 1600 ms | A skeleton's highlight sweep (section 6) |
 
@@ -409,8 +410,24 @@ Inbox: M7's move. Frames: `motion/arrival/*`, `motion/inbox/*`.
   transition (one card).
 - **Archive or removal**: the card fades and shrinks to `--motion-scale-enter-sm` (`fast`, exit),
   then the rows below glide up (`spring-smooth`). Height never animates.
+- **Swipe to read** (a touch screen, an unread card the reader can mark read):
+  the card follows a finger sideways, either way, once it has gone 10 px more
+  across than down (a touch that goes down first is the page's scroll, kept
+  the browser's by `touch-action: pan-y`; a touch from the left screen edge is
+  the system's Back). The side it uncovers shows 「Read」 a small gap behind the
+  card, soft mint (`swipe-action-face`) until letting go would commit it, then
+  filled with its icon at `--motion-scale-arm` (colours on `fast`, the icon on
+  `spring-snappy`). Let go past 30% of the card's width, or flicked faster than
+  500 px/s past 24 px, it marks read through 「Mark read」's path and the card
+  returns to rest on `spring-snappy` while *Unread cleared* plays; a tab that
+  drops the card draws its leaving copy where the card was let go. Any other
+  release springs back on `spring-snappy`. A card that moved never opens.
+  Mouse and pen do not swipe. Reduced: the card follows the finger and snaps
+  back; the action keeps its fill and drops the growth.
 - **Reduced**: crossfade on `fast`.
-- **Frames**: `motion/inbox/phone-move`, `phone-move-reduced`.
+- **Frames**: `motion/inbox/phone-move`, `phone-move-reduced`,
+  `phone-swipe-left`, `phone-swipe-left-armed`, `phone-swipe-right`,
+  `phone-swipe-right-armed`.
 
 ### M8 · Press feedback and quick replies (P2)
 
