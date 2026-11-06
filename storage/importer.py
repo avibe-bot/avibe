@@ -3,10 +3,13 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+import sqlite3
 import tempfile
 import threading
+from contextlib import closing
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -90,31 +93,91 @@ def reset_ensured_sqlite_state() -> None:
         _ensured_targets.clear()
 
 
+@lru_cache(maxsize=1)
+def _installed_schema_revision() -> str | None:
+    from alembic.script import ScriptDirectory
+    from storage.migrations import alembic_config
+
+    return ScriptDirectory.from_config(alembic_config()).get_current_head()
+
+
+def probe_current_sqlite_state(db_path: Path | None = None) -> bool:
+    """Check existing completion receipts without a lock, engine, or repair.
+
+    One bounded SELECT observes the revision and all receipts in the same SQLite
+    snapshot. This does not extend that snapshot to the caller's later operation;
+    the existing process-lifetime ensure contract is unchanged.
+    """
+    from storage.resource_access_service import LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY
+
+    try:
+        target_db = (db_path or paths.get_sqlite_state_path()).expanduser().resolve()
+        with closing(sqlite3.connect(f"{target_db.as_uri()}?mode=ro", uri=True, timeout=0)) as conn:
+            conn.execute("PRAGMA query_only = ON")
+            rows = conn.execute(
+                "SELECT version_num, "
+                "(SELECT value_json FROM state_meta WHERE key = ?), "
+                "(SELECT value_json FROM state_meta WHERE key = ?), "
+                "(SELECT value_json FROM state_meta WHERE key = ?) "
+                "FROM alembic_version LIMIT 2",
+                (JSON_IMPORT_MARKER, BACKGROUND_IMPORT_MARKER, LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY),
+            ).fetchall()
+        expected_revision = _installed_schema_revision()
+        if expected_revision is None or len(rows) != 1 or rows[0][0] != expected_revision:
+            return False
+        for value in rows[0][1:3]:
+            timestamp = json.loads(value)
+            if not isinstance(timestamp, str) or datetime.fromisoformat(timestamp).tzinfo is None:
+                return False
+        marker = json.loads(rows[0][3])
+        return (
+            isinstance(marker, dict)
+            and type(marker.get("schema_version")) is int
+            and (marker.get("state"), marker["schema_version"])
+            in {("completed", 3), ("sealed_unattributed", 2)}
+        )
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return False
+
+
 def ensure_sqlite_state(
     *,
     db_path: Path | None = None,
     state_dir: Path | None = None,
     primary_platform: str | None = None,
 ) -> MigrationImportReport:
-    """Create/migrate the SQLite DB and import existing JSON state once.
+    """Prove current state read-only, or run the conservative repair path once.
 
-    Callers treat this as a cheap precondition and put it in front of ordinary
-    operations, so repeating it must cost nothing. The full body takes a
-    cross-process migration lock and re-runs the whole Alembic upgrade
-    pipeline; running that per request serializes unrelated work machine-wide
-    and turns any transient SQLite contention into a user-visible failure. Once
-    a target is ensured, this process is done with it.
+    CLI and service callers share this precondition. Preserve the existing
+    process-lifetime memo: a successful ensure is not a live replacement or
+    concurrent-version exclusion protocol.
     """
-
     target_db = (db_path or paths.get_sqlite_state_path()).expanduser().resolve()
     target_state_dir = (state_dir or paths.get_state_dir()).expanduser().resolve()
     ensured_key = (target_db, target_state_dir)
     with _ensured_lock:
         ensured = _ensured_targets.get(ensured_key)
-    # The database file is the evidence; a caller that removed it out from
-    # under us gets a real migration rather than a stale promise.
     if ensured is not None and target_db.exists():
         return ensured
+    guard_source_checkout_default_state_migration(target_db)
+    if probe_current_sqlite_state(target_db):
+        report = MigrationImportReport(db_path=target_db, imported=False)
+        with _ensured_lock:
+            _ensured_targets[ensured_key] = report
+        return report
+    return repair_sqlite_state(db_path=db_path, state_dir=state_dir, primary_platform=primary_platform)
+
+
+def repair_sqlite_state(
+    *,
+    db_path: Path | None = None,
+    state_dir: Path | None = None,
+    primary_platform: str | None = None,
+) -> MigrationImportReport:
+    """Create/migrate/import state, retaining the full conservative repair path."""
+    target_db = (db_path or paths.get_sqlite_state_path()).expanduser().resolve()
+    target_state_dir = (state_dir or paths.get_state_dir()).expanduser().resolve()
+    ensured_key = (target_db, target_state_dir)
     guard_source_checkout_default_state_migration(target_db)
     _ensure_sqlite_target_dirs(
         target_state_dir=target_state_dir,
