@@ -89,10 +89,11 @@ export function HarnessGroup({
         onClick={onToggle}
         aria-expanded={false}
         aria-label={countLabel}
-        className={clsx('group/harness flex max-w-[min(92%,860px)] flex-col items-start gap-1.5 text-left', closed && 'motion-summary-in')}
+        className="group/harness flex max-w-[min(92%,860px)] flex-col items-start gap-1.5 text-left"
       >
         {head}
-        <span className="relative block w-[min(100%,460px)] pb-3">
+        {/* The folded card comes in where the members left; the head above it stays as it was. */}
+        <span className={clsx('relative block w-[min(100%,460px)] pb-3', closed && 'motion-summary-in')}>
           {/* Two offset sheets behind the latest message: more is folded in. */}
           <span aria-hidden className="absolute inset-x-5 bottom-0 top-5 rounded-xl border border-cyan/25 bg-background opacity-60" />
           <span aria-hidden className="absolute inset-x-2.5 bottom-1.5 top-2.5 rounded-xl border border-cyan/30 bg-background" />

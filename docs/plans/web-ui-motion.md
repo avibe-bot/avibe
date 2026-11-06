@@ -359,7 +359,8 @@ reduced-motion form.
   texts are drawn over each other. Then the layout lets go of it in one commit,
   and what was below moves up. A Harness group's head keeps its open shape
   until its members are gone. What stands for it closed (a chip's pill, a
-  group's folded card, the running card's compact view) then comes in where it
+  group's folded card under its unchanged head line, the running card's compact
+  view) then comes in where it
   lands, in that same commit's layout: it fades in and grows from
   `--motion-scale-enter-sm` at its top-left corner on `instant`, enter, never
   appearing whole in one frame (owner, 2026-11-06). The scroller holds the

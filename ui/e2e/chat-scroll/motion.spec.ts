@@ -633,13 +633,20 @@ const reveals = (page: Page) => page.evaluate(() => {
 const SHOWS = ['opacity', 'scale'];
 const topOf = (page: Page, selector: string) => page.locator(selector).last().evaluate((el) => el.getBoundingClientRect().top);
 
-type Closing = { tapped: number; below: number | null; leaving: number; bare: number; motion: string[]; expanded: string | null; summary: number | null };
+type Closing = { tapped: number; below: number | null; leaving: number; bare: number; motion: string[]; expanded: string | null; summary: number | null; steady: number | null };
 
 /** Taps the disclosure control `control` and reads each of the frames that follow: where the item it is in
  *  and the item under what closes are, how many of the nodes matching `leaving` are still there, the
  *  animations they play, what the control says, and how opaque what stands for it closed (`summary`) is. */
-async function closeAndWatch(page: Page, control: string, leaving: string, below: string | null, summary: string | null = null) {
-  return page.evaluate(async ([controlSelector, leavingSelector, belowSelector, summarySelector]) => {
+async function closeAndWatch(page: Page, control: string, leaving: string, below: string | null, summary: string | null = null, steady: string | null = null) {
+  return page.evaluate(async ([controlSelector, leavingSelector, belowSelector, summarySelector, steadySelector]) => {
+    // How opaque an element shows, with every box around it inside the transcript.
+    const shownOpacity = (el: Element | null | undefined) => {
+      if (!el) return null;
+      let opacity = 1;
+      for (let node: Element | null = el; node && node !== transcript; node = node.parentElement) opacity *= parseFloat(getComputedStyle(node).opacity);
+      return opacity;
+    };
     const transcript = document.querySelector('[data-testid="chat-transcript"]')!;
     const column = transcript.firstElementChild!.firstElementChild! as HTMLElement;
     const button = [...transcript.querySelectorAll<HTMLElement>(controlSelector)].at(-1)!;
@@ -660,6 +667,7 @@ async function closeAndWatch(page: Page, control: string, leaving: string, below
           const shown = summarySelector ? [...transcript.querySelectorAll<HTMLElement>(summarySelector)].at(-1) : null;
           return shown ? parseFloat(getComputedStyle(shown).opacity) : null;
         })(),
+        steady: steadySelector ? shownOpacity([...transcript.querySelectorAll(steadySelector)].at(-1)) : null,
       });
     };
     read();
@@ -673,7 +681,7 @@ async function closeAndWatch(page: Page, control: string, leaving: string, below
     }
     changes.disconnect();
     return frames;
-  }, [control, leaving, below, summary] as const);
+  }, [control, leaving, below, summary, steady] as const);
 }
 
 /** What stands for a disclosure closed comes in once what it closed has gone: it first shows faint, then
@@ -714,7 +722,7 @@ test('opening a Harness group while following the tail holds its head where it w
   // still hold their room, so the row below them does not move up into them; then they go, in one commit.
   // The head holds throughout, and nothing animates a layout property.
   await watchReveals(page);
-  const frames = await closeAndWatch(page, '[data-harness-group] button[aria-expanded="true"]', '[data-transcript-key^="harness-member:"], [data-transcript-key^="harness-collapse:"]', '[data-message-id]', '[data-harness-group] button.flex-col');
+  const frames = await closeAndWatch(page, '[data-harness-group] button[aria-expanded="true"]', '[data-transcript-key^="harness-member:"], [data-transcript-key^="harness-collapse:"]', '[data-message-id]', '[data-harness-group] button.flex-col > span.relative', '[data-harness-group] button > span:first-child');
   const during = frames.slice(1).filter(({ leaving }) => leaving > 0);
   expect(frames[1].expanded).toBe('false');
   expect(during.length).toBeGreaterThan(0);
@@ -722,8 +730,9 @@ test('opening a Harness group while following the tail holds its head where it w
   expect(during.every(({ below }) => Math.abs(below! - frames[0].below!) <= 1)).toBe(true);
   expect(frames.at(-1)!.leaving).toBe(0);
   expect(Math.max(...frames.map(({ tapped }) => Math.abs(tapped - frames[0].tapped)))).toBeLessThanOrEqual(1);
-  // The folded card comes in where they were, never whole in one frame.
+  // The folded card comes in where they were, never whole in one frame; the head's own line stays as it was.
   expectSummaryComesIn(frames);
+  expect(frames.every(({ steady }) => steady === 1)).toBe(true);
   expect((await reveals(page)).layout).toEqual([]);
   expect(opened.layout).toEqual([]);
   // Still not following: the next row leaves the head where it is.
@@ -806,13 +815,13 @@ test('under reduced motion what opens only fades in', async ({ page }) => {
   expect(opened.reveals.filter(({ item }) => !item).every(({ props }) => props.length === 0)).toBe(true);
   // And what closes only fades out, in place.
   await page.waitForTimeout(300);
-  const frames = await closeAndWatch(page, '[data-harness-group] button[aria-expanded="true"]', '[data-transcript-key^="harness-member:"]', null, '[data-harness-group] button.flex-col');
+  const frames = await closeAndWatch(page, '[data-harness-group] button[aria-expanded="true"]', '[data-transcript-key^="harness-member:"]', null, '[data-harness-group] button.flex-col > span.relative');
   const during = frames.slice(1).filter(({ leaving }) => leaving > 0);
   expect(during.length).toBeGreaterThan(0);
   expect(during.every(({ motion, bare }) => motion.join() === 'motion-fade-out' && bare === 0)).toBe(true);
   // The folded card fades in, without growing.
   expectSummaryComesIn(frames);
-  expect(await page.locator('[data-harness-group] button.flex-col').last().evaluate((el) => getComputedStyle(el).animationName)).toBe('motion-fade-in');
+  expect(await page.locator('[data-harness-group] button.flex-col > span.relative').last().evaluate((el) => getComputedStyle(el).animationName)).toBe('motion-fade-in');
 });
 
 test('what a read adds to an opened group lands still; only what the reader opens shows itself', async ({ page }) => {
