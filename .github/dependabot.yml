@@ -36,9 +36,13 @@ updates:
         update-types:
           - minor
           - patch
+    # Vitest 5.1.0 excludes our supported Node20 toolchain. Keep the 4.x
+    # declaration and leave later candidates eligible for compatibility review.
     # This candidate changes refresh diagnostics beyond the existing lint ledger.
     # Keep 0.4.26 for now; later candidates still get an independent review.
     ignore:
+      - dependency-name: vitest
+        versions: ["5.1.0"]
       - dependency-name: eslint-plugin-react-refresh
         versions: ["0.5.7"]
 

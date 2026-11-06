@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import yaml
@@ -58,3 +59,19 @@ def test_dependabot_covers_ordinary_ecosystems_with_reviewable_update_policy() -
     assert uv["package-ecosystem"] == "uv"
     assert uv["versioning-strategy"] == "increase"
     assert uv["ignore"] == [{"dependency-name": "claude-agent-sdk"}]
+
+
+def test_ui_vitest_hold_preserves_the_node20_toolchain() -> None:
+    # The candidate's engine contract drops Node20 even when a smoke test works.
+    # Hold that candidate, not unrelated UI packages or future reviewed releases.
+    ui = next(item for item in _updates() if item["package-ecosystem"] == "npm" and item["directory"] == "/ui")
+    assert [item for item in ui["ignore"] if item["dependency-name"] == "vitest"] == [
+        {"dependency-name": "vitest", "versions": ["5.1.0"]}
+    ]
+    package = json.loads((ROOT / "ui/package.json").read_text(encoding="utf-8"))
+    lock = json.loads((ROOT / "ui/package-lock.json").read_text(encoding="utf-8"))
+    assert "^20." in package["engines"]["node"]
+    assert package["devDependencies"]["vitest"].startswith("^4.")
+    assert lock["packages"][""]["devDependencies"]["vitest"] == package["devDependencies"]["vitest"]
+    assert lock["packages"]["node_modules/vitest"]["version"].startswith("4.")
+    assert "^20." in lock["packages"]["node_modules/vitest"]["engines"]["node"]
