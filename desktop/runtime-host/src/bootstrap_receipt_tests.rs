@@ -281,7 +281,14 @@ async fn cmd_start_receipt_timeout_override() {
         trace["result"], 1,
         "the producer also expires, rather than keeping its old 120s budget"
     );
-    assert!(trace["helper_work_ms"].as_f64().unwrap() < 1800.0);
+    // The producer's budget begins immediately before start_service, not while
+    // parsing arguments or loading pre-launch dependencies. Keep the bound on
+    // the entire startup/timeout cleanup, without charging lazy imports to it.
+    let startup_work_ms = trace["helper_work_ms"].as_f64().unwrap() - trace["service_start_ms"].as_f64().unwrap();
+    assert!(
+        (900.0..1800.0).contains(&startup_work_ms),
+        "the producer must exhaust its 1s budget: {startup_work_ms:.0}ms; trace: {trace}"
+    );
     assert_eq!(fixture.launches.load(Ordering::SeqCst), 1);
 }
 struct CountProbe {
