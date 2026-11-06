@@ -633,13 +633,19 @@ const reveals = (page: Page) => page.evaluate(() => {
 const SHOWS = ['opacity', 'scale'];
 const topOf = (page: Page, selector: string) => page.locator(selector).last().evaluate((el) => el.getBoundingClientRect().top);
 
-type Closing = { tapped: number; below: number | null; leaving: number; bare: number; motion: string[]; expanded: string | null; summary: number | null; steady: number | null };
+type Closing = { tapped: number; below: number | null; leaving: number; bare: number; motion: string[]; expanded: string | null; summary: number | null; steady: number | null; fading: number | null; fadingMotion: string | null; leavingMotion: string | null };
 
 /** Taps the disclosure control `control` and reads each of the frames that follow: where the item it is in
  *  and the item under what closes are, how many of the nodes matching `leaving` are still there, the
  *  animations they play, what the control says, and how opaque what stands for it closed (`summary`) is. */
-async function closeAndWatch(page: Page, control: string, leaving: string, below: string | null, summary: string | null = null, steady: string | null = null) {
-  return page.evaluate(async ([controlSelector, leavingSelector, belowSelector, summarySelector, steadySelector]) => {
+async function closeAndWatch(page: Page, control: string, leaving: string, below: string | null, summary: string | null = null, steady: string | null = null, fading: string | null = null) {
+  return page.evaluate(async ([controlSelector, leavingSelector, belowSelector, summarySelector, steadySelector, fadingSelector]) => {
+    // The animation an element plays, with its time and curve.
+    const motionOf = (el: Element | null | undefined) => {
+      if (!el) return null;
+      const style = getComputedStyle(el);
+      return `${style.animationName} ${style.animationDuration} ${style.animationTimingFunction}`;
+    };
     // How opaque an element shows, with every box around it inside the transcript.
     const shownOpacity = (el: Element | null | undefined) => {
       if (!el) return null;
@@ -668,6 +674,9 @@ async function closeAndWatch(page: Page, control: string, leaving: string, below
           return shown ? parseFloat(getComputedStyle(shown).opacity) : null;
         })(),
         steady: steadySelector ? shownOpacity([...transcript.querySelectorAll(steadySelector)].at(-1)) : null,
+        fading: fadingSelector ? shownOpacity([...transcript.querySelectorAll(fadingSelector)].at(-1)) : null,
+        fadingMotion: fadingSelector ? motionOf([...transcript.querySelectorAll(fadingSelector)].at(-1)) : null,
+        leavingMotion: motionOf(nodes[0]),
       });
     };
     read();
@@ -681,7 +690,7 @@ async function closeAndWatch(page: Page, control: string, leaving: string, below
     }
     changes.disconnect();
     return frames;
-  }, [control, leaving, below, summary, steady] as const);
+  }, [control, leaving, below, summary, steady, fading] as const);
 }
 
 /** What stands for a disclosure closed comes in once what it closed has gone: it first shows faint, then
@@ -722,7 +731,7 @@ test('opening a Harness group while following the tail holds its head where it w
   // still hold their room, so the row below them does not move up into them; then they go, in one commit.
   // The head holds throughout, and nothing animates a layout property.
   await watchReveals(page);
-  const frames = await closeAndWatch(page, '[data-harness-group] button[aria-expanded="true"]', '[data-transcript-key^="harness-member:"], [data-transcript-key^="harness-collapse:"]', '[data-message-id]', '[data-harness-group] button.flex-col > span.relative', '[data-harness-group] button > span:first-child');
+  const frames = await closeAndWatch(page, '[data-harness-group] button[aria-expanded="true"]', '[data-transcript-key^="harness-member:"], [data-transcript-key^="harness-collapse:"]', '[data-message-id]', '[data-harness-group] button.flex-col > span.relative', '[data-harness-group] button > span:first-child', '[data-harness-group] button:not(.flex-col) > span:last-child');
   const during = frames.slice(1).filter(({ leaving }) => leaving > 0);
   expect(frames[1].expanded).toBe('false');
   expect(during.length).toBeGreaterThan(0);
@@ -733,6 +742,12 @@ test('opening a Harness group while following the tail holds its head where it w
   // The folded card comes in where they were, never whole in one frame; the head's own line stays as it was.
   expectSummaryComesIn(frames);
   expect(frames.every(({ steady }) => steady === 1)).toBe(true);
+  // The head's collapse pill fades out with the members, on their time and curve, never coming back.
+  expect(frames[0].fading).toBe(1);
+  expect(during.every(({ fading, fadingMotion, leavingMotion }) => fading !== null && fadingMotion === leavingMotion && fadingMotion!.startsWith('motion-fade-out '))).toBe(true);
+  const pill = frames.map(({ fading }) => fading).filter((opacity) => opacity !== null);
+  pill.forEach((opacity, index) => { if (index > 0) expect(opacity).toBeLessThanOrEqual(pill[index - 1]! + 0.001); });
+  expect(frames.at(-1)!.fading).toBeNull();
   expect((await reveals(page)).layout).toEqual([]);
   expect(opened.layout).toEqual([]);
   // Still not following: the next row leaves the head where it is.

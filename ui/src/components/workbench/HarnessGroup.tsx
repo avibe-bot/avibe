@@ -73,7 +73,13 @@ export function HarnessGroup({
           className="group/harness flex w-full max-w-[min(92%,860px)] items-center gap-2 rounded-lg text-left"
         >
           <span className="min-w-0 flex-1">{head}</span>
-          <span className="inline-flex shrink-0 items-center gap-0.5 rounded-md bg-cyan/[0.08] px-1.5 py-0.5 text-[11px] font-semibold text-cyan-ink group-hover/harness:bg-cyan/[0.14]">
+          {/* Closing, the collapse pill fades out with the members, so it is gone, not cut, when the folded card comes in. */}
+          <span
+            className={clsx(
+              'inline-flex shrink-0 items-center gap-0.5 rounded-md bg-cyan/[0.08] px-1.5 py-0.5 text-[11px] font-semibold text-cyan-ink group-hover/harness:bg-cyan/[0.14]',
+              closing && 'motion-disclose-out-fade',
+            )}
+          >
             {t('chat.collapse')}
             <ChevronDown className="size-3.5 rotate-180" />
           </span>

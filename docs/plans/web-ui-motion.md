@@ -358,7 +358,8 @@ reduced-motion form.
   turn-at-work handoff's tokens), so nothing below moves up into it and no two
   texts are drawn over each other. Then the layout lets go of it in one commit,
   and what was below moves up. A Harness group's head keeps its open shape
-  until its members are gone. What stands for it closed (a chip's pill, a
+  until its members are gone; its collapse pill fades out with them, on the
+  same time and curve. What stands for it closed (a chip's pill, a
   group's folded card under its unchanged head line, the running card's compact
   view) then comes in where it
   lands, in that same commit's layout: it fades in and grows from
