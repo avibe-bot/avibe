@@ -1,5 +1,6 @@
 import { GlobalScopeChip } from './GlobalScopeChip';
-import { ArrowUp, Ellipsis, Github, WandSparkles } from 'lucide-react';
+import { ArrowUp, Ellipsis, WandSparkles } from 'lucide-react';
+import { GithubIcon } from '@/components/visual/GithubIcon';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 import type { SkillBrief } from '../../../context/ApiContext';
@@ -50,7 +51,7 @@ export function SkillRow({ skill, selected, inherited, updateAvailable, onSelect
           <span className="flex items-center gap-1.5 font-mono text-[10px] text-muted">
             {skill.installSource ? (
               <>
-                <Github className="size-2.5 shrink-0" />
+                <GithubIcon className="size-2.5 shrink-0" />
                 <span className="truncate">{skill.installSource}</span>
               </>
             ) : null}
