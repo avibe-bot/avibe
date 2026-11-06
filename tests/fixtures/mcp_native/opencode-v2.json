@@ -1,0 +1,10 @@
+{
+  "mcp": {
+    "servers": {
+      "same": {
+        "type": "local",
+        "command": ["/usr/bin/false", "GLOBAL"]
+      }
+    }
+  }
+}
