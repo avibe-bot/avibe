@@ -653,7 +653,7 @@ _BROWSER_COMMANDS = (
     "run test:project-order",
     "run test:inbox-return",
     "run test:workbench-general -- sidebar-floating.spec.ts desktop-window-chrome.spec.ts "
-    "composer-route-trigger.spec.ts skills-dialog.spec.ts bots.spec.ts",
+    "composer-route-trigger.spec.ts skills-dialog.spec.ts bots.spec.ts project-expansion-return.spec.ts",
     "run test:chat-interactions",
     "run test:pdf-preview",
     "run test:motion",
