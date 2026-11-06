@@ -877,7 +877,7 @@ final class NavigationPolicyTests: XCTestCase {
     }
 
     @MainActor
-    func testLegacyAccountFallbackWaitsForRegistrationAndRejectsChildRegistration() async throws {
+    func testAccountFallbackTracksRegistrationAndPrimaryNavigationLifecycle() async throws {
         var visibility: [Bool] = []
         let controller = WebViewController(
             instanceOrigin: instance,
@@ -978,6 +978,37 @@ final class NavigationPolicyTests: XCTestCase {
             contentWorld: .page
         )
         visibility.removeAll()
+        try await waitUntil {
+            visibility.last == true
+        }
+
+        _ = try await webView.callAsyncJavaScript(
+            """
+            await window.avibeNative.call(
+              "app.setAccountActionAvailable",
+              {available: true}
+            );
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+        visibility.removeAll()
+        controller.webView(
+            webView,
+            didStartProvisionalNavigation: nil
+        )
+        _ = try await webView.callAsyncJavaScript(
+            """
+            await window.avibeNative.call(
+              "app.setAccountActionAvailable",
+              {available: false}
+            );
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
         try await Task.sleep(for: .milliseconds(500))
         XCTAssertFalse(visibility.contains(true))
 

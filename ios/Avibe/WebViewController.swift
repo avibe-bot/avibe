@@ -228,6 +228,7 @@ final class WebViewController: UIViewController {
     private var dialogIdentifiersByWebView: [ObjectIdentifier: Set<UUID>] = [:]
     private var isInvalidatedForAccountTransition = false
     private var accountActionAvailable = false
+    private var primaryNavigationInProgress = false
     private var accountFallbackWorkItem: DispatchWorkItem?
     private var primaryURLObservation: NSKeyValueObservation?
     private var primaryBackItemObservation: NSKeyValueObservation?
@@ -458,12 +459,16 @@ final class WebViewController: UIViewController {
         accountFallbackWorkItem?.cancel()
         accountFallbackWorkItem = nil
         accountFallbackVisibilityChanged(false)
+        if !available {
+            scheduleAccountFallbackIfNeeded()
+        }
         return true
     }
 
     private func scheduleAccountFallbackIfNeeded() {
         guard
             !accountActionAvailable,
+            !primaryNavigationInProgress,
             let currentURL = retainedWebView?.url,
             WebOrigin(url: currentURL, requiresHTTPS: false) == instanceOrigin
         else {
@@ -475,6 +480,7 @@ final class WebViewController: UIViewController {
             guard
                 let self,
                 !self.accountActionAvailable,
+                !self.primaryNavigationInProgress,
                 let currentURL = self.retainedWebView?.url,
                 WebOrigin(url: currentURL, requiresHTTPS: false)
                     == self.instanceOrigin
@@ -500,6 +506,7 @@ final class WebViewController: UIViewController {
                 + popupRecords.values.map(\.webView)
         )
         isInvalidatedForAccountTransition = true
+        primaryNavigationInProgress = false
         blockedBackForwardSourceURL = nil
         primaryStableInstanceURL = nil
         accountFallbackWorkItem?.cancel()
@@ -1127,6 +1134,10 @@ extension WebViewController: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation?) {
         cancelPendingDialogs(for: webView)
         if webView === self.webView {
+            primaryNavigationInProgress = true
+            accountFallbackWorkItem?.cancel()
+            accountFallbackWorkItem = nil
+            accountFallbackVisibilityChanged(false)
             didStartLoading()
         }
     }
@@ -1149,6 +1160,7 @@ extension WebViewController: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation?) {
         if webView === self.webView {
+            primaryNavigationInProgress = false
             updateBackNavigationGesture(in: webView)
             scheduleAccountFallbackIfNeeded()
             didFinishLoading()
@@ -1160,10 +1172,16 @@ extension WebViewController: WKNavigationDelegate {
         didFailProvisionalNavigation navigation: WKNavigation?,
         withError error: Error
     ) {
+        if webView === self.webView {
+            primaryNavigationInProgress = false
+        }
         reportLoadFailure(error, in: webView)
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation?, withError error: Error) {
+        if webView === self.webView {
+            primaryNavigationInProgress = false
+        }
         reportLoadFailure(error, in: webView)
     }
 
