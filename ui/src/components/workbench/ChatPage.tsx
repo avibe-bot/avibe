@@ -4962,8 +4962,8 @@ export const Transcript: React.FC<TranscriptProps> = ({
   const touchYRef = useRef<number | null>(null);
   // The current touch is what stopped following the tail (``settleTouch``).
   const touchLeftTailRef = useRef(false);
-  // What ``whenSettled`` reads: fingers on the transcript, the last scroll, and
-  // the waits it has not released yet.
+  // What ``whenSettled`` reads: fingers on the screen, the last scroll, and the
+  // waits it has not released yet.
   const touchesRef = useRef(0);
   const lastScrollAtRef = useRef(Number.NEGATIVE_INFINITY);
   const settleWaitersRef = useRef(new Set<() => void>());
@@ -5264,6 +5264,17 @@ export const Transcript: React.FC<TranscriptProps> = ({
     settleWaitersRef.current.add(finish);
     check();
   }), []);
+  // Fingers on the screen, counted over the whole document: a finger that went
+  // down on the transcript can still be on the screen after one lifted
+  // elsewhere, and a touch that ends outside it never reaches its handlers.
+  useEffect(() => {
+    const count = (event: TouchEvent) => { touchesRef.current = event.touches.length; };
+    const types = ['touchstart', 'touchend', 'touchcancel'] as const;
+    for (const type of types) document.addEventListener(type, count, { capture: true, passive: true });
+    return () => {
+      for (const type of types) document.removeEventListener(type, count, { capture: true });
+    };
+  }, []);
   // Unmounting releases every wait: the page's own guards discard what it read.
   useEffect(() => {
     const waiters = settleWaitersRef.current;
@@ -5380,8 +5391,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
   };
   // A touch that left the tail but never moved the transcript (a tap, or a drag
   // still inside the touch slop) returns to following when it ends.
-  const settleTouch = (event: React.TouchEvent) => {
-    touchesRef.current = event.touches.length;
+  const settleTouch = () => {
     touchYRef.current = null;
     const el = scrollRef.current;
     if (!touchLeftTailRef.current || !el) return;
@@ -5614,7 +5624,6 @@ export const Transcript: React.FC<TranscriptProps> = ({
           }
         }}
         onTouchStart={(event) => {
-          touchesRef.current = event.touches.length;
           touchYRef.current = event.touches.length === 1 ? event.touches[0].clientY : null;
           touchLeftTailRef.current = false;
           pagingGestureRef.current = { kind: 'touch', consumed: event.touches.length !== 1, at: 0 };

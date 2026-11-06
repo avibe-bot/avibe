@@ -404,6 +404,37 @@ describe('transcript older-page loading', () => {
     }
   });
 
+  // A second finger elsewhere (the composer) can outlast the one on the
+  // transcript and end where the transcript never hears of it.
+  it('counts a touch that ends outside the transcript as ended', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+    try {
+      let landed = false;
+      const onLoadOlder = vi.fn(async (whenSettled: () => Promise<void>) => {
+        await whenSettled();
+        landed = true;
+        return true;
+      });
+      const { scroller } = renderTranscript({ onLoadOlder });
+      const outside = document.createElement('div');
+      document.body.append(outside);
+      const own = { identifier: 1, clientY: 100 };
+      const other = { identifier: 2, clientY: 600 };
+      fireEvent.touchStart(scroller, { touches: [own] });
+      await act(async () => fireEvent.touchMove(scroller, { touches: [{ ...own, clientY: 140 }] }));
+      expect(onLoadOlder).toHaveBeenCalledTimes(1);
+      fireEvent.touchStart(outside, { touches: [own, other] });
+      fireEvent.touchEnd(scroller, { touches: [other] });
+      await act(async () => { vi.advanceTimersByTime(500); });
+      expect(landed).toBe(false);
+      fireEvent.touchEnd(outside, { touches: [] });
+      await act(async () => { vi.advanceTimersByTime(200); });
+      expect(landed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('consumes input begun while a page is pending until the next gesture', async () => {
     const first = pendingPage();
     const onLoadOlder = vi.fn().mockReturnValueOnce(first.promise).mockResolvedValue(true);
