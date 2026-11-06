@@ -56,6 +56,18 @@ describe('pickScrollAnchor', () => {
     expect(pick([tall])).toMatchObject({ el: tall });
   });
 
+  // An entrance moves a row with a transform its layout knows nothing of: the
+  // anchor is the next row, which holds still.
+  it('passes over a row whose own animation is running', () => {
+    const entering = row({ top: 20, height: 60, id: 'm1' });
+    entering.getAnimations = () => [{ playState: 'running' } as Animation];
+    const next = row({ top: 92, height: 60, id: 'm2' });
+
+    expect(pick([entering, next])).toMatchObject({ el: next });
+    entering.getAnimations = () => [{ playState: 'finished' } as Animation];
+    expect(pick([entering, next])).toMatchObject({ el: entering });
+  });
+
   it('reports no anchor when every row is scrolled past', () => {
     expect(pick([row({ top: -120, height: 60, id: 'm1' })])).toBeNull();
   });
