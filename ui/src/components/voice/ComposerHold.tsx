@@ -7,7 +7,7 @@ import type { VoiceLevelSource } from '@/lib/voiceLevel';
 import { Button } from '../ui/button';
 import type { HoldOutcome, useHoldToTalk } from './useHoldToTalk';
 import { PendingVoiceTakes } from './PendingVoiceTakes';
-import { VoiceCancelTarget, VoiceCard, VoiceHalo, VoiceToastClose, type VoiceTarget } from './VoiceCard';
+import { VoiceCancelTarget, VoiceCard, VoiceHalo, VoiceClose, type VoiceTarget } from './VoiceCard';
 
 // Holding an empty composer to talk (ui/design: composer/hold-desktop/*, composer/hold-mobile/*):
 // the take's card above the composer, what the composer itself shows while it is held, and the
@@ -19,6 +19,8 @@ export type ComposerHoldView = Pick<
   ReturnType<typeof useHoldToTalk>,
   'phase' | 'interruptReason' | 'text' | 'stash' | 'seconds' | 'progress' | 'outcome' | 'canRetry' | 'sendInterrupted' | 'retry' | 'discard' | 'dismiss'
 > & {
+  /** Stops waiting for a finishing take's words (the card's ×); absent or null when it cannot. */
+  cancelSettling?: (() => void) | null;
   /** The microphone's loudness for the card's meter. */
   level?: VoiceLevelSource | null;
   /** Live recognition is not working for this take. */
@@ -60,7 +62,7 @@ export function ComposerHoldCard({
 }) {
   const { t, i18n } = useTranslation();
   const { phase, outcome, dismiss } = hold;
-  const quiet = outcome === 'cancelled' || outcome === 'too-short' || outcome === 'asking';
+  const quiet = outcome === 'cancelled' || outcome === 'kept' || outcome === 'too-short' || outcome === 'asking';
   useEffect(() => {
     if (!quiet) return;
     const timer = setTimeout(dismiss, NOTE_MS);
@@ -95,6 +97,7 @@ export function ComposerHoldCard({
             reason={hold.interruptReason ?? 'dropped'}
             level={hold.level}
             liveUnavailable={hold.liveUnavailable}
+            onCancel={hold.cancelSettling}
             actions={
               <>
                 <Button type="button" variant="ghost" size="icon" className="mr-auto size-8 text-muted" aria-label={t('voice.discard')} onClick={hold.discard}>
@@ -176,12 +179,13 @@ function HoldNote({ note, pointer, onDismiss }: { note: Exclude<HoldOutcome, 'se
       )}
     >
       {note === 'asking' && <Mic className="mt-0.5 size-4 shrink-0 text-mint-ink" />}
-      {note === 'cancelled' && <Undo2 className="mt-0.5 size-4 shrink-0 text-muted" />}
+      {(note === 'cancelled' || note === 'kept') && <Undo2 className="mt-0.5 size-4 shrink-0 text-muted" />}
       {note === 'too-short' && <MicOff className="mt-0.5 size-4 shrink-0 text-muted" />}
       {note === 'denied' && <MicOff className="mt-0.5 size-4 shrink-0 text-destructive-ink" />}
       {note === 'unavailable' && <CloudOff className="mt-0.5 size-4 shrink-0 text-muted" />}
       <div className="flex min-w-0 flex-1 flex-col gap-0.5 text-xs leading-relaxed">
         {note === 'cancelled' && <span className="text-foreground">{t('voice.cancelled')}</span>}
+        {note === 'kept' && <span className="text-foreground">{t('voice.composer.cancelledKept')}</span>}
         {note === 'too-short' && <span className="text-foreground">{t('voice.composer.tooShort')}</span>}
         {note === 'asking' && <span className="text-foreground">{t('voice.asking')}</span>}
         {note === 'denied' && (
@@ -192,7 +196,7 @@ function HoldNote({ note, pointer, onDismiss }: { note: Exclude<HoldOutcome, 'se
         )}
         {note === 'unavailable' && <span className="text-foreground">{t('pet.voice.cloudRequired')}</span>}
       </div>
-      <VoiceToastClose label={t('voice.dismiss')} onClick={onDismiss} />
+      <VoiceClose label={t('voice.dismiss')} onClick={onDismiss} />
     </div>
   );
 }

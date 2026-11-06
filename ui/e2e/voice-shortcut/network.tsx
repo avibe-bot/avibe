@@ -9,7 +9,7 @@ import '../../src/index.css';
 // A composer whose network the test steers (`window.voiceNet`): the cloud token, the realtime
 // socket, avibe.bot's dictation route, and the local relay can each work, fail, or hang, and
 // change between takes. Every request the take makes is logged (`window.voiceNetLog`), so a
-// spec can say which path carried which segment.
+// spec can say which path carried which segment, and which requests a cancel stopped.
 
 void i18n.changeLanguage('en');
 
@@ -18,15 +18,19 @@ type Net = {
   token: 'ok' | 'fail' | 'hang';
   /** The realtime socket: works, is refused at the handshake, or dies two seconds in. */
   socket: 'ok' | 'refuse' | 'kill-mid';
-  /** avibe.bot's dictation route from the browser: answers, or the network fails. */
-  cloud: 'ok' | 'down';
+  /** avibe.bot's dictation route from the browser: answers, answers only after `slowMs` (a bad
+   *  network), or the network fails. */
+  cloud: 'ok' | 'slow' | 'down';
   /** The local relay (`/api/asr/transcribe`): answers, or the network fails. */
   relay: 'ok' | 'down';
   /** Segments whose next cloud request fails once with a 503 (a transient service failure). */
   cloudFailOnce: number[];
+  /** How long a `slow` route takes to answer. */
+  slowMs: number;
 };
 
 type DictationRequest = { path: 'cloud' | 'relay'; sequence: number; final: boolean; receipts: string[] };
+type SlowRequest = { path: 'cloud'; sequence: number; final: boolean };
 
 declare global {
   interface Window {
@@ -35,6 +39,9 @@ declare global {
       tokens: string[];
       sockets: string[];
       dictations: DictationRequest[];
+      /** Requests a `slow` route was still answering, and those its caller aborted. */
+      slow: SlowRequest[];
+      aborted: SlowRequest[];
       sent: string[];
     };
   }
@@ -47,11 +54,12 @@ window.voiceNet = {
   cloud: 'ok',
   relay: 'ok',
   cloudFailOnce: [],
+  slowMs: 8_000,
   ...JSON.parse(sessionStorage.getItem('voiceNet') ?? '{}') as Partial<Net>,
 };
 // The reader, as InstanceAuthorizationProvider names it: kept takes belong to it.
 setLocalSnapshotPrincipal('local');
-window.voiceNetLog = { tokens: [], sockets: [], dictations: [], sent: [] };
+window.voiceNetLog = { tokens: [], sockets: [], dictations: [], slow: [], aborted: [], sent: [] };
 
 const CLOUD = 'https://cloud.test';
 /** 16 kHz mono WAV of five seconds: the recorder cuts a segment every five seconds. */
@@ -65,6 +73,19 @@ const json = (body: unknown, status = 200) => new Response(JSON.stringify(body),
 });
 
 const never = () => new Promise<Response>(() => undefined);
+
+/** Answers after `slowMs`, unless the caller aborts first. */
+const slowly = (request: SlowRequest, signal: AbortSignal | null | undefined, answer: () => Response) => {
+  window.voiceNetLog.slow.push(request);
+  return new Promise<Response>((resolve, reject) => {
+    const timer = setTimeout(() => resolve(answer()), window.voiceNet.slowMs);
+    signal?.addEventListener('abort', () => {
+      clearTimeout(timer);
+      window.voiceNetLog.aborted.push(request);
+      reject(new DOMException('aborted', 'AbortError'));
+    }, { once: true });
+  });
+};
 
 const answerDictation = (request: DictationRequest): Response => {
   window.voiceNetLog.dictations.push(request);
@@ -87,12 +108,16 @@ window.fetch = async (input, init) => {
       net.cloudFailOnce.splice(failOnce, 1);
       return json({ error: 'asr_unavailable' }, 503);
     }
-    return answerDictation({
+    const request: DictationRequest = {
       path: 'cloud',
       sequence,
       final: form.get('final') === 'true',
       receipts: form.getAll('receipt').map(String),
-    });
+    };
+    if (net.cloud === 'slow') {
+      return slowly({ path: 'cloud', sequence, final: request.final }, init?.signal, () => answerDictation(request));
+    }
+    return answerDictation(request);
   }
   switch (url.pathname) {
     case '/api/asr/status':

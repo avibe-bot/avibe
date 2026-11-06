@@ -177,6 +177,7 @@ export function BotHoldLayer({
       reason={hold.interruptReason ?? 'dropped'}
       level={hold.level}
       liveUnavailable={hold.liveUnavailable}
+      onCancel={hold.cancelSettling}
       actions={
         <VoiceInterruptedActions
           canRetry={hold.canRetry}

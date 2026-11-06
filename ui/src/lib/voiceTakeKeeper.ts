@@ -105,6 +105,21 @@ export class VoiceTakeKeeper {
     this.queue(async () => setVoiceTakeLive(this.take.id, false));
   }
 
+  /** The reader stopped waiting for its words: it stays on the device as a pending voice item,
+   *  marked so that no page tries it on its own as it first shows it (`VoiceTake.setAside`).
+   *  Nothing this keeper does after this changes it. */
+  setAside(): void {
+    if (this.ended) return;
+    if (this.take.status === 'recording') {
+      this.take.status = 'pending';
+      delete this.take.text;
+    }
+    this.take.setAside = true;
+    this.save();
+    this.release();
+    this.ended = true;
+  }
+
   private save(): void {
     if (this.ended) return;
     this.take.updatedAt = Date.now();

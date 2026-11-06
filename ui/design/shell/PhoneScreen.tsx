@@ -118,6 +118,7 @@ export function MainBotVoiceLayer({ hold }: { hold: Partial<HoldView> }) {
     retry: () => {},
     discard: () => {},
     dismiss: () => {},
+    cancelSettling: () => {},
     ...hold,
     level: hold.level ?? meterFor(hold.phase ?? 'idle'),
   };

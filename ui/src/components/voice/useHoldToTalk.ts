@@ -22,8 +22,10 @@ import { VoiceTranscriptionError } from '../../lib/voiceTranscription';
 // microphone; the shipped dictation pipeline (the one Chat and the desktop pet use) streams
 // the transcript; releasing sends it, sliding into the cancel zone and releasing cancels.
 // There is no time limit. A take cut off on the way keeps what was heard until the user
-// sends it, retries, or discards it. The surface (the tab bar's main Bot, a composer) draws
-// the phases; this hook owns the gesture, the microphone, the transcript, and the send.
+// sends it, retries, or discards it. While its words are being finalized, the card's × (or Esc)
+// stops waiting for them (ui/design: composer/hold-*/f-settling). The surface (the tab bar's main
+// Bot, a composer) draws the phases; this hook owns the gesture, the microphone, the transcript,
+// and the send.
 
 /** Where a hold is: pressing (not yet `holdMs`), listening (the microphone is open, no words
  *  yet), recording, armed (released now, it cancels), settling (released, the final text and the
@@ -34,8 +36,9 @@ export type HoldPhase = 'idle' | 'pressing' | 'listening' | 'recording' | 'armed
  *  failed, the system took the press (background, focus, a stolen pointer), or the send failed. */
 export type HoldInterruptReason = 'dropped' | 'failed' | 'system' | 'send-failed';
 
-/** How the last press ended, for the surface's toast or note. */
-export type HoldOutcome = 'sent' | 'cancelled' | 'too-short' | 'asking' | 'denied' | 'unavailable';
+/** How the last press ended, for the surface's toast or note. `kept`: cancelled while its words
+ *  were finalized, and its recording kept on the device for the pending voice items. */
+export type HoldOutcome = 'sent' | 'cancelled' | 'kept' | 'too-short' | 'asking' | 'denied' | 'unavailable';
 
 export type HoldGesture = {
   /** How long a press is held before the microphone opens. */
@@ -200,6 +203,9 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
   const [outcome, setOutcome] = useState<HoldOutcome | null>(null);
   const [available, setAvailable] = useState<boolean | null>(null);
   const [canRetry, setCanRetry] = useState(false);
+  // Settling, the take's words are still being transcribed (not yet on their way as a message):
+  // the card offers to stop waiting for them.
+  const [finalizing, setFinalizingState] = useState(false);
   // Live recognition stopped working during this take (lib/showPageVoiceDictation onLiveChange):
   // the card says so, and that the take is still being kept.
   const [liveUnavailable, setLiveUnavailable] = useState(false);
@@ -223,6 +229,11 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
   const toPhase = useCallback((next: HoldPhase) => {
     phaseRef.current = next;
     if (mounted.current) setPhase(next);
+  }, []);
+  const finalizingRef = useRef(false);
+  const setFinalizing = useCallback((next: boolean) => {
+    finalizingRef.current = next;
+    if (mounted.current) setFinalizingState(next);
   }, []);
 
   // Whether voice can work at all here: read once, as the composer does.
@@ -276,6 +287,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     stopClock();
     level.reset();
     armed.current = false;
+    setFinalizing(false);
     if (!mounted.current) return;
     setText('');
     setStash('');
@@ -284,7 +296,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     setInterruptReason(null);
     setCanRetry(false);
     setLiveUnavailable(false);
-  }, [level, stopClock]);
+  }, [level, setFinalizing, stopClock]);
 
   /** The press is over with nothing to keep: back to rest, saying how it ended. */
   const end = useCallback((how: HoldOutcome | null) => {
@@ -303,16 +315,19 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     level.reset();
     releasePointer();
     armed.current = false;
+    setFinalizing(false);
     if (!mounted.current) return;
     setInterruptReason(reason);
     setText(heard);
     setStash('');
     setCanRetry(Boolean(take.current?.dictation.canRetry()));
     toPhase('interrupted');
-  }, [level, releasePointer, stopClock, toPhase]);
+  }, [level, releasePointer, setFinalizing, stopClock, toPhase]);
 
   const deliver = useCallback(async (words: string) => {
     const current = take.current;
+    // The words are on their way as a message: a cancel could no longer take it back.
+    setFinalizing(false);
     toPhase('settling');
     const ok = await latest.current.send(words, VOICE_MESSAGE_METADATA).catch(() => false);
     // The words landed: the kept copy goes, whether or not this surface is still here.
@@ -329,7 +344,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     interrupt('send-failed', words);
     // A failed send has nothing to transcribe again: it is sent again.
     setCanRetry(false);
-  }, [interrupt, reset, toPhase]);
+  }, [interrupt, reset, setFinalizing, toPhase]);
 
   const settle = useCallback((current: Take, words: string) => {
     if (take.current !== current || current.ending === 'cancel') return;
@@ -490,9 +505,27 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     stopClock();
     armed.current = false;
     impactFeedback('light');
+    setFinalizing(true);
     toPhase('settling');
     current.dictation.finish();
-  }, [end, releasePointer, stopClock, toPhase]);
+  }, [end, releasePointer, setFinalizing, stopClock, toPhase]);
+
+  /** The card's × (or Esc) while the take's words are finalized: stop waiting for them. Every
+   *  request and retry stops, nothing is sent, and the card closes. A take that held speech long
+   *  enough stays on the device for the pending voice items (`kept`); a slip is discarded. */
+  const cancelSettling = useCallback(() => {
+    const current = take.current;
+    if (!current || phaseRef.current !== 'settling' || !finalizingRef.current) return;
+    current.ending = 'cancel';
+    take.current = null;
+    cancelFeedback();
+    end(null);
+    // Said once the take is judged (at once, or when its last audio is in), unless a new press
+    // has begun meanwhile.
+    void current.dictation.setAside().then((kept) => {
+      if (mounted.current && !take.current && phaseRef.current === 'idle') setOutcome(kept ? 'kept' : 'cancelled');
+    });
+  }, [end]);
 
   const systemTook = useCallback(() => {
     if (press.current && !take.current) {
@@ -506,7 +539,19 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
   }, [end, finishTake]);
 
   // While a press is live: Esc cancels wherever focus is, and the page leaving is the system's.
+  // While its words are finalized, Esc stops waiting for them, as the card's × does.
   const live = phase === 'pressing' || phase === 'listening' || phase === 'recording' || phase === 'armed';
+  const stoppable = phase === 'settling' && finalizing;
+  useEffect(() => {
+    if (!stoppable) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      cancelSettling();
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [cancelSettling, stoppable]);
   useEffect(() => {
     if (!live) return;
     const onKey = (event: KeyboardEvent) => {
@@ -687,6 +732,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     const current = take.current;
     if (phaseRef.current !== 'interrupted' || !current || !current.dictation.canRetry()) return;
     current.ending = 'send';
+    setFinalizing(true);
     toPhase('settling');
     void current.dictation.retry({ before: '', after: '' }).then(
       (words) => {
@@ -700,7 +746,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
         interrupt(failureReason(current, error), text);
       },
     );
-  }, [deliver, end, interrupt, text, toPhase]);
+  }, [deliver, end, interrupt, setFinalizing, text, toPhase]);
 
   const discard = useCallback(() => {
     take.current?.dictation.abort();
@@ -722,6 +768,9 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     canRetry,
     liveUnavailable,
     level,
+    /** Settling, while the take's words are still being transcribed: stops waiting for them (the
+     *  card's ×). Null otherwise, and once the words are on their way as a message. */
+    cancelSettling: stoppable ? cancelSettling : null,
     bind: {
       onPointerDown,
       onPointerMove,

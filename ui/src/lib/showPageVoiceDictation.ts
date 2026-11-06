@@ -57,6 +57,10 @@ export type ShowPageVoiceDictationInput = {
  *  working, and the take goes on over HTTP. */
 const VOICE_LIVE_SILENT_SPEECH_MS = 4_000;
 
+/** A take set aside (`setAside`) is kept when it held speech for at least this long; a shorter
+ *  one is taken for a slip, and discarded. */
+export const VOICE_SET_ASIDE_MIN_MS = 3_000;
+
 export type ShowPageVoiceDictationDependencies = {
   getUserMedia?: () => Promise<MediaStream>;
   createPipeline?: (options: VoiceRecordingPipelineOptions) => VoicePipeline;
@@ -116,6 +120,13 @@ export class ShowPageVoiceDictation {
   /** A live preview carried words: the take held speech, whatever the levels say. */
   private heardWords = false;
   private startedAt: number | undefined;
+  /** When capture was asked to end (or ended), for the take's length. */
+  private endedAt: number | undefined;
+  /** The reader stopped waiting for this take's words (`setAside`): nothing more is transcribed,
+   *  and once capture ends the take is kept for the pending voice items or discarded. */
+  private setAsideRequested = false;
+  /** Settles `setAside` for a capture that was still writing its last segment. */
+  private setAsideDecided: ((kept: boolean) => void) | null = null;
   /** Speech heard since the last live preview (or the start), in ms. */
   private speechWithoutPreviewMs = 0;
   private live = true;
@@ -233,9 +244,15 @@ export class ShowPageVoiceDictation {
         },
         onStopped: (reason) => {
           this.stopped = true;
+          this.endedAt ??= Date.now();
           this.settleBy = Date.now() + VOICE_SETTLE_RETRY_WINDOW_MS;
           this.captureRetries.abort();
           this.releaseCaptureClaim();
+          if (this.setAsideRequested) {
+            // Everything it recorded is in, its last audio too: kept, or discarded.
+            this.decideSetAside();
+            return;
+          }
           if (reason === 'abort') {
             this.reject(cancelledError());
             return;
@@ -265,6 +282,7 @@ export class ShowPageVoiceDictation {
   }
 
   finish(): void {
+    if (this.pipeline) this.endedAt ??= Date.now();
     this.pipeline?.finish();
   }
 
@@ -288,8 +306,10 @@ export class ShowPageVoiceDictation {
     void this.done.then(() => undefined, () => undefined).finally(() => this.keeper?.release());
   }
 
-  /** Discards the take: capture stops, nothing more is sent, and its kept copy is deleted. */
+  /** Discards the take: capture stops, nothing more is sent, and its kept copy is deleted. A take
+   *  set aside is the pending voice items' already, and stays. */
   abort(): void {
+    if (this.setAsideRequested) return;
     this.keeper?.forget();
     if (this.abortController.signal.aborted) return;
     this.abortController.abort();
@@ -298,6 +318,59 @@ export class ShowPageVoiceDictation {
     this.stream?.getTracks().forEach((track) => track.stop());
     this.releaseCaptureClaim();
     this.reject(cancelledError());
+  }
+
+  /**
+   * The reader stopped waiting for this take's words (the card's × while it is finalized): every
+   * request and retry stops at once, and nothing lands from here. A take worth keeping (it passed
+   * the silence gate and lasted `VOICE_SET_ASIDE_MIN_MS`) stays on the device for the pending
+   * voice items, which leave it to the reader to retry or discard; anything else is discarded.
+   * Resolves whether it was kept: at once, or, for a capture still writing its last segment, once
+   * that last audio is in (it counts toward the silence gate like the rest).
+   */
+  setAside(): Promise<boolean> {
+    if (this.abortController.signal.aborted) return Promise.resolve(false);
+    if (!this.keeper || !this.pipeline || this.stopped) {
+      if (!this.worthKeeping()) {
+        this.abort();
+        return Promise.resolve(false);
+      }
+      this.stopWaiting();
+      this.keeper?.setAside();
+      return Promise.resolve(true);
+    }
+    this.stopWaiting();
+    const decided = new Promise<boolean>((resolve) => {
+      this.setAsideDecided = resolve;
+    });
+    this.pipeline.finish();
+    return decided;
+  }
+
+  /** Nothing more is asked of the network for this take, and nothing lands from it. */
+  private stopWaiting(): void {
+    this.setAsideRequested = true;
+    this.abortController.abort();
+    this.realtime?.abort();
+    this.reject(cancelledError());
+  }
+
+  /** A take set aside while its capture was ending, judged once all of it is in. */
+  private decideSetAside(): void {
+    const kept = this.worthKeeping();
+    if (kept) this.keeper?.setAside();
+    else this.keeper?.forget();
+    this.setAsideDecided?.(kept);
+    this.setAsideDecided = null;
+  }
+
+  /** A take set aside is kept only when there is a place to keep it, it held speech, it recorded
+   *  audio, and it is long enough not to be a slip. */
+  private worthKeeping(): boolean {
+    if (!this.keeper || this.startedAt === undefined) return false;
+    if (capturedNothing(this.captureError) || this.isSilent()) return false;
+    if (!this.segments.some((segment) => segment.blob !== null)) return false;
+    return (this.endedAt ?? Date.now()) - this.startedAt >= VOICE_SET_ASIDE_MIN_MS;
   }
 
   /** Whether the take holds audio that can be transcribed again: it ended, was not discarded,

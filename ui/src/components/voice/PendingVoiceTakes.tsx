@@ -173,8 +173,9 @@ function useKeptVoiceTakes(target: string | null): VoiceTake[] {
 const triedOnLoad = new Set<string>();
 
 /** Transcribes the kept takes that have no text yet: each once when this page first shows it
- *  (a reload is a return), and all of them again whenever the page comes back online or to
- *  the front. Never while the browser reports no network. */
+ *  (a reload is a return; not one the reader set aside, whose words they stopped waiting for),
+ *  and all of them again whenever the page comes back online or to the front. Never while the
+ *  browser reports no network. */
 function useAutoRetry(takes: VoiceTake[], onFailed: (id: string) => void) {
   const retryAll = useRef<(only?: (take: VoiceTake) => boolean) => void>(() => undefined);
   useEffect(() => {
@@ -187,7 +188,7 @@ function useAutoRetry(takes: VoiceTake[], onFailed: (id: string) => void) {
       }
     };
     retryAll.current((take) => {
-      if (triedOnLoad.has(take.id)) return false;
+      if (take.setAside || triedOnLoad.has(take.id)) return false;
       triedOnLoad.add(take.id);
       return true;
     });

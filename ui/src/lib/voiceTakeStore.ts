@@ -68,6 +68,10 @@ export type VoiceTake = {
   /** Some recorded audio never reached the device (the page died between a segment and its
    *  bytes): `text` holds what was kept, up to the first missing part. */
   truncated?: boolean;
+  /** The reader stopped waiting for its words on the surface it was spoken on (the card's ×):
+   *  the pending voice items, in any document, do not try it on their own as they first show it.
+   *  The page coming back online or to the front, or the reader, retries it. */
+  setAside?: boolean;
   segments: VoiceTakeSegmentInfo[];
   /** How many times its record was written; set by the store. A writer that is not the take's
    *  keeper (a retry from another surface) updates only the revision it read. */
