@@ -87,7 +87,7 @@ def only_read_connections(monkeypatch):
     rejected = []
 
     def readonly_connect(database, *args, **kwargs):
-        if "mode=ro" not in str(database):
+        if not (str(database).startswith("file:") and "mode=ro" in str(database) and kwargs.get("uri") is True):
             rejected.append(str(database))
             raise AssertionError("read command opened writable SQLite")
         opened.append(str(database))
@@ -237,11 +237,60 @@ def test_binding_read_before_initialization_keeps_missing_result_without_creatio
     assert not target.exists()
 
 
-def test_binding_read_existing_state_uses_a_readonly_connection(current_state, only_read_connections):
+def test_binding_read_existing_state_reuses_a_readonly_connection(current_state, only_read_connections):
     from storage.remote_access_authorization_service import load_instance_binding_state
 
-    assert load_instance_binding_state(ensure=False) is None
-    assert only_read_connections
+    for _ in range(4):
+        assert load_instance_binding_state(ensure=False) is None
+    assert len(only_read_connections) == 1
+
+
+@pytest.mark.parametrize("reader_first", [True, False])
+def test_cached_engine_separates_capabilities_and_disposes_both(current_state, reader_first):
+    from storage.db import dispose_cached_sqlite_engines, get_cached_sqlite_engine
+
+    engines = {mode: get_cached_sqlite_engine(current_state, read_only=mode)
+               for mode in (reader_first, not reader_first)}
+    reader, writer = engines[True], engines[False]
+    assert reader is not writer
+    assert get_cached_sqlite_engine(current_state.parent / "." / current_state.name, read_only=True) is reader
+    assert get_cached_sqlite_engine(current_state) is writer
+    with writer.begin() as conn:
+        assert conn.exec_driver_sql("PRAGMA query_only").scalar_one() == 0
+        conn.execute(models.agents.update().values(description="writer still works"))
+    with reader.connect() as conn:
+        assert conn.exec_driver_sql("PRAGMA query_only").scalar_one() == 1
+        assert conn.execute(select(models.agents.c.description)).scalar_one() == "writer still works"
+        with pytest.raises(OperationalError, match="readonly"):
+            conn.execute(models.agents.update().values(description="forbidden"))
+    # Capture the actual SQLite handles after returning them to their pools.
+    handles = []
+    for engine in (reader, writer):
+        with engine.connect() as conn:
+            handles.append(conn.connection.driver_connection)
+    dispose_cached_sqlite_engines()
+    for handle in handles:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            handle.execute("SELECT 1")
+    assert get_cached_sqlite_engine(current_state, read_only=True) is not reader
+    assert get_cached_sqlite_engine(current_state) is not writer
+
+
+@pytest.mark.parametrize("content", [b"", b"not a SQLite database"])
+def test_binding_read_preserves_missing_table_and_corrupt_state_errors(content):
+    from storage.remote_access_authorization_service import load_instance_binding_state
+
+    target = paths.get_sqlite_state_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(content)
+    if content:
+        from sqlalchemy.exc import DatabaseError
+
+        with pytest.raises(DatabaseError, match="not a database"):
+            load_instance_binding_state(ensure=False)
+    else:
+        assert load_instance_binding_state(ensure=False) is None
+    assert target.read_bytes() == content
 
 
 def test_read_command_still_initializes_a_missing_default_home(monkeypatch, capsys):

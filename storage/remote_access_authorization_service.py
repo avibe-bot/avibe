@@ -12,7 +12,7 @@ from sqlalchemy import Integer, and_, cast, delete, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import OperationalError
 
-from storage.db import create_sqlite_engine, get_cached_sqlite_engine
+from storage.db import get_cached_sqlite_engine
 from storage.models import remote_access_authorizations, state_meta
 
 INSTANCE_BINDING_STATE_META_KEY = "remote_access.instance_binding.v1"
@@ -500,7 +500,9 @@ def load_instance_binding_state(*, ensure: bool = True) -> dict[str, Any] | None
             # Admission may inspect a fresh install before shared initialization.
             # Its legacy no-row result must not create a database just to read it.
             return None
-        engine = create_sqlite_engine(db_path, read_only=True)
+        # Also used by service hot paths: retain pooled checkout rather than
+        # rebuilding the engine on each authority check.
+        engine = get_cached_sqlite_engine(db_path, read_only=True)
     try:
         with engine.connect() as conn:
             return _load_binding_state_from_connection(conn)
@@ -512,9 +514,6 @@ def load_instance_binding_state(*, ensure: bool = True) -> dict[str, Any] | None
         if not ensure and "no such table" in str(exc).lower():
             return None
         raise
-    finally:
-        if not ensure:
-            engine.dispose()
 
 
 def _validate_transition_identity(

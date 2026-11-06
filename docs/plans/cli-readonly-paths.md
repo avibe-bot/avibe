@@ -26,7 +26,10 @@ The Phase 2 process memo and check-to-use window stay unchanged.
   through that capability. Keep guarded arbitrary SQL views/authorizer unchanged.
 - Preserve invocation/admission checks. Their binding-state lookup remains the
   same read and legacy missing-state result, without creating a writable engine
-  merely to inspect it. The CLI queue-list target resolver opts into an explicit
+  merely to inspect it. Its read-only pool uses the existing process-local engine
+  cache, keyed by path and capability, so service callers retain pooled checkout
+  and both capabilities share the existing reset/disposal owner. The CLI
+  queue-list target resolver opts into an explicit
   read-only connection; the shared resolver keeps its default writer-compatible
   behavior for service and mutation callers. Pure-SELECT CLI preflight checks
   also use fresh read-only engines after readiness, without changing their

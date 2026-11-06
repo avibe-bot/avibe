@@ -168,7 +168,7 @@ def test_cmd_agent_models_by_name_echoes_current(monkeypatch):
     monkeypatch.setattr(
         cli,
         "_agent_store",
-        lambda: SimpleNamespace(require=lambda name: agent, require_accessible=lambda name: agent),
+        lambda *, read_only: SimpleNamespace(require=lambda name: agent, require_accessible=lambda name: agent),
     )
     monkeypatch.setattr(
         vibe.api,
@@ -206,7 +206,7 @@ def test_cmd_agent_models_current_flags_invalid_effort(monkeypatch):
     monkeypatch.setattr(
         cli,
         "_agent_store",
-        lambda: SimpleNamespace(require=lambda name: agent, require_accessible=lambda name: agent),
+        lambda *, read_only: SimpleNamespace(require=lambda name: agent, require_accessible=lambda name: agent),
     )
     monkeypatch.setattr(
         vibe.api,
@@ -239,7 +239,7 @@ def test_cmd_agent_models_model_filter_keeps_current_honest(monkeypatch):
     monkeypatch.setattr(
         cli,
         "_agent_store",
-        lambda: SimpleNamespace(require=lambda name: agent, require_accessible=lambda name: agent),
+        lambda *, read_only: SimpleNamespace(require=lambda name: agent, require_accessible=lambda name: agent),
     )
     monkeypatch.setattr(
         vibe.api,
