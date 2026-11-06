@@ -68,6 +68,11 @@ updates:
         update-types:
           - minor
           - patch
+    # Both versions break forwarding to an already-running Windows 2.5.3 shell.
+    # Keep later candidates reviewable; unpin only after mixed-version validation.
+    ignore:
+      - dependency-name: tauri-plugin-single-instance
+        versions: ["2.5.4", "2.5.5"]
 
   # Dependabot's uv ecosystem can update the declared Python requirements and
   # uv.lock together. `increase` makes declaration-bound maintenance explicit;
