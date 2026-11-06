@@ -93,7 +93,7 @@ Limitations:
 - Avibe does not inspect or clean values you type into `.mcp.json`. Anything written there, including a literal token, is in your repository; use placeholders for secrets.
 - Deleting an entry from `.mcp.json` by hand hides the server at once, but its cached secrets, approval and tokens stay. Do not run `vibe mcp <name> --remove` afterwards: with the entry gone, the name resolves to the global server of that name, which would be removed instead, and the project cache would stay. To drop the cache, restore the entry, then run `vibe mcp <name> --remove` from the project. Restoring the same entry also restores its approval and secrets.
 - Scopes separate what Agents are shown, not what they can read: Agents run as the same OS user.
-- Other native project configs (OpenCode, Codex project config, Claude per-path entries) are not imported.
+- Project-root native configs are imported read-only alongside `.mcp.json`: Claude's canonical project entry, trusted Codex `.codex/config.toml`, and root OpenCode `opencode.json`/`.jsonc` plus `.opencode/`. Hub precedence is `.mcp.json` > Claude > Codex > OpenCode; this is Avibe's documented order, not native precedence emulation. Each imported server has one source file and requires Owner approval. Ancestor walks, Codex cross-file merges, OpenCode V1 lookup, and per-tool precedence are out of scope.
 
 ## OAuth login
 

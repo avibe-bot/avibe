@@ -105,7 +105,7 @@ def project_scope(
     if not working_directory:
         return None
     root = managed_skill_project_root(working_directory, project_base)
-    if require_config and not (root / PROJECT_FILE).exists():
+    if require_config and not (root / PROJECT_FILE).exists() and not native.read_project(root):
         return None
     return Scope("project:" + _directory_key(root), root)
 
@@ -168,10 +168,12 @@ def _raw_entry(key: ScopedName) -> dict[str, Any]:
         if stored is None:
             raise repository._not_found(key.name)
         # Released global files use the normalized shape. Keep that disk contract.
-        raw = dict(stored["transport"])
-        if "oauth" in stored:
-            raw["oauth"] = stored["oauth"]
-        return raw
+        return _definition_raw(stored)
+    native_server = _project_native(key)
+    if native_server is not None:
+        if native_server.error or native_server.definition is None:
+            raise native_server.error or McpHubError("invalid_definition", f"{key}: invalid native entry")
+        return _definition_raw(native_server.definition)
     try:
         _, document = _document(key.scope)
     except (OSError, ValueError) as exc:
@@ -181,6 +183,21 @@ def _raw_entry(key: ScopedName) -> dict[str, Any]:
         raise repository._not_found(key.name)
     validate_name(key.name)
     return raw
+
+
+def _definition_raw(definition: dict[str, Any]) -> dict[str, Any]:
+    """Convert the normalized definition back to the provider shape consumed by _effective."""
+    raw = dict(definition.get("transport") or {})
+    if "oauth" in definition:
+        raw["oauth"] = definition["oauth"]
+    return raw
+
+
+def _project_native(key: ScopedName) -> Optional[native.NativeServer]:
+    """Return the native winner only when the repository file has no same name."""
+    if not repository.is_project(key) or not key.project_root or key.name in _project_names(key.scope):
+        return None
+    return native.read_project(key.project_root).get(key.name)
 
 
 def _cached(key: ScopedName, file: str) -> dict[str, Any]:
@@ -265,6 +282,8 @@ class ScopedServer:
     state: str
     missing: list[str]
     placeholders: list[str]
+    native_source: Optional[str] = None
+    native_path: Optional[Path] = None
 
     def require_definition(self) -> dict[str, Any]:
         if self.state in BLOCKED_STATES:
@@ -290,8 +309,8 @@ class ScopedServer:
             "name": str(self.key),
             "scope": self.key.scope.key,
             "state": state,
-            "source": "project" if repository.is_project(self.key) else "avibe",
-            "sourcePath": str(_project_file(self.key.scope) if repository.is_project(self.key) else repository._avibe_definition_path(self.key.name)),
+            "source": self.native_source or ("project" if repository.is_project(self.key) else "avibe"),
+            "sourcePath": str(self.native_path or (_project_file(self.key.scope) if repository.is_project(self.key) else repository._avibe_definition_path(self.key.name))),
             "missingVariables": self.missing,
             "placeholders": self.placeholders,
             "url": self.raw.get("url", ""),
@@ -423,6 +442,7 @@ def project_add_definition(name: str, raw: object) -> dict[str, Any]:
 
 
 def load_server(key: ScopedName) -> ScopedServer:
+    native_server = _project_native(key)
     raw = _raw_entry(key)
     definition, missing, placeholders = _effective(key, raw, _secrets(key))
     if missing:
@@ -434,7 +454,9 @@ def load_server(key: ScopedName) -> ScopedServer:
         state = "needs_config"
     else:
         state = "ok"
-    return ScopedServer(key, raw, definition, state, missing, placeholders)
+    return ScopedServer(key, raw, definition, state, missing, placeholders,
+                        native_server.source if native_server else None,
+                        native_server.path if native_server else None)
 
 
 # ---------------------------------------------------------------------------
@@ -455,7 +477,7 @@ def resolve(selected: list[Scope], name: str) -> ScopedName:
     """Bounded name lookup: the caller's project entry shadows global; nothing else is read."""
 
     project = selected[-1]
-    if project.project_root is not None and name in _project_names(project):
+    if project.project_root is not None and (name in _project_names(project) or name in native.read_project(project.project_root)):
         return ScopedName(project, name)
     return ScopedName(Scope(), name)
 
@@ -481,6 +503,16 @@ def project_servers(scope: Scope) -> dict[str, Optional[ScopedServer]]:
             result[name] = load_server(ScopedName(scope, name))
         except McpHubError as exc:
             logger.warning("Skipping invalid project MCP server %s: %s", name, exc)
+            result[name] = None
+    for name, native_server in native.read_project(scope.project_root).items() if scope.project_root else {}.items():
+        if name in result:
+            continue
+        if native_server.error:
+            result[name] = None
+            continue
+        try:
+            result[name] = load_server(ScopedName(scope, name))
+        except McpHubError:
             result[name] = None
     return result
 
@@ -691,6 +723,14 @@ def write_server(key: ScopedName, entry: Optional[dict[str, Any]], *, replace: b
 
 
 def remove_server(key: ScopedName) -> None:
+    if repository.is_project(key) and key.project_root:
+        native_server = _project_native(key)
+        if native_server is not None:
+            native.remove_project_entry(native_server, key.project_root)
+            directory = repository.package_dir(key)
+            if directory.exists():
+                shutil.rmtree(directory)
+            return
     write_server(key, None)
     directory = repository.package_dir(key)
     if directory.exists():

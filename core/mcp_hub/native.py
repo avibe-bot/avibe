@@ -198,6 +198,8 @@ class NativeServer:
     definition: Optional[dict[str, Any]]
     error: Optional[McpHubError]
     has_cwd: bool = False
+    project: bool = False
+    raw: Optional[dict[str, Any]] = None
 
 
 def _native_enabled(source: str, entry: dict[str, Any]) -> bool:
@@ -256,6 +258,86 @@ def read_all() -> dict[str, NativeServer]:
                     has_cwd=isinstance(entry, dict) and "cwd" in entry,
                 )
     return servers
+
+
+def _project_codex_path(root: Path) -> Path:
+    return root / ".codex" / "config.toml"
+
+
+def _project_opencode_paths(root: Path) -> list[Path]:
+    return [
+        root / "opencode.json",
+        root / "opencode.jsonc",
+        root / ".opencode" / "opencode.json",
+        root / ".opencode" / "opencode.jsonc",
+    ]
+
+
+def read_project(root: Path) -> dict[str, NativeServer]:
+    """Read only the explicitly selected project's native files.
+
+    This intentionally does not walk ancestors or subdirectories. The Hub's
+    project order is `.mcp.json`, Claude local, Codex, then OpenCode.
+    """
+    root = root.resolve()
+    result: dict[str, NativeServer] = {}
+
+    def add(source: str, path: Path, entries: dict[str, Any]) -> None:
+        if not isinstance(entries, dict):
+            logger.warning("Skipping %s project MCP map in %s: expected an object", source, path)
+            return
+        for name, entry in entries.items():
+            if name in result:
+                continue
+            try:
+                if not isinstance(entry, dict):
+                    raise McpHubError("invalid_definition", f"{source} entry {name!r} is not an object.")
+                if not _native_enabled(source, entry):
+                    continue
+                raw = _READERS[source](entry)
+                if isinstance(raw.get("cwd"), str) and raw["cwd"].strip():
+                    raw["cwd"] = _resolve_cwd(path, raw["cwd"])
+                definition = definition_from_provider(str(name), raw)
+                if definition.get("transport", {}).get("type") == "stdio" and "cwd" not in definition["transport"]:
+                    definition["transport"]["cwd"] = str(root)
+                    raw["cwd"] = str(root)
+                result[str(name)] = NativeServer(str(name), source, path, definition, None, "cwd" in entry, True, raw)
+            except McpHubError as exc:
+                result[str(name)] = NativeServer(str(name), source, path, None, exc, isinstance(entry, dict) and "cwd" in entry, True, entry if isinstance(entry, dict) else None)
+
+    # Claude local scope is keyed by canonical project root.
+    try:
+        path, data = _load(CLAUDE)
+        projects = data.get("projects") if isinstance(data.get("projects"), dict) else {}
+        local = projects.get(str(root), {})
+        add(CLAUDE, path, local.get("mcpServers", {}) if isinstance(local, dict) else {})
+    except McpHubError:
+        pass
+
+    # Codex project config is active only for an explicitly trusted root.
+    try:
+        _path, global_data = _load(CODEX)
+        projects = global_data.get("projects") if isinstance(global_data.get("projects"), dict) else {}
+        trusted = projects.get(str(root), {})
+        trusted = isinstance(trusted, dict) and trusted.get("trust_level") == "trusted"
+        path = _project_codex_path(root)
+        if trusted and path.exists():
+            data = _parse(CODEX, path.read_text(encoding="utf-8"))
+            add(CODEX, path, _servers(CODEX, data))
+    except (OSError, ValueError, McpHubError) as exc:
+        logger.warning("Skipping Codex project config for %s: %s", root, exc)
+
+    # OpenCode V2 project files accumulate unique names; nearest file wins.
+    for path in reversed(_project_opencode_paths(root)):
+        if not path.exists():
+            continue
+        try:
+            data = _parse(OPENCODE, path.read_text(encoding="utf-8"))
+            add(OPENCODE, path, _servers(OPENCODE, data))
+        except (OSError, ValueError, McpHubError) as exc:
+            logger.warning("Skipping OpenCode project config %s: %s", path, exc)
+            continue
+    return result
 
 
 def disabled_source(name: str) -> Optional[str]:
@@ -333,16 +415,16 @@ def _remove_codex(text: str, name: str) -> str:
     return "".join(kept)
 
 
-def _remove_text(source: str, text: str, name: str) -> str:
+def _remove_text(source: str, text: str, name: str, container: Optional[tuple[str, ...]] = None) -> str:
     if source == CODEX:
         return _remove_codex(text, name)
     from vibe.opencode_config import remove_jsonc_member
 
-    parent = ("mcp", "servers") if source == OPENCODE and _opencode_v2(_parse(source, text)) else _KEY[source]
+    parent = container or (("mcp", "servers") if source == OPENCODE and _opencode_v2(_parse(source, text)) else (_KEY[source],))
     return remove_jsonc_member(text, parent, name)
 
 
-def remove_entry(source: str, name: str) -> bool:
+def remove_entry(source: str, name: str, *, path: Optional[Path] = None, container: Optional[tuple[str, ...]] = None) -> bool:
     """Delete ``name`` from ``source``'s native file; ``False`` if it is already gone.
 
     Re-reads the file, so an edit since discovery is respected. The result must
@@ -350,13 +432,25 @@ def remove_entry(source: str, name: str) -> bool:
     """
 
     with _EDIT_LOCK:
-        return _remove_entry_locked(source, name)
+        return _remove_entry_locked(source, name, path=path, container=container)
 
 
-def _remove_entry_locked(source: str, name: str) -> bool:
+def remove_project_entry(server: NativeServer, root: Path) -> bool:
+    """Remove one root-project declaration from a native project source."""
+    path = server.path
+    if server.source != CLAUDE:
+        return remove_entry(server.source, server.name, path=path)
+    return remove_entry(server.source, server.name, path=path,
+                        container=("projects", str(root.resolve()), "mcpServers"))
+
+
+def _remove_entry_locked(source: str, name: str, *, path: Optional[Path] = None, container: Optional[tuple[str, ...]] = None) -> bool:
     from config.atomic_io import write_atomic
 
-    path, _data = _load(source)
+    if path is None:
+        path, _data = _load(source)
+    else:
+        _data = _parse(source, path.read_text(encoding="utf-8"))
     try:
         text = path.read_text(encoding="utf-8")
         data = _parse(source, text)
@@ -364,14 +458,15 @@ def _remove_entry_locked(source: str, name: str) -> bool:
         return False
     except Exception as exc:
         raise _unreadable(source, path, exc) from None
-    if not isinstance(data, dict) or name not in _servers(source, data):
+    entries = _container_entries(source, data, container)
+    if name not in entries:
         return False
     try:
-        updated = _remove_text(source, text, name)
+        updated = _remove_text(source, text, name, container)
         expected = json.loads(json.dumps(data, default=str))
-        _servers(source, expected).pop(name)
+        _container_entries(source, expected, container).pop(name)
         actual = json.loads(json.dumps(_parse(source, updated), default=str))
-        if expected[_KEY[source]] == {} and _KEY[source] not in actual:
+        if container is None and expected[_KEY[source]] == {} and _KEY[source] not in actual:
             expected.pop(_KEY[source])  # an implicit TOML parent table goes with its last child
         if actual != expected:
             raise ValueError("entry is not a standalone block")
@@ -388,6 +483,15 @@ def _remove_entry_locked(source: str, name: str) -> bool:
 
     write_atomic(path, updated, follow_symlinks=True, mode=path.stat().st_mode & 0o777, before_replace=unchanged)
     return True
+
+
+def _container_entries(source: str, data: dict[str, Any], container: Optional[tuple[str, ...]]) -> dict[str, Any]:
+    if container is None:
+        return _servers(source, data)
+    value: Any = data
+    for part in container:
+        value = value.get(part) if isinstance(value, dict) else None
+    return value if isinstance(value, dict) else {}
 
 
 # ---------------------------------------------------------------------------

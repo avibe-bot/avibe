@@ -174,7 +174,7 @@ export function McpServerDetail({
   onActivateLogin,
 }: McpServerDetailProps) {
   const { t } = useTranslation();
-  const projectRow = current.source === 'project';
+  const projectRow = Boolean(current.scope?.startsWith('project:'));
   const owned = projectRow || current.source === 'avibe';
   const state = current.state ?? 'ok';
   // A project server has tools (and can be refreshed) once approved and configured.
@@ -244,7 +244,7 @@ export function McpServerDetail({
       </div>
       </>
       ) : null}
-      {!(project && current.source !== 'project') && current.auth === 'needs_login' ? <LoginLink name={current.name} project={project} className={buttonVariants({ variant: 'brand', size: 'sm' })} onActivate={onActivateLogin}>{t('mcpHub.login')}</LoginLink> : null}
+      {(!project || projectRow) && current.auth === 'needs_login' ? <LoginLink name={current.name} project={project} className={buttonVariants({ variant: 'brand', size: 'sm' })} onActivate={onActivateLogin}>{t('mcpHub.login')}</LoginLink> : null}
       {canManage ? (
         <div className="flex flex-wrap items-center gap-2 pt-1">
           {projectRow && state === 'pending_approval' && onApprove ? (
@@ -406,7 +406,7 @@ export function McpRemoveDialog({ server, busy, onConfirm, onCancel }: McpRemove
       <DialogContent className="max-w-md" closeLabel={t('common.close')}>
         <DialogTitle>{t('mcpHub.removeConfirm', { name: server?.name ?? '' })}</DialogTitle>
         <DialogDescription>
-          {server?.source === 'avibe' ? t('mcpHub.removeAvibeHint') : server?.source === 'project' ? t('mcpHub.removeProjectHint', {
+          {server?.source === 'avibe' ? t('mcpHub.removeAvibeHint') : server?.scope?.startsWith('project:') ? t('mcpHub.removeProjectHint', {
                 name: server.name,
                 path: server.sourcePath ?? '',
               }) : t('mcpHub.removeNativeHint', {
@@ -708,11 +708,11 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null, se
   // Project view grouping mirrors Skills: this project's `.mcp.json` rows first,
   // then the inherited global rows (the backend already drops globals shadowed
   // by a same-named project server).
-  const projectRows = useMemo(() => filtered.filter((server) => server.source === 'project'), [filtered]);
-  const inheritedRows = useMemo(() => filtered.filter((server) => server.source !== 'project'), [filtered]);
+  const projectRows = useMemo(() => filtered.filter((server) => projectId && server.scope?.startsWith('project:')), [filtered, projectId]);
+  const inheritedRows = useMemo(() => filtered.filter((server) => !projectId || !server.scope?.startsWith('project:')), [filtered, projectId]);
 
   const current = servers.find((item) => item.name === selected) ?? null;
-  const currentInherited = Boolean(projectId && current && current.source !== 'project');
+  const currentInherited = Boolean(projectId && current && !current.scope?.startsWith('project:'));
   const renderRows = (rows: McpServerSummary[], inherited = false) => (
     <div className="flex flex-col gap-2">{rows.map((server) => (
       <McpRow
@@ -1008,7 +1008,7 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null, se
             onRefresh={() => void onRefreshOne(current.name)}
             onRemove={() => setConfirmDelete(current)}
             onApprove={projectId ? () => setConfirmApprove(current) : undefined}
-            onConfigure={current.source === 'project' || current.source === 'avibe' ? () => openConfigure(current) : undefined}
+            onConfigure={current.source === 'avibe' || (current.source === 'project' && current.scope?.startsWith('project:')) ? () => openConfigure(current) : undefined}
             onActivateLogin={onActivateLogin}
           />
         ) : null}
