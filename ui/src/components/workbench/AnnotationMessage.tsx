@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
 import { annotationTitleKey, type AnnotationView } from '../../lib/annotationView';
+import { SIDE_ATTRIBUTE } from '../../lib/transcriptMotion';
 import { AGENT_BUBBLE, USER_BUBBLE } from './chatBubble';
 import { RoleAvatar } from './RoleAvatar';
 
@@ -82,7 +83,8 @@ export const AnnotationMessage: React.FC<AnnotationMessageProps> = ({
   ) : null;
 
   return (
-    <div data-message-id={messageId} className={rowClass(fromUser ? 'justify-end' : 'justify-start')}>
+    // A card sent from here sits on the right and comes up from the composer, as a sent message does.
+    <div data-message-id={messageId} {...(fromUser ? { [SIDE_ATTRIBUTE]: 'end' } : {})} className={rowClass(fromUser ? 'justify-end' : 'justify-start')}>
       <div
         className={clsx(
           'group/message flex max-w-[min(92%,860px)] flex-col gap-1',

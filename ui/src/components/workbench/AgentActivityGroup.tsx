@@ -31,6 +31,7 @@ import { HostedToolRow } from './HostedToolRow';
 import { Dialog, DialogContent } from '../ui/dialog';
 import { copyTextToClipboard } from '../../lib/utils';
 import { bindCitations } from '../../lib/citations';
+import { ITEM_KEY_ATTRIBUTE, WORKING_ATTRIBUTE, type DepartureKind } from '../../lib/transcriptMotion';
 import {
   filterActivityRows,
   formatActivityElapsedClock,
@@ -413,6 +414,8 @@ export const ActivityCard: React.FC<{
   onToggleTools: () => void;
   onDisableActivity?: () => void;
   statusLabel?: string | null;
+  /** Told when the card leaves the transcript, while it is still in the document (lib/transcriptMotion). */
+  onDepart?: (node: HTMLElement, kind: DepartureKind) => void;
 }> = ({
   rows,
   startedAtMs,
@@ -422,8 +425,17 @@ export const ActivityCard: React.FC<{
   onToggleTools,
   onDisableActivity,
   statusLabel,
+  onDepart,
 }) => {
   const { t } = useTranslation();
+  // The turn at work, at the transcript's tail: it enters as the working bubble
+  // gives way to it, and fades as what settles the turn comes in.
+  const rootRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const node = rootRef.current;
+    if (!node || !onDepart) return undefined;
+    return () => onDepart(node, 'working');
+  }, [onDepart]);
   const [nowMs, setNowMs] = useState(() => Date.now());
   // Fallback start if the turn's start time is unknown (defensive — the card only
   // shows once a live row has set it): the card's mount time.
@@ -470,7 +482,12 @@ export const ActivityCard: React.FC<{
   const clock = formatActivityElapsedClock(elapsedMs, t('chat.agentActivity.dayShort'));
 
   return (
-    <div className="flex w-full justify-start">
+    <div
+      ref={rootRef}
+      data-transcript-row=""
+      {...{ [ITEM_KEY_ATTRIBUTE]: 'activity-live', [WORKING_ATTRIBUTE]: '' }}
+      className="flex w-full justify-start"
+    >
       <div className="flex w-full max-w-[min(92%,860px)] flex-col overflow-hidden rounded-2xl rounded-tl-md border border-mint/25 bg-background">
         {/* Header — the label/clock region toggles compact ↔ expanded; the eye pill
             (B) is a sibling button (never nested) that flips tool-row visibility. */}
@@ -566,7 +583,9 @@ export const ActivityChip: React.FC<{
   onRetry?: () => void;
   showToolCalls: boolean;
   onToggleTools: () => void;
-}> = ({ group, expanded, loading, error, onToggle, onRetry, showToolCalls, onToggleTools }) => {
+  /** What makes the chip a transcript item (its key, what it hangs on), on its root. */
+  itemAttributes?: Record<string, string>;
+}> = ({ group, expanded, loading, error, onToggle, onRetry, showToolCalls, onToggleTools, itemAttributes }) => {
   const { t } = useTranslation();
   const StatusIcon =
     group.status === 'failed' ? AlertTriangle : group.status === 'interrupted' ? CircleSlash : CheckCircle2;
@@ -609,7 +628,7 @@ export const ActivityChip: React.FC<{
   );
 
   return (
-    <div className="flex w-full justify-start">
+    <div {...itemAttributes} className="flex w-full justify-start">
       <div className="flex w-full max-w-[min(92%,860px)] flex-col gap-1">
         {!expanded ? (
           <button

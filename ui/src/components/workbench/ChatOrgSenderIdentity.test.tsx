@@ -221,6 +221,15 @@ describe('organization sender identity', () => {
 
     expect(row(agent, 'organization')).toBe(row(agent, 'personal'));
   });
+
+  // The transcript's motion follows the side a row sits on (lib/transcriptMotion): a row on the right
+  // comes up from the composer, whoever wrote it.
+  it('draws another member\'s message on the right, and marks it as such for the transcript motion', () => {
+    const markup = row(humanMessage(), 'organization');
+    expect(markup).toMatch(/data-message-id="msg_human" data-transcript-side="end" class="[^"]*justify-end/);
+    const agent = { ...humanMessage(), id: 'msg_agent', type: 'result', author: 'agent', author_id: null } as unknown as WorkbenchMessage;
+    expect(row(agent, 'organization')).not.toContain('data-transcript-side');
+  });
 });
 
 describe('sender avatar derivation', () => {

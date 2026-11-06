@@ -4,6 +4,7 @@ import clsx from 'clsx';
 
 import type { WorkbenchMessage } from '../../context/ApiContext';
 import { chatTriggerLink, harnessChipLabelKey } from '../../lib/chatTrigger';
+import { ITEM_KEY_ATTRIBUTE } from '../../lib/transcriptMotion';
 import { RoleAvatar } from './RoleAvatar';
 
 // The left rail that ties an expanded group's rows together. Each row draws its
@@ -113,11 +114,12 @@ export function HarnessGroup({
   );
 }
 
-/** The trailing control of an expanded group, for when its head has scrolled away. */
-export function HarnessGroupCollapse({ count, onCollapse }: { count: number; onCollapse: () => void }) {
+/** The trailing control of an expanded group, for when its head has scrolled away. A transcript item of
+ *  its own (lib/transcriptMotion), which the scroller can hold. */
+export function HarnessGroupCollapse({ groupKey, count, onCollapse }: { groupKey: string; count: number; onCollapse: () => void }) {
   const { t } = useTranslation();
   return (
-    <div className={HARNESS_GROUP_RAIL}>
+    <div data-transcript-row="" {...{ [ITEM_KEY_ATTRIBUTE]: `harness-collapse:${groupKey}` }} className={HARNESS_GROUP_RAIL}>
       <button
         type="button"
         onClick={onCollapse}

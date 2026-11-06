@@ -341,3 +341,242 @@ test('a chat drawn from what this device saved hands over to the live answer wit
   expect(await page.evaluate(() => (window as unknown as { started: string[] }).started)).toEqual([]);
   expect(await fromBottom(page)).toBeLessThan(1);
 });
+
+// One contract for every item the transcript draws (lib/transcriptMotion): an item a live event brings
+// enters by the side it sits on, and whatever a read brings lands still.
+
+type Entrance = { key: string; corner: string; rises: boolean; grows: boolean; fades: boolean; delay: number };
+
+/** From now on, how each item the transcript column takes in enters, read as it goes in (an entrance
+ *  lasts a moment, and a slow runner must not miss it). An item that does not move has no entry fields
+ *  set: nothing rises, grows or fades. */
+async function watchEntrances(page: Page) {
+  await page.evaluate(() => {
+    const transcript = document.querySelector('[data-testid="chat-transcript"]')!;
+    // The content column, inside the box that clips the glide.
+    const column = transcript.firstElementChild!.firstElementChild! as HTMLElement;
+    const lab = window as unknown as { entrances: Entrance[]; glides: number };
+    lab.entrances = [];
+    lab.glides = 0;
+    const describe = (el: HTMLElement): Entrance => {
+      const own = el.getAnimations().filter((animation) => !(animation instanceof CSSAnimation));
+      const from = own.map((animation) => (animation.effect as KeyframeEffect).getKeyframes()[0]);
+      const [x, y] = getComputedStyle(el).transformOrigin.split(' ').map(parseFloat);
+      const corner = x < 1 && y < 1 ? 'top left'
+        : Math.abs(x - el.offsetWidth) < 1 && Math.abs(y - el.offsetHeight) < 1 ? 'bottom right' : 'centre';
+      return {
+        key: el.dataset.messageId ?? el.getAttribute('data-transcript-key') ?? (el.hasAttribute('data-transcript-working') ? 'working' : '?'),
+        corner: own.some((animation) => 'transform' in (animation.effect as KeyframeEffect).getKeyframes()[0]) ? corner : 'none',
+        rises: from.some((frame) => String(frame.transform ?? '').includes('translateY')),
+        grows: from.some((frame) => String(frame.transform ?? '').includes('scale')),
+        fades: from.some((frame) => 'opacity' in frame),
+        delay: Math.max(0, ...own.map((animation) => Number(animation.effect!.getTiming().delay ?? 0))),
+      };
+    };
+    new MutationObserver((records) => {
+      for (const node of records.flatMap((record) => [...record.addedNodes])) {
+        if (node instanceof HTMLElement && !node.inert) lab.entrances.push(describe(node));
+      }
+      if (column.getAnimations().some((animation) => animation.id === 'transcript-glide')) lab.glides += 1;
+    }).observe(column, { childList: true });
+  });
+}
+const entrances = (page: Page) => page.evaluate(() => (window as unknown as { entrances: Entrance[] }).entrances);
+const glides = (page: Page) => page.evaluate(() => (window as unknown as { glides: number }).glides);
+const shape = ({ corner, rises, grows, fades }: Entrance) => ({ corner, rises, grows, fades });
+const FROM_COMPOSER = { corner: 'bottom right', rises: true, grows: true, fades: true };
+const IN_PLACE = { corner: 'top left', rises: false, grows: true, fades: true };
+const STILL = { corner: 'none', rises: false, grows: false, fades: false };
+
+test('every item a live event brings enters by its side: the right comes up from the composer, the left grows in place', async ({ page }) => {
+  await open(page, 'delay=0');
+  await watchEntrances(page);
+  const arrive = async (fields: Record<string, unknown>) => {
+    const id = await page.evaluate((row) => window.__scrollLab.arrive(row).id, fields);
+    await expect(transcript(page).locator(`[data-message-id="${id}"]`)).toBeVisible();
+    // One at a time: rows that come together are a burst, which lands without the glide.
+    await page.waitForTimeout(600);
+    return id;
+  };
+  const member = await arrive({ author: 'user', type: 'user', source: 'user', author_id: 'remote:sub-amy', text: 'Sent from another device.' });
+  const cardFromHere = await arrive({
+    author: 'harness', type: 'annotation', source: 'harness', author_id: null, text: 'Make this heading shorter.',
+    content: { annotation: { direction: 'user', action: 'created', quote: 'Release notes' } },
+  });
+  const cardFromAgent = await arrive({
+    author: 'agent', type: 'annotation', source: 'agent', author_id: null, text: 'This chart is out of date.',
+    content: { annotation: { direction: 'agent', action: 'created', quote: 'Weekly builds' } },
+  });
+  const notice = await arrive({ author: 'system', type: 'notify', source: 'system', author_id: null, text: 'The nightly build finished.' });
+  const reply = await arrive({ author: 'agent', type: 'result', source: 'agent', author_id: null, text: 'Both are fixed.' });
+  const seen = await entrances(page);
+  const of = (key: string) => seen.filter((entrance) => entrance.key === key).map(shape);
+  expect({
+    member: of(member), cardFromHere: of(cardFromHere), cardFromAgent: of(cardFromAgent), notice: of(notice), reply: of(reply),
+  }).toEqual({
+    member: [FROM_COMPOSER], cardFromHere: [FROM_COMPOSER], cardFromAgent: [IN_PLACE], notice: [IN_PLACE], reply: [IN_PLACE],
+  });
+  expect(await fromBottom(page)).toBeLessThan(1);
+});
+
+test('rows a read brings land still, after a reconnect too, and the first live row after it enters', async ({ page }) => {
+  await open(page, 'delay=0');
+  await watchEntrances(page);
+  await record(page);
+  // Two rows the stream missed while it was down; the page reads them back when it reconnects.
+  const missed = await page.evaluate(() => [
+    window.__scrollLab.miss({ author: 'user', type: 'user', source: 'user', author_id: 'local', text: 'Sent while the stream was down.' }).id,
+    window.__scrollLab.miss({ author: 'agent', type: 'result', source: 'agent', author_id: null, text: 'Answered while the stream was down.' }).id,
+  ]);
+  await page.evaluate(() => window.__scrollLab.reconnect());
+  await expect(transcript(page).locator(`[data-message-id="${missed[1]}"]`)).toBeVisible();
+  await page.waitForTimeout(500);
+  const { frames } = await stop(page);
+  expect((await entrances(page)).filter((entrance) => missed.includes(entrance.key)).map(shape)).toEqual([STILL, STILL]);
+  // The conversation is where it ends up at once: no glide.
+  expect(await glides(page)).toBe(0);
+  const caughtUp = travel(frames);
+  expect(caughtUp.total).toBeGreaterThan(40);
+  expect(caughtUp.between).toBe(0);
+  expect(await fromBottom(page)).toBeLessThan(1);
+  // The first row the stream delivers after the gap is live.
+  const reply = await page.evaluate(() => window.__scrollLab.push('The first live reply after the gap.', 'agent').id);
+  await expect(transcript(page).locator(`[data-message-id="${reply}"]`)).toBeVisible();
+  await page.waitForTimeout(600);
+  expect((await entrances(page)).filter((entrance) => entrance.key === reply).map(shape)).toEqual([IN_PLACE]);
+  expect(await glides(page)).toBe(1);
+  expect(await fromBottom(page)).toBeLessThan(1);
+});
+
+type Handoff = { keys: string[]; delay: number; copyOpacity: number };
+
+/** From now on, each commit that brings items in while a copy of the turn at work (the working bubble or
+ *  the running card, leaving whole) is still fading where it was: what came in, when the first of them
+ *  starts, and how opaque the copy is by then. */
+async function watchHandoffs(page: Page) {
+  await page.evaluate(() => {
+    const transcript = document.querySelector('[data-testid="chat-transcript"]')!;
+    const column = transcript.firstElementChild!.firstElementChild! as HTMLElement;
+    const lab = window as unknown as { handoffs: Handoff[] };
+    lab.handoffs = [];
+    const copies: HTMLElement[] = [];
+    new MutationObserver((records) => {
+      const added = records.flatMap((record) => [...record.addedNodes]).filter((node): node is HTMLElement => node instanceof HTMLElement);
+      // A copy that holds words (a dots-only copy, under a reply that keeps the bubble's head, holds none).
+      copies.push(...added.filter((node) => node.inert && node.textContent!.trim() !== ''));
+      const fading = copies.filter((copy) => copy.isConnected && copy.getAnimations().some((animation) => animation.playState === 'running'));
+      const items = added.filter((node) => !node.inert && node.getAnimations().length > 0);
+      if (fading.length === 0 || items.length === 0) return;
+      const delay = Math.min(...items.flatMap((item) => item.getAnimations().map((animation) => Number(animation.effect!.getTiming().delay ?? 0))));
+      // Each copy's fade, read at that moment and put back.
+      const copyOpacity = Math.max(...fading.map((copy) => {
+        const fade = copy.getAnimations()[0];
+        const was = Number(fade.currentTime ?? 0);
+        fade.currentTime = was + delay;
+        const opacity = parseFloat(getComputedStyle(copy).opacity);
+        fade.currentTime = was;
+        return opacity;
+      }));
+      lab.handoffs.push({ keys: items.map((item) => item.dataset.messageId ?? item.getAttribute('data-transcript-key') ?? '?'), delay, copyOpacity });
+    }).observe(column, { childList: true });
+  });
+}
+const handoffs = (page: Page) => page.evaluate(() => (window as unknown as { handoffs: Handoff[] }).handoffs);
+
+test('the running card grows in as the working bubble gives way, and leaves as the reply and its chip grow in', async ({ page }) => {
+  await open(page, 'delay=0&activity=1');
+  await page.evaluate(() => window.__scrollLab.turn('start'));
+  await expect(page.locator('[data-transcript-working]')).toBeVisible();
+  await page.waitForTimeout(500);
+  await watchEntrances(page);
+  await watchCopies(page);
+  await watchHandoffs(page);
+  await page.evaluate(() => window.__scrollLab.arrive({ author: 'agent', type: 'tool_call', source: 'agent', author_id: null, text: 'Read ui/src/lib/motion.ts' }));
+  const card = page.locator('[data-transcript-key="activity-live"]');
+  await expect(card).toBeVisible();
+  await page.waitForTimeout(600);
+  // The bubble's dots fade where they were, as the card grows in out of its top-left corner.
+  expect((await entrances(page)).filter((entrance) => entrance.key === 'activity-live').map(shape)).toEqual([IN_PLACE]);
+  const bubbleLeft = (await page.evaluate(() => (window as unknown as { copies: Copy[] }).copies)).map(({ rows, animations }) => ({ rows, animations }));
+  expect(bubbleLeft).toEqual([{ rows: 0, animations: [{ moves: false, fades: true }] }]);
+  // The turn ends: its reply, the execution-process chip above it, and the card fading where it was.
+  const reply = await page.evaluate(() => {
+    const id = window.__scrollLab.push('Done: the motion tokens are in.', 'agent').id;
+    window.__scrollLab.settle(id);
+    window.__scrollLab.turn('end');
+    return id;
+  });
+  const chip = page.locator(`[data-transcript-key="activity:grp_live_${reply}"]`);
+  await expect(chip).toBeVisible();
+  await expect(card).toHaveCount(0);
+  await page.waitForTimeout(600);
+  const seen = await entrances(page);
+  expect({
+    reply: seen.filter((entrance) => entrance.key === reply).map(shape),
+    chip: seen.filter((entrance) => entrance.key === `activity:grp_live_${reply}`).map(shape),
+  }).toEqual({ reply: [IN_PLACE], chip: [IN_PLACE] });
+  const cardLeft = (await page.evaluate(() => (window as unknown as { copies: Copy[] }).copies))
+    .filter(({ text }) => text.includes('ui/src/lib/motion.ts'))
+    .map(({ animations }) => animations);
+  expect(cardLeft).toEqual([[{ moves: false, fades: true }]]);
+  // Only the settled chip of this turn entered; the chips the bootstrap read stayed still.
+  expect(seen.filter((entrance) => entrance.key.startsWith('activity:') && entrance.corner !== 'none').map((entrance) => entrance.key))
+    .toEqual([`activity:grp_live_${reply}`]);
+  // One after the other, never two texts over each other: whatever comes in while the copy of the turn at
+  // work is still fading (the card in the bubble's place; the reply and the chip in the card's, together or
+  // a moment apart, unless they come once it is gone) starts once that copy has faded to a tenth, its words
+  // no longer to be made out. The card always comes in as the bubble's copy fades.
+  const swaps = await handoffs(page);
+  expect(swaps.flatMap(({ keys }) => keys)).toContain('activity-live');
+  for (const { copyOpacity } of swaps) expect(copyOpacity).toBeLessThanOrEqual(0.11);
+  expect(await fromBottom(page)).toBeLessThan(1);
+});
+
+test('rows the retained window dropped come back with an older page and land still, even those that came in live', async ({ page }) => {
+  // One row of history and live rows the reader saw come in; then more than the transcript keeps, so the
+  // oldest of them leave its window.
+  await open(page, 'delay=0&count=1');
+  const push = (from: number, count: number) => page.evaluate(([first, n]) => {
+    for (let index = first; index < first + n; index += 1) window.__scrollLab.push(`Live row ${index + 1}.`, index % 2 ? 'agent' : 'user');
+  }, [from, count]);
+  await push(0, 40);
+  await expect(transcript(page).locator('[data-message-id]')).toHaveCount(41);
+  await page.waitForTimeout(400);
+  await push(40, 290);
+  await expect(transcript(page).locator('[data-message-id]')).toHaveCount(300);
+  const dropped = await page.evaluate(() => window.__scrollLab.history.slice(0, 31).map((row) => row.id));
+  await expect(transcript(page).locator(`[data-message-id="${dropped[30]}"]`)).toHaveCount(0);
+  await page.waitForTimeout(800);
+  await watchEntrances(page);
+  // Reading back up asks for the page the window dropped.
+  await transcript(page).evaluate((el) => { el.scrollTop = 0; el.dispatchEvent(new Event('scroll')); });
+  await expect(transcript(page).locator(`[data-message-id="${dropped[30]}"]`)).toHaveCount(1);
+  await page.waitForTimeout(600);
+  const back = (await entrances(page)).filter((entrance) => dropped.includes(entrance.key));
+  expect(back.length).toBeGreaterThanOrEqual(30);
+  expect(back.filter((entrance) => entrance.corner !== 'none' || entrance.fades)).toEqual([]);
+  expect(await glides(page)).toBe(0);
+});
+
+test('while the reader is scrolled up, what comes in live enters without moving what they read', async ({ page }) => {
+  await open(page, 'delay=0');
+  await transcript(page).evaluate((el) => { el.scrollTop -= 900; });
+  await page.waitForTimeout(400);
+  await watchEntrances(page);
+  await record(page, 0.4);
+  const sent = await page.evaluate(() => window.__scrollLab.arrive({ author: 'user', type: 'user', source: 'user', author_id: 'local', text: 'Sent from my phone.' }).id);
+  await page.waitForTimeout(600);
+  const reply = await page.evaluate(() => window.__scrollLab.push('A reply below the fold.', 'agent').id);
+  await page.waitForTimeout(600);
+  const { frames, writes } = await stop(page);
+  const seen = await entrances(page);
+  expect({
+    sent: seen.filter((entrance) => entrance.key === sent).map(shape),
+    reply: seen.filter((entrance) => entrance.key === reply).map(shape),
+  }).toEqual({ sent: [FROM_COMPOSER], reply: [IN_PLACE] });
+  // What the reader reads did not move, and the motion wrote no scroll position.
+  expect(travel(frames).total).toBeLessThan(1);
+  expect(await glides(page)).toBe(0);
+  expect(writes.filter((write) => !write.site?.startsWith('restoreScrollPosition'))).toEqual([]);
+  expect(await fromBottom(page)).toBeGreaterThan(800);
+});

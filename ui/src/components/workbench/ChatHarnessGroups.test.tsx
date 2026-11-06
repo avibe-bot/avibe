@@ -127,6 +127,31 @@ describe('transcript Harness groups', () => {
     vi.unstubAllGlobals();
   });
 
+  // The motion and the scroller know the transcript's items by these marks (lib/transcriptMotion,
+  // lib/transcriptScrollAnchor); the chrome above the history, which older rows go in under, has none.
+  it('marks every item under the history for the motion and the scroller, and nothing above it', () => {
+    const members = [watch('h1'), watch('h2'), watch('h3')];
+    const above = { ...chip('above', 'none', 'after'), anchorMessageId: null };
+    renderTranscript({
+      messages: [userMessage('u1'), ...members, reply('r1')],
+      activity: { ...activity([chip('answering', 'r1', 'before')]), topGroups: [above] },
+    });
+    fireEvent.click(groupToggle(3));
+    const marked = [...document.querySelectorAll('[data-transcript-key]')]
+      .map((el) => `${el.getAttribute('data-transcript-key')}${el.hasAttribute('data-transcript-row') ? ' row' : ''}`);
+    expect(marked).toEqual([
+      'harness-member:h1 row', 'harness-member:h2 row', 'harness-member:h3 row',
+      expect.stringMatching(/^harness-collapse:\S+ row$/),
+      'activity:answering row',
+    ]);
+    // The chip with no message is drawn, above the history, as neither.
+    const column = document.querySelector('[data-testid="chat-transcript"]')!.firstElementChild!.firstElementChild!;
+    const first = column.firstElementChild!;
+    expect(first.querySelector('button')).toBeTruthy();
+    expect(first.hasAttribute('data-transcript-row') || first.hasAttribute('data-transcript-key')).toBe(false);
+    expect(document.querySelector('[data-transcript-key="activity:answering"]')!.getAttribute('data-transcript-for')).toBe('r1');
+  });
+
   it('folds a run with its silent Turns and opens it in place', () => {
     const brief = watch('brief');
     const members = [watch('h1'), watch('h2'), watch('h3')];

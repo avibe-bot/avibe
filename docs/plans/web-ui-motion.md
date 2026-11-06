@@ -295,9 +295,10 @@ reduced-motion form.
   exit), then Stop grows from it on `spring-snappy` while it fades in (`fast`). The queue-send
   button that appears beside Stop when there is text enters the same way.
   Stop → Send is the mirror.
-- **Working bubble**: enters one beat (`--motion-beat`) after the message, rising
-  `--motion-offset-sm` and fading in on `fast`; it leaves by fading where the
-  reply grows over it (M3).
+- **Working bubble**: enters one beat (`--motion-beat`) after the message,
+  growing in place from its top-left corner as every item on the left does
+  (M3); it leaves by fading where the reply grows over it, or where the running
+  Activity card takes its place.
 - **Reduced**: crossfade on `fast`; the dots hold still.
 - **Components**: `Composer`, `ThinkingBubble`.
 
@@ -306,15 +307,44 @@ reduced-motion form.
 - **Motion**: the working bubble fades out (`instant`) while the reply grows
   in its place from its top-left corner (`--motion-scale-enter`, `spring-smooth`, fading on
   `base`), and the transcript glides up by what the reply adds. Stop hands back
-  to Send (M2). Interim rows and activity rows enter the same way, one glide
-  per 100 ms at most; a row that grows while it streams is not animated (its
+  to Send (M2). A row that grows while it streams is not animated (its
   height change is followed by the pinned glide).
+- **One contract for every transcript item** (owner, 2026-11-06): a message of
+  any kind, a Harness group and its opened members, an execution-process chip,
+  the running Activity card, and the working bubble. An item a live event
+  brings enters by the side it sits on, not by who wrote it:
+  - on the right (the reader's own message, another member's, a Show Page card
+    sent from here), it comes up from the composer as M1's message does
+    (bottom-right, `--motion-offset` and `--motion-scale-enter`, fading on
+    `fast`);
+  - on the left (a reply, a notice, a failure, a chip, the running card, the
+    working bubble), it grows in place from its top-left corner
+    (`--motion-scale-enter`, fading on `base`); the turn at work trails the
+    message that started it by one `--motion-beat`.
+  - The running card takes the working bubble's place as the reply does: the
+    bubble fades, the card grows in. When the turn ends the card fades
+    (`instant`) and the reply and its chip grow in.
+  - **One after the other.** What takes the place of the turn at work (the
+    card for the bubble; the reply and the chip for the card, together or a
+    moment apart) starts once the copy of what held it has faded to 10%
+    (about 92 ms into `instant` on the exit curve), so two texts are never drawn
+    over each other (owner, 2026-11-06; at 30% the two still showed together
+    for a frame). A reply that keeps the bubble's head
+    takes over from its dots alone, at once.
+  - **Live** means the stream delivered it or the reader sent it here. What a
+    read brings lands still, and the conversation around it does not glide:
+    the bootstrap, a catch-up after the stream was down, a cached window the
+    live one replaces, an older page. The first row the stream delivers after
+    a reconnect is live again. A row is live only while it is shown: one the
+    retained window dropped, read back with an older page, lands still.
 - **Reduced**: crossfade on `fast`.
-- **Frames**: `motion/arrival/phone`, `phone-reduced`.
+- **Frames**: `motion/arrival/phone`, `phone-reduced`, `phone-card`,
+  `phone-turn-end`, `phone-show-page`.
 
 ### M4 · Cache → live hand-over (P1)
 
-Section 6. Chat: M3's arrival for new tail rows, M7's leave for removed rows.
+Section 6. Chat: rows the live window brings that the cached one did not have
+land still (M3: a read is not an arrival); M7's leave for removed rows.
 Inbox: M7's move. Frames: `motion/arrival/*`, `motion/inbox/*`.
 
 ### M5 · Navigation (P2)
@@ -500,9 +530,19 @@ send (they change `ChatPage`).
   vertical padding), so a glide's offset never adds to what the transcript can
   scroll: the anchor and follow-tail see the layout they would see with no
   motion, and nothing in the motion writes a scroll position.
-- **What enters** is what is new at the tail, compared by element rather than
-  id: the server's row that takes a sending row's place, and a saved window
-  the live answer replaces, keep their elements and do not enter again.
+- **What enters** is an item new to the transcript that came in live, compared
+  by element rather than id: the server's row that takes a sending row's
+  place, and a saved window the live answer replaces, keep their elements and
+  do not enter again. Every item is a direct child of the transcript column
+  marked as such: `data-message-id` for a message row, and
+  `data-transcript-key` (stable and unique) with `data-transcript-row` for the
+  rest (the running card, a chip, a Harness group's opened member and its
+  collapse bar), so the scroller can hold them too; the chrome above the
+  history carries neither, including a chip with no message, which renders
+  there. `data-transcript-side="end"` marks an item on the
+  right. Live message ids are recorded where the stream's rows and the
+  reader's sends come in (`appendMessage`, the pending send); a chip follows
+  the message it hangs on, a Harness group its members.
 - **What leaves.** React has removed a row before an effect can see it, so a
   withdrawn send and the working bubble are drawn for their exit by an inert,
   hidden copy of their last frame, removed when the exit ends.
