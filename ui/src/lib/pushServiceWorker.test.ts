@@ -188,6 +188,65 @@ describe('push service worker notification launches', () => {
     });
   });
 
+  // iOS cannot route a tap through notificationclick reliably (WebKit 252544,
+  // 259212, 268797, 279456), so an iPhone or iPad notification names where a
+  // tap opens. Desktop browsers that honor `navigate` would open a new tab per
+  // tap, so they keep the click handler.
+  const IPHONE = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0.1 Mobile/15E148 Safari/604.1';
+  const DESKTOP_SAFARI = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0 Safari/605.1.15';
+  const DESKTOP_FIREFOX = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:158.0) Gecko/20100101 Firefox/158.0';
+  const DESKTOP_CHROME = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36';
+  it.each([
+    ['iPhone', '/chat/session-1?msg=msg-1&from=notification', 'https://avibe.local/chat/session-1?msg=msg-1&from=notification', IPHONE],
+    ['iPhone', undefined, 'https://avibe.local/inbox', IPHONE],
+    ['iPhone', 'https://elsewhere.example/chat/session-1', 'https://avibe.local/inbox', IPHONE],
+    ['desktop Safari', '/chat/session-1?msg=msg-1&from=notification', undefined, DESKTOP_SAFARI],
+    ['desktop Firefox', '/chat/session-1?msg=msg-1&from=notification', undefined, DESKTOP_FIREFOX],
+    ['desktop Chrome', '/chat/session-1?msg=msg-1&from=notification', undefined, DESKTOP_CHROME],
+  ])('%s: the notification for a tap on %s navigates to %s', async (_device, url, navigate, userAgent) => {
+    const source = await readFile(new URL('../../public/push-sw.js', import.meta.url), 'utf8');
+    const handlers = new Map<string, (event: unknown) => void>();
+    const showNotification = vi.fn(async (_title: string, _options: Record<string, unknown>) => {});
+    const worker = {
+      location: { origin: 'https://avibe.local' },
+      clients: { matchAll: vi.fn(async () => []) },
+      registration: { showNotification },
+      addEventListener: (type: string, handler: (event: unknown) => void) => handlers.set(type, handler),
+    };
+    runInNewContext(source, { self: worker, navigator: { userAgent }, URL, Response, Date, Number, JSON, Promise });
+
+    let completion: Promise<unknown> | undefined;
+    handlers.get('push')?.({
+      data: { json: () => ({ title: 'Avibe', url }) },
+      waitUntil: (promise: Promise<unknown>) => { completion = promise; },
+    });
+    await completion;
+
+    expect(showNotification).toHaveBeenCalledOnce();
+    const options = showNotification.mock.calls[0][1];
+    if (navigate) expect(options.navigate).toBe(navigate);
+    else expect(options).not.toHaveProperty('navigate');
+    expect(options.data).toEqual({ url: url ?? '/inbox' });
+  });
+
+  it('takes over from an older worker without waiting for a suspended app to close', async () => {
+    const source = await readFile(new URL('../../public/push-sw.js', import.meta.url), 'utf8');
+    const handlers = new Map<string, (event: unknown) => void>();
+    const skipWaiting = vi.fn(async () => {});
+    const worker = {
+      location: { origin: 'https://avibe.local' },
+      skipWaiting,
+      addEventListener: (type: string, handler: (event: unknown) => void) => handlers.set(type, handler),
+    };
+    runInNewContext(source, { self: worker, navigator: {}, URL, Response, Date, Number, JSON, Promise });
+
+    let completion: Promise<unknown> | undefined;
+    handlers.get('install')?.({ waitUntil: (promise: Promise<unknown>) => { completion = promise; } });
+    await completion;
+
+    expect(skipWaiting).toHaveBeenCalledOnce();
+  });
+
   it('uses current server unread count instead of a delayed push count for the app badge', async () => {
     const source = await readFile(new URL('../../public/push-sw.js', import.meta.url), 'utf8');
     const handlers = new Map<string, (event: unknown) => void>();

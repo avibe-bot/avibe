@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { useDesktopWindowChrome } from '../../context/DesktopWindowChromeContext';
 import { Fragment, forwardRef, memo, useCallback, useContext, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { Link, Navigate, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, Bell, Bot, ChevronDown, ChevronRight, Clock, Eye, EyeOff, GitFork, Image as ImageIcon, Info, Loader2, MapPin, MessageSquare, MessageSquareQuote, Pencil, Terminal, Undo2, UploadCloud, X } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import type { TFunction } from 'i18next';
@@ -284,6 +284,13 @@ const serverUnreachable = (error: unknown): boolean => {
   return typeof status !== 'number' || status >= 500;
 };
 
+// The server answered that this chat is not there for the reader: deleted, or
+// outside what they may read.
+const sessionUnavailable = (error: unknown): boolean => {
+  const status = (error as { status?: unknown } | null)?.status;
+  return status === 404 || status === 403;
+};
+
 // One older page: ``loadOlderMessages`` asks for this many rows.
 const OLDER_PAGE_SIZE = 50;
 // Wheel events have no gesture-end event; an idle gap ends a momentum burst.
@@ -324,6 +331,8 @@ export const ChatPage: React.FC = () => {
   // A "show me the chat" navigation carries ?view=chat (see sessionChatPath({ showChat:
   // true })) — a general signal that this navigation must leave Show Page mode.
   const showChatSignal = searchParams.get('view') === 'chat';
+  // A notification tap carries ?from=notification (core/web_push_notifications.py).
+  const openedFromNotification = searchParams.get('from') === 'notification';
   const api = useApi();
   const {
     capabilities,
@@ -629,6 +638,8 @@ export const ChatPage: React.FC = () => {
   // reconnect/auth refreshes so an already visible chat stays visible.
   const [hydratedTranscriptSessionId, setHydratedTranscriptSessionId] = useState<string | null>(null);
   const [failedBootstrapSessionId, setFailedBootstrapSessionId] = useState<string | null>(null);
+  // The route whose failed bootstrap said the chat is gone or not readable.
+  const [unavailableSessionId, setUnavailableSessionId] = useState<string | null>(null);
   const provisionPlacement = useMemo(
     () => placeVaultProvisionRequests(messages, vaultRequests),
     [messages, vaultRequests],
@@ -1993,6 +2004,7 @@ export const ChatPage: React.FC = () => {
         } else {
           setError(errorMessage(err) ?? String(err));
           setFailedBootstrapSessionId(sessionId);
+          setUnavailableSessionId(sessionUnavailable(err) ? sessionId : null);
           chatSnapshotRead.fail();
         }
       }
@@ -3390,6 +3402,10 @@ export const ChatPage: React.FC = () => {
   if (viewState === 'loading') return <ChatPageSkeleton onBack={goBack} />;
 
   if (viewState === 'failed' || !session) {
+    // A notification can outlive its chat. Its tap lands in the Inbox, not on an error.
+    if (viewState === 'failed' && openedFromNotification && unavailableSessionId === sessionId) {
+      return <Navigate to="/inbox" replace />;
+    }
     return (
       <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 py-8">
         <button

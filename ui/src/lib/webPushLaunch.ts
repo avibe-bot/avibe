@@ -1,4 +1,4 @@
-import { normalizeRestorablePwaPath } from './pwaRouteMemory';
+import { normalizePwaLaunchTarget, normalizeRestorablePwaPath } from './pwaRouteMemory';
 
 const CACHE_NAME = 'avibe.web-push-launch.v1';
 const CACHE_ENTRY_PATH = '/__avibe/web-push-launch';
@@ -32,7 +32,7 @@ export function parsePendingWebPushLaunch(value: unknown, now: number): string |
 
   const age = now - createdAt;
   if (age < 0 || age > WEB_PUSH_LAUNCH_MAX_AGE_MS) return null;
-  return normalizeRestorablePwaPath(url);
+  return normalizePwaLaunchTarget(url);
 }
 
 async function consumePendingWebPushLaunch(
@@ -65,7 +65,11 @@ async function consumePendingWebPushLaunch(
     );
     // A newer notification may have replaced the handoff before a prior
     // message reaches the page. Do not consume that newer destination.
-    if (expectedPath && latest?.path && latest.path !== normalizeRestorablePwaPath(expectedPath)) return null;
+    if (
+      expectedPath
+      && latest?.path
+      && normalizeRestorablePwaPath(latest.path) !== normalizeRestorablePwaPath(expectedPath)
+    ) return null;
     // Delete only keys returned by this snapshot. A click written while JSON
     // was loading has its own key and must survive for the next resume.
     await Promise.all(entries.map((entry) => cache.delete(entry.request)));

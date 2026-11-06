@@ -7,6 +7,7 @@ import json
 import logging
 import threading
 import time
+import urllib.parse
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Mapping
@@ -726,7 +727,7 @@ def maybe_notify_inbox_message(message: dict[str, Any] | None, inbox_row: dict[s
     # A workspace-addressed notice needs no session because it is addressed to the
     # workspace. Where a session IS named the deep link still points at it.
     session_id = message.get("session_id")
-    url = f"/chat/{session_id}" if session_id else "/harness"
+    url = _notification_url(session_id, message.get("id"))
     tag = f"session:{session_id}" if session_id else "harness:failure"
 
     # ``badge_count`` is computed per subscription owner at send time, not from
@@ -742,6 +743,20 @@ def maybe_notify_inbox_message(message: dict[str, Any] | None, inbox_row: dict[s
     }
     thread = threading.Thread(target=_send_to_enabled_subscriptions, args=(payload,), daemon=True)
     thread.start()
+
+
+def _notification_url(session_id: Any, message_id: Any) -> str:
+    """The page a tap opens: the chat at this message, marked as a notification.
+
+    ``msg`` is ChatPage's deep-link anchor. ``from=notification`` sends a tap
+    whose chat is gone or no longer readable to the Inbox instead of an error.
+    """
+
+    if not session_id:
+        return "/harness"
+    query = {"msg": message_id} if message_id else {}
+    query["from"] = "notification"
+    return f"/chat/{urllib.parse.quote(str(session_id), safe='')}?{urllib.parse.urlencode(query)}"
 
 
 def _message_still_unread(conn: Any, message_id: str | None) -> bool:

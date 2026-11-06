@@ -266,6 +266,33 @@ function rememberPendingNotificationLaunch(url) {
 
 let notificationClickQueue = Promise.resolve();
 
+// Where a tap opens the app: a same-origin path from the payload, else the Inbox.
+function notificationTarget(url) {
+  try {
+    const target = new URL(typeof url === 'string' && url ? url : '/inbox', self.location.origin);
+    if (target.origin === self.location.origin) return target;
+  } catch {
+    // A malformed target opens the Inbox like a foreign one.
+  }
+  return new URL('/inbox', self.location.origin);
+}
+
+// A Home Screen app on iPhone (or an iPad whose user agent says so): the only
+// place this worker hands taps to the platform (see `navigate` below). iOS
+// subscribes only from Home Screen apps. Desktop Safari and Firefox also honor
+// `navigate`, but there it opens a new tab per tap, so desktop keeps the click
+// handler. An iPad reporting a desktop-class (Mac) user agent does too.
+const HANDS_TAPS_TO_PLATFORM = /\b(iPhone|iPad|iPod)\b/.test(
+  typeof navigator.userAgent === 'string' ? navigator.userAgent : '',
+);
+
+// This worker has no fetch handler, so an update cannot mix asset versions.
+// Take over at once: a Home Screen app can stay suspended for days, and a
+// waiting worker would keep the old notification behavior until it is killed.
+self.addEventListener('install', (event) => {
+  event.waitUntil(self.skipWaiting());
+});
+
 self.addEventListener('pushsubscriptionchange', (event) => {
   event.waitUntil(
     (async () => {
@@ -298,6 +325,13 @@ self.addEventListener('push', (event) => {
     icon: '/icon-192.png',
     badge: '/icon-192.png',
   };
+  // iOS 18.4+ opens this URL itself on a tap, cold or suspended, and skips
+  // notificationclick. iOS cannot route a tap through the worker reliably: it
+  // launches the app at its start URL, a suspended client may reject focus()
+  // or miss postMessage, and openWindow() resolves early (WebKit 252544,
+  // 259212, 268797, 279456). Older iOS ignores the option and uses the click
+  // handler below, as every desktop browser does.
+  if (HANDS_TAPS_TO_PLATFORM) options.navigate = notificationTarget(url).href;
 
   const tasks = [self.registration.showNotification(title, options)];
   tasks.push(refreshAppBadge());
@@ -306,10 +340,7 @@ self.addEventListener('push', (event) => {
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  const targetUrl = new URL(event.notification.data?.url || '/inbox', self.location.origin);
-  if (targetUrl.origin !== self.location.origin) {
-    targetUrl.href = new URL('/inbox', self.location.origin).href;
-  }
+  const targetUrl = notificationTarget(event.notification.data?.url);
   const href = targetUrl.href;
   const message = {
     type: 'vibe.notification-click',
