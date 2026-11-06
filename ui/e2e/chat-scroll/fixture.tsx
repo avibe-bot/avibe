@@ -42,6 +42,7 @@ const history = conversation(count).map((message) =>
 );
 const PAGE = 50;
 const tail = history.slice(-PAGE);
+const initialGroups = activity ? activityGroups(history) : [];
 
 installDesignNetwork();
 
@@ -68,7 +69,7 @@ const fixtures = chatFixtures({
   } : undefined,
   messages: tail,
   ui: { show_agent_activity: activity },
-  activity: activity ? activityGroups(history) : [],
+  activity: initialGroups,
   // Each chart is a distinct image the page has not measured yet.
   api: Object.fromEntries(
     history.filter((m) => m.text.includes('/api/media/')).map((m) => {
@@ -96,6 +97,10 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     const row = { ...messageAt(history.length), author: 'user', type: 'user', source: 'user', author_id: 'local', id: `msg_sent_${history.length}`, text: sent.text ?? '', metadata: sent.metadata ?? {} } as WorkbenchMessage;
     history.push(row);
     return json(row);
+  }
+  // The settled execution-process groups, as the server has them now.
+  if (url.pathname === `${base}/activity` && !url.searchParams.has('group_id')) {
+    return json({ groups: [...initialGroups, ...settledGroups] });
   }
   if (url.pathname !== `${base}/messages`) return designFetch(input, init);
   const before = url.searchParams.get('before_id');
@@ -151,6 +156,15 @@ declare global {
       turn(phase: 'start' | 'end'): void;
       /** A row the conversation already has, changed over the event stream (its text replaced). */
       update(id: string, text: string): WorkbenchMessage;
+      /** Any row over the event stream: the next one of the conversation with `fields` over it. A live
+       *  activity row (a tool call, the agent's narration) is not stored with the conversation. */
+      arrive(fields: Partial<WorkbenchMessage>): WorkbenchMessage;
+      /** A row the server stores while the stream misses it: only a read brings it. */
+      miss(fields?: Partial<WorkbenchMessage>): WorkbenchMessage;
+      /** The stream comes back after a gap (its `connected` frame): the page catches up with a read. */
+      reconnect(): void;
+      /** The turn that wrote `replyId` leaves a settled execution-process group above it. */
+      settle(replyId: string): void;
       history: WorkbenchMessage[];
     };
   }
@@ -158,6 +172,14 @@ declare global {
 
 if (reader) setLocalSnapshotPrincipal(reader);
 const recorder = installScrollRecorder();
+const settledGroups: ReturnType<typeof activityGroups> = [];
+let activityRows = 0;
+let subscription = 1;
+const deliver = (row: WorkbenchMessage) => {
+  for (const source of LabEventSource.live) {
+    source.dispatchEvent(new MessageEvent('message.new', { data: JSON.stringify({ type: 'message.new', data: row }) }));
+  }
+};
 window.__scrollLab = Object.assign(recorder, {
   history,
   push(text?: string, author?: 'user' | 'agent') {
@@ -167,10 +189,40 @@ window.__scrollLab = Object.assign(recorder, {
       : author === 'agent' ? { author: 'agent', type: 'result', source: 'agent', author_id: null } : {};
     const row = { ...next, ...by, ...(text ? { text } : {}) } as WorkbenchMessage;
     history.push(row);
-    for (const source of LabEventSource.live) {
-      source.dispatchEvent(new MessageEvent('message.new', { data: JSON.stringify({ type: 'message.new', data: row }) }));
-    }
+    deliver(row);
     return row;
+  },
+  arrive(fields: Partial<WorkbenchMessage>) {
+    const transient = fields.type === 'tool_call' || fields.type === 'assistant';
+    const row = { ...messageAt(history.length), ...(transient ? { id: `act_${(activityRows += 1)}` } : {}), ...fields } as WorkbenchMessage;
+    if (!transient) history.push(row);
+    deliver(row);
+    return row;
+  },
+  miss(fields: Partial<WorkbenchMessage> = {}) {
+    const row = { ...messageAt(history.length), ...fields } as WorkbenchMessage;
+    history.push(row);
+    return row;
+  },
+  reconnect() {
+    subscription += 1;
+    for (const source of LabEventSource.live) {
+      source.dispatchEvent(new MessageEvent('connected', { data: JSON.stringify({ sub_id: subscription }) }));
+    }
+  },
+  settle(replyId: string) {
+    const reply = history.find((row) => row.id === replyId)!;
+    settledGroups.push({
+      id: `grp_live_${replyId}`,
+      anchor_message_id: replyId,
+      anchor_position: 'before',
+      open: false,
+      status: 'done',
+      steps: 2,
+      duration_ms: 9_000,
+      started_at: reply.created_at,
+      rows: [],
+    } as (typeof settledGroups)[number]);
   },
   turn(phase: 'start' | 'end') {
     for (const source of LabEventSource.live) {

@@ -94,7 +94,7 @@ import {
 } from '../../lib/transcriptOrder';
 import { prefersReducedMotion } from '../../lib/motion';
 import { anchorForTouched, pickScrollAnchor, resolveScrollAnchor, type ScrollAnchor } from '../../lib/transcriptScrollAnchor';
-import { BeforeCommit, HEAD_ATTRIBUTE, useTranscriptMotion, WORKING_ATTRIBUTE, type DepartureKind } from '../../lib/transcriptMotion';
+import { BeforeCommit, HEAD_ATTRIBUTE, ITEM_FOR_ATTRIBUTE, ITEM_KEY_ATTRIBUTE, SIDE_ATTRIBUTE, useTranscriptMotion, WORKING_ATTRIBUTE, type DepartureKind } from '../../lib/transcriptMotion';
 import { AgentRoutePicker } from './AgentRoutePicker';
 import type { MentionSearchResult } from './MentionEditor';
 import {
@@ -1230,7 +1230,13 @@ export const ChatPage: React.FC = () => {
     };
   }, [releaseChatSnapshot, settlePendingSend]);
 
+  // What came in live for the open chat: the stream delivered it or the reader
+  // sent it here. Only those enter the transcript with motion; what a read
+  // brings lands still (lib/transcriptMotion).
+  const liveMessageIdsRef = useRef(new Set<string>());
+  const isLiveMessage = useCallback((id: string) => liveMessageIdsRef.current.has(id), []);
   const appendMessage = useCallback((msg: WorkbenchMessage) => {
+    liveMessageIdsRef.current.add(msg.id);
     setMessages((prev) => {
       // Ordered single-row insert (deduped, no full re-sort) so an out-of-order
       // live event can't render a reply ahead of its prompt.
@@ -2044,6 +2050,7 @@ export const ChatPage: React.FC = () => {
     rowFromSnapshotRef.current = false;
     liveRowRouteRef.current = null;
     setSessionCanChat(false);
+    liveMessageIdsRef.current = new Set();
     setMessages([]);
     setHydratedTranscriptSessionId(null);
     setFailedBootstrapSessionId(null);
@@ -2377,6 +2384,7 @@ export const ChatPage: React.FC = () => {
       const place = !metadata?.quick_reply_for && workingRef.current && !workingSeededRef.current
         ? 'queue'
         : 'transcript';
+      liveMessageIdsRef.current.add(clientId);
       addPendingSend({
         id: clientId,
         scope_id: null,
@@ -3557,6 +3565,7 @@ export const ChatPage: React.FC = () => {
         {offlineSessionId === sessionId && <ChatOfflineNotice />}
         <Transcript
           messages={transcriptRows}
+          isLiveMessage={isLiveMessage}
           skeleton={Boolean(chatSnapshotView?.partial)}
           pendingIds={pendingRowIds}
           sentRowFollow={sentRowFollow}
@@ -4825,6 +4834,10 @@ interface TranscriptProps {
   // bottom of the transcript, where the sent row is, into view.
   pendingIds?: ReadonlySet<string>;
   sentRowFollow?: number;
+  // Whether a message came in live (the stream delivered it, or the reader sent
+  // it here): only such rows enter with motion (lib/transcriptMotion). Without
+  // it, every row new to the transcript counts as live.
+  isLiveMessage?: (id: string) => boolean;
   // The transcript is known only in part (a chat opened on what its lists say):
   // the rest of it is a skeleton until the live window lands, and the rows that
   // replace it fade in where it was.
@@ -4859,6 +4872,7 @@ interface TranscriptProps {
 // the older-page trigger is a property of this subtree, and driving it through
 // the whole ChatPage would prove it only for one wiring of the props.
 const NO_PENDING_ROWS: ReadonlySet<string> = new Set();
+const EVERY_ROW_LIVE = () => true;
 
 export const Transcript: React.FC<TranscriptProps> = ({
   messages,
@@ -4889,6 +4903,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
   followingTailRef,
   pendingIds = NO_PENDING_ROWS,
   sentRowFollow = 0,
+  isLiveMessage = EVERY_ROW_LIVE,
   skeleton = false,
   activity,
   footer,
@@ -5087,11 +5102,18 @@ export const Transcript: React.FC<TranscriptProps> = ({
   const showActivityCard = shouldShowRunningCard(!!activity?.enabled, working, activity?.liveRows.length ?? 0);
   const showThinking = working && (!lastIsAgentTerminal || recovery.active) && !liveActive;
   // Render one settled-turn chip (before/after its anchor message, or at the top).
-  // Plain render helper (not a component) so it stays referentially simple.
+  // Plain render helper (not a component) so it stays referentially simple. A
+  // transcript item of its own, keyed by its group for good: it enters with the
+  // message it hangs on, and the scroller can hold it.
   const renderActivityChip = (group: ActivityGroup) =>
     activity ? (
       <ActivityChip
         key={group.id}
+        itemAttributes={{
+          'data-transcript-row': '',
+          [ITEM_KEY_ATTRIBUTE]: `activity:${group.id}`,
+          ...(group.anchorMessageId ? { [ITEM_FOR_ATTRIBUTE]: group.anchorMessageId } : {}),
+        }}
         group={group}
         expanded={!!activity.expanded[group.id]}
         loading={!!activity.loading[group.id]}
@@ -5741,16 +5763,12 @@ export const Transcript: React.FC<TranscriptProps> = ({
   // row. This also covers the loading slot being inserted or removed.
   useLayoutEffect(restoreScrollPosition);
 
-  // A sent message, a reply, the working bubble: in from the composer's edge,
-  // the conversation gliding up to meet them. Not while a deep link jumps or a
-  // skeleton hands over, which bring their own.
-  const ownMessageIds = useMemo(
-    () => new Set(messages.filter((message) => message.author === 'user' && message.type === 'user').map((message) => message.id)),
-    [messages],
-  );
+  // What came in live enters (a sent message from the composer's edge, a reply
+  // in place), the conversation gliding up to meet it. Not while a deep link
+  // jumps or a skeleton hands over, which bring their own.
   const { afterCommit } = motion;
   useLayoutEffect(() => {
-    afterCommit((id) => ownMessageIds.has(id), Boolean(jumpTarget) || skeleton || rowHandover !== undefined);
+    afterCommit(isLiveMessage, Boolean(jumpTarget) || skeleton || rowHandover !== undefined);
   });
 
   // One upward gesture asks for one page, but a page that landed above the
@@ -5976,11 +5994,16 @@ export const Transcript: React.FC<TranscriptProps> = ({
                     onToggle={toggle}
                   />
                   {open && item.members.map(({ message, index }) => (
-                    <div key={message.id} className={clsx(HARNESS_GROUP_RAIL, 'flex flex-col gap-3')}>
+                    <div
+                      key={message.id}
+                      data-transcript-row=""
+                      {...{ [ITEM_KEY_ATTRIBUTE]: `harness-member:${message.id}` }}
+                      className={clsx(HARNESS_GROUP_RAIL, 'flex flex-col gap-3')}
+                    >
                       {renderTranscriptRow(message, index)}
                     </div>
                   ))}
-                  {open && <HarnessGroupCollapse count={memberIds.length} onCollapse={toggle} />}
+                  {open && <HarnessGroupCollapse groupKey={key} count={memberIds.length} onCollapse={toggle} />}
                 </Fragment>
               );
             }
@@ -5991,6 +6014,8 @@ export const Transcript: React.FC<TranscriptProps> = ({
               (or the ThinkingBubble fallback) — never a settled/interrupted chip. */}
           {showActivityCard && activity ? (
             <ActivityCard
+              key="activity-live"
+              onDepart={motion.depart}
               rows={activity.liveRows}
               startedAtMs={activity.liveStartedAt}
               expanded={activity.cardExpanded}
@@ -6438,7 +6463,7 @@ export const MessageRow = memo(function MessageRow({
         />
       ) : null;
     return (
-      <div ref={sendingRowRef} data-message-id={message.id} className={rowClass('justify-end')} aria-busy={pending || undefined}>
+      <div ref={sendingRowRef} data-message-id={message.id} {...{ [SIDE_ATTRIBUTE]: 'end' }} className={rowClass('justify-end')} aria-busy={pending || undefined}>
         <div className="group/message flex max-w-[min(92%,860px)] flex-col items-end gap-1">
           {senderHead}
           <div
