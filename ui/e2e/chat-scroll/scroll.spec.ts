@@ -119,6 +119,12 @@ test('an older page goes in only once the reader comes to rest, and holds their 
   await nextFrames(page);
   const reference = await page.evaluate(() => window.__scrollLab.refTop());
   await expect.poll(first).not.toBe(head);
+  // Rows that go in above the reader are history: nothing enters or glides.
+  const moving = await transcript(page).evaluate((el) => {
+    const rows = [...el.querySelectorAll('[data-message-id]')];
+    return [rows[0].parentElement!, ...rows].filter((node) => node.getAnimations().length > 0).length;
+  });
+  expect(moving).toBe(0);
   await nextFrames(page);
   const after = await page.evaluate(() => window.__scrollLab.refTop());
   expect(Math.abs(after! - reference!)).toBeLessThanOrEqual(1);
