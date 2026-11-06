@@ -430,10 +430,31 @@ class NativeMcpSuppressionTests(unittest.IsolatedAsyncioTestCase):
                             self.assertEqual(writes[1]["params"]["config"], expected)
                             self.assertEqual(writes[1]["method"], method)
                         self.assertEqual(writes[0]["params"], {
-                            "includeLayers": False, **({"cwd": cwd} if cwd else {})})
+                            "includeLayers": True, **({"cwd": cwd} if cwd else {})})
                         self.assertEqual(params["config"], {"keep": True, "mcp_servers": {"project-only": {"command": "keep"}}})
 
-    async def test_real_cli_does_not_start_project_mcp(self):
+            for effective, layers, expected_names in (
+                ({}, [{"config": {"mcp_servers": {"disabled-only": {}}}}], {"disabled-only"}),
+                ({"mcp_servers": {"effective-only": {}}}, [], {"effective-only"}),
+                ({"mcp_servers": {"both": {}}}, [{"config": {"mcp_servers": {"both": {}, "layer-only": {}}}}], {"both", "layer-only"}),
+            ):
+                with self.subTest(effective=effective, layers=layers):
+                    transport = CodexTransport(binary="codex", cwd="/server")
+                    transport._process = SimpleNamespace(returncode=None)
+                    writes = []
+
+                    async def write(message):
+                        writes.append(message)
+                        result = {"config": effective, "layers": layers} if message["method"] == "config/read" else {"thread": {"id": "thread"}}
+                        await transport._dispatch({"id": message["id"], "result": result})
+
+                    transport._write_message = write
+                    await transport.send_request("thread/start", {"cwd": "/project", "config": {}})
+                    self.assertEqual(
+                        set(writes[1]["params"]["config"]["mcp_servers"]), expected_names
+                    )
+
+    async def test_real_cli_does_not_start_project_mcp_before_or_after_trust(self):
         import json
         import os
         import shutil
@@ -441,40 +462,51 @@ class NativeMcpSuppressionTests(unittest.IsolatedAsyncioTestCase):
 
         from tests.conftest import REAL_USER_HOME, _AMBIENT_AVIBE_HOME
 
-        # Read only the configured executable; never load/migrate production config.
         config_path = Path(_AMBIENT_AVIBE_HOME or REAL_USER_HOME / ".avibe") / "config/config.json"
         configured = json.loads(config_path.read_text()) if config_path.exists() else {}
         binary = shutil.which(configured.get("agents", {}).get("codex", {}).get("cli_path", "codex"))
         if not binary:
             self.skipTest("Avibe-configured Codex executable unavailable")
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory).resolve()
-            home = root / "home"
-            codex_home = home / ".codex"
-            project = root / "project"
-            codex_home.mkdir(parents=True)
-            (project / ".codex").mkdir(parents=True)
-            marker = root / "started"
-            codex_home.joinpath("config.toml").write_text(
-                f'[projects.{json.dumps(str(project))}]\ntrust_level = "trusted"\n')
-            project.joinpath(".codex/config.toml").write_text("".join(
-                f'[mcp_servers.{json.dumps(name)}]\ncommand = "/usr/bin/touch"\n'
-                f'args = [{json.dumps(str(marker))}]\n'
-                for name in ("project-only", "foo.bar", 'a"b')
-            ))
-            env = {"PATH": os.environ.get("PATH", os.defpath), "HOME": str(home), "CODEX_HOME": str(codex_home),
-                   "XDG_CONFIG_HOME": str(home / ".config"), "XDG_DATA_HOME": str(home / ".local/share"),
-                   "XDG_CACHE_HOME": str(home / ".cache"), "TMPDIR": str(root)}
-            transport = CodexTransport(binary=binary, cwd=str(project), runtime_env=env)
-            try:
-                await transport.start()
-                effective = await transport.send_request("config/read", {"cwd": str(project)})
-                self.assertIn("project-only", effective["config"]["mcp_servers"])
-                await transport.send_request("thread/start", {
-                    "cwd": str(project), "model": "gpt-5", "approvalPolicy": "never",
-                    "sandbox": "read-only",
-                })
-                await asyncio.sleep(0.5)
-                self.assertFalse(marker.exists())
-            finally:
-                await transport.stop()
+
+        for trusted in (False, True):
+            with self.subTest(trusted=trusted), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                home = root / "home"
+                codex_home = home / ".codex"
+                project = root / "project"
+                codex_home.mkdir(parents=True)
+                (project / ".codex").mkdir(parents=True)
+                marker = root / "started"
+                if trusted:
+                    codex_home.joinpath("config.toml").write_text(
+                        f'[projects.{json.dumps(str(project))}]\ntrust_level = "trusted"\n'
+                    )
+                else:
+                    codex_home.joinpath("config.toml").write_text("")
+                project.joinpath(".codex/config.toml").write_text(
+                    "[mcp_servers.acc]\ncommand = \"/usr/bin/touch\"\n"
+                    f"args = [{json.dumps(str(marker))}]\n"
+                )
+                env = {
+                    "PATH": os.environ.get("PATH", os.defpath),
+                    "HOME": str(home),
+                    "CODEX_HOME": str(codex_home),
+                    "XDG_CONFIG_HOME": str(home / ".config"),
+                    "XDG_DATA_HOME": str(home / ".local/share"),
+                    "XDG_CACHE_HOME": str(home / ".cache"),
+                    "TMPDIR": str(root),
+                }
+                transport = CodexTransport(binary=binary, cwd=str(project), runtime_env=env)
+                try:
+                    await transport.start()
+                    await transport.send_request("thread/start", {
+                        "cwd": str(project),
+                        "model": "gpt-5",
+                        "approvalPolicy": "never",
+                        "sandbox": "danger-full-access",
+                        "ephemeral": True,
+                    })
+                    await asyncio.sleep(0.5)
+                    self.assertFalse(marker.exists())
+                finally:
+                    await transport.stop()
