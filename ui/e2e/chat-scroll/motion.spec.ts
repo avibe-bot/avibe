@@ -840,8 +840,10 @@ test('the running card shows its full view each time it opens, and closing it ag
   const card = page.locator('[data-transcript-key="activity-live"]');
   await expect(card).toBeVisible();
   await page.waitForTimeout(600);
-  const toggle = card.locator('button[aria-expanded]').first();
+  // Opened by its label, then by the chevron beside it: both are the same disclosure control.
   for (const round of [1, 2]) {
+    // The label has no name of its own; the chevron is named for what it does.
+    const toggle = card.locator(round === 1 ? 'button[aria-expanded]:not([aria-label])' : 'button[aria-expanded][aria-label]').first();
     await watchReveals(page);
     await toggle.click();
     await expect(toggle).toHaveAttribute('aria-expanded', 'true');

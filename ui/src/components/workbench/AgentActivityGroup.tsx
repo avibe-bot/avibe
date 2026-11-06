@@ -518,7 +518,8 @@ export const ActivityCard: React.FC<{
               <X className="size-3.5" aria-hidden="true" />
             </button>
           )}
-          <button type="button" onClick={onToggleExpanded} aria-label={t('chat.agentActivity.collapse')}>
+          {/* A disclosure control like the label beside it, so opening by either is the same tap. */}
+          <button type="button" onClick={onToggleExpanded} aria-expanded={expanded} aria-label={t('chat.agentActivity.collapse')}>
             <ChevronDown
               className={clsx('size-3.5 shrink-0 text-muted transition-transform', expanded && 'rotate-180')}
               aria-hidden="true"
@@ -691,7 +692,7 @@ export const ActivityChip: React.FC<{
                 <span className="min-w-0 truncate text-[12px] font-medium text-foreground/90">{label}</span>
               </button>
               <ToolsEyePill shown={showToolCalls} onToggle={onToggleTools} />
-              <button type="button" onClick={onToggle} aria-label={t('chat.agentActivity.collapse')}>
+              <button type="button" onClick={onToggle} aria-expanded={expanded} aria-label={t('chat.agentActivity.collapse')}>
                 <ChevronDown className="size-3.5 shrink-0 rotate-180 text-muted" aria-hidden="true" />
               </button>
             </div>
