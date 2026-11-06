@@ -365,12 +365,22 @@ bridge and do not run these Web UI branches.
 
 ## Verification
 
-- Xcode 27.2 simulator: Debug XCTest and Release-macro XCTest with no signing,
-  including bridge policy, runtime `app.showAccount`, account transport
-  lifecycle, stage-accurate failure mapping, bounded hanging readiness/GET/DELETE,
-  cold selection ownership, bundled full-bleed/keyboard constraints, and real
-  WebKit cookie behavior against a hermetic local server.
-- CI remains authoritative on Xcode 26.6 and runs `lint` plus `ios-shell`.
+| Environment | Coverage |
+| --- | --- |
+| CI: Xcode 26.6, iOS 26.4.1 simulator | Authoritative `ios-shell` build and serialized full XCTest, including cold WebKit transport startup, redirect isolation, cookie behavior, and bundled-page interaction. |
+| Local: Xcode 27.2, iOS 26.4.1 simulator | Full Debug XCTest plus repeated serialized transport integration and the compact keyboard viewport regression. |
+| Local: Xcode 27.2, iOS 27.2 simulator | Debug and Release-macro full XCTest without signing, repeated serialized transport integration, compact keyboard viewport, and light/dark screenshots. |
+
+The initial hidden-WebView readiness bound is 30 seconds so a cold WebContent
+process on the CI runtime can start without leaving account operations
+unbounded. Request and best-effort logout deadlines remain independently
+bounded.
+
+- Native XCTest covers bridge policy, runtime `app.showAccount`, account
+  transport lifecycle, stage-accurate failure mapping, bounded hanging
+  readiness/GET/DELETE, cold selection ownership, bundled
+  full-bleed/keyboard constraints, and real WebKit cookie behavior against a
+  hermetic local server.
 - Web UI: focused Vitest coverage for the bundled OTP/picker/account flow,
   bridge adapter, haptics, Workbench outer-scroll lifecycle, keyboard ownership,
   hidden Web Push/installation surfaces, and all five PWA decisions; production
@@ -380,8 +390,10 @@ bridge and do not run these Web UI branches.
   covers scrolling to and selecting the final instance plus OTP button access
   with the keyboard on a compact viewport; light and dark screenshots verify
   full-bleed safe-area backgrounds.
-- Production Supabase mail delivery, hosted OTP policy, real account refresh,
-  consent, and device behavior remain unverified.
+- The owner manually verified production Supabase email OTP, a real account
+  session, and online/offline instance discovery on the iOS 27.2 simulator.
+  First-instance consent, hosted refresh competition, and physical-device
+  keyboard/autofill remain unverified.
 
 ## Local build
 
@@ -430,15 +442,18 @@ Avibe instance.
 
 ## CI
 
-`.github/workflows/ios-shell.yml` runs for iOS changes and direct bundled-mobile
-inputs. It installs the repository-pinned Node version and lockfile, runs
-`build:mobile`, verifies the generated entry and assets, then pins the same
-Xcode 26.6 toolchain used by the desktop native workflow. The workflow builds
-against the iOS Simulator SDK without signing and runs the XCTest navigation,
-new-window, download, bundled-page, and WebKit capability contracts on an
-available iPhone simulator. Debug and Release use the same generated folder
-resource; the bundled-page XCTest resolves `MobileApp` from the built
-application bundle and executes its React entry through `avibe-app://bundle`.
+`.github/workflows/ios-shell.yml` runs for iOS changes and the complete browser
+input set declared by `BROWSER_CHECKOUT` (except the Docker packaging file).
+A structural test derives both pull-request and push path lists from that
+single source, so new shared or out-of-tree UI inputs cannot silently skip the
+mobile build. The job installs the repository-pinned Node version and lockfile,
+runs `build:mobile`, verifies the generated entry and assets, then pins the same
+Xcode 26.6 toolchain used by the desktop native workflow. It builds against the
+iOS Simulator SDK without signing and runs the XCTest navigation, new-window,
+download, bundled-page, and WebKit capability contracts on an available iPhone
+simulator. Debug and Release use the same generated folder resource; the
+bundled-page XCTest resolves `MobileApp` from the built application bundle and
+executes its React entry through `avibe-app://bundle`.
 
 ## TestFlight prerequisites
 

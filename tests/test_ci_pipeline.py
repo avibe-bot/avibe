@@ -518,14 +518,15 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
         (ROOT / ".github/workflows/ios-shell.yml").read_text(encoding="utf-8")
     )
     triggers = workflow[True]
+    browser_inputs = [
+        f"{entry}**" if entry.endswith("/") else entry
+        for entry in BROWSER_CHECKOUT
+        if entry != "Dockerfile"
+    ]
     expected_paths = [
         "ios/**",
-        "ui/src/mobile/**",
-        "ui/mobile.html",
-        "ui/vite.mobile.config.ts",
-        "ui/package*.json",
-        "assets/mascot/cloud-tuanzi-v2.png",
         ".github/workflows/ios-shell.yml",
+        *browser_inputs,
     ]
     assert triggers["pull_request"]["paths"] == expected_paths
     assert triggers["push"]["paths"] == expected_paths

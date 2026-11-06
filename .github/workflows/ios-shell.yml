@@ -4,23 +4,21 @@ on:
   pull_request:
     paths:
       - "ios/**"
-      - "ui/src/mobile/**"
-      - "ui/mobile.html"
-      - "ui/vite.mobile.config.ts"
-      - "ui/package*.json"
-      - "assets/mascot/cloud-tuanzi-v2.png"
       - ".github/workflows/ios-shell.yml"
+      - "ui/**"
+      - "vibe/message_types.json"
+      - "vibe/data/**"
+      - "assets/mascot/cloud-tuanzi-v2.png"
   push:
     branches:
       - master
     paths:
       - "ios/**"
-      - "ui/src/mobile/**"
-      - "ui/mobile.html"
-      - "ui/vite.mobile.config.ts"
-      - "ui/package*.json"
-      - "assets/mascot/cloud-tuanzi-v2.png"
       - ".github/workflows/ios-shell.yml"
+      - "ui/**"
+      - "vibe/message_types.json"
+      - "vibe/data/**"
+      - "assets/mascot/cloud-tuanzi-v2.png"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}

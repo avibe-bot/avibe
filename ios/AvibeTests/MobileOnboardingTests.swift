@@ -207,16 +207,26 @@ final class MobileOnboardingTests: XCTestCase {
 
         let welcome = try await waitForJavaScriptValue(in: webView) {
             """
-            document.querySelector("main button") !== null
+            (() => {
+              const button = document.querySelector("main button");
+              return button instanceof HTMLButtonElement && !button.disabled;
+            })()
             """
         }
         XCTAssertTrue(welcome)
-        _ = try await webView.evaluateJavaScript(
+        let openedEmail = try await webView.evaluateJavaScript(
             """
-            document.querySelector("main button")?.click();
-            true;
+            (() => {
+              const button = document.querySelector("main button");
+              if (!(button instanceof HTMLButtonElement) || button.disabled) {
+                return false;
+              }
+              button.click();
+              return true;
+            })()
             """
-        )
+        ) as? Bool
+        XCTAssertEqual(openedEmail, true)
 
         let emailReady = try await waitForJavaScriptValue(in: webView) {
             """
@@ -224,21 +234,38 @@ final class MobileOnboardingTests: XCTestCase {
             """
         }
         XCTAssertTrue(emailReady)
-        _ = try await webView.evaluateJavaScript(
+        let enteredEmail = try await replaceText(
+            "alex@example.com",
+            in: webView,
+            selector: "#mobile-login-email"
+        )
+        XCTAssertTrue(enteredEmail)
+        let emailSubmitReady = try await waitForJavaScriptValue(in: webView) {
             """
             (() => {
-              const input = document.querySelector("#mobile-login-email");
-              const setter = Object.getOwnPropertyDescriptor(
-                HTMLInputElement.prototype,
-                "value"
-              )?.set;
-              setter?.call(input, "alex@example.com");
-              input?.dispatchEvent(new Event("input", {bubbles: true}));
-              document.querySelector("form button[type=submit]")?.click();
+              const button = document.querySelector(
+                "form button[type=submit]"
+              );
+              return button instanceof HTMLButtonElement && !button.disabled;
+            })()
+            """
+        }
+        XCTAssertTrue(emailSubmitReady)
+        let submittedEmail = try await webView.evaluateJavaScript(
+            """
+            (() => {
+              const button = document.querySelector(
+                "form button[type=submit]"
+              );
+              if (!(button instanceof HTMLButtonElement) || button.disabled) {
+                return false;
+              }
+              button.click();
               return true;
             })()
             """
-        )
+        ) as? Bool
+        XCTAssertEqual(submittedEmail, true)
 
         let codeReady = try await waitForJavaScriptValue(in: webView) {
             """
@@ -246,21 +273,12 @@ final class MobileOnboardingTests: XCTestCase {
             """
         }
         XCTAssertTrue(codeReady)
-        _ = try await webView.evaluateJavaScript(
-            """
-            (() => {
-              const input = document.querySelector("#mobile-login-code");
-              input?.focus();
-              const setter = Object.getOwnPropertyDescriptor(
-                HTMLInputElement.prototype,
-                "value"
-              )?.set;
-              setter?.call(input, "123456");
-              input?.dispatchEvent(new Event("input", {bubbles: true}));
-              return true;
-            })()
-            """
+        let enteredCode = try await replaceText(
+            "123456",
+            in: webView,
+            selector: "#mobile-login-code"
         )
+        XCTAssertTrue(enteredCode)
 
         window.frame = CGRect(x: 0, y: 0, width: 320, height: 280)
         controller.view.frame = window.bounds
@@ -855,6 +873,30 @@ final class MobileOnboardingTests: XCTestCase {
             controller.view.subviews.compactMap { $0 as? WKWebView }.first
         )
         return (window, webView)
+    }
+
+    private func replaceText(
+        _ text: String,
+        in webView: WKWebView,
+        selector: String
+    ) async throws -> Bool {
+        let result = try await webView.callAsyncJavaScript(
+            """
+            const input = document.querySelector(selector);
+            if (!(input instanceof HTMLInputElement)) return false;
+            input.focus();
+            // WebKit emits the editing events React observes for keyboard input.
+            return document.execCommand("insertText", false, text)
+              && input.value === text;
+            """,
+            arguments: [
+                "selector": selector,
+                "text": text,
+            ],
+            in: nil,
+            contentWorld: .page
+        )
+        return result as? Bool == true
     }
 
     private func waitForJavaScriptValue(

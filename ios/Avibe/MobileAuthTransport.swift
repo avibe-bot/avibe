@@ -22,7 +22,7 @@ struct MobileAuthTransportDeadlines: Equatable {
     let logoutMilliseconds: Int
 
     static let standard = MobileAuthTransportDeadlines(
-        readinessMilliseconds: 10_000,
+        readinessMilliseconds: 30_000,
         requestMilliseconds: 15_000,
         logoutMilliseconds: 5_000
     )

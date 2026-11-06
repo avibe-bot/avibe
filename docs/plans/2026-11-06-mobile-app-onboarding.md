@@ -188,10 +188,11 @@ compiled only in Debug/test builds; Release ignores it.
 
 Backend authorization and response behavior, React state/accessibility, Swift
 session state, cookie handling, and simulator UI use hermetic fixtures.
-The owner separately verified production Supabase email OTP on the iOS 27.2
-simulator on 2026-11-06. Automated production email, hosted token refresh,
-physical-device autofill, and real instance consent remain explicitly
-unverified until an isolated integration environment is available.
+The owner separately verified production Supabase email OTP, a real account
+session, and online/offline instance discovery on the iOS 27.2 simulator on
+2026-11-06. Hosted token refresh competition, physical-device autofill, and
+real first-instance consent remain explicitly unverified until an isolated
+integration environment is available.
 
 ### Known-by-design ledger
 
@@ -229,6 +230,15 @@ for request/response events instead of racing the app deadline, and
 cross-origin cases use a numeric loopback host rather than DNS fallback.
 `ios-shell` uploads the `.xcresult` bundle when XCTest fails so the exact
 assertion and attachment evidence remain available.
+
+The validation matrix covers the CI-fixed Xcode 26.6 / iOS 26.4.1 simulator,
+local Xcode 27.2 / iOS 26.4.1 full Debug XCTest and repeated transport runs,
+and local Xcode 27.2 / iOS 27.2 Debug and Release-macro runs. Cold WebContent
+startup on iOS 26.4.1 can exceed ten seconds, so the product readiness bound is
+30 seconds while request and best-effort logout deadlines stay independently
+bounded. `ios-shell` triggers on the browser input set declared by
+`BROWSER_CHECKOUT` (except `Dockerfile`), with a structural test pinning both
+workflow events to that source.
 
 Any future release, archive, signing, or TestFlight workflow must perform
 `npm ci`, `npm run build:mobile`, and the same bundle verification in the job
