@@ -198,6 +198,7 @@ class NativeServer:
     definition: Optional[dict[str, Any]]
     error: Optional[McpHubError]
     has_cwd: bool = False
+    project: bool = False
 
 
 def _native_enabled(source: str, entry: dict[str, Any]) -> bool:
@@ -256,6 +257,75 @@ def read_all() -> dict[str, NativeServer]:
                     has_cwd=isinstance(entry, dict) and "cwd" in entry,
                 )
     return servers
+
+
+def _project_codex_path(root: Path) -> Path:
+    return root / ".codex" / "config.toml"
+
+
+def _project_opencode_paths(root: Path) -> list[Path]:
+    return [
+        root / "opencode.json",
+        root / "opencode.jsonc",
+        root / ".opencode" / "opencode.json",
+        root / ".opencode" / "opencode.jsonc",
+    ]
+
+
+def read_project(root: Path) -> dict[str, NativeServer]:
+    """Read only the explicitly selected project's native files.
+
+    This intentionally does not walk ancestors or subdirectories. The Hub's
+    project order is `.mcp.json`, Claude local, Codex, then OpenCode.
+    """
+    root = root.resolve()
+    result: dict[str, NativeServer] = {}
+
+    def add(source: str, path: Path, entries: dict[str, Any]) -> None:
+        for name, entry in entries.items():
+            if name in result:
+                continue
+            try:
+                if not isinstance(entry, dict):
+                    raise McpHubError("invalid_definition", f"{source} entry {name!r} is not an object.")
+                if not _native_enabled(source, entry):
+                    continue
+                result[str(name)] = NativeServer(str(name), source, path, _from_native(source, str(name), entry, path), None, "cwd" in entry, True)
+            except McpHubError as exc:
+                result[str(name)] = NativeServer(str(name), source, path, None, exc, isinstance(entry, dict) and "cwd" in entry, True)
+
+    # Claude local scope is keyed by canonical project root.
+    try:
+        path, data = _load(CLAUDE)
+        projects = data.get("projects") if isinstance(data.get("projects"), dict) else {}
+        local = projects.get(str(root), {})
+        add(CLAUDE, path, local.get("mcpServers", {}) if isinstance(local, dict) else {})
+    except McpHubError:
+        pass
+
+    # Codex project config is active only for an explicitly trusted root.
+    try:
+        _path, global_data = _load(CODEX)
+        projects = global_data.get("projects") if isinstance(global_data.get("projects"), dict) else {}
+        trusted = projects.get(str(root), {})
+        trusted = isinstance(trusted, dict) and trusted.get("trust_level") == "trusted"
+        path = _project_codex_path(root)
+        if trusted and path.exists():
+            data = _parse(CODEX, path.read_text(encoding="utf-8"))
+            add(CODEX, path, _servers(CODEX, data))
+    except (OSError, ValueError, McpHubError):
+        pass
+
+    # OpenCode V2 project files accumulate unique names; nearest file wins.
+    for path in reversed(_project_opencode_paths(root)):
+        if not path.exists():
+            continue
+        try:
+            data = _parse(OPENCODE, path.read_text(encoding="utf-8"))
+            add(OPENCODE, path, _servers(OPENCODE, data))
+        except (OSError, ValueError, McpHubError):
+            continue
+    return result
 
 
 def disabled_source(name: str) -> Optional[str]:
@@ -342,7 +412,7 @@ def _remove_text(source: str, text: str, name: str) -> str:
     return remove_jsonc_member(text, parent, name)
 
 
-def remove_entry(source: str, name: str) -> bool:
+def remove_entry(source: str, name: str, *, path: Optional[Path] = None) -> bool:
     """Delete ``name`` from ``source``'s native file; ``False`` if it is already gone.
 
     Re-reads the file, so an edit since discovery is respected. The result must
@@ -350,13 +420,46 @@ def remove_entry(source: str, name: str) -> bool:
     """
 
     with _EDIT_LOCK:
-        return _remove_entry_locked(source, name)
+        return _remove_entry_locked(source, name, path=path)
 
 
-def _remove_entry_locked(source: str, name: str) -> bool:
+def remove_project_entry(server: NativeServer, root: Path) -> bool:
+    """Remove one root-project declaration from a native project source."""
+    path = server.path
+    if server.source != CLAUDE:
+        return _remove_entry_locked(server.source, server.name, path=path)
+    text = path.read_text(encoding="utf-8")
+    data = _parse(server.source, text)
+    if server.source == CLAUDE:
+        projects = data.get("projects", {})
+        project = projects.get(str(root.resolve()), {}) if isinstance(projects, dict) else {}
+        servers = project.get("mcpServers", {}) if isinstance(project, dict) else {}
+        if server.name not in servers:
+            return False
+        del servers[server.name]
+    else:
+        servers = _servers(server.source, data)
+        if server.name not in servers:
+            return False
+        servers.pop(server.name)
+    from vibe.opencode_config import remove_jsonc_member
+    updated = remove_jsonc_member(text, ("projects", str(root.resolve()), "mcpServers"), server.name)
+    expected = json.loads(json.dumps(data))
+    del expected["projects"][str(root.resolve())]["mcpServers"][server.name]
+    if _parse(server.source, updated) != expected:
+        raise McpHubError("invalid_native_config", f"could not remove {server.name!r} without changing other content")
+    from config.atomic_io import write_atomic
+    write_atomic(path, updated, follow_symlinks=True, mode=path.stat().st_mode & 0o777)
+    return True
+
+
+def _remove_entry_locked(source: str, name: str, *, path: Optional[Path] = None) -> bool:
     from config.atomic_io import write_atomic
 
-    path, _data = _load(source)
+    if path is None:
+        path, _data = _load(source)
+    else:
+        _data = _parse(source, path.read_text(encoding="utf-8"))
     try:
         text = path.read_text(encoding="utf-8")
         data = _parse(source, text)

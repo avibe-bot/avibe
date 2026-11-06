@@ -172,6 +172,12 @@ def _raw_entry(key: ScopedName) -> dict[str, Any]:
         if "oauth" in stored:
             raw["oauth"] = stored["oauth"]
         return raw
+    project_native = native.read_project(key.project_root) if key.project_root else {}
+    native_server = project_native.get(key.name)
+    if native_server is not None:
+        if native_server.error or native_server.definition is None:
+            raise native_server.error or McpHubError("invalid_definition", f"{key}: invalid native entry")
+        return native_server.definition
     try:
         _, document = _document(key.scope)
     except (OSError, ValueError) as exc:
@@ -265,6 +271,8 @@ class ScopedServer:
     state: str
     missing: list[str]
     placeholders: list[str]
+    native_source: Optional[str] = None
+    native_path: Optional[Path] = None
 
     def require_definition(self) -> dict[str, Any]:
         if self.state in BLOCKED_STATES:
@@ -290,8 +298,8 @@ class ScopedServer:
             "name": str(self.key),
             "scope": self.key.scope.key,
             "state": state,
-            "source": "project" if repository.is_project(self.key) else "avibe",
-            "sourcePath": str(_project_file(self.key.scope) if repository.is_project(self.key) else repository._avibe_definition_path(self.key.name)),
+            "source": self.native_source or ("project" if repository.is_project(self.key) else "avibe"),
+            "sourcePath": str(self.native_path or (_project_file(self.key.scope) if repository.is_project(self.key) else repository._avibe_definition_path(self.key.name))),
             "missingVariables": self.missing,
             "placeholders": self.placeholders,
             "url": self.raw.get("url", ""),
@@ -423,6 +431,13 @@ def project_add_definition(name: str, raw: object) -> dict[str, Any]:
 
 
 def load_server(key: ScopedName) -> ScopedServer:
+    if repository.is_project(key):
+        native_server = (native.read_project(key.project_root) if key.project_root else {}).get(key.name)
+        if native_server is not None:
+            if native_server.error or native_server.definition is None:
+                raise native_server.error or McpHubError("invalid_definition", f"{key}: invalid native entry")
+            approved = _cached(key, "approval.json").get("fingerprint") == fingerprint(native_server.definition)
+            return ScopedServer(key, native_server.definition, native_server.definition, "ok" if approved else "pending_approval", [], [], native_server.source, native_server.path)
     raw = _raw_entry(key)
     definition, missing, placeholders = _effective(key, raw, _secrets(key))
     if missing:
@@ -455,7 +470,7 @@ def resolve(selected: list[Scope], name: str) -> ScopedName:
     """Bounded name lookup: the caller's project entry shadows global; nothing else is read."""
 
     project = selected[-1]
-    if project.project_root is not None and name in _project_names(project):
+    if project.project_root is not None and (name in _project_names(project) or name in native.read_project(project.project_root)):
         return ScopedName(project, name)
     return ScopedName(Scope(), name)
 
@@ -481,6 +496,18 @@ def project_servers(scope: Scope) -> dict[str, Optional[ScopedServer]]:
             result[name] = load_server(ScopedName(scope, name))
         except McpHubError as exc:
             logger.warning("Skipping invalid project MCP server %s: %s", name, exc)
+            result[name] = None
+    for name, native_server in native.read_project(scope.project_root).items() if scope.project_root else {}.items():
+        if name in result:
+            continue
+        if native_server.error:
+            result[name] = None
+            continue
+        key = ScopedName(scope, name)
+        try:
+            approval = _cached(key, "approval.json").get("fingerprint") == fingerprint(native_server.definition)
+            result[name] = ScopedServer(key, native_server.definition or {}, native_server.definition, "ok" if approval else "pending_approval", [], [], native_server.source, native_server.path)
+        except McpHubError:
             result[name] = None
     return result
 
@@ -691,6 +718,14 @@ def write_server(key: ScopedName, entry: Optional[dict[str, Any]], *, replace: b
 
 
 def remove_server(key: ScopedName) -> None:
+    if repository.is_project(key) and key.project_root:
+        native_server = native.read_project(key.project_root).get(key.name)
+        if native_server is not None:
+            native.remove_project_entry(native_server, key.project_root)
+            directory = repository.package_dir(key)
+            if directory.exists():
+                shutil.rmtree(directory)
+            return
     write_server(key, None)
     directory = repository.package_dir(key)
     if directory.exists():

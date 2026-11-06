@@ -38,8 +38,11 @@ Non-goals:
 - Changing the global layout. It is already private (`0700`/`0600`, outside any
   repository) and shipped in v3.2.4; no migration.
 - Security isolation between Projects of the same OS user (§10).
-- Importing other native project configs (`opencode.json`, Codex project config,
-  Claude's per-path entries in `~/.claude.json`).
+- Native project import follows the separate PR3 contract: project-root Claude
+  local, trusted Codex `.codex/config.toml`, and root OpenCode files are read
+  read-only in Hub order `.mcp.json` > Claude > Codex > OpenCode. Ancestor walks,
+  cross-file Codex merges, OpenCode V1 lookup and per-tool precedence remain
+  out of scope.
 - A file watcher, or a Project delete flow (Projects only archive today).
 
 ## 3. Decisions

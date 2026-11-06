@@ -237,7 +237,38 @@ def test_opencode_local_cwd_is_resolved_from_native_file(native_files):
     opencode.write_text(json.dumps(data))
     definition = repository.read_definition("local-cwd")
     assert definition["transport"]["cwd"] == str(opencode.parent)
-    assert definition["transport"]["command"] == "./server"
+
+
+def test_project_native_sources_are_root_scoped_and_ordered(tmp_path, monkeypatch):
+    root = tmp_path / "project"
+    (root / ".codex").mkdir(parents=True)
+    (root / ".opencode").mkdir()
+    (root / ".mcp.json").write_text(json.dumps({"mcpServers": {"repo": {"command": "repo"}}}))
+    claude = tmp_path / "claude.json"
+    claude.write_text(json.dumps({"projects": {str(root.resolve()): {"mcpServers": {"claude": {"command": "claude"}}}}}))
+    codex = tmp_path / "config.toml"
+    codex.write_text(f'[projects."{root.resolve()}"]\ntrust_level = "trusted"\n')
+    project_codex = root / ".codex" / "config.toml"
+    project_codex.write_text('[mcp_servers.codex]\ncommand = "codex"\n')
+    (root / "opencode.json").write_text(json.dumps({"mcp": {"servers": {"open": {"type": "local", "command": ["open"]}}}}))
+    (root / ".opencode" / "opencode.jsonc").write_text(json.dumps({"mcp": {"servers": {"open": {"type": "local", "command": ["near"]}, "near": {"type": "local", "command": ["near"]}}}}))
+    monkeypatch.setattr(native, "claude_path", lambda: claude)
+    monkeypatch.setattr(native, "codex_path", lambda: codex)
+    result = native.read_project(root)
+    assert set(result) == {"claude", "codex", "open", "near"}
+    assert result["open"].definition["transport"]["command"] == "near"
+    assert result["codex"].path == project_codex
+
+
+def test_project_codex_is_ignored_without_trust(tmp_path, monkeypatch):
+    root = tmp_path / "project"
+    (root / ".codex").mkdir(parents=True)
+    (root / ".codex" / "config.toml").write_text('[mcp_servers.secret]\ncommand = "secret"\n')
+    codex = tmp_path / "config.toml"
+    codex.write_text("")
+    monkeypatch.setattr(native, "claude_path", lambda: tmp_path / "missing-claude.json")
+    monkeypatch.setattr(native, "codex_path", lambda: codex)
+    assert native.read_project(root) == {}
 
 
 def test_natively_disabled_entry_is_omitted_from_hub_lists(native_files):

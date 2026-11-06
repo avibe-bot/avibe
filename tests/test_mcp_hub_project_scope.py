@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from core.mcp_hub import repository
+from core.mcp_hub import native, repository
 from core.mcp_hub import runtime as mcp_runtime
 from core.mcp_hub.runtime import McpRuntime
 from tests.ui_server_test_helpers import save_config
@@ -822,3 +822,18 @@ def test_project_add_splits_templates_from_concrete_values(tmp_path, runtime, fi
         scope.write_server(key, {**transport, field: {"BAD\nKEY": "invalid"}})
     assert (root / ".mcp.json").read_bytes() == old_document
     assert (cache_path.read_bytes() if cache_path.exists() else None) == old_cache
+
+
+def test_project_native_row_is_pending_and_uses_native_chip(tmp_path, monkeypatch):
+    from core.mcp_hub import scope
+
+    root = _project(tmp_path / "repo", {})
+    entry = native.NativeServer(
+        "codex-only", native.CODEX, root / ".codex" / "config.toml",
+        {"name": "codex-only", "transport": {"type": "stdio", "command": "codex"}}, None, False, True,
+    )
+    monkeypatch.setattr(native, "read_project", lambda _root: {entry.name: entry})
+    rows = scope.project_servers(scope.Scope("project:test", root))
+    assert rows[entry.name].state == "pending_approval"
+    assert rows[entry.name].summary()["source"] == "codex"
+    assert rows[entry.name].summary()["scope"] == "project:test"
