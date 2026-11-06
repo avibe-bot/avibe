@@ -13,7 +13,8 @@ import pytest
 
 _ROOT = Path(__file__).resolve().parents[1]
 # Captured from the pre-refactor parser (29bec5f70), not derived from the parser
-# under test. COLUMNS is pinned below so usage wrapping is deterministic.
+# under test. Only usage whitespace is normalized: argparse wrapping varies
+# across supported Python versions even with COLUMNS pinned.
 _MISSING_SUBCOMMANDS = [
     (["agent"], "{list,show,models,create,update,enable,disable,remove,import,run}",
      "usage: vibe agent [-h]\n                  {list,show,models,create,update,enable,disable,remove,import,run}\n                  ...", None),
@@ -148,7 +149,9 @@ def test_static_entry_never_imports_runtime_or_opens_database(tmp_path, remote, 
     assert result.returncode == exit_code, result.stderr
     if isinstance(output, dict):
         assert result.stdout == ""
-        assert json.loads(result.stderr) == output
+        payload = json.loads(result.stderr)
+        assert payload.pop("usage").split() == output["usage"].split()
+        assert payload == {key: value for key, value in output.items() if key != "usage"}
     elif output in {"error", "unsupported-version"}:
         assert result.stdout == ""
         payload = json.loads(result.stderr)
@@ -156,7 +159,9 @@ def test_static_entry_never_imports_runtime_or_opens_database(tmp_path, remote, 
             assert payload["error"] == "unrecognized arguments: --version"
         if argv == ["restart", "--delay-seconds", "nan"]:
             assert payload["error"] == "argument --delay-seconds: must be finite"
-            assert payload["usage"] == "usage: vibe restart [-h] [--delay-seconds DELAY_SECONDS] [--allow-downgrade]"
+            assert payload["usage"].split() == (
+                "usage: vibe restart [-h] [--delay-seconds DELAY_SECONDS] [--allow-downgrade]"
+            ).split()
         assert payload["schema_version"] == 1
         assert payload["ok"] is False
         assert payload["kind"] == "error"

@@ -56,7 +56,9 @@ remain the primary coverage for their respective contracts.
 - [x] Implement light entry dependencies and local handler imports.
 - [x] Retarget accidental test aliases and run focused regressions/lint:
       2,043 cases passed across five focused invocations, including 57 cold-entry,
-      parser-tail and selected-command cases. The Show/Watch bundle required a
+      parser-tail and selected-command cases. Those 57 cases pass on Python 3.12
+      and 3.14; only stdlib-controlled usage whitespace is normalized, while
+      usage tokens and the rest of each error envelope remain exact. The Show/Watch bundle required a
       process-local `ulimit -n 4096` after macOS's default descriptor limit was
       exhausted; the isolated rerun passed all 239 cases. No product change was
       made for that test-process limit.
