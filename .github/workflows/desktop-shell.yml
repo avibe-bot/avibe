@@ -142,7 +142,7 @@ jobs:
       - name: Install startup fixture dependencies
         working-directory: .
         run: |
-          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.12.10
+          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.13.7
           uv sync --frozen --no-install-project --no-dev
 
       - name: Verify launcher stdout closes while Runtime children stay alive
