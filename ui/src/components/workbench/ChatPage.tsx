@@ -237,17 +237,34 @@ const emptyRuntimeState = (): SessionRuntimeState => ({
 const MAX_RETAINED_MESSAGES = 300;
 
 // Upward input requests the older page while this much history is still above
-// the viewport, so the page lands off-screen while the reader is still moving
-// rather than after a fling has run into the top and stopped there (on iOS, in
-// the top bounce, which overrides the restore's write). Five screens, about what
-// a hard flick covers while a page is on its way, and never less than
-// OLDER_PREFETCH_MIN_PX.
-const OLDER_PREFETCH_SCREENS = 5;
-const OLDER_PREFETCH_MIN_PX = 2500;
+// the viewport, so it is in hand well before the reader gets to the top. It is
+// inserted at the next pause (``whenSettled`` in the Transcript): measured on an
+// iPhone (iOS 27), a hard flick covers five screens before a page arrives, and
+// the page needs the reader to stop once before the top. Eight screens, and never
+// less than OLDER_PREFETCH_MIN_PX.
+const OLDER_PREFETCH_SCREENS = 8;
+const OLDER_PREFETCH_MIN_PX = 4000;
 const olderPrefetchBand = (el: HTMLElement) => Math.max(OLDER_PREFETCH_MIN_PX, el.clientHeight * OLDER_PREFETCH_SCREENS);
 // Near the hard top an older page is always asked for (the band paging used
 // before the prefetch).
 const OLDER_AT_TOP_PX = 120;
+// When the transcript counts as at rest (``whenSettled``). Measured on iOS 27,
+// momentum can go quiet for up to 300 ms and then move its last pixels, which
+// overwrites any write made in between. So rest is the ``scrollend`` iOS sends
+// once its own scrolling has really finished, then SETTLE_QUIET_MS; an engine
+// without ``scrollend`` waits SETTLE_QUIET_NO_SCROLLEND_MS of silence, and a
+// ``scrollend`` that never comes stops counting after SETTLE_SCROLLEND_LOST_MS.
+const SETTLE_QUIET_MS = 150;
+const SETTLE_QUIET_NO_SCROLLEND_MS = 400;
+const SETTLE_SCROLLEND_LOST_MS = 1500;
+// A write that held the reader's place, put back by the platform within this
+// long (iOS finishing a scroll animation of its own: measured 80 ms after the
+// write), is made once more.
+const TAKEBACK_WINDOW_MS = 250;
+// iOS also sends ``scrollend`` for a write of ours, 10-30 ms after it, while
+// its own momentum goes on (measured on iOS 27). One this soon after our last
+// write does not end the platform's scrolling.
+const SCROLLEND_AFTER_WRITE_MS = 100;
 /** Whether a request failed without the server refusing it: no answer at all
  *  (offline, a timeout), or the server, or the tunnel to it, failing. A refusal
  *  (any 4xx) is the server's say about the chat, and the saved copy defers to it. */
@@ -1577,7 +1594,7 @@ export const ChatPage: React.FC = () => {
   // answer and the device holds nothing more joined to the head), so the
   // transcript scroller can re-arm and let a later scroll retry; true for
   // success / no-op / stale session.
-  const loadOlderMessages = useCallback(async (): Promise<boolean> => {
+  const loadOlderMessages = useCallback(async (whenSettled?: () => Promise<void>): Promise<boolean> => {
     if (!sessionId || !olderCursor || loadingOlderRef.current) return true;
     // A painted cursor pages from a window the bootstrap is about to replace,
     // unless that bootstrap could not reach the server: then what this device
@@ -1592,6 +1609,15 @@ export const ChatPage: React.FC = () => {
       // (docs/plans/local-sync-store.md section 4.3).
       const head = messagesRef.current[0];
       const generation = committedTranscriptReadGenerationRef.current;
+      // Rows go in above the reader only while the transcript is at rest (the
+      // Transcript's ``whenSettled``); the reads themselves never wait. Whatever
+      // landed meanwhile still decides whether they go in at all.
+      const settled = async () => {
+        if (whenSettled) await whenSettled();
+        return sessionId === sessionIdRef.current
+          && committedTranscriptReadGenerationRef.current === generation
+          && isChatSnapshotPainted() === painted;
+      };
       const local = head && head.id === olderCursor ? await readLocalStoreOlder(sessionId, head, OLDER_PAGE_SIZE) : null;
       if (sessionId !== sessionIdRef.current) return true; // switched chats mid-read
       // A live window landed while the store answered (the bootstrap after a
@@ -1599,6 +1625,7 @@ export const ChatPage: React.FC = () => {
       if (committedTranscriptReadGenerationRef.current !== generation || isChatSnapshotPainted() !== painted) return true;
       const saved = (local?.messages ?? []).filter(isTranscriptMessage);
       if (saved.length) {
+        if (!(await settled())) return true;
         // While painted, they leave when its bootstrap lands.
         if (painted) for (const row of saved) savedRowsRef.current.add(row);
         prependOlder(saved);
@@ -1635,6 +1662,9 @@ export const ChatPage: React.FC = () => {
         // The server answered with a refusal: the saved rows shown ahead of it go,
         // and the rows it was asked about are its call.
         if (saved.length) {
+          // Waited for rest: the chat may have changed meanwhile, and nothing
+          // here may touch the one that replaced it.
+          if (!(await settled())) return true;
           const shown = new Set(saved);
           setMessages((prev) => prev.filter((row) => !shown.has(row)));
         }
@@ -1648,7 +1678,10 @@ export const ChatPage: React.FC = () => {
       // return is no longer there. A row the stream updated since is a newer
       // object and stays. Rows keep their id, so the row the reader is on stays put.
       const shown = new Set(saved);
-      if (older.length || shown.size) prependOlder(older, (row) => shown.has(row));
+      if (older.length || shown.size) {
+        if (!(await settled())) return true;
+        prependOlder(older, (row) => shown.has(row));
+      }
       setOlderCursor(res.next_before_id ?? null);
       setHistoryGap(false);
       return true;
@@ -4725,7 +4758,10 @@ interface TranscriptProps {
   loadingOlder: boolean;
   /** Saved history ends at the head and the server could not be reached. */
   historyGap: boolean;
-  onLoadOlder: () => void | Promise<boolean>;
+  /** Asks for the older page. Whoever inserts rows above the reader awaits
+   *  ``whenSettled`` first, so they land, with the write that holds the reader's
+   *  place, while the transcript is at rest. */
+  onLoadOlder: (whenSettled: () => Promise<void>) => void | Promise<boolean>;
   needsLatestReload: boolean;
   onReloadLatest: () => Promise<boolean>;
   // Deep-link jump (P5): the message id to scroll to once it's in the DOM, a
@@ -4942,6 +4978,23 @@ export const Transcript: React.FC<TranscriptProps> = ({
   const touchYRef = useRef<number | null>(null);
   // The current touch is what stopped following the tail (``settleTouch``).
   const touchLeftTailRef = useRef(false);
+  // What ``whenSettled`` reads: fingers on the screen, the last scroll, and the
+  // waits it has not released yet.
+  const touchesRef = useRef(0);
+  const lastScrollAtRef = useRef(Number.NEGATIVE_INFINITY);
+  const settleWaitersRef = useRef(new Set<() => void>());
+  // The platform has scrolled since its last ``scrollend``.
+  const scrollingRef = useRef(false);
+  // The last scroll the platform made went past the bottom (the rubber band);
+  // until it comes to rest, its own animation owns the position.
+  const bottomBounceRef = useRef(false);
+  // The last write that held the reader's place, in case the platform puts it
+  // back, and the reader's last input (touch, wheel, key, pointer) since which
+  // a move is theirs.
+  const takebackRef = useRef<{ from: number; to: number; at: number } | null>(null);
+  const lastWriteAtRef = useRef(Number.NEGATIVE_INFINITY);
+  const lastInputAtRef = useRef(Number.NEGATIVE_INFINITY);
+  const pinWhenSettledRef = useRef(false);
   const pagingGestureRef = useRef<{
     kind: 'pointer' | 'wheel' | 'touch' | 'keyboard';
     consumed: boolean;
@@ -5128,13 +5181,73 @@ export const Transcript: React.FC<TranscriptProps> = ({
     );
   }, []);
 
+  // Rows inserted above the reader need a scroll write to hold their place, and
+  // iOS takes a write back while it is still moving the transcript itself:
+  // measured on iOS 27, the top bounce took back every one, and momentum most.
+  // The reader then lands on the top of the page that just arrived. A write at
+  // rest always held, so rows above the reader wait for rest: no finger down,
+  // the platform's own scrolling over (see SETTLE_QUIET_MS), and not pulled
+  // past either end.
+  const isAtRest = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return true;
+    const quiet = performance.now() - lastScrollAtRef.current;
+    const ended = 'onscrollend' in window
+      ? !scrollingRef.current || quiet >= SETTLE_SCROLLEND_LOST_MS
+      : quiet >= SETTLE_QUIET_NO_SCROLLEND_MS;
+    return touchesRef.current === 0
+      && quiet >= SETTLE_QUIET_MS
+      && ended
+      && el.scrollTop >= 0
+      && el.scrollTop <= el.scrollHeight - el.clientHeight + 1;
+  }, []);
+  const whenSettled = useCallback(() => new Promise<void>((resolve) => {
+    const check = () => {
+      if (!isAtRest() && settleWaitersRef.current.has(finish)) {
+        timer = window.setTimeout(check, 50);
+        return;
+      }
+      finish();
+    };
+    let timer = 0;
+    const finish = () => {
+      window.clearTimeout(timer);
+      settleWaitersRef.current.delete(finish);
+      resolve();
+    };
+    settleWaitersRef.current.add(finish);
+    check();
+  }), [isAtRest]);
+
   // Every write here is made only when something actually moved: a scroll write
   // that changes nothing still interrupts a touch on iOS.
   const restoreScrollPosition = useCallback(() => {
     const el = scrollRef.current;
     if (!el || suppressAnchorRef.current || jumpTarget) return;
     if (pinnedRef.current) {
-      if (el.scrollHeight - el.clientHeight - el.scrollTop > 0.5) el.scrollTop = el.scrollHeight;
+      if (el.scrollHeight - el.clientHeight - el.scrollTop > 0.5) {
+        if (bottomBounceRef.current && !isAtRest()) {
+          // The rubber band at the bottom takes a write back (iOS 27): pin
+          // the new bottom once it has come to rest.
+          if (!pinWhenSettledRef.current) {
+            pinWhenSettledRef.current = true;
+            void whenSettled().then(() => {
+              pinWhenSettledRef.current = false;
+              bottomBounceRef.current = false;
+              const now = scrollRef.current;
+              if (!now || !pinnedRef.current || suppressAnchorRef.current) return;
+              if (now.scrollHeight - now.clientHeight - now.scrollTop > 0.5) {
+                now.scrollTop = now.scrollHeight;
+                lastWriteAtRef.current = performance.now();
+              }
+              lastScrollTopRef.current = Math.max(0, now.scrollTop);
+            });
+          }
+        } else {
+          el.scrollTop = el.scrollHeight;
+          lastWriteAtRef.current = performance.now();
+        }
+      }
     } else {
       const anchor = anchorRef.current;
       const content = contentRef.current;
@@ -5150,6 +5263,8 @@ export const Transcript: React.FC<TranscriptProps> = ({
       const before = el.scrollTop;
       el.scrollTop += delta;
       const applied = el.scrollTop - before;
+      takebackRef.current = { from: before, to: el.scrollTop, at: performance.now() };
+      lastWriteAtRef.current = takebackRef.current.at;
       // Held from here: the shift is compensated and must not be again. What
       // the scroll position could not take (a fraction of a device pixel) stays
       // owed, so fractions do not add up over a run of shifts; anything larger
@@ -5170,7 +5285,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
     // A programmatic adjustment must not look like upward input when its
     // queued scroll event is delivered.
     lastScrollTopRef.current = Math.max(0, el.scrollTop);
-  }, [captureAnchor, jumpTarget, pinnedRef]);
+  }, [captureAnchor, isAtRest, jumpTarget, pinnedRef, whenSettled]);
 
   // Jump to the exact bottom and resume following. Instant, not smooth: a smooth
   // glide emits intermediate scroll events that would flip the pin off mid-flight
@@ -5209,6 +5324,32 @@ export const Transcript: React.FC<TranscriptProps> = ({
 
   // The one path that starts an older-page load, so upward input and the
   // retry affordance cannot drift apart on how a failure is recorded.
+  // Fingers on the screen, counted over the whole document: a finger that went
+  // down on the transcript can still be on the screen after one lifted
+  // elsewhere, and a touch that ends outside it never reaches its handlers.
+  useEffect(() => {
+    const count = (event: TouchEvent) => {
+      touchesRef.current = event.touches.length;
+      // A finger on the screen takes over from any rubber band.
+      if (event.type === 'touchstart') {
+        bottomBounceRef.current = false;
+        lastInputAtRef.current = performance.now();
+      }
+    };
+    const types = ['touchstart', 'touchend', 'touchcancel'] as const;
+    for (const type of types) document.addEventListener(type, count, { capture: true, passive: true });
+    return () => {
+      for (const type of types) document.removeEventListener(type, count, { capture: true });
+    };
+  }, []);
+  // Unmounting releases every wait: the page's own guards discard what it read.
+  useEffect(() => {
+    const waiters = settleWaitersRef.current;
+    return () => {
+      for (const finish of [...waiters]) finish();
+    };
+  }, []);
+
   const runLoadOlder = useCallback(() => {
     if (!hasOlder || loadingOlder || loadInFlightRef.current || jumpTarget) return;
     const requestingSession = session.id;
@@ -5219,13 +5360,13 @@ export const Transcript: React.FC<TranscriptProps> = ({
     setFollowingTail(false);
     captureAnchor();
     setOlderLoadFailed(false);
-    void Promise.resolve(loadOlderRef.current()).then((ok) => {
+    void Promise.resolve(loadOlderRef.current(whenSettled)).then((ok) => {
       if (lastSessionRef.current !== requestingSession) return;
       loadInFlightRef.current = false;
       const el = scrollRef.current;
       if (ok === false && el && el.scrollTop <= olderPrefetchBand(el)) setOlderLoadFailed(true);
     });
-  }, [captureAnchor, hasOlder, jumpTarget, loadingOlder, pinnedRef, restoreScrollPosition, session.id, setFollowingTail]);
+  }, [captureAnchor, hasOlder, jumpTarget, loadingOlder, pinnedRef, restoreScrollPosition, session.id, setFollowingTail, whenSettled]);
 
   // Only upward input asks for another page. Settling a request or changing
   // layout is not a new request, even if the viewport remains near the top.
@@ -5258,6 +5399,26 @@ export const Transcript: React.FC<TranscriptProps> = ({
   const handleScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
+    const now = performance.now();
+    lastScrollAtRef.current = now;
+    // The event of a write of ours (nothing moved since) is not the platform scrolling.
+    const ownWrite = el.scrollTop >= 0 && el.scrollTop === lastScrollTopRef.current;
+    if (!ownWrite) scrollingRef.current = true;
+    // iOS finishing a scroll animation of its own can put back the position from
+    // before a write that held the reader's place (measured: the last pixel of
+    // momentum, 80 ms after a page went in). With no finger down that is not the
+    // reader: the write is made once more, and nothing else here reads the move.
+    const takeback = takebackRef.current;
+    if (takeback && !ownWrite) {
+      takebackRef.current = null;
+      if (touchesRef.current === 0 && lastInputAtRef.current < takeback.at && now - takeback.at < TAKEBACK_WINDOW_MS
+        && Math.abs(takeback.to - takeback.from) >= 2 && Math.abs(el.scrollTop - takeback.from) < 2) {
+        el.scrollTop = takeback.to;
+        lastWriteAtRef.current = now;
+        lastScrollTopRef.current = Math.max(0, el.scrollTop);
+        return;
+      }
+    }
     const movingUp = Math.max(0, el.scrollTop) < lastScrollTopRef.current;
     const movingDown = Math.max(0, el.scrollTop) > lastScrollTopRef.current;
     // Content above the anchor can have moved in this same frame, ahead of the
@@ -5269,6 +5430,11 @@ export const Transcript: React.FC<TranscriptProps> = ({
     const top = Math.max(0, el.scrollTop);
     lastScrollTopRef.current = top;
     const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distance < -0.5) bottomBounceRef.current = true;
+    // The rubber band at the bottom settling, with no finger down, is not the
+    // reader leaving the tail, even where content that grew meanwhile puts the
+    // bottom further down (it is pinned once the band comes to rest).
+    const settlingAtBottom = bottomBounceRef.current && touchesRef.current === 0;
     // Near the bottom keeps us "following", but any upward move off the bottom is
     // the reader leaving the tail: following stops at once, so a row streaming in
     // cannot pull them back while they start to scroll up. (Content shrinking at
@@ -5279,7 +5445,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
     // historical search window cannot be considered pinned to the live tail
     // until the explicit latest reload succeeds.
     const pinned = !needsLatestReload && (pinnedRef.current
-      ? distance < 80 && !(movingUp && distance > 1)
+      ? settlingAtBottom || (distance < 80 && !(movingUp && distance > 1))
       : distance <= 1 || (movingDown && distance < 80));
     setFollowingTail(pinned);
     setShowJump(distance > 240 || needsLatestReload);
@@ -5529,11 +5695,18 @@ export const Transcript: React.FC<TranscriptProps> = ({
         data-testid="chat-transcript"
         tabIndex={0}
         onScroll={handleScroll}
+        onScrollEnd={() => {
+          if (performance.now() - lastWriteAtRef.current < SCROLLEND_AFTER_WRITE_MS) return;
+          scrollingRef.current = false;
+          bottomBounceRef.current = false;
+        }}
         onClickCapture={(event) => holdTouchedRow(event.target)}
         onPointerDown={() => {
+          lastInputAtRef.current = performance.now();
           pagingGestureRef.current = { kind: 'pointer', consumed: false, at: 0 };
         }}
         onWheel={(event) => {
+          lastInputAtRef.current = performance.now();
           if (event.defaultPrevented || event.ctrlKey) return;
           const at = performance.now();
           const gesture = pagingGestureRef.current;
@@ -5572,6 +5745,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
         onTouchEnd={settleTouch}
         onTouchCancel={settleTouch}
         onKeyDown={(event) => {
+          lastInputAtRef.current = performance.now();
           if (!event.repeat) pagingGestureRef.current = { kind: 'keyboard', consumed: false, at: 0 };
           if (event.defaultPrevented || !transcriptOwnsUpwardInput(event.target, event.currentTarget)) return;
           if (event.key === 'ArrowUp' || event.key === 'PageUp' || event.key === 'Home' || (event.key === ' ' && event.shiftKey)) {

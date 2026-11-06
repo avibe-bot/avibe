@@ -45,7 +45,7 @@ export function motionTiming(duration: MotionDuration, ease: MotionEase): Motion
  * The springs for framer-motion, in its own form (§4): the same three the CSS samples into
  * `--motion-spring-*`, so a framer animation and a CSS one of the same name settle alike. `snappy`
  * for controls (press release, Send and Stop, badges), `smooth` for content (a message rising, rows
- * moving), `sheet` for surfaces (sheets, drawers, a page push).
+ * moving), `sheet` for surfaces (sheets, drawers).
  */
 export const SPRINGS = {
   snappy: { type: 'spring', visualDuration: 0.2, bounce: 0 },

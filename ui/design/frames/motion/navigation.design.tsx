@@ -1,9 +1,10 @@
 // Into a conversation from the Inbox and back, on a phone (docs/plans/web-ui-motion.md M5), as shipped: the
 // router runs a view transition and plays these keyframes (src/index.css, `data-nav-motion`) on snapshots of
-// the two pages. The conversation is pushed in from the right while the Inbox drifts the other way, and Back
-// reverses it, on the sheet spring; under reduced motion the conversation cross-fades in. Here the same
-// keyframes play on the two shipped pages, stacked; each frame settles where its step ends. On iOS 17,
-// which has no View Transitions, navigation stays a cut.
+// the two pages. The conversation is pushed in from the right while the Inbox drifts the other way, and our
+// own Back reverses it, at a native navigation's pace (`--motion-nav-*`); a system edge swipe runs no
+// transition of ours. Under reduced motion the conversation cross-fades in. Here the same keyframes play on
+// the two shipped pages, stacked; each frame settles where its step ends. On iOS 17, which has no View
+// Transitions, navigation stays a cut.
 import type { CSSProperties, ReactNode } from 'react';
 
 import { frames } from '../../frame';
@@ -15,7 +16,7 @@ const AT = 600;
 const REPLAY = 2400;
 
 /** One of the shipped navigation keyframes, on the timing its `data-nav-motion` rule gives it. */
-const sheet = (name: string): CSSProperties => ({ animation: `${name} var(--motion-spring-sheet-duration) var(--motion-spring-sheet) ${AT}ms both` });
+const navStep = (name: string, kind: 'push' | 'pop'): CSSProperties => ({ animation: `${name} var(--motion-nav-${kind}-duration) var(--motion-nav-ease) ${AT}ms both` });
 const fade = (name: string): CSSProperties => ({ animation: `${name} var(--motion-duration-fast) var(--motion-ease-move) ${AT}ms both` });
 
 /** A page of the stack, moving as its snapshot does. */
@@ -33,8 +34,8 @@ const designFrames = frames([
     title: '从收件箱进入会话 · 手机',
     render: () => (
       <PhoneStage>
-        {moving(sheet('motion-nav-recede'), inbox)}
-        {moving(sheet('motion-nav-arrive'), chat)}
+        {moving(navStep('motion-nav-recede', 'push'), inbox)}
+        {moving(navStep('motion-nav-arrive', 'push'), chat)}
       </PhoneStage>
     ),
   },
@@ -44,8 +45,8 @@ const designFrames = frames([
     title: '从会话返回收件箱 · 手机',
     render: () => (
       <PhoneStage>
-        {moving(sheet('motion-nav-return'), inbox)}
-        {moving(sheet('motion-nav-depart'), chat)}
+        {moving(navStep('motion-nav-return', 'pop'), inbox)}
+        {moving(navStep('motion-nav-depart', 'pop'), chat)}
       </PhoneStage>
     ),
   },

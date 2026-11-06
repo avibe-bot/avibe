@@ -52,6 +52,13 @@ export type ScrollViewport = { top: number; bottom: number };
 const isTranscriptRow = (el: HTMLElement): boolean =>
   el.dataset.messageId !== undefined || el.dataset.transcriptRow !== undefined;
 
+// A row with an animation of its own running (a reply growing in at the tail,
+// ui: transcriptMotion) is drawn away from where its layout puts it until it
+// ends. Its box would read the animation as the content moving, so it is never
+// the anchor; the rows around it are where they are.
+const isAnimating = (el: HTMLElement): boolean =>
+  typeof el.getAnimations === 'function' && el.getAnimations().some((animation) => animation.playState === 'running');
+
 /**
  * The anchor among the content's children. ``viewport`` decides which element
  * the reader sees; ``contentTop`` (the content box's top, in the same viewport
@@ -71,7 +78,7 @@ export const pickScrollAnchor = (
     const el = children[i];
     const rect = el.getBoundingClientRect();
     // Entirely above the viewport top — scrolled past, not what the reader sees.
-    if (rect.bottom <= viewport.top) continue;
+    if (rect.bottom <= viewport.top || isAnimating(el)) continue;
     if (rect.top < viewport.top) {
       straddling ??= { el, rect };
       continue;

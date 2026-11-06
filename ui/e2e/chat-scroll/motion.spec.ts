@@ -14,7 +14,6 @@ async function open(page: Page, query: string) {
   await page.route('**/api/**', (route) => route.fulfill({ status: 503, json: { error: 'No backend in this fixture' } }));
   await page.goto(`/e2e/chat-scroll/fixture.html?images=0&${query}`);
   await expect(transcript(page).locator('[data-message-id]').first()).toBeVisible();
-  await page.evaluate(() => document.fonts.ready);
   await expect.poll(() => fromBottom(page)).toBeLessThan(1);
   await page.waitForTimeout(300);
 }

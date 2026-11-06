@@ -219,8 +219,10 @@ for (const theme of ['light', 'dark'] as const) {
     await expect(botsHeader).toBeVisible();
     await expect(sessionsHeader).toBeVisible();
     expect((await botsHeader.boundingBox())!.y).toBeLessThan((await sessionsHeader.boundingBox())!.y);
-    await expect(popover.getByRole('button').filter({ hasText: '首席安全官' })).toContainText('avault');
-    await expect(popover.getByRole('button').filter({ hasText: '中文项目' })).toContainText('Fix the cache break');
+    // Each conversation is a row the reader presses (its title is the link).
+    const peekRows = popover.locator('[data-inbox-peek-id]');
+    await expect(peekRows.filter({ hasText: '首席安全官' })).toContainText('avault');
+    await expect(peekRows.filter({ hasText: '中文项目' })).toContainText('Fix the cache break');
     await page.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-inbox-${theme}.png`, clip: { x: 0, y: 0, width: 680, height: 560 } });
     expect(denied).toEqual([]);
   });

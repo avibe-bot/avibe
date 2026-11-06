@@ -11,7 +11,7 @@ Reachable servers are registered automatically. Two sources share one list:
 | Codex | `~/.codex/config.toml` `[mcp_servers.<name>]` |
 | OpenCode | `~/.config/opencode/opencode.json` `mcp` |
 
-Avibe sessions do not load native MCP: Claude, Codex and OpenCode started by Avibe call tools only through `vibe mcp`. Native files are not rewritten for this.
+Avibe sessions do not load native MCP: Claude, Codex and OpenCode started by Avibe call tools only through `vibe mcp`. Native files are not rewritten. OpenCode V1 cannot suppress project-level MCP; upgrade to OpenCode V2 for this guarantee.
 
 ## Discover
 
@@ -29,7 +29,7 @@ Refresh one server:
 vibe mcp docs --refresh
 ```
 
-A Codex/OpenCode server with `enabled = false` is omitted. Native extras Hub does not use (timeouts, …) are ignored, except Codex `env_vars` copied from the parent environment at read. A relative native `cwd` resolves against that file's directory.
+OpenCode global import accepts legacy `mcp.<name>` and V2 `mcp.servers.<name>` configurations. A Codex/OpenCode server with `enabled = false`, or an OpenCode server with `disabled: true`, is omitted. Native extras Hub does not use (timeouts, …) are ignored, except Codex `env_vars` copied from the parent environment at read. A relative native `cwd` resolves against that file's directory.
 
 ## Add a server
 

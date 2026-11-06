@@ -3,7 +3,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import { copy } from '../support/copy';
 
-type Step = { motion: string | undefined; old: string[]; next: string[]; scrollTop: number | null };
+type Step = { motion: string | undefined; old: string[]; next: string[]; durations: number[]; scrollTop: number | null };
 
 declare global {
   interface Window {
@@ -13,7 +13,7 @@ declare global {
 }
 
 /** Records each view transition: the motion the root asked for, and, once it plays, the keyframes on the
- *  two snapshots and where the list was scrolled when the new snapshot was taken. */
+ *  two snapshots, how long they run, and where the list was scrolled when the new snapshot was taken. */
 const recordTransitions = () => {
   window.__steps = [];
   window.__finished = 0;
@@ -21,14 +21,16 @@ const recordTransitions = () => {
   if (typeof start !== 'function') return;
   Document.prototype.startViewTransition = function record(this: Document, ...args: Parameters<Document['startViewTransition']>) {
     const transition = start.apply(this, args);
-    const step: Step = { motion: document.documentElement.dataset.navMotion, old: [], next: [], scrollTop: null };
+    const step: Step = { motion: document.documentElement.dataset.navMotion, old: [], next: [], durations: [], scrollTop: null };
     window.__steps.push(step);
     void transition.ready.then(() => {
-      const names = (pseudo: string) => document.getAnimations()
-        .filter((animation) => (animation.effect as KeyframeEffect | null)?.pseudoElement === pseudo)
-        .map((animation) => (animation as CSSAnimation).animationName);
+      const on = (pseudo: string) => document.getAnimations()
+        .filter((animation) => (animation.effect as KeyframeEffect | null)?.pseudoElement === pseudo);
+      const names = (pseudo: string) => on(pseudo).map((animation) => (animation as CSSAnimation).animationName);
       step.old = names('::view-transition-old(root)');
       step.next = names('::view-transition-new(root)');
+      step.durations = [...on('::view-transition-old(root)'), ...on('::view-transition-new(root)')]
+        .map((animation) => Number(animation.effect!.getTiming().duration));
       step.scrollTop = document.getElementById('app-shell-scroll')?.scrollTop ?? null;
     }, () => {});
     void transition.finished.finally(() => { window.__finished += 1; });
@@ -37,7 +39,8 @@ const recordTransitions = () => {
 };
 
 const row = (page: Page, id: number) => page.locator(`[data-inbox-session-id="session-${id}"]`);
-const openButton = (page: Page, id: number) => row(page, id).getByRole('button', { name: copy('workbench.inbox.openSession') });
+/** What a tap on a card opens from: its preview (the card itself opens the conversation). */
+const cardBody = (page: Page, id: number) => row(page, id).locator('.line-clamp-3');
 const steps = (page: Page) => page.evaluate(() => window.__steps);
 const settled = (page: Page, count: number) => expect.poll(() => page.evaluate(() => window.__finished)).toBe(count);
 
@@ -56,7 +59,7 @@ test.describe('on a phone', () => {
     await row(page, 30).scrollIntoViewIfNeeded();
     const top = await page.evaluate(() => document.getElementById('app-shell-scroll')!.scrollTop);
     expect(top).toBeGreaterThan(1000);
-    await openButton(page, 30).click();
+    await cardBody(page, 30).click();
     await expect(page.getByTestId('chat-detail')).toBeVisible();
     await settled(page, 1);
     await page.getByRole('button', { name: 'Back', exact: true }).click();
@@ -69,17 +72,81 @@ test.describe('on a phone', () => {
     expect(await page.evaluate(() => document.documentElement.dataset.navMotion)).toBeUndefined();
   });
 
+  test('pushes and pops at the pace of the --motion-nav-* tokens', async ({ page }) => {
+    await open(page);
+    // Distinct values, so each duration can only have come from its token.
+    await page.evaluate(() => {
+      document.documentElement.style.setProperty('--motion-nav-push-duration', '310ms');
+      document.documentElement.style.setProperty('--motion-nav-pop-duration', '270ms');
+    });
+    await cardBody(page, 1).click();
+    await settled(page, 1);
+    await page.getByRole('button', { name: 'Back', exact: true }).click();
+    await settled(page, 2);
+    const [push, pop] = await steps(page);
+    expect(push.durations).toEqual([310, 310]);
+    expect(pop.durations).toEqual([270, 270]);
+  });
+
+  // An edge swipe, the browser's Back or Forward, a keyboard shortcut, `history.back()` from anywhere but
+  // our own Back: the step lands at once, with no View Transition, so no snapshot of the page just left is
+  // ever shown, whatever the browser says about having animated it (WebKit does not reliably say).
+  for (const animated of ['true', 'false', 'absent'] as const) {
+    test(`cuts a history step it did not start (hasUAVisualTransition ${animated})`, async ({ page }) => {
+      await page.addInitScript((value) => {
+        const proto = PopStateEvent.prototype as unknown as Record<string, unknown>;
+        if (value === 'absent') delete proto.hasUAVisualTransition;
+        else Object.defineProperty(proto, 'hasUAVisualTransition', { configurable: true, get: () => value === 'true' });
+      }, animated);
+      await open(page);
+      await cardBody(page, 1).click();
+      await expect(page.getByTestId('chat-detail')).toBeVisible();
+      await settled(page, 1);
+      /** Takes a history step the way the system does, and reads every frame that follows it. */
+      const traverse = (direction: 'back' | 'forward') => page.evaluate(async (direction) => {
+        const popped = new Promise<unknown>((resolve) => {
+          window.addEventListener('popstate', (event) => resolve((event as unknown as Record<string, unknown>).hasUAVisualTransition), { once: true });
+        });
+        history[direction]();
+        const reported = await popped;
+        const frames: { chat: boolean; list: boolean; snapshots: number }[] = [];
+        for (let frame = 0; frame < 12; frame += 1) {
+          await new Promise(requestAnimationFrame);
+          frames.push({
+            chat: document.querySelector('[data-testid="chat-detail"]') !== null,
+            list: document.querySelector('[data-inbox-session-id]') !== null,
+            snapshots: document.getAnimations()
+              .filter((animation) => (animation.effect as KeyframeEffect | null)?.pseudoElement?.startsWith('::view-transition')).length,
+          });
+        }
+        return { reported, frames };
+      }, direction);
+      const back = await traverse('back');
+      expect(back.reported).toBe(animated === 'absent' ? undefined : animated === 'true');
+      // From the first frame on: the list, and nothing of the conversation.
+      expect(back.frames).toEqual(Array(12).fill({ chat: false, list: true, snapshots: 0 }));
+      const forward = await traverse('forward');
+      expect(forward.frames).toEqual(Array(12).fill({ chat: true, list: false, snapshots: 0 }));
+      // Only the push ran a transition.
+      expect((await steps(page)).length).toBe(1);
+      // Our own Back still pops.
+      await page.getByRole('button', { name: 'Back', exact: true }).click();
+      await settled(page, 2);
+      expect((await steps(page))[1]).toMatchObject({ motion: 'pop', old: ['motion-nav-depart'], next: ['motion-nav-return'] });
+    });
+  }
+
   test('cross-fades instead of sliding under reduced motion', async ({ page }) => {
     await page.emulateMedia({ reducedMotion: 'reduce' });
     await open(page);
-    await openButton(page, 1).click();
+    await cardBody(page, 1).click();
     await settled(page, 1);
     expect((await steps(page))[0]).toMatchObject({ motion: 'fade', old: ['motion-fade-out'], next: ['motion-fade-in'] });
   });
 
   test('finishes a push at once when the reader touches the screen', async ({ page }) => {
     await open(page);
-    await openButton(page, 1).click();
+    await cardBody(page, 1).click();
     await expect.poll(async () => (await steps(page)).length).toBe(1);
     await expect.poll(async () => (await steps(page))[0].next.length).toBe(1);
     const finishedIn = await page.evaluate(async () => {
@@ -88,7 +155,7 @@ test.describe('on a phone', () => {
       while (window.__finished === 0) await new Promise(requestAnimationFrame);
       return performance.now() - startedAt;
     });
-    // The push runs 440 ms; skipped, it ends within a frame or two.
+    // The push runs `--motion-nav-push-duration`; skipped, it ends within a frame or two.
     expect(finishedIn).toBeLessThan(100);
   });
 });
@@ -96,7 +163,7 @@ test.describe('on a phone', () => {
 test('switches pages on a desktop without a transition', async ({ page, isMobile }) => {
   test.skip(isMobile, 'desktop navigation');
   await open(page);
-  await openButton(page, 1).click();
+  await cardBody(page, 1).click();
   await expect(page.getByTestId('chat-detail')).toBeVisible();
   await page.getByRole('button', { name: 'Back', exact: true }).click();
   await expect(row(page, 2)).toBeVisible();
@@ -105,7 +172,8 @@ test('switches pages on a desktop without a transition', async ({ page, isMobile
 
 test('sinks a pressed control and steps its colour, and keeps only the colour under reduced motion', async ({ page }) => {
   await open(page);
-  const chip = openButton(page, 1);
+  // A control on a card: its 「Mark read」 (the card itself is a surface, which sinks less).
+  const chip = row(page, 1).getByRole('button', { name: copy('workbench.inbox.markRead') });
   // Until the chip's transitions (the press, or the release's spring) have run their course.
   const settled = () => chip.evaluate((el) => Promise.all(el.getAnimations().map((animation) => animation.finished.catch(() => undefined))));
   const pressed = async () => {
@@ -119,7 +187,7 @@ test('sinks a pressed control and steps its colour, and keeps only the colour un
     return style;
   };
   const rest = await chip.evaluate((el) => getComputedStyle(el).backgroundColor);
-  // The release would open the conversation: keep the click from reaching it.
+  // The release would mark the card read: keep the click from reaching it.
   await chip.evaluate((el) => el.addEventListener('click', (event) => event.stopPropagation(), { capture: true }));
   const full = await pressed();
   expect(full.scale).toBe('0.94');
