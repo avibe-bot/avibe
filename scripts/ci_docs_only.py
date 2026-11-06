@@ -195,10 +195,12 @@ def classify(event_name: str, event: dict, sha: str, repo: Path) -> Scope:
     try:
         if not isinstance(event, dict):
             raise ValueError("event payload is not an object")
-        sha = revision(sha)
-        if git(repo, "rev-parse", "HEAD").decode().strip() != sha:
-            raise ValueError("checkout does not match event SHA")
+        checked_out_sha = revision(git(repo, "rev-parse", "HEAD").decode().strip())
         if event_name == "pull_request":
+            # actions/checkout uses the synthetic merge ref, while GITHUB_SHA may
+            # identify the PR source head. The event's base/head parent check below
+            # is the authority that proves this checkout is the intended merge.
+            sha = checked_out_sha
             pr = event["pull_request"]
             base, head = revision(pr["base"]["sha"]), revision(pr["head"]["sha"])
             header = git(repo, "cat-file", "commit", sha).split(b"\n\n", 1)[0]
@@ -206,6 +208,9 @@ def classify(event_name: str, event: dict, sha: str, repo: Path) -> Scope:
             if parents != [base, head]:
                 raise ValueError("checkout is not the event's synthetic merge")
         elif event_name == "push":
+            sha = revision(sha)
+            if checked_out_sha != sha:
+                raise ValueError("checkout does not match event SHA")
             if any(event.get(flag) is not False for flag in ("created", "deleted", "forced")):
                 raise ValueError("new, deleted, forced or incomplete push event")
             base = revision(event["before"])
