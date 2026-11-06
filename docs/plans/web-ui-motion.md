@@ -121,7 +121,7 @@ curves also exposed as `ease-*` utilities through `@theme inline`.
 | `--motion-ease-move` (`ease-move`) | `cubic-bezier(0.32, 0.72, 0, 1)` | Something on screen moving to a new place (the existing `--settle`) |
 | `--motion-spring-{snappy,smooth,sheet}` (`ease-spring-*`) | `linear()` curves | The springs below, for CSS |
 | `--motion-spring-*-duration` | 290 / 440 / 440 ms | The time each spring needs to settle |
-| `--motion-nav-push-duration` / `--motion-nav-pop-duration` / `--motion-nav-ease` | 300 / 260 ms / enter | A page pushed over another on a phone, and popped off it by the app's Back (M5) |
+| `--motion-nav-push-duration` / `--motion-nav-pop-duration` / `--motion-nav-ease` | 260 / 220 ms / enter | A page pushed over another on a phone, and popped off it by the app's Back (M5) |
 | `--motion-beat` | 120 ms | A follower trails its leader (the working bubble after the message) |
 | `--motion-offset-sm` / `--motion-offset` / `--motion-offset-lg` | 4 / 8 / 16 px | How far a thing travels as it enters |
 | `--motion-drift` | 30% | How far the page beneath drifts the other way on a push |
@@ -323,14 +323,14 @@ Inbox: M7's move. Frames: `motion/arrival/*`, `motion/inbox/*`.
   card sinks to `--motion-scale-press`; the conversation slides in from the
   right edge while the page beneath drifts `--motion-drift` the other way, as a
   native push does, and the app's own Back reverses it. The pace is a native
-  navigation's: `--motion-nav-push-duration` (300 ms) and
-  `--motion-nav-pop-duration` (260 ms) on `--motion-nav-ease` (the `enter`
+  navigation's: `--motion-nav-push-duration` (260 ms) and
+  `--motion-nav-pop-duration` (220 ms) on `--motion-nav-ease` (the `enter`
   curve), one decelerating curve with no settle. Built on same-document View
   Transitions (`document.startViewTransition`, Safari 18 and Chrome 111+),
   named per page; where they are missing (iOS 17), navigation stays a cut
   rather than a JavaScript slide.
   - Input is never held: any pointer or key input during a transition calls
-    `skipTransition()`, and the transition is at most 300 ms.
+    `skipTransition()`, and the transition is at most 260 ms.
   - **A pop animates only when the app's own Back started it** (the header's
     Back, or another in-app back affordance calling `navigate(-1)`). Every other
     history step (the system edge swipe, the browser's Back or Forward, a
@@ -566,8 +566,9 @@ send (they change `ChatPage`).
   marks its own Back, every other history step is a cut that skips the View
   Transition entirely (the router renders the list in the same task), and no
   transition starts for a moment after it. The pace also changed from the
-  sheet spring (440 ms with a long settle) to `--motion-nav-*` (300 / 260 ms,
-  `enter`). The iOS shell's bridge exposes no gesture capability, and the shell
+  sheet spring (440 ms with a long settle) to `--motion-nav-*` (260 / 220 ms,
+  `enter`), the fastest of three paces recorded side by side, chosen by the
+  owner. The iOS shell's bridge exposes no gesture capability, and the shell
   leaves `allowsBackForwardNavigationGestures` at WebKit's default (off); a
   shell that turns it on needs no Web change.
 - **A relaunch** that restores the last page (the Home Screen app after iOS

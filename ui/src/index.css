@@ -120,8 +120,8 @@
   /* A page pushed over another on a phone, and popped off it: a native
      navigation's pace, one decelerating curve with no settle; the pop is a
      little shorter. */
-  --motion-nav-push-duration: 300ms;
-  --motion-nav-pop-duration: 260ms;
+  --motion-nav-push-duration: 260ms;
+  --motion-nav-pop-duration: 220ms;
   --motion-nav-ease: var(--motion-ease-enter);
 
   /* Loading (plan §6): content taking over from a skeleton or from the
