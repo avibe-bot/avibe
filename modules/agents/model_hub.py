@@ -68,7 +68,6 @@ from core.native_dispatch_phase import mark_prewrite_recovery_required
 from modules.agents.catalog import display_name_for_backend
 from vibe.codex_config import format_toml_basic_string
 from vibe.i18n import t
-from vibe.opencode_config import managed_opencode_runtime_config_content
 
 
 logger = logging.getLogger(__name__)
@@ -1667,8 +1666,7 @@ class ModelHubRuntimeRouter:
             )
             + "\n"
         ).encode()
-        inline_content = managed_opencode_runtime_config_content(content).encode()
-        content_hash = hashlib.sha256(inline_content).hexdigest()
+        content_hash = hashlib.sha256(content).hexdigest()
         self._secure_write_overlay(content)
         return OpenCodeOverlay(
             path=self.overlay_path,
