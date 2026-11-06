@@ -15,6 +15,8 @@ from unittest.mock import patch
 import pytest
 
 import vibe.cli as cli
+
+pytestmark = pytest.mark.usefixtures("in_process_cli_control")
 from storage.importer import ensure_sqlite_state
 
 

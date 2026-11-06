@@ -43,6 +43,7 @@ from vibe.authorization import (
 
 
 _INSTANCE_ID = "inst-cli"
+pytestmark = pytest.mark.usefixtures("in_process_cli_control")
 
 
 def _pair_instance(*, instance_id: str = _INSTANCE_ID, instance_kind: str = "organization") -> None:

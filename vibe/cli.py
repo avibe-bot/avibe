@@ -431,6 +431,10 @@ def _avault_cli_error(exc: Exception, message: str, *, code: str = "avault_faile
 
 
 def _print_task_error(exc: Exception, *, help_command: str | None = None) -> None:
+    print(_json_text(_task_error_payload(exc, help_command=help_command), stream=sys.stderr), file=sys.stderr)
+
+
+def _task_error_payload(exc: Exception, *, help_command: str | None = None) -> dict:
     # Re-typed BEFORE the ``TaskCliError`` branch, and here rather than in each command's
     # own ``except``, because this is the one printer every CLI admission door funnels its
     # broad handler through. ``cmd_agent_run``, ``cmd_task_add`` and ``cmd_watch_add`` all
@@ -489,7 +493,7 @@ def _print_task_error(exc: Exception, *, help_command: str | None = None) -> Non
         }
         if help_command:
             payload["help_command"] = help_command
-    print(_json_text(payload, stream=sys.stderr), file=sys.stderr)
+    return payload
 
 
 def _definition_conflict_cli_error(
@@ -2195,7 +2199,9 @@ def _default_timezone_name() -> str:
     return "UTC"
 
 
-def _resolve_message_input(args, *, help_command: str, example_command: str) -> str:
+def _resolve_message_input(
+    args, *, help_command: str, example_command: str, invocation_cwd: str | None = None,
+) -> str:
     message = (getattr(args, "message", None) or "").strip()
     message_file = getattr(args, "message_file", None)
     if message and message_file:
@@ -2216,7 +2222,10 @@ def _resolve_message_input(args, *, help_command: str, example_command: str) -> 
         )
     if message_file:
         try:
-            content = Path(message_file).read_text(encoding="utf-8").strip()
+            input_path = Path(message_file)
+            if invocation_cwd is not None and not input_path.is_absolute():
+                input_path = Path(invocation_cwd) / input_path
+            content = input_path.read_text(encoding="utf-8").strip()
         except OSError as exc:
             raise TaskCliError(
                 f"failed to read message file: {exc}",
@@ -3619,10 +3628,11 @@ def _resolve_agent_target(
     session_key: str,
     help_command: str,
     existing_agent_reference: bool = False,
+    agent_store: VibeAgentStore | None = None,
 ) -> _AgentTargetResolution:
     from core.scheduled_tasks import resolve_session_id_target
 
-    store = _agent_store()
+    store = agent_store if agent_store is not None else _agent_store()
     try:
         requested = None
         if agent_name:
@@ -3694,7 +3704,8 @@ def _resolve_agent_target(
         default_agent = store.get_default_agent()
         return _AgentTargetResolution(default_agent, default_agent is not None)
     finally:
-        store.close()
+        if agent_store is None:
+            store.close()
 
 
 def _resolve_agent_for_target(
@@ -3704,6 +3715,7 @@ def _resolve_agent_for_target(
     session_key: str,
     help_command: str,
     existing_agent_reference: bool = False,
+    agent_store: VibeAgentStore | None = None,
 ):
     return _resolve_agent_target(
         agent_name=agent_name,
@@ -3711,6 +3723,7 @@ def _resolve_agent_for_target(
         session_key=session_key,
         help_command=help_command,
         existing_agent_reference=existing_agent_reference,
+        agent_store=agent_store,
     ).agent
 
 
@@ -6254,6 +6267,7 @@ def _resolve_run_cwd(
     session_policy: str,
     scoped_session: bool = False,
     invocation_cwd_default: bool = False,
+    invocation_cwd: str | None = None,
     help_command: str,
 ) -> Optional[str]:
     """Working directory for a session this run RESERVES.
@@ -6275,7 +6289,7 @@ def _resolve_run_cwd(
             )
         return None
     if raw:
-        resolved = os.path.abspath(os.path.expanduser(raw))
+        resolved = os.path.abspath(os.path.join(invocation_cwd or os.getcwd(), os.path.expanduser(raw)))
         if not os.path.isdir(resolved):
             raise TaskCliError(
                 f"--cwd directory does not exist: {resolved}",
@@ -6286,7 +6300,7 @@ def _resolve_run_cwd(
         return resolved
     if scoped_session:
         return None
-    return os.getcwd() if invocation_cwd_default else None
+    return (invocation_cwd or os.getcwd()) if invocation_cwd_default else None
 
 
 def _resolve_definition_session_cwd(
@@ -6945,6 +6959,34 @@ def _resolve_bot_run_target(args) -> None:
 
 
 def cmd_agent_run(args):
+    """DB-free client; admission and enqueue belong to the warm controller."""
+    from core.control_requests import ADMISSION_SECONDS, failure, new_request
+    from vibe import internal_client
+
+    request = new_request("agent.run", vars(args))
+    wait = getattr(args, "wait_timeout", None)
+    wait = wait if isinstance(wait, (int, float)) and math.isfinite(wait) else 1800.0
+    timeout = ADMISSION_SECONDS + (max(0, wait) if getattr(args, "sync_run", False) else 0) + 5.0
+    try:
+        response = internal_client.control_request_sync(request.to_payload(), timeout=timeout)
+    except internal_client.InternalServerUnavailable:
+        response = failure("service_unavailable", "Avibe service unavailable; Agent Run not executed")
+    except internal_client.InternalServerTimeout:
+        response = failure(
+            "execution_unknown", "Agent Run may have been enqueued; its result could not be confirmed",
+            execution="execution_unknown",
+        )
+    stream = sys.stdout if response["exit_code"] == 0 else sys.stderr
+    print(_json_text(response["payload"], stream=stream), file=stream)
+    return response["exit_code"]
+
+
+def _enqueue_agent_run(args, *, caller_env, invocation_cwd, agent_store, request_store):
+    """Existing enqueue semantics, with request-local inputs and service-owned stores.
+
+    No process environment, working directory or output stream is changed. The
+    control handler owns admission, result formatting and asynchronous waiting.
+    """
     from core.scheduled_tasks import (
         AGENT_RUN_CALLBACK_FAILURE_ONLY,
         AGENT_RUN_CALLBACK_MODE_METADATA_KEY,
@@ -6959,13 +7001,14 @@ def cmd_agent_run(args):
         bot_target = bool((getattr(args, "bot", None) or "").strip())
         if bot_target:
             _resolve_bot_run_target(args)
-        caller_context = caller_context_from_env()
+        caller_context = caller_context_from_env(caller_env)
         visibility = (getattr(args, "visibility", None) or "background").strip()
         run_async = _agent_run_is_async(args)
         message = _resolve_message_input(
             args,
             help_command="vibe agent run --help",
             example_command="vibe agent run --agent default",
+            invocation_cwd=invocation_cwd,
         )
         session_policy = _validate_run_session_policy(args, help_command="vibe agent run --help")
         delivery_intent = (
@@ -7012,9 +7055,10 @@ def cmd_agent_run(args):
             session_policy=session_policy,
             scoped_session=_has_modern_scope_target(args),
             invocation_cwd_default=has_resolved_caller_placement and not _has_modern_scope_target(args),
+            invocation_cwd=invocation_cwd,
             help_command="vibe agent run --help",
         )
-        agent = _agent_store().require_enabled(agent_name) if agent_name else None
+        agent = agent_store.require_enabled(agent_name) if agent_name else None
         fork_result = None
         session_metadata = _session_creation_metadata_from_caller(caller_context)
         if session_policy in {"existing", "fork"} and session_id:
@@ -7025,6 +7069,7 @@ def cmd_agent_run(args):
                 session_id=session_id,
                 session_key=session_key,
                 help_command="vibe agent run --help",
+                agent_store=agent_store,
             )
             # The Agent resolved above is the SESSION's -- an explicit --agent
             # may only restate it -- so admitting the caller to the Session
@@ -7080,7 +7125,7 @@ def cmd_agent_run(args):
             session_id = fork_result.session_id
             reserved_session_id = session_id
             if agent_name:
-                agent = _agent_store().require_enabled(agent_name)
+                agent = agent_store.require_enabled(agent_name)
         if session_id and not session_key:
             target = resolve_session_id_target(session_id)
             session_key = target.session_key.to_key()
@@ -7089,6 +7134,7 @@ def cmd_agent_run(args):
                 session_id=session_id,
                 session_key=session_key,
                 help_command="vibe agent run --help",
+                agent_store=agent_store,
             )
         override_fields: dict = {}
         if model_override or effort_override:
@@ -7124,7 +7170,6 @@ def cmd_agent_run(args):
             provenance_metadata[AGENT_RUN_CLOSE_AFTER_METADATA_KEY] = True
         if callback_mode:
             provenance_metadata[AGENT_RUN_CALLBACK_MODE_METADATA_KEY] = callback_mode
-        request_store = _task_request_store()
         request = request_store.enqueue_agent_run(
             agent_name=agent.name if agent else None,
             agent_id=agent.id if agent else None,
@@ -7171,31 +7216,23 @@ def cmd_agent_run(args):
         }
         if callback_notice:
             payload["callback_notice"] = callback_notice
-        if not run_async:
-            run_payload = _wait_for_run_result(request_store, request.id, wait_timeout=args.wait_timeout)
-            if callback_session_id and _sync_run_detached(run_payload):
-                request_store.mark_callback_pending(request.id)
-                run_payload["callback_status"] = "pending"
-            payload["run"] = run_payload
-        _print_cli_payload("agent_run", **payload, **override_fields)
-        return 0
-    except Exception as exc:
+        return _cli_payload("agent_run", **payload, **override_fields), callback_session_id
+    except Exception:
         if reserved_session_id:
             _release_cli_session_reservation(
                 reserved_session_id,
                 reason="Agent Run enqueue failed before its Session reservation was adopted",
             )
-        _print_task_error(exc, help_command="vibe agent run --help")
-        return 1
+        raise
 
 
-def _wait_for_run_result(store: TaskExecutionStore, run_id: str, *, wait_timeout: Optional[float]) -> dict:
+async def _wait_for_run_result(store: TaskExecutionStore, run_id: str, *, wait_timeout: Optional[float]) -> dict:
     from storage.background import normalize_run_status
 
     started = time.monotonic()
     max_wait = wait_timeout if wait_timeout is not None else 1800.0
     while True:
-        run = store.get_run(run_id)
+        run = await asyncio.to_thread(store.get_run, run_id)
         if run and normalize_run_status(run.get("status")) in {"succeeded", "failed", "canceled"}:
             return _run_payload(run)
         elapsed = time.monotonic() - started
@@ -7205,7 +7242,7 @@ def _wait_for_run_result(store: TaskExecutionStore, run_id: str, *, wait_timeout
             run["handoff_reason"] = "wait_limit_reached"
             run["wait_elapsed_seconds"] = round(elapsed, 3)
             return _run_payload(run)
-        time.sleep(0.25)
+        await asyncio.sleep(0.25)
 
 
 def _model_request_store():
@@ -18154,8 +18191,9 @@ def build_parser():
         "run",
         help="Run an Avibe Agent",
         description=(
-    "Run an Agent turn in a new background Session (--agent), an existing Session "
-            "(--session-id), or a fork. Runs are async."
+            "Run an Agent turn in a new background Session (--agent), an existing Session "
+            "(--session-id), or a fork. Runs are async. Requires the running Avibe service; "
+            "no offline enqueue or automatic service start."
         ),
         epilog=_agent_run_examples_text(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -19982,13 +20020,22 @@ def _dispatch_path(parser: argparse.ArgumentParser, args) -> tuple[tuple[str, ..
 def _require_command_admission(parser: argparse.ArgumentParser, args) -> None:
     """Admit the invocation to this command's namespace before it can act."""
 
-    from vibe.authorization import InstanceAuthorizationError, require_instance_role
-
     path, subcommand_missing = _dispatch_path(parser, args)
     if path not in _CLI_COMMAND_FLOORS and subcommand_missing:
         # Not a command at all: argparse is about to print usage and exit, and no
         # product effect can run in between.
         return
+    try:
+        _require_command_path_admission(path)
+    except TaskCliError as exc:
+        _print_task_error(exc)
+        sys.exit(1)
+
+
+def _require_command_path_admission(path: tuple[str, ...]) -> None:
+    """One admission decision for direct commands and service-owned requests."""
+    from vibe.authorization import InstanceAuthorizationError, require_instance_role
+
     floor = _CLI_COMMAND_FLOORS.get(path, "owner")
     if floor is None:
         return
@@ -19996,14 +20043,10 @@ def _require_command_admission(parser: argparse.ArgumentParser, args) -> None:
         require_instance_role(None, floor)
     except InstanceAuthorizationError as exc:
         command = " ".join(("vibe", *path)).strip()
-        _print_task_error(
-            TaskCliError(
-                str(exc),
-                code=exc.code,
-                details={"command": command, "minimum_role": exc.minimum_role},
-            )
-        )
-        sys.exit(1)
+        raise TaskCliError(
+            str(exc), code=exc.code,
+            details={"command": command, "minimum_role": exc.minimum_role},
+        ) from exc
 
 
 def _require_internal_activation_admission(command: str) -> None:
@@ -20034,6 +20077,10 @@ def main():
             sys.exit(cmd_version(args))
         if args.command == "show" and args.show_command is None:
             sys.exit(cmd_show(args))
+        if args.command == "agent" and args.agent_command == "run":
+            # The service resolves and checks this invocation's authority. Doing
+            # it here would open SQLite in every otherwise thin CLI process.
+            sys.exit(cmd_agent_run(args))
 
     from vibe.authorization import invocation_authority
 

@@ -29,6 +29,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import vibe.cli as cli
 
+pytestmark = pytest.mark.usefixtures("in_process_cli_control")
+
 
 def _parse_agent_run(argv: list[str]):
     parser = cli.build_parser()

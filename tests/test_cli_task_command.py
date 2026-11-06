@@ -23,6 +23,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from storage.importer import ensure_sqlite_state
 from vibe import cli
 
+pytestmark = pytest.mark.usefixtures("in_process_cli_control")
+
 
 def _configured_v2(platforms: set[str]):
     return SimpleNamespace(
@@ -2741,7 +2743,7 @@ def test_agent_run_rejects_cross_backend_agent_for_existing_session(tmp_path: Pa
         result, payload = _capture_stderr_json(cli.cmd_agent_run, args)
 
     assert result == 1
-    assert payload["code"] == "agent_session_backend_mismatch"
+    assert payload["code"] == "agent_session_backend_mismatch", payload
 
 
 def test_agent_run_existing_session_allows_matching_agent_hint(tmp_path: Path, capsys, sqlite_schema_db_factory) -> None:
@@ -2818,7 +2820,7 @@ def test_agent_run_rejects_different_same_backend_agent_for_existing_session(tmp
         result, payload = _capture_stderr_json(cli.cmd_agent_run, args)
 
     assert result == 1
-    assert payload["code"] == "agent_session_agent_mismatch"
+    assert payload["code"] == "agent_session_agent_mismatch", payload
 
 
 def test_agent_run_existing_session_uses_session_agent_when_agent_omitted(tmp_path: Path, capsys, sqlite_schema_db_factory) -> None:
