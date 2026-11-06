@@ -5279,7 +5279,13 @@ export const Transcript: React.FC<TranscriptProps> = ({
         };
       } else {
         // Followed the message to its new element: hold that one from here.
-        anchorRef.current = { el: target.el, top: target.top + applied, rowId: anchor.rowId, rowTop: target.top + applied };
+        anchorRef.current = {
+          el: target.el,
+          top: target.top + applied,
+          rowId: anchor.rowId,
+          rowTop: anchor.rowTop === undefined ? undefined : anchor.rowTop + applied,
+          key: target.el.dataset.transcriptKey,
+        };
       }
     }
     // A programmatic adjustment must not look like upward input when its
@@ -5473,9 +5479,23 @@ export const Transcript: React.FC<TranscriptProps> = ({
   // click causes. The first row on screen would hold instead, and the opened
   // content would be compensated out of view above it. The next scroll takes
   // the usual anchor again.
+  // While the reader follows the tail, only opening or closing something (a
+  // disclosure control, ``aria-expanded``) does this, and it leaves the tail:
+  // they are reading what they opened, and the bottom must not pull it away. A
+  // plain tap (selecting text, a link, copying) keeps following.
   const holdTouchedRow = (target: EventTarget) => {
     const content = contentRef.current;
-    if (pinnedRef.current || suppressAnchorRef.current || !content || !(target instanceof Node)) return;
+    if (suppressAnchorRef.current || !content || !(target instanceof Node)) return;
+    if (pinnedRef.current) {
+      const element = target instanceof Element ? target : target.parentElement;
+      const control = element?.closest('[aria-expanded]');
+      if (!control || !content.contains(control)) return;
+      const anchor = anchorForTouched(Array.from(content.children) as HTMLElement[], target, content.getBoundingClientRect().top);
+      if (!anchor) return;
+      setFollowingTail(false);
+      anchorRef.current = anchor;
+      return;
+    }
     restoreScrollPosition();
     const anchor = anchorForTouched(Array.from(content.children) as HTMLElement[], target, content.getBoundingClientRect().top);
     if (anchor) anchorRef.current = anchor;

@@ -309,6 +309,42 @@ test('a Harness group opened across the top edge opens where the reader touched 
   expect(onScreen).toBe(true);
 });
 
+test('following the tail, opening something holds it where it was tapped and stops following; a plain tap does not', async ({ page }) => {
+  // count=392 puts the last execution-process chip on screen at the bottom.
+  await open(page, 'delay=0&images=0&activity=1&count=392');
+  const bottomGap = () => transcript(page).evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop);
+  // The transcript item holding the last chip (it re-mounts as it opens), and
+  // its top: what holds still. The conversation's glide must be over first.
+  const settled = () => transcript(page).evaluate((el) => el.querySelector('[data-message-id]')!.parentElement!.getAnimations().length === 0);
+  const itemTop = () => transcript(page).evaluate((el) => {
+    const column = el.querySelector('[data-message-id]')!.parentElement!;
+    const chip = [...el.querySelectorAll('[aria-expanded]')].at(-1)!;
+    return [...column.children].find((child) => child.contains(chip))!.getBoundingClientRect().top;
+  });
+  expect(await bottomGap()).toBeLessThan(1);
+
+  // A plain tap on a message keeps following: a row streaming in is followed.
+  const text = transcript(page).locator('[data-message-id]').last();
+  const textBox = (await text.boundingBox())!;
+  await page.mouse.click(textBox.x + 20, textBox.y + Math.min(20, textBox.height / 2));
+  await page.evaluate(() => window.__scrollLab.push('A row streaming in.'));
+  await expect.poll(bottomGap).toBeLessThan(1);
+  await expect.poll(settled).toBe(true);
+
+  // Opening the chip: its item holds still, and the next row does not pull it away.
+  const chip = transcript(page).locator('[aria-expanded]').last();
+  const box = (await chip.boundingBox())!;
+  const before = await itemTop();
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  await expect(transcript(page).locator('[aria-expanded="true"]')).toHaveCount(1);
+  await nextFrames(page);
+  expect(Math.abs(await itemTop() - before)).toBeLessThanOrEqual(1);
+  await page.evaluate(() => window.__scrollLab.push('Another row streaming in.'));
+  await page.waitForTimeout(400);
+  expect(Math.abs(await itemTop() - before)).toBeLessThanOrEqual(1);
+  expect(await bottomGap()).toBeGreaterThan(1);
+});
+
 test('older rows appear at once after a chat opened on its skeleton', async ({ page }) => {
   await open(page, 'reader=local&images=0&inbox=1&boot=600&delay=100');
   // The live window replaced the skeleton (which holds one row, the Inbox's).

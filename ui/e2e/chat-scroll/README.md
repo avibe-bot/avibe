@@ -33,6 +33,9 @@ to move under the reader:
   scroll's event (asynchronous scrolling on iOS and WebKit).
 - A reader starting to scroll up is not pulled back to a tail that is still
   streaming.
+- Following the tail, opening something (a disclosure control, `aria-expanded`)
+  holds it where it was tapped and stops following, so the next row does not
+  pull it away. A plain tap keeps following.
 - Rows mounted after a chat opened on its skeleton appear at once instead of
   fading in from blank.
 
