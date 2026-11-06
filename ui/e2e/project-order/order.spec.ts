@@ -87,7 +87,9 @@ test('header click expands; a direct drag animates neighbors and persists across
     await page.mouse.move(x, endY, { steps: 12 });
   }
   await expect(page.locator('[data-project-drag-preview]')).toBeVisible();
-  await expect.poll(() => rows(page).nth(1).evaluate((el) => getComputedStyle(el).transform)).not.toBe('none');
+  // Over the third row, the second moves up into the first row's place, and slides there. (A pickup
+  // gives every row a zero translate, which is not a move yet.)
+  await expect.poll(() => rows(page).nth(1).evaluate((el) => getComputedStyle(el).transform)).toMatch(/-\d/);
   expect(await rows(page).nth(1).evaluate((el) => getComputedStyle(el).transitionDuration)).toBe('0.22s');
   await page.screenshot({ path: testInfo.outputPath('project-drag.png'), scale: 'css' });
   if (cdp) await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
