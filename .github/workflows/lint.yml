@@ -326,7 +326,7 @@ jobs:
       - name: Test browser interactions
         # The Model Hub catalog regression (about ten minutes) runs on the
         # scheduled/manual model-hub-ui-regression workflow instead of blocking
-        # every PR. Its provider suite also runs here, in lane 2.
+        # every PR. Its provider suite runs here, in lane 2.
         working-directory: ui
         run: |
           # Time the entire npm command (including built-app preparation), not

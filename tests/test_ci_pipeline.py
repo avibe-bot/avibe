@@ -666,6 +666,25 @@ _BROWSER_COMMANDS = (
 )
 
 
+def _npm_suites(script: str) -> set[str]:
+    return {line.split()[2] for line in script.splitlines() if line.strip().startswith("npm run test:")}
+
+
+def test_nightly_model_hub_regression_runs_only_suites_no_browser_lane_runs() -> None:
+    """A suite a pull request lane runs needs no nightly run; the nightly keeps what pull requests leave out."""
+    nightly = yaml.safe_load(
+        (ROOT / ".github/workflows/model-hub-ui-regression.yml").read_text(encoding="utf-8")
+    )
+    nightly_suites = set().union(*(
+        _npm_suites(step.get("run", "")) for job in nightly["jobs"].values() for step in job["steps"]
+    ))
+    legs = _jobs()["ui-browser-checks"]["strategy"]["matrix"]["include"]
+    lane_suites = set().union(*(_npm_suites(leg["suites"]) for leg in legs))
+    assert "test:model-provider" in lane_suites
+    assert not nightly_suites & lane_suites
+    assert nightly_suites == {"test:model-catalog"}
+
+
 def test_browser_matrix_runs_complete_disjoint_commands_and_propagates_each_failure(tmp_path: Path) -> None:
     """Execute actual workflow commands: scheduling must not drop/duplicate work or swallow an exit code.
 

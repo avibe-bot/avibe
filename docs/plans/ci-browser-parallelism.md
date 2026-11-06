@@ -39,7 +39,7 @@ are placed largest first. Measured in PR runs `42190302240` (chat-paging) and
 | Suite | On CI | Placement |
 | --- | --- | --- |
 | chat-paging | 52 s | lane 2 |
-| model-provider | 41 s (49–50 s nightly) | lane 2; still in the nightly run as well |
+| model-provider | 41 s (49–50 s nightly) | lane 2; no longer in the nightly run |
 | citations | 29 s | lane 3 |
 | session-dot | 24 s | lane 3 |
 | web-fetch | 10 s | lane 2, through the new `test:web-fetch` |
@@ -47,6 +47,8 @@ are placed largest first. Measured in PR runs `42190302240` (chat-paging) and
 | model-catalog | 619–628 s, nightly | out; nightly `model-hub-ui-regression` |
 
 Lanes 2 and 3 come to about 530 s and 540 s, still under lanes 1 and 4.
+The nightly `model-hub-ui-regression` keeps only suites no pull request lane
+runs, now model-catalog alone.
 
 The sections below record the original PR #3232 contract and measurements, not
 a requirement to restore its screenshot gate. Removing parallel captures reduces
