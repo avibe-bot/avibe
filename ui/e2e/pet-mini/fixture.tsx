@@ -45,6 +45,8 @@ declare global {
     petFixtureAddActivity: () => void;
     petFixtureFinishTurn: (result: Record<string, unknown>) => void;
     petFixtureReleaseExpansion: () => void;
+    petFixtureRead: (id: string) => void;
+    petFixtureResolveVault: () => void;
   }
 }
 window.petLayoutHitRegions = [];
@@ -111,7 +113,7 @@ const requests = personal ? [{
   id: 'vr_fixture', request_type: 'access', status: 'pending', card: { request_type: 'access' },
   session: { id: 'ses_fixture_0' }, expires_at: null,
 }] : [];
-if (historyActions) requests.push({
+if (historyActions || params.has('pendingVault')) requests.push({
   id: 'vr_main_fixture', request_type: 'access', status: 'pending', card: { request_type: 'access' },
   session: { id: 'ses_main' }, expires_at: null,
 });
@@ -197,6 +199,20 @@ window.petFixtureMessage = (message) => {
   };
   for (const stream of streams) {
     stream.dispatchEvent(new MessageEvent('message.new', { data: JSON.stringify({ type: 'message.new', data }) }));
+  }
+};
+window.petFixtureRead = (id) => {
+  const row = messages.find((message) => message.id === id);
+  if (!row) throw new Error(`Missing fixture message ${id}`);
+  Object.assign(row, { read_at: '2026-11-06T00:00:00Z' });
+  for (const stream of streams) {
+    stream.dispatchEvent(new MessageEvent('message.updated', { data: JSON.stringify({ type: 'message.updated', data: row }) }));
+  }
+};
+window.petFixtureResolveVault = () => {
+  requests.splice(0);
+  for (const stream of streams) {
+    stream.dispatchEvent(new MessageEvent('vaults.updated', { data: JSON.stringify({ type: 'vaults.updated', data: {} }) }));
   }
 };
 // Start one more visible activity, announced the way a run change is.

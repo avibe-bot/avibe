@@ -10,7 +10,7 @@ describe('useReplyLinger', () => {
     vi.useRealTimers();
   });
 
-  it('keeps an untouched reply for 20 seconds', () => {
+  it('keeps an untouched reply for 30 seconds', () => {
     vi.useFakeTimers();
     const scope = {};
     const { result } = renderHook(() => useReplyLinger({
@@ -20,7 +20,7 @@ describe('useReplyLinger', () => {
       keyboardHeld: () => false,
     }));
 
-    act(() => { vi.advanceTimersByTime(REPLY_LINGER_MS - 1); });
+    act(() => { vi.advanceTimersByTime(29_999); });
     expect(result.current.lingeringId).toBe('reply-1');
     act(() => { vi.advanceTimersByTime(1); });
     expect(result.current.lingeringId).toBeNull();
@@ -50,4 +50,38 @@ describe('useReplyLinger', () => {
     act(() => { vi.advanceTimersByTime(1); });
     expect(result.current.lingeringId).toBeNull();
   });
+  it('starts a full budget when a displayed reply becomes read, including while paused', () => {
+    vi.useFakeTimers();
+    const props = { scope: 'test', candidateId: 'reply', counting: true, read: false, keyboardHeld: () => false };
+    const { result, rerender } = renderHook(() => useReplyLinger(props));
+    act(() => { vi.advanceTimersByTime(10_000); });
+    props.counting = false;
+    rerender();
+    props.read = true;
+    rerender();
+    act(() => { vi.advanceTimersByTime(60_000); });
+    props.counting = true;
+    rerender();
+    act(() => { vi.advanceTimersByTime(29_999); });
+    expect(result.current.lingeringId).toBe('reply');
+    act(() => { vi.advanceTimersByTime(1); });
+    expect(result.current.lingeringId).toBeNull();
+  });
+
+  it('leaves at least three seconds after any counting pause', () => {
+    vi.useFakeTimers();
+    const props = { scope: 'test', candidateId: 'reply', counting: true, keyboardHeld: () => false };
+    const { result, rerender } = renderHook(() => useReplyLinger(props));
+    act(() => { vi.advanceTimersByTime(REPLY_LINGER_MS - 1_000); });
+    props.counting = false;
+    rerender();
+    act(() => { vi.advanceTimersByTime(60_000); });
+    props.counting = true;
+    rerender();
+    act(() => { vi.advanceTimersByTime(2_999); });
+    expect(result.current.lingeringId).toBe('reply');
+    act(() => { vi.advanceTimersByTime(1); });
+    expect(result.current.lingeringId).toBeNull();
+  });
+
 });

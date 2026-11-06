@@ -174,11 +174,12 @@ then the latest reply. The bubble names Vibey in its existing localized spelling
 It remains available with either the collapsed or expanded stack.
 
 **When it shows.** While Vibey's conversation is active: the turn is running
-or thinking, or a send is pending; Vibey needs the user (a pending Vault
-handoff, a failure notice, an uncertain-send notice, or a queued notice); or
-the history is open. Composing and dictating take the slot as before (§5.2).
+or thinking, or a send is pending; Vibey needs the user (a failure notice,
+an uncertain-send notice, a queued notice, or an actionable quick reply); or
+the history is open. Pending Vault requests use the existing needs-input pet
+pose and history authorization entry, and do not hold an old reply open. Composing and dictating take the slot as before (§5.2).
 Then, when Vibey's turn ends, the bubble shows the reply summary for
-**10 seconds of on-screen time** before it hides with the speech slot's
+**30 seconds** before it hides with the speech slot's
 transition (instant under reduced motion), taking no space and no clicks.
 
 - **The reply of a turn this epoch watched end.** One thing lingers: that
@@ -203,35 +204,47 @@ transition (instant under reduced motion), taking no space and no clicks.
   server report it running) does not linger; Vibey's badge still marks it, and
   a Vibey click opens it. A turn that ends in failure keeps the bubble shown
   through its failure notice (needs-you).
-- **On-screen time.** The 10s count only while the reply itself is on
-  screen: the document is visible, the slot is drawing this bubble (not the
-  input, the dictation marquee, or the loading and unavailable notices), its
-  summary row is the reply (not "thinking" while the turn still reads as
-  running, nor a failure notice), and the pointer is not over the bubble.
-  The pointer reading counts only while the bubble is drawn; when the input or
-  the marquee replaces it, or it hides, the reading is dropped, since no leave
-  event may come.
-  Typing or dictating pauses it, and the rest plays when the bubble is back.
-  Leaving the bubble with the pointer leaves at least 3s. One timer, rescheduled
-  whenever these change.
-- **Keyboard focus** is read when the time runs out, not tracked: focus on a
-  focus-visible control inside the bubble keeps the reply and is looked at
-  again a second later. A pointer click never pins it. If the bubble goes
-  while focus is inside, whether it folds away or is replaced (by the input,
-  the dictation marquee, or a loading notice), focus moves to Vibey's button.
-- **Looked at means done.** A reply present while the history is open (its
-  expansion confirmed by the shell) counts as seen and does not linger after,
-  whether the history was opened from the lingering reply (a Vibey click or its
-  toggle row) or the reply arrived while it was already open; closing the
-  history hides the bubble. A reply that arrives only after the history has
-  closed was not seen there, so it lingers. A history the user asked for that
-  the shell has not confirmed yet holds the bubble and pauses the linger; if
-  the shell refuses, the request is dropped and the linger resumes. A new running turn holds the bubble again, and its
-  own result lingers anew.
+- **One 30-second budget (Owner, 2026-11-06).** Read and unread replies
+  share `REPLY_LINGER_MS = 30_000`. A reply is read when `read_at` is set
+  (including updates from other windows), or when confirmed history has
+  shown it locally. If already read when displayed, its budget starts when
+  displayed. Becoming read while still displayed starts one full 30-second
+  budget; a read update never revives an expired reply.
+- **Visibility and pauses.** Unread replies count only while the document is
+  visible and the reply itself occupies the speech slot. Read replies keep
+  counting across document hidden/window invisibility, including when they
+  become read while hidden. This avoids retaining an old read reply merely
+  because the user was away. Both pause while the pointer is over the bubble,
+  the composer/dictation occupies the slot, keyboard focus is visibly inside
+  the bubble, or history is open or awaiting shell confirmation. Thinking and
+  failure notices are not reply exposure. Resuming after any pause leaves at
+  least three seconds. One timer retains the remaining budget.
+  A pointer reading is cleared when the bubble is replaced or hidden, since
+  its leave event may not arrive. When a focused bubble is replaced, focus
+  transfers to the input or pet as before.
+- **Seen history.** Confirmed history marks the reply seen and pauses its
+  budget. Closing history and its input resumes that budget; it no longer
+  permanently suppresses a reply just because history showed it. A reply
+  arriving after history closes has not been seen there. A refused shell
+  expansion releases the pending pause. A new running turn shows thinking;
+  a silent turn does not reset or revive the old reply's budget.
 
-Unread replies only light Vibey's badge and never hold the bubble; quick
-replies stay in the history. A new running turn, a new needs-you state or a
-Vibey click that opens the history shows the bubble at once.
+After expiry an unread reply leaves the existing unread dot, which clears
+when another window marks it read. Pending Vault requests cannot hold a
+reply after expiry, even if the reply mentions that request. Actionable quick
+replies are an explicit exception: their existing history entry remains
+available while they still require an answer. Failure, uncertain-send, and
+queued notices keep their existing intervention behavior.
+
+**Diagnosis boundary (2026-11-06).** An isolated WKWebView reproduced a
+pending Vault request retaining an old reply after its timer had expired:
+`lingeringId = null`, but the old Vault-derived `needsYou` kept `held` true.
+Removing that hold fixes this cause. A read-only replay of the no-pending
+screenshot's API shape did not reproduce its persistence. Hidden/locked
+WebView state is a hypothesis, not its established cause; the read wall-time
+rule covers that class of return-to-an-old-reply behavior. Bounded native
+pointer and silent-turn probes did not establish a missing-pointer-leave
+cause or a silent-turn timer reset. No native hover or IPC changes are made.
 
 Click the bubble to expand recent turns from the loaded tail. Preserve all
 previous main detail behavior:

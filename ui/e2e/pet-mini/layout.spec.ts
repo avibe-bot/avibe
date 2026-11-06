@@ -986,7 +986,7 @@ test('an old, finished exchange starts with the bubble hidden, and takes no spac
   await expect.poll(() => bubbleIsRegion(page)).toBe(false);
 });
 
-// The reply lingers for 20s of on-screen time after the turn ends (spec §4.2).
+// The reply lingers for 30s of on-screen time after the turn ends (spec §4.2).
 // It waits until the running turn and its conversation are on screen, so the
 // turn's end is one this page watched happen.
 const finishTurn = async (page: import('@playwright/test').Page, text = '做完了。') => {
@@ -994,6 +994,131 @@ const finishTurn = async (page: import('@playwright/test').Page, text = '做完�
   await page.evaluate((text) =>
     window.petFixtureFinishTurn({ id: 'live_reply', author: 'agent', type: 'result', text, read_at: null }), text);
 };
+// Owner decision 2026-11-06: read and unread replies share the same budget.
+for (const read of [false, true]) {
+  test(`reply lifetime: ${read ? 'read' : 'unread'} reply stays for 30s then folds`, async ({ page }) => {
+    await page.clock.install();
+    await page.goto('/e2e/pet-mini/fixture.html?lang=zh&activities=0&running=1');
+    await finishTurn(page);
+    if (read) await page.evaluate(() => window.petFixtureRead('live_reply'));
+    await page.clock.runFor(29_000);
+    await expect(bubbleShown(page)).toBeVisible();
+    await page.clock.runFor(1_200);
+    await expect(bubbleShown(page)).toHaveCount(0);
+    await expect(page.locator('.pet-mini-avatar-unread-dot')).toHaveCount(read ? 0 : 1);
+    if (!read) {
+      await page.evaluate(() => window.petFixtureRead('live_reply'));
+      await expect(page.locator('.pet-mini-avatar-unread-dot')).toHaveCount(0);
+      await expect(bubbleShown(page)).toHaveCount(0);
+    }
+  });
+}
+
+for (const readWhen of ['before hidden', 'while hidden', 'unread'] as const) {
+  test(`reply lifetime: hidden document (${readWhen})`, async ({ page }) => {
+    await page.clock.install();
+    await page.goto('/e2e/pet-mini/fixture.html?lang=zh&activities=0&running=1');
+    await finishTurn(page);
+    if (readWhen === 'before hidden') await page.evaluate(() => window.petFixtureRead('live_reply'));
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    if (readWhen !== 'before hidden') {
+      await page.clock.runFor(60_000);
+      await expect(bubbleShown(page)).toBeVisible();
+      if (readWhen === 'while hidden') await page.evaluate(() => window.petFixtureRead('live_reply'));
+      else await page.evaluate(() => {
+        Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
+        document.dispatchEvent(new Event('visibilitychange'));
+      });
+    }
+    await page.clock.runFor(29_000);
+    await expect(bubbleShown(page)).toBeVisible();
+    await page.clock.runFor(1_200);
+    await expect(bubbleShown(page)).toHaveCount(0);
+    await expect(page.locator('.pet-mini-avatar-unread-dot')).toHaveCount(readWhen === 'unread' ? 1 : 0);
+  });
+}
+
+test('reply lifetime: becoming read while displayed grants a full 30s without reopening expired replies', async ({ page }) => {
+  await page.clock.install();
+  await page.goto('/e2e/pet-mini/fixture.html?lang=zh&activities=0&running=1');
+  await finishTurn(page);
+  await page.clock.runFor(10_000);
+  await page.evaluate(() => window.petFixtureRead('live_reply'));
+  await page.clock.runFor(29_000);
+  await expect(bubbleShown(page)).toBeVisible();
+  await page.clock.runFor(1_200);
+  await expect(bubbleShown(page)).toHaveCount(0);
+  await expect(page.locator('.pet-mini-avatar-unread-dot')).toHaveCount(0);
+});
+
+test('reply lifetime: a pending Vault keeps the existing needs-input entry, not an expired reply', async ({ page }) => {
+  await page.clock.install();
+  await page.goto('/e2e/pet-mini/fixture.html?lang=zh&activities=0&running=1&pendingVault');
+  await finishTurn(page, '还有一个待授权请求。');
+  await page.evaluate(() => window.petFixtureRead('live_reply'));
+  await page.clock.runFor(30_200);
+  await expect(bubbleShown(page)).toHaveCount(0);
+  await expect(page.locator('.pet-avatar')).toHaveAttribute('data-pose', 'needs_input');
+  await page.locator('.pet-mini-avatar-button').click();
+  await expect(page.locator('.pet-mini-detail.is-open').getByRole('button', { name: '需要授权，在 Avibe 中打开', exact: true })).toBeVisible();
+  await page.evaluate(() => window.petFixtureResolveVault());
+  await expect(page.locator('.pet-avatar')).not.toHaveAttribute('data-pose', 'needs_input');
+});
+
+test('reply lifetime: history marks a reply seen but resumes its budget after typing closes', async ({ page }) => {
+  await page.clock.install();
+  await page.goto('/e2e/pet-mini/fixture.html?lang=zh&activities=0&running=1');
+  await finishTurn(page);
+  await page.locator('.pet-mini-avatar-button').click();
+  await expect(page.locator('.pet-mini-detail.is-open')).toBeVisible();
+  await page.clock.runFor(60_000);
+  await page.locator('.pet-mini-avatar-button').click();
+  await expect(page.getByRole('textbox')).toBeVisible();
+  await page.getByRole('button', { name: '关闭输入', exact: true }).click();
+  await page.mouse.move(2, 2);
+  await expect(bubbleShown(page)).toBeVisible();
+  await page.clock.runFor(29_000);
+  await expect(bubbleShown(page)).toBeVisible();
+  await page.clock.runFor(1_200);
+  await expect(bubbleShown(page)).toHaveCount(0);
+  await expect(page.locator('.pet-mini-avatar-unread-dot')).toHaveCount(0);
+});
+
+test('reply lifetime: keyboard focus pauses the budget and leaves three seconds after focus moves', async ({ page, browserName }) => {
+  await page.clock.install();
+  await page.goto('/e2e/pet-mini/fixture.html?lang=zh&activities=0&running=1');
+  await finishTurn(page);
+  await page.clock.runFor(19_000);
+  await tabToToggle(page, browserName);
+  await page.clock.runFor(60_000);
+  await expect(bubbleShown(page)).toBeVisible();
+  await page.locator('.pet-mini-avatar-button').focus();
+  await page.clock.runFor(10_000);
+  await expect(bubbleShown(page)).toBeVisible();
+  await page.clock.runFor(1_200);
+  await expect(bubbleShown(page)).toHaveCount(0);
+});
+
+test('reply lifetime: typing near expiry pauses and resumes with at least three seconds', async ({ page }) => {
+  await page.clock.install();
+  await page.goto('/e2e/pet-mini/fixture.html?lang=zh&activities=0&running=1');
+  await finishTurn(page);
+  await page.clock.runFor(29_000);
+  await expect(bubbleShown(page)).toBeVisible();
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent('avibe:pet-summon', { detail: { intent: 'listen' } })));
+  await expect(page.getByRole('textbox')).toBeVisible();
+  await page.clock.runFor(60_000);
+  await page.getByRole('button', { name: '关闭输入', exact: true }).click();
+  await page.mouse.move(2, 2);
+  await page.clock.runFor(2_800);
+  await expect(bubbleShown(page)).toBeVisible();
+  await page.clock.runFor(400);
+  await expect(bubbleShown(page)).toHaveCount(0);
+});
+
 // Tab (Option+Tab in WebKit, whose Tab skips buttons) until the toggle row has
 // keyboard focus; with no cards it is the first stop.
 const tabToToggle = async (page: import('@playwright/test').Page, browserName: string) => {
@@ -1007,7 +1132,7 @@ const tabToToggle = async (page: import('@playwright/test').Page, browserName: s
 };
 
 for (const theme of ['light', 'dark']) {
-  test(`a running turn shows thinking, then its reply for 20s on screen (${theme})`, async ({ page }) => {
+  test(`a running turn shows thinking, then its reply for 30s on screen (${theme})`, async ({ page }) => {
     await page.clock.install();
     await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&running=1&asr=1');
     await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
@@ -1018,7 +1143,7 @@ for (const theme of ['light', 'dark']) {
     await page.clock.runFor(100);
     await expect(bubbleShown(page)).toBeVisible();
     await expect(page.locator('.pet-mini-reply-toggle')).toContainText('做完了。');
-    await page.clock.runFor(19_500);
+    await page.clock.runFor(29_500);
     await expect(bubbleShown(page)).toBeVisible();
     await page.clock.runFor(1_000);
     await expect(bubbleShown(page)).toHaveCount(0);
@@ -1048,8 +1173,8 @@ test('the pointer over the lingering reply holds it, and leaving leaves at least
   await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&running=1');
   await page.clock.runFor(500);
   await finishTurn(page);
-  // Within the last second of the 20s linger.
-  await page.clock.runFor(19_000);
+  // Within the last second of the 30s linger.
+  await page.clock.runFor(29_000);
   await page.locator('.pet-mini-reply-toggle').hover();
   await page.clock.runFor(60_000);
   await expect(bubbleShown(page)).toBeVisible();
@@ -1069,13 +1194,13 @@ test('keyboard focus in the lingering reply keeps it until focus moves on', asyn
   await tabToToggle(page, browserName);
   await page.clock.runFor(30_000);
   await expect(bubbleShown(page)).toBeVisible();
-  // Focus moves on: the next look finds nothing holding it, and it goes.
+  // Focus pauses the full budget. Moving on resumes its unspent time.
   await page.locator('.pet-mini-avatar-button').focus();
-  await page.clock.runFor(1_500);
+  await page.clock.runFor(30_200);
   await expect(bubbleShown(page)).toHaveCount(0);
 });
 
-test('a Vibey click on the lingering reply opens its history, which does not linger after', async ({ page }) => {
+test('a Vibey click on the lingering reply opens its history, then the input holds the slot', async ({ page }) => {
   await page.clock.install();
   await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&running=1');
   await page.clock.runFor(500);
@@ -1083,7 +1208,7 @@ test('a Vibey click on the lingering reply opens its history, which does not lin
   await page.clock.runFor(2_000);
   const avatar = page.locator('.pet-mini-avatar-button');
   await avatar.click();
-  await page.clock.runFor(300);
+  await page.clock.runFor(600);
   await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).toHaveClass(/is-open/);
   await expect.poll(() => page.locator('.pet-mini-bubble-history').evaluate((node) => Math.abs(node.scrollHeight - node.clientHeight - node.scrollTop))).toBeLessThanOrEqual(1);
   await avatar.click();
@@ -1112,7 +1237,7 @@ test('the lingering reply\'s toggle row opens its history; closing it hides the 
   await expect(page.getByRole('textbox')).toBeFocused();
 });
 
-for (const [name, query] of [['a running turn', 'running=1'], ['a pending Vault handoff', 'history=actions']] as const) {
+for (const [name, query] of [['a running turn', 'running=1'], ['actionable quick replies', 'history=actions']] as const) {
   test(`${name} keeps the bubble shown`, async ({ page }) => {
     await page.goto(`/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&${query}`);
     await expect(bubbleShown(page)).toBeVisible();

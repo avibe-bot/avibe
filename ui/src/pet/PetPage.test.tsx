@@ -2957,15 +2957,15 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
   // Vibey's own bubble (its toggle row), not the loading notice that shares the slot.
   const bubbleOpen = () => document.querySelector('.pet-mini-reply-toggle')?.closest('.pet-mini-slot')?.classList.contains('is-open') ?? false;
 
-  it('starts hidden for an old, finished exchange, quick replies and unread included', async () => {
+  it.each([false, true])('an old reply is hidden unless it still has actionable quick replies (%s)', async (actionable) => {
     tails.S = [
       message('u', 'S', { author: 'user', type: 'user', text: 'hello' }),
-      message('r', 'S', { text: 'Done already', read_at: null, content: { quick_replies: ['Yes', 'No'] } }),
+      message('r', 'S', { text: 'Done already', read_at: null, content: actionable ? { quick_replies: ['Yes', 'No'] } : {} }),
     ];
     mainSession('S');
     render(<PetPage />);
-    await screen.findByLabelText('pet.recentTurns');
-    expect(bubbleOpen()).toBe(false);
+    await waitFor(() => expect(document.querySelector('.pet-mini-reply-summary')?.textContent).toBe('Done already'));
+    expect(bubbleOpen()).toBe(actionable);
   });
 
   // A turn that is running, then ends with `text` as its result; returns the
@@ -3037,7 +3037,7 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
 
   it('leaves an unread dot when an untouched reply times out, then clears it on expansion', async () => {
     await runToResult();
-    await act(async () => { vi.advanceTimersByTime(20_100); });
+    await act(async () => { vi.advanceTimersByTime(30_100); });
     await waitFor(() => expect(bubbleOpen()).toBe(false));
     // Still drawn in its closing slot, so it fades out rather than vanishing;
     // the closed slot keeps it out of reach.
@@ -3052,7 +3052,7 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
 
   it('clears the unread dot when another window marks the last reply read', async () => {
     await runToResult();
-    await act(async () => { vi.advanceTimersByTime(20_100); });
+    await act(async () => { vi.advanceTimersByTime(30_100); });
     await waitFor(() => expect(document.querySelector('.pet-mini-avatar-unread-dot')).not.toBeNull());
 
     const read = message('r', 'S', { text: 'All done', read_at: '2026-10-04T00:00:02Z' });
@@ -3065,29 +3065,32 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
     await waitFor(() => expect(document.querySelector('.pet-mini-avatar-unread-dot')).toBeNull());
   });
 
-  it('a double-click leaves the lingering reply unseen and on its original timer', async () => {
+  it('a double-click opens Avibe and leaves the seen reply on its budget', async () => {
     await runToResult();
     const { petBridge } = await import('./petBridge');
     const opens = vi.spyOn(petBridge, 'open').mockResolvedValue();
     await userEvent.dblClick(screen.getByLabelText('pet.recentTurns'));
     expect(opens).toHaveBeenCalledExactlyOnceWith('avibe://session/S');
     expect(document.querySelector('.pet-mini-detail.is-open')).toBeNull();
+    expect(bubbleOpen()).toBe(true);
+    act(() => { vi.advanceTimersByTime(30_100); });
     expect(bubbleOpen()).toBe(false);
+    expect(document.querySelector('.pet-mini-avatar-unread-dot')).toBeNull();
   });
 
-  it('keeps the bubble open from running to its result, then shows the reply for 20s', async () => {
+  it('keeps the bubble open from running to its result, then shows the reply for 30s', async () => {
     const classes = await runToResult();
     // No closed frame between the running bubble and the reply.
     expect(classes.every((value) => value.includes('is-open'))).toBe(true);
     expect(bubbleOpen()).toBe(true);
     expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('All done');
-    act(() => { vi.advanceTimersByTime(19_900); });
+    act(() => { vi.advanceTimersByTime(29_900); });
     expect(bubbleOpen()).toBe(true);
     act(() => { vi.advanceTimersByTime(200); });
     expect(bubbleOpen()).toBe(false);
   });
 
-  it('spends nothing while the turn still reads as running, so a late turn end still gets the full 20s', async () => {
+  it('spends nothing while the turn still reads as running, so a late turn end still gets the full 30s', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'], shouldAdvanceTime: true });
     tails.S = [message('u', 'S', { author: 'user', type: 'user', text: 'hello' })];
     let running = true;
@@ -3104,7 +3107,7 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
     running = false;
     await emit((h) => h.onTurnEnd?.({ session_id: 'S' }));
     await waitFor(() => expect(document.querySelector('.pet-mini-reply-toggle .pet-mini-running-dot')).toBeNull());
-    act(() => { vi.advanceTimersByTime(19_800); });
+    act(() => { vi.advanceTimersByTime(29_800); });
     expect(bubbleOpen()).toBe(true);
     act(() => { vi.advanceTimersByTime(400); });
     expect(bubbleOpen()).toBe(false);
@@ -3220,7 +3223,11 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
       await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('Answered while open'));
     });
     await userEvent.click(screen.getByLabelText('pet.recentTurns'));
-    await waitFor(() => expect(bubbleOpen()).toBe(false));
+    await userEvent.keyboard('{Escape}');
+    expect(bubbleOpen()).toBe(true);
+    act(() => { vi.advanceTimersByTime(30_100); });
+    expect(bubbleOpen()).toBe(false);
+    expect(document.querySelector('.pet-mini-avatar-unread-dot')).toBeNull();
   });
 
   it('lingers a reply that lands after its turn end, once the history it was not in has closed', async () => {
@@ -3253,7 +3260,7 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
     tails.S = [...tails.S, late];
     await emit((h) => h.onMessageNew?.(late));
     await waitFor(() => expect(bubbleOpen()).toBe(true));
-    act(() => { vi.advanceTimersByTime(19_800); });
+    act(() => { vi.advanceTimersByTime(29_800); });
     expect(bubbleOpen()).toBe(true);
     act(() => { vi.advanceTimersByTime(400); });
     expect(bubbleOpen()).toBe(false);
@@ -3281,7 +3288,7 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
       await act(async () => expand.reject(new Error('no monitor')));
       // Refused: the history never opened, so the reply plays out its time.
       expect(bubbleOpen()).toBe(true);
-      act(() => { vi.advanceTimersByTime(20_200); });
+      act(() => { vi.advanceTimersByTime(30_200); });
       expect(bubbleOpen()).toBe(false);
     } finally {
       Reflect.deleteProperty(window, '__AVIBE_DESKTOP_SHELL__');
@@ -3372,7 +3379,7 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
     act(() => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); });
     expect(screen.queryByLabelText('pet.inputPlaceholder')).toBeNull();
     expect(bubbleOpen()).toBe(true);
-    act(() => { vi.advanceTimersByTime(15_900); });
+    act(() => { vi.advanceTimersByTime(25_900); });
     expect(bubbleOpen()).toBe(true);
     act(() => { vi.advanceTimersByTime(200); });
     expect(bubbleOpen()).toBe(false);
@@ -3385,7 +3392,7 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
     act(() => { vi.advanceTimersByTime(60_000); });
     expect(bubbleOpen()).toBe(true);
     fireEvent.pointerLeave(bubbleWrap());
-    act(() => { vi.advanceTimersByTime(10_900); });
+    act(() => { vi.advanceTimersByTime(20_900); });
     expect(bubbleOpen()).toBe(true);
     act(() => { vi.advanceTimersByTime(200); });
     expect(bubbleOpen()).toBe(false);
@@ -3401,18 +3408,24 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
     act(() => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); });
     expect(screen.queryByLabelText('pet.inputPlaceholder')).toBeNull();
     expect(bubbleOpen()).toBe(true);
-    act(() => { vi.advanceTimersByTime(15_900); });
+    act(() => { vi.advanceTimersByTime(25_900); });
     expect(bubbleOpen()).toBe(true);
     act(() => { vi.advanceTimersByTime(200); });
     expect(bubbleOpen()).toBe(false);
   });
 
-  it('does not linger again once its history has been opened and closed', async () => {
+  it('resumes the seen reply budget once history and its input close', async () => {
     await runToResult();
     await userEvent.click(screen.getByLabelText('pet.recentTurns'));
     await waitFor(() => expect(document.querySelector('.pet-mini-detail.is-open')).not.toBeNull());
     await userEvent.click(screen.getByLabelText('pet.recentTurns'));
-    await waitFor(() => expect(bubbleOpen()).toBe(false));
+    await userEvent.keyboard('{Escape}');
+    expect(bubbleOpen()).toBe(true);
+    act(() => { vi.advanceTimersByTime(29_000); });
+    expect(bubbleOpen()).toBe(true);
+    act(() => { vi.advanceTimersByTime(1_100); });
+    expect(bubbleOpen()).toBe(false);
+    expect(document.querySelector('.pet-mini-avatar-unread-dot')).toBeNull();
   });
 
   it('stays shown while a failure needs the user', async () => {
