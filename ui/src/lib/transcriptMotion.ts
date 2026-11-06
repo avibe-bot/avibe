@@ -52,6 +52,11 @@ export const ITEM_KEY_ATTRIBUTE = 'data-transcript-key';
 export const ITEM_FOR_ATTRIBUTE = 'data-transcript-for';
 /** `end` on an item drawn on the right, which rises from the composer; any other item is on the left. */
 export const SIDE_ATTRIBUTE = 'data-transcript-side';
+/** Marks what a disclosure opens (a chip's panel, a Harness row's body, the running card's full view, a
+ *  Harness group's opened member and collapse bar): it shows itself when the reader opens it. */
+export const REVEAL_ATTRIBUTE = 'data-transcript-reveal';
+/** How long after a tap on a disclosure control what it opens still counts as opened by it. */
+const DISCLOSURE_WINDOW_MS = 1000;
 /** What takes the place of the turn at work starts once that has faded this far (its copy at 10%
  *  opacity, its words no longer to be made out): the two never draw their words over each other. */
 const HANDOFF_PROGRESS = 0.9;
@@ -100,6 +105,7 @@ type Tokens = {
   sinkMove: MotionTiming;
   offset: number;
   scaleEnter: number;
+  scaleEnterSmall: number;
   beat: number;
   handover: number;
 };
@@ -118,6 +124,7 @@ function readTokens(): Tokens {
     sinkMove: motionTiming('base', 'move'),
     offset: readMotionNumber('--motion-offset', 8),
     scaleEnter: readMotionNumber('--motion-scale-enter', 0.96),
+    scaleEnterSmall: readMotionNumber('--motion-scale-enter-sm', 0.98),
     beat: readMotionMs('--motion-beat'),
     handover: readMotionMs('--motion-handover-duration'),
   };
@@ -148,6 +155,19 @@ function enter(el: HTMLElement, tokens: Tokens, { origin, from, fade, delay = 0 
   el.animate([{ opacity: 0 }, { opacity: 1 }], { ...fade, delay, fill: 'backwards' });
   const rise = el.animate([{ transform: from }, { transform: 'none' }], { ...tokens.rise, delay, fill: 'backwards' });
   void rise.finished.then(() => { el.style.transformOrigin = ''; }, () => {});
+}
+
+/** What a disclosure opened shows itself: it grows from `--motion-scale-enter-sm` at its top-left corner
+ *  while it fades in on `fast`; under reduced motion it only fades. By the individual `scale` property,
+ *  so a transform of its own is kept; never its layout, which has changed at once. */
+function reveal(el: HTMLElement, reduced: boolean, tokens: Tokens) {
+  if (reduced) {
+    el.animate([{ opacity: 0 }, { opacity: 1 }], { ...tokens.fadeInFast, fill: 'backwards' });
+    return;
+  }
+  el.style.transformOrigin = 'top left';
+  const shown = el.animate([{ opacity: 0, scale: String(tokens.scaleEnterSmall) }, { opacity: 1, scale: '1' }], { ...tokens.fadeInFast, fill: 'backwards' });
+  void shown.finished.then(() => { el.style.transformOrigin = ''; }, () => {});
 }
 
 /** The last item that stays put through a commit as far as the transcript knows: not the turn at work,
@@ -253,6 +273,22 @@ export function useTranscriptMotion({
   // The copies of the turn at work still fading where it was, and when each is faint enough for what
   // comes in there to start (ms into its fade).
   const fading = useRef<{ fade: Animation; clearAt: number }[]>([]);
+  // The item whose disclosure control the reader just tapped, and what the transcript has shown that a
+  // disclosure opens (so only what one opens now shows itself, never what a read brings back).
+  const disclosure = useRef<{ session: string; item: HTMLElement; at: number } | null>(null);
+  const shownReveals = useRef(new WeakSet<Element>());
+
+  /** Call with the target of every click in the transcript: a tap on a disclosure control (anything with
+   *  `aria-expanded`) inside an item marks what the next commit opens there as opened by the reader. */
+  const noteDisclosure = useCallback((target: EventTarget) => {
+    const column = columnRef.current;
+    const element = target instanceof Element ? target : target instanceof Node ? target.parentElement : null;
+    const control = element?.closest('[aria-expanded]');
+    if (!column || !control || !column.contains(control)) return;
+    let item: Element = control;
+    while (item.parentElement && item.parentElement !== column) item = item.parentElement;
+    if (item.parentElement === column && isItem(item)) disclosure.current = { session: sessionId, item, at: performance.now() };
+  }, [columnRef, sessionId]);
 
   const capture = useCallback(() => {
     const el = scrollRef.current;
@@ -276,6 +312,10 @@ export function useTranscriptMotion({
     const items = column ? Array.from(column.children).filter(isItem) : [];
     const previous = seen.current;
     seen.current = { session: sessionId, rows: new Set(items) };
+    // What a disclosure opens that the transcript had not shown before this commit.
+    const reveals = column ? Array.from(column.querySelectorAll<HTMLElement>(`[${REVEAL_ATTRIBUTE}]`)) : [];
+    const newReveals = reveals.filter((node) => !shownReveals.current.has(node));
+    for (const node of newReveals) shownReveals.current.add(node);
     const leaving = departures.current.filter((departure) => !departure.node.isConnected);
     departures.current = [];
     const snapshot = before.current;
@@ -300,7 +340,23 @@ export function useTranscriptMotion({
     glides.current = glides.current.filter((at) => now - at < BURST_WINDOW_MS);
     const burst = glides.current.length >= BURST_GLIDES;
     const shouldGlide = !reduced && !handover && !burst && !read && moved !== 0 && Math.abs(moved) <= el.clientHeight;
-    if (!shouldGlide && leaving.length === 0 && entering.length === 0) return;
+    // What the reader just opened: new content inside the item they tapped, and the items it laid out right
+    // under it (a Harness group's members and collapse bar). The layout changed at once and the scroller
+    // holds the tapped item where it was; only the content shows itself (an item by its children, never
+    // the item's own box, which the scroller measures).
+    const opened = disclosure.current;
+    let revealing: HTMLElement[] = [];
+    if (opened && (opened.session !== sessionId || now - opened.at > DISCLOSURE_WINDOW_MS || !opened.item.isConnected)) {
+      disclosure.current = null;
+    } else if (opened) {
+      revealing = newReveals.flatMap((node) => {
+        if (opened.item.contains(node) && node !== opened.item) return [node];
+        if (node.parentElement === column && arrived.includes(node) && !live(node)) return Array.from(node.children) as HTMLElement[];
+        return [];
+      });
+      if (revealing.length > 0) disclosure.current = null;
+    }
+    if (!shouldGlide && leaving.length === 0 && entering.length === 0 && revealing.length === 0) return;
     // Everything this commit's motion reads, before it writes anything.
     const tokens = readTokens();
     if (shouldGlide) {
@@ -324,6 +380,8 @@ export function useTranscriptMotion({
     // alone, at once.
     fading.current = fading.current.filter(({ fade }) => fade.playState !== 'finished' && fade.playState !== 'idle');
     const handoff = Math.max(0, ...fading.current.map(({ fade, clearAt }) => clearAt - Number(fade.currentTime ?? 0)));
+
+    for (const node of revealing) reveal(node, reduced, tokens);
 
     const withMessage = entering.some((item) => !isWorking(item));
     for (const item of entering) {
@@ -356,5 +414,5 @@ export function useTranscriptMotion({
     }
   }, [columnRef, scrollRef, sessionId]);
 
-  return { capture, depart, afterCommit };
+  return { capture, depart, afterCommit, noteDisclosure };
 }

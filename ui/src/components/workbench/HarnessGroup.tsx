@@ -4,7 +4,7 @@ import clsx from 'clsx';
 
 import type { WorkbenchMessage } from '../../context/ApiContext';
 import { chatTriggerLink, harnessChipLabelKey } from '../../lib/chatTrigger';
-import { ITEM_KEY_ATTRIBUTE } from '../../lib/transcriptMotion';
+import { ITEM_KEY_ATTRIBUTE, REVEAL_ATTRIBUTE } from '../../lib/transcriptMotion';
 import { RoleAvatar } from './RoleAvatar';
 
 // The left rail that ties an expanded group's rows together. Each row draws its
@@ -24,12 +24,15 @@ export function HarnessGroup({
   groupKey,
   members,
   expanded,
+  closing = false,
   onToggle,
 }: {
   /** Stable across growth; the Transcript finds the head by it after a collapse. */
   groupKey: string;
   members: WorkbenchMessage[];
   expanded: boolean;
+  /** Closed, while its members leave in place: still drawn as open, so nothing moves until they are gone. */
+  closing?: boolean;
   onToggle: () => void;
 }) {
   const { t } = useTranslation();
@@ -56,13 +59,13 @@ export function HarnessGroup({
     'data-harness-members': members.map((message) => message.id).join(' '),
   };
 
-  if (expanded) {
+  if (expanded || closing) {
     return (
       <div {...rowAttributes} className="flex w-full justify-start">
         <button
           type="button"
           onClick={onToggle}
-          aria-expanded
+          aria-expanded={!closing}
           aria-label={countLabel}
           className="group/harness flex w-full max-w-[min(92%,860px)] items-center gap-2 rounded-lg text-left"
         >
@@ -116,10 +119,15 @@ export function HarnessGroup({
 
 /** The trailing control of an expanded group, for when its head has scrolled away. A transcript item of
  *  its own (lib/transcriptMotion), which the scroller can hold. */
-export function HarnessGroupCollapse({ groupKey, count, onCollapse }: { groupKey: string; count: number; onCollapse: () => void }) {
+export function HarnessGroupCollapse({ groupKey, count, onCollapse, closing = false }: { groupKey: string; count: number; onCollapse: () => void; closing?: boolean }) {
   const { t } = useTranslation();
   return (
-    <div data-transcript-row="" {...{ [ITEM_KEY_ATTRIBUTE]: `harness-collapse:${groupKey}` }} className={HARNESS_GROUP_RAIL}>
+    <div
+      data-transcript-row=""
+      {...{ [ITEM_KEY_ATTRIBUTE]: `harness-collapse:${groupKey}`, [REVEAL_ATTRIBUTE]: '' }}
+      aria-hidden={closing || undefined}
+      className={clsx(HARNESS_GROUP_RAIL, closing && 'motion-disclose-out-children')}
+    >
       <button
         type="button"
         onClick={onCollapse}

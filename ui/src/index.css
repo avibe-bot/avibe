@@ -1032,6 +1032,26 @@ pre,
 @keyframes motion-nav-return { from { transform: translateX(calc(-1 * var(--motion-drift))); } }
 @keyframes motion-fade-in { from { opacity: 0; } }
 @keyframes motion-fade-out { to { opacity: 0; } }
+/* What a disclosure in the transcript closes (src/lib/motion.ts useDisclosure;
+   docs/plans/web-ui-motion.md M3) leaves the way it came, while it still holds
+   its layout: it fades and shrinks to `--motion-scale-enter-sm` toward its
+   top-left corner on `instant`, exit (as what the turn at work hands over
+   does), then the layout lets go of it. `-children` moves what an item holds,
+   never the item's own box, which the scroller measures. Reduced motion: it
+   only fades. */
+.motion-disclose-out,
+.motion-disclose-out-children > * {
+  transform-origin: top left;
+  pointer-events: none;
+  animation: motion-disclose-out var(--motion-duration-instant) var(--motion-ease-exit) forwards;
+}
+@keyframes motion-disclose-out { to { opacity: 0; scale: var(--motion-scale-enter-sm); } }
+@media (prefers-reduced-motion: reduce) {
+  .motion-disclose-out,
+  .motion-disclose-out-children > * {
+    animation-name: motion-fade-out;
+  }
+}
 
 /* Sheets, dialogs, popovers (docs/plans/web-ui-motion.md M6; src/lib/sheetDrag.ts;
    ui/design: motion/sheets/*). Keyed on the `data-state` Radix sets, which waits
