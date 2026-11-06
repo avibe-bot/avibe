@@ -273,6 +273,7 @@ jobs:
           --bundles "${{ matrix.bundle }}"
           --features bundled-runtime
           --config tauri.release.conf.json
+          -- --locked
 
       - name: Verify macOS SDK and deployment target ceiling
         if: runner.os == 'macOS'

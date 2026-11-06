@@ -124,6 +124,7 @@ jobs:
           --bundles nsis
           --features bundled-runtime
           --config tauri.release.conf.json
+          -- --locked
 
       # SignPath's windows-installer-test configuration signs exactly this one
       # file at the root of the artifact ZIP.
