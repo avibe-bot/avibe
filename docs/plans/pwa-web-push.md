@@ -208,8 +208,9 @@ Responsibilities:
 - Call `self.registration.showNotification(title, options)`.
 - Update badge when supported (`navigator.setAppBadge` is page-side; service
   worker support differs, so keep badge best-effort).
-- Show every notification with `navigate` set to its absolute target URL.
-- Listen for `notificationclick` for engines that ignore `navigate`.
+- On iPhone and iPad (by the worker's user agent), show the notification with
+  `navigate` set to its absolute target URL.
+- Listen for `notificationclick` for every other browser and for older iOS.
 - Focus an existing client if available; otherwise open the target URL.
 
 Payload shape:
@@ -244,12 +245,14 @@ its client is live (WebKit 252544, 259212, 268797, 279456). The page used to
 read the Cache Storage handoff once per launch or resume, so a handoff written
 after that read was missed and the app stayed on its last page.
 
-Safari 18.4 and later, including iOS Home Screen apps, open a notification's
-`navigate` URL themselves on a tap, cold or suspended, and do not fire
-`notificationclick`. The page then loads at the target, so nothing else is
-shown first. Chromium ignores `navigate`; its taps still focus a window and
-post `vibe.notification-click`, or open the target, with the Cache Storage
-handoff as before. iOS before 18.4 keeps that best-effort path.
+iOS 18.4 and later open a notification's `navigate` URL themselves on a tap,
+cold or suspended, and do not fire `notificationclick`. The page then loads at
+the target, so nothing else is shown first. The worker sets `navigate` only when
+its user agent names an iPhone, iPad, or iPod: desktop Safari and Firefox also
+honor it, but there each tap would open a new tab. Desktop browsers (and an iPad
+reporting a Mac user agent) keep the existing path: focus a window and post
+`vibe.notification-click`, or open the target, with the Cache Storage handoff.
+iOS before 18.4 ignores `navigate` and keeps that best-effort path.
 
 The worker calls `skipWaiting()` on install. It has no fetch handler, and a
 suspended Home Screen app would otherwise keep an older worker until killed.
