@@ -12,10 +12,7 @@ import { InboxCard } from './InboxCard';
 // the link, a press anywhere else on it follows that link, its own 「Mark read」 marks read and stays,
 // a drag that selects text selects, and a modified or middle press opens a new tab.
 
-vi.mock('../ui/markdown', () => ({
-  // As the real renderer does with `interactive={false}`: a link's text, not an anchor.
-  Markdown: ({ content }: { content: string }) => <p>{content.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')}</p>,
-}));
+// The preview is the shipped Markdown renderer: what a link in it does is what the card asserts.
 
 const t = ((key: string) => key) as unknown as TFunction;
 const session = (unread = 2): InboxSession => ({
