@@ -18209,8 +18209,8 @@ def build_parser():
         "run",
         help="Run an Avibe Agent",
         description=(
-            "Run async in a new background Session, existing Session, or fork. "
-            "Requires Avibe running; no offline enqueue or auto-start."
+            "New background Session, existing Session, or a fork. Runs are async. "
+            "Needs Avibe running; no offline enqueue/auto-start."
         ),
         epilog=_agent_run_examples_text(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
