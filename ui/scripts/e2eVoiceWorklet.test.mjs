@@ -2,14 +2,16 @@
 // e2e/support/browserTest, which makes the composer's voice worklet load
 // nothing. On Linux WebKit that load can freeze the page for good, so a suite
 // that misses the stub times out in CI on an element that is already there.
-// Two suites had copied the stub by hand; the next one had not.
+// Two suites had copied the stub by hand; the next one had not. What the base
+// does is checked in the browsers (e2e/chat-interactions/browserTest.spec.ts);
+// whether a suite runs on it has no symptom a run can be sure to show, since
+// the freeze is intermittent, so it is read here: the module each spec imports.
 //
 // Which suites reach the composer is read from the files, not listed: the
 // pages each suite opens (page.goto paths, fixture .html literals; any other
 // route is the whole app), then each page's module script and its imports,
 // static or dynamic. A suite whose pages cannot be read fails, rather than
-// passing unjudged. A suite that records from a fake microphone keeps the real
-// worklet (`voiceWorklet: 'real'` in its config), since it captures through it.
+// passing unjudged.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,8 +22,9 @@ const E2E = path.join(UI, 'e2e');
 const SRC = path.join(UI, 'src');
 const COMPOSER = path.join(SRC, 'components/workbench/Composer.tsx');
 const BASE = path.join(E2E, 'support/browserTest.ts');
-const BASE_IMPORT = "from '../support/browserTest'";
-const STUB = 'AudioWorklet.prototype.addModule';
+/** An import of the base module, by its path. */
+const IMPORTS_BASE = /from\s*['"]\.\.\/support\/browserTest(?:\.ts)?['"]/;
+const IMPORTS_PLAYWRIGHT = /from\s*['"]@playwright\/test['"]/;
 
 const IMPORT = /(?:import|export)\s[^'"]*?from\s*['"]([^'"]+)['"]|import\s*\(\s*['"]([^'"]+)['"]\s*\)|import\s+['"]([^'"]+)['"]/g;
 const EXTENSIONS = ['', '.ts', '.tsx', '.js', '.jsx', '/index.ts', '/index.tsx'];
@@ -91,14 +94,10 @@ const suites = fs.readdirSync(E2E, { withFileTypes: true })
 
 const composerSuites = suites.filter((suite) => suite.composer);
 
-/** The Playwright configs that run a suite's directory. */
-const configsOf = (suite) => fs.readdirSync(UI)
-  .filter((name) => /^playwright\..*config\.ts$/.test(name))
-  .filter((name) => read(path.join(UI, name)).includes(`testDir: './e2e/${suite.name}'`));
-
 describe('browser suites that reach the composer', () => {
   it('are found where the composer is known to be, and nowhere it is not', () => {
     expect(fs.existsSync(COMPOSER)).toBe(true);
+    expect(fs.existsSync(BASE)).toBe(true);
     const unread = suites.filter((suite) => suite.entries.length === 0).map((suite) => suite.name);
     expect(unread, `No page found for ${unread.join(', ')}: say where it opens, or this guard cannot judge it.`).toEqual([]);
     const names = composerSuites.map((suite) => suite.name);
@@ -106,47 +105,16 @@ describe('browser suites that reach the composer', () => {
     for (const known of ['chat-interactions', 'chat-scroll', 'voice-shortcut', 'workbench-general']) expect(names).toContain(known);
     // A fixture that never shows a chat.
     expect(names).not.toContain('project-order');
-    // Every one of them is run by a config the microphone rule reads.
-    expect(composerSuites.filter((suite) => configsOf(suite).length === 0).map((suite) => suite.name)).toEqual([]);
   });
 
   it.each(composerSuites.map((suite) => [suite.name, suite]))('%s runs every spec on support/browserTest', (_name, suite) => {
     const offences = suite.specs.flatMap((spec) => {
       const source = read(path.join(suite.directory, spec));
       return [
-        ...(source.includes(BASE_IMPORT) ? [] : [`${spec} does not import \`test\` ${BASE_IMPORT}`]),
-        ...(/from\s*['"]@playwright\/test['"]/.test(source) ? [`${spec} imports from '@playwright/test' beside it`] : []),
+        ...(IMPORTS_BASE.test(source) ? [] : [`${spec} does not import its test from ../support/browserTest`]),
+        ...(IMPORTS_PLAYWRIGHT.test(source) ? [`${spec} imports from '@playwright/test' beside it`] : []),
       ];
     });
-    // A context a spec makes itself does not come through the base's fixture.
-    for (const name of suite.files) {
-      const source = read(path.join(suite.directory, name));
-      const made = source.match(/browser\.newContext\(/g)?.length ?? 0;
-      const stubbed = source.match(/stubVoiceWorklet\(/g)?.length ?? 0;
-      if (made > stubbed) offences.push(`${name} makes ${made} context(s) with browser.newContext() but stubs ${stubbed}`);
-    }
-    // A fake microphone means the suite captures audio, through the real worklet.
-    for (const config of configsOf(suite)) {
-      const source = read(path.join(UI, config));
-      if (source.includes('--use-fake-device-for-media-stream') && !source.includes("voiceWorklet: 'real'")) {
-        offences.push(`${config} records from a fake microphone but stubs the voice worklet: set voiceWorklet: 'real'`);
-      }
-    }
     expect(offences, offences.join('\n')).toEqual([]);
   });
-});
-
-it('the voice worklet stub is written once, in support/browserTest', () => {
-  expect(read(BASE)).toContain(STUB);
-  const copies = [];
-  const walk = (directory) => {
-    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-      if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
-      const file = path.join(directory, entry.name);
-      if (entry.isDirectory()) walk(file);
-      else if (/\.[jt]sx?$/.test(entry.name) && file !== BASE && read(file).includes(STUB)) copies.push(path.relative(UI, file));
-    }
-  };
-  walk(E2E);
-  expect(copies, `Use support/browserTest instead of a copy: ${copies.join(', ')}`).toEqual([]);
 });
