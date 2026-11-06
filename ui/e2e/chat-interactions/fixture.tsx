@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { MemoryRouter } from 'react-router-dom';
 
 import { MessageRow } from '../../src/components/workbench/ChatPage';
+import { Composer } from '../../src/components/workbench/Composer';
 import { HARNESS_GROUP_RAIL, HarnessGroup } from '../../src/components/workbench/HarnessGroup';
 import { SelectionQuoteToolbar } from '../../src/components/workbench/SelectionQuoteToolbar';
 import type { WorkbenchMessage, WorkbenchSession } from '../../src/context/ApiContext';
@@ -50,10 +51,32 @@ function HarnessRows() {
   );
 }
 
+// The chat composer with a restored draft. ``?composer=refuse``: the send is refused.
+// Each send is recorded on ``window.__sends``.
+function ComposerCase({ refuse }: { refuse: boolean }) {
+  return (
+    <div className="fixed inset-x-0 bottom-0 p-4">
+      <Composer
+        sessionId={session.id}
+        initialDraft="hello"
+        busy={new URLSearchParams(location.search).has('busy')}
+        onSearchAgents={async () => []}
+        onSearchSessions={async () => []}
+        onSend={async (text) => {
+          const sends = ((window as unknown as { __sends?: string[] }).__sends ??= []);
+          sends.push(text);
+          return refuse ? false : undefined;
+        }}
+      />
+    </div>
+  );
+}
+
 export function Fixture() {
   const containerRef = useRef<HTMLDivElement>(null);
   const params = new URLSearchParams(location.search);
   const failure = params.has('failure');
+  if (params.has('composer')) return <ComposerCase refuse={params.get('composer') === 'refuse'} />;
   return (
     <div ref={containerRef} className="h-dvh overflow-y-auto bg-background px-4 py-32 text-foreground">
       {params.has('harness') ? (
