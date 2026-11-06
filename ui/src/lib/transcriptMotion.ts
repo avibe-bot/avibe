@@ -30,7 +30,7 @@
 // fades what enters and what leaves, in place, and nothing glides.
 import { Component, useCallback, useRef } from 'react';
 
-import { canAnimate, motionTiming, prefersReducedMotion, readMotionMs, readMotionNumber, springTiming, type MotionTiming } from './motion';
+import { canAnimate, motionTiming, prefersReducedMotion, readMotionMs, readMotionNumber, springTiming, timeToProgress, type MotionTiming } from './motion';
 
 /** How a departing element leaves. */
 export type DepartureKind = 'withdrawn' | 'working';
@@ -52,6 +52,9 @@ export const ITEM_KEY_ATTRIBUTE = 'data-transcript-key';
 export const ITEM_FOR_ATTRIBUTE = 'data-transcript-for';
 /** `end` on an item drawn on the right, which rises from the composer; any other item is on the left. */
 export const SIDE_ATTRIBUTE = 'data-transcript-side';
+/** What takes the place of the turn at work starts once that has faded to this far (its copy at 30%
+ *  opacity): the two never draw their words over each other. */
+const HANDOFF_PROGRESS = 0.7;
 /** More rows than this arriving at once is a hand-over (a cached window replaced), not a reply. */
 const MAX_ENTERING = 5;
 /** More glides than this within a second is a burst of live rows: they land without one. */
@@ -200,7 +203,8 @@ function ghostOf(column: HTMLElement, departure: Placed): HTMLElement {
 }
 
 /** `bodyOnly`: the working bubble hands its head to the reply that takes its place; only its body leaves. */
-function leave(column: HTMLElement, departure: Departure, reduced: boolean, tokens: Tokens, bodyOnly = false) {
+/** The copy's fade. */
+function leave(column: HTMLElement, departure: Departure, reduced: boolean, tokens: Tokens, bodyOnly = false): Animation {
   const ghost = ghostOf(column, bodyOnly && departure.body ? departure.body : departure);
   let animation: Animation;
   // Held at its last frame until the copy is gone, so it can never show again for a frame.
@@ -216,6 +220,7 @@ function leave(column: HTMLElement, departure: Departure, reduced: boolean, toke
     animation = ghost.animate([{ opacity: 1 }, { opacity: 0 }], { ...tokens.fadeOutBase, fill: 'forwards' });
   }
   void animation.finished.then(() => ghost.remove(), () => ghost.remove());
+  return animation;
 }
 
 /**
@@ -245,6 +250,9 @@ export function useTranscriptMotion({
   const seen = useRef<{ session: string; rows: Set<Element> } | null>(null);
   const departures = useRef<Departure[]>([]);
   const glides = useRef<number[]>([]);
+  // The copies of the turn at work still fading where it was, and when each is faint enough for what
+  // comes in there to start (ms into its fade).
+  const fading = useRef<{ fade: Animation; clearAt: number }[]>([]);
 
   const capture = useCallback(() => {
     const el = scrollRef.current;
@@ -303,7 +311,19 @@ export function useTranscriptMotion({
     // A reply in the working bubble's place: the head they share stays where it is.
     const bubble = handover ? undefined : leaving.find((departure) => departure.kind === 'working' && departure.body);
     const reply = bubble && entering.find((item) => !isWorking(item) && !onRight(item) && bodyOf(item).length > 0);
-    for (const departure of leaving) leave(column, departure, reduced, tokens, reply !== undefined && departure === bubble);
+    for (const departure of leaving) {
+      const bodyOnly = reply !== undefined && departure === bubble;
+      const fade = leave(column, departure, reduced, tokens, bodyOnly);
+      if (departure.kind === 'working' && !bodyOnly) {
+        fading.current.push({ fade, clearAt: timeToProgress(reduced ? tokens.fadeOutFast : tokens.fadeOutInstant, HANDOFF_PROGRESS) });
+      }
+    }
+    // The turn at work leaving whole (the working bubble for the running card, the card for the reply and
+    // its chip, which may come a moment later): what comes in starts once its copy has mostly gone, so no
+    // two texts are drawn over each other. A reply that keeps the bubble's head takes over from its dots
+    // alone, at once.
+    fading.current = fading.current.filter(({ fade }) => fade.playState !== 'finished' && fade.playState !== 'idle');
+    const handoff = Math.max(0, ...fading.current.map(({ fade, clearAt }) => clearAt - Number(fade.currentTime ?? 0)));
 
     const withMessage = entering.some((item) => !isWorking(item));
     for (const item of entering) {
@@ -314,13 +334,15 @@ export function useTranscriptMotion({
           else part.animate([{ opacity: 0 }, { opacity: 1 }], { ...(reduced ? tokens.fadeInFast : tokens.fadeInBase), fill: 'backwards' });
         });
       } else if (reduced || handover) {
-        item.animate([{ opacity: 0 }, { opacity: 1 }], reduced ? tokens.fadeInFast : { duration: tokens.handover, easing: 'ease-out' });
+        const fade = reduced ? tokens.fadeInFast : { duration: tokens.handover, easing: 'ease-out' };
+        item.animate([{ opacity: 0 }, { opacity: 1 }], { ...fade, delay: handoff, fill: 'backwards' });
       } else if (onRight(item)) {
         // From the composer: up from behind its edge, out of the corner nearest it.
         enter(item, tokens, {
           origin: 'bottom right',
           from: `translateY(${tokens.offset}px) scale(${tokens.scaleEnter})`,
           fade: tokens.fadeInFast,
+          delay: handoff,
         });
       } else {
         // In place, out of its top-left corner; the turn at work trails what started it by a beat.
@@ -328,7 +350,7 @@ export function useTranscriptMotion({
           origin: 'top left',
           from: `scale(${tokens.scaleEnter})`,
           fade: tokens.fadeInBase,
-          delay: isWorking(item) && withMessage ? tokens.beat : 0,
+          delay: handoff + (isWorking(item) && withMessage ? tokens.beat : 0),
         });
       }
     }

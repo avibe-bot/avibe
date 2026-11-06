@@ -323,12 +323,19 @@ reduced-motion form.
     message that started it by one `--motion-beat`.
   - The running card takes the working bubble's place as the reply does: the
     bubble fades, the card grows in. When the turn ends the card fades
-    (`instant`) as the reply and its chip grow in together.
+    (`instant`) and the reply and its chip grow in.
+  - **One after the other.** What takes the place of the turn at work (the
+    card for the bubble; the reply and the chip for the card, together or a
+    moment apart) starts once the copy of what held it has faded below 30%
+    (about 80 ms into `instant` on the exit curve), so two texts are never drawn
+    over each other (owner, 2026-11-06). A reply that keeps the bubble's head
+    takes over from its dots alone, at once.
   - **Live** means the stream delivered it or the reader sent it here. What a
     read brings lands still, and the conversation around it does not glide:
     the bootstrap, a catch-up after the stream was down, a cached window the
     live one replaces, an older page. The first row the stream delivers after
-    a reconnect is live again.
+    a reconnect is live again. A row is live only while it is shown: one the
+    retained window dropped, read back with an older page, lands still.
 - **Reduced**: crossfade on `fast`.
 - **Frames**: `motion/arrival/phone`, `phone-reduced`, `phone-card`,
   `phone-turn-end`, `phone-show-page`.
@@ -530,7 +537,8 @@ send (they change `ChatPage`).
   `data-transcript-key` (stable and unique) with `data-transcript-row` for the
   rest (the running card, a chip, a Harness group's opened member and its
   collapse bar), so the scroller can hold them too; the chrome above the
-  history carries neither. `data-transcript-side="end"` marks an item on the
+  history carries neither, including a chip with no message, which renders
+  there. `data-transcript-side="end"` marks an item on the
   right. Live message ids are recorded where the stream's rows and the
   reader's sends come in (`appendMessage`, the pending send); a chip follows
   the message it hangs on, a Harness group its members.

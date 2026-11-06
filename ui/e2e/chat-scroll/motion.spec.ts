@@ -448,6 +448,41 @@ test('rows a read brings land still, after a reconnect too, and the first live r
   expect(await fromBottom(page)).toBeLessThan(1);
 });
 
+type Handoff = { keys: string[]; delay: number; copyOpacity: number };
+
+/** From now on, each commit that brings items in while a copy of the turn at work (the working bubble or
+ *  the running card, leaving whole) is still fading where it was: what came in, when the first of them
+ *  starts, and how opaque the copy is by then. */
+async function watchHandoffs(page: Page) {
+  await page.evaluate(() => {
+    const transcript = document.querySelector('[data-testid="chat-transcript"]')!;
+    const column = transcript.firstElementChild!.firstElementChild! as HTMLElement;
+    const lab = window as unknown as { handoffs: Handoff[] };
+    lab.handoffs = [];
+    const copies: HTMLElement[] = [];
+    new MutationObserver((records) => {
+      const added = records.flatMap((record) => [...record.addedNodes]).filter((node): node is HTMLElement => node instanceof HTMLElement);
+      // A copy that holds words (a dots-only copy, under a reply that keeps the bubble's head, holds none).
+      copies.push(...added.filter((node) => node.inert && node.textContent!.trim() !== ''));
+      const fading = copies.filter((copy) => copy.isConnected && copy.getAnimations().some((animation) => animation.playState === 'running'));
+      const items = added.filter((node) => !node.inert && node.getAnimations().length > 0);
+      if (fading.length === 0 || items.length === 0) return;
+      const delay = Math.min(...items.flatMap((item) => item.getAnimations().map((animation) => Number(animation.effect!.getTiming().delay ?? 0))));
+      // Each copy's fade, read at that moment and put back.
+      const copyOpacity = Math.max(...fading.map((copy) => {
+        const fade = copy.getAnimations()[0];
+        const was = Number(fade.currentTime ?? 0);
+        fade.currentTime = was + delay;
+        const opacity = parseFloat(getComputedStyle(copy).opacity);
+        fade.currentTime = was;
+        return opacity;
+      }));
+      lab.handoffs.push({ keys: items.map((item) => item.dataset.messageId ?? item.getAttribute('data-transcript-key') ?? '?'), delay, copyOpacity });
+    }).observe(column, { childList: true });
+  });
+}
+const handoffs = (page: Page) => page.evaluate(() => (window as unknown as { handoffs: Handoff[] }).handoffs);
+
 test('the running card grows in as the working bubble gives way, and leaves as the reply and its chip grow in', async ({ page }) => {
   await open(page, 'delay=0&activity=1');
   await page.evaluate(() => window.__scrollLab.turn('start'));
@@ -455,6 +490,7 @@ test('the running card grows in as the working bubble gives way, and leaves as t
   await page.waitForTimeout(500);
   await watchEntrances(page);
   await watchCopies(page);
+  await watchHandoffs(page);
   await page.evaluate(() => window.__scrollLab.arrive({ author: 'agent', type: 'tool_call', source: 'agent', author_id: null, text: 'Read ui/src/lib/motion.ts' }));
   const card = page.locator('[data-transcript-key="activity-live"]');
   await expect(card).toBeVisible();
@@ -486,7 +522,40 @@ test('the running card grows in as the working bubble gives way, and leaves as t
   // Only the settled chip of this turn entered; the chips the bootstrap read stayed still.
   expect(seen.filter((entrance) => entrance.key.startsWith('activity:') && entrance.corner !== 'none').map((entrance) => entrance.key))
     .toEqual([`activity:grp_live_${reply}`]);
+  // One after the other, never two texts over each other: what takes the turn's place (the card for the
+  // bubble; the reply and the chip for the card, together or a moment apart) starts once the copy of what
+  // held it has faded below a third.
+  const swaps = await handoffs(page);
+  expect(swaps.flatMap(({ keys }) => keys).filter((key) => ['activity-live', reply, `activity:grp_live_${reply}`].includes(key)).sort())
+    .toEqual(['activity-live', reply, `activity:grp_live_${reply}`].sort());
+  for (const { copyOpacity } of swaps) expect(copyOpacity).toBeLessThanOrEqual(0.31);
   expect(await fromBottom(page)).toBeLessThan(1);
+});
+
+test('rows the retained window dropped come back with an older page and land still, even those that came in live', async ({ page }) => {
+  // One row of history and live rows the reader saw come in; then more than the transcript keeps, so the
+  // oldest of them leave its window.
+  await open(page, 'delay=0&count=1');
+  const push = (from: number, count: number) => page.evaluate(([first, n]) => {
+    for (let index = first; index < first + n; index += 1) window.__scrollLab.push(`Live row ${index + 1}.`, index % 2 ? 'agent' : 'user');
+  }, [from, count]);
+  await push(0, 40);
+  await expect(transcript(page).locator('[data-message-id]')).toHaveCount(41);
+  await page.waitForTimeout(400);
+  await push(40, 290);
+  await expect(transcript(page).locator('[data-message-id]')).toHaveCount(300);
+  const dropped = await page.evaluate(() => window.__scrollLab.history.slice(0, 31).map((row) => row.id));
+  await expect(transcript(page).locator(`[data-message-id="${dropped[30]}"]`)).toHaveCount(0);
+  await page.waitForTimeout(800);
+  await watchEntrances(page);
+  // Reading back up asks for the page the window dropped.
+  await transcript(page).evaluate((el) => { el.scrollTop = 0; el.dispatchEvent(new Event('scroll')); });
+  await expect(transcript(page).locator(`[data-message-id="${dropped[30]}"]`)).toHaveCount(1);
+  await page.waitForTimeout(600);
+  const back = (await entrances(page)).filter((entrance) => dropped.includes(entrance.key));
+  expect(back.length).toBeGreaterThanOrEqual(30);
+  expect(back.filter((entrance) => entrance.corner !== 'none' || entrance.fades)).toEqual([]);
+  expect(await glides(page)).toBe(0);
 });
 
 test('while the reader is scrolled up, what comes in live enters without moving what they read', async ({ page }) => {

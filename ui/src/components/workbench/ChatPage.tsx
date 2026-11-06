@@ -1232,9 +1232,19 @@ export const ChatPage: React.FC = () => {
 
   // What came in live for the open chat: the stream delivered it or the reader
   // sent it here. Only those enter the transcript with motion; what a read
-  // brings lands still (lib/transcriptMotion).
+  // brings lands still (lib/transcriptMotion). A row is live while it is shown:
+  // once it has left (the retained window dropped it, a deep link's window
+  // replaced it), or never showed, reading it back is a read. Kept in step in
+  // the commit itself, after the transcript's motion has read it: a row added
+  // before a render is in what that render shows unless it was dropped.
   const liveMessageIdsRef = useRef(new Set<string>());
   const isLiveMessage = useCallback((id: string) => liveMessageIdsRef.current.has(id), []);
+  useLayoutEffect(() => {
+    const live = liveMessageIdsRef.current;
+    if (live.size === 0) return;
+    const shown = new Set(transcriptRows.map((row) => row.id));
+    for (const id of live) if (!shown.has(id)) live.delete(id);
+  }, [transcriptRows]);
   const appendMessage = useCallback((msg: WorkbenchMessage) => {
     liveMessageIdsRef.current.add(msg.id);
     setMessages((prev) => {
@@ -5102,18 +5112,20 @@ export const Transcript: React.FC<TranscriptProps> = ({
   const showActivityCard = shouldShowRunningCard(!!activity?.enabled, working, activity?.liveRows.length ?? 0);
   const showThinking = working && (!lastIsAgentTerminal || recovery.active) && !liveActive;
   // Render one settled-turn chip (before/after its anchor message, or at the top).
-  // Plain render helper (not a component) so it stays referentially simple. A
-  // transcript item of its own, keyed by its group for good: it enters with the
-  // message it hangs on, and the scroller can hold it.
+  // Plain render helper (not a component) so it stays referentially simple. Next
+  // to its message a chip is a transcript item of its own, keyed by its group for
+  // good: it enters with the message it hangs on, and the scroller can hold it.
+  // One with no message renders above the history, which a page of older rows
+  // goes in under: like the rest of that chrome it is no item and no anchor.
   const renderActivityChip = (group: ActivityGroup) =>
     activity ? (
       <ActivityChip
         key={group.id}
-        itemAttributes={{
+        itemAttributes={group.anchorMessageId ? {
           'data-transcript-row': '',
           [ITEM_KEY_ATTRIBUTE]: `activity:${group.id}`,
-          ...(group.anchorMessageId ? { [ITEM_FOR_ATTRIBUTE]: group.anchorMessageId } : {}),
-        }}
+          [ITEM_FOR_ATTRIBUTE]: group.anchorMessageId,
+        } : undefined}
         group={group}
         expanded={!!activity.expanded[group.id]}
         loading={!!activity.loading[group.id]}

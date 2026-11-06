@@ -42,6 +42,26 @@ export function motionTiming(duration: MotionDuration, ease: MotionEase): Motion
 }
 
 /**
+ * How far into `timing` (ms) it is when its eased progress first reaches `progress` (0–1). Exact for a
+ * `cubic-bezier()` curve; any other easing counts as linear.
+ */
+export function timeToProgress(timing: MotionTiming, progress: number): number {
+  const curve = /^cubic-bezier\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\)$/.exec(timing.easing.trim());
+  if (!curve) return timing.duration * progress;
+  const [x1, y1, x2, y2] = curve.slice(1).map(Number);
+  const at = (t: number, a: number, b: number) => 3 * (1 - t) ** 2 * t * a + 3 * (1 - t) * t ** 2 * b + t ** 3;
+  // The curve's own parameter where its progress first reaches the target, then the time there.
+  let lo = 0;
+  let hi = 1;
+  for (let step = 0; step < 40; step += 1) {
+    const mid = (lo + hi) / 2;
+    if (at(mid, y1, y2) < progress) lo = mid;
+    else hi = mid;
+  }
+  return timing.duration * at(hi, x1, x2);
+}
+
+/**
  * The springs for framer-motion, in its own form (§4): the same three the CSS samples into
  * `--motion-spring-*`, so a framer animation and a CSS one of the same name settle alike. `snappy`
  * for controls (press release, Send and Stop, badges), `smooth` for content (a message rising, rows
