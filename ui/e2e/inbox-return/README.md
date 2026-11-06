@@ -49,3 +49,13 @@ position in the snapshot the pop reveals; that reduced motion cross-fades instea
 that a touch during a push finishes it at once; that a desktop navigation runs no
 transition; and that a pressed control sinks and steps its colour, keeping only
 the colour under reduced motion. Frame rate on an iPhone is a device check.
+
+`load-more.spec.ts` loads `load-more.html`, which mounts the production
+`WorkbenchInboxProvider` and `InboxPage` over a routed `GET /api/inbox` that pages
+the way the server does (newest first, keyset cursor, a cursor only when another
+row exists). It checks that "Load more" belongs to the current view: the Unread
+tab offers it only while an unread conversation is not loaded yet, and one click
+reads on until that conversation shows; the All tab loads the next page and drops
+the button at the end of the feed; a click while the feed is being refreshed shows
+its loading card at once and its page follows. That the server sends no cursor
+for a page the feed fills exactly is covered in `tests/test_messages_service.py`.

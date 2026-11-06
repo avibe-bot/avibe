@@ -3,7 +3,12 @@ import type { ReactNode } from 'react';
 
 import { useApi } from './ApiContext';
 import type { InboxSession } from './ApiContext';
-import { WorkbenchInboxContext, type InboxFeedStatus, type InboxState } from './WorkbenchInboxContext';
+import {
+  WorkbenchInboxContext,
+  type InboxFeedStatus,
+  type InboxLoadMoreGoal,
+  type InboxState,
+} from './WorkbenchInboxContext';
 import { useNotificationPreferences } from './NotificationPreferencesContext';
 import { useBotRoster } from './BotRosterContext';
 import { badgeTotal as loudUnread, unreadByCategory as splitUnread } from '../lib/notificationPreferences';
@@ -23,6 +28,8 @@ import {
 } from '../lib/localSnapshots';
 
 const PAGE_SIZE = 30;
+// Pages one "Load more" reads, at most, looking for a row the reader's view shows.
+const LOAD_MORE_MAX_PAGES = 10;
 
 // The first page and the unread map as last read, so a cold start paints the
 // feed before ``listInbox`` answers (docs/plans/web-ui-local-cache.md).
@@ -185,7 +192,17 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   const loadMoreRunnerRef = useRef<() => void>(() => {});
   const reconcileSessionRef = useRef<(sessionId: string) => void>(() => {});
   const refreshLoadingGenerationRef = useRef(0);
-  const loadMoreLoadingGenerationRef = useRef(0);
+  // A "Load more" is one pursuit, however many pages it takes: it reads on until a
+  // page brings a row the reader's view shows (``goal``), the feed ends, or
+  // ``LOAD_MORE_MAX_PAGES`` pages showed nothing. ``loadingMore`` is true for the
+  // whole of it, from the click on, including while its first page waits behind a
+  // broad read, so a click is never left without an answer. While it is set, a
+  // page read is in flight or queued; every path that drops both ends it.
+  const loadMorePursuitRef = useRef<{ goal: InboxLoadMoreGoal; pages: number } | null>(null);
+  const endLoadMore = useCallback(() => {
+    loadMorePursuitRef.current = null;
+    setLoadingMore(false);
+  }, []);
   // Targeted foreground restores own one session independently from the
   // windowed feed. Keep their latest committed values so a later whole-feed
   // replacement cannot erase a restored card merely because the row sorts
@@ -275,6 +292,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       refreshPendingRef.current = false;
       reconcilePendingRef.current = false;
       loadMorePendingRef.current = false;
+      if (loadMorePursuitRef.current) endLoadMore();
       // A queued refresh/reconcile was ALSO the scheduled payment for the unread
       // debt, and dropping it here is the moment that payment stops existing.
       // Re-settling is what turns the drop into the counts-only read the debt is
@@ -299,7 +317,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       loadMorePendingRef.current = false;
       loadMoreRunnerRef.current();
     }
-  }, [isFeedActive]);
+  }, [endLoadMore, isFeedActive]);
 
   const queueRefreshIntent = useCallback(() => {
     refreshPendingRef.current = true;
@@ -510,7 +528,12 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     }
   }, [acceptFeedRows, api, applyNextCursor, applyWholeUnreadRead, feedReadFailed, feedReadStarted, flushFeedReadIntent, markFeedAuthoritative, mergeTargetedSnapshots, queueRefreshIntent]);
 
-  const loadMore = useCallback(async function loadMore() {
+  // One page of a "Load more" pursuit. Serialized with the broad reads like every
+  // feed read, so a page waits for a refresh or reconcile to settle and then reads
+  // on from the cursor that left.
+  const loadNextPage = useCallback(async function loadNextPage() {
+    const pursuit = loadMorePursuitRef.current;
+    if (!pursuit) return;
     if (
       broadReadInFlightRef.current ||
       refreshPendingRef.current ||
@@ -519,38 +542,57 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       queueLoadMoreIntent();
       return;
     }
-    // A duplicate click while the same cursor is already loading is not a new
-    // page intent. Mutation invalidation queues its retry explicitly below.
+    // A page is already being read: its answer carries the pursuit on.
     if (cursorReadsInFlightRef.current > 0) return;
     loadMorePendingRef.current = false;
     const cursor = cursorRef.current;
-    if (!cursor) return;
+    if (!cursor) {
+      endLoadMore();
+      return;
+    }
     const read = readOwnershipRef.current.beginRead(['inbox-feed', 'inbox-feed-cursor']);
     cursorReadsInFlightRef.current += 1;
-    const loadingGeneration = ++loadMoreLoadingGenerationRef.current;
-    let retryAfterInvalidation = false;
-    setLoadingMore(true);
+    let readAgain = false;
     try {
       const result = await api.listInbox({ platform: 'avibe', limit: PAGE_SIZE, before: cursor });
       if (!readOwnershipRef.current.isCurrent(read, 'inbox-feed')) {
-        retryAfterInvalidation = readOwnershipRef.current.isLatestRead(read);
+        readAgain = readOwnershipRef.current.isLatestRead(read);
         return;
       }
+      const loaded = new Set(inboxSessionsRef.current.map((row) => row.session_id));
+      const added = result.sessions.filter((row) => !loaded.has(row.session_id));
       acceptFeedRows(read, result.sessions);
       setInboxSessions((prev) => mergeTargetedSnapshots(appendPage(prev, result.sessions)));
       applyNextCursor(result.next_cursor);
+      pursuit.pages += 1;
+      // The unread map covers every page, so whether a row shows on the Unread tab
+      // is known the moment it arrives.
+      const shown = pursuit.goal === 'unread'
+        ? added.some((row) => (unreadBySessionRef.current[row.session_id] ?? 0) > 0)
+        : added.length > 0;
+      readAgain = !shown && result.next_cursor !== null && pursuit.pages < LOAD_MORE_MAX_PAGES;
     } catch (err) {
-      retryAfterInvalidation =
+      readAgain =
         !readOwnershipRef.current.isCurrent(read, 'inbox-feed') &&
         readOwnershipRef.current.isLatestRead(read);
-      if (!retryAfterInvalidation) console.error('[inbox] load more failed', err);
+      if (!readAgain) console.error('[inbox] load more failed', err);
     } finally {
       cursorReadsInFlightRef.current -= 1;
-      if (loadMoreLoadingGenerationRef.current === loadingGeneration) setLoadingMore(false);
-      if (retryAfterInvalidation) queueLoadMoreIntent();
-      else flushFeedReadIntent();
+      // A click while this page was out started a pursuit of its own: carry that on.
+      const current = loadMorePursuitRef.current;
+      if (current && (current !== pursuit || readAgain)) queueLoadMoreIntent();
+      else {
+        if (current) endLoadMore();
+        flushFeedReadIntent();
+      }
     }
-  }, [acceptFeedRows, api, applyNextCursor, flushFeedReadIntent, mergeTargetedSnapshots, queueLoadMoreIntent]);
+  }, [acceptFeedRows, api, applyNextCursor, endLoadMore, flushFeedReadIntent, mergeTargetedSnapshots, queueLoadMoreIntent]);
+
+  const loadMore = useCallback(async (goal: InboxLoadMoreGoal = 'any') => {
+    loadMorePursuitRef.current = { goal, pages: 0 };
+    setLoadingMore(true);
+    await loadNextPage();
+  }, [loadNextPage]);
 
   const markRead = useCallback(
     async (sessionId: string, untilMessageId?: string) => {
@@ -908,7 +950,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   unreadReadRunnerRef.current = () => void refreshUnread();
   refreshRunnerRef.current = () => void refresh();
   reconcileRunnerRef.current = () => void reconcile();
-  loadMoreRunnerRef.current = () => void loadMore();
+  loadMoreRunnerRef.current = () => void loadNextPage();
   reconcileSessionRef.current = (sessionId) => void reconcileSession(sessionId);
 
   // The feed's first read waits for a consumer that renders it. ``feedActive`` is

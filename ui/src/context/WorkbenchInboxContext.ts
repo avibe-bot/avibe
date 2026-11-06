@@ -38,9 +38,14 @@ export interface InboxState {
   /** The feed's live read for this window; see `InboxFeedStatus`. */
   feedStatus: InboxFeedStatus;
   loading: boolean;
+  /** A "Load more" is under way: from the click until a page shows the reader
+   *  something, the feed ends, or a bounded number of pages showed nothing. */
   loadingMore: boolean;
   refresh: () => Promise<void>;
-  loadMore: () => Promise<void>;
+  /** Read further pages until one brings a row ``goal`` shows (any row, or an
+   *  unread conversation for the Unread tab), the feed ends, or a bounded number
+   *  of pages brought none. */
+  loadMore: (goal?: InboxLoadMoreGoal) => Promise<void>;
   /** Resolves true when the server applied the read, false when it did not
    *  (errors are not raised: clearing unread is best-effort). */
   markRead: (sessionId: string, untilMessageId?: string) => Promise<boolean>;
@@ -51,6 +56,10 @@ export interface InboxState {
    *  free from ``useWorkbenchInbox``. */
   activateFeed: () => () => void;
 }
+
+/** What a "Load more" looks for: any row (the All tab), or an unread conversation
+ *  (the Unread tab, which shows nothing else). */
+export type InboxLoadMoreGoal = 'any' | 'unread';
 
 export const WorkbenchInboxContext = createContext<InboxState | undefined>(undefined);
 

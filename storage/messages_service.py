@@ -1360,7 +1360,7 @@ def list_inbox_sessions(
     working and survives a reload, clearing only once the agent replies.
 
     Keyset pagination via ``before`` (an opaque ``"<last_activity_at>|<session_id>"``
-    cursor returned as ``next_cursor``).
+    cursor returned as ``next_cursor``, only when a further row exists).
     """
 
     allowed_scope_ids = list(dict.fromkeys(scope_ids)) if scope_ids is not None else None
@@ -1575,9 +1575,12 @@ def list_inbox_sessions(
             )
 
     effective_limit = min(max(int(limit), 1), 100)
+    # One row past the page says whether another page exists. Without it a page the
+    # feed fills exactly would carry a cursor to an empty page, and the Inbox would
+    # offer a "Load more" that finds nothing.
     query = query.order_by(
         session_rows_sub.c.last_activity_at.desc(), session_rows_sub.c.session_id.desc()
-    ).limit(effective_limit)
+    ).limit(effective_limit + 1)
     limited_sessions = query.subquery()
     preview_msg = messages.alias()
     query = (
@@ -1591,8 +1594,9 @@ def list_inbox_sessions(
     )
 
     rows = conn.execute(query).mappings().all()
+    has_more = len(rows) > effective_limit
     sessions: list[dict[str, Any]] = []
-    for row in rows:
+    for row in rows[:effective_limit]:
         preview = row["preview_text"]
         if not preview and row["preview_json"]:
             try:
@@ -1648,7 +1652,7 @@ def list_inbox_sessions(
         )
 
     next_cursor = None
-    if len(sessions) == effective_limit:
+    if has_more:
         tail = sessions[-1]
         next_cursor = f"{tail['last_activity_at']}|{tail['session_id']}"
     return {"sessions": sessions, "next_cursor": next_cursor}
