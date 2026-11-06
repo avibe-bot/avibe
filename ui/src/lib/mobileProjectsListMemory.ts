@@ -13,6 +13,60 @@ const EMPTY_SNAPSHOT: MobileProjectsListSnapshot = { visibleCounts: {}, scrollTo
 let snapshot: MobileProjectsListSnapshot = EMPTY_SNAPSHOT;
 let heldForChatReturn = false;
 
+// The scroll position also outlives the document, in this tab only
+// (sessionStorage), because the list can come back in a new one: a tab the
+// browser discarded in the background reloads the conversation, and going back
+// then loads the list afresh. Only the position: how far each project was
+// revealed belongs to the document that revealed it.
+const SCROLL_KEY = 'avibe.projects-list.scroll.v1';
+// Whether this document has a list position of its own yet. Until it does, the
+// one a previous document of this tab stored is the one to restore.
+let rememberedInDocument = false;
+// The stored position this document inherited: undefined until read, null once
+// there is none or it has been restored.
+let inheritedScrollTop: number | null | undefined;
+
+function storeScrollTop(top: number): void {
+  rememberedInDocument = true;
+  try {
+    window.sessionStorage.setItem(SCROLL_KEY, String(top));
+  } catch {
+    // Without storage a new document simply opens the list at the top.
+  }
+}
+
+function forgetStoredScrollTop(): void {
+  rememberedInDocument = true;
+  inheritedScrollTop = null;
+  try {
+    window.sessionStorage.removeItem(SCROLL_KEY);
+  } catch {
+    // Nothing stored to forget.
+  }
+}
+
+/** The position a previous document of this tab left the list at, when this
+ *  document has none of its own, until ``consumeInheritedProjectsListScroll``. */
+export function inheritedProjectsListScroll(): number | null {
+  if (inheritedScrollTop === undefined) {
+    inheritedScrollTop = null;
+    if (!rememberedInDocument) {
+      try {
+        const top = Number(window.sessionStorage.getItem(SCROLL_KEY) ?? Number.NaN);
+        if (Number.isFinite(top) && top > 0) inheritedScrollTop = top;
+      } catch {
+        // No storage, nothing inherited.
+      }
+    }
+  }
+  return inheritedScrollTop;
+}
+
+/** The inherited position was restored, or given up: it is not restored again. */
+export function consumeInheritedProjectsListScroll(): void {
+  inheritedScrollTop = null;
+}
+
 export function isChatRoutePath(pathname: string): boolean {
   return pathname.startsWith('/chat/');
 }
@@ -55,6 +109,7 @@ export function writeMobileProjectsListSnapshot(next: MobileProjectsListSnapshot
     visibleCounts: { ...next.visibleCounts },
     scrollTop: Number.isFinite(next.scrollTop) ? Math.max(0, next.scrollTop) : 0,
   };
+  storeScrollTop(snapshot.scrollTop);
 }
 
 export function holdMobileProjectsListForChatReturn(next: MobileProjectsListSnapshot): void {
@@ -77,6 +132,7 @@ export function rememberMobileProjectsListScroll(scrollTop: number): void {
     ...snapshot,
     scrollTop: Number.isFinite(scrollTop) ? Math.max(0, scrollTop) : 0,
   };
+  storeScrollTop(snapshot.scrollTop);
 }
 
 export function rememberMobileProjectsListCounts(visibleCounts: MobileProjectsVisibleCounts): void {
@@ -93,6 +149,7 @@ export function forgetMobileProjectsListUnlessPreserved(pathname: string): void 
   if (isProjectsRoutePath(pathname) || isChatRoutePath(pathname)) return;
   snapshot = EMPTY_SNAPSHOT;
   heldForChatReturn = false;
+  forgetStoredScrollTop();
 }
 
 export function isMobileProjectsListHeldForChatReturn(): boolean {
@@ -102,6 +159,7 @@ export function isMobileProjectsListHeldForChatReturn(): boolean {
 export function clearMobileProjectsListSnapshot(): void {
   snapshot = EMPTY_SNAPSHOT;
   heldForChatReturn = false;
+  forgetStoredScrollTop();
 }
 
 type ScrollOwner = {
