@@ -85,6 +85,39 @@ async function watchCopies(page: Page) {
     }).observe(transcript, { childList: true, subtree: true });
   });
 }
+/** The glide the next commit starts, read along its own timeline the moment it starts: where the row
+ *  under `at` of the viewport stands at 0, ¼, ½, ¾ and all of the glide, and how long it takes. Read in
+ *  the commit's own task, so it does not depend on how many frames the runner draws while it plays (a
+ *  slow runner, busy with the commits that follow, may draw only one). */
+async function sampleNextGlide(page: Page, at = 0.4) {
+  await page.evaluate((fraction) => {
+    const transcript = document.querySelector('[data-testid="chat-transcript"]')!;
+    const column = transcript.firstElementChild!.firstElementChild as HTMLElement;
+    const box = transcript.getBoundingClientRect();
+    const line = box.top + box.height * fraction;
+    const row = [...column.querySelectorAll<HTMLElement>('[data-message-id]')]
+      .find((el) => { const rect = el.getBoundingClientRect(); return rect.top <= line && rect.bottom > line; })!;
+    const lab = window as unknown as { glide: { duration: number; tops: number[] } | null };
+    lab.glide = null;
+    new MutationObserver((_, observer) => {
+      const animation = column.getAnimations().find((candidate) => candidate.id === 'transcript-glide');
+      if (!animation) return;
+      observer.disconnect();
+      const duration = Number(animation.effect!.getTiming().duration);
+      const [time, running] = [animation.currentTime, animation.playState === 'running'];
+      animation.pause();
+      const tops = [0, 0.25, 0.5, 0.75, 1].map((part) => {
+        animation.currentTime = duration * part;
+        return row.getBoundingClientRect().top;
+      });
+      animation.currentTime = time;
+      if (running) animation.play();
+      lab.glide = { duration, tops };
+    }).observe(column, { childList: true, subtree: true });
+  }, at);
+}
+const sampledGlide = (page: Page) => page.evaluate(() => (window as unknown as { glide: { duration: number; tops: number[] } | null }).glide);
+
 const copiesOf = (page: Page, text: string) =>
   page.evaluate((needle) => (window as unknown as { copies: Copy[] }).copies.filter((copy) => copy.text.includes(needle)), text);
 
@@ -156,6 +189,7 @@ test('a send that fails goes back under the composer the way it came as the conv
   await page.waitForTimeout(600);
   // A row above the message and the working bubble, which both go.
   await watchCopies(page);
+  await sampleNextGlide(page, 0.4);
   await record(page, 0.4);
   await expect(page.locator(sending)).toHaveCount(0);
   // What leaves is drawn where it was for the moment it takes: not a row any more, inert, sinking as it fades.
@@ -167,9 +201,19 @@ test('a send that fails goes back under the composer the way it came as the conv
   expect(await banner.evaluate((el) => getComputedStyle(el).animationName)).toBe('motion-fade-in');
   await page.waitForTimeout(500);
   const { frames } = await stop(page);
-  const { total, between } = travel(frames);
-  expect(total).toBeGreaterThan(40);
-  expect(between).toBeGreaterThanOrEqual(2);
+  expect(travel(frames).total).toBeGreaterThan(40);
+  // It glides: on its way down the row stands between where it was and where it lands, and the way
+  // takes the glide's time. Read on the glide's own timeline (sampleNextGlide), not off the frames this
+  // runner happened to draw while the commits that follow the failure kept it busy.
+  const sampled = await sampledGlide(page);
+  expect(sampled, 'the failure starts the conversation\'s glide').not.toBeNull();
+  const glide = sampled!;
+  expect(glide.duration).toBeGreaterThanOrEqual(200);
+  const [first, last] = [glide.tops[0], glide.tops.at(-1)!];
+  expect(last - first).toBeGreaterThan(40);
+  const between = glide.tops.filter((top) => first + 1 < top && top < last - 1);
+  expect(between.length).toBeGreaterThanOrEqual(2);
+  expect(glide.tops).toEqual([...glide.tops].sort((a, b) => a - b));
   // Gone, and the tail is still followed.
   expect(await page.evaluate(() => document.querySelectorAll('[data-testid="chat-transcript"] [aria-hidden="true"][inert]').length)).toBe(0);
   expect(await fromBottom(page)).toBeLessThan(1);
