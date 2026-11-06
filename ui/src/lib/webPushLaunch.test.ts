@@ -48,11 +48,10 @@ describe('pending web-push launches', () => {
     navigation.dispose();
   });
 
-  it('accepts only fresh canonical app paths', () => {
+  it('accepts only fresh app paths and keeps a notification target\'s message anchor', () => {
     const now = 1_000_000;
-    expect(parsePendingWebPushLaunch({ url: '/chat/session-1?from=push', createdAt: now - 1 }, now)).toBe(
-      '/chat/session-1',
-    );
+    const target = '/chat/session-1?msg=msg-1&from=notification';
+    expect(parsePendingWebPushLaunch({ url: target, createdAt: now - 1 }, now)).toBe(target);
     expect(
       parsePendingWebPushLaunch(
         { url: '/chat/session-1', createdAt: now - WEB_PUSH_LAUNCH_MAX_AGE_MS - 1 },

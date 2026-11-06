@@ -50,6 +50,10 @@ describe('PWA route memory', () => {
   it('restores only an installed PWA launched at the manifest root', () => {
     const root = { pathname: '/', search: '', hash: '' };
     expect(resolvePwaLaunchPath(true, root, '/chat/session-123')).toBe('/chat/session-123');
+    // A tapped notification's handoff keeps the message it points at.
+    expect(resolvePwaLaunchPath(true, root, '/chat/session-123?msg=msg-1&from=notification')).toBe(
+      '/chat/session-123?msg=msg-1&from=notification',
+    );
     expect(resolvePwaLaunchPath(false, root, '/chat/session-123')).toBeNull();
     expect(resolvePwaLaunchPath(true, { ...root, pathname: '/inbox' }, '/chat/session-123')).toBeNull();
     expect(resolvePwaLaunchPath(true, { ...root, search: '?login=1' }, '/chat/session-123')).toBeNull();

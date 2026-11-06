@@ -67,6 +67,16 @@ export function normalizeRestorablePwaPath(value: unknown): string | null {
   }
 }
 
+// A launch target (a remembered page, or a tapped notification's handoff) keeps
+// its query and fragment: a notification carries its message anchor and marker
+// there. Its path must still be one this app restores.
+export function normalizePwaLaunchTarget(value: unknown): string | null {
+  const pathname = normalizeRestorablePwaPath(value);
+  if (!pathname || typeof value !== 'string') return null;
+  const { search, hash } = new URL(value, 'https://avibe.local');
+  return pathname + search + hash;
+}
+
 export function readLastPwaPath(storage?: ReadableStorage): string | null {
   try {
     const target = storage ?? (typeof window !== 'undefined' ? window.localStorage : undefined);
@@ -101,8 +111,8 @@ export function resolvePwaLaunchPath(
 ): string | null {
   if (!standalone || location.pathname !== '/' || location.search || location.hash) return null;
 
-  const normalized = normalizeRestorablePwaPath(rememberedPath);
-  return normalized && normalized !== '/' ? normalized : null;
+  const target = normalizePwaLaunchTarget(rememberedPath);
+  return target && normalizeRestorablePwaPath(target) !== '/' ? target : null;
 }
 
 export function shouldRestorePwaLaunch(
