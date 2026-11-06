@@ -441,18 +441,16 @@ class CodexTransport:
             read_params = {"includeLayers": False}
             if params.get("cwd"):
                 read_params["cwd"] = params["cwd"]
-            self._reading_mcp_config = True
-            try:
-                response = await self.send_request("config/read", read_params)
-            finally:
-                self._reading_mcp_config = False
+            response = await self.send_request("config/read", read_params)
             config = response.get("config") if isinstance(response, dict) else None
-            servers = config.get("mcp_servers") if isinstance(config, dict) else None
+            servers = config.get("mcp_servers", {}) if isinstance(config, dict) else None
+            if servers is None:
+                servers = {}
             if not isinstance(servers, dict):
-                raise RuntimeError("Codex config/read did not return effective mcp_servers")
+                raise RuntimeError("Codex config/read returned invalid mcp_servers")
             params = dict(params)
             config = dict(params.get("config") or {})
-            config.update({f'mcp_servers."{name}".enabled': False for name in servers})
+            config.update({f"mcp_servers.{json.dumps(name)}.enabled": False for name in servers if isinstance(name, str)})
             params["config"] = config
 
         self._request_id += 1
