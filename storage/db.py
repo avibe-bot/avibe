@@ -73,7 +73,9 @@ def create_sqlite_engine(db_path: Path | None = None, *, read_only: bool = False
     @event.listens_for(engine, "connect")
     def _set_sqlite_pragmas(dbapi_connection, _connection_record) -> None:
         cursor = dbapi_connection.cursor()
-        if not read_only:
+        if read_only:
+            cursor.execute("PRAGMA query_only = ON")
+        else:
             with loop_writers.track_autocommit_write(dbapi_connection):
                 cursor.execute("PRAGMA journal_mode = WAL")
         cursor.execute("PRAGMA foreign_keys = ON")
@@ -126,23 +128,24 @@ def retry_sqlite_write(operation: Callable[[], _T]) -> _T:
 
 
 _cached_engine_lock = RLock()
-_cached_engines: dict[Path, Engine] = {}
+_cached_engines: dict[tuple[Path, bool], Engine] = {}
 
 
-def get_cached_sqlite_engine(db_path: Path | None = None) -> Engine:
-    """Return a process-local SQLite engine for hot write paths.
+def get_cached_sqlite_engine(db_path: Path | None = None, *, read_only: bool = False) -> Engine:
+    """Return a process-local engine with a pool isolated by path and capability.
 
     ``create_sqlite_engine`` intentionally remains a fresh-engine factory for
-    tests, migrations, and short one-off tools. Controller hot paths should use
-    this cache so every emitted chunk or queue tick does not allocate a new
-    SQLAlchemy engine and SQLite connection pool.
+    tests, migrations, and short one-off tools. Controller hot paths use this
+    cache so repeated writes and binding-state reads do not allocate an engine
+    and SQLite connection pool each time. Read-only and writable callers never
+    share a pool; both follow the existing process/reset disposal lifecycle.
     """
-    path = _resolve_sqlite_path(db_path)
+    key = (_resolve_sqlite_path(db_path), read_only)
     with _cached_engine_lock:
-        engine = _cached_engines.get(path)
+        engine = _cached_engines.get(key)
         if engine is None:
-            engine = create_sqlite_engine(path)
-            _cached_engines[path] = engine
+            engine = create_sqlite_engine(key[0], read_only=read_only)
+            _cached_engines[key] = engine
         return engine
 
 

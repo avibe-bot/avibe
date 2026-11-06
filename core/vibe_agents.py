@@ -738,16 +738,22 @@ class AgentImportResult:
 
 
 class VibeAgentStore:
-    def __init__(self, db_path: Optional[Path] = None):
+    def __init__(self, db_path: Optional[Path] = None, *, read_only: bool = False):
         self.db_path = db_path or paths.get_sqlite_state_path()
-        guard_source_checkout_default_state_migration(self.db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        if db_path is None:
-            ensure_sqlite_state(primary_platform=resolve_primary_platform_from_config(paths.get_state_dir()))
-        else:
-            run_migrations(self.db_path)
-        self.engine = create_sqlite_engine(self.db_path)
-        self.prefill_missing_models()
+        # Read-only callers own readiness; opening a reader must never repair or
+        # materialize legacy Agent models as a side effect of discovery.
+        if not read_only:
+            guard_source_checkout_default_state_migration(self.db_path)
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            if db_path is None:
+                ensure_sqlite_state(primary_platform=resolve_primary_platform_from_config(paths.get_state_dir()))
+            else:
+                run_migrations(self.db_path)
+        self.engine = (
+            create_sqlite_engine(self.db_path, read_only=True) if read_only else create_sqlite_engine(self.db_path)
+        )
+        if not read_only:
+            self.prefill_missing_models()
         self._probe = SqliteInvalidationProbe(self.engine)
 
     def close(self) -> None:

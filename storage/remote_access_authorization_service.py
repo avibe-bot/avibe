@@ -489,7 +489,20 @@ def load_instance_binding_state(*, ensure: bool = True) -> dict[str, Any] | None
 
     if ensure:
         _ensure_sqlite_state()
-    engine = get_cached_sqlite_engine()
+        engine = get_cached_sqlite_engine()
+    else:
+        from config import paths
+
+        db_path = paths.get_sqlite_state_path()
+        try:
+            db_path.stat()
+        except FileNotFoundError:
+            # Admission may inspect a fresh install before shared initialization.
+            # Its legacy no-row result must not create a database just to read it.
+            return None
+        # Also used by service hot paths: retain pooled checkout rather than
+        # rebuilding the engine on each authority check.
+        engine = get_cached_sqlite_engine(db_path, read_only=True)
     try:
         with engine.connect() as conn:
             return _load_binding_state_from_connection(conn)

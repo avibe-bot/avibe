@@ -396,7 +396,7 @@ def test_harness_status_cli_returns_one_unified_payload(monkeypatch, capsys) -> 
     monkeypatch.setattr(
         cli,
         "_task_request_store",
-        lambda: SimpleNamespace(sqlite_backend=sqlite_store),
+        lambda *, read_only: SimpleNamespace(sqlite_backend=sqlite_store),
     )
 
     async def _controller_snapshot(*, run_ids):
@@ -438,7 +438,7 @@ def test_harness_status_cli_revalidates_runs_after_ownership_snapshot(
     monkeypatch.setattr(
         cli,
         "_task_request_store",
-        lambda: SimpleNamespace(sqlite_backend=sqlite_store),
+        lambda *, read_only: SimpleNamespace(sqlite_backend=sqlite_store),
     )
 
     async def _controller_snapshot(*, run_ids):
@@ -473,7 +473,7 @@ def test_harness_status_cli_preserves_pre_snapshot_run_truncation(
     monkeypatch.setattr(
         cli,
         "_task_request_store",
-        lambda: SimpleNamespace(sqlite_backend=sqlite_store),
+        lambda *, read_only: SimpleNamespace(sqlite_backend=sqlite_store),
     )
 
     async def _controller_snapshot(*, run_ids):
@@ -523,7 +523,7 @@ def test_harness_status_prioritizes_running_run_before_bounded_probe(
         monkeypatch.setattr(
             cli,
             "_task_request_store",
-            lambda: SimpleNamespace(sqlite_backend=store),
+            lambda *, read_only: SimpleNamespace(sqlite_backend=store),
         )
         probed_run_ids = []
 
