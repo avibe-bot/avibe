@@ -41,6 +41,13 @@ def test_dependabot_covers_ordinary_ecosystems_with_reviewable_update_policy() -
         assert "auto-merge" not in item
         assert "automerge" not in item
 
+    # Known-incompatible Windows IPC versions must not overwrite the safety pin.
+    # Keep the exclusion version-scoped so later fixes still receive review.
+    cargo = next(item for item in updates if item["package-ecosystem"] == "cargo")
+    assert cargo["ignore"] == [
+        {"dependency-name": "tauri-plugin-single-instance", "versions": ["2.5.4", "2.5.5"]}
+    ]
+
     uv = updates[-1]
     assert uv["package-ecosystem"] == "uv"
     assert uv["versioning-strategy"] == "increase"
