@@ -1,5 +1,5 @@
 import { mkdir } from 'node:fs/promises';
-import { expect, test } from '@playwright/test';
+import { expect, test } from '../support/browserTest';
 import { OWNER_INSTANCE_CAPABILITIES } from '../../src/lib/sessionInfo';
 import { open, serveProduct } from './support';
 

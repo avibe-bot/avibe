@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from '../support/browserTest';
 import en from '../../src/i18n/en.json' with { type: 'json' };
 
 // A click on the empty composer is a click on its input, though a longer press of the same
@@ -16,13 +16,9 @@ declare global {
   }
 }
 
-// No microphone here. The composer loads its audio worklet as it mounts, and that load can hang
-// Linux WebKit's page (CI's stand-in for Safari's engine); the click under test needs no audio.
-test.beforeEach(async ({ page }) => {
-  await page.addInitScript(() => {
-    if (typeof AudioWorklet !== 'undefined') AudioWorklet.prototype.addModule = async () => undefined;
-  });
-});
+// No microphone here, so no voice worklet either, in the Chromium project that keeps the real
+// one for the microphone specs (see support/browserTest).
+test.use({ voiceWorklet: 'stub' });
 
 for (const [name, pressMs] of [['A click', 40], ['A slow click', HOLD_MS - 100]] as const) {
   test(`${name} on the empty composer leaves a visible caret in its input`, async ({ page }) => {

@@ -1,5 +1,5 @@
-import { expect, test } from '@playwright/test';
-import type { Page } from '@playwright/test';
+import { expect, test } from '../support/browserTest';
+import type { Page } from '../support/browserTest';
 import { open, serveProduct } from './support';
 
 // Lane C: actual App/router/Composer/AgentRoutePicker with API responses confined

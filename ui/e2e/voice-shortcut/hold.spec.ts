@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from '../support/browserTest';
 import en from '../../src/i18n/en.json' with { type: 'json' };
 
 // Holding the empty composer to talk, with a real mouse in a real browser (ui/design:

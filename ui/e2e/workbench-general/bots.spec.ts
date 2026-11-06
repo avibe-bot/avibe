@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from '../support/browserTest';
 
 import { DESKTOP, NARROW, open, serveProduct, type Lang } from './support';
 

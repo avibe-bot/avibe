@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from '../support/browserTest';
 import en from '../../src/i18n/en.json' with { type: 'json' };
 
 declare global {

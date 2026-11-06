@@ -1,4 +1,4 @@
-import { expect, test, type Locator } from '@playwright/test';
+import { expect, test, type Locator } from '../support/browserTest';
 
 import { DESKTOP, NARROW, ORIGIN, WIDE, config, open, serveProduct } from './support';
 

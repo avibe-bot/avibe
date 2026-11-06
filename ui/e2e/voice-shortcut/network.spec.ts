@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from '../support/browserTest';
 import en from '../../src/i18n/en.json' with { type: 'json' };
 
 // A take whose network fails (ui/design: composer/hold-desktop/*): the realtime socket dies or is

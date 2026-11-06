@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '../support/browserTest';
 import { VIEWPORTS, serveProduct, settleEffects, size } from './support';
 import { importableCount, openProviders, serveProviders, vendorCount } from './provider-support';
 

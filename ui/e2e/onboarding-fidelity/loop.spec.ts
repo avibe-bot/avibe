@@ -1,5 +1,5 @@
 import { writeFile } from 'node:fs/promises';
-import { expect, test } from '@playwright/test';
+import { expect, test } from '../support/browserTest';
 import { openOnboarding, renderedPhase, serveProduct, setDocumentHidden } from './support';
 
 /**

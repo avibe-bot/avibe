@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '../support/browserTest';
 import { open, serveProduct } from './support';
 
 // The composer's route trigger names who answers the next message. When the

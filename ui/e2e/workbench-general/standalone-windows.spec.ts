@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from '../support/browserTest';
 import { open, serveProduct } from './support';
 
 // Real AppShell -> Dock -> WindowLayer -> AppWindow -> ShowPageApp, with only

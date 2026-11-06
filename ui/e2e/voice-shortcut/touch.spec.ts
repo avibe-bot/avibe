@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '../support/browserTest';
 import en from '../../src/i18n/en.json' with { type: 'json' };
 
 // The toast a hold leaves, with a finger on a phone (ui/design: composer/hold-mobile/*,

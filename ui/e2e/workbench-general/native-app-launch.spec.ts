@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from '../support/browserTest';
 import { DESKTOP, serveProduct } from './support';
 
 type Surface = 'Dock' | 'Library' | 'Search';

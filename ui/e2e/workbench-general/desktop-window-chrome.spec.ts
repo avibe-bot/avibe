@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from '../support/browserTest';
 import { open, serveProduct } from './support';
 
 // The neutral overlay and the aside's resizer used to paint two lines at

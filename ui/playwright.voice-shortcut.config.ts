@@ -3,6 +3,8 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defineConfig, devices } from '@playwright/test';
 
+import type { VoiceWorkletOptions } from './e2e/support/browserTest';
+
 const outputDir = './e2e/.artifacts/voice-shortcut';
 
 /** A continuous tone at about −12 dBFS, so a fake microphone is loud from its first sample (the
@@ -34,7 +36,7 @@ const toneFile = (() => {
   return file;
 })();
 
-export default defineConfig({
+export default defineConfig<VoiceWorkletOptions>({
   testDir: './e2e/voice-shortcut',
   outputDir,
   workers: 1,
@@ -52,13 +54,16 @@ export default defineConfig({
     url: 'http://127.0.0.1:5218/e2e/voice-shortcut/fixture.html',
   },
   projects: [
-    { name: 'chromium', testIgnore: /meter\.spec\.ts/, use: { ...devices['Desktop Chrome'] } },
+    // The microphone projects keep the composer's real voice worklet: they capture through it
+    // (support/browserTest stubs it everywhere else).
+    { name: 'chromium', testIgnore: /meter\.spec\.ts/, use: { ...devices['Desktop Chrome'], voiceWorklet: 'real' } },
     // The meter, on a microphone that is never quiet.
     {
       name: 'meter',
       testMatch: /meter\.spec\.ts/,
       use: {
         ...devices['Desktop Chrome'],
+        voiceWorklet: 'real',
         launchOptions: {
           args: [
             '--use-fake-device-for-media-stream',

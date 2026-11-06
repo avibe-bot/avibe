@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '../support/browserTest';
 import en from '../../src/i18n/en.json' with { type: 'json' };
 
 // Holding a Bot's avatar in the Bots strip to talk to that Bot (docs/plans/bots.md D5), with a real

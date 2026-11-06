@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from '../support/browserTest';
 import { copy } from '../support/copy';
 
 const fixture = (page: Page) => page.getByTestId('chat-paging-fixture');

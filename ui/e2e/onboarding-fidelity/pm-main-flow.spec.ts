@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from '../support/browserTest';
 import { guardRetiredMemory, isRetiredMemoryPath, ORIGIN, serveProduct } from './support';
 import { readFileSync } from 'node:fs';
 const en=JSON.parse(readFileSync(new URL('../../src/i18n/en.json', import.meta.url),'utf8'));

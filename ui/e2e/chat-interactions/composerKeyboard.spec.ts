@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from '../support/browserTest';
 
 // On a phone, sending ends the typing: the soft keyboard closes (the editor
 // gives up focus) and nothing in the editor focuses it again, in the engines

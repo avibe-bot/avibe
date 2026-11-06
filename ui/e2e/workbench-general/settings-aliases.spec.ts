@@ -1,5 +1,5 @@
-import { expect, test } from '@playwright/test';
-import type { Page } from '@playwright/test';
+import { expect, test } from '../support/browserTest';
+import type { Page } from '../support/browserTest';
 
 import { NARROW, open, serveProduct } from './support';
 

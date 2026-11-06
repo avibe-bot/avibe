@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from '../support/browserTest';
 import { ORIGIN, serveProduct } from './support';
 
 // Exercise the actual App/AuthGuard/Settings overlay/Wizard boundary. All

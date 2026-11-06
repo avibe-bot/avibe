@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from '../support/browserTest';
 import { open, serveProduct } from './support';
 
 // The `#` and `@` pickers open at the caret. Typed near the composer's right

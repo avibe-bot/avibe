@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from '../support/browserTest';
 import { DESKTOP, open, serveProduct } from './support';
 
 test('inline Settings stays open when the project row opens its context menu', async ({ page }) => {
