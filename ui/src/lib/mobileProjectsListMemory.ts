@@ -164,6 +164,8 @@ export function clearMobileProjectsListSnapshot(): void {
 
 type ScrollOwner = {
   scrollTop: number;
+  scrollHeight?: number;
+  clientHeight?: number;
   addEventListener?(type: 'scroll', listener: () => void, options?: { passive?: boolean }): void;
   removeEventListener?(type: 'scroll', listener: () => void): void;
 };

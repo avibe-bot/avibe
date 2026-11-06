@@ -67,9 +67,17 @@ async function openTwoAndAConversation(page: Page) {
   await header(page, 'Research').click();
   await expect(row(page, 'project-2', 1)).toBeVisible();
   await row(page, 'project-2', 4).scrollIntoViewIfNeeded();
-  const left = await scrollTop(page);
-  expect(left).toBeGreaterThan(100);
+  // Where the list is as the reader taps: the click may scroll the row out from
+  // under the tab bar first, so the place is read at the press.
+  await page.evaluate(() => {
+    const scroller = document.getElementById('app-shell-scroll')!;
+    document.addEventListener('pointerdown', () => {
+      (window as unknown as { __left: number }).__left = scroller.scrollTop;
+    }, { capture: true, once: true });
+  });
   await row(page, 'project-2', 4).click();
+  const left = await page.evaluate(() => (window as unknown as { __left: number }).__left);
+  expect(left).toBeGreaterThan(100);
   await expect(page).toHaveURL(/\/chat\/project-2-s3$/);
   await expect(chatBack(page)).toBeVisible();
   return left;

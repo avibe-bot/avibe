@@ -490,16 +490,27 @@ export const ProjectsPage: React.FC = () => {
   }, [inheritedOnMount]);
 
   // The place a previous document left the list at, written once, before the
-  // first frame that has the list: the projects it left open are open in that
-  // render, with their rows or their skeletons, so the height is already there.
+  // first frame that can hold it. The projects it left open are open from the
+  // first render that has the list, but one whose rows were not stored draws a
+  // shorter skeleton until they come, so a place near the end waits for them.
+  // Once the list has settled (live, and no open project still waiting), the
+  // place is written even if the list is shorter now: the nearest it has.
   const listShown = projects !== null;
+  const listSettled = listShown && projectsLoaded && !(projects ?? []).some((project) => {
+    if (!isExpanded(project.id)) return false;
+    const state = sessionsOf(project.id);
+    return state.loading && !state.sessions?.length;
+  });
   useLayoutEffect(() => {
     if (!listShown) return;
     const top = inheritedProjectsListScroll();
     if (top === null) return;
+    const scroller = appShellScrollElement();
+    const room = (scroller?.scrollHeight ?? 0) - (scroller?.clientHeight ?? 0);
+    if (room < top && !listSettled) return;
     consumeInheritedProjectsListScroll();
-    writeAppShellScrollTop(appShellScrollElement(), top);
-  }, [listShown]);
+    writeAppShellScrollTop(scroller, top);
+  });
 
   useEffect(() => {
     rememberMobileProjectsListCounts(visibleSessionCounts);

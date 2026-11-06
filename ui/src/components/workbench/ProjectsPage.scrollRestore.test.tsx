@@ -12,7 +12,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { WorkbenchProject, WorkbenchSession } from '../../context/ApiContext';
 
-const tree = vi.hoisted(() => ({ projects: null as unknown[] | null }));
+// The list as the provider has it: `loaded` once a live list landed, `loading`
+// while an open project waits for its rows (its skeleton is shorter), and the
+// room the scroller then has below the top.
+const tree = vi.hoisted(() => ({ projects: null as unknown[] | null, loaded: true, loading: false, room: 10_000 }));
 
 vi.mock('../../context/WorkbenchInboxContext', () => ({
   useWorkbenchInbox: () => ({ unreadBySession: {} }),
@@ -26,10 +29,10 @@ vi.mock('../../context/WorkbenchProjectsContext', () => ({
   }),
   useWorkbenchProjectsTree: () => ({
     projects: tree.projects,
-    projectsLoaded: tree.projects !== null,
+    projectsLoaded: tree.projects !== null && tree.loaded,
     projectsError: null,
     refreshProjects: vi.fn(),
-    sessionsOf: () => ({ sessions: rows, loading: false, loadingMore: false, cursor: null, error: false }),
+    sessionsOf: () => ({ sessions: tree.loading ? null : rows, loading: tree.loading, loadingMore: false, cursor: null, error: false }),
     isExpanded: () => true,
     toggleExpanded: vi.fn(),
     loadMore: vi.fn(),
@@ -78,8 +81,10 @@ beforeEach(() => {
       top = value;
     },
   });
+  Object.defineProperty(scroller, 'clientHeight', { configurable: true, get: () => 600 });
+  Object.defineProperty(scroller, 'scrollHeight', { configurable: true, get: () => 600 + tree.room });
   document.body.appendChild(scroller);
-  tree.projects = null;
+  Object.assign(tree, { projects: null, loaded: true, loading: false, room: 10_000 });
 });
 
 afterEach(async () => {
@@ -133,6 +138,35 @@ describe('the project list\'s place', () => {
     rerender();
     tree.projects = null;
     rerender();
+    listArrives();
+    expect(writes).toEqual([420]);
+  });
+
+  it('in a new document, waits for an open project\'s rows when its skeleton is too short to hold the place', async () => {
+    const before = await newDocument();
+    before.memory.rememberMobileProjectsListScroll(420);
+
+    const { mount } = await newDocument();
+    const { listArrives, rerender } = mount();
+    // Painted from the device; the open project's rows were not stored.
+    Object.assign(tree, { loaded: false, loading: true, room: 200 });
+    listArrives();
+    expect(writes).toEqual([]);
+    // Its rows come with the live list, and the list can hold the place.
+    Object.assign(tree, { loaded: true, loading: false, room: 900 });
+    rerender();
+    expect(writes).toEqual([420]);
+    rerender();
+    expect(writes).toEqual([420]);
+  });
+
+  it('in a new document, settles for the nearest place a settled list has', async () => {
+    const before = await newDocument();
+    before.memory.rememberMobileProjectsListScroll(420);
+
+    const { mount } = await newDocument();
+    const { listArrives } = mount();
+    tree.room = 200;
     listArrives();
     expect(writes).toEqual([420]);
   });

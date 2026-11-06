@@ -94,17 +94,21 @@ function fakeApi(listed: string[], { hold = false, fail = false }: { hold?: bool
   const handlers: WorkbenchEventHandlers[] = [];
   const bootstraps: (BootstrapParams | undefined)[] = [];
   const server = { listed };
+  const held: (() => void)[] = [];
   const listSessions = vi.fn(async ({ projectId }: { projectId: string }) => pageOf(projectId));
   apiRef.current = {
     getWorkbenchProjectsBootstrap: vi.fn((params?: BootstrapParams) => {
       bootstraps.push(params);
-      if (hold) return new Promise(() => {});
+      const answer = () => {
+        const projects = server.listed.map(projectOf);
+        const sessions = Object.fromEntries((params?.projectIds ?? [])
+          .filter((projectId) => server.listed.includes(projectId))
+          .map((projectId) => [projectId, pageOf(projectId)]));
+        return { projects, sessions };
+      };
+      if (hold) return new Promise((resolve) => { held.push(() => resolve(answer())); });
       if (fail) return Promise.reject(new Error('offline'));
-      const projects = server.listed.map(projectOf);
-      const sessions = Object.fromEntries((params?.projectIds ?? [])
-        .filter((projectId) => server.listed.includes(projectId))
-        .map((projectId) => [projectId, pageOf(projectId)]));
-      return Promise.resolve({ projects, sessions });
+      return Promise.resolve(answer());
     }),
     listSessions,
     connectWorkbenchEvents: (next: WorkbenchEventHandlers) => {
@@ -112,7 +116,14 @@ function fakeApi(listed: string[], { hold = false, fail = false }: { hold?: bool
       return () => undefined;
     },
   };
-  return { handlers, bootstraps, listSessions, server };
+  return {
+    handlers, bootstraps, listSessions, server,
+    /** Answer the bootstraps held so far, with what the server holds now. */
+    release: async () => {
+      await act(async () => { for (const answer of held.splice(0)) answer(); });
+      await settle();
+    },
+  };
 }
 
 type Frame = { listed: string[] | null; open: string[]; rows: Record<string, string[] | null> };
@@ -223,6 +234,29 @@ describe('the projects a reader leaves open', () => {
     expect(state.current!.sessionsOf('a').sessions?.map((row) => row.id)).toEqual(['a-live']);
   });
 
+  it('wait for the live list to open one the painted list is too old to have, and keep it stored meanwhile', async () => {
+    // Created just before the last reload, whose bootstrap failed: open, but not
+    // in the painted list yet.
+    await storeForReader('local', { open: ['a', 'new'], list: ['a'] });
+    const api = fakeApi(['a', 'new'], { hold: true });
+    const state = mount('local');
+    await settle();
+    expect(state.current!.isExpanded('a')).toBe(true);
+    expect(await storedOpen('local')).toEqual(['a', 'new']);
+    // A toggle meanwhile stores it with the rest, not over it.
+    setLocalSnapshotPrincipal('local');
+    act(() => state.current!.toggleExpanded('a'));
+    await settle();
+    expect(await storedOpen('local')).toEqual(['new']);
+
+    setLocalSnapshotPrincipal('local');
+    await api.release();
+    expect(state.current!.projects?.map((project) => project.id)).toEqual(['a', 'new']);
+    expect(state.current!.isExpanded('new')).toBe(true);
+    expect(state.current!.sessionsOf('new').sessions?.map((row) => row.id)).toEqual(['new-live']);
+    expect(await storedOpen('local')).toEqual(['new']);
+  });
+
   it('lose a project the live list no longer has, on screen and in the record', async () => {
     await storeForReader('local', { open: ['a', 'gone'] });
     const api = fakeApi(['a']);
@@ -288,6 +322,26 @@ describe('the projects a reader leaves open', () => {
     const again = mount('local');
     await settle();
     expect(again.current!.isExpanded('a')).toBe(false);
+  });
+
+  it('are gone after an authorization change that lands while one still waits for the live list', async () => {
+    await storeForReader('local', { open: ['a', 'new'], list: ['a'] });
+    const api = fakeApi(['a', 'new'], { hold: true });
+    const state = mount('local');
+    await settle();
+    expect(await storedOpen('local')).toEqual(['a', 'new']);
+
+    setLocalSnapshotPrincipal('local');
+    await act(async () => {
+      void clearLocalSnapshots();
+      for (const handler of api.handlers) handler.onAuthorizationChanged?.({});
+    });
+    await settle();
+    expect(state.current!.isExpanded('a')).toBe(false);
+    expect(await storedOpen('local')).toEqual([]);
+    setLocalSnapshotPrincipal('local');
+    await api.release();
+    expect(state.current!.isExpanded('new')).toBe(false);
   });
 
   it('are gone after sign-out', async () => {

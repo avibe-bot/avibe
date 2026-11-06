@@ -346,7 +346,20 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   // first and draw a restored project closed for a frame. Until it is applied the
   // open set is not stored either, so the empty set a document starts with cannot
   // overwrite the one the reader left.
-  const expansionRef = useRef<{ principal: string; ids: string[] | null; read: Promise<string[]>; applied: boolean } | null>(null);
+  //
+  // Only a live list says a project is gone. The painted one can be older than
+  // the stored set (a project created just before a reload whose bootstrap
+  // failed), so it opens what it holds and leaves the rest ``pending``, still
+  // stored, for the live list to open or drop.
+  const expansionRef = useRef<{
+    principal: string;
+    ids: string[] | null;
+    read: Promise<string[]>;
+    /** Some list has been restored onto; from then on every change is stored. */
+    applied: boolean;
+    /** Stored ids no list has opened yet; null once a live list has settled them. */
+    pending: Set<string> | null;
+  } | null>(null);
   // Restored projects with nothing to show yet: they draw their skeleton rows,
   // and whichever bootstrap applied the restore reads what its answer left out.
   const restoredUnloadedRef = useRef(new Set<string>());
@@ -363,23 +376,29 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         readExpandedProjects(),
         new Promise<string[]>((resolve) => { window.setTimeout(() => resolve([]), EXPANSION_READ_LIMIT_MS); }),
       ]);
-      const created: NonNullable<typeof entry> = { principal, ids: null, read, applied: false };
+      const created: NonNullable<typeof entry> = { principal, ids: null, read, applied: false, pending: null };
       void read.then((ids) => { created.ids = ids; });
       entry = created;
       expansionRef.current = entry;
     }
-    return entry.applied ? null : entry.read;
+    return entry.applied && entry.pending === null ? null : entry.read;
   }, []);
 
   /** Open the stored projects ``listed`` holds, with the rows they had: called in
-   *  the same render as the list it is checked against. */
-  const restoreExpansion = useCallback((listed: ReadonlySet<string>) => {
+   *  the same render as the list it is checked against. ``live`` says the list is
+   *  the server's, which settles the stored ids it does not hold: they are gone. */
+  const restoreExpansion = useCallback((listed: ReadonlySet<string>, { live }: { live: boolean }) => {
     const entry = expansionRef.current;
-    if (!entry || entry.applied || entry.ids === null || entry.principal !== getLocalSnapshotPrincipal()) return;
+    if (!entry || entry.ids === null || entry.principal !== getLocalSnapshotPrincipal()) return;
+    if (entry.applied && entry.pending === null) return;
+    const candidates = entry.pending ?? new Set(entry.ids);
     entry.applied = true;
-    const restored = entry.ids.filter((projectId) => listed.has(projectId) && !expandedRef.current.has(projectId));
-    // What no longer lists is dropped from the record too, even with nothing to open.
-    if (restored.length !== entry.ids.length) void rememberExpandedProjects([...expandedRef.current, ...restored]);
+    const restored = [...candidates].filter((projectId) => listed.has(projectId) && !expandedRef.current.has(projectId));
+    const unmatched = [...candidates].filter((projectId) => !listed.has(projectId));
+    entry.pending = live ? null : new Set(unmatched);
+    // What a live list no longer has is dropped from the record too, even with
+    // nothing to open.
+    if (live && unmatched.length > 0) void rememberExpandedProjects([...expandedRef.current, ...restored]);
     if (restored.length === 0) return;
     expandedRef.current = new Set([...expandedRef.current, ...restored]);
     setExpanded((prev) => new Set([...prev, ...restored]));
@@ -631,7 +650,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       const kept = [...prev].filter((projectId) => accessibleIds.has(projectId));
       return kept.length === prev.size ? prev : new Set(kept);
     });
-    restoreExpansion(accessibleIds);
+    restoreExpansion(accessibleIds, { live: true });
     setCreating((prev) => new Set([...prev].filter((projectId) => accessibleIds.has(projectId))));
     for (const projectId of [...pendingReconcileRef.current.keys()]) {
       if (!accessibleIds.has(projectId)) pendingReconcileRef.current.delete(projectId);
@@ -675,6 +694,8 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     sessionsRef.current = {};
     expandedRef.current = new Set();
     restoredUnloadedRef.current.clear();
+    // Nothing stored before the change is restored after it, nor stored again.
+    if (expansionRef.current) expansionRef.current.pending = null;
     sessionProjectRef.current.clear();
     pendingReconcileRef.current.clear();
     pendingCachedRowRefreshRef.current.clear();
@@ -1132,7 +1153,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         // A live list is on screen already, because the reader was named after it
         // landed: what they left open opens on it.
         if (restoring && liveProjectIdsRef.current) {
-          restoreExpansion(liveProjectIdsRef.current);
+          restoreExpansion(liveProjectIdsRef.current, { live: true });
           loadRestoredWindows();
         }
         return;
@@ -1143,7 +1164,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       const listed = new Set(snapshot.projects.map((project) => project.id));
       setPaintedSnapshot({ principal, ids: listed });
       commitProjects(snapshot.projects);
-      restoreExpansion(listed);
+      restoreExpansion(listed, { live: false });
       // A bootstrap in flight asked for these windows and reads what it left out
       // when it settles; one that settled already (a failure can beat the paint)
       // left that to this.
@@ -1173,11 +1194,12 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
 
   // Every change to what is open is stored at once, so a reload cannot lose a
   // toggle: an expand, a collapse, a project a new Session opened, or one that
-  // left the list. Never before the stored set is applied (``restoreExpansion``).
+  // left the list. Never before the stored set is applied (``restoreExpansion``),
+  // and with the stored ids no live list has settled yet.
   useEffect(() => {
     const expansion = expansionRef.current;
     if (!expansion?.applied || expansion.principal !== getLocalSnapshotPrincipal()) return;
-    void rememberExpandedProjects(expanded);
+    void rememberExpandedProjects(new Set([...expanded, ...(expansion.pending ?? [])]));
   }, [expanded]);
 
   useEffect(() => {
