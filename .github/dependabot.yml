@@ -36,6 +36,11 @@ updates:
         update-types:
           - minor
           - patch
+    # This candidate changes refresh diagnostics beyond the existing lint ledger.
+    # Keep 0.4.26 for now; later candidates still get an independent review.
+    ignore:
+      - dependency-name: eslint-plugin-react-refresh
+        versions: ["0.5.7"]
 
   - package-ecosystem: npm
     directory: /desktop

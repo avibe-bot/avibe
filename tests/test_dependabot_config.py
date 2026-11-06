@@ -41,6 +41,12 @@ def test_dependabot_covers_ordinary_ecosystems_with_reviewable_update_policy() -
         assert "auto-merge" not in item
         assert "automerge" not in item
 
+    # Keep the known lint-policy drift out of grouped UI bumps without blocking
+    # future candidates from being reviewed against the existing lint ledger.
+    ui = next(item for item in updates if item["directory"] == "/ui")
+    refresh_ignores = [item for item in ui.get("ignore", []) if item["dependency-name"] == "eslint-plugin-react-refresh"]
+    assert refresh_ignores == [{"dependency-name": "eslint-plugin-react-refresh", "versions": ["0.5.7"]}]
+
     # Known-incompatible Windows IPC versions must not overwrite the safety pin.
     # Keep the exclusion version-scoped so later fixes still receive review.
     cargo = next(item for item in updates if item["package-ecosystem"] == "cargo")
