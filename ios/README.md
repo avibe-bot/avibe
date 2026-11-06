@@ -409,13 +409,21 @@ bridge and do not run these Web UI branches.
 | Environment | Coverage |
 | --- | --- |
 | CI: Xcode 26.6, iOS 26.4.1 simulator | Authoritative `ios-shell` build and serialized full XCTest, including cold WebKit transport startup, redirect isolation, cookie behavior, and bundled-page interaction. |
-| Local: Xcode 27.2, iOS 26.4.1 simulator | Full Debug XCTest plus repeated serialized transport integration and the compact keyboard viewport regression. |
-| Local: Xcode 27.2, iOS 27.2 simulator | Debug and Release-macro full XCTest without signing, repeated serialized transport integration, compact keyboard viewport, and light/dark screenshots. |
+| Local: Xcode 27.2, iOS 26.4.1 simulator | Debug and Release full XCTest, including the runtime teardown crash regression. |
+| Local: Xcode 27.2, iOS 27.2 simulator | Debug and Release full XCTest without signing, including the runtime teardown crash regression, repeated serialized transport integration, compact keyboard viewport, and light/dark screenshots. |
 
 The initial hidden-WebView readiness bound is 30 seconds so a cold WebContent
 process on the CI runtime can start without leaving account operations
 unbounded. Request and best-effort logout deadlines remain independently
 bounded.
+
+Runtime teardown has one ownership rule: once an account, instance, or logout
+transition invalidates a runtime controller, no callback may recreate or use
+its primary or child WebView. Delegate, bridge, KVO, observer, delayed-work,
+download, and popup paths use retained-only references and become no-ops or
+cancel their completion after invalidation. The AppModel transition regression
+drives this rule through a real `app.showAccount` bridge call before delivering
+late WebKit callbacks.
 
 - Native XCTest covers bridge policy, runtime `app.showAccount`, account
   action registration and fallback timing, selected-instance SPA history,

@@ -238,9 +238,10 @@ final class WebViewController: UIViewController {
     private var primaryBackItemObservation: NSKeyValueObservation?
     private var primaryCurrentItemObservation: NSKeyValueObservation?
     private var blockedBackForwardNavigation = false
+    private var downloadedFilePresentationWorkItem: DispatchWorkItem?
     private var retainedWebViewFactory: WebViewFactory?
     private var retainedWebView: WKWebView?
-    private var webViewFactory: WebViewFactory {
+    private func makeWebViewFactory() -> WebViewFactory {
         if let retainedWebViewFactory {
             return retainedWebViewFactory
         }
@@ -259,16 +260,19 @@ final class WebViewController: UIViewController {
             historyDidChange: { [weak self] sourceWebView in
                 self?.historyDidChange(in: sourceWebView) ?? false
             },
-            showAccount: showAccount
+            showAccount: { [weak self] in
+                self?.showAccountIfActive()
+            }
         )
         retainedWebViewFactory = factory
         return factory
     }
-    private var webView: WKWebView {
+
+    private func makePrimaryWebView() -> WKWebView {
         if let retainedWebView {
             return retainedWebView
         }
-        let created = webViewFactory.makeWebView(delegate: self)
+        let created = makeWebViewFactory().makeWebView(delegate: self)
         retainedWebView = created
         observePrimaryNavigationState(created)
         return created
@@ -324,7 +328,8 @@ final class WebViewController: UIViewController {
         guard !isInvalidatedForAccountTransition else {
             return
         }
-        webViewFactory.install(webView, in: view)
+        let factory = makeWebViewFactory()
+        factory.install(makePrimaryWebView(), in: view)
 
         NotificationCenter.default.addObserver(
             self,
@@ -365,6 +370,8 @@ final class WebViewController: UIViewController {
 
     deinit {
         NotificationCenter.default.removeObserver(self)
+        accountFallbackWorkItem?.cancel()
+        downloadedFilePresentationWorkItem?.cancel()
         retainedWebView?.stopLoading()
         primaryURLObservation?.invalidate()
         primaryBackItemObservation?.invalidate()
@@ -391,7 +398,26 @@ final class WebViewController: UIViewController {
         guard !isInvalidatedForAccountTransition else {
             return
         }
-        webView.load(URLRequest(url: instanceOrigin.url))
+        retainedWebView?.load(URLRequest(url: instanceOrigin.url))
+    }
+
+    private func showAccountIfActive() {
+        guard !isInvalidatedForAccountTransition else {
+            return
+        }
+        showAccount()
+    }
+
+    private func isPrimaryWebView(_ webView: WKWebView) -> Bool {
+        !isInvalidatedForAccountTransition && webView === retainedWebView
+    }
+
+    private func isActiveWebView(_ webView: WKWebView) -> Bool {
+        guard !isInvalidatedForAccountTransition else {
+            return false
+        }
+        return isPrimaryWebView(webView)
+            || popupRecords[ObjectIdentifier(webView)] != nil
     }
 
     private func observePrimaryNavigationState(_ webView: WKWebView) {
@@ -426,7 +452,7 @@ final class WebViewController: UIViewController {
     }
 
     private func updateBackNavigationGesture(in webView: WKWebView) {
-        guard webView === retainedWebView else {
+        guard isPrimaryWebView(webView) else {
             return
         }
         let currentOrigin = webView.url.flatMap {
@@ -456,7 +482,7 @@ final class WebViewController: UIViewController {
     }
 
     private func historyDidChange(in webView: WKWebView) -> Bool {
-        guard webView === retainedWebView else {
+        guard isPrimaryWebView(webView) else {
             return false
         }
         updateBackNavigationGesture(in: webView)
@@ -474,7 +500,7 @@ final class WebViewController: UIViewController {
         _ available: Bool,
         from sourceWebView: WKWebView
     ) -> Bool {
-        guard sourceWebView === retainedWebView else {
+        guard isPrimaryWebView(sourceWebView) else {
             return false
         }
         accountActionAvailable = available
@@ -501,6 +527,7 @@ final class WebViewController: UIViewController {
         let workItem = DispatchWorkItem { [weak self] in
             guard
                 let self,
+                !self.isInvalidatedForAccountTransition,
                 !self.accountActionAvailable,
                 !self.primaryNavigationInProgress,
                 let currentURL = self.retainedWebView?.url,
@@ -532,11 +559,16 @@ final class WebViewController: UIViewController {
         blockedBackForwardNavigation = false
         accountFallbackWorkItem?.cancel()
         accountFallbackWorkItem = nil
+        downloadedFilePresentationWorkItem?.cancel()
+        downloadedFilePresentationWorkItem = nil
         accountFallbackVisibilityChanged(false)
         NotificationCenter.default.removeObserver(self)
         cancelAllPendingDialogs()
         discardAllPopups(animated: false)
         discardPendingDownloadedFiles()
+        downloadContexts.removeAll()
+        downloadDestinations.removeAll()
+        cancelledDownloads.removeAll()
         if let retainedWebView {
             primaryURLObservation?.invalidate()
             primaryURLObservation = nil
@@ -594,7 +626,9 @@ final class WebViewController: UIViewController {
     }
 
     private func navigationContext(for webView: WKWebView) -> NavigationContext {
-        return webView === self.webView ? .primaryMainFrame : .popupMainFrame
+        return isPrimaryWebView(webView)
+            ? .primaryMainFrame
+            : .popupMainFrame
     }
 
     private func mainFrameNavigationDecision(
@@ -621,7 +655,7 @@ final class WebViewController: UIViewController {
     }
 
     private func finishPrimaryLoadingIfNeeded(_ webView: WKWebView) {
-        if webView === self.webView {
+        if isPrimaryWebView(webView) {
             didFinishLoading()
         }
     }
@@ -631,7 +665,7 @@ final class WebViewController: UIViewController {
         guard error.domain != NSURLErrorDomain || error.code != NSURLErrorCancelled else {
             return
         }
-        if webView === self.webView {
+        if isPrimaryWebView(webView) {
             accountFallbackWorkItem?.cancel()
             accountFallbackWorkItem = nil
             accountFallbackVisibilityChanged(false)
@@ -660,7 +694,7 @@ final class WebViewController: UIViewController {
         var parentIdentifier = ObjectIdentifier(sourceWebView)
         var presenter: UIViewController
 
-        if sourceWebView === webView {
+        if isPrimaryWebView(sourceWebView) {
             presenter = self
         } else if let record = popupRecords[parentIdentifier],
                   let visibleController = record.navigationController.visibleViewController {
@@ -692,7 +726,12 @@ final class WebViewController: UIViewController {
         using configuration: WKWebViewConfiguration,
         from sourceWebView: WKWebView
     ) -> WKWebView? {
-        guard let presentation = popupPresentationContext(for: sourceWebView) else {
+        guard
+            !isInvalidatedForAccountTransition,
+            isActiveWebView(sourceWebView),
+            let presentation = popupPresentationContext(for: sourceWebView),
+            let webViewFactory = retainedWebViewFactory
+        else {
             return nil
         }
 
@@ -761,9 +800,15 @@ final class WebViewController: UIViewController {
     }
 
     private func discardAllPopups(animated: Bool) {
-        let mainIdentifier = ObjectIdentifier(webView)
-        let rootControllers = popupRecords.values.compactMap { record in
-            record.parentIdentifier == mainIdentifier ? record.navigationController : nil
+        let rootControllers: [UINavigationController]
+        if let mainIdentifier = retainedWebView.map(ObjectIdentifier.init) {
+            rootControllers = popupRecords.values.compactMap { record in
+                record.parentIdentifier == mainIdentifier
+                    ? record.navigationController
+                    : nil
+            }
+        } else {
+            rootControllers = []
         }
         for controller in rootControllers {
             controller.dismiss(animated: animated)
@@ -847,12 +892,17 @@ final class WebViewController: UIViewController {
     }
 
     private func enqueueDownloadedFile(at url: URL) {
+        guard !isInvalidatedForAccountTransition else {
+            removeDownloadedFile(at: url)
+            return
+        }
         pendingDownloadedFiles.append(url)
         presentNextDownloadedFile()
     }
 
     private func presentNextDownloadedFile() {
         guard
+            !isInvalidatedForAccountTransition,
             !isPresentingDownloadedFile,
             let url = pendingDownloadedFiles.first
         else {
@@ -900,9 +950,25 @@ final class WebViewController: UIViewController {
     }
 
     private func presentNextDownloadedFileAfterDismissal() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-            self?.presentNextDownloadedFile()
+        guard !isInvalidatedForAccountTransition else {
+            return
         }
+        downloadedFilePresentationWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard
+                let self,
+                !self.isInvalidatedForAccountTransition
+            else {
+                return
+            }
+            self.downloadedFilePresentationWorkItem = nil
+            self.presentNextDownloadedFile()
+        }
+        downloadedFilePresentationWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + 0.35,
+            execute: workItem
+        )
     }
 
     private func discardPendingDownloadedFiles() {
@@ -947,7 +1013,7 @@ final class WebViewController: UIViewController {
 
     private func dialogPresenter(for webView: WKWebView) -> UIViewController? {
         let presenter: UIViewController
-        if webView === self.webView {
+        if isPrimaryWebView(webView) {
             presenter = self
         } else if let record = popupRecords[ObjectIdentifier(webView)],
                   let visibleController = record.navigationController.visibleViewController {
@@ -1043,6 +1109,10 @@ extension WebViewController: WKNavigationDelegate {
         decidePolicyFor navigationAction: WKNavigationAction,
         decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
     ) {
+        guard isActiveWebView(webView) else {
+            decisionHandler(.cancel)
+            return
+        }
         guard let url = navigationAction.request.url else {
             decisionHandler(.cancel)
             return
@@ -1079,7 +1149,7 @@ extension WebViewController: WKNavigationDelegate {
         }
 
         if
-            webView === self.webView,
+            isPrimaryWebView(webView),
             navigationAction.navigationType == .backForward,
             !navigationPolicy.allowsBackForwardNavigation(
                 to: url,
@@ -1100,6 +1170,10 @@ extension WebViewController: WKNavigationDelegate {
         decidePolicyFor navigationResponse: WKNavigationResponse,
         decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void
     ) {
+        guard isActiveWebView(webView) else {
+            decisionHandler(.cancel)
+            return
+        }
         guard
             isAttachment(navigationResponse.response) || !navigationResponse.canShowMIMEType
         else {
@@ -1131,6 +1205,9 @@ extension WebViewController: WKNavigationDelegate {
         navigationAction: WKNavigationAction,
         didBecome download: WKDownload
     ) {
+        guard isActiveWebView(webView) else {
+            return
+        }
         registerDownload(
             download,
             context: downloadContext(
@@ -1145,6 +1222,9 @@ extension WebViewController: WKNavigationDelegate {
         navigationResponse: WKNavigationResponse,
         didBecome download: WKDownload
     ) {
+        guard isActiveWebView(webView) else {
+            return
+        }
         registerDownload(
             download,
             context: downloadContext(for: webView, sourceOrigin: nil)
@@ -1152,8 +1232,11 @@ extension WebViewController: WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation?) {
+        guard isActiveWebView(webView) else {
+            return
+        }
         cancelPendingDialogs(for: webView)
-        if webView === self.webView {
+        if isPrimaryWebView(webView) {
             primaryNavigationInProgress = true
             accountFallbackWorkItem?.cancel()
             accountFallbackWorkItem = nil
@@ -1163,8 +1246,11 @@ extension WebViewController: WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation?) {
-        webViewFactory.resetForNavigationCommit(in: webView)
-        if webView === self.webView {
+        guard isActiveWebView(webView) else {
+            return
+        }
+        retainedWebViewFactory?.resetForNavigationCommit(in: webView)
+        if isPrimaryWebView(webView) {
             blockedBackForwardNavigation = false
             resetAccountActionForNavigationCommit()
             updateBackNavigationGesture(in: webView)
@@ -1172,7 +1258,10 @@ extension WebViewController: WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation?) {
-        if webView === self.webView {
+        guard isActiveWebView(webView) else {
+            return
+        }
+        if isPrimaryWebView(webView) {
             primaryNavigationInProgress = false
             updateBackNavigationGesture(in: webView)
             scheduleAccountFallbackIfNeeded()
@@ -1185,14 +1274,20 @@ extension WebViewController: WKNavigationDelegate {
         didFailProvisionalNavigation navigation: WKNavigation?,
         withError error: Error
     ) {
-        if webView === self.webView {
+        guard isActiveWebView(webView) else {
+            return
+        }
+        if isPrimaryWebView(webView) {
             primaryNavigationInProgress = false
         }
         reportLoadFailure(error, in: webView)
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation?, withError error: Error) {
-        if webView === self.webView {
+        guard isActiveWebView(webView) else {
+            return
+        }
+        if isPrimaryWebView(webView) {
             primaryNavigationInProgress = false
         }
         reportLoadFailure(error, in: webView)
@@ -1210,8 +1305,11 @@ extension WebViewController: WKNavigationDelegate {
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        guard isActiveWebView(webView) else {
+            return
+        }
         cancelPendingDialogs(for: webView)
-        if webView === self.webView {
+        if isPrimaryWebView(webView) {
             discardAllPopups(animated: false)
             loadConfiguredInstance()
         } else {
@@ -1228,6 +1326,10 @@ extension WebViewController: WKUIDelegate {
         type: WKMediaCaptureType,
         decisionHandler: @escaping (WKPermissionDecision) -> Void
     ) {
+        guard isActiveWebView(webView) else {
+            decisionHandler(.deny)
+            return
+        }
         let allowed = frame.isMainFrame
             && type == .microphone
             && webOrigin(for: origin) == instanceOrigin
@@ -1240,6 +1342,10 @@ extension WebViewController: WKUIDelegate {
         initiatedByFrame frame: WKFrameInfo,
         completionHandler: @escaping () -> Void
     ) {
+        guard isActiveWebView(webView) else {
+            completionHandler()
+            return
+        }
         let alert = UIAlertController(
             title: dialogTitle(key: "browser.alert.title", frame: frame),
             message: message,
@@ -1269,6 +1375,10 @@ extension WebViewController: WKUIDelegate {
         initiatedByFrame frame: WKFrameInfo,
         completionHandler: @escaping (Bool) -> Void
     ) {
+        guard isActiveWebView(webView) else {
+            completionHandler(false)
+            return
+        }
         let alert = UIAlertController(
             title: dialogTitle(key: "browser.confirm.title", frame: frame),
             message: message,
@@ -1310,6 +1420,10 @@ extension WebViewController: WKUIDelegate {
         initiatedByFrame frame: WKFrameInfo,
         completionHandler: @escaping (String?) -> Void
     ) {
+        guard isActiveWebView(webView) else {
+            completionHandler(nil)
+            return
+        }
         let alert = UIAlertController(
             title: dialogTitle(key: "browser.prompt.title", frame: frame),
             message: prompt,
@@ -1354,6 +1468,9 @@ extension WebViewController: WKUIDelegate {
         for navigationAction: WKNavigationAction,
         windowFeatures: WKWindowFeatures
     ) -> WKWebView? {
+        guard isActiveWebView(webView) else {
+            return nil
+        }
         guard let url = navigationAction.request.url else {
             return nil
         }
@@ -1403,6 +1520,10 @@ extension WebViewController: WKDownloadDelegate {
         suggestedFilename: String,
         completionHandler: @escaping (URL?) -> Void
     ) {
+        guard !isInvalidatedForAccountTransition else {
+            completionHandler(nil)
+            return
+        }
         do {
             let destination = try downloadDestination(for: suggestedFilename)
             downloadDestinations[ObjectIdentifier(download)] = destination
@@ -1420,6 +1541,10 @@ extension WebViewController: WKDownloadDelegate {
         newRequest request: URLRequest,
         decisionHandler: @escaping (WKDownload.RedirectPolicy) -> Void
     ) {
+        guard !isInvalidatedForAccountTransition else {
+            decisionHandler(.cancel)
+            return
+        }
         let identifier = ObjectIdentifier(download)
         guard
             let context = downloadContexts[identifier],
@@ -1459,6 +1584,9 @@ extension WebViewController: WKDownloadDelegate {
     }
 
     func downloadDidFinish(_ download: WKDownload) {
+        guard !isInvalidatedForAccountTransition else {
+            return
+        }
         let identifier = ObjectIdentifier(download)
         downloadContexts.removeValue(forKey: identifier)
         cancelledDownloads.remove(identifier)
@@ -1473,6 +1601,9 @@ extension WebViewController: WKDownloadDelegate {
         didFailWithError error: Error,
         resumeData: Data?
     ) {
+        guard !isInvalidatedForAccountTransition else {
+            return
+        }
         let identifier = ObjectIdentifier(download)
         downloadContexts.removeValue(forKey: identifier)
         if let destination = downloadDestinations.removeValue(forKey: identifier) {

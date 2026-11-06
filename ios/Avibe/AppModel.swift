@@ -15,6 +15,7 @@ final class AppModel: ObservableObject {
 
     private let defaults: UserDefaults
     private let controlPlane: MobileControlPlaneConfiguration
+    private let transportFactory: MobileSessionCoordinator.TransportFactory
     private weak var runtimeController: WebViewController?
     private var pendingRuntimeReleaseBarriers: [
         WebsiteDataStoreReleaseBarrier
@@ -24,6 +25,7 @@ final class AppModel: ObservableObject {
         defaults: defaults,
         controlPlane: controlPlane,
         websiteDataStore: websiteDataStore,
+        transportFactory: transportFactory,
         onOpenRuntime: { [weak self] runtime in
             self?.openRuntime(runtime)
         },
@@ -42,11 +44,17 @@ final class AppModel: ObservableObject {
 
     init(
         defaults: UserDefaults = .standard,
-        controlPlane: MobileControlPlaneConfiguration = MobileControlPlaneConfiguration()
+        controlPlane: MobileControlPlaneConfiguration = MobileControlPlaneConfiguration(),
+        websiteDataStore: AccountWebsiteDataStore? = nil,
+        transportFactory: @escaping MobileSessionCoordinator.TransportFactory = {
+            MobileAuthTransport(controlPlaneURL: $0, websiteDataStore: $1)
+        }
     ) {
         self.defaults = defaults
         self.controlPlane = controlPlane
-        websiteDataStore = AccountWebsiteDataStore(defaults: defaults)
+        self.websiteDataStore =
+            websiteDataStore ?? AccountWebsiteDataStore(defaults: defaults)
+        self.transportFactory = transportFactory
 
         Task { [weak self] in
             await self?.bootstrap()

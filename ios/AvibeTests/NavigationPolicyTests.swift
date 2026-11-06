@@ -918,6 +918,329 @@ final class NavigationPolicyTests: XCTestCase {
     }
 
     @MainActor
+    func testAccountBridgeTransitionDoesNotRecreateReleasedRuntimeWebView() async throws {
+        let accountShown = expectation(description: "account bridge requested")
+        var accountRequestCount = 0
+        var controller: WebViewController!
+        controller = WebViewController(
+            instanceOrigin: instance,
+            websiteDataStore: .nonPersistent(),
+            showAccount: {
+                accountRequestCount += 1
+                accountShown.fulfill()
+                _ = controller.invalidateForAccountTransition()
+            },
+            didStartLoading: {},
+            didFinishLoading: {},
+            didFailLoading: {}
+        )
+        let window = host(controller)
+        defer {
+            window.isHidden = true
+        }
+        let webView = try XCTUnwrap(
+            controller.view.subviews.compactMap { $0 as? WKWebView }.first
+        )
+        let probe = WebViewLoadProbe()
+        webView.navigationDelegate = probe
+        try await probe.loadHTML(
+            """
+            <!doctype html>
+            <button id="account" onclick="window.avibeNative.call('app.showAccount')">
+              Account
+            </button>
+            """,
+            baseURL: instance.url,
+            in: webView
+        )
+
+        _ = try await webView.callAsyncJavaScript(
+            "document.querySelector('#account').click()",
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+        await fulfillment(of: [accountShown], timeout: 2)
+
+        let lateBridgeResult = try await webView.callAsyncJavaScript(
+            """
+            const result = {};
+            await window.avibeNative.call("app.showAccount");
+            try {
+              await window.avibeNative.call(
+                "app.setAccountActionAvailable",
+                {available: true}
+              );
+            } catch (error) {
+              result.registration = error.code;
+            }
+            try {
+              await window.avibeNative.call("navigation.historyChanged");
+            } catch (error) {
+              result.history = error.code;
+            }
+            return JSON.stringify(result);
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+        let lateBridgePayload = try jsonObject(from: lateBridgeResult)
+        XCTAssertEqual(lateBridgePayload["registration"] as? String, "forbidden")
+        XCTAssertEqual(lateBridgePayload["history"] as? String, "forbidden")
+        XCTAssertEqual(accountRequestCount, 1)
+
+        let cancelled = NSError(
+            domain: NSURLErrorDomain,
+            code: NSURLErrorCancelled
+        )
+        controller.webView(
+            webView,
+            didStartProvisionalNavigation: nil
+        )
+        controller.webView(
+            webView,
+            didCommit: nil
+        )
+        controller.webView(
+            webView,
+            didFinish: nil
+        )
+        controller.webView(
+            webView,
+            didFailProvisionalNavigation: nil,
+            withError: cancelled
+        )
+        controller.webView(
+            webView,
+            didFail: nil,
+            withError: cancelled
+        )
+        controller.webViewWebContentProcessDidTerminate(webView)
+        controller.webViewDidClose(webView)
+    }
+
+    @MainActor
+    func testAccountBridgeUsesAppModelTransitionBeforeLateCallbacks() async throws {
+        let suiteName = "NavigationPolicyTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+
+        let websiteDataStore = AccountWebsiteDataStore(
+            defaults: defaults,
+            operations: AccountWebsiteDataStoreOperations(
+                makeDataStore: { _ in .nonPersistent() },
+                removeIdentifier: { _ in nil }
+            )
+        )
+        let runtimeInstance = MobileInstance(
+            id: "instance",
+            name: "Alice",
+            host: instance.host,
+            url: instance.url,
+            relationship: "owner",
+            ownerEmail: "max@example.com",
+            available: true
+        )
+        let snapshot = MobileSessionSnapshot(
+            account: MobileAccount(id: "account", email: "max@example.com"),
+            instances: [runtimeInstance]
+        )
+        let transport = AppModelTransitionTransport(session: snapshot)
+        let appModel = AppModel(
+            defaults: defaults,
+            controlPlane: MobileControlPlaneConfiguration(
+                testBaseURL: URL(string: "http://127.0.0.1:1")!
+            ),
+            websiteDataStore: websiteDataStore,
+            transportFactory: { _, _ in transport }
+        )
+
+        try await waitUntil {
+            if case .onboarding(.instances) = appModel.route {
+                return true
+            }
+            return false
+        }
+        _ = try appModel.mobileSessionCoordinator.selectInstance(id: "instance")
+
+        let runtime: MobileRuntimeContext
+        guard case .browser(let selectedRuntime) = appModel.route else {
+            XCTFail("Selecting an instance did not open the runtime.")
+            return
+        }
+        runtime = selectedRuntime
+
+        let controller = WebViewController(
+            instanceOrigin: instance,
+            websiteDataStore: appModel.runtimeWebsiteDataStore,
+            showAccount: appModel.showAccount,
+            didStartLoading: {},
+            didFinishLoading: {},
+            didFailLoading: {}
+        )
+        appModel.registerRuntimeController(controller, for: runtime)
+        let window = host(controller)
+        defer {
+            window.isHidden = true
+        }
+        let webView = try XCTUnwrap(
+            controller.view.subviews.compactMap { $0 as? WKWebView }.first
+        )
+        let probe = WebViewLoadProbe()
+        webView.navigationDelegate = probe
+        try await probe.loadHTML(
+            """
+            <!doctype html>
+            <button id="account" onclick="window.avibeNative.call('app.showAccount')">
+              Account
+            </button>
+            """,
+            baseURL: instance.url,
+            in: webView
+        )
+
+        _ = try await webView.callAsyncJavaScript(
+            "document.querySelector('#account').click()",
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+        try await waitUntil {
+            if case .onboarding(.account) = appModel.route {
+                return true
+            }
+            return false
+        }
+        XCTAssertNil(webView.superview)
+
+        let lateBridgeResult = try await webView.callAsyncJavaScript(
+            """
+            const result = {};
+            await window.avibeNative.call("app.showAccount");
+            try {
+              await window.avibeNative.call(
+                "app.setAccountActionAvailable",
+                {available: true}
+              );
+            } catch (error) {
+              result.registration = error.code;
+            }
+            try {
+              await window.avibeNative.call("navigation.historyChanged");
+            } catch (error) {
+              result.history = error.code;
+            }
+            return JSON.stringify(result);
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+        let lateBridgePayload = try jsonObject(from: lateBridgeResult)
+        XCTAssertEqual(lateBridgePayload["registration"] as? String, "forbidden")
+        XCTAssertEqual(lateBridgePayload["history"] as? String, "forbidden")
+
+        controller.webView(
+            webView,
+            didStartProvisionalNavigation: nil
+        )
+        controller.webView(
+            webView,
+            didCommit: nil
+        )
+        controller.webView(
+            webView,
+            didFinish: nil
+        )
+        controller.webViewWebContentProcessDidTerminate(webView)
+        controller.webViewDidClose(webView)
+    }
+
+    @MainActor
+    func testInvalidatedRuntimeCancelsAccountFallbackWork() async throws {
+        var visibility: [Bool] = []
+        let controller = WebViewController(
+            instanceOrigin: instance,
+            websiteDataStore: .nonPersistent(),
+            accountFallbackVisibilityChanged: {
+                visibility.append($0)
+            },
+            didStartLoading: {},
+            didFinishLoading: {},
+            didFailLoading: {}
+        )
+        let window = host(controller)
+        defer {
+            window.isHidden = true
+        }
+        let webView = try XCTUnwrap(
+            controller.view.subviews.compactMap { $0 as? WKWebView }.first
+        )
+        let probe = WebViewLoadProbe()
+        webView.navigationDelegate = probe
+        try await probe.loadHTML(
+            "<!doctype html><title>Workbench</title>",
+            baseURL: instance.url,
+            in: webView
+        )
+
+        controller.webView(webView, didFinish: nil)
+        _ = controller.invalidateForAccountTransition()
+        try await Task.sleep(for: .milliseconds(500))
+
+        XCTAssertFalse(visibility.contains(true))
+    }
+
+    @MainActor
+    func testInvalidatedRuntimeIgnoresRealLateWebKitUIDelegateCallbacks() async throws {
+        let controller = WebViewController(
+            instanceOrigin: instance,
+            websiteDataStore: .nonPersistent(),
+            didStartLoading: {},
+            didFinishLoading: {},
+            didFailLoading: {}
+        )
+        let window = host(controller)
+        defer {
+            window.isHidden = true
+        }
+        let webView = try XCTUnwrap(
+            controller.view.subviews.compactMap { $0 as? WKWebView }.first
+        )
+        _ = controller.invalidateForAccountTransition()
+
+        let probe = WebViewLoadProbe()
+        webView.navigationDelegate = probe
+        webView.uiDelegate = controller
+        try await probe.loadHTML(
+            """
+            <!doctype html>
+            <button id="callbacks" onclick="runCallbacks()">Run</button>
+            <script>
+              function runCallbacks() {
+                alert("late");
+                confirm("late");
+                prompt("late", "default");
+                window.open("about:blank", "_blank");
+              }
+            </script>
+            """,
+            baseURL: instance.url,
+            in: webView
+        )
+
+        _ = try await webView.callAsyncJavaScript(
+            "document.querySelector('#callbacks').click()",
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+    }
+
+    @MainActor
     func testAccountFallbackTracksRegistrationAndPrimaryNavigationLifecycle() async throws {
         var visibility: [Bool] = []
         let controller = WebViewController(
@@ -1235,6 +1558,38 @@ final class NavigationPolicyTests: XCTestCase {
 
 private enum TestWaitError: Error {
     case timedOut
+}
+
+@MainActor
+private final class AppModelTransitionTransport: MobileAuthTransporting {
+    let session: MobileSessionSnapshot
+
+    init(session: MobileSessionSnapshot) {
+        self.session = session
+    }
+
+    func requestOTP(email: String) async throws -> Int {
+        throw MobileAccountError.signedOut
+    }
+
+    func verifyOTP(
+        email: String,
+        code: String
+    ) async throws -> MobileSessionSnapshot {
+        session
+    }
+
+    func fetchSession() async throws -> MobileSessionSnapshot? {
+        session
+    }
+
+    func logout() async throws {}
+
+    func cancelAll() async {}
+
+    func invalidate() -> WebsiteDataStoreReleaseBarrier? {
+        nil
+    }
 }
 
 private struct LegacyRuntimeToolbarScreenshotFixture: View {
