@@ -473,6 +473,68 @@ send (they change `ChatPage`).
 
 ## 13. Delivery notes
 
+### Phase 1 (conversation)
+
+- **The glide leaves the scroller alone.** The transcript still pins its
+  bottom and holds the reader's anchor exactly as before (#3286). The motion
+  (`src/lib/transcriptMotion.ts`) measures how far the last row that stays
+  moved on screen, from just before React changes the document
+  (`getSnapshotBeforeUpdate`) to after the pin, and moves the content column
+  off that offset and back (FLIP with the Web Animations API, transform
+  only). It glides only while the reader follows the tail. What changes above
+  that row (a saved page replaced by the server's, a row that grows) does not
+  move it on screen, so it glides nothing; the pin's own scroll delta would
+  have counted it. The column sits in a
+  box that clips it (`overflow-y: clip`, which took over the transcript's
+  vertical padding), so a glide's offset never adds to what the transcript can
+  scroll: the anchor and follow-tail see the layout they would see with no
+  motion, and nothing in the motion writes a scroll position.
+- **What enters** is what is new at the tail, compared by element rather than
+  id: the server's row that takes a sending row's place, and a saved window
+  the live answer replaces, keep their elements and do not enter again.
+- **What leaves.** React has removed a row before an effect can see it, so a
+  withdrawn send and the working bubble are drawn for their exit by an inert,
+  hidden copy of their last frame, removed when the exit ends.
+- **The reply takes the bubble's place.** The working bubble and a reply
+  draw the same head (the avatar and the name) in the same place. When a
+  reply replaces the bubble, the head stays still: only the bubble's dots
+  fade, and only the reply's body grows in. Crossfading both whole rows drew
+  the head twice, slightly apart, for the length of the fade.
+- **Limits.** More than five rows at once is a hand-over (M4): they fade on
+  the hand-over tokens, with no glide. After three glides in one second (a
+  burst of live rows, a fast stream), further rows land without one, and a
+  move longer than the viewport is never a glide. A row that grows while it
+  streams is followed by the same glide, under the same limit.
+- **Not pinned.** When the reader is up in the history nothing glides. Sending
+  from there still takes the reader to the new message, as optimistic send
+  (#3261) shipped it; the message's entrance plays where it lands.
+- **The composer.** When Send and Stop trade places, the control that arrives
+  grows in where the other was, and the one that leaves goes at once (it is
+  unmounted, and the two share a place, so the trade reads as one control
+  changing). Each control is keyed as its own element; unkeyed, React turned
+  Stop's element into Send, which kept its finished animation and only
+  shifted colours. Nothing morphs as the composer first draws; the queue-send button
+  beside Stop always morphs in.
+  The typed text clears at once instead of in the two beats M1 describes: the
+  message rises from behind the composer's top edge, so the two never overlap.
+- **The queue strip** fades in, and a message queued from this tab rises into
+  it; the server's queued row keeps that entrance. The inline error fades in;
+  the jump-to-latest control grows in.
+- **Not animated yet.** Rows a live refresh removes (other than the two exits
+  above) still go at once; an activity card's own expansion is unchanged.
+- **Frames.** `motion/send/*` and `motion/arrival/*` render the shipped page;
+  a frame's `fixtures.stream` delivers event-stream events on a clock (the
+  reply arriving).
+- **Tests.** `e2e/chat-scroll/motion.spec.ts` (in `test:chat-scroll`) holds
+  each moment to the scroller's guarantees: one pin write, the tail still
+  followed, and travel spread over many frames rather than one.
+- **Cost.** The motion adds 2–3 ms of script (Chromium, 4× CPU, a 350-row
+  conversation) to the commit that starts it. It reads every token it needs
+  before it writes anything, so that commit recalculates style once, not once
+  per token. While any animation runs, Chromium recalculates style about every
+  other frame even for compositor animations (a lone opacity fade does too);
+  over a whole moment that is 3–4 ms at 4×.
+
 ### Phase 2 (navigation and touch)
 
 - **Where a push happens.** On a phone, a push or pop runs between a

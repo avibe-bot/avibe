@@ -5,7 +5,7 @@ import type { Bot, BotAvatar, BotLimit } from '@/lib/bots';
 import { OWNER_INSTANCE_CAPABILITIES, type InstanceKind } from '@/lib/sessionInfo';
 
 import { DESIGN_NOW } from './clock';
-import type { DesignSocketMessage } from './network';
+import type { DesignSocketMessage, DesignStreamEvent } from './network';
 
 /** What a frame can set. Everything is optional; omitted parts are empty, not loading. */
 export interface WorkbenchFixtures {
@@ -59,6 +59,8 @@ export interface WorkbenchFixtures {
   copy?: Record<string, { zh: string; en: string }>;
   /** Messages a WebSocket receives once it opens, by path prefix (`/api/terminal/`): the terminal's ready frame and output. */
   sockets?: Record<string, DesignSocketMessage[]>;
+  /** Events the page's event stream delivers, each `after` ms once the page opens it (a reply arriving, a turn ending). */
+  stream?: DesignStreamEvent[];
 }
 
 /** Everything the frame's providers fetch, as the network stub serves it. */

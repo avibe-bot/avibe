@@ -217,7 +217,7 @@ describe('transcript Harness groups', () => {
     // jsdom has no layout: every direct child of the transcript column is 100px
     // tall, stacked in DOM order, and the viewport is 800px tall at the top.
     const scroller = view.getByTestId('chat-transcript');
-    const column = scroller.firstElementChild!;
+    const column = scroller.firstElementChild!.firstElementChild!;
     let scrollTop = 0;
     Object.defineProperties(scroller, {
       clientHeight: { configurable: true, get: () => 800 },
@@ -246,7 +246,7 @@ describe('transcript Harness groups', () => {
   // tall, stacked in DOM order, and a nested element sits at its top-level
   // ancestor's place. The viewport is 800px tall.
   const layOut = (scroller: HTMLElement) => {
-    const column = scroller.firstElementChild!;
+    const column = scroller.firstElementChild!.firstElementChild!;
     let scrollTop = 0;
     Object.defineProperties(scroller, {
       clientHeight: { configurable: true, get: () => 800 },

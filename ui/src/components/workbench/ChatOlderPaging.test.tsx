@@ -93,7 +93,8 @@ const renderTranscript = (over: Partial<Props> = {}) => {
   // Walk siblings instead of querying the subtree. The anchor search reads one
   // rect per row above the viewport, and a subtree query per rect made each
   // scroll cost (rows above) x (whole DOM): seconds over 300 rows on CI.
-  const column = () => scroller.firstElementChild!;
+  // The content column, inside the box that clips the conversation's glide.
+  const column = () => scroller.firstElementChild!.firstElementChild!;
   const rowsFrom = (node: Element | null) => {
     let count = 0;
     for (; node; node = node.previousElementSibling) if ((node as HTMLElement).dataset.messageId !== undefined) count += 1;

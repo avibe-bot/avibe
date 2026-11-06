@@ -1098,6 +1098,43 @@ pre,
     animation: motion-fade-out var(--motion-duration-fast) var(--motion-ease-exit) forwards;
   }
 }
+/* Small moments of the conversation (docs/plans/web-ui-motion.md M1, M2;
+   src/lib/transcriptMotion.ts moves the transcript itself). Each plays once,
+   when its element mounts, and fills backwards only.
+   - `motion-appear`: fades in on `fast` (the inline error).
+   - `motion-rise-in`: a message entering a list it is not the tail of (a queued
+     message): rises `--motion-offset` while fading in, as a sent message does.
+   - `motion-morph-in`: a control trading places with another (Send and Stop):
+     grows from `--motion-scale-morph` on `spring-snappy` while fading in.
+   - `motion-pop-in`: a control appearing over the conversation (jump to the
+     latest): fades and grows from `--motion-scale-enter` on `fast`.
+   Reduced motion: a `fast` fade. */
+.motion-appear {
+  animation: motion-fade-in var(--motion-duration-fast) var(--motion-ease-enter) backwards;
+}
+.motion-rise-in {
+  animation:
+    motion-rise var(--motion-spring-smooth-duration) var(--motion-spring-smooth) backwards,
+    motion-fade-in var(--motion-duration-fast) var(--motion-ease-enter) backwards;
+}
+.motion-morph-in {
+  animation:
+    motion-morph var(--motion-spring-snappy-duration) var(--motion-spring-snappy) backwards,
+    motion-fade-in var(--motion-duration-fast) var(--motion-ease-enter) backwards;
+}
+.motion-pop-in {
+  animation: motion-grow-in var(--motion-duration-fast) var(--motion-ease-enter) backwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .motion-rise-in,
+  .motion-morph-in,
+  .motion-pop-in {
+    animation: motion-fade-in var(--motion-duration-fast) var(--motion-ease-enter) backwards;
+  }
+}
+@keyframes motion-rise { from { translate: 0 var(--motion-offset); } }
+@keyframes motion-morph { from { scale: var(--motion-scale-morph); } }
+
 /* On the individual `translate` and `scale` properties, so they add to whatever
    transform a surface is placed with (a dialog centred by its own transform)
    instead of replacing it. */
