@@ -326,9 +326,10 @@ reduced-motion form.
     (`instant`) and the reply and its chip grow in.
   - **One after the other.** What takes the place of the turn at work (the
     card for the bubble; the reply and the chip for the card, together or a
-    moment apart) starts once the copy of what held it has faded below 30%
-    (about 80 ms into `instant` on the exit curve), so two texts are never drawn
-    over each other (owner, 2026-11-06). A reply that keeps the bubble's head
+    moment apart) starts once the copy of what held it has faded to 10%
+    (about 92 ms into `instant` on the exit curve), so two texts are never drawn
+    over each other (owner, 2026-11-06; at 30% the two still showed together
+    for a frame). A reply that keeps the bubble's head
     takes over from its dots alone, at once.
   - **Live** means the stream delivered it or the reader sent it here. What a
     read brings lands still, and the conversation around it does not glide:

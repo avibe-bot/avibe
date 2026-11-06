@@ -524,11 +524,11 @@ test('the running card grows in as the working bubble gives way, and leaves as t
     .toEqual([`activity:grp_live_${reply}`]);
   // One after the other, never two texts over each other: what takes the turn's place (the card for the
   // bubble; the reply and the chip for the card, together or a moment apart) starts once the copy of what
-  // held it has faded below a third.
+  // held it has faded to a tenth, its words no longer to be made out.
   const swaps = await handoffs(page);
   expect(swaps.flatMap(({ keys }) => keys).filter((key) => ['activity-live', reply, `activity:grp_live_${reply}`].includes(key)).sort())
     .toEqual(['activity-live', reply, `activity:grp_live_${reply}`].sort());
-  for (const { copyOpacity } of swaps) expect(copyOpacity).toBeLessThanOrEqual(0.31);
+  for (const { copyOpacity } of swaps) expect(copyOpacity).toBeLessThanOrEqual(0.11);
   expect(await fromBottom(page)).toBeLessThan(1);
 });
 

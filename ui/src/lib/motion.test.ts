@@ -4,11 +4,13 @@ import { describe, expect, it } from 'vitest';
 import { timeToProgress } from './motion';
 
 describe('timeToProgress', () => {
-  it('finds when an accelerating exit has faded a copy to 30%', () => {
+  it('finds when an accelerating exit has faded a copy to 30% and to 10%', () => {
     // `--motion-ease-exit` on `instant`: slow at first, so the copy is still above 30% at 70 ms.
-    const at = timeToProgress({ duration: 100, easing: 'cubic-bezier(0.4, 0, 1, 1)' }, 0.7);
-    expect(at).toBeGreaterThan(78);
-    expect(at).toBeLessThan(82);
+    const exit = { duration: 100, easing: 'cubic-bezier(0.4, 0, 1, 1)' };
+    expect(timeToProgress(exit, 0.7)).toBeGreaterThan(78);
+    expect(timeToProgress(exit, 0.7)).toBeLessThan(82);
+    expect(timeToProgress(exit, 0.9)).toBeGreaterThan(90);
+    expect(timeToProgress(exit, 0.9)).toBeLessThan(95);
   });
 
   it('is early on a decelerating curve, and proportional on any other easing', () => {

@@ -52,9 +52,9 @@ export const ITEM_KEY_ATTRIBUTE = 'data-transcript-key';
 export const ITEM_FOR_ATTRIBUTE = 'data-transcript-for';
 /** `end` on an item drawn on the right, which rises from the composer; any other item is on the left. */
 export const SIDE_ATTRIBUTE = 'data-transcript-side';
-/** What takes the place of the turn at work starts once that has faded to this far (its copy at 30%
- *  opacity): the two never draw their words over each other. */
-const HANDOFF_PROGRESS = 0.7;
+/** What takes the place of the turn at work starts once that has faded this far (its copy at 10%
+ *  opacity, its words no longer to be made out): the two never draw their words over each other. */
+const HANDOFF_PROGRESS = 0.9;
 /** More rows than this arriving at once is a hand-over (a cached window replaced), not a reply. */
 const MAX_ENTERING = 5;
 /** More glides than this within a second is a burst of live rows: they land without one. */
