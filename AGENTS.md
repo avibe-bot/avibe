@@ -217,6 +217,8 @@ there rather than expanding this index.
 
 ### PR Delivery
 
+- `master` requires the merge queue in both CLI and Web UI: merge intent means enqueue the verified head, wait for `MERGED`, then clean up; never push directly to `master` or bypass the queue. The `pr-delivery-loop` skill owns queue recovery and close-out.
+
 - Codex review is triggered automatically by cyhhao after pushes; do not add a trigger while that review is running. When the current head's review fails (Codex reports "Something went wrong"), is never picked up, or stalls (its Watch reports `Codex review stalled`), post `@codex review` yourself and verify pickup; the exact-head review gate is unchanged.
 - load and follow the `pr-delivery-loop` skill for every implementation task;
   it owns the detailed procedure, but cannot weaken the baseline below

@@ -3,6 +3,28 @@
 This document contains the release-specific details that are too operational
 for `AGENTS.md`. The workflows are the source of truth for the final commands.
 
+## Select the release commit
+
+Fetch `origin/master` and select its latest commit when starting a release. Record
+that exact SHA for all release-only validation and tag creation; do not switch the
+candidate silently while checks run. New PRs may continue through the merge queue:
+there is no routine release-time merge freeze or requirement to wait for duplicate
+`push: master` lint, iOS-shell, or desktop-shell runs.
+
+Require successful merge-group validation for the candidate's landing tree, traced
+through the merged PR/queue timeline and its associated `merge_group` Actions runs.
+A green PR head alone is insufficient, and a synthetic queue head is not the commit
+to tag. If queue evidence is unavailable (for example, a pre-queue bootstrap commit),
+run the applicable validation explicitly against the selected SHA rather than
+assuming missing checks passed. Keep the post-merge cache and release-guard jobs;
+the queue replaces duplicated pre-merge suites, not release-specific safeguards.
+
+Before pushing a tag, fetch master again. If the release is required to include
+newly landed work, select the new tip and repeat candidate-specific gates; otherwise
+retain the recorded, validated candidate. Require the owner's release authorization
+in either case. The stable-release E2E below and asset-complete publication gates
+remain mandatory.
+
 ## Tags and notifications
 
 - Tags advance the latest version number, for example `v1.0.1` to `v1.0.2`.
