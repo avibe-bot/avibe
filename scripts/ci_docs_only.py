@@ -38,7 +38,13 @@ RUN, SKIP = "run", "skip"
 # pinned equal by tests/test_ci_pipeline.py): the Web UI, plus the files Vite
 # serves to it and the build's out-of-tree import check reads. Nothing else in
 # the repository exists on those runners.
-BROWSER_CHECKOUT = ("ui/", "vibe/message_types.json", "vibe/data/", "Dockerfile")
+BROWSER_CHECKOUT = (
+    "ui/",
+    "vibe/message_types.json",
+    "vibe/data/",
+    "assets/mascot/cloud-tuanzi-v2.png",
+    "Dockerfile",
+)
 # A change confined to these roots (outside the browser checkout) cannot reach
 # a browser lane. Every Python, Vitest, build and install job still runs.
 BACKEND_ROOTS = frozenset({

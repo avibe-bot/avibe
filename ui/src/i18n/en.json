@@ -197,6 +197,106 @@
     "zoomPercent": "{{percent}}%",
     "download": "Download"
   },
+  "mobileApp": {
+    "brand": {
+      "name": "Avibe",
+      "agentOs": "Agent OS"
+    },
+    "boot": {
+      "loading": "Restoring your account…"
+    },
+    "welcome": {
+      "mascotAlt": "Vibey cloud mascot",
+      "greeting": "Hi, I’m Vibey",
+      "titleLine1": "Your AI partner,",
+      "titleLine2": "by your side.",
+      "bodyLine1": "Avibe on your computer,",
+      "bodyLine2": "now in your pocket.",
+      "action": "Sign in / Create account",
+      "footerLine1": "Vibey, your built-in AI partner.",
+      "footerLine2": "Connect to your instances or those shared with you."
+    },
+    "email": {
+      "title": "It starts with an email.",
+      "subtitle": "Sign in or create your avibe.bot account",
+      "label": "Email",
+      "placeholder": "you@example.com",
+      "hint": "New emails create an account automatically. No password needed.",
+      "send": "Send verification code",
+      "sending": "Sending…",
+      "sendIn": "Try again in {{count}}s",
+      "invalid": "Enter a valid email to receive a verification code.",
+      "footer": "We’ll email you a code. Enter it here to sign in."
+    },
+    "code": {
+      "title": "Check your inbox.",
+      "sentTo": "Code sent to",
+      "changeEmail": "Change email",
+      "label": "Enter the 6-digit code from your email",
+      "hint": "Enter the 6-digit code from your email",
+      "verify": "Verify and sign in",
+      "verifying": "Verifying…",
+      "resendPrompt": "Didn’t receive a code?",
+      "resend": "Resend",
+      "resending": "Resending…",
+      "resendIn": "Resend in {{count}}s",
+      "resent": "Sent — check your inbox again.",
+      "invalid": "Invalid or expired code. Try again or resend the email.",
+      "rateLimited": "Too many requests. Please try again later.",
+      "footer": "Paste your code here. You can also check your spam folder."
+    },
+    "instances": {
+      "title": "Where shall we begin?",
+      "switchTitle": "Switch instance",
+      "subtitle": "Your instances and those shared with you",
+      "refresh": "Refresh instances",
+      "refreshing": "Refreshing…",
+      "loading": "Loading instances…",
+      "unavailable": "Couldn’t load instances",
+      "online": "Online",
+      "offline": "Offline",
+      "shared": "Shared",
+      "current": "Current",
+      "yours": "Yours",
+      "sharedBy": "Shared by {{owner}}",
+      "unknownOwner": "another account",
+      "add": "Add your own instance",
+      "offlineTitle": "{{name}} is offline",
+      "offlineBody": "Start Avibe on that computer and connect it to the internet. Then refresh the list or choose another online instance."
+    },
+    "empty": {
+      "title": "Bring your work along.",
+      "subtitle": "Run on your computer. Connect from your phone.",
+      "body": "No instances yet. Install Avibe on your computer and pair this account.",
+      "desktopTitle": "Install on your computer",
+      "desktopBody": "Finish setup, then pair in Remote Access",
+      "commandTitle": "Use the command line",
+      "commandBody": "Install the CLI, then run vibe remote",
+      "refresh": "I have paired · Refresh",
+      "cliTitle": "Install and pair",
+      "cliSubtitle": "Run on your computer. Connect from your phone.",
+      "cliBody": "Run in Terminal on macOS or Linux. On Windows, follow the guide for WSL.",
+      "stepInstall": "1. Install and finish setup",
+      "installCommand": "bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --launch'",
+      "stepPair": "2. Pair your account",
+      "pairCommand": "vibe remote",
+      "pairBody": "Sign in with the same avibe.bot account when prompted. After pairing, return here and refresh.",
+      "guide": "Installation guide"
+    },
+    "account": {
+      "title": "Account",
+      "signedInAs": "Signed in as",
+      "signOut": "Sign out on this device",
+      "signingOut": "Signing out…",
+      "current": "Current instance",
+      "none": "No instance selected",
+      "switch": "Switch instance",
+      "choose": "Choose an instance"
+    },
+    "errors": {
+      "network": "Could not reach avibe.bot. Check your connection and retry."
+    }
+  },
   "common": {
     "back": "Back",
     "continue": "Continue",
@@ -3397,6 +3497,7 @@
     "versionLabel": "Version",
     "accountMenuLabel": "Account ({{email}})",
     "signedInAs": "Signed in as",
+    "openMobileAccount": "Account and Avibes",
     "signOut": "Sign out",
     "signingOut": "Signing out…",
     "resizeSidebar": "Resize sidebar"

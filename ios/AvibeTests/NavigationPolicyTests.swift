@@ -371,7 +371,10 @@ final class NavigationPolicyTests: XCTestCase {
 
     @MainActor
     func testWebViewFactoryUsesTheSameKeyboardLayoutForPrimaryAndChild() {
-        let factory = WebViewFactory(instanceOrigin: instance)
+        let factory = WebViewFactory(
+            instanceOrigin: instance,
+            websiteDataStore: .nonPersistent()
+        )
         let delegate = WebViewDelegateProbe()
         let primary = factory.makeWebView(delegate: delegate)
         let child = factory.makeWebView(
@@ -400,11 +403,21 @@ final class NavigationPolicyTests: XCTestCase {
             primary.configuration.userContentController
                 === child.configuration.userContentController
         )
+        #if DEBUG
+        XCTAssertTrue(primary.isInspectable)
+        XCTAssertTrue(child.isInspectable)
+        #else
+        XCTAssertFalse(primary.isInspectable)
+        XCTAssertFalse(child.isInspectable)
+        #endif
     }
 
     @MainActor
     func testOuterScrollLockWorksPerWebViewAndResetsOnItsCommit() {
-        let factory = WebViewFactory(instanceOrigin: instance)
+        let factory = WebViewFactory(
+            instanceOrigin: instance,
+            websiteDataStore: .nonPersistent()
+        )
         let delegate = WebViewDelegateProbe()
         let primary = factory.makeWebView(delegate: delegate)
         let child = factory.makeWebView(
@@ -457,6 +470,7 @@ final class NavigationPolicyTests: XCTestCase {
             userAgentVersion: "1.2.3"
         )
         var outerScrollRequests: [Bool] = []
+        let accountShown = expectation(description: "runtime bridge opens account surface")
         let webView = WKWebView(
             frame: .zero,
             configuration: NativeBridgeConfiguration.make(
@@ -465,6 +479,9 @@ final class NavigationPolicyTests: XCTestCase {
                 setOuterScrollLocked: { _, locked in
                     outerScrollRequests.append(locked)
                     return true
+                },
+                showAccount: {
+                    accountShown.fulfill()
                 }
             )
         )
@@ -487,6 +504,7 @@ final class NavigationPolicyTests: XCTestCase {
               "viewport.setOuterScrollLocked",
               {locked: true}
             );
+            await window.avibeNative.call("app.showAccount");
             let unsupported = null;
             try {
               await window.avibeNative.call("app.instances");
@@ -498,6 +516,7 @@ final class NavigationPolicyTests: XCTestCase {
               contract: info.contract,
               platform: info.platform,
               shellVersion: info.shellVersion,
+              accountPresentationCapability: info.capabilities.accountPresentation,
               appCapability: info.capabilities.app,
               keyboardResizesViewport: info.capabilities.keyboardResizesViewport,
               viewportCapability: info.capabilities.viewport,
@@ -516,6 +535,10 @@ final class NavigationPolicyTests: XCTestCase {
         XCTAssertEqual(instancePayload["contract"] as? Int, 1)
         XCTAssertEqual(instancePayload["platform"] as? String, "ios")
         XCTAssertEqual(instancePayload["shellVersion"] as? String, "1.2.3 (45)")
+        XCTAssertEqual(
+            instancePayload["accountPresentationCapability"] as? Int,
+            1
+        )
         XCTAssertEqual(instancePayload["appCapability"] as? Int, 1)
         XCTAssertEqual(instancePayload["keyboardResizesViewport"] as? Int, 1)
         XCTAssertEqual(instancePayload["viewportCapability"] as? Int, 1)
@@ -523,6 +546,7 @@ final class NavigationPolicyTests: XCTestCase {
         XCTAssertEqual(instancePayload["subframeBridge"] as? String, "undefined")
         XCTAssertEqual(instancePayload["unsupported"] as? String, "unsupported")
         assertForbiddenReply(instancePayload["subframeTransport"])
+        await fulfillment(of: [accountShown], timeout: 2)
 
         try await probe.loadHTML(
             "<!doctype html><title>External</title>",

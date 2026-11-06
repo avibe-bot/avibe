@@ -91,9 +91,10 @@ to the product's locale catalogs when implemented.
   Errors use destructive cells and a text alert, never color alone.
 - Production must synchronize typing, paste and autofill to the display, normalize
   digits, focus the underlying field when any cell is tapped, expose a visible
-  focus ring for actual input focus (including filled/error states), and announce
-  busy/error/success changes. The static fixture input does not implement those
-  behaviors. No real keyboard, screen-reader or iOS autofill claim is made.
+  focus state on the current cell without an outer ring around all six cells, keep
+  the cells and Verify action reachable above the keyboard accessory bar, and
+  announce busy/error/success changes. The static fixture input does not implement
+  those behaviors. No screen-reader or iOS autofill claim is made.
 - Change email is centered with the recipient text. It returns to editable email
   entry, clears the code, error and resend timer. Busy actions cannot duplicate.
 - Initial send success enters blank code entry with resend available. Resending

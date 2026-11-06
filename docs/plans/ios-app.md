@@ -100,8 +100,8 @@ sit at least partly in WebKit's `contenteditable` handling, which every
 | Composer | `@` / `#` pickers, Agent and model menu, attachment previews and upload, draft persistence, voice pipeline | Text entry, send and stop, hold-to-talk button with haptics, attachments button, keyboard layout (section 5) |
 | Voice capture and dictation | `getUserMedia`, AudioWorklet, WAV segments, realtime socket (unchanged) | Answer the media-capture permission; `NSMicrophoneUsageDescription` |
 | Notifications | Inbox, categories, preferences UI | APNs registration, Notification Service Extension, tap routing |
-| Sign-in | Instance login pages, avibe.bot login form | Phase 1: `ASWebAuthenticationSession` and handoff |
-| Instance choice | - | Instance list, add by URL or QR, switch |
+| Sign-in | Existing instance OIDC and consent after selection | Bundled avibe.bot email OTP and current-device account lifecycle |
+| Instance choice | Runtime authorization remains server-owned | Account-scoped owned/shared/Organization list, offline recovery, switch |
 | Reach (Phase 2) | Deep-link targets | App Intents, widgets, Share extension, HealthKit (section 10) |
 
 A native client would duplicate a Web UI that ships several times a week. The
@@ -131,7 +131,8 @@ interface AvibeNative {
 
 | Capability | Calls (web → native) | Events (native → web) |
 | --- | --- | --- |
-| `app` | `app.info()`, `app.openExternal({url})`, `app.instances()` | `app.foreground`, `app.background` |
+| `accountPresentation` | `app.showAccount()` | - |
+| `app` | `app.info()`, `app.openExternal({url})` | `app.foreground`, `app.background` |
 | `haptics` | `haptics.impact({style})`, `haptics.notify({type})`, `haptics.selection()` | - |
 | `keyboardResizesViewport` | No calls. Declares that UIKit shrinks this WebView's viewport with `keyboardLayoutGuide`. | - |
 | `voice` | `voice.permission()` (the grant itself needs no call) | `voice.trigger({action: 'start' \| 'stop'})` from App Intents and hardware |
@@ -148,6 +149,9 @@ Phase 0a PR 2 implements this v1 subset:
   `{contract, platform, shellVersion, capabilities}`;
 - `app.openExternal({url})` returns `{opened}` and accepts `http`/`https` URLs
   with a host plus `mailto`/`tel` URLs with a non-empty target;
+- `accountPresentation: 1` admits `app.showAccount()`, which returns `null`,
+  tears down the current runtime surface, and presents the app-bundled account
+  and instance-switching flow;
 - `haptics.impact({style})` accepts `light`, `medium`, `heavy`, `soft`, or
   `rigid`; `haptics.notify({type})` accepts `success`, `warning`, or `error`;
   and `haptics.selection()` has no parameters;
@@ -172,6 +176,10 @@ Rules:
 - **Compatibility**: shells ship slowly and instances update weekly, so a new
   Web UI must work with the previous contract major, and a shell must answer
   unknown methods with `{code: 'unsupported'}`. Minor versions only add.
+  Account presentation therefore has its own capability: a new Web UI keeps
+  its previous web sign-out action when an older shell omits it or the call
+  fails. A new app loading an older Web UI still exposes Account and Change
+  Instance through the native browser menu.
 - **Transport**: `call` sends `{method, params}` and receives either
   `{ok: true, result}` or `{ok: false, error: {code, message}}`; the injected
   JavaScript rejects the latter error object. On iOS,
@@ -345,10 +353,13 @@ later), so that a bridge change and its Web UI consumer land in one PR.
   (`*-app.avibe.bot`, or an Enterprise custom hostname). No UI, workspace, or
   Agent runtime traffic passes through avibe.bot, matching the product
   boundary in the workspace `AGENTS.md` and `avibe-bot-backend/AGENTS.md`.
-- avibe.bot keeps its control-plane roles (identity, policy, pairing, tunnel).
-  New avibe.bot pieces are control-plane functions: an APNs relay for encrypted
-  payloads, Sign in with Apple, account deletion, and optionally an instance
-  list.
+- avibe.bot keeps its control-plane roles (identity, policy, pairing, tunnel,
+  and account-scoped instance discovery). Backend PR #308 added the narrow
+  mobile session GET/DELETE endpoints by reusing existing owned, shared, and
+  Organization access rules. It merged as
+  `1cea1dffdc3e68c6a2cc8594064bf94367485b5c` and Vercel deployed that merge to
+  Production successfully on 2026-11-05 at 18:44:16 UTC. A public no-cookie
+  probe returns the expected `401`, but no real account session was used.
 - Primary-main-frame navigation has three classes:
   1. **Instance origins** (configured by the user) load in the WebView and get
      the native bridge and the microphone grant.
@@ -401,80 +412,97 @@ later), so that a bridge change and its Web UI consumer land in one PR.
   start capture without a WebKit prompt; the iOS recording indicator still
   shows, and an Agent already has full access to the machine. If this needs a
   real boundary later, Show Pages must move to a separate origin.
-- Phase 0 adds no credential: the WebView holds the same
-  `__Host-vibe_remote_session` cookie a browser holds (`vibe/remote_access.py`,
-  24-hour personal session, renewed after half its life).
+- Account and runtime cookies live in one persistent named
+  `WKWebsiteDataStore` for the current phone account. WebKit is the only
+  persistent cookie owner; native code never copies a full cookie snapshot.
+  Bundled UI, instance pages, child windows, and iframes receive no Supabase
+  tokens or generic authenticated-fetch bridge.
 
 ### Adding an instance
 
-1. Paste the instance URL, or scan a QR code shown by the Web UI on a computer
-   (new "Open on iPhone" entry in Settings that encodes the instance origin).
-2. Phase 2: sign in to avibe.bot in the app and pick from the instances the
-   account can use. The backend already has an owner-scoped `GET /api/instances`
-   for the console session; an app-facing list that also includes shared
-   instances is a small backend addition.
+The bundled onboarding flow lists every instance the signed-in account can
+open: owned Personal instances, permitted shared instances, and Organization
+instances admitted by the existing email, domain, or group rules.
+Organization management authority does not imply runtime access. The mobile
+projection contains only id, display name, host/URL, owner/shared relationship,
+owner email, and availability.
 
-Pairing (`/api/v1/pairing/redeem`) is between an instance and avibe.bot and is
-not involved: the phone is a client of an already-paired instance, like a
-browser.
+An account with no instance sees the existing desktop/CLI install and
+`vibe remote` pairing path, then refreshes the same account-scoped list. There
+is no LAN scan. Pairing remains between an instance and avibe.bot; the phone is
+a client of an already-paired instance.
+
+Selecting an available row stores its id and URL scoped by account id, then
+loads the runtime. Offline is a recovery state, not an authorization result.
+The runtime's existing OIDC and consent checks remain authoritative.
 
 ### Signing in
 
-Phase 0, inside the WebView: the instance redirects to avibe.bot's OIDC
-authorize page as it does for a browser, and the user signs in there with the
-email code, password, or GitHub. The whole round trip (instance, avibe.bot,
-Supabase Auth, GitHub, back to the instance's `/auth/callback`) stays in the
-WebView through the authentication-origin class above, so the session cookie
-lands in the WebView's own store. Google blocks OAuth in embedded webviews with
-`disallowed_useragent` ([Google](https://developers.googleblog.com/upcoming-security-changes-to-googles-oauth-20-authorization-endpoint-in-embedded-webviews/)).
-The shell intercepts navigation to Google's authorization endpoint and explains
-that the email code works for the same account. Supabase links identities with
-the same email address to one user
-([Supabase](https://supabase.com/docs/guides/auth/auth-identity-linking)); confirm
-on the owner's account. The magic link in the email opens Safari, not the app,
-so the shell's copy points to the code.
+Local React pages implement the approved email and six-digit OTP flow. Only
+their top-level `avibe-app://bundle` document receives the narrow
+`avibeMobile` bridge. A read-only custom URL scheme serves only files inside
+the app-bundled mobile build directory, giving Vite's ES modules and assets one
+fixed local origin.
+A native-owned hidden WebView loads the public auth configuration from the
+known control-plane origin, sends and verifies the Supabase email OTP, and
+posts the transient access/refresh pair to the existing `/auth/callback`.
+That callback remains the owner of Supabase `setSession`, invitation activation,
+membership email synchronization, and `avibe_session`.
 
-Phase 1, system browser plus handoff:
+The hidden transport has no page message handler and runs fixed scripts in
+`WKContentWorld.defaultClient`. That isolated world is defense in depth, not a
+security process: the practical boundary is the fixed origin, compiled method
+surface, no arbitrary fetch, and non-overlapping account/runtime lifecycle.
+Tokens are never returned to bundled or remote page JavaScript.
 
-1. The app creates a random verifier and opens
-   `https://<instance>/auth/app/start?challenge=<S256(verifier)>&next=/` in
-   `ASWebAuthenticationSession` with callback scheme `avibe`.
-2. The instance runs its normal OIDC login against avibe.bot in that browser
-   context (Google works there, and Sign in with Apple once avibe.bot offers
-   it).
-3. On success the instance redirects to `avibe://auth/handoff?code=<one-time>`
-   instead of landing the browser.
-4. The app posts `code` and `verifier` to `https://<instance>/auth/app/redeem`
-   from inside the `WKWebView`. The instance checks the code (single use, short
-   TTL, bound to the challenge) and sets `__Host-vibe_remote_session` in the
-   WebView's cookie store, then redirects to `next`.
-
-This mirrors the pattern used for Hotwire Native apps
-([gist](https://gist.github.com/strzibny/aad1439326c1b47a8d066d45b133fcb6)). The
-one-time code store can follow the in-memory, single-use, TTL-pruned handshake
-store introduced for the PWA callback desync
-(`docs/plans/pwa-oauth-login-state-desync.md`), which solved the same
-multi-context problem for Home Screen web apps. A custom-scheme
-callback (`ASWebAuthenticationSession.Callback.customScheme`) avoids per-host
-associated domains, which arbitrary instance hosts cannot provide
-([Apple](https://developer.apple.com/documentation/authenticationservices/aswebauthenticationsession/callback)).
-The two new instance endpoints are an authentication change and need security
-review.
+Instance entry then uses the existing instance → avibe.bot OIDC → instance
+callback and consent flow. No app-specific PKCE or credential exchange endpoint
+is added without evidence that this path fails.
 
 ### Keeping the session
 
-`WKWebsiteDataStore.default()` persists cookies across launches. Opening the
-app at least once a day keeps the 24-hour session rolling. When it lapses, the
-WebView bounces to avibe.bot: in Phase 0 a still-valid avibe.bot session in the
-WebView reduces this to the authorize step; Phase 1 re-runs the handoff, which
-costs one system sheet. A longer-lived app session would be a separate security
-decision and is not proposed.
+One named `WKWebsiteDataStore` persists the current account across launches.
+Cold start calls the mobile session endpoint before restoring a selected
+instance; the stored account id, instance id, URL, current authorization, and
+availability must all still agree.
+
+The hidden account transport is destroyed before runtime opens. Returning to
+Account explicitly stops the primary and child runtime WebViews, then creates
+the transport only when the bundled account view appears. Every login, logout,
+refresh, account switch, or store rotation enters one native transition
+authority before its first suspension: it increments the generation, revokes
+the selectable snapshot, and detaches any runtime. Instance selection and cold
+restore are admitted only while that authority is ready. Each accepted runtime
+open carries its generation and store identifier; the route and the WebView
+registration both reject a delayed open after a transition. The hidden
+transport has a native readiness deadline and a shared `AbortController`
+deadline for each fixed request. It rejects navigation actions and responses
+outside the configured control-plane origin, and fixed requests reject
+redirects so email, OTP, tokens, and cookies cannot follow another origin.
+Logout can preempt an older account request, aborts it, attempts current-device
+DELETE with the required control-plane `Origin` under a shorter bound, clears
+phone-owned selection, rotates to a fresh named store, and removes the old
+store even when the remote request fails or times out. Global Supabase logout
+and remembered-consent deletion are not used.
+
+The bundled React page mirrors that ownership with one token-bearing account
+operation. Its controls derive one lock from that token, including navigation,
+email/code editing, submit, resend, refresh, selection, account actions, and
+external help links. Async handlers may update screen, session, errors, or
+cooldowns and release the lock only while they still own the token. Only a
+provider rejection at the verify stage is reported as an invalid or expired
+code. Callback, mobile-session, malformed-response, abort, timeout, and script
+failures use the approved network state. Because a timed-out verification may
+already have consumed its OTP, the page keeps the email but clears the code and
+leaves resend available.
 
 ### Several instances
 
-Each instance is its own origin, so cookies coexist in one data store. The
-picker switches the loaded origin; the microphone grant and bridge allowlist is
-the set of configured origins; each instance has its own push subscription.
+Each instance remains its own origin, so its cookies coexist in the current
+account store. The picker switches the loaded origin. Runtime native bridge and
+microphone trust are still limited to the selected instance origin; account
+management trust is never promoted to instance, child, Show Page, or iframe
+content.
 
 ### Known risk: Protected Vault passkeys
 
@@ -583,10 +611,11 @@ production capture pipeline works inside `WKWebView`. The macOS and iOS
 `WKWebView` share this UIProcess permission code
 (`UserMediaPermissionRequestManagerProxy`).
 
-### Not yet verified
+### iPhone verification
 
-This machine has no Xcode or iOS Simulator. The iPhone checks are part of the
-Phase 0 exit checklist (section 15).
+The Phase 0 shell and mobile onboarding paths now have simulator evidence on
+Xcode 27.2. CI remains authoritative on its pinned Xcode 26.6 toolchain; physical
+device microphone behavior remains part of the release checklist in section 15.
 
 ### Background audio
 
@@ -819,14 +848,13 @@ Push to APNs (section 8).
 
   A bundle id cannot change after the first build is uploaded; the App Store
   name can. Extensions must be prefixed by the app's id. App Intents live in
-  the app target unless they need an extension. The Phase 1 handoff uses an
-  `ASWebAuthenticationSession` custom-scheme callback, which the session
-  matches itself without registering the scheme. Turn off "iPhone and iPad
-  apps on Apple silicon Mac" availability, so the iOS app never competes with
-  the desktop app's `avibe://` scheme on a Mac.
-- **`Info.plist`**: `NSMicrophoneUsageDescription`. Phase 0 must also check
-  whether file inputs and the native camera picker need
-  `NSCameraUsageDescription` and `NSPhotoLibraryAddUsageDescription`.
+  the app target unless they need an extension. Turn off "iPhone and iPad apps
+  on Apple silicon Mac" availability, so the iOS app does not compete with the
+  desktop app on a Mac.
+- **`Info.plist`**: localized `NSMicrophoneUsageDescription`,
+  `NSCameraUsageDescription`, and `NSPhotoLibraryAddUsageDescription` cover
+  microphone capture, WebKit's file-picker camera path, and activity-sheet
+  photo saving.
 - **Privacy**: a privacy manifest (`PrivacyInfo.xcprivacy`) and App Store
   privacy labels covering the account email and audio sent for transcription
   through avibe.bot.
@@ -907,9 +935,9 @@ Effort assumes one Agent lane per track, with owner review between phases.
 
 | Track | Work | Effort |
 | --- | --- | --- |
-| Native | PR 1: SwiftUI app with one browser-equivalent `WKWebView`, persistent data, configured-origin media-capture grant, primary-main-frame navigation handoff, recursive child windows, downloads, safe areas, offline/error UI, and Google interception. PR 2: `avibeNative` v1 with `app`, `haptics`, `keyboardResizesViewport`, `viewport`, and `voice`, plus one factory that gives primary and child WebViews the same keyboard ownership and independent page-requested outer-scroll state. First-use instance entry remains a later slice | 1.5 weeks |
+| Native | PR 1: browser-equivalent shell. PR 2: `avibeNative` v1, shared primary/child keyboard ownership, and page-requested outer-scroll state. Mobile onboarding slice: bundled email OTP/account/instance UI, named WebKit account store, current-device logout, cold restore, runtime account entry, and backend #308 discovery contract. | 1.5 weeks |
 | Build | Xcode project, signing, and `xcodebuild` or fastlane upload to TestFlight | 0.5 week, parallel |
-| Web UI | PR 2: `native.ts`, `isNativeShell()`, the capability-based `useIosKeyboardInset` decision, Web Push toggle and install hint hidden, haptics calls, and explicit handling for each iOS Home Screen PWA branch. The "Open on iPhone" QR remains a later slice | 3 days, parallel |
+| Web UI | PR 2: native-shell capability integration and PWA branch decisions. Mobile onboarding slice: approved A / Cloud letter pages, complete email display, accessible single-input OTP, provider cooldown/error states, owned/shared/offline picker, empty/install recovery, and local account/switch/logout surfaces. | 3 days, parallel |
 
 Exit: run the section 15 checklist on the web composer, to measure which input
 problems a shell alone fixes. The microphone items must pass. The results
@@ -930,8 +958,8 @@ notifications keep the Home Screen web app as well.
 
 | Track | Work | Effort |
 | --- | --- | --- |
-| Native | Notification Service Extension with RFC 8291 decryption (CryptoKit P-256, HKDF, AES-GCM), `push` capability, tap routing, badge; `ASWebAuthenticationSession` handoff | 2 weeks |
-| Instance | `/auth/app/start` and `/auth/app/redeem`, payload byte budget, subscription label, tests | 1 week |
+| Native | Notification Service Extension with RFC 8291 decryption (CryptoKit P-256, HKDF, AES-GCM), `push` capability, tap routing, and badge | 2 weeks |
+| Instance | Payload byte budget, subscription label, and tests | 1 week |
 | Backend | Relay registration and delivery routes, APNs HTTP/2 client, rate limits; Sign in with Apple; account deletion | 1.5 weeks |
 | Reviews | Product and security review of the relay and the handoff | Before merge |
 
@@ -941,7 +969,7 @@ notifications keep the Home Screen web app as well.
 | --- | --- | --- |
 | Native | App Intents and App Shortcuts, Action Button, Control Center control, widgets, Share extension, `intents` and `share` capabilities, multi-instance list | 2.5 weeks |
 | Web UI | Tap-to-toggle voice mode, deep-link targets | 3 days |
-| Backend and instance | App-facing instance list; device credential for extensions (security review) | 1 week |
+| Backend and instance | Device credential for extensions (security review) | 1 week |
 | Release | Demo instance, metadata, screenshots, privacy labels, submission | 0.5 week |
 
 ### Parallel mobile track

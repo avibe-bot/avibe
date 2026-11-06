@@ -20,6 +20,13 @@
 		10000000000000000000000B /* NavigationPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000C /* NavigationPolicyTests.swift */; };
 		10000000000000000000000C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000F /* Assets.xcassets */; };
 		10000000000000000000000D /* NativeBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000010 /* NativeBridge.swift */; };
+		10000000000000000000000E /* MobileAccount.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000011 /* MobileAccount.swift */; };
+		10000000000000000000000F /* MobileAuthTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000012 /* MobileAuthTransport.swift */; };
+		100000000000000000000010 /* MobileOnboardingBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000013 /* MobileOnboardingBridge.swift */; };
+		100000000000000000000011 /* MobileOnboardingContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000014 /* MobileOnboardingContainer.swift */; };
+		100000000000000000000012 /* MobileApp in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000015 /* MobileApp */; };
+		100000000000000000000013 /* MobileOnboardingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000016 /* MobileOnboardingTests.swift */; };
+		100000000000000000000014 /* MobileAuthTransportIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000017 /* MobileAuthTransportIntegrationTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -49,6 +56,13 @@
 		20000000000000000000000E /* AvibeTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AvibeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		20000000000000000000000F /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		200000000000000000000010 /* NativeBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBridge.swift; sourceTree = "<group>"; };
+		200000000000000000000011 /* MobileAccount.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAccount.swift; sourceTree = "<group>"; };
+		200000000000000000000012 /* MobileAuthTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAuthTransport.swift; sourceTree = "<group>"; };
+		200000000000000000000013 /* MobileOnboardingBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileOnboardingBridge.swift; sourceTree = "<group>"; };
+		200000000000000000000014 /* MobileOnboardingContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileOnboardingContainer.swift; sourceTree = "<group>"; };
+		200000000000000000000015 /* MobileApp */ = {isa = PBXFileReference; lastKnownFileType = folder; path = MobileApp; sourceTree = "<group>"; };
+		200000000000000000000016 /* MobileOnboardingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileOnboardingTests.swift; sourceTree = "<group>"; };
+		200000000000000000000017 /* MobileAuthTransportIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAuthTransportIntegrationTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -83,7 +97,11 @@
 			children = (
 				200000000000000000000001 /* AvibeApp.swift */,
 				200000000000000000000002 /* AppModel.swift */,
-					200000000000000000000010 /* NativeBridge.swift */,
+				200000000000000000000011 /* MobileAccount.swift */,
+				200000000000000000000012 /* MobileAuthTransport.swift */,
+				200000000000000000000013 /* MobileOnboardingBridge.swift */,
+				200000000000000000000014 /* MobileOnboardingContainer.swift */,
+				200000000000000000000010 /* NativeBridge.swift */,
 				200000000000000000000003 /* NavigationPolicy.swift */,
 				200000000000000000000004 /* RootView.swift */,
 				200000000000000000000005 /* WebOrigin.swift */,
@@ -98,6 +116,7 @@
 			isa = PBXGroup;
 			children = (
 				20000000000000000000000F /* Assets.xcassets */,
+				200000000000000000000015 /* MobileApp */,
 				200000000000000000000008 /* Info.plist */,
 				20000000000000000000000A /* InfoPlist.xcstrings */,
 				200000000000000000000009 /* Localizable.xcstrings */,
@@ -110,6 +129,8 @@
 			isa = PBXGroup;
 			children = (
 				20000000000000000000000C /* NavigationPolicyTests.swift */,
+				200000000000000000000016 /* MobileOnboardingTests.swift */,
+				200000000000000000000017 /* MobileAuthTransportIntegrationTests.swift */,
 			);
 			path = AvibeTests;
 			sourceTree = "<group>";
@@ -130,6 +151,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 800000000000000000000002 /* Build configuration list for PBXNativeTarget "Avibe" */;
 			buildPhases = (
+				D00000000000000000000001 /* Verify Mobile App Bundle */,
 				900000000000000000000001 /* Sources */,
 				600000000000000000000001 /* Frameworks */,
 				A00000000000000000000001 /* Resources */,
@@ -209,6 +231,7 @@
 				100000000000000000000009 /* InfoPlist.xcstrings in Resources */,
 				100000000000000000000008 /* Localizable.xcstrings in Resources */,
 				10000000000000000000000A /* PrivacyInfo.xcprivacy in Resources */,
+				100000000000000000000012 /* MobileApp in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -221,6 +244,32 @@
 		};
 /* End PBXResourcesBuildPhase section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		D00000000000000000000001 /* Verify Mobile App Bundle */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/Avibe/Resources/MobileApp/assets",
+				"$(SRCROOT)/Avibe/Resources/MobileApp/mobile.html",
+				"$(SRCROOT)/scripts/verify_mobile_bundle.sh",
+			);
+			name = "Verify Mobile App Bundle";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "AVIBE_MOBILE_BUNDLE_EXISTENCE_ONLY=1 /bin/sh \"$SRCROOT/scripts/verify_mobile_bundle.sh\" \"$SRCROOT/Avibe/Resources/MobileApp\"\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		900000000000000000000001 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -228,7 +277,11 @@
 			files = (
 				100000000000000000000002 /* AppModel.swift in Sources */,
 				100000000000000000000001 /* AvibeApp.swift in Sources */,
-					10000000000000000000000D /* NativeBridge.swift in Sources */,
+				10000000000000000000000E /* MobileAccount.swift in Sources */,
+				10000000000000000000000F /* MobileAuthTransport.swift in Sources */,
+				100000000000000000000010 /* MobileOnboardingBridge.swift in Sources */,
+				100000000000000000000011 /* MobileOnboardingContainer.swift in Sources */,
+				10000000000000000000000D /* NativeBridge.swift in Sources */,
 				100000000000000000000003 /* NavigationPolicy.swift in Sources */,
 				100000000000000000000004 /* RootView.swift in Sources */,
 				100000000000000000000005 /* WebOrigin.swift in Sources */,
@@ -242,6 +295,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				10000000000000000000000B /* NavigationPolicyTests.swift in Sources */,
+				100000000000000000000013 /* MobileOnboardingTests.swift in Sources */,
+				100000000000000000000014 /* MobileAuthTransportIntegrationTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

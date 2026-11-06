@@ -15,6 +15,7 @@
     "typecheck:design": "tsc -p design/tsconfig.json --noEmit",
     "validate:imports": "node scripts/validate-out-of-tree-imports.mjs",
     "build": "npm run validate:imports && tsc -b && vite build",
+    "build:mobile": "npm run validate:imports && tsc -b && vite build --config vite.mobile.config.ts",
     "lint": "node scripts/lint-baseline.mjs",
     "lint:report": "node scripts/lint-baseline.mjs --report",
     "lint:baseline": "node scripts/lint-baseline.mjs --update",

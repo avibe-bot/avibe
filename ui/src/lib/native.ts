@@ -1,5 +1,6 @@
 export type NativePlatform = 'ios' | 'android';
 export type NativeCapability =
+  | 'accountPresentation'
   | 'app'
   | 'haptics'
   | 'keyboardResizesViewport'
@@ -86,6 +87,16 @@ export async function openNativeExternal(url: string): Promise<boolean> {
       { url },
     );
     return result?.opened === true;
+  } catch {
+    return false;
+  }
+}
+
+export async function nativeShowAccount(): Promise<boolean> {
+  try {
+    if (!hasNativeCapability('accountPresentation')) return false;
+    await callNative<null>('accountPresentation', 'app.showAccount');
+    return true;
   } catch {
     return false;
   }

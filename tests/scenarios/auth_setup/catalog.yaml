@@ -329,6 +329,84 @@ scenarios:
     # iframe keeps the daily rule.
     supporting_tests:
       - tests/test_remote_access_vibe_cloud.py::test_a_page_load_renews_an_hour_old_session_while_a_fetch_waits_a_day
+  - id: AUTH-SETUP-148
+    name: Bundled iOS onboarding completes email OTP, account discovery, and authorized instance selection
+    status: covered
+    kind: happy_path
+    layer: contract
+    backend: ios
+    test: ui/src/mobile/MobileOnboarding.test.tsx::AUTH-SETUP-148 completes email OTP discovery and authorized instance selection
+    reason: >-
+      The owning browser boundary is the bundled React page and its fixed
+      avibeMobile contract. The collected Vitest case drives the approved
+      Welcome, full-email, six-cell OTP, session discovery, and authorized
+      selection flow against deterministic bridge responses.
+  - id: AUTH-SETUP-149
+    name: Mobile account failures preserve their owning screen and never silently start reauthentication
+    status: covered
+    kind: negative_path
+    layer: contract
+    backend: ios
+    test: ui/src/mobile/MobileOnboarding.test.tsx::AUTH-SETUP-149 keeps every bridge failure on its owning screen without reauthentication
+    reason: >-
+      The page consumes the native failure classification instead of deriving a
+      second auth state machine. The collected Vitest case covers every page
+      operation against every finite native/bridge error code plus an unknown
+      provider code, including cold-start and #account bootstrap.
+  - id: AUTH-SETUP-150
+    name: Native WebKit account transport keeps cookies, redirects, deadlines, store rotation, and bundled scrolling inside their boundaries
+    status: partial
+    kind: authorization
+    layer: contract
+    missing_layer: hosted-supabase-and-physical-device
+    backend: ios
+    reason: >-
+      Real WKWebView, WKHTTPCookieStore, hermetic HTTP fixtures, Debug and
+      Release XCTest, and simulator UI checks own this boundary. The catalog
+      citation checker does not collect Swift XCTest, so this row records the
+      evidence honestly instead of attaching a Python case that cannot execute
+      WebKit. Hosted Supabase and physical-device behavior remain separate.
+    owning_layer: iOS XCTest plus authorized hosted/device acceptance
+  - id: AUTH-SETUP-151
+    name: Production Supabase email OTP reaches the bundled iOS flow
+    status: manual
+    kind: happy_path
+    layer: smoke
+    backend: ios
+    reason: >-
+      The owner manually verified real email delivery and OTP entry on the iOS
+      27.2 simulator on 2026-11-06. Automation remains hermetic and does not send
+      production email or mutate a real account.
+  - id: AUTH-SETUP-152
+    name: Physical-device keyboard and one-time-code autofill keep the OTP action reachable
+    status: gap
+    kind: accessibility
+    layer: smoke
+    backend: ios
+    reason: >-
+      Reduced-height real-WKWebView and simulator evidence cover scrolling, but
+      physical-device keyboard and Mail/SMS one-time-code autofill remain
+      unverified.
+  - id: AUTH-SETUP-153
+    name: A first mobile instance entry completes the existing OIDC consent decision
+    status: gap
+    kind: authorization
+    layer: smoke
+    backend: ios
+    reason: >-
+      Instance selection preserves the existing OIDC and consent boundary, but
+      no authorized live-account test has exercised first-instance allow or
+      deny from the app.
+  - id: AUTH-SETUP-154
+    name: Competing token refreshes across hidden transport and runtime keep one account session authoritative
+    status: gap
+    kind: concurrency
+    layer: smoke
+    backend: ios
+    reason: >-
+      WebKit is the sole persistent cookie owner and lifecycle tests separate
+      transport from runtime, but real hosted token expiry and concurrent refresh
+      behavior remain unverified.
   - id: AUTH-SETUP-404
     name: Verified limited Show Page identity admits and denies a revoked guest lease
     status: covered

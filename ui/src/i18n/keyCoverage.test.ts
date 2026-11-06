@@ -916,9 +916,16 @@ const NON_KEY_LITERALS = [
   // Native bridge method names. They are transport identifiers, never copy.
   'app.info',
   'app.openExternal',
+  'app.showAccount',
+  'auth.requestOtp',
+  'auth.verifyOtp',
   'haptics.impact',
   'haptics.notify',
   'haptics.selection',
+  'session.bootstrap',
+  'session.logout',
+  'session.refresh',
+  'session.selectInstance',
   'viewport.setOuterScrollLocked',
   'voice.permission',
 

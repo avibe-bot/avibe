@@ -274,6 +274,7 @@ jobs:
             /ui/
             /vibe/message_types.json
             /vibe/data/
+            /assets/mascot/cloud-tuanzi-v2.png
             /Dockerfile
           sparse-checkout-cone-mode: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0

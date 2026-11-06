@@ -197,6 +197,106 @@
     "zoomPercent": "{{percent}}%",
     "download": "下载"
   },
+  "mobileApp": {
+    "brand": {
+      "name": "Avibe",
+      "agentOs": "Agent OS"
+    },
+    "boot": {
+      "loading": "正在恢复你的账号…"
+    },
+    "welcome": {
+      "mascotAlt": "Vibey 云团子",
+      "greeting": "你好，我是 Vibey",
+      "titleLine1": "你的 AI 伙伴，",
+      "titleLine2": "随身同行。",
+      "bodyLine1": "电脑上的 Avibe，",
+      "bodyLine2": "现在也在你的口袋里。",
+      "action": "登录 / 注册",
+      "footerLine1": "Vibey，你的内置 AI 伙伴。",
+      "footerLine2": "连接自己的实例，也可以加入别人共享的实例。"
+    },
+    "email": {
+      "title": "从一封邮件开始。",
+      "subtitle": "登录 / 注册你的 avibe.bot 账号",
+      "label": "邮箱",
+      "placeholder": "you@example.com",
+      "hint": "新邮箱将自动注册，无需设置密码。",
+      "send": "发送验证码",
+      "sending": "发送中…",
+      "sendIn": "{{count}} 秒后重试",
+      "invalid": "请填写有效的邮箱以接收验证码。",
+      "footer": "验证码会送到你的邮箱，在这里完成登录。"
+    },
+    "code": {
+      "title": "查看你的邮箱。",
+      "sentTo": "验证码已发送至",
+      "changeEmail": "修改邮箱",
+      "label": "输入邮件里的 6 位验证码",
+      "hint": "输入邮件里的 6 位验证码",
+      "verify": "验证并登录",
+      "verifying": "验证中…",
+      "resendPrompt": "没收到验证码？",
+      "resend": "重新发送",
+      "resending": "重新发送中…",
+      "resendIn": "{{count}} 秒后可重新发送",
+      "resent": "已重新发送，请再次查看邮箱。",
+      "invalid": "验证码无效或已过期，请重试或重新发送邮件。",
+      "rateLimited": "请求过于频繁，请稍后再试。",
+      "footer": "可直接粘贴验证码，也可以检查垃圾邮件文件夹。"
+    },
+    "instances": {
+      "title": "想从哪里开始？",
+      "switchTitle": "切换实例",
+      "subtitle": "自己的实例，以及别人共享的实例",
+      "refresh": "刷新实例",
+      "refreshing": "正在刷新…",
+      "loading": "正在加载实例…",
+      "unavailable": "暂时无法加载实例",
+      "online": "在线",
+      "offline": "离线",
+      "shared": "共享",
+      "current": "当前",
+      "yours": "我的实例",
+      "sharedBy": "{{owner}} 共享",
+      "unknownOwner": "其他账号",
+      "add": "添加自己的实例",
+      "offlineTitle": "{{name}} 处于离线状态",
+      "offlineBody": "在这台电脑上启动 Avibe 并连接网络，然后刷新列表，或选择其他在线实例。"
+    },
+    "empty": {
+      "title": "让电脑与手机相连。",
+      "subtitle": "在电脑上运行，从手机上连接",
+      "body": "还没有可用实例。先在电脑上安装 Avibe，并配对这个账号。",
+      "desktopTitle": "在电脑上安装",
+      "desktopBody": "完成设置后，在「远程访问」中配对",
+      "commandTitle": "使用命令行",
+      "commandBody": "安装 CLI，再运行 vibe remote",
+      "refresh": "我已完成配对，刷新",
+      "cliTitle": "安装与配对",
+      "cliSubtitle": "在电脑上运行，从手机上连接",
+      "cliBody": "在 macOS 或 Linux 终端运行。Windows 用户请按指南使用 WSL。",
+      "stepInstall": "1. 安装并完成设置",
+      "installCommand": "bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --launch'",
+      "stepPair": "2. 配对你的账号",
+      "pairCommand": "vibe remote",
+      "pairBody": "按终端提示登录相同的 avibe.bot 账号，完成配对后回到手机刷新。",
+      "guide": "安装指南"
+    },
+    "account": {
+      "title": "账户",
+      "signedInAs": "当前登录",
+      "signOut": "在此设备退出",
+      "signingOut": "正在退出…",
+      "current": "当前实例",
+      "none": "尚未选择实例",
+      "switch": "切换实例",
+      "choose": "选择实例"
+    },
+    "errors": {
+      "network": "暂时连不上 avibe.bot。检查网络后重试。"
+    }
+  },
   "common": {
     "back": "返回",
     "continue": "继续",
@@ -3397,6 +3497,7 @@
     "versionLabel": "版本",
     "accountMenuLabel": "账户（{{email}}）",
     "signedInAs": "当前登录账户",
+    "openMobileAccount": "账号与 Avibe",
     "signOut": "退出登录",
     "signingOut": "正在退出…",
     "resizeSidebar": "调整侧栏宽度"

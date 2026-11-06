@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Link as LinkIcon, LogOut } from 'lucide-react';
+import { Link as LinkIcon, LogOut, UserRound } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
 import { useStatus } from '../../context/StatusContext';
 import { useAuthAccount } from '../../lib/useAuthAccount';
+import { hasNativeCapability, nativeShowAccount } from '../../lib/native';
 import { LanguageSwitcher } from '../LanguageSwitcher';
 import { ThemeToggle } from '../ThemeToggle';
 import { VersionBadge } from '../VersionBadge';
@@ -37,8 +38,15 @@ export const MoreAppearanceSection: React.FC = () => {
 export const MoreAccountSection: React.FC = () => {
   const { t } = useTranslation();
   const { email, signingOut, signOut } = useAuthAccount();
+  const nativeAccount = hasNativeCapability('accountPresentation');
 
   if (!email) return null;
+
+  const handleAccountAction = async () => {
+    if (!nativeAccount || !await nativeShowAccount()) {
+      await signOut();
+    }
+  };
 
   return (
     <div className="overflow-hidden rounded-xl border border-border bg-surface">
@@ -48,17 +56,26 @@ export const MoreAccountSection: React.FC = () => {
         </span>
         <div className="min-w-0 flex-1">
           <div className="text-[10px] font-bold uppercase tracking-[0.16em] text-muted">{t('appShell.signedInAs')}</div>
-          <div className="truncate text-sm font-medium">{email}</div>
+          <div className="break-all text-sm font-medium">{email}</div>
         </div>
       </div>
       <button
         type="button"
-        onClick={signOut}
+        onClick={() => void handleAccountAction()}
         disabled={signingOut}
-        className="flex w-full items-center gap-2 border-t border-border px-4 py-3 text-left text-sm font-medium text-destructive-ink transition hover:bg-destructive/[0.06] disabled:opacity-60"
+        className={clsx(
+          'flex w-full items-center gap-2 border-t border-border px-4 py-3 text-left text-sm font-medium transition disabled:opacity-60',
+          nativeAccount
+            ? 'text-foreground hover:bg-surface-2'
+            : 'text-destructive-ink hover:bg-destructive/[0.06]',
+        )}
       >
-        <LogOut className="size-4" />
-        {signingOut ? t('appShell.signingOut') : t('appShell.signOut')}
+        {nativeAccount ? <UserRound className="size-4" /> : <LogOut className="size-4" />}
+        {nativeAccount
+          ? t('appShell.openMobileAccount')
+          : signingOut
+            ? t('appShell.signingOut')
+            : t('appShell.signOut')}
       </button>
     </div>
   );

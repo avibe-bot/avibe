@@ -15,6 +15,7 @@ struct NativeShellMetadata: Equatable {
     static let contract = 1
     static let platform = "ios"
     static let capabilities = [
+        "accountPresentation": 1,
         "app": 1,
         "haptics": 1,
         "keyboardResizesViewport": 1,
@@ -61,6 +62,7 @@ struct NativeShellMetadata: Equatable {
 enum NativeBridgeMethod: String, CaseIterable {
     case appInfo = "app.info"
     case appOpenExternal = "app.openExternal"
+    case appShowAccount = "app.showAccount"
     case hapticsImpact = "haptics.impact"
     case hapticsNotify = "haptics.notify"
     case hapticsSelection = "haptics.selection"
@@ -174,14 +176,18 @@ enum NativeBridgeConfiguration {
     static func make(
         instanceOrigin: WebOrigin,
         metadata: NativeShellMetadata = NativeShellMetadata(),
-        setOuterScrollLocked: @escaping (WKWebView, Bool) -> Bool
+        websiteDataStore: WKWebsiteDataStore = .default(),
+        setOuterScrollLocked: @escaping (WKWebView, Bool) -> Bool,
+        showAccount: @escaping () -> Void = {}
     ) -> WKWebViewConfiguration {
         let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = websiteDataStore
         let controller = WKUserContentController()
         let handler = NativeBridgeHandler(
             policy: NativeBridgePolicy(instanceOrigin: instanceOrigin),
             metadata: metadata,
-            setOuterScrollLocked: setOuterScrollLocked
+            setOuterScrollLocked: setOuterScrollLocked,
+            showAccount: showAccount
         )
         controller.addScriptMessageHandler(
             handler,
@@ -275,15 +281,18 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
     private let policy: NativeBridgePolicy
     private let metadata: NativeShellMetadata
     private let setOuterScrollLocked: (WKWebView, Bool) -> Bool
+    private let showAccount: () -> Void
 
     init(
         policy: NativeBridgePolicy,
         metadata: NativeShellMetadata,
-        setOuterScrollLocked: @escaping (WKWebView, Bool) -> Bool
+        setOuterScrollLocked: @escaping (WKWebView, Bool) -> Bool,
+        showAccount: @escaping () -> Void
     ) {
         self.policy = policy
         self.metadata = metadata
         self.setOuterScrollLocked = setOuterScrollLocked
+        self.showAccount = showAccount
     }
 
     func userContentController(
@@ -338,6 +347,11 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
             }
             UIApplication.shared.open(url, options: [:]) { opened in
                 self.reply(replyHandler, result: ["opened": opened])
+            }
+        case .appShowAccount:
+            reply(replyHandler, result: NSNull())
+            DispatchQueue.main.async { [showAccount] in
+                showAccount()
             }
         case .hapticsImpact:
             guard

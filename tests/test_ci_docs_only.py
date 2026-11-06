@@ -239,6 +239,7 @@ BACKEND = (
     # Inside the browser checkout, or shapes the package.
     (("vibe/data/api_key_vendors.json",), FULL),
     (("vibe/message_types.json",), FULL),
+    (("assets/mascot/cloud-tuanzi-v2.png",), FULL),
     (("Dockerfile",), FULL),
     (("ui/package.json",), FULL),
     (("ui/package-lock.json",), FULL),
