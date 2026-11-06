@@ -88,6 +88,42 @@ test('an upward fling gets the older page before it reaches the top, and startin
   expect(restores[0].from).toBeGreaterThan(200);
 });
 
+test('an older page goes in only once the reader comes to rest, and holds their place', async ({ page }) => {
+  // iOS takes back a scroll write made during momentum or the top bounce
+  // (measured on iOS 27), which would drop the reader on the top of the page that
+  // just landed. So the page waits for rest, however early it arrived.
+  await open(page, 'delay=50&images=0');
+  // Just outside the prefetch band (eight screens), so the request comes mid-fling.
+  await transcript(page).evaluate((el) => { el.scrollTop = el.clientHeight * 8 + 300; });
+  await page.waitForTimeout(300);
+  expect(await loads(page)).toBe(0);
+  const first = () => transcript(page).locator('[data-message-id]').first().getAttribute('data-message-id');
+  const head = await first();
+  // Keep the transcript moving, a few pixels a frame, as a long fling does.
+  await transcript(page).evaluate((el) => {
+    const fling = { stop: false };
+    (window as unknown as { fling: typeof fling }).fling = fling;
+    const step = () => {
+      if (fling.stop) return;
+      el.scrollTop -= 6;
+      requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  });
+  await expect.poll(() => loads(page)).toBe(1);
+  // The page is in hand, but nothing goes in while the transcript moves.
+  await page.waitForTimeout(600);
+  expect(await first()).toBe(head);
+  await page.evaluate(() => window.__scrollLab.pinRef(0));
+  await page.evaluate(() => { (window as unknown as { fling: { stop: boolean } }).fling.stop = true; });
+  await nextFrames(page);
+  const reference = await page.evaluate(() => window.__scrollLab.refTop());
+  await expect.poll(first).not.toBe(head);
+  await nextFrames(page);
+  const after = await page.evaluate(() => window.__scrollLab.refTop());
+  expect(Math.abs(after! - reference!)).toBeLessThanOrEqual(1);
+});
+
 test('the reading position holds within a pixel through every older page, the retained-window cap, and the images that arrive with them', async ({ page }) => {
   await open(page, 'delay=800');
   for (let page_ = 0; page_ < 7; page_ += 1) {

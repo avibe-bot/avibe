@@ -332,9 +332,9 @@ describe('transcript older-page loading', () => {
     });
     // The page landed above: the reader is a page further from the top.
     expect(scroller.scrollTop).toBe(3000 + 50 * 112);
-    await flingTo(5000);
+    await flingTo(8000);
     expect(onLoadOlder).toHaveBeenCalledTimes(1);
-    await flingTo(3500);
+    await flingTo(6000);
     expect(onLoadOlder).toHaveBeenCalledTimes(2);
   });
 
@@ -368,6 +368,40 @@ describe('transcript older-page loading', () => {
     scroller.scrollTop = scroller.scrollHeight;
     fireEvent.scroll(scroller);
     expect(props.followingTailRef.current).toBe(true);
+  });
+
+  // iOS takes back a scroll write made while it is still moving the transcript,
+  // so rows above the reader wait for rest: no finger down, no scroll for a beat.
+  it('lets the page in only once the transcript is at rest', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+    try {
+      let landed = false;
+      const onLoadOlder = vi.fn(async (whenSettled: () => Promise<void>) => {
+        await whenSettled();
+        landed = true;
+        return true;
+      });
+      const { scroller } = renderTranscript({ onLoadOlder });
+      fireEvent.touchStart(scroller, { touches: [{ clientY: 100 }] });
+      await act(async () => fireEvent.touchMove(scroller, { touches: [{ clientY: 140 }] }));
+      expect(onLoadOlder).toHaveBeenCalledTimes(1);
+      await act(async () => { vi.advanceTimersByTime(500); });
+      expect(landed).toBe(false);
+      fireEvent.touchEnd(scroller, { touches: [] });
+      // Momentum: scroll events keep coming after the finger lifts.
+      for (let frame = 0; frame < 6; frame += 1) {
+        await act(async () => {
+          scroller.scrollTop -= 20;
+          fireEvent.scroll(scroller);
+          vi.advanceTimersByTime(50);
+        });
+      }
+      expect(landed).toBe(false);
+      await act(async () => { vi.advanceTimersByTime(200); });
+      expect(landed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('consumes input begun while a page is pending until the next gesture', async () => {
@@ -472,7 +506,8 @@ describe('transcript older-page loading', () => {
 
   it('surfaces failures and offers one explicit retry without an automatic retry loop', async () => {
     const onLoadOlder = vi.fn().mockResolvedValue(false);
-    const { getByText, scroller, scrollTo } = renderTranscript({ onLoadOlder });
+    // A window taller than the prefetch band (eight screens), so a reader can leave it.
+    const { getByText, scroller, scrollTo } = renderTranscript({ messages: messages(201, 100), onLoadOlder });
     await act(async () => scrollTo(0));
     expect(getByText('chat.olderLoadFailed')).toBeTruthy();
     act(TestResizeObserver.resize);
@@ -480,8 +515,8 @@ describe('transcript older-page loading', () => {
     expect(onLoadOlder).toHaveBeenCalledTimes(1);
     await act(async () => fireEvent.click(getByText('chat.olderLoadFailed')));
     expect(onLoadOlder).toHaveBeenCalledTimes(2);
-    // Leaving the prefetch band (five screens) and coming back is a fresh ask.
-    scrollTo(4880);
+    // Leaving the prefetch band and coming back is a fresh ask.
+    scrollTo(10000);
     await act(async () => scrollTo(0));
     expect(onLoadOlder).toHaveBeenCalledTimes(3);
   });
@@ -489,9 +524,9 @@ describe('transcript older-page loading', () => {
   it('does not hold a failure against a reader who left before it arrived', async () => {
     const first = pendingPage();
     const onLoadOlder = vi.fn().mockReturnValueOnce(first.promise).mockResolvedValue(true);
-    const { scrollTo, queryByText } = renderTranscript({ onLoadOlder });
+    const { scrollTo, queryByText } = renderTranscript({ messages: messages(201, 100), onLoadOlder });
     scrollTo(0);
-    scrollTo(4880);
+    scrollTo(10000);
     await act(async () => first.land(false));
     expect(queryByText('chat.olderLoadFailed')).toBeNull();
     await act(async () => scrollTo(0));
