@@ -340,7 +340,7 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         }
 
         let defaults = makeDefaults()
-        let accountStore = AccountWebsiteDataStore(defaults: defaults)
+        let accountStore = makeRealAccountStore(defaults: defaults)
         let coordinator = MobileSessionCoordinator(
             defaults: defaults,
             controlPlane: MobileControlPlaneConfiguration(testBaseURL: baseURL),
@@ -357,7 +357,7 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
                 )
             },
             onOpenRuntime: { _ in },
-            onPrepareAccountTransition: {}
+            onPrepareAccountTransition: { [] }
         )
         coordinator.activateAccountSurface()
         _ = try await coordinator.bootstrap()
@@ -704,7 +704,7 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         }
 
         let defaults = makeDefaults()
-        let accountStore = AccountWebsiteDataStore(defaults: defaults)
+        let accountStore = makeRealAccountStore(defaults: defaults)
         await setCookie(
             HTTPCookie(properties: [
                 .domain: "127.0.0.1",
@@ -744,6 +744,59 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         XCTAssertNil(cookie(named: "late_generation", in: newCookies))
     }
 
+    func testNamedStoreLedgerNeverRemovesAnUnownedLiveIdentifier() async throws {
+        let before = await allNamedDataStoreIdentifiers()
+        let defaults = makeDefaults()
+        let registry = RealNamedDataStoreRegistry()
+        var accountStore: AccountWebsiteDataStore? = AccountWebsiteDataStore(
+            defaults: defaults,
+            operations: registry.operations
+        )
+        let unownedIdentifier = UUID()
+        registry.trackForCleanup(unownedIdentifier)
+        addTeardownBlock {
+            let remaining = await registry.removeCreatedIdentifiers()
+            XCTAssertTrue(remaining.isEmpty)
+        }
+        var unownedStore: WKWebsiteDataStore? = WKWebsiteDataStore(
+            forIdentifier: unownedIdentifier
+        )
+        await setCookie(
+            HTTPCookie(properties: [
+                .domain: "example.test",
+                .path: "/",
+                .name: "test_owned_unrelated",
+                .value: "present",
+            ])!,
+            in: try XCTUnwrap(unownedStore).httpCookieStore
+        )
+        let registered = await allNamedDataStoreIdentifiers()
+        XCTAssertTrue(registered.contains(unownedIdentifier))
+
+        await accountStore?.rotate()
+        await accountStore?.sweepOrphans()
+
+        let afterSweep = await allNamedDataStoreIdentifiers()
+        XCTAssertTrue(before.isSubset(of: afterSweep))
+        XCTAssertTrue(afterSweep.contains(unownedIdentifier))
+
+        let identifiersCreatedByTest =
+            registry.createdIdentifiers
+        accountStore = nil
+        unownedStore = nil
+        await Task.yield()
+        let remaining = await registry.removeCreatedIdentifiers()
+        XCTAssertTrue(remaining.isEmpty)
+
+        let afterCleanup = await allNamedDataStoreIdentifiers()
+        XCTAssertTrue(before.isSubset(of: afterCleanup))
+        XCTAssertTrue(
+            afterCleanup.isDisjoint(
+                with: identifiersCreatedByTest.subtracting(before)
+            )
+        )
+    }
+
     private static let sessionJSON = """
     {
       "account": {
@@ -772,6 +825,28 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
             defaults.removePersistentDomain(forName: suite)
         }
         return defaults
+    }
+
+    private func makeRealAccountStore(
+        defaults: UserDefaults
+    ) -> AccountWebsiteDataStore {
+        let registry = RealNamedDataStoreRegistry()
+        addTeardownBlock {
+            let remaining = await registry.removeCreatedIdentifiers()
+            XCTAssertTrue(remaining.isEmpty)
+        }
+        return AccountWebsiteDataStore(
+            defaults: defaults,
+            operations: registry.operations
+        )
+    }
+
+    private func allNamedDataStoreIdentifiers() async -> Set<UUID> {
+        await withCheckedContinuation { continuation in
+            WKWebsiteDataStore.fetchAllDataStoreIdentifiers {
+                continuation.resume(returning: Set($0))
+            }
+        }
     }
 
     private func allCookies(
@@ -834,6 +909,55 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         case .failure(let error):
             XCTFail("Unexpected error: \(error)", file: file, line: line)
         }
+    }
+}
+
+@MainActor
+private final class RealNamedDataStoreRegistry {
+    private(set) var createdIdentifiers = Set<UUID>()
+
+    var operations: AccountWebsiteDataStoreOperations {
+        AccountWebsiteDataStoreOperations(
+            makeDataStore: { [self] identifier in
+                createdIdentifiers.insert(identifier)
+                return WKWebsiteDataStore(forIdentifier: identifier)
+            },
+            removeIdentifier: { [self] identifier in
+                let error = await AccountWebsiteDataStoreOperations.live
+                    .removeIdentifier(identifier)
+                if error == nil {
+                    createdIdentifiers.remove(identifier)
+                }
+                return error
+            }
+        )
+    }
+
+    func trackForCleanup(_ identifier: UUID) {
+        createdIdentifiers.insert(identifier)
+    }
+
+    func removeCreatedIdentifiers() async -> Set<UUID> {
+        for attempt in 0..<50 {
+            var remaining = Set<UUID>()
+            for identifier in createdIdentifiers.sorted(by: {
+                $0.uuidString < $1.uuidString
+            }) {
+                if await AccountWebsiteDataStoreOperations.live
+                    .removeIdentifier(identifier) != nil
+                {
+                    remaining.insert(identifier)
+                }
+            }
+            createdIdentifiers = remaining
+            if remaining.isEmpty {
+                return []
+            }
+            if attempt < 49 {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
+        return createdIdentifiers
     }
 }
 

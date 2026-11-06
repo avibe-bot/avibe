@@ -549,7 +549,7 @@ final class MobileOnboardingTests: XCTestCase {
         let otherAccountTransport = FakeMobileAuthTransport()
         otherAccountTransport.session = snapshot(accountID: "account-2")
         let replacementTransport = FakeMobileAuthTransport()
-        let mismatchedStore = AccountWebsiteDataStore(defaults: defaults)
+        let mismatchedStore = makeAccountStore(defaults: defaults)
         let mismatchedStoreIdentifier = mismatchedStore.identifier
         let otherAccount = makeCoordinator(
             defaults: defaults,
@@ -623,6 +623,7 @@ final class MobileOnboardingTests: XCTestCase {
             transports: [transport, FakeMobileAuthTransport()],
             onPrepareAccountTransition: {
                 transitions += 1
+                return []
             }
         )
         coordinator.activateAccountSurface()
@@ -774,7 +775,7 @@ final class MobileOnboardingTests: XCTestCase {
         }
         oldTransport.logoutError = MobileAccountError.network
         let replacement = FakeMobileAuthTransport()
-        let store = AccountWebsiteDataStore(defaults: defaults)
+        let store = makeAccountStore(defaults: defaults)
         let coordinator = makeCoordinator(
             defaults: defaults,
             websiteDataStore: store,
@@ -818,16 +819,13 @@ final class MobileOnboardingTests: XCTestCase {
 
         await store.rotate()
 
-        XCTAssertTrue(store.pendingRemovalIdentifiers.contains(oldIdentifier))
         XCTAssertTrue(registry.identifiers.contains(oldIdentifier))
         XCTAssertTrue(registry.identifiers.contains(store.identifier))
+        XCTAssertEqual(registry.removalAttempts, [oldIdentifier])
 
         let relaunched = AccountWebsiteDataStore(
             defaults: defaults,
             operations: registry.operations
-        )
-        XCTAssertTrue(
-            relaunched.pendingRemovalIdentifiers.contains(oldIdentifier)
         )
 
         registry.failingIdentifiers.remove(oldIdentifier)
@@ -835,13 +833,16 @@ final class MobileOnboardingTests: XCTestCase {
 
         XCTAssertFalse(registry.identifiers.contains(oldIdentifier))
         XCTAssertTrue(registry.identifiers.contains(relaunched.identifier))
-        XCTAssertTrue(relaunched.pendingRemovalIdentifiers.isEmpty)
+        XCTAssertEqual(
+            registry.removalAttempts.filter { $0 == oldIdentifier }.count,
+            2
+        )
         XCTAssertFalse(
             registry.removalAttempts.contains(relaunched.identifier)
         )
     }
 
-    func testLaunchSweepRemovesAnOrphanAndPreservesTheCurrentStore() async {
+    func testLaunchSweepIgnoresUnownedStoresAndPreservesTheCurrentStore() async {
         let defaults = makeDefaults()
         let registry = FakeNamedDataStoreRegistry()
         let store = AccountWebsiteDataStore(
@@ -853,12 +854,72 @@ final class MobileOnboardingTests: XCTestCase {
 
         await store.sweepOrphans()
 
-        XCTAssertFalse(registry.identifiers.contains(orphan))
+        XCTAssertTrue(registry.identifiers.contains(orphan))
         XCTAssertTrue(registry.identifiers.contains(store.identifier))
-        XCTAssertEqual(registry.removalAttempts, [orphan])
+        XCTAssertTrue(registry.removalAttempts.isEmpty)
     }
 
-    func testAccountTransitionReleasesRuntimeChildrenBeforeStoreRemoval() async throws {
+    func testStoreRemovalWaitIsBoundedAndDefersCleanupForARetainedWebView() async throws {
+        let defaults = makeDefaults()
+        let registry = FakeNamedDataStoreRegistry()
+        let store = AccountWebsiteDataStore(
+            defaults: defaults,
+            operations: registry.operations
+        )
+        let oldIdentifier = store.identifier
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        var retainedWebView: WKWebView? = WKWebView(
+            frame: .zero,
+            configuration: configuration
+        )
+        var secondRetainedWebView: WKWebView? = WKWebView(
+            frame: .zero,
+            configuration: configuration
+        )
+        let releaseBarrier = WebsiteDataStoreReleaseBarrier(
+            webViews: [try XCTUnwrap(retainedWebView)]
+        )
+        let secondReleaseBarrier = WebsiteDataStoreReleaseBarrier(
+            webViews: [try XCTUnwrap(secondRetainedWebView)]
+        )
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            websiteDataStore: store,
+            transports: [
+                FakeMobileAuthTransport(),
+                FakeMobileAuthTransport(),
+            ],
+            onPrepareAccountTransition: {
+                [releaseBarrier, secondReleaseBarrier]
+            }
+        )
+        coordinator.activateAccountSurface()
+
+        let clock = ContinuousClock()
+        let startedAt = clock.now
+        let state = try await coordinator.logout()
+        let elapsed = startedAt.duration(to: clock.now)
+
+        XCTAssertEqual(state, .signedOut)
+        XCTAssertLessThan(elapsed, .milliseconds(1500))
+        XCTAssertNotEqual(store.identifier, oldIdentifier)
+        XCTAssertTrue(registry.identifiers.contains(oldIdentifier))
+        XCTAssertTrue(registry.removalAttempts.isEmpty)
+
+        retainedWebView = nil
+        secondRetainedWebView = nil
+        let unreleased = await WebsiteDataStoreReleaseBarrier.waitForRelease(
+            of: [releaseBarrier, secondReleaseBarrier]
+        )
+        XCTAssertTrue(unreleased.isEmpty)
+        await store.sweepOrphans()
+
+        XCTAssertFalse(registry.identifiers.contains(oldIdentifier))
+        XCTAssertEqual(registry.removalAttempts, [oldIdentifier])
+    }
+
+    func testAccountTransitionReleasesARealPopupBeforeStoreRemoval() async throws {
         let defaults = makeDefaults()
         let registry = FakeNamedDataStoreRegistry()
         let store = AccountWebsiteDataStore(
@@ -875,28 +936,94 @@ final class MobileOnboardingTests: XCTestCase {
             didFinishLoading: {},
             didFailLoading: {}
         )
+        let window = UIWindow(
+            frame: CGRect(x: 0, y: 0, width: 390, height: 700)
+        )
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
         controller.loadViewIfNeeded()
-        XCTAssertNotNil(
-            controller.view.subviews
-                .compactMap { $0 as? WKWebView }
-                .first
+        controller.view.frame = window.bounds
+        controller.view.layoutIfNeeded()
+        defer {
+            window.isHidden = true
+        }
+
+        var runtimeWebView: WKWebView? = try XCTUnwrap(
+            controller.view.subviews.compactMap { $0 as? WKWebView }.first
+        )
+        runtimeWebView?.stopLoading()
+        runtimeWebView?.loadHTMLString(
+            """
+            <!doctype html>
+            <html>
+              <body>
+                <button id="open-popup" onclick="window.open('about:blank', '_blank')">
+                  Open
+                </button>
+              </body>
+            </html>
+            """,
+            baseURL: URL(string: "https://alice-app.avibe.bot")!
+        )
+        let popupButtonReady = try await waitForJavaScriptValue(
+            in: try XCTUnwrap(runtimeWebView)
+        ) {
+            """
+            document.querySelector("#open-popup") instanceof HTMLButtonElement
+            """
+        }
+        XCTAssertTrue(popupButtonReady)
+        _ = try await runtimeWebView?.evaluateJavaScript(
+            """
+            document.querySelector("#open-popup").click()
+            """
         )
 
-        let childConfiguration = WKWebViewConfiguration()
-        childConfiguration.websiteDataStore = store.dataStore
-        var childWebView: WKWebView? = WKWebView(
-            frame: .zero,
-            configuration: childConfiguration
+        var popupNavigationController: UINavigationController?
+        for _ in 0..<50 {
+            if let presented = controller.presentedViewController
+                as? UINavigationController
+            {
+                popupNavigationController = presented
+                break
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        var popupController: UIViewController? = try XCTUnwrap(
+            popupNavigationController?.topViewController
         )
-        controller.retainPopupForTesting(try XCTUnwrap(childWebView))
-        XCTAssertEqual(controller.managedWebViewCountForTesting, 2)
+        popupController?.loadViewIfNeeded()
+
+        var childWebView: WKWebView? = try XCTUnwrap(
+            descendantWebViews(in: try XCTUnwrap(popupController?.view)).first
+        )
+        let navigationProbe = NavigationCallbackProbe()
+        childWebView?.navigationDelegate = navigationProbe
+        childWebView?.loadHTMLString(
+            "<!doctype html><title>Child</title><p>Loading</p>",
+            baseURL: nil
+        )
+        await fulfillment(
+            of: [navigationProbe.started],
+            timeout: 5
+        )
+
+        let runtimeReference = WeakObjectReference(runtimeWebView)
+        let childReference = WeakObjectReference(childWebView)
+        let popupNavigationReference = WeakObjectReference(
+            popupNavigationController
+        )
+        runtimeWebView = nil
         childWebView = nil
+        popupController = nil
+        popupNavigationController = nil
 
         var releasedBeforeRemoval = false
         registry.beforeRemoval = { identifier in
             if identifier == oldIdentifier {
                 releasedBeforeRemoval =
-                    controller.managedWebViewCountForTesting == 0
+                    runtimeReference.value == nil
+                    && childReference.value == nil
             }
         }
         let coordinator = makeCoordinator(
@@ -907,7 +1034,7 @@ final class MobileOnboardingTests: XCTestCase {
                 FakeMobileAuthTransport(),
             ],
             onPrepareAccountTransition: {
-                controller.invalidateForAccountTransition()
+                [controller.invalidateForAccountTransition()]
             }
         )
         coordinator.activateAccountSurface()
@@ -915,7 +1042,27 @@ final class MobileOnboardingTests: XCTestCase {
         _ = try await coordinator.logout()
 
         XCTAssertTrue(releasedBeforeRemoval)
-        XCTAssertEqual(controller.managedWebViewCountForTesting, 0)
+        XCTAssertNil(runtimeReference.value)
+        XCTAssertNil(childReference.value)
+        var popupWasDismissed = false
+        for _ in 0..<50 {
+            if controller.presentedViewController == nil {
+                popupWasDismissed = true
+                break
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        XCTAssertTrue(popupWasDismissed)
+        XCTAssertNil(
+            popupNavigationReference.value?.presentingViewController
+        )
+
+        let callbackCountAfterLogout = navigationProbe.callbackCount
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertEqual(
+            navigationProbe.callbackCount,
+            callbackCountAfterLogout
+        )
     }
 
     func testInvalidatedRuntimeControllerDoesNotRecreateAStoreWebView() {
@@ -929,10 +1076,9 @@ final class MobileOnboardingTests: XCTestCase {
             didFailLoading: {}
         )
 
-        controller.invalidateForAccountTransition()
+        _ = controller.invalidateForAccountTransition()
         controller.loadViewIfNeeded()
 
-        XCTAssertEqual(controller.managedWebViewCountForTesting, 0)
         XCTAssertTrue(
             controller.view.subviews.compactMap { $0 as? WKWebView }.isEmpty
         )
@@ -979,7 +1125,9 @@ final class MobileOnboardingTests: XCTestCase {
         transports: [FakeMobileAuthTransport],
         onCreateTransport: @escaping () -> Void = {},
         onOpen: @escaping (MobileRuntimeContext) -> Void = { _ in },
-        onPrepareAccountTransition: @escaping () -> Void = {}
+        onPrepareAccountTransition: @escaping () -> [
+            WebsiteDataStoreReleaseBarrier
+        ] = { [] }
     ) -> MobileSessionCoordinator {
         var queue = transports
         return MobileSessionCoordinator(
@@ -988,7 +1136,7 @@ final class MobileOnboardingTests: XCTestCase {
                 testBaseURL: URL(string: "http://127.0.0.1:43127")!
             ),
             websiteDataStore: websiteDataStore
-                ?? AccountWebsiteDataStore(defaults: defaults),
+                ?? makeAccountStore(defaults: defaults),
             transportFactory: { _, _ in
                 precondition(!queue.isEmpty)
                 onCreateTransport()
@@ -997,6 +1145,21 @@ final class MobileOnboardingTests: XCTestCase {
             onOpenRuntime: onOpen,
             onPrepareAccountTransition: onPrepareAccountTransition
         )
+    }
+
+    private func makeAccountStore(
+        defaults: UserDefaults
+    ) -> AccountWebsiteDataStore {
+        let registry = FakeNamedDataStoreRegistry()
+        return AccountWebsiteDataStore(
+            defaults: defaults,
+            operations: registry.operations
+        )
+    }
+
+    private func descendantWebViews(in view: UIView) -> [WKWebView] {
+        let direct = view.subviews.compactMap { $0 as? WKWebView }
+        return direct + view.subviews.flatMap(descendantWebViews(in:))
     }
 
     private func present(
@@ -1112,14 +1275,11 @@ private final class FakeNamedDataStoreRegistry {
 
     var operations: AccountWebsiteDataStoreOperations {
         AccountWebsiteDataStoreOperations(
-            makeDataStore: { [unowned self] identifier in
+            makeDataStore: { [self] identifier in
                 identifiers.insert(identifier)
                 return .nonPersistent()
             },
-            fetchIdentifiers: { [unowned self] in
-                Array(identifiers)
-            },
-            removeIdentifier: { [unowned self] identifier in
+            removeIdentifier: { [self] identifier in
                 beforeRemoval?(identifier)
                 removalAttempts.append(identifier)
                 guard !failingIdentifiers.contains(identifier) else {
@@ -1132,6 +1292,58 @@ private final class FakeNamedDataStoreRegistry {
                 return nil
             }
         )
+    }
+}
+
+@MainActor
+private final class NavigationCallbackProbe: NSObject, WKNavigationDelegate {
+    let started = XCTestExpectation(description: "child navigation started")
+    private(set) var callbackCount = 0
+
+    func webView(
+        _ webView: WKWebView,
+        didStartProvisionalNavigation navigation: WKNavigation?
+    ) {
+        callbackCount += 1
+        started.fulfill()
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        didCommit navigation: WKNavigation?
+    ) {
+        callbackCount += 1
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        didFinish navigation: WKNavigation?
+    ) {
+        callbackCount += 1
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        didFail navigation: WKNavigation?,
+        withError error: Error
+    ) {
+        callbackCount += 1
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        didFailProvisionalNavigation navigation: WKNavigation?,
+        withError error: Error
+    ) {
+        callbackCount += 1
+    }
+}
+
+private final class WeakObjectReference<Value: AnyObject> {
+    weak var value: Value?
+
+    init(_ value: Value?) {
+        self.value = value
     }
 }
 
@@ -1180,9 +1392,10 @@ private final class FakeMobileAuthTransport: MobileAuthTransporting {
         cancelled = true
     }
 
-    func invalidate() {
+    func invalidate() -> WebsiteDataStoreReleaseBarrier? {
         invalidated = true
         onInvalidate()
+        return nil
     }
 }
 

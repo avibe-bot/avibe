@@ -16,6 +16,9 @@ final class AppModel: ObservableObject {
     private let defaults: UserDefaults
     private let controlPlane: MobileControlPlaneConfiguration
     private weak var runtimeController: WebViewController?
+    private var pendingRuntimeReleaseBarriers: [
+        WebsiteDataStoreReleaseBarrier
+    ] = []
 
     private lazy var sessionCoordinator = MobileSessionCoordinator(
         defaults: defaults,
@@ -25,7 +28,7 @@ final class AppModel: ObservableObject {
             self?.openRuntime(runtime)
         },
         onPrepareAccountTransition: { [weak self] in
-            self?.prepareForAccountTransition()
+            self?.prepareForAccountTransition() ?? []
         }
     )
 
@@ -58,13 +61,25 @@ final class AppModel: ObservableObject {
             route == .browser(runtime),
             sessionCoordinator.isCurrentRuntime(runtime)
         else {
-            controller.invalidateForAccountTransition()
+            recordRuntimeReleaseBarrier(
+                controller.invalidateForAccountTransition()
+            )
             if route == .browser(runtime) {
                 route = .onboarding(.instances)
             }
             return
         }
         runtimeController = controller
+    }
+
+    func recordRuntimeReleaseBarrier(
+        _ barrier: WebsiteDataStoreReleaseBarrier
+    ) {
+        pendingRuntimeReleaseBarriers.removeAll(where: \.isReleased)
+        guard !barrier.isReleased else {
+            return
+        }
+        pendingRuntimeReleaseBarriers.append(barrier)
     }
 
     func showAccount() {
@@ -94,7 +109,11 @@ final class AppModel: ObservableObject {
     }
 
     private func stopRuntime() {
-        runtimeController?.invalidateForAccountTransition()
+        if let runtimeController {
+            recordRuntimeReleaseBarrier(
+                runtimeController.invalidateForAccountTransition()
+            )
+        }
         runtimeController = nil
     }
 
@@ -106,10 +125,15 @@ final class AppModel: ObservableObject {
         route = .browser(runtime)
     }
 
-    private func prepareForAccountTransition() {
+    private func prepareForAccountTransition() -> [
+        WebsiteDataStoreReleaseBarrier
+    ] {
         stopRuntime()
         if case .browser = route {
             route = .onboarding(.instances)
         }
+        let barriers = pendingRuntimeReleaseBarriers
+        pendingRuntimeReleaseBarriers.removeAll()
+        return barriers
     }
 }

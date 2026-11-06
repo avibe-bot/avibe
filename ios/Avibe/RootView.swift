@@ -42,6 +42,9 @@ private struct BrowserScreen: View {
                     didCreateController: {
                         appModel.registerRuntimeController($0, for: runtime)
                     },
+                    didReleaseWebViews: {
+                        appModel.recordRuntimeReleaseBarrier($0)
+                    },
                     didStartLoading: {
                         isLoading = true
                         failed = false

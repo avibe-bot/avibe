@@ -123,12 +123,23 @@ and real `WKHTTPCookieStore` must prove:
 
 Before removal, the runtime controller releases its primary and child WebViews,
 the hidden transport is invalidated and released, and the onboarding document
-remains on its non-persistent store. Failed named-store removals remain in a
-persisted pending set. App launch and every rotation enumerate named stores and
-retry removal of every identifier except the current one, covering both
-transient WebKit retention and a crash between identifier persistence and
-cleanup. A failed attempt logs only the store UUID and error; logout still
-completes against the fresh, detached store.
+remains on its non-persistent store. The account store persists an ownership
+ledger before creating each named WebKit store. App launch and every rotation
+retry only ledger entries other than the current identifier; successful
+removals leave the ledger, while failures remain for the next sweep. This
+survives a crash between identifier persistence and cleanup without enumerating
+or touching named stores created by another caller in the App container. No
+released Avibe version created mobile account stores, so there is no legacy
+orphan set to discover or migrate.
+
+Each runtime primary WebView, popup child, SwiftUI-dismantled controller, and
+hidden transport contributes a weak release barrier before rotation. Account
+transitions share one aggregate one-second deadline across all barriers. If any
+old WebView remains retained, the transition still creates and activates the
+fresh store but skips old-store deletion for that rotation. The old UUID stays
+in the ownership ledger for the next launch or rotation, when cleanup is
+retried after the stale WebView is gone. A failed removal logs only the store
+UUID and error; logout still completes against the fresh, detached store.
 
 Cooldown has one page owner. A provider `rate_limited` result or retry duration
 from send, resend, or verify replaces the prior timer and gates every control
@@ -257,10 +268,29 @@ bounded. `ios-shell` triggers on the browser input set declared by
 workflow events to that source.
 
 Focused lifecycle coverage injects named-store removal failures, relaunches
-with persisted pending cleanup, sweeps an orphan while preserving the current
-identifier, and verifies runtime primary and child WebViews are released before
-removal begins. The page failure matrix also covers provider rate limits with
-and without a retry duration for send, resend, and verify.
+with persisted owned cleanup, ignores registry identifiers outside the
+ownership ledger, and drives a real `window.open` child through the production
+`WKUIDelegate` before verifying that the presented controller is dismissed and
+both runtime WebViews are released before removal begins. A real WebKit
+integration case snapshots the process-wide named-store registry before and
+after rotation and cleanup, proving that no identifier outside the test-owned
+set disappears. A retained-WebView case proves the release wait is bounded,
+the current store rotates without attempting unsafe deletion, and a later
+ledger sweep removes the detached store.
+
+The native test inventory is hermetic by construction:
+
+- coordinator tests use suite-scoped `UserDefaults` and an in-memory named-store
+  registry;
+- WebKit integration tests use suite-scoped ledgers, real named stores tracked
+  by a test-owned registry, and loopback fixture servers;
+- WebView factory and bundled-page tests use non-persistent stores;
+- no onboarding test uses `UserDefaults.standard`,
+  `WKWebsiteDataStore.default()`, shared cookie/cache/session storage, Keychain,
+  production network, or a production symbol whose only purpose is testing.
+
+The page failure matrix also covers provider rate limits with and without a
+retry duration for send, resend, and verify.
 
 Any future release, archive, signing, or TestFlight workflow must perform
 `npm ci`, `npm run build:mobile`, and the same bundle verification in the job

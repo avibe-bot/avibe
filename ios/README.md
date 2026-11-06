@@ -53,9 +53,17 @@ and Web resizing cannot both run.
   phases, so WebKit remains the only cookie owner and sessions survive app
   launches without native cookie snapshots. Account transitions release the
   runtime primary and child WebViews plus the hidden transport before rotating.
-  Failed removal stays in a persisted pending set; launch and post-rotation
-  sweeps remove every named identifier except the current store and log failed
-  UUIDs for later retry.
+  Every created identifier enters a persisted ownership ledger before WebKit
+  creates the store. Launch and post-rotation sweeps remove only non-current
+  ledger entries, retaining failed UUIDs for later retry and never enumerating
+  or touching stores outside the app account owner's ledger. There is no legacy
+  orphan migration because no released Avibe version created these mobile
+  stores. Runtime primary WebViews, popup children, SwiftUI-dismantled
+  controllers, and the hidden transport contribute weak release barriers.
+  Rotation gives all barriers one shared one-second deadline. If any remain
+  retained, the app activates the fresh store without deleting old stores in
+  that rotation; their ledger entries are retried at the next launch or
+  rotation.
 - Primary and child WebViews are created through one factory and pinned to
   `keyboardLayoutGuide`. Outer scrolling and automatic content insets use
   WebKit defaults until an instance-origin Workbench document requests
@@ -222,6 +230,18 @@ The hermetic WebKit transport tests run serially, wait for fixture events with
 budgets separate from the app's deadlines, and use numeric loopback origins for
 cross-origin redirect checks. When `ios-shell` XCTest fails, CI uploads
 `AvibeTests.xcresult` as `ios-shell-xcresult`.
+
+Coordinator tests inject an in-memory named-store registry. Integration tests
+that require real named stores use suite-scoped `UserDefaults`, track every UUID
+they create, and remove only that set. One integration case snapshots WebKit's
+live registry around rotation and cleanup to prove unrelated identifiers
+survive. Popup teardown coverage loads a hermetic page in the production
+runtime WebView, creates the child through the real `window.open` /
+`WKUIDelegate` path, and observes controller dismissal, WebView release, and
+navigation callback shutdown without test-only production hooks. Another case
+retains a WebView past the release bound and proves that logout still rotates
+the store, deletion is deferred, and a later ownership-ledger sweep completes
+cleanup.
 
 ## WebKit API inventory
 

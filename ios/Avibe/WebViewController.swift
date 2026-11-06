@@ -109,13 +109,6 @@ final class WebViewFactory {
         self.showAccount = showAccount
     }
 
-    convenience init(instanceOrigin: WebOrigin) {
-        self.init(
-            instanceOrigin: instanceOrigin,
-            websiteDataStore: .default()
-        )
-    }
-
     func makeWebView<Delegate: WKNavigationDelegate & WKUIDelegate>(
         configuration: WKWebViewConfiguration? = nil,
         delegate: Delegate
@@ -366,10 +359,14 @@ final class WebViewController: UIViewController {
         webView.load(URLRequest(url: instanceOrigin.url))
     }
 
-    func invalidateForAccountTransition() {
+    func invalidateForAccountTransition() -> WebsiteDataStoreReleaseBarrier {
         guard !isInvalidatedForAccountTransition else {
-            return
+            return WebsiteDataStoreReleaseBarrier(webViews: [])
         }
+        let releaseBarrier = WebsiteDataStoreReleaseBarrier(
+            webViews: [retainedWebView].compactMap { $0 }
+                + popupRecords.values.map(\.webView)
+        )
         isInvalidatedForAccountTransition = true
         NotificationCenter.default.removeObserver(self)
         cancelAllPendingDialogs()
@@ -385,6 +382,7 @@ final class WebViewController: UIViewController {
         retainedWebView = nil
         retainedWebViewFactory = nil
         websiteDataStore = nil
+        return releaseBarrier
     }
 
     private func presentExternalURL(_ url: URL) {
@@ -601,28 +599,6 @@ final class WebViewController: UIViewController {
             record.controller.invalidateForAccountTransition()
         }
         popupRecords.removeAll()
-    }
-
-    func retainPopupForTesting(_ childWebView: WKWebView) {
-        let popupController = PopupWebViewController(
-            webView: childWebView,
-            webViewFactory: webViewFactory,
-            onClose: {},
-            onOpenInSafari: { _ in }
-        )
-        let navigationController = UINavigationController(
-            rootViewController: popupController
-        )
-        popupRecords[ObjectIdentifier(childWebView)] = PopupRecord(
-            webView: childWebView,
-            controller: popupController,
-            navigationController: navigationController,
-            parentIdentifier: ObjectIdentifier(webView)
-        )
-    }
-
-    var managedWebViewCountForTesting: Int {
-        (retainedWebView == nil ? 0 : 1) + popupRecords.count
     }
 
     private func downloadContext(

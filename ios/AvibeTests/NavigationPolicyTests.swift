@@ -371,7 +371,10 @@ final class NavigationPolicyTests: XCTestCase {
 
     @MainActor
     func testWebViewFactoryUsesTheSameKeyboardLayoutForPrimaryAndChild() {
-        let factory = WebViewFactory(instanceOrigin: instance)
+        let factory = WebViewFactory(
+            instanceOrigin: instance,
+            websiteDataStore: .nonPersistent()
+        )
         let delegate = WebViewDelegateProbe()
         let primary = factory.makeWebView(delegate: delegate)
         let child = factory.makeWebView(
@@ -411,7 +414,10 @@ final class NavigationPolicyTests: XCTestCase {
 
     @MainActor
     func testOuterScrollLockWorksPerWebViewAndResetsOnItsCommit() {
-        let factory = WebViewFactory(instanceOrigin: instance)
+        let factory = WebViewFactory(
+            instanceOrigin: instance,
+            websiteDataStore: .nonPersistent()
+        )
         let delegate = WebViewDelegateProbe()
         let primary = factory.makeWebView(delegate: delegate)
         let child = factory.makeWebView(

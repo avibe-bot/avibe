@@ -166,18 +166,10 @@ struct MobileControlPlaneConfiguration: Equatable {
 
 struct AccountWebsiteDataStoreOperations {
     let makeDataStore: @MainActor (UUID) -> WKWebsiteDataStore
-    let fetchIdentifiers: @MainActor () async -> [UUID]
     let removeIdentifier: @MainActor (UUID) async -> Error?
 
     static let live = AccountWebsiteDataStoreOperations(
         makeDataStore: { WKWebsiteDataStore(forIdentifier: $0) },
-        fetchIdentifiers: {
-            await withCheckedContinuation { continuation in
-                WKWebsiteDataStore.fetchAllDataStoreIdentifiers {
-                    continuation.resume(returning: $0)
-                }
-            }
-        },
         removeIdentifier: { identifier in
             await withCheckedContinuation { continuation in
                 WKWebsiteDataStore.remove(forIdentifier: identifier) {
@@ -189,10 +181,51 @@ struct AccountWebsiteDataStoreOperations {
 }
 
 @MainActor
+final class WebsiteDataStoreReleaseBarrier {
+    private final class WeakWebViewReference {
+        weak var webView: WKWebView?
+
+        init(_ webView: WKWebView) {
+            self.webView = webView
+        }
+    }
+
+    private let references: [WeakWebViewReference]
+
+    init(webViews: [WKWebView]) {
+        references = webViews.map(WeakWebViewReference.init)
+    }
+
+    var isReleased: Bool {
+        references.allSatisfy { $0.webView == nil }
+    }
+
+    func waitForRelease() async -> Bool {
+        await Self.waitForRelease(of: [self]).isEmpty
+    }
+
+    static func waitForRelease(
+        of barriers: [WebsiteDataStoreReleaseBarrier]
+    ) async -> [WebsiteDataStoreReleaseBarrier] {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(1))
+        var unreleased = barriers.filter { !$0.isReleased }
+        while !unreleased.isEmpty {
+            guard clock.now < deadline else {
+                return unreleased
+            }
+            try? await Task.sleep(for: .milliseconds(10))
+            unreleased = barriers.filter { !$0.isReleased }
+        }
+        return []
+    }
+}
+
+@MainActor
 final class AccountWebsiteDataStore {
     private static let identifierKey = "avibe.mobile.websiteDataStoreIdentifier"
-    private static let pendingRemovalKey =
-        "avibe.mobile.pendingWebsiteDataStoreIdentifiers"
+    private static let ownedIdentifiersKey =
+        "avibe.mobile.ownedWebsiteDataStoreIdentifiers"
     private static let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "com.avibe",
         category: "MobileAccount"
@@ -202,7 +235,7 @@ final class AccountWebsiteDataStore {
     private let operations: AccountWebsiteDataStoreOperations
     private(set) var identifier: UUID
     private(set) var dataStore: WKWebsiteDataStore
-    private(set) var pendingRemovalIdentifiers: Set<UUID>
+    private var ownedIdentifiers: Set<UUID>
 
     init(
         defaults: UserDefaults = .standard,
@@ -210,66 +243,68 @@ final class AccountWebsiteDataStore {
     ) {
         self.defaults = defaults
         self.operations = operations
-        pendingRemovalIdentifiers = Set(
-            (defaults.stringArray(forKey: Self.pendingRemovalKey) ?? [])
+        var persistedIdentifiers = Set(
+            (defaults.stringArray(forKey: Self.ownedIdentifiersKey) ?? [])
                 .compactMap(UUID.init(uuidString:))
         )
+        let resolvedIdentifier: UUID
         if
             let rawIdentifier = defaults.string(forKey: Self.identifierKey),
             let savedIdentifier = UUID(uuidString: rawIdentifier)
         {
-            identifier = savedIdentifier
+            resolvedIdentifier = savedIdentifier
         } else {
-            identifier = UUID()
-            defaults.set(identifier.uuidString, forKey: Self.identifierKey)
+            resolvedIdentifier = UUID()
         }
-        dataStore = operations.makeDataStore(identifier)
+        persistedIdentifiers.insert(resolvedIdentifier)
+        identifier = resolvedIdentifier
+        ownedIdentifiers = persistedIdentifiers
+        defaults.set(resolvedIdentifier.uuidString, forKey: Self.identifierKey)
+        defaults.set(
+            persistedIdentifiers.map(\.uuidString).sorted(),
+            forKey: Self.ownedIdentifiersKey
+        )
+        dataStore = operations.makeDataStore(resolvedIdentifier)
     }
 
-    func rotate() async {
-        let oldIdentifier = identifier
-        pendingRemovalIdentifiers.insert(oldIdentifier)
-        persistPendingRemovals()
-
-        identifier = UUID()
-        defaults.set(identifier.uuidString, forKey: Self.identifierKey)
-        dataStore = operations.makeDataStore(identifier)
+    func rotate(sweepOwnedStores: Bool = true) async {
+        let newIdentifier = UUID()
+        ownedIdentifiers.insert(newIdentifier)
+        identifier = newIdentifier
+        defaults.set(newIdentifier.uuidString, forKey: Self.identifierKey)
+        persistOwnedIdentifiers()
+        dataStore = operations.makeDataStore(newIdentifier)
 
         await Task.yield()
-        await sweepOrphans()
+        if sweepOwnedStores {
+            await sweepOrphans()
+        }
     }
 
     func sweepOrphans() async {
-        let knownIdentifiers = Set(await operations.fetchIdentifiers())
-        let candidates = knownIdentifiers
-            .union(pendingRemovalIdentifiers)
-            .subtracting([identifier])
-        var failedIdentifiers = Set<UUID>()
+        let candidates = ownedIdentifiers.subtracting([identifier])
 
         for candidate in candidates.sorted(by: {
             $0.uuidString < $1.uuidString
         }) {
-            guard knownIdentifiers.contains(candidate) else {
-                continue
-            }
             if let error = await operations.removeIdentifier(candidate) {
-                failedIdentifiers.insert(candidate)
                 Self.logger.error(
                     "Named WebKit store cleanup failed for \(candidate.uuidString, privacy: .public): \(String(describing: error), privacy: .public)"
                 )
+            } else {
+                ownedIdentifiers.remove(candidate)
             }
         }
 
-        pendingRemovalIdentifiers = failedIdentifiers
-        persistPendingRemovals()
+        persistOwnedIdentifiers()
     }
 
-    private func persistPendingRemovals() {
+    private func persistOwnedIdentifiers() {
         defaults.set(
-            pendingRemovalIdentifiers
+            ownedIdentifiers
                 .map(\.uuidString)
                 .sorted(),
-            forKey: Self.pendingRemovalKey
+            forKey: Self.ownedIdentifiersKey
         )
     }
 }
@@ -281,7 +316,7 @@ protocol MobileAuthTransporting: AnyObject {
     func fetchSession() async throws -> MobileSessionSnapshot?
     func logout() async throws
     func cancelAll() async
-    func invalidate()
+    func invalidate() -> WebsiteDataStoreReleaseBarrier?
 }
 
 private struct StoredMobileSelection: Codable, Equatable {
@@ -304,13 +339,18 @@ final class MobileSessionCoordinator {
     private let websiteDataStore: AccountWebsiteDataStore
     private let transportFactory: TransportFactory
     private let onOpenRuntime: (MobileRuntimeContext) -> Void
-    private let onPrepareAccountTransition: () -> Void
+    private let onPrepareAccountTransition: () -> [
+        WebsiteDataStoreReleaseBarrier
+    ]
 
     private var transport: MobileAuthTransporting?
     private var snapshot: MobileSessionSnapshot?
     private var generation = 0
     private var phase = Phase.ready
     private var signedOutStoreIsFresh = false
+    private var pendingStoreReleaseBarriers: [
+        WebsiteDataStoreReleaseBarrier
+    ] = []
 
     private enum Phase: Equatable {
         case ready
@@ -330,7 +370,9 @@ final class MobileSessionCoordinator {
             MobileAuthTransport(controlPlaneURL: $0, websiteDataStore: $1)
         },
         onOpenRuntime: @escaping (MobileRuntimeContext) -> Void,
-        onPrepareAccountTransition: @escaping () -> Void
+        onPrepareAccountTransition: @escaping () -> [
+            WebsiteDataStoreReleaseBarrier
+        ]
     ) {
         self.defaults = defaults
         self.controlPlane = controlPlane
@@ -349,7 +391,7 @@ final class MobileSessionCoordinator {
     }
 
     func deactivateAccountSurface() {
-        transport?.invalidate()
+        recordReleaseBarrier(transport?.invalidate())
         transport = nil
     }
 
@@ -512,11 +554,10 @@ final class MobileSessionCoordinator {
         if let oldTransport = transport {
             await oldTransport.cancelAll()
             try? await oldTransport.logout()
-            oldTransport.invalidate()
         }
-        transport = nil
+        deactivateAccountSurface()
 
-        await websiteDataStore.rotate()
+        await rotateWebsiteDataStore()
         signedOutStoreIsFresh = true
         activateAccountSurface()
         return .signedOut
@@ -602,7 +643,9 @@ final class MobileSessionCoordinator {
         if clearSelection {
             clearStoredSelection()
         }
-        onPrepareAccountTransition()
+        pendingStoreReleaseBarriers.append(
+            contentsOf: onPrepareAccountTransition()
+        )
         return generation
     }
 
@@ -659,13 +702,31 @@ final class MobileSessionCoordinator {
     }
 
     private func replaceWithFreshSignedOutStore() async {
-        transport?.invalidate()
-        transport = nil
+        deactivateAccountSurface()
         snapshot = nil
         clearStoredSelection()
-        await websiteDataStore.rotate()
+        await rotateWebsiteDataStore()
         signedOutStoreIsFresh = true
         activateAccountSurface()
+    }
+
+    private func recordReleaseBarrier(
+        _ barrier: WebsiteDataStoreReleaseBarrier?
+    ) {
+        guard let barrier, !barrier.isReleased else {
+            return
+        }
+        pendingStoreReleaseBarriers.append(barrier)
+    }
+
+    private func rotateWebsiteDataStore() async {
+        let unreleased = await WebsiteDataStoreReleaseBarrier.waitForRelease(
+            of: pendingStoreReleaseBarriers
+        )
+        pendingStoreReleaseBarriers = unreleased
+        await websiteDataStore.rotate(
+            sweepOwnedStores: unreleased.isEmpty
+        )
     }
 
     private static func isValidEmail(_ email: String) -> Bool {

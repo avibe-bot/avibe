@@ -47,7 +47,7 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
 
     private let controlPlaneURL: URL
     private let deadlines: MobileAuthTransportDeadlines
-    private let webView: WKWebView
+    private var webView: WKWebView?
     private var loadState: LoadState = .idle
     private var loadContinuations: [CheckedContinuation<Void, Error>] = []
     private var loadDeadlineTask: Task<Void, Never>?
@@ -61,7 +61,8 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
         self.deadlines = deadlines
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = websiteDataStore
-        webView = WKWebView(frame: .zero, configuration: configuration)
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        self.webView = webView
         super.init()
         webView.navigationDelegate = self
     }
@@ -129,7 +130,7 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
     }
 
     func cancelAll() async {
-        _ = try? await webView.callAsyncJavaScript(
+        _ = try? await webView?.callAsyncJavaScript(
             """
             (() => {
               const controllers = window.__avibeMobileControllers;
@@ -144,16 +145,21 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
         )
     }
 
-    func invalidate() {
+    func invalidate() -> WebsiteDataStoreReleaseBarrier? {
         loadDeadlineTask?.cancel()
         loadDeadlineTask = nil
-        webView.stopLoading()
-        webView.navigationDelegate = nil
+        let releaseBarrier = webView.map {
+            WebsiteDataStoreReleaseBarrier(webViews: [$0])
+        }
+        webView?.stopLoading()
+        webView?.navigationDelegate = nil
+        webView = nil
         loadContinuations.forEach {
             $0.resume(throwing: MobileAccountError.network)
         }
         loadContinuations.removeAll()
         loadState = .failed
+        return releaseBarrier
     }
 
     private func ensureReady() async throws {
@@ -172,6 +178,12 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
                 return
             }
             loadState = .loading
+            guard let webView else {
+                loadState = .failed
+                loadContinuations.removeAll()
+                continuation.resume(throwing: MobileAccountError.network)
+                return
+            }
             let configURL = controlPlaneURL.appending(path: "api/config/auth")
             webView.load(
                 URLRequest(
@@ -191,6 +203,7 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
         do {
             try await ensureReady()
             guard
+                let webView,
                 let currentURL = webView.url,
                 Self.sameOrigin(currentURL, controlPlaneURL)
             else {
@@ -242,7 +255,7 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
             guard !Task.isCancelled, let self, self.loadState == .loading else {
                 return
             }
-            self.webView.stopLoading()
+            self.webView?.stopLoading()
             self.finishLoading(with: .failure(MobileAccountError.network))
         }
     }
