@@ -199,6 +199,32 @@ describe('Composer pending voice items', () => {
     }
   });
 
+  // A take whose words the reader stopped waiting for (the card's × while it finished), in this
+  // document or another: the composer leaves it to the reader as it first shows it, and tries it
+  // again once the page comes back online.
+  it.each([
+    { setAside: true, triedOnShow: false },
+    { setAside: false, triedOnShow: true },
+  ])('tries a pending take as it first shows it unless the reader set it aside: $setAside', async ({ setAside, triedOnShow }) => {
+    const id = `take-set-aside-${setAside}`;
+    await saveVoiceTake(kept({ id, status: 'pending', text: undefined, ...(setAside ? { setAside } : {}) }));
+    await saveVoiceTakeAudio(id, 0, new Blob(['audio'], { type: 'audio/wav' }));
+    const transcribing = () => apiFetch.mock.calls.some(([path]) => path === '/api/cloud/token' || path === '/api/asr/transcribe');
+    renderComposer();
+
+    await screen.findByText(en.voice.pending.title);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    });
+    expect(transcribing()).toBe(triedOnShow);
+    if (!setAside) return;
+    expect(screen.getByText(en.voice.pending.waiting)).toBeTruthy();
+    await act(async () => {
+      window.dispatchEvent(new Event('online'));
+    });
+    await waitFor(() => expect(transcribing()).toBe(true));
+  });
+
   it('leaves a take another document still records to that document, until it lets go or goes away', async () => {
     Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => false });
     const uninstall = installWebLocks();

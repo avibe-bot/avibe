@@ -7,7 +7,6 @@ import { setLocalSnapshotPrincipal } from './localSnapshots';
 import { ShowPageVoiceDictation } from './showPageVoiceDictation';
 import { VOICE_LEVEL_INTERVAL_MS, type VoiceRecordingPipelineOptions } from './voiceRecording';
 import type { VoiceRealtimeOptions } from './voiceRealtime';
-import { firstVoiceTakeRetry } from './voiceTakeRetry';
 import { deleteVoiceTake, isVoiceTakeLive, readVoiceTakeAudio, readVoiceTakes } from './voiceTakeStore';
 import { finalizeVoiceDictation, VoiceTranscriptionError } from './voiceTranscription';
 
@@ -170,18 +169,18 @@ describe('ShowPageVoiceDictation set aside', () => {
     await vi.waitFor(() => expect(finalize).toHaveBeenCalledOnce());
     const signal = finalize.mock.calls[0]![2]!.signal!;
 
-    expect(take.dictation.setAside()).toBe(true);
+    const kept = take.dictation.setAside();
     expect(signal.aborted).toBe(true);
     expect(take.realtimeAbort).toHaveBeenCalled();
+    await expect(kept).resolves.toBe(true);
     await expect(take.dictation.done).rejects.toMatchObject({ code: 'cancelled' });
-    // On the device, with its audio, for the pending voice items: no surface holds it, and they
-    // leave it to the reader rather than trying it again on their own at once.
+    // On the device, with its audio, for the pending voice items: no surface holds it, and it is
+    // marked so that no page tries it again on its own as it first shows it.
     await vi.waitFor(async () => {
       expect(isVoiceTakeLive('kept-take')).toBe(false);
-      expect((await readVoiceTakes('ses_a'))[0]).toMatchObject({ id: 'kept-take', status: 'pending' });
+      expect((await readVoiceTakes('ses_a'))[0]).toMatchObject({ id: 'kept-take', status: 'pending', setAside: true });
       expect(await (await readVoiceTakeAudio('kept-take')).get(0)?.text()).toBe('tail');
     });
-    expect(firstVoiceTakeRetry('kept-take')).toBe(false);
     // A discard meant for the surface's own copy does not reach the kept take.
     take.dictation.abort();
     await idle();
@@ -189,10 +188,12 @@ describe('ShowPageVoiceDictation set aside', () => {
   });
 
   it.each([
-    { said: 'speech for 5 s', ms: 5_000, amplitude: SPEECH, kept: true },
-    { said: 'speech for 2 s', ms: 2_000, amplitude: SPEECH, kept: false },
-    { said: 'silence for 5 s', ms: 5_000, amplitude: SILENCE, kept: false },
-  ])('set aside while its last segment is still being written, $said is kept: $kept', async ({ ms, amplitude, kept }) => {
+    { said: 'speech for 5 s', ms: 5_000, amplitude: SPEECH, tail: SPEECH, kept: true },
+    { said: 'speech for 2 s', ms: 2_000, amplitude: SPEECH, tail: SPEECH, kept: false },
+    { said: 'silence for 5 s', ms: 5_000, amplitude: SILENCE, tail: SILENCE, kept: false },
+    // The audio the recorder flushes as it stops is judged with the rest.
+    { said: 'silence for 5 s, then speech in its last audio', ms: 5_000, amplitude: SILENCE, tail: SPEECH, kept: true },
+  ])('set aside while its last segment is still being written, $said is kept: $kept', async ({ ms, amplitude, tail, kept }) => {
     vi.useFakeTimers({ toFake: ['Date'] });
     setLocalSnapshotPrincipal('local');
     const finalize = vi.fn();
@@ -201,8 +202,10 @@ describe('ShowPageVoiceDictation set aside', () => {
     record(take, ms, amplitude);
     take.dictation.finish();
 
-    expect(take.dictation.setAside()).toBe(kept);
+    const decided = take.dictation.setAside();
+    take.pipeline().onPcm?.(second(tail));
     take.stop();
+    await expect(decided).resolves.toBe(kept);
     await expect(take.dictation.done).rejects.toMatchObject({ code: 'cancelled' });
     await idle();
     await vi.waitFor(async () => {

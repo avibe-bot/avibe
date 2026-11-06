@@ -1329,7 +1329,7 @@ function usePetVoice({ enabled, epoch, draft, keepTarget, onOpenComposer, onCapt
     capture.ending = true;
     capture.cancelled = true;
     captureRef.current = null;
-    if (finishing) capture.dictation.setAside();
+    if (finishing) void capture.dictation.setAside();
     else capture.dictation.abort();
     setListening(false);
     setFinishing(false);

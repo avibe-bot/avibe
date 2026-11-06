@@ -11,7 +11,6 @@ import {
   type VoiceTakeIntent,
   type VoiceTakeSegmentInfo,
 } from './voiceTakeStore';
-import { leaveVoiceTakeToReader } from './voiceTakeRetry';
 
 /** Where a kept take's words go, and how (lib/voiceTakeStore). */
 export type VoiceTakeKeep = {
@@ -107,12 +106,16 @@ export class VoiceTakeKeeper {
   }
 
   /** The reader stopped waiting for its words: it stays on the device as a pending voice item,
-   *  which this page does not transcribe on its own until the reader comes back to it. Nothing
-   *  this keeper does after this changes it. */
+   *  marked so that no page tries it on its own as it first shows it (`VoiceTake.setAside`).
+   *  Nothing this keeper does after this changes it. */
   setAside(): void {
     if (this.ended) return;
-    if (this.take.status === 'recording') this.pending();
-    leaveVoiceTakeToReader(this.take.id);
+    if (this.take.status === 'recording') {
+      this.take.status = 'pending';
+      delete this.take.text;
+    }
+    this.take.setAside = true;
+    this.save();
     this.release();
     this.ended = true;
   }

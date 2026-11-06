@@ -68,8 +68,9 @@ vi.mock('../../lib/showPageVoiceDictation', () => ({
         voiced: vi.fn(() => false),
         landed: vi.fn(),
         detach: vi.fn(),
-        // As the dictation does: its requests stop, and `done` rejects as cancelled.
-        setAside: vi.fn(() => {
+        // As the dictation does: its requests stop, `done` rejects as cancelled, and it says
+        // whether the take was kept.
+        setAside: vi.fn(async () => {
           reject(new VoiceTranscriptionError('cancelled'));
           return pipeline.keepOnSetAside;
         }),

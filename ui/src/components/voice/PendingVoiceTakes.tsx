@@ -15,7 +15,6 @@ import {
   type VoiceTake,
 } from '@/lib/voiceTakeStore';
 import {
-  firstVoiceTakeRetry,
   isRetryingVoiceTake,
   keptVoiceTakeHasAudio,
   retryKeptVoiceTake,
@@ -170,10 +169,13 @@ function useKeptVoiceTakes(target: string | null): VoiceTake[] {
   return takes.filter((take) => !isVoiceTakeLive(take.id));
 }
 
+// Takes this document has already tried on its own once since it loaded.
+const triedOnLoad = new Set<string>();
+
 /** Transcribes the kept takes that have no text yet: each once when this page first shows it
- *  (a reload is a return; not one the reader stopped waiting for here), and all of them again
- *  whenever the page comes back online or to the front. Never while the browser reports no
- *  network. */
+ *  (a reload is a return; not one the reader set aside, whose words they stopped waiting for),
+ *  and all of them again whenever the page comes back online or to the front. Never while the
+ *  browser reports no network. */
 function useAutoRetry(takes: VoiceTake[], onFailed: (id: string) => void) {
   const retryAll = useRef<(only?: (take: VoiceTake) => boolean) => void>(() => undefined);
   useEffect(() => {
@@ -185,7 +187,11 @@ function useAutoRetry(takes: VoiceTake[], onFailed: (id: string) => void) {
         void retryKeptVoiceTake(take).catch(() => onFailed(take.id));
       }
     };
-    retryAll.current((take) => firstVoiceTakeRetry(take.id));
+    retryAll.current((take) => {
+      if (take.setAside || triedOnLoad.has(take.id)) return false;
+      triedOnLoad.add(take.id);
+      return true;
+    });
   });
   useEffect(() => {
     const onOnline = () => retryAll.current();

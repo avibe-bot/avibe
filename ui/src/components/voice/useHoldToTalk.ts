@@ -518,9 +518,13 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     if (!current || phaseRef.current !== 'settling' || !finalizingRef.current) return;
     current.ending = 'cancel';
     take.current = null;
-    const kept = current.dictation.setAside();
     cancelFeedback();
-    end(kept ? 'kept' : 'cancelled');
+    end(null);
+    // Said once the take is judged (at once, or when its last audio is in), unless a new press
+    // has begun meanwhile.
+    void current.dictation.setAside().then((kept) => {
+      if (mounted.current && !take.current && phaseRef.current === 'idle') setOutcome(kept ? 'kept' : 'cancelled');
+    });
   }, [end]);
 
   const systemTook = useCallback(() => {

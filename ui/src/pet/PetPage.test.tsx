@@ -1830,7 +1830,7 @@ describe('desktop mini v2 interaction contract', () => {
   it('sets an in-flight finish aside on Escape, so Finishing does not stick and nothing said is lost', async () => {
     const done = deferred<string>();
     const abort = vi.fn();
-    const setAside = vi.fn(() => true);
+    const setAside = vi.fn(async () => true);
     class Dictation {
       done = done.promise;
       start = async () => {};
