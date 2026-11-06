@@ -275,12 +275,34 @@ def create_app(
 
         # A request or answer can carry a whole message: both codecs run off the
         # loop. The answer is encoded as the CLI prints it -- non-finite numbers
-        # included -- for this private Python client, not normalized by FastAPI.
+        # included -- for this private channel, not normalized by FastAPI.
         body = await request.body()
         payload = await asyncio.to_thread(_json_object, body)
-        response = await handle_control_request(controller, payload, run_sync=_run_store_step)
-        content = await asyncio.to_thread(_json_bytes, response)
-        return Response(content=content, media_type="application/json")
+        if payload.get("operation") != "vault.fetch.await":
+            response = await handle_control_request(controller, payload, run_sync=_run_store_step)
+            content = await asyncio.to_thread(_json_bytes, response)
+            return Response(content=content, media_type="application/json")
+
+        # Unlike an admitted mutation, an approval waiter belongs to this live
+        # connection. Losing it must release its OS lock for the existing Vault
+        # callback arbiter. The handler lands in-flight store steps before cleanup.
+        operation = asyncio.create_task(handle_control_request(controller, payload, run_sync=_run_store_step))
+
+        async def disconnect():
+            while not operation.done():
+                if await request.is_disconnected():
+                    operation.cancel()
+                    return
+                await asyncio.sleep(0.1)
+
+        monitor = asyncio.create_task(disconnect())
+        try:
+            response = await operation
+            content = await asyncio.to_thread(_json_bytes, response)
+            return Response(content=content, media_type="application/json")
+        finally:
+            monitor.cancel()
+            await asyncio.gather(monitor, return_exceptions=True)
 
     async def _off_loop(operation: Callable[[], Any]) -> tuple["asyncio.Future[Any]", bool]:
         """Run one scheduled-turn store step on the runtime-work executor, the door the

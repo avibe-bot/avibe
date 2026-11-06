@@ -142,3 +142,30 @@ def validate_result(value: object) -> dict[str, Any]:
     ):
         raise ValueError("Invalid control response; execution is unknown")
     return value
+
+
+def validate_vault_result(value: object, operation: str) -> dict[str, Any]:
+    """Validate continuation before a client can consume an approval or egress."""
+    response = validate_result(value)
+    payload = response["payload"]
+    approval = response.get("approval")
+    valid = False
+    if payload.get("kind") == "error" and payload["ok"] is False:
+        valid = "approval" not in response or (
+            operation == "vault.fetch" and response["execution"] == "not_executed"
+            and payload.get("code") == "approval_required" and isinstance(approval, dict)
+            and all(isinstance(approval.get(key), str) and approval[key] for key in ("auth", "request_id"))
+            and type(approval.get("timeout")) in {int, float}
+            and math.isfinite(approval["timeout"]) and approval["timeout"] > 0
+        )
+    elif operation == "vault.fetch" and payload.get("kind") == "vault_fetch":
+        valid = (
+            response["execution"] == "completed" and "approval" not in response
+            and isinstance(payload.get("body"), str) and type(payload.get("status")) is int
+            and payload["ok"] == (200 <= payload["status"] <= 299)
+        )
+    elif operation == "vault.fetch.await" and payload.get("kind") == "vault_fetch_approved":
+        valid = response["execution"] == "not_executed" and payload["ok"] is True and "approval" not in response
+    if not valid:
+        raise ValueError("Invalid Vault response; execution/continuation ownership is unknown")
+    return response

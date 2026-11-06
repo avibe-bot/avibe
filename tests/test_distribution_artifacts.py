@@ -61,6 +61,8 @@ def _assert_members_and_metadata(members, metadata):
         "core/controller.py",
         "vibe/show_runtime_manifest.json",
         "vibe/show_router.tsx",
+        "vibe/show_server/vault.mjs",
+        "vibe/show_server/vault.d.ts",
         "vibe/ui/dist/index.html",
         "vibe/computer_sdk/index.mjs",
         "vibe/computer_sdk/index.d.ts",

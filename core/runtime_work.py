@@ -27,14 +27,16 @@ logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
 
 
-async def land_step(step: Awaitable[_T]) -> tuple[asyncio.Future[_T], bool]:
+async def land_step(step: Awaitable[_T], *, on_cancel: Callable[[], None] | None = None) -> tuple[asyncio.Future[_T], bool]:
     """Wait for one store step to finish, whatever cancels the caller meanwhile.
 
     A Python thread cannot be cancelled safely, and a step a cancellation split would
     leave what it committed unowned, so the step is never cancelled: every
     cancellation that reaches the caller meanwhile is caught instead. Returns the
     finished step, whose ``result()`` gives its outcome, and whether a cancellation
-    was caught, for the caller to answer from that outcome.
+    was caught, for the caller to answer from that outcome. ``on_cancel`` can
+    fence work that is still queued before it acquires ownership; cleanup and
+    already-started work must still land.
     """
 
     future = asyncio.ensure_future(step)
@@ -45,6 +47,8 @@ async def land_step(step: Awaitable[_T]) -> tuple[asyncio.Future[_T], bool]:
             await asyncio.wait((future,))
         except asyncio.CancelledError:
             cancelled = True
+            if on_cancel is not None:
+                on_cancel()
     return future, cancelled
 
 

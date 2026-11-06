@@ -2,7 +2,7 @@
 name: use-show-pages
 slug: use-show-pages
 description: Build, inspect, update, restore, or share Avibe Show Pages for visual explanations, diagrams, reports, or interactive prototypes. Covers the page workspace and its Git history.
-version: 0.4.0
+version: 0.5.0
 ---
 
 # Use Show Pages
@@ -37,6 +37,13 @@ For more usage details, run `vibe show --help` or a subcommand help such as `vib
 
 For live runtime, visibility, and URL availability, treat
 `vibe show status` and the relevant command output as authoritative.
+
+### Vault fetch from server handlers
+
+For credentialed HTTP requests in `api/*.ts`, use the Node-only
+[server Vault adapter](references/vault-fetch.md) instead of spawning
+`vibe vault fetch` for every request. It preserves Vault custody and checks;
+it is never a browser import or a way to publish credentials.
 
 ### Public server-to-server handlers
 

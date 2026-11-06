@@ -407,6 +407,28 @@ vibe doctor repair tmux --yes
 - `vibe doctor --deep` 还会在不下载正文的情况下探测缺失依赖的精确地址
 - 托管下载会对临时 HTTP、DNS、超时和连接故障执行有界退避重试
 
+### `vibe vault fetch`
+
+通过 avault 发出带凭据的 HTTP 请求，不返回凭据本身：
+
+```bash
+vibe vault fetch --auth GITHUB_API.token --url https://api.github.com/user
+```
+
+CLI 是常驻 Avibe 服务的轻客户端，不打开 SQLite 连接。调用进程负责读取
+`--data-file`、检查和写入 `--output`，并输出上游响应正文。非 2xx 响应仍输出
+正文，但退出码为 1。现有域名策略、保护级批准、一次性授权和审计规则不变。
+
+服务未启动或版本过旧时，返回 `service_unavailable` 和
+`execution: not_executed`。需要明确启动或更新服务，不会离线回退或自动启动。
+请求发出后响应丢失或格式错误时，结果为 `execution_unknown`，不能自动重试。
+批准等待沿用现有 callback 仲裁；如果批准完成的响应在下一次 fetch 前丢失，
+可能既不会自动执行 fetch，也不会再收到 callback。应检查请求和上游状态，
+不要重新争用这一条 continuation。
+
+Show 的 `api/*.ts` handler 可使用 `use-show-pages` Skill 介绍的 Node 服务端
+适配器，避免每次请求都启动 CLI 进程。已有页面不会自动改写。
+
 ### `vibe vault key authorize`
 
 授权 avault 一次，让它读取这台 Mac 钥匙串中的 Vault 密钥。

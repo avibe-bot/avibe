@@ -529,6 +529,31 @@ vibe doctor repair tmux --yes
 - `vibe doctor --deep` also probes missing dependencies without downloading their bodies
 - managed downloads retry transient HTTP, DNS, timeout, and connection failures with bounded backoff
 
+### `vibe vault fetch`
+
+Make a credentialed HTTP request through avault without returning the secret:
+
+```bash
+vibe vault fetch --auth GITHUB_API.token --url https://api.github.com/user
+```
+
+The CLI is a thin client of the running Avibe service; it opens no SQLite
+connection. The calling process reads `--data-file`, validates/writes `--output`,
+and prints the upstream body. Non-2xx responses still print their body and exit 1.
+Existing host policies, protected approvals, one-shot grants and audits apply.
+
+A missing or older service returns `service_unavailable` with
+`execution: not_executed`. Start/update it explicitly; there is no offline
+fallback or automatic start. A lost or malformed post-send response is
+`execution_unknown`, never a reason to retry automatically. Approval waits use
+the existing callback arbitration; an approval-completion response lost before
+the next fetch may leave neither an automatic fetch nor a callback. Inspect the
+request/upstream state rather than re-arming that continuation.
+
+For Show `api/*.ts` handlers, the `use-show-pages` Skill documents the Node-only
+server adapter, which avoids starting a CLI process for each request. Existing
+pages are not rewritten automatically.
+
 ### `vibe vault key authorize`
 
 Authorize avault, once, to read the Vault key in this Mac's Keychain.

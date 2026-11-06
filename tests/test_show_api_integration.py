@@ -166,3 +166,89 @@ async def test_real_ui_runtime_signed_handler_inbox(tmp_path, monkeypatch):
         manager.stop()
         proxy.close()
         await proxy.wait_closed()
+
+
+async def test_real_vite_handler_imports_shipped_vault_adapter(tmp_path, monkeypatch):
+    """Real pinned Vite -> Node helper -> private control -> policy/audit path.
+
+    Only avault egress is stubbed; file-URL SSR import and browser isolation
+    cannot be established by the plain-Node adapter tests.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from core import control_ipc
+    from core.internal_server import create_app
+    from storage import vault_service
+    from storage.vault_crypto import Sealed
+    from vibe import api, cli as vibe_cli, internal_client
+
+    configured = os.environ.get("AVIBE_SHOW_API_RUNTIME_ROOT")
+    if not configured:
+        pytest.skip("Real Runtime is exercised by the pinned show-router-integration CI job")
+    runtime = Path(configured).resolve()
+    assert subprocess.check_output(["git", "-C", str(runtime), "rev-parse", "HEAD"], text=True).strip() == RUNTIME_SHA
+    runtime_cli = runtime / "packages/runtime/dist/cli.js"
+    ingress = create_ingress(tmp_path)
+    (ingress.workspace / "api/vault.ts").write_text(textwrap.dedent('''\
+        export async function POST(request: Request, context) {
+          const { vaultFetch } = await import(/* @vite-ignore */ process.env.AVIBE_SHOW_SERVER_MODULE!)
+          const result = await vaultFetch({auth: "SYNTHETIC", url: "https://api.example.com", noApprovalWait: true}, {
+            cwd: context.session.workspace, callerEnv: {AVIBE_SESSION_ID: context.session.id}, signal: request.signal
+          })
+          if (result.payload.kind !== "vault_fetch") return Response.json({code: result.payload.code}, {status: 503})
+          return new Response(result.payload.body, {status: result.payload.status})
+        }
+    '''))
+    with vibe_cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="SYNTHETIC", sealed=Sealed(ciphertext="synthetic", nonce="n", wrap_meta="w"),
+                                    policy={"allowed_hosts": ["api.example.com"]})
+    fetch = Mock(return_value={"status": 202, "headers": {}, "body": "accepted upstream"})
+    monkeypatch.setattr(api, "avault_deliver_fetch", fetch)
+    safe_env = {name: os.environ[name] for name in (
+        "PATH", "HOME", "AVIBE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME",
+    )}
+    for name in tuple(os.environ):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in safe_env.items():
+        monkeypatch.setenv(name, value)
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    descriptor = control_ipc.ControlIpcDescriptor(
+        schema_version=1, transport="tcp", host="127.0.0.1", port=listener.getsockname()[1],
+        instance_id="c" * 32, bearer_token="synthetic-private-control-token-" + "x" * 32,
+    )
+    endpoint = control_ipc.ControlIpcClientEndpoint(transport="tcp", descriptor=descriptor)
+    monkeypatch.setattr(internal_client, "resolve_control_endpoint", lambda: endpoint)
+    server = uvicorn.Server(uvicorn.Config(create_app(SimpleNamespace(), instance_id=descriptor.instance_id,
+                                                     bearer_token=descriptor.bearer_token), lifespan="off", log_level="error"))
+    serving = asyncio.create_task(server.serve(sockets=[listener]))
+    manager = show_runtime.ShowRuntimeManager(
+        command=shlex.join([shutil.which("node"), str(runtime_cli)]), workspace_root=paths.get_show_pages_dir(),
+        runtime_dir=tmp_path / "runtime", auto_install=False, offline=True,
+    )
+    envelope = show_runtime.ShowRuntimeProtocolEnvelope(show_runtime.ShowRuntimeContext.PRIVATE)
+    try:
+        for _ in range(100):
+            if server.started:
+                break
+            await asyncio.sleep(0.02)
+        assert server.started
+        ready = await manager.ensure()
+        assert ready.available, ready.reason
+        response = await manager.request("POST", f"/sessions/{ingress.page.session_id}/app/api/vault", envelope=envelope)
+        assert response.status_code == 202, response.text
+        assert response.text == "accepted upstream"
+        fetch.assert_called_once()
+        assert fetch.call_args.args[2]["allowed_hosts"] == ["api.example.com"]
+        with vibe_cli._open_vault_engine().connect() as conn:
+            assert vault_service.get_secret_meta(conn, "SYNTHETIC")["use_count"] == 1
+        snapshot = manager._vault_snapshot.path
+        leak = await manager.request("GET", f"/sessions/{ingress.page.session_id}/app/@fs/{str(snapshot).lstrip('/')}", envelope=envelope)
+        assert leak.status_code in {403, 404}, leak.text
+        assert descriptor.bearer_token not in leak.text
+    finally:
+        manager.stop()
+        server.should_exit = True
+        await asyncio.wait_for(serving, 10)
+        listener.close()
