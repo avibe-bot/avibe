@@ -2199,9 +2199,7 @@ def _default_timezone_name() -> str:
     return "UTC"
 
 
-def _resolve_message_input(
-    args, *, help_command: str, example_command: str, invocation_cwd: str | None = None,
-) -> str:
+def _resolve_message_input(args, *, help_command: str, example_command: str) -> str:
     message = (getattr(args, "message", None) or "").strip()
     message_file = getattr(args, "message_file", None)
     if message and message_file:
@@ -2222,10 +2220,7 @@ def _resolve_message_input(
         )
     if message_file:
         try:
-            input_path = Path(message_file)
-            if invocation_cwd is not None and not input_path.is_absolute():
-                input_path = Path(invocation_cwd) / input_path
-            content = input_path.read_text(encoding="utf-8").strip()
+            content = Path(message_file).read_text(encoding="utf-8").strip()
         except OSError as exc:
             raise TaskCliError(
                 f"failed to read message file: {exc}",
@@ -6289,7 +6284,10 @@ def _resolve_run_cwd(
             )
         return None
     if raw:
-        resolved = os.path.abspath(os.path.join(invocation_cwd or os.getcwd(), os.path.expanduser(raw)))
+        expanded = os.path.expanduser(raw)
+        if not os.path.isabs(expanded) and invocation_cwd == "":
+            raise TaskCliError("The invocation working directory is unavailable", code="cwd_not_found", help_command=help_command)
+        resolved = os.path.abspath(os.path.join(invocation_cwd or os.getcwd(), expanded))
         if not os.path.isdir(resolved):
             raise TaskCliError(
                 f"--cwd directory does not exist: {resolved}",
@@ -6300,6 +6298,8 @@ def _resolve_run_cwd(
         return resolved
     if scoped_session:
         return None
+    if invocation_cwd_default and invocation_cwd == "":
+        raise TaskCliError("The invocation working directory is unavailable", code="cwd_not_found", help_command=help_command)
     return (invocation_cwd or os.getcwd()) if invocation_cwd_default else None
 
 
@@ -6963,7 +6963,19 @@ def cmd_agent_run(args):
     from core.control_requests import ADMISSION_SECONDS, failure, new_request
     from vibe import internal_client
 
-    request = new_request("agent.run", vars(args))
+    arguments = dict(vars(args))
+    if arguments.get("message_file"):
+        # /dev/stdin and /dev/fd/N name this process's descriptors, not the
+        # service's. Materialize here, but let service admission (and Bot target
+        # resolution) still precede reporting a file/input error as before.
+        try:
+            arguments["message"] = _resolve_message_input(
+                args, help_command="vibe agent run --help", example_command="vibe agent run --agent default",
+            )
+        except Exception as exc:
+            arguments["message_input_error"] = _task_error_payload(exc, help_command="vibe agent run --help")
+        arguments["message_file"] = None
+    request = new_request("agent.run", arguments)
     wait = getattr(args, "wait_timeout", None)
     wait = wait if isinstance(wait, (int, float)) and math.isfinite(wait) else 1800.0
     timeout = ADMISSION_SECONDS + (max(0, wait) if getattr(args, "sync_run", False) else 0) + 5.0
@@ -7004,11 +7016,17 @@ def _enqueue_agent_run(args, *, caller_env, invocation_cwd, agent_store, request
         caller_context = caller_context_from_env(caller_env)
         visibility = (getattr(args, "visibility", None) or "background").strip()
         run_async = _agent_run_is_async(args)
+        input_error = getattr(args, "message_input_error", None)
+        if input_error is not None:
+            raise TaskCliError(
+                input_error["error"], code=input_error["code"], hint=input_error.get("hint"),
+                example=input_error.get("example"), help_command=input_error.get("help_command"),
+                details=input_error.get("details"),
+            )
         message = _resolve_message_input(
             args,
             help_command="vibe agent run --help",
             example_command="vibe agent run --agent default",
-            invocation_cwd=invocation_cwd,
         )
         session_policy = _validate_run_session_policy(args, help_command="vibe agent run --help")
         delivery_intent = (

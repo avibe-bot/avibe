@@ -712,6 +712,15 @@ for one that already exists.
 Run an Agent directly. Runs are async by default and do not store a scheduled
 task definition. Use `--sync` only when the terminal should wait for completion.
 
+This command requires a running Avibe service that supports control requests;
+it does not enqueue offline or start the service automatically. A
+`service_unavailable` error with `execution: not_executed` means there was no
+handoff. Start or update the service explicitly before trying again.
+`execution_unknown` means submission may have succeeded but its response could
+not be confirmed: inspect `vibe runs list` before submitting new work, rather
+than blindly retrying. The CLI reads `--message-file` itself, including caller
+stdin and shell process-substitution descriptors.
+
 ```bash
 vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
 vibe agent run --callback --agent release-reviewer --message 'Review the latest deployment result and send me the findings.'

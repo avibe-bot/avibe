@@ -23,7 +23,7 @@ _AGENT_RUN_BOOLS = frozenset({
 
 def _agent_run_arguments(arguments: dict[str, Any]) -> Namespace:
     defaults = {**dict.fromkeys(_AGENT_RUN_STRINGS), **dict.fromkeys(_AGENT_RUN_BOOLS, False), "wait_timeout": None}
-    allowed = {*defaults, "command", "agent_command"}
+    allowed = {*defaults, "command", "agent_command", "message_input_error"}
     if arguments.keys() - allowed:
         raise ValueError("Unknown Agent Run arguments")
     values = {**defaults, **arguments}
@@ -34,6 +34,17 @@ def _agent_run_arguments(arguments: dict[str, Any]) -> Namespace:
         or values.get("agent_command", "run") != "run"
     ):
         raise ValueError("Invalid Agent Run arguments")
+    if values["message_file"] is not None:
+        raise ValueError("Message files must be read by the invoking client")
+    input_error = values.get("message_input_error")
+    if input_error is not None and (
+        not isinstance(input_error, dict)
+        or any(not isinstance(input_error.get(key), str) for key in ("code", "error"))
+        or any(input_error.get(key) is not None and not isinstance(input_error[key], str)
+               for key in ("hint", "example", "help_command"))
+        or (input_error.get("details") is not None and not isinstance(input_error["details"], dict))
+    ):
+        raise ValueError("Invalid message input error")
     wait = values["wait_timeout"]
     if wait is not None and (type(wait) not in {int, float} or not math.isfinite(wait)):
         raise ValueError("Invalid Agent Run wait timeout")

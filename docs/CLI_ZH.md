@@ -574,6 +574,12 @@ Session，且在目标 Session 已存在时仍然会被拒绝。
 直接运行一个 Agent。Run 默认异步，并且不会创建持久化任务定义。只有终端需要等待完成时才使用
 `--sync`。
 
+此命令需要正在运行且支持控制请求的 Avibe 服务；服务停止时不会离线入队，也不会自动
+启动服务。`service_unavailable` 错误中的 `execution: not_executed` 表示没有发生交接，
+请明确启动或更新服务后再试。`execution_unknown` 表示请求可能已提交成功，只是无法
+确认响应：先用 `vibe runs list` 检查状态，不要盲目重试。`--message-file` 由 CLI
+自身读取，包括调用方的 stdin 和 shell 进程替换文件描述符。
+
 ```bash
 vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
 vibe agent run --callback --agent release-reviewer --message 'Review the latest deployment result and send me the findings.'

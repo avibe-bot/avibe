@@ -42,6 +42,8 @@ from storage.sessions_service import SQLiteSessionsService
 from storage.workbench_sessions_service import create_session
 from vibe import cli
 
+pytestmark = pytest.mark.usefixtures("in_process_cli_control")
+
 from tests.scenarios.permissions.test_cli_invocation_authority import (
     _INSTANCE_ID,
     _pair_instance,

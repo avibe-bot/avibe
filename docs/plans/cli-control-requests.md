@@ -12,6 +12,9 @@ Performance only; the invocation context is not a security boundary.
   `CALLER_CONTEXT_ENV_NAMES` fields, the invocation cwd and an admission deadline.
   The controller applies the same command and resource checks. It never mutates
   process-wide environment, cwd or standard streams to impersonate a request.
+  File inputs are materialized by the CLI (including stdin/process substitution);
+  an input error is delivered only after the existing admission/target checks.
+  An unavailable invocation cwd is explicit and only refused when actually needed.
 - The controller's existing Agent and execution stores own enqueue. Blocking
   preparation and state access run on the existing runtime-work executor.
   Sync waits sleep asynchronously and only dispatch bounded reads to threads.

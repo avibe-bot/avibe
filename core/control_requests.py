@@ -44,7 +44,7 @@ class ControlRequest:
             or not isinstance(caller_env, dict)
             or any(k not in CALLER_CONTEXT_ENV_NAMES or not isinstance(v, str) for k, v in caller_env.items())
             or not isinstance(cwd, str)
-            or not os.path.isabs(cwd)
+            or (cwd != "" and not os.path.isabs(cwd))
             or isinstance(deadline, bool)
             or not isinstance(deadline, (int, float))
             or not math.isfinite(deadline)
@@ -58,11 +58,18 @@ class ControlRequest:
 
 
 def new_request(operation: str, arguments: Mapping[str, Any]) -> ControlRequest:
+    try:
+        cwd = os.getcwd()
+    except OSError:
+        # Existing/forked Sessions do not need the caller cwd. Preserve that
+        # behavior after a shell's worktree is removed; only a consumer that
+        # actually needs this directory refuses the empty unavailable marker.
+        cwd = ""
     return ControlRequest(
         operation=operation,
         arguments=dict(arguments),
         caller_env={key: os.environ[key] for key in CALLER_CONTEXT_ENV_NAMES if key in os.environ},
-        cwd=os.getcwd(),
+        cwd=cwd,
         deadline=time.time() + ADMISSION_SECONDS,
     )
 
@@ -73,7 +80,7 @@ def result(payload: dict[str, Any], *, execution: str = "completed") -> dict[str
 
 def failure(code: str, message: str, *, execution: str = "not_executed") -> dict[str, Any]:
     hint = (
-        "The operation was not executed. Start Avibe explicitly before trying again."
+        "The operation was not executed. Start Avibe explicitly, or update an older running service, before trying again."
         if code == "service_unavailable"
         else "Do not retry blindly; inspect the resulting state before submitting new work."
         if execution == "execution_unknown"

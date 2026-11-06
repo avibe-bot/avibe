@@ -130,6 +130,111 @@ def test_control_preparation_failure_is_not_executed(monkeypatch, capsys):
     assert json.loads(capsys.readouterr().err)["execution"] == "not_executed"
 
 
+@pytest.mark.parametrize("source_kind", ["file", "stdin", "fd"])
+def test_message_file_is_materialized_in_the_client(monkeypatch, tmp_path, capsys, source_kind):
+    """stdin/process-substitution descriptors belong to the CLI, not the service."""
+    if source_kind != "file" and os.name == "nt":
+        pytest.skip("POSIX descriptor paths")
+    attempts = _no_sqlite(monkeypatch)
+    text = "report from caller: 完成"
+    input_path = tmp_path / "message.txt"
+    input_path.write_text(text, encoding="utf-8")
+    reader = writer = saved_stdin = None
+    try:
+        if source_kind != "file":
+            reader, writer = os.pipe()
+            os.write(writer, text.encode("utf-8"))
+            os.close(writer)
+            writer = None
+            if source_kind == "stdin":
+                saved_stdin = os.dup(0)
+                os.dup2(reader, 0)
+                input_path = Path("/dev/stdin")
+            else:
+                input_path = Path(f"/dev/fd/{reader}")
+
+        def receive(request):
+            arguments = json.loads(request.content)["arguments"]
+            assert arguments["message"] == text
+            assert arguments["message_file"] is None
+            return httpx.Response(200, json=result({"ok": True, "kind": "agent_run", "run": {"id": "run-1"}}))
+
+        _transport(monkeypatch, receive)
+        args = cli.build_parser().parse_args(["agent", "run", "--agent", "worker", "--message-file", str(input_path)])
+        assert cli.cmd_agent_run(args) == 0
+        assert json.loads(capsys.readouterr().out)["run"]["id"] == "run-1"
+        assert attempts == []
+    finally:
+        if saved_stdin is not None:
+            os.dup2(saved_stdin, 0)
+            os.close(saved_stdin)
+        for fd in (reader, writer):
+            if fd is not None:
+                os.close(fd)
+
+
+def test_preparing_a_file_error_keeps_the_client_db_free(monkeypatch, tmp_path, capsys):
+    attempts = _no_sqlite(monkeypatch)
+
+    def receive(request):
+        error = json.loads(request.content)["arguments"]["message_input_error"]
+        assert error["code"] == "message_file_read_failed"
+        return httpx.Response(200, json=result(error))
+
+    _transport(monkeypatch, receive)
+    args = cli.build_parser().parse_args([
+        "agent", "run", "--agent", "worker", "--message-file", str(tmp_path / "missing.txt"),
+    ])
+    assert cli.cmd_agent_run(args) == 1
+    assert json.loads(capsys.readouterr().err)["code"] == "message_file_read_failed"
+    assert attempts == []
+
+
+@pytest.mark.parametrize("remote", [False, True])
+def test_file_error_preserves_service_admission_precedence(in_process_cli_control, monkeypatch, tmp_path, capsys, remote):
+    if remote:
+        monkeypatch.setenv("AVIBE_CALLER_REMOTE", "1")
+    args = cli.build_parser().parse_args([
+        "agent", "run", "--agent", "worker", "--message-file", str(tmp_path / "missing.txt"),
+    ])
+    assert cli.cmd_agent_run(args) == 1
+    payload = json.loads(capsys.readouterr().err)
+    assert payload["code"] == ("instance_access_forbidden" if remote else "message_file_read_failed")
+
+
+@pytest.mark.asyncio
+async def test_service_refuses_unmaterialized_descriptor_input():
+    request = new_request("agent.run", {"agent": "worker", "message_file": "/dev/stdin"})
+    response = await handle_control_request(object(), request.to_payload())
+    assert response["execution"] == "not_executed"
+    assert response["payload"]["code"] == "invalid_control_request"
+
+
+@pytest.mark.asyncio
+async def test_deleted_invocation_cwd_only_refuses_operations_that_need_it(warm_controller, monkeypatch, tmp_path):
+    from core.services.sessions import reserve_standalone_agent_session
+
+    agent = warm_controller.vibe_agent_store.require("worker")
+    session_id = reserve_standalone_agent_session(
+        agent_backend="codex", session_anchor="deleted-cwd", agent_id=agent.id,
+        agent_name=agent.name, model=agent.model, workdir=str(tmp_path),
+    )
+
+    def unavailable():
+        raise FileNotFoundError("invocation cwd was removed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "getcwd", unavailable)
+        request = new_request("agent.run", {"session_id": session_id, "message": "hi"})
+        relative = new_request("agent.run", {"agent": "worker", "cwd": ".", "message": "hi"})
+    assert request.cwd == ""
+    response = await handle_control_request(warm_controller, request.to_payload())
+    assert response["exit_code"] == 0, response
+    assert response["payload"]["run"]["session_id"] == session_id
+    refused = await handle_control_request(warm_controller, relative.to_payload())
+    assert refused["payload"]["code"] == "cwd_not_found"
+
+
 def test_agent_run_wire_fields_cover_parser_arguments():
     args = cli.build_parser().parse_args(["agent", "run", "--agent", "worker", "--message", "hi"])
     decoded = _agent_run_arguments(vars(args))
@@ -185,7 +290,7 @@ async def test_concurrent_requests_keep_caller_cwd_message_and_warm_store_isolat
             agent_name=agent.name, model=agent.model, workdir=str(cwd),
         )
         requests.append(ControlRequest(
-            "agent.run", {"agent": "worker", "message_file": "message.txt"},
+            "agent.run", {"agent": "worker", "message": f"message-{index}"},
             {"AVIBE_SESSION_ID": source, "AVIBE_RUN_ID": f"parent-{index}"}, str(cwd), time.time() + 30,
         ))
     env_before, cwd_before = dict(os.environ), os.getcwd()
