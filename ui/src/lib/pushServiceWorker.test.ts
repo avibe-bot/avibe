@@ -188,6 +188,52 @@ describe('push service worker notification launches', () => {
     });
   });
 
+  // iOS cannot route a tap through notificationclick reliably (WebKit 252544,
+  // 259212, 268797, 279456), so the notification itself names where a tap opens.
+  it.each([
+    ['/chat/session-1?msg=msg-1&from=notification', 'https://avibe.local/chat/session-1?msg=msg-1&from=notification'],
+    [undefined, 'https://avibe.local/inbox'],
+    ['https://elsewhere.example/chat/session-1', 'https://avibe.local/inbox'],
+  ])('lets the platform open a tap on %s at %s', async (url, navigate) => {
+    const source = await readFile(new URL('../../public/push-sw.js', import.meta.url), 'utf8');
+    const handlers = new Map<string, (event: unknown) => void>();
+    const showNotification = vi.fn(async () => {});
+    const worker = {
+      location: { origin: 'https://avibe.local' },
+      clients: { matchAll: vi.fn(async () => []) },
+      registration: { showNotification },
+      addEventListener: (type: string, handler: (event: unknown) => void) => handlers.set(type, handler),
+    };
+    runInNewContext(source, { self: worker, navigator: {}, URL, Response, Date, Number, JSON, Promise });
+
+    let completion: Promise<unknown> | undefined;
+    handlers.get('push')?.({
+      data: { json: () => ({ title: 'Avibe', url }) },
+      waitUntil: (promise: Promise<unknown>) => { completion = promise; },
+    });
+    await completion;
+
+    expect(showNotification).toHaveBeenCalledWith('Avibe', expect.objectContaining({ navigate }));
+  });
+
+  it('takes over from an older worker without waiting for a suspended app to close', async () => {
+    const source = await readFile(new URL('../../public/push-sw.js', import.meta.url), 'utf8');
+    const handlers = new Map<string, (event: unknown) => void>();
+    const skipWaiting = vi.fn(async () => {});
+    const worker = {
+      location: { origin: 'https://avibe.local' },
+      skipWaiting,
+      addEventListener: (type: string, handler: (event: unknown) => void) => handlers.set(type, handler),
+    };
+    runInNewContext(source, { self: worker, navigator: {}, URL, Response, Date, Number, JSON, Promise });
+
+    let completion: Promise<unknown> | undefined;
+    handlers.get('install')?.({ waitUntil: (promise: Promise<unknown>) => { completion = promise; } });
+    await completion;
+
+    expect(skipWaiting).toHaveBeenCalledOnce();
+  });
+
   it('uses current server unread count instead of a delayed push count for the app badge', async () => {
     const source = await readFile(new URL('../../public/push-sw.js', import.meta.url), 'utf8');
     const handlers = new Map<string, (event: unknown) => void>();

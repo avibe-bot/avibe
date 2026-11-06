@@ -208,7 +208,8 @@ Responsibilities:
 - Call `self.registration.showNotification(title, options)`.
 - Update badge when supported (`navigator.setAppBadge` is page-side; service
   worker support differs, so keep badge best-effort).
-- Listen for `notificationclick`.
+- Show every notification with `navigate` set to its absolute target URL.
+- Listen for `notificationclick` for engines that ignore `navigate`.
 - Focus an existing client if available; otherwise open the target URL.
 
 Payload shape:
@@ -217,11 +218,45 @@ Payload shape:
 {
   "title": "Agent replied",
   "body": "Short preview text",
-  "url": "/sessions/<session_id>",
+  "url": "/chat/<session_id>?msg=<message_id>&from=notification",
   "tag": "session:<session_id>",
+  "message_id": "<message_id>",
+  "session_id": "<session_id>",
   "badge_count": 3
 }
 ```
+
+A notice without a session opens `/harness`; anything that is not a
+same-origin path opens `/inbox`.
+
+### Notification taps
+
+A tap opens the exact chat, scrolled to the notified message (`msg`, the same
+deep-link anchor Search uses). When that chat is gone or not readable for the
+reader (bootstrap 404/403), `from=notification` makes ChatPage replace the route
+with the Inbox instead of showing an error.
+
+iOS Home Screen apps cannot route a tap through `notificationclick`
+reliably: iOS launches the app at the manifest start URL, a suspended client
+can reject `focus()` or miss `postMessage`, the worker that handles the click
+may not reach a client the user launched, and `openWindow()` can resolve before
+its client is live (WebKit 252544, 259212, 268797, 279456). The page used to
+read the Cache Storage handoff once per launch or resume, so a handoff written
+after that read was missed and the app stayed on its last page.
+
+Safari 18.4 and later, including iOS Home Screen apps, open a notification's
+`navigate` URL themselves on a tap, cold or suspended, and do not fire
+`notificationclick`. The page then loads at the target, so nothing else is
+shown first. Chromium ignores `navigate`; its taps still focus a window and
+post `vibe.notification-click`, or open the target, with the Cache Storage
+handoff as before. iOS before 18.4 keeps that best-effort path.
+
+The worker calls `skipWaiting()` on install. It has no fetch handler, and a
+suspended Home Screen app would otherwise keep an older worker until killed.
+
+The UI server logs `web push: notification opened <path> msg=<id>` when a
+document loads with `from=notification`, which is the device-side evidence that
+the platform opened the tapped URL.
 
 ### App registration
 

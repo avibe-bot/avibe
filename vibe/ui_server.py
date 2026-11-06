@@ -18360,6 +18360,14 @@ def serve_static(path):
     if "." not in path:
         index_path = ui_dist / "index.html"
         if index_path.exists():
+            if request.args.get("from") == "notification":
+                # The platform opened a tapped notification's own URL
+                # (push-sw.js ``navigate``). Ids and paths only.
+                logger.info(
+                    "web push: notification opened %r msg=%r",
+                    f"/{path}"[:200],
+                    (request.args.get("msg") or "")[:80],
+                )
             ui_asset_archive.record_served_build(ui_dist)
             return _ui_static_file_response(
                 index_path,

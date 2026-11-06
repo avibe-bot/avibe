@@ -278,12 +278,13 @@ def test_maybe_notify_inbox_message_schedules_agent_result(monkeypatch):
     )
 
     # badge_count is intentionally NOT set at schedule time. It is computed for
-    # each subscription owner after the debounce delay.
+    # each subscription owner after the debounce delay. A tap opens the chat at
+    # this message, marked so that a vanished chat falls back to the Inbox.
     assert calls == [
         {
             "title": "Build fix",
             "body": "Done",
-            "url": "/chat/ses_1",
+            "url": "/chat/ses_1?msg=msg_1&from=notification",
             "tag": "session:ses_1",
             "message_id": "msg_1",
             "session_id": "ses_1",

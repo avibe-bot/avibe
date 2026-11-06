@@ -772,6 +772,35 @@ describe('ChatPage transcript hydration', () => {
     expect(screen.queryByText('chat.transcriptEmpty')).toBeNull();
   });
 
+  // A notification can outlive its chat; its tap must not strand the reader on
+  // an error. Any other refusal, or the same refusal for an ordinary link, keeps
+  // the error view.
+  it.each([
+    [404, '?msg=msg-1&from=notification', true],
+    [403, '?from=notification', true],
+    [404, '?msg=msg-1', false],
+    [500, '?msg=msg-1&from=notification', false],
+  ])('answers a %i bootstrap for /chat/session-gone%s with the Inbox: %s', async (status, search, toInbox) => {
+    mocks.api.getSessionBootstrap.mockRejectedValue(Object.assign(new Error('chat refused'), { status }));
+
+    render(
+      <MemoryRouter initialEntries={[`/chat/session-gone${search}`]}>
+        <Routes>
+          <Route path="/chat/:sessionId" element={<ChatPage />} />
+          <Route path="/inbox" element={<p>inbox page</p>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    if (toInbox) {
+      expect(await screen.findByText('inbox page')).toBeTruthy();
+      expect(screen.queryByText('chat refused')).toBeNull();
+    } else {
+      expect(await screen.findByText('chat refused')).toBeTruthy();
+      expect(screen.queryByText('inbox page')).toBeNull();
+    }
+  });
+
   it('ignores a bootstrap failure after a newer same-route refresh starts', async () => {
     const staleBootstrap = deferred<never>();
     const currentBootstrap = deferred<never>();

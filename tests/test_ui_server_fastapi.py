@@ -2843,6 +2843,25 @@ def test_static_ui_assets_use_cache_headers(monkeypatch, tmp_path):
     assert spa_response.headers["Cache-Control"] == "no-store, private"
 
 
+def test_spa_load_opened_by_a_notification_is_logged(monkeypatch, tmp_path, caplog):
+    # The only server-side trace that a platform opened a tapped notification's
+    # URL itself: owner device checks read it instead of describing what they saw.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    ui_dist = tmp_path / "dist"
+    ui_dist.mkdir()
+    (ui_dist / "index.html").write_text("<html></html>", encoding="utf-8")
+    monkeypatch.setattr(ui_server, "get_ui_dist_path", lambda: ui_dist)
+
+    client = app.test_client()
+    with caplog.at_level("INFO", logger=ui_server.logger.name):
+        assert client.get("/chat/ses_1?msg=msg_1&from=notification").status_code == 200
+        assert client.get("/chat/ses_2?msg=msg_2").status_code == 200
+
+    assert [r.getMessage() for r in caplog.records if "notification opened" in r.getMessage()] == [
+        "web push: notification opened '/chat/ses_1' msg='msg_1'"
+    ]
+
+
 def test_static_ui_serves_previous_build_chunks_after_upgrade(monkeypatch, tmp_path):
     # An upgrade replaces ui/dist wholesale. A page loaded before it keeps
     # requesting its own build's hashed chunks; the previous build must stay
