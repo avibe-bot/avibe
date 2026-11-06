@@ -1,6 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
 
-import { blockWebFonts } from './fonts';
 import type { LabFrame, LabWrite } from './recorder';
 
 // The conversation's motion (docs/plans/web-ui-motion.md M1–M4) on the shipped ChatPage (fixture.tsx),
@@ -13,7 +12,6 @@ const transcript = (page: Page) => page.getByTestId('chat-transcript');
 async function open(page: Page, query: string) {
   // No request from this page may reach a running Avibe service.
   await page.route('**/api/**', (route) => route.fulfill({ status: 503, json: { error: 'No backend in this fixture' } }));
-  await blockWebFonts(page);
   await page.goto(`/e2e/chat-scroll/fixture.html?images=0&${query}`);
   await expect(transcript(page).locator('[data-message-id]').first()).toBeVisible();
   await expect.poll(() => fromBottom(page)).toBeLessThan(1);
