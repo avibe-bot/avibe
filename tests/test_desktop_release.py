@@ -771,6 +771,31 @@ def test_workflow_signs_every_macos_layer_before_recording():
     assert "AVIBE_COMPUTER_USE_SNAPSHOT_PATH" not in workflow_text
 
 
+# Cargo subcommands that resolve the dependency graph, and so read Cargo.lock.
+_RESOLVING_CARGO = re.compile(r"\bcargo\s+(?:build|check|clippy|test|run|bench|doc|metadata|tree|install)\b([^\n;&|]*)")
+# `tauri build` runs `cargo build`; arguments after its own `--` go to cargo.
+_TAURI_BUILD = re.compile(r"\btauri\s+--\s+build\b([^\n;&|]*)")
+
+
+def test_every_workflow_cargo_step_refuses_a_stale_lock():
+    """Without --locked, cargo rewrites a Cargo.lock that no longer matches the manifests and
+    passes; the release's `cargo run --locked` then fails (rc14). Every workflow step that
+    resolves the graph must refuse instead, so the stale lock fails the pull request."""
+    seen = set()
+    for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        jobs = yaml.safe_load(path.read_text(encoding="utf-8")).get("jobs") or {}
+        for job in jobs.values():
+            for item in job.get("steps", []):
+                run = item.get("run", "")
+                for match in _RESOLVING_CARGO.finditer(run):
+                    seen.add(path.name)
+                    assert "--locked" in match.group(1).split(" -- ")[0].split(), (path.name, match.group(0))
+                for match in _TAURI_BUILD.finditer(run):
+                    seen.add(path.name)
+                    assert "--locked" in match.group(1).partition(" -- ")[2].split(), (path.name, match.group(0))
+    assert {"desktop-shell.yml", "desktop-package.yml", "desktop-signpath-test.yml"} <= seen
+
+
 def test_driver_workflows_parse_and_install_yaml_before_driver_validation():
     package = workflow("desktop-package.yml")["jobs"]["package"]["steps"]
     shell = workflow("desktop-shell.yml")["jobs"]["shell"]["steps"]
