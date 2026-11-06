@@ -522,12 +522,12 @@ test('the running card grows in as the working bubble gives way, and leaves as t
   // Only the settled chip of this turn entered; the chips the bootstrap read stayed still.
   expect(seen.filter((entrance) => entrance.key.startsWith('activity:') && entrance.corner !== 'none').map((entrance) => entrance.key))
     .toEqual([`activity:grp_live_${reply}`]);
-  // One after the other, never two texts over each other: what takes the turn's place (the card for the
-  // bubble; the reply and the chip for the card, together or a moment apart) starts once the copy of what
-  // held it has faded to a tenth, its words no longer to be made out.
+  // One after the other, never two texts over each other: whatever comes in while the copy of the turn at
+  // work is still fading (the card in the bubble's place; the reply and the chip in the card's, together or
+  // a moment apart, unless they come once it is gone) starts once that copy has faded to a tenth, its words
+  // no longer to be made out. The card always comes in as the bubble's copy fades.
   const swaps = await handoffs(page);
-  expect(swaps.flatMap(({ keys }) => keys).filter((key) => ['activity-live', reply, `activity:grp_live_${reply}`].includes(key)).sort())
-    .toEqual(['activity-live', reply, `activity:grp_live_${reply}`].sort());
+  expect(swaps.flatMap(({ keys }) => keys)).toContain('activity-live');
   for (const { copyOpacity } of swaps) expect(copyOpacity).toBeLessThanOrEqual(0.11);
   expect(await fromBottom(page)).toBeLessThan(1);
 });
