@@ -6,8 +6,16 @@ On the first `ensure_sqlite_state()` for a database/state-directory pair in a
 process, check the exact installed Alembic head and existing import/data receipts
 through an existing-file SQLite `mode=ro` connection. Only a proven current state
 skips repair. The probe takes no migration lock, creates no engine or directory,
-performs no backup bookkeeping, and scans no history/report counts. Every existing
-CLI and service caller inherits this through the shared `ensure_sqlite_state()`.
+performs no backup bookkeeping, and scans no history/report counts. Existing CLI
+and ordinary service-store callers inherit this through the shared
+`ensure_sqlite_state()`.
+
+**Service startup exception:** `main.prepare_sqlite_state()` runs the full repair
+and backup validation once per service start. The existing 72-hour backup-expiry
+lifecycle requires the service to validate its own attempt before recording
+readiness, including when another CLI/UI process upgraded first or a previous
+service died before readiness. A schema probe must not replace that lifecycle
+owner. This keeps backup bookkeeping out of every cold CLI invocation.
 
 Missing, old, future/unknown, malformed, incomplete, or unreadable state enters
 `repair_sqlite_state()`, the existing conservative lock/migrate/import/backup path.
@@ -43,7 +51,9 @@ Protect the owning boundary with current-state read-only/held-lock tests and
 old/future/missing/corrupt/malformed/incomplete/replaced-file cases. Synchronize a
 real concurrent upgrade before its final version commit and verify repair waits
 rather than returning an old schema. Keep existing importer, migration-lock,
-backup-lifecycle, and startup behavior tests.
+backup-lifecycle, and startup behavior tests. The expiry owner test also covers a
+CLI process upgrading first, followed by a fresh service validating that same
+attempt, reaching `ready`, and expiring the backup at the existing deadline.
 
 Measure hermetically with synthetic HOME/AVIBE_HOME/XDG state: cold commands and
 200 mixed full-dispatch CLI calls at 20-way concurrency with fixed-rate real
