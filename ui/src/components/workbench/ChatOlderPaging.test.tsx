@@ -86,7 +86,8 @@ const renderTranscript = (over: Partial<Props> = {}) => {
   };
   const view = render(<MemoryRouter><Transcript {...props} /></MemoryRouter>);
   const scroller = view.getByTestId('chat-transcript');
-  const geometry = { extraAbove: 0, clientHeight: 800 };
+  // ``overscroll``: how far past the bottom the platform's rubber band may pull.
+  const geometry = { extraAbove: 0, clientHeight: 800, overscroll: 0 };
   let scrollTop = 0;
   // jsdom has no layout, so geometry comes from the committed content column's
   // direct children: the head slot and the rows, which pickScrollAnchor walks too.
@@ -115,7 +116,7 @@ const renderTranscript = (over: Partial<Props> = {}) => {
     scrollTop: {
       configurable: true,
       get: () => scrollTop,
-      set: (value: number) => { scrollTop = Math.max(0, Math.min(value, scroller.scrollHeight - scroller.clientHeight)); },
+      set: (value: number) => { scrollTop = Math.max(0, Math.min(value, scroller.scrollHeight - scroller.clientHeight + geometry.overscroll)); },
     },
   });
   scroller.getBoundingClientRect = () => ({ top: 10, bottom: 10 + geometry.clientHeight, height: geometry.clientHeight }) as DOMRect;
@@ -397,8 +398,92 @@ describe('transcript older-page loading', () => {
         });
       }
       expect(landed).toBe(false);
-      await act(async () => { vi.advanceTimersByTime(200); });
+      // iOS momentum can go quiet for 300 ms before its last pixels: silence
+      // alone is not rest while the platform has not said its scroll ended.
+      await act(async () => { vi.advanceTimersByTime(400); });
+      expect(landed).toBe(false);
+      await act(async () => {
+        fireEvent(scroller, new Event('scrollend'));
+        vi.advanceTimersByTime(100);
+      });
       expect(landed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // iOS finishing a scroll of its own (the last pixel of momentum) can put back
+  // the position from before the write that held the reader's place.
+  it('makes a write the platform put back once more, unless a finger is down', async () => {
+    const first = pendingPage();
+    const second = pendingPage();
+    const onLoadOlder = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    const { scroller, scrollTo, rerender } = renderTranscript({ onLoadOlder });
+    await act(async () => scrollTo(3000));
+    await act(async () => scrollTo(2990));
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      rerender({ messages: messages(251, 100) });
+      first.land(true);
+    });
+    const held = 2990 + 50 * 112;
+    expect(scroller.scrollTop).toBe(held);
+    // The write's own scroll event, then the platform putting the old position back.
+    fireEvent.scroll(scroller);
+    scroller.scrollTop = 2990;
+    fireEvent.scroll(scroller);
+    expect(scroller.scrollTop).toBe(held);
+    // Once only: the same again is the reader's.
+    scroller.scrollTop = 2990;
+    fireEvent.scroll(scroller);
+    expect(scroller.scrollTop).toBe(2990);
+
+    // With a finger down, a move back is the reader's.
+    await act(async () => scrollTo(2980));
+    await act(async () => {
+      rerender({ messages: messages(201, 150) });
+      second.land(true);
+    });
+    const heldAgain = 2980 + 50 * 112;
+    expect(scroller.scrollTop).toBe(heldAgain);
+    fireEvent.touchStart(document.body, { touches: [{ identifier: 1, clientY: 300 }] });
+    scroller.scrollTop = 2980;
+    fireEvent.scroll(scroller);
+    expect(scroller.scrollTop).toBe(2980);
+    fireEvent.touchEnd(document.body, { touches: [] });
+  });
+
+  // The rubber band at the bottom takes a write back on iOS: content that grew
+  // above a reader following the tail is pinned once the band has come to rest,
+  // and the band settling is not the reader leaving the tail.
+  it('pins a bottom that grew during the rubber band once the band comes to rest', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+    try {
+      const { scroller, geometry, props } = renderTranscript({ hasOlder: false });
+      const bottom = () => scroller.scrollHeight - scroller.clientHeight;
+      scroller.scrollTop = bottom();
+      fireEvent.scroll(scroller);
+      expect(props.followingTailRef.current).toBe(true);
+      // Pulled 3 px past the bottom, and settling back.
+      geometry.overscroll = 3;
+      scroller.scrollTop = bottom() + 3;
+      fireEvent.scroll(scroller);
+      const settledAt = bottom();
+      // Content grows above the reader while the band is out.
+      geometry.extraAbove = 380;
+      act(TestResizeObserver.resize);
+      expect(scroller.scrollTop).toBe(settledAt + 3);
+      // The band returns to where it was heading: 380 px above the new bottom.
+      scroller.scrollTop = settledAt;
+      fireEvent.scroll(scroller);
+      expect(props.followingTailRef.current).toBe(true);
+      geometry.overscroll = 0;
+      await act(async () => {
+        fireEvent(scroller, new Event('scrollend'));
+        vi.advanceTimersByTime(300);
+      });
+      expect(scroller.scrollTop).toBe(bottom());
+      expect(props.followingTailRef.current).toBe(true);
     } finally {
       vi.useRealTimers();
     }
