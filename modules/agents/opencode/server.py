@@ -1779,6 +1779,7 @@ async def _launch_environment(spec: OpenCodeLaunchSpec, overlay_path: Optional[P
     env["OPENCODE_CONFIG_CONTENT"] = _managed_runtime_config_content(
         env.get("OPENCODE_CONFIG_CONTENT"),
         await asyncio.to_thread(opencode_disabled_mcp),
+        spec.binary_version,
     )
     return env
 
