@@ -117,13 +117,21 @@ def test_existing_environment_converges_to_lock_despite_equal_fingerprints(locke
         shutil.rmtree(project.parent / "app")
         expected = {"fixture-runtime": locked}
     else:
-        assert versions()["fixture-runtime"] == initial
-        expected = {"fixture-runtime": locked, "pip": versions()["pip"]}
+        before = versions()
+        assert before["fixture-runtime"] == initial
+        # stdlib venv seeds setuptools only before Python 3.12. Whitelist the
+        # known bootstrap tools, never arbitrary preexisting application deps.
+        bootstrap = ("pip", "setuptools") if sys.version_info < (3, 12) else ("pip",)
+        expected = {"fixture-runtime": locked, **{name: before[name] for name in bootstrap if name in before}}
+        interpreter = (project.parent / "app/bin/python").resolve()
     assert "python" in sync()
 
-    # uv deliberately retains the venv's pip bootstrap; unselected application
+    # uv deliberately retains the venv's bootstrap tools; unselected application
     # and development distributions must still disappear.
     assert versions() == expected
+    if initial is not None:
+        assert (project.parent / "app/bin/python").resolve() == interpreter
+        assert (project.parent / "app/keep-marker").read_text() == "existing interpreter environment"
     assert (project / "uv.lock").read_bytes() == lock
     assert not (project / ".venv").exists()
     assert (untouched / "keep").read_text() == "not the application environment"

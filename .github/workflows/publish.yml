@@ -282,7 +282,7 @@ jobs:
 
       - name: Install pinned uv
         run: |
-          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.12.10
+          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.13.7
 
       - name: Build Python distributions
         run: |

@@ -340,6 +340,18 @@ def test_official_finalization_serializes_cross_version_decision_and_publication
     assert not job.get("continue-on-error")
 
 
+@pytest.mark.parametrize("workflow_name", ["lint.yml", "publish.yml", "desktop-shell.yml", "model-hub-e2e.yml"])
+def test_workflow_uv_pins_match_regression_tooling(workflow_name):
+    """A tool-only bump must also reach every CI installer and its cache key."""
+    requirements = (ROOT / "scripts/requirements-regression.txt").read_text()
+    expected, = re.findall(r"^uv==([^\s]+)$", requirements, re.MULTILINE)
+    workflow = (ROOT / ".github/workflows" / workflow_name).read_text()
+    installs = re.findall(r"\buv==([\w.]+)", workflow)
+    assert installs and set(installs) == {expected}
+    for cached_version in re.findall(r"\bci-uv-([\w.]+)-py", workflow):
+        assert cached_version == expected
+
+
 def test_release_installer_job_provisions_the_same_uv_as_its_ci_consumer():
     job = _job("publish.yml", "build")
     lint = _job("lint.yml", "install-upgrade-shards")
@@ -347,7 +359,7 @@ def test_release_installer_job_provisions_the_same_uv_as_its_ci_consumer():
     ci_setup = _step(lint, "Install pinned uv")
     consumer = _step(job, "Run release install and upgrade regressions")
     assert setup["run"] == ci_setup["run"]
-    assert "--only-binary=:all: --no-deps uv==0.12.10" in setup["run"]
+    assert "--only-binary=:all: --no-deps uv==" in setup["run"]
     assert job["steps"].index(setup) < job["steps"].index(consumer)
     assert job["steps"].index(consumer) < job["steps"].index(_step(job, "Upload GitHub release assets"))
     assert "tests/e2e/test_install_command.py" in consumer["run"]

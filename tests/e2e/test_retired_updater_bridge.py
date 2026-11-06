@@ -32,7 +32,7 @@ def test_released_updater_replaces_companion_without_touching_user_data(tmp_path
     command = (
         "apt-get update -qq && apt-get install -y -qq python3-venv ca-certificates openssl >/dev/null && "
         "touch /avibe-bridge-container && python3 -m venv /opt/probe && "
-        "/opt/probe/bin/pip -q install uv==0.12.10 && "
+        "/opt/probe/bin/pip -q install uv==0.13.7 && "
         "/opt/probe/bin/python /fixtures/retired_updater_probe.py"
     )
     result = subprocess.run(

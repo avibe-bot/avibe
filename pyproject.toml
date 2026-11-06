@@ -49,7 +49,7 @@ dependencies = [
     # upstream ships it again.
     "claude-agent-sdk>=0.2.162; sys_platform != 'win32'",
     "claude-agent-sdk>=0.2.158,<0.2.160; sys_platform == 'win32'",
-    "anyio>=4.0.0",
+    "anyio>=4.16.0",
     "APScheduler>=3.10.4",
     "slack-sdk>=3.26.0",
     "discord.py>=2.4.0",
@@ -101,7 +101,7 @@ dependencies = [
     "cryptography>=50.0.2; sys_platform != 'darwin' or platform_machine != 'x86_64'",
     # keccak256 + ripemd160 for vault signing-key address derivation
     # (storage/vault_addresses.py); cryptography ships neither.
-    "pycryptodome>=3.20",
+    "pycryptodome>=4.3.0",
     "prometheus-client>=0.20.0",
     # MCP Hub client (docs/plans/mcp-hub-mvp.md); 2.x is the current stable line.
     "mcp>=2.3.0,<3",
