@@ -677,11 +677,12 @@ test('opening a Harness group while following the tail holds its head where it w
   const members = transcript(page).locator('[data-transcript-key^="harness-member:"]');
   await expect(members).toHaveCount(4);
   await page.waitForTimeout(300);
-  // The head held where it was tapped; the members show themselves under it, each by what it holds.
+  // The head held where it was tapped; the members show themselves under it: each fades as a whole (its
+  // rail too) while what it holds grows, and its own box, which the scroller measures, does not move.
   expect(Math.abs(await topOf(page, head) - before)).toBeLessThanOrEqual(1);
   const opened = await reveals(page);
-  expect(opened.reveals.filter(({ item }) => item).map(({ props }) => props)).toEqual(Array(5).fill([]));
-  expect(opened.reveals.filter(({ item }) => !item).every(({ props }) => props.sort().join() === SHOWS.join())).toBe(true);
+  expect(opened.reveals.filter(({ item }) => item).map(({ props }) => props)).toEqual(Array(5).fill(['opacity']));
+  expect(opened.reveals.filter(({ item }) => !item).every(({ props }) => props.join() === 'scale')).toBe(true);
   expect(opened.reveals.filter(({ item }) => !item).length).toBeGreaterThanOrEqual(5);
   // No longer following: a row streaming in does not move what was opened, and stays below it.
   await page.evaluate(() => window.__scrollLab.push('A row streaming in under the opened group.', 'agent'));
@@ -696,7 +697,7 @@ test('opening a Harness group while following the tail holds its head where it w
   const during = frames.slice(1).filter(({ leaving }) => leaving > 0);
   expect(frames[1].expanded).toBe('false');
   expect(during.length).toBeGreaterThan(0);
-  expect(during.every(({ motion, bare }) => motion.join() === 'motion-disclose-out' && bare === 0)).toBe(true);
+  expect(during.every(({ motion, bare }) => [...motion].sort().join() === 'motion-fade-out,motion-shrink-out' && bare === 0)).toBe(true);
   expect(during.every(({ below }) => Math.abs(below! - frames[0].below!) <= 1)).toBe(true);
   expect(frames.at(-1)!.leaving).toBe(0);
   expect(Math.max(...frames.map(({ tapped }) => Math.abs(tapped - frames[0].tapped)))).toBeLessThanOrEqual(1);
@@ -776,8 +777,8 @@ test('under reduced motion what opens only fades in', async ({ page }) => {
   await page.locator('[data-harness-group]').last().locator('button[aria-expanded="false"]').click();
   await expect(transcript(page).locator('[data-transcript-key^="harness-member:"]')).toHaveCount(4);
   const opened = await reveals(page);
-  expect(opened.reveals.filter(({ item }) => !item).every(({ props }) => props.join() === 'opacity')).toBe(true);
-  expect(opened.reveals.filter(({ item }) => item).every(({ props }) => props.length === 0)).toBe(true);
+  expect(opened.reveals.filter(({ item }) => item).every(({ props }) => props.join() === 'opacity')).toBe(true);
+  expect(opened.reveals.filter(({ item }) => !item).every(({ props }) => props.length === 0)).toBe(true);
   // And what closes only fades out, in place.
   await page.waitForTimeout(300);
   const frames = await closeAndWatch(page, '[data-harness-group] button[aria-expanded="true"]', '[data-transcript-key^="harness-member:"]', null);

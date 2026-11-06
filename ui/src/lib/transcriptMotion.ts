@@ -159,15 +159,20 @@ function enter(el: HTMLElement, tokens: Tokens, { origin, from, fade, delay = 0 
 
 /** What a disclosure opened shows itself: it grows from `--motion-scale-enter-sm` at its top-left corner
  *  while it fades in on `fast`; under reduced motion it only fades. By the individual `scale` property,
- *  so a transform of its own is kept; never its layout, which has changed at once. */
-function reveal(el: HTMLElement, reduced: boolean, tokens: Tokens) {
-  if (reduced) {
-    el.animate([{ opacity: 0 }, { opacity: 1 }], { ...tokens.fadeInFast, fill: 'backwards' });
-    return;
+ *  so a transform of its own is kept; never its layout, which has changed at once. An item it laid out (a
+ *  Harness group's member, with the rail it draws) fades as a whole while what it holds grows, so its own
+ *  box never moves: the scroller measures it. */
+function reveal(el: HTMLElement, reduced: boolean, tokens: Tokens, item = false) {
+  if (reduced || item) el.animate([{ opacity: 0 }, { opacity: 1 }], { ...tokens.fadeInFast, fill: 'backwards' });
+  if (reduced) return;
+  for (const part of item ? Array.from(el.children) as HTMLElement[] : [el]) {
+    part.style.transformOrigin = 'top left';
+    const grown = part.animate(
+      item ? [{ scale: String(tokens.scaleEnterSmall) }, { scale: '1' }] : [{ opacity: 0, scale: String(tokens.scaleEnterSmall) }, { opacity: 1, scale: '1' }],
+      { ...tokens.fadeInFast, fill: 'backwards' },
+    );
+    void grown.finished.then(() => { part.style.transformOrigin = ''; }, () => {});
   }
-  el.style.transformOrigin = 'top left';
-  const shown = el.animate([{ opacity: 0, scale: String(tokens.scaleEnterSmall) }, { opacity: 1, scale: '1' }], { ...tokens.fadeInFast, fill: 'backwards' });
-  void shown.finished.then(() => { el.style.transformOrigin = ''; }, () => {});
 }
 
 /** The last item that stays put through a commit as far as the transcript knows: not the turn at work,
@@ -342,16 +347,16 @@ export function useTranscriptMotion({
     const shouldGlide = !reduced && !handover && !burst && !read && moved !== 0 && Math.abs(moved) <= el.clientHeight;
     // What the reader just opened: new content inside the item they tapped, and the items it laid out right
     // under it (a Harness group's members and collapse bar). The layout changed at once and the scroller
-    // holds the tapped item where it was; only the content shows itself (an item by its children, never
-    // the item's own box, which the scroller measures).
+    // holds the tapped item where it was; only the content shows itself (an item it laid out fades as a
+    // whole while what it holds grows; the box the scroller measures never moves).
     const opened = disclosure.current;
-    let revealing: HTMLElement[] = [];
+    let revealing: { node: HTMLElement; item: boolean }[] = [];
     if (opened && (opened.session !== sessionId || now - opened.at > DISCLOSURE_WINDOW_MS || !opened.item.isConnected)) {
       disclosure.current = null;
     } else if (opened) {
-      revealing = newReveals.flatMap((node) => {
-        if (opened.item.contains(node) && node !== opened.item) return [node];
-        if (node.parentElement === column && arrived.includes(node) && !live(node)) return Array.from(node.children) as HTMLElement[];
+      revealing = newReveals.flatMap((node): { node: HTMLElement; item: boolean }[] => {
+        if (opened.item.contains(node) && node !== opened.item) return [{ node, item: false }];
+        if (node.parentElement === column && arrived.includes(node) && !live(node)) return [{ node, item: true }];
         return [];
       });
       if (revealing.length > 0) disclosure.current = null;
@@ -381,7 +386,7 @@ export function useTranscriptMotion({
     fading.current = fading.current.filter(({ fade }) => fade.playState !== 'finished' && fade.playState !== 'idle');
     const handoff = Math.max(0, ...fading.current.map(({ fade, clearAt }) => clearAt - Number(fade.currentTime ?? 0)));
 
-    for (const node of revealing) reveal(node, reduced, tokens);
+    for (const { node, item } of revealing) reveal(node, reduced, tokens, item);
 
     const withMessage = entering.some((item) => !isWorking(item));
     for (const item of entering) {

@@ -343,10 +343,11 @@ reduced-motion form.
   the reader tapped where it was, leaving the tail if it was following it
   (#3307). What opened then shows itself: it grows from
   `--motion-scale-enter-sm` at its top-left corner while it fades in on `fast`
-  (enter). Only what is inside an item moves (a chip's panel, a row's body, the
-  rows of an opened group), by the individual `scale` property and opacity,
-  never the item's own box, which the scroller measures, and never a layout
-  property. A chip opened while its rows load shows its spinner in their
+  (enter). Only what is inside an item moves (a chip's panel, a row's body,
+  what an opened group's member holds), by the individual `scale` property and
+  opacity; an item a disclosure laid out (a group's member, with the rail it
+  draws) fades as a whole. The box the scroller measures never moves, and no
+  layout property is animated. A chip opened while its rows load shows its spinner in their
   place, and the rows fade in when they land, without a second reveal. Only a
   tap on a disclosure control (`aria-expanded`) in the last second opens
   anything this way; what a read adds to an opened group lands still.
