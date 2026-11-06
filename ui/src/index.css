@@ -109,13 +109,20 @@
   --motion-ease-move: cubic-bezier(0.32, 0.72, 0, 1);
 
   /* snappy: controls (press release, send/stop, badges); smooth: content
-     (a message rising, a row moving); sheet: surfaces (sheets, page push). */
+     (a message rising, a row moving); sheet: surfaces (sheets, drawers). */
   --motion-spring-snappy: cubic-bezier(0.25, 1, 0.5, 1);
   --motion-spring-snappy-duration: 290ms;
   --motion-spring-smooth: cubic-bezier(0.25, 1, 0.5, 1);
   --motion-spring-smooth-duration: 440ms;
   --motion-spring-sheet: cubic-bezier(0.32, 0.72, 0, 1);
   --motion-spring-sheet-duration: 440ms;
+
+  /* A page pushed over another on a phone, and popped off it: a native
+     navigation's pace, one decelerating curve with no settle; the pop is a
+     little shorter. */
+  --motion-nav-push-duration: 300ms;
+  --motion-nav-pop-duration: 260ms;
+  --motion-nav-ease: var(--motion-ease-enter);
 
   /* Loading (plan §6): content taking over from a skeleton or from the
      cached view fades in place on `handover`; a skeleton's shimmer sweeps once
@@ -974,10 +981,10 @@ pre,
    transition for the navigations that move, and the root's `data-nav-motion`
    says how: `push`, a conversation sliding in from the right edge while the
    page beneath drifts `--motion-drift` the other way, and `pop`, the reverse,
-   both on the sheet spring; `fade`, a cross-fade on `fast`; or `none`, when the
-   system already animated the step (an edge swipe). Only the two snapshots of
-   the page move, by transform or opacity; the group around them does not
-   animate, since the page keeps its size. */
+   on the `--motion-nav-*` pace; or `fade`, a cross-fade on `fast`. A history
+   step the system took (an edge swipe) runs no transition at all. Only the two
+   snapshots of the page move, by transform or opacity; the group around them
+   does not animate, since the page keeps its size. */
 :root[data-nav-motion]::view-transition-group(root) {
   animation: none;
 }
@@ -987,9 +994,13 @@ pre,
 :root[data-nav-motion="pop"]::view-transition-new(root) {
   /* Opaque pages sliding over each other, not two images summed. */
   mix-blend-mode: normal;
-  animation-duration: var(--motion-spring-sheet-duration);
-  animation-timing-function: var(--motion-spring-sheet);
+  animation-duration: var(--motion-nav-push-duration);
+  animation-timing-function: var(--motion-nav-ease);
   animation-fill-mode: both;
+}
+:root[data-nav-motion="pop"]::view-transition-old(root),
+:root[data-nav-motion="pop"]::view-transition-new(root) {
+  animation-duration: var(--motion-nav-pop-duration);
 }
 :root[data-nav-motion="push"]::view-transition-old(root) { animation-name: motion-nav-recede; }
 :root[data-nav-motion="push"]::view-transition-new(root) { animation-name: motion-nav-arrive; }
@@ -1004,10 +1015,6 @@ pre,
 }
 :root[data-nav-motion="fade"]::view-transition-old(root) { animation-name: motion-fade-out; }
 :root[data-nav-motion="fade"]::view-transition-new(root) { animation-name: motion-fade-in; }
-:root[data-nav-motion="none"]::view-transition-old(root),
-:root[data-nav-motion="none"]::view-transition-new(root) {
-  animation: none;
-}
 @keyframes motion-nav-arrive { from { transform: translateX(100%); } }
 @keyframes motion-nav-recede { to { transform: translateX(calc(-1 * var(--motion-drift))); } }
 @keyframes motion-nav-depart { to { transform: translateX(100%); } }

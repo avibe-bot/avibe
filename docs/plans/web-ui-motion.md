@@ -121,6 +121,7 @@ curves also exposed as `ease-*` utilities through `@theme inline`.
 | `--motion-ease-move` (`ease-move`) | `cubic-bezier(0.32, 0.72, 0, 1)` | Something on screen moving to a new place (the existing `--settle`) |
 | `--motion-spring-{snappy,smooth,sheet}` (`ease-spring-*`) | `linear()` curves | The springs below, for CSS |
 | `--motion-spring-*-duration` | 290 / 440 / 440 ms | The time each spring needs to settle |
+| `--motion-nav-push-duration` / `--motion-nav-pop-duration` / `--motion-nav-ease` | 300 / 260 ms / enter | A page pushed over another on a phone, and popped off it by the app's Back (M5) |
 | `--motion-beat` | 120 ms | A follower trails its leader (the working bubble after the message) |
 | `--motion-offset-sm` / `--motion-offset` / `--motion-offset-lg` | 4 / 8 / 16 px | How far a thing travels as it enters |
 | `--motion-drift` | 30% | How far the page beneath drifts the other way on a push |
@@ -141,7 +142,7 @@ cubic-bezier through `@supports`.
 | --- | --- | --- | --- | --- |
 | `snappy` | `{ type: 'spring', visualDuration: 0.2, bounce: 0 }` | 685 / 52 | 290 ms | Controls: press release, Send ↔ Stop, badges |
 | `smooth` | `{ visualDuration: 0.3, bounce: 0 }` | 305 / 35 | 440 ms | Content: a message rising, rows moving (FLIP) |
-| `sheet` | `{ visualDuration: 0.38, bounce: 0.08 }` | 190 / 25 | 440 ms | Surfaces: sheets, drawers, page push |
+| `sheet` | `{ visualDuration: 0.38, bounce: 0.08 }` | 190 / 25 | 440 ms | Surfaces: sheets, drawers |
 
 Existing literal durations move onto these tokens as each phase touches their
 component; nothing is migrated in bulk.
@@ -320,16 +321,24 @@ Inbox: M7's move. Frames: `motion/arrival/*`, `motion/inbox/*`.
 
 - **Phone, hierarchy** (Inbox, Projects, Search → a conversation): the tapped
   card sinks to `--motion-scale-press`; the conversation slides in from the
-  right edge on `spring-sheet` while the page beneath drifts `--motion-drift` the
-  other way, as a native push does; Back reverses it. Built on same-document View
+  right edge while the page beneath drifts `--motion-drift` the other way, as a
+  native push does, and the app's own Back reverses it. The pace is a native
+  navigation's: `--motion-nav-push-duration` (300 ms) and
+  `--motion-nav-pop-duration` (260 ms) on `--motion-nav-ease` (the `enter`
+  curve), one decelerating curve with no settle. Built on same-document View
   Transitions (`document.startViewTransition`, Safari 18 and Chrome 111+),
   named per page; where they are missing (iOS 17), navigation stays a cut
   rather than a JavaScript slide.
   - Input is never held: any pointer or key input during a transition calls
-    `skipTransition()`, and the transition is at most 440 ms.
-  - When the system already animated the change (a native edge swipe in the
-    iOS shell, or `hasUAVisualTransition` on the event), no web transition
-    runs.
+    `skipTransition()`, and the transition is at most 300 ms.
+  - **A pop animates only when the app's own Back started it** (the header's
+    Back, or another in-app back affordance calling `navigate(-1)`). Every other
+    history step (the system edge swipe, the browser's Back or Forward, a
+    keyboard shortcut, `history.back()` from anywhere else) is a cut with no
+    View Transition at all, whatever `hasUAVisualTransition` says, and no
+    transition starts for a moment after it unless the reader acts. The app
+    marks its own Back right before it navigates; nothing is inferred from
+    event properties.
 - **Phone, tabs** (the tab bar): no slide, as on iOS; at most a `fast`
   crossfade of the content.
 - **Desktop**: no slide. Switching conversations cross-fades the chat column
@@ -450,8 +459,10 @@ send (they change `ChatPage`).
 4. **Pressed state**: cards and rows sink to 0.97 (`--motion-scale-press`) and
    buttons and chips to 0.94 (`--motion-scale-press-control`), each with a
    color step (M8).
-5. **Native back swipe**: when the iOS shell enables the system edge swipe,
-   the web pop animation steps aside for it (M5).
+5. **Native back swipe**: the system edge swipe always wins. Our pop animates
+   only from the app's own Back; a system traversal (an edge swipe in Safari,
+   the Home Screen app or the iOS shell, the browser's Back) is a cut with no
+   web transition (M5; owner feedback 2026-11-06).
 
 ## 12. Known by design
 
@@ -546,11 +557,19 @@ send (they change `ChatPage`).
   so every caller that opens a conversation gets it.
 - **The tapped card.** An Inbox card is not itself a tap target; its Open
   button is, and it presses as a control (0.94) before the push.
-- **The system back swipe.** The iOS shell's bridge exposes no gesture
-  capability, and the shell leaves `allowsBackForwardNavigationGestures` at
-  WebKit's default (off). WebKit marks the history step its own swipe animated
-  with `hasUAVisualTransition`, and the router motion adds nothing to such a
-  step, so a shell that turns the swipe on needs no Web change.
+- **The system back swipe.** The first cut trusted `hasUAVisualTransition` to
+  tell a system swipe from our Back. On the owner's iPhone, in the Home Screen
+  app, the conversation flashed back after an edge swipe: WebKit sets the flag
+  only while its swipe animation is still running, and the router replays a
+  View Transition on every POP whose push had one, deferring the new page so
+  the snapshot it takes is the conversation the reader just left. Now the app
+  marks its own Back, every other history step is a cut that skips the View
+  Transition entirely (the router renders the list in the same task), and no
+  transition starts for a moment after it. The pace also changed from the
+  sheet spring (440 ms with a long settle) to `--motion-nav-*` (300 / 260 ms,
+  `enter`). The iOS shell's bridge exposes no gesture capability, and the shell
+  leaves `allowsBackForwardNavigationGestures` at WebKit's default (off); a
+  shell that turns it on needs no Web change.
 - **A relaunch** that restores the last page (the Home Screen app after iOS
   evicted it) lands without a push.
 - **Press.** `press` (controls) and `press-surface` (rows and cards) in

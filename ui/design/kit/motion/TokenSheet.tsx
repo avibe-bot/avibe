@@ -1,6 +1,6 @@
 // The motion tokens (docs/plans/web-ui-motion.md §4), each shown doing what it is for: a dot crossing a
 // track on that duration and curve, and the curve itself. Sizes are the spacing scale's.
-import { cut, progress, spring, timed, type Curve, type Track } from './loop';
+import { cut, nav, progress, spring, timed, type Curve, type Track } from './loop';
 import { MotionLoop } from './MotionLoop';
 
 const START = 300;
@@ -32,7 +32,14 @@ function rows(): { title: string; rows: Row[] }[] {
       rows: [
         { name: 'snappy', token: '--motion-spring-snappy', use: '控件：松手回弹、发送↔停止', curve: spring('snappy') },
         { name: 'smooth', token: '--motion-spring-smooth', use: '内容：消息升起、行移动', curve: spring('smooth') },
-        { name: 'sheet', token: '--motion-spring-sheet', use: '界面：底部弹层、页面推入', curve: spring('sheet') },
+        { name: 'sheet', token: '--motion-spring-sheet', use: '界面：底部弹层', curve: spring('sheet') },
+      ],
+    },
+    {
+      title: '页面（手机上的推入与返回）',
+      rows: [
+        { name: 'push', token: '--motion-nav-push-duration', use: '进入会话：从右侧推入，原页面反向漂移', curve: nav('push') },
+        { name: 'pop', token: '--motion-nav-pop-duration', use: '点返回：会话退回右侧；系统滑动不加动画', curve: nav('pop') },
       ],
     },
   ];
