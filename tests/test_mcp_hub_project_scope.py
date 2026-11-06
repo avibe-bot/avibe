@@ -837,3 +837,19 @@ def test_project_native_row_is_pending_and_uses_native_chip(tmp_path, monkeypatc
     assert rows[entry.name].state == "pending_approval"
     assert rows[entry.name].summary()["source"] == "codex"
     assert rows[entry.name].summary()["scope"] == "project:test"
+
+
+@pytest.mark.parametrize("native_source", ["claude", "codex", "opencode"])
+def test_repository_project_entry_shadows_native_and_delete_reveals_it(tmp_path, monkeypatch, native_source):
+    from core.mcp_hub import scope
+
+    root = _project(tmp_path / "repo", {"same": {"command": "repository"}})
+    native_entry = native.NativeServer(
+        "same", native_source, root / f"{native_source}.json",
+        {"name": "same", "transport": {"type": "stdio", "command": native_source}}, None, False, True,
+    )
+    monkeypatch.setattr(native, "read_project", lambda _root: {"same": native_entry})
+    key = scope.ScopedName(scope.Scope("project:test", root), "same")
+    assert scope.load_server(key).definition["transport"]["command"] == "repository"
+    scope.remove_server(key)
+    assert scope.load_server(key).definition["transport"]["command"] == native_source

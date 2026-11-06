@@ -313,8 +313,8 @@ def read_project(root: Path) -> dict[str, NativeServer]:
         if trusted and path.exists():
             data = _parse(CODEX, path.read_text(encoding="utf-8"))
             add(CODEX, path, _servers(CODEX, data))
-    except (OSError, ValueError, McpHubError):
-        pass
+    except (OSError, ValueError, McpHubError) as exc:
+        logger.warning("Skipping Codex project config for %s: %s", root, exc)
 
     # OpenCode V2 project files accumulate unique names; nearest file wins.
     for path in reversed(_project_opencode_paths(root)):
@@ -323,7 +323,8 @@ def read_project(root: Path) -> dict[str, NativeServer]:
         try:
             data = _parse(OPENCODE, path.read_text(encoding="utf-8"))
             add(OPENCODE, path, _servers(OPENCODE, data))
-        except (OSError, ValueError, McpHubError):
+        except (OSError, ValueError, McpHubError) as exc:
+            logger.warning("Skipping OpenCode project config %s: %s", path, exc)
             continue
     return result
 
@@ -430,18 +431,12 @@ def remove_project_entry(server: NativeServer, root: Path) -> bool:
         return _remove_entry_locked(server.source, server.name, path=path)
     text = path.read_text(encoding="utf-8")
     data = _parse(server.source, text)
-    if server.source == CLAUDE:
-        projects = data.get("projects", {})
-        project = projects.get(str(root.resolve()), {}) if isinstance(projects, dict) else {}
-        servers = project.get("mcpServers", {}) if isinstance(project, dict) else {}
-        if server.name not in servers:
-            return False
-        del servers[server.name]
-    else:
-        servers = _servers(server.source, data)
-        if server.name not in servers:
-            return False
-        servers.pop(server.name)
+    projects = data.get("projects", {})
+    project = projects.get(str(root.resolve()), {}) if isinstance(projects, dict) else {}
+    servers = project.get("mcpServers", {}) if isinstance(project, dict) else {}
+    if server.name not in servers:
+        return False
+    del servers[server.name]
     from vibe.opencode_config import remove_jsonc_member
     updated = remove_jsonc_member(text, ("projects", str(root.resolve()), "mcpServers"), server.name)
     expected = json.loads(json.dumps(data))

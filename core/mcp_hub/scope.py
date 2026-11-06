@@ -172,8 +172,7 @@ def _raw_entry(key: ScopedName) -> dict[str, Any]:
         if "oauth" in stored:
             raw["oauth"] = stored["oauth"]
         return raw
-    project_native = native.read_project(key.project_root) if key.project_root else {}
-    native_server = project_native.get(key.name)
+    native_server = _project_native(key)
     if native_server is not None:
         if native_server.error or native_server.definition is None:
             raise native_server.error or McpHubError("invalid_definition", f"{key}: invalid native entry")
@@ -187,6 +186,13 @@ def _raw_entry(key: ScopedName) -> dict[str, Any]:
         raise repository._not_found(key.name)
     validate_name(key.name)
     return raw
+
+
+def _project_native(key: ScopedName) -> Optional[native.NativeServer]:
+    """Return the native winner only when the repository file has no same name."""
+    if not repository.is_project(key) or not key.project_root or key.name in _project_names(key.scope):
+        return None
+    return native.read_project(key.project_root).get(key.name)
 
 
 def _cached(key: ScopedName, file: str) -> dict[str, Any]:
@@ -432,7 +438,7 @@ def project_add_definition(name: str, raw: object) -> dict[str, Any]:
 
 def load_server(key: ScopedName) -> ScopedServer:
     if repository.is_project(key):
-        native_server = (native.read_project(key.project_root) if key.project_root else {}).get(key.name)
+        native_server = _project_native(key)
         if native_server is not None:
             if native_server.error or native_server.definition is None:
                 raise native_server.error or McpHubError("invalid_definition", f"{key}: invalid native entry")
@@ -719,7 +725,7 @@ def write_server(key: ScopedName, entry: Optional[dict[str, Any]], *, replace: b
 
 def remove_server(key: ScopedName) -> None:
     if repository.is_project(key) and key.project_root:
-        native_server = native.read_project(key.project_root).get(key.name)
+        native_server = _project_native(key)
         if native_server is not None:
             native.remove_project_entry(native_server, key.project_root)
             directory = repository.package_dir(key)
