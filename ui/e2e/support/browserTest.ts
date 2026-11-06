@@ -16,8 +16,9 @@
 // through `stubVoiceWorklet`. A project that does capture audio, like
 // voice-shortcut's microphone projects, sets `voiceWorklet: 'real'`.
 //
-// scripts/e2eVoiceWorklet.test.mjs finds the suites whose pages reach the
-// composer and holds each of them to this base.
+// Every suite whose pages can show the composer runs on this base. A new
+// suite that can show it imports its `test` from here as well.
+// e2e/chat-interactions/browserTest.spec.ts checks the base in the browsers.
 import { type BrowserContext, test as base } from '@playwright/test';
 
 export * from '@playwright/test';
