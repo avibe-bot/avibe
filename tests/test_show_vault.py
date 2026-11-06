@@ -27,6 +27,26 @@ NODE = shutil.which("node")
 MODULE = (Path(__file__).resolve().parents[1] / "vibe/show_server/vault.mjs").as_uri()
 
 
+def _node_environment(snapshot):
+    # A stripped Windows environment prevents Node's crypto initialization.
+    # Retain only OS bootstrap paths alongside the test-isolated homes.
+    env = {key: os.environ[key] for key in ("PATH", "HOME", "AVIBE_HOME", "SYSTEMROOT", "WINDIR") if key in os.environ}
+    env.update(snapshot.environment())
+    return env
+
+
+def test_node_environment_keeps_os_bootstrap_but_not_ambient_credentials(tmp_path, monkeypatch):
+    """Windows Node startup needs OS paths, not the caller's tokens or config."""
+    expected = {key: str(tmp_path / key.lower()) for key in ("PATH", "HOME", "AVIBE_HOME", "SYSTEMROOT", "WINDIR")}
+    for key, value in expected.items():
+        monkeypatch.setenv(key, value)
+    for key in ("GITHUB_TOKEN", "NODE_OPTIONS", "OPENSSL_CONF", "HTTP_PROXY", "AVIBE_SESSION_ID"):
+        monkeypatch.setenv(key, "synthetic-ambient-value")
+    snapshot_env = {"AVIBE_SHOW_CONTROL_SNAPSHOT": str(tmp_path / "endpoint.json")}
+    snapshot = SimpleNamespace(environment=lambda: snapshot_env)
+    assert _node_environment(snapshot) == {**expected, **snapshot_env}
+
+
 @pytest.mark.asyncio
 @pytest.mark.skipif(not NODE, reason="Node is required for the shipped server adapter")
 async def test_node_snapshot_recovers_same_process_and_never_replays(tmp_path, monkeypatch):
@@ -90,8 +110,7 @@ async def test_node_snapshot_recovers_same_process_and_never_replays(tmp_path, m
           console.log(JSON.stringify(value));
         }}
     '''
-    env = {key: os.environ[key] for key in ("PATH", "HOME", "AVIBE_HOME") if key in os.environ}
-    env.update(snapshot.environment())
+    env = _node_environment(snapshot)
     child = await asyncio.create_subprocess_exec(
         NODE, "--input-type=module", "-e", script, env=env,
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -329,8 +348,7 @@ async def test_node_approval_continuation_validates_ownership_and_aborts_ipc(tmp
         lines.close();
         process.stdin.pause();
     '''
-    env = {key: os.environ[key] for key in ("PATH", "HOME", "AVIBE_HOME") if key in os.environ}
-    env.update(snapshot.environment())
+    env = _node_environment(snapshot)
     child = await asyncio.create_subprocess_exec(
         NODE, "--input-type=module", "-e", script, env=env,
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
