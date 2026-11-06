@@ -271,6 +271,16 @@ def test_project_codex_is_ignored_without_trust(tmp_path, monkeypatch):
     assert native.read_project(root) == {}
 
 
+def test_remove_project_claude_entry_preserves_other_project_entries(tmp_path):
+    root = (tmp_path / "project").resolve()
+    path = tmp_path / "claude.json"
+    path.write_text(json.dumps({"projects": {str(root): {"mcpServers": {"drop": {"command": "drop"}, "keep": {"command": "keep"}}}}}, indent=2) + "\n")
+    server = native.NativeServer("drop", native.CLAUDE, path, {"name": "drop", "transport": {"type": "stdio", "command": "drop"}}, None, False, True, {"command": "drop"})
+    assert native.remove_project_entry(server, root)
+    data = json.loads(path.read_text())
+    assert set(data["projects"][str(root)]["mcpServers"]) == {"keep"}
+
+
 def test_natively_disabled_entry_is_omitted_from_hub_lists(native_files):
     import sys
     from pathlib import Path

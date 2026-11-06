@@ -199,6 +199,7 @@ class NativeServer:
     error: Optional[McpHubError]
     has_cwd: bool = False
     project: bool = False
+    raw: Optional[dict[str, Any]] = None
 
 
 def _native_enabled(source: str, entry: dict[str, Any]) -> bool:
@@ -282,6 +283,9 @@ def read_project(root: Path) -> dict[str, NativeServer]:
     result: dict[str, NativeServer] = {}
 
     def add(source: str, path: Path, entries: dict[str, Any]) -> None:
+        if not isinstance(entries, dict):
+            logger.warning("Skipping %s project MCP map in %s: expected an object", source, path)
+            return
         for name, entry in entries.items():
             if name in result:
                 continue
@@ -290,9 +294,14 @@ def read_project(root: Path) -> dict[str, NativeServer]:
                     raise McpHubError("invalid_definition", f"{source} entry {name!r} is not an object.")
                 if not _native_enabled(source, entry):
                     continue
-                result[str(name)] = NativeServer(str(name), source, path, _from_native(source, str(name), entry, path), None, "cwd" in entry, True)
+                raw = _READERS[source](entry)
+                definition = definition_from_provider(str(name), raw)
+                if definition.get("transport", {}).get("type") == "stdio" and "cwd" not in definition["transport"]:
+                    definition["transport"]["cwd"] = str(root)
+                    raw["cwd"] = str(root)
+                result[str(name)] = NativeServer(str(name), source, path, definition, None, "cwd" in entry, True, raw)
             except McpHubError as exc:
-                result[str(name)] = NativeServer(str(name), source, path, None, exc, isinstance(entry, dict) and "cwd" in entry, True)
+                result[str(name)] = NativeServer(str(name), source, path, None, exc, isinstance(entry, dict) and "cwd" in entry, True, entry if isinstance(entry, dict) else None)
 
     # Claude local scope is keyed by canonical project root.
     try:
@@ -436,10 +445,10 @@ def remove_project_entry(server: NativeServer, root: Path) -> bool:
     servers = project.get("mcpServers", {}) if isinstance(project, dict) else {}
     if server.name not in servers:
         return False
+    expected = json.loads(json.dumps(data))
     del servers[server.name]
     from vibe.opencode_config import remove_jsonc_member
     updated = remove_jsonc_member(text, ("projects", str(root.resolve()), "mcpServers"), server.name)
-    expected = json.loads(json.dumps(data))
     del expected["projects"][str(root.resolve())]["mcpServers"][server.name]
     if _parse(server.source, updated) != expected:
         raise McpHubError("invalid_native_config", f"could not remove {server.name!r} without changing other content")

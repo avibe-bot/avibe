@@ -105,7 +105,7 @@ def project_scope(
     if not working_directory:
         return None
     root = managed_skill_project_root(working_directory, project_base)
-    if require_config and not (root / PROJECT_FILE).exists():
+    if require_config and not (root / PROJECT_FILE).exists() and not native.read_project(root):
         return None
     return Scope("project:" + _directory_key(root), root)
 
@@ -176,7 +176,7 @@ def _raw_entry(key: ScopedName) -> dict[str, Any]:
     if native_server is not None:
         if native_server.error or native_server.definition is None:
             raise native_server.error or McpHubError("invalid_definition", f"{key}: invalid native entry")
-        return native_server.definition
+        return native_server.raw or native_server.definition
     try:
         _, document = _document(key.scope)
     except (OSError, ValueError) as exc:
@@ -442,8 +442,9 @@ def load_server(key: ScopedName) -> ScopedServer:
         if native_server is not None:
             if native_server.error or native_server.definition is None:
                 raise native_server.error or McpHubError("invalid_definition", f"{key}: invalid native entry")
-            approved = _cached(key, "approval.json").get("fingerprint") == fingerprint(native_server.definition)
-            return ScopedServer(key, native_server.definition, native_server.definition, "ok" if approved else "pending_approval", [], [], native_server.source, native_server.path)
+            raw = native_server.raw or native_server.definition
+            approved = _cached(key, "approval.json").get("fingerprint") == fingerprint(raw)
+            return ScopedServer(key, raw, native_server.definition, "ok" if approved else "pending_approval", [], [], native_server.source, native_server.path)
     raw = _raw_entry(key)
     definition, missing, placeholders = _effective(key, raw, _secrets(key))
     if missing:
@@ -511,8 +512,9 @@ def project_servers(scope: Scope) -> dict[str, Optional[ScopedServer]]:
             continue
         key = ScopedName(scope, name)
         try:
-            approval = _cached(key, "approval.json").get("fingerprint") == fingerprint(native_server.definition)
-            result[name] = ScopedServer(key, native_server.definition or {}, native_server.definition, "ok" if approval else "pending_approval", [], [], native_server.source, native_server.path)
+            raw = native_server.raw or native_server.definition
+            approval = _cached(key, "approval.json").get("fingerprint") == fingerprint(raw)
+            result[name] = ScopedServer(key, raw or {}, native_server.definition, "ok" if approval else "pending_approval", [], [], native_server.source, native_server.path)
         except McpHubError:
             result[name] = None
     return result
