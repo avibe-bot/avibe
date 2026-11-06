@@ -692,7 +692,7 @@ export const ActivityChip: React.FC<{
                 <span className="min-w-0 truncate text-[12px] font-medium text-foreground/90">{label}</span>
               </button>
               <ToolsEyePill shown={showToolCalls} onToggle={onToggleTools} />
-              <button type="button" onClick={onToggle} aria-expanded={expanded} aria-label={t('chat.agentActivity.collapse')}>
+              <button type="button" onClick={onToggle} aria-label={t('chat.agentActivity.collapse')}>
                 <ChevronDown className="size-3.5 shrink-0 rotate-180 text-muted" aria-hidden="true" />
               </button>
             </div>
