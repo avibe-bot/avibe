@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Check, Compass, Github, Loader2, Plus, Search, Star } from 'lucide-react';
+import { Check, Compass, Loader2, Plus, Search, Star } from 'lucide-react';
+import { GithubIcon } from '@/components/visual/GithubIcon';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 import { useApi } from '../../../context/ApiContext';
@@ -149,7 +150,7 @@ export function BrowseRegistryDialog({ scope, projectId, installedNames, onClose
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="min-w-0 break-words text-[14px] font-semibold text-foreground [overflow-wrap:anywhere]">{item.name}</span>
                       <AiScoreBadge score={item.aiScore} />
-                      <Github className="size-3 text-muted" />
+                      <GithubIcon className="size-3 text-muted" />
                       <span className="min-w-0 break-all font-mono text-[10px] text-muted">
                         {item.owner}
                         {item.repo ? `/${item.repo}` : ''}

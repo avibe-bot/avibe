@@ -1,5 +1,6 @@
 import { useMemo, useRef, useState } from 'react';
-import { Download, Github, Loader2, PackageCheck, PackagePlus, Search, Terminal } from 'lucide-react';
+import { Download, Loader2, PackageCheck, PackagePlus, Search, Terminal } from 'lucide-react';
+import { GithubIcon } from '@/components/visual/GithubIcon';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 import { useApi } from '../../../context/ApiContext';
@@ -281,7 +282,7 @@ export function AddSkillDialogView({
             <label className="flex flex-col gap-1.5">
               <span className="font-mono text-[10px] font-bold uppercase tracking-[0.1em] text-muted">{t('skills.addDialog.urlLabel')}</span>
               <div className="flex min-w-0 items-center gap-2 rounded-lg border border-border-strong bg-surface px-2.5 py-2">
-                <Github className="size-3.5 shrink-0 text-muted" />
+                <GithubIcon className="size-3.5 shrink-0 text-muted" />
                 <input
                   value={url}
                   onChange={(e) => onUrlChange(e.target.value)}
