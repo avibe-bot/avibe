@@ -477,16 +477,21 @@ send (they change `ChatPage`).
 
 - **The glide leaves the scroller alone.** The transcript still pins its
   bottom and holds the reader's anchor exactly as before (#3286). The motion
-  (`src/lib/transcriptMotion.ts`) reads, after each commit, how far that pin
-  moved the conversation, and moves the content column off that offset and
-  back (FLIP with the Web Animations API, transform only). The column sits in a
+  (`src/lib/transcriptMotion.ts`) measures how far the last row that stays
+  moved on screen, from just before React changes the document
+  (`getSnapshotBeforeUpdate`) to after the pin, and moves the content column
+  off that offset and back (FLIP with the Web Animations API, transform
+  only). It glides only while the reader follows the tail. What changes above
+  that row (a saved page replaced by the server's, a row that grows) does not
+  move it on screen, so it glides nothing; the pin's own scroll delta would
+  have counted it. The column sits in a
   box that clips it (`overflow-y: clip`, which took over the transcript's
   vertical padding), so a glide's offset never adds to what the transcript can
   scroll: the anchor and follow-tail see the layout they would see with no
   motion, and nothing in the motion writes a scroll position.
 - **What enters** is what is new at the tail, compared by element rather than
-  id, so the server's row that takes a sending row's place does not enter
-  again.
+  id: the server's row that takes a sending row's place, and a saved window
+  the live answer replaces, keep their elements and do not enter again.
 - **What leaves.** React has removed a row before an effect can see it, so a
   withdrawn send and the working bubble are drawn for their exit by an inert,
   hidden copy of their last frame, removed when the exit ends.

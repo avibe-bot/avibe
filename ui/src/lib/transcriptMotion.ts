@@ -8,7 +8,9 @@
 // - While the reader follows the tail, the conversation glides to its new place instead of jumping
 //   there: the transcript has already pinned its new bottom (the scroller's own job, untouched), and the
 //   rows take the inverse offset and glide off it (FLIP, Web Animations, on the compositor). Rows that
-//   came in rise from behind the composer's edge as they do.
+//   came in rise from behind the composer's edge as they do. How far is measured on the last row that
+//   stays, from just before React changes the document to after the pin: what changed above it (a page
+//   of history replaced, a row that grew) moves nothing on screen, so it glides nothing.
 // - What leaves with a motion of its own: a sent message withdrawn when the send failed sinks back
 //   under the composer while the conversation glides down, and the working bubble fades as a reply
 //   grows in its place. Both are drawn for the moment they leave by a copy of their last frame, since
@@ -21,7 +23,7 @@
 // it (`overflow-y: clip`), so its offset never adds to what the transcript can scroll, and the reader's
 // anchor and follow-tail (Transcript) see the layout they would see without any motion. Reduced motion
 // fades what enters and what leaves, in place, and nothing glides.
-import { useCallback, useLayoutEffect, useRef } from 'react';
+import { Component, useCallback, useRef } from 'react';
 
 import { canAnimate, motionTiming, prefersReducedMotion, readMotionMs, readMotionNumber, springTiming, type MotionTiming } from './motion';
 
@@ -116,6 +118,29 @@ function enter(el: HTMLElement, tokens: Tokens, { origin, from, fade, delay = 0 
   void rise.finished.then(() => { el.style.transformOrigin = ''; }, () => {});
 }
 
+/** The last row that stays put through a commit as far as the transcript knows: not the working
+ *  bubble, not a message still sending. */
+function lastSettled(column: HTMLElement): HTMLElement | null {
+  for (let el = column.lastElementChild; el; el = el.previousElementSibling) {
+    const id = rowId(el);
+    if (id && id !== WORKING_ATTRIBUTE && !el.hasAttribute('aria-busy')) return el as HTMLElement;
+  }
+  return null;
+}
+
+/** Calls `onBefore` in every commit that renders it, before React changes the document (FLIP's First).
+ *  The transcript renders it with `useTranscriptMotion`'s `capture`. */
+export class BeforeCommit extends Component<{ onBefore: () => void }> {
+  getSnapshotBeforeUpdate() {
+    this.props.onBefore();
+    return null;
+  }
+  componentDidUpdate() {}
+  render() {
+    return null;
+  }
+}
+
 /** The body of a row with a head: what follows its head, or nothing. */
 function bodyOf(row: HTMLElement): HTMLElement[] {
   const head = row.querySelector(`[${HEAD_ATTRIBUTE}]`);
@@ -168,36 +193,38 @@ function leave(column: HTMLElement, departure: Departure, reduced: boolean, toke
 }
 
 /**
- * The transcript's motion. Call it where the transcript's layout effects are declared, ahead of the
- * one that pins or re-anchors the scroll position; call the returned `afterCommit` from a layout effect
- * after it. `depart` is for an element about to be removed (from a layout effect's cleanup, while it is
- * still in the document). `isOwn(id)`: the row is a message the reader sent. `still`: this commit moves
- * nothing (a deep-link jump, a skeleton hand-over).
+ * The transcript's motion. Render `<BeforeCommit onBefore={capture} />` anywhere in the transcript, so
+ * it sees each commit before React changes the document; call `afterCommit` from a layout effect
+ * declared after the one that pins or re-anchors the scroll position. `depart` is for an element about to be removed (from
+ * a layout effect's cleanup, while it is still in the document). `isOwn(id)`: the row is a message the
+ * reader sent. `still`: this commit moves nothing (a deep-link jump, a skeleton hand-over).
  */
 export function useTranscriptMotion({
   scrollRef,
   columnRef,
   pinnedRef,
-  lastScrollTopRef,
   sessionId,
 }: {
   scrollRef: React.RefObject<HTMLElement | null>;
   columnRef: React.RefObject<HTMLElement | null>;
   pinnedRef: React.RefObject<boolean>;
-  lastScrollTopRef: React.RefObject<number>;
   sessionId: string;
 }) {
-  // Where the transcript was before this commit pinned or re-anchored it.
-  const before = useRef<{ session: string; scrollTop: number; pinned: boolean } | null>(null);
+  // While the reader followed the tail: the last settled row, and where it was on screen just before
+  // this commit changed the document (a running glide included, which a new one continues from).
+  const before = useRef<{ session: string; row: HTMLElement; top: number } | null>(null);
   // The rows the last commit showed, for this session. By element: a sent message keeps its element
   // when the server's row takes its place under a new id, and must not enter twice.
   const seen = useRef<{ session: string; rows: Set<Element> } | null>(null);
   const departures = useRef<Departure[]>([]);
   const glides = useRef<number[]>([]);
 
-  useLayoutEffect(() => {
-    before.current = { session: sessionId, scrollTop: lastScrollTopRef.current ?? 0, pinned: pinnedRef.current === true };
-  });
+  const capture = useCallback(() => {
+    const el = scrollRef.current;
+    const column = columnRef.current;
+    const row = el && column && pinnedRef.current === true ? lastSettled(column) : null;
+    before.current = el && row ? { session: sessionId, row, top: row.getBoundingClientRect().top } : null;
+  }, [scrollRef, columnRef, pinnedRef, sessionId]);
 
   const depart = useCallback((node: HTMLElement, kind: DepartureKind) => {
     // The body's offsets are in the same box as the row's (the column) only if nothing between is positioned.
@@ -217,6 +244,7 @@ export function useTranscriptMotion({
     const leaving = departures.current.filter((departure) => !departure.node.isConnected);
     departures.current = [];
     const snapshot = before.current;
+    before.current = null;
     // A new session, the first commit, or nothing to move in.
     if (!el || !column || !previous || previous.session !== sessionId || still || !canAnimate(column)) return;
 
@@ -229,8 +257,10 @@ export function useTranscriptMotion({
     const reduced = prefersReducedMotion();
     const handover = entering.filter((row) => rowId(row) !== WORKING_ATTRIBUTE).length > MAX_ENTERING;
 
-    // The glide: how far the pin moved the conversation, while the reader followed the tail.
-    const moved = snapshot?.pinned && snapshot.session === sessionId ? el.scrollTop - snapshot.scrollTop : 0;
+    // The glide: how far the row the reader saw last moved up on screen, while they followed the tail.
+    const moved = snapshot && snapshot.session === sessionId && snapshot.row.parentElement === column
+      ? snapshot.top - snapshot.row.getBoundingClientRect().top
+      : 0;
     const now = performance.now();
     glides.current = glides.current.filter((at) => now - at < BURST_WINDOW_MS);
     const burst = glides.current.length >= BURST_GLIDES;
@@ -281,5 +311,5 @@ export function useTranscriptMotion({
     }
   }, [columnRef, scrollRef, sessionId]);
 
-  return { depart, afterCommit };
+  return { capture, depart, afterCommit };
 }

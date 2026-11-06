@@ -22,9 +22,11 @@ async function open(page: Page, query: string) {
 const fromBottom = (page: Page) => transcript(page).evaluate((el) => Math.round(el.scrollHeight - el.clientHeight - el.scrollTop));
 const beat = (page: Page) => page.evaluate(() => parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--motion-beat')));
 
-/** Records from now, against the row under `at` of the viewport's height. */
+/** Records from now, against the row under `at` of the viewport's height; resolves once frames where
+ *  nothing has happened yet are on record, so a move that lands in one frame is still seen. */
 async function record(page: Page, at = 0.8) {
   await page.evaluate((fraction) => { window.__scrollLab.pinRef(fraction); window.__scrollLab.start(); }, at);
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 }
 async function stop(page: Page): Promise<{ frames: LabFrame[]; writes: LabWrite[] }> {
   await page.evaluate(() => window.__scrollLab.stop());
@@ -33,11 +35,14 @@ async function stop(page: Page): Promise<{ frames: LabFrame[]; writes: LabWrite[
 }
 const restoreWrites = (writes: LabWrite[]) => writes.filter((write) => write.site?.startsWith('restoreScrollPosition'));
 
-/** How the reference row moved on screen: in all, and the most in any one frame. */
+/** How the reference row moved on screen: in all, the most in any one frame, and in how many frames it
+ *  stood between where it started and where it ended (a glide passes through some; a jump through none). */
 function travel(frames: LabFrame[]) {
   const tops = frames.map((frame) => frame.ref).filter((top): top is number => top !== null);
   const steps = tops.slice(1).map((top, index) => Math.abs(top - tops[index]));
-  return { total: Math.abs(tops[tops.length - 1] - tops[0]), largestStep: Math.max(0, ...steps) };
+  const [first, last] = [tops[0], tops[tops.length - 1]];
+  const between = tops.filter((top) => Math.min(first, last) + 1 < top && top < Math.max(first, last) - 1).length;
+  return { total: Math.abs(last - first), largestStep: Math.max(0, ...steps), between };
 }
 
 /** What each running Web Animation on the element matching `selector` animates, and when it starts. */
@@ -56,6 +61,33 @@ const animationsOf = (page: Page, selector: string) => page.evaluate((sel) => {
     }),
   };
 }, selector);
+
+type Kind = { moves: boolean; fades: boolean };
+type Copy = { text: string; rows: number; animations: Kind[]; column: Kind[] };
+
+/** From now on, each copy of a row that leaves as it goes in (it lasts a moment, and a slow runner must
+ *  not miss it): its text, the rows still in it, what it plays, and what the content column plays then. */
+async function watchCopies(page: Page) {
+  await page.evaluate(() => {
+    const transcript = document.querySelector('[data-testid="chat-transcript"]')!;
+    // The content column, inside the box that clips the glide.
+    const column = transcript.firstElementChild!.firstElementChild!;
+    const kinds = (el: Element) => el.getAnimations().filter((animation) => !(animation instanceof CSSAnimation)).map((animation) => {
+      const frames = (animation.effect as KeyframeEffect).getKeyframes();
+      return { moves: frames.some((frame) => 'transform' in frame), fades: frames.some((frame) => 'opacity' in frame) };
+    });
+    const lab = window as unknown as { copies: Copy[] };
+    lab.copies = [];
+    new MutationObserver((records) => {
+      for (const node of records.flatMap((record) => [...record.addedNodes])) {
+        if (!(node instanceof HTMLElement) || !node.matches('[aria-hidden="true"][inert]')) continue;
+        lab.copies.push({ text: node.textContent!.trim(), rows: node.querySelectorAll('[data-message-id]').length, animations: kinds(node), column: kinds(column) });
+      }
+    }).observe(transcript, { childList: true, subtree: true });
+  });
+}
+const copiesOf = (page: Page, text: string) =>
+  page.evaluate((needle) => (window as unknown as { copies: Copy[] }).copies.filter((copy) => copy.text.includes(needle)), text);
 
 async function send(page: Page, text: string) {
   await page.locator('[contenteditable="true"]').first().click();
@@ -76,9 +108,9 @@ test('a reply that lands while the reader follows the tail glides in, and the ta
   expect(entrance!.animations.some((animation) => animation.fades)).toBe(true);
   expect(entrance!.origin).toMatch(/^0px 0px/);
   // The conversation moved up by what the reply added, over many frames, not in one.
-  const { total, largestStep } = travel(frames);
+  const { total, between } = travel(frames);
   expect(total).toBeGreaterThan(40);
-  expect(largestStep).toBeLessThan(total / 2);
+  expect(between).toBeGreaterThanOrEqual(2);
   // The scroller pinned its new bottom once, as without motion, and the tail is still followed.
   expect(restoreWrites(writes)).toHaveLength(1);
   expect(await fromBottom(page)).toBeLessThan(1);
@@ -108,9 +140,9 @@ test('a sent message rises from the composer as the conversation glides, the wor
     .toEqual([[false, true], [true, false]]);
   // The working bubble follows one beat later.
   expect(bubble!.animations.map((animation) => animation.delay)).toEqual([await beat(page), await beat(page)]);
-  const { total, largestStep } = travel(frames);
+  const { total, between } = travel(frames);
   expect(total).toBeGreaterThan(40);
-  expect(largestStep).toBeLessThan(total / 2);
+  expect(between).toBeGreaterThanOrEqual(2);
   // Its entrance was long over when the server answered, and none starts again.
   expect(confirmed).toEqual({ connected: true, moving: 0 });
   expect(await fromBottom(page)).toBeLessThan(1);
@@ -124,24 +156,21 @@ test('a send that fails goes back under the composer the way it came as the conv
   await expect(page.locator(sending)).toBeVisible();
   await page.waitForTimeout(600);
   // A row above the message and the working bubble, which both go.
+  await watchCopies(page);
   await record(page, 0.4);
   await expect(page.locator(sending)).toHaveCount(0);
-  // What leaves is drawn where it was for the moment it takes: not a row any more, and inert.
-  const leaving = await page.evaluate(() => {
-    const ghosts = [...document.querySelectorAll<HTMLElement>('[data-testid="chat-transcript"] [aria-hidden="true"][inert]')]
-      .filter((ghost) => ghost.textContent?.includes('This one will not go through.'));
-    return ghosts.map((ghost) => ({ rows: ghost.querySelectorAll('[data-message-id]').length, animations: ghost.getAnimations().length }));
-  });
-  expect(leaving).toEqual([{ rows: 0, animations: 2 }]);
+  // What leaves is drawn where it was for the moment it takes: not a row any more, inert, sinking as it fades.
+  const leaving = await copiesOf(page, 'This one will not go through.');
+  expect(leaving.map(({ rows, animations }) => ({ rows, animations }))).toEqual([{ rows: 0, animations: [{ moves: true, fades: false }, { moves: false, fades: true }] }]);
   // The reason appears by fading in, not at once.
   const banner = page.getByText('The agent is not available.');
   await expect(banner).toBeVisible();
   expect(await banner.evaluate((el) => getComputedStyle(el).animationName)).toBe('motion-fade-in');
   await page.waitForTimeout(500);
   const { frames } = await stop(page);
-  const { total, largestStep } = travel(frames);
+  const { total, between } = travel(frames);
   expect(total).toBeGreaterThan(40);
-  expect(largestStep).toBeLessThan(total / 2);
+  expect(between).toBeGreaterThanOrEqual(2);
   // Gone, and the tail is still followed.
   expect(await page.evaluate(() => document.querySelectorAll('[data-testid="chat-transcript"] [aria-hidden="true"][inert]').length)).toBe(0);
   expect(await fromBottom(page)).toBeLessThan(1);
@@ -153,30 +182,36 @@ for (const reduced of [false, true]) test(`the working bubble fades where the re
   await page.evaluate(() => window.__scrollLab.turn('start'));
   await expect(page.locator('[data-transcript-working]')).toBeVisible();
   await page.waitForTimeout(500);
-  const reply = await page.evaluate(() => {
-    const row = window.__scrollLab.push('The reply, where the bubble was.', 'agent');
+  // What the commit that swaps the bubble for the reply starts, read as the bubble's copy goes in: the
+  // copy lasts a moment, and a slow runner must not miss it.
+  await page.evaluate(() => {
+    const transcript = document.querySelector('[data-testid="chat-transcript"]')!;
+    const own = (el: Element) => el.getAnimations().filter((animation) => !(animation instanceof CSSAnimation));
+    const lab = window as unknown as { handover: unknown; replyId: string };
+    new MutationObserver((records, observer) => {
+      const added = records.flatMap((record) => [...record.addedNodes]);
+      if (!added.some((node) => node instanceof HTMLElement && node.matches('[aria-hidden="true"][inert]'))) return;
+      observer.disconnect();
+      const copies = [...transcript.querySelectorAll<HTMLElement>('[aria-hidden="true"][inert]')];
+      const copy = copies.find((el) => el.querySelector('.vr-typing-dot'));
+      const row = transcript.querySelector(`[data-message-id="${lab.replyId}"]`)!;
+      const head = row.querySelector('[data-transcript-head]')!;
+      const body = head.nextElementSibling!;
+      lab.handover = {
+        // Only the bubble's dots leave; its head is not copied, so it is never drawn twice.
+        copies: copies.length,
+        copyHasHead: copy ? copy.textContent!.trim() !== '' : null,
+        copyFades: copy ? own(copy).map((animation) => animation.effect!.getTiming().duration) : null,
+        // The reply's head stays where it is; its body grows in.
+        rowMoves: own(row).length + own(head).length,
+        bodyMoves: own(body).map((animation) => Object.keys((animation.effect as KeyframeEffect).getKeyframes()[0]).filter((key) => key === 'opacity' || key === 'transform')).flat().sort(),
+      };
+    }).observe(transcript, { childList: true, subtree: true });
+    lab.replyId = window.__scrollLab.push('The reply, where the bubble was.', 'agent').id;
     window.__scrollLab.turn('end');
-    return row.id;
   });
   await expect(page.locator('[data-transcript-working]')).toHaveCount(0);
-  await expect(transcript(page).locator(`[data-message-id="${reply}"]`)).toBeVisible();
-  const handover = await page.evaluate((id) => {
-    const own = (el: Element) => el.getAnimations().filter((animation) => !(animation instanceof CSSAnimation));
-    const copies = [...document.querySelectorAll<HTMLElement>('[data-testid="chat-transcript"] [aria-hidden="true"][inert]')];
-    const copy = copies.find((el) => el.querySelector('.vr-typing-dot'));
-    const row = document.querySelector(`[data-message-id="${id}"]`)!;
-    const head = row.querySelector('[data-transcript-head]')!;
-    const body = head.nextElementSibling!;
-    return {
-      // Only the bubble's dots leave; its head is not copied, so it is never drawn twice.
-      copies: copies.length,
-      copyHasHead: copy ? copy.textContent!.trim() !== '' : null,
-      copyFades: copy ? own(copy).map((animation) => animation.effect!.getTiming().duration) : null,
-      // The reply's head stays where it is; its body grows in.
-      rowMoves: own(row).length + own(head).length,
-      bodyMoves: own(body).map((animation) => Object.keys((animation.effect as KeyframeEffect).getKeyframes()[0]).filter((key) => key === 'opacity' || key === 'transform')).flat().sort(),
-    };
-  }, reply);
+  const handover = await page.evaluate(() => (window as unknown as { handover: unknown }).handover);
   expect(handover).toEqual({
     copies: 1,
     copyHasHead: false,
@@ -216,9 +251,10 @@ test('under reduced motion what arrives fades in where it lands, and nothing gli
   const { frames } = await stop(page);
   expect(entrance!.animations).toEqual([{ moves: false, fades: true, delay: 0 }]);
   // The conversation is where it ends up in the first frame.
-  const { total, largestStep } = travel(frames);
+  const { total, largestStep, between } = travel(frames);
   expect(total).toBeGreaterThan(40);
   expect(largestStep).toBe(total);
+  expect(between).toBe(0);
   expect(await fromBottom(page)).toBeLessThan(1);
 });
 
@@ -228,20 +264,11 @@ test('under reduced motion a failed send fades where it was, and nothing glides'
   await send(page, 'This one fades where it was.');
   const sending = '[data-testid="chat-transcript"] [aria-busy="true"][data-message-id]';
   await expect(page.locator(sending)).toBeVisible();
+  await watchCopies(page);
   await expect(page.locator(sending)).toHaveCount(0);
   // A copy of what left, fading in place: no move of its own, and the conversation does not glide.
-  const leaving = await page.evaluate(() => {
-    const ghost = [...document.querySelectorAll<HTMLElement>('[data-testid="chat-transcript"] [aria-hidden="true"][inert]')]
-      .find((el) => el.textContent?.includes('This one fades where it was.'));
-    const kinds = (el: Element) => el.getAnimations().filter((animation) => !(animation instanceof CSSAnimation)).map((animation) => {
-      const frames = (animation.effect as KeyframeEffect).getKeyframes();
-      return { moves: frames.some((frame) => 'transform' in frame), fades: frames.some((frame) => 'opacity' in frame) };
-    });
-    // The content column, inside the box that clips the glide.
-    const column = document.querySelector('[data-testid="chat-transcript"]')!.firstElementChild!.firstElementChild!;
-    return { ghost: ghost ? kinds(ghost) : null, column: kinds(column) };
-  });
-  expect(leaving).toEqual({ ghost: [{ moves: false, fades: true }], column: [] });
+  const leaving = (await copiesOf(page, 'This one fades where it was.')).map(({ animations, column }) => ({ ghost: animations, column }));
+  expect(leaving).toEqual([{ ghost: [{ moves: false, fades: true }], column: [] }]);
 });
 
 test('a message sent while the agent works rises into the queue, and the strip fades in', async ({ page }) => {
@@ -261,4 +288,57 @@ test('the way back to the latest message appears by growing in', async ({ page }
   const jump = page.getByRole('button', { name: /Scroll to latest|回到最新/ });
   await expect(jump).toBeVisible();
   expect(await jump.evaluate((el) => getComputedStyle(el).animationName)).toBe('motion-grow-in');
+});
+
+test('a row above the tail that grows while the reader follows the tail moves nothing on screen', async ({ page }) => {
+  await open(page, 'delay=0');
+  const [above, last] = await page.evaluate(() => window.__scrollLab.history.slice(-2).map((row) => row.id));
+  const result = await page.evaluate(async ([aboveId, lastId]) => {
+    const transcript = document.querySelector('[data-testid="chat-transcript"]')!;
+    // The content column, inside the box that clips the glide.
+    const column = transcript.firstElementChild!.firstElementChild!;
+    const row = (id: string) => transcript.querySelector(`[data-message-id="${id}"]`)!;
+    const top = row(lastId).getBoundingClientRect().top;
+    const height = row(aboveId).getBoundingClientRect().height;
+    window.__scrollLab.update(aboveId, 'A row that grew while the reader followed the tail. '.repeat(12));
+    let moved = 0;
+    let glided = false;
+    for (let frame = 0; frame < 30; frame += 1) {
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      moved = Math.max(moved, Math.abs(row(lastId).getBoundingClientRect().top - top));
+      glided ||= column.getAnimations().some((animation) => animation.id === 'transcript-glide');
+    }
+    return { grew: row(aboveId).getBoundingClientRect().height - height, moved, glided };
+  }, [above, last]);
+  // The scroller kept the tail where it was; the motion adds nothing to that.
+  expect(result.grew).toBeGreaterThan(40);
+  expect(result.moved).toBeLessThan(1);
+  expect(result.glided).toBe(false);
+  expect(await fromBottom(page)).toBeLessThan(1);
+});
+
+test('a chat drawn from what this device saved hands over to the live answer with nothing entering or gliding', async ({ page }) => {
+  // The first visit saves the chat; the reload draws it at once and the bootstrap answers 1.5 s later.
+  await open(page, 'reader=local&delay=0&boot=1500');
+  await page.waitForTimeout(800);
+  await page.addInitScript(() => {
+    const lab = window as unknown as { started: string[] };
+    lab.started = [];
+    const animate = Element.prototype.animate;
+    Element.prototype.animate = function (this: Element, ...args: Parameters<Element['animate']>) {
+      if (this.closest('[data-testid="chat-transcript"]')) lab.started.push(this.getAttribute('data-message-id') ?? this.tagName);
+      return animate.apply(this, args);
+    };
+  });
+  await page.reload();
+  // Drawn from what was saved, well before the server answers.
+  await expect(transcript(page).locator('[data-message-id]').last()).toBeVisible({ timeout: 1000 });
+  const saved = await transcript(page).locator('[data-message-id]').count();
+  // The server answers, and its window takes the saved one's place.
+  await page.waitForTimeout(2500);
+  const live = await transcript(page).locator('[data-message-id]').count();
+  expect(saved).toBeGreaterThan(0);
+  expect(live).toBeGreaterThanOrEqual(saved);
+  expect(await page.evaluate(() => (window as unknown as { started: string[] }).started)).toEqual([]);
+  expect(await fromBottom(page)).toBeLessThan(1);
 });

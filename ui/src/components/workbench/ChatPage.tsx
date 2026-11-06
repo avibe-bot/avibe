@@ -92,7 +92,7 @@ import {
   reconcileWorkbenchClaimedDeliveries,
 } from '../../lib/transcriptOrder';
 import { anchorForTouched, pickScrollAnchor, resolveScrollAnchor, type ScrollAnchor } from '../../lib/transcriptScrollAnchor';
-import { HEAD_ATTRIBUTE, useTranscriptMotion, WORKING_ATTRIBUTE, type DepartureKind } from '../../lib/transcriptMotion';
+import { BeforeCommit, HEAD_ATTRIBUTE, useTranscriptMotion, WORKING_ATTRIBUTE, type DepartureKind } from '../../lib/transcriptMotion';
 import { AgentRoutePicker } from './AgentRoutePicker';
 import type { MentionSearchResult } from './MentionEditor';
 import {
@@ -4954,9 +4954,10 @@ export const Transcript: React.FC<TranscriptProps> = ({
     [pinnedRef],
   );
   // The conversation's motion (docs/plans/web-ui-motion.md M1–M4): it reads
-  // where the transcript was ahead of the restore below, and moves what a
-  // commit brought in or took away after it, without touching either.
-  const motion = useTranscriptMotion({ scrollRef, columnRef: contentRef, pinnedRef, lastScrollTopRef, sessionId: session.id });
+  // where the conversation was on screen before a commit (BeforeCommit,
+  // rendered below), and moves what the commit brought in or took away after the
+  // restore, without touching either.
+  const motion = useTranscriptMotion({ scrollRef, columnRef: contentRef, pinnedRef, sessionId: session.id });
   const loadOlderRef = useRef(onLoadOlder);
   const reloadLatestRef = useRef(onReloadLatest);
 
@@ -5512,6 +5513,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
   }
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
+      <BeforeCommit onBefore={motion.capture} />
       {!readOnly && (
         <SelectionQuoteToolbar
           containerRef={scrollRef}

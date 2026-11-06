@@ -141,6 +141,8 @@ declare global {
       push(text?: string, author?: 'user' | 'agent'): WorkbenchMessage;
       /** A turn starting or ending over the event stream. */
       turn(phase: 'start' | 'end'): void;
+      /** A row the conversation already has, changed over the event stream (its text replaced). */
+      update(id: string, text: string): WorkbenchMessage;
       history: WorkbenchMessage[];
     };
   }
@@ -166,6 +168,15 @@ window.__scrollLab = Object.assign(recorder, {
     for (const source of LabEventSource.live) {
       source.dispatchEvent(new MessageEvent(`turn.${phase}`, { data: JSON.stringify({ type: `turn.${phase}`, data: { session_id: LAB_SESSION_ID } }) }));
     }
+  },
+  update(id: string, text: string) {
+    const index = history.findIndex((row) => row.id === id);
+    const row = { ...history[index], text } as WorkbenchMessage;
+    history[index] = row;
+    for (const source of LabEventSource.live) {
+      source.dispatchEvent(new MessageEvent('message.updated', { data: JSON.stringify({ type: 'message.updated', data: row }) }));
+    }
+    return row;
   },
 });
 
