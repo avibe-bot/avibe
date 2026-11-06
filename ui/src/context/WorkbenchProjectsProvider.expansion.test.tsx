@@ -344,6 +344,27 @@ describe('the projects a reader leaves open', () => {
     expect(state.current!.isExpanded('new')).toBe(false);
   });
 
+  it('are gone after an authorization change that lands before any list could open them', async () => {
+    // Nothing painted, and the live list is slow: the stored set has been read
+    // but no list has opened it yet.
+    await storeForReader('local', { open: ['a'] });
+    const api = fakeApi(['a', 'b'], { hold: true });
+    const state = mount('local');
+    await settle();
+    expect(state.current!.projects).toBeNull();
+
+    await act(async () => {
+      void clearLocalSnapshots();
+      for (const handler of api.handlers) handler.onAuthorizationChanged?.({});
+    });
+    await settle();
+    await api.release();
+    await api.release();
+    expect(state.current!.projects?.map((project) => project.id)).toEqual(['a', 'b']);
+    expect(state.current!.isExpanded('a')).toBe(false);
+    expect(await storedOpen('local')).toEqual([]);
+  });
+
   it('are gone after sign-out', async () => {
     await storeForReader('local', { open: ['a'] });
     setLocalSnapshotPrincipal('local');

@@ -694,8 +694,11 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     sessionsRef.current = {};
     expandedRef.current = new Set();
     restoredUnloadedRef.current.clear();
-    // Nothing stored before the change is restored after it, nor stored again.
-    if (expansionRef.current) expansionRef.current.pending = null;
+    // Nothing stored before the change is restored after it, nor stored again,
+    // whether a list had opened it yet or not: the stored set is settled as
+    // empty, and what the reader opens from here on is stored as usual.
+    const expansion = expansionRef.current;
+    if (expansion) Object.assign(expansion, { applied: true, pending: null, ids: [] });
     sessionProjectRef.current.clear();
     pendingReconcileRef.current.clear();
     pendingCachedRowRefreshRef.current.clear();
