@@ -70,8 +70,10 @@ def test_fetch_main_is_db_free_and_forwards_raw_context(monkeypatch, capfd, remo
     assert sent[0].arguments["caller_pid"] == os.getpid()
 
 
-def test_fetch_missing_service_does_not_open_database_or_start_process(monkeypatch, tmp_path, capfd):
+@pytest.mark.parametrize("platform_name", ["posix", "nt"])
+def test_fetch_missing_service_does_not_open_database_or_start_process(monkeypatch, tmp_path, capfd, platform_name):
     attempts = _no_sqlite(monkeypatch)
+    monkeypatch.setattr(internal_client, "_platform_name", lambda: platform_name)
     home = tmp_path / "absent-home"
     monkeypatch.setenv("AVIBE_HOME", str(home))
     monkeypatch.setenv("VIBE_INTERNAL_DISPATCH_SOCKET", str(tmp_path / "absent.sock"))
@@ -88,7 +90,14 @@ def test_fetch_missing_service_does_not_open_database_or_start_process(monkeypat
     assert (payload["code"], payload["execution"]) == ("service_unavailable", "not_executed")
     assert attempts == []
     assert starts == []
-    assert not home.exists()
+    if platform_name == "nt":
+        # Native Windows discovery may create its private descriptor lock even
+        # when no endpoint exists. It must create nothing else, especially a DB.
+        assert {path.relative_to(home).as_posix() for path in home.rglob("*")} == {
+            "runtime", "runtime/control-ipc", "runtime/control-ipc/endpoint.json.lock",
+        }
+    else:
+        assert not home.exists()
 
 
 @pytest.mark.parametrize("source", ["file", "stdin", "fd"])

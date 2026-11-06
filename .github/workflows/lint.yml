@@ -1216,6 +1216,10 @@ jobs:
           }
           python -m pip install $wheel pytest pytest-asyncio
 
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: "22.23.4"
+
       - name: Verify Windows Controller control IPC
         run: python -m pytest tests/test_control_ipc.py -q
 
@@ -1223,6 +1227,9 @@ jobs:
       # caller's own cwd and inputs, over the Windows descriptor endpoint.
       - name: Verify CLI mutations over Windows control IPC
         run: python -m pytest tests/test_cli_mutation_control_requests.py -q -ra
+
+      - name: Verify Vault waiter and Show snapshot on Windows
+        run: python -m pytest tests/test_vault_control_requests.py tests/test_show_vault.py -q -ra
 
       # Windows reports 0o777/0o666 whatever the access rules are, so the Model
       # Hub's engine state and takeover journal are owner-private only through

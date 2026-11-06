@@ -757,6 +757,12 @@ def test_windows_platform_checks_route_queue_entries_like_pull_requests() -> Non
     mutation_step = next(step for step in ipc_steps if step.get("name") == "Verify CLI mutations over Windows control IPC")
     assert "tests/test_cli_mutation_control_requests.py" in mutation_step["run"]
     assert not mutation_step.get("if") and not mutation_step.get("continue-on-error")
+    vault_step = next(step for step in ipc_steps if step.get("name") == "Verify Vault waiter and Show snapshot on Windows")
+    assert "tests/test_show_vault.py" in vault_step["run"]
+    assert "tests/test_vault_control_requests.py" in vault_step["run"]
+    assert not vault_step.get("if") and not vault_step.get("continue-on-error")
+    node = next(step for step in ipc_steps if step.get("uses", "").startswith("actions/setup-node@"))
+    assert node["with"]["node-version"] == "22.23.4"
     install = next(step for step in ipc_steps if step.get("name") == "Install package and focused test dependency")
     assert "pytest-asyncio" in install["run"]
     assert jobs["windows-agent"]["if"] == (
