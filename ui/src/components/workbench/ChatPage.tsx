@@ -653,6 +653,11 @@ export const ChatPage: React.FC = () => {
     offlineSessionIdRef.current = id;
     setOfflineSessionIdState(id);
   }, []);
+  // Rows shown from what this device saved rather than from a server answer,
+  // while a painted chat could not reach the server: they leave when its
+  // bootstrap lands, and with the painted window when the cache stops speaking
+  // for the page. Weak, so a row the transcript trimmed away is not kept.
+  const savedRowsRef = useRef(new WeakSet<WorkbenchMessage>());
   // True while the loaded window does NOT reach the live tail: entered by a
   // deep-link/search jump into a middle window, AND by the retained-window cap
   // detaching the tail while the reader is scrolled up (see MAX_RETAINED_MESSAGES).
@@ -1095,6 +1100,13 @@ export const ChatPage: React.FC = () => {
   // failed bootstrap): nothing it seeded may keep acting.
   const dropChatSnapshot = useCallback((rows: ReadonlySet<WorkbenchMessage> | null) => {
     if (rows) unpaintChatSnapshot(rows);
+    // What was read from the store for this window goes with it: it may be
+    // another reader's now, or the store was cleared.
+    const saved = savedRowsRef.current;
+    setMessages((prev) => (prev.some((row) => saved.has(row)) ? prev.filter((row) => !saved.has(row)) : prev));
+    savedRowsRef.current = new WeakSet();
+    setOfflineSessionId(null);
+    setHistoryGap(false);
     setSessionCanChat(false);
     if (workingSeededRef.current) {
       workingSeededRef.current = false;
@@ -1105,13 +1117,13 @@ export const ChatPage: React.FC = () => {
       rowFromSnapshotRef.current = false;
       applyLocalSession(null);
     }
-  }, [unpaintChatSnapshot, applyLocalSession]);
+  }, [unpaintChatSnapshot, applyLocalSession, setOfflineSessionId]);
   const {
     view: chatSnapshotView,
     beginBootstrap: beginChatSnapshotBootstrap,
     release: releaseChatSnapshot,
     isPainted: isChatSnapshotPainted,
-    paintMore: paintMoreChatSnapshot,
+    isSavedPaint: isSavedChatPainted,
     whenStoredRead: whenChatSnapshotRead,
     paintKnown: paintKnownChatSnapshot,
   } = useChatSnapshot({
@@ -1578,13 +1590,17 @@ export const ChatPage: React.FC = () => {
       // once; online, the server's page for the same stretch then replaces them
       // (docs/plans/local-sync-store.md section 4.3).
       const head = messagesRef.current[0];
+      const generation = committedTranscriptReadGenerationRef.current;
       const local = head && head.id === olderCursor ? await readLocalStoreOlder(sessionId, head, OLDER_PAGE_SIZE) : null;
       if (sessionId !== sessionIdRef.current) return true; // switched chats mid-read
+      // A live window landed while the store answered (the bootstrap after a
+      // reconnect): this page was read for the window it replaced.
+      if (committedTranscriptReadGenerationRef.current !== generation || isChatSnapshotPainted() !== painted) return true;
       const saved = (local?.messages ?? []).filter(isTranscriptMessage);
       if (saved.length) {
+        // While painted, they leave when its bootstrap lands.
+        if (painted) for (const row of saved) savedRowsRef.current.add(row);
         prependOlder(saved);
-        // They leave with the painted window when its bootstrap lands.
-        if (painted) paintMoreChatSnapshot(saved);
       }
       // What the device can say when the server cannot: more saved rows to page
       // through, the start of history, or a gap the marker shows.
@@ -1641,7 +1657,7 @@ export const ChatPage: React.FC = () => {
         setLoadingOlder(false);
       }
     }
-  }, [api, olderCursor, sessionId, isChatSnapshotPainted, paintMoreChatSnapshot, prependOlder]);
+  }, [api, olderCursor, sessionId, isChatSnapshotPainted, prependOlder]);
 
   const reloadLatestMessages = useCallback(async (): Promise<boolean> => {
     if (!sessionId) return false;
@@ -1854,7 +1870,13 @@ export const ChatPage: React.FC = () => {
       // render the live path already rejects.
       const transcriptSnapshotIsCurrent = claimTranscriptSnapshot();
       if (transcriptSnapshotIsCurrent) {
-        setMessages((prev) => mergeById(prev, bootstrap.messages.filter(isTranscriptMessage)));
+        // After reading saved history offline, what was read from the store
+        // leaves too: the bootstrap's window replaces it.
+        const saved = offlineSessionIdRef.current === sessionId ? savedRowsRef.current : null;
+        setMessages((prev) => mergeById(
+          saved ? prev.filter((row) => !saved.has(row)) : prev,
+          bootstrap.messages.filter(isTranscriptMessage),
+        ));
         setOlderCursor(bootstrap.next_before_id ?? null);
         setHistoricalWindow(false);
       }
@@ -1908,9 +1930,11 @@ export const ChatPage: React.FC = () => {
       // loading state, even when both requests belong to the same route.
       // A saved chat may still be on its way from IndexedDB: the server failing
       // first must not decide it away.
-      if (requestIsCurrent() && serverUnreachable(err) && !isChatSnapshotPainted()) await whenChatSnapshotRead();
+      if (requestIsCurrent() && serverUnreachable(err) && !isSavedChatPainted()) await whenChatSnapshotRead();
       if (requestIsCurrent()) {
-        if (serverUnreachable(err) && isChatSnapshotPainted()) {
+        // Only a saved conversation reads offline: a chat painted from the lists
+        // alone has nothing more to show, so it fails as before.
+        if (serverUnreachable(err) && isSavedChatPainted()) {
           // The server could not be reached, but it refused nothing: what this
           // device saved stays readable, and the bootstrap runs again once the
           // event stream reconnects. A run only the list said was going on is
@@ -1932,7 +1956,7 @@ export const ChatPage: React.FC = () => {
       // of its own loading state into a premature not-found / error view.
       if (requestIsCurrent()) setLoading(false);
     }
-  }, [api, sessionId, markWorking, scheduleActivityRefresh, refreshSessionRow, beginTranscriptSnapshotRead, beginQueueSnapshotRead, installServerSession, beginChatSnapshotBootstrap, showQueuedSends, isChatSnapshotPainted, whenChatSnapshotRead]);
+  }, [api, sessionId, markWorking, scheduleActivityRefresh, refreshSessionRow, beginTranscriptSnapshotRead, beginQueueSnapshotRead, installServerSession, beginChatSnapshotBootstrap, showQueuedSends, isSavedChatPainted, whenChatSnapshotRead, setOfflineSessionId]);
   useEffect(() => {
     retryBootstrapRef.current = () => { void refresh(); };
   }, [refresh]);
@@ -1976,6 +2000,7 @@ export const ChatPage: React.FC = () => {
     setLoadingOlder(false);
     setHistoryGap(false);
     setOfflineSessionId(null);
+    savedRowsRef.current = new WeakSet();
     // Reset the retained-window state so no stale trim signal or follow flag from
     // the previous chat leaks into the fresh one (the Transcript re-pins on open).
     followingTailRef.current = true;
@@ -2931,15 +2956,17 @@ export const ChatPage: React.FC = () => {
     // replaces it (docs/plans/local-sync-store.md section 4.3).
     let cancelled = false;
     let answered = false;
+    // A bootstrap that lands while the store answers (the reconnect after an
+    // offline open) restarts this effect through ``loading``, which cancels it.
     const painted = isChatSnapshotPainted();
     const savedWindow = readLocalStoreAround(requestSessionId, targetMsg).then((local) => {
       if (!local || cancelled || answered || requestSessionId !== sessionIdRef.current) return;
       const window = local.messages.filter(isTranscriptMessage);
       if (!window.some((row) => row.id === targetMsg)) return;
       deepLinkWindowShownRef.current = targetMsg;
+      // While painted, they leave when its bootstrap lands.
+      if (painted) for (const row of window) savedRowsRef.current.add(row);
       setMessages(window);
-      // They leave with the painted window when its bootstrap lands.
-      if (painted) paintMoreChatSnapshot(window);
       deepLinkWindowHandledRef.current = !local.reachesTail;
       setOlderCursor(local.startReached ? null : window[0].id);
       setHistoricalWindow(!local.reachesTail);
@@ -2966,8 +2993,8 @@ export const ChatPage: React.FC = () => {
         // reload the live tail; if not, it already reaches the tail and can keep
         // normal pinned/follow behavior. Rows a saved window showed keep their
         // id, so the target stays where the reader sees it.
+        if (painted) for (const row of window) savedRowsRef.current.add(row);
         setMessages(window);
-        if (painted) paintMoreChatSnapshot(window);
         const reachesHistoricalWindow = Boolean(res.next_after_id);
         deepLinkWindowHandledRef.current = reachesHistoricalWindow;
         setOlderCursor(res.next_before_id ?? null);
@@ -2999,7 +3026,7 @@ export const ChatPage: React.FC = () => {
     // window is dropped and ``?msg`` stays unhandled (Codex P2). The closure
     // still reads ``session`` for the ``!session`` / ``session.id !== sessionId``
     // readiness checks; it only needs to re-run when the id changes.
-  }, [api, deepLinkMessageId, loading, selectChatView, session?.id, sessionId, setSearchParams, startHighlight, isChatSnapshotPainted, paintMoreChatSnapshot, reloadLatestMessages]);
+  }, [api, deepLinkMessageId, loading, selectChatView, session?.id, sessionId, setSearchParams, startHighlight, isChatSnapshotPainted, reloadLatestMessages]);
 
   // Re-arm the jump guard once ``?msg=`` is gone. ``clearParam`` (above) nulls
   // the param after handling, so without this re-selecting the SAME search hit

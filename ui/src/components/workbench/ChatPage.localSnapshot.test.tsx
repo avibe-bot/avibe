@@ -940,6 +940,16 @@ describe('ChatPage opened with no cached copy', () => {
 
   beforeEach(() => setLocalSnapshotPrincipal('local'));
 
+  it('fails as before when the server cannot be reached and only the lists knew the chat', async () => {
+    mount(tree());
+    expect(skeleton()).not.toBeNull();
+    await act(async () => live.reject(new TypeError('Failed to fetch')));
+    // Nothing saved could fill the skeleton: no offline reading, no lasting blocks.
+    await screen.findByText('Failed to fetch');
+    expect(skeleton()).toBeNull();
+    expect(screen.queryByText('chat.offline.notice')).toBeNull();
+  });
+
   it('opens on what its list row says, the transcript a skeleton, and hands over to the live window', async () => {
     mount(tree());
 
@@ -1069,6 +1079,32 @@ describe('ChatPage history this device saved', () => {
     });
   };
   type Page = { messages: WorkbenchMessage[]; next_before_id?: string | null; next_after_id?: string | null };
+  // Hold the store's rows behind a write that has not finished: IndexedDB runs
+  // a read of them only after it, so a case can let something else land first.
+  const holdStore = async () => {
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open('avibe-local-store');
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const tx = db.transaction(['messages'], 'readwrite');
+    let held = true;
+    const keepBusy = () => {
+      const request = tx.objectStore('messages').count();
+      request.onsuccess = () => {
+        if (held) keepBusy();
+      };
+    };
+    keepBusy();
+    const finished = new Promise((resolve) => {
+      tx.oncomplete = resolve;
+    });
+    return async () => {
+      held = false;
+      await finished;
+      db.close();
+    };
+  };
   const serve = (pages: { older?: Promise<Page>; around?: Promise<Page>; tail?: Promise<Page> }) =>
     mocks.api.listSessionMessages.mockImplementation((_id: string, params: { beforeId?: string; aroundId?: string; tail?: boolean } = {}) => {
       if (params.beforeId) return pages.older ?? new Promise(() => {});
@@ -1201,6 +1237,46 @@ describe('ChatPage history this device saved', () => {
     expect(screen.queryByText('history 30')).toBeNull();
   });
 
+  it('drops a saved page that answers after the bootstrap replaced the window it was read for', async () => {
+    await storePage('tail', span(1, 130), null, true);
+    serve({});
+    mount();
+    await screen.findByText('history 130');
+    await act(async () => live.reject(new TypeError('Failed to fetch')));
+    await screen.findByText('chat.offline.notice');
+
+    // The page is read from the store, and the stream reconnects before it answers.
+    mocks.api.getSessionBootstrap.mockResolvedValue(liveWindow(span(111, 130), 'h111'));
+    await act(async () => {
+      fireEvent.wheel(screen.getByTestId('chat-transcript'), { deltaY: -100 });
+      mocks.events!.onConnected();
+    });
+    await waitFor(() => expect(screen.queryByText('chat.offline.notice')).toBeNull());
+    await waitFor(() => expect(screen.queryByRole('status', { name: 'chat.loadingOlder' })).toBeNull());
+    expect(screen.queryByText('history 80')).toBeNull();
+    expect(screen.getByText('history 111')).toBeTruthy();
+  });
+
+  it('takes what was read from the store offline away when another reader is named', async () => {
+    await storePage('tail', span(21, 130), 'h021', true);
+    serve({});
+    mount();
+    await screen.findByText('history 130');
+    await act(async () => live.reject(new TypeError('Failed to fetch')));
+    await scrollUp();
+    await screen.findByText('history 31');
+
+    act(() => setLocalSnapshotPrincipal('remote:bob'));
+    await waitFor(() => expect(screen.queryByText('chat.offline.notice')).toBeNull());
+    // The new reader's own window lands onto what is left: nothing of the last one.
+    mocks.api.getSession.mockResolvedValue(sessionRow('Live title'));
+    mocks.api.getSessionBootstrap.mockResolvedValue(liveWindow(span(121, 130), 'h121'));
+    await act(async () => mocks.events!.onAuthorizationChanged({ resource_kinds: [] }));
+    await screen.findByText('history 121');
+    expect(screen.queryByText('history 31')).toBeNull();
+    expect(screen.queryByText('history 81')).toBeNull();
+  });
+
   it('withdraws the saved rows it showed when the server refuses the older page', async () => {
     await storePage('tail', span(1, 70), null, true);
     const older = deferred<Page>();
@@ -1261,6 +1337,25 @@ describe('ChatPage history this device saved', () => {
       await act(async () => live.resolve(liveWindow(span(51, 100), 'h051')));
       await screen.findByText('history 30');
       expect(screen.getByText('history 1')).toBeTruthy();
+    });
+
+    it('drops a saved window that answers after the bootstrap replaced the chat', async () => {
+      await storePage('tail', span(1, 100), null, true);
+      serve({});
+      mount(null, `/chat/${SESSION}?msg=h030`);
+      await screen.findByText('history 100');
+      // Offline, the deep link reads the store, held until the stream has
+      // reconnected and the bootstrap has answered.
+      const release = await holdStore();
+      await act(async () => live.reject(new TypeError('Failed to fetch')));
+      await screen.findByText('chat.offline.notice');
+      mocks.api.getSessionBootstrap.mockResolvedValue(liveWindow(span(81, 100), 'h081'));
+      await act(async () => mocks.events!.onConnected());
+      await waitFor(() => expect(screen.queryByText('chat.offline.notice')).toBeNull());
+      await act(async () => release());
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 50)));
+      expect(screen.queryByText('history 30')).toBeNull();
+      expect(screen.getByText('history 100')).toBeTruthy();
     });
 
     it('withdraws the saved window when the server refuses it', async () => {

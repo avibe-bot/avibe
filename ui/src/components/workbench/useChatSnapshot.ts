@@ -236,14 +236,8 @@ export function useChatSnapshot({ sessionId, paint, knownFromLists, unpaint, dro
   }), [withdraw]);
 
   const isPainted = useCallback(() => paintedRef.current !== null, []);
-
-  // Rows the page added from the store while its bootstrap could not answer
-  // (older history read offline): they go with the painted window when it lands.
-  const paintMore = useCallback((rows: readonly WorkbenchMessage[]) => {
-    const painted = paintedRef.current;
-    if (!painted) return;
-    for (const row of rows) painted.rows.add(row);
-  }, []);
+  // Painted from a saved conversation, not only from what the lists know.
+  const isSavedPaint = useCallback(() => paintedRef.current !== null && partialRef.current === null, []);
 
   return {
     /** The painted snapshot for the open chat while its bootstrap is out. */
@@ -253,8 +247,8 @@ export function useChatSnapshot({ sessionId, paint, knownFromLists, unpaint, dro
     release,
     /** Painted rows are on screen; older paging waits for the live window. */
     isPainted,
-    /** Count ``rows`` as painted too: they leave when the live window lands. */
-    paintMore,
+    /** The painted window is a saved conversation, not a list seed. */
+    isSavedPaint,
     /** Settles once the open chat's saved conversation read has answered. */
     whenStoredRead,
     /** Paint the record held in memory for the open chat, if any: the page
