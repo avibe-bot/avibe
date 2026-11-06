@@ -2623,7 +2623,8 @@ def _definition_read_store():
     """Own the canonical read projection store used by CLI read commands."""
     from storage.background import SQLiteBackgroundTaskStore
 
-    store = SQLiteBackgroundTaskStore(include_private_metadata=False)
+    _ensure_cli_sqlite_state()
+    store = SQLiteBackgroundTaskStore(include_private_metadata=False, read_only=True)
     try:
         yield store
     finally:
@@ -2701,15 +2702,21 @@ def _task_mutation_payload(task) -> dict:
     return _task_projection_payload(projected)
 
 
-def _task_request_store() -> TaskExecutionStore:
+def _task_request_store(*, read_only: bool = False) -> TaskExecutionStore:
     from core.scheduled_tasks import TaskExecutionStore
 
+    if read_only:
+        _ensure_cli_sqlite_state()
+        return TaskExecutionStore(read_only=True)
     return TaskExecutionStore()
 
 
-def _agent_store() -> VibeAgentStore:
+def _agent_store(*, read_only: bool = False) -> VibeAgentStore:
     from core.vibe_agents import VibeAgentStore
 
+    if read_only:
+        _ensure_cli_sqlite_state()
+        return VibeAgentStore(read_only=True)
     return VibeAgentStore()
 
 
@@ -2970,7 +2977,7 @@ def _require_cli_turn_authority(
     from vibe.authorization import InstanceAuthorizationError
 
     _ensure_cli_sqlite_state()
-    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    engine = create_sqlite_engine(paths.get_sqlite_state_path(), read_only=True)
     try:
         with engine.connect() as conn:
             sessions_service.require_session_turn_authority(conn, target_session_id)
@@ -3178,7 +3185,7 @@ def _validate_existing_scope_id(scope_id: str, *, help_command: str):
 
     target = _parse_validated_scope_id(scope_id, help_command=help_command)
     _ensure_cli_sqlite_state()
-    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    engine = create_sqlite_engine(paths.get_sqlite_state_path(), read_only=True)
     try:
         with engine.connect() as conn:
             found = conn.execute(
@@ -3581,7 +3588,7 @@ def _resolve_scope_routing_target(session_key: str) -> _ScopeRoutingTarget:
             return _ScopeRoutingTarget(None, None)
     scope_id = make_scope_id(parsed.platform, parsed.scope_type, parsed.scope_id)
     _ensure_cli_sqlite_state()
-    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    engine = create_sqlite_engine(paths.get_sqlite_state_path(), read_only=True)
     try:
         with engine.connect() as conn:
             row = conn.execute(
@@ -3974,7 +3981,7 @@ def cmd_harness_status(args) -> int:
 
     try:
         scope = _resolve_session_list_scope(args, help_command="vibe harness status --help")
-        request_store = _task_request_store()
+        request_store = _task_request_store(read_only=True)
         sqlite_store = request_store.sqlite_backend
         if sqlite_store is None:
             raise RuntimeError("Harness status requires the SQLite task store.")
@@ -5405,7 +5412,7 @@ def _add_json_flag(parser) -> None:
 def cmd_agent_list(args):
     try:
         page_request = _page_request_from_args(args, help_command="vibe agent list --help")
-        store = _agent_store()
+        store = _agent_store(read_only=True)
         backend = getattr(args, "backend", None)
         disabled_only = bool(getattr(args, "disabled", False))
         include_disabled = disabled_only or bool(getattr(args, "include_disabled", False))
@@ -5439,7 +5446,7 @@ def cmd_agent_show(args):
     from core.vibe_agents import VibeAgentAccessError
 
     try:
-        agent = _agent_store().require_accessible(args.name)
+        agent = _agent_store(read_only=True).require_accessible(args.name)
     except VibeAgentAccessError as exc:
         _print_task_error(
             TaskCliError(str(exc), code="agent_access_forbidden", details={"agent": args.name})
@@ -5529,7 +5536,7 @@ def cmd_agent_models(args):
             # follows the same use access as selecting it. The catalog options
             # below stay open: they describe a backend, not an Agent.
             try:
-                agent = _agent_store().require_accessible(name)
+                agent = _agent_store(read_only=True).require_accessible(name)
             except VibeAgentAccessError as exc:
                 raise TaskCliError(
                     str(exc), code="agent_access_forbidden", details={"agent": name}
@@ -7323,7 +7330,7 @@ def cmd_runs_list(args):
             field_name="--created-before",
             help_command="vibe runs list --help",
         )
-        result = _task_request_store().list_runs_page(
+        result = _task_request_store(read_only=True).list_runs_page(
             status=getattr(args, "status", None),
             run_type=getattr(args, "type", None),
             agent_name=getattr(args, "agent", None),
@@ -7367,7 +7374,7 @@ def cmd_runs_show(args):
     except Exception as exc:
         _print_task_error(exc, help_command="vibe runs show --help")
         return 1
-    run = _task_request_store().get_run(run_id)
+    run = _task_request_store(read_only=True).get_run(run_id)
     if run is None:
         _print_task_error(TaskCliError(f"run '{run_id}' not found", code="run_not_found", details={"run_id": run_id}))
         return 1
@@ -7648,7 +7655,8 @@ def cmd_data_retention(args):
 
     try:
         ensure_sqlite_state()
-        engine = create_sqlite_engine()
+        should_run = bool(getattr(args, "run", False)) or bool(getattr(args, "compact", False))
+        engine = create_sqlite_engine(read_only=not should_run)
         days_override = getattr(args, "days", None)
         # The configured window is the default; --days overrides for this call.
         # A recovered/unreadable config must not silently run with substituted
@@ -7686,7 +7694,6 @@ def cmd_data_retention(args):
                 )
                 return 1
             config_recovered = False
-        should_run = bool(getattr(args, "run", False)) or bool(getattr(args, "compact", False))
         if config_recovered and should_run:
             print(
                 "The Avibe config could not be read (recovery defaults active); the retention policy is unknown. Re-run with an explicit --days window to delete anything.",
@@ -7787,7 +7794,7 @@ def cmd_data_skill_usage(args):
         from storage.resource_access_service import resolve_resource_access_context
         from storage import skill_observability
         from core.skill_observability import collection_enabled
-        from storage.db import get_cached_sqlite_engine
+        from storage.db import create_sqlite_engine, get_cached_sqlite_engine
 
         caller = caller_resource_user_context(caller_context_from_env())
         if not resolve_resource_access_context(caller).can_manage_instance:
@@ -7800,8 +7807,16 @@ def cmd_data_skill_usage(args):
         from storage.importer import ensure_sqlite_state
 
         ensure_sqlite_state()
-        with get_cached_sqlite_engine().begin() as conn:
-            result = skill_observability.clear(conn) if args.clear else skill_observability.status(conn)
+        if args.clear:
+            with get_cached_sqlite_engine().begin() as conn:
+                result = skill_observability.clear(conn)
+        else:
+            engine = create_sqlite_engine(read_only=True)
+            try:
+                with engine.connect() as conn:
+                    result = skill_observability.status(conn)
+            finally:
+                engine.dispose()
         _print_cli_payload("skill_usage", enabled=enabled, **result)
         return 0
     except Exception as exc:
@@ -8014,13 +8029,13 @@ def _validate_session_type(platform: str) -> None:
         )
 
 
-def _open_session_engine():
+def _open_session_engine(*, read_only: bool = False):
     # Bootstrap/migrate the SQLite state first so a fresh Avibe home returns a clean
     # empty list / not-found instead of a raw "no such table" error (Codex P2).
     from storage.db import create_sqlite_engine
 
     _ensure_cli_sqlite_state()
-    return create_sqlite_engine(paths.get_sqlite_state_path())
+    return create_sqlite_engine(paths.get_sqlite_state_path(), read_only=read_only)
 
 
 def cmd_session_list(args):
@@ -8031,7 +8046,7 @@ def cmd_session_list(args):
         page_request = _page_request_from_args(args, help_command="vibe session list --help")
         from core.services import sessions as sessions_service
 
-        engine = _open_session_engine()
+        engine = _open_session_engine(read_only=True)
         with engine.connect() as conn:
             result = sessions_service.list_sessions_page(
                 conn,
@@ -8060,7 +8075,7 @@ def cmd_session_get(args):
             args,
             help_command="vibe session get --help",
         )
-        engine = _open_session_engine()
+        engine = _open_session_engine(read_only=True)
         with engine.connect() as conn:
             payload = sessions_service.get_active_session(conn, session_id)
     except LookupError:
@@ -8208,10 +8223,10 @@ def cmd_session_queue_list(args):
             args,
             help_command="vibe session queue list --help",
         )
-        engine = _open_session_engine()
+        engine = _open_session_engine(read_only=True)
         with engine.connect() as conn:
             sessions_service.require_session_chat_access(conn, session_id)
-            target = resolve_session_id_target(session_id)
+            target = resolve_session_id_target(session_id, read_only=True)
             if target.session_key.platform != "avibe":
                 raise TaskCliError(
                     "queue inspection requires a Web/Workbench Agent Session",
@@ -8415,11 +8430,11 @@ def cmd_session_update(args):
 # deliver existing vault material, but it never accepts plaintext secrets for create.
 
 
-def _open_vault_engine():
+def _open_vault_engine(*, read_only: bool = False):
     from storage.db import create_sqlite_engine
 
     _ensure_cli_sqlite_state()
-    return create_sqlite_engine(paths.get_sqlite_state_path())
+    return create_sqlite_engine(paths.get_sqlite_state_path(), read_only=read_only)
 
 
 def _vault_caller_metadata() -> dict[str, str]:
@@ -8812,7 +8827,7 @@ def cmd_vault_list(args):
 
     help_command = "vibe vault list --help"
     try:
-        engine = _open_vault_engine()
+        engine = _open_vault_engine(read_only=True)
         tags = _vault_tag_filters(args)
         query = _vault_query_arg(args, help_command=help_command)
         with engine.connect() as conn:
@@ -8856,7 +8871,7 @@ def cmd_vault_find(args):
 
     help_command = "vibe vault find --help"
     try:
-        engine = _open_vault_engine()
+        engine = _open_vault_engine(read_only=True)
         tags = _vault_tag_filters(args)
         query = _vault_query_arg(args, help_command=help_command)
         with engine.connect() as conn:
@@ -8902,7 +8917,7 @@ def cmd_vault_tags(args):
 
     help_command = "vibe vault tags --help"
     try:
-        engine = _open_vault_engine()
+        engine = _open_vault_engine(read_only=True)
         query = _vault_query_arg(args, help_command=help_command)
         with engine.connect() as conn:
             tags = vault_service.list_secret_tags(conn, query=query, tag_type=getattr(args, "type", None))
@@ -15459,9 +15474,12 @@ def _print_show_page_error(exc: Exception) -> None:
     print(_json_text(payload, stream=sys.stderr), file=sys.stderr)
 
 
-def _load_show_page_store():
+def _load_show_page_store(*, read_only: bool = False):
     from core.show_pages import ShowPageStore
 
+    if read_only:
+        _ensure_cli_sqlite_state()
+        return ShowPageStore(read_only=True)
     return ShowPageStore()
 
 
@@ -15481,7 +15499,7 @@ def _show_page_row(page_payload: Mapping[str, object]) -> dict:
 def cmd_show_list(args):
     from core.show_pages import avibe_cloud_connect_guidance, show_page_payload
 
-    store = _load_show_page_store()
+    store = _load_show_page_store(read_only=True)
     try:
         scope = _resolve_session_list_scope(args, help_command="vibe show list --help")
         page_request = _page_request_from_args(args, help_command="vibe show list --help")
@@ -15567,7 +15585,7 @@ def _prewarm_show_page_session_best_effort(
 def cmd_show_status(args):
     from core.show_git import show_history_status
 
-    store = _load_show_page_store()
+    store = _load_show_page_store(read_only=True)
     try:
         session_id = _resolve_caller_session_id(args, help_command="vibe show status --help")
         page = store.get(session_id)
@@ -16218,7 +16236,8 @@ def cmd_show_reply(args):
 def cmd_show_marks(args):
     from core.show_session_events import ShowSessionEventStore
 
-    event_store = ShowSessionEventStore()
+    _ensure_cli_sqlite_state()
+    event_store = ShowSessionEventStore(read_only=True)
     try:
         session_id = _resolve_caller_session_id(args, help_command="vibe show marks --help")
         page_request = _page_request_from_args(args, help_command="vibe show marks --help")

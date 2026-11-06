@@ -178,15 +178,21 @@ def _require_show_dispatch_authority(conn: Any, session_id: str, context: Any) -
 @dataclass(frozen=True)
 class ShowSessionEventStore:
     db_path: Path | None = None
+    read_only: bool = False
 
     def __post_init__(self) -> None:
-        if self.db_path is None:
-            ensure_sqlite_state(primary_platform=resolve_primary_platform_from_config(paths.get_state_dir()))
-        else:
-            from storage.migrations import run_migrations
+        if not self.read_only:
+            if self.db_path is None:
+                ensure_sqlite_state(primary_platform=resolve_primary_platform_from_config(paths.get_state_dir()))
+            else:
+                from storage.migrations import run_migrations
 
-            run_migrations(self.db_path)
-        object.__setattr__(self, "engine", create_sqlite_engine(self.db_path))
+                run_migrations(self.db_path)
+        engine = (
+            create_sqlite_engine(self.db_path, read_only=True)
+            if self.read_only else create_sqlite_engine(self.db_path)
+        )
+        object.__setattr__(self, "engine", engine)
 
     def close(self) -> None:
         self.engine.dispose()

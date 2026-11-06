@@ -3397,19 +3397,24 @@ def _runs_blocked_by_live_activities(
     return blocked
 
 class SQLiteBackgroundTaskStore:
-    def __init__(self, db_path: Optional[Path] = None, *, include_private_metadata: bool = True):
+    def __init__(
+        self, db_path: Optional[Path] = None, *, include_private_metadata: bool = True, read_only: bool = False
+    ):
         self._include_private_metadata = include_private_metadata
         self.db_path = db_path or paths.get_sqlite_state_path()
-        guard_source_checkout_default_state_migration(self.db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        if db_path is None:
-            from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
+        if not read_only:
+            guard_source_checkout_default_state_migration(self.db_path)
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            if db_path is None:
+                from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
 
-            ensure_sqlite_state(primary_platform=resolve_primary_platform_from_config(paths.get_state_dir()))
-        if not background_tables_ready(self.db_path):
-            initialize_background_tables(self.db_path)
-        ensure_background_indexes(self.db_path)
-        self.engine = create_sqlite_engine(self.db_path)
+                ensure_sqlite_state(primary_platform=resolve_primary_platform_from_config(paths.get_state_dir()))
+            if not background_tables_ready(self.db_path):
+                initialize_background_tables(self.db_path)
+            ensure_background_indexes(self.db_path)
+        self.engine = (
+            create_sqlite_engine(self.db_path, read_only=True) if read_only else create_sqlite_engine(self.db_path)
+        )
         self._probe = SqliteInvalidationProbe(self.engine)
 
     def close(self) -> None:

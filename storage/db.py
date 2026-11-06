@@ -73,7 +73,9 @@ def create_sqlite_engine(db_path: Path | None = None, *, read_only: bool = False
     @event.listens_for(engine, "connect")
     def _set_sqlite_pragmas(dbapi_connection, _connection_record) -> None:
         cursor = dbapi_connection.cursor()
-        if not read_only:
+        if read_only:
+            cursor.execute("PRAGMA query_only = ON")
+        else:
             with loop_writers.track_autocommit_write(dbapi_connection):
                 cursor.execute("PRAGMA journal_mode = WAL")
         cursor.execute("PRAGMA foreign_keys = ON")

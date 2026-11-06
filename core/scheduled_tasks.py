@@ -780,12 +780,26 @@ class SessionBindingChange:
         return f"{self.action}:{self.reason}:{self.previous_session_id or ''}"
 
 
-def resolve_session_id_target(session_id: str, *, db_path: Optional[Path] = None) -> ResolvedSessionIdTarget:
+def resolve_session_id_target(
+    session_id: str,
+    *,
+    db_path: Optional[Path] = None,
+    read_only: bool = False,
+) -> ResolvedSessionIdTarget:
+    """Resolve a stored Session target without changing its routing semantics.
+
+    CLI read paths may opt into an existing-state-only connection after shared
+    readiness. The default remains writer-compatible for service and mutation
+    callers that historically used this resolver.
+    """
     raw = (session_id or "").strip()
     if not raw:
         raise ValueError("session id is required")
 
-    engine = create_sqlite_engine(db_path or paths.get_sqlite_state_path())
+    engine = create_sqlite_engine(
+        db_path or paths.get_sqlite_state_path(),
+        read_only=read_only,
+    )
     try:
         with engine.connect() as conn:
             row = conn.execute(
@@ -2196,9 +2210,14 @@ class ScheduledTaskStore:
 
 
 class TaskExecutionStore:
-    def __init__(self, root: Optional[Path] = None):
+    def __init__(self, root: Optional[Path] = None, *, read_only: bool = False):
+        if read_only and root is not None:
+            raise ValueError("read_only requires the SQLite backend")
         self.root = root or (paths.get_state_dir() / "task_requests")
-        self._sqlite = SQLiteBackgroundTaskStore() if root is None else None
+        self._sqlite = (
+            SQLiteBackgroundTaskStore(read_only=True)
+            if read_only else SQLiteBackgroundTaskStore() if root is None else None
+        )
         self.pending_dir = self.root / "pending"
         self.processing_dir = self.root / "processing"
         self.completed_dir = self.root / "completed"
