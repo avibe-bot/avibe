@@ -36,6 +36,11 @@ updates:
         update-types:
           - minor
           - patch
+    # Vitest 5.1.0 excludes our supported Node20 toolchain. Keep the 4.x
+    # declaration and leave later candidates eligible for compatibility review.
+    ignore:
+      - dependency-name: vitest
+        versions: ["5.1.0"]
 
   - package-ecosystem: npm
     directory: /desktop
