@@ -52,6 +52,15 @@ const screenshot: AnnotationState = { available: true, enabled: true, mode: 'scr
 
 const designFrames = frames([
   {
+    name: 'mobile-runtime',
+    title: '会话头部 · 手机 · 与首页同高',
+    width: 390,
+    height: 56,
+    status: 'shipped',
+    fixtures: chatFixtures(),
+    render: header({ title: '移动端交互设计' }),
+  },
+  {
     name: 'title-hover',
     title: '会话头部 · 标题悬停（点击改名）',
     width: 1192,

@@ -7,6 +7,7 @@ import { useApi } from '../../context/ApiContext';
 import { useStatus } from '../../context/StatusContext';
 import { useAuthAccount } from '../../lib/useAuthAccount';
 import { hasNativeCapability, nativeShowAccount } from '../../lib/native';
+import { accountDrawerAvatarClassName, accountInitialFor } from '../AccountAvatar';
 import { LanguageSwitcher } from '../LanguageSwitcher';
 import { ThemeToggle } from '../ThemeToggle';
 import { VersionBadge } from '../VersionBadge';
@@ -51,8 +52,8 @@ export const MoreAccountSection: React.FC = () => {
   return (
     <div className="overflow-hidden rounded-xl border border-border bg-surface">
       <div className="flex items-center gap-3 px-4 py-3">
-        <span className="grid size-9 shrink-0 place-items-center rounded-full border border-cyan/35 bg-cyan/[0.08] text-[13px] font-semibold text-cyan-ink">
-          {(email.split('@')[0]?.[0] ?? '?').toUpperCase()}
+        <span className={accountDrawerAvatarClassName}>
+          {accountInitialFor(email)}
         </span>
         <div className="min-w-0 flex-1">
           <div className="text-[10px] font-bold uppercase tracking-[0.16em] text-muted">{t('appShell.signedInAs')}</div>

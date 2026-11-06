@@ -50,6 +50,8 @@ const api = vi.hoisted(() => ({
   getConfig: vi.fn(),
   getVersion: vi.fn(),
   getMacOSLoginSessionStatus: vi.fn(),
+  getAuthSession: vi.fn(),
+  signOut: vi.fn(),
 }));
 const status = vi.hoisted(() => ({ state: 'ready' as const }));
 const inbox = vi.hoisted(() => ({ totalUnread: 0 }));
@@ -137,7 +139,9 @@ vi.mock('./AppsLauncher', async () => {
     AppsLauncher: () => (useRouteSurfaceActive() ? <div data-testid="apps-launcher" /> : null),
   };
 });
-vi.mock('./AccountMenu', () => ({ AccountMenu: () => <div data-testid="account-menu" /> }));
+vi.mock('./AccountMenu', () => ({
+  AccountMenu: () => <div data-testid="account-menu" />,
+}));
 vi.mock('./LanguageSwitcher', () => ({ LanguageSwitcher: () => <div data-testid="language-switcher" /> }));
 vi.mock('./ThemeToggle', () => ({ ThemeToggle: () => <div data-testid="theme-toggle" /> }));
 vi.mock('./VersionBadge', () => ({ VersionBadge: () => <div data-testid="version-badge" /> }));
@@ -211,13 +215,36 @@ beforeEach(() => {
   api.getConfig.mockResolvedValue({ platforms: { enabled: [] } });
   api.getVersion.mockResolvedValue({ version: 'test' });
   api.getMacOSLoginSessionStatus.mockResolvedValue({ ok: true, state: 'healthy' });
+  api.getAuthSession.mockResolvedValue({
+    remote: true,
+    authenticated: true,
+    email: 'max@example.com',
+  });
+  api.signOut.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
   cleanup();
   clearMobileProjectsListSnapshot();
+  Reflect.deleteProperty(window, 'avibeNative');
   vi.clearAllMocks();
 });
+
+const installNativeAccountBridge = () => {
+  const call = vi.fn(async () => null);
+  Object.defineProperty(window, 'avibeNative', {
+    configurable: true,
+    value: {
+      contract: 1,
+      platform: 'ios',
+      shellVersion: '1.0 (1)',
+      capabilities: { accountPresentation: 2 },
+      call,
+      on: vi.fn(() => () => undefined),
+    },
+  });
+  return call;
+};
 
 describe('AppShell stale login session notice', () => {
   it('shows the restart instruction when the service outlived the macOS login session', async () => {
@@ -977,6 +1004,35 @@ describe('AppShell persistent Workbench chrome', () => {
 });
 
 describe('AppShell remote Apps access', () => {
+  it('keeps one registered native account avatar for chat-capable users and viewers', async () => {
+    const call = installNativeAccountBridge();
+    const tree = () => (
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route index element={<div data-testid="workbench-surface" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>
+    );
+    const view = render(tree());
+
+    expect((await screen.findByRole('button', { name: 'appShell.accountMenuLabel' })).textContent).toBe('M');
+    expect(call).toHaveBeenCalledWith(
+      'app.setAccountActionAvailable',
+      { available: true },
+    );
+
+    instanceAuth.capabilities.can_chat = false;
+    view.rerender(tree());
+
+    expect((await screen.findByRole('button', { name: 'appShell.accountMenuLabel' })).textContent).toBe('M');
+    expect(screen.queryByTestId('mobile-dock-drawer')).toBeNull();
+    expect(call.mock.calls.filter(([method]) => method === 'app.setAccountActionAvailable')).toEqual([
+      ['app.setAccountActionAvailable', { available: true }],
+    ]);
+  });
+
   it('gives the mobile Show Page app the full viewport without duplicate shell chrome', async () => {
     render(
       <MemoryRouter initialEntries={['/apps/show/session-1']}>

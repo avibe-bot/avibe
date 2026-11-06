@@ -33,6 +33,7 @@ struct MobileSessionSnapshot: Codable, Equatable {
 }
 
 struct MobileRuntimeContext: Equatable {
+    let account: MobileAccount
     let instance: MobileInstance
     fileprivate let generation: Int
     fileprivate let websiteDataStoreIdentifier: UUID
@@ -538,6 +539,7 @@ final class MobileSessionCoordinator {
         deactivateAccountSurface()
         onOpenRuntime(
             MobileRuntimeContext(
+                account: snapshot.account,
                 instance: instance,
                 generation: generation,
                 websiteDataStoreIdentifier: websiteDataStore.identifier
@@ -594,6 +596,7 @@ final class MobileSessionCoordinator {
             return nil
         }
         let runtime = MobileRuntimeContext(
+            account: snapshot.account,
             instance: selected,
             generation: generation,
             websiteDataStoreIdentifier: websiteDataStore.identifier

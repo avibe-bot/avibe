@@ -102,6 +102,22 @@ export async function nativeShowAccount(): Promise<boolean> {
   }
 }
 
+export async function setNativeAccountActionAvailable(
+  available: boolean,
+): Promise<boolean> {
+  try {
+    if (!hasNativeCapability('accountPresentation', 2)) return false;
+    await callNative<null>(
+      'accountPresentation',
+      'app.setAccountActionAvailable',
+      { available },
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function nativeHapticImpact(style: NativeImpactStyle): Promise<boolean> {
   try {
     if (!hasNativeCapability('haptics')) return false;

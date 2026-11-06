@@ -1,3 +1,4 @@
+import SwiftUI
 import XCTest
 import WebKit
 @testable import Avibe
@@ -50,6 +51,95 @@ final class NavigationPolicyTests: XCTestCase {
         XCTAssertEqual(policy.disposition(for: sandbox, context: .popupMainFrame), .allow)
         XCTAssertEqual(policy.disposition(for: external, context: .primaryMainFrame), .external)
         XCTAssertEqual(policy.disposition(for: external, context: .popupMainFrame), .allow)
+    }
+
+    func testPrimaryBackForwardNavigationStaysInsideTheSelectedInstance() {
+        let policy = NavigationPolicy(instanceOrigins: [instance])
+
+        XCTAssertTrue(
+            policy.allowsBackForwardNavigation(
+                to: URL(string: "https://alice-app.avibe.bot/chat/ses_1")!,
+                context: .primaryMainFrame
+            )
+        )
+        for url in [
+            URL(string: "https://avibe.bot/oauth/authorize")!,
+            URL(string: "https://github.com/login/oauth/authorize")!,
+            URL(string: "https://example.com/docs")!,
+        ] {
+            XCTAssertFalse(
+                policy.allowsBackForwardNavigation(
+                    to: url,
+                    context: .primaryMainFrame
+                )
+            )
+            XCTAssertTrue(
+                policy.allowsBackForwardNavigation(
+                    to: url,
+                    context: .popupMainFrame
+                )
+            )
+        }
+    }
+
+    func testRuntimeAccountAvatarUsesTheAccountLocalPartInitial() {
+        XCTAssertEqual(
+            runtimeAccountInitial(for: "max@example.com"),
+            "M"
+        )
+        XCTAssertEqual(
+            runtimeAccountInitial(for: "  alex@example.com"),
+            "A"
+        )
+        XCTAssertEqual(runtimeAccountInitial(for: nil), "A")
+        XCTAssertEqual(runtimeAccountInitial(for: " @example.com"), "A")
+    }
+
+    @MainActor
+    func testLegacyRuntimeToolbarMatchesTheMobileBrandHeaderHeight() throws {
+        for colorScheme in [ColorScheme.light, .dark] {
+            let toolbarController = UIHostingController(
+                rootView: LegacyRuntimeToolbar(
+                    instanceName: "Personal Avibe",
+                    accountEmail: "max@example.com",
+                    showAccount: {},
+                    showInstancePicker: {}
+                )
+                .environment(\.colorScheme, colorScheme)
+                .environment(\.dynamicTypeSize, .large)
+            )
+            let toolbarSize = toolbarController.sizeThatFits(
+                in: CGSize(width: 390, height: 180)
+            )
+            XCTAssertEqual(toolbarSize.height, 56, accuracy: 0.5)
+
+            let controller = UIHostingController(
+                rootView: LegacyRuntimeToolbarScreenshotFixture(
+                    instanceName: "Personal Avibe",
+                    accountEmail: "max@example.com"
+                )
+                .environment(\.colorScheme, colorScheme)
+                .environment(\.dynamicTypeSize, .large)
+            )
+            controller.loadViewIfNeeded()
+            controller.view.frame = CGRect(
+                x: 0,
+                y: 0,
+                width: 390,
+                height: 180
+            )
+            controller.view.layoutIfNeeded()
+
+            let image = snapshot(of: controller.view)
+
+            let attachment = XCTAttachment(
+                data: try XCTUnwrap(image.pngData()),
+                uniformTypeIdentifier: "public.png"
+            )
+            attachment.name = "legacy-runtime-fallback-\(colorScheme)"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
     }
 
     func testSubframesUseWebKitDefaultsExceptForExternalApplicationSchemes() {
@@ -317,6 +407,21 @@ final class NavigationPolicyTests: XCTestCase {
             .viewportSetOuterScrollLocked
         )
         XCTAssertEqual(
+            try NativeBridgeRequest.parse(
+                [
+                    "method": "app.setAccountActionAvailable",
+                    "params": ["available": true],
+                ]
+            ).get().method,
+            .appSetAccountActionAvailable
+        )
+        XCTAssertEqual(
+            try NativeBridgeRequest.parse(
+                ["method": "navigation.historyChanged"]
+            ).get().method,
+            .navigationHistoryChanged
+        )
+        XCTAssertEqual(
             NativeBridgeRequest.parse(["method": "app.instances"]).failure,
             .unsupported
         )
@@ -470,6 +575,9 @@ final class NavigationPolicyTests: XCTestCase {
             userAgentVersion: "1.2.3"
         )
         var outerScrollRequests: [Bool] = []
+        var accountActionRequests: [Bool] = []
+        var historyChangeRequests = 0
+        weak var primaryWebView: WKWebView?
         let accountShown = expectation(description: "runtime bridge opens account surface")
         let webView = WKWebView(
             frame: .zero,
@@ -480,11 +588,26 @@ final class NavigationPolicyTests: XCTestCase {
                     outerScrollRequests.append(locked)
                     return true
                 },
+                setAccountActionAvailable: { sourceWebView, available in
+                    guard sourceWebView === primaryWebView else {
+                        return false
+                    }
+                    accountActionRequests.append(available)
+                    return true
+                },
+                historyDidChange: { sourceWebView in
+                    guard sourceWebView === primaryWebView else {
+                        return false
+                    }
+                    historyChangeRequests += 1
+                    return true
+                },
                 showAccount: {
                     accountShown.fulfill()
                 }
             )
         )
+        primaryWebView = webView
         let probe = WebViewLoadProbe()
         webView.navigationDelegate = probe
 
@@ -504,6 +627,20 @@ final class NavigationPolicyTests: XCTestCase {
               "viewport.setOuterScrollLocked",
               {locked: true}
             );
+            await window.avibeNative.call(
+              "app.setAccountActionAvailable",
+              {available: true}
+            );
+            await window.avibeNative.call("navigation.historyChanged");
+            let invalidHistory = null;
+            try {
+              await window.avibeNative.call(
+                "navigation.historyChanged",
+                {url: window.location.href}
+              );
+            } catch (error) {
+              invalidHistory = error.code;
+            }
             await window.avibeNative.call("app.showAccount");
             let unsupported = null;
             try {
@@ -523,6 +660,7 @@ final class NavigationPolicyTests: XCTestCase {
               subframeBridge: typeof document.querySelector("#child").contentWindow.avibeNative,
               subframeTransport: await document.querySelector("#child").contentWindow.webkit
                 .messageHandlers.avibeNative.postMessage({method: "app.info", params: {}}),
+              invalidHistory,
               unsupported
             });
             """,
@@ -537,13 +675,16 @@ final class NavigationPolicyTests: XCTestCase {
         XCTAssertEqual(instancePayload["shellVersion"] as? String, "1.2.3 (45)")
         XCTAssertEqual(
             instancePayload["accountPresentationCapability"] as? Int,
-            1
+            2
         )
         XCTAssertEqual(instancePayload["appCapability"] as? Int, 1)
         XCTAssertEqual(instancePayload["keyboardResizesViewport"] as? Int, 1)
         XCTAssertEqual(instancePayload["viewportCapability"] as? Int, 1)
         XCTAssertEqual(outerScrollRequests, [true])
+        XCTAssertEqual(accountActionRequests, [true])
+        XCTAssertEqual(historyChangeRequests, 1)
         XCTAssertEqual(instancePayload["subframeBridge"] as? String, "undefined")
+        XCTAssertEqual(instancePayload["invalidHistory"] as? String, "invalid_argument")
         XCTAssertEqual(instancePayload["unsupported"] as? String, "unsupported")
         assertForbiddenReply(instancePayload["subframeTransport"])
         await fulfillment(of: [accountShown], timeout: 2)
@@ -589,9 +730,26 @@ final class NavigationPolicyTests: XCTestCase {
               "viewport.setOuterScrollLocked",
               {locked: false}
             );
+            let registration = null;
+            try {
+              await window.avibeNative.call(
+                "app.setAccountActionAvailable",
+                {available: true}
+              );
+            } catch (error) {
+              registration = error.code;
+            }
+            let history = null;
+            try {
+              await window.avibeNative.call("navigation.historyChanged");
+            } catch (error) {
+              history = error.code;
+            }
             return JSON.stringify({
               bridge: typeof window.avibeNative,
-              keyboardResizesViewport: info.capabilities.keyboardResizesViewport
+              keyboardResizesViewport: info.capabilities.keyboardResizesViewport,
+              registration,
+              history
             });
             """,
             arguments: [:],
@@ -601,7 +759,334 @@ final class NavigationPolicyTests: XCTestCase {
         let childPayload = try jsonObject(from: childResult)
         XCTAssertEqual(childPayload["bridge"] as? String, "object")
         XCTAssertEqual(childPayload["keyboardResizesViewport"] as? Int, 1)
+        XCTAssertEqual(childPayload["registration"] as? String, "forbidden")
+        XCTAssertEqual(childPayload["history"] as? String, "forbidden")
+        XCTAssertEqual(historyChangeRequests, 1)
         XCTAssertEqual(outerScrollRequests, [true, false])
+        XCTAssertEqual(accountActionRequests, [true])
+    }
+
+    @MainActor
+    func testPrimaryWebViewTraversesSPAHistoryWithTheInteractiveGestureEnabled() async throws {
+        let server = try LocalHTTPServer { request in
+            LocalHTTPResponse.html(
+                """
+                <!doctype html>
+                <title>Workbench</title>
+                <p>\(request.path)</p>
+                """
+            )
+        }
+        let baseURL = try await server.start()
+        defer {
+            server.stop()
+        }
+        let instanceOrigin = try XCTUnwrap(
+            WebOrigin(url: baseURL, requiresHTTPS: false)
+        )
+        let controller = makeRuntimeController(instanceOrigin: instanceOrigin)
+        let window = host(controller)
+        defer {
+            window.isHidden = true
+        }
+        let webView = try XCTUnwrap(
+            controller.view.subviews.compactMap { $0 as? WKWebView }.first
+        )
+        try await waitForTitle("Workbench", in: webView)
+
+        _ = try await webView.evaluateJavaScript(
+            """
+            history.pushState({idx: 1}, "", "/inbox");
+            history.pushState({idx: 2}, "", "/chat/ses_1");
+            """
+        )
+        try await waitUntil {
+            webView.allowsBackForwardNavigationGestures
+                && webView.backForwardList.backItem?.url.path == "/inbox"
+        }
+
+        XCTAssertNotNil(webView.goBack())
+        try await waitUntil {
+            webView.url?.path == "/inbox"
+        }
+        XCTAssertEqual(webView.url?.path, "/inbox")
+    }
+
+    @MainActor
+    func testPrimaryBackGestureAndForcedBackCannotEnterAuthenticationHistory() async throws {
+        let instanceServer = try LocalHTTPServer { request in
+            LocalHTTPResponse.html(
+                """
+                <!doctype html>
+                <title>\(request.path == "/returned" ? "Instance returned" : "Instance start")</title>
+                """
+            )
+        }
+        let authServer = try LocalHTTPServer { _ in
+            LocalHTTPResponse.html(
+                "<!doctype html><title>Consent</title>"
+            )
+        }
+        let instanceBaseURL = try await instanceServer.start()
+        let authBaseURL = try await authServer.start()
+        defer {
+            instanceServer.stop()
+            authServer.stop()
+        }
+        let instanceOrigin = try XCTUnwrap(
+            WebOrigin(url: instanceBaseURL, requiresHTTPS: false)
+        )
+        let authOrigin = try XCTUnwrap(
+            WebOrigin(url: authBaseURL, requiresHTTPS: false)
+        )
+        let policy = NavigationPolicy(
+            instanceOrigins: [instanceOrigin],
+            authenticationOrigins: [authOrigin]
+        )
+        let controller = makeRuntimeController(
+            instanceOrigin: instanceOrigin,
+            navigationPolicy: policy
+        )
+        let window = host(controller)
+        defer {
+            window.isHidden = true
+        }
+        let webView = try XCTUnwrap(
+            controller.view.subviews.compactMap { $0 as? WKWebView }.first
+        )
+        try await waitForTitle("Instance start", in: webView)
+        webView.load(
+            URLRequest(
+                url: authBaseURL.appendingPathComponent("consent")
+            )
+        )
+        try await waitForTitle("Consent", in: webView)
+        webView.load(
+            URLRequest(
+                url: instanceBaseURL.appendingPathComponent("returned")
+            )
+        )
+        try await waitForTitle("Instance returned", in: webView)
+        try await waitUntil {
+            WebOrigin(
+                url: webView.backForwardList.backItem?.url
+                    ?? URL(fileURLWithPath: "/"),
+                requiresHTTPS: false
+            ) == authOrigin
+        }
+
+        XCTAssertFalse(webView.allowsBackForwardNavigationGestures)
+        XCTAssertNotNil(webView.goBack())
+        try await Task.sleep(for: .milliseconds(400))
+        XCTAssertEqual(
+            WebOrigin(
+                url: try XCTUnwrap(webView.url),
+                requiresHTTPS: false
+            ),
+            instanceOrigin
+        )
+        let returnedTitle = try await webView.evaluateJavaScript(
+            "document.title"
+        ) as? String
+        XCTAssertEqual(
+            returnedTitle,
+            "Instance returned"
+        )
+        let remainingBackOrigin = webView.backForwardList.backItem.flatMap {
+            WebOrigin(url: $0.url, requiresHTTPS: false)
+        }
+        XCTAssertEqual(remainingBackOrigin, authOrigin)
+        XCTAssertFalse(webView.allowsBackForwardNavigationGestures)
+
+        let returnedURL = try XCTUnwrap(webView.url)
+        _ = try await webView.evaluateJavaScript(
+            "history.pushState({idx: 3}, '', window.location.href)"
+        )
+        try await waitUntil {
+            webView.allowsBackForwardNavigationGestures
+                && WebOrigin(
+                    url: webView.backForwardList.backItem?.url
+                        ?? URL(fileURLWithPath: "/"),
+                    requiresHTTPS: false
+                ) == instanceOrigin
+        }
+        XCTAssertEqual(webView.url, returnedURL)
+    }
+
+    @MainActor
+    func testAccountFallbackTracksRegistrationAndPrimaryNavigationLifecycle() async throws {
+        var visibility: [Bool] = []
+        let controller = WebViewController(
+            instanceOrigin: instance,
+            websiteDataStore: .nonPersistent(),
+            accountFallbackVisibilityChanged: {
+                visibility.append($0)
+            },
+            didStartLoading: {},
+            didFinishLoading: {},
+            didFailLoading: {}
+        )
+        let window = host(controller)
+        defer {
+            window.isHidden = true
+        }
+        let webView = try XCTUnwrap(
+            controller.view.subviews.compactMap { $0 as? WKWebView }.first
+        )
+        webView.stopLoading()
+        webView.loadHTMLString(
+            """
+            <!doctype html>
+            <meta name="viewport" content="width=device-width">
+            <style>
+              * { box-sizing: border-box; }
+              body {
+                margin: 0;
+                color: #111827;
+                background: #ffffff;
+                font: 15px -apple-system, sans-serif;
+              }
+              header {
+                height: 56px;
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                padding: 0 16px;
+                border-bottom: 1px solid #dfe3eb;
+                background: #f4f6fb;
+              }
+              .avatar {
+                width: 28px;
+                height: 28px;
+                display: grid;
+                place-items: center;
+                margin-left: auto;
+                border: 1px solid rgba(8, 145, 178, 0.35);
+                border-radius: 50%;
+                color: #0891b2;
+                background: rgba(8, 145, 178, 0.08);
+                font-size: 11px;
+                font-weight: 600;
+              }
+              main { padding: 24px 16px; }
+            </style>
+            <title>Current Workbench</title>
+            <header>
+              <strong>Avibe</strong>
+              <span>Chat</span>
+              <span class="avatar">M</span>
+            </header>
+            <main>Current Workbench account action</main>
+            """,
+            baseURL: instance.url
+        )
+        try await waitForTitle("Current Workbench", in: webView)
+        _ = try await webView.callAsyncJavaScript(
+            """
+            await window.avibeNative.call(
+              "app.setAccountActionAvailable",
+              {available: true}
+            );
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+        visibility.removeAll()
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertFalse(visibility.contains(true))
+        let attachment = XCTAttachment(
+            data: try XCTUnwrap(snapshot(of: controller.view).pngData()),
+            uniformTypeIdentifier: "public.png"
+        )
+        attachment.name = "current-runtime-native-fallback-hidden"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+
+        _ = try await webView.callAsyncJavaScript(
+            """
+            await window.avibeNative.call(
+              "app.setAccountActionAvailable",
+              {available: false}
+            );
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+        visibility.removeAll()
+        try await waitUntil {
+            visibility.last == true
+        }
+
+        _ = try await webView.callAsyncJavaScript(
+            """
+            await window.avibeNative.call(
+              "app.setAccountActionAvailable",
+              {available: true}
+            );
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+        visibility.removeAll()
+        controller.webView(
+            webView,
+            didStartProvisionalNavigation: nil
+        )
+        _ = try await webView.callAsyncJavaScript(
+            """
+            await window.avibeNative.call(
+              "app.setAccountActionAvailable",
+              {available: false}
+            );
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertFalse(visibility.contains(true))
+
+        webView.loadHTMLString(
+            "<!doctype html><title>Legacy Workbench</title>",
+            baseURL: instance.url
+        )
+        try await waitForTitle("Legacy Workbench", in: webView)
+        try await waitUntil {
+            visibility.last == true
+        }
+
+        let child = WKWebView(
+            frame: .zero,
+            configuration: webView.configuration
+        )
+        let childProbe = WebViewLoadProbe()
+        child.navigationDelegate = childProbe
+        try await childProbe.loadHTML(
+            "<!doctype html><title>Child</title>",
+            baseURL: instance.url,
+            in: child
+        )
+        let childResult = try await child.callAsyncJavaScript(
+            """
+            try {
+              await window.avibeNative.call(
+                "app.setAccountActionAvailable",
+                {available: true}
+              );
+              return "allowed";
+            } catch (error) {
+              return error.code;
+            }
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+        XCTAssertEqual(childResult as? String, "forbidden")
+        XCTAssertFalse(child.allowsBackForwardNavigationGestures)
     }
 
     @MainActor
@@ -652,6 +1137,75 @@ final class NavigationPolicyTests: XCTestCase {
     }
 
     @MainActor
+    private func makeRuntimeController(
+        instanceOrigin: WebOrigin? = nil,
+        navigationPolicy: NavigationPolicy? = nil
+    ) -> WebViewController {
+        WebViewController(
+            instanceOrigin: instanceOrigin ?? instance,
+            websiteDataStore: .nonPersistent(),
+            navigationPolicy: navigationPolicy,
+            didStartLoading: {},
+            didFinishLoading: {},
+            didFailLoading: {}
+        )
+    }
+
+    @MainActor
+    private func host(_ controller: UIViewController) -> UIWindow {
+        let window = UIWindow(
+            frame: CGRect(x: 0, y: 0, width: 390, height: 700)
+        )
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        controller.loadViewIfNeeded()
+        controller.view.frame = window.bounds
+        controller.view.layoutIfNeeded()
+        return window
+    }
+
+    @MainActor
+    private func waitForTitle(
+        _ title: String,
+        in webView: WKWebView
+    ) async throws {
+        try await waitUntil {
+            let value = try? await webView.evaluateJavaScript("document.title")
+            return value as? String == title
+        }
+    }
+
+    @MainActor
+    private func waitUntil(
+        timeout: Duration = .seconds(5),
+        condition: @escaping @MainActor () async -> Bool
+    ) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while clock.now < deadline {
+            if await condition() {
+                return
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTFail("Condition did not become true before the deadline.")
+        throw TestWaitError.timedOut
+    }
+
+    @MainActor
+    private func snapshot(of view: UIView) -> UIImage {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let renderer = UIGraphicsImageRenderer(
+            bounds: view.bounds,
+            format: format
+        )
+        return renderer.image { _ in
+            view.drawHierarchy(in: view.bounds, afterScreenUpdates: true)
+        }
+    }
+
+    @MainActor
     private func assertKeyboardBottomConstraint(
         _ constraints: [NSLayoutConstraint],
         webView: WKWebView,
@@ -672,6 +1226,48 @@ final class NavigationPolicyTests: XCTestCase {
                 && constraint.secondAttribute == .top
         }
         XCTAssertTrue(hasKeyboardBottomConstraint, file: file, line: line)
+    }
+}
+
+private enum TestWaitError: Error {
+    case timedOut
+}
+
+private struct LegacyRuntimeToolbarScreenshotFixture: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    let instanceName: String
+    let accountEmail: String?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            LegacyRuntimeToolbar(
+                instanceName: instanceName,
+                accountEmail: accountEmail,
+                showAccount: {},
+                showInstancePicker: {}
+            )
+
+            HStack(spacing: 10) {
+                Image(systemName: "chevron.left")
+                Text("Chat")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Image(systemName: "rectangle.on.rectangle")
+            }
+            .padding(.horizontal, 16)
+            .frame(height: 48)
+            .background(webFixtureBackground)
+
+            Spacer()
+        }
+        .background(webFixtureBackground)
+    }
+
+    private var webFixtureBackground: Color {
+        colorScheme == .dark
+            ? Color(red: 8 / 255, green: 8 / 255, blue: 18 / 255)
+            : .white
     }
 }
 

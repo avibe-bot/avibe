@@ -6,8 +6,11 @@ import { Loader2, Mic } from 'lucide-react';
 
 import { Button } from './ui/button';
 import { InstallHint } from './InstallHint';
+import { accountDrawerAvatarClassName, accountInitialFor } from './AccountAvatar';
 import { BotFace } from './workbench/bots/BotFace';
 import type { BotAvatar as BotAvatarSpec } from '../lib/bots';
+import { useAuthAccount } from '../lib/useAuthAccount';
+import { nativeShowAccount } from '../lib/native';
 import logoImg from '../assets/logo.png';
 
 // The mobile shell's chrome as views (props only), so AppShell keeps the data and
@@ -195,7 +198,40 @@ const NewSessionCenter: React.FC<{ center: CenterButton }> = ({ center }) => {
 // 16px top inset below it, so the first section neither crowds the header nor floats
 // far below it. The open tab names the page for assistive tech only; the tab bar
 // shows it to everyone else.
-export const MobileBrandHeader: React.FC<{ title?: string | null }> = ({ title }) => {
+const NativeHeaderAccountAction: React.FC = () => {
+  const { t } = useTranslation();
+  const { email, signingOut, signOut } = useAuthAccount();
+  const accountLabel = email
+    ? t('appShell.accountMenuLabel', { email })
+    : t('appShell.openMobileAccount');
+
+  const openAccount = async () => {
+    if (signingOut) return;
+    if (!await nativeShowAccount()) {
+      await signOut();
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      aria-label={accountLabel}
+      title={accountLabel}
+      disabled={signingOut}
+      onClick={() => void openAccount()}
+      className="inline-flex size-11 shrink-0 items-center justify-center rounded-full transition hover:bg-foreground/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/60 disabled:cursor-not-allowed disabled:opacity-60"
+    >
+      <span className={accountDrawerAvatarClassName} aria-hidden="true">
+        {accountInitialFor(email)}
+      </span>
+    </button>
+  );
+};
+
+export const MobileBrandHeader: React.FC<{
+  title?: string | null;
+  nativeAccountAction?: boolean;
+}> = ({ title, nativeAccountAction = false }) => {
   const { t } = useTranslation();
   return (
     <header className="sticky top-0 z-40 flex h-[calc(3.5rem+env(safe-area-inset-top))] shrink-0 items-center justify-between gap-2 border-b border-border bg-background/92 px-4 pt-[env(safe-area-inset-top)] backdrop-blur md:hidden">
@@ -216,6 +252,7 @@ export const MobileBrandHeader: React.FC<{ title?: string | null }> = ({ title }
           theme / account live in the More tab. */}
       <div className="flex items-center gap-1.5">
         <InstallHint />
+        {nativeAccountAction && <NativeHeaderAccountAction />}
       </div>
     </header>
   );

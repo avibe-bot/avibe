@@ -10,6 +10,7 @@ import {
   nativeShowAccount,
   nativeVoicePermission,
   openNativeExternal,
+  setNativeAccountActionAvailable,
   setNativeOuterScrollLocked,
 } from './native';
 
@@ -23,7 +24,7 @@ const installBridge = (
         platform: 'ios',
         shellVersion: '1.0 (1)',
         capabilities: {
-          accountPresentation: 1,
+          accountPresentation: 2,
           app: 1,
           haptics: 1,
           keyboardResizesViewport: 1,
@@ -43,7 +44,7 @@ const installBridge = (
       platform: 'ios',
       shellVersion: '1.0 (1)',
       capabilities: {
-        accountPresentation: 1,
+        accountPresentation: 2,
         app: 1,
         haptics: 1,
         keyboardResizesViewport: 1,
@@ -87,6 +88,7 @@ describe('native shell bridge', () => {
     });
     await expect(openNativeExternal('https://avibe.bot')).resolves.toBe(true);
     await expect(nativeShowAccount()).resolves.toBe(true);
+    await expect(setNativeAccountActionAvailable(true)).resolves.toBe(true);
     await expect(nativeHapticImpact('medium')).resolves.toBe(true);
     await expect(setNativeOuterScrollLocked(true)).resolves.toBe(true);
     await expect(nativeVoicePermission()).resolves.toBe('granted');
@@ -94,6 +96,7 @@ describe('native shell bridge', () => {
       'app.info',
       'app.openExternal',
       'app.showAccount',
+      'app.setAccountActionAvailable',
       'haptics.impact',
       'viewport.setOuterScrollLocked',
       'voice.permission',
@@ -105,6 +108,7 @@ describe('native shell bridge', () => {
       capabilities: { app: 1 },
     });
     await expect(nativeShowAccount()).resolves.toBe(false);
+    await expect(setNativeAccountActionAvailable(true)).resolves.toBe(false);
     expect(missingCall).not.toHaveBeenCalledWith('app.showAccount', {});
 
     installBridge({
@@ -119,5 +123,6 @@ describe('native shell bridge', () => {
     await expect(nativeVoicePermission()).resolves.toBeNull();
     await expect(openNativeExternal('https://avibe.bot')).resolves.toBe(false);
     await expect(nativeShowAccount()).resolves.toBe(false);
+    await expect(setNativeAccountActionAvailable(true)).resolves.toBe(false);
   });
 });

@@ -34,6 +34,8 @@ import { useViewportHeightVar } from '../lib/useViewportHeightVar';
 import { APP_SHELL_SCROLL_ID, forgetMobileProjectsListUnlessPreserved } from '../lib/mobileProjectsListMemory';
 import { useIsDesktop } from '../lib/useIsDesktop';
 import { useNativeOuterScrollLock } from '../lib/useNativeOuterScrollLock';
+import { useNativeAccountActionRegistration } from '../lib/useNativeAccountActionRegistration';
+import { hasNativeCapability } from '../lib/native';
 import { onPageReactivated } from '../lib/pageActivity';
 import { adoptPersistedLanguage } from '../lib/useLanguageSelection';
 import { isOwnerOnlyPath } from '../lib/adminNavigation';
@@ -206,6 +208,12 @@ export const AppShell: React.FC = () => {
   // shell states it here, next to the two conditions that actually decide
   // whether an `<aside>` is rendered at all, and publishes it below.
   const shellDrawsSidebar = !chromeless && !setupShell;
+  // Registration and the visible account avatar share one fact. Pushed
+  // surfaces keep it registered because Back returns to this tabbed shell.
+  const nativeHeaderAccountAvailable =
+    shellDrawsSidebar
+    && hasNativeCapability('accountPresentation', 2);
+  useNativeAccountActionRegistration(nativeHeaderAccountAvailable);
   // Two different questions wear the same name if you let them. `settingsOpen`
   // asks whether Settings is the foreground route — that is what the toggle in
   // the sidebar reads, so it stays on that. This asks whether Settings has TAKEN
@@ -551,7 +559,10 @@ export const AppShell: React.FC = () => {
           behind them). A chromeless single-app tab hides it for the same
           reason: the app owns the viewport. */}
       {!isFullScreenMobile && !chromeless && (
-        <MobileBrandHeader title={activeTab?.label ?? null} />
+        <MobileBrandHeader
+          title={activeTab?.label ?? null}
+          nativeAccountAction={nativeHeaderAccountAvailable}
+        />
       )}
 
       {!chromeless && !isFullScreenMobile && !isSettings && (
