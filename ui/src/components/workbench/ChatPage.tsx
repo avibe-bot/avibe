@@ -1112,6 +1112,7 @@ export const ChatPage: React.FC = () => {
     release: releaseChatSnapshot,
     isPainted: isChatSnapshotPainted,
     paintMore: paintMoreChatSnapshot,
+    whenStoredRead: whenChatSnapshotRead,
     paintKnown: paintKnownChatSnapshot,
   } = useChatSnapshot({
     sessionId,
@@ -1556,6 +1557,10 @@ export const ChatPage: React.FC = () => {
     if (willDetachTail) setHistoricalWindow(true);
   }, []);
 
+  // The bootstrap again, for a chat reading what this device saved: the only way
+  // past the end of saved history is the server (set once ``refresh`` exists).
+  const retryBootstrapRef = useRef<() => void>(() => {});
+
   // Returns false only when no older page could be shown (the server could not
   // answer and the device holds nothing more joined to the head), so the
   // transcript scroller can re-arm and let a later scroll retry; true for
@@ -1598,14 +1603,25 @@ export const ChatPage: React.FC = () => {
         setHistoryGap(true);
         return false;
       };
-      if (painted) return fromDevice();
+      if (painted) {
+        const more = fromDevice();
+        // At the end of what is saved, the bootstrap that could not answer is the
+        // way past it: try it again (it replaces everything shown when it lands).
+        if (!more) retryBootstrapRef.current();
+        return more;
+      }
       let res: Awaited<ReturnType<typeof api.listSessionMessages>>;
       try {
         res = await api.listSessionMessages(sessionId, { limit: OLDER_PAGE_SIZE, beforeId: olderCursor });
       } catch (error) {
         if (sessionId !== sessionIdRef.current) return true;
         if (serverUnreachable(error)) return fromDevice();
-        // The server answered with a refusal: the rows it was asked about are its call.
+        // The server answered with a refusal: the saved rows shown ahead of it go,
+        // and the rows it was asked about are its call.
+        if (saved.length) {
+          const shown = new Set(saved);
+          setMessages((prev) => prev.filter((row) => !shown.has(row)));
+        }
         setHistoryGap(false);
         return false;
       }
@@ -1891,6 +1907,9 @@ export const ChatPage: React.FC = () => {
     } catch (err) {
       // A superseded failure must not stamp an error onto the newer request's
       // loading state, even when both requests belong to the same route.
+      // A saved chat may still be on its way from IndexedDB: the server failing
+      // first must not decide it away.
+      if (requestIsCurrent() && serverUnreachable(err) && !isChatSnapshotPainted()) await whenChatSnapshotRead();
       if (requestIsCurrent()) {
         if (serverUnreachable(err) && isChatSnapshotPainted()) {
           // The server could not be reached, but it refused nothing: what this
@@ -1914,7 +1933,10 @@ export const ChatPage: React.FC = () => {
       // of its own loading state into a premature not-found / error view.
       if (requestIsCurrent()) setLoading(false);
     }
-  }, [api, sessionId, markWorking, scheduleActivityRefresh, refreshSessionRow, beginTranscriptSnapshotRead, beginQueueSnapshotRead, installServerSession, beginChatSnapshotBootstrap, showQueuedSends, isChatSnapshotPainted]);
+  }, [api, sessionId, markWorking, scheduleActivityRefresh, refreshSessionRow, beginTranscriptSnapshotRead, beginQueueSnapshotRead, installServerSession, beginChatSnapshotBootstrap, showQueuedSends, isChatSnapshotPainted, whenChatSnapshotRead]);
+  useEffect(() => {
+    retryBootstrapRef.current = () => { void refresh(); };
+  }, [refresh]);
 
   // Clear per-session state the instant the session changes (React Router swaps
   // only :sessionId, reusing this instance), before the new session's
@@ -2906,7 +2928,7 @@ export const ChatPage: React.FC = () => {
     let cancelled = false;
     let answered = false;
     const painted = isChatSnapshotPainted();
-    void readLocalStoreAround(requestSessionId, targetMsg).then((local) => {
+    const savedWindow = readLocalStoreAround(requestSessionId, targetMsg).then((local) => {
       if (!local || cancelled || answered || requestSessionId !== sessionIdRef.current) return;
       const window = local.messages.filter(isTranscriptMessage);
       if (!window.some((row) => row.id === targetMsg)) return;
@@ -2949,9 +2971,12 @@ export const ChatPage: React.FC = () => {
         setJumpTarget(targetMsg);
         startHighlight(targetMsg);
         clearParam();
-      } catch {
+      } catch (error) {
         // Fetch failed — keep whatever the normal load produced, drop the param
-        // so a re-render doesn't loop, and let the user retry from search.
+        // so a re-render doesn't loop, and let the user retry from search. When
+        // the server could not be reached, the saved window is all there is: let
+        // its read finish first (dropping the param ends this effect's reads).
+        if (serverUnreachable(error)) await savedWindow.catch(() => undefined);
         if (!cancelled && requestSessionId === sessionIdRef.current) clearParam();
       }
     })();
@@ -4865,6 +4890,13 @@ export const Transcript: React.FC<TranscriptProps> = ({
   // adds no content, so nothing moves and the trigger below has no change to react
   // to. The explicit retry is the affordance for a reader who stays put.
   const [olderLoadFailed, setOlderLoadFailed] = useState(false);
+  // The gap clears when the chat reloads from the server: the failure that
+  // showed it goes with it (the reset React documents for a changed prop).
+  const [gapShown, setGapShown] = useState(historyGap);
+  if (gapShown !== historyGap) {
+    setGapShown(historyGap);
+    if (!historyGap) setOlderLoadFailed(false);
+  }
   // Input can arrive again before the parent's loading prop commits.
   const loadInFlightRef = useRef(false);
   const lastScrollTopRef = useRef(0);

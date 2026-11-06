@@ -122,8 +122,12 @@ export function useChatSnapshot({ sessionId, paint, knownFromLists, unpaint, dro
   // stored window as recent replaces it when IndexedDB answers.
   const partialRef = useRef<{ latestAt: string | null } | null>(null);
 
+  // The open chat's read of the saved conversation, once it has started.
+  const storedReadRef = useRef<Promise<void>>(Promise.resolve());
+
   // A layout effect, so it runs before the page's reset and its ``paintKnown``.
   useLayoutEffect(() => {
+    storedReadRef.current = Promise.resolve();
     liveRef.current = false;
     paintedRef.current = null;
     seededRef.current = null;
@@ -189,7 +193,7 @@ export function useChatSnapshot({ sessionId, paint, knownFromLists, unpaint, dro
     let cancelled = false;
     // The composer renders its voice control from the last known status, so
     // that status is in memory before the chat paints (lib/voiceAvailability).
-    void Promise.all([readChatSnapshot(sessionId), loadKnownVoiceStatus()]).then(([snapshot]) => {
+    const read = Promise.all([readChatSnapshot(sessionId), loadKnownVoiceStatus()]).then(([snapshot]) => {
       if (cancelled) return;
       if (!snapshot || liveRef.current || getLocalSnapshotPrincipal() !== principal) return;
       // A full window already on screen stays. One painted from the lists gives
@@ -205,10 +209,15 @@ export function useChatSnapshot({ sessionId, paint, knownFromLists, unpaint, dro
       }
       paintSnapshot(snapshot, principal);
     });
+    storedReadRef.current = read.then(() => undefined, () => undefined);
     return () => {
       cancelled = true;
     };
   }, [sessionId, principal, paintSnapshot]);
+
+  // Settles once the saved conversation read for the open chat has answered,
+  // and painted it if it could.
+  const whenStoredRead = useCallback(() => storedReadRef.current, []);
 
   const beginBootstrap = useCallback((requestSessionId: string): ChatSnapshotBootstrapRead => ({
     commit: () => {
@@ -246,6 +255,8 @@ export function useChatSnapshot({ sessionId, paint, knownFromLists, unpaint, dro
     isPainted,
     /** Count ``rows`` as painted too: they leave when the live window lands. */
     paintMore,
+    /** Settles once the open chat's saved conversation read has answered. */
+    whenStoredRead,
     /** Paint the record held in memory for the open chat, if any: the page
      *  calls it in the layout effect that resets it for the route. */
     paintKnown,

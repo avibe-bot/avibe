@@ -1126,7 +1126,52 @@ describe('ChatPage history this device saved', () => {
     await waitFor(() => expect(screen.queryByText('history 21')).toBeNull());
     expect(screen.queryByText('history 81')).toBeNull();
     expect(screen.queryByText('chat.offline.historyGap')).toBeNull();
+    expect(screen.queryByText('chat.olderLoadFailed')).toBeNull();
     expect(screen.getByText('history 111')).toBeTruthy();
+  });
+
+  it('keeps a saved chat the server fails before the device has read it', async () => {
+    await storePage('tail', span(1, 30), null, true);
+    // A later load: only IndexedDB holds it, and the server fails first.
+    asALaterLoad();
+    serve({});
+    mount();
+    expect(screen.queryByText('history 30')).toBeNull();
+    live.reject(new TypeError('Failed to fetch'));
+    await screen.findByText('history 30');
+    expect(screen.getByText('chat.offline.notice')).toBeTruthy();
+    expect(screen.queryByText('Failed to fetch')).toBeNull();
+  });
+
+  it('asks the server again from the marker, and its answer replaces everything saved', async () => {
+    await storePage('before', span(1, 10), null);
+    await storePage('tail', span(21, 70), 'h021', true);
+    serve({});
+    mount();
+    await screen.findByText('history 70');
+    await act(async () => live.reject(new TypeError('Failed to fetch')));
+    await scrollUp();
+    const marker = await screen.findByText('chat.offline.historyGap');
+
+    mocks.api.getSessionBootstrap.mockResolvedValue(liveWindow(span(51, 70), 'h051'));
+    await act(async () => marker.click());
+    await waitFor(() => expect(screen.queryByText('chat.offline.notice')).toBeNull());
+    expect(screen.queryByText('history 21')).toBeNull();
+    expect(screen.queryByText('chat.offline.historyGap')).toBeNull();
+    expect(screen.getByText('history 51')).toBeTruthy();
+  });
+
+  it('withdraws the saved rows it showed when the server refuses the older page', async () => {
+    await storePage('tail', span(1, 70), null, true);
+    const older = deferred<Page>();
+    serve({ older: older.promise });
+    mount();
+    await act(async () => live.resolve(liveWindow(span(21, 70), 'h021')));
+    await scrollUp();
+    await screen.findByText('history 1');
+    await act(async () => older.reject(Object.assign(new Error('Session not found'), { status: 404 })));
+    await waitFor(() => expect(screen.queryByText('history 1')).toBeNull());
+    expect(screen.getByText('history 21')).toBeTruthy();
   });
 
   it('still withdraws a saved chat the server refuses', async () => {
@@ -1141,6 +1186,13 @@ describe('ChatPage history this device saved', () => {
   });
 
   describe('a deep link', () => {
+    // The jump looks its row up by id and centers it; jsdom has neither
+    // CSS.escape nor scrollIntoView.
+    beforeEach(() => {
+      vi.stubGlobal('CSS', { escape: (value: string) => value });
+      Element.prototype.scrollIntoView = vi.fn();
+    });
+
     const openAt = async (around: Promise<Page>, tail?: Promise<Page>) => {
       await storePage('tail', span(1, 100), null, true);
       serve({ around, tail });
@@ -1158,6 +1210,17 @@ describe('ChatPage history this device saved', () => {
       await act(async () => around.resolve({ messages: span(20, 40), next_before_id: 'h020', next_after_id: 'h040' }));
       await waitFor(() => expect(screen.queryByText('history 1')).toBeNull());
       expect(screen.getByText('history 30')).toBeTruthy();
+    });
+
+    it('keeps the saved window when the server fails before the device answers', async () => {
+      await storePage('tail', span(1, 100), null, true);
+      const failed = Promise.reject(new TypeError('Failed to fetch'));
+      failed.catch(() => undefined);
+      serve({ around: failed });
+      mount(null, `/chat/${SESSION}?msg=h030`);
+      await act(async () => live.resolve(liveWindow(span(51, 100), 'h051')));
+      await screen.findByText('history 30');
+      expect(screen.getByText('history 1')).toBeTruthy();
     });
 
     it('keeps the saved window when the server cannot be reached', async () => {
