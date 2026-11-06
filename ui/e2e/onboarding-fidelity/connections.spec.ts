@@ -1,5 +1,5 @@
 import { writeFile } from 'node:fs/promises';
-import { expect, test, type Locator, type Page, type Route } from '@playwright/test';
+import { expect, stubVoiceWorklet, test, type Locator, type Page, type Route } from '../support/browserTest';
 import { openOnboarding, openSetup, serveProduct, settleEffects, size } from './support';
 
 async function authFixtures(page: Page) {
@@ -547,6 +547,7 @@ const viewportVars = (page: Page) => page.evaluate(() => Object.fromEntries(
 for (const touch of [true, false]) {
   test(`the frame ${touch ? 'gives way to the soft keyboard' : 'ignores a viewport no keyboard shrank'}`, async ({ browser }, info) => {
     const context = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: touch });
+    await stubVoiceWorklet(context);
     const page = await context.newPage();
     await simulateSoftKeyboard(page);
     const denied = await serveProduct(page);
@@ -670,6 +671,7 @@ for (const device of [{ width: 900, height: 700 }, { width: 620, height: 700 }])
     const inset = { t: 30, r: 24, b: 20, l: 40 };
     const MARGIN = 2 * CLEARANCE;
     const context = await browser.newContext({ viewport: device, hasTouch: true });
+    await stubVoiceWorklet(context);
     const page = await context.newPage();
     await simulateSoftKeyboard(page);
     const denied = await serveProduct(page);
@@ -795,6 +797,7 @@ for (const device of [{ width: 900, height: 700 }, { width: 620, height: 700 }])
  */
 test('a room smaller than the frame scrolls rather than clipping what it cannot hold', async ({ browser }, info) => {
   const context = await browser.newContext({ viewport: { width: 844, height: 390 }, hasTouch: true });
+  await stubVoiceWorklet(context);
   const page = await context.newPage();
   await simulateSoftKeyboard(page);
   const denied = await serveProduct(page);
@@ -873,6 +876,7 @@ test('a room smaller than the frame scrolls rather than clipping what it cannot 
  */
 test('the scroll changes hands at the floor, in both directions, whatever is on screen', async ({ browser }, info) => {
   const context = await browser.newContext({ viewport: { width: 844, height: 390 }, hasTouch: true });
+  await stubVoiceWorklet(context);
   const page = await context.newPage();
   await simulateSoftKeyboard(page);
   const denied = await serveProduct(page);

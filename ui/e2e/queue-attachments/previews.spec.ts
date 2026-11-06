@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '../support/browserTest';
 
 /**
  * Queued attachment previews, measured in a browser rather than inferred from

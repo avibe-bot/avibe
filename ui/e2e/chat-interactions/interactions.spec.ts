@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from '../support/browserTest';
 
 const TURN = 'turn_0123456789abcdef0123456789abcdef';
 

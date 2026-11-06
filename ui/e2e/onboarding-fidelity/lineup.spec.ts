@@ -2,7 +2,7 @@
 // screen's row, the row keeps the reference's tracks, and the built-in card offering its
 // models never has the shell's aside drawn over it while the action stays where every
 // screen puts it. Hermetic: every read is answered here and every write is refused.
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from '../support/browserTest';
 import { PHASES, VIEWPORTS, freezeAt, openOnboarding, openSetup, serveProduct, size } from './support';
 import { CONTRACT_VERSION } from '../../src/components/settings/models/types';
 

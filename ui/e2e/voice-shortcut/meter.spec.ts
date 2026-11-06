@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from '../support/browserTest';
 
 // The take card's meter draws the microphone's real level (ui/design: mobile/main-bot-voice/
 // d-recording, composer/hold-desktop/d-recording), in a real browser on a fake microphone that

@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from '../support/browserTest';
 import {
   PHASES, VIEWPORTS, cssEffects, freezeAt, openOnboarding, openSetup, renderedPhase,
   serveModelHub, serveProduct, serveSetupSource, setDocumentHidden, settleEffects, size, storeThemePreference,

@@ -115,14 +115,6 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
   return json({ messages: history.slice(start, end), next_after_id: null, next_before_id: start > 0 ? history[start].id : null });
 };
 
-// No microphone here, and no audio: the composer prepares its capture worklet as
-// it mounts (prewarmVoiceCapture), and on Linux WebKit (CI's stand-in for
-// Safari's engine) that load can stop the whole page for good, so that not even
-// Playwright's own calls return. Seen right after the live window mounted the
-// composer, in this suite and before in voice-shortcut (#3224, caret.spec.ts).
-// Nothing here measures audio.
-if (typeof AudioWorklet !== 'undefined') AudioWorklet.prototype.addModule = async () => undefined;
-
 // The event stream: open, silent until the lab pushes a row.
 class LabEventSource extends EventTarget {
   static live = new Set<LabEventSource>();

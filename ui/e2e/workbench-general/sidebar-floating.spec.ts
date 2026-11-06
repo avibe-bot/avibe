@@ -1,6 +1,6 @@
 import { writeFile } from 'node:fs/promises';
 
-import { expect, test, type Locator, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '../support/browserTest';
 
 import { open, ORIGIN, serveProduct as serveWorkbench, type Lang } from './support';
 
