@@ -175,6 +175,15 @@ function reveal(el: HTMLElement, reduced: boolean, tokens: Tokens, item = false)
   }
 }
 
+/** Whether `item` is one the Harness group `head` lays out when it opens: one of its members, or its
+ *  collapse bar. */
+function laidOutBy(head: HTMLElement, item: HTMLElement): boolean {
+  const key = item.getAttribute(ITEM_KEY_ATTRIBUTE) ?? '';
+  if (key.startsWith('harness-member:')) return (head.dataset.harnessMembers ?? '').split(' ').includes(key.slice('harness-member:'.length));
+  if (key.startsWith('harness-collapse:')) return head.dataset.harnessGroup === key.slice('harness-collapse:'.length);
+  return false;
+}
+
 /** The last item that stays put through a commit as far as the transcript knows: not the turn at work,
  *  not a message still sending. */
 function lastSettled(column: HTMLElement): HTMLElement | null {
@@ -278,18 +287,21 @@ export function useTranscriptMotion({
   // The copies of the turn at work still fading where it was, and when each is faint enough for what
   // comes in there to start (ms into its fade).
   const fading = useRef<{ fade: Animation; clearAt: number }[]>([]);
-  // The item whose disclosure control the reader just tapped, and what the transcript has shown that a
-  // disclosure opens (so only what one opens now shows itself, never what a read brings back).
+  // The item whose disclosure control the reader just tapped to open it, and what a disclosure opens that
+  // the last commit showed (so only what one opens now shows itself, never what a read brings back, and
+  // an element shown again after it was gone counts as new).
   const disclosure = useRef<{ session: string; item: HTMLElement; at: number } | null>(null);
-  const shownReveals = useRef(new WeakSet<Element>());
+  const shownReveals = useRef(new Set<Element>());
 
-  /** Call with the target of every click in the transcript: a tap on a disclosure control (anything with
-   *  `aria-expanded`) inside an item marks what the next commit opens there as opened by the reader. */
+  /** Call with the target of every click in the transcript: a tap that opens a disclosure control
+   *  (anything with `aria-expanded="false"`) inside an item marks what the next commit opens there as
+   *  opened by the reader. A tap that closes one opens nothing, and drops any such mark. */
   const noteDisclosure = useCallback((target: EventTarget) => {
     const column = columnRef.current;
     const element = target instanceof Element ? target : target instanceof Node ? target.parentElement : null;
     const control = element?.closest('[aria-expanded]');
     if (!column || !control || !column.contains(control)) return;
+    disclosure.current = null;
     let item: Element = control;
     while (item.parentElement && item.parentElement !== column) item = item.parentElement;
     if (item.parentElement === column && isItem(item)) disclosure.current = { session: sessionId, item, at: performance.now() };
@@ -320,7 +332,7 @@ export function useTranscriptMotion({
     // What a disclosure opens that the transcript had not shown before this commit.
     const reveals = column ? Array.from(column.querySelectorAll<HTMLElement>(`[${REVEAL_ATTRIBUTE}]`)) : [];
     const newReveals = reveals.filter((node) => !shownReveals.current.has(node));
-    for (const node of newReveals) shownReveals.current.add(node);
+    shownReveals.current = new Set(reveals);
     const leaving = departures.current.filter((departure) => !departure.node.isConnected);
     departures.current = [];
     const snapshot = before.current;
@@ -356,7 +368,7 @@ export function useTranscriptMotion({
     } else if (opened) {
       revealing = newReveals.flatMap((node): { node: HTMLElement; item: boolean }[] => {
         if (opened.item.contains(node) && node !== opened.item) return [{ node, item: false }];
-        if (node.parentElement === column && arrived.includes(node) && !live(node)) return [{ node, item: true }];
+        if (node.parentElement === column && arrived.includes(node) && !live(node) && laidOutBy(opened.item, node)) return [{ node, item: true }];
         return [];
       });
       if (revealing.length > 0) disclosure.current = null;

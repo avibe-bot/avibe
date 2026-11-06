@@ -45,22 +45,21 @@ export function motionTiming(duration: MotionDuration, ease: MotionEase): Motion
  * A disclosure's content (a chip's panel, a Harness row's body, an opened group's members, the running
  * card's full view) while it is open, and for one `instant` after it closes: closing, it leaves in place
  * (`motion-disclose-out` in src/index.css) while it still holds its layout, so nothing below moves up into
- * it, and only then lets go of the layout in one commit (docs/plans/web-ui-motion.md M3). Where the token
+ * it, and only then lets go of the layout in one commit (docs/plans/web-ui-motion.md M3). `closed`: it
+ * has just left that way, so what stands for it closed (a pill, a folded card) comes in
+ * (`motion-summary-in`) rather than appearing whole; it stays true until it opens again. Where the token
  * is missing (no stylesheet), it goes at once.
  */
-export function useDisclosure(open: boolean): { present: boolean; closing: boolean } {
-  const [closing, setClosing] = useState(false);
-  const [wasOpen, setWasOpen] = useState(open);
-  if (wasOpen !== open) {
-    setWasOpen(open);
-    setClosing(!open && readMotionMs('--motion-duration-instant') > 0);
-  }
+export function useDisclosure(open: boolean): { present: boolean; closing: boolean; closed: boolean } {
+  const [phase, setPhase] = useState<'open' | 'closing' | 'closed' | 'rest'>(open ? 'open' : 'rest');
+  if (open && phase !== 'open') setPhase('open');
+  if (!open && phase === 'open') setPhase(readMotionMs('--motion-duration-instant') > 0 ? 'closing' : 'rest');
   useEffect(() => {
-    if (!closing) return undefined;
-    const timer = window.setTimeout(() => setClosing(false), readMotionMs('--motion-duration-instant'));
+    if (phase !== 'closing') return undefined;
+    const timer = window.setTimeout(() => setPhase('closed'), readMotionMs('--motion-duration-instant'));
     return () => window.clearTimeout(timer);
-  }, [closing]);
-  return { present: open || closing, closing };
+  }, [phase]);
+  return { present: phase === 'open' || phase === 'closing', closing: phase === 'closing', closed: phase === 'closed' };
 }
 
 /**

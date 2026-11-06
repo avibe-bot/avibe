@@ -527,6 +527,7 @@ export const ActivityCard: React.FC<{
         </div>
         {full.present ? (
           // What opening the card shows (lib/transcriptMotion reveals it), and leaves in place once closed.
+          // Keyed apart from the compact view, so each opening is a view of its own to show.
           <div
             className={clsx('relative', full.closing && 'motion-disclose-out')}
             aria-hidden={full.closing || undefined}
@@ -565,8 +566,9 @@ export const ActivityCard: React.FC<{
           // (justify-end) and older rows clipped + faded up. ``overflow-hidden`` clips
           // the top overflow; the tail auto-follow lives in the Transcript scroller.
           <div
+            key="compact"
             ref={compactBodyRef}
-            className="relative flex flex-col justify-end overflow-hidden px-1.5 py-1.5"
+            className={clsx('relative flex flex-col justify-end overflow-hidden px-1.5 py-1.5', full.closed && 'motion-summary-in')}
             style={{ maxHeight: COMPACT_CAP_PX }}
           >
             <ActivityRows rows={rows} showToolCalls={showToolCalls} variant="compact-live" />
@@ -654,6 +656,8 @@ export const ActivityChip: React.FC<{
             title={t('chat.agentActivity.expand')}
             className={clsx(
               'inline-flex w-fit max-w-full items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] transition-colors',
+              // Closed just now: the pill comes in where the panel left.
+              panel.closed && 'motion-summary-in',
               group.status === 'failed'
                 ? 'border-destructive/30 bg-destructive/[0.06] hover:bg-destructive/[0.1]'
                 : group.status === 'interrupted'

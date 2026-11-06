@@ -25,6 +25,7 @@ export function HarnessGroup({
   members,
   expanded,
   closing = false,
+  closed = false,
   onToggle,
 }: {
   /** Stable across growth; the Transcript finds the head by it after a collapse. */
@@ -33,6 +34,8 @@ export function HarnessGroup({
   expanded: boolean;
   /** Closed, while its members leave in place: still drawn as open, so nothing moves until they are gone. */
   closing?: boolean;
+  /** Its members have just left: the folded card comes in where they were (`motion-summary-in`). */
+  closed?: boolean;
   onToggle: () => void;
 }) {
   const { t } = useTranslation();
@@ -86,7 +89,7 @@ export function HarnessGroup({
         onClick={onToggle}
         aria-expanded={false}
         aria-label={countLabel}
-        className="group/harness flex max-w-[min(92%,860px)] flex-col items-start gap-1.5 text-left"
+        className={clsx('group/harness flex max-w-[min(92%,860px)] flex-col items-start gap-1.5 text-left', closed && 'motion-summary-in')}
       >
         {head}
         <span className="relative block w-[min(100%,460px)] pb-3">

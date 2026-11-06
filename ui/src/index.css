@@ -1053,9 +1053,19 @@ pre,
 .motion-disclose-out-children > * { transform-origin: top left; animation-name: motion-shrink-out; }
 @keyframes motion-disclose-out { to { opacity: 0; scale: var(--motion-scale-enter-sm); } }
 @keyframes motion-shrink-out { to { scale: var(--motion-scale-enter-sm); } }
+/* Then what stands for it closed (a chip's pill, a group's folded card, the
+   running card's compact view) comes in where it lands: it fades in and grows
+   from `--motion-scale-enter-sm` at its top-left corner on `instant`, enter,
+   so nothing appears whole in one frame. */
+.motion-summary-in {
+  transform-origin: top left;
+  animation: motion-summary-in var(--motion-duration-instant) var(--motion-ease-enter) backwards;
+}
+@keyframes motion-summary-in { from { opacity: 0; scale: var(--motion-scale-enter-sm); } }
 @media (prefers-reduced-motion: reduce) {
   .motion-disclose-out { animation-name: motion-fade-out; }
   .motion-disclose-out-children > * { animation-name: none; }
+  .motion-summary-in { animation-name: motion-fade-in; }
 }
 
 /* Sheets, dialogs, popovers (docs/plans/web-ui-motion.md M6; src/lib/sheetDrag.ts;

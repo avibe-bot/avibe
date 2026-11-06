@@ -358,10 +358,16 @@ reduced-motion form.
   turn-at-work handoff's tokens), so nothing below moves up into it and no two
   texts are drawn over each other. Then the layout lets go of it in one commit,
   and what was below moves up. A Harness group's head keeps its open shape
-  until its members are gone. The scroller holds the tapped item through both
-  commits.
-- **Reduced**: crossfade on `fast`; what opens only fades in, and what closes
-  only fades out.
+  until its members are gone. What stands for it closed (a chip's pill, a
+  group's folded card, the running card's compact view) then comes in where it
+  lands, in that same commit's layout: it fades in and grows from
+  `--motion-scale-enter-sm` at its top-left corner on `instant`, enter, never
+  appearing whole in one frame (owner, 2026-11-06). The scroller holds the
+  tapped item through both commits. A tap that closes something opens nothing:
+  only a tap on a closed control marks what the next commit opens, and only
+  inside the tapped item or among the items its own Harness group lays out.
+- **Reduced**: crossfade on `fast`; what opens only fades in, what closes only
+  fades out, and what stands for it closed only fades in.
 - **Frames**: `motion/arrival/phone`, `phone-reduced`, `phone-card`,
   `phone-turn-end`, `phone-show-page`; `motion/disclosure/*`.
 

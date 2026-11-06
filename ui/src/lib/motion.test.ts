@@ -32,23 +32,24 @@ describe('useDisclosure', () => {
     vi.useFakeTimers();
     document.documentElement.style.setProperty('--motion-duration-instant', '100ms');
     const { result, rerender } = renderHook(({ open }) => useDisclosure(open), { initialProps: { open: true } });
-    expect(result.current).toEqual({ present: true, closing: false });
+    expect(result.current).toEqual({ present: true, closing: false, closed: false });
     rerender({ open: false });
-    expect(result.current).toEqual({ present: true, closing: true });
+    expect(result.current).toEqual({ present: true, closing: true, closed: false });
     act(() => { vi.advanceTimersByTime(99); });
     expect(result.current.present).toBe(true);
     act(() => { vi.advanceTimersByTime(1); });
-    expect(result.current).toEqual({ present: false, closing: false });
+    // Gone, and what stands for it closed comes in until it opens again.
+    expect(result.current).toEqual({ present: false, closing: false, closed: true });
     // Opened again while closing, it is simply open.
     rerender({ open: true });
     rerender({ open: false });
     rerender({ open: true });
-    expect(result.current).toEqual({ present: true, closing: false });
+    expect(result.current).toEqual({ present: true, closing: false, closed: false });
   });
 
   it('lets go at once where there is no token to time it by', () => {
     const { result, rerender } = renderHook(({ open }) => useDisclosure(open), { initialProps: { open: true } });
     rerender({ open: false });
-    expect(result.current).toEqual({ present: false, closing: false });
+    expect(result.current).toEqual({ present: false, closing: false, closed: false });
   });
 });

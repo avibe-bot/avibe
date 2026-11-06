@@ -6080,7 +6080,7 @@ function HarnessGroupItem({
   onToggle: () => void;
   renderRow: (message: WorkbenchMessage, index: number) => React.ReactNode;
 }) {
-  const { present, closing } = useDisclosure(open);
+  const { present, closing, closed } = useDisclosure(open);
   return (
     <>
       <HarnessGroup
@@ -6088,6 +6088,7 @@ function HarnessGroupItem({
         members={members.map(({ message }) => message)}
         expanded={open}
         closing={closing}
+        closed={closed}
         onToggle={onToggle}
       />
       {present && members.map(({ message, index }) => (
