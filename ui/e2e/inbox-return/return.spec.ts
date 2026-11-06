@@ -25,7 +25,8 @@ const open = async (page: Page, query = '') => {
   await expect(rows(page)).toHaveCount(60);
 };
 const enter = async (page: Page, id: number) => {
-  await row(page, id).getByRole('button', { name: copy('workbench.inbox.openSession') }).click();
+  // The card itself opens the conversation: press its preview, away from 「Mark read」.
+  await row(page, id).locator('.line-clamp-3').click();
   await expect(page.getByTestId('chat-detail')).toBeVisible();
 };
 
