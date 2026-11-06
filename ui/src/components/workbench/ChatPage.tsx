@@ -34,6 +34,7 @@ import { annotationStandIn, annotationTitleKey, readAnnotationView } from '../..
 import { isAgentActivityBoundaryMessage, isRetriedFailureNotice, isRetryableFailureNotice, isTerminalAgentMessage, offersContinueOnVibey, isTranscriptMessage, shouldRefreshAgentActivityForMessage } from '../../lib/chatMessageTypes';
 import { chatRowKind, drawsEmptyBodyPlaceholder, isAgentAuthored } from '../../lib/chatRowKind';
 import { useIosKeyboardInset } from '../../lib/useIosKeyboardInset';
+import { dismissSoftKeyboard } from '../../lib/softKeyboard';
 import { isProxyMediaUrl } from '../../lib/mediaProxy';
 import { readMessageAttachments } from '../../lib/messageAttachments';
 import {
@@ -2846,6 +2847,8 @@ export const ChatPage: React.FC = () => {
     // it, or start a new turn if idle. Only a compatible prefix may be claimed.
     const sid = sessionId;
     if (!sid || queue.length === 0 || sendingQueueNow || isQueueDeliveryFenced(queue[0])) return;
+    // Sending ends the typing on a phone: the soft keyboard closes, as after Send.
+    dismissSoftKeyboard();
     const requestGeneration = ++queueSendGenerationRef.current;
     const isCurrentRequest = () =>
       requestGeneration === queueSendGenerationRef.current && sid === sessionIdRef.current;
