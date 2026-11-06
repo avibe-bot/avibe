@@ -325,15 +325,24 @@ def control_request_sync(
     """Submit once. Only a failed connection or explicit rejection proves no execution."""
     from core.control_requests import failure, validate_result
 
+    try:
+        content = json.dumps(payload, allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        return failure("invalid_control_request", str(exc))
     endpoint = _resolve_endpoint(socket_path)
     try:
-        with httpx.Client(
+        client = httpx.Client(
             transport=_sync_transport(endpoint),
             base_url=endpoint.base_url,
             headers=endpoint.headers,
             timeout=httpx.Timeout(timeout, connect=5.0),
-        ) as client:
-            response = client.post("/internal/control", json=payload)
+        )
+    except (httpx.TransportError, OSError) as exc:
+        # Client/transport construction has not submitted any bytes.
+        raise InternalServerUnavailable(str(exc)) from exc
+    try:
+        with client:
+            response = client.post("/internal/control", content=content, headers={"Content-Type": "application/json"})
             # Both are pre-handler refusals: auth middleware, or an older service
             # without this endpoint. Never fall back to direct SQLite or auto-start.
             if response.status_code in {401, 404}:

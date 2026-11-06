@@ -117,6 +117,19 @@ def test_control_transport_never_replays_or_claims_post_send_nonexecution(monkey
     assert len(calls) == 1
 
 
+def test_control_preparation_failure_is_not_executed(monkeypatch, capsys):
+    endpoint = control_ipc.ControlIpcClientEndpoint(transport="unix", socket_path=Path("/unused-test.sock"))
+    monkeypatch.setattr(internal_client, "_resolve_endpoint", lambda _path: endpoint)
+
+    def unavailable(_endpoint):
+        raise OSError("Transport construction failed before submission")
+
+    monkeypatch.setattr(internal_client, "_sync_transport", unavailable)
+    args = cli.build_parser().parse_args(["agent", "run", "--agent", "worker", "--message", "hi"])
+    assert cli.cmd_agent_run(args) == 1
+    assert json.loads(capsys.readouterr().err)["execution"] == "not_executed"
+
+
 def test_agent_run_wire_fields_cover_parser_arguments():
     args = cli.build_parser().parse_args(["agent", "run", "--agent", "worker", "--message", "hi"])
     decoded = _agent_run_arguments(vars(args))
