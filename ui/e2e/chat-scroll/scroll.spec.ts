@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 
+import { fontsSettled } from './fonts';
 import type { LabFrame, LabWrite } from './recorder';
 
 // The shipped ChatPage on a long conversation of mixed rows (fixture.tsx). Each
@@ -22,8 +23,7 @@ async function open(page: Page, query: string, { imageDelay = 50, imagesHeldUnti
   });
   await page.goto(`/e2e/chat-scroll/fixture.html?${query}`);
   await expect(transcript(page).locator('[data-message-id]').first()).toBeVisible();
-  // A web font arriving reflows the rows on screen, which no anchor can hold.
-  await page.evaluate(() => document.fonts.ready);
+  await fontsSettled(page);
   await expect.poll(() => transcript(page).evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThan(1);
   await page.waitForTimeout(300);
 }

@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 
+import { fontsSettled } from './fonts';
 import type { LabFrame, LabWrite } from './recorder';
 
 // The conversation's motion (docs/plans/web-ui-motion.md M1–M4) on the shipped ChatPage (fixture.tsx),
@@ -14,7 +15,7 @@ async function open(page: Page, query: string) {
   await page.route('**/api/**', (route) => route.fulfill({ status: 503, json: { error: 'No backend in this fixture' } }));
   await page.goto(`/e2e/chat-scroll/fixture.html?images=0&${query}`);
   await expect(transcript(page).locator('[data-message-id]').first()).toBeVisible();
-  await page.evaluate(() => document.fonts.ready);
+  await fontsSettled(page);
   await expect.poll(() => fromBottom(page)).toBeLessThan(1);
   await page.waitForTimeout(300);
 }
