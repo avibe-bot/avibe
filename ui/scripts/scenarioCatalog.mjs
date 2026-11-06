@@ -231,10 +231,6 @@ export const collectCases = ({ root = UI_ROOT, files = [], globals = false } = {
       [
         VITEST_BIN,
         'list',
-        // Evidence must reflect runtime collection, not Vitest 5's default
-        // static parse, which includes unreachable declarations and leaves
-        // parameterized names unexpanded.
-        '--no-staticParse',
         `--json=${output}`,
         '--root',
         root,
