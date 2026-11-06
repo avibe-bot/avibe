@@ -71,7 +71,7 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
 
         upgrade.verify_upgrade_candidate = lambda activation: upgrade.IntegrityResult(True, 1)
         if os.environ.get("VIBE_TEST_ACTIVATION_PEER_FAILURE") == "1":
-            _activate = cli.activate_installer_candidate
+            _activate = upgrade.activate_installer_candidate
 
             def _activate_with_peer_failure(activation):
                 outcome = _activate(activation)
@@ -82,7 +82,7 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
                 )
                 return upgrade.ActivationOutcome(outcome.activated_launcher, (failure,))
 
-            cli.activate_installer_candidate = _activate_with_peer_failure
+            upgrade.activate_installer_candidate = _activate_with_peer_failure
         if os.environ.get("VIBE_TEST_CP1252_DIAGNOSTIC") == "1":
             sys.stdout = io.TextIOWrapper(
                 os.fdopen(os.dup(1), "wb"),

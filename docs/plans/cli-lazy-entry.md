@@ -55,7 +55,7 @@ remain the primary coverage for their respective contracts.
       `apscheduler` import is rejected before the first command.
 - [x] Implement light entry dependencies and local handler imports.
 - [x] Retarget accidental test aliases and run focused regressions/lint:
-      1,971 cases passed across four focused invocations, including 57 cold-entry,
+      2,043 cases passed across five focused invocations, including 57 cold-entry,
       parser-tail and selected-command cases. The Show/Watch bundle required a
       process-local `ulimit -n 4096` after macOS's default descriptor limit was
       exhausted; the isolated rerun passed all 239 cases. No product change was
