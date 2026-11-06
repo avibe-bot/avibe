@@ -1241,6 +1241,110 @@ final class NavigationPolicyTests: XCTestCase {
     }
 
     @MainActor
+    func testInvalidatedRuntimeCancelsDownloadsAndRemovesTemporaryDestinations() async throws {
+        let server = try LocalHTTPServer { _ in
+            return .html(
+                """
+                <!doctype html>
+                <title>Workbench download</title>
+                <button id="download" onclick="startDownload()">Download</button>
+                <script>
+                  function startDownload() {
+                    const chunk = new Uint8Array(1024 * 1024);
+                    const blob = new Blob(
+                      Array.from({length: 64}, () => chunk),
+                      {type: "application/octet-stream"}
+                    );
+                    const url = URL.createObjectURL(blob);
+                    const link = document.createElement("a");
+                    link.href = url;
+                    link.download = "account-export.txt";
+                    link.click();
+                    setTimeout(() => URL.revokeObjectURL(url), 10000);
+                  }
+                </script>
+                """
+            )
+        }
+        let baseURL = try await server.start()
+        defer {
+            server.stop()
+        }
+        let instanceOrigin = try XCTUnwrap(
+            WebOrigin(url: baseURL, requiresHTTPS: false)
+        )
+        let controller = makeRuntimeController(instanceOrigin: instanceOrigin)
+        let window = host(controller)
+        defer {
+            window.isHidden = true
+        }
+        let webView = try XCTUnwrap(
+            controller.view.subviews.compactMap { $0 as? WKWebView }.first
+        )
+        try await waitForTitle("Workbench download", in: webView)
+        let directoriesBeforeDownload = temporaryDownloadDirectories()
+
+        _ = try await webView.evaluateJavaScript(
+            "document.querySelector('#download').click()"
+        )
+        var createdDirectories: Set<URL> = []
+        try await waitUntil {
+            createdDirectories =
+                self.temporaryDownloadDirectories().subtracting(
+                    directoriesBeforeDownload
+                )
+            return !createdDirectories.isEmpty
+        }
+
+        _ = controller.invalidateForAccountTransition()
+
+        try await waitUntil {
+            createdDirectories.allSatisfy {
+                !FileManager.default.fileExists(atPath: $0.path)
+            }
+        }
+        try await Task.sleep(for: .milliseconds(300))
+    }
+
+    func testRuntimeDelegateEntryPointsUseTheTeardownGuardByConstruction() throws {
+        let testFile = URL(fileURLWithPath: #filePath)
+        let sourceURL = testFile
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Avibe/WebViewController.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        for conformance in [
+            "WKNavigationDelegate",
+            "WKUIDelegate",
+            "WKDownloadDelegate",
+        ] {
+            let marker = "extension WebViewController: \(conformance) {"
+            let markerRange = try XCTUnwrap(source.range(of: marker))
+            let suffix = source[markerRange.upperBound...]
+            let nextExtension = suffix.range(of: "\n}\n\nextension ")
+            let nextType = suffix.range(of: "\n}\n\nprivate final class ")
+            let end = try XCTUnwrap(
+                [nextExtension?.lowerBound, nextType?.lowerBound]
+                    .compactMap { $0 }
+                    .min()
+            )
+            let body = String(suffix[..<end])
+            let methods = body.components(separatedBy: "\n    func ").dropFirst()
+
+            XCTAssertFalse(methods.isEmpty, "No \(conformance) methods found.")
+            for method in methods {
+                let signature = method.split(separator: "\n", maxSplits: 1).first
+                    .map(String.init) ?? method
+                XCTAssertTrue(
+                    method.contains("acceptsRuntimeCallback(from:"),
+                    "\(conformance).\(signature) bypasses the teardown guard."
+                )
+            }
+        }
+    }
+
+    @MainActor
     func testAccountFallbackTracksRegistrationAndPrimaryNavigationLifecycle() async throws {
         var visibility: [Bool] = []
         let controller = WebViewController(
@@ -1449,6 +1553,21 @@ final class NavigationPolicyTests: XCTestCase {
         let data = try XCTUnwrap(string.data(using: .utf8))
         return try XCTUnwrap(
             JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+    }
+
+    private func temporaryDownloadDirectories() -> Set<URL> {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+        let contents = (
+            try? FileManager.default.contentsOfDirectory(
+                at: temporaryDirectory,
+                includingPropertiesForKeys: nil
+            )
+        ) ?? []
+        return Set(
+            contents.filter {
+                $0.lastPathComponent.hasPrefix("Avibe-")
+            }
         )
     }
 

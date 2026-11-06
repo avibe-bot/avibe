@@ -223,6 +223,7 @@ final class WebViewController: UIViewController {
     private var websiteDataStore: WKWebsiteDataStore?
     private let showAccount: () -> Void
     private var popupRecords: [ObjectIdentifier: PopupRecord] = [:]
+    private var activeDownloads: [ObjectIdentifier: WKDownload] = [:]
     private var downloadContexts: [ObjectIdentifier: DownloadContext] = [:]
     private var downloadDestinations: [ObjectIdentifier: URL] = [:]
     private var cancelledDownloads: Set<ObjectIdentifier> = []
@@ -363,6 +364,7 @@ final class WebViewController: UIViewController {
         if parent == nil {
             cancelAllPendingDialogs()
             discardAllPopups(animated: false)
+            cancelAllDownloads()
             discardPendingDownloadedFiles()
         }
         super.willMove(toParent: parent)
@@ -384,6 +386,7 @@ final class WebViewController: UIViewController {
             record.webView.navigationDelegate = nil
             record.webView.uiDelegate = nil
         }
+        cancelAllDownloads()
         for url in pendingDownloadedFiles {
             removeDownloadedFile(at: url)
         }
@@ -418,6 +421,19 @@ final class WebViewController: UIViewController {
         }
         return isPrimaryWebView(webView)
             || popupRecords[ObjectIdentifier(webView)] != nil
+    }
+
+    private func acceptsRuntimeCallback(from webView: WKWebView) -> Bool {
+        isActiveWebView(webView)
+    }
+
+    private func acceptsRuntimeCallback(from download: WKDownload) -> Bool {
+        guard !isInvalidatedForAccountTransition else {
+            return false
+        }
+        let identifier = ObjectIdentifier(download)
+        return activeDownloads[identifier] === download
+            && downloadContexts[identifier] != nil
     }
 
     private func observePrimaryNavigationState(_ webView: WKWebView) {
@@ -565,10 +581,8 @@ final class WebViewController: UIViewController {
         NotificationCenter.default.removeObserver(self)
         cancelAllPendingDialogs()
         discardAllPopups(animated: false)
+        cancelAllDownloads()
         discardPendingDownloadedFiles()
-        downloadContexts.removeAll()
-        downloadDestinations.removeAll()
-        cancelledDownloads.removeAll()
         if let retainedWebView {
             primaryURLObservation?.invalidate()
             primaryURLObservation = nil
@@ -831,8 +845,57 @@ final class WebViewController: UIViewController {
     }
 
     private func registerDownload(_ download: WKDownload, context: DownloadContext) {
-        downloadContexts[ObjectIdentifier(download)] = context
+        guard !isInvalidatedForAccountTransition else {
+            cancelDownload(download)
+            return
+        }
+        let identifier = ObjectIdentifier(download)
+        activeDownloads[identifier] = download
+        downloadContexts[identifier] = context
         download.delegate = self
+    }
+
+    private func cancelDownload(_ download: WKDownload) {
+        let identifier = ObjectIdentifier(download)
+        activeDownloads.removeValue(forKey: identifier)
+        downloadContexts.removeValue(forKey: identifier)
+        cancelledDownloads.remove(identifier)
+        let destination = downloadDestinations.removeValue(forKey: identifier)
+        download.delegate = nil
+        if let destination {
+            removeDownloadedFile(at: destination)
+        }
+        download.cancel { _ in
+            guard let destination else {
+                return
+            }
+            try? FileManager.default.removeItem(
+                at: destination.deletingLastPathComponent()
+            )
+        }
+    }
+
+    private func cancelAllDownloads() {
+        for download in Array(activeDownloads.values) {
+            cancelDownload(download)
+        }
+        for destination in downloadDestinations.values {
+            removeDownloadedFile(at: destination)
+        }
+        activeDownloads.removeAll()
+        downloadContexts.removeAll()
+        downloadDestinations.removeAll()
+        cancelledDownloads.removeAll()
+    }
+
+    @discardableResult
+    private func discardDownloadState(for download: WKDownload) -> URL? {
+        let identifier = ObjectIdentifier(download)
+        activeDownloads.removeValue(forKey: identifier)
+        downloadContexts.removeValue(forKey: identifier)
+        cancelledDownloads.remove(identifier)
+        download.delegate = nil
+        return downloadDestinations.removeValue(forKey: identifier)
     }
 
     private func beginDownload(
@@ -1109,7 +1172,7 @@ extension WebViewController: WKNavigationDelegate {
         decidePolicyFor navigationAction: WKNavigationAction,
         decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
     ) {
-        guard isActiveWebView(webView) else {
+        guard acceptsRuntimeCallback(from: webView) else {
             decisionHandler(.cancel)
             return
         }
@@ -1170,7 +1233,7 @@ extension WebViewController: WKNavigationDelegate {
         decidePolicyFor navigationResponse: WKNavigationResponse,
         decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void
     ) {
-        guard isActiveWebView(webView) else {
+        guard acceptsRuntimeCallback(from: webView) else {
             decisionHandler(.cancel)
             return
         }
@@ -1205,7 +1268,8 @@ extension WebViewController: WKNavigationDelegate {
         navigationAction: WKNavigationAction,
         didBecome download: WKDownload
     ) {
-        guard isActiveWebView(webView) else {
+        guard acceptsRuntimeCallback(from: webView) else {
+            cancelDownload(download)
             return
         }
         registerDownload(
@@ -1222,7 +1286,8 @@ extension WebViewController: WKNavigationDelegate {
         navigationResponse: WKNavigationResponse,
         didBecome download: WKDownload
     ) {
-        guard isActiveWebView(webView) else {
+        guard acceptsRuntimeCallback(from: webView) else {
+            cancelDownload(download)
             return
         }
         registerDownload(
@@ -1232,7 +1297,7 @@ extension WebViewController: WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation?) {
-        guard isActiveWebView(webView) else {
+        guard acceptsRuntimeCallback(from: webView) else {
             return
         }
         cancelPendingDialogs(for: webView)
@@ -1246,7 +1311,7 @@ extension WebViewController: WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation?) {
-        guard isActiveWebView(webView) else {
+        guard acceptsRuntimeCallback(from: webView) else {
             return
         }
         retainedWebViewFactory?.resetForNavigationCommit(in: webView)
@@ -1258,7 +1323,7 @@ extension WebViewController: WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation?) {
-        guard isActiveWebView(webView) else {
+        guard acceptsRuntimeCallback(from: webView) else {
             return
         }
         if isPrimaryWebView(webView) {
@@ -1274,7 +1339,7 @@ extension WebViewController: WKNavigationDelegate {
         didFailProvisionalNavigation navigation: WKNavigation?,
         withError error: Error
     ) {
-        guard isActiveWebView(webView) else {
+        guard acceptsRuntimeCallback(from: webView) else {
             return
         }
         if isPrimaryWebView(webView) {
@@ -1284,7 +1349,7 @@ extension WebViewController: WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation?, withError error: Error) {
-        guard isActiveWebView(webView) else {
+        guard acceptsRuntimeCallback(from: webView) else {
             return
         }
         if isPrimaryWebView(webView) {
@@ -1301,11 +1366,15 @@ extension WebViewController: WKNavigationDelegate {
             URLCredential?
         ) -> Void
     ) {
+        guard acceptsRuntimeCallback(from: webView) else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
         completionHandler(.performDefaultHandling, nil)
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        guard isActiveWebView(webView) else {
+        guard acceptsRuntimeCallback(from: webView) else {
             return
         }
         cancelPendingDialogs(for: webView)
@@ -1326,7 +1395,7 @@ extension WebViewController: WKUIDelegate {
         type: WKMediaCaptureType,
         decisionHandler: @escaping (WKPermissionDecision) -> Void
     ) {
-        guard isActiveWebView(webView) else {
+        guard acceptsRuntimeCallback(from: webView) else {
             decisionHandler(.deny)
             return
         }
@@ -1342,7 +1411,7 @@ extension WebViewController: WKUIDelegate {
         initiatedByFrame frame: WKFrameInfo,
         completionHandler: @escaping () -> Void
     ) {
-        guard isActiveWebView(webView) else {
+        guard acceptsRuntimeCallback(from: webView) else {
             completionHandler()
             return
         }
@@ -1375,7 +1444,7 @@ extension WebViewController: WKUIDelegate {
         initiatedByFrame frame: WKFrameInfo,
         completionHandler: @escaping (Bool) -> Void
     ) {
-        guard isActiveWebView(webView) else {
+        guard acceptsRuntimeCallback(from: webView) else {
             completionHandler(false)
             return
         }
@@ -1420,7 +1489,7 @@ extension WebViewController: WKUIDelegate {
         initiatedByFrame frame: WKFrameInfo,
         completionHandler: @escaping (String?) -> Void
     ) {
-        guard isActiveWebView(webView) else {
+        guard acceptsRuntimeCallback(from: webView) else {
             completionHandler(nil)
             return
         }
@@ -1468,7 +1537,7 @@ extension WebViewController: WKUIDelegate {
         for navigationAction: WKNavigationAction,
         windowFeatures: WKWindowFeatures
     ) -> WKWebView? {
-        guard isActiveWebView(webView) else {
+        guard acceptsRuntimeCallback(from: webView) else {
             return nil
         }
         guard let url = navigationAction.request.url else {
@@ -1509,6 +1578,9 @@ extension WebViewController: WKUIDelegate {
     }
 
     func webViewDidClose(_ webView: WKWebView) {
+        guard acceptsRuntimeCallback(from: webView) else {
+            return
+        }
         closePopup(webView)
     }
 }
@@ -1520,7 +1592,7 @@ extension WebViewController: WKDownloadDelegate {
         suggestedFilename: String,
         completionHandler: @escaping (URL?) -> Void
     ) {
-        guard !isInvalidatedForAccountTransition else {
+        guard acceptsRuntimeCallback(from: download) else {
             completionHandler(nil)
             return
         }
@@ -1529,7 +1601,7 @@ extension WebViewController: WKDownloadDelegate {
             downloadDestinations[ObjectIdentifier(download)] = destination
             completionHandler(destination)
         } catch {
-            downloadContexts.removeValue(forKey: ObjectIdentifier(download))
+            _ = discardDownloadState(for: download)
             completionHandler(nil)
             presentDownloadFailure()
         }
@@ -1541,7 +1613,7 @@ extension WebViewController: WKDownloadDelegate {
         newRequest request: URLRequest,
         decisionHandler: @escaping (WKDownload.RedirectPolicy) -> Void
     ) {
-        guard !isInvalidatedForAccountTransition else {
+        guard acceptsRuntimeCallback(from: download) else {
             decisionHandler(.cancel)
             return
         }
@@ -1580,17 +1652,21 @@ extension WebViewController: WKDownloadDelegate {
             URLCredential?
         ) -> Void
     ) {
+        guard acceptsRuntimeCallback(from: download) else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
         completionHandler(.performDefaultHandling, nil)
     }
 
     func downloadDidFinish(_ download: WKDownload) {
-        guard !isInvalidatedForAccountTransition else {
+        guard acceptsRuntimeCallback(from: download) else {
+            if let destination = discardDownloadState(for: download) {
+                removeDownloadedFile(at: destination)
+            }
             return
         }
-        let identifier = ObjectIdentifier(download)
-        downloadContexts.removeValue(forKey: identifier)
-        cancelledDownloads.remove(identifier)
-        guard let destination = downloadDestinations.removeValue(forKey: identifier) else {
+        guard let destination = discardDownloadState(for: download) else {
             return
         }
         enqueueDownloadedFile(at: destination)
@@ -1601,15 +1677,18 @@ extension WebViewController: WKDownloadDelegate {
         didFailWithError error: Error,
         resumeData: Data?
     ) {
-        guard !isInvalidatedForAccountTransition else {
+        guard acceptsRuntimeCallback(from: download) else {
+            if let destination = discardDownloadState(for: download) {
+                removeDownloadedFile(at: destination)
+            }
             return
         }
         let identifier = ObjectIdentifier(download)
-        downloadContexts.removeValue(forKey: identifier)
-        if let destination = downloadDestinations.removeValue(forKey: identifier) {
+        let wasCancelled = cancelledDownloads.contains(identifier)
+        if let destination = discardDownloadState(for: download) {
             removeDownloadedFile(at: destination)
         }
-        if cancelledDownloads.remove(identifier) != nil {
+        if wasCancelled {
             return
         }
         let error = error as NSError

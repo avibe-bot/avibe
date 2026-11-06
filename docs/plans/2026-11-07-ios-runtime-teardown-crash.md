@@ -26,6 +26,9 @@ The crash reproduces with a real `WKWebView` and the real
   released or foreign WebViews as inactive.
 - Invalidation cancels observers, pending dialogs, fallback and presentation
   work, downloads, popups, and WebView delegates before releasing the store.
+- Active downloads are cancelled before their bookkeeping is released. Any
+  temporary destination is removed immediately and again when cancellation
+  completes, so a late write cannot leave account data in temporary storage.
 - Late bridge calls cannot start another account transition or update runtime
   state.
 - The same invariant covers account entry, instance switching, logout, and
@@ -44,6 +47,12 @@ The WebKit regression uses a hermetic AppModel with a non-persistent named-store
 substitute and a fake transport. It performs the real route transition from a
 loaded runtime page, then delivers late bridge, navigation, content-process,
 and UI-delegate callbacks.
+
+A structural XCTest enumerates every method in the controller's actual
+`WKNavigationDelegate`, `WKUIDelegate`, and `WKDownloadDelegate` conformances
+and requires each one to pass through the shared teardown guard. A download
+regression also verifies that invalidation cancels an active download, detaches
+its delegate, removes its temporary destination, and rejects late callbacks.
 
 ## Validation
 

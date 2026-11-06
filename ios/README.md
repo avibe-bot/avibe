@@ -423,7 +423,10 @@ its primary or child WebView. Delegate, bridge, KVO, observer, delayed-work,
 download, and popup paths use retained-only references and become no-ops or
 cancel their completion after invalidation. The AppModel transition regression
 drives this rule through a real `app.showAccount` bridge call before delivering
-late WebKit callbacks.
+late WebKit callbacks. Active downloads are cancelled and their temporary
+destinations are removed before runtime state is released; a structural test
+enumerates every implemented WebKit delegate entry point and requires it to use
+the shared teardown guard.
 
 - Native XCTest covers bridge policy, runtime `app.showAccount`, account
   action registration and fallback timing, selected-instance SPA history,
