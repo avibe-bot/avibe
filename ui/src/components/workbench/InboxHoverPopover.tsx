@@ -1,11 +1,12 @@
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { ArrowLeft, ArrowRight, MessageSquareReply, RefreshCw } from 'lucide-react';
 import clsx from 'clsx';
 
 import type { InboxSession } from '../../context/ApiContext';
 import type { InboxFeedStatus } from '../../context/WorkbenchInboxContext';
+import type { Bot } from '../../lib/bots';
 import { useBots } from '../../context/BotsContext';
 import { useNotificationPreferences } from '../../context/NotificationPreferencesContext';
 import { useBotRoster } from '../../context/BotRosterContext';
@@ -19,6 +20,7 @@ import { NotificationMenu } from './NotificationMenu';
 import { useNotificationMode } from './useNotificationMode';
 import { BotTag } from './bots/BotTag';
 import { InboxSectionHeader } from './InboxSectionHeader';
+import { chatHref, useCardOpen } from './useCardOpen';
 import { InboxPopoverRowsSkeleton } from './listSkeletons';
 import { FlipList } from '../ui/flip-list';
 import { useSkeletonHandover } from '../ui/skeleton-handover';
@@ -55,6 +57,90 @@ type Section = {
   /** Unread replies, for the section header. */
   unread: number;
 };
+
+/**
+ * One conversation in the peek, opened by a press on the row itself (`useCardOpen` has the rule): its
+ * title is the link, and the rest of the row follows it. Unread stays marked in a muted category; only
+ * the mint that asks for attention is withheld.
+ */
+function InboxPeekRow({
+  session: s,
+  unread,
+  quiet,
+  inBotSection,
+  bot,
+  botLabel,
+  onOpen,
+}: {
+  session: InboxSession;
+  unread: number;
+  quiet: boolean;
+  inBotSection: boolean;
+  bot: Bot | undefined;
+  botLabel: string;
+  onOpen: (session: InboxSession) => void;
+}) {
+  const { t } = useTranslation();
+  const href = chatHref(s.session_id);
+  const opens = useCardOpen(href, () => onOpen(s));
+  const replied = s.replied ? (
+    <MessageSquareReply className="size-3 shrink-0 text-cyan-ink" aria-label={t('workbench.inbox.replied')} />
+  ) : null;
+  const preview = s.preview_text ? (
+    <InboxPreview
+      text={s.preview_text}
+      className={clsx('line-clamp-2 text-[11.5px] leading-relaxed', unread > 0 ? 'text-foreground' : 'text-muted')}
+    />
+  ) : null;
+  // A surface under the pointer (M8): it sinks, and its fill steps to the one it hovers to.
+  const shell = clsx(
+    'press press-surface cursor-pointer rounded-lg px-3 py-2.5 text-left',
+    'has-[a:focus-visible]:ring-2 has-[a:focus-visible]:ring-ring',
+    unread > 0
+      ? quiet
+        ? 'border-l-2 border-border-strong bg-foreground/[0.04] hover:bg-foreground/[0.07] active:bg-foreground/[0.07]'
+        : 'border-l-2 border-mint bg-mint/[0.06] hover:bg-mint/[0.10] active:bg-mint/[0.10]'
+      : 'hover:bg-foreground/[0.04] active:bg-foreground/[0.04]',
+  );
+  if (bot) {
+    // A Bot's conversation reads as the Bot: its avatar and name instead of "project · title"
+    // (docs/plans/bots.md D5). Inside the Bots section the header already says so, which is why the
+    // row carries no Bot tag there.
+    return (
+      <div data-flip-id={s.session_id} data-inbox-peek-id={s.session_id} {...opens.card} className={clsx('flex gap-2.5', shell)}>
+        <BotAvatar avatar={bot.avatar} name={botLabel} size={28} inList className="mt-0.5" />
+        <div className="flex min-w-0 flex-1 flex-col gap-1">
+          <div className="flex items-center gap-1.5 text-[11px]">
+            <Link to={href} {...opens.link} className="truncate font-bold text-foreground focus-visible:outline-none">{botLabel}</Link>
+            {!inBotSection && <BotTag />}
+            <span className="flex-1" />
+            {replied}
+            <span className="shrink-0 font-mono text-[10px] text-muted">{formatRelativeTime(s.last_activity_at, t)}</span>
+          </div>
+          {preview}
+        </div>
+      </div>
+    );
+  }
+  const projectLabel = s.project_name || s.project_id;
+  return (
+    <div data-flip-id={s.session_id} data-inbox-peek-id={s.session_id} {...opens.card} className={clsx('flex flex-col gap-1.5', shell)}>
+      <div className="flex items-center gap-1.5 text-[10px]">
+        {projectLabel && (
+          <span className="truncate font-semibold text-cyan-ink after:ml-1.5 after:font-normal after:text-muted after:content-['·']">
+            {projectLabel}
+          </span>
+        )}
+        <Link to={href} {...opens.link} className="flex-1 truncate font-semibold text-foreground focus-visible:outline-none">
+          {s.title?.trim() || s.session_id}
+        </Link>
+        {replied}
+        <span className="font-mono text-muted">{formatRelativeTime(s.last_activity_at, t)}</span>
+      </div>
+      {preview}
+    </div>
+  );
+}
 
 // 360px floating popover that opens when the user hovers the Inbox icon
 // (ui/design: sidebar/inbox-popover/open): header, a few conversation cards, an "open full inbox" link,
@@ -126,64 +212,18 @@ export const InboxHoverPopover: React.FC<{
   };
 
   const renderRow = (s: InboxSession, quiet: boolean, inBotSection: boolean) => {
-    const unread = unreadOf(s);
     const bot = botForSession(s.session_id);
-    const replied = s.replied ? (
-      <MessageSquareReply className="size-3 shrink-0 text-cyan-ink" aria-label={t('workbench.inbox.replied')} />
-    ) : null;
-    const preview = s.preview_text ? (
-      <InboxPreview
-        text={s.preview_text}
-        className={clsx('line-clamp-2 text-[11.5px] leading-relaxed', unread > 0 ? 'text-foreground' : 'text-muted')}
-      />
-    ) : null;
-    // Unread stays marked in a muted category; only the mint that asks for
-    // attention is withheld.
-    // Read eases the wash away (colour only, M7).
-    const shell = clsx(
-      'rounded-lg px-3 py-2.5 text-left transition-[background-color,border-color] duration-(--motion-duration-fast) ease-(--motion-ease-exit)',
-      unread > 0
-        ? quiet
-          ? 'border-l-2 border-border-strong bg-foreground/[0.04] hover:bg-foreground/[0.07]'
-          : 'border-l-2 border-mint bg-mint/[0.06] hover:bg-mint/[0.10]'
-        : 'hover:bg-foreground/[0.04]',
-    );
-    if (bot) {
-      // A Bot's conversation reads as the Bot: its avatar and name instead of
-      // "project · title" (docs/plans/bots.md D5). Inside the Bots section the
-      // header already says so, which is why the row carries no Bot tag there.
-      const name = botName(bot);
-      return (
-        <button key={s.session_id} data-flip-id={s.session_id} type="button" onClick={() => onItemClick(s)} className={clsx('flex gap-2.5', shell)}>
-          <BotAvatar avatar={bot.avatar} name={name} size={28} inList className="mt-0.5" />
-          <div className="flex min-w-0 flex-1 flex-col gap-1">
-            <div className="flex items-center gap-1.5 text-[11px]">
-              <span className="truncate font-bold text-foreground">{name}</span>
-              {!inBotSection && <BotTag />}
-              <span className="flex-1" />
-              {replied}
-              <span className="shrink-0 font-mono text-[10px] text-muted">{formatRelativeTime(s.last_activity_at, t)}</span>
-            </div>
-            {preview}
-          </div>
-        </button>
-      );
-    }
-    const projectLabel = s.project_name || s.project_id;
     return (
-      <button key={s.session_id} data-flip-id={s.session_id} type="button" onClick={() => onItemClick(s)} className={clsx('flex flex-col gap-1.5', shell)}>
-        <div className="flex items-center gap-1.5 text-[10px]">
-          {projectLabel && (
-            <span className="truncate font-semibold text-cyan-ink after:ml-1.5 after:font-normal after:text-muted after:content-['·']">
-              {projectLabel}
-            </span>
-          )}
-          <span className="flex-1 truncate font-semibold text-foreground">{s.title?.trim() || s.session_id}</span>
-          {replied}
-          <span className="font-mono text-muted">{formatRelativeTime(s.last_activity_at, t)}</span>
-        </div>
-        {preview}
-      </button>
+      <InboxPeekRow
+        key={s.session_id}
+        session={s}
+        unread={unreadOf(s)}
+        quiet={quiet}
+        inBotSection={inBotSection}
+        bot={bot}
+        botLabel={bot ? botName(bot) : ''}
+        onOpen={onItemClick}
+      />
     );
   };
 

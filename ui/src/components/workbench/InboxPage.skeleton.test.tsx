@@ -135,4 +135,32 @@ describe('the Inbox first load', () => {
     expect(heads).toEqual(['workbench.inbox.sections.bots', 'workbench.inbox.sections.sessions']);
     expect(cardsSkeleton()).toHaveLength(3);
   });
+
+  it('draws a skeleton card in the box of a real unread card: its rows, and its 「Mark read」 row', () => {
+    const view = render(app());
+    const skeleton = cardsSkeleton()[0];
+    const skeletonRows = [...skeleton.children].filter((node) => !node.classList.contains('skeleton-shimmer'));
+    view.unmount();
+    feed.inboxSessions = [row('ses_a')];
+    feed.unreadBySession = { ses_a: 1 };
+    feed.loading = false;
+    feed.feedStatus = 'loaded';
+    render(app());
+    const card = document.querySelector<HTMLElement>('[data-inbox-session-id="ses_a"]')!;
+    const cardRows = [...card.children];
+    // The same padding, border and gap, and as many rows.
+    for (const box of ['p-4', 'border', 'gap-3', 'rounded-xl']) {
+      expect(skeleton.classList.contains(box) && card.classList.contains(box)).toBe(true);
+    }
+    expect(skeletonRows).toHaveLength(cardRows.length);
+    // The header at the card's text size; the last row one button tall, with the button's box.
+    expect(skeletonRows[0].className).toContain('text-[11px]');
+    expect(cardRows[0].className).toContain('text-[11px]');
+    const button = cardRows.at(-1)!.querySelector('button')!;
+    const blocks = [...skeletonRows.at(-1)!.children];
+    expect(blocks).toHaveLength(1);
+    for (const box of ['px-3', 'py-1.5', 'text-[11px]', 'border']) {
+      expect(button.classList.contains(box) && blocks[0].classList.contains(box)).toBe(true);
+    }
+  });
 });

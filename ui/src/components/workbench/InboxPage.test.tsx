@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { StrictMode } from 'react';
-import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import type { InboxSession } from '../../context/ApiContext';
@@ -72,7 +72,7 @@ function mount() {
 const article = (id: number) => shell.querySelector<HTMLElement>(`[data-inbox-session-id="session-${id}"]`)!;
 const offset = (id: number) => article(id).getBoundingClientRect().top - shell.getBoundingClientRect().top;
 const open = (id: number) => {
-  fireEvent.click(within(article(id)).getByRole('button', { name: /workbench.inbox.openSession/ }));
+  fireEvent.click(article(id));
   expect(shell.scrollTop).toBe(0); // Chat's shorter layout clamps the shared scroll owner.
 };
 const back = () => fireEvent.click(screen.getByText('Back'));

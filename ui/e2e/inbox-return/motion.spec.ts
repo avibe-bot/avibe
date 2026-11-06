@@ -39,7 +39,8 @@ const recordTransitions = () => {
 };
 
 const row = (page: Page, id: number) => page.locator(`[data-inbox-session-id="session-${id}"]`);
-const openButton = (page: Page, id: number) => row(page, id).getByRole('button', { name: copy('workbench.inbox.openSession') });
+/** What a tap on a card opens from: its preview (the card itself opens the conversation). */
+const cardBody = (page: Page, id: number) => row(page, id).locator('.line-clamp-3');
 const steps = (page: Page) => page.evaluate(() => window.__steps);
 const settled = (page: Page, count: number) => expect.poll(() => page.evaluate(() => window.__finished)).toBe(count);
 
@@ -58,7 +59,7 @@ test.describe('on a phone', () => {
     await row(page, 30).scrollIntoViewIfNeeded();
     const top = await page.evaluate(() => document.getElementById('app-shell-scroll')!.scrollTop);
     expect(top).toBeGreaterThan(1000);
-    await openButton(page, 30).click();
+    await cardBody(page, 30).click();
     await expect(page.getByTestId('chat-detail')).toBeVisible();
     await settled(page, 1);
     await page.getByRole('button', { name: 'Back', exact: true }).click();
@@ -78,7 +79,7 @@ test.describe('on a phone', () => {
       document.documentElement.style.setProperty('--motion-nav-push-duration', '310ms');
       document.documentElement.style.setProperty('--motion-nav-pop-duration', '270ms');
     });
-    await openButton(page, 1).click();
+    await cardBody(page, 1).click();
     await settled(page, 1);
     await page.getByRole('button', { name: 'Back', exact: true }).click();
     await settled(page, 2);
@@ -98,7 +99,7 @@ test.describe('on a phone', () => {
         else Object.defineProperty(proto, 'hasUAVisualTransition', { configurable: true, get: () => value === 'true' });
       }, animated);
       await open(page);
-      await openButton(page, 1).click();
+      await cardBody(page, 1).click();
       await expect(page.getByTestId('chat-detail')).toBeVisible();
       await settled(page, 1);
       /** Takes a history step the way the system does, and reads every frame that follows it. */
@@ -138,14 +139,14 @@ test.describe('on a phone', () => {
   test('cross-fades instead of sliding under reduced motion', async ({ page }) => {
     await page.emulateMedia({ reducedMotion: 'reduce' });
     await open(page);
-    await openButton(page, 1).click();
+    await cardBody(page, 1).click();
     await settled(page, 1);
     expect((await steps(page))[0]).toMatchObject({ motion: 'fade', old: ['motion-fade-out'], next: ['motion-fade-in'] });
   });
 
   test('finishes a push at once when the reader touches the screen', async ({ page }) => {
     await open(page);
-    await openButton(page, 1).click();
+    await cardBody(page, 1).click();
     await expect.poll(async () => (await steps(page)).length).toBe(1);
     await expect.poll(async () => (await steps(page))[0].next.length).toBe(1);
     const finishedIn = await page.evaluate(async () => {
@@ -162,7 +163,7 @@ test.describe('on a phone', () => {
 test('switches pages on a desktop without a transition', async ({ page, isMobile }) => {
   test.skip(isMobile, 'desktop navigation');
   await open(page);
-  await openButton(page, 1).click();
+  await cardBody(page, 1).click();
   await expect(page.getByTestId('chat-detail')).toBeVisible();
   await page.getByRole('button', { name: 'Back', exact: true }).click();
   await expect(row(page, 2)).toBeVisible();
@@ -171,7 +172,8 @@ test('switches pages on a desktop without a transition', async ({ page, isMobile
 
 test('sinks a pressed control and steps its colour, and keeps only the colour under reduced motion', async ({ page }) => {
   await open(page);
-  const chip = openButton(page, 1);
+  // A control on a card: its 「Mark read」 (the card itself is a surface, which sinks less).
+  const chip = row(page, 1).getByRole('button', { name: copy('workbench.inbox.markRead') });
   // Until the chip's transitions (the press, or the release's spring) have run their course.
   const settled = () => chip.evaluate((el) => Promise.all(el.getAnimations().map((animation) => animation.finished.catch(() => undefined))));
   const pressed = async () => {
@@ -185,7 +187,7 @@ test('sinks a pressed control and steps its colour, and keeps only the colour un
     return style;
   };
   const rest = await chip.evaluate((el) => getComputedStyle(el).backgroundColor);
-  // The release would open the conversation: keep the click from reaching it.
+  // The release would mark the card read: keep the click from reaching it.
   await chip.evaluate((el) => el.addEventListener('click', (event) => event.stopPropagation(), { capture: true }));
   const full = await pressed();
   expect(full.scale).toBe('0.94');
