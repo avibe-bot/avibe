@@ -5306,6 +5306,17 @@ export const Transcript: React.FC<TranscriptProps> = ({
   // Jump to the exact bottom and resume following. Instant, not smooth: a smooth
   // glide emits intermediate scroll events that would flip the pin off mid-flight
   // and, if content grows during the glide, land short of the true bottom.
+  // The glide to the latest message (``glideToLatest``) while it runs or waits
+  // for rest. Anything else that moves the transcript (a sent message, a jump to
+  // a search result, another chat) stops it first, so it never writes over them.
+  const glideRef = useRef<{ frame: number } | null>(null);
+  const stopGlideToLatest = useCallback(() => {
+    const glide = glideRef.current;
+    if (!glide) return;
+    glideRef.current = null;
+    cancelAnimationFrame(glide.frame);
+  }, []);
+
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -5320,9 +5331,10 @@ export const Transcript: React.FC<TranscriptProps> = ({
   // also from a scrolled-up position, the way a sent message lands in any chat.
   useEffect(() => {
     if (!sentRowFollow) return undefined;
+    stopGlideToLatest();
     const id = requestAnimationFrame(() => scrollToBottom());
     return () => cancelAnimationFrame(id);
-  }, [sentRowFollow, scrollToBottom]);
+  }, [sentRowFollow, scrollToBottom, stopGlideToLatest]);
 
   // Jump-to-latest handler behind the down-arrow button. A search result that
   // was not already loaded installs a centered historical window; its loaded
@@ -5335,13 +5347,6 @@ export const Transcript: React.FC<TranscriptProps> = ({
   // once to the reader: a finger, the wheel, a key, or a pointer stops it where
   // it is. Following the tail starts at the bottom, not before, so the
   // conversation's own glide (transcriptMotion) does not run on top of it.
-  const glideRef = useRef<{ frame: number } | null>(null);
-  const stopGlideToLatest = useCallback(() => {
-    const glide = glideRef.current;
-    if (!glide) return;
-    glideRef.current = null;
-    cancelAnimationFrame(glide.frame);
-  }, []);
   const glideToLatest = useCallback(() => {
     stopGlideToLatest();
     if (prefersReducedMotion()) {
@@ -5595,6 +5600,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
   useEffect(() => {
     if (lastSessionRef.current === session.id) return;
     lastSessionRef.current = session.id;
+    stopGlideToLatest();
     setFollowingTail(true);
     anchorRef.current = null;
     setShowJump(false);
@@ -5609,7 +5615,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
     pagingGestureRef.current = null;
     const id = requestAnimationFrame(() => scrollToBottom());
     return () => cancelAnimationFrame(id);
-  }, [session.id, scrollToBottom, setFollowingTail]);
+  }, [session.id, scrollToBottom, setFollowingTail, stopGlideToLatest]);
 
   // Deep-link jump (P5): once ChatPage has put the target message into
   // ``messages`` (either it was already loaded or the around-window was fetched
@@ -5622,6 +5628,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
   // suppression lifts.
   useEffect(() => {
     if (!jumpTarget) return;
+    stopGlideToLatest();
     const el = scrollRef.current;
     if (!el) return;
     // If the target is the newest loaded row AND we're genuinely at the live tail
@@ -5670,6 +5677,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
     onJumpHandled,
     scrollToBottom,
     setFollowingTail,
+    stopGlideToLatest,
   ]);
 
 

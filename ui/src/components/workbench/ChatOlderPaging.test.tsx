@@ -594,6 +594,39 @@ describe('transcript older-page loading', () => {
     }
   });
 
+  // Whatever else moves the transcript (here a jump to a search result) takes
+  // over from the glide, which must not write over it.
+  it('stops the glide to the latest message when a jump takes over', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+    const scrollIntoView = Element.prototype.scrollIntoView;
+    try {
+      const { scroller, rerender, getByRole, scrollTo } = renderTranscript({ hasOlder: false });
+      await act(async () => scrollTo(1000));
+      await act(async () => { vi.advanceTimersByTime(1600); });
+      fireEvent.click(getByRole('button', { name: 'chat.scrollToBottom' }));
+      for (let frame = 0; frame < 3; frame += 1) {
+        await act(async () => {
+          vi.advanceTimersByTime(16);
+          flushFrames();
+        });
+      }
+      expect(scroller.scrollTop).toBeGreaterThan(1000);
+      // The jump puts its row at 2000.
+      Element.prototype.scrollIntoView = function scrollIntoViewStub() { scroller.scrollTop = 2000; };
+      await act(async () => rerender({ jumpTarget: 'msg-320', highlightedId: 'msg-320' }));
+      for (let frame = 0; frame < 30; frame += 1) {
+        await act(async () => {
+          vi.advanceTimersByTime(16);
+          flushFrames();
+        });
+      }
+      expect(scroller.scrollTop).toBe(2000);
+    } finally {
+      Element.prototype.scrollIntoView = scrollIntoView;
+      vi.useRealTimers();
+    }
+  });
+
   // A second finger elsewhere (the composer) can outlast the one on the
   // transcript and end where the transcript never hears of it.
   it('counts a touch that ends outside the transcript as ended', async () => {
