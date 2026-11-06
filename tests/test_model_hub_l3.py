@@ -5849,7 +5849,8 @@ def test_settlement_retires_correlation_when_mode_persistence_fails(
     )
 
 
-def test_opencode_overlay_projects_menu_identity_to_exact_hop_model(tmp_path: Path) -> None:
+@pytest.mark.parametrize("opencode_version", ["1.2.15", "2.0.0"])
+def test_opencode_overlay_projects_menu_identity_to_exact_hop_model(tmp_path: Path, monkeypatch, opencode_version) -> None:
     source = _source("src_overlay01", "Overlay", model_id="upstream-model")
     source.models[0].reasoning_efforts = ["medium"]
     config = _config([source])
@@ -5879,6 +5880,12 @@ def test_opencode_overlay_projects_menu_identity_to_exact_hop_model(tmp_path: Pa
     overlay = asyncio.run(router.prepare_opencode_overlay())
 
     assert overlay is not None
+    from modules.agents.opencode import client_manager
+
+    monkeypatch.setattr(client_manager, "_binary_version", lambda _inputs: opencode_version)
+    inputs = client_manager.read_launch_inputs(str(tmp_path / "opencode"), 0)
+    spec = client_manager.compute_launch_spec(inputs, overlay)
+    assert ("policies" in json.loads(spec.overlay_inline_content)) == opencode_version.startswith("2.")
     payload = json.loads(overlay.content)
     assert overlay.provider_ids == ("avibe-openai",)
     assert payload["enabled_providers"] == ["avibe-openai"]

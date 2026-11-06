@@ -81,6 +81,7 @@ class OpenCodeRuntimeConfigInvalidError(RuntimeError):
 def managed_opencode_runtime_config_content(
     raw: str | bytes | None,
     disabled_mcp: Dict[str, Any] | None = None,
+    opencode_version: str | None = None,
 ) -> str:
     """Apply Avibe-owned OpenCode runtime policy without mutating user config."""
 
@@ -125,14 +126,27 @@ def managed_opencode_runtime_config_content(
     # Computer Use is exposed through ``vibe computer`` and must never be
     # reintroduced from a stale user or runtime configuration.
     managed_mcp.pop("avibe_computer", None)
-    # Native MCP is off in Avibe sessions; agents call MCP through ``vibe mcp``
-    # (core/mcp_hub/native.py supplies the user's entries with enabled=false).
-    for name, entry in (disabled_mcp or {}).items():
-        current = managed_mcp.get(name)
-        managed_mcp[name] = {**(current if isinstance(current, dict) else entry), "enabled": False}
-    for name, entry in list(managed_mcp.items()):
-        if isinstance(entry, dict):
-            managed_mcp[name] = {**entry, "enabled": False}
+    # V2 supports a policy that covers project-native servers whose names are
+    # unknown to Avibe. Unknown versions are treated as V2; V1 keeps the
+    # existing per-name behavior and cannot suppress project-level MCP.
+    is_v1 = isinstance(opencode_version, str) and opencode_version.lstrip("v").split(".", 1)[0] == "1"
+    if is_v1:
+        for name, entry in (disabled_mcp or {}).items():
+            current = managed_mcp.get(name)
+            managed_mcp[name] = {**(current if isinstance(current, dict) else entry), "enabled": False}
+        for name, entry in list(managed_mcp.items()):
+            if isinstance(entry, dict):
+                managed_mcp[name] = {**entry, "enabled": False}
+    else:
+        existing_policies = payload.get("policies")
+        policies = list(existing_policies) if isinstance(existing_policies, list) else []
+        for policy in (
+            {"action": "integration.use", "resource": "mcp:*", "effect": "deny"},
+            {"action": "mcp.use", "resource": "*", "effect": "deny"},
+        ):
+            if policy not in policies:
+                policies.append(policy)
+        payload["policies"] = policies
     if managed_mcp:
         payload["mcp"] = managed_mcp
     else:

@@ -10,8 +10,12 @@ every command's dependencies at startup.
 
 Identity resolution, command floors, invocation context reset, placement checks
 and resource checks retain their existing decisions. No readiness/importer,
-read-only-engine or warm-service changes belong to this phase. The branch starts
-independently from master; it does not depend on Phase 2.
+read-only-engine or warm-service changes belong to this phase. The branch started
+independently from master. Before final validation, it was synchronized without
+history rewriting to master `42e510d6a3dce1cfb90e921762cbd547089da2b5`, which
+contains the merged Phase 2 readiness probe (#3306). Final Phase 1 benchmarks
+compare against that exact base, with readiness present on both sides; this PR's
+diff does not change the readiness/importer contract.
 
 ### Existing-contract exception
 
@@ -58,10 +62,14 @@ remain the primary coverage for their respective contracts.
       2,043 cases passed across five focused invocations, including 57 cold-entry,
       parser-tail and selected-command cases. Those 57 cases pass on Python 3.12
       and 3.14; only stdlib-controlled usage whitespace is normalized, while
-      usage tokens and the rest of each error envelope remain exact. The Show/Watch bundle required a
+      usage tokens and the rest of each error envelope remain exact. The
+      Show/Watch bundle required a
       process-local `ulimit -n 4096` after macOS's default descriptor limit was
       exhausted; the isolated rerun passed all 239 cases. No product change was
       made for that test-process limit.
+- [x] Integrate merged master `42e510d6a` without history rewriting. After the
+      sync, 163 focused cold-entry/readiness/startup/authority/pagination cases
+      pass on Python 3.12, and all 57 cold-entry cases pass again on Python 3.14.
 - [ ] Benchmark exact candidate head through the coordinated phase harness:
       cold timings; 200-call / 20-way mixed load; lock errors; transcript latency;
       rollback. Benchmark owner coordinates runs; no production state.

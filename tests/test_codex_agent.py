@@ -47,6 +47,8 @@ def _catalog_reference(path):
 
 def _fork_transport():
     def send_request(method, _params):
+        if method == "config/read":
+            return {"config": {"mcp_servers": {"project-only": {}, "foo.bar": {}}}}
         if method == "thread/turns/list":
             return {
                 "data": [
@@ -3382,6 +3384,8 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
                 )
 
                 async def send_request(method, params):
+                    if method == "config/read":
+                        return {"config": {"mcp_servers": {"project-only": {}, "foo.bar": {}}}}
                     if method == "thread/turns/list":
                         self.assertEqual(params["itemsView"], "notLoaded")
                         self.assertEqual(params["limit"], 2)

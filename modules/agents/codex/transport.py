@@ -87,14 +87,6 @@ def _avibe_app_server_config_args() -> list[str]:
     ]
 
 
-def _native_mcp_disabled_args() -> list[str]:
-    """Native MCP is off in Avibe sessions; agents call MCP through ``vibe mcp``."""
-
-    from core.mcp_hub.native import codex_disable_overrides
-
-    return [arg for override in codex_disable_overrides() for arg in ("-c", override)]
-
-
 class CodexRPCError(RuntimeError):
     """A structured server error, distinct from an ambiguous transport failure."""
 
@@ -190,7 +182,6 @@ class CodexTransport:
             + self._runtime_args
             + self._extra_args
             + _avibe_app_server_config_args()
-            + await asyncio.to_thread(_native_mcp_disabled_args)
         )
         if self._model_hub_catalog is not None:
             # The path actually consumed must be the one we pin, even if a
@@ -446,6 +437,24 @@ class CodexTransport:
         """Send a JSON-RPC request and return the result (blocking)."""
         if not self.is_alive:
             raise ConnectionError("Codex app-server transport is not available")
+        if method in {"thread/start", "thread/resume", "thread/fork"}:
+            read_params = {"includeLayers": False}
+            if params.get("cwd"):
+                read_params["cwd"] = params["cwd"]
+            response = await self.send_request("config/read", read_params)
+            config = response.get("config") if isinstance(response, dict) else None
+            servers = config.get("mcp_servers", {}) if isinstance(config, dict) else None
+            if not isinstance(servers, dict):
+                raise RuntimeError("Codex config/read returned invalid mcp_servers")
+            params = dict(params)
+            config = dict(params.get("config") or {})
+            if servers:
+                overrides = dict(config.get("mcp_servers") or {})
+                for name in servers:
+                    if isinstance(name, str):
+                        overrides[name] = {**overrides.get(name, {}), "enabled": False}
+                config["mcp_servers"] = overrides
+            params["config"] = config
 
         self._request_id += 1
         req_id = self._request_id

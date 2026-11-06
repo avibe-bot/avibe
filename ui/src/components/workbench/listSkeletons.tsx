@@ -93,8 +93,8 @@ export const MobileProjectCardsSkeleton = ({ rows, quiet = false }: { rows: numb
   );
 };
 
-/** One Inbox card (`InboxPage`'s card), drawn at the most common real card: an unread one
- *  (Open and Mark read), whose preview runs two lines on a phone and one on a wider screen.
+/** One Inbox card (`InboxCard`), drawn at the most common real card: an unread one (its
+ *  「Mark read」 row), whose preview runs two lines on a phone and one on a wider screen.
  *  A Bot's card leads with its 24px avatar, a Session's with its project tag. */
 const InboxCardSkeleton = ({ kind, index }: { kind: 'bot' | 'session'; index: number }) => (
   <SkeletonShimmer className="flex flex-col gap-3 rounded-xl border border-border bg-surface p-4">
@@ -116,10 +116,8 @@ const InboxCardSkeleton = ({ kind, index }: { kind: 'bot' | 'session'; index: nu
         <TextLine textClass="md:hidden" barClass={clsx('h-2', index % 2 ? 'w-[46%]' : 'w-[70%]')} />
       </div>
     </div>
+    {/* An unread card's 「Mark read」 row: the card itself opens the conversation. */}
     <div className="flex items-center gap-2">
-      <Skeleton className="border border-transparent px-3 py-1.5 text-[11px]">
-        <span className="block h-[1lh] w-20" />
-      </Skeleton>
       <Skeleton className="border border-transparent px-3 py-1.5 text-[11px]">
         <span className="block h-[1lh] w-14" />
       </Skeleton>

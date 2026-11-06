@@ -66,10 +66,9 @@ def _current_spec(runtime: OpenCodeRuntime, overlay=None) -> OpenCodeLaunchSpec:
 
 
 def _overlay(content: str = '{"provider":{"avibe-openai":{}}}'):
-    inline = opencode_server._managed_runtime_config_content(content)
     return SimpleNamespace(
         content=content.encode(),
-        content_hash=hashlib.sha256(inline.encode()).hexdigest(),
+        content_hash=hashlib.sha256(content.encode()).hexdigest(),
         provider_ids=("avibe-openai",),
     )
 

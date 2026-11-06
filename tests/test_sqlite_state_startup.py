@@ -27,11 +27,11 @@ def _config() -> V2Config:
 def test_prepare_sqlite_state_uses_config_primary_platform(monkeypatch) -> None:
     calls = []
 
-    def fake_ensure_sqlite_state(*, primary_platform: str):
+    def fake_repair_sqlite_state(*, primary_platform: str):
         calls.append(primary_platform)
         return SimpleNamespace(imported=True, db_path=Path("/tmp/vibe.sqlite"), backup_path=Path("/tmp/backup"))
 
-    monkeypatch.setattr(service_main, "ensure_sqlite_state", fake_ensure_sqlite_state)
+    monkeypatch.setattr("storage.importer.repair_sqlite_state", fake_repair_sqlite_state)
 
     report = service_main.prepare_sqlite_state(_config())
 

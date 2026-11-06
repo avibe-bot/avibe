@@ -185,6 +185,26 @@ describe('resolveScrollAnchor', () => {
     expect(resolveScrollAnchor(anchor, content(chrome({ top: 0, height: 10 })))).toBeNull();
   });
 
+  // Items that are not messages (an activity card or chip, a Harness group's
+  // members, its collapse bar) name themselves with data-transcript-key.
+  it('finds an item that is not a message again by its key when it re-mounts', () => {
+    const chip = chrome({ top: 40, height: 30 });
+    chip.dataset.transcriptRow = '';
+    chip.dataset.transcriptKey = 'activity:grp_7';
+    const anchor = pick([chip], VIEWPORT, 0)!;
+    expect(anchor).toMatchObject({ el: chip, key: 'activity:grp_7', top: 40 });
+    chip.remove();
+
+    const remounted = chrome({ top: 300, height: 30 });
+    remounted.dataset.transcriptRow = '';
+    remounted.dataset.transcriptKey = 'activity:grp_7';
+    const other = chrome({ top: 0, height: 30 });
+    other.dataset.transcriptKey = 'activity:grp_8';
+    expect(resolveScrollAnchor(anchor, content(other, remounted))).toEqual({ el: remounted, top: 40 });
+    // Gone for good: nothing to hold.
+    expect(resolveScrollAnchor(anchor, content(other))).toBeNull();
+  });
+
   it('lets a dissolved group hand its place to its first message', () => {
     const head = chrome({ top: -20, height: 70 });
     head.dataset.transcriptRow = '';
