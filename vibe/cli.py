@@ -6964,7 +6964,7 @@ def cmd_agent_run(args):
     from vibe import internal_client
 
     arguments = dict(vars(args))
-    if arguments.get("message_file"):
+    if arguments.get("message_file") is not None:
         # /dev/stdin and /dev/fd/N name this process's descriptors, not the
         # service's. Materialize here, but let service admission (and Bot target
         # resolution) still precede reporting a file/input error as before.
@@ -18209,9 +18209,8 @@ def build_parser():
         "run",
         help="Run an Avibe Agent",
         description=(
-            "Run an Agent turn in a new background Session (--agent), an existing Session "
-            "(--session-id), or a fork. Runs are async. Requires the running Avibe service; "
-            "no offline enqueue or automatic service start."
+            "Run async in a new background Session, existing Session, or fork. "
+            "Requires Avibe running; no offline enqueue or auto-start."
         ),
         epilog=_agent_run_examples_text(),
         formatter_class=argparse.RawDescriptionHelpFormatter,

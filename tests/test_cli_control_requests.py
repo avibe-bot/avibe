@@ -190,16 +190,38 @@ def test_preparing_a_file_error_keeps_the_client_db_free(monkeypatch, tmp_path, 
     assert attempts == []
 
 
+@pytest.mark.parametrize(
+    ("source_kind", "expected_code"),
+    [("missing-file", "message_file_read_failed"), ("empty-name", "missing_message"),
+     ("empty-file", "empty_message"), ("whitespace-file", "empty_message"),
+     ("non-utf8", "task_command_failed"), ("directory", "message_file_read_failed"),
+     ("nul-path", "task_command_failed")],
+)
 @pytest.mark.parametrize("remote", [False, True])
-def test_file_error_preserves_service_admission_precedence(in_process_cli_control, monkeypatch, tmp_path, capsys, remote):
+def test_file_error_preserves_service_admission_precedence(
+    in_process_cli_control, monkeypatch, tmp_path, capsys, remote, source_kind, expected_code,
+):
+    """Every parser-accepted file input keeps its original error and admission order."""
+    input_path = tmp_path / "message.txt"
+    if source_kind == "empty-file":
+        input_path.write_bytes(b"")
+    elif source_kind == "whitespace-file":
+        input_path.write_text(" \n\t", encoding="utf-8")
+    elif source_kind == "non-utf8":
+        input_path.write_bytes(b"\xff")
+    elif source_kind == "directory":
+        input_path.mkdir()
+    argument = "" if source_kind == "empty-name" else str(input_path)
+    if source_kind == "nul-path":
+        argument += "\0"
     if remote:
         monkeypatch.setenv("AVIBE_CALLER_REMOTE", "1")
     args = cli.build_parser().parse_args([
-        "agent", "run", "--agent", "worker", "--message-file", str(tmp_path / "missing.txt"),
+        "agent", "run", "--agent", "worker", "--message-file", argument,
     ])
     assert cli.cmd_agent_run(args) == 1
     payload = json.loads(capsys.readouterr().err)
-    assert payload["code"] == ("instance_access_forbidden" if remote else "message_file_read_failed")
+    assert payload["code"] == ("instance_access_forbidden" if remote else expected_code)
 
 
 @pytest.mark.asyncio
