@@ -34,6 +34,7 @@ import { useViewportHeightVar } from '../lib/useViewportHeightVar';
 import { APP_SHELL_SCROLL_ID, forgetMobileProjectsListUnlessPreserved } from '../lib/mobileProjectsListMemory';
 import { useIsDesktop } from '../lib/useIsDesktop';
 import { useNativeOuterScrollLock } from '../lib/useNativeOuterScrollLock';
+import { useNativeAccountActionRegistration } from '../lib/useNativeAccountActionRegistration';
 import { onPageReactivated } from '../lib/pageActivity';
 import { adoptPersistedLanguage } from '../lib/useLanguageSelection';
 import { isOwnerOnlyPath } from '../lib/adminNavigation';
@@ -144,6 +145,7 @@ const ConfigRecoveryNotice: React.FC<{ config: ConfigRecoveryProjection | null }
 
 export const AppShell: React.FC = () => {
   useNativeOuterScrollLock();
+  useNativeAccountActionRegistration();
   const { t, i18n } = useTranslation();
   const { status } = useStatus();
   // Badge only — the shell is mounted on every route and renders no feed.

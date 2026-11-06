@@ -994,14 +994,14 @@ private final class NavigationProbe: NSObject, WKNavigationDelegate {
     }
 }
 
-private struct LocalHTTPRequest: Sendable {
+struct LocalHTTPRequest: Sendable {
     let method: String
     let path: String
     let headers: [String: String]
     let body: Data
 }
 
-private struct LocalHTTPResponse: Sendable {
+struct LocalHTTPResponse: Sendable {
     let status: Int
     let headers: [(String, String)]
     let body: Data
@@ -1054,7 +1054,7 @@ private struct LocalHTTPResponse: Sendable {
     }
 }
 
-private final class FixtureEvent: @unchecked Sendable {
+final class FixtureEvent: @unchecked Sendable {
     let expectation: XCTestExpectation
 
     init(description: String) {
@@ -1093,7 +1093,7 @@ private final class HTTPFixtureState: @unchecked Sendable {
     }
 }
 
-private final class LocalHTTPServer: @unchecked Sendable {
+final class LocalHTTPServer: @unchecked Sendable {
     enum LoopbackAddress {
         case ipv4
         case ipv6

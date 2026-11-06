@@ -568,9 +568,11 @@ send (they change `ChatPage`).
   transition starts for a moment after it. The pace also changed from the
   sheet spring (440 ms with a long settle) to `--motion-nav-*` (260 / 220 ms,
   `enter`), the fastest of three paces recorded side by side, chosen by the
-  owner. The iOS shell's bridge exposes no gesture capability, and the shell
-  leaves `allowsBackForwardNavigationGestures` at WebKit's default (off); a
-  shell that turns it on needs no Web change.
+  owner. The iOS shell's bridge exposes no gesture capability. Its primary
+  runtime now enables `allowsBackForwardNavigationGestures` only when the
+  immediate back item belongs to the selected instance; the Web rule above
+  already treats that system traversal as a cut, so no second motion path is
+  needed.
 - **A relaunch** that restores the last page (the Home Screen app after iOS
   evicted it) lands without a push.
 - **Press.** `press` (controls) and `press-surface` (rows and cards) in

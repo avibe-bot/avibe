@@ -50,7 +50,9 @@ The iOS app depends on `avibe-backend#308`, merged to backend `main` as
 `1cea1dffdc3e68c6a2cc8594064bf94367485b5c` and successfully deployed to
 Production by Vercel on 2026-11-05 at 18:44:16 UTC. A public no-cookie request
 to the mobile session endpoint returns the expected `401`, and health returns
-200. Hosted behavior with a real account remains unverified.
+200. The owner separately verified production email OTP, a real account
+session, and online/offline instance discovery on the iOS 27.2 simulator on
+2026-11-06; automated tests remain hermetic.
 
 ## Native Bridge Contract
 
@@ -66,13 +68,13 @@ The bundled page receives only these account operations:
 | `session.logout` | none | signed-out state |
 | `app.openExternal` | HTTPS URL from the closed install/help allowlist | whether iOS accepted the handoff |
 
-The runtime `avibeNative` bridge adds only `app.showAccount`, admitted by the
-dedicated `accountPresentation: 1` capability. It asks the app to show the
-bundled account surface; it does not expose account methods, tokens, or an
-authenticated fetch primitive to instance pages. A new Web UI keeps its prior
-web sign-out action when an older app omits the capability or the native call
-fails. A new app loading an older instance Web UI still provides Account and
-Change Instance through the native browser menu.
+The runtime `avibeNative` bridge keeps `app.showAccount` under
+`accountPresentation: 1`. Capability 2 adds the primary-only display hint
+`app.setAccountActionAvailable({available})`; it does not expose account
+methods, tokens, or an authenticated fetch primitive. A current AppShell
+registers its Web account action and receives no native bar. An older instance
+Web UI receives a delayed 56-point top fallback outside the WebView, preserving
+Account and Change Instance without covering Web controls.
 
 ## Data Ownership
 
@@ -197,9 +199,10 @@ compiled only in Debug/test builds; Release ignores it.
   cold restore, and WebView registration require a current generation/store
   lease; a delayed open from the previous account is rejected.
 - Runtime entry points are limited to validated cold restore and
-  `session.selectInstance`. Runtime exits are the native Account/Change
-  Instance menu, `app.showAccount`, and every account transition; all of them
-  converge on the same AppModel route and teardown path.
+  `session.selectInstance`. Runtime exits are the current Web account action,
+  the old-Web native fallback, `app.showAccount`, and every account
+  transition; all of them converge on the same AppModel route and teardown
+  path.
 - Revoked or stale selections return to the picker. An unavailable selected
   instance keeps account and switching controls usable.
 - Instance entry continues through existing OIDC and consent. The app does not
@@ -230,7 +233,9 @@ integration environment is available.
   Swift/WebKit boundary as partial without inventing a pytest wrapper that would
   not execute it. `AUTH-SETUP-151` through `AUTH-SETUP-154` keep live email,
   device autofill, first-instance consent, and hosted refresh competition
-  visible as manual or gap evidence.
+  visible as manual or gap evidence. `AUTH-SETUP-155` records the Swift/WebKit
+  selected-instance history boundary and leaves physical-device gesture feel
+  as manual acceptance.
 
 ## Bundled UI Build Ownership
 

@@ -15,7 +15,7 @@ struct NativeShellMetadata: Equatable {
     static let contract = 1
     static let platform = "ios"
     static let capabilities = [
-        "accountPresentation": 1,
+        "accountPresentation": 2,
         "app": 1,
         "haptics": 1,
         "keyboardResizesViewport": 1,
@@ -62,6 +62,7 @@ struct NativeShellMetadata: Equatable {
 enum NativeBridgeMethod: String, CaseIterable {
     case appInfo = "app.info"
     case appOpenExternal = "app.openExternal"
+    case appSetAccountActionAvailable = "app.setAccountActionAvailable"
     case appShowAccount = "app.showAccount"
     case hapticsImpact = "haptics.impact"
     case hapticsNotify = "haptics.notify"
@@ -178,6 +179,7 @@ enum NativeBridgeConfiguration {
         metadata: NativeShellMetadata = NativeShellMetadata(),
         websiteDataStore: WKWebsiteDataStore = .default(),
         setOuterScrollLocked: @escaping (WKWebView, Bool) -> Bool,
+        setAccountActionAvailable: @escaping (WKWebView, Bool) -> Bool = { _, _ in false },
         showAccount: @escaping () -> Void = {}
     ) -> WKWebViewConfiguration {
         let configuration = WKWebViewConfiguration()
@@ -187,6 +189,7 @@ enum NativeBridgeConfiguration {
             policy: NativeBridgePolicy(instanceOrigin: instanceOrigin),
             metadata: metadata,
             setOuterScrollLocked: setOuterScrollLocked,
+            setAccountActionAvailable: setAccountActionAvailable,
             showAccount: showAccount
         )
         controller.addScriptMessageHandler(
@@ -281,17 +284,20 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
     private let policy: NativeBridgePolicy
     private let metadata: NativeShellMetadata
     private let setOuterScrollLocked: (WKWebView, Bool) -> Bool
+    private let setAccountActionAvailable: (WKWebView, Bool) -> Bool
     private let showAccount: () -> Void
 
     init(
         policy: NativeBridgePolicy,
         metadata: NativeShellMetadata,
         setOuterScrollLocked: @escaping (WKWebView, Bool) -> Bool,
+        setAccountActionAvailable: @escaping (WKWebView, Bool) -> Bool,
         showAccount: @escaping () -> Void
     ) {
         self.policy = policy
         self.metadata = metadata
         self.setOuterScrollLocked = setOuterScrollLocked
+        self.setAccountActionAvailable = setAccountActionAvailable
         self.showAccount = showAccount
     }
 
@@ -348,6 +354,24 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
             UIApplication.shared.open(url, options: [:]) { opened in
                 self.reply(replyHandler, result: ["opened": opened])
             }
+        case .appSetAccountActionAvailable:
+            guard let available = request.params["available"] as? Bool else {
+                reply(
+                    replyHandler,
+                    error: .invalidArgument(
+                        "app.setAccountActionAvailable requires a boolean available value."
+                    )
+                )
+                return
+            }
+            guard
+                let sourceWebView,
+                setAccountActionAvailable(sourceWebView, available)
+            else {
+                reply(replyHandler, error: .forbidden)
+                return
+            }
+            reply(replyHandler, result: NSNull())
         case .appShowAccount:
             reply(replyHandler, result: NSNull())
             DispatchQueue.main.async { [showAccount] in

@@ -86,6 +86,7 @@ final class OuterScrollLockController {
 final class WebViewFactory {
     private let instanceOrigin: WebOrigin
     private let websiteDataStore: WKWebsiteDataStore
+    private let setAccountActionAvailable: (WKWebView, Bool) -> Bool
     private let showAccount: () -> Void
     private var outerScrollLockControllers: [
         ObjectIdentifier: OuterScrollLockController
@@ -96,16 +97,19 @@ final class WebViewFactory {
         setOuterScrollLocked: { [weak self] webView, locked in
             self?.setOuterScrollLocked(locked, in: webView) ?? false
         },
+        setAccountActionAvailable: setAccountActionAvailable,
         showAccount: showAccount
     )
 
     init(
         instanceOrigin: WebOrigin,
         websiteDataStore: WKWebsiteDataStore,
+        setAccountActionAvailable: @escaping (WKWebView, Bool) -> Bool = { _, _ in false },
         showAccount: @escaping () -> Void = {}
     ) {
         self.instanceOrigin = instanceOrigin
         self.websiteDataStore = websiteDataStore
+        self.setAccountActionAvailable = setAccountActionAvailable
         self.showAccount = showAccount
     }
 
@@ -211,6 +215,7 @@ final class WebViewController: UIViewController {
     private let didStartLoading: () -> Void
     private let didFinishLoading: () -> Void
     private let didFailLoading: () -> Void
+    private let accountFallbackVisibilityChanged: (Bool) -> Void
     private var websiteDataStore: WKWebsiteDataStore?
     private let showAccount: () -> Void
     private var popupRecords: [ObjectIdentifier: PopupRecord] = [:]
@@ -222,6 +227,12 @@ final class WebViewController: UIViewController {
     private var pendingDialogs: [UUID: PendingJavaScriptDialog] = [:]
     private var dialogIdentifiersByWebView: [ObjectIdentifier: Set<UUID>] = [:]
     private var isInvalidatedForAccountTransition = false
+    private var accountActionAvailable = false
+    private var accountFallbackWorkItem: DispatchWorkItem?
+    private var primaryURLObservation: NSKeyValueObservation?
+    private var primaryBackItemObservation: NSKeyValueObservation?
+    private var blockedBackForwardSourceURL: URL?
+    private var primaryStableInstanceURL: URL?
     private var retainedWebViewFactory: WebViewFactory?
     private var retainedWebView: WKWebView?
     private var webViewFactory: WebViewFactory {
@@ -234,6 +245,12 @@ final class WebViewController: UIViewController {
         let factory = WebViewFactory(
             instanceOrigin: instanceOrigin,
             websiteDataStore: websiteDataStore,
+            setAccountActionAvailable: { [weak self] sourceWebView, available in
+                self?.setAccountActionAvailable(
+                    available,
+                    from: sourceWebView
+                ) ?? false
+            },
             showAccount: showAccount
         )
         retainedWebViewFactory = factory
@@ -245,13 +262,16 @@ final class WebViewController: UIViewController {
         }
         let created = webViewFactory.makeWebView(delegate: self)
         retainedWebView = created
+        observePrimaryNavigationState(created)
         return created
     }
 
     init(
         instanceOrigin: WebOrigin,
         websiteDataStore: WKWebsiteDataStore,
+        navigationPolicy: NavigationPolicy? = nil,
         showAccount: @escaping () -> Void = {},
+        accountFallbackVisibilityChanged: @escaping (Bool) -> Void = { _ in },
         didStartLoading: @escaping () -> Void,
         didFinishLoading: @escaping () -> Void,
         didFailLoading: @escaping () -> Void
@@ -259,7 +279,10 @@ final class WebViewController: UIViewController {
         self.instanceOrigin = instanceOrigin
         self.websiteDataStore = websiteDataStore
         self.showAccount = showAccount
-        navigationPolicy = NavigationPolicy(instanceOrigins: [instanceOrigin])
+        self.navigationPolicy = navigationPolicy
+            ?? NavigationPolicy(instanceOrigins: [instanceOrigin])
+        self.accountFallbackVisibilityChanged =
+            accountFallbackVisibilityChanged
         self.didStartLoading = didStartLoading
         self.didFinishLoading = didFinishLoading
         self.didFailLoading = didFailLoading
@@ -289,6 +312,7 @@ final class WebViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
+        accountFallbackVisibilityChanged(false)
         guard !isInvalidatedForAccountTransition else {
             return
         }
@@ -334,6 +358,8 @@ final class WebViewController: UIViewController {
     deinit {
         NotificationCenter.default.removeObserver(self)
         retainedWebView?.stopLoading()
+        primaryURLObservation?.invalidate()
+        primaryBackItemObservation?.invalidate()
         retainedWebView?.navigationDelegate = nil
         retainedWebView?.uiDelegate = nil
         cancelAllPendingDialogs(dismissAlerts: false)
@@ -359,6 +385,112 @@ final class WebViewController: UIViewController {
         webView.load(URLRequest(url: instanceOrigin.url))
     }
 
+    private func observePrimaryNavigationState(_ webView: WKWebView) {
+        webView.allowsBackForwardNavigationGestures = false
+        primaryURLObservation = webView.observe(
+            \.url,
+            options: [.initial, .new]
+        ) { [weak self, weak webView] _, _ in
+            guard let self, let webView else {
+                return
+            }
+            self.updateBackNavigationGesture(in: webView)
+        }
+        primaryBackItemObservation = webView.backForwardList.observe(
+            \.backItem,
+            options: [.initial, .new]
+        ) { [weak self, weak webView] _, _ in
+            guard let self, let webView else {
+                return
+            }
+            self.updateBackNavigationGesture(in: webView)
+        }
+    }
+
+    private func updateBackNavigationGesture(in webView: WKWebView) {
+        guard webView === retainedWebView else {
+            return
+        }
+        if let blockedBackForwardSourceURL {
+            let currentURL = webView.url
+            let currentOrigin = currentURL.flatMap {
+                WebOrigin(url: $0, requiresHTTPS: false)
+            }
+            guard
+                !webView.isLoading,
+                currentOrigin == instanceOrigin,
+                currentURL != blockedBackForwardSourceURL
+            else {
+                webView.allowsBackForwardNavigationGestures = false
+                return
+            }
+            self.blockedBackForwardSourceURL = nil
+        }
+        if
+            !webView.isLoading,
+            let currentURL = webView.url,
+            WebOrigin(url: currentURL, requiresHTTPS: false) == instanceOrigin
+        {
+            primaryStableInstanceURL = currentURL
+        }
+        let backOrigin = webView.backForwardList.backItem.flatMap {
+            WebOrigin(url: $0.url, requiresHTTPS: false)
+        }
+        webView.allowsBackForwardNavigationGestures =
+            backOrigin == instanceOrigin
+    }
+
+    private func resetAccountActionForNavigationCommit() {
+        accountActionAvailable = false
+        accountFallbackWorkItem?.cancel()
+        accountFallbackWorkItem = nil
+        accountFallbackVisibilityChanged(false)
+    }
+
+    private func setAccountActionAvailable(
+        _ available: Bool,
+        from sourceWebView: WKWebView
+    ) -> Bool {
+        guard sourceWebView === retainedWebView else {
+            return false
+        }
+        accountActionAvailable = available
+        accountFallbackWorkItem?.cancel()
+        accountFallbackWorkItem = nil
+        accountFallbackVisibilityChanged(false)
+        return true
+    }
+
+    private func scheduleAccountFallbackIfNeeded() {
+        guard
+            !accountActionAvailable,
+            let currentURL = retainedWebView?.url,
+            WebOrigin(url: currentURL, requiresHTTPS: false) == instanceOrigin
+        else {
+            return
+        }
+
+        accountFallbackWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard
+                let self,
+                !self.accountActionAvailable,
+                let currentURL = self.retainedWebView?.url,
+                WebOrigin(url: currentURL, requiresHTTPS: false)
+                    == self.instanceOrigin
+            else {
+                return
+            }
+            self.accountFallbackVisibilityChanged(true)
+            self.accountFallbackWorkItem = nil
+        }
+        accountFallbackWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + .milliseconds(350),
+            execute: workItem
+        )
+    }
+
     func invalidateForAccountTransition() -> WebsiteDataStoreReleaseBarrier {
         guard !isInvalidatedForAccountTransition else {
             return WebsiteDataStoreReleaseBarrier(webViews: [])
@@ -368,11 +500,20 @@ final class WebViewController: UIViewController {
                 + popupRecords.values.map(\.webView)
         )
         isInvalidatedForAccountTransition = true
+        blockedBackForwardSourceURL = nil
+        primaryStableInstanceURL = nil
+        accountFallbackWorkItem?.cancel()
+        accountFallbackWorkItem = nil
+        accountFallbackVisibilityChanged(false)
         NotificationCenter.default.removeObserver(self)
         cancelAllPendingDialogs()
         discardAllPopups(animated: false)
         discardPendingDownloadedFiles()
         if let retainedWebView {
+            primaryURLObservation?.invalidate()
+            primaryURLObservation = nil
+            primaryBackItemObservation?.invalidate()
+            primaryBackItemObservation = nil
             retainedWebView.stopLoading()
             retainedWebView.navigationDelegate = nil
             retainedWebView.uiDelegate = nil
@@ -461,6 +602,9 @@ final class WebViewController: UIViewController {
             return
         }
         if webView === self.webView {
+            accountFallbackWorkItem?.cancel()
+            accountFallbackWorkItem = nil
+            accountFallbackVisibilityChanged(false)
             didFailLoading()
         }
     }
@@ -904,6 +1048,23 @@ extension WebViewController: WKNavigationDelegate {
             return
         }
 
+        if
+            webView === self.webView,
+            navigationAction.navigationType == .backForward,
+            !navigationPolicy.allowsBackForwardNavigation(
+                to: url,
+                context: .primaryMainFrame
+            )
+        {
+            blockedBackForwardSourceURL =
+                primaryStableInstanceURL
+                ?? webView.backForwardList.currentItem?.url
+                ?? webView.url
+            webView.allowsBackForwardNavigationGestures = false
+            decisionHandler(.cancel)
+            return
+        }
+
         decisionHandler(mainFrameNavigationDecision(for: url, in: webView))
     }
 
@@ -972,10 +1133,24 @@ extension WebViewController: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation?) {
         webViewFactory.resetForNavigationCommit(in: webView)
+        if webView === self.webView {
+            blockedBackForwardSourceURL = nil
+            if
+                let currentURL = webView.url,
+                WebOrigin(url: currentURL, requiresHTTPS: false)
+                    == instanceOrigin
+            {
+                primaryStableInstanceURL = currentURL
+            }
+            resetAccountActionForNavigationCommit()
+            updateBackNavigationGesture(in: webView)
+        }
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation?) {
         if webView === self.webView {
+            updateBackNavigationGesture(in: webView)
+            scheduleAccountFallbackIfNeeded()
             didFinishLoading()
         }
     }

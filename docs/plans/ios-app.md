@@ -131,7 +131,7 @@ interface AvibeNative {
 
 | Capability | Calls (web → native) | Events (native → web) |
 | --- | --- | --- |
-| `accountPresentation` | `app.showAccount()` | - |
+| `accountPresentation` | `app.showAccount()`, `app.setAccountActionAvailable({available})` | - |
 | `app` | `app.info()`, `app.openExternal({url})` | `app.foreground`, `app.background` |
 | `haptics` | `haptics.impact({style})`, `haptics.notify({type})`, `haptics.selection()` | - |
 | `keyboardResizesViewport` | No calls. Declares that UIKit shrinks this WebView's viewport with `keyboardLayoutGuide`. | - |
@@ -151,7 +151,10 @@ Phase 0a PR 2 implements this v1 subset:
   with a host plus `mailto`/`tel` URLs with a non-empty target;
 - `accountPresentation: 1` admits `app.showAccount()`, which returns `null`,
   tears down the current runtime surface, and presents the app-bundled account
-  and instance-switching flow;
+  and instance-switching flow. Capability 2 additionally admits
+  `app.setAccountActionAvailable({available})` from the selected-instance
+  primary main frame so current Web UI can suppress the old-Web native
+  fallback bar;
 - `haptics.impact({style})` accepts `light`, `medium`, `heavy`, `soft`, or
   `rigid`; `haptics.notify({type})` accepts `success`, `warning`, or `error`;
   and `haptics.selection()` has no parameters;
@@ -178,8 +181,10 @@ Rules:
   unknown methods with `{code: 'unsupported'}`. Minor versions only add.
   Account presentation therefore has its own capability: a new Web UI keeps
   its previous web sign-out action when an older shell omits it or the call
-  fails. A new app loading an older Web UI still exposes Account and Change
-  Instance through the native browser menu.
+  fails. A new app loading an older Web UI waits until primary load completes,
+  then exposes Account and Change Instance through a 56-point top fallback bar
+  outside the WebView. A current Web UI registers its own account action and
+  receives no native bar.
 - **Transport**: `call` sends `{method, params}` and receives either
   `{ok: true, result}` or `{ok: false, error: {code, message}}`; the injected
   JavaScript rejects the latter error object. On iOS,
@@ -359,7 +364,9 @@ later), so that a bridge change and its Web UI consumer land in one PR.
   Organization access rules. It merged as
   `1cea1dffdc3e68c6a2cc8594064bf94367485b5c` and Vercel deployed that merge to
   Production successfully on 2026-11-05 at 18:44:16 UTC. A public no-cookie
-  probe returns the expected `401`, but no real account session was used.
+  probe returns the expected `401`. The owner separately verified production
+  email OTP, a real account session, and online/offline instance discovery on
+  the iOS 27.2 simulator on 2026-11-06; automated tests remain hermetic.
 - Primary-main-frame navigation has three classes:
   1. **Instance origins** (configured by the user) load in the WebView and get
      the native bridge and the microphone grant.
@@ -384,6 +391,11 @@ later), so that a bridge change and its Web UI consumer land in one PR.
   and the media-capture delegate checks the requesting origin against class 1
   on every call, so authentication, Vault, and external pages never receive
   either capability.
+- The primary runtime observes WebKit's immediate back item. It enables the
+  interactive edge gesture only when that item belongs to the selected
+  instance origin, and the action policy rejects any `.backForward` traversal
+  to authentication, consent, callback, or another origin. Child windows keep
+  their existing close/back behavior and do not enable the primary gesture.
 - The shell's browser behavior has a closed deviation list:
   1. External primary-main-frame HTTP(S) navigation uses
      `SFSafariViewController`.
@@ -395,6 +407,9 @@ later), so that a bridge change and its Web UI consumer land in one PR.
   5. Admitted downloads use `WKDownload` and the system share sheet.
   6. The native bridge is injected only into an instance main frame and checks
      every message origin.
+  7. The primary runtime enables interactive back only for an immediate
+     selected-instance history item and rejects cross-origin back-forward
+     traversal.
 
   Everything outside this list uses WebKit defaults. Protected Vault is an
   ordinary cross-origin browsing context, not a shell-specific navigation

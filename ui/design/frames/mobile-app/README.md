@@ -73,6 +73,13 @@ All A drafts live in `ui/design/kit/mobile-app.tsx`; no competing direction kit.
 | `NativeInstanceError` | Instance failure and retry/switch recovery | Existing AlertTriangle, `gold-ink`, raised identity card, brand/outline Button |
 | `NativeWindowTopBar` | Child-window browser actions | Actual MobileAppHeader, compact ghost Buttons; the document underneath is illustrative |
 
+The old-runtime account fallback is an implementation compatibility state, not
+a new design-frame variant. It reuses the Account avatar and
+`MobileBrandHeader` metrics: a 56px content row plus the top safe-area inset,
+the existing background/border tokens, the account email-local-part initial,
+and Account/Change Instance actions. Current Web UI registers its own account
+action and shows no native fallback.
+
 All spacing, type, radius, semantic colors, shadows, gradients and motion values
 come from `ui/src/index.css` or existing component variants. No new tokens. The
 round/surface/gradient layers are static, with no animated filter or backdrop.

@@ -443,16 +443,26 @@ final class MobileOnboardingTests: XCTestCase {
         )
     }
 
-    func testRuntimeBridgeAddsOnlyTheAccountPresentationMethod() throws {
-        let request = try XCTUnwrap(
+    func testRuntimeBridgeAddsOnlyTheAccountPresentationMethods() throws {
+        let showAccountRequest = try XCTUnwrap(
             NativeBridgeRequest.parse(["method": "app.showAccount"]).success
         )
-        XCTAssertEqual(request.method, .appShowAccount)
+        XCTAssertEqual(showAccountRequest.method, .appShowAccount)
+        let registrationRequest = try XCTUnwrap(
+            NativeBridgeRequest.parse(
+                ["method": "app.setAccountActionAvailable"]
+            ).success
+        )
+        XCTAssertEqual(
+            registrationRequest.method,
+            .appSetAccountActionAvailable
+        )
         XCTAssertEqual(
             Set(NativeBridgeMethod.allCases.map(\.rawValue)),
             [
                 "app.info",
                 "app.openExternal",
+                "app.setAccountActionAvailable",
                 "app.showAccount",
                 "haptics.impact",
                 "haptics.notify",

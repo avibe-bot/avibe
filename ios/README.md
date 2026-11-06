@@ -23,6 +23,10 @@ and Web resizing cannot both run.
 - Configured instance and authentication origins stay in the primary WebView.
   Other primary-main-frame HTTP(S) navigation opens in
   `SFSafariViewController`.
+- The primary runtime enables WebKit's interactive back gesture only when the
+  immediate history item belongs to the selected instance origin. A
+  back-forward traversal to authentication or another origin is rejected.
+  Child windows retain their existing toolbar and do not enable this gesture.
 - Subframes use WebKit's browser behavior for HTTP(S), `about:blank`,
   `about:srcdoc`, `blob:`, and `data:` navigation. A subframe cannot launch
   `mailto:`, `tel:`, or another external application scheme.
@@ -91,6 +95,9 @@ The closed deviation list is:
 5. Admitted downloads use `WKDownload` and the system activity sheet.
 6. The origin-checked native bridge is available only to an instance main
    frame.
+7. The primary runtime enables WebKit's interactive back gesture only for an
+   immediate selected-instance history item and rejects cross-origin
+   back-forward traversal.
 
 ## Native bridge v1
 
@@ -116,13 +123,15 @@ all subframes, and direct transport calls from those frames remain rejected.
 The viewport method additionally requires the source to be a WebView managed
 by the shared factory. Both the primary WebView and an instance-origin child
 can therefore lock their own outer scroll state; an unknown WebView receives
-`forbidden`.
+`forbidden`. Account-action registration requires the source to be the
+selected-instance primary WebView; a child receives `forbidden`.
 
 The PR 2 method surface is fixed:
 
 | Capability | Method | Result |
 | --- | --- | --- |
 | `accountPresentation: 1` | `app.showAccount()` | `null`; closes the runtime surface and opens the bundled account page |
+| `accountPresentation: 2` | `app.setAccountActionAvailable({available})` | `null`; primary Workbench display hint used to suppress or restore the old-Web native fallback |
 | `app: 1` | `app.info()` | `{contract, platform, shellVersion, capabilities}` |
 | `app: 1` | `app.openExternal({url})` | `{opened}` for `http`/`https` URLs with a host and `mailto`/`tel` URLs with a target |
 | `haptics: 1` | `haptics.impact({style})` | `null`; styles are `light`, `medium`, `heavy`, `soft`, or `rigid` |
@@ -268,7 +277,7 @@ pinned to Xcode 26.6.
 | `authenticationChallenge:shouldAllowDeprecatedTLS` | Intentionally not implemented, so deprecated TLS is not admitted by shell policy. | API ledger; no deprecated-TLS fixture is maintained. |
 | `navigationAction:didBecome download` | Implemented and attaches the shared download context/delegate. | Simulator build and download policy tests. |
 | `navigationResponse:didBecome download` | Implemented and attaches the shared download context/delegate. | Simulator build and download policy tests. |
-| `shouldGoTo backForwardListItem` | Uses WebKit default. JavaScript and back-forward-list navigation are not given a second shell policy. | API ledger; interactive traversal is a manual check. |
+| `shouldGoTo backForwardListItem` | Uses WebKit default continuation. The ordinary action-policy delegate still rejects a primary `.backForward` target outside the selected instance origin. | Hermetic SPA/auth-history XCTest on iOS 26.4.1 and 27.2; gesture feel remains a device check. |
 | `willSubmitForm` (iOS 27) | Uses WebKit default continuation. The pinned Xcode 26.6 toolchain does not expose this method. | Revisit when CI moves to an iOS 27 SDK. |
 
 ### `WKUIDelegate`
@@ -310,7 +319,8 @@ pinned to Xcode 26.6.
 | `applicationNameForUserAgent` | `AvibeiOS/<CFBundleShortVersionString>`, appended by WebKit to its standard user agent. | Configuration XCTest and Debug/Release simulator builds. |
 | `allowsInlineMediaPlayback`, `mediaTypesRequiringUserActionForPlayback` | WebKit defaults. Phase 0a adds no media playback policy. | API ledger; playback is a device check. |
 | `javaScriptCanOpenWindowsAutomatically` | WebKit default. WebKit decides whether a script may request a new context; accepted requests use the child-WebView rule. | New-window policy tests and simulator build. |
-| `allowsBackForwardNavigationGestures`, `allowsLinkPreview`, `dataDetectorTypes` | WebKit defaults. The shell adds no gesture, preview, or data-detector policy. | API ledger; interactions are manual checks. |
+| `allowsBackForwardNavigationGestures` | Disabled for child windows. The primary runtime enables it dynamically only when the immediate back item belongs to the selected instance origin. | Hermetic SPA/auth-history XCTest on iOS 26.4.1 and 27.2; gesture feel remains a device check. |
+| `allowsLinkPreview`, `dataDetectorTypes` | WebKit defaults. | API ledger; interactions are manual checks. |
 | `isElementFullscreenEnabled` | WebKit default. Fullscreen product work remains deferred. | API ledger; the deferral is recorded below. |
 | `isInspectable` | Enabled for managed runtime WebViews only in Debug so device investigations can use Safari Web Inspector. Release keeps the WebKit default. | Factory XCTest plus Debug and Release simulator builds. |
 | `upgradeKnownHostsToHTTPS`, `limitsNavigationsToAppBoundDomains` | WebKit defaults. Configured instance input independently requires HTTPS; the shell does not opt into App-Bound Domains. | Simulator build and origin policy tests. |
@@ -346,7 +356,8 @@ pinned to Xcode 26.6.
 | PWA remote-auth deferral | Not reused. Automatic login follows the existing WebView authentication-origin flow. |
 | Haptics | Hold-to-talk start/release/cancel and accepted typed/attachment sends use bridge haptics. Browser contexts retain `navigator.vibrate` as the hold fallback. |
 | Voice permission probe | Hold-to-talk reads `voice.permission()` first in the native shell, then retains the browser Permissions API fallback elsewhere. |
-| Account presentation | `accountPresentation: 1` opens the bundled account surface. Older apps keep the Web UI's prior sign-out action; a failed native call also falls back to sign-out. New apps loading older instance Web UIs retain the native Account and Change Instance menu. |
+| Account presentation | `accountPresentation: 1` opens the bundled account surface. Capability 2 lets the trusted primary AppShell declare its own account action. Current Web UI then uses no native chrome; an older Web UI receives a 56-point WebView-external fallback bar after load, with the account initial and Account/Change Instance actions. |
+| Runtime back gesture | The primary WebView traverses only selected-instance history. SPA `pushState` entries participate, authentication history disables the gesture, and forced cross-origin back-forward navigation is cancelled. |
 | Workbench outer-scroll lock | An AppShell in either primary or child requests the `viewport: 1` lock for its own WebView while mounted and releases it on unmount or `pagehide`. Authentication pages, Show Pages, shared pages, previews, errors, and other ordinary documents keep WebKit scrolling by default. |
 
 ## Primary and child behavior inventory
@@ -362,10 +373,10 @@ bridge and do not run these Web UI branches.
 | Construction and configuration | Shared `WebViewFactory`; native bridge, message handler, delegates, safe-area constraints, keyboard layout, and scroll-lock state are installed together. | Same factory using WebKit's supplied configuration, which preserves `window.opener` and the shared user content controller. | None. |
 | Keyboard viewport | Bottom is pinned to `keyboardLayoutGuide.topAnchor`. | Same. | None. |
 | Outer-scroll lock | The instance main frame can lock only its own WebView; commit resets only that state. | Same, with independent state. | None. |
-| Navigation policy | Instance/authentication stay in the primary; other top-level HTTP(S) destinations open in `SFSafariViewController`. | Main-frame HTTP(S) navigation stays in the child. | This is the shell's closed primary-navigation deviation; a child is already the requested browsing context. |
+| Navigation policy | Instance/authentication stay in the primary; other top-level HTTP(S) destinations open in `SFSafariViewController`. Interactive back is enabled only for an immediate instance-origin item, and cross-origin back-forward traversal is rejected. | Main-frame HTTP(S) navigation stays in the child; the primary interactive gesture remains disabled. | The primary owns selected-instance history admission; a child is already the requested browsing context and keeps its explicit close/back controls. |
 | Subframes and external application schemes | WebKit handles ordinary subframes; external application schemes are cancelled. Trusted top-level application schemes use the system. | Same. | None. |
 | Dialogs, downloads, microphone, and nested windows | Shared delegates and origin checks. | Same, including recursive child creation. | None. |
-| Window chrome and close | The app's root loading/error UI owns the configured instance. | Host title, Done, and Open in Safari own the child browsing-context lifecycle; `window.close()` closes its subtree. | A child needs an explicit close affordance and external-browser escape. |
+| Window chrome and close | A current AppShell registers its Web account action and receives no native bar. An old Web UI receives a 56-point top fallback after the load grace period; it sits outside the WebView and uses the account initial. | Host title, Done, and Open in Safari own the child browsing-context lifecycle; `window.close()` closes its subtree. | The primary fallback preserves account access without covering Web controls; a child needs an explicit close affordance and external-browser escape. |
 | Content-process termination | Closes all children and reloads the configured instance URL. | Closes the terminated child subtree. | Reloading a popup after process loss would invent navigation state; the primary has one configured recovery URL. |
 | Loading callbacks | Drives the root loading/error state. | Does not change root loading/error state. | Child loading is contained by its own presented window. |
 
@@ -379,7 +390,7 @@ bridge and do not run these Web UI branches.
 | Web Push surfaces | `isNativeShell()` | Setup gap, Settings toggle, and notification menu omit browser push. | Same. |
 | Haptics | `haptics: 1` | Native haptics for hold-to-talk and accepted sends. | Same. |
 | Voice permission probe | `voice: 1` | Reads native permission state before browser fallback. | Same. |
-| Account presentation | `accountPresentation: 1` | Web account controls open the bundled account surface; missing/rejected support retains web sign-out. The native browser menu remains available independently of the instance Web UI version. | Same. |
+| Account presentation | `accountPresentation: 1/2` | Capability 1 opens the bundled account surface. Capability 2 registers the current AppShell account action, suppressing the native fallback; older Web UI gets the delayed fallback bar. | Capability 1 remains available, but capability-2 registration is rejected because child content cannot control primary chrome. |
 | `appLaunch` new-context suppression | `isNativeShell()` | iOS standalone suppression is disabled; `window.open` reaches native child creation. | Same for nested windows. |
 | `PwaLoopbackLinkGuard` | `isNativeShell()` | Loopback blocking remains; same-origin `_blank` rewriting is disabled. | Same. |
 | `downloadMedia` | `isNativeShell()` | PWA Web Share interception is disabled; admitted anchors reach `WKDownload`. | Same. |
@@ -401,7 +412,9 @@ unbounded. Request and best-effort logout deadlines remain independently
 bounded.
 
 - Native XCTest covers bridge policy, runtime `app.showAccount`, account
-  transport lifecycle, stage-accurate failure mapping, bounded hanging
+  action registration and fallback timing, selected-instance SPA history,
+  authentication-history rejection, transport lifecycle, stage-accurate
+  failure mapping, bounded hanging
   readiness/GET/DELETE, cold selection ownership, bundled
   full-bleed/keyboard constraints, named-store failure/relaunch/orphan cleanup,
   release of runtime primary and child WebViews before removal, and real WebKit

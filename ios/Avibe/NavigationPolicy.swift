@@ -99,6 +99,13 @@ struct NavigationPolicy {
         }
     }
 
+    func allowsBackForwardNavigation(
+        to url: URL,
+        context: NavigationContext
+    ) -> Bool {
+        context != .primaryMainFrame || destination(for: url) == .instance
+    }
+
     func subframeDisposition(for url: URL) -> SubframeNavigationDisposition {
         isExternalApplicationURL(url) ? .cancel : .allow
     }
