@@ -41,6 +41,10 @@ struct NavigationPolicy {
     private static let productionAuthenticationOrigins: Set<WebOrigin> = [
         WebOrigin.parseConfigured("https://avibe.bot"),
         WebOrigin.parseConfigured("https://mctppyrqmrjotgkrwdse.supabase.co"),
+        // Supabase custom domain for the same project. It serves Auth on our
+        // hostname for networks that reset `*.supabase.co`; the default
+        // domain stays valid during and after the switch.
+        WebOrigin.parseConfigured("https://auth.avibe.bot"),
         WebOrigin.parseConfigured("https://github.com"),
     ].compactMap { $0 }.reduce(into: []) { result, origin in
         result.insert(origin)

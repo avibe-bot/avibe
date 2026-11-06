@@ -37,6 +37,10 @@ final class NavigationPolicyTests: XCTestCase {
             policy.destination(for: URL(string: "https://mctppyrqmrjotgkrwdse.supabase.co/auth/v1/authorize")!),
             .authentication
         )
+        XCTAssertEqual(
+            policy.destination(for: URL(string: "https://auth.avibe.bot/auth/v1/callback?code=1")!),
+            .authentication
+        )
         XCTAssertEqual(policy.destination(for: URL(string: "https://github.com/login/oauth/authorize")!), .authentication)
         XCTAssertEqual(policy.destination(for: URL(string: "https://evil.avibe.bot/login")!), .external)
     }
