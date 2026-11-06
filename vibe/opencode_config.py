@@ -600,14 +600,15 @@ def set_jsonc_top_level_string_property(source: str, key: str, value: str) -> st
         return updated_source[:insertion_point] + insertion + updated_source[insertion_point:]
 
 
-def remove_jsonc_member(source: str, parent_key: str, key: str) -> str:
+def remove_jsonc_member(source: str, parent_key: str | tuple[str, ...], key: str) -> str:
     """Drop ``parent_key.key`` from the text, leaving every other byte in place."""
 
-    _root_start, _root_end, properties = _scan_jsonc_top_level_properties(source)
-    parent = next((prop for prop in reversed(properties) if prop.key == parent_key), None)
-    if parent is None or source[parent.value_start] != "{":
-        raise ValueError(f"{parent_key} is not an object")
-    start, end, members = _scan_jsonc_top_level_properties(source, parent.value_start)
+    start, end, members = _scan_jsonc_top_level_properties(source)
+    for part in (parent_key,) if isinstance(parent_key, str) else parent_key:
+        parent = next((prop for prop in reversed(members) if prop.key == part), None)
+        if parent is None or source[parent.value_start] != "{":
+            raise ValueError(f"{part} is not an object")
+        start, end, members = _scan_jsonc_top_level_properties(source, parent.value_start)
     index = next((i for i in range(len(members) - 1, -1, -1) if members[i].key == key), None)
     if index is None:
         raise KeyError(key)

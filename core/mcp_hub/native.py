@@ -34,7 +34,7 @@ SOURCES = (CLAUDE, CODEX, OPENCODE)
 
 # Native keys that carry no connection meaning for the Hub; kept on rewrite.
 _CODEX_KEPT = {"enabled", "startup_timeout_sec", "startup_timeout_ms", "tool_timeout_sec", "enabled_tools", "disabled_tools", "env_vars"}
-_OPENCODE_KEPT = {"enabled", "timeout"}
+_OPENCODE_KEPT = {"enabled", "disabled", "timeout"}
 
 
 def claude_path() -> Path:
@@ -98,8 +98,21 @@ def _parse(source: str, text: str) -> Any:
 
 def _servers(source: str, data: dict[str, Any]) -> dict[str, Any]:
     value = data.get(_KEY[source])
+    if source == OPENCODE and _opencode_v2(data):
+        return value["servers"]
     return value if isinstance(value, dict) else {}
 
+
+def _opencode_v2(data: dict[str, Any]) -> bool:
+    """Distinguish the V2 container from a legacy server named ``servers``."""
+
+    mcp = data.get("mcp")
+    servers = mcp.get("servers") if isinstance(mcp, dict) else None
+    return isinstance(servers, dict) and not (
+        isinstance(servers.get("type"), str)
+        or isinstance(servers.get("command"), list)
+        or isinstance(servers.get("url"), str)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +205,7 @@ def _native_enabled(source: str, entry: dict[str, Any]) -> bool:
 
     if source == CLAUDE:
         return True
-    return entry.get("enabled") is not False
+    return entry.get("enabled") is not False and (source != OPENCODE or entry.get("disabled") is not True)
 
 
 def _from_native(source: str, name: str, entry: dict[str, Any], path: Path) -> dict[str, Any]:
@@ -325,7 +338,8 @@ def _remove_text(source: str, text: str, name: str) -> str:
         return _remove_codex(text, name)
     from vibe.opencode_config import remove_jsonc_member
 
-    return remove_jsonc_member(text, _KEY[source], name)
+    parent = ("mcp", "servers") if source == OPENCODE and _opencode_v2(_parse(source, text)) else _KEY[source]
+    return remove_jsonc_member(text, parent, name)
 
 
 def remove_entry(source: str, name: str) -> bool:
@@ -355,7 +369,7 @@ def _remove_entry_locked(source: str, name: str) -> bool:
     try:
         updated = _remove_text(source, text, name)
         expected = json.loads(json.dumps(data, default=str))
-        expected[_KEY[source]].pop(name)
+        _servers(source, expected).pop(name)
         actual = json.loads(json.dumps(_parse(source, updated), default=str))
         if expected[_KEY[source]] == {} and _KEY[source] not in actual:
             expected.pop(_KEY[source])  # an implicit TOML parent table goes with its last child

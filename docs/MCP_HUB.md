@@ -29,7 +29,7 @@ Refresh one server:
 vibe mcp docs --refresh
 ```
 
-A Codex/OpenCode server with `enabled = false` is omitted. Native extras Hub does not use (timeouts, …) are ignored, except Codex `env_vars` copied from the parent environment at read. A relative native `cwd` resolves against that file's directory.
+OpenCode global import accepts legacy `mcp.<name>` and V2 `mcp.servers.<name>` configurations. A Codex/OpenCode server with `enabled = false`, or an OpenCode server with `disabled: true`, is omitted. Native extras Hub does not use (timeouts, …) are ignored, except Codex `env_vars` copied from the parent environment at read. A relative native `cwd` resolves against that file's directory.
 
 ## Add a server
 
