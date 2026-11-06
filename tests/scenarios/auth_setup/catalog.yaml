@@ -415,11 +415,12 @@ scenarios:
     missing_layer: physical-device-interactive-gesture
     backend: ios
     reason: >-
-      Hermetic real-WKWebView XCTest owns SPA history, authentication-history
-      rejection, direct goBack rejection, and primary-versus-child behavior on
-      iOS 26.4.1 and 27.2 simulators. The catalog citation checker does not
-      collect Swift XCTest, so this row records the boundary without inventing
-      a Python case. Physical-device interactive gesture feel remains manual.
+      Hermetic real-WKWebView XCTest owns SPA history including same-URL
+      pushState recovery, authentication-history rejection, direct goBack
+      rejection, and primary-versus-child behavior on iOS 26.4.1 and 27.2
+      simulators. The catalog citation checker does not collect Swift XCTest,
+      so this row records the boundary without inventing a Python case.
+      Physical-device interactive gesture feel remains manual.
     owning_layer: iOS XCTest plus physical-device acceptance
   - id: AUTH-SETUP-404
     name: Verified limited Show Page identity admits and denies a revoked guest lease

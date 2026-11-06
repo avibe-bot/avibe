@@ -68,6 +68,18 @@ afterEach(() => {
 });
 
 describe('native desktop drag surfaces', () => {
+  it('uses the MobileBrandHeader height on phones and preserves desktop padding', () => {
+    renderHeaders();
+    const header = document.querySelector('[data-chat-header]');
+
+    expect(header?.className).toContain('h-[calc(3.5rem+env(safe-area-inset-top))]');
+    expect(header?.className).toContain('pt-[env(safe-area-inset-top)]');
+    expect(header?.className).toContain('bg-background/92');
+    expect(header?.className).toContain('md:h-auto');
+    expect(header?.className).toContain('md:bg-surface/70');
+    expect(header?.className).toContain('md:py-2.5');
+  });
+
   it('marks existing header blanks and clearance without marking controls or their descendants', () => {
     inShell();
     renderHeaders();

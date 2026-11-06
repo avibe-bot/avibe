@@ -68,6 +68,15 @@ const fixturesOf = (state: State, desktopApp: boolean): WorkbenchFixtures =>
 
 const home = phoneShell('/', <Workbench />);
 
+const nativeHome = () => (
+  <div className="flex h-full flex-col overflow-hidden bg-background text-foreground">
+    <MobileBrandHeader nativeAccountAction />
+    <div className="min-h-0 flex-1 overflow-hidden px-4">
+      <Workbench />
+    </div>
+  </div>
+);
+
 /**
  * The keyboard up on a phone (rule 8 in `HomeLayout`): the group does not re-center, and the
  * composer rests on the keyboard, which covers the tab bar. Drawn without a script: above the
@@ -113,6 +122,24 @@ const stateFrames: FrameSpec[] = STATES.flatMap((state) => [
 
 const designFrames = frames([
   ...stateFrames,
+  {
+    name: 'e-native-phone',
+    title: '首页 · iOS App · 账户头像进入账号与实例',
+    width: 390,
+    height: 844,
+    status: 'shipped',
+    route: '/',
+    fixtures: workbenchFixtures({
+      ...agentsApi,
+      ...homeFactsApi(STATES[2].facts),
+      '/api/session': {
+        remote: true,
+        authenticated: true,
+        email: 'max@example.com',
+      },
+    }, STATES[2].base),
+    render: nativeHome,
+  },
   {
     name: 'z-keyboard-phone',
     title: '首页 · 手机键盘弹起：整组不重新居中，页面整体上移，底栏被键盘盖住',

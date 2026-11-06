@@ -1,37 +1,46 @@
-import { useEffect } from 'react';
+import { useEffect, useEffectEvent, useRef } from 'react';
 
 import {
   hasNativeCapability,
   setNativeAccountActionAvailable,
 } from './native';
 
-export function useNativeAccountActionRegistration(): void {
+export function useNativeAccountActionRegistration(available: boolean): void {
+  const mountedRef = useRef(false);
+  const pageActiveRef = useRef(true);
+  const publishAvailability = useEffectEvent((pageActive: boolean) => {
+    void setNativeAccountActionAvailable(pageActive && available);
+  });
+
   useEffect(() => {
     if (!hasNativeCapability('accountPresentation', 2)) return undefined;
 
-    let mounted = true;
-    let registered = false;
-
-    const register = () => {
-      if (!mounted || registered) return;
-      registered = true;
-      void setNativeAccountActionAvailable(true);
+    const handlePageHide = () => {
+      pageActiveRef.current = false;
+      publishAvailability(false);
+    };
+    const handlePageShow = () => {
+      pageActiveRef.current = true;
+      publishAvailability(true);
     };
 
-    const unregister = () => {
-      if (!registered) return;
-      registered = false;
+    pageActiveRef.current = true;
+    publishAvailability(true);
+    window.addEventListener('pagehide', handlePageHide);
+    window.addEventListener('pageshow', handlePageShow);
+    return () => {
+      window.removeEventListener('pagehide', handlePageHide);
+      window.removeEventListener('pageshow', handlePageShow);
       void setNativeAccountActionAvailable(false);
     };
-
-    register();
-    window.addEventListener('pagehide', unregister);
-    window.addEventListener('pageshow', register);
-    return () => {
-      mounted = false;
-      window.removeEventListener('pagehide', unregister);
-      window.removeEventListener('pageshow', register);
-      unregister();
-    };
   }, []);
+
+  useEffect(() => {
+    if (!mountedRef.current) {
+      mountedRef.current = true;
+      return;
+    }
+    if (!hasNativeCapability('accountPresentation', 2)) return;
+    publishAvailability(pageActiveRef.current);
+  }, [available]);
 }

@@ -87,6 +87,7 @@ final class WebViewFactory {
     private let instanceOrigin: WebOrigin
     private let websiteDataStore: WKWebsiteDataStore
     private let setAccountActionAvailable: (WKWebView, Bool) -> Bool
+    private let historyDidChange: (WKWebView) -> Bool
     private let showAccount: () -> Void
     private var outerScrollLockControllers: [
         ObjectIdentifier: OuterScrollLockController
@@ -98,6 +99,7 @@ final class WebViewFactory {
             self?.setOuterScrollLocked(locked, in: webView) ?? false
         },
         setAccountActionAvailable: setAccountActionAvailable,
+        historyDidChange: historyDidChange,
         showAccount: showAccount
     )
 
@@ -105,11 +107,13 @@ final class WebViewFactory {
         instanceOrigin: WebOrigin,
         websiteDataStore: WKWebsiteDataStore,
         setAccountActionAvailable: @escaping (WKWebView, Bool) -> Bool = { _, _ in false },
+        historyDidChange: @escaping (WKWebView) -> Bool = { _ in false },
         showAccount: @escaping () -> Void = {}
     ) {
         self.instanceOrigin = instanceOrigin
         self.websiteDataStore = websiteDataStore
         self.setAccountActionAvailable = setAccountActionAvailable
+        self.historyDidChange = historyDidChange
         self.showAccount = showAccount
     }
 
@@ -232,8 +236,8 @@ final class WebViewController: UIViewController {
     private var accountFallbackWorkItem: DispatchWorkItem?
     private var primaryURLObservation: NSKeyValueObservation?
     private var primaryBackItemObservation: NSKeyValueObservation?
-    private var blockedBackForwardSourceURL: URL?
-    private var primaryStableInstanceURL: URL?
+    private var primaryCurrentItemObservation: NSKeyValueObservation?
+    private var blockedBackForwardNavigation = false
     private var retainedWebViewFactory: WebViewFactory?
     private var retainedWebView: WKWebView?
     private var webViewFactory: WebViewFactory {
@@ -251,6 +255,9 @@ final class WebViewController: UIViewController {
                     available,
                     from: sourceWebView
                 ) ?? false
+            },
+            historyDidChange: { [weak self] sourceWebView in
+                self?.historyDidChange(in: sourceWebView) ?? false
             },
             showAccount: showAccount
         )
@@ -361,6 +368,7 @@ final class WebViewController: UIViewController {
         retainedWebView?.stopLoading()
         primaryURLObservation?.invalidate()
         primaryBackItemObservation?.invalidate()
+        primaryCurrentItemObservation?.invalidate()
         retainedWebView?.navigationDelegate = nil
         retainedWebView?.uiDelegate = nil
         cancelAllPendingDialogs(dismissAlerts: false)
@@ -406,39 +414,53 @@ final class WebViewController: UIViewController {
             }
             self.updateBackNavigationGesture(in: webView)
         }
+        primaryCurrentItemObservation = webView.backForwardList.observe(
+            \.currentItem,
+            options: [.initial, .new]
+        ) { [weak self, weak webView] _, _ in
+            guard let self, let webView else {
+                return
+            }
+            self.updateBackNavigationGesture(in: webView)
+        }
     }
 
     private func updateBackNavigationGesture(in webView: WKWebView) {
         guard webView === retainedWebView else {
             return
         }
-        if let blockedBackForwardSourceURL {
-            let currentURL = webView.url
-            let currentOrigin = currentURL.flatMap {
-                WebOrigin(url: $0, requiresHTTPS: false)
-            }
-            guard
-                !webView.isLoading,
-                currentOrigin == instanceOrigin,
-                currentURL != blockedBackForwardSourceURL
-            else {
-                webView.allowsBackForwardNavigationGestures = false
-                return
-            }
-            self.blockedBackForwardSourceURL = nil
-        }
-        if
-            !webView.isLoading,
-            let currentURL = webView.url,
-            WebOrigin(url: currentURL, requiresHTTPS: false) == instanceOrigin
-        {
-            primaryStableInstanceURL = currentURL
+        let currentOrigin = webView.url.flatMap {
+            WebOrigin(url: $0, requiresHTTPS: false)
         }
         let backOrigin = webView.backForwardList.backItem.flatMap {
             WebOrigin(url: $0.url, requiresHTTPS: false)
         }
+        if blockedBackForwardNavigation {
+            let currentItem = webView.backForwardList.currentItem
+            let currentItemOrigin = currentItem.flatMap {
+                WebOrigin(url: $0.url, requiresHTTPS: false)
+            }
+            guard
+                !webView.isLoading,
+                currentOrigin == instanceOrigin,
+                currentItemOrigin == instanceOrigin,
+                backOrigin == instanceOrigin
+            else {
+                webView.allowsBackForwardNavigationGestures = false
+                return
+            }
+            self.blockedBackForwardNavigation = false
+        }
         webView.allowsBackForwardNavigationGestures =
             backOrigin == instanceOrigin
+    }
+
+    private func historyDidChange(in webView: WKWebView) -> Bool {
+        guard webView === retainedWebView else {
+            return false
+        }
+        updateBackNavigationGesture(in: webView)
+        return true
     }
 
     private func resetAccountActionForNavigationCommit() {
@@ -507,8 +529,7 @@ final class WebViewController: UIViewController {
         )
         isInvalidatedForAccountTransition = true
         primaryNavigationInProgress = false
-        blockedBackForwardSourceURL = nil
-        primaryStableInstanceURL = nil
+        blockedBackForwardNavigation = false
         accountFallbackWorkItem?.cancel()
         accountFallbackWorkItem = nil
         accountFallbackVisibilityChanged(false)
@@ -521,6 +542,8 @@ final class WebViewController: UIViewController {
             primaryURLObservation = nil
             primaryBackItemObservation?.invalidate()
             primaryBackItemObservation = nil
+            primaryCurrentItemObservation?.invalidate()
+            primaryCurrentItemObservation = nil
             retainedWebView.stopLoading()
             retainedWebView.navigationDelegate = nil
             retainedWebView.uiDelegate = nil
@@ -1063,10 +1086,7 @@ extension WebViewController: WKNavigationDelegate {
                 context: .primaryMainFrame
             )
         {
-            blockedBackForwardSourceURL =
-                primaryStableInstanceURL
-                ?? webView.backForwardList.currentItem?.url
-                ?? webView.url
+            blockedBackForwardNavigation = true
             webView.allowsBackForwardNavigationGestures = false
             decisionHandler(.cancel)
             return
@@ -1145,14 +1165,7 @@ extension WebViewController: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation?) {
         webViewFactory.resetForNavigationCommit(in: webView)
         if webView === self.webView {
-            blockedBackForwardSourceURL = nil
-            if
-                let currentURL = webView.url,
-                WebOrigin(url: currentURL, requiresHTTPS: false)
-                    == instanceOrigin
-            {
-                primaryStableInstanceURL = currentURL
-            }
+            blockedBackForwardNavigation = false
             resetAccountActionForNavigationCommit()
             updateBackNavigationGesture(in: webView)
         }

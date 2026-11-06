@@ -15,9 +15,10 @@ compatibility account entry out of the Web content area.
 - Child windows keep their existing native toolbar, history, and close
   behavior. They do not gain the primary interactive gesture.
 - `accountPresentation: 2` adds
-  `app.setAccountActionAvailable({available})`. The Workbench AppShell
-  registers while its account action is mounted and releases the registration
-  on `pagehide` or unmount.
+  `app.setAccountActionAvailable({available})`. The Workbench AppShell renders
+  a 44-point Account-initial avatar in `MobileBrandHeader` and registers from
+  the same availability fact, including viewer capability states. It releases
+  the registration on `pagehide` or unmount.
 - Registration is accepted only from the trusted selected-instance primary
   main frame. It is a display hint and grants no account operation or
   authorization.
@@ -29,14 +30,22 @@ compatibility account entry out of the Web content area.
   Avibe initial when no account is available. Its 56-point content height,
   safe-area background, border, and light/dark colors match the existing
   mobile brand header and Account avatar.
+- The mobile chat header owns the same 56-point content row and top safe area
+  as `MobileBrandHeader`. The compact 48-point `MobileAppHeader` remains
+  separate built-in-app chrome.
 
 ## History Boundary
 
 The Web UI records phone conversation navigation with same-document history.
 The native shell observes WebKit's immediate `backForwardList.backItem`, so SPA
-`pushState` entries participate without a parallel history model. A system
-edge traversal is deliberately a cut in the Web motion layer; only the Web
-header's own Back action runs the product pop animation.
+`pushState` entries participate without a parallel history model. Because the
+iOS 26 runtime does not consistently notify back-forward-list observers for a
+same-URL insertion, the document-start bridge reports an internal
+`navigation.historyChanged` signal after `pushState` or `replaceState`. The
+signal carries no history data and only asks native code to reread WebKit's
+actual current and back items. A system edge traversal is deliberately a cut
+in the Web motion layer; only the Web header's own Back action runs the product
+pop animation.
 
 OIDC remains ordinary primary navigation while it is active, but it is never an
 admitted interactive back target. If history is
@@ -49,7 +58,8 @@ gesture and a forced back traversal is rejected. A later instance-origin
 New Web UI plus old app keeps the existing Web account behavior because
 capability 1 still admits only `app.showAccount()`. New app plus old Web UI
 shows the native fallback after the grace period. New app plus current Web UI
-uses the Workbench account action and shows no native bar.
+uses the `MobileBrandHeader` Account avatar and shows no native bar. If native
+presentation rejects, the avatar falls back to the existing Web sign-out path.
 
 ## Evidence
 
@@ -57,8 +67,8 @@ uses the Workbench account action and shows no native bar.
   lifecycle.
 - Hermetic real-WKWebView XCTest covers SPA push/back, an authentication item
   in the back-forward list, forced traversal rejection, recovery after a new
-  instance history entry, primary-only registration, child rejection, and the
-  delayed old-Web fallback.
+  same-URL instance history entry, primary-only registration, child rejection,
+  and the delayed old-Web fallback.
 - SwiftUI host snapshots cover the old-Web fallback in light and dark themes;
   a WebKit attachment covers the current Web UI with the fallback suppressed.
 - The focused WebKit suite runs on local iOS 26.4.1 and iOS 27.2 simulators.

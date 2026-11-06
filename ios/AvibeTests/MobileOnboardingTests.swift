@@ -443,7 +443,7 @@ final class MobileOnboardingTests: XCTestCase {
         )
     }
 
-    func testRuntimeBridgeAddsOnlyTheAccountPresentationMethods() throws {
+    func testRuntimeBridgeKeepsCapabilityMethodsAndInternalHistorySignalClosed() throws {
         let showAccountRequest = try XCTUnwrap(
             NativeBridgeRequest.parse(["method": "app.showAccount"]).success
         )
@@ -457,6 +457,13 @@ final class MobileOnboardingTests: XCTestCase {
             registrationRequest.method,
             .appSetAccountActionAvailable
         )
+        let historyRequest = try XCTUnwrap(
+            NativeBridgeRequest.parse(
+                ["method": "navigation.historyChanged"]
+            ).success
+        )
+        XCTAssertEqual(historyRequest.method, .navigationHistoryChanged)
+        XCTAssertNil(NativeShellMetadata.capabilities["navigation"])
         XCTAssertEqual(
             Set(NativeBridgeMethod.allCases.map(\.rawValue)),
             [
@@ -467,6 +474,7 @@ final class MobileOnboardingTests: XCTestCase {
                 "haptics.impact",
                 "haptics.notify",
                 "haptics.selection",
+                "navigation.historyChanged",
                 "viewport.setOuterScrollLocked",
                 "voice.permission",
             ]

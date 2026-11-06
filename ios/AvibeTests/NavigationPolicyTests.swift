@@ -416,6 +416,12 @@ final class NavigationPolicyTests: XCTestCase {
             .appSetAccountActionAvailable
         )
         XCTAssertEqual(
+            try NativeBridgeRequest.parse(
+                ["method": "navigation.historyChanged"]
+            ).get().method,
+            .navigationHistoryChanged
+        )
+        XCTAssertEqual(
             NativeBridgeRequest.parse(["method": "app.instances"]).failure,
             .unsupported
         )
@@ -570,6 +576,7 @@ final class NavigationPolicyTests: XCTestCase {
         )
         var outerScrollRequests: [Bool] = []
         var accountActionRequests: [Bool] = []
+        var historyChangeRequests = 0
         weak var primaryWebView: WKWebView?
         let accountShown = expectation(description: "runtime bridge opens account surface")
         let webView = WKWebView(
@@ -586,6 +593,13 @@ final class NavigationPolicyTests: XCTestCase {
                         return false
                     }
                     accountActionRequests.append(available)
+                    return true
+                },
+                historyDidChange: { sourceWebView in
+                    guard sourceWebView === primaryWebView else {
+                        return false
+                    }
+                    historyChangeRequests += 1
                     return true
                 },
                 showAccount: {
@@ -617,6 +631,16 @@ final class NavigationPolicyTests: XCTestCase {
               "app.setAccountActionAvailable",
               {available: true}
             );
+            await window.avibeNative.call("navigation.historyChanged");
+            let invalidHistory = null;
+            try {
+              await window.avibeNative.call(
+                "navigation.historyChanged",
+                {url: window.location.href}
+              );
+            } catch (error) {
+              invalidHistory = error.code;
+            }
             await window.avibeNative.call("app.showAccount");
             let unsupported = null;
             try {
@@ -636,6 +660,7 @@ final class NavigationPolicyTests: XCTestCase {
               subframeBridge: typeof document.querySelector("#child").contentWindow.avibeNative,
               subframeTransport: await document.querySelector("#child").contentWindow.webkit
                 .messageHandlers.avibeNative.postMessage({method: "app.info", params: {}}),
+              invalidHistory,
               unsupported
             });
             """,
@@ -657,7 +682,9 @@ final class NavigationPolicyTests: XCTestCase {
         XCTAssertEqual(instancePayload["viewportCapability"] as? Int, 1)
         XCTAssertEqual(outerScrollRequests, [true])
         XCTAssertEqual(accountActionRequests, [true])
+        XCTAssertEqual(historyChangeRequests, 1)
         XCTAssertEqual(instancePayload["subframeBridge"] as? String, "undefined")
+        XCTAssertEqual(instancePayload["invalidHistory"] as? String, "invalid_argument")
         XCTAssertEqual(instancePayload["unsupported"] as? String, "unsupported")
         assertForbiddenReply(instancePayload["subframeTransport"])
         await fulfillment(of: [accountShown], timeout: 2)
@@ -712,10 +739,17 @@ final class NavigationPolicyTests: XCTestCase {
             } catch (error) {
               registration = error.code;
             }
+            let history = null;
+            try {
+              await window.avibeNative.call("navigation.historyChanged");
+            } catch (error) {
+              history = error.code;
+            }
             return JSON.stringify({
               bridge: typeof window.avibeNative,
               keyboardResizesViewport: info.capabilities.keyboardResizesViewport,
-              registration
+              registration,
+              history
             });
             """,
             arguments: [:],
@@ -726,6 +760,8 @@ final class NavigationPolicyTests: XCTestCase {
         XCTAssertEqual(childPayload["bridge"] as? String, "object")
         XCTAssertEqual(childPayload["keyboardResizesViewport"] as? Int, 1)
         XCTAssertEqual(childPayload["registration"] as? String, "forbidden")
+        XCTAssertEqual(childPayload["history"] as? String, "forbidden")
+        XCTAssertEqual(historyChangeRequests, 1)
         XCTAssertEqual(outerScrollRequests, [true, false])
         XCTAssertEqual(accountActionRequests, [true])
     }
@@ -862,18 +898,19 @@ final class NavigationPolicyTests: XCTestCase {
         XCTAssertEqual(remainingBackOrigin, authOrigin)
         XCTAssertFalse(webView.allowsBackForwardNavigationGestures)
 
+        let returnedURL = try XCTUnwrap(webView.url)
         _ = try await webView.evaluateJavaScript(
-            "history.pushState({idx: 3}, '', '/chat/ses_2')"
+            "history.pushState({idx: 3}, '', window.location.href)"
         )
         try await waitUntil {
-            webView.url?.path == "/chat/ses_2"
-                && webView.allowsBackForwardNavigationGestures
+            webView.allowsBackForwardNavigationGestures
                 && WebOrigin(
                     url: webView.backForwardList.backItem?.url
                         ?? URL(fileURLWithPath: "/"),
                     requiresHTTPS: false
                 ) == instanceOrigin
         }
+        XCTAssertEqual(webView.url, returnedURL)
     }
 
     @MainActor

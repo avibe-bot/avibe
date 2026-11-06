@@ -125,6 +125,12 @@ by the shared factory. Both the primary WebView and an instance-origin child
 can therefore lock their own outer scroll state; an unknown WebView receives
 `forbidden`. Account-action registration requires the source to be the
 selected-instance primary WebView; a child receives `forbidden`.
+The document-start bridge also reports the internal
+`navigation.historyChanged` signal after `history.pushState` or
+`history.replaceState`. It is not an advertised capability and carries no
+history data. The trusted primary-main-frame handler uses it only to reread
+WebKit's current and immediate back items; the controller rejects child
+WebViews, and those native origin checks remain the gesture authority.
 
 The PR 2 method surface is fixed:
 
@@ -356,8 +362,8 @@ pinned to Xcode 26.6.
 | PWA remote-auth deferral | Not reused. Automatic login follows the existing WebView authentication-origin flow. |
 | Haptics | Hold-to-talk start/release/cancel and accepted typed/attachment sends use bridge haptics. Browser contexts retain `navigator.vibrate` as the hold fallback. |
 | Voice permission probe | Hold-to-talk reads `voice.permission()` first in the native shell, then retains the browser Permissions API fallback elsewhere. |
-| Account presentation | `accountPresentation: 1` opens the bundled account surface. Capability 2 lets the trusted primary AppShell declare its own account action. Current Web UI then uses no native chrome; an older Web UI receives a 56-point WebView-external fallback bar after load, with the account initial and Account/Change Instance actions. |
-| Runtime back gesture | The primary WebView traverses only selected-instance history. SPA `pushState` entries participate, authentication history disables the gesture, and forced cross-origin back-forward navigation is cancelled. |
+| Account presentation | `accountPresentation: 1` opens the bundled account surface. Capability 2 lets the trusted primary AppShell declare its own account action. Current Web UI renders the Account-style initial avatar in `MobileBrandHeader` and uses no native chrome; an older Web UI receives a 56-point WebView-external fallback bar after load, with the account initial and Account/Change Instance actions. |
+| Runtime back gesture | The primary WebView traverses only selected-instance history. SPA `pushState` entries participate, including same-URL entries synchronized by the internal trusted-main-frame history signal. Authentication history disables the gesture, and forced cross-origin back-forward navigation is cancelled. |
 | Workbench outer-scroll lock | An AppShell in either primary or child requests the `viewport: 1` lock for its own WebView while mounted and releases it on unmount or `pagehide`. Authentication pages, Show Pages, shared pages, previews, errors, and other ordinary documents keep WebKit scrolling by default. |
 
 ## Primary and child behavior inventory
@@ -376,7 +382,7 @@ bridge and do not run these Web UI branches.
 | Navigation policy | Instance/authentication stay in the primary; other top-level HTTP(S) destinations open in `SFSafariViewController`. Interactive back is enabled only for an immediate instance-origin item, and cross-origin back-forward traversal is rejected. | Main-frame HTTP(S) navigation stays in the child; the primary interactive gesture remains disabled. | The primary owns selected-instance history admission; a child is already the requested browsing context and keeps its explicit close/back controls. |
 | Subframes and external application schemes | WebKit handles ordinary subframes; external application schemes are cancelled. Trusted top-level application schemes use the system. | Same. | None. |
 | Dialogs, downloads, microphone, and nested windows | Shared delegates and origin checks. | Same, including recursive child creation. | None. |
-| Window chrome and close | A current AppShell registers its Web account action and receives no native bar. An old Web UI receives a 56-point top fallback after the load grace period; it sits outside the WebView and uses the account initial. | Host title, Done, and Open in Safari own the child browsing-context lifecycle; `window.close()` closes its subtree. | The primary fallback preserves account access without covering Web controls; a child needs an explicit close affordance and external-browser escape. |
+| Window chrome and close | A current AppShell renders an Account-style avatar in `MobileBrandHeader`, registers that reachable action, and receives no native bar. An old Web UI receives a 56-point top fallback after the load grace period; it sits outside the WebView and uses the account initial. | Host title, Done, and Open in Safari own the child browsing-context lifecycle; `window.close()` closes its subtree. | The primary fallback preserves account access without covering Web controls; a child needs an explicit close affordance and external-browser escape. |
 | Content-process termination | Closes all children and reloads the configured instance URL. | Closes the terminated child subtree. | Reloading a popup after process loss would invent navigation state; the primary has one configured recovery URL. |
 | Loading callbacks | Drives the root loading/error state. | Does not change root loading/error state. | Child loading is contained by its own presented window. |
 
@@ -390,7 +396,7 @@ bridge and do not run these Web UI branches.
 | Web Push surfaces | `isNativeShell()` | Setup gap, Settings toggle, and notification menu omit browser push. | Same. |
 | Haptics | `haptics: 1` | Native haptics for hold-to-talk and accepted sends. | Same. |
 | Voice permission probe | `voice: 1` | Reads native permission state before browser fallback. | Same. |
-| Account presentation | `accountPresentation: 1/2` | Capability 1 opens the bundled account surface. Capability 2 registers the current AppShell account action, suppressing the native fallback; older Web UI gets the delayed fallback bar. | Capability 1 remains available, but capability-2 registration is rejected because child content cannot control primary chrome. |
+| Account presentation | `accountPresentation: 1/2` | Capability 1 opens the bundled account surface. Capability 2 renders and registers the current AppShell header avatar, suppressing the native fallback; older Web UI gets the delayed fallback bar. | Capability 1 remains available, but capability-2 registration is rejected because child content cannot control primary chrome. |
 | `appLaunch` new-context suppression | `isNativeShell()` | iOS standalone suppression is disabled; `window.open` reaches native child creation. | Same for nested windows. |
 | `PwaLoopbackLinkGuard` | `isNativeShell()` | Loopback blocking remains; same-origin `_blank` rewriting is disabled. | Same. |
 | `downloadMedia` | `isNativeShell()` | PWA Web Share interception is disabled; admitted anchors reach `WKDownload`. | Same. |

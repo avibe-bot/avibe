@@ -67,6 +67,7 @@ enum NativeBridgeMethod: String, CaseIterable {
     case hapticsImpact = "haptics.impact"
     case hapticsNotify = "haptics.notify"
     case hapticsSelection = "haptics.selection"
+    case navigationHistoryChanged = "navigation.historyChanged"
     case viewportSetOuterScrollLocked = "viewport.setOuterScrollLocked"
     case voicePermission = "voice.permission"
 }
@@ -180,6 +181,7 @@ enum NativeBridgeConfiguration {
         websiteDataStore: WKWebsiteDataStore = .default(),
         setOuterScrollLocked: @escaping (WKWebView, Bool) -> Bool,
         setAccountActionAvailable: @escaping (WKWebView, Bool) -> Bool = { _, _ in false },
+        historyDidChange: @escaping (WKWebView) -> Bool = { _ in false },
         showAccount: @escaping () -> Void = {}
     ) -> WKWebViewConfiguration {
         let configuration = WKWebViewConfiguration()
@@ -190,6 +192,7 @@ enum NativeBridgeConfiguration {
             metadata: metadata,
             setOuterScrollLocked: setOuterScrollLocked,
             setAccountActionAvailable: setAccountActionAvailable,
+            historyDidChange: historyDidChange,
             showAccount: showAccount
         )
         controller.addScriptMessageHandler(
@@ -252,6 +255,24 @@ enum NativeBridgeConfiguration {
             });
           };
 
+          const notifyHistoryChanged = () => {
+            window.setTimeout(() => {
+              void call("navigation.historyChanged").catch(() => {});
+            }, 0);
+          };
+          for (const method of ["pushState", "replaceState"]) {
+            const original = window.history[method];
+            Object.defineProperty(window.history, method, {
+              configurable: true,
+              writable: true,
+              value(...args) {
+                const result = original.apply(this, args);
+                notifyHistoryChanged();
+                return result;
+              }
+            });
+          }
+
           const on = (event, handler) => {
             if (typeof event !== "string" || typeof handler !== "function") return () => {};
             const type = `avibe:native:${event}`;
@@ -285,6 +306,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
     private let metadata: NativeShellMetadata
     private let setOuterScrollLocked: (WKWebView, Bool) -> Bool
     private let setAccountActionAvailable: (WKWebView, Bool) -> Bool
+    private let historyDidChange: (WKWebView) -> Bool
     private let showAccount: () -> Void
 
     init(
@@ -292,12 +314,14 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         metadata: NativeShellMetadata,
         setOuterScrollLocked: @escaping (WKWebView, Bool) -> Bool,
         setAccountActionAvailable: @escaping (WKWebView, Bool) -> Bool,
+        historyDidChange: @escaping (WKWebView) -> Bool,
         showAccount: @escaping () -> Void
     ) {
         self.policy = policy
         self.metadata = metadata
         self.setOuterScrollLocked = setOuterScrollLocked
         self.setAccountActionAvailable = setAccountActionAvailable
+        self.historyDidChange = historyDidChange
         self.showAccount = showAccount
     }
 
@@ -377,6 +401,24 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
             DispatchQueue.main.async { [showAccount] in
                 showAccount()
             }
+        case .navigationHistoryChanged:
+            guard request.params.isEmpty else {
+                reply(
+                    replyHandler,
+                    error: .invalidArgument(
+                        "navigation.historyChanged does not accept parameters."
+                    )
+                )
+                return
+            }
+            guard
+                let sourceWebView,
+                historyDidChange(sourceWebView)
+            else {
+                reply(replyHandler, error: .forbidden)
+                return
+            }
+            reply(replyHandler, result: NSNull())
         case .hapticsImpact:
             guard
                 let rawStyle = request.params["style"] as? String,

@@ -3392,7 +3392,7 @@ export const ChatPage: React.FC = () => {
     // at the viewport top — it must be a full ``100dvh`` tall. The previous
     // ``calc(100dvh-4rem)`` double-subtracted the (already-cancelled) padding
     // and left a 4rem dead gap below the compose bar. On mobile the sticky
-    // ``h-16`` header occupies 4rem at the top, so subtract that instead.
+    // the 56px mobile header owns the safe-area inset inside this surface.
     <ImageViewerProvider images={sessionImages}>
       <FileViewerProvider>
       {/* Attachment cards keep their metadata with this conversation (lib/localStore). */}
@@ -3415,7 +3415,7 @@ export const ChatPage: React.FC = () => {
       <div
         ref={chatSurfaceRef}
         style={windowChrome ? { paddingTop: 'var(--desktop-chat-toolbar-h)' } : undefined}
-        className="fixed inset-x-0 bottom-0 top-[var(--macos-stale-login-session-notice-h,0px)] z-40 flex flex-col bg-background pt-[env(safe-area-inset-top)] md:relative md:inset-auto md:z-auto md:-mx-10 md:-my-8 md:h-[var(--app-vvh)] md:bg-transparent md:pt-0"
+        className="fixed inset-x-0 bottom-0 top-[var(--macos-stale-login-session-notice-h,0px)] z-40 flex flex-col bg-background md:relative md:inset-auto md:z-auto md:-mx-10 md:-my-8 md:h-[var(--app-vvh)] md:bg-transparent"
         onKeyDown={annotation.handleShortcutKeyDown}
         onPointerDownCapture={focusCanvas}
         {...fileDropHandlers}
@@ -4465,13 +4465,13 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
     // No project-id pill and no override banner — both were noise the user
     // flagged (regression feedback #1/#3).
     <div data-chat-header="" data-tauri-drag-region={desktopDragRegion()} className={clsx(
-      'shrink-0 px-4 md:px-8',
-      'border-b border-border bg-surface/70 py-2.5 backdrop-blur',
-      windowChrome && 'h-full',
+      'h-[calc(3.5rem+env(safe-area-inset-top))] shrink-0 border-b border-border bg-background/92 px-4 pt-[env(safe-area-inset-top)] backdrop-blur',
+      'md:h-auto md:bg-surface/70 md:px-8 md:py-2.5 md:pt-2.5',
+      windowChrome && 'md:h-full',
     )}>
       <div data-tauri-drag-region={desktopDragRegion()} className={clsx(
-        'mx-auto flex w-full max-w-[1080px] items-center gap-3',
-        windowChrome && 'h-full',
+        'mx-auto flex h-full w-full max-w-[1080px] items-center gap-3 md:h-auto',
+        windowChrome && 'md:h-full',
       )}>
         <Button
           type="button"
