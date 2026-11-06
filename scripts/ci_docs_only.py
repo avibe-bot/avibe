@@ -2,11 +2,11 @@
 """Classify a complete event diff; uncertainty selects full CI.
 
 Only Git trees are consulted: no API file-list limits or truncated push commit
-arrays. A pull request whose every changed path is narrative skips the test
-jobs (docs/plans/ci-docs-fast-path.md). Otherwise two job families may skip on
-a pull request when no changed path can reach their inputs
-(docs/plans/ci-affected-routing.md). Pushes, errors and anything unrecognised
-run everything.
+arrays. A pull request or merge-group entry targeting the default branch whose
+every changed path is narrative skips the test jobs (docs/plans/ci-docs-fast-path.md).
+Otherwise two job families may skip when no changed path can reach their inputs
+(docs/plans/ci-affected-routing.md). Errors and anything unrecognised run
+full CI; pushes are retained only for standalone exact-diff probes.
 """
 from __future__ import annotations
 
@@ -183,12 +183,30 @@ def scope_of(entries: list[tuple[str, str, str, str]], routable: bool) -> Scope:
     return Scope(False, reason, windows_control_ipc, browser, browser_reason, platform, platform_reason)
 
 
-def targets_default_branch(event: dict) -> bool:
-    pr, repository = event.get("pull_request"), event.get("repository")
-    if not isinstance(pr, dict) or not isinstance(pr.get("base"), dict) or not isinstance(repository, dict):
+def targets_default_branch(event_name: str, event: dict) -> bool:
+    repository = event.get("repository")
+    default = repository.get("default_branch") if isinstance(repository, dict) else None
+    if not isinstance(default, str) or not default:
         return False
-    base, default = pr["base"].get("ref"), repository.get("default_branch")
-    return isinstance(base, str) and bool(base) and base == default
+    if event_name == "pull_request":
+        pr = event.get("pull_request")
+        base = pr.get("base") if isinstance(pr, dict) else None
+        ref = base.get("ref") if isinstance(base, dict) else None
+    elif event_name == "merge_group":
+        group = event.get("merge_group")
+        ref = group.get("base_ref") if isinstance(group, dict) else None
+    else:
+        return False
+    return isinstance(ref, str) and bool(ref) and ref == default
+
+
+def object_exists(repo: Path, revision_name: str) -> None:
+    try:
+        git(repo, "cat-file", "-e", f"{revision_name}^{{commit}}")
+    except subprocess.CalledProcessError:
+        # A shallow checkout may not contain the validated base object. Fetch
+        # that exact object, never a moving ref or an event-provided name.
+        git(repo, "fetch", "--no-tags", "--depth=1", "origin", revision_name)
 
 
 def classify(event_name: str, event: dict, sha: str, repo: Path) -> Scope:
@@ -207,6 +225,18 @@ def classify(event_name: str, event: dict, sha: str, repo: Path) -> Scope:
             parents = [line[7:].decode() for line in header.splitlines() if line.startswith(b"parent ")]
             if parents != [base, head]:
                 raise ValueError("checkout is not the event's synthetic merge")
+        elif event_name == "merge_group":
+            # The queue checkout is the exact merge-group head. Unlike a PR
+            # merge ref, the event gives us the base/head pair to diff; this is
+            # what keeps affected-job routing valid for a queue group.
+            sha = revision(sha)
+            if checked_out_sha != sha:
+                raise ValueError("checkout does not match event SHA")
+            group = event["merge_group"]
+            base = revision(group["base_sha"])
+            if revision(group["head_sha"]) != sha:
+                raise ValueError("checkout does not match merge-group head SHA")
+            object_exists(repo, base)
         elif event_name == "push":
             sha = revision(sha)
             if checked_out_sha != sha:
@@ -216,12 +246,7 @@ def classify(event_name: str, event: dict, sha: str, repo: Path) -> Scope:
             base = revision(event["before"])
             if revision(event["after"]) != sha:
                 raise ValueError("push after does not match checkout")
-            try:
-                git(repo, "cat-file", "-e", f"{base}^{{commit}}")
-            except subprocess.CalledProcessError:
-                # A depth-two checkout may not contain before on a multi-commit
-                # push. Fetch that exact validated object, not an untrusted ref.
-                git(repo, "fetch", "--no-tags", "--depth=1", "origin", base)
+            object_exists(repo, base)
         else:
             raise ValueError("unsupported event")
 
@@ -240,7 +265,8 @@ def classify(event_name: str, event: dict, sha: str, repo: Path) -> Scope:
             if len(meta) != 5 or not meta[0].startswith(":"):
                 raise ValueError("unexpected diff record")
             entries.append((meta[4], meta[0][1:], meta[1], name.decode("utf-8")))
-        return scope_of(entries, event_name == "pull_request" and targets_default_branch(event))
+        routable = event_name in {"pull_request", "merge_group"} and targets_default_branch(event_name, event)
+        return scope_of(entries, routable)
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
         # Do not print Git stderr, event payloads or arbitrary commit data.
         # Conservatively select the Windows job when classification cannot prove
@@ -255,12 +281,8 @@ def main() -> None:
         event = {}
     event_name = os.environ.get("GITHUB_EVENT_NAME", "")
     scope = classify(event_name, event, os.environ.get("GITHUB_SHA", ""), Path.cwd())
-    # A master push supersedes the preceding run even when only docs changed.
-    # It must cover code inherited from that cancelled run, not merely its own
-    # before..after diff. PRs retain the reviewed fast path and routes.
-    if event_name != "pull_request" and (scope.docs_only or SKIP in (scope.browser, scope.platform)):
-        scope = full("latest master push validates the whole tree, including superseded code changes",
-                     scope.windows_control_ipc)
+    # Merge-group scope is derived above from its validated base/head pair;
+    # there is no second master-push pass to widen it.
     # Output/write failures remain job failures; consumers require success AND
     # literal dispositions, so no missing output can authorize a skip.
     outputs = {

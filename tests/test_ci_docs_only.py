@@ -192,6 +192,66 @@ def synthetic_pr(repo: Path, change=None, **pull_request) -> tuple[dict, str]:
     return event, git(repo, "rev-parse", "HEAD")
 
 
+def synthetic_merge_group(repo: Path, change=None, **merge_group) -> tuple[dict, str]:
+    """A queue merge group whose head is the exact tree GitHub will test."""
+    pr_event, head = synthetic_pr(repo, change)
+    group = {
+        "base_sha": pr_event["pull_request"]["base"]["sha"],
+        "base_ref": "main",
+        "head_sha": head,
+        "head_ref": "gh-readonly-queue/main/pr-1",
+    }
+    group.update(merge_group)
+    return {
+        "merge_group": group,
+        "repository": pr_event["repository"],
+    }, head
+
+
+def test_merge_group_compares_base_and_head_from_the_event(repo: Path) -> None:
+    event, head = synthetic_merge_group(repo, writes("core/feature.py", "docs/plans/feature.md"))
+    scope = classify("merge_group", event, head, repo)
+    assert scope.docs_only is False and routes(scope) == ("skip", "run")
+
+
+def test_docs_only_merge_group_keeps_both_expensive_families_skipped(repo: Path) -> None:
+    event, head = synthetic_merge_group(repo, writes("docs/queue.md"))
+    scope = classify("merge_group", event, head, repo)
+    assert scope.docs_only is True and routes(scope) == ("skip", "skip")
+
+
+def test_merge_group_fetches_a_missing_base_object(repo: Path, tmp_path: Path) -> None:
+    event, head = synthetic_merge_group(repo, writes("ui/src/Queue.tsx"))
+    shallow = tmp_path / "merge-group-checkout"
+    subprocess.run(["git", "clone", "-q", "--depth=1", repo.as_uri(), str(shallow)], check=True)
+    assert git(shallow, "rev-parse", "--is-shallow-repository") == "true"
+    assert routes(classify("merge_group", event, head, shallow)) == ("run", "skip")
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda event: event["merge_group"].update(base_sha="f" * 40),
+    lambda event: event["merge_group"].update(head_sha="f" * 40),
+])
+def test_invalid_merge_group_sha_falls_back_to_full(repo: Path, mutate) -> None:
+    event, head = synthetic_merge_group(repo, writes("docs/queue.md"))
+    mutate(event)
+    result = classify("merge_group", event, head, repo)
+    assert result.docs_only is False and result.windows_control_ipc is True and routes(result) == FULL
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda event: event["merge_group"].pop("base_ref"),
+    lambda event: event.pop("repository"),
+])
+def test_merge_group_without_default_branch_metadata_keeps_docs_fast_path_but_not_routes(
+    repo: Path, mutate,
+) -> None:
+    event, head = synthetic_merge_group(repo, writes("docs/queue.md"))
+    mutate(event)
+    result = classify("merge_group", event, head, repo)
+    assert result.docs_only is True and routes(result) == ("skip", "skip")
+
+
 def writes(*paths: str):
     def change(repo: Path) -> None:
         for path in paths:
@@ -447,28 +507,33 @@ def test_cli_pr_uses_checked_out_merge_head_when_github_sha_is_source_head(repo:
     assert "## CI scope: documentation only" in summary
 
 
-@pytest.mark.parametrize("event_name,expected", [
-    ("pull_request", "docs_only=true\nwindows_control_ipc=false\nbrowser=skip\nplatform=skip\n"),
-    ("push", "docs_only=false\nwindows_control_ipc=false\nbrowser=run\nplatform=run\n"),
-])
-def test_cli_keeps_docs_pr_fast_but_master_replaces_full_coverage(
-    repo: Path, tmp_path: Path, event_name: str, expected: str,
+def test_cli_merge_group_uses_event_base_and_head_for_routing(repo: Path, tmp_path: Path) -> None:
+    payload, head = synthetic_merge_group(repo, writes("ui/src/Queue.tsx"))
+    _, output, summary = run_cli(repo, tmp_path, "merge_group", payload, head)
+    assert output == "docs_only=false\nwindows_control_ipc=false\nbrowser=run\nplatform=skip\n"
+    assert "## CI scope: routed" in summary
+
+
+@pytest.mark.parametrize("event_name", ["pull_request", "merge_group", "push"])
+def test_cli_keeps_routable_docs_fast_without_the_old_master_push_override(
+    repo: Path, tmp_path: Path, event_name: str,
 ) -> None:
     if event_name == "pull_request":
         payload, sha = synthetic_pr(repo)
+    elif event_name == "merge_group":
+        payload, sha = synthetic_merge_group(repo)
     else:
-        # This code commit may still have a running (now superseded) full CI.
-        write(repo, "core.py", "print('code awaiting CI')\n")
-        before = commit(repo)
+        # Pushes are no longer the second full-suite pass. The classifier still
+        # validates their exact diff when called by a standalone probe.
+        before = git(repo, "rev-parse", "HEAD")
         write(repo, "AGENTS.md")
         sha = commit(repo)
         payload = {"before": before, "after": sha, "created": False, "deleted": False, "forced": False}
+    expected = "docs_only=true\nwindows_control_ipc=false\nbrowser=skip\nplatform=skip\n"
     stdout, output, summary = run_cli(repo, tmp_path, event_name, payload, sha)
     assert output == expected
-    if event_name == "push":
-        assert "superseded code changes" in stdout and "## CI scope: full" in summary
-    else:
-        assert "## CI scope: documentation only" in summary
+    assert "## CI scope: documentation only" in summary
+    assert "superseded code changes" not in stdout
     stdout, output, summary = run_cli(repo, tmp_path, event_name, payload, sha, event_file=False)
     assert output == "docs_only=false\nwindows_control_ipc=true\nbrowser=run\nplatform=run\n"
     assert "## CI scope: full" in summary and "classification unavailable" in summary

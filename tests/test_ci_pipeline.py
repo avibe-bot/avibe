@@ -532,7 +532,7 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
         *browser_inputs,
     ]
     assert triggers["pull_request"]["paths"] == expected_paths
-    assert triggers["push"]["paths"] == expected_paths
+    assert triggers["merge_group"] == {"types": ["checks_requested"]}
 
     steps = workflow["jobs"]["simulator"]["steps"]
     setup_node, = [
@@ -735,14 +735,15 @@ def test_browser_matrix_runs_complete_disjoint_commands_and_propagates_each_fail
     assert Counter(observed) == Counter(expected)
 
 
-def test_windows_platform_checks_leave_only_latest_installer_smoke_on_prs() -> None:
+def test_windows_platform_checks_route_queue_entries_like_pull_requests() -> None:
     jobs = _jobs()
-    assert jobs["windows-model-hub"]["if"] == "github.event_name != 'pull_request'"
-    assert jobs["windows-control-ipc"]["needs"] == ["changes", "build-linux-artifacts"]
-    assert jobs["windows-control-ipc"]["if"] == (
-        "needs.changes.outputs.docs_only == 'false' && "
-        "(github.event_name != 'pull_request' || needs.changes.outputs.windows_control_ipc == 'true')"
+    expected_scope = "needs.changes.outputs.docs_only == 'false'"
+    assert jobs["windows-model-hub"]["needs"] == ["changes", "build-linux-artifacts"]
+    assert jobs["windows-model-hub"]["if"] == (
+        expected_scope + " && needs.changes.outputs.platform != 'skip' && github.event_name != 'pull_request'"
     )
+    assert jobs["windows-control-ipc"]["needs"] == ["changes", "build-linux-artifacts"]
+    assert jobs["windows-control-ipc"]["if"] == expected_scope + " && needs.changes.outputs.windows_control_ipc == 'true'"
     skill_step = next(
         step for step in jobs["windows-control-ipc"]["steps"]
         if step.get("name") == "Verify Skill discovery keeps real directory identities"
@@ -750,7 +751,7 @@ def test_windows_platform_checks_leave_only_latest_installer_smoke_on_prs() -> N
     assert "tests/test_managed_skills.py" in skill_step["run"]
     assert "zero_directory_entry_identities" in skill_step["run"]
     assert jobs["windows-agent"]["if"] == (
-        "needs.changes.outputs.docs_only == 'false' && github.event_name != 'pull_request'"
+        expected_scope + " && needs.changes.outputs.platform != 'skip' && github.event_name != 'pull_request'"
     )
 
     smoke = jobs["windows-install-smoke-runners"]
@@ -1154,16 +1155,17 @@ def test_web_fetch_runtime_verifies_every_python_in_its_own_interpreter(tmp_path
         assert "web-fetch-runtime failed on Python: 3.11 3.13" in result.stdout
 
 
-def test_lint_replaces_only_the_same_pr_or_branch_and_runs_no_release_listener() -> None:
-    # A shared global group would cancel unrelated PRs; master must cancel its
-    # own obsolete full run. Trigger scope is part of that scheduling contract.
-    workflow = yaml.safe_load((ROOT / ".github/workflows/lint.yml").read_text())
-    assert workflow["concurrency"] == {
-        "group": "${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}",
-        "cancel-in-progress": True,
+def test_ci_workflows_scope_pr_and_queue_runs_without_master_push_duplicates() -> None:
+    expected_concurrency = {
+        "group": "${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}",
+        "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
     }
-    assert set(workflow[True]) == {"pull_request", "push"}
-    assert workflow[True]["push"]["branches"] == ["master"]
+    for filename in ("lint.yml", "ios-shell.yml", "desktop-shell.yml"):
+        workflow = yaml.safe_load((ROOT / ".github/workflows" / filename).read_text())
+        events = workflow[True]
+        assert "merge_group" in events and events["merge_group"] == {"types": ["checks_requested"]}
+        assert "push" not in events
+        assert workflow["concurrency"] == expected_concurrency
 
 
 def test_docs_scope_gates_all_work_without_filtering_away_required_checks() -> None:
@@ -1171,7 +1173,7 @@ def test_docs_scope_gates_all_work_without_filtering_away_required_checks() -> N
     events = workflow[True]  # PyYAML YAML 1.1 reads the Actions `on` key as True.
     # Default activity types plus the labeling that re-runs the hosted wire gate.
     assert events["pull_request"] == {"types": ["opened", "synchronize", "reopened", "labeled", "unlabeled"]}
-    assert not any(key.startswith("paths") for key in events["push"])
+    assert events["merge_group"] == {"types": ["checks_requested"]}
     jobs = workflow["jobs"]
     gates = set(_REQUIRED_GATES)
     # Branch protection skips nothing it has not been told about: a required
@@ -1198,7 +1200,7 @@ def test_docs_scope_gates_all_work_without_filtering_away_required_checks() -> N
         else:
             assert needs == ["build-linux-artifacts"], name
             assert "always()" not in condition
-        if name not in _ROUTED:
+        if name not in _ROUTED and name not in {"windows-model-hub", "windows-control-ipc", "windows-agent"}:
             assert "outputs.browser" not in condition and "outputs.platform" not in condition, name
         assert not job.get("continue-on-error")
     scope = jobs["changes"]

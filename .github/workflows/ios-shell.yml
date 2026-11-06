@@ -9,19 +9,13 @@ on:
       - "vibe/message_types.json"
       - "vibe/data/**"
       - "assets/mascot/cloud-tuanzi-v2.png"
-  push:
-    branches:
-      - master
-    paths:
-      - "ios/**"
-      - ".github/workflows/ios-shell.yml"
-      - "ui/**"
-      - "vibe/message_types.json"
-      - "vibe/data/**"
-      - "assets/mascot/cloud-tuanzi-v2.png"
+  merge_group:
+    types: [checks_requested]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  # PR runs may be superseded within one PR. Queue groups must not cancel
+  # another group or a PR run.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
