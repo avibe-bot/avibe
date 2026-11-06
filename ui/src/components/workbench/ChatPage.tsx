@@ -1540,18 +1540,17 @@ export const ChatPage: React.FC = () => {
   // Prepend an older page, keeping the retained window bounded. Paging up only
   // fires while scrolled to the top (not pinned), so the newest overflow goes:
   // those rows sit far BELOW the viewport, and the scroll anchor tracks the TOP
-  // visible row, so removing them can't shift the reader. ``drop``: rows a
-  // server page no longer has. The live tail is detached SYNCHRONOUSLY when the
+  // visible row, so removing them can't shift the reader. ``drop``: rows the
+  // page takes the place of. The live tail is detached SYNCHRONOUSLY when the
   // window will exceed the cap (not via the [messages] effect), so the same
   // commit that hides the tail also gates mark-read, keeping an unseen trimmed
   // reply unread; jump-to-latest reloads the tail.
-  const prependOlder = useCallback((older: WorkbenchMessage[], drop: ReadonlySet<string> = new Set()) => {
-    const ids = new Set(messagesRef.current.map((row) => row.id));
-    for (const id of drop) ids.delete(id);
+  const prependOlder = useCallback((older: WorkbenchMessage[], drop: (row: WorkbenchMessage) => boolean = () => false) => {
+    const ids = new Set(messagesRef.current.filter((row) => !drop(row)).map((row) => row.id));
     for (const row of older) ids.add(row.id);
     const willDetachTail = ids.size > MAX_RETAINED_MESSAGES;
     setMessages((prev) => {
-      const merged = mergeById(drop.size ? prev.filter((row) => !drop.has(row.id)) : prev, older);
+      const merged = mergeById(prev.filter((row) => !drop(row)), older);
       return merged.length > MAX_RETAINED_MESSAGES ? merged.slice(0, MAX_RETAINED_MESSAGES) : merged;
     });
     if (willDetachTail) setHistoricalWindow(true);
@@ -1627,12 +1626,12 @@ export const ChatPage: React.FC = () => {
       }
       if (sessionId !== sessionIdRef.current) return true; // switched chats mid-fetch
       const older = res.messages.filter(isTranscriptMessage);
-      // The server's page speaks for the stretch the saved rows showed: a saved
-      // row it did not return is no longer there. Rows it did return keep their
-      // id, so the row the reader is on stays put.
-      const answered = new Set(older.map((row) => row.id));
-      const gone = new Set(saved.filter((row) => !answered.has(row.id)).map((row) => row.id));
-      if (older.length || gone.size) prependOlder(older, gone);
+      // The server's page speaks for the stretch the saved rows showed: its rows
+      // take their place, in their current version, and a saved row it did not
+      // return is no longer there. A row the stream updated since is a newer
+      // object and stays. Rows keep their id, so the row the reader is on stays put.
+      const shown = new Set(saved);
+      if (older.length || shown.size) prependOlder(older, (row) => shown.has(row));
       setOlderCursor(res.next_before_id ?? null);
       setHistoryGap(false);
       return true;
@@ -2033,6 +2032,13 @@ export const ChatPage: React.FC = () => {
     // native bind whose turn.end went missing. Both gap edges want exactly
     // this, so they share it rather than each keeping their own copy.
     const catchUpAfterGap = () => {
+      // A chat reading what this device saved recovers through the bootstrap
+      // that could not answer: its window replaces everything shown, and a
+      // transcript read of its own would race it for the transcript.
+      if (offlineSessionIdRef.current === sessionIdRef.current) {
+        void refresh();
+        return;
+      }
       void reconcile({ force: true });
       void refreshQueue();
       void syncTurnState({ quiet: true });
@@ -2198,8 +2204,6 @@ export const ChatPage: React.FC = () => {
         const connected = state === 'connected';
         setEventStreamConnected(connected);
         if (!connected) void syncTurnState({ quiet: true });
-        // Back in reach: the bootstrap that could not answer runs again.
-        else if (offlineSessionIdRef.current === sessionIdRef.current) void refresh();
       },
       onError: () => {
         // ApiContext owns the explicit retry loop; keep the page usable while
@@ -2977,6 +2981,8 @@ export const ChatPage: React.FC = () => {
         // the server could not be reached, the saved window is all there is: let
         // its read finish first (dropping the param ends this effect's reads).
         if (serverUnreachable(error)) await savedWindow.catch(() => undefined);
+        // A refusal is the server's say: a saved window shown ahead of it goes.
+        else if (deepLinkWindowShownRef.current === targetMsg) void reloadLatestMessages();
         if (!cancelled && requestSessionId === sessionIdRef.current) clearParam();
       }
     })();

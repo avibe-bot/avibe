@@ -1121,7 +1121,7 @@ describe('ChatPage history this device saved', () => {
 
     // Back in reach: the bootstrap runs again, and its window replaces everything saved.
     mocks.api.getSessionBootstrap.mockResolvedValue(liveWindow(span(111, 130), 'h111'));
-    await act(async () => (mocks.events as unknown as { onConnectionState: (state: string) => void }).onConnectionState('connected'));
+    await act(async () => mocks.events!.onConnected());
     await waitFor(() => expect(screen.queryByText('chat.offline.notice')).toBeNull());
     await waitFor(() => expect(screen.queryByText('history 21')).toBeNull());
     expect(screen.queryByText('history 81')).toBeNull();
@@ -1159,6 +1159,41 @@ describe('ChatPage history this device saved', () => {
     expect(screen.queryByText('history 21')).toBeNull();
     expect(screen.queryByText('chat.offline.historyGap')).toBeNull();
     expect(screen.getByText('history 51')).toBeTruthy();
+  });
+
+  it("shows the server's version of a saved row the page returns", async () => {
+    await storePage('tail', span(1, 70), null, true);
+    const older = deferred<Page>();
+    serve({ older: older.promise });
+    mount();
+    await act(async () => live.resolve(liveWindow(span(21, 70), 'h021')));
+    await scrollUp();
+    await screen.findByText('history 5');
+    const edited = { ...hist(5), text: 'history 5, edited' };
+    await act(async () => older.resolve({ messages: [...span(1, 4), edited, ...span(6, 20)], next_before_id: null }));
+    await screen.findByText('history 5, edited');
+    expect(screen.queryByText('history 5')).toBeNull();
+  });
+
+  it('recovers a saved chat in a historical window through its bootstrap alone when the stream reconnects', async () => {
+    vi.stubGlobal('CSS', { escape: (value: string) => value });
+    Element.prototype.scrollIntoView = vi.fn();
+    await storePage('tail', span(1, 100), null, true);
+    // A tail read of the stream's own catch-up would answer at once.
+    serve({ tail: Promise.resolve({ messages: span(81, 100), next_before_id: 'h081' }) });
+    mount(null, `/chat/${SESSION}?msg=h030`);
+    await act(async () => live.reject(new TypeError('Failed to fetch')));
+    // Offline, the deep link opened in saved history.
+    await screen.findByText('history 30');
+    expect(screen.queryByText('history 100')).toBeNull();
+
+    const back = deferred<ReturnType<typeof liveWindow>>();
+    mocks.api.getSessionBootstrap.mockReturnValue(back.promise);
+    await act(async () => mocks.events!.onConnected());
+    await act(async () => back.resolve(liveWindow(span(81, 100), 'h081')));
+    await screen.findByText('history 100');
+    expect(screen.queryByText('chat.offline.notice')).toBeNull();
+    expect(screen.queryByText('history 30')).toBeNull();
   });
 
   it('withdraws the saved rows it showed when the server refuses the older page', async () => {
@@ -1221,6 +1256,14 @@ describe('ChatPage history this device saved', () => {
       await act(async () => live.resolve(liveWindow(span(51, 100), 'h051')));
       await screen.findByText('history 30');
       expect(screen.getByText('history 1')).toBeTruthy();
+    });
+
+    it('withdraws the saved window when the server refuses it', async () => {
+      const around = deferred<Page>();
+      await openAt(around.promise, Promise.resolve({ messages: span(51, 100), next_before_id: 'h051' }));
+      await act(async () => around.reject(Object.assign(new Error('Forbidden'), { status: 403 })));
+      await screen.findByText('history 100');
+      expect(screen.queryByText('history 1')).toBeNull();
     });
 
     it('keeps the saved window when the server cannot be reached', async () => {
