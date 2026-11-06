@@ -2,13 +2,14 @@
 import 'fake-indexeddb/auto';
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 
 import type { InboxSession, SessionRuntimeState, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import type { ComposerProps } from './Composer';
 import { readChatSnapshot, type ChatSnapshot } from '../../lib/chatSnapshots';
 import { clearLocalSnapshots, setLocalSnapshotPrincipal } from '../../lib/localSnapshots';
+import * as localStore from '../../lib/localStore';
 import { beginLocalStoreRead, recordLocalStorePage } from '../../lib/localStore';
 import { writeChatViewMode } from '../../lib/chatViewMemory';
 import { WorkbenchProjectsContext, type WorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
@@ -1070,13 +1071,37 @@ describe('ChatPage history this device saved', () => {
     await readChatSnapshot(SESSION);
   };
   const liveWindow = (messages: WorkbenchMessage[], nextBeforeId: string | null) => ({ ...bootstrap(messages), next_before_id: nextBeforeId });
+  // Older pages and deep links read saved history with an IndexedDB cursor: on
+  // the fake database 240-390 ms, and past a second on a loaded runner, beyond
+  // the second findBy and waitFor give. A case waits for the read itself, then
+  // for what it shows.
+  let olderReads: MockInstance<typeof localStore.readLocalStoreOlder>;
+  let aroundReads: MockInstance<typeof localStore.readLocalStoreAround>;
+  beforeEach(() => {
+    olderReads = vi.spyOn(localStore, 'readLocalStoreOlder');
+    aroundReads = vi.spyOn(localStore, 'readLocalStoreAround');
+  });
+  afterEach(() => {
+    olderReads.mockRestore();
+    aroundReads.mockRestore();
+  });
+  // Waits for a read after the first ``after`` of them to start, then for it to answer.
+  const readLands = async (reads: MockInstance<(...args: never[]) => Promise<unknown>>, after = 0) => {
+    await waitFor(() => expect(reads.mock.calls.length).toBeGreaterThan(after));
+    await act(async () => {
+      await reads.mock.results.at(-1)!.value;
+    });
+  };
   // An upward gesture while an older page is still loading is consumed by
   // design: scroll again only once the head slot no longer shows one loading.
+  // Every gesture here reads the page from the store first.
   const scrollUp = async () => {
     await waitFor(() => expect(screen.queryByRole('status', { name: 'chat.loadingOlder' })).toBeNull());
+    const after = olderReads.mock.calls.length;
     await act(async () => {
       fireEvent.wheel(screen.getByTestId('chat-transcript'), { deltaY: -100 });
     });
+    await readLands(olderReads, after);
   };
   type Page = { messages: WorkbenchMessage[]; next_before_id?: string | null; next_after_id?: string | null };
   // Hold the store's rows behind a write that has not finished: IndexedDB runs
@@ -1225,6 +1250,7 @@ describe('ChatPage history this device saved', () => {
     mount(null, `/chat/${SESSION}?msg=h030`);
     await act(async () => live.reject(new TypeError('Failed to fetch')));
     // Offline, the deep link opened in saved history.
+    await readLands(aroundReads);
     await screen.findByText('history 30');
     expect(screen.queryByText('history 100')).toBeNull();
 
@@ -1252,9 +1278,37 @@ describe('ChatPage history this device saved', () => {
       mocks.events!.onConnected();
     });
     await waitFor(() => expect(screen.queryByText('chat.offline.notice')).toBeNull());
+    await readLands(olderReads);
     await waitFor(() => expect(screen.queryByRole('status', { name: 'chat.loadingOlder' })).toBeNull());
     expect(screen.queryByText('history 80')).toBeNull();
     expect(screen.getByText('history 111')).toBeTruthy();
+  });
+
+  it('leaves the new window alone when a saved page that found nothing answers after the bootstrap replaced it', async () => {
+    // Nothing is saved above row 81: offline, the read would end at a gap.
+    await storePage('tail', span(81, 130), 'h081', true);
+    serve({});
+    mount();
+    await screen.findByText('history 130');
+    await act(async () => live.reject(new TypeError('Failed to fetch')));
+    await screen.findByText('chat.offline.notice');
+
+    // The read is held until the stream has reconnected and the bootstrap has answered.
+    const release = await holdStore();
+    const after = olderReads.mock.calls.length;
+    await act(async () => {
+      fireEvent.wheel(screen.getByTestId('chat-transcript'), { deltaY: -100 });
+    });
+    mocks.api.getSessionBootstrap.mockResolvedValue(liveWindow(span(111, 130), 'h111'));
+    await act(async () => mocks.events!.onConnected());
+    await waitFor(() => expect(screen.queryByText('chat.offline.notice')).toBeNull());
+    const bootstraps = mocks.api.getSessionBootstrap.mock.calls.length;
+    await act(async () => release());
+    await readLands(olderReads, after);
+    await waitFor(() => expect(screen.queryByRole('status', { name: 'chat.loadingOlder' })).toBeNull());
+    // No marker on the live window, and no second bootstrap asked for.
+    expect(screen.queryByText('chat.offline.historyGap')).toBeNull();
+    expect(mocks.api.getSessionBootstrap).toHaveBeenCalledTimes(bootstraps);
   });
 
   it('takes what was read from the store offline away when another reader is named', async () => {
@@ -1315,6 +1369,7 @@ describe('ChatPage history this device saved', () => {
       mount(null, `/chat/${SESSION}?msg=h030`);
       await act(async () => live.resolve(liveWindow(span(51, 100), 'h051')));
       // From this device, while the server's window is still out.
+      await readLands(aroundReads);
       await screen.findByText('history 30');
       expect(screen.getByText('history 1')).toBeTruthy();
       expect(screen.queryByText('history 100')).toBeNull();
@@ -1335,6 +1390,7 @@ describe('ChatPage history this device saved', () => {
       serve({ around: failed });
       mount(null, `/chat/${SESSION}?msg=h030`);
       await act(async () => live.resolve(liveWindow(span(51, 100), 'h051')));
+      await readLands(aroundReads);
       await screen.findByText('history 30');
       expect(screen.getByText('history 1')).toBeTruthy();
     });
@@ -1353,7 +1409,7 @@ describe('ChatPage history this device saved', () => {
       await act(async () => mocks.events!.onConnected());
       await waitFor(() => expect(screen.queryByText('chat.offline.notice')).toBeNull());
       await act(async () => release());
-      await act(async () => new Promise((resolve) => setTimeout(resolve, 50)));
+      await readLands(aroundReads);
       expect(screen.queryByText('history 30')).toBeNull();
       expect(screen.getByText('history 100')).toBeTruthy();
     });
