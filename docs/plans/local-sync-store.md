@@ -7,7 +7,8 @@
 > 2. the access digest (section 6.2, #3272);
 > 3. the chat's first paint from the store, which retires the conversation
 >    snapshots (2a, #3278);
-> 4. local-first older pages and deep links with the offline gap marker (2b);
+> 4. local-first older pages and deep links, offline reading, and the gap
+>    marker (2b);
 > 5. prefetch warming the Inbox's first page, and deleting the leftover
 >    `chat:*` records (PR 3).
 > **Owner**: cyhhao
@@ -465,6 +466,28 @@ bootstrap's 50, and only when no gap lies among them. The older-page cursor is
 the one the server would give: null once the window reaches the start of
 history, otherwise its first row's id. Without such a stored chat, the page
 paints what the lists know of it (`chatListSeed`), as before.
+
+Older pages and deep links read only what the store holds in full next to what
+is on screen (`readLocalStoreOlder`, `readLocalStoreAround`):
+
+- **Scrolling up.** The saved rows joined to the oldest row on screen show at
+  once. Online, the server's page for the same stretch then replaces exactly
+  those rows: a saved row it did not return goes, and rows it did return keep
+  their id, so the row the reader is on stays put (the transcript scroller holds
+  the reader to that row, #3286).
+- **A deep link.** A saved window around the target shows first, through the
+  same `jumpTarget` path. The server's window replaces it, and when the server
+  no longer has the target, the live tail replaces it.
+- **Offline.** A bootstrap that fails without the server refusing anything
+  (no answer, or a 5xx from the server or the tunnel) leaves a painted chat on
+  screen with a quiet notice. Its saved history pages as above without asking
+  the server. When the event stream reconnects, the bootstrap runs again, and its
+  window replaces everything shown from the store. A refusal (any 4xx) still
+  withdraws the painted chat.
+- **The gap marker.** Where saved history ends, short of the start of history,
+  and the server cannot be reached, the transcript's head slot shows a marker
+  that retries. It lives in that fixed-height slot rather than among the rows,
+  so it never becomes the row the scroller holds the reader to.
 
 When the Inbox reads from this store (Phase 2), it keeps the `feedStatus`
 contract of `InboxState`:
@@ -1030,7 +1053,11 @@ The Phase 1 wipe and fence rules are rows of the scenario catalog
 - LSYNC-023: an access change that no `authorization.changed` delivered clears
   the store at the next session check, at an open or after a stream gap;
 - LSYNC-024: the `chat:*` records the earlier snapshot design stored are
-  deleted once a reader is named, every reader's.
+  deleted once a reader is named, every reader's;
+- LSYNC-025: a conversation seen before opens and its saved history scrolls
+  when the server cannot be reached, and the marker shows where it ends;
+- LSYNC-026: saved rows shown ahead of the server give way to its answer for
+  the same stretch.
 
 **Rollout:** no flag, as with the existing cache. A missing or failing store
 falls back to today's behavior (invariant 2).

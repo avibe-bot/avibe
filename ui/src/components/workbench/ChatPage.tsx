@@ -155,6 +155,8 @@ import { FileCard } from '../ui/file-card';
 import { ImageViewerProvider } from '../ui/image-viewer';
 import { FileViewerProvider } from '../ui/file-viewer';
 import { MediaSessionContext } from '../ui/media-session-context';
+import { ChatOfflineNotice, HistoryGapMarker } from './ChatOfflineState';
+import { readLocalStoreAround, readLocalStoreOlder } from '../../lib/localStore';
 import { useFileViewer } from '../ui/file-viewer-context';
 import { Input } from '../ui/input';
 import { Markdown } from '../ui/markdown';
@@ -245,6 +247,14 @@ const olderPrefetchBand = (el: HTMLElement) => Math.max(OLDER_PREFETCH_MIN_PX, e
 // Near the hard top an older page is always asked for (the band paging used
 // before the prefetch).
 const OLDER_AT_TOP_PX = 120;
+/** Whether a request failed without the server refusing it: no answer at all
+ *  (offline, a timeout), or the server, or the tunnel to it, failing. A refusal
+ *  (any 4xx) is the server's say about the chat, and the saved copy defers to it. */
+const serverUnreachable = (error: unknown): boolean => {
+  const status = (error as { status?: unknown } | null)?.status;
+  return typeof status !== 'number' || status >= 500;
+};
+
 // One older page: ``loadOlderMessages`` asks for this many rows.
 const OLDER_PAGE_SIZE = 50;
 // Wheel events have no gesture-end event; an idle gap ends a momentum burst.
@@ -606,6 +616,9 @@ export const ChatPage: React.FC = () => {
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
   const deepLinkWindowHandledRef = useRef(false);
+  // The deep link whose window this device's saved rows showed before the
+  // server answered.
+  const deepLinkWindowShownRef = useRef<string | null>(null);
   const markVaultRequestHidden = useCallback((_requestId: string) => {
     // The merged provision flow keeps inline provision cards beside their
     // owning replies, so hiding a request no longer needs extra local anchor
@@ -629,6 +642,17 @@ export const ChatPage: React.FC = () => {
   const [olderCursor, setOlderCursor] = useState<string | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const loadingOlderRef = useRef(false);
+  // Saved history ends here and the server could not be reached for more: the
+  // head of the transcript shows where (docs/plans/local-sync-store.md D4).
+  const [historyGap, setHistoryGap] = useState(false);
+  // The chat whose bootstrap could not reach the server while it showed what
+  // this device saved: it stays, readable, until a bootstrap answers.
+  const [offlineSessionId, setOfflineSessionIdState] = useState<string | null>(null);
+  const offlineSessionIdRef = useRef<string | null>(null);
+  const setOfflineSessionId = useCallback((id: string | null) => {
+    offlineSessionIdRef.current = id;
+    setOfflineSessionIdState(id);
+  }, []);
   // True while the loaded window does NOT reach the live tail: entered by a
   // deep-link/search jump into a middle window, AND by the retained-window cap
   // detaching the tail while the reader is scrolled up (see MAX_RETAINED_MESSAGES).
@@ -1087,6 +1111,7 @@ export const ChatPage: React.FC = () => {
     beginBootstrap: beginChatSnapshotBootstrap,
     release: releaseChatSnapshot,
     isPainted: isChatSnapshotPainted,
+    paintMore: paintMoreChatSnapshot,
     paintKnown: paintKnownChatSnapshot,
   } = useChatSnapshot({
     sessionId,
@@ -1511,45 +1536,97 @@ export const ChatPage: React.FC = () => {
     }
   }, [api, beginQueueSnapshotRead, sessionId, showQueuedSends]);
 
-  // Returns false only when the fetch itself failed, so the transcript scroller can
-  // re-arm and let a later scroll retry; true for success / no-op / stale session.
+  // Prepend an older page, keeping the retained window bounded. Paging up only
+  // fires while scrolled to the top (not pinned), so the newest overflow goes:
+  // those rows sit far BELOW the viewport, and the scroll anchor tracks the TOP
+  // visible row, so removing them can't shift the reader. ``drop``: rows a
+  // server page no longer has. The live tail is detached SYNCHRONOUSLY when the
+  // window will exceed the cap (not via the [messages] effect), so the same
+  // commit that hides the tail also gates mark-read, keeping an unseen trimmed
+  // reply unread; jump-to-latest reloads the tail.
+  const prependOlder = useCallback((older: WorkbenchMessage[], drop: ReadonlySet<string> = new Set()) => {
+    const ids = new Set(messagesRef.current.map((row) => row.id));
+    for (const id of drop) ids.delete(id);
+    for (const row of older) ids.add(row.id);
+    const willDetachTail = ids.size > MAX_RETAINED_MESSAGES;
+    setMessages((prev) => {
+      const merged = mergeById(drop.size ? prev.filter((row) => !drop.has(row.id)) : prev, older);
+      return merged.length > MAX_RETAINED_MESSAGES ? merged.slice(0, MAX_RETAINED_MESSAGES) : merged;
+    });
+    if (willDetachTail) setHistoricalWindow(true);
+  }, []);
+
+  // Returns false only when no older page could be shown (the server could not
+  // answer and the device holds nothing more joined to the head), so the
+  // transcript scroller can re-arm and let a later scroll retry; true for
+  // success / no-op / stale session.
   const loadOlderMessages = useCallback(async (): Promise<boolean> => {
-    // A painted cursor pages from a window the bootstrap is about to replace.
-    if (!sessionId || !olderCursor || loadingOlderRef.current || isChatSnapshotPainted()) return true;
+    if (!sessionId || !olderCursor || loadingOlderRef.current) return true;
+    // A painted cursor pages from a window the bootstrap is about to replace,
+    // unless that bootstrap could not reach the server: then what this device
+    // saved is all there is to read.
+    const painted = isChatSnapshotPainted();
+    if (painted && offlineSessionIdRef.current !== sessionId) return true;
     loadingOlderRef.current = true;
     setLoadingOlder(true);
     try {
-      const res = await api.listSessionMessages(sessionId, { limit: OLDER_PAGE_SIZE, beforeId: olderCursor });
+      // The rows this device holds just above the head, joined to it, show at
+      // once; online, the server's page for the same stretch then replaces them
+      // (docs/plans/local-sync-store.md section 4.3).
+      const head = messagesRef.current[0];
+      const local = head && head.id === olderCursor ? await readLocalStoreOlder(sessionId, head, OLDER_PAGE_SIZE) : null;
+      if (sessionId !== sessionIdRef.current) return true; // switched chats mid-read
+      const saved = (local?.messages ?? []).filter(isTranscriptMessage);
+      if (saved.length) {
+        prependOlder(saved);
+        // They leave with the painted window when its bootstrap lands.
+        if (painted) paintMoreChatSnapshot(saved);
+      }
+      // What the device can say when the server cannot: more saved rows to page
+      // through, the start of history, or a gap the marker shows.
+      const fromDevice = (): boolean => {
+        if (local?.startReached) {
+          setOlderCursor(null);
+          setHistoryGap(false);
+          return true;
+        }
+        if (saved.length) setOlderCursor(saved[0].id);
+        if (local?.moreStored) {
+          setHistoryGap(false);
+          return true;
+        }
+        setHistoryGap(true);
+        return false;
+      };
+      if (painted) return fromDevice();
+      let res: Awaited<ReturnType<typeof api.listSessionMessages>>;
+      try {
+        res = await api.listSessionMessages(sessionId, { limit: OLDER_PAGE_SIZE, beforeId: olderCursor });
+      } catch (error) {
+        if (sessionId !== sessionIdRef.current) return true;
+        if (serverUnreachable(error)) return fromDevice();
+        // The server answered with a refusal: the rows it was asked about are its call.
+        setHistoryGap(false);
+        return false;
+      }
       if (sessionId !== sessionIdRef.current) return true; // switched chats mid-fetch
       const older = res.messages.filter(isTranscriptMessage);
-      if (older.length) {
-        // Bounded retained window: paging up only fires while scrolled to the top
-        // (not pinned), so drop the newest overflow — those rows sit far BELOW the
-        // viewport, and the manual scroll-anchor tracks the TOP visible row, so
-        // removing them can't shift the reader. Older rows are strictly before the
-        // current head (before_id is exclusive), so they never overlap and the
-        // merged length is deterministic — detach the live tail SYNCHRONOUSLY when
-        // it will exceed the cap (not via the [messages] effect) so the same commit
-        // that hides the tail also gates mark-read, keeping an unseen trimmed reply
-        // unread. jump-to-latest reloads the tail.
-        const willDetachTail = messagesRef.current.length + older.length > MAX_RETAINED_MESSAGES;
-        setMessages((prev) => {
-          const merged = mergeById(prev, older);
-          return merged.length > MAX_RETAINED_MESSAGES ? merged.slice(0, MAX_RETAINED_MESSAGES) : merged;
-        });
-        if (willDetachTail) setHistoricalWindow(true);
-      }
+      // The server's page speaks for the stretch the saved rows showed: a saved
+      // row it did not return is no longer there. Rows it did return keep their
+      // id, so the row the reader is on stays put.
+      const answered = new Set(older.map((row) => row.id));
+      const gone = new Set(saved.filter((row) => !answered.has(row.id)).map((row) => row.id));
+      if (older.length || gone.size) prependOlder(older, gone);
       setOlderCursor(res.next_before_id ?? null);
+      setHistoryGap(false);
       return true;
-    } catch {
-      return false; // keep the transcript; caller re-arms so a later scroll retries
     } finally {
       if (sessionId === sessionIdRef.current) {
         loadingOlderRef.current = false;
         setLoadingOlder(false);
       }
     }
-  }, [api, olderCursor, sessionId, isChatSnapshotPainted]);
+  }, [api, olderCursor, sessionId, isChatSnapshotPainted, paintMoreChatSnapshot, prependOlder]);
 
   const reloadLatestMessages = useCallback(async (): Promise<boolean> => {
     if (!sessionId) return false;
@@ -1809,20 +1886,35 @@ export const ChatPage: React.FC = () => {
         setActivityGroups([]);
       }
       chatSnapshotRead.commit();
+      setOfflineSessionId(null);
+      setHistoryGap(false);
     } catch (err) {
       // A superseded failure must not stamp an error onto the newer request's
       // loading state, even when both requests belong to the same route.
       if (requestIsCurrent()) {
-        setError(errorMessage(err) ?? String(err));
-        setFailedBootstrapSessionId(sessionId);
-        chatSnapshotRead.fail();
+        if (serverUnreachable(err) && isChatSnapshotPainted()) {
+          // The server could not be reached, but it refused nothing: what this
+          // device saved stays readable, and the bootstrap runs again once the
+          // event stream reconnects. A run only the list said was going on is
+          // not one anything confirmed.
+          setOfflineSessionId(sessionId);
+          if (workingSeededRef.current) {
+            workingSeededRef.current = false;
+            workingRef.current = false;
+            setWorking(false);
+          }
+        } else {
+          setError(errorMessage(err) ?? String(err));
+          setFailedBootstrapSessionId(sessionId);
+          chatSnapshotRead.fail();
+        }
       }
     } finally {
       // Same guard: a stale load finishing must not flip the latest request out
       // of its own loading state into a premature not-found / error view.
       if (requestIsCurrent()) setLoading(false);
     }
-  }, [api, sessionId, markWorking, scheduleActivityRefresh, refreshSessionRow, beginTranscriptSnapshotRead, beginQueueSnapshotRead, installServerSession, beginChatSnapshotBootstrap, showQueuedSends]);
+  }, [api, sessionId, markWorking, scheduleActivityRefresh, refreshSessionRow, beginTranscriptSnapshotRead, beginQueueSnapshotRead, installServerSession, beginChatSnapshotBootstrap, showQueuedSends, isChatSnapshotPainted]);
 
   // Clear per-session state the instant the session changes (React Router swaps
   // only :sessionId, reusing this instance), before the new session's
@@ -1854,12 +1946,15 @@ export const ChatPage: React.FC = () => {
     setHydratedTranscriptSessionId(null);
     setFailedBootstrapSessionId(null);
     deepLinkWindowHandledRef.current = false;
+    deepLinkWindowShownRef.current = null;
     setOlderCursor(null);
     setHistoricalWindow(false);
     oldestLoadedIdRef.current = null;
     newestLoadedIdRef.current = null;
     loadingOlderRef.current = false;
     setLoadingOlder(false);
+    setHistoryGap(false);
+    setOfflineSessionId(null);
     // Reset the retained-window state so no stale trim signal or follow flag from
     // the previous chat leaks into the fresh one (the Transcript re-pins on open).
     followingTailRef.current = true;
@@ -2081,6 +2176,8 @@ export const ChatPage: React.FC = () => {
         const connected = state === 'connected';
         setEventStreamConnected(connected);
         if (!connected) void syncTurnState({ quiet: true });
+        // Back in reach: the bootstrap that could not answer runs again.
+        else if (offlineSessionIdRef.current === sessionIdRef.current) void refresh();
       },
       onError: () => {
         // ApiContext owns the explicit retry loop; keep the page usable while
@@ -2803,16 +2900,37 @@ export const ChatPage: React.FC = () => {
       return;
     }
 
-    // Not loaded → fetch the centered window and swap the transcript to it.
+    // Not loaded → fetch the centered window and swap the transcript to it. A
+    // window this device holds around the target shows first, and the server's
+    // replaces it (docs/plans/local-sync-store.md section 4.3).
     let cancelled = false;
+    let answered = false;
+    const painted = isChatSnapshotPainted();
+    void readLocalStoreAround(requestSessionId, targetMsg).then((local) => {
+      if (!local || cancelled || answered || requestSessionId !== sessionIdRef.current) return;
+      const window = local.messages.filter(isTranscriptMessage);
+      if (!window.some((row) => row.id === targetMsg)) return;
+      deepLinkWindowShownRef.current = targetMsg;
+      setMessages(window);
+      // They leave with the painted window when its bootstrap lands.
+      if (painted) paintMoreChatSnapshot(window);
+      deepLinkWindowHandledRef.current = !local.reachesTail;
+      setOlderCursor(local.startReached ? null : window[0].id);
+      setHistoricalWindow(!local.reachesTail);
+      setJumpTarget(targetMsg);
+      startHighlight(targetMsg);
+    });
     void (async () => {
       try {
         const res = await api.listSessionMessages(requestSessionId, { aroundId: targetMsg, cache: false });
         if (cancelled || requestSessionId !== sessionIdRef.current) return;
+        answered = true;
         const window = res.messages.filter(isTranscriptMessage);
         if (window.length === 0) {
           // Unknown / deleted / cross-session id — leave the normal tail load
           // intact (don't replace messages or highlight); just drop the param.
+          // A saved window shown around it is stale: the live tail replaces it.
+          if (deepLinkWindowShownRef.current === targetMsg) void reloadLatestMessages();
           clearParam();
           return;
         }
@@ -2820,8 +2938,10 @@ export const ChatPage: React.FC = () => {
         // for reading above the match. If there are newer rows beyond this
         // window, treat it as historical context and require the down-arrow to
         // reload the live tail; if not, it already reaches the tail and can keep
-        // normal pinned/follow behavior.
+        // normal pinned/follow behavior. Rows a saved window showed keep their
+        // id, so the target stays where the reader sees it.
         setMessages(window);
+        if (painted) paintMoreChatSnapshot(window);
         const reachesHistoricalWindow = Boolean(res.next_after_id);
         deepLinkWindowHandledRef.current = reachesHistoricalWindow;
         setOlderCursor(res.next_before_id ?? null);
@@ -2848,7 +2968,7 @@ export const ChatPage: React.FC = () => {
     // window is dropped and ``?msg`` stays unhandled (Codex P2). The closure
     // still reads ``session`` for the ``!session`` / ``session.id !== sessionId``
     // readiness checks; it only needs to re-run when the id changes.
-  }, [api, deepLinkMessageId, loading, selectChatView, session?.id, sessionId, setSearchParams, startHighlight]);
+  }, [api, deepLinkMessageId, loading, selectChatView, session?.id, sessionId, setSearchParams, startHighlight, isChatSnapshotPainted, paintMoreChatSnapshot, reloadLatestMessages]);
 
   // Re-arm the jump guard once ``?msg=`` is gone. ``clearParam`` (above) nulls
   // the param after handling, so without this re-selecting the SAME search hit
@@ -3313,6 +3433,7 @@ export const ChatPage: React.FC = () => {
             {error}
           </div>
         )}
+        {offlineSessionId === sessionId && <ChatOfflineNotice />}
         <Transcript
           messages={transcriptRows}
           skeleton={Boolean(chatSnapshotView?.partial)}
@@ -3325,6 +3446,7 @@ export const ChatPage: React.FC = () => {
           working={working}
           modelRecovery={runtimeState.model_recovery}
           hasOlder={!!olderCursor}
+          historyGap={historyGap}
           loadingOlder={loadingOlder}
           onLoadOlder={loadOlderMessages}
           needsLatestReload={historicalWindow}
@@ -4537,6 +4659,8 @@ interface TranscriptProps {
   modelRecovery?: SessionRuntimeState['model_recovery'];
   hasOlder: boolean;
   loadingOlder: boolean;
+  /** Saved history ends at the head and the server could not be reached. */
+  historyGap: boolean;
   onLoadOlder: () => void | Promise<boolean>;
   needsLatestReload: boolean;
   onReloadLatest: () => Promise<boolean>;
@@ -4617,6 +4741,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
   modelRecovery,
   hasOlder,
   loadingOlder,
+  historyGap,
   onLoadOlder,
   needsLatestReload,
   onReloadLatest,
@@ -5391,13 +5516,16 @@ export const Transcript: React.FC<TranscriptProps> = ({
               <Skeleton className="h-1.5 w-24 animate-skeleton-reveal motion-reduce:animate-none" />
             </div>
           ) : olderLoadFailed ? (
-            <button
-              type="button"
-              onClick={runLoadOlder}
-              className="flex h-8 items-center justify-center text-[12px] text-muted hover:text-foreground"
-            >
-              {t('chat.olderLoadFailed')}
-            </button>
+            // Where saved history ends offline is a gap, not a failure (D4).
+            historyGap ? <HistoryGapMarker onRetry={runLoadOlder} /> : (
+              <button
+                type="button"
+                onClick={runLoadOlder}
+                className="flex h-8 items-center justify-center text-[12px] text-muted hover:text-foreground"
+              >
+                {t('chat.olderLoadFailed')}
+              </button>
+            )
           ) : atHistoryStart ? (
             <div className="flex h-8 items-center justify-center text-[12px] text-muted">
               {t('chat.noEarlierMessages')}

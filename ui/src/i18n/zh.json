@@ -5392,6 +5392,10 @@
     "loadingOlder": "正在加载更早的消息",
     "noEarlierMessages": "没有更早的消息了",
     "olderLoadFailed": "加载更早的消息失败，点击重试",
+    "offline": {
+      "notice": "连不上 Avibe，正在显示本机保存的内容。",
+      "historyGap": "更早的消息没有保存在本机，点击重试"
+    },
     "organizationNotice": "这是一个组织会话，消息会显示发送者。",
     "senderUnknown": "未知发送者",
     "senderYou": "你",
